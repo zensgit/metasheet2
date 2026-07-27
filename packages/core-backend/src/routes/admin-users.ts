@@ -30,6 +30,7 @@ import {
   PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
 } from '../auth/user-activation'
 import { activatePendingUser } from '../auth/user-activate'
+import type { ActivateErrorCode } from '../auth/user-activate'
 import {
   assertAliasCutoverAllowed,
   backfillUserLoginAliases,
@@ -1744,47 +1745,105 @@ async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise
 }
 
 /**
+ * Fallback for every failure whose reason is not an authored `ActivateErrorCode`.
+ *
+ * Kept as its own constant, deliberately NOT a row of `ACTIVATE_ERROR_POLICY`: the closure test
+ * asserts set equality between the reasons thrown at `throwCoded` call sites and the policy
+ * table's keys, and folding the fallback into the table would make that equality vacuous.
+ */
+export const ACTIVATE_ERROR_FALLBACK = {
+  status: 500,
+  code: 'ACTIVATE_FAILED',
+  message: 'Activation failed',
+} as const
+
+/**
+ * Closed policy table: every authored activation reason → the status and the message we publish.
+ *
+ * Typed `Record<ActivateErrorCode, …>`, so adding a reason in `auth/user-activate.ts` without
+ * adding a row here is a compile error, and a row here whose key is not an authored reason is a
+ * compile error too.
+ *
+ * Statuses per owner ruling 2026-07-27 (RULED, not proposed):
+ *   ACTIVATE_INTEGRATION_INACTIVE → 409, ACTIVATE_RACE → 409, ACTIVATE_SOURCE_MISSING → 409.
+ *
+ * Messages are authored HERE, not inherited from the thrown Error. The thrown message stays
+ * useful for server-side logs; it is simply never part of the response.
+ */
+export const ACTIVATE_ERROR_POLICY: Record<ActivateErrorCode, { status: number; message: string }> = {
+  ACTIVATE_USER_REQUIRED: { status: 400, message: 'A target user id is required to activate' },
+  ACTIVATE_USER_NOT_FOUND: { status: 404, message: 'User not found' },
+  ACTIVATE_NOT_PENDING: { status: 409, message: 'User is not pending activation' },
+  // RULED 409: a lost race means another actor already moved the user out of pending — the
+  // caller's view of the world is stale, which is a client-visible conflict, not an outage.
+  ACTIVATE_RACE: { status: 409, message: 'User is no longer pending activation' },
+  ACTIVATE_ALIAS_CONFLICT: { status: 409, message: 'A login identifier is already claimed by another account' },
+  ACTIVATE_ALIAS_REQUIRED: { status: 409, message: 'Activation requires at least one usable login identifier' },
+  // Infrastructure (a failed durable write), never a client conflict.
+  ACTIVATE_ALIAS_FAILED: { status: 500, message: 'Failed to claim login alias during activation' },
+  // RULED 409: no linked directory account is a configuration state the caller can fix.
+  ACTIVATE_SOURCE_MISSING: { status: 409, message: 'No linked active directory account for activation' },
+  ACTIVATE_SOURCE_INACTIVE: { status: 409, message: 'Directory account is inactive; cannot activate' },
+  // RULED 409: an inactive integration is likewise configuration, not an outage.
+  ACTIVATE_INTEGRATION_INACTIVE: { status: 409, message: 'Directory integration is not active; cannot activate' },
+  ACTIVATE_LINK_MISMATCH: { status: 409, message: 'Directory link points to a different user' },
+}
+
+/**
+ * Lookup view of the table above. A `Map` rather than an object index: a Map has no prototype
+ * chain to borrow from, so a thrown `.code` of `'constructor'` / `'toString'` / `'__proto__'`
+ * cannot resolve to a row, and the response path needs no computed property access at all
+ * (which keeps the AST scan's "no computed read on the response path" rule strict).
+ */
+const ACTIVATE_ERROR_POLICY_LOOKUP: ReadonlyMap<string, { status: number; message: string }> =
+  new Map(Object.entries(ACTIVATE_ERROR_POLICY))
+
+/**
  * Error surface for `POST /api/admin/users/:id/activate`.
  *
  * Exported so the contract is testable: before this existed, the mapping lived inline in the
  * handler and nothing asserted it, so re-classifying an infrastructure failure as a client 409
  * was a silent one-line regression.
  *
- * Two rules, both about not letting the driver speak for us:
+ * RETRACTION (2026-07-27) — the previous version of this comment claimed two rules, and the
+ * second one was false as written:
  *
- *  - The API's `code` is ours. `activatePendingUser` throws `ACTIVATE_*` codes; a `pg` error
- *    carries a SQLSTATE in the SAME `.code` property, so reading `.code` unconditionally
- *    published e.g. `42703` as if it were an API error code. Anything not `ACTIVATE_*` is
- *    infrastructure and collapses to `ACTIVATE_FAILED` / 500.
- *  - The message is ours too, whenever the code is not. `ACTIVATE_*` messages are authored in
- *    `throwCoded`; everything else is driver text (`column "created_at" of relation "user_orgs"
- *    does not exist` — schema shape handed to the client) and is replaced wholesale.
+ *   Old text: "The message is ours too, whenever the code is not. `ACTIVATE_*` messages are
+ *   authored in `throwCoded`; everything else is driver text … and is replaced wholesale."
+ *
+ *   Why it did not hold: the code selecting branch was a PREFIX test
+ *   (`rawCode.startsWith('ACTIVATE_')`), not a membership test. So "the code is ours" was only
+ *   ever "the code LOOKS like ours". Any thrown or propagated error carrying an
+ *   `ACTIVATE_`-shaped string in `.code` — including one that `throwCoded` never authored —
+ *   satisfied the prefix, fell past both message special-cases, and reached
+ *   `(error as Error)?.message`, publishing raw driver text. Owner's executed repro:
+ *   `ACTIVATE_DB_FAILURE -> 500 / ACTIVATE_DB_FAILURE / column "secret_col" does not exist`.
+ *   The status branch had the same defect independently: `code.startsWith('ACTIVATE_SOURCE')`
+ *   handed 409 to any unauthored `ACTIVATE_SOURCE*` string.
+ *
+ *   What is true now: the response never reads `error.message` at all — not for authored
+ *   reasons, not for unauthored ones. `.code` is the ONLY property read off the thrown value,
+ *   and it is matched by exact membership in `ACTIVATE_ERROR_POLICY` (own keys only, so
+ *   inherited `Object.prototype` names like `constructor` cannot match). Everything else,
+ *   including a well-formed `ACTIVATE_`-looking string, collapses to
+ *   `ACTIVATE_ERROR_FALLBACK` — 500 / `ACTIVATE_FAILED` / a fixed generic message.
+ *
+ * Three layers close this, and each is a different kind of evidence (see
+ * `tests/unit/admin-users-activate-error-closure.test.ts` for the standing caveat that the
+ * static layers are not behaviour proofs):
+ *   1. this exact-membership table at runtime;
+ *   2. `ActivateErrorCode` constraining `throwCoded`, so an unauthored reason cannot be thrown;
+ *   3. a TypeScript-AST scan of the `throwCoded` call sites, set-equal against this table's keys.
  */
 export function mapActivateError(error: unknown): { status: number; code: string; message: string } {
   const rawCode = (error as { code?: unknown } | null)?.code
-  const code = typeof rawCode === 'string' && rawCode.startsWith('ACTIVATE_')
-    ? rawCode
-    : 'ACTIVATE_FAILED'
-
-  // Only client/config conflicts are 409. ACTIVATE_ALIAS_FAILED is infrastructure (DB write)
-  // → 500, and so is every unmapped failure.
-  const status =
-    code === 'ACTIVATE_USER_NOT_FOUND' ? 404
-      : code === 'ACTIVATE_NOT_PENDING'
-        || code.startsWith('ACTIVATE_SOURCE')
-        || code === 'ACTIVATE_LINK_MISMATCH'
-        || code === 'ACTIVATE_ALIAS_CONFLICT'
-        || code === 'ACTIVATE_ALIAS_REQUIRED'
-        ? 409
-        : code === 'ACTIVATE_USER_REQUIRED' ? 400
-          : 500
-
-  const message =
-    code === 'ACTIVATE_ALIAS_FAILED' ? 'Failed to claim login alias during activation'
-      : code === 'ACTIVATE_FAILED' ? 'Activation failed'
-        : ((error as Error)?.message || 'Activation failed')
-
-  return { status, code, message }
+  // Exact membership, never a prefix. `.code` is the only property read off the thrown value.
+  if (typeof rawCode === 'string') {
+    const policy = ACTIVATE_ERROR_POLICY_LOOKUP.get(rawCode)
+    // Spread, not `policy.message`: the response path reads no `message` property anywhere.
+    if (policy) return { code: rawCode, ...policy }
+  }
+  return { ...ACTIVATE_ERROR_FALLBACK }
 }
 
 export function adminUsersRouter(): Router {

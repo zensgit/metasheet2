@@ -1,48 +1,132 @@
 import { describe, expect, it } from 'vitest'
-import { mapActivateError } from '../../src/routes/admin-users'
+import {
+  ACTIVATE_ERROR_FALLBACK,
+  ACTIVATE_ERROR_POLICY,
+  mapActivateError,
+} from '../../src/routes/admin-users'
 
 /**
- * The activate endpoint's error surface. #4581 r2 stopped `ACTIVATE_ALIAS_FAILED` being reported
- * as a client 409 and stopped it echoing the alias claim's message — but nothing asserted either,
- * so both were one edit away from coming back.
+ * The activate endpoint's error surface, at RUNTIME. (The static-consistency layer lives in
+ * `admin-users-activate-error-closure.test.ts`; it is a different kind of evidence and does not
+ * substitute for these calls.)
  *
- * The last case is the one that motivated extracting this function: `pg` puts its SQLSTATE in the
- * same `.code` property `throwCoded` uses, so any unmapped database failure used to publish the
- * SQLSTATE as the API error code and the driver's sentence as the message. Verified against real
- * Postgres by renaming a column out from under the activate transaction: the client received
+ * History this file is guarding, retraction-first:
+ *
+ *   #4581 r2 stopped `ACTIVATE_ALIAS_FAILED` being reported as a client 409 and stopped it
+ *   echoing the alias claim's message. r3 then claimed "the message is ours too, whenever the
+ *   code is not". That claim was FALSE: the branch selecting the code was a prefix test
+ *   (`rawCode.startsWith('ACTIVATE_')`), so an unauthored but `ACTIVATE_`-shaped `.code` was
+ *   treated as ours and its `error.message` was published verbatim. Owner's executed repro:
+ *   `ACTIVATE_DB_FAILURE -> 500 / ACTIVATE_DB_FAILURE / column "secret_col" does not exist`.
+ *
+ *   What holds now (owner ruling 2026-07-27): membership in `ACTIVATE_ERROR_POLICY`, never a
+ *   prefix; and `error.message` is not read on the response path at all, so no authored reason
+ *   inherits the thrown text either.
+ *
+ * The original `pg` observation still stands and is still asserted below: `pg` puts its SQLSTATE
+ * in the same `.code` property `throwCoded` uses. Verified against real Postgres by renaming a
+ * column out from under the activate transaction — the client received
  * `500 / 42703 / column "created_at" of relation "user_orgs" does not exist`.
  */
 describe('mapActivateError (activate endpoint error surface)', () => {
   const codedError = (code: string, message: string) =>
     Object.assign(new Error(message), { code })
 
-  it('classifies client/config conflicts as 409 and keeps our authored message', () => {
-    for (const code of [
-      'ACTIVATE_NOT_PENDING',
-      'ACTIVATE_LINK_MISMATCH',
-      'ACTIVATE_ALIAS_CONFLICT',
-      'ACTIVATE_ALIAS_REQUIRED',
-      'ACTIVATE_SOURCE_INACTIVE',
-    ]) {
-      const mapped = mapActivateError(codedError(code, `authored: ${code}`))
-      expect({ code: mapped.code, status: mapped.status }).toEqual({ code, status: 409 })
-      expect(mapped.message).toBe(`authored: ${code}`)
+  /**
+   * Owner ruling 2026-07-27, transcribed. Written out longhand rather than derived from
+   * `ACTIVATE_ERROR_POLICY` on purpose: a table-driven expectation that reads the table under
+   * test asserts only that the table equals itself.
+   */
+  const RULED: Record<string, { status: number; message: string }> = {
+    ACTIVATE_USER_REQUIRED: { status: 400, message: 'A target user id is required to activate' },
+    ACTIVATE_USER_NOT_FOUND: { status: 404, message: 'User not found' },
+    ACTIVATE_NOT_PENDING: { status: 409, message: 'User is not pending activation' },
+    ACTIVATE_RACE: { status: 409, message: 'User is no longer pending activation' },
+    ACTIVATE_ALIAS_CONFLICT: {
+      status: 409,
+      message: 'A login identifier is already claimed by another account',
+    },
+    ACTIVATE_ALIAS_REQUIRED: {
+      status: 409,
+      message: 'Activation requires at least one usable login identifier',
+    },
+    ACTIVATE_ALIAS_FAILED: {
+      status: 500,
+      message: 'Failed to claim login alias during activation',
+    },
+    ACTIVATE_SOURCE_MISSING: {
+      status: 409,
+      message: 'No linked active directory account for activation',
+    },
+    ACTIVATE_SOURCE_INACTIVE: {
+      status: 409,
+      message: 'Directory account is inactive; cannot activate',
+    },
+    ACTIVATE_INTEGRATION_INACTIVE: {
+      status: 409,
+      message: 'Directory integration is not active; cannot activate',
+    },
+    ACTIVATE_LINK_MISMATCH: {
+      status: 409,
+      message: 'Directory link points to a different user',
+    },
+  }
+
+  it('maps every authored reason to the RULED status and OUR message, never the thrown text', () => {
+    for (const [code, expected] of Object.entries(RULED)) {
+      // Thrown text is deliberately hostile: if any branch ever reads `error.message` again,
+      // this string is what lands in the response.
+      const mapped = mapActivateError(
+        codedError(code, `driver leak: relation "user_orgs" column "secret_col" does not exist`),
+      )
+      expect({ code: mapped.code, status: mapped.status, message: mapped.message })
+        .toEqual({ code, status: expected.status, message: expected.message })
+      expect(mapped.message).not.toMatch(/secret_col|user_orgs|relation|driver leak/i)
     }
   })
 
-  it('classifies a missing/blank target as 404 / 400', () => {
-    expect(mapActivateError(codedError('ACTIVATE_USER_NOT_FOUND', 'nope')).status).toBe(404)
-    expect(mapActivateError(codedError('ACTIVATE_USER_REQUIRED', 'nope')).status).toBe(400)
+  it('covers the three reasons the owner ruled on 2026-07-27 (previously untested)', () => {
+    // These three had NO case before this change: the suite covered 8 of 11 authored reasons.
+    expect(mapActivateError(codedError('ACTIVATE_INTEGRATION_INACTIVE', 'x')).status).toBe(409)
+    expect(mapActivateError(codedError('ACTIVATE_RACE', 'x')).status).toBe(409)
+    expect(mapActivateError(codedError('ACTIVATE_SOURCE_MISSING', 'x')).status).toBe(409)
   })
 
-  it('classifies a failed alias WRITE as infrastructure: 500, never 409, never the raw text', () => {
+  it('asserts the RULED transcription covers exactly the policy table (no silent drift)', () => {
+    expect(Object.keys(RULED).sort()).toEqual(Object.keys(ACTIVATE_ERROR_POLICY).sort())
+    expect(Object.keys(RULED)).toHaveLength(11)
+  })
+
+  it('collapses an unauthored but ACTIVATE_-shaped code — the fail-open the owner reproduced', () => {
+    // This is the exact repro. Under the prefix test it returned
+    // 500 / ACTIVATE_DB_FAILURE / column "secret_col" does not exist.
     const mapped = mapActivateError(
-      codedError('ACTIVATE_ALIAS_FAILED', 'connection refused 5432 DETAIL: secret'),
+      codedError('ACTIVATE_DB_FAILURE', 'column "secret_col" does not exist'),
+    )
+    expect(mapped).toEqual({ status: 500, code: 'ACTIVATE_FAILED', message: 'Activation failed' })
+    expect(mapped.code).not.toBe('ACTIVATE_DB_FAILURE')
+    expect(mapped.message).not.toMatch(/secret_col|column|does not exist/i)
+  })
+
+  it('collapses an unauthored ACTIVATE_SOURCE*-shaped code to 500, not the old prefix 409', () => {
+    // Discriminates the SECOND prefix test specifically: `code.startsWith('ACTIVATE_SOURCE')`
+    // handed 409 to anything source-shaped, authored or not.
+    const mapped = mapActivateError(
+      codedError('ACTIVATE_SOURCE_EXPLODED', 'deadlock detected on directory_accounts'),
     )
     expect(mapped.status).toBe(500)
-    expect(mapped.code).toBe('ACTIVATE_ALIAS_FAILED')
-    expect(mapped.message).toBe('Failed to claim login alias during activation')
-    expect(mapped.message).not.toMatch(/5432|DETAIL|secret/i)
+    expect(mapped.code).toBe('ACTIVATE_FAILED')
+    expect(mapped.message).toBe('Activation failed')
+  })
+
+  it('never lets a prototype-chain name borrow a policy row', () => {
+    for (const code of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      expect(mapActivateError(codedError(code, 'x'))).toEqual({
+        status: 500,
+        code: 'ACTIVATE_FAILED',
+        message: 'Activation failed',
+      })
+    }
   })
 
   it('never publishes a PostgreSQL SQLSTATE as the API error code, nor driver text as the message', () => {
@@ -56,8 +140,26 @@ describe('mapActivateError (activate endpoint error surface)', () => {
     expect(mapped.message).not.toMatch(/column|relation|does not exist|user_orgs/i)
   })
 
-  it('collapses an uncoded throw rather than leaking whatever it happened to say', () => {
-    const mapped = mapActivateError(new Error('Cannot read properties of undefined (reading foo)'))
-    expect(mapped).toEqual({ status: 500, code: 'ACTIVATE_FAILED', message: 'Activation failed' })
+  it('collapses an uncoded throw, a non-string code, and a non-error throw', () => {
+    const generic = { status: 500, code: 'ACTIVATE_FAILED', message: 'Activation failed' }
+    expect(mapActivateError(new Error('Cannot read properties of undefined (reading foo)')))
+      .toEqual(generic)
+    expect(mapActivateError(Object.assign(new Error('x'), { code: 42703 }))).toEqual(generic)
+    expect(mapActivateError(null)).toEqual(generic)
+    expect(mapActivateError(undefined)).toEqual(generic)
+    expect(mapActivateError('ACTIVATE_RACE')).toEqual(generic)
+  })
+
+  it('keeps ACTIVATE_FAILED out of the throwable-reason table (closure must not be vacuous)', () => {
+    expect(Object.prototype.hasOwnProperty.call(ACTIVATE_ERROR_POLICY, 'ACTIVATE_FAILED'))
+      .toBe(false)
+    expect(ACTIVATE_ERROR_FALLBACK.code).toBe('ACTIVATE_FAILED')
+  })
+
+  it('returns a fresh object each call — a caller cannot mutate the shared fallback', () => {
+    const first = mapActivateError(new Error('boom')) as { message: string }
+    first.message = 'mutated'
+    expect(mapActivateError(new Error('boom')).message).toBe('Activation failed')
+    expect(ACTIVATE_ERROR_FALLBACK.message).toBe('Activation failed')
   })
 })

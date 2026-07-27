@@ -33,7 +33,32 @@ export type ActivateUserResult = {
   localPasswordSet: boolean
 }
 
-function throwCoded(message: string, code: string): never {
+/**
+ * Closed set of activation failure reasons this module is allowed to throw.
+ *
+ * This is the authored-reason set. `ACTIVATE_FAILED` is deliberately NOT a member: it is the
+ * response layer's fallback for everything unauthored, and admitting it here would make the
+ * throw-site/policy-table set equality in
+ * `tests/unit/admin-users-activate-error-closure.test.ts` trivially satisfiable.
+ *
+ * Adding a reason without adding its policy-table row is a compile error at the table's
+ * `Record<ActivateErrorCode, …>` type (see `ACTIVATE_ERROR_POLICY` in `routes/admin-users.ts`);
+ * throwing a reason that is not a member is a compile error here at `throwCoded`.
+ */
+export type ActivateErrorCode =
+  | 'ACTIVATE_USER_REQUIRED'
+  | 'ACTIVATE_USER_NOT_FOUND'
+  | 'ACTIVATE_NOT_PENDING'
+  | 'ACTIVATE_RACE'
+  | 'ACTIVATE_ALIAS_CONFLICT'
+  | 'ACTIVATE_ALIAS_REQUIRED'
+  | 'ACTIVATE_ALIAS_FAILED'
+  | 'ACTIVATE_SOURCE_MISSING'
+  | 'ACTIVATE_SOURCE_INACTIVE'
+  | 'ACTIVATE_INTEGRATION_INACTIVE'
+  | 'ACTIVATE_LINK_MISMATCH'
+
+function throwCoded(message: string, code: ActivateErrorCode): never {
   const err = new Error(message)
   ;(err as Error & { code?: string }).code = code
   throw err
