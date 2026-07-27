@@ -12,13 +12,17 @@
 // shapes only ... with hermetic harness tests", and "wiring either is
 // B1-observability — §4 item 5, a separate runtime-authorization gate."
 //
-// ERROR DISCIPLINE (closes the V-9 channel BY CONSTRUCTION, not by hiding a verb):
-// `fail(reason)` takes ONLY a reason from the frozen vocabulary. There is no
-// `message` parameter and no `details` parameter, so no caller — including a
-// foreign callback that `require()`s this module — can mint a genuinely branded
-// error carrying attacker text. The public error class reads its message from a
-// frozen per-reason map and ignores every constructor argument beyond the reason,
-// so direct construction cannot carry text either.
+// ERROR DISCIPLINE — RETRACTION (round 7). This paragraph said no caller "can mint a
+// genuinely branded error carrying attacker text" and that the V-9 channel was closed
+// BY CONSTRUCTION. That was FALSE. `fail(reason)` takes no text and the error class
+// ignores every argument beyond the reason — both still true — but a caller who
+// obtains a genuinely branded error (every refusal hands one out) can assign
+// `message`, `stack` and `reason` on it, and until round 7 the boundary re-threw a
+// branded error VERBATIM. The attacker-text half is a DISCLOSED residual under the
+// 2026-07-26 in-process-caller ruling (see the PR body). The half FIXED here, because
+// it needs no adversary: the boundary now RE-MINTS every branded error it catches from
+// the frozen table below, so a reason outside
+// `OBSERVABILITY_CONTRACT_ERROR_REASONS` cannot leave it.
 
 const {
   isPlainObject,
@@ -130,7 +134,21 @@ function safeOwnSymbols(value, reason) {
 // itself, removing the snapshot from an entry point would still be refused here and
 // the gate's positive control would prove nothing.
 const failEntryNotInert = () => fail('OBSERVABILITY_ENTRY_NOT_INERT')
-const guardEntry = createEntryGuard(isBrandedError, failEntryNotInert)
+// ROUND 7 — RE-MINT, NEVER RE-THROW. See the note at `createEntryGuard`: the brand
+// attests who minted an object, never what it currently says, so a caught branded
+// error is discarded and replaced by a fresh one built from the frozen table above.
+// The `.reason` read is guarded because an accessor can have been installed on the
+// object after minting; a throw there collapses to the L2 token.
+const remintBrandedEntryError = (caught) => {
+  let reason
+  try {
+    reason = caught.reason
+  } catch (_error) {
+    reason = undefined
+  }
+  fail(typeof reason === 'string' && ERROR_REASON_SET.has(reason) ? reason : 'OBSERVABILITY_ENTRY_NOT_INERT')
+}
+const guardEntry = createEntryGuard(isBrandedError, failEntryNotInert, remintBrandedEntryError)
 
 function assertClosedKeySet(value, allowedKeys, hostileReason, extraKeyReason) {
   const keys = safeOwnKeys(value, hostileReason)

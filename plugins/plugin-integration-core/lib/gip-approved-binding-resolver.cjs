@@ -60,10 +60,15 @@
 // appear silently — the saturation REDs and NAMES it if one does.
 //
 // -- ERROR DISCIPLINE ------------------------------------------------------
-// `fail(reason)` takes ONLY a reason from the frozen vocabulary — no `message`
-// parameter, no `details` parameter — so the V-9 channel (a foreign callback
-// require()ing the module and minting a genuinely branded error carrying attacker
-// text) is closed BY CONSTRUCTION and not merely by hiding the verb.
+// RETRACTION (round 7). This paragraph said the V-9 channel was "closed BY
+// CONSTRUCTION". It was not. `fail(reason)` takes no text, but a caller who obtains a
+// genuinely branded error — every refusal hands one out — can assign `message`,
+// `stack` and `reason` on it, and until round 7 the boundary re-threw a branded error
+// VERBATIM. The attacker-text half is a DISCLOSED residual under the 2026-07-26
+// in-process-caller ruling (see the PR body). The half FIXED here, because it needs no
+// adversary: the boundary now RE-MINTS every branded error it catches from the frozen
+// table above, so a reason outside `BINDING_RESOLVER_ERROR_REASONS` cannot leave it.
+// Still unconditionally true: `fail` takes a reason and nothing else.
 
 const {
   deepCloneFrozenCanonical,
@@ -194,7 +199,21 @@ function safeLength(value, reason) {
 // traps itself it would cover for the gate, so removing the gate from an entry point
 // would no longer RED.
 const failEntryNotInert = () => fail('RESOLVER_ENTRY_NOT_INERT')
-const guardEntry = createEntryGuard(isBrandedError, failEntryNotInert)
+// ROUND 7 — RE-MINT, NEVER RE-THROW. See the note at `createEntryGuard`: the brand
+// attests who minted an object, never what it currently says, so a caught branded
+// error is discarded and replaced by a fresh one built from the frozen table above.
+// The `.reason` read is guarded because an accessor can have been installed on the
+// object after minting; a throw there collapses to the L2 token.
+const remintBrandedEntryError = (caught) => {
+  let reason
+  try {
+    reason = caught.reason
+  } catch (_error) {
+    reason = undefined
+  }
+  fail(typeof reason === 'string' && ERROR_REASON_SET.has(reason) ? reason : 'RESOLVER_ENTRY_NOT_INERT')
+}
+const guardEntry = createEntryGuard(isBrandedError, failEntryNotInert, remintBrandedEntryError)
 
 function hasControlCharacter(text) {
   for (let index = 0; index < text.length; index += 1) {

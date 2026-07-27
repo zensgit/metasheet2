@@ -1500,48 +1500,174 @@ async function probeAuthorityIsClosureBoundNotCallerInjected() {
 }
 
 // ---------------------------------------------------------------------------
-// ROUND 6, ITEM 2 — THE TRUST-MINTING SURFACE, ENUMERATED MECHANICALLY.
+// ITEM 2 — THE TRUST-MINTING SURFACE. ROUND 7: THE REACH IS DERIVED, NOT AUTHORED.
 //
-// -- WHAT THIS IS, AND WHAT IT IS NOT ---------------------------------------
-// It is an OPEN-SET LEDGER, not a closure assertion. It does NOT claim "no public
-// export mints trust" — that claim is FALSE at this head and writing it would be the
-// exact overclaim shape this PR keeps paying for. What it asserts is that the set of
-// publicly-reachable trust-minting paths is EXACTLY the declared eight, by set
-// equality. Both directions are load-bearing:
-//   * a NINTH granting factory appears ⇒ RED, naming the export that minted;
-//   * one of the eight is CLOSED       ⇒ RED, forcing this ledger and the PR body to
-//                                        be revised instead of going stale.
-// Same shape as `brandedErrorChannelIsOpenOnTheSpikeClass` and
-// `spikeClassHasNoUnforgeableBrand`: a residual asserted POSITIVELY is a residual that
-// cannot quietly change.
+// -- WHY ROUND 6's VERSION WAS A DEFECT, STATED PLAINLY ---------------------
+// It asserted SET EQUALITY over "the SATURATED public surface". Its reach was bounded
+// by TWO HAND-AUTHORED LISTS — a four-entry module table and a six-entry checker table
+// — and neither was derived from anything. Both bounds were shown to hide a real
+// minting path with every suite GREEN and the banner byte-identical:
+//   * SEED-BOUND: `attackerSeedPool()` never formed a `{ db: { … } }` argument, so no
+//     call could ever construct a read-source config store. 192,780 calls over 42
+//     exports stayed green while a public factory minted a brand nobody counted.
+//   * TABLE-BOUND: a granting factory placed in a module OUTSIDE the four-entry table
+//     is unreachable by construction, however many calls the sweep makes.
+// The concrete omission was `createReadSourceConfigStore`, which this PR itself
+// changed: it adds `const firstPartyReadSourceConfigStores = new WeakSet()` and
+// `.add(store)` inside an already-public factory. It appeared in NO list and NO
+// ledger row. A hand-authored reach cannot support a set-equality claim about a
+// surface it never had to look at.
 //
-// -- HOW IT LOOKS, RATHER THAN WHO IT ASKS ----------------------------------
-// A hand-written list of "the factories I think grant trust" proves nothing — that is
-// the same reading which produced the round-5 header claiming ONE public factory when
-// there were TWO. So this SATURATES instead: seed a pool with every export of the four
-// modules plus caller-controlled attacker fixtures, call every function export with
-// every argument tuple the pool can form, feed every result back into the pool, and
-// repeat. Anything the pool ever reaches that ANY of the six trust checkers accepts is
-// recorded together with the export that produced it. TRANSITIVE trust is found the
-// same way as direct trust — `createServerBoundSourceExecutor` only mints once the pool
-// has ALREADY reached a trusted registry and a trusted binder, which is exactly the
-// property that would make a closure real if the leaves were ever closed.
+// -- WHAT IS DERIVED NOW, AND FROM WHAT --------------------------------------
+//   1. THE BRAND SET is derived by scanning every `lib/*.cjs` for `new WeakSet()`.
+//      A MODULE-SCOPE `const X = new WeakSet()` is a trust declaration; every OTHER
+//      occurrence must be listed as an explicit exemption with a reason. That scan is
+//      what catches `read-source-config-store.cjs` STRUCTURALLY — it declares one, so
+//      it cannot be missed by anyone forgetting to add it anywhere.
+//   2. EACH DECLARATION'S PREDICATE is derived too: the scan attributes every
+//      `<identifier>.has(` to the enclosing `function`, resolves that name in the
+//      module's EXPORT TABLE, and CLASSIFIES it BEHAVIOURALLY by calling it — a
+//      function that answers a boolean is a sweepable predicate; one that THROWS is an
+//      `assert*` and cannot answer "no"; one that is absent from the export table
+//      cannot be asked at all. Both of the latter are recorded as NOT SWEEPABLE, with
+//      the reason, rather than being left out of the count.
+//   3. THE MODULE TABLE is derived from 1: every module that declares a trust WeakSet,
+//      plus the inert-entry gate and every module that requires it. Nothing is added
+//      or removed by hand.
 //
-// -- SCOPE, STATED ----------------------------------------------------------
-// The pool is seeded from the FOUR modules' exports plus attacker data. It does NOT
-// seed a first-party read-source config store, so `resolveApprovedBinding` — which
-// mints the sixth brand — is not reached BY THIS SWEEP; it is in the ledger anyway,
-// EXECUTED directly below. Reporting only what the sweep reached would understate the
-// surface, which is the failure this ledger exists to prevent.
+// -- THE CLAIM IS NARROWED, BECAUSE FULL DERIVATION IS NOT ACHIEVABLE ---------
+// The ARGUMENT POOL is still hand-authored and bounded, and deriving it — synthesising,
+// for every export, the argument shapes its guards would accept — is a static analysis
+// this suite does not have. So the honest claim is NOT "these are the only trust-minting
+// paths on the public surface". It is exactly this, and nothing wider:
+//
+//   (a) the set of trust WeakSet DECLARATIONS in `lib/` is exactly the declared ledger
+//       — a genuine set equality, mechanically derived, both directions load-bearing;
+//   (b) over the DERIVED module set, with the hand-authored bounded argument pool
+//       below, the sweep reaches exactly the declared minting paths and no others;
+//   (c) a brand the sweep cannot judge (throwing `assert*` checker) or cannot reach
+//       is listed as such rather than silently reported as closed.
+// (b) is a statement about THIS REACH, not about the public surface. An argument shape
+// the pool cannot form is a path this sweep cannot see, and that is stated, not hidden.
 // ---------------------------------------------------------------------------
-const TRUST_CHECKERS = Object.freeze({
-  httpProbeActionRegistry: executorModule.isTrustedHttpProbeActionRegistry,
-  sourceBinder: executorModule.isTrustedSourceBinder,
-  serverBoundSourceExecutor: executorModule.isTrustedServerBoundSourceExecutor,
-  systemIdentityAuthority: resolverModule.isTrustedSystemIdentityAuthority,
-  canonicalObjectAuthority: resolverModule.isTrustedCanonicalObjectAuthority,
-  bindingResolution: resolverModule.isTrustedBindingResolution,
+const fs = require('node:fs')
+
+const ANY_WEAKSET = /new WeakSet\(/
+const MODULE_SCOPE_WEAKSET = /^const\s+([A-Za-z0-9_$]+)\s*=\s*new WeakSet\(\)\s*$/
+const FUNCTION_HEAD = /^function\s+([A-Za-z0-9_$]+)\s*\(/
+const REQUIRES_GATE = /require\('\.\/gip-inert-entry\.cjs'\)/
+const GATE_MODULE = 'gip-inert-entry.cjs'
+
+// EXEMPTIONS — every `new WeakSet(` occurrence in `lib/` that is NOT a module-scope
+// trust declaration, named with the reason it is not one. The scan asserts this list is
+// exact, so a WeakSet introduced anywhere in `lib/` must be classified deliberately.
+const DECLARED_WEAKSET_EXEMPTIONS = Object.freeze({
+  'gip-inert-entry.cjs': 'the per-call error brand inside createErrorBrand() — a FRESH set per call, '
+    + 'disconnected from every other, so it confers no cross-module trust',
+  'payload-redaction.cjs': 'cycle-detection `seen` sets inside the sanitiser — reachability bookkeeping, not trust',
 })
+
+// THE DERIVED TRUST-DECLARATION LEDGER: module -> identifier -> the checker that reads
+// it -> how that checker can be used. `sweepable` is BEHAVIOURAL, not a naming
+// convention: the classification comes from CALLING the exported function and seeing
+// whether it answers a boolean. A checker that THROWS cannot be asked about a swept
+// value, because "it threw" is not "no" (round 6, P2-C); one that is not exported at all
+// cannot be asked from outside the module.
+//
+// ELEVEN declarations, SEVEN of them sweepable. The seventh sweepable brand —
+// `firstPartyReadSourceConfigStores` — is the one round 6's hand-authored checker table
+// omitted, and it is minted by a factory this PR changed. FOUR declarations live in
+// modules BYTE-IDENTICAL to `origin/main` (`gip-system-identity-read.cjs`,
+// `gip-canonical-object-contract-registry.cjs` ×2, `gip-connector-kind-registry.cjs`);
+// each guards its set with a module-private `assert*` and exports no boolean checker, so
+// this sweep CANNOT judge those four brands. Under this PR's scope rule that is
+// DISCLOSED here and not fixed — adding a checker to an unchanged module would be a
+// change to a module this PR does not touch.
+const DECLARED_TRUST_DECLARATIONS = Object.freeze([
+  'gip-approved-binding-resolver.cjs.trustedBindingResolutions -> isTrustedBindingResolution [sweepable]',
+  'gip-approved-binding-resolver.cjs.trustedCanonicalObjectAuthorities -> isTrustedCanonicalObjectAuthority [sweepable]',
+  'gip-approved-binding-resolver.cjs.trustedSystemIdentityAuthorities -> isTrustedSystemIdentityAuthority [sweepable]',
+  'gip-canonical-object-contract-registry.cjs.trustedContractRegistries -> assertTrustedRegistry [checker-not-exported]',
+  'gip-canonical-object-contract-registry.cjs.trustedInventoryAttestations -> assertTrustedInventoryAttestation [checker-not-exported]',
+  'gip-connector-kind-registry.cjs.trustedConnectorKindRegistries -> assertTrustedRegistry [checker-not-exported]',
+  'gip-server-bound-source-executor.cjs.trustedHttpProbeActionRegistries -> isTrustedHttpProbeActionRegistry [sweepable]',
+  'gip-server-bound-source-executor.cjs.trustedServerBoundSourceExecutors -> isTrustedServerBoundSourceExecutor [sweepable]',
+  'gip-server-bound-source-executor.cjs.trustedSourceBinders -> isTrustedSourceBinder [sweepable]',
+  'gip-system-identity-read.cjs.trustedSystemIdentityServices -> assertTrustedSystemIdentityService [checker-not-exported]',
+  'read-source-config-store.cjs.firstPartyReadSourceConfigStores -> isFirstPartyReadSourceConfigStore [sweepable]',
+])
+
+// A PURE function of injectable inputs, so both positive controls can run the IDENTICAL
+// derivation over a synthetic module or a synthetically-edited source. A derivation
+// that can only be run against the real tree cannot be shown to have teeth.
+function deriveReach(sources) {
+  const declarations = []
+  const exemptions = []
+  const violations = []
+  for (const entry of sources) {
+    const lines = entry.source.split('\n')
+    let currentFunction = null
+    const hasSites = new Map()
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]
+      const head = FUNCTION_HEAD.exec(line)
+      if (head) currentFunction = head[1]
+      const declared = MODULE_SCOPE_WEAKSET.exec(line)
+      if (declared) {
+        declarations.push({ module: entry.name, identifier: declared[1], line: index + 1 })
+      } else if (ANY_WEAKSET.test(line)) {
+        exemptions.push({ module: entry.name, line: index + 1 })
+      }
+      const readMatch = /([A-Za-z0-9_$]+)\.has\(/.exec(line)
+      if (readMatch && currentFunction && !hasSites.has(readMatch[1])) {
+        hasSites.set(readMatch[1], currentFunction)
+      }
+    }
+    for (const declaration of declarations.filter((d) => d.module === entry.name)) {
+      const checkerName = hasSites.get(declaration.identifier) || null
+      declaration.checker = checkerName
+      declaration.kind = 'no-exported-checker'
+      const exported = checkerName ? entry.table[checkerName] : undefined
+      if (typeof exported === 'function') {
+        try {
+          declaration.kind = typeof exported(Object.freeze({})) === 'boolean' ? 'sweepable' : 'non-boolean'
+        } catch (_error) {
+          declaration.kind = 'throwing-assert'
+        }
+      } else if (checkerName) {
+        declaration.kind = 'checker-not-exported'
+      }
+      if (declaration.kind === 'non-boolean') {
+        violations.push(`${entry.name}.${declaration.identifier}: ${checkerName} answered a non-boolean`)
+      }
+    }
+  }
+  // The module table falls out of the declarations plus the gate's own require edge.
+  const modules = new Set(declarations.map((d) => d.module))
+  for (const entry of sources) {
+    if (entry.name === GATE_MODULE || REQUIRES_GATE.test(entry.source)) modules.add(entry.name)
+  }
+  const render = (d) => `${d.module}.${d.identifier} -> ${d.checker || '<none>'} [${d.kind}]`
+  return {
+    declarations,
+    rendered: declarations.map(render).sort(),
+    exemptions,
+    violations,
+    modules: [...modules].sort(),
+    sweepable: declarations.filter((d) => d.kind === 'sweepable'),
+  }
+}
+
+function libSources() {
+  return fs.readdirSync(LIB)
+    .filter((name) => name.endsWith('.cjs'))
+    .sort()
+    .map((name) => ({
+      name,
+      source: fs.readFileSync(path.join(LIB, name), 'utf8'),
+      table: require(path.join(LIB, name)),
+    }))
+}
 
 // THE DECLARED LEDGER: export -> the brand it mints.
 //
@@ -1552,6 +1678,11 @@ const TRUST_CHECKERS = Object.freeze({
 // registry is the EMPTY module-load instance. They carry no caller-controlled behaviour
 // or values. The four `createHarness*ForTests` entries DO carry caller-controlled
 // behaviour and values, and that is the class ITEM 2 asks to be closed.
+//
+// ROUND 7 adds the NINTH row, for the SEVENTH brand: `createReadSourceConfigStore` mints
+// `firstPartyReadSourceConfigStores`. It is not a defect either — the checker it feeds is
+// what lets a consumer refuse a duck-typed store — but it was UNCOUNTED, and an uncounted
+// minting path is exactly what this ledger exists to make impossible.
 const DECLARED_TRUST_MINTING_PATHS = Object.freeze({
   'executor.createHarnessHttpProbeActionRegistryForTests': 'httpProbeActionRegistry',
   'executor.createHarnessSourceBinderForTests': 'sourceBinder',
@@ -1560,14 +1691,23 @@ const DECLARED_TRUST_MINTING_PATHS = Object.freeze({
   'resolver.createHarnessCanonicalObjectAuthorityForTests': 'canonicalObjectAuthority',
   'resolver.createCertifiedSystemIdentityAuthority': 'systemIdentityAuthority',
   'resolver.createCertifiedCanonicalObjectAuthority': 'canonicalObjectAuthority',
+  'store.createReadSourceConfigStore': 'readSourceConfigStore',
   'resolver.<resolver>.resolveApprovedBinding': 'bindingResolution',
 })
 
+// The brand's short name is derived from its checker, so a brand cannot be renamed in
+// the ledger without renaming the code: `isTrustedSourceBinder` -> `sourceBinder`,
+// `isFirstPartyReadSourceConfigStore` -> `readSourceConfigStore`.
+function brandKeyFor(checkerName) {
+  const stripped = checkerName.replace(/^is(Trusted|FirstParty)?/, '')
+  return stripped.charAt(0).toLowerCase() + stripped.slice(1)
+}
+
 // Brands a value carries. TRI-STATE ON THE CHECKER ITSELF: a checker that THROWS has
 // not answered "no", and must never be recorded as "no" (round 6, P2-C).
-function brandsHeldBy(value, violations, label) {
+function brandsHeldBy(value, violations, label, checkers) {
   const held = []
-  for (const [brand, check] of Object.entries(TRUST_CHECKERS)) {
+  for (const [brand, check] of Object.entries(checkers)) {
     let answer
     try {
       answer = check(value)
@@ -1587,9 +1727,22 @@ function describeErrorSafely(error) {
 
 function attackerSeedPool() {
   const hostileHandle = { execute: async () => ({ duplicateGroupsSampled: 0, nullKeyRowsSampled: 0 }) }
+  // A SCOPED-DB-HELPER SHAPE. Round 6's pool could not form one, so no call it ever made
+  // could construct a read-source config store and the seventh brand was invisible to
+  // 192,780 calls. It is hand-authored, like the rest of the pool, and that bound is
+  // stated in the narrowed claim rather than papered over.
+  const fakeDb = Object.freeze({
+    selectOne: async () => null,
+    select: async () => [],
+    insertOne: async () => ({}),
+    updateRow: async () => ({}),
+    transaction: async (fn) => fn(fakeDb),
+  })
   return [
     undefined, null, 0, 1, '', 'x', true, false,
     {}, [], () => {}, async () => {},
+    { db: fakeDb },
+    { db: fakeDb, idGenerator: () => 'id' },
     // PLAUSIBLE arguments — the point is to let a factory SUCCEED wherever it can, not
     // to feed it only garbage it would have refused anyway.
     [{
@@ -1642,7 +1795,7 @@ function shapeOf(value) {
   return `object{${keys.join(',')}}`
 }
 
-async function saturateAndFindMintingPaths(tables, rounds) {
+async function saturateAndFindMintingPaths(tables, rounds, checkers) {
   const violations = []
   const found = new Map()
   const seen = new Set()
@@ -1658,7 +1811,7 @@ async function saturateAndFindMintingPaths(tables, rounds) {
   // fewer brands than the ledger declares is visible rather than silent.
   const trustedByBrand = new Map()
   const record = (name, value) => {
-    const brands = brandsHeldBy(value, violations, name)
+    const brands = brandsHeldBy(value, violations, name, checkers)
     for (const brand of brands) if (!trustedByBrand.has(brand)) trustedByBrand.set(brand, value)
     for (const brand of brands) {
       if (!found.has(name)) found.set(name, new Set())
@@ -1791,13 +1944,62 @@ async function saturateAndFindMintingPaths(tables, rounds) {
   }
 }
 
+// STEP 1 — THE DERIVATION ITSELF, ASSERTED BY SET EQUALITY. This half IS a genuine
+// mechanical set equality and it is the half that would have caught round 6's omission:
+// `read-source-config-store.cjs` enters purely because it declares a trust WeakSet.
+function trustBrandInventoryIsDerivedNotAuthored() {
+  const reach = deriveReach(libSources())
+  assert.deepEqual(reach.violations, [], `derivation violations:\n  ${reach.violations.join('\n  ')}`)
+  assert.deepEqual(reach.rendered, [...DECLARED_TRUST_DECLARATIONS],
+    'the trust WeakSet declarations in lib/ are not the declared ledger — a brand was added, removed, '
+    + 'renamed, or its checker changed shape')
+  // EVERY OTHER `new WeakSet(` occurrence must be deliberately exempted, so a trust set
+  // cannot hide by being declared somewhere the module-scope pattern does not match.
+  const exemptModules = [...new Set(reach.exemptions.map((e) => e.module))].sort()
+  assert.deepEqual(exemptModules, Object.keys(DECLARED_WEAKSET_EXEMPTIONS).sort(),
+    `an unclassified \`new WeakSet(\` appeared: ${JSON.stringify(reach.exemptions)}`)
+  // Brand short names must be unique, or two brands would silently share a ledger row.
+  const keys = reach.sweepable.map((d) => brandKeyFor(d.checker))
+  assert.equal(new Set(keys).size, keys.length, `two brands derive the same short name: ${keys.join(', ')}`)
+  console.log(`  DERIVED-REACH ${reach.declarations.length} trust WeakSets across `
+    + `${new Set(reach.declarations.map((d) => d.module)).size} modules; ${reach.sweepable.length} sweepable, `
+    + `${reach.declarations.length - reach.sweepable.length} unjudgeable (checker not exported); `
+    + `${reach.modules.length} modules in the walk`)
+}
+
+// STEP 2 — THE SWEEP, over the DERIVED module set and the DERIVED checkers.
 async function publicSurfaceMintsExactlyTheDeclaredTrust() {
-  const result = await saturateAndFindMintingPaths({
-    executor: executorModule,
-    resolver: resolverModule,
-    observability: require(path.join(LIB, 'gip-read-observability-contracts.cjs')),
-    gate: require(path.join(LIB, 'gip-inert-entry.cjs')),
-  }, 3)
+  const sources = libSources()
+  const reach = deriveReach(sources)
+  const byName = new Map(sources.map((entry) => [entry.name, entry.table]))
+
+  // The walked table is DERIVED. Round 6 hand-wrote four entries here; the label is a
+  // short alias so ledger rows stay readable, and the alias map is asserted to cover
+  // every derived module, so a module cannot be dropped by forgetting to alias it.
+  const ALIASES = Object.freeze({
+    'gip-server-bound-source-executor.cjs': 'executor',
+    'gip-approved-binding-resolver.cjs': 'resolver',
+    'gip-read-observability-contracts.cjs': 'observability',
+    'gip-inert-entry.cjs': 'gate',
+    'read-source-config-store.cjs': 'store',
+    'gip-system-identity-read.cjs': 'systemIdentity',
+    'gip-canonical-object-contract-registry.cjs': 'contractRegistry',
+    'gip-connector-kind-registry.cjs': 'connectorKinds',
+  })
+  const tables = {}
+  for (const moduleName of reach.modules) {
+    assert.ok(ALIASES[moduleName], `derived module ${moduleName} has no ledger alias — add one rather than dropping it`)
+    tables[ALIASES[moduleName]] = byName.get(moduleName)
+  }
+
+  const checkers = {}
+  for (const declaration of reach.sweepable) {
+    checkers[brandKeyFor(declaration.checker)] = byName.get(declaration.module)[declaration.checker]
+  }
+  assert.equal(Object.keys(checkers).length, 7,
+    `the derived checker set must be the seven sweepable brands, got ${Object.keys(checkers).sort().join(', ')}`)
+
+  const result = await saturateAndFindMintingPaths(tables, 3, checkers)
 
   assert.deepEqual(result.violations, [],
     `trust checkers must answer, not throw:\n  ${result.violations.join('\n  ')}`)
@@ -1811,13 +2013,13 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
   // two brands and found only two minting paths would satisfy a set equality written
   // for those two, and the missing five would read as "closed".
   assert.deepEqual(result.trustedBrandsReached, [
-    'canonicalObjectAuthority', 'httpProbeActionRegistry',
+    'canonicalObjectAuthority', 'httpProbeActionRegistry', 'readSourceConfigStore',
     'serverBoundSourceExecutor', 'sourceBinder', 'systemIdentityAuthority',
-  ], 'the closure must reach every brand the ledger says is publicly mintable except bindingResolution, '
-    + 'which needs a first-party config store the pool does not seed')
+  ], 'the closure must reach every sweepable brand except bindingResolution, which needs an APPROVED '
+    + 'config row the pool cannot form; it is executed directly below instead')
   assert.equal(result.capHits, 0,
-    `the saturation pool hit its cap (${result.capHits} values dropped) — the sweep is TRUNCATED and its `
-    + 'set equality below would be a statement about a subset, not about the public surface')
+    `the saturation pool hit its cap (${result.capHits} values dropped) — the sweep is TRUNCATED, so the `
+    + 'statement below would be about a subset of even this derived reach')
 
   const swept = {}
   for (const [name, brands] of result.found) swept[name] = [...brands].sort().join('+')
@@ -1830,9 +2032,10 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     'resolver.createCertifiedSystemIdentityAuthority',
     'resolver.createHarnessCanonicalObjectAuthorityForTests',
     'resolver.createHarnessSystemIdentityAuthorityForTests',
-  ], `the SATURATED public surface mints trust from a different set than declared:\n${JSON.stringify(swept, null, 2)}`)
+    'store.createReadSourceConfigStore',
+  ], `over the DERIVED reach, the walk mints trust from a different set than declared:\n${JSON.stringify(swept, null, 2)}`)
 
-  // "We found seven names" is not "the seven mint what the ledger says they mint".
+  // "We found eight names" is not "the eight mint what the ledger says they mint".
   for (const [name, brand] of Object.entries(swept)) {
     assert.equal(DECLARED_TRUST_MINTING_PATHS[name], brand,
       `${name} mints ${brand}; the ledger declares ${DECLARED_TRUST_MINTING_PATHS[name]}`)
@@ -1842,23 +2045,115 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
   const stack = buildStack()
   const resolution = await resolveAlpha(stack.resolver)
   assert.equal(resolverModule.isTrustedBindingResolution(resolution), true,
-    'resolveApprovedBinding is declared as the eighth minting path; it must actually mint')
+    'resolveApprovedBinding is declared as the ninth minting path; it must actually mint')
   assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 1,
     'the declared ledger must be exactly the swept set plus the directly-executed resolution path')
 
-  console.log(`  TRUST-SURFACE ${result.calls} calls over ${result.exportCount} exports, pool=${result.poolSize}: `
-    + `${Object.keys(swept).length} minting paths swept + 1 executed directly = ${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
+  console.log(`  TRUST-SURFACE ${result.calls} calls over ${result.exportCount} exports in `
+    + `${reach.modules.length} DERIVED modules, pool=${result.poolSize}: ${Object.keys(swept).length} minting paths `
+    + `swept + 1 executed directly = ${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
 }
 
 // ---------------------------------------------------------------------------
-// ADDING A GRANTING FACTORY BACK MUST RED — the positive control the owner named.
+// POSITIVE CONTROL A — A GRANTING FACTORY IN A PREVIOUSLY-UNWALKED MODULE.
 //
-// Everything above asserts a SET EQUALITY. A saturation that silently reached nothing,
-// or a `found` map that is never written to, would satisfy it against nothing. So the
-// SAME saturation runs over a synthetic table carrying ONE granting factory added back,
-// and it must find it AND NAME it, and must NOT smear onto its honest sibling. This
-// runs on every CI run; it is not a substitute for mutating the real module, which is
-// recorded separately in the PR body.
+// This is the control round 6 did NOT have. Its control put a granting factory in a
+// synthetic TABLE that was handed to the sweep, which proves the sweep names a factory
+// it was already pointed at — it says nothing about whether the reach would have FOUND
+// the module. Here the synthetic module is fed only to the DERIVATION, as source text
+// plus an export table, exactly like a real file: it must be pulled into the module set
+// BECAUSE it declares a trust WeakSet, its checker must be classified as sweepable, and
+// its granting factory must then be NAMED by the walk — with its honest sibling clean.
+// ---------------------------------------------------------------------------
+async function aGrantingFactoryInAnUnwalkedModuleIsFound() {
+  const trustedSyntheticThings = new WeakSet()
+  const synthetic = {
+    name: 'synthetic-unwalked-module.cjs',
+    source: [
+      'const trustedSyntheticThings = new WeakSet()',
+      'function isTrustedSyntheticThing(value) {',
+      '  return trustedSyntheticThings.has(value)',
+      '}',
+    ].join('\n'),
+    table: {
+      isTrustedSyntheticThing: (value) => trustedSyntheticThings.has(value),
+      createSyntheticGrant() {
+        const thing = Object.freeze({ synthetic: true })
+        trustedSyntheticThings.add(thing)
+        return thing
+      },
+      honestUntrustedFactory() { return Object.freeze({ synthetic: false }) },
+    },
+  }
+
+  const baseline = deriveReach(libSources())
+  const widened = deriveReach([...libSources(), synthetic])
+  assert.ok(!baseline.modules.includes(synthetic.name), 'the synthetic module must be UNWALKED before it is added')
+  assert.ok(widened.modules.includes(synthetic.name),
+    'the derivation must pull an unwalked module in BECAUSE it declares a trust WeakSet')
+  const added = widened.rendered.filter((row) => !baseline.rendered.includes(row))
+  assert.deepEqual(added, ['synthetic-unwalked-module.cjs.trustedSyntheticThings -> isTrustedSyntheticThing [sweepable]'],
+    `the derivation must NAME the new declaration; got ${JSON.stringify(added)}`)
+
+  // AND THE WALK MUST NAME THE FACTORY, not merely the declaration.
+  const checkers = {}
+  for (const declaration of widened.sweepable) {
+    const table = declaration.module === synthetic.name
+      ? synthetic.table
+      : require(path.join(LIB, declaration.module))
+    checkers[brandKeyFor(declaration.checker)] = table[declaration.checker]
+  }
+  const result = await saturateAndFindMintingPaths({ synthetic: synthetic.table }, 1, checkers)
+  const names = [...result.found.keys()].sort()
+  assert.deepEqual(names, ['synthetic.createSyntheticGrant'],
+    `the walk must NAME the granting factory and must not smear onto its honest sibling; got ${JSON.stringify(names)}`)
+  assert.deepEqual([...result.found.get('synthetic.createSyntheticGrant')], ['syntheticThing'],
+    'the walk must name WHICH brand the granting factory mints')
+  console.log('  CONTROL-A unwalked module pulled in by its WeakSet; walk named synthetic.createSyntheticGrant '
+    + '(syntheticThing), 0 on the honest sibling')
+}
+
+// ---------------------------------------------------------------------------
+// POSITIVE CONTROL B — A NEW WeakSet BRAND DECLARED ANYWHERE IN THE DERIVED SET.
+//
+// The other direction: not a new module, but one more trust declaration inside a module
+// already walked. The derivation must see it and the set equality in step 1 must FAIL
+// NAMING it — a ledger that silently absorbs a new brand is a ledger that proves nothing.
+// The edit is applied to a COPY of the source text, never to the tree.
+// ---------------------------------------------------------------------------
+function aNewWeakSetBrandAnywhereRedsTheLedger() {
+  const sources = libSources()
+  const target = sources.find((entry) => entry.name === 'gip-read-observability-contracts.cjs')
+  assert.ok(target, 'the control needs a module inside the derived set')
+  const localSet = new WeakSet()
+  const edited = sources.map((entry) => (entry.name !== target.name ? entry : {
+    name: entry.name,
+    source: `${entry.source}\nconst trustedSyntheticCounters = new WeakSet()\nfunction isTrustedSyntheticCounter(value) {\n  return trustedSyntheticCounters.has(value)\n}\n`,
+    table: { ...entry.table, isTrustedSyntheticCounter: (value) => localSet.has(value) },
+  }))
+
+  const widened = deriveReach(edited)
+  const added = widened.rendered.filter((row) => !DECLARED_TRUST_DECLARATIONS.includes(row))
+  assert.deepEqual(added,
+    ['gip-read-observability-contracts.cjs.trustedSyntheticCounters -> isTrustedSyntheticCounter [sweepable]'],
+    `the derivation must NAME a brand newly declared inside an already-walked module; got ${JSON.stringify(added)}`)
+  // And the step-1 equality must actually RED on it, naming it — not merely differ.
+  let caught = null
+  try {
+    assert.deepEqual(widened.rendered, [...DECLARED_TRUST_DECLARATIONS])
+  } catch (error) {
+    caught = error
+  }
+  assert.ok(caught, 'the ledger equality must FAIL when a brand is added')
+  assert.ok(String(caught.message).includes('trustedSyntheticCounters'),
+    `the failure must NAME the added brand; it said: ${String(caught.message).slice(0, 200)}`)
+  console.log('  CONTROL-B a brand added inside an already-walked module REDs the ledger equality, by name')
+}
+
+// ---------------------------------------------------------------------------
+// ADDING A GRANTING FACTORY BACK MUST RED — the control kept from round 6, now over
+// the DERIVED checker set. It covers a case control A does not: a factory that hands
+// out an object minted by a REAL brand, rather than one it minted itself.
 // ---------------------------------------------------------------------------
 async function addingAGrantingFactoryBackIsFound() {
   const stack = buildStack()
@@ -1868,7 +2163,12 @@ async function addingAGrantingFactoryBackIsFound() {
     // Its control sibling: a public factory whose product is NOT trusted.
     honestUntrustedFactory() { return { handleFor() { return null } } },
   }
-  const result = await saturateAndFindMintingPaths({ synthetic: syntheticTable }, 1)
+  const reach = deriveReach(libSources())
+  const checkers = {}
+  for (const declaration of reach.sweepable) {
+    checkers[brandKeyFor(declaration.checker)] = require(path.join(LIB, declaration.module))[declaration.checker]
+  }
+  const result = await saturateAndFindMintingPaths({ synthetic: syntheticTable }, 1, checkers)
   const names = [...result.found.keys()].sort()
   assert.deepEqual(names, ['synthetic.reAddedGrantingFactory'],
     `the sweep must NAME a re-added granting factory and must not smear onto its honest sibling; got ${JSON.stringify(names)}`)
@@ -2165,7 +2465,10 @@ async function main() {
   brandedErrorChannelIsOpenOnTheSpikeClass()
   exportSurfacesArePinned()
   await probeAuthorityIsClosureBoundNotCallerInjected()
+  trustBrandInventoryIsDerivedNotAuthored()
   await publicSurfaceMintsExactlyTheDeclaredTrust()
+  await aGrantingFactoryInAnUnwalkedModuleIsFound()
+  aNewWeakSetBrandAnywhereRedsTheLedger()
   await addingAGrantingFactoryBackIsFound()
   noSuiteJudgesInScopeBrandsByInstanceof()
   spikeClassHasNoUnforgeableBrand()

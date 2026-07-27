@@ -52,10 +52,19 @@
 // here can reach a live customer system.
 //
 // -- ERROR DISCIPLINE --------------------------------------------------------
-// `fail(reason)` takes ONLY a reason from the frozen vocabulary — no `message`, no
-// `details` — so a foreign connector callback that require()s this module cannot
-// mint a branded error carrying attacker text. Every catch around a foreign call
-// discards unconditionally: no cause, no stack, no message, no class exemption.
+// RETRACTION (round 7). This paragraph said a foreign callback "cannot mint a branded
+// error carrying attacker text". That was FALSE as an absolute: `fail(reason)` indeed
+// takes no text, but a caller who obtains a genuinely branded error — every refusal
+// hands one out — can assign `message`, `stack` and `reason` on it, because they are
+// ordinary writable own properties, and until round 7 the boundary re-threw a branded
+// error VERBATIM. The attacker-text half of that is a DISCLOSED residual under the
+// 2026-07-26 in-process-caller ruling (see the PR body). The half that is FIXED here,
+// because it is a closed-set invariant violation reachable without any adversary at
+// all: the boundary now RE-MINTS every branded error it catches from the frozen table
+// below, so a reason outside `SOURCE_EXECUTOR_ERROR_REASONS` can no longer leave it.
+// What remains unconditionally true: `fail` takes a reason and nothing else, and every
+// catch around a foreign call discards whole — no cause, no stack, no message, no
+// class exemption.
 
 const { assertTrustedBindingResolution } = require('./gip-approved-binding-resolver.cjs')
 const {
@@ -168,7 +177,23 @@ function safeLength(value, reason) {
 // design: it runs only on already-inert values, and a self-guarding predicate would
 // cover for the gate and destroy the gate's exclusive failure.
 const failEntryNotInert = () => fail('EXECUTOR_ENTRY_NOT_INERT')
-const guardEntry = createEntryGuard(isBrandedError, failEntryNotInert)
+// ROUND 7 — RE-MINT, NEVER RE-THROW. The brand attests WHO minted an object; it says
+// nothing about what that object currently SAYS, because `reason` is an ordinary
+// writable own property. So a caught branded error is discarded and a fresh one is
+// minted from the frozen table above, keeping the caught reason only when it is in
+// `ERROR_REASON_SET`. The read of `.reason` is itself guarded: an accessor can have
+// been installed on a branded object after it was minted, and a throw there is
+// treated as "not in the vocabulary" rather than escaping the boundary.
+const remintBrandedEntryError = (caught) => {
+  let reason
+  try {
+    reason = caught.reason
+  } catch (_error) {
+    reason = undefined
+  }
+  fail(typeof reason === 'string' && ERROR_REASON_SET.has(reason) ? reason : 'EXECUTOR_ENTRY_NOT_INERT')
+}
+const guardEntry = createEntryGuard(isBrandedError, failEntryNotInert, remintBrandedEntryError)
 
 function hasControlCharacter(text) {
   for (let index = 0; index < text.length; index += 1) {
@@ -219,8 +244,8 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 //
 //   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
 //      `buildTrustedHttpProbeActionRegistry`.
-//   2. `createHarnessSourceBinderForTests` (:367) is the SOLE writer into
-//      `trustedSourceBinders` (:361, written :441) and is publicly EXPORTED (:597) — there is no
+//   2. `createHarnessSourceBinderForTests` (:392) is the SOLE writer into
+//      `trustedSourceBinders` (:386, written :466) and is publicly EXPORTED (:622) — there is no
 //      private granter behind it at all, so it is not even "build split from trust";
 //      it is the single granting path. And unlike (1) it has NO CERTIFIED
 //      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified

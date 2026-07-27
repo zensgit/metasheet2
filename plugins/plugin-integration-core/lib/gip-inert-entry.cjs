@@ -23,12 +23,21 @@
 //      reads the SNAPSHOT and never touches the caller's object again, so no trap —
 //      named or not yet named — is reachable from downstream at all.
 //
-//   L2 BOUNDARY — `createEntryGuard` wraps a public export so that ANY throw, and
-//      ANY promise rejection, that is not an already-branded error of the wrapping
-//      module is discarded unconditionally (no `cause`, no `message`, no `stack`, no
-//      class exemption) and re-thrown as that module's own closed token. L2 does not
-//      know or care WHICH operation threw. That is exactly why it holds against the
-//      trap the next round would otherwise find.
+//   L2 BOUNDARY — `createEntryGuard` wraps a public export so that NOTHING it catches
+//      is ever re-thrown verbatim. A throw or rejection that is not an already-branded
+//      error of the wrapping module is discarded whole (no `cause`, no `message`, no
+//      `stack`, no class exemption) and replaced by that module's own closed token; a
+//      branded one is RE-MINTED from the module's frozen per-reason table, keeping its
+//      reason only if that reason is in the frozen vocabulary. L2 does not know or care
+//      WHICH operation threw.
+//
+//      RETRACTION (round 7). The sentence that stood here — "ANY throw ... that is not
+//      an already-branded error ... is discarded unconditionally" — was true of the
+//      unbranded half and FALSE of the branded half: until round 7 a branded error was
+//      re-thrown VERBATIM, carrying whatever `reason`, `message` and `stack` it held at
+//      the moment it was caught. `reason` is an ordinary writable own property, so the
+//      brand attests who minted the object, never what it currently says. See the note
+//      at `createEntryGuard`.
 //
 // -- WHY THE BRAND IS A WeakSet AND NOT `instanceof` (ROUND 6, P1-A) --------
 // Until round 6 L2 recognised "already branded" with `error instanceof BrandedError`.
@@ -71,15 +80,19 @@
 // very identity the trust check reads. So members are carried BY IDENTITY past the
 // snapshot bound.
 //
-// That is safe for a reason that is checkable rather than hopeful: every trap in the
-// class lives on the CONTAINER (get / ownKeys / getPrototypeOf /
+// RETRACTION (round 7). The sentence that stood here — "Nothing coerces a member, so
+// `Symbol.toPrimitive`, `valueOf` and `toString` have no site to fire from" — was an
+// ABSOLUTE claim over every current and future member read, and it is not one this
+// file can support: it is a statement about three consuming modules' code, checked by
+// reading, and unguarded coercion on a factory PRODUCT is a disclosed residual at this
+// head (see the PR body's residuals section). What is true, and is all that is claimed
+// now: the traps in the class live on the CONTAINER (get / ownKeys / getPrototypeOf /
 // getOwnPropertyDescriptor / has / defineProperty), and the container is what the
-// snapshot replaces. A member carried by identity is only ever subjected to
-// operations that cannot run caller code — `typeof`, `Array.isArray`,
-// `WeakSet.has`, `Map.get` — or is CALLED inside an existing unconditional-discard
-// try/catch. Nothing coerces a member, so `Symbol.toPrimitive`, `valueOf` and
-// `toString` have no site to fire from. Where that reasoning is wrong, L2 catches it
-// and the failure is a closed token rather than attacker text.
+// snapshot replaces; a member carried by identity is subjected to `typeof`,
+// `Array.isArray`, `WeakSet.has` and `Map.get`, which cannot run caller code, or is
+// CALLED inside an unconditional-discard try/catch. Where a member read is neither of
+// those, L2 catches it and the failure is a closed token rather than attacker text —
+// L2 is the guarantee here, not the member-read inventory.
 //
 // -- (α) IS AN EXPLICIT NON-CUSTOMER OF THIS MODULE -------------------------
 // One caller-adjacent value is deliberately NOT snapshotted: the opaque handle
@@ -251,14 +264,49 @@ function createErrorBrand() {
 // `*_ENTRY_NOT_INERT` token. Anything else that escapes — a bare `Error` from a trap
 // nobody has enumerated, a `TypeError` from a shape nobody anticipated, an object
 // built on the branded class's own prototype — is discarded whole and replaced.
-function createEntryGuard(isBrandedError, failNotInert) {
+//
+// -- ROUND 7 — NOTHING CAUGHT IS EVER RE-THROWN VERBATIM --------------------
+// Until round 7 both catch sites did `if (isBrandedError(error)) throw error`. The
+// brand is unforgeable, so the object WAS one this module minted — but `reason`,
+// `message` and `stack` on it are ordinary writable own properties, and the brand
+// says nothing about their CURRENT values. So the boundary emitted whatever `reason`
+// the object carried at the moment it was caught, while all three consuming modules
+// state in their own headers that a branded error carries a reason from a FROZEN
+// vocabulary. The boundary did not enforce the invariant it stated: it inherited it
+// from the fact that, at this head, every branded error happens to be minted by
+// `fail()` and nothing mutates one in flight. Both of those are properties of code
+// OUTSIDE this function.
+//
+// `remintBranded(caught)` closes that structurally. It MUST throw; it constructs a
+// FRESH branded error from the module's frozen per-reason table, keeping the caught
+// `reason` only when it is in the vocabulary and collapsing to the module's
+// `*_ENTRY_NOT_INERT` token otherwise. The caught object is discarded whole — no
+// `cause`, no `message`, no `stack`, no identity.
+//
+// IN-VOCABULARY REASONS ARE PRESERVED, AND THAT IS LOAD-BEARING, NOT A CONCESSION.
+// The L1/L2 exclusivity argument in this file's header rests on L2 emitting a token
+// L1 never emits while every L1 refusal keeps its own precise token. Collapsing every
+// re-mint to `*_ENTRY_NOT_INERT` would flip every L1 cell to the L2 token and destroy
+// exactly the exclusive-failure property the two-door claim depends on.
+//
+// A missing minter is a WIRING BUG, NEVER A FALLBACK: it fails closed HERE, at guard
+// construction, rather than degrading to the verbatim rethrow this replaces.
+function createEntryGuard(isBrandedError, failNotInert, remintBranded) {
+  if (typeof isBrandedError !== 'function'
+    || typeof failNotInert !== 'function'
+    || typeof remintBranded !== 'function') {
+    throw new TypeError('createEntryGuard: isBrandedError, failNotInert and remintBranded are all required')
+  }
   return function guardEntry(fn) {
     return function guardedEntry(...args) {
       let result
       try {
         result = fn.apply(this, args)
       } catch (error) {
-        if (isBrandedError(error)) throw error
+        // SITE 1 of 2 — the SYNCHRONOUS half. `remintBranded` throws; the
+        // `failNotInert()` beneath it is not a fallback, it is the fail-closed answer
+        // to a minter that returned instead of throwing.
+        if (isBrandedError(error)) remintBranded(error)
         failNotInert()
       }
       // ROUND 6, P1-B — THE `then` READ IS ITSELF A TRAPPABLE OPERATION, and until
@@ -291,8 +339,11 @@ function createEntryGuard(isBrandedError, failNotInert) {
       } catch (_error) {
         failNotInert()
       }
+      // SITE 2 of 2 — the ASYNCHRONOUS half. A synchronous try/catch never sees a
+      // rejection, so this site is reached by inputs site 1 cannot see and is
+      // neutered independently of it.
       return adopted.then(undefined, (error) => {
-        if (isBrandedError(error)) throw error
+        if (isBrandedError(error)) remintBranded(error)
         failNotInert()
       })
     }

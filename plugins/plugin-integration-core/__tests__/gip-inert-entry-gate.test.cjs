@@ -58,6 +58,50 @@ const resolver = require('../lib/gip-approved-binding-resolver.cjs')
 const executor = require('../lib/gip-server-bound-source-executor.cjs')
 
 // ---------------------------------------------------------------------------
+// A FIRST-PARTY MODULE FIXTURE, wired to the gate EXACTLY as the three real modules
+// wire it: a frozen reason vocabulary, one fixed message per reason, a module-private
+// brand whose sole writer is `fail`, and a re-minter that keeps an in-vocabulary
+// reason and collapses everything else to the boundary token.
+//
+// It exists because the property under test — "nothing the boundary emits carries a
+// reason outside the vocabulary" — is a property OF THE GUARD, and the guard is a
+// shared primitive three modules instantiate. Testing it through one of those modules
+// would test that module's particular reachability, which is not what the primitive
+// promises.
+// ---------------------------------------------------------------------------
+const LOCAL_REASONS = Object.freeze(['LOCAL_PRECISE', 'LOCAL_ENTRY_NOT_INERT'])
+const LOCAL_REASON_SET = new Set(LOCAL_REASONS)
+const LOCAL_MESSAGES = Object.freeze({
+  LOCAL_PRECISE: 'local fixed message',
+  LOCAL_ENTRY_NOT_INERT: 'local fixed message',
+})
+const LOCAL_UNDECLARED_MESSAGE = 'local fixture internal: undeclared error reason'
+
+function buildLocalModuleFixture() {
+  class LocalBranded extends Error {
+    constructor(reason) {
+      const known = typeof reason === 'string' && LOCAL_REASON_SET.has(reason)
+      super(known ? LOCAL_MESSAGES[reason] : LOCAL_UNDECLARED_MESSAGE)
+      this.name = 'LocalBranded'
+      this.reason = known ? reason : 'LOCAL_ENTRY_NOT_INERT'
+    }
+  }
+  const { brandError: brandLocal, isBrandedError: isBrandedLocal } = gate.createErrorBrand()
+  const failLocal = (reason) => { throw brandLocal(new LocalBranded(reason)) }
+  const remintLocal = (caught) => {
+    let reason
+    try {
+      reason = caught.reason
+    } catch (_error) {
+      reason = undefined
+    }
+    failLocal(typeof reason === 'string' && LOCAL_REASON_SET.has(reason) ? reason : 'LOCAL_ENTRY_NOT_INERT')
+  }
+  const guard = gate.createEntryGuard(isBrandedLocal, () => failLocal('LOCAL_ENTRY_NOT_INERT'), remintLocal)
+  return { LocalBranded, brandLocal, isBrandedLocal, failLocal, remintLocal, guard }
+}
+
+// ---------------------------------------------------------------------------
 // THE HOSTILE MATRIX.
 //
 // Named constructions, each a FRESH value per use — a Proxy that has already thrown
@@ -568,15 +612,9 @@ function thereIsExactlyOnePlainObjectDefinition() {
 // mutation-detectable.
 // ---------------------------------------------------------------------------
 async function l2RebrandsRejectionsNotOnlyThrows() {
-  const { createEntryGuard, createErrorBrand } = require('../lib/gip-inert-entry.cjs')
-  class LocalBranded extends Error {
-    constructor(reason) { super('local fixed message'); this.reason = reason }
-  }
   // ROUND 6: the boundary is parameterised by the UNFORGEABLE brand predicate, not by
   // the error CLASS. `brandLocal` is the only writer, exactly as in the real modules.
-  const { brandError: brandLocal, isBrandedError: isBrandedLocal } = createErrorBrand()
-  const failLocal = (reason) => { throw brandLocal(new LocalBranded(reason)) }
-  const guard = createEntryGuard(isBrandedLocal, () => failLocal('LOCAL_ENTRY_NOT_INERT'))
+  const { isBrandedLocal, failLocal, guard } = buildLocalModuleFixture()
 
   // ASYNC: an unbranded throw inside an async function is a REJECTION. A boundary
   // that only wraps the synchronous call never sees it.
@@ -716,11 +754,7 @@ function forgedBrandsAreRefused() {
   // NOW DRIVE ALL THREE THROUGH THE BOUNDARY ITSELF. The matrix above judges what a
   // module threw; this judges what the BOUNDARY does when a foreign callback throws a
   // forgery at it.
-  class LocalBranded extends Error {
-    constructor(reason) { super('local fixed message'); this.reason = reason }
-  }
-  const { brandError: brandLocal, isBrandedError: isBrandedLocal } = createErrorBrand()
-  const guard = createEntryGuard(isBrandedLocal, () => { throw brandLocal(new LocalBranded('LOCAL_ENTRY_NOT_INERT')) })
+  const { LocalBranded, isBrandedLocal, guard } = buildLocalModuleFixture()
 
   const forgeries = {
     prototypeForged: () => {
@@ -770,12 +804,8 @@ function forgedBrandsAreRefused() {
 // IDENTITY, so any `await` of a snapshot handed the caller a callback.
 // ---------------------------------------------------------------------------
 async function thenableBoundaryIsClosed() {
-  const { createEntryGuard, createErrorBrand, inertRecord, inertRecordList, GipNonPlainValue } = gate
-  class LocalBranded extends Error {
-    constructor(reason) { super('local fixed message'); this.reason = reason }
-  }
-  const { brandError: brandLocal, isBrandedError: isBrandedLocal } = createErrorBrand()
-  const guard = createEntryGuard(isBrandedLocal, () => { throw brandLocal(new LocalBranded('LOCAL_ENTRY_NOT_INERT')) })
+  const { inertRecord, inertRecordList, GipNonPlainValue } = gate
+  const { LocalBranded, brandLocal, isBrandedLocal, guard } = buildLocalModuleFixture()
 
   // 1. THE `then` GETTER THROWS — outside the old guarded region.
   const getterEntry = guard(() => ({ get then() { throw new Error(CANARY) } }))
@@ -833,6 +863,218 @@ async function thenableBoundaryIsClosed() {
 }
 
 // ---------------------------------------------------------------------------
+// ROUND 7 — A BRANDED ERROR MUST NEVER CARRY AN OUT-OF-VOCABULARY `reason`.
+//
+// -- THE DEFECT, STATED WITHOUT AN ADVERSARY --------------------------------
+// Both boundary catch sites did `if (isBrandedError(error)) throw error`. The brand is
+// unforgeable, so the caught object really was minted by the wrapping module — but the
+// brand attests WHO MINTED IT, never WHAT IT CURRENTLY SAYS: `reason`, `message` and
+// `stack` are ordinary writable own properties on an ordinary `Error`. Every one of
+// the three modules states in its own header that a branded error carries a reason
+// from a FROZEN vocabulary. The boundary did not enforce that; it inherited it from
+// two facts about code outside itself — every branded error happens to be minted by
+// `fail()`, and nothing mutates one in flight. Neither is a property the guard holds.
+//
+// This is a CLOSED-SET INVARIANT VIOLATION, and it is why the fix survives the
+// 2026-07-26 in-process-caller ruling: it needs no attacker. Any first-party holder
+// that annotates a branded error before it re-enters a guarded frame, and any future
+// `brandError` call that does not go through `fail`, breaks the closed set silently.
+// Honest scope: at THIS head no in-repo path performs that mutation — every foreign
+// call in the three modules is already inside an unconditional-discard try/catch — so
+// what is fixed is that the boundary now ENFORCES the invariant it states instead of
+// inheriting it. The attacker-text half is a disclosed residual, not the justification.
+//
+// -- WHY OBJECT IDENTITY IS THE ASSERTION THAT DISCRIMINATES -----------------
+// Asserting only that the escaping reason is in the vocabulary passes on a VERBATIM
+// rethrow whenever the planted reason happens to be in-vocabulary. Identity does not:
+// a re-mint is a different object, a rethrow is the same one. `notStrictEqual` is
+// therefore the load-bearing line here, and the vocabulary/message checks sit on top.
+//
+// -- THE CRITERION IS THE WeakSet, NOT `.name`, NOT `instanceof` -------------
+// `.name` is attacker-writable and `instanceof` is satisfied by
+// `Object.create(prototype)` — an earlier headline result in this PR was invalidated
+// for exactly that reason. Every brand judgement below goes through the fixture's own
+// `isBrandedLocal`, which reads a module-private WeakSet.
+//
+// -- SITE 1 of 2: THE SYNCHRONOUS HALF --------------------------------------
+// Neutering the async site alone leaves this GREEN, and vice versa; both mutations are
+// in the PR body. A single test covering both would let one door cover for the other.
+// ---------------------------------------------------------------------------
+function brandedErrorsAreRemintedAtTheSynchronousSite() {
+  const { isBrandedLocal, brandLocal, LocalBranded, guard } = buildLocalModuleFixture()
+
+  // A GENUINELY branded error — minted by the fixture's own private writer, exactly as
+  // every refusal in the three real modules mints one — whose `reason` is then assigned
+  // a token outside the frozen vocabulary. Assignment, not construction: the class
+  // already collapses an undeclared reason, so constructing one would test the class
+  // rather than the boundary.
+  const planted = brandLocal(new LocalBranded('LOCAL_PRECISE'))
+  planted.reason = 'FORGED_REASON_NOT_IN_VOCABULARY'
+  planted.message = CANARY
+  assert.equal(isBrandedLocal(planted), true, 'the planted error must really carry the mint brand')
+
+  const wrapped = guard(function syncEntry() { throw planted })
+  let caught = null
+  try { wrapped() } catch (error) { caught = error }
+
+  assert.ok(caught, 'the synchronous boundary must refuse')
+  assert.notStrictEqual(caught, planted,
+    'the synchronous boundary RE-THREW the caught object verbatim — a re-mint is a DIFFERENT object')
+  assert.equal(isBrandedLocal(caught), true, 'what the boundary throws must carry its own mint brand')
+  assert.ok(LOCAL_REASON_SET.has(caught.reason),
+    `an out-of-vocabulary reason escaped the synchronous boundary: ${String(caught.reason)}`)
+  assert.equal(caught.reason, 'LOCAL_ENTRY_NOT_INERT',
+    'an undeclared reason must collapse to the boundary token, not to an L1 token')
+  assert.equal(caught.message, LOCAL_MESSAGES.LOCAL_ENTRY_NOT_INERT,
+    'the re-minted message must come from the frozen per-reason table')
+  // Side effect, stated honestly: discarding the caught object also drops the text it
+  // carried. Under the ruling that is NOT the justification for this fix — the
+  // vocabulary invariant is — but a check that would have caught the leak is cheap.
+  assert.equal(renderForLeakCheck({ m: caught.message, s: caught.stack }).state, 'clean',
+    'the re-minted error must not carry the discarded object\'s text')
+
+  // THE OTHER DIRECTION, AND IT IS LOAD-BEARING, NOT A COURTESY. If the re-mint
+  // collapsed EVERY reason to the boundary token, every L1 refusal in all three modules
+  // would surface as `*_ENTRY_NOT_INERT` and the two doors would stop having exclusive
+  // failures — which is the property the whole L1/L2 argument rests on. An
+  // IN-vocabulary reason must survive, on a FRESH object.
+  const preciseSource = brandLocal(new LocalBranded('LOCAL_PRECISE'))
+  const precise = guard(function syncPrecise() { throw preciseSource })
+  caught = null
+  try { precise() } catch (error) { caught = error }
+  assert.equal(caught.reason, 'LOCAL_PRECISE', 'an in-vocabulary reason must be PRESERVED across the re-mint')
+  assert.notStrictEqual(caught, preciseSource, 'preservation must still be a re-mint, not a pass-through')
+
+  // A `reason` ACCESSOR THAT THROWS. A branded object can have one installed after it
+  // was minted, and the re-minter reads `reason` — an unguarded read there would throw
+  // out of the catch block and escape the boundary entirely.
+  const accessorSource = brandLocal(new LocalBranded('LOCAL_PRECISE'))
+  Object.defineProperty(accessorSource, 'reason', { get() { throw new Error(CANARY) }, configurable: true })
+  const accessor = guard(function syncAccessor() { throw accessorSource })
+  caught = null
+  try { accessor() } catch (error) { caught = error }
+  assert.equal(isBrandedLocal(caught), true, 'a throwing `reason` accessor must not escape the boundary')
+  assert.equal(caught.reason, 'LOCAL_ENTRY_NOT_INERT', 'an unreadable reason is not an in-vocabulary reason')
+  assert.equal(renderForLeakCheck({ m: caught.message, s: caught.stack }).state, 'clean',
+    'a throwing `reason` accessor must not leak its text')
+
+  console.log('  REMINT-SYNC out-of-vocabulary collapsed, in-vocabulary preserved, throwing accessor contained, all fresh objects')
+}
+
+// ---------------------------------------------------------------------------
+// SITE 2 of 2: THE ASYNCHRONOUS HALF. A synchronous try/catch never sees a rejection,
+// so this site is reached by inputs site 1 cannot see, and is neutered independently.
+// ---------------------------------------------------------------------------
+async function brandedErrorsAreRemintedAtTheAsynchronousSite() {
+  const { isBrandedLocal, brandLocal, LocalBranded, guard } = buildLocalModuleFixture()
+
+  const planted = brandLocal(new LocalBranded('LOCAL_PRECISE'))
+  planted.reason = 'FORGED_REASON_NOT_IN_VOCABULARY'
+  planted.message = CANARY
+  assert.equal(isBrandedLocal(planted), true, 'the planted error must really carry the mint brand')
+
+  const wrapped = guard(async function asyncEntry() { throw planted })
+  let caught = null
+  try { await wrapped() } catch (error) { caught = error }
+
+  assert.ok(caught, 'the asynchronous boundary must reject')
+  assert.notStrictEqual(caught, planted,
+    'the rejection handler RE-THREW the caught object verbatim — a re-mint is a DIFFERENT object')
+  assert.equal(isBrandedLocal(caught), true, 'what the rejection handler throws must carry its own mint brand')
+  assert.ok(LOCAL_REASON_SET.has(caught.reason),
+    `an out-of-vocabulary reason escaped the asynchronous boundary: ${String(caught.reason)}`)
+  assert.equal(caught.reason, 'LOCAL_ENTRY_NOT_INERT', 'an undeclared reason must collapse to the boundary token')
+  assert.equal(caught.message, LOCAL_MESSAGES.LOCAL_ENTRY_NOT_INERT,
+    'the re-minted message must come from the frozen per-reason table')
+  assert.equal(renderForLeakCheck({ m: caught.message, s: caught.stack }).state, 'clean',
+    'the re-minted rejection must not carry the discarded object\'s text')
+
+  // A FOREIGN THENABLE that rejects with the same planted object reaches the identical
+  // handler by a different route — the adoption path, not `async`.
+  const thenablePlanted = brandLocal(new LocalBranded('LOCAL_PRECISE'))
+  thenablePlanted.reason = 'FORGED_REASON_NOT_IN_VOCABULARY'
+  const thenable = guard(() => ({ then(_ok, bad) { bad(thenablePlanted) } }))
+  caught = null
+  try { await thenable() } catch (error) { caught = error }
+  assert.notStrictEqual(caught, thenablePlanted, 'a thenable rejection must be re-minted, not passed through')
+  assert.equal(caught.reason, 'LOCAL_ENTRY_NOT_INERT', 'an undeclared reason from a thenable must collapse')
+
+  // The preservation half again, on the async site.
+  const preciseSource = brandLocal(new LocalBranded('LOCAL_PRECISE'))
+  caught = null
+  try { await guard(async function asyncPrecise() { throw preciseSource })() } catch (error) { caught = error }
+  assert.equal(caught.reason, 'LOCAL_PRECISE', 'an in-vocabulary reason must be PRESERVED across the async re-mint')
+  assert.notStrictEqual(caught, preciseSource, 'preservation must still be a re-mint, not a pass-through')
+
+  console.log('  REMINT-ASYNC rejection + foreign-thenable collapsed, in-vocabulary preserved, all fresh objects')
+}
+
+// ---------------------------------------------------------------------------
+// BOTH SITES ARE REPORTED SEPARATELY IN EVERY RUN — that is what makes them
+// separately load-bearing rather than jointly load-bearing.
+//
+// A suite that aborts at the first failed assertion cannot show exclusivity: neuter
+// the synchronous site and the run stops before the asynchronous cell has executed, so
+// "the async cell was unaffected" would be an argument rather than an observation, and
+// two fail-closed doors that only ever fail together are the exact shape this package's
+// own review history keeps rejecting. So both cells run, both outcomes print, and the
+// failures are raised TOGETHER at the end. One mutation, one run, both facts visible.
+// ---------------------------------------------------------------------------
+async function bothRemintSitesReportSeparately() {
+  const cells = [
+    ['SYNC-SITE', () => brandedErrorsAreRemintedAtTheSynchronousSite()],
+    ['ASYNC-SITE', () => brandedErrorsAreRemintedAtTheAsynchronousSite()],
+  ]
+  const failures = []
+  for (const [label, run] of cells) {
+    try {
+      await run()
+      console.log(`  REMINT-EXCLUSIVITY ${label}: PASS`)
+    } catch (error) {
+      console.log(`  REMINT-EXCLUSIVITY ${label}: FAIL — ${error && error.message}`)
+      failures.push(`${label}: ${error && error.message}`)
+    }
+  }
+  assert.deepEqual(failures, [],
+    `the re-mint cells failed:\n  ${failures.join('\n  ')}`)
+}
+
+// ---------------------------------------------------------------------------
+// THE MINTER IS A WIRING REQUIREMENT, NEVER A FALLBACK.
+//
+// A guard constructed without a re-minter must fail AT CONSTRUCTION rather than
+// degrading to the verbatim rethrow this replaces — "a wiring bug, never a fallback".
+// That construction check is also what proves the three REAL modules are wired to the
+// re-minting guard: each of them calls `createEntryGuard` at module load, so a module
+// that passed only two arguments could not have been `require`d at the top of this
+// file at all. Mutating any one of the three to drop its third argument REDs the whole
+// suite at load; that is recorded in the PR body.
+// ---------------------------------------------------------------------------
+function theGuardCannotBeWiredWithoutAMinter() {
+  const { createEntryGuard, createErrorBrand } = gate
+  const { isBrandedError } = createErrorBrand()
+  const noop = () => {}
+  for (const [name, args] of Object.entries({
+    noMinter: [isBrandedError, noop],
+    minterNotAFunction: [isBrandedError, noop, {}],
+    noFailNotInert: [isBrandedError],
+    nothing: [],
+  })) {
+    assert.throws(() => createEntryGuard(...args), TypeError,
+      `${name}: an incompletely wired guard must fail closed at construction`)
+  }
+  // POSITIVE CONTROL: the complete wiring constructs.
+  assert.equal(typeof createEntryGuard(isBrandedError, noop, noop), 'function')
+
+  // AND THE THREE REAL MODULES ARE WIRED — they are at the top of this file, and each
+  // calls `createEntryGuard` at module load, so their presence here is the proof.
+  for (const [name, mod] of Object.entries({ observability, resolver, executor })) {
+    assert.ok(mod && typeof mod === 'object', `${name} must have loaded`)
+  }
+  console.log('  MINTER-WIRING 4 incomplete wirings refused at construction; observability/resolver/executor all loaded')
+}
+
+// ---------------------------------------------------------------------------
 // ROUND 6, P2-C — THE LEAK CHECK ITSELF MUST FAIL CLOSED.
 //
 // A serialization that throws and is swallowed to `''` is then judged "no leak". That
@@ -870,6 +1112,8 @@ async function main() {
   await l2RebrandsRejectionsNotOnlyThrows()
   forgedBrandsAreRefused()
   await thenableBoundaryIsClosed()
+  await bothRemintSitesReportSeparately()
+  theGuardCannotBeWiredWithoutAMinter()
   leakCheckFailsClosedWhenTheCheckFails()
   await checkerHasTeeth()
   credentialHandleIsGuardedNotEnumerated()
