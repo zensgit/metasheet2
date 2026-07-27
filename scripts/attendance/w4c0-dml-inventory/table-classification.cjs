@@ -113,6 +113,15 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_import_rollback_closures: 'w4_canonical',
   attendance_calculation_rollout_state: 'w4_canonical',
   attendance_calculation_rollout_events: 'w4_canonical',
+
+  // --- w4_canonical: W4C-2 P1-2 scheduled-run tables (#4556, PR #4617 amendment §1.1/§1.1.1,
+  // RATIFIED bundle A). Written only by the canonical scheduled-run module
+  // (packages/core-backend/src/attendance/w4c2-scheduled-run.ts) and the P1-2 migration —
+  // both already covered by W4_CANONICAL_PATH_PREFIXES below; adding the tables here closes
+  // the classification set the Stage D collector enforces fail-closed. -----------------------
+  attendance_scheduled_runs: 'w4_canonical',
+  attendance_scheduled_run_targets: 'w4_canonical',
+  attendance_scheduled_run_target_outcomes: 'w4_canonical',
 })
 
 // Buckets whose DML sites require an individual curated P0x (or later-slice) debt-ID match.
