@@ -18,6 +18,7 @@ const {
   CAPABILITY_HANDSHAKE_EXPECTATION_KEYS,
   CAPABILITY_HANDSHAKE_OUTCOMES,
   evaluateCapabilityHandshake,
+  isBrandedReadObservabilityContractError,
 } = moduleExports
 
 const ATTACKER_TEXT = 'ATTACKER-CANARY-6f23e39f'
@@ -27,8 +28,8 @@ const ATTACKER_TEXT = 'ATTACKER-CANARY-6f23e39f'
 function refusesWith(fn, expectedReason) {
   let caught = null
   try { fn() } catch (error) { caught = error }
-  assert.ok(caught instanceof GipReadObservabilityContractError,
-    `expected GipReadObservabilityContractError, got ${caught && caught.name}`)
+  assert.ok(isBrandedReadObservabilityContractError(caught),
+    `expected an error MINTED by the module (unforgeable brand), got ${caught && caught.name}`)
   assert.equal(caught.reason, expectedReason)
   return caught
 }
@@ -327,6 +328,11 @@ function exportSurfaceIsPinned() {
     '__internals',
     'assertValuesFreeCounterSample',
     'evaluateCapabilityHandshake',
+    // ROUND 6, P1-A. A CHECKER, not a granter: a predicate over an object that
+    // already exists, which admits nothing and mints nothing. It exists so that no
+    // assertion anywhere has to fall back on `instanceof`/`.name`, both of which are
+    // forgeable.
+    'isBrandedReadObservabilityContractError',
   ])
   assert.deepEqual(keySet(moduleExports.__internals), [
     'COUNTER_SAMPLE_KEY_MEMBERS',

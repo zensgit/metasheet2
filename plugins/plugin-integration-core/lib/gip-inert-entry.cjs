@@ -30,6 +30,27 @@
 //      know or care WHICH operation threw. That is exactly why it holds against the
 //      trap the next round would otherwise find.
 //
+// -- WHY THE BRAND IS A WeakSet AND NOT `instanceof` (ROUND 6, P1-A) --------
+// Until round 6 L2 recognised "already branded" with `error instanceof BrandedError`.
+// That criterion does not hold, and all three refutations were EXECUTED against the
+// round-5 head before this change:
+//   * `Object.create(BrandedError.prototype)` — `instanceof` is TRUE while the object
+//     carries attacker `message`/`stack`. L2 rethrew it VERBATIM.
+//   * a plain `Error` with `.name` assigned the branded class name — `.name` is an
+//     ordinary writable property, so any "is branded" test written on `.name`
+//     (including the criterion behind the RETRACTED 0/12 matrix) passes on an object
+//     whose `instanceof` is false.
+//   * `Symbol.hasInstance` — the `instanceof` EXPRESSION ITSELF throws, and it sat
+//     inside L2's `catch`, so the attacker's text escaped past the boundary.
+// A module-private `WeakSet` has none of those properties: membership is conferred
+// ONLY by the `brandError` writer the minting module keeps private, `WeakSet.prototype
+// .has` reads an internal slot and therefore invokes NO caller code (it cannot be made
+// to throw, and it returns `false` rather than throwing on primitives), and no
+// prototype, no writable property and no well-known symbol can add a member.
+// `createErrorBrand()` is exported, and exporting it grants nothing: every call returns
+// a FRESH, disconnected set, so branding an error into your own set is invisible to
+// every other set in the process.
+//
 // -- NEITHER LAYER IS REDUNDANT, AND THE SUITE PROVES IT BY EXCLUSION --------
 // Two fail-closed doors in series normally cover for each other: neuter either one
 // and the other still refuses, so neither has an exclusive failure and neither is
@@ -121,6 +142,22 @@ function snapshotRecordUnderGuard(value) {
   return Object.freeze(out)
 }
 
+// THENABLE NEUTRALISATION (round 6, P1-B). A snapshot must not carry a CALLABLE
+// `then`: `await`, `Promise.resolve`, `new Promise(r => r(x))` and every promise
+// resolution path READ `then` and CALL it, and those operations run OUTSIDE any
+// try/catch that a later reader happens to write. Carrying the caller's `then` by
+// identity — which is what "functions are carried through untouched" did — therefore
+// handed the caller a callback that fires from inside the promise machinery.
+// EXECUTED before this change: `inertRecord({ then(){...} }).then` was a function.
+//
+// The stand-in is `GipNonPlainValue`, not `undefined`, for the reason stated at that
+// class: collapsing "you passed a thenable" into "you passed nothing" loses a
+// distinction the two are different wiring bugs. The KEY STAYS PRESENT, so every
+// closed-key-set refusal downstream still fires exactly as it did.
+function neutralizeThenable(key, member) {
+  return key === 'then' && typeof member === 'function' ? new GipNonPlainValue() : member
+}
+
 function defineSnapshotMember(out, source, key) {
   // `ownKeys` may report a key whose descriptor is `undefined` — a Proxy is free to
   // be inconsistent. Skipping is correct: an absent descriptor is an absent member,
@@ -136,7 +173,7 @@ function defineSnapshotMember(out, source, key) {
     ? (typeof descriptor.get === 'function' ? descriptor.get.call(source) : undefined)
     : descriptor.value
   Object.defineProperty(out, key, {
-    value: member,
+    value: neutralizeThenable(key, member),
     enumerable: descriptor.enumerable === true,
     writable: false,
     configurable: false,
@@ -185,30 +222,79 @@ function inertRecordList(value, failHostile) {
 
 // --- L2: the boundary -------------------------------------------------------
 
-// `BrandedError` is the wrapping module's OWN error class; `failNotInert` throws that
-// module's `*_ENTRY_NOT_INERT` token. Anything else that escapes — a bare `Error`
-// from a trap nobody has enumerated, a `TypeError` from a shape nobody anticipated —
-// is discarded whole and replaced.
-function createEntryGuard(BrandedError, failNotInert) {
+// THE BRAND. `createErrorBrand()` mints a FRESH module-private WeakSet plus the only
+// two verbs over it. The minting module keeps `brandError` private and threads
+// `isBrandedError` into `createEntryGuard`; calling `createErrorBrand()` from anywhere
+// else yields an unrelated set, so this export confers nothing on anybody's errors.
+// See the P1-A note in the header for the three constructions this replaces.
+function createErrorBrand() {
+  const branded = new WeakSet()
+  return Object.freeze({
+    brandError(error) {
+      // `WeakSet.prototype.add` throws on a primitive; the modules only ever brand a
+      // freshly constructed error, and a primitive simply stays unbranded.
+      if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
+        branded.add(error)
+      }
+      return error
+    },
+    isBrandedError(value) {
+      // Reads an internal slot. Invokes no caller code, cannot throw, returns false
+      // for primitives and for every forgery.
+      return branded.has(value)
+    },
+  })
+}
+
+// `isBrandedError` is the wrapping module's UNFORGEABLE brand predicate (never its
+// error CLASS — see the header); `failNotInert` throws that module's
+// `*_ENTRY_NOT_INERT` token. Anything else that escapes — a bare `Error` from a trap
+// nobody has enumerated, a `TypeError` from a shape nobody anticipated, an object
+// built on the branded class's own prototype — is discarded whole and replaced.
+function createEntryGuard(isBrandedError, failNotInert) {
   return function guardEntry(fn) {
     return function guardedEntry(...args) {
       let result
       try {
         result = fn.apply(this, args)
       } catch (error) {
-        if (error instanceof BrandedError) throw error
+        if (isBrandedError(error)) throw error
+        failNotInert()
+      }
+      // ROUND 6, P1-B — THE `then` READ IS ITSELF A TRAPPABLE OPERATION, and until
+      // this change it sat OUTSIDE the guarded region: `typeof result.then` fired a
+      // hostile getter and the throw escaped past the boundary raw (EXECUTED). It is
+      // now read ONCE, inside the guard, into a LOCAL — once, because reading it again
+      // for the call would reopen a differing-return channel where a getter answers
+      // "not a thenable" to the test and a callable to the use.
+      let thenMember
+      try {
+        thenMember = (result !== null && typeof result === 'object') || typeof result === 'function'
+          ? result.then
+          : undefined
+      } catch (_error) {
         failNotInert()
       }
       // An async entry point turns a throw into a REJECTION, which a synchronous
       // try/catch does not see at all. Re-branding only the synchronous half would
       // leave every `async` public export uncovered.
-      if (result !== null && typeof result === 'object' && typeof result.then === 'function') {
-        return result.then(undefined, (error) => {
-          if (error instanceof BrandedError) throw error
-          failNotInert()
-        })
+      if (typeof thenMember !== 'function') return result
+      // THE CALL IS FOREIGN TOO. Adopting through a FIRST-PARTY promise is what makes
+      // that safe: everything the thenable can do from here — throw out of `then`,
+      // throw out of a synchronous resolve, resolve with a second hostile thenable —
+      // happens inside the promise machinery, which converts it into a REJECTION this
+      // handler sees, instead of a synchronous throw past the boundary. `result.then(
+      // undefined, handler)` did NOT have that property: the call itself threw out.
+      let adopted
+      try {
+        adopted = new Promise((resolve, reject) => { thenMember.call(result, resolve, reject) })
+      } catch (_error) {
+        failNotInert()
       }
-      return result
+      return adopted.then(undefined, (error) => {
+        if (isBrandedError(error)) throw error
+        failNotInert()
+      })
     }
   }
 }
@@ -220,10 +306,16 @@ function createEntryGuard(BrandedError, failNotInert) {
 // their own stated posture.
 //
 // TWO DELIBERATE NON-WRAPS, because wrapping them would BREAK the module:
-//   * CLASSES. A wrapper is not the class, so `instanceof` stops working — and
-//     `instanceof` is what L2 itself uses to recognise an already-branded error.
-//     The error classes take no caller text by construction (they read a frozen
-//     per-reason map and ignore everything else), so there is nothing to contain.
+//   * CLASSES. A wrapper is not the class: `new Wrapped(...)` and every
+//     `instanceof`/prototype relationship a consumer writes against the exported class
+//     would break. (The reason stated here BEFORE round 6 — "`instanceof` is what L2
+//     itself uses to recognise an already-branded error" — is no longer true and would
+//     be a false comment if left: L2 now recognises a brand by module-private WeakSet
+//     membership and uses no `instanceof` at all.) The error classes take no caller
+//     text by construction (they read a frozen per-reason map and ignore everything
+//     else), so there is nothing to contain; note that a DIRECTLY constructed error is
+//     deliberately NOT branded, so if a foreign callback throws one it is discarded and
+//     replaced like any other foreign throw.
 //   * EXPORTED OBJECTS THAT CARRY TRUST IDENTITY. Rebuilding an exported frozen
 //     object produces a NEW object, and admission downstream is `WeakSet.has(it)` —
 //     so a "helpful" wrap of `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` would silently
@@ -257,6 +349,7 @@ module.exports = {
   isPlainObject,
   inertRecord,
   inertRecordList,
+  createErrorBrand,
   createEntryGuard,
   guardExportTable,
 }

@@ -62,6 +62,7 @@ const {
   isPlainObject,
   inertRecord,
   inertRecordList,
+  createErrorBrand,
   createEntryGuard,
   guardExportTable,
 } = require('./gip-inert-entry.cjs')
@@ -103,8 +104,23 @@ class GipSourceExecutorError extends Error {
   }
 }
 
+// THE BRAND IS UNFORGEABLE (round 6, P1-A). `brandError` is the SOLE writer and is
+// module-private; `isBrandedSourceExecutorError` is a CHECKER — a predicate over an
+// object that already exists, which admits nothing and grants nothing. An error
+// constructed DIRECTLY off the exported class is deliberately NOT branded: it is not
+// something this module minted, so L2 discards and replaces it like any other foreign
+// throw. `instanceof GipSourceExecutorError` is NOT this predicate and must not be
+// used as one — `Object.create(GipSourceExecutorError.prototype)` satisfies it while
+// carrying attacker text (EXECUTED), and `Symbol.hasInstance` makes the expression
+// itself throw.
+const { brandError, isBrandedError } = createErrorBrand()
+
 function fail(reason) {
-  throw new GipSourceExecutorError(reason)
+  throw brandError(new GipSourceExecutorError(reason))
+}
+
+function isBrandedSourceExecutorError(value) {
+  return isBrandedError(value)
 }
 
 // --- hostile-input readers --------------------------------------------------
@@ -152,7 +168,7 @@ function safeLength(value, reason) {
 // design: it runs only on already-inert values, and a self-guarding predicate would
 // cover for the gate and destroy the gate's exclusive failure.
 const failEntryNotInert = () => fail('EXECUTOR_ENTRY_NOT_INERT')
-const guardEntry = createEntryGuard(GipSourceExecutorError, failEntryNotInert)
+const guardEntry = createEntryGuard(isBrandedError, failEntryNotInert)
 
 function hasControlCharacter(text) {
   for (let index = 0; index < text.length; index += 1) {
@@ -203,8 +219,8 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 //
 //   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
 //      `buildTrustedHttpProbeActionRegistry`.
-//   2. `createHarnessSourceBinderForTests` (:331) is the SOLE writer into
-//      `trustedSourceBinders` (:325, written :405) and is publicly EXPORTED (:544) — there is no
+//   2. `createHarnessSourceBinderForTests` (:347) is the SOLE writer into
+//      `trustedSourceBinders` (:341, written :421) and is publicly EXPORTED (:560) — there is no
 //      private granter behind it at all, so it is not even "build split from trust";
 //      it is the single granting path. And unlike (1) it has NO CERTIFIED
 //      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified
@@ -544,6 +560,7 @@ module.exports = guardExportTable({
   createHarnessSourceBinderForTests,
   createServerBoundSourceExecutor,
   isTrustedServerBoundSourceExecutor,
+  isBrandedSourceExecutorError,
   // `fail` is deliberately ABSENT — and inert anyway, since it takes no caller text.
   // `buildTrustedHttpProbeActionRegistry` is absent BECAUSE IT GRANTS TRUST.
   // Both pinned by the exact-key-set test, so re-adding either reds.

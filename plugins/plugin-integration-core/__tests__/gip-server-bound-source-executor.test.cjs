@@ -57,12 +57,44 @@ const PROBED_AT = '2026-07-26T00:00:00Z'
 const SECRET_CANARY = 'CONNECTION-SECRET-CANARY-6f23e39f'
 const ATTACKER_TEXT = 'ATTACKER-CANARY-6f23e39f'
 
+// ROUND 6, P1-A — BRANDEDNESS IS JUDGED BY AN UNFORGEABLE CHECKER WHERE ONE EXISTS.
+//
+// `caught instanceof ErrorClass` is not a brand and never was. All three refutations
+// were EXECUTED against the round-5 head: `Object.create(ErrorClass.prototype)`
+// satisfies it while carrying attacker text; `.name` is an ordinary writable property
+// so every name-based criterion (including the one behind the RETRACTED 0/12 matrix)
+// is satisfied by a plain `Error`; and a `Symbol.hasInstance` hijack makes the
+// EXPRESSION ITSELF throw — inside this helper that would abort the run rather than
+// fail the case. The two in-scope modules now expose module-private-WeakSet checkers,
+// which invoke no caller code, cannot be made to throw, and cannot be conferred from
+// outside.
+//
+// ⚠ DISCLOSED, NOT FIXED — `GipQualificationError` HAS NO UNFORGEABLE BRAND. The
+// spike module's `fail()` and its error class are BYTE-IDENTICAL to `origin/main`
+// (verified: `git diff origin/main -- lib/gip-binding-qualification-spike.cjs` carries
+// no hunk over either), so under this PR's scope rule they are disclosed rather than
+// changed. Cells judged against that class therefore still rest on `instanceof`, and
+// what they actually prove is the `reason` TOKEN EQUALITY on the next line — which is
+// asserted for every cell either way. `spikeClassHasNoUnforgeableBrand()` pins the
+// residual positively, so the day a future PR brands that class, this comment REDs
+// instead of going stale.
+const UNFORGEABLE_BRAND_CHECKER = new Map([
+  [GipSourceExecutorError, executorModule.isBrandedSourceExecutorError],
+  [GipApprovedBindingResolverError, resolverModule.isBrandedApprovedBindingResolverError],
+])
+
+function judgeBranded(ErrorClass, caught) {
+  const checker = UNFORGEABLE_BRAND_CHECKER.get(ErrorClass)
+  if (typeof checker === 'function') return checker(caught)
+  return caught instanceof ErrorClass
+}
+
 // Token EQUALITY, never `includes` — two tokens minted at the same fail() call site
 // can otherwise cover for each other.
 function refusesWith(fn, ErrorClass, expectedReason) {
   let caught = null
   try { fn() } catch (error) { caught = error }
-  assert.ok(caught instanceof ErrorClass, `expected ${ErrorClass.name}, got ${caught && caught.name}: ${caught && caught.message}`)
+  assert.ok(judgeBranded(ErrorClass, caught), `expected ${ErrorClass.name}, got ${caught && caught.name}: ${caught && caught.message}`)
   assert.equal(caught.reason, expectedReason)
   return caught
 }
@@ -70,7 +102,7 @@ function refusesWith(fn, ErrorClass, expectedReason) {
 async function refusesWithAsync(fn, ErrorClass, expectedReason) {
   let caught = null
   try { await fn() } catch (error) { caught = error }
-  assert.ok(caught instanceof ErrorClass, `expected ${ErrorClass.name}, got ${caught && caught.name}: ${caught && caught.message}`)
+  assert.ok(judgeBranded(ErrorClass, caught), `expected ${ErrorClass.name}, got ${caught && caught.name}: ${caught && caught.message}`)
   assert.equal(caught.reason, expectedReason)
   return caught
 }
@@ -921,7 +953,7 @@ async function hostileGetterOnAnAllowlistedKeyIsRefusedNotLeaked() {
     observations.push({ key, reason: caught.reason, surfaces })
 
     // FAIL CLOSED under the ALREADY-DECLARED token, by EQUALITY.
-    assert.ok(caught instanceof GipQualificationError,
+    assert.ok(judgeBranded(GipQualificationError, caught),
       `${key}: expected GipQualificationError, got ${caught && caught.name}`)
     assert.equal(caught.reason, 'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED')
   }
@@ -993,7 +1025,7 @@ async function hostileGetterOnTheVerifiedQualificationIsRefusedNotLeaked() {
     } catch (error) { caught = error }
 
     assert.ok(caught, `qualification.${key}: the hostile getter must fail closed`)
-    assert.ok(caught instanceof GipQualificationError,
+    assert.ok(judgeBranded(GipQualificationError, caught),
       `qualification.${key}: expected GipQualificationError, got ${caught && caught.name}`)
     assert.equal(caught.reason, 'QUALIFICATION_NOT_OBJECT')
     for (const surface of [String(caught.message), String(caught.stack), JSON.stringify(caught.details || {})]) {
@@ -1017,7 +1049,7 @@ async function hostileGetterOnTheVerifiedQualificationIsRefusedNotLeaked() {
     })
   } catch (error) { envelopeCaught = error }
   assert.ok(envelopeCaught)
-  assert.ok(!(envelopeCaught instanceof GipQualificationError),
+  assert.ok(!judgeBranded(GipQualificationError, envelopeCaught),
     'OS-3 residual: this is expected to be an UNBRANDED escape today — if it is now branded, the '
     + 'residual was closed and §9A/OS-3 must be updated')
   assert.ok(String(envelopeCaught.message).includes(ATTACKER_TEXT),
@@ -1092,7 +1124,7 @@ async function hostileGetterOnTheProberComponentsIsRefusedNotLeaked() {
     try { createBindingQualificationProber(components) } catch (error) { caught = error }
 
     assert.ok(caught, `${label}: must fail closed`)
-    assert.ok(caught instanceof GipQualificationError,
+    assert.ok(judgeBranded(GipQualificationError, caught),
       `${label}: expected GipQualificationError, got ${caught && caught.name}`)
     // Token EQUALITY on the reason this DOOR declares — not the run-input token.
     assert.equal(caught.reason, 'PROBE_EXECUTOR_UNTRUSTED')
@@ -1145,7 +1177,7 @@ async function ownKeysTrapDuringRunInputEnumerationIsRefusedNotLeaked() {
   try { await stack.prober.probeFromResolution(input) } catch (error) { caught = error }
 
   assert.ok(caught, 'a throwing ownKeys trap must fail the probe closed')
-  assert.ok(caught instanceof GipQualificationError,
+  assert.ok(judgeBranded(GipQualificationError, caught),
     `expected GipQualificationError, got ${caught && caught.name}`)
   assert.equal(caught.reason, 'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED')
   for (const surface of [String(caught.message), String(caught.stack), JSON.stringify(caught.details || {})]) {
@@ -1160,7 +1192,11 @@ async function ownKeysTrapDuringRunInputEnumerationIsRefusedNotLeaked() {
   // the executor module's `safeOwnKeys`. A `GipSourceExecutorError` here would mean
   // this test is measuring the other door — the exact substitution the round-3 table
   // made in prose.
-  assert.ok(!(caught instanceof GipSourceExecutorError),
+  // ROUND 6, P1-A: judged by the UNFORGEABLE checker. `!(x instanceof C)` is an even
+  // worse criterion than its positive twin — a `Symbol.hasInstance` hijack makes the
+  // expression throw, and a prototype forgery makes it FALSE, so a leak would read as
+  // a pass on both counts.
+  assert.ok(!executorModule.isBrandedSourceExecutorError(caught),
     'the refusal must come from the spike module, not the executor module')
 
   // POSITIVE CONTROL: the same stack with an ordinary run input still qualifies.
@@ -1212,7 +1248,7 @@ async function outerVerifyArgumentIsGuardedNotDestructuredRaw() {
     let caught = null
     try { verifyBindingQualification(make()) } catch (error) { caught = error }
     assert.ok(caught, `${label}: must fail closed`)
-    assert.ok(caught instanceof GipQualificationError,
+    assert.ok(judgeBranded(GipQualificationError, caught),
       `${label}: expected GipQualificationError, got ${caught && caught.name}`)
     assert.equal(caught.reason, 'QUALIFICATION_NOT_OBJECT')
     for (const surface of [String(caught.message), String(caught.stack), JSON.stringify(caught.details || {})]) {
@@ -1416,6 +1452,107 @@ function brandedErrorChannelIsOpenOnTheSpikeClass() {
 }
 
 // ---------------------------------------------------------------------------
+// ROUND 6, P1-A — NO SUITE MAY JUDGE THE TWO IN-SCOPE BRANDS BY `instanceof`/`.name`.
+//
+// The behavioural proof that the brand holds lives in `forgedBrandsAreRefused()` in
+// the gate suite. THIS is the COMPLETENESS half: a forgery test proves the checker
+// works, it does NOT prove that every assertion in five files actually uses it. One
+// leftover `caught instanceof GipSourceExecutorError` is a cell that passes on a
+// prototype forgery, and finding those by reading is exactly how three rounds of this
+// PR shipped a stale claim.
+//
+// SCOPE THE INSTRUMENT HONESTLY (source-text assertions are not behaviour assertions):
+// this is a SOURCE-TEXT sweep. It cannot prove behaviour and a determined edit can
+// route around it. What it does is keep the criterion FIXED — a newly written
+// `instanceof`-based brand assertion on either in-scope class REDs, naming the file
+// and line. The count pin on the DISCLOSED `GipQualificationError` residual does the
+// same job in the other direction: closing that residual, or adding a new one, REDs
+// and forces this ledger entry to be revised rather than left stale.
+// ---------------------------------------------------------------------------
+function noSuiteJudgesInScopeBrandsByInstanceof() {
+  const fs = require('node:fs')
+  const SUITES = [
+    'gip-inert-entry-gate.test.cjs',
+    'gip-server-bound-source-executor.test.cjs',
+    'gip-approved-binding-resolver.test.cjs',
+    'gip-read-observability-contracts.test.cjs',
+    'gip-binding-qualification-spike.test.cjs',
+  ]
+  // The two classes whose modules ARE in this PR's scope and DO carry an unforgeable
+  // checker. Zero tolerance: there is a correct instrument, so nothing may use the
+  // forgeable one.
+  const IN_SCOPE = /instanceof\s+(?:\w+\.)?(?:GipSourceExecutorError|GipApprovedBindingResolverError)\b/
+  // `.name`-based brandedness — the criterion behind the RETRACTED 0/12 matrix.
+  const NAME_CRITERION = /\.name\s*!==\s*'Error'|\.name\s*===\s*'Gip\w*Error'/
+  const violations = []
+  let scanned = 0
+  let disclosedResidual = 0
+
+  for (const suite of SUITES) {
+    const lines = fs.readFileSync(path.join(__dirname, suite), 'utf8').split('\n')
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]
+      scanned += 1
+      // Comments are the ledger; they DESCRIBE the retired criterion by name and must
+      // not be mistaken for uses of it.
+      if (/^\s*(\/\/|\*)/.test(line)) continue
+      if (IN_SCOPE.test(line)) violations.push(`${suite}:${index + 1}: ${line.trim()}`)
+      if (NAME_CRITERION.test(line)) violations.push(`${suite}:${index + 1}: name-based brand criterion: ${line.trim()}`)
+      if (/instanceof\s+GipQualificationError\b/.test(line)) disclosedResidual += 1
+    }
+  }
+
+  assert.deepEqual(violations, [],
+    `an in-scope brand is still judged by a forgeable criterion:\n  ${violations.join('\n  ')}`)
+  // The sweep must be shown to have READ something — a scan over zero lines passes
+  // every assertion above it.
+  assert.ok(scanned > 3000, `the sweep read too few lines (${scanned})`)
+  // EXACTLY THREE disclosed residual sites, and they are named so the pin is a ledger
+  // rather than a number:
+  //   1. `judgeQualificationBrand` (spike suite) — the ONE criterion every spike-side
+  //      refusal assertion routes through. Every other call site was converted.
+  //   2. `brandedErrorChannelIsOpenOnTheSpikeClass` — asserts the residual POSITIVELY.
+  //   3. `spikeClassHasNoUnforgeableBrand` — asserts the prototype forgery is accepted
+  //      by that class and REFUSED by both in-scope classes.
+  // All three are ASSERTIONS ABOUT the residual, not uses of it to prove a refusal.
+  assert.equal(disclosedResidual, 3,
+    `the DISCLOSED GipQualificationError residual is pinned at exactly 3 named sites; found ${disclosedResidual}. `
+    + 'More means a new forgeable criterion was written; fewer means the residual was closed and the '
+    + 'disclosure comments plus the PR ledger must be updated.')
+  console.log(`  BRAND-SWEEP ${scanned} lines across ${SUITES.length} suites: 0 forgeable in-scope criteria, ${disclosedResidual} disclosed residual`)
+}
+
+// ---------------------------------------------------------------------------
+// ROUND 6 — THE DISCLOSED RESIDUAL, PINNED POSITIVELY.
+// `GipQualificationError` carries NO unforgeable brand, because the spike module's
+// `fail()` and error class are byte-identical to `origin/main` and are therefore
+// outside this PR's scope. Asserting the residual EXISTS is what stops the disclosure
+// from going stale: when a future PR brands that class, this REDs.
+// ---------------------------------------------------------------------------
+function spikeClassHasNoUnforgeableBrand() {
+  assert.equal(typeof spikeModule.isBrandedQualificationError, 'undefined',
+    'the spike module now exposes a brand checker — the round-6 disclosure is stale and must be revised')
+  // And the forgery the missing brand admits, EXECUTED rather than asserted in prose.
+  const forged = Object.create(GipQualificationError.prototype)
+  forged.message = ATTACKER_TEXT
+  forged.reason = 'QUALIFICATION_INPUT_INVALID'
+  assert.ok(forged instanceof GipQualificationError,
+    'the residual is that `instanceof` accepts a prototype forgery on this class')
+  assert.equal(judgeBranded(GipQualificationError, forged), true,
+    'DISCLOSED: with no unforgeable checker, the helper accepts a forgery on this class')
+  // The two IN-SCOPE classes refuse the identical construction — the exclusive
+  // failure that shows the fix is real and not a relabelling.
+  const forgedExecutor = Object.create(GipSourceExecutorError.prototype)
+  forgedExecutor.message = ATTACKER_TEXT
+  assert.equal(judgeBranded(GipSourceExecutorError, forgedExecutor), false,
+    'the in-scope brand must refuse the identical prototype forgery')
+  const forgedResolver = Object.create(GipApprovedBindingResolverError.prototype)
+  assert.equal(judgeBranded(GipApprovedBindingResolverError, forgedResolver), false,
+    'the in-scope brand must refuse the identical prototype forgery')
+  console.log('  RESIDUAL spike class unbranded (disclosed); both in-scope classes refuse the same forgery')
+}
+
+// ---------------------------------------------------------------------------
 // Exact key-set pins on every exported surface this slice adds or touches.
 // ---------------------------------------------------------------------------
 function exportSurfacesArePinned() {
@@ -1429,6 +1566,10 @@ function exportSurfacesArePinned() {
     'createHarnessSourceBinderForTests',
     'createHttpProbeActionRegistry',
     'createServerBoundSourceExecutor',
+    // ROUND 6, P1-A. CHECKERS, not granters — predicates over objects that already
+    // exist. They admit nothing and mint nothing, and they exist so that no assertion
+    // anywhere has to fall back on the forgeable `instanceof`/`.name` criteria.
+    'isBrandedSourceExecutorError',
     'isTrustedServerBoundSourceExecutor',
   ])
   assert.deepEqual(keySet(executorModule.__internals), [
@@ -1445,6 +1586,7 @@ function exportSurfacesArePinned() {
     'createCertifiedSystemIdentityAuthority',
     'createHarnessCanonicalObjectAuthorityForTests',
     'createHarnessSystemIdentityAuthorityForTests',
+    'isBrandedApprovedBindingResolverError',
     'isTrustedBindingResolution',
   ])
   assert.deepEqual(keySet(resolverModule.__internals), [
@@ -1590,6 +1732,8 @@ async function main() {
   duplicateSystemContentKeyIsRefusedNotLastWins()
   brandedErrorChannelIsOpenOnTheSpikeClass()
   exportSurfacesArePinned()
+  noSuiteJudgesInScopeBrandsByInstanceof()
+  spikeClassHasNoUnforgeableBrand()
   latentByEnumeration()
   console.log('gip-server-bound-source-executor.test.cjs OK')
 }

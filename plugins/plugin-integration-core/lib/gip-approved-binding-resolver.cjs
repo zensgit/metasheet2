@@ -67,6 +67,7 @@ const {
   isPlainObject,
   inertRecord,
   inertRecordList,
+  createErrorBrand,
   createEntryGuard,
   guardExportTable,
 } = require('./gip-inert-entry.cjs')
@@ -116,8 +117,22 @@ class GipApprovedBindingResolverError extends Error {
   }
 }
 
+// THE BRAND IS UNFORGEABLE (round 6, P1-A). `brandError` is the SOLE writer and stays
+// module-private; `isBrandedApprovedBindingResolverError` is a CHECKER over an object
+// that already exists — it admits nothing and grants nothing. `instanceof
+// GipApprovedBindingResolverError` is NOT this predicate: `Object.create(
+// GipApprovedBindingResolverError.prototype)` satisfies it while carrying attacker
+// text, a writable `.name` satisfies any name-based criterion, and a
+// `Symbol.hasInstance` hijack makes the expression ITSELF throw. All three were
+// EXECUTED against the round-5 head.
+const { brandError, isBrandedError } = createErrorBrand()
+
 function fail(reason) {
-  throw new GipApprovedBindingResolverError(reason)
+  throw brandError(new GipApprovedBindingResolverError(reason))
+}
+
+function isBrandedApprovedBindingResolverError(value) {
+  return isBrandedError(value)
 }
 
 // --- hostile-input readers --------------------------------------------------
@@ -162,7 +177,7 @@ function safeLength(value, reason) {
 // traps itself it would cover for the gate, so removing the gate from an entry point
 // would no longer RED.
 const failEntryNotInert = () => fail('RESOLVER_ENTRY_NOT_INERT')
-const guardEntry = createEntryGuard(GipApprovedBindingResolverError, failEntryNotInert)
+const guardEntry = createEntryGuard(isBrandedError, failEntryNotInert)
 
 function hasControlCharacter(text) {
   for (let index = 0; index < text.length; index += 1) {
@@ -326,9 +341,25 @@ function buildTrustedBindingResolution(draft) {
     // identity proves where an object came from — it does not stop a holder
     // mutating a nested array inside the probe's async window.
     owned = deepCloneFrozenCanonical(draft)
-  } catch (error) {
-    if (error instanceof CanonicalDomainError) fail('RESOLVER_CONFIG_BODY_INVALID')
-    throw error
+  } catch (_error) {
+    // NO CLASS EXEMPTION (round 6, P1-A). This catch used to read
+    // `error instanceof CanonicalDomainError` and RETHROW anything else. That is the
+    // same forgeable criterion L2 just stopped using, one module over: `instanceof` is
+    // satisfied by `Object.create(CanonicalDomainError.prototype)` and the expression
+    // itself throws under a `Symbol.hasInstance` hijack — and here the fallback was to
+    // RETHROW, i.e. the forgery decided whether an error left this module raw.
+    // `gip-canonical-json.cjs` is byte-identical to `origin/main` and so is OUT OF
+    // SCOPE for this PR, which is exactly why the fix is stated on THIS side of the
+    // boundary rather than by adding a brand there: the discard is now unconditional
+    // and the outward reason is the one this site already declared.
+    //
+    // WHAT THIS COSTS, stated rather than hidden: an unexpected internal failure of
+    // the canonical cloner no longer propagates as itself. It becomes
+    // RESOLVER_CONFIG_BODY_INVALID. The draft is built here from already-validated
+    // first-party locals, so the only errors this path has ever produced are domain
+    // errors; if that ever stops being true, the symptom is a closed refusal rather
+    // than a leak, which is the direction this module fails in everywhere else.
+    fail('RESOLVER_CONFIG_BODY_INVALID')
   }
   trustedBindingResolutions.add(owned)
   return owned
@@ -589,6 +620,7 @@ module.exports = guardExportTable({
   createHarnessCanonicalObjectAuthorityForTests,
   isTrustedBindingResolution,
   assertTrustedBindingResolution,
+  isBrandedApprovedBindingResolverError,
   // `fail` is deliberately ABSENT — and inert anyway, since it takes no caller
   // text. `buildTrustedBindingResolution` is absent BECAUSE IT GRANTS TRUST: a
   // granting verb under `__internals` is the identical hole one namespace deeper.

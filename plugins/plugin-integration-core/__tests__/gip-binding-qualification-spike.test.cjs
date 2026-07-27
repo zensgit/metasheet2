@@ -50,6 +50,20 @@ const {
   createServerBoundSourceExecutor,
 } = require(path.join(__dirname, '..', 'lib', 'gip-server-bound-source-executor.cjs'))
 
+// ROUND 6, P1-A — ⚠ DISCLOSED, NOT FIXED. `GipQualificationError` has NO unforgeable
+// brand: this module's `fail()` and its error class are BYTE-IDENTICAL to
+// `origin/main`, so under this PR's scope rule they are disclosed rather than changed.
+// The two in-scope modules (`gip-server-bound-source-executor.cjs`,
+// `gip-approved-binding-resolver.cjs`) DO expose module-private-WeakSet checkers and
+// every assertion against them uses those. Here the criterion is `instanceof`, which
+// is forgeable three ways (prototype, writable `.name`, `Symbol.hasInstance`) — so
+// what these cells actually prove is the `reason` TOKEN EQUALITY asserted on the next
+// line, not the brand. Stated in ONE place so it cannot be read as a closure claim at
+// each call site.
+function judgeQualificationBrand(caught) {
+  return caught instanceof GipQualificationError
+}
+
 function rejectsWith(fn, reason) {
   let caught = null
   try {
@@ -57,7 +71,7 @@ function rejectsWith(fn, reason) {
   } catch (error) {
     caught = error
   }
-  assert.ok(caught instanceof GipQualificationError, `expected qualification error (${reason})`)
+  assert.ok(judgeQualificationBrand(caught), `expected qualification error (${reason})`)
   assert.equal(caught.reason, reason)
   return caught
 }
@@ -69,7 +83,7 @@ async function rejectsWithAsync(fn, reason) {
   } catch (error) {
     caught = error
   }
-  assert.ok(caught instanceof GipQualificationError, `expected qualification error (${reason})`)
+  assert.ok(judgeQualificationBrand(caught), `expected qualification error (${reason})`)
   assert.equal(caught.reason, reason)
   return caught
 }

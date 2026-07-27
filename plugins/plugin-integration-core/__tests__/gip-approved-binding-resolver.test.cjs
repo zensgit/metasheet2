@@ -36,6 +36,7 @@ const {
   createHarnessCanonicalObjectAuthorityForTests,
   isTrustedBindingResolution,
   assertTrustedBindingResolution,
+  isBrandedApprovedBindingResolverError,
 } = resolverModule
 
 const PROFILE = 'fixture.http_read.v1'
@@ -44,8 +45,8 @@ const ENVELOPE_KEY = Object.freeze({ keyId: 'kres', secret: Buffer.alloc(32, 3) 
 function refusesWith(fn, expectedReason) {
   let caught = null
   try { fn() } catch (error) { caught = error }
-  assert.ok(caught instanceof GipApprovedBindingResolverError,
-    `expected GipApprovedBindingResolverError, got ${caught && caught.name}: ${caught && caught.message}`)
+  assert.ok(isBrandedApprovedBindingResolverError(caught),
+    `expected an error MINTED by the module (unforgeable brand), got ${caught && caught.name}: ${caught && caught.message}`)
   assert.equal(caught.reason, expectedReason)
   return caught
 }
@@ -53,8 +54,8 @@ function refusesWith(fn, expectedReason) {
 async function refusesWithAsync(fn, expectedReason) {
   let caught = null
   try { await fn() } catch (error) { caught = error }
-  assert.ok(caught instanceof GipApprovedBindingResolverError,
-    `expected GipApprovedBindingResolverError, got ${caught && caught.name}: ${caught && caught.message}`)
+  assert.ok(isBrandedApprovedBindingResolverError(caught),
+    `expected an error MINTED by the module (unforgeable brand), got ${caught && caught.name}: ${caught && caught.message}`)
   assert.equal(caught.reason, expectedReason)
   return caught
 }

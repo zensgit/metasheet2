@@ -23,6 +23,7 @@
 const {
   isPlainObject,
   inertRecord,
+  createErrorBrand,
   createEntryGuard,
   guardExportTable,
 } = require('./gip-inert-entry.cjs')
@@ -64,8 +65,21 @@ class GipReadObservabilityContractError extends Error {
   }
 }
 
+// THE BRAND IS UNFORGEABLE (round 6, P1-A). `brandError` is the SOLE writer and stays
+// module-private; `isBrandedReadObservabilityContractError` is a CHECKER over an
+// object that already exists — it admits nothing and grants nothing. `instanceof
+// GipReadObservabilityContractError` is NOT this predicate: it is satisfied by
+// `Object.create(...prototype)` carrying attacker text, any `.name`-based criterion is
+// satisfied by an ordinary writable property, and `Symbol.hasInstance` makes the
+// expression ITSELF throw. All three were EXECUTED against the round-5 head.
+const { brandError, isBrandedError } = createErrorBrand()
+
 function fail(reason) {
-  throw new GipReadObservabilityContractError(reason)
+  throw brandError(new GipReadObservabilityContractError(reason))
+}
+
+function isBrandedReadObservabilityContractError(value) {
+  return isBrandedError(value)
 }
 
 // --- hostile-input readers -------------------------------------------------
@@ -116,7 +130,7 @@ function safeOwnSymbols(value, reason) {
 // itself, removing the snapshot from an entry point would still be refused here and
 // the gate's positive control would prove nothing.
 const failEntryNotInert = () => fail('OBSERVABILITY_ENTRY_NOT_INERT')
-const guardEntry = createEntryGuard(GipReadObservabilityContractError, failEntryNotInert)
+const guardEntry = createEntryGuard(isBrandedError, failEntryNotInert)
 
 function assertClosedKeySet(value, allowedKeys, hostileReason, extraKeyReason) {
   const keys = safeOwnKeys(value, hostileReason)
@@ -287,6 +301,7 @@ module.exports = guardExportTable({
   CAPABILITY_HANDSHAKE_EXPECTATION_KEYS,
   CAPABILITY_HANDSHAKE_OUTCOMES,
   evaluateCapabilityHandshake,
+  isBrandedReadObservabilityContractError,
   // `fail` is deliberately ABSENT — and it would be inert here anyway, since it
   // takes no caller text. Pinned by the exact-key-set test, so re-adding it reds.
   __internals: {

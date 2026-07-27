@@ -52,6 +52,7 @@ const assert = require('node:assert')
 
 const CANARY = 'GIP-R5-ENTRY-CANARY-do-not-echo'
 
+const gate = require('../lib/gip-inert-entry.cjs')
 const observability = require('../lib/gip-read-observability-contracts.cjs')
 const resolver = require('../lib/gip-approved-binding-resolver.cjs')
 const executor = require('../lib/gip-server-bound-source-executor.cjs')
@@ -138,8 +139,45 @@ function isClassConstructor(fn) {
   return /^class[\s{]/.test(Function.prototype.toString.call(fn))
 }
 
+// ROUND 6, P2-C — A LEAK CHECK MUST DISTINGUISH "CHECKED AND CLEAN" FROM "THE CHECK
+// FAILED", and the latter must never be reported as clean. Serialization runs
+// caller-owned code (`toJSON`, `toString`, `valueOf`, `Symbol.toPrimitive`,
+// `ownKeys`), so it is itself attackable; swallowing its throw to `''` produced a
+// FALSE GREEN that a hostile value could reach on purpose. Tri-state, and the
+// caller decides — no caller of this helper may treat `check-failed` as clean.
+function renderForLeakCheck(value) {
+  let json
+  try {
+    json = JSON.stringify(value)
+  } catch (error) {
+    return { state: 'check-failed', detail: `JSON.stringify threw: ${describeSafely(error)}` }
+  }
+  let text
+  try {
+    text = json === undefined ? String(value) : json
+  } catch (error) {
+    return { state: 'check-failed', detail: `String() threw: ${describeSafely(error)}` }
+  }
+  return { state: text.includes(CANARY) ? 'dirty' : 'clean', detail: text }
+}
+
+// Reading `.constructor.name`/`.message` off a hostile value is itself trappable, so
+// even the FAILURE-REPORTING path must not be the thing that throws.
+function describeSafely(value) {
+  try {
+    if (value === null || value === undefined) return String(value)
+    const ctor = value.constructor
+    const name = ctor && ctor.name
+    return typeof name === 'string' ? name : typeof value
+  } catch (_error) {
+    return 'unreadable'
+  }
+}
+
 async function auditExportTable(spec) {
-  const { label, table, BrandedError, vocabulary } = spec
+  const { label, table, BrandedError, isBranded, vocabulary } = spec
+  assert.equal(typeof isBranded, 'function',
+    `${label}: the matrix must judge brandedness with the module's UNFORGEABLE checker`)
   const reasons = new Set(vocabulary)
   const violations = []
   const messagesSeen = new Set()
@@ -219,8 +257,18 @@ async function auditExportTable(spec) {
         }
 
         if (thrown !== null) {
-          if (!(thrown instanceof BrandedError)) {
-            violations.push(`${cell}: escaped UNBRANDED as ${thrown && thrown.constructor && thrown.constructor.name}`)
+          // ROUND 6, P1-A — THE CRITERION ITSELF WAS THE WEAK LINK. This read
+          // `thrown instanceof BrandedError` until round 6, and `instanceof` is not a
+          // brand: `Object.create(BrandedError.prototype)` satisfies it while carrying
+          // attacker text, `.name` is an ordinary writable property so any name-based
+          // criterion is satisfied by a plain `Error`, and a `Symbol.hasInstance`
+          // hijack makes the EXPRESSION ITSELF throw — which, inside this loop, would
+          // have crashed the audit rather than recorded a violation. The module's
+          // `isBranded*` checker reads module-private WeakSet membership: it invokes
+          // no caller code, cannot be made to throw, and cannot be conferred from
+          // outside. `forgedBrandsAreRefused()` below drives all three forgeries.
+          if (!isBranded(thrown)) {
+            violations.push(`${cell}: escaped UNBRANDED as ${describeSafely(thrown)}`)
             continue
           }
           if (!reasons.has(thrown.reason)) {
@@ -265,13 +313,15 @@ async function auditExportTable(spec) {
         // Returned normally — the return must be inert too. An export that answers
         // with the attacker's own object has leaked just as surely as one that throws
         // it.
-        let rendered
-        try {
-          rendered = JSON.stringify(returned) || String(returned)
-        } catch (_error) {
-          rendered = ''
-        }
-        if (String(rendered).includes(CANARY)) {
+        // ROUND 6, P2-C — "CHECKED AND CLEAN" IS NOT "THE CHECK FAILED". This used
+        // to swallow a throwing serialization to `''` and then judge `''` as "no
+        // leak": a return value that could not be rendered — `toJSON`/`toString`/
+        // `Symbol.toPrimitive` all belong to the caller — silently PASSED. Every leak
+        // check in this file is now TRI-STATE, and `check-failed` is a VIOLATION.
+        const verdict = renderForLeakCheck(returned)
+        if (verdict.state === 'check-failed') {
+          violations.push(`${cell}: the RETURN-value leak check itself failed (${verdict.detail}) — not judged clean`)
+        } else if (verdict.state === 'dirty') {
           violations.push(`${cell}: attacker text reached the RETURN value`)
         }
       }
@@ -286,19 +336,27 @@ const MODULES = [
     label: 'observability',
     table: observability,
     BrandedError: observability.GipReadObservabilityContractError,
+    isBranded: observability.isBrandedReadObservabilityContractError,
     vocabulary: observability.OBSERVABILITY_CONTRACT_ERROR_REASONS,
+    // Reaches a refusal through a PUBLIC export, so the error it throws is one the
+    // module actually minted — the genuine half of the forgery control.
+    mintGenuine: () => observability.assertValuesFreeCounterSample(null),
   },
   {
     label: 'resolver',
     table: resolver,
     BrandedError: resolver.GipApprovedBindingResolverError,
+    isBranded: resolver.isBrandedApprovedBindingResolverError,
     vocabulary: resolver.BINDING_RESOLVER_ERROR_REASONS,
+    mintGenuine: () => resolver.createApprovedBindingResolver(null),
   },
   {
     label: 'executor',
     table: executor,
     BrandedError: executor.GipSourceExecutorError,
+    isBranded: executor.isBrandedSourceExecutorError,
     vocabulary: executor.SOURCE_EXECUTOR_ERROR_REASONS,
+    mintGenuine: () => executor.createServerBoundSourceExecutor(null),
   },
 ]
 
@@ -336,6 +394,7 @@ async function checkerHasTeeth() {
   // single undeclared-reason fallback. The control must be structurally comparable to
   // what it is controlling for, or it is testing a different thing.
   const SYNTHETIC_MESSAGES = { SYNTHETIC_REFUSED: 'synthetic refusal' }
+  const { brandError: brandSynthetic, isBrandedError: isBrandedSynthetic } = gate.createErrorBrand()
   class SyntheticError extends Error {
     constructor(reason) {
       const known = typeof reason === 'string' && Object.prototype.hasOwnProperty.call(SYNTHETIC_MESSAGES, reason)
@@ -348,8 +407,8 @@ async function checkerHasTeeth() {
     SyntheticError,
     // GATED: behaves exactly as the real exports do.
     gatedExport(value) {
-      if (!value || typeof value !== 'object') throw new SyntheticError('SYNTHETIC_REFUSED')
-      throw new SyntheticError('SYNTHETIC_REFUSED')
+      if (!value || typeof value !== 'object') throw brandSynthetic(new SyntheticError('SYNTHETIC_REFUSED'))
+      throw brandSynthetic(new SyntheticError('SYNTHETIC_REFUSED'))
     },
     // UNGATED: reads the caller's object the way the modules did before round 5 —
     // an unguarded prototype interrogation, exactly the round-4 P1.
@@ -362,6 +421,7 @@ async function checkerHasTeeth() {
     label: 'synthetic',
     table: synthetic,
     BrandedError: SyntheticError,
+    isBranded: isBrandedSynthetic,
     vocabulary: synthetic.SYNTHETIC_REASONS,
   })
   assert.ok(result.violations.length > 0, 'the checker reported nothing on a deliberately ungated export')
@@ -401,7 +461,7 @@ function credentialHandleIsGuardedNotEnumerated() {
     assert.throws(
       () => executor.createHarnessSourceBinderForTests([{ systemContentKey: 'sck-1', credentialFactory: make }]),
       (error) => {
-        assert.ok(error instanceof executor.GipSourceExecutorError, 'a hostile handle must be refused BRANDED')
+        assert.ok(executor.isBrandedSourceExecutorError(error), 'a hostile handle must be refused BRANDED (unforgeable checker, not instanceof)')
         assert.equal(error.reason, 'EXECUTOR_COMPONENTS_INVALID')
         assert.ok(!String(error.message).includes(CANARY), 'no attacker text in the message')
         assert.ok(!String(error.stack || '').includes(CANARY), 'no attacker text in the stack')
@@ -508,17 +568,21 @@ function thereIsExactlyOnePlainObjectDefinition() {
 // mutation-detectable.
 // ---------------------------------------------------------------------------
 async function l2RebrandsRejectionsNotOnlyThrows() {
-  const { createEntryGuard } = require('../lib/gip-inert-entry.cjs')
+  const { createEntryGuard, createErrorBrand } = require('../lib/gip-inert-entry.cjs')
   class LocalBranded extends Error {
     constructor(reason) { super('local fixed message'); this.reason = reason }
   }
-  const guard = createEntryGuard(LocalBranded, () => { throw new LocalBranded('LOCAL_ENTRY_NOT_INERT') })
+  // ROUND 6: the boundary is parameterised by the UNFORGEABLE brand predicate, not by
+  // the error CLASS. `brandLocal` is the only writer, exactly as in the real modules.
+  const { brandError: brandLocal, isBrandedError: isBrandedLocal } = createErrorBrand()
+  const failLocal = (reason) => { throw brandLocal(new LocalBranded(reason)) }
+  const guard = createEntryGuard(isBrandedLocal, () => failLocal('LOCAL_ENTRY_NOT_INERT'))
 
   // ASYNC: an unbranded throw inside an async function is a REJECTION. A boundary
   // that only wraps the synchronous call never sees it.
   const asyncLeaky = guard(async () => { throw new Error(CANARY) })
   await assert.rejects(asyncLeaky(), (error) => {
-    assert.ok(error instanceof LocalBranded, `an async rejection must be re-branded, got ${error && error.constructor.name}`)
+    assert.ok(isBrandedLocal(error), `an async rejection must be re-branded, got ${error && error.constructor.name}`)
     assert.equal(error.reason, 'LOCAL_ENTRY_NOT_INERT')
     assert.ok(!String(error.message).includes(CANARY), 'no attacker text in an async rejection')
     return true
@@ -532,7 +596,7 @@ async function l2RebrandsRejectionsNotOnlyThrows() {
   // because pinning one would be pinning an implementation detail of the thenable.
   const thenableLeaky = guard(() => ({ then(_ok, bad) { bad(new Error(CANARY)) } }))
   await assert.rejects(async () => thenableLeaky(), (error) => {
-    assert.ok(error instanceof LocalBranded, 'a thenable rejection must be re-branded')
+    assert.ok(isBrandedLocal(error), 'a thenable rejection must be re-branded')
     assert.ok(!String(error.message).includes(CANARY), 'no attacker text from a thenable')
     return true
   })
@@ -540,7 +604,7 @@ async function l2RebrandsRejectionsNotOnlyThrows() {
   // NEGATIVE HALF: an already-branded rejection must pass through UNCHANGED, or the
   // boundary would flatten every precise L1 token into the L2 token and the two doors
   // would stop being distinguishable.
-  const asyncBranded = guard(async () => { throw new LocalBranded('LOCAL_PRECISE') })
+  const asyncBranded = guard(async () => { failLocal('LOCAL_PRECISE') })
   await assert.rejects(asyncBranded(), (error) => {
     assert.equal(error.reason, 'LOCAL_PRECISE', 'a branded rejection must NOT be re-branded by the boundary')
     return true
@@ -590,9 +654,223 @@ function inCodeLineCitationsAreAccurate() {
   console.log(`  CITATIONS re-derived: factory=:${actual.factory} weakSet=:${actual.weakSet} write=:${actual.write} export=:${actual.exported}`)
 }
 
+// ---------------------------------------------------------------------------
+// ROUND 6, P1-A — THE BRAND CANNOT BE FORGED, AND THE OLD CRITERION COULD BE.
+//
+// This test asserts a NEGATIVE ("a forged error is not passed through"), so it also
+// carries its own POSITIVE CONTROL: for every construction it first asserts that the
+// RETIRED criterion (`instanceof` / `.name`) WOULD have accepted it. Without that
+// half, a forgery the runtime happens to reject for an unrelated reason would look
+// like proof of the brand.
+//
+// The three constructions are the ones the owner reproduced at the round-5 head:
+//   (1) `Object.create(BrandedError.prototype)` — `instanceof` TRUE, attacker text.
+//   (2) a plain `Error` with `.name` assigned the branded class name — satisfies any
+//       `.name`-based criterion, including the one behind the RETRACTED 0/12 matrix.
+//   (3) `Symbol.hasInstance` — the `instanceof` EXPRESSION ITSELF throws, out of the
+//       `catch` block, carrying the attacker's text.
+// ---------------------------------------------------------------------------
+function forgedBrandsAreRefused() {
+  const { createEntryGuard, createErrorBrand } = gate
+  let checked = 0
+
+  for (const spec of MODULES) {
+    const { label, BrandedError, isBranded } = spec
+
+    // (1) PROTOTYPE FORGERY.
+    const prototypeForged = Object.create(BrandedError.prototype)
+    prototypeForged.message = CANARY
+    prototypeForged.stack = CANARY
+    prototypeForged.reason = CANARY
+    assert.ok(prototypeForged instanceof BrandedError,
+      `${label}: control — the RETIRED instanceof criterion must accept the prototype forgery`)
+    assert.equal(isBranded(prototypeForged), false,
+      `${label}: a prototype forgery must NOT be branded`)
+
+    // (2) NAME SPOOF. `.name` is an ordinary writable property.
+    const nameForged = new Error(CANARY)
+    nameForged.name = BrandedError.name
+    assert.notEqual(nameForged.name, 'Error',
+      `${label}: control — the RETIRED name-based criterion must accept the name spoof`)
+    assert.equal(isBranded(nameForged), false, `${label}: a name spoof must NOT be branded`)
+
+    // (3) A REAL branded error IS branded. Without this the predicate could be a
+    // constant `false` and every assertion above would still pass.
+    let genuine = null
+    try {
+      // Every module's error table maps its own undeclared-reason fallback; reaching
+      // a refusal through a public export is what mints a genuinely branded error.
+      spec.mintGenuine()
+    } catch (error) {
+      genuine = error
+    }
+    assert.ok(genuine, `${label}: the genuine-brand control must have thrown`)
+    assert.equal(isBranded(genuine), true, `${label}: a genuinely minted error MUST be branded`)
+    // And a DIRECTLY constructed instance is deliberately NOT branded — it is not
+    // something the module minted, so the boundary must not exempt it.
+    assert.equal(isBranded(new BrandedError('__NOT_A_DECLARED_REASON__')), false,
+      `${label}: a directly constructed error must not carry the mint brand`)
+    checked += 4
+  }
+
+  // NOW DRIVE ALL THREE THROUGH THE BOUNDARY ITSELF. The matrix above judges what a
+  // module threw; this judges what the BOUNDARY does when a foreign callback throws a
+  // forgery at it.
+  class LocalBranded extends Error {
+    constructor(reason) { super('local fixed message'); this.reason = reason }
+  }
+  const { brandError: brandLocal, isBrandedError: isBrandedLocal } = createErrorBrand()
+  const guard = createEntryGuard(isBrandedLocal, () => { throw brandLocal(new LocalBranded('LOCAL_ENTRY_NOT_INERT')) })
+
+  const forgeries = {
+    prototypeForged: () => {
+      const forged = Object.create(LocalBranded.prototype)
+      forged.message = CANARY
+      forged.stack = CANARY
+      return forged
+    },
+    nameSpoofed: () => {
+      const forged = new Error(CANARY)
+      forged.name = 'LocalBranded'
+      return forged
+    },
+    hasInstanceHijack: () => {
+      // The hijack is on the CLASS the old boundary tested against, so the throw
+      // happened at the `instanceof` expression inside the `catch`.
+      class Hostile extends Error {
+        static [Symbol.hasInstance]() { throw new Error(CANARY) }
+      }
+      return new Hostile(CANARY)
+    },
+  }
+  for (const [name, make] of Object.entries(forgeries)) {
+    const wrapped = guard(function entry() { throw make() })
+    let caught = null
+    try { wrapped() } catch (error) { caught = error }
+    assert.ok(caught, `${name}: the boundary must refuse`)
+    assert.equal(isBrandedLocal(caught), true, `${name}: what the boundary threw must be its OWN branded error`)
+    assert.equal(caught.reason, 'LOCAL_ENTRY_NOT_INERT',
+      `${name}: a forgery must be replaced by the boundary token, not passed through`)
+    const verdict = renderForLeakCheck({ message: caught.message, stack: caught.stack })
+    assert.equal(verdict.state, 'clean', `${name}: attacker text escaped the boundary (${verdict.detail})`)
+    checked += 3
+  }
+
+  // The `Symbol.hasInstance` construction is also an ASYNC case: the old boundary ran
+  // the same expression in its rejection handler.
+  console.log(`  FORGERY ${checked} assertions: prototype / name-spoof / Symbol.hasInstance all refused, genuine brand accepted`)
+}
+
+// ---------------------------------------------------------------------------
+// ROUND 6, P1-B — THE THENABLE BOUNDARY.
+//
+// `.then` is READ and CALLED by every promise resolution path, and both used to
+// happen OUTSIDE the guarded region: `typeof result.then` fired a hostile getter and
+// the throw escaped raw (EXECUTED). A snapshot also carried the caller's `then` BY
+// IDENTITY, so any `await` of a snapshot handed the caller a callback.
+// ---------------------------------------------------------------------------
+async function thenableBoundaryIsClosed() {
+  const { createEntryGuard, createErrorBrand, inertRecord, inertRecordList, GipNonPlainValue } = gate
+  class LocalBranded extends Error {
+    constructor(reason) { super('local fixed message'); this.reason = reason }
+  }
+  const { brandError: brandLocal, isBrandedError: isBrandedLocal } = createErrorBrand()
+  const guard = createEntryGuard(isBrandedLocal, () => { throw brandLocal(new LocalBranded('LOCAL_ENTRY_NOT_INERT')) })
+
+  // 1. THE `then` GETTER THROWS — outside the old guarded region.
+  const getterEntry = guard(() => ({ get then() { throw new Error(CANARY) } }))
+  let caught = null
+  try { await getterEntry() } catch (error) { caught = error }
+  assert.ok(caught && isBrandedLocal(caught), 'a throwing `then` getter must be contained and re-branded')
+  assert.equal(caught.reason, 'LOCAL_ENTRY_NOT_INERT')
+  assert.equal(renderForLeakCheck({ m: caught.message, s: caught.stack }).state, 'clean',
+    'attacker text escaped from a throwing `then` getter')
+
+  // 2. THE `then` CALL THROWS.
+  const callEntry = guard(() => ({ then() { throw new Error(CANARY) } }))
+  caught = null
+  try { await callEntry() } catch (error) { caught = error }
+  assert.ok(caught && isBrandedLocal(caught), 'a throwing `then` CALL must be contained and re-branded')
+  assert.equal(renderForLeakCheck({ m: caught.message, s: caught.stack }).state, 'clean',
+    'attacker text escaped from a throwing `then` call')
+
+  // 3. THE `then` GETTER IS READ EXACTLY ONCE. Reading it again for the call would
+  // reopen a differing-return channel: answer "not a thenable" to the test, a hostile
+  // callable to the use.
+  let reads = 0
+  const countingEntry = guard(() => ({
+    get then() { reads += 1; return (resolve) => resolve('ok') },
+  }))
+  assert.equal(await countingEntry(), 'ok')
+  assert.equal(reads, 1, `the boundary must read \`then\` ONCE; it read it ${reads} times`)
+
+  // 4. A SNAPSHOT MUST NOT CARRY A CALLABLE `then`.
+  const snapshot = inertRecord({ then(_ok, bad) { bad(new Error(CANARY)) }, value: 1 }, () => {
+    throw new Error('unexpected L1 failure')
+  })
+  assert.notEqual(typeof snapshot.then, 'function', 'the snapshot still carries a CALLABLE then')
+  assert.ok(snapshot.then instanceof GipNonPlainValue, 'the neutralised `then` must be the declared stand-in')
+  // THE REFUSAL IS PRESERVED: the key is still PRESENT, so every closed-key-set pin
+  // downstream still refuses the record exactly as it did before neutralisation.
+  assert.ok(Object.keys(snapshot).includes('then'), 'neutralising must not DROP the key — that would widen every closed key set')
+  // Awaiting the snapshot must not run the caller's code.
+  const awaited = await snapshot
+  assert.equal(awaited, snapshot, 'awaiting an inert snapshot must not adopt it as a thenable')
+
+  // 5. Same, one level down, through the LIST entry point.
+  const listSnapshot = inertRecordList([{ then() { throw new Error(CANARY) } }], () => {
+    throw new Error('unexpected L1 failure')
+  })
+  assert.notEqual(typeof listSnapshot[0].then, 'function', 'a list-member snapshot still carries a CALLABLE then')
+
+  // 6. POSITIVE CONTROL — a genuine async entry point still resolves with its value,
+  // and a branded rejection still passes through unchanged.
+  assert.deepEqual(await guard(async () => ({ ok: 1 }))(), { ok: 1 })
+  caught = null
+  try { await guard(async () => { throw brandLocal(new LocalBranded('LOCAL_PRECISE')) })() } catch (e) { caught = e }
+  assert.equal(caught.reason, 'LOCAL_PRECISE', 'a branded rejection must not be flattened into the boundary token')
+  console.log('  THENABLE getter-throw, call-throw, read-once, snapshot-neutralised (both levels), positive controls intact')
+}
+
+// ---------------------------------------------------------------------------
+// ROUND 6, P2-C — THE LEAK CHECK ITSELF MUST FAIL CLOSED.
+//
+// A serialization that throws and is swallowed to `''` is then judged "no leak". That
+// is a check reporting SUCCESS because it did not run. Serialization runs caller-owned
+// code, so a hostile value can reach that branch ON PURPOSE.
+// ---------------------------------------------------------------------------
+function leakCheckFailsClosedWhenTheCheckFails() {
+  assert.equal(renderForLeakCheck({ ok: 1 }).state, 'clean')
+  assert.equal(renderForLeakCheck({ leaked: CANARY }).state, 'dirty')
+
+  // The three ways a caller makes the CHECK itself throw.
+  const throwingToJson = { toJSON() { throw new Error(CANARY) } }
+  const circularWithHostileToString = (() => {
+    const target = { toString() { throw new Error(CANARY) } }
+    target.self = target
+    return target
+  })()
+  const throwingOwnKeys = new Proxy({}, { ownKeys() { throw new Error(CANARY) } })
+
+  for (const [name, value] of Object.entries({ throwingToJson, circularWithHostileToString, throwingOwnKeys })) {
+    const verdict = renderForLeakCheck(value)
+    assert.equal(verdict.state, 'check-failed',
+      `${name}: a check that could not run must report check-failed, never clean (got ${verdict.state})`)
+    assert.notEqual(verdict.state, 'clean', `${name}: FALSE GREEN — the swallowed check was judged clean`)
+  }
+
+  // The check-failed verdict must not itself carry attacker text onward.
+  assert.ok(!String(renderForLeakCheck(throwingToJson).detail).includes(CANARY),
+    'the check-failed detail must not echo the attacker text it was checking for')
+  console.log('  LEAK-CHECK tri-state: clean / dirty / check-failed, and check-failed is never clean')
+}
+
 async function main() {
   await entryTableIsGated()
   await l2RebrandsRejectionsNotOnlyThrows()
+  forgedBrandsAreRefused()
+  await thenableBoundaryIsClosed()
+  leakCheckFailsClosedWhenTheCheckFails()
   await checkerHasTeeth()
   credentialHandleIsGuardedNotEnumerated()
   doorsAreDistinguishable()
