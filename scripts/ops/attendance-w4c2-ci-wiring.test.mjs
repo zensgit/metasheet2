@@ -77,6 +77,10 @@ const FILES = Object.freeze([
   // run-creation/resume/finalization/`abandoned`/promotion-block-guard/sweep transactional
   // half's own real-DB gate suite (same discipline as the eight above).
   'tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts',
+  // W4C-2 P1-2 third suite (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the
+  // durable delivery / lock-order / atomicity gates (section 2 gates 2-8, 15, 17, 19,
+  // 22-23 controls) — same two-point discipline as the nine above.
+  'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
 ])
 
 /**

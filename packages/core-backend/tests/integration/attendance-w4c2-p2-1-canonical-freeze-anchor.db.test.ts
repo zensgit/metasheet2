@@ -432,6 +432,40 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   const GNC_DAY = '2026-07-24'
   const GNC_OCCURRED_AT = '2026-07-24T10:00:00.000Z'
 
+  // ---------------------------------------------------------------------
+  // OD-W4C-53=(i) gate pair (RATIFIED, owner Bundle A, #4617 comment
+  // ratification): amendment section 3.2's "Gate shape this option needs" —
+  // per section 4 step 3, this positive/negative pair is the ONLY missing
+  // piece before the already-wired narrow-domain comparison counts as
+  // closed under token (i).
+  //  - POSITIVE control (own org, byte-identical geometry to Group E /
+  //    eDay2): the exact zero-concurrency same-operation reasonCode-flip
+  //    fixture PASSES lock §8.2 step 7's equality gate under the narrow
+  //    domain ({resolvedAt, reasonCode} excluded) — outcome `completed`,
+  //    never `review_required`/`context_mismatch`. Mutation-provable: the
+  //    source mutation `Set(['resolvedAt','reasonCode'])` ->
+  //    `Set(['resolvedAt'])` in w4c1-fingerprints.ts flips THIS leg red
+  //    while the negative leg below stays green.
+  //  - NEGATIVE control (own org, same fixture family — L6's tz-drift
+  //    geometry): drift in a field the narrow domain does NOT exclude
+  //    (the shift's own `timezone`, entering both the frozen context and
+  //    the attribution window computation) still FAILS step 7's equality
+  //    gate, proving the narrowing is exactly the one field wide it
+  //    claims to be, not wider. Identity (workDate/shiftId) is unchanged
+  //    by construction, so the fingerprint conjunct is what must fire.
+  //    Mutation-provable: neutering `fingerprintMismatch` in
+  //    w4c2-live-scheduled-boundary.ts flips THIS leg red while the
+  //    positive leg above stays green.
+  // ---------------------------------------------------------------------
+  const o53iPosOrg = randomUUID()
+  const o53iPosShift = randomUUID()
+  const o53iPosUser = randomUUID()
+  const o53iNegOrg = randomUUID()
+  const o53iNegShift = randomUUID()
+  const o53iNegUser = randomUUID()
+  const O53I_NEG_DAY = '2026-07-19'
+  const O53I_NEG_OCCURRED_AT = '2026-07-19T12:00:00.000Z'
+
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
       const s = net.createServer()
@@ -445,7 +479,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     process.env.SKIP_PLUGINS = 'false'
     priorAllowlistEnv = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED =
-      [shadowOrgA, raceOrg, tzRaceOrg, sidOrg, osidOrg, eDay1Org, eDay2Org, fProbeOrg, gncOrg].join(',')
+      [shadowOrgA, raceOrg, tzRaceOrg, sidOrg, osidOrg, eDay1Org, eDay2Org, fProbeOrg, gncOrg, o53iPosOrg, o53iNegOrg].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
     const { MetaSheetServer } = await import('../../src/index')
@@ -555,10 +589,25 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       )
     }
     await insertAssignment(randomUUID(), gncOrg, gncUser, gncShiftX, GNC_DAY)
+
+    // OD-W4C-53=(i) gate-pair fixtures. Positive: byte-identical geometry to
+    // Group E's eDay2 (overnight UTC 22:00-06:00, belongs to EDAY). Negative:
+    // L6's tz-drift geometry (day shift UTC 06:00-22:00) on its OWN shift row
+    // (the race commits a permanent timezone mutation, so it must never share
+    // a shift row with any other leg).
+    await insertShadowRolloutRow(o53iPosOrg)
+    await insertActiveUser(o53iPosUser, o53iPosOrg)
+    await insertShift(o53iPosShift, o53iPosOrg, 'W4C2-O53I-Pos', 'UTC', '22:00', '06:00', true)
+    await insertAssignment(randomUUID(), o53iPosOrg, o53iPosUser, o53iPosShift, EDAY)
+
+    await insertShadowRolloutRow(o53iNegOrg)
+    await insertActiveUser(o53iNegUser, o53iNegOrg)
+    await insertShift(o53iNegShift, o53iNegOrg, 'W4C2-O53I-Neg', 'UTC', '06:00', '22:00', false)
+    await insertAssignment(randomUUID(), o53iNegOrg, o53iNegUser, o53iNegShift, O53I_NEG_DAY)
   }, 120000)
 
   afterAll(async () => {
-    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, osidUser, eDay1User, eDay2User, fProbeUser, gncUser]) {
+    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, osidUser, eDay1User, eDay2User, fProbeUser, gncUser, o53iPosUser, o53iNegUser]) {
       await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
@@ -1640,5 +1689,76 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     ]) {
       expect(outerValue[key], `field '${key}' expected byte-identical outer vs inner`).toEqual(inner[key])
     }
+  })
+
+  // ---------------------------------------------------------------------
+  // OD-W4C-53=(i) gate pair — see the fixture-block comment above for the
+  // full §3.2 provenance. These two legs are the RATIFIED token's closure
+  // pair; their red/green mutation runs are recorded in the PR body's P1-2
+  // section (mutation A: narrow-domain exclusion set -> {resolvedAt} only,
+  // positive leg red / negative leg green; mutation B: fingerprint conjunct
+  // neutered, negative leg red / positive leg green).
+  // ---------------------------------------------------------------------
+  it('OD-W4C-53(i) POSITIVE control: the zero-concurrency same-operation reasonCode-flip fixture (eDay2 geometry) PASSES step 7 equality under the narrow domain — completed, no context_mismatch', async () => {
+    const token = await mintToken(o53iPosUser)
+    const res = await punch(token, {
+      eventType: 'check_in', occurredAt: EDAY2_OCCURRED_AT, timezone: 'Asia/Tokyo', orgId: o53iPosOrg, operationId: randomUUID(),
+    })
+    expect(res.status, res.raw).toBe(200)
+    const calcs = await calculationRowsForUser(o53iPosUser)
+    expect(calcs.length).toBe(1)
+    // The false-positive PRECONDITION actually occurred on this fixture: the inner
+    // resolution saw this operation's own step-3 write (`OPEN_PREVIOUS_NIGHT_RECORD`),
+    // i.e. the reasonCode DID flip outer-vs-inner — and step 7's equality gate, computed
+    // over the narrow domain that excludes {resolvedAt, reasonCode}, still passed.
+    expect(calcs[0].attribution_snapshot.value.reasonCode).toBe('OPEN_PREVIOUS_NIGHT_RECORD')
+    expect(calcs[0].attribution_snapshot.value.workDate).toBe(EDAY)
+    expect(calcs[0].outcome).toBe('completed')
+    expect(calcs[0].outcome_reason_code).not.toBe('context_mismatch')
+    expect(calcs[0].expected_segment_count).toBeGreaterThan(0)
+  })
+
+  it('OD-W4C-53(i) NEGATIVE control: drift in a field the narrow domain does NOT exclude (shift timezone) still FAILS step 7 equality — review_required/context_mismatch, zero segments, identity unchanged', async () => {
+    const plugin = loadPlugin()
+    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
+    if (typeof setSeam !== 'function') {
+      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
+    }
+    let signalReached: () => void
+    const reached = new Promise<void>((resolve) => { signalReached = resolve })
+    let release: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    setSeam(async () => {
+      signalReached()
+      await released
+    })
+    let res: HttpResponse
+    try {
+      const token = await mintToken(o53iNegUser)
+      const punchPromise = punch(token, {
+        eventType: 'check_in', occurredAt: O53I_NEG_OCCURRED_AT, timezone: 'UTC', orgId: o53iNegOrg, operationId: randomUUID(),
+      })
+      await reached
+      // Connection B: ONLY the winning shift's own timezone changes — a field inside the
+      // narrow domain (NOT excluded), while identity (workDate/shiftId) stays fixed
+      // (Asia/Kolkata's 06:00-22:00 local window still contains 12:00Z).
+      await pool.query(`UPDATE attendance_shifts SET timezone = 'Asia/Kolkata' WHERE id = $1`, [o53iNegShift])
+      release!()
+      res = await punchPromise
+    } finally {
+      setSeam(null)
+    }
+    expect(res.status, res.raw).toBe(200)
+    const calcs = await calculationRowsForUser(o53iNegUser)
+    expect(calcs.length).toBe(1)
+    // Identity conjunct silent by construction — the narrow-domain fingerprint conjunct is
+    // what must catch this (proving the §3.2 claim: the narrowing is exactly one field wide;
+    // every non-excluded field still trips step 7).
+    expect(calcs[0].attribution_snapshot.value.workDate).toBe(O53I_NEG_DAY)
+    expect(calcs[0].attribution_snapshot.value.shiftId).toBe(o53iNegShift)
+    expect(calcs[0].outcome).toBe('review_required')
+    expect(calcs[0].outcome_reason_code).toBe('context_mismatch')
+    expect(calcs[0].expected_segment_count).toBe(0)
+    expect(await segmentCountForCalculation(calcs[0].id)).toBe(0)
   })
 })
