@@ -14,8 +14,7 @@ $ErrorActionPreference = 'Continue'
 $changed = $false
 
 foreach ($appName in @('metasheet-windows-gateway', 'metasheet-backend')) {
-  $app = Get-WindowsNativePm2Process -Pm2Command $pm2Command -AppName $appName
-  if ($null -eq $app) {
+  if (-not (Test-WindowsNativePm2AppExists -Pm2Command $pm2Command -AppName $appName)) {
     Write-Host "[attendance-windows-native-stop] already stopped: $appName"
     continue
   }

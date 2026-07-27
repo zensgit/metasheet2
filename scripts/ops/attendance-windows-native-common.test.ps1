@@ -23,6 +23,20 @@ switch ($Action) {
     Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","username":"lower","USERNAME":"upper"}},{"name":"metasheet-windows-gateway","pm2_env":{"status":"online","username":"lower","USERNAME":"upper"}}]'
     exit 0
   }
+  'describe' {
+    if ($Name -in @('metasheet-backend', 'metasheet-windows-gateway')) {
+      exit 0
+    }
+    exit 1
+  }
+  'pid' {
+    if ($Name -eq 'metasheet-backend') {
+      Write-Output '4242'
+    } else {
+      Write-Output '0'
+    }
+    exit 0
+  }
   'delete' {
     exit 23
   }
@@ -49,6 +63,18 @@ try {
   Import-WindowsNativeEnvFile -EnvFile $envFixture | Out-Null
   if ($env:WINDOWS_NATIVE_IMPORT_PROBE -ne 'file-value') {
     throw 'Normal env import did not export the parsed value'
+  }
+  if (-not (Test-WindowsNativePm2AppExists -Pm2Command $fakePm2 -AppName 'metasheet-backend')) {
+    throw 'PM2 existence probe rejected an existing app'
+  }
+  if (Test-WindowsNativePm2AppExists -Pm2Command $fakePm2 -AppName 'missing-app') {
+    throw 'PM2 existence probe accepted a missing app'
+  }
+  if (-not (Test-WindowsNativePm2AppOnline -Pm2Command $fakePm2 -AppName 'metasheet-backend')) {
+    throw 'PM2 online probe rejected a positive PID'
+  }
+  if (Test-WindowsNativePm2AppOnline -Pm2Command $fakePm2 -AppName 'metasheet-windows-gateway') {
+    throw 'PM2 online probe accepted PID zero'
   }
 
   $failedClosed = $false

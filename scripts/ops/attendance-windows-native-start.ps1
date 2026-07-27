@@ -23,7 +23,7 @@ $pm2Command = Resolve-WindowsNativePm2Command -RootDir $resolvedRoot
 $ErrorActionPreference = 'Continue'
 
 foreach ($appName in @('metasheet-backend', 'metasheet-windows-gateway')) {
-  if ($null -ne (Get-WindowsNativePm2Process -Pm2Command $pm2Command -AppName $appName)) {
+  if (Test-WindowsNativePm2AppExists -Pm2Command $pm2Command -AppName $appName) {
     throw "PM2 app already exists: $appName. Run windows-native-stop.bat before starting again."
   }
 }

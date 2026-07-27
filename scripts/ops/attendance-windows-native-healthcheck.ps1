@@ -12,8 +12,7 @@ $envValues = Import-WindowsNativeEnvFile -EnvFile $envFile
 $pm2Command = Resolve-WindowsNativePm2Command -RootDir $resolvedRoot
 
 foreach ($appName in @('metasheet-backend', 'metasheet-windows-gateway')) {
-  $app = Get-WindowsNativePm2Process -Pm2Command $pm2Command -AppName $appName
-  if ($null -eq $app -or $null -eq $app.pm2_env -or $app.pm2_env.status -ne 'online') {
+  if (-not (Test-WindowsNativePm2AppOnline -Pm2Command $pm2Command -AppName $appName)) {
     throw "PM2 app is not online: $appName"
   }
 }

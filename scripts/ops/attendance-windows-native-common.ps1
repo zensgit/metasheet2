@@ -276,6 +276,55 @@ process.stdin.on('end', () => {
   }
 }
 
+function Test-WindowsNativePm2AppExists {
+  param(
+    [string]$Pm2Command,
+    [string]$AppName
+  )
+
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & $Pm2Command describe $AppName *> $null
+    $pm2ExitCode = $LASTEXITCODE
+  }
+  finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  return $pm2ExitCode -eq 0
+}
+
+function Test-WindowsNativePm2AppOnline {
+  param(
+    [string]$Pm2Command,
+    [string]$AppName
+  )
+
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $rawPid = (& $Pm2Command pid $AppName 2>$null | Out-String).Trim()
+    $pm2ExitCode = $LASTEXITCODE
+  }
+  finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  if ($pm2ExitCode -ne 0) {
+    return $false
+  }
+
+  foreach ($line in ($rawPid -split '\r?\n')) {
+    $candidate = 0
+    if (
+      [int]::TryParse($line.Trim(), [ref]$candidate) -and
+      $candidate -gt 0
+    ) {
+      return $true
+    }
+  }
+  return $false
+}
+
 function Remove-WindowsNativePm2Apps {
   param(
     [string]$Pm2Command,
@@ -287,7 +336,7 @@ function Remove-WindowsNativePm2Apps {
   $ErrorActionPreference = 'Continue'
   try {
     foreach ($appName in $AppNames) {
-      if ($null -eq (Get-WindowsNativePm2Process -Pm2Command $Pm2Command -AppName $appName)) {
+      if (-not (Test-WindowsNativePm2AppExists -Pm2Command $Pm2Command -AppName $appName)) {
         continue
       }
       & $Pm2Command delete $appName *> $null
