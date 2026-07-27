@@ -464,6 +464,55 @@ jobs:
             throw 'Second migration pass failed'
           }
 
+      - name: Capture sanitized Windows runtime diagnostics
+        if: ${{ failure() }}
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          if (
+            [string]::IsNullOrWhiteSpace($env:PACKAGE_ROOT) -or
+            -not (Test-Path -LiteralPath $env:PACKAGE_ROOT -PathType Container)
+          ) {
+            Write-Host 'Package root is unavailable; no runtime diagnostics to capture.'
+            exit 0
+          }
+
+          . (Join-Path $env:PACKAGE_ROOT 'scripts\ops\attendance-windows-native-common.ps1')
+          $pm2Command = Resolve-WindowsNativePm2Command -RootDir $env:PACKAGE_ROOT
+          foreach ($name in @('metasheet-backend', 'metasheet-windows-gateway')) {
+            $app = Get-WindowsNativePm2Process -Pm2Command $pm2Command -AppName $name
+            $status = if ($null -eq $app) {
+              'missing'
+            } else {
+              [string]$app.pm2_env.status
+            }
+            Write-Host "PM2 $name status: $status"
+          }
+
+          $redactions = @(
+            'windows_native_ci_password',
+            'windows-native-ci-synthetic-secret-20260727',
+            'Windows-Native-QA-Only-20260727'
+          )
+          Get-ChildItem `
+            -LiteralPath (Join-Path $env:PACKAGE_ROOT 'output\logs') `
+            -Filter '*.log' `
+            -ErrorAction SilentlyContinue |
+          Sort-Object Name |
+          ForEach-Object {
+            Write-Host "::group::$($_.Name)"
+            $content = (Get-Content -LiteralPath $_.FullName -Tail 200) -join "`n"
+            foreach ($secret in $redactions) {
+              $content = $content.Replace($secret, '[REDACTED]')
+            }
+            $content = $content -replace `
+              'postgres(?:ql)?://[^@\s]+@', `
+              'postgres://[REDACTED]@'
+            Write-Host $content
+            Write-Host '::endgroup::'
+          }
+
       - name: Stop packaged Windows runtime
         if: ${{ always() }}
         shell: powershell
