@@ -45,6 +45,7 @@ function verify_windows_entrypoints() {
   local root="$1"
   local start_script="${root}/start-pm2.bat"
   local deploy_script="${root}/deploy-${run_label}.bat"
+  local native_entrypoint
 
   if ! search_fixed_string '-RootDir "%~dp0."' "$start_script"; then
     die "start-pm2.bat must pass -RootDir \"%~dp0.\" to avoid Windows path quoting bugs"
@@ -55,6 +56,21 @@ function verify_windows_entrypoints() {
       die "deploy-${run_label}.bat must pass -RootDir \"%~dp0.\" to avoid Windows path quoting bugs"
     fi
   fi
+
+  for native_entrypoint in \
+    "windows-native-preflight.bat" \
+    "windows-native-start.bat" \
+    "windows-native-stop.bat" \
+    "windows-native-healthcheck.bat" \
+    "windows-native-bootstrap-admin.bat"
+  do
+    if ! search_fixed_string '-RootDir "%~dp0."' "${root}/${native_entrypoint}"; then
+      die "${native_entrypoint} must pass -RootDir \"%~dp0.\""
+    fi
+    if search_fixed_string 'wsl.exe' "${root}/${native_entrypoint}"; then
+      die "${native_entrypoint} must not invoke WSL"
+    fi
+  done
 }
 
 function verify_workspace_manifest() {
@@ -147,6 +163,59 @@ function verify_onprem_env_templates() {
     grep -q '^JWT_SECRET=change-me$' "$abs" || die "${rel} must retain JWT_SECRET=change-me placeholder"
     grep -q '^BCRYPT_SALT_ROUNDS=12$' "$abs" || die "${rel} must pin BCRYPT_SALT_ROUNDS=12"
   done
+
+  local windows_env="${root}/docker/app.env.attendance-windows-native.qa.example"
+  grep -q '^JWT_SECRET=change-me$' "$windows_env" \
+    || die "Windows native QA env must retain JWT_SECRET=change-me placeholder"
+  grep -q '^ATTENDANCE_IMPORT_UPLOAD_DIR=storage/attendance-import$' "$windows_env" \
+    || die "Windows native QA env must use a package-relative upload path"
+  grep -q '^WINDOWS_NATIVE_GATEWAY_HOST=127.0.0.1$' "$windows_env" \
+    || die "Windows native QA gateway must bind to loopback by default"
+}
+
+function verify_windows_native_gateway() {
+  local root="$1"
+  local gateway="${root}/scripts/ops/attendance-windows-native-gateway.mjs"
+  local config="${root}/ecosystem.windows-native.config.cjs"
+  local start="${root}/scripts/ops/attendance-windows-native-start.ps1"
+
+  command -v node >/dev/null 2>&1 || die "node is required to verify the Windows native gateway"
+  node --check "$gateway" >/dev/null \
+    || die "Windows native gateway has invalid JavaScript syntax"
+  node --check "$config" >/dev/null \
+    || die "Windows native PM2 config has invalid JavaScript syntax"
+  search_fixed_string 'metasheet-windows-gateway' "$config" \
+    || die "Windows native PM2 config must name the gateway process"
+  search_fixed_string 'attendance-windows-native-preflight.ps1' "$start" \
+    || die "Windows native start must run preflight before deployment"
+  search_fixed_string 'attendance-onprem-deploy-run.ps1' "$start" \
+    || die "Windows native start must run migrations and the packaged backend"
+  search_fixed_string 'Run windows-native-stop.bat before starting again' "$start" \
+    || die "Windows native start must reject ambiguous reuse of existing PM2 apps"
+  search_fixed_string 'Remove-WindowsNativePm2Apps' "$start" \
+    || die "Windows native start must clean up both package-owned PM2 apps after failure"
+  search_fixed_string 'PM2 cleanup failed' \
+    "${root}/scripts/ops/attendance-windows-native-common.ps1" \
+    || die "Windows native PM2 cleanup must surface delete/save failures"
+  search_fixed_string 'multitable-onprem-bootstrap-admin.ps1' \
+    "${root}/scripts/ops/attendance-windows-native-bootstrap-admin.ps1" \
+    || die "Windows native admin bootstrap must delegate to the existing native PostgreSQL helper"
+  search_fixed_string 'Assert-WindowsNativeLoopbackHost' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must enforce loopback-only runtime hosts"
+  search_fixed_string 'Attendance opt-in is forbidden' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must reject attendance rollout opt-ins"
+  search_fixed_string 'External integration configuration is forbidden' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must reject external integration configuration"
+  search_fixed_string "headers['x-forwarded-for'] = remoteAddress" "$gateway" \
+    || die "Windows native gateway must replace client-supplied forwarding identity"
+  search_fixed_string 'gateway host must be loopback' "$gateway" \
+    || die "Windows native gateway must enforce a loopback listener"
+  if search_fixed_string 'wsl.exe' "${root}/scripts/ops/attendance-windows-native-"*; then
+    die "Windows native scripts must not invoke WSL"
+  fi
 }
 
 function verify_web_dist_publish_entrypoints() {
@@ -316,6 +385,11 @@ run_label="$(printf '%s' "$pkg_name" | sed -nE 's/^.*-(run[0-9]+)(-.+)?$/\1/p')"
 required=(
   "start-pm2.bat"
   "start-pm2-remote.bat"
+  "windows-native-preflight.bat"
+  "windows-native-start.bat"
+  "windows-native-stop.bat"
+  "windows-native-healthcheck.bat"
+  "windows-native-bootstrap-admin.bat"
   "apps/web/dist/index.html"
   "apps/web/package.json"
   "packages/core-backend/dist/src/index.js"
@@ -333,6 +407,14 @@ required=(
   "plugins/plugin-attendance/index.cjs"
   "scripts/ops/attendance-onprem-start-pm2.ps1"
   "scripts/ops/attendance-onprem-deploy-run.ps1"
+  "scripts/ops/attendance-windows-native-common.ps1"
+  "scripts/ops/attendance-windows-native-preflight.ps1"
+  "scripts/ops/attendance-windows-native-start.ps1"
+  "scripts/ops/attendance-windows-native-stop.ps1"
+  "scripts/ops/attendance-windows-native-healthcheck.ps1"
+  "scripts/ops/attendance-windows-native-bootstrap-admin.ps1"
+  "scripts/ops/attendance-windows-native-gateway.mjs"
+  "scripts/ops/multitable-onprem-bootstrap-admin.ps1"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
   "scripts/ops/attendance-onprem-publish-web-dist.sh"
@@ -343,11 +425,14 @@ required=(
   "docker/app.env.example"
   "docker/app.env.attendance-onprem.template"
   "docker/app.env.attendance-onprem.ready.env"
+  "docker/app.env.attendance-windows-native.qa.example"
+  "ecosystem.windows-native.config.cjs"
   "ops/nginx/attendance-onprem.conf.example"
   "docs/deployment/attendance-windows-onprem-easy-start-20260306.md"
   "docs/deployment/attendance-windows-wsl-onprem-20260306.md"
   "docs/deployment/attendance-windows-wsl-direct-commands-20260306.md"
   "docs/deployment/attendance-windows-wsl-customer-profiled-commands-20260306.md"
+  "docs/deployment/attendance-windows-native-qa-20260727.md"
 )
 
 for rel in "${required[@]}"; do
@@ -378,6 +463,7 @@ verify_onprem_env_templates "$pkg_root"
 verify_workspace_manifest "$pkg_root"
 verify_workspace_runtime_dependencies "$pkg_root"
 verify_web_dist_publish_entrypoints "$pkg_root"
+verify_windows_native_gateway "$pkg_root"
 verify_core_backend_migration_set "$pkg_root"
 
 if search_extended_regex 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "${pkg_root}/apps/web/dist"; then

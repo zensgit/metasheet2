@@ -38,6 +38,13 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     'plugins/plugin-attendance/plugin.json',
     'plugins/plugin-attendance/index.cjs',
     'scripts/ops/attendance-onprem-start-pm2.ps1',
+    'scripts/ops/attendance-windows-native-common.ps1',
+    'scripts/ops/attendance-windows-native-preflight.ps1',
+    'scripts/ops/attendance-windows-native-start.ps1',
+    'scripts/ops/attendance-windows-native-stop.ps1',
+    'scripts/ops/attendance-windows-native-healthcheck.ps1',
+    'scripts/ops/attendance-windows-native-bootstrap-admin.ps1',
+    'scripts/ops/multitable-onprem-bootstrap-admin.ps1',
     'scripts/ops/attendance-onprem-package-install.sh',
     'scripts/ops/attendance-onprem-package-upgrade.sh',
     'scripts/ops/attendance-onprem-publish-web-dist.sh',
@@ -46,6 +53,7 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     'scripts/ops/attendance-wsl-portproxy-refresh.ps1',
     'scripts/ops/attendance-wsl-portproxy-task.ps1',
     'docker/app.env.example',
+    'docs/deployment/attendance-windows-native-qa-20260727.md',
     'ops/nginx/attendance-onprem.conf.example',
     'docs/deployment/attendance-windows-onprem-easy-start-20260306.md',
     'docs/deployment/attendance-windows-wsl-onprem-20260306.md',
@@ -56,6 +64,17 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   for (const rel of placeholderFiles) {
     writeFile(pkgRoot, rel, `${rel}\n`)
   }
+
+  writeFile(
+    pkgRoot,
+    'packages/core-backend/package.json',
+    JSON.stringify({ name: '@metasheet/core-backend', dependencies: {} })
+  )
+  writeFile(
+    pkgRoot,
+    'plugins/plugin-attendance/package.json',
+    JSON.stringify({ name: '@metasheet/plugin-attendance', dependencies: {} })
+  )
 
   writeFile(pkgRoot, 'apps/web/dist/index.html', '<html>attendance</html>\n')
   writeFile(pkgRoot, 'packages/core-backend/dist/src/index.js', 'module.exports = {}\n')
@@ -86,6 +105,16 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   )
   writeFile(
     pkgRoot,
+    'docker/app.env.attendance-windows-native.qa.example',
+    [
+      'JWT_SECRET=change-me',
+      'ATTENDANCE_IMPORT_UPLOAD_DIR=storage/attendance-import',
+      'WINDOWS_NATIVE_GATEWAY_HOST=127.0.0.1',
+      '',
+    ].join('\n')
+  )
+  writeFile(
+    pkgRoot,
     'pnpm-workspace.yaml',
     "packages:\n  - 'packages/*'\n  - 'plugins/*'\n"
   )
@@ -96,6 +125,19 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\ops\\attendance-onprem-start-pm2.ps1" -RootDir "%~dp0."\n'
   )
   writeFile(pkgRoot, 'start-pm2-remote.bat', 'call "%~dp0start-pm2.bat"\n')
+  for (const [name, script] of [
+    ['windows-native-preflight.bat', 'attendance-windows-native-preflight.ps1'],
+    ['windows-native-start.bat', 'attendance-windows-native-start.ps1'],
+    ['windows-native-stop.bat', 'attendance-windows-native-stop.ps1'],
+    ['windows-native-healthcheck.bat', 'attendance-windows-native-healthcheck.ps1'],
+    ['windows-native-bootstrap-admin.bat', 'attendance-windows-native-bootstrap-admin.ps1'],
+  ]) {
+    writeFile(
+      pkgRoot,
+      name,
+      `powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\ops\\${script}" -RootDir "%~dp0."\n`
+    )
+  }
   writeFile(
     pkgRoot,
     'deploy-run34.bat',
@@ -105,6 +147,51 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     pkgRoot,
     'scripts/ops/attendance-onprem-deploy-run.ps1',
     'scripts\\ops\\attendance-onprem-publish-web-dist.ps1\n'
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-common.ps1',
+    'PM2 cleanup failed\n'
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-preflight.ps1',
+    [
+      'Assert-WindowsNativeLoopbackHost',
+      'Attendance opt-in is forbidden',
+      'External integration configuration is forbidden',
+      '',
+    ].join('\n')
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-start.ps1',
+    [
+      'attendance-windows-native-preflight.ps1',
+      'attendance-onprem-deploy-run.ps1',
+      'Run windows-native-stop.bat before starting again',
+      'Remove-WindowsNativePm2Apps',
+      '',
+    ].join('\n')
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-bootstrap-admin.ps1',
+    'multitable-onprem-bootstrap-admin.ps1\n'
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-gateway.mjs',
+    [
+      "const headers = {}; headers['x-forwarded-for'] = remoteAddress",
+      "throw new Error('gateway host must be loopback')",
+      '',
+    ].join('\n')
+  )
+  writeFile(
+    pkgRoot,
+    'ecosystem.windows-native.config.cjs',
+    'module.exports={apps:[{name:"metasheet-windows-gateway"}]}\n'
   )
   writeFile(
     pkgRoot,

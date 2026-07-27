@@ -34,6 +34,14 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-onprem-deploy-easy.sh"
   "scripts/ops/attendance-onprem-start-pm2.ps1"
   "scripts/ops/attendance-onprem-deploy-run.ps1"
+  "scripts/ops/attendance-windows-native-common.ps1"
+  "scripts/ops/attendance-windows-native-preflight.ps1"
+  "scripts/ops/attendance-windows-native-start.ps1"
+  "scripts/ops/attendance-windows-native-stop.ps1"
+  "scripts/ops/attendance-windows-native-healthcheck.ps1"
+  "scripts/ops/attendance-windows-native-bootstrap-admin.ps1"
+  "scripts/ops/attendance-windows-native-gateway.mjs"
+  "scripts/ops/multitable-onprem-bootstrap-admin.ps1"
   "scripts/ops/attendance-onprem-bootstrap.sh"
   "scripts/ops/attendance-onprem-bootstrap-admin.sh"
   "scripts/ops/attendance-onprem-env-check.sh"
@@ -47,11 +55,13 @@ REQUIRED_PATHS=(
   "docker/app.env.example"
   "docker/app.env.attendance-onprem.template"
   "docker/app.env.attendance-onprem.ready.env"
+  "docker/app.env.attendance-windows-native.qa.example"
   "ops/nginx/attendance-onprem.conf.example"
   "ops/systemd/metasheet-backend.service.example"
   "ops/systemd/metasheet-healthcheck.service.example"
   "ops/systemd/metasheet-healthcheck.timer.example"
   "ecosystem.config.cjs"
+  "ecosystem.windows-native.config.cjs"
   "package.json"
   "pnpm-lock.yaml"
   "pnpm-workspace.yaml"
@@ -61,6 +71,7 @@ REQUIRED_PATHS=(
   "docs/deployment/attendance-windows-wsl-onprem-20260306.md"
   "docs/deployment/attendance-windows-wsl-direct-commands-20260306.md"
   "docs/deployment/attendance-windows-wsl-customer-profiled-commands-20260306.md"
+  "docs/deployment/attendance-windows-native-qa-20260727.md"
   "docs/deployment/attendance-onprem-app-env-template-20260306.md"
   "docs/deployment/attendance-onprem-postdeploy-30min-verification-20260306.md"
 )
@@ -143,6 +154,49 @@ call "%~dp0start-pm2.bat" >> "%~dp0output\logs\start-pm2-remote.log" 2>&1
 exit /b %ERRORLEVEL%
 EOF
 
+  cat > "${PACKAGE_ROOT}/windows-native-preflight.bat" <<'EOF'
+@echo off
+setlocal
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\attendance-windows-native-preflight.ps1" -RootDir "%~dp0."
+exit /b %ERRORLEVEL%
+EOF
+
+  cat > "${PACKAGE_ROOT}/windows-native-start.bat" <<'EOF'
+@echo off
+setlocal
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\attendance-windows-native-start.ps1" -RootDir "%~dp0."
+exit /b %ERRORLEVEL%
+EOF
+
+  cat > "${PACKAGE_ROOT}/windows-native-stop.bat" <<'EOF'
+@echo off
+setlocal
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\attendance-windows-native-stop.ps1" -RootDir "%~dp0."
+exit /b %ERRORLEVEL%
+EOF
+
+  cat > "${PACKAGE_ROOT}/windows-native-healthcheck.bat" <<'EOF'
+@echo off
+setlocal
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\attendance-windows-native-healthcheck.ps1" -RootDir "%~dp0."
+exit /b %ERRORLEVEL%
+EOF
+
+  cat > "${PACKAGE_ROOT}/windows-native-bootstrap-admin.bat" <<'EOF'
+@echo off
+setlocal
+if "%~1"=="" (
+  echo Usage: windows-native-bootstrap-admin.bat ^<admin-email^> ^<admin-password^> [admin-name]
+  exit /b 2
+)
+if "%~2"=="" (
+  echo Usage: windows-native-bootstrap-admin.bat ^<admin-email^> ^<admin-password^> [admin-name]
+  exit /b 2
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\attendance-windows-native-bootstrap-admin.ps1" -RootDir "%~dp0." -AdminEmail "%~1" -AdminPassword "%~2" -AdminName "%~3"
+exit /b %ERRORLEVEL%
+EOF
+
   cat > "${PACKAGE_ROOT}/deploy-${PACKAGE_RUN_LABEL}.bat" <<EOF
 @echo off
 setlocal
@@ -194,6 +248,9 @@ Tag: ${PACKAGE_TAG}
 
 Install quickstart:
   docs/deployment/attendance-windows-onprem-easy-start-20260306.md
+
+Windows native internal QA (no WSL2):
+  docs/deployment/attendance-windows-native-qa-20260727.md
 
 Package layout guide:
   docs/deployment/attendance-onprem-package-layout-20260306.md
