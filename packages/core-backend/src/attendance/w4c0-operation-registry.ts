@@ -59,6 +59,7 @@ import {
 } from './w4c0-fingerprints'
 import {
   ATTENDANCE_W4_OUTBOX_EVENT_KINDS_V1,
+  ATTENDANCE_W4_SCHEDULED_RUN_OUTBOX_EVENT_KINDS_V1,
   AttendanceW4OperationError,
   W4_MAX_BATCH_ITEMS,
   W4_TRANSACTION_LOCK_TIMEOUT_MS,
@@ -833,15 +834,22 @@ export async function enqueueAttendanceResultEventOutboxV1(
     if (!(ATTENDANCE_W4_OUTBOX_EVENT_KINDS_V1 as readonly string[]).includes(event.eventKind)) {
       fail('W4C0_OUTBOX_EVENT_KIND_INVALID')
     }
+    // W4C-2 amendment section 1.4.1: the per-user (operation-identity) enqueue surface
+    // rejects the two run-level kinds even though they are now members of the eight-member
+    // closed set above — this is one half of gate 1's "a run-level kind with
+    // identity_kind='operation' fails" leg, enforced at the TS boundary before any SQL.
+    if ((ATTENDANCE_W4_SCHEDULED_RUN_OUTBOX_EVENT_KINDS_V1 as readonly string[]).includes(event.eventKind)) {
+      fail('W4C0_OUTBOX_EVENT_KIND_INVALID')
+    }
     if (!Number.isInteger(event.payloadSchemaVersion) || event.payloadSchemaVersion < 1) {
       fail('W4C0_OUTBOX_EVENTS_INVALID')
     }
     requireHex64(event.businessKeyFingerprint, 'W4C0_OUTBOX_EVENTS_INVALID')
     await trx.query(
       `INSERT INTO attendance_result_event_outbox (
-          org_id, entrypoint, operation_id, event_kind, payload,
+          org_id, entrypoint, operation_id, identity_kind, event_kind, payload,
           payload_schema_version, business_key_fingerprint, delivery_state
-        ) VALUES ($1,$2,$3::uuid,$4,$5::jsonb,$6,$7,'pending')`,
+        ) VALUES ($1,$2,$3::uuid,'operation',$4,$5::jsonb,$6,$7,'pending')`,
       [
         verified.org.orgId,
         verified.entrypoint,

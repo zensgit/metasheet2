@@ -39,6 +39,7 @@ export const ATTENDANCE_W4_OPERATION_ERROR_CODES_V1 = Object.freeze([
   'W4_BATCH_LIMIT_EXCEEDED', // above item/target maxima, before source DML (422)
   'ATTENDANCE_WRITE_NOT_AUTHORIZED', // authorization witness/capability failure (403)
   'W4_ATTRIBUTION_UNSUPPORTED', // fresh unsupported attribution (422)
+  'ATTENDANCE_SCHEDULED_RUN_BUSY', // scheduled-run (class-01) helper budget/55P03 busy (503) — W4C-2 §1.6
 ] as const)
 export type AttendanceW4OperationErrorCodeV1 = (typeof ATTENDANCE_W4_OPERATION_ERROR_CODES_V1)[number]
 
@@ -56,6 +57,7 @@ export const ATTENDANCE_W4_OPERATION_ERROR_HTTP_STATUS_V1: Readonly<
   W4_BATCH_LIMIT_EXCEEDED: 422,
   ATTENDANCE_WRITE_NOT_AUTHORIZED: 403,
   W4_ATTRIBUTION_UNSUPPORTED: 422,
+  ATTENDANCE_SCHEDULED_RUN_BUSY: 503,
 })
 
 /**
@@ -67,9 +69,12 @@ export const ATTENDANCE_W4_OPERATION_ERROR_HTTP_STATUS_V1: Readonly<
 export class AttendanceW4OperationError extends Error {
   readonly code: AttendanceW4OperationErrorCodeV1
   readonly httpStatus: number
-  readonly lockClass: 'rollout' | 'operation' | 'target' | null
+  readonly lockClass: 'rollout' | 'operation' | 'target' | 'scheduled_run' | null
 
-  constructor(code: AttendanceW4OperationErrorCodeV1, lockClass: 'rollout' | 'operation' | 'target' | null = null) {
+  constructor(
+    code: AttendanceW4OperationErrorCodeV1,
+    lockClass: 'rollout' | 'operation' | 'target' | 'scheduled_run' | null = null,
+  ) {
     super(code)
     this.name = 'AttendanceW4OperationError'
     this.code = code
@@ -83,10 +88,19 @@ export function failW4Operation(code: AttendanceW4OperationErrorCodeV1): never {
 }
 
 // ---------------------------------------------------------------------------
-// Section 7.1a closed outbox event-kind allowlist (byte-identical to the Stage A
-// migration's OUTBOX_EVENT_KINDS; Stage D's generated reachable-event inventory
-// must reconcile BOTH copies before the slice PR is finalized — see
-// HANDOFF-W4C0.md).
+// Section 7.1a closed outbox event-kind allowlist.
+//
+// W4C-2 amendment section 1.5 (docs/development/attendance-issue-4556-w4c2-scheduled-run-identity-amendment-20260726.md,
+// PR #4617, RATIFIED, owner Bundle A): this list gained the two run-level kinds below.
+// Its parity partner is NO LONGER the already-applied W4C-0 migration's own
+// `OUTBOX_EVENT_KINDS` constant (`zzzz20260725120000_...:210-217`) — that constant is a
+// historical artifact, consumed once at that migration's own `up()`, and is permanently
+// excluded from parity now that this list has grown past it. The current parity partner
+// is `W4C2_OUTBOX_EVENT_KINDS_V1`, the eight-member LOCAL literal exported by
+// `zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union.ts` (section 1.10
+// step 6). Gate 9's parity assertion must compare against THAT object, not the W4C-0
+// migration's. Reconcile both copies (and W4C-0's generated reachable-event inventory) in
+// the same commit as any future change here.
 // ---------------------------------------------------------------------------
 
 export const ATTENDANCE_W4_OUTBOX_EVENT_KINDS_V1 = Object.freeze([
@@ -96,5 +110,19 @@ export const ATTENDANCE_W4_OUTBOX_EVENT_KINDS_V1 = Object.freeze([
   'attendance.request.cancelled',
   'attendance.resolved',
   'attendance.outdoorPunch.requested',
+  'attendance.absence.generated',
+  'attendance.work_date.review_required',
 ] as const)
 export type AttendanceW4OutboxEventKindV1 = (typeof ATTENDANCE_W4_OUTBOX_EVENT_KINDS_V1)[number]
+
+/**
+ * Section 1.5/1.4.1: the two run-level kinds this amendment adds — the exact subset
+ * `enqueueAttendanceScheduledRunEventOutboxV1` (w4c2-scheduled-run.ts) accepts and
+ * `enqueueAttendanceResultEventOutboxV1` (w4c0-operation-registry.ts) rejects, even
+ * though both are members of the eight-member closed set above.
+ */
+export const ATTENDANCE_W4_SCHEDULED_RUN_OUTBOX_EVENT_KINDS_V1 = Object.freeze([
+  'attendance.absence.generated',
+  'attendance.work_date.review_required',
+] as const)
+export type AttendanceW4ScheduledRunOutboxEventKindV1 = (typeof ATTENDANCE_W4_SCHEDULED_RUN_OUTBOX_EVENT_KINDS_V1)[number]
