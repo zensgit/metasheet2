@@ -21,8 +21,10 @@
 // branded error VERBATIM. The attacker-text half is a DISCLOSED residual under the
 // 2026-07-26 in-process-caller ruling (see the PR body). The half FIXED here, because
 // it needs no adversary: the boundary now RE-MINTS every branded error it catches from
-// the frozen table below, so a reason outside
-// `OBSERVABILITY_CONTRACT_ERROR_REASONS` cannot leave it.
+// the frozen table below, so no branded error THE BOUNDARY EMITS can carry a reason
+// outside `OBSERVABILITY_CONTRACT_ERROR_REASONS`. Narrow on purpose: `guardExportTable`
+// does not wrap the error class or identity-carrying exports, so throws from those
+// never reach the boundary and are never re-minted.
 
 const {
   isPlainObject,

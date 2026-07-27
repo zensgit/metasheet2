@@ -832,7 +832,15 @@ async function answerPlaneIsValuesFreeAndForeignTextIsDiscarded() {
   // and `gip-approved-binding-resolver.cjs`): their `fail()` takes NO `message` and
   // NO `details` parameter at all, and their error classes read a frozen per-reason
   // message and ignore every further constructor argument. For those two, a foreign
-  // callback that require()s the module has nothing to put text into.
+  // callback that require()s the module has nothing to put text into AT MINT TIME.
+  //
+  // ROUND 7 NARROWS THIS FURTHER: "at mint time" is load-bearing. Minting is not the
+  // only route to a branded error carrying text — a caller who obtains one (every
+  // refusal hands one out) can assign `message`, `stack` and `reason` on it, and until
+  // round 7 the entry boundary re-threw such an object verbatim. That vector is a
+  // DISCLOSED residual under the 2026-07-26 in-process-caller ruling; its closed-set
+  // half — an out-of-vocabulary `reason` leaving the boundary — is fixed by the
+  // re-mint, which the gate suite executes at both sites.
   //
   // WHAT THIS DOES **NOT** ASSERT: anything about `gip-binding-qualification-spike.cjs`.
   // Its `GipQualificationError` is exported (and was already exported on `main`),
@@ -1554,7 +1562,10 @@ const fs = require('node:fs')
 
 const ANY_WEAKSET = /new WeakSet\(/
 const MODULE_SCOPE_WEAKSET = /^const\s+([A-Za-z0-9_$]+)\s*=\s*new WeakSet\(\)\s*$/
-const FUNCTION_HEAD = /^function\s+([A-Za-z0-9_$]+)\s*\(/
+// Both function forms this package writes: a top-level declaration and a `const NAME =`
+// binding to a function or arrow. Matching only the first would attribute a `.has(` read
+// inside an arrow-defined checker to whatever `function` happened to precede it.
+const FUNCTION_HEAD = /^\s*(?:function\s+([A-Za-z0-9_$]+)\s*\(|(?:const|let)\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s+)?(?:function\b|\())/
 const REQUIRES_GATE = /require\('\.\/gip-inert-entry\.cjs'\)/
 const GATE_MODULE = 'gip-inert-entry.cjs'
 
@@ -1611,7 +1622,7 @@ function deriveReach(sources) {
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index]
       const head = FUNCTION_HEAD.exec(line)
-      if (head) currentFunction = head[1]
+      if (head) currentFunction = head[1] || head[2]
       const declared = MODULE_SCOPE_WEAKSET.exec(line)
       if (declared) {
         declarations.push({ module: entry.name, identifier: declared[1], line: index + 1 })
@@ -1619,26 +1630,36 @@ function deriveReach(sources) {
         exemptions.push({ module: entry.name, line: index + 1 })
       }
       const readMatch = /([A-Za-z0-9_$]+)\.has\(/.exec(line)
-      if (readMatch && currentFunction && !hasSites.has(readMatch[1])) {
-        hasSites.set(readMatch[1], currentFunction)
+      if (readMatch && currentFunction) {
+        // EVERY enclosing function, not the first. Taking the first would let a
+        // module-private `assert*` written ABOVE an exported boolean checker silently
+        // classify the brand as unjudgeable and drop it out of the sweepable set —
+        // a reach that narrows itself while the ledger still reads as complete.
+        if (!hasSites.has(readMatch[1])) hasSites.set(readMatch[1], [])
+        const seenHere = hasSites.get(readMatch[1])
+        if (!seenHere.includes(currentFunction)) seenHere.push(currentFunction)
       }
     }
     for (const declaration of declarations.filter((d) => d.module === entry.name)) {
-      const checkerName = hasSites.get(declaration.identifier) || null
-      declaration.checker = checkerName
-      declaration.kind = 'no-exported-checker'
-      const exported = checkerName ? entry.table[checkerName] : undefined
-      if (typeof exported === 'function') {
+      const candidates = hasSites.get(declaration.identifier) || []
+      // Classify every candidate, then PREFER a sweepable one. `kind` is behavioural:
+      // the function is CALLED and its answer inspected.
+      const classified = candidates.map((name) => {
+        const exported = entry.table[name]
+        if (typeof exported !== 'function') return { name, kind: 'checker-not-exported' }
         try {
-          declaration.kind = typeof exported(Object.freeze({})) === 'boolean' ? 'sweepable' : 'non-boolean'
+          return { name, kind: typeof exported(Object.freeze({})) === 'boolean' ? 'sweepable' : 'non-boolean' }
         } catch (_error) {
-          declaration.kind = 'throwing-assert'
+          return { name, kind: 'throwing-assert' }
         }
-      } else if (checkerName) {
-        declaration.kind = 'checker-not-exported'
-      }
+      })
+      const chosen = classified.find((c) => c.kind === 'sweepable') || classified[0]
+        || { name: null, kind: 'no-checker-found' }
+      declaration.checker = chosen.name
+      declaration.kind = chosen.kind
+      declaration.candidates = classified.map((c) => `${c.name}[${c.kind}]`)
       if (declaration.kind === 'non-boolean') {
-        violations.push(`${entry.name}.${declaration.identifier}: ${checkerName} answered a non-boolean`)
+        violations.push(`${entry.name}.${declaration.identifier}: ${chosen.name} answered a non-boolean`)
       }
     }
   }
@@ -1961,6 +1982,40 @@ function trustBrandInventoryIsDerivedNotAuthored() {
   // Brand short names must be unique, or two brands would silently share a ledger row.
   const keys = reach.sweepable.map((d) => brandKeyFor(d.checker))
   assert.equal(new Set(keys).size, keys.length, `two brands derive the same short name: ${keys.join(', ')}`)
+
+  // THE FOUR UNJUDGEABLE BRANDS ARE UNJUDGEABLE IN FACT, NOT BY REGEX ACCIDENT.
+  // The attribution collects EVERY function that reads a declaration's WeakSet and
+  // prefers an exported boolean one, so "no exported checker" cannot be an artifact of
+  // a module-private `assert*` merely appearing first in the file. Asserted directly:
+  // for each unjudgeable brand, NO candidate is sweepable, and its module's export
+  // table really contains none of them.
+  for (const declaration of reach.declarations.filter((d) => d.kind !== 'sweepable')) {
+    assert.ok(!declaration.candidates.some((c) => c.endsWith('[sweepable]')),
+      `${declaration.module}.${declaration.identifier} has a sweepable checker after all: ${declaration.candidates.join(', ')}`)
+  }
+  // AND THE PREFERENCE IS LOAD-BEARING — a private assert written ABOVE an exported
+  // boolean checker must still classify sweepable. Without this the hardening is a
+  // comment, and the "first `.has(` wins" reading would silently narrow the reach.
+  const shadowed = new WeakSet()
+  const orderControl = deriveReach([{
+    name: 'synthetic-order-control.cjs',
+    source: [
+      'const trustedShadowed = new WeakSet()',
+      'function assertTrustedShadowed(value) {',
+      '  if (!trustedShadowed.has(value)) throw new Error("nope")',
+      '}',
+      'function isTrustedShadowed(value) {',
+      '  return trustedShadowed.has(value)',
+      '}',
+    ].join('\n'),
+    table: {
+      assertTrustedShadowed(value) { if (!shadowed.has(value)) throw new Error('nope') },
+      isTrustedShadowed: (value) => shadowed.has(value),
+    },
+  }])
+  assert.deepEqual(orderControl.rendered,
+    ['synthetic-order-control.cjs.trustedShadowed -> isTrustedShadowed [sweepable]'],
+    'a private assert written above an exported boolean checker must not make the brand unjudgeable')
   console.log(`  DERIVED-REACH ${reach.declarations.length} trust WeakSets across `
     + `${new Set(reach.declarations.map((d) => d.module)).size} modules; ${reach.sweepable.length} sweepable, `
     + `${reach.declarations.length - reach.sweepable.length} unjudgeable (checker not exported); `

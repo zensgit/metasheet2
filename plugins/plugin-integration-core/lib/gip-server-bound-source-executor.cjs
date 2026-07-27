@@ -61,7 +61,10 @@
 // 2026-07-26 in-process-caller ruling (see the PR body). The half that is FIXED here,
 // because it is a closed-set invariant violation reachable without any adversary at
 // all: the boundary now RE-MINTS every branded error it catches from the frozen table
-// below, so a reason outside `SOURCE_EXECUTOR_ERROR_REASONS` can no longer leave it.
+// below, so no branded error THE BOUNDARY EMITS can carry a reason outside
+// `SOURCE_EXECUTOR_ERROR_REASONS`. Stated that narrowly on purpose: `guardExportTable`
+// deliberately does not wrap the error CLASS or identity-carrying exports, so a throw
+// from one of those never reaches the boundary and is never re-minted.
 // What remains unconditionally true: `fail` takes a reason and nothing else, and every
 // catch around a foreign call discards whole — no cause, no stack, no message, no
 // class exemption.
@@ -244,8 +247,8 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 //
 //   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
 //      `buildTrustedHttpProbeActionRegistry`.
-//   2. `createHarnessSourceBinderForTests` (:392) is the SOLE writer into
-//      `trustedSourceBinders` (:386, written :466) and is publicly EXPORTED (:622) — there is no
+//   2. `createHarnessSourceBinderForTests` (:395) is the SOLE writer into
+//      `trustedSourceBinders` (:389, written :469) and is publicly EXPORTED (:625) — there is no
 //      private granter behind it at all, so it is not even "build split from trust";
 //      it is the single granting path. And unlike (1) it has NO CERTIFIED
 //      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified

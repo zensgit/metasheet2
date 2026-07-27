@@ -67,7 +67,9 @@
 // VERBATIM. The attacker-text half is a DISCLOSED residual under the 2026-07-26
 // in-process-caller ruling (see the PR body). The half FIXED here, because it needs no
 // adversary: the boundary now RE-MINTS every branded error it catches from the frozen
-// table above, so a reason outside `BINDING_RESOLVER_ERROR_REASONS` cannot leave it.
+// table above, so no branded error THE BOUNDARY EMITS can carry a reason outside
+// `BINDING_RESOLVER_ERROR_REASONS`. Narrow on purpose: `guardExportTable` does not wrap
+// the error class or identity-carrying exports, so throws from those never reach it.
 // Still unconditionally true: `fail` takes a reason and nothing else.
 
 const {

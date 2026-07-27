@@ -526,9 +526,17 @@ async function refusalsAreValuesFreeAndClosed() {
   }
   observed.push(String(caught.stack), String(caught.cause))
 
-  // `fail` takes no message and no details at all, so a foreign callback that
-  // require()s this module cannot mint a branded error carrying attacker text —
-  // and neither can direct construction.
+  // RETRACTION (round 7). This comment read "a foreign callback that require()s this
+  // module cannot mint a branded error carrying attacker text". FALSE as an absolute:
+  // MINTING is not the only route. A caller who obtains a genuinely branded error —
+  // every refusal below hands one out — can assign `message`, `stack` and `reason` on
+  // it, because they are ordinary writable own properties. Until round 7 the entry
+  // boundary re-threw such an object VERBATIM. What is asserted here, and all that is:
+  // `fail` takes no message and no details, `fail` is exported nowhere, and direct
+  // construction ignores every argument beyond the reason — so no caller can put text
+  // in AT MINT TIME. The mutate-after-mint vector is a DISCLOSED residual under the
+  // 2026-07-26 in-process-caller ruling; its closed-set half is fixed by the re-mint
+  // at the boundary.
   assert.equal(resolverModule.fail, undefined)
   assert.equal(resolverModule.__internals.fail, undefined)
   const branded = new GipApprovedBindingResolverError('RESOLVER_RUN_INPUT_INVALID', ATTACKER, { leak: ATTACKER })
