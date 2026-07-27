@@ -233,7 +233,17 @@ function Resolve-Pm2Command {
     return $localPm2
   }
 
-  return 'pm2'
+  $globalPm2Cmd = Get-Command 'pm2.cmd' -ErrorAction SilentlyContinue
+  if ($null -ne $globalPm2Cmd) {
+    return $globalPm2Cmd.Source
+  }
+
+  $globalPm2 = Get-Command 'pm2' -ErrorAction SilentlyContinue
+  if ($null -ne $globalPm2) {
+    return $globalPm2.Source
+  }
+
+  throw 'Missing pm2. Install it with: npm install --global pm2'
 }
 
 function ConvertTo-ComparablePath {
@@ -267,9 +277,45 @@ function Get-Pm2AppProcess {
     return $null
   }
 
+  $sanitizeScript = @'
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
   try {
-    $apps = $json | ConvertFrom-Json
-    return @($apps) | Where-Object { $_.name -eq $AppName } | Select-Object -First 1
+    const appName = process.argv[1];
+    const retainedKeys = (process.argv[2] || '').split(',').filter(Boolean);
+    const apps = JSON.parse(input);
+    const app = apps.find((entry) => entry && entry.name === appName);
+    if (!app) return;
+    const env = app.pm2_env || {};
+    const projectedEnv = {
+      status: env.status || null,
+      pm_exec_path: env.pm_exec_path || null,
+      pm_cwd: env.pm_cwd || null,
+    };
+    for (const key of retainedKeys) {
+      if (Object.prototype.hasOwnProperty.call(env, key)) {
+        projectedEnv[key] = env[key];
+      }
+    }
+    process.stdout.write(JSON.stringify({
+      name: app.name,
+      pm2_env: projectedEnv,
+    }));
+  } catch {
+    process.exitCode = 2;
+  }
+});
+'@
+  $retainedKeyList = $RetiredSensitiveEnvKeys -join ','
+  $sanitized = ($json | & node -e $sanitizeScript $AppName $retainedKeyList | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sanitized)) {
+    return $null
+  }
+
+  try {
+    return $sanitized | ConvertFrom-Json
   }
   catch {
     return $null
