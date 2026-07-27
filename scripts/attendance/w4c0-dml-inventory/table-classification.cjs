@@ -130,6 +130,10 @@ const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   // the w4_canonical tables (shadow calculations/segments, outbox claim/deliver flips).
   'packages/core-backend/src/attendance/w4c2-',
   'packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_',
+  // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED): the scheduled-run identity + outbox
+  // discriminated-union migration's own backfill DML (UPDATE attendance_result_event_outbox
+  // SET identity_kind = 'operation' ...), same precedent as the W4C-0 migration file above.
+  'packages/core-backend/src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union',
 ])
 
 function classifyTable(tableName) {
