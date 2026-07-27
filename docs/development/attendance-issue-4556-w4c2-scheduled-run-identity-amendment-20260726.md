@@ -183,12 +183,23 @@
 > closed `abandoned_by_actor_posture` column, write-once by construction
 > of the existing state machine, not a new mechanism), concurrency, and
 > idempotency (both reusing section 1.8 step 3's losing-racer branch), plus
-> gate 23. This round's diff is confined to sections 0.5's cross-reference,
-> 1.1, 1.1.1 (new 1.1.2), 1.2, 1.4.1, 1.7 step 4, 1.7.1, 1.8 steps 4-5,
-> 1.9, 1.10, section 2 (gates 11's cross-reference, 20, 22, 23, 2.1), section
-> 3 (`OD-W4C-44`/`45` rows), 3.1 (`OD-W4C-50` row), new 3.3, section 4 step
-> 3, and section 5 — it does not touch section 3.2/`O-5`'s ballot text,
-> which this round did not review and does not alter.
+> gate 23. **Self-correction within this same pass** (found before any
+> external re-review, per a pre-commit self-scan): the O-3 fork applied to
+> section 1.7 step 4 had not been propagated to the recovery sweep's own
+> two branches (same section, "No stuck absorbing state"), which would
+> otherwise have fired both branches at once for a `failed` target under
+> `O-3=(a)`; section 1.1.2 as first drafted had no `blocked`/`suspended`
+> branch, letting `abandoned` convert a paused run into the terminal
+> outcome `W4C-R43` separates from suspension — both are fixed in place,
+> and section 0.5 gained the cross-reference its own "confined to" claim
+> already asserted but the first draft of this paragraph had not yet made
+> true. This round's diff is confined to sections 0.5, 1.1, 1.1.1 (new
+> 1.1.2), 1.2, 1.4.1, 1.7 (step 4 and the recovery-sweep branches), 1.7.1,
+> 1.8 steps 4-5, 1.9, 1.10, section 2 (gates 11's cross-reference, 20, 22,
+> 23, 2.1), section 3 (`OD-W4C-44`/`45` rows), 3.1 (`OD-W4C-50` row), new
+> 3.3, section 4 step 3, and section 5 — it does not touch section
+> 3.2/`O-5`'s ballot text, which this round did not review and does not
+> alter.
 >
 > Runtime posture: PR #4612 stays **Draft** under
 > **OWNER-AUTHORIZATION-HOLD**. This amendment contains **no runtime code**
@@ -344,6 +355,11 @@ full and name the owner decisions — `O-3` = `OD-W4C-50`, `O-4` =
 `OD-W4C-52` — that must be ratified, alongside `OD-W4C-44..48` and `O-1`
 (`OD-W4C-49`) and `O-2` (`OD-W4C-51`), before implementation (section 3,
 section 4 step 2). This draft does not pick between the options it states.
+Section 1.1.2's `abandoned` transition remains, regardless of which side
+either decision takes, the general-purpose escape hatch for a `running`
+run this section's two named triggers are not the only possible cause
+of — see section 1.1.2 for its own authorization/lock-order/audit
+contract, not restated here.
 (A fifth, unrelated pending decision, `O-5`/`OD-W4C-53`, is bundled into
 the same one-pass ratification by section 3.2; it does not bear on the
 gap this section discloses.)
@@ -767,7 +783,26 @@ below), not a new gate.
 **Lock order — identical to section 1.8's finalization order, introducing
 no fourth lock-order shape:**
 
-1. acquire class-00 org rollout **shared** for the caller's org;
+1. acquire class-00 org rollout **shared** for the caller's org; resolve
+   posture. **If the resolved posture is `blocked` (the org is
+   `suspended`)**, the transition is **refused, deferred, not executed**:
+   return the closed, values-free, **retryable** outcome
+   `ATTENDANCE_SCHEDULED_RUN_ABANDON_DEFERRED` with **zero DML** — the run
+   (if `running`) stays `running`; a later call, once the org is no longer
+   `blocked`, may retry. This mirrors section 1.8 step 1's own first
+   branch exactly, and is required by the same red line that branch
+   already honors: `W4C-R43` (section 1, "not superseded, binding on this
+   amendment's own design") states suspended stays retryable and
+   **distinct from a terminal remediation outcome** — `abandoned` is
+   precisely a terminal remediation outcome, so executing it while an org
+   is `blocked` would convert a paused run into the very thing `W4C-R43`
+   separates from suspension. If the resolved posture is `shadow` or
+   `authoritative`, continue to step 2 — **unlike section 1.8 step 1**,
+   there is no further posture-mismatch branch here: `abandoned` writes no
+   source DML and its `completed_user_count` fold (step 4 below) is a
+   point-in-time snapshot of already-durable evidence, not something a
+   frozen `accepted_write_posture` comparison governs, so `O-4`/`OD-W4C-52`
+   (section 1.7.1) does not fork this step the way it forks finalization's;
 2. acquire the class-01 run key lock for `(org_id, initiator, work_date)`;
 3. `SELECT ... FOR UPDATE` the run row. If it is **not** `running`
    (already `completed` or already `abandoned`), return the recorded
@@ -1438,14 +1473,22 @@ responsibility, fully specified as follows:
   resume protocol and section 1.8's finalization, so the sweep introduces
   no new lock-order leg.
 - **Two branches per candidate, both already fully specified elsewhere in
-  this section** — the sweep introduces no third transaction shape:
-  - if any `target_kind='generate'` target's operation row is absent or not
-    `completed`, the sweep resumes the run exactly as the resume protocol
-    above describes (this is the "restart" case with no process to
-    restart);
-  - if every `generate` target is terminal, the sweep attempts finalization
-    exactly as section 1.8 describes, including its posture handling
-    (below).
+  this section** — the sweep introduces no third transaction shape, and
+  uses the **same** terminal-evidence definition step 4 above forks on
+  `O-3` (not the pre-`O-3` "absent or not `completed`" test — using that
+  test unmodified here would, under `O-3=(a)`, make a `failed` target both
+  "not `completed`" and "terminal" at once, so both branches below would
+  fire for the same candidate and the resume branch would retry a target
+  section 1.1.1 already specifies as never retried):
+  - if any `target_kind='generate'` target is **not yet terminal** by step
+    4's definition (under `O-3=(b)`, its operation row is absent or not
+    `completed`; under `O-3=(a)`, it has no row in
+    `attendance_scheduled_run_target_outcomes`), the sweep resumes the run
+    exactly as the resume protocol above describes (this is the "restart"
+    case with no process to restart);
+  - if every `generate` target **is** terminal by that same definition, the
+    sweep attempts finalization exactly as section 1.8 describes, including
+    its posture handling (below).
 - **Authorization.** The sweep is the scheduled entrypoint's own registered
   processor acting under its existing service identity; it accepts no
   caller-supplied run ID scope beyond what its own scan produces, and no
@@ -2062,7 +2105,14 @@ today, but the amendment must not implement `O-3`/`O-4` without them:**
     outbox row and no source DML and acquires no class-`11` lock (extends
     gate 15 to this transaction shape explicitly, rather than assuming
     gate 15's existing legs already cover a transaction they were not
-    written against).
+    written against). **Blocked-org deferral (`W4C-R43`):** an abandon
+    call against a `running` run whose org resolves to `blocked` returns
+    `ATTENDANCE_SCHEDULED_RUN_ABANDON_DEFERRED` with zero DML and the run
+    stays `running`; once the org is no longer `blocked`, a retried call
+    succeeds. Removing section 1.1.2 step 1's blocked branch (folding it
+    into the normal path) must make only this leg fail — gates 17's
+    equivalent finalization-side leg must stay green under that same
+    mutation, since it is a different transaction.
 
 Section 12.3's existing scheduled gates remain in force and are amended only
 to read: run-level outbox rows are inserted in the finalization transaction
@@ -2653,7 +2703,7 @@ draft's).**
 | D0a | `44=(b)`, any other value | This document's already-written sections 1.1-1.9 (durable row, frozen counts, resume-by-row-read, finalization-by-fold) presuppose a durable run row with an ID that outlives the process; `44(b)`'s derived in-process ID cannot carry any of that (section 3's own "fails because…" text). Not a bundling issue — `44` is not a free choice this document's own body leaves open. |
 | D0b | `44=(c)`, any other value | Foreclosed by an **external, already-ratified** decision: `44(c)` is verbatim the G-2 option `(a)` the owner already rejected (section 0.1) in favor of `(b2)`. Re-litigating it here would contradict a ruling this amendment itself takes as given. |
 | D1 | `46=(a)`, `49=(b)` | `OD-W4C-49(b)`'s own cell text states this directly: if the red line is not rewritten, class `01` remains forbidden, so `46` cannot be `(a)`. (Already annotated on `46`'s row before this pass; restated here for the matrix's completeness, not newly found.) |
-| D2 | `48=(b)`, `50=(b)` | Section 1.1's own rules assert "`running` is the only non-terminal state and is always recoverable" (no stuck absorbing state). Under `50=(b)` (all-or-nothing), a deterministically-failed target's **only** exit is the explicit `abandoned` transition (section 1.1.1's text for `50(b)`, unchanged by this pass). Under `48=(b)`, that state does not exist. The combination leaves a run with a permanently-failed target with **zero** legal exit — not merely an unrecommended residual (as `48=(b)` alone, or `50=(b)` alone, each are) but a direct contradiction of section 1.1's own asserted invariant. `48=(b)` is legal only paired with `50=(a)`. |
+| D2 | `48=(b)`, `50=(b)` | Section 1.1's own rules assert "`running` is the only non-terminal state and is always recoverable" (no stuck absorbing state). `48=(b)`'s own cell text ("accept that an unsatisfiable run holds the partial unique index indefinitely") was drafted before `O-3` existed as an axis, and — read precisely — describes exactly the `48(b)+50(b)` world: under `50=(a)` instead, every `generate` target always reaches a recorded outcome (`completed` or `failed`, section 1.1.1) and finalization is therefore always eventually admitted, so no run is ever "unsatisfiable" in the sense `48(b)`'s cell means — that residual is **vacuous**, not merely accepted, under `50=(a)`. So the pairing does not create a *new* problem out of two independently-tolerable ones; it is the **one** case `48(b)`'s own pre-existing text was actually describing, now made precise by naming `50`'s role in it, and it is a direct contradiction of section 1.1's "always recoverable" assertion (zero legal exit, not "holds indefinitely pending some remediation" — there is no remediation left once `abandoned` is also removed). `48=(b)` is legal — and its own residual clause non-vacuous only in the sense of "textually present," never actually triggered — when paired with `50=(a)`. |
 
 **Interaction (not an exclusion — a cost multiplier the ballot should
 see together, not on two separate rows).**
