@@ -3,10 +3,12 @@
 // Sealed-export S1 — closed failure vocabulary (issue #4636 deliverable 4).
 //
 // LATENT: nothing in this directory is wired to a route, scheduler, flag, package
-// entry point or any runtime path. `index.cjs` requires each lib module by explicit
-// path and never globs, so a module nobody requires has no consumer — asserted
-// mechanically by the zero-consumer sweep in
-// __tests__/sealed-export-failure-vocabulary.test.cjs.
+// entry point or any runtime path. The zero-consumer sweep in
+// __tests__/sealed-export-failure-vocabulary.test.cjs checks this repository-wide —
+// it walks the runtime code of apps/, packages/ and plugins/ (test trees excluded)
+// and looks for an IMPORT of this directory in either module syntax, not a mention.
+// Its own detection power is shown by a synthetic cross-package consumer that must
+// make it RED by name.
 //
 // PROVENANCE / GOVERNANCE STATUS OF THIS SET
 // -----------------------------------------
