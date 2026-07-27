@@ -48,6 +48,7 @@ const { validateReadSourceConfig: validateBridgeReadSourceConfig } = require(pat
 const {
   createApprovedBindingResolver,
   createHarnessSystemIdentityAuthorityForTests,
+  bindingResolutionGrade,
   createHarnessCanonicalObjectAuthorityForTests,
 } = require(path.join(__dirname, '..', 'lib', 'gip-approved-binding-resolver.cjs'))
 
@@ -529,6 +530,12 @@ async function qualificationDigestBinding() {
     canonicalObjectVersion: resolution.canonicalObjectVersion,
   }
   assert.equal(inputs.actionProfileVersion, BRIDGE_BOUNDED_READ_PROFILE.actionProfileVersion)
+  // ROUND 6 — the envelope MAC now binds the resolution's GRADE, so a hand-built
+  // qualification has to state which grade it was probed at. Read it off the resolution
+  // rather than writing 'harness' as a literal: a literal would keep passing if a future
+  // change silently re-graded what `resolutionForProfile` returns.
+  const bindingGrade = bindingResolutionGrade(resolution)
+  assert.equal(bindingGrade, 'harness', 'this fixture stack is harness-graded; no certified binder exists at this head')
   const evidence = { profileVersion: BRIDGE_BOUNDED_READ_PROFILE.actionProfileVersion, usedCompletenessProofs: ['SHORT_PAGE'] }
   const qualificationDigest = computeQualificationDigest({ ...inputs, evidence })
   const expiresAt = '2027-01-01T00:00:00Z'
@@ -536,13 +543,21 @@ async function qualificationDigestBinding() {
     status: 'candidate',
     qualificationDigest,
     envelopeKeyId: envelopeKey.keyId,
-    envelopeMac: computeEnvelopeMac({ envelopeKey, qualificationDigest, status: 'candidate', expiresAt }),
+    envelopeMac: computeEnvelopeMac({ envelopeKey, qualificationDigest, status: 'candidate', expiresAt, bindingGrade }),
     evidence,
     expiresAt,
   }
-  const verified = verifyBindingQualification({ qualification, resolution, envelopeKey, now: '2026-07-23T00:00:00Z' })
-  assert.equal(verified.verified, true)
-  assert.equal(verified.qualificationDigest, qualificationDigest)
+  // The profile's actionProfileVersion binds into the digest, and the digest binds this
+  // resolution — proven by REACHING the verify path's last door. Under round 6 the
+  // success return needs a CERTIFIED resolution, which no certified binder exists to
+  // produce; landing on QUALIFICATION_GRADE_UNCERTIFIED means status, envelope MAC,
+  // expiry AND the digest recompute all passed, which is what this test is about.
+  let gradeCaught = null
+  try {
+    verifyBindingQualification({ qualification, resolution, envelopeKey, now: '2026-07-23T00:00:00Z' })
+  } catch (error) { gradeCaught = error }
+  assert.ok(gradeCaught instanceof GipQualificationError && gradeCaught.reason === 'QUALIFICATION_GRADE_UNCERTIFIED',
+    `the digest must bind this resolution — expected the grade door, got ${gradeCaught && gradeCaught.reason}`)
 
   // ── LINEAGE INVALIDATION (owner review P1) ──────────────────────────────────────────────
   // The adapter hardening (v1→v2) changed what a completeness qualification MEANS, so a
@@ -564,7 +579,7 @@ async function qualificationDigestBinding() {
     envelopeKeyId: envelopeKey.keyId,
     // a REAL old envelope: MAC is valid over the v1 digest, so this passes authentication and
     // fails specifically on version lineage (not on a forged/using-invalid MAC shortcut).
-    envelopeMac: computeEnvelopeMac({ envelopeKey, qualificationDigest: oldDigest, status: 'candidate', expiresAt }),
+    envelopeMac: computeEnvelopeMac({ envelopeKey, qualificationDigest: oldDigest, status: 'candidate', expiresAt, bindingGrade }),
     evidence: oldEvidence,
     expiresAt,
   }

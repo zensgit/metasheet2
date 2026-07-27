@@ -39,8 +39,20 @@
 // BUILDERS but are on NO probe path — that is the accepted v1 outcome.
 const crypto = require('node:crypto')
 const { CanonicalDomainError, stableCanonicalStringify } = require('./gip-canonical-json.cjs')
-const { isTrustedBindingResolution } = require('./gip-approved-binding-resolver.cjs')
-const { isTrustedServerBoundSourceExecutor } = require('./gip-server-bound-source-executor.cjs')
+// `isTrustedBindingResolution` / `isTrustedServerBoundSourceExecutor` are NO LONGER
+// imported here. Both now mean CERTIFIED, and this module needs to distinguish three
+// answers (certified / harness / not ours at all), not two — an import of the boolean
+// form would silently collapse "harness" and "forged" into the same refusal at doors
+// where they are different findings. The grade readers are the same WeakSet lookups
+// with the third answer preserved.
+const {
+  bindingResolutionGrade,
+  BINDING_GRADES,
+} = require('./gip-approved-binding-resolver.cjs')
+const {
+  serverBoundSourceExecutorGrade,
+} = require('./gip-server-bound-source-executor.cjs')
+const [GRADE_CERTIFIED] = BINDING_GRADES
 
 const QUALIFICATION_ERROR_REASONS = Object.freeze([
   'QUALIFICATION_INPUT_INVALID',
@@ -61,6 +73,14 @@ const QUALIFICATION_ERROR_REASONS = Object.freeze([
   'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED',
   'PROBE_EXECUTOR_UNTRUSTED',
   'PROBE_RESOLUTION_UNTRUSTED',
+  // B1a-3 round 6. The LAST door on the verify path, and the only one that is about
+  // PROVENANCE rather than shape, authentication or lifecycle: a qualification whose
+  // whole chain is real but HARNESS-graded is refused here, by name, so that "this
+  // binding qualifies" can never be said about a stack a caller assembled. Deliberately
+  // its own token and not a merge into PROBE_RESOLUTION_UNTRUSTED: that one means
+  // "not minted by the resolver at all", and collapsing the two would make the
+  // grade door and the identity door cover for each other.
+  'QUALIFICATION_GRADE_UNCERTIFIED',
 ])
 const QUALIFICATION_ERROR_REASON_SET = new Set(QUALIFICATION_ERROR_REASONS)
 
@@ -327,9 +347,19 @@ function createBindingQualificationProber(components) {
   // the trap is never invoked here, the read simply falls through to the target and
   // yields `undefined`, which the identity check rejects. That is not a guard.
   const executor = safeReadComponent(components, 'executor')
-  // WeakSet-backed checker: returns false for primitives and null, never throws. A
+  // WeakSet-backed reader: returns null for primitives and null, never throws. A
   // duck-typed object carrying every expected public field is refused here.
-  if (!isTrustedServerBoundSourceExecutor(executor)) {
+  //
+  // ROUND 6 — this reads the GRADE rather than `isTrustedServerBoundSourceExecutor`,
+  // which now means CERTIFIED. Admitting a harness executor here is deliberate and it
+  // grants nothing: probing yields an OBSERVATION and a candidate qualification, and
+  // the grade rides all the way through to `verifyBindingQualification`, which is
+  // where "qualifies" is actually said and where CERTIFIED is required. Refusing at
+  // this door instead would leave the entire probe pipeline unexecutable at a head
+  // where no certified binder exists — an all-fail-closed suite that proves nothing
+  // about the pipeline it is supposed to be pinning.
+  const executorGrade = serverBoundSourceExecutorGrade(executor)
+  if (executorGrade === null) {
     fail('PROBE_EXECUTOR_UNTRUSTED', 'a trusted server-bound source executor is required', {})
   }
   // EXACT KEY SET — `{ probeFromResolution }` and nothing that accepts a
@@ -337,7 +367,7 @@ function createBindingQualificationProber(components) {
   // under any name (plausible, obscure or symbol-keyed) reds.
   return Object.freeze({
     probeFromResolution(input) {
-      return probeFromTrustedResolution(executor, input)
+      return probeFromTrustedResolution(executor, executorGrade, input)
     },
   })
 }
@@ -424,13 +454,27 @@ function requiredIdentityToken(value, field) {
   return text
 }
 
-function computeEnvelopeMac({ envelopeKey, qualificationDigest, status, expiresAt }) {
+// `bindingGrade` rides in the MAC MATERIAL, and deliberately NOT in
+// `computeQualificationDigest` — that digest's shape is GIP-D0 §3 FROZEN, and widening
+// it would be a digest-lineage change this slice has no mandate to make. The envelope
+// MAC is this module's own lifecycle authenticator, so it is the right place: it makes
+// a qualification indelibly bound to the GRADE it was probed at. Without it, two
+// resolutions carrying an identical six-field tuple at different grades produce an
+// identical digest, and a harness-minted qualification would verify against a certified
+// resolution. Not constructible at this head — no certified resolution exists — which is
+// exactly why it is closed NOW, before one does.
+//
+// `bindingGrade` is defaulted to null rather than required so that the exported
+// `computeEnvelopeMac` keeps its published arity for callers that pass four fields; a
+// null grade is a DISTINCT MAC material from any real grade, so it cannot collide.
+function computeEnvelopeMac({ envelopeKey, qualificationDigest, status, expiresAt, bindingGrade = null }) {
   const key = normalizeEnvelopeKey(envelopeKey)
   return crypto.createHmac('sha256', key.secret).update(stableStringify({
     keyId: key.keyId,
     qualificationDigest: requiredString(qualificationDigest, 'qualificationDigest'),
     status: requiredString(status, 'status'),
     expiresAt: expiresAt === undefined ? null : requiredString(expiresAt, 'expiresAt'),
+    bindingGrade: bindingGrade === null ? null : requiredString(bindingGrade, 'bindingGrade'),
   })).digest('hex')
 }
 
@@ -469,7 +513,7 @@ function safeReadRunInput(input, key) {
 // under ANY key name, with the NAMED closed reason
 // PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED. That is residual 2, closed as a named
 // refusal; residual 1 is closed one level up, as inexpressibility.
-async function probeFromTrustedResolution(executor, input) {
+async function probeFromTrustedResolution(executor, executorGrade, input) {
   if (!isPlainObject(input)) {
     fail('QUALIFICATION_INPUT_INVALID', 'probe needs a plain-object run input', {})
   }
@@ -503,7 +547,12 @@ async function probeFromTrustedResolution(executor, input) {
   const resolution = safeReadRunInput(input, 'resolution')
   // Trust is OBJECT IDENTITY. A hand-built object carrying every expected public
   // field — and any plausible brand — is refused BY NAME.
-  if (!isTrustedBindingResolution(resolution)) {
+  //
+  // ROUND 6 — GRADE MATCH. An unbranded resolution is refused exactly as before; in
+  // addition, a resolution whose grade differs from the closure-bound executor's is
+  // refused, so a harness stack cannot borrow a certified resolution's provenance and
+  // a certified executor can never be handed a caller-chosen tuple.
+  if (bindingResolutionGrade(resolution) !== executorGrade) {
     fail('PROBE_RESOLUTION_UNTRUSTED', 'a resolution minted by the approved-binding resolver is required', {})
   }
   const envelopeKey = normalizeEnvelopeKey(safeReadRunInput(input, 'envelopeKey'))
@@ -566,7 +615,9 @@ async function probeFromTrustedResolution(executor, input) {
     status: 'candidate',
     qualificationDigest,
     envelopeKeyId: envelopeKey.keyId,
-    envelopeMac: computeEnvelopeMac({ envelopeKey, qualificationDigest, status: 'candidate', expiresAt }),
+    envelopeMac: computeEnvelopeMac({
+      envelopeKey, qualificationDigest, status: 'candidate', expiresAt, bindingGrade: executorGrade,
+    }),
     evidence,
     ...(expiresAt !== undefined ? { expiresAt } : {}),
   })
@@ -626,7 +677,19 @@ function verifyBindingQualification(verifyInput) {
   if (!isPlainObject(qualification)) {
     fail('QUALIFICATION_NOT_OBJECT', 'qualification must be a plain object', {})
   }
-  if (!isTrustedBindingResolution(resolution)) {
+  //
+  // ROUND 6 — TWO DOORS, NOT ONE, AND THEY ARE ORDERED. This site used to be
+  // `isTrustedBindingResolution(resolution)`, which now means CERTIFIED. Leaving the
+  // certified requirement HERE would make it fire before status, envelope MAC, expiry
+  // and digest — so every one of those doors would become unreachable on a harness
+  // stack, and the tests that pin them (six hostile-getter keys, the read-once pin on
+  // `expiresAt`, the expiry case) would go green against nothing.
+  //
+  // So: this door keeps its own job — "minted by the resolver AT ALL" — and its own
+  // existing token. The CERTIFIED requirement moves to the very END of this function,
+  // after every other check has run and passed.
+  const resolutionGrade = bindingResolutionGrade(resolution)
+  if (resolutionGrade === null) {
     fail('PROBE_RESOLUTION_UNTRUSTED', 'a resolution minted by the approved-binding resolver is required', {})
   }
   // GUARDED READS (P1-B, second site — B1a-3 round 3). `qualification` is a
@@ -679,6 +742,10 @@ function verifyBindingQualification(verifyInput) {
     qualificationDigest: claimedDigest,
     status: claimedStatus,
     expiresAt: claimedExpiresAt,
+    // The grade of the resolution BEING VERIFIED, not one the caller stated. A
+    // qualification minted at one grade cannot authenticate against a resolution of
+    // another, because the MAC material differs.
+    bindingGrade: resolutionGrade,
   })
   // strict hex syntax + decoded length BEFORE timingSafeEqual (review P2: a 64-char
   // non-hex MAC made Buffer.from decode short and timingSafeEqual throw
@@ -711,6 +778,25 @@ function verifyBindingQualification(verifyInput) {
   if (recomputed !== claimedDigest) {
     // Input-binding violation (cross-object / cross-config reuse, or tampering).
     fail('QUALIFICATION_DIGEST_MISMATCH', 'qualification does not bind these inputs', {})
+  }
+  // THE LAST DOOR (B1a-3 round 6). Everything above has passed: the qualification is
+  // shaped correctly, its lifecycle is authenticated under a server-held key, it has
+  // not expired, and its digest binds exactly this resolution's tuple. The one thing
+  // left to ask is PROVENANCE — was the chain that produced it first-party?
+  //
+  // Placing it last is what keeps this function's other doors testable, and it is also
+  // what makes this check its own POSITIVE CONTROL: neuter this `if` and the very next
+  // line returns `{ verified: true }` for a fully genuine harness-graded qualification.
+  // The suite runs exactly that mutation, so "the path is green right up to here" is
+  // EXECUTED rather than asserted — no certified object has to be minted to prove it.
+  //
+  // At this head this refuses EVERY qualification that can be constructed, because no
+  // certified binder exists and therefore no certified resolution does either. Say that
+  // plainly: this is not a door that is open for the happy path and shut for attackers.
+  // It is shut for everyone until the certified substrate exists, which is the honest
+  // posture of (β), (γ) and an empty certified action registry.
+  if (resolutionGrade !== GRADE_CERTIFIED) {
+    fail('QUALIFICATION_GRADE_UNCERTIFIED', 'a certified-grade binding resolution is required to qualify', {})
   }
   return Object.freeze({ verified: true, qualificationDigest: recomputed })
 }

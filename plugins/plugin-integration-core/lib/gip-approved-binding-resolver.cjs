@@ -32,15 +32,40 @@
 // prior attempt (#4596 @ 774bdb5e6 L843/L851) mint WeakSet-trusted resolutions from
 // two caller-supplied fakes.
 //
-// ⚠ SCOPE THE CLAIM HONESTLY. The two `createHarness*ForTests` constructors below are
-// PUBLIC and their products ARE attested into this module's authority WeakSets — so
-// "no public factory's products are trusted" is NOT unconditionally true here either.
-// They exist because BOTH certified authorities are unreachable at this head (RQ-2 /
-// RQ-3) and a control routed through `__internals` or an untrusted registry would make
-// this module's own provenance mutations undetectable. Containment today is LATENCY;
-// closing them is a precondition of any runtime wiring. What IS unconditional: the
-// resolution granter itself is unexported, and the exported export set is pinned by
-// exact key equality so no third seam can appear silently.
+// -- TWO GRADES, AND ONLY ONE OF THEM IS TRUST (B1a-3 round 6) --------------
+// RETRACTION FIRST. Every round from 2 to 5 shipped this module with a residual it
+// disclosed but did not close: `createHarnessSystemIdentityAuthorityForTests` and
+// `createHarnessCanonicalObjectAuthorityForTests` were PUBLIC and their products were
+// attested into the SAME WeakSets the certified path writes, so any in-process
+// importer could mint a fully trusted resolution carrying a caller-chosen
+// `systemContentKey` and `canonicalObjectVersion`. The containment offered was
+// LATENCY ("no production consumers yet"), which is a schedule, not a mechanism, and
+// the `ForTests` suffix in those names is a NAME, not a mechanism. That is now closed
+// rather than disclosed again.
+//
+// The mechanism is a GRADE, carried by which WeakSet an object is in:
+//   * CERTIFIED — granted ONLY by first-party module-load construction from
+//     first-party dependencies. No exported function grants it, at any depth, for any
+//     argument. `CERTIFIED_SYSTEM_IDENTITY_AUTHORITY` and
+//     `CERTIFIED_CANONICAL_OBJECT_AUTHORITY` below are module-load CONSTANTS, not
+//     factories, precisely so that there is no argument a caller can supply.
+//   * HARNESS — publicly mintable, and refused wherever certification is required.
+//     It exists so the probe/resolve batteries stay EXECUTABLE (a suite that can only
+//     construct refusals proves nothing), and it grants nothing: a harness-graded
+//     resolution is refused by `assertTrustedBindingResolution`, so it cannot reach
+//     the qualification verdict.
+//
+// `isTrustedBindingResolution` means CERTIFIED and nothing else. The grade a resolver
+// stamps is the grade of its OWN dependencies, fixed at construction — a resolver
+// cannot be talked into stamping a grade it was not built with, because the grade is
+// closure-bound alongside the dependencies and is never a parameter of any entry point.
+//
+// SCOPE THE CLAIM HONESTLY, as this module's header has had to before. What is closed
+// is MINTING: no publicly-reachable code path yields a CERTIFIED-graded object. What is
+// NOT claimed is that a certified resolution is obtainable at all — at this head it is
+// not, because (β) refuses every identity service and (γ) ships an empty registry. That
+// is the substrate's real posture; the harness factories were what made it look
+// otherwise.
 //
 // -- ERROR DISCIPLINE ------------------------------------------------------
 // `fail(reason)` takes ONLY a reason from the frozen vocabulary — no `message`
@@ -58,6 +83,10 @@ const {
 } = require('./read-source-config-store.cjs')
 const {
   resolveCanonicalObjectContractVersion,
+  // (γ)'s first-party module-load registry. It SHIPS EMPTY, and binding it here is
+  // what makes `CERTIFIED_CANONICAL_OBJECT_AUTHORITY` a constant rather than a
+  // caller-parameterised factory.
+  CANONICAL_OBJECT_CONTRACT_REGISTRY,
 } = require('./gip-canonical-object-contract-registry.cjs')
 const {
   deriveSystemContentKeyForSystemId,
@@ -174,6 +203,16 @@ function hasControlCharacter(text) {
 
 function readIdentityToken(container, key, reason) {
   const raw = safeRead(container, key, reason)
+  return identityTokenArgument(raw, reason)
+}
+
+// The SCALAR half of the same predicate. It exists because the two certified
+// authorities take their tokens as POSITIONAL ARGUMENTS rather than members of a
+// container, so there is no key to read them from — and an entry point that validates
+// nothing before delegating hands a foreign module the caller's object, which is how
+// the delegate's OWN brand ends up escaping this module's export surface. `typeof` runs
+// no caller code, so this is safe on hostile input without a guarded read.
+function identityTokenArgument(raw, reason) {
   if (typeof raw !== 'string' || raw.length === 0 || raw.length > 128) fail(reason)
   if (hasControlCharacter(raw)) fail(reason)
   return raw
@@ -181,15 +220,48 @@ function readIdentityToken(container, key, reason) {
 
 // --- trust sets -------------------------------------------------------------
 
-// The ONE set that makes a resolution admissible downstream. Its only writer is
-// buildTrustedBindingResolution below, which is exported NOWHERE.
-const trustedBindingResolutions = new WeakSet()
+// GRADE TOKENS. Closed set, frozen, and the ONLY two values any grade function may
+// return besides `null` ("not one of ours at all").
+const GRADE_CERTIFIED = 'certified'
+const GRADE_HARNESS = 'harness'
+const BINDING_GRADES = Object.freeze([GRADE_CERTIFIED, GRADE_HARNESS])
 
-// First-party construction attestation for the two pluggable authorities. Every
-// writer below is module-private; the exported constructors are the ONLY way in,
-// and each is named for exactly what it is.
-const trustedSystemIdentityAuthorities = new WeakSet()
-const trustedCanonicalObjectAuthorities = new WeakSet()
+// The set that makes a resolution admissible AT THE QUALIFICATION DOOR. Its only
+// writer is `buildTrustedBindingResolution` below, which is exported NOWHERE and is
+// reached only when the resolver's closure-bound grade is CERTIFIED.
+const certifiedBindingResolutions = new WeakSet()
+// The harness grade. Publicly reachable, and refused by every certified door.
+const harnessBindingResolutions = new WeakSet()
+
+// First-party construction attestation for the two pluggable authorities, SPLIT BY
+// GRADE. The certified sets are written EXACTLY ONCE each, at module load, from the
+// module-load constants below — no exported function writes them.
+const certifiedSystemIdentityAuthorities = new WeakSet()
+const certifiedCanonicalObjectAuthorities = new WeakSet()
+const harnessSystemIdentityAuthorities = new WeakSet()
+const harnessCanonicalObjectAuthorities = new WeakSet()
+
+// Grade readers. A reader is a predicate over an object that already exists: it
+// admits nothing, grants nothing, and returns `null` rather than throwing for values
+// that are not this module's at all. `WeakSet.has` on a primitive returns false and
+// never throws, so these are safe on hostile input without a guard.
+function systemIdentityAuthorityGrade(value) {
+  if (certifiedSystemIdentityAuthorities.has(value)) return GRADE_CERTIFIED
+  if (harnessSystemIdentityAuthorities.has(value)) return GRADE_HARNESS
+  return null
+}
+
+function canonicalObjectAuthorityGrade(value) {
+  if (certifiedCanonicalObjectAuthorities.has(value)) return GRADE_CERTIFIED
+  if (harnessCanonicalObjectAuthorities.has(value)) return GRADE_HARNESS
+  return null
+}
+
+function bindingResolutionGrade(value) {
+  if (certifiedBindingResolutions.has(value)) return GRADE_CERTIFIED
+  if (harnessBindingResolutions.has(value)) return GRADE_HARNESS
+  return null
+}
 
 // --- the two authorities ----------------------------------------------------
 //
@@ -203,41 +275,89 @@ const trustedCanonicalObjectAuthorities = new WeakSet()
 //     so every real object is CANONICAL_OBJECT_CONTRACT_UNREGISTERED (⟲OD2: an
 //     inventory TOOL is not an inventory RESULT).
 
-function createCertifiedSystemIdentityAuthority(identityService) {
-  const authority = Object.freeze({
-    async systemContentKeyFor(systemId) {
-      // The β module enforces its own trust on `identityService`; this module does
-      // not second-guess it and does not reach into its `__internals`.
-      return deriveSystemContentKeyForSystemId(identityService, systemId)
-    },
-  })
-  trustedSystemIdentityAuthorities.add(authority)
-  return authority
-}
-
-function createCertifiedCanonicalObjectAuthority(contractRegistry) {
-  const authority = Object.freeze({
-    canonicalObjectVersionFor(contractId, contractVersion) {
-      // The γ module enforces trust on `contractRegistry`.
-      const found = resolveCanonicalObjectContractVersion(contractRegistry, contractId, contractVersion)
-      return found && found.version
-    },
-  })
-  trustedCanonicalObjectAuthorities.add(authority)
-  return authority
-}
-
-// HARNESS shape — the RQ-3 substitute, named so it cannot be mistaken for the
-// certified path. It exists because the certified positive controls are NOT
-// CONSTRUCTIBLE at this base head (see the two notes above), and a control routed
-// through `__internals.computeSystemContentKey` or through an untrusted registry's
-// `resolve()` would make this module's own provenance mutations undetectable.
+// CONSTANTS, NOT FACTORIES (B1a-3 round 6). These were `createCertified*Authority(dep)`
+// — public functions that branded their product into the certified WeakSet for ANY
+// argument a caller passed. That is the same trust-granting shape as the harness
+// factories, one name away: an importer supplying its own `identityService` got a
+// certified-graded authority, and the fact that (β) then refused that service is a
+// property of ANOTHER module, not a check this one performed. A constant has no
+// argument, so there is nothing for a caller to supply.
 //
-// DECLARED RESIDUAL, not a hidden one: a resolution minted through a harness
-// authority carries the SAME trust brand as one minted through the certified path.
-// Its containment today is LATENCY — this module has zero production consumers,
-// proven by executed enumeration — and closing it is a precondition of any runtime
-// wiring, alongside RQ-2/RQ-3.
+// The dependency is bound HERE, from first-party module state, and both delegate to
+// the first-party module that owns the decision without reaching into its
+// `__internals`.
+//
+// WHAT THESE ACTUALLY DO AT THIS HEAD — stated plainly, because "certified" must not
+// imply "working":
+//   * (β) `deriveSystemContentKeyForSystemId` refuses EVERY service, because #4610
+//     landed with `buildSystemIdentityService` exported nowhere and with no call site
+//     (RQ-2, UNRULED). `CERTIFIED_SYSTEM_IDENTITY_SERVICE` below is therefore the
+//     ONLY honest binding available: `null`, which β refuses like everything else.
+//     So this authority always refuses. That is the substrate, not a defect here.
+//   * (γ) the only trusted contract registry is the EMPTY module-load instance, so
+//     every real object is CANONICAL_OBJECT_CONTRACT_UNREGISTERED (⟲OD2: an inventory
+//     TOOL is not an inventory RESULT).
+// Consequence, and it is deliberate: NO certified resolution is constructible at this
+// head. The suite executes that as a refusal rather than asserting it in a comment.
+const CERTIFIED_SYSTEM_IDENTITY_SERVICE = null
+
+// L2 ON THE METHODS, and this is not decoration — it is a leak these constants
+// INTRODUCED and the gate's own export-table walk caught before they shipped.
+//
+// `guardExportTable` wraps function-valued exports and recurses into `__internals`; it
+// deliberately does NOT rebuild an exported OBJECT, because rebuilding one produces a
+// new identity and admission downstream is `WeakSet.has`. These two constants are
+// exported objects WITH METHODS, so their methods are outside that wrap. When the
+// resolver calls them internally the delegate's throw lands in an unconditional-discard
+// catch; called DIRECTLY off the export, it escaped as the DELEGATE's brand
+// (`GipCanonicalObjectContractError`) carrying the delegate's text — 15 of 15 hostile
+// constructions, executed by `entryTableIsGated`. The methods are therefore wrapped
+// HERE, before the freeze, so identity is minted once and never rebuilt.
+const CERTIFIED_SYSTEM_IDENTITY_AUTHORITY = Object.freeze({
+  systemContentKeyFor: guardEntry(async function systemContentKeyFor(systemId) {
+    // L1 — FIRST TOUCH, on a positional argument. Nothing is passed to (β) until it is
+    // known to be a plain identity token, so a hostile object never reaches a foreign
+    // module and the refusal carries THIS module's vocabulary.
+    return deriveSystemContentKeyForSystemId(
+      CERTIFIED_SYSTEM_IDENTITY_SERVICE,
+      identityTokenArgument(systemId, 'RESOLVER_SYSTEM_IDENTITY_UNAVAILABLE'),
+    )
+  }),
+})
+certifiedSystemIdentityAuthorities.add(CERTIFIED_SYSTEM_IDENTITY_AUTHORITY)
+
+const CERTIFIED_CANONICAL_OBJECT_AUTHORITY = Object.freeze({
+  canonicalObjectVersionFor: guardEntry(function canonicalObjectVersionFor(contractId, contractVersion) {
+    // L1 — FIRST TOUCH, both positional arguments, before (γ) is reached.
+    const id = identityTokenArgument(contractId, 'RESOLVER_CANONICAL_OBJECT_CONTRACT_UNREGISTERED')
+    const version = identityTokenArgument(contractVersion, 'RESOLVER_CANONICAL_OBJECT_CONTRACT_UNREGISTERED')
+    let found
+    try {
+      found = resolveCanonicalObjectContractVersion(CANONICAL_OBJECT_CONTRACT_REGISTRY, id, version)
+    } catch (_error) {
+      // Unconditional discard: (γ)'s brand and text are ITS vocabulary, not this
+      // module's, and re-throwing them off this export surface is the leak the gate's
+      // export-table walk caught here.
+      fail('RESOLVER_CANONICAL_OBJECT_CONTRACT_UNREGISTERED')
+    }
+    return found && found.version
+  }),
+})
+certifiedCanonicalObjectAuthorities.add(CERTIFIED_CANONICAL_OBJECT_AUTHORITY)
+
+// HARNESS shape — the RQ-3 substitute. It exists because the certified positive
+// controls are NOT CONSTRUCTIBLE at this base head (see the two notes above), and a
+// control routed through `__internals.computeSystemContentKey` or through an untrusted
+// registry's `resolve()` would make this module's own provenance mutations
+// undetectable.
+//
+// ROUND 6 — THE RESIDUAL THESE CARRIED IS CLOSED, NOT RE-DISCLOSED. Rounds 2-5 shipped
+// with "a resolution minted through a harness authority carries the SAME trust brand as
+// one minted through the certified path", contained by LATENCY. It no longer does: the
+// product is HARNESS-graded, `createApprovedBindingResolver` stamps its resolutions with
+// its own dependencies' grade, and `assertTrustedBindingResolution` — the door the
+// qualification verdict stands behind — requires CERTIFIED. A caller who mints one of
+// these gets exactly what it could compute for itself and no admission anywhere.
 function createHarnessSystemIdentityAuthorityForTests(rawTable) {
   // L1 — FIRST TOUCH.
   const systemContentKeyBySystemId = inertRecord(rawTable, () => fail('RESOLVER_INPUT_HOSTILE'))
@@ -254,7 +374,7 @@ function createHarnessSystemIdentityAuthorityForTests(rawTable) {
       return found
     },
   })
-  trustedSystemIdentityAuthorities.add(authority)
+  harnessSystemIdentityAuthorities.add(authority)
   return authority
 }
 
@@ -291,7 +411,7 @@ function createHarnessCanonicalObjectAuthorityForTests(rawEntries) {
       return found
     },
   })
-  trustedCanonicalObjectAuthorities.add(authority)
+  harnessCanonicalObjectAuthorities.add(authority)
   return authority
 }
 
@@ -317,8 +437,13 @@ const ORDERING_ENTRY_KEY_SET = new Set(ORDERING_ENTRY_KEYS)
 const ORDERING_DIRECTIONS = new Set(['ASC', 'DESC'])
 
 // MODULE-PRIVATE. Never exported, under any name, anywhere. The ONLY place that
-// grants resolution trust.
-function buildTrustedBindingResolution(draft) {
+// grants resolution grade.
+//
+// `grade` is NOT a parameter a caller can reach: it is read off the resolver's
+// closure-bound `bound.grade`, which was fixed at construction from the grade of the
+// dependencies and is never re-derived per call. There is no entry point that takes a
+// grade, so "ask for certified" is inexpressible rather than merely refused.
+function buildTrustedBindingResolution(draft, grade) {
   let owned
   try {
     // ⟲R2: an owned clone in the STRICT canonical-JSON domain, RECURSIVELY frozen.
@@ -330,18 +455,25 @@ function buildTrustedBindingResolution(draft) {
     if (error instanceof CanonicalDomainError) fail('RESOLVER_CONFIG_BODY_INVALID')
     throw error
   }
-  trustedBindingResolutions.add(owned)
+  // Not a default, not a fallback: an unrecognised grade grants NOTHING rather than
+  // silently landing in the harness set (or, worse, the certified one).
+  if (grade === GRADE_CERTIFIED) certifiedBindingResolutions.add(owned)
+  else if (grade === GRADE_HARNESS) harnessBindingResolutions.add(owned)
   return owned
 }
 
 // Exported CHECKERS. A checker is a predicate over an object that already exists —
 // it admits nothing and grants nothing. Only the GRANTER must stay module-private.
+//
+// `isTrustedBindingResolution` means CERTIFIED, not "one of ours". A harness-graded
+// resolution answers `false` here, which is the whole of round 6's closure at this
+// door: the qualification verdict stands behind this predicate.
 function isTrustedBindingResolution(value) {
-  return trustedBindingResolutions.has(value)
+  return certifiedBindingResolutions.has(value)
 }
 
 function assertTrustedBindingResolution(value) {
-  if (!trustedBindingResolutions.has(value)) fail('RESOLVER_RESOLUTION_NOT_TRUSTED')
+  if (!certifiedBindingResolutions.has(value)) fail('RESOLVER_RESOLUTION_NOT_TRUSTED')
   return value
 }
 
@@ -535,7 +667,7 @@ async function resolveApprovedBindingInternal(components, rawRunInput) {
     objectKey,
     canonicalObjectVersion,
     orderingKeySpec,
-  })
+  }, components.grade)
 }
 
 // The service factory. Dependencies are admitted by FIRST-PARTY IDENTITY and are
@@ -560,9 +692,24 @@ function createApprovedBindingResolver(rawComponents) {
   // NOT `typeof configStore.getForRuntime === 'function'` — that duck-type door is
   // exactly what let #4596's resolver mint trusted resolutions from two fakes.
   if (!isFirstPartyReadSourceConfigStore(configStore)) fail('RESOLVER_COMPONENTS_INVALID')
-  if (!trustedSystemIdentityAuthorities.has(systemIdentityAuthority)) fail('RESOLVER_COMPONENTS_INVALID')
-  if (!trustedCanonicalObjectAuthorities.has(canonicalObjectAuthority)) fail('RESOLVER_COMPONENTS_INVALID')
-  const bound = Object.freeze({ configStore, systemIdentityAuthority, canonicalObjectAuthority })
+  // GRADE IS MATCHED, NOT MERELY PRESENT (B1a-3 round 6). Two separate reads, then an
+  // EQUALITY: an unknown authority yields `null` and is refused, and — the case that
+  // matters — a CERTIFIED authority paired with a HARNESS one is refused too. Without
+  // the equality, `{ systemIdentityAuthority: CERTIFIED_…, canonicalObjectAuthority:
+  // <mine> }` would be enough to have a caller-chosen canonicalObjectVersion stamped
+  // into a resolution whose grade the certified half vouched for. A grade is only
+  // meaningful if it describes the WHOLE dependency set.
+  const systemGrade = systemIdentityAuthorityGrade(systemIdentityAuthority)
+  const canonicalGrade = canonicalObjectAuthorityGrade(canonicalObjectAuthority)
+  if (systemGrade === null || canonicalGrade === null) fail('RESOLVER_COMPONENTS_INVALID')
+  if (systemGrade !== canonicalGrade) fail('RESOLVER_COMPONENTS_INVALID')
+  const bound = Object.freeze({
+    configStore,
+    systemIdentityAuthority,
+    canonicalObjectAuthority,
+    // CLOSURE-BOUND, never a parameter of any entry point.
+    grade: systemGrade,
+  })
   return Object.freeze({
     // L2 on a RETURNED method. `guardExportTable` covers the module's export table;
     // it does not reach a method minted per construction, and this one is `async`, so
@@ -582,13 +729,23 @@ module.exports = guardExportTable({
   BINDING_RESOLVER_ERROR_REASONS,
   GipApprovedBindingResolverError,
   RESOLUTION_KEYS,
+  BINDING_GRADES,
   createApprovedBindingResolver,
-  createCertifiedSystemIdentityAuthority,
-  createCertifiedCanonicalObjectAuthority,
+  // CONSTANTS, not factories. See the note at their definition: as factories they
+  // branded certified for any caller argument, which is the shape round 6 closes.
+  CERTIFIED_SYSTEM_IDENTITY_AUTHORITY,
+  CERTIFIED_CANONICAL_OBJECT_AUTHORITY,
   createHarnessSystemIdentityAuthorityForTests,
   createHarnessCanonicalObjectAuthorityForTests,
   isTrustedBindingResolution,
   assertTrustedBindingResolution,
+  // GRADE READERS. Each is a predicate over an object that already exists; none can
+  // move an object between sets. They are exported because the spike must MATCH
+  // grades across a module boundary, and because the trust-grant-surface sweep needs
+  // a mechanical way to ask "is this certified?" without reaching into a WeakSet.
+  bindingResolutionGrade,
+  systemIdentityAuthorityGrade,
+  canonicalObjectAuthorityGrade,
   // `fail` is deliberately ABSENT — and inert anyway, since it takes no caller
   // text. `buildTrustedBindingResolution` is absent BECAUSE IT GRANTS TRUST: a
   // granting verb under `__internals` is the identical hole one namespace deeper.

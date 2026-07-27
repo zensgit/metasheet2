@@ -30,13 +30,27 @@ const {
   BINDING_RESOLVER_ERROR_REASONS,
   RESOLUTION_KEYS,
   createApprovedBindingResolver,
-  createCertifiedSystemIdentityAuthority,
-  createCertifiedCanonicalObjectAuthority,
+  CERTIFIED_SYSTEM_IDENTITY_AUTHORITY,
+  CERTIFIED_CANONICAL_OBJECT_AUTHORITY,
   createHarnessSystemIdentityAuthorityForTests,
   createHarnessCanonicalObjectAuthorityForTests,
   isTrustedBindingResolution,
   assertTrustedBindingResolution,
+  bindingResolutionGrade,
 } = resolverModule
+
+// ROUND 6. `isTrustedBindingResolution` means CERTIFIED, and no certified resolution
+// is constructible at this head — so a harness-stack assertion has to say what it
+// actually means. `isHarnessGraded` is NOT a weaker synonym for the old assertion: it
+// is a DIFFERENT claim ("the resolver minted this, at harness grade"), and every site
+// that used to assert trust now asserts BOTH that it is harness-graded AND that
+// `isTrustedBindingResolution` answers false. Asserting only the first would let a
+// regression that re-branded harness objects as certified pass unnoticed.
+function assertHarnessGradedResolution(resolution) {
+  assert.equal(bindingResolutionGrade(resolution), 'harness')
+  assert.equal(isTrustedBindingResolution(resolution), false)
+  return resolution
+}
 
 const PROFILE = 'fixture.http_read.v1'
 const ENVELOPE_KEY = Object.freeze({ keyId: 'kres', secret: Buffer.alloc(32, 3) })
@@ -158,8 +172,13 @@ async function tupleIsCompleteAndServerDerived() {
   assert.equal(resolution.objectKey, 'material_master')
   assert.equal(resolution.canonicalObjectVersion, 'com.acme.material/7')
   assert.deepEqual(resolution.orderingKeySpec.map((e) => `${e.fieldId}:${e.direction}`), ['tgt_1:ASC', 'tgt_2:DESC'])
-  assert.ok(isTrustedBindingResolution(resolution))
-  assert.equal(assertTrustedBindingResolution(resolution), resolution)
+  assertHarnessGradedResolution(resolution)
+  // ROUND 6 — this line used to be `assert.equal(assertTrustedBindingResolution(
+  // resolution), resolution)`. It now asserts the REFUSAL, because a harness-graded
+  // resolution is precisely what must not pass the certified assertion. The refusal
+  // is the closure: this is the object an arbitrary in-process importer can mint, and
+  // the door the qualification verdict stands behind rejects it BY NAME.
+  refusesWith(() => assertTrustedBindingResolution(resolution), 'RESOLVER_RESOLUTION_NOT_TRUSTED')
 
   // `systemContentKey` is OBTAINED, never derived here — pinned by PROVENANCE: the
   // authority returns a DISTINGUISHABLE value that the tuple must carry VERBATIM, so
@@ -203,7 +222,7 @@ async function runInputIsAClosedAllowlist() {
   await refusesWithAsync(() => resolver.resolveApprovedBinding({ tenantId: 't-1' }), 'RESOLVER_RUN_INPUT_INVALID')
 
   // POSITIVE CONTROL — the legal input set still resolves.
-  assert.ok(isTrustedBindingResolution(await resolver.resolveApprovedBinding(RUN)))
+  assertHarnessGradedResolution(await resolver.resolveApprovedBinding(RUN))
 }
 
 // ---------------------------------------------------------------------------
@@ -212,14 +231,14 @@ async function runInputIsAClosedAllowlist() {
 async function approvalTenancyAndScope() {
   const rows = [rowFor('cfg-1', body())]
   const resolver = resolverOver(rows)
-  assert.ok(isTrustedBindingResolution(await resolver.resolveApprovedBinding(RUN)))
+  assertHarnessGradedResolution(await resolver.resolveApprovedBinding(RUN))
 
   // Revoke AFTER a successful resolution: the next resolution must NOT be honoured
   // from a cached decision.
   rows[0].status = 'retired'
   await refusesWithAsync(() => resolver.resolveApprovedBinding(RUN), 'RESOLVER_APPROVED_CONFIG_UNAVAILABLE')
   rows[0].status = 'approved'
-  assert.ok(isTrustedBindingResolution(await resolver.resolveApprovedBinding(RUN)))
+  assertHarnessGradedResolution(await resolver.resolveApprovedBinding(RUN))
 
   // Wrong tenant, wrong workspace, unknown id — ALL collapse to the SAME outward
   // reason, so the resolver is not a cross-tenant existence oracle.
@@ -260,7 +279,7 @@ async function contentKeyIsRecomputedAndCompared() {
   // rather than reported as CONTENT_KEY_MISMATCH, i.e. accusing the database of
   // tampering. Door 5 fires BEFORE door 4, which is what makes the two attributable.
   const fifty = resolverOver([rowFor('cfg-1', body({ fieldCount: 50 }))])
-  assert.ok(isTrustedBindingResolution(await fifty.resolveApprovedBinding(RUN)),
+  assert.ok(bindingResolutionGrade(await fifty.resolveApprovedBinding(RUN)) === 'harness',
     'the 50-entry positive control must RESOLVE — otherwise the 51-entry result below proves nothing')
   const fiftyOne = resolverOver([rowFor('cfg-1', body({ fieldCount: 51 }))])
   await refusesWithAsync(() => fiftyOne.resolveApprovedBinding(RUN), 'RESOLVER_APPROVED_CONFIG_NOT_LOSSLESS')
@@ -438,7 +457,7 @@ async function trustIsObjectIdentity() {
   assert.equal(isTrustedBindingResolution(duckTyped), false)
 
   // POSITIVE CONTROL — an internally-wired resolver still mints an accepted resolution.
-  assert.ok(isTrustedBindingResolution(await resolver.resolveApprovedBinding(RUN)))
+  assertHarnessGradedResolution(await resolver.resolveApprovedBinding(RUN))
 }
 
 // ---------------------------------------------------------------------------
@@ -448,30 +467,51 @@ async function trustIsObjectIdentity() {
 async function certifiedAuthoritiesAreFailClosed() {
   // (γ) — the ONLY trusted contract registry is the EMPTY module-load instance, so
   // every real object is unregistered. ⟲OD2: an inventory TOOL is not a RESULT.
-  const certifiedObject = createCertifiedCanonicalObjectAuthority(CANONICAL_OBJECT_CONTRACT_REGISTRY)
-  const resolverGamma = createApprovedBindingResolver({
+  // ROUND 6 — the certified authorities are CONSTANTS now, not factories, so this
+  // test can no longer build one around a caller-supplied dependency. It builds the
+  // ONE certified stack that exists and drives it end to end.
+  const certifiedResolver = createApprovedBindingResolver({
+    configStore: storeOver([rowFor('cfg-1', body())]),
+    systemIdentityAuthority: CERTIFIED_SYSTEM_IDENTITY_AUTHORITY,
+    canonicalObjectAuthority: CERTIFIED_CANONICAL_OBJECT_AUTHORITY,
+  })
+  // (β) fires FIRST on this path — the identity read refuses every service, and
+  // `CERTIFIED_SYSTEM_IDENTITY_SERVICE` is `null` because #4610 exported no builder.
+  await refusesWithAsync(() => certifiedResolver.resolveApprovedBinding(RUN),
+    'RESOLVER_SYSTEM_IDENTITY_UNAVAILABLE')
+
+  // (γ) is reached by pairing the certified object authority with a harness identity
+  // one... except that MIXED GRADES are refused, which is itself the round-6 property:
+  // a certified half cannot vouch for a caller-supplied half.
+  refusesWith(() => createApprovedBindingResolver({
     configStore: storeOver([rowFor('cfg-1', body())]),
     systemIdentityAuthority: harnessAuthorities().systemIdentityAuthority,
-    canonicalObjectAuthority: certifiedObject,
-  })
-  await refusesWithAsync(() => resolverGamma.resolveApprovedBinding(RUN),
-    'RESOLVER_CANONICAL_OBJECT_CONTRACT_UNREGISTERED')
+    canonicalObjectAuthority: CERTIFIED_CANONICAL_OBJECT_AUTHORITY,
+  }), 'RESOLVER_COMPONENTS_INVALID')
+  refusesWith(() => createApprovedBindingResolver({
+    configStore: storeOver([rowFor('cfg-1', body())]),
+    systemIdentityAuthority: CERTIFIED_SYSTEM_IDENTITY_AUTHORITY,
+    canonicalObjectAuthority: harnessAuthorities().canonicalObjectAuthority,
+  }), 'RESOLVER_COMPONENTS_INVALID')
 
-  // (β) — `buildSystemIdentityService` is exported NOWHERE and has no call site, so
-  // the identity read refuses EVERY caller. The only reachable constructor yields a
-  // service that is refused by design.
+  // (γ) directly: the certified object authority is bound to the EMPTY module-load
+  // registry, so every real object is unregistered. ⟲OD2: a TOOL is not a RESULT.
+  // Called as a plain function — no resolver needed to show the fail-closure.
+  assert.throws(() => CERTIFIED_CANONICAL_OBJECT_AUTHORITY
+    .canonicalObjectVersionFor('fixture_view', PROFILE))
+
+  // (β) directly, for the same reason.
+  await assert.rejects(() => CERTIFIED_SYSTEM_IDENTITY_AUTHORITY.systemContentKeyFor('sys-alpha'))
+
+  // The reachable β constructor still yields a service that is refused by design —
+  // and it is NOT a dependency any certified authority in this module will accept,
+  // because the certified authority takes no dependency at all.
   const untrustedService = createUntrustedSystemIdentityServiceForTests({
     credentialStore: { decrypt: async () => '{}' },
     hmacKey: Buffer.alloc(32, 1),
     resolveSystem: async () => ({ id: 'sys-alpha', kind: 'erp_http' }),
   })
-  const certifiedIdentity = createCertifiedSystemIdentityAuthority(untrustedService)
-  const resolverBeta = createApprovedBindingResolver({
-    configStore: storeOver([rowFor('cfg-1', body())]),
-    systemIdentityAuthority: certifiedIdentity,
-    canonicalObjectAuthority: harnessAuthorities().canonicalObjectAuthority,
-  })
-  await refusesWithAsync(() => resolverBeta.resolveApprovedBinding(RUN), 'RESOLVER_SYSTEM_IDENTITY_UNAVAILABLE')
+  assert.equal(resolverModule.systemIdentityAuthorityGrade(untrustedService), null)
 
   // NOTE, stated rather than left implicit: the CERTIFIED positive controls — "a
   // certified kind resolves and the tuple carries the identity read's value" and "a

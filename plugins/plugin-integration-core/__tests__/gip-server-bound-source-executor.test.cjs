@@ -34,6 +34,9 @@ const {
   createHarnessSystemIdentityAuthorityForTests,
   createHarnessCanonicalObjectAuthorityForTests,
   isTrustedBindingResolution,
+  bindingResolutionGrade,
+  CERTIFIED_SYSTEM_IDENTITY_AUTHORITY,
+  CERTIFIED_CANONICAL_OBJECT_AUTHORITY,
 } = resolverModule
 const {
   GipSourceExecutorError,
@@ -44,6 +47,10 @@ const {
   createHarnessHttpProbeActionRegistryForTests,
   createHarnessSourceBinderForTests,
   createServerBoundSourceExecutor,
+  isTrustedServerBoundSourceExecutor,
+  httpProbeActionRegistryGrade,
+  sourceBinderGrade,
+  serverBoundSourceExecutorGrade,
 } = executorModule
 const {
   GipQualificationError,
@@ -76,6 +83,27 @@ async function refusesWithAsync(fn, ErrorClass, expectedReason) {
 }
 
 function keySet(object) { return Object.keys(object).sort() }
+
+// ROUND 6 — THE REPLACEMENT FOR `assert.equal(verify(...).verified, true)`.
+//
+// `verifyBindingQualification` walks status → envelope MAC → expiry → digest recompute
+// → GRADE, in that order, and the LAST door requires a CERTIFIED-graded resolution. No
+// certified resolution is constructible at this head (no certified source binder
+// exists), so on a harness stack the function's success return is unreachable.
+//
+// Reaching `QUALIFICATION_GRADE_UNCERTIFIED` is therefore a STRICTLY STRONGER
+// observation than `verified === true` was: it says every earlier door was reached AND
+// passed, and it additionally says the last one refused. A qualification that failed
+// its MAC, or was expired, or whose digest did not bind the resolution, would land on a
+// DIFFERENT token and this helper would red.
+//
+// The claim "the path is green up to here, and only the grade door refuses" is not left
+// to that reasoning: `gradeDoorIsTheOnlyThingRefusingTheHarnessStack` NEUTERS the door
+// in a copy of the module and observes `verified === true` come back.
+function verifyReachesTheGradeDoor(input) {
+  return refusesWith(() => verifyBindingQualification(input),
+    GipQualificationError, 'QUALIFICATION_GRADE_UNCERTIFIED')
+}
 
 // --- fixtures ---------------------------------------------------------------
 // RAC-24: the resolver is driven through the REAL read projection. The config
@@ -232,7 +260,13 @@ async function positiveControlThroughExecutor() {
   const stack = buildStack()
   const resolution = await resolveAlpha(stack.resolver)
 
-  assert.ok(isTrustedBindingResolution(resolution))
+  // ROUND 6 — this is a HARNESS-graded stack, and saying so is the point. It used to
+  // read `assert.ok(isTrustedBindingResolution(resolution))`, which was TRUE only
+  // because the harness factories minted the same brand the certified path did.
+  assert.equal(bindingResolutionGrade(resolution), 'harness')
+  assert.equal(isTrustedBindingResolution(resolution), false)
+  assert.equal(serverBoundSourceExecutorGrade(stack.executor), 'harness')
+  assert.equal(isTrustedServerBoundSourceExecutor(stack.executor), false)
   assert.deepEqual(keySet(resolution), [...RESOLUTION_KEYS].sort())
   assert.equal(resolution.systemContentKey, 'SCK-ALPHA-DISTINGUISHABLE')
   assert.equal(resolution.canonicalObjectVersion, 'com.acme.material/7')
@@ -278,11 +312,67 @@ async function positiveControlThroughExecutor() {
   assert.equal(qualification.evidence.probeDialect, undefined)
 
   // AC-7 / RAC-20: verify re-enters through the RESOLUTION, not a caller tuple.
-  const verified = verifyBindingQualification({
+  //
+  // ROUND 6 — THE POSITIVE CONTROL IS NOW "GREEN UP TO THE LAST DOOR", AND THAT IS A
+  // STRONGER STATEMENT THAN THE OLD `verified === true`, NOT A WEAKER ONE.
+  //
+  // Everything above executed: the resolver minted a real six-field tuple, the probe
+  // ran through the executor against the source handle, the evidence came back
+  // values-free, the digest was computed and the envelope was MAC'd under a
+  // server-held key. `verifyBindingQualification` then walks status → envelope MAC →
+  // expiry → digest recompute, and every one of those passes, before refusing on the
+  // last door with `QUALIFICATION_GRADE_UNCERTIFIED`.
+  //
+  // The old assertion could not distinguish "the pipeline works" from "the trust
+  // brand is forgeable" — it was true for exactly the reason round 6 closes. The
+  // suite's `gradeDoorIsTheOnlyThingRefusingTheHarnessStack` mutation proves the path
+  // is otherwise green by NEUTERING this door and observing `verified === true`.
+  refusesWith(() => verifyBindingQualification({
     qualification, resolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-26T12:00:00Z',
-  })
-  assert.equal(verified.verified, true)
-  assert.equal(verified.qualificationDigest, qualification.qualificationDigest)
+  }), GipQualificationError, 'QUALIFICATION_GRADE_UNCERTIFIED')
+}
+
+// ---------------------------------------------------------------------------
+// THE EXECUTOR'S OWN RESOLUTION DOOR (B1a-3 round 6).
+//
+// `executeOrderingKeyProbe` is reachable DIRECTLY off the executor — the prober is not
+// the only caller, and its refusal is not this door's refusal. Round 6's mutation
+// battery found this door UNCOVERED: neutering it left every existing test GREEN,
+// because every path into the probe went through the spike's gate first. A guard whose
+// deletion reds nothing is an asserted invariant, not an enforced one.
+// ---------------------------------------------------------------------------
+async function theExecutorRefusesAResolutionItDidNotGrade() {
+  const stack = buildStack()
+  const genuine = await resolveAlpha(stack.resolver)
+
+  // POSITIVE CONTROL FIRST: the genuine, same-grade resolution DOES probe. Without it,
+  // an executor that refused everything would pass the refusals below.
+  const observation = await stack.executor.executeOrderingKeyProbe(genuine)
+  assert.equal(observation.probeKind, 'ordering_key_total_order_negative')
+
+  // A hand-built object carrying EVERY public field of a real resolution, with the same
+  // values, is refused BY NAME — trust is WeakSet identity, never shape.
+  const duckTyped = { ...genuine }
+  assert.deepEqual(keySet(duckTyped), keySet(genuine))
+  assert.equal(bindingResolutionGrade(duckTyped), null)
+  await refusesWithAsync(
+    () => stack.executor.executeOrderingKeyProbe(duckTyped),
+    GipSourceExecutorError,
+    'PROBE_RESOLUTION_UNTRUSTED',
+  )
+
+  // ...and a frozen deep copy, and a Object.create()-backed impostor, likewise.
+  for (const impostor of [
+    Object.freeze(JSON.parse(JSON.stringify(genuine))),
+    Object.create(genuine),
+    Object.assign(Object.create(null), genuine),
+  ]) {
+    await refusesWithAsync(
+      () => stack.executor.executeOrderingKeyProbe(impostor),
+      GipSourceExecutorError,
+      'PROBE_RESOLUTION_UNTRUSTED',
+    )
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -475,9 +565,12 @@ async function buildIsSplitFromTrust() {
     GipSourceExecutorError,
     'PROBE_ACTION_REGISTRY_UNTRUSTED',
   )
-  // The trust GRANTER is exported nowhere — not at top level, not under __internals.
-  assert.equal(executorModule.buildTrustedHttpProbeActionRegistry, undefined)
-  assert.equal(executorModule.__internals.buildTrustedHttpProbeActionRegistry, undefined)
+  // The CERTIFIED granter is exported nowhere — not at top level, not under
+  // __internals — under EITHER its round-5 or its round-6 name.
+  for (const name of ['buildTrustedHttpProbeActionRegistry', 'buildCertifiedHttpProbeActionRegistry']) {
+    assert.equal(executorModule[name], undefined)
+    assert.equal(executorModule.__internals[name], undefined)
+  }
   // Likewise for the resolver's granter.
   assert.equal(resolverModule.buildTrustedBindingResolution, undefined)
   assert.equal(resolverModule.__internals.buildTrustedBindingResolution, undefined)
@@ -492,14 +585,35 @@ async function buildIsSplitFromTrust() {
   )
 
   // The certified registry SHIPS EMPTY (⟲OD2 — an inventory TOOL is not an
-  // inventory RESULT), so a real profile fails closed BY NAME.
+  // inventory RESULT).
   assert.equal(CERTIFIED_HTTP_PROBE_ACTION_REGISTRY.size(), 0)
-  const emptyExecutor = createServerBoundSourceExecutor({
-    actionRegistry: CERTIFIED_HTTP_PROBE_ACTION_REGISTRY, sourceBinder: stack.sourceBinder,
+  assert.equal(httpProbeActionRegistryGrade(CERTIFIED_HTTP_PROBE_ACTION_REGISTRY), 'certified')
+
+  // ROUND 6 — pairing it with a harness binder no longer BUILDS. That construction
+  // used to succeed, which is exactly the hole: a certified half vouching for a
+  // caller-supplied half. Both orders are refused, so neither half can be the one
+  // that carries the pairing.
+  refusesWith(
+    () => createServerBoundSourceExecutor({
+      actionRegistry: CERTIFIED_HTTP_PROBE_ACTION_REGISTRY, sourceBinder: stack.sourceBinder,
+    }),
+    GipSourceExecutorError,
+    'EXECUTOR_COMPONENTS_INVALID',
+  )
+
+  // PROBE_ACTION_UNBOUND is still REACHABLE, and it has to be shown reachable rather
+  // than assumed — a token nothing can reach is a token that proves nothing. A
+  // same-grade registry that simply has no action for THIS profile fails closed by
+  // name, which is the identical condition the empty certified registry would raise.
+  const otherProfileOnly = createHarnessHttpProbeActionRegistryForTests([
+    harnessAction({ actionProfileVersion: OTHER_PROFILE, execute: async () => ({}) }),
+  ])
+  const unboundExecutor = createServerBoundSourceExecutor({
+    actionRegistry: otherProfileOnly, sourceBinder: stack.sourceBinder,
   })
   const resolution = await resolveAlpha(stack.resolver)
   await refusesWithAsync(
-    () => emptyExecutor.executeOrderingKeyProbe(resolution),
+    () => unboundExecutor.executeOrderingKeyProbe(resolution),
     GipSourceExecutorError,
     'PROBE_ACTION_UNBOUND',
   )
@@ -847,6 +961,9 @@ async function answerPlaneIsValuesFreeAndForeignTextIsDiscarded() {
     'PROBE_SOURCE_HANDLE_UNAVAILABLE',
     'PROBE_ACTION_FAILED',
     'PROBE_ANSWER_UNVERIFIABLE',
+    // B1a-3 round 6 — this door's OWN reason. It used to delegate to the resolver's
+    // assertion, whose brand L2 then flattened into EXECUTOR_ENTRY_NOT_INERT.
+    'PROBE_RESOLUTION_UNTRUSTED',
     // B1a-3 round 5. L2-ONLY token — see `entryTableIsGated`.
     'EXECUTOR_ENTRY_NOT_INERT',
   ])
@@ -973,10 +1090,10 @@ async function hostileGetterOnTheVerifiedQualificationIsRefusedNotLeaked() {
   const genuine = await stack.prober.probeFromResolution({
     resolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT, expiresAt: '2026-07-27T00:00:00Z',
   })
-  // POSITIVE CONTROL: unmodified, it verifies.
-  assert.equal(verifyBindingQualification({
+  // POSITIVE CONTROL: unmodified, it reaches the LAST door — every earlier one passed.
+  verifyReachesTheGradeDoor({
     qualification: genuine, resolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-26T12:00:00Z',
-  }).verified, true)
+  })
 
   const keys = ['status', 'envelopeKeyId', 'envelopeMac', 'qualificationDigest', 'expiresAt', 'evidence']
   for (const key of keys) {
@@ -1188,10 +1305,10 @@ async function outerVerifyArgumentIsGuardedNotDestructuredRaw() {
     resolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT, expiresAt: '2026-07-27T00:00:00Z',
   })
 
-  // POSITIVE CONTROL: the ordinary object-literal call still verifies.
-  assert.equal(verifyBindingQualification({
+  // POSITIVE CONTROL: the ordinary object-literal call still reaches the LAST door.
+  verifyReachesTheGradeDoor({
     qualification: genuine, resolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-26T12:00:00Z',
-  }).verified, true)
+  })
 
   const fields = ['qualification', 'resolution', 'envelopeKey', 'now']
   const constructions = fields.map((field) => [`throwing getter on .${field}`, () => {
@@ -1319,10 +1436,12 @@ async function expiresAtIsReadExactlyOnceOnTheProbePath() {
   assert.notEqual(FIRST, SECOND)
 
   // ...and the minted qualification is internally consistent: its MAC authenticates
-  // the expiry it actually carries. Under a double read the two would disagree.
-  assert.equal(verifyBindingQualification({
+  // the expiry it actually carries. Under a double read the two would disagree, and the
+  // refusal would be QUALIFICATION_ENVELOPE_MISMATCH rather than the grade door — which
+  // is exactly what makes reaching the grade door the assertion that pins this.
+  verifyReachesTheGradeDoor({
     qualification: minted, resolution: probeResolution, envelopeKey: ENVELOPE_KEY, now: '2026-07-26T12:00:00Z',
-  }).verified, true)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -1429,23 +1548,30 @@ function exportSurfacesArePinned() {
     'createHarnessSourceBinderForTests',
     'createHttpProbeActionRegistry',
     'createServerBoundSourceExecutor',
+    'httpProbeActionRegistryGrade',
     'isTrustedServerBoundSourceExecutor',
+    'serverBoundSourceExecutorGrade',
+    'sourceBinderGrade',
   ])
   assert.deepEqual(keySet(executorModule.__internals), [
     'hasControlCharacter', 'isPlainObject', 'normalizeActionDeclaration',
   ])
   assert.deepEqual(keySet(resolverModule), [
+    'BINDING_GRADES',
     'BINDING_RESOLVER_ERROR_REASONS',
+    'CERTIFIED_CANONICAL_OBJECT_AUTHORITY',
+    'CERTIFIED_SYSTEM_IDENTITY_AUTHORITY',
     'GipApprovedBindingResolverError',
     'RESOLUTION_KEYS',
     '__internals',
     'assertTrustedBindingResolution',
+    'bindingResolutionGrade',
+    'canonicalObjectAuthorityGrade',
     'createApprovedBindingResolver',
-    'createCertifiedCanonicalObjectAuthority',
-    'createCertifiedSystemIdentityAuthority',
     'createHarnessCanonicalObjectAuthorityForTests',
     'createHarnessSystemIdentityAuthorityForTests',
     'isTrustedBindingResolution',
+    'systemIdentityAuthorityGrade',
   ])
   assert.deepEqual(keySet(resolverModule.__internals), [
     'assertLosslessConfigBody', 'hasControlCharacter', 'isPlainObject',
@@ -1572,6 +1698,7 @@ function latentByEnumeration() {
 
 async function main() {
   await positiveControlThroughExecutor()
+  await theExecutorRefusesAResolutionItDidNotGrade()
   await residual1InexpressibleByExactKeySet()
   await residual2NamedClosedRefusal()
   await crossSystemAnswersDoNotTransfer()

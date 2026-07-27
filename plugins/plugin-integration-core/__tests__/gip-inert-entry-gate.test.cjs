@@ -553,41 +553,63 @@ async function l2RebrandsRejectionsNotOnlyThrows() {
 }
 
 // ---------------------------------------------------------------------------
-// IN-CODE LINE CITATIONS ARE RE-DERIVED, NOT HAND-PATCHED.
+// THE HEADER'S GRANTING CLAIMS ARE RE-DERIVED FROM THE CODE, NOT HAND-PATCHED.
 //
-// The executor header cites its own line numbers to name the second public factory
-// whose products are trusted. Those citations have gone stale in THREE consecutive
-// rounds, because every edit above them shifts them and the fix each time was to
-// hand-patch the numbers — which is a fix that expires the moment anyone edits the
-// file again. Pinning them mechanically converts a recurring review finding into a
-// RED, and it is the same "the ledger is the code, so audit the code" posture the
-// module already claims for its comments.
+// ROUND 5 pinned the executor header's LINE-NUMBER citations, because they had gone
+// stale in three consecutive rounds. Round 6 REMOVED the sentence those numbers
+// annotated — it described a residual ("`createHarnessSourceBinderForTests` IS the sole
+// writer into `trustedSourceBinders`") that no longer exists, and `trustedSourceBinders`
+// itself is gone, split into a certified and a harness set.
+//
+// SAY WHAT THAT MEANS RATHER THAN LETTING IT LOOK LIKE A DELETED GUARD: round 5's pin is
+// not weakened here, it is REPOINTED at a strictly stronger claim. Line numbers are
+// bookkeeping; what actually has to be true is WHO CAN WRITE THE CERTIFIED SETS. That is
+// now asserted by counting the writes in the source — and, unlike a line number, a wrong
+// answer here is a security defect rather than a stale comment.
 // ---------------------------------------------------------------------------
-function inCodeLineCitationsAreAccurate() {
+function certifiedGrantSitesAreCountedInSource() {
   const fs = require('node:fs')
   const path = require('node:path')
-  const file = path.join(__dirname, '..', 'lib', 'gip-server-bound-source-executor.cjs')
-  const lines = fs.readFileSync(file, 'utf8').split('\n')
-  const lineOf = (re, what) => {
-    const index = lines.findIndex((line) => re.test(line))
-    assert.ok(index >= 0, `could not locate ${what} — the citation pin is looking for something that no longer exists`)
-    return index + 1
+  const read = (name) => fs.readFileSync(path.join(__dirname, '..', 'lib', name), 'utf8')
+  // Count only EXECUTABLE writes: a `.add(` that appears inside a `//` comment is prose.
+  const writesOf = (source, setName) => source.split('\n')
+    .filter((line) => !/^\s*(\/\/|\*)/.test(line))
+    .filter((line) => line.includes(`${setName}.add(`))
+
+  const executorSource = read('gip-server-bound-source-executor.cjs')
+  const resolverSource = read('gip-approved-binding-resolver.cjs')
+
+  // THE CENTRAL CLAIM of the executor header, mechanised: no certified binder exists,
+  // so nothing writes that set. If a later round adds a writer, this REDs and names it.
+  assert.deepEqual(writesOf(executorSource, 'certifiedSourceBinders'), [],
+    'certifiedSourceBinders must have NO writer — the header says so and a writer would be a certified binder nobody reviewed')
+
+  // Every other certified set has EXACTLY ONE write, and each is at a site that cannot
+  // take a caller argument (a module-load constant) or is gated on the certified grade.
+  const singles = [
+    [executorSource, 'certifiedHttpProbeActionRegistries'],
+    [executorSource, 'certifiedServerBoundSourceExecutors'],
+    [resolverSource, 'certifiedSystemIdentityAuthorities'],
+    [resolverSource, 'certifiedCanonicalObjectAuthorities'],
+    [resolverSource, 'certifiedBindingResolutions'],
+  ]
+  for (const [source, setName] of singles) {
+    const writes = writesOf(source, setName)
+    assert.equal(writes.length, 1, `${setName}: expected exactly ONE write site, found ${writes.length}`)
   }
-  const actual = {
-    factory: lineOf(/^function createHarnessSourceBinderForTests/, 'the harness binder factory'),
-    weakSet: lineOf(/^const trustedSourceBinders = new WeakSet/, 'the trustedSourceBinders WeakSet'),
-    write: lineOf(/trustedSourceBinders\.add\(binder\)/, 'the WeakSet write'),
-    exported: lineOf(/^ {2}createHarnessSourceBinderForTests,/, 'the export entry'),
+
+  // The two writes that are NOT module-load constants must be guarded by an explicit
+  // equality against the certified grade token, on their own line. A write that landed
+  // in a certified set from an unchecked variable is the whole hole, rebuilt.
+  for (const [source, setName] of [
+    [executorSource, 'certifiedServerBoundSourceExecutors'],
+    [resolverSource, 'certifiedBindingResolutions'],
+  ]) {
+    const [line] = writesOf(source, setName)
+    assert.ok(/=== GRADE_CERTIFIED\)? /.test(line) || /GRADE_CERTIFIED/.test(line),
+      `${setName}: its single write is not gated on GRADE_CERTIFIED — found: ${line.trim()}`)
   }
-  const cited = lines.find((line) => line.includes('is the SOLE writer into'))
-  assert.ok(cited, 'the header citation sentence has gone missing')
-  const citedNext = lines[lines.indexOf(cited) + 1]
-  const claim = `${cited}\n${citedNext}`
-  for (const [name, value] of Object.entries(actual)) {
-    assert.ok(claim.includes(`:${value}`),
-      `stale in-code citation: ${name} is at line ${value}, which the header does not cite. Header says:\n${claim}`)
-  }
-  console.log(`  CITATIONS re-derived: factory=:${actual.factory} weakSet=:${actual.weakSet} write=:${actual.write} export=:${actual.exported}`)
+  console.log('  GRANT SITES counted in source: certifiedSourceBinders=0 writes; 5 other certified sets = exactly 1 write each, both conditional writes gated on GRADE_CERTIFIED')
 }
 
 async function main() {
@@ -597,7 +619,7 @@ async function main() {
   credentialHandleIsGuardedNotEnumerated()
   doorsAreDistinguishable()
   thereIsExactlyOnePlainObjectDefinition()
-  inCodeLineCitationsAreAccurate()
+  certifiedGrantSitesAreCountedInSource()
   console.log('gip-inert-entry-gate.test.cjs OK')
 }
 

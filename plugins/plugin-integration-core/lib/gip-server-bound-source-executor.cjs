@@ -57,7 +57,15 @@
 // mint a branded error carrying attacker text. Every catch around a foreign call
 // discards unconditionally: no cause, no stack, no message, no class exemption.
 
-const { assertTrustedBindingResolution } = require('./gip-approved-binding-resolver.cjs')
+const {
+  // The GRADE VOCABULARY has ONE owner — the resolver module — and is imported here
+  // rather than re-declared. Two modules each spelling `'certified'` for themselves is
+  // a token that can drift on one side only; a grade mismatch would then read as a
+  // refusal nobody could explain. The suite pins the equality across the boundary.
+  BINDING_GRADES,
+  bindingResolutionGrade,
+} = require('./gip-approved-binding-resolver.cjs')
+const [GRADE_CERTIFIED, GRADE_HARNESS] = BINDING_GRADES
 const {
   isPlainObject,
   inertRecord,
@@ -76,6 +84,16 @@ const SOURCE_EXECUTOR_ERROR_REASONS = Object.freeze([
   'PROBE_SOURCE_HANDLE_UNAVAILABLE',
   'PROBE_ACTION_FAILED',
   'PROBE_ANSWER_UNVERIFIABLE',
+  // B1a-3 round 6. This door used to delegate to the RESOLVER's
+  // `assertTrustedBindingResolution`, which throws the RESOLVER's brand — and L2, which
+  // passes through only THIS module's brand, then flattened it into
+  // EXECUTOR_ENTRY_NOT_INERT. So the outward reason for "that is not a resolution I
+  // graded" was "a public entry point was reached with data that could not be made
+  // inert", which is a different finding. Executed, not reasoned about: the round-6
+  // battery's first attempt at a direct-door test caught exactly that. The door now
+  // fails with its OWN reason, in its OWN vocabulary, and the L2 token goes back to
+  // meaning only what it says.
+  'PROBE_RESOLUTION_UNTRUSTED',
   // L2 ONLY — emitted by the entry boundary and by no path inside this module.
   'EXECUTOR_ENTRY_NOT_INERT',
 ])
@@ -90,6 +108,7 @@ const ERROR_MESSAGES = Object.freeze({
   PROBE_FIELD_TRANSLATION_UNDECLARED: 'an ordering-key field has no certified connector-owned translation',
   PROBE_SOURCE_HANDLE_UNAVAILABLE: 'no source handle is bound to this resolution',
   PROBE_ACTION_FAILED: 'the HTTP probe action did not complete',
+  PROBE_RESOLUTION_UNTRUSTED: 'a resolution minted by the approved-binding resolver is required',
   PROBE_ANSWER_UNVERIFIABLE: 'the HTTP probe action returned no verifiable values-free answer',
   EXECUTOR_ENTRY_NOT_INERT: 'a public entry point was reached with data that could not be made inert',
 })
@@ -197,37 +216,40 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 // not at top level, not under `__internals` (reachable by require(), so a
 // trust-granting verb there is the identical hole one namespace deeper).
 //
-// ⚠ SCOPE THE CLAIM HONESTLY — this split is NOT unconditionally closed. There are
-// TWO public wrappers around a private granter in this module, not one, and the
-// earlier version of this block named only the first:
+// -- ROUND 6: THE TWO PUBLIC GRANTERS ARE CLOSED, NOT DISCLOSED AGAIN -------
+// RETRACTION FIRST. Rounds 2-5 each restated, and did not fix, this module's own
+// finding: there were TWO public wrappers around trust in this module.
 //
-//   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
-//      `buildTrustedHttpProbeActionRegistry`.
-//   2. `createHarnessSourceBinderForTests` (:331) is the SOLE writer into
-//      `trustedSourceBinders` (:325, written :405) and is publicly EXPORTED (:544) — there is no
-//      private granter behind it at all, so it is not even "build split from trust";
-//      it is the single granting path. And unlike (1) it has NO CERTIFIED
-//      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified
-//      binder does — so for binders there is currently no non-harness way to obtain
-//      a trusted one at all.
+//   1. `createHarnessHttpProbeActionRegistryForTests` wrapped the private granter.
+//   2. `createHarnessSourceBinderForTests` was the SOLE writer into `trustedSourceBinders`
+//      and was publicly EXPORTED — no private granter behind it at all, so it was not
+//      even "build split from trust"; it WAS the granting path. Unlike (1) it has no
+//      certified counterpart: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and no
+//      certified binder does.
 //
-// Both ARE "a public factory whose products are trusted". The `ForTests` suffix is a
-// NAME, not a mechanism. They exist because the certified registry ships EMPTY and no
-// certified binder exists, so the ratified positive control is otherwise not
-// executable at all; their containment today is LATENCY (zero production consumers,
-// proven by executed enumeration), and closing BOTH is a precondition of any runtime
-// wiring. Do not read the paragraph above as "no public factory confers trust here" —
-// read it as "the BUILD-ONLY factory confers nothing", which is what the mutation
-// battery proves. Mitigation that does hold: both factories sit inside the
-// exact-key-set export pin, so neither can be widened and no third one can be added
-// without reding.
+// Both WERE "a public factory whose products are trusted", which is the exact class
+// the owner ruled on for #4610's registries — "equivalent to no trust check at all".
+// The containment offered was LATENCY, which is a schedule and not a mechanism, and
+// the `ForTests` suffix is a NAME, not a mechanism.
 //
-// This is the class the owner ruled on for #4610's registries — "a public factory
-// whose products are trusted is equivalent to no trust check at all" — and it is
-// the class that is STILL LIVE on main in `gip-binding-qualification-spike.cjs`,
-// whose exported `createProbeStrategyRegistry` is the sole writer into its own
-// trust WeakSet. §4 step 1.5 assigns that closure to "1.4's builder identity".
-const trustedHttpProbeActionRegistries = new WeakSet()
+// The fix is a GRADE, carried by which WeakSet an object is in — the same two-grade
+// mechanism the resolver module documents in full:
+//   * CERTIFIED — written ONLY by module-load construction from a first-party
+//     literal. `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` is the sole certified registry
+//     and it ships EMPTY. `certifiedSourceBinders` HAS NO WRITER AT ALL, in this file
+//     or anywhere: no certified binder exists to write it, and inventing one to make
+//     a green control possible would be exactly the overclaim B-5 forbids.
+//   * HARNESS — publicly mintable, refused wherever certification is required.
+//
+// CONSEQUENCE, STATED PLAINLY RATHER THAN IMPLIED: because a certified executor needs
+// BOTH components certified and no certified binder exists,
+// `isTrustedServerBoundSourceExecutor` returns `false` for EVERY object obtainable at
+// this head. The probe battery still runs — at HARNESS grade, which is what keeps the
+// suite from being an all-fail-closed one — and the qualification VERDICT, which is
+// the thing that would matter at wiring time, is unreachable. That is the substrate's
+// real posture; the harness factories were what made it look otherwise.
+const certifiedHttpProbeActionRegistries = new WeakSet()
+const harnessHttpProbeActionRegistries = new WeakSet()
 
 // The DECLARATION shape. Note what is NOT here: no `dialect`, no
 // `snapshotSemantics`, no isolation claim, no read-only claim, no guarantee token
@@ -286,10 +308,11 @@ function createHttpProbeActionRegistry(rawEntries) {
 }
 
 // MODULE-PRIVATE. Never exported, under any name, anywhere. The ONLY place that
-// grants registry trust.
-function buildTrustedHttpProbeActionRegistry(entries) {
+// grants CERTIFIED registry grade, and it has exactly ONE call site — the module-load
+// constant three lines down, with a first-party literal argument.
+function buildCertifiedHttpProbeActionRegistry(entries) {
   const registry = createHttpProbeActionRegistry(entries)
-  trustedHttpProbeActionRegistries.add(registry)
+  certifiedHttpProbeActionRegistries.add(registry)
   return registry
 }
 
@@ -297,22 +320,41 @@ function buildTrustedHttpProbeActionRegistry(entries) {
 // could add to this instance once built. Only a future, separately-reviewed
 // amendment may extend this literal array, and only after a certified HTTP probe
 // action exists to put in it.
-const CERTIFIED_HTTP_PROBE_ACTION_REGISTRY = buildTrustedHttpProbeActionRegistry([])
+const CERTIFIED_HTTP_PROBE_ACTION_REGISTRY = buildCertifiedHttpProbeActionRegistry([])
 
-// HARNESS seam — the RQ-3 substitute, named so it cannot be mistaken for the
-// certified registry. It exists because the certified registry ships EMPTY, so the
-// ratified POSITIVE control ("a probe executed through the server-bound executor
-// against the harness source still qualifies") is otherwise not executable at all.
-// Reaching a positive control through the UNTRUSTED build-only factory instead
-// would make this module's own trust mutations undetectable — the
-// green-against-nothing class this line has already paid for.
+// HARNESS seam. It exists because the certified registry ships EMPTY, so a probe
+// battery routed only through certified components would execute nothing at all.
+// Reaching that battery through the UNTRUSTED build-only factory instead would make
+// this module's own grade mutations undetectable — the green-against-nothing class
+// this line has already paid for.
 //
-// DECLARED RESIDUAL: a registry minted here carries the SAME trust brand as the
-// certified one. Its containment today is LATENCY — zero production consumers,
-// proven by executed enumeration — and closing it is a precondition of any runtime
-// wiring.
+// ROUND 6: its product is HARNESS-graded. A registry minted here no longer carries
+// the certified brand, so pairing it with anything cannot produce a certified
+// executor.
 function createHarnessHttpProbeActionRegistryForTests(entries) {
-  return buildTrustedHttpProbeActionRegistry(entries)
+  const registry = createHttpProbeActionRegistry(entries)
+  harnessHttpProbeActionRegistries.add(registry)
+  return registry
+}
+
+// Grade readers — predicates over objects that already exist. `WeakSet.has` on a
+// primitive returns false and never throws, so these need no hostile-input guard.
+function httpProbeActionRegistryGrade(value) {
+  if (certifiedHttpProbeActionRegistries.has(value)) return GRADE_CERTIFIED
+  if (harnessHttpProbeActionRegistries.has(value)) return GRADE_HARNESS
+  return null
+}
+
+function sourceBinderGrade(value) {
+  if (certifiedSourceBinders.has(value)) return GRADE_CERTIFIED
+  if (harnessSourceBinders.has(value)) return GRADE_HARNESS
+  return null
+}
+
+function serverBoundSourceExecutorGrade(value) {
+  if (certifiedServerBoundSourceExecutors.has(value)) return GRADE_CERTIFIED
+  if (harnessServerBoundSourceExecutors.has(value)) return GRADE_HARNESS
+  return null
 }
 
 // --- the source binder, and the (α) credential boundary ---------------------
@@ -322,7 +364,14 @@ function createHarnessHttpProbeActionRegistryForTests(entries) {
 // reachable from the executor — HMAC does not apply". The executor below therefore
 // holds a closure and nothing else: it never holds, sees, hashes or can enumerate
 // the secret. A PR that HMACs the connection secret has misread (α).
-const trustedSourceBinders = new WeakSet()
+//
+// `certifiedSourceBinders` HAS NO WRITER ANYWHERE IN THIS FILE. That is not an
+// oversight to be tidied up later — no certified binder exists, and adding a writer so
+// that a certified control could go green would be manufacturing the very thing B-5
+// forbids ("'certified' requires a VERIFIED guarantee, not an honest label"). The
+// suite asserts the emptiness by execution rather than trusting this comment.
+const certifiedSourceBinders = new WeakSet()
+const harnessSourceBinders = new WeakSet()
 
 // The binder maps a RESOLUTION'S OWN systemContentKey to its handle. This is the
 // whole of B-1's mechanism: the handle demonstrably derives from each resolution's
@@ -402,7 +451,7 @@ function createHarnessSourceBinderForTests(rawEntries) {
       return bySystemContentKey.get(systemContentKey) || null
     },
   })
-  trustedSourceBinders.add(binder)
+  harnessSourceBinders.add(binder)
   return binder
 }
 
@@ -412,10 +461,19 @@ function createHarnessSourceBinderForTests(rawEntries) {
 // `isTrustedServerBoundSourceExecutor` below is a CHECKER export — a predicate over
 // an object that already exists. It admits nothing and grants nothing; only the
 // granting constructor stays private.
-const trustedServerBoundSourceExecutors = new WeakSet()
+//
+// ROUND 6: "trusted" here means CERTIFIED and nothing else. A harness-graded executor
+// answers `false`, which is what stops a caller-assembled stack from reaching the
+// qualification prober.
+//
+// Like `certifiedSourceBinders`, `certifiedServerBoundSourceExecutors` has no reachable
+// writer at this head — `createServerBoundSourceExecutor` writes it only when BOTH
+// components are certified, and no certified binder exists.
+const certifiedServerBoundSourceExecutors = new WeakSet()
+const harnessServerBoundSourceExecutors = new WeakSet()
 
 function isTrustedServerBoundSourceExecutor(value) {
-  return trustedServerBoundSourceExecutors.has(value)
+  return certifiedServerBoundSourceExecutors.has(value)
 }
 
 const ANSWER_KEYS = Object.freeze(['duplicateGroupsSampled', 'nullKeyRowsSampled'])
@@ -434,7 +492,34 @@ function readCount(container, key) {
 async function executeOrderingKeyProbeInternal(bound, resolution) {
   // Trust is OBJECT IDENTITY. A hand-built object carrying every expected public
   // field — and any plausible brand — is refused BY NAME.
-  assertTrustedBindingResolution(resolution)
+  //
+  // ROUND 6 — GRADE MATCH, not `assertTrustedBindingResolution`. This call used to be
+  // `assertTrustedBindingResolution(resolution)`, which now means CERTIFIED; keeping it
+  // would make the probe unexecutable at this head and leave the suite unable to
+  // observe anything but refusals. The rule enforced instead is STRICTER in the
+  // direction that matters and looser only in the direction that grants nothing:
+  //   * an unbranded / hand-built resolution is refused, exactly as before;
+  //   * a CERTIFIED resolution handed to a HARNESS executor is refused — so a harness
+  //     stack cannot borrow a certified resolution's provenance;
+  //   * a HARNESS resolution handed to a CERTIFIED executor is refused — so the
+  //     certified path can never be fed a caller-chosen tuple.
+  // The probe OBSERVATION this returns grants nothing on its own; the door that would
+  // matter at wiring time is the qualification verdict, and that one requires CERTIFIED.
+  // TWO SEPARATE `if`s, not one `||`. A merged condition has no exclusive failure: a
+  // mutation that deletes either half leaves the other still refusing, so neither half
+  // is shown to be load-bearing. Split, the null half has its own test and its own
+  // mutation.
+  const resolutionGrade = bindingResolutionGrade(resolution)
+  if (resolutionGrade === null) fail('PROBE_RESOLUTION_UNTRUSTED')
+  // DISCLOSED, NOT CLAIMED COVERED. This half — a resolution of one grade handed to an
+  // executor of another — is UNREACHABLE at this head, and no test can red on it: the
+  // only two grades are certified and harness, no certified resolution is constructible
+  // (no certified binder exists), and every harness resolution matches every harness
+  // executor. Deleting this line therefore reds NOTHING, which is stated here rather
+  // than left for a reviewer to find. It is retained because it becomes load-bearing the
+  // moment a certified binder lands, and adding it then — with a certified path live —
+  // is strictly worse than having it already. Symmetric with round 4's M9/M14 handling.
+  if (resolutionGrade !== bound.grade) fail('PROBE_RESOLUTION_UNTRUSTED')
 
   // The action, the handle and the probed FIELD SET all derive FROM THE RESOLUTION.
   const action = bound.actionRegistry.resolve(resolution.actionProfileVersion)
@@ -514,9 +599,19 @@ function createServerBoundSourceExecutor(rawComponents) {
   assertClosedKeySet(components, new Set(['actionRegistry', 'sourceBinder']), 'EXECUTOR_COMPONENTS_INVALID')
   const actionRegistry = safeRead(components, 'actionRegistry', 'EXECUTOR_INPUT_HOSTILE')
   const sourceBinder = safeRead(components, 'sourceBinder', 'EXECUTOR_INPUT_HOSTILE')
-  if (!trustedHttpProbeActionRegistries.has(actionRegistry)) fail('PROBE_ACTION_REGISTRY_UNTRUSTED')
-  if (!trustedSourceBinders.has(sourceBinder)) fail('EXECUTOR_COMPONENTS_INVALID')
-  const bound = Object.freeze({ actionRegistry, sourceBinder })
+  // GRADE IS MATCHED, NOT MERELY PRESENT (B1a-3 round 6). The two reason tokens stay
+  // DISTINCT and door-exclusive — an unknown registry still says
+  // PROBE_ACTION_REGISTRY_UNTRUSTED and an unknown binder still says
+  // EXECUTOR_COMPONENTS_INVALID, so neither door can quietly cover for the other going
+  // missing. The MISMATCH case is a third condition, and it is the one that matters:
+  // `{ actionRegistry: CERTIFIED_HTTP_PROBE_ACTION_REGISTRY, sourceBinder: <mine> }`
+  // must NOT yield a certified executor on the strength of the certified half.
+  const registryGrade = httpProbeActionRegistryGrade(actionRegistry)
+  const binderGrade = sourceBinderGrade(sourceBinder)
+  if (registryGrade === null) fail('PROBE_ACTION_REGISTRY_UNTRUSTED')
+  if (binderGrade === null) fail('EXECUTOR_COMPONENTS_INVALID')
+  if (registryGrade !== binderGrade) fail('EXECUTOR_COMPONENTS_INVALID')
+  const bound = Object.freeze({ actionRegistry, sourceBinder, grade: registryGrade })
   const executor = Object.freeze({
     // L2 on a RETURNED method. `guardExportTable` covers the export table, not a
     // method minted per construction — and this one is `async`, so an uncontained
@@ -525,7 +620,9 @@ function createServerBoundSourceExecutor(rawComponents) {
       return executeOrderingKeyProbeInternal(bound, resolution)
     }),
   })
-  trustedServerBoundSourceExecutors.add(executor)
+  // Not a default: an unrecognised grade lands in NEITHER set.
+  if (registryGrade === GRADE_CERTIFIED) certifiedServerBoundSourceExecutors.add(executor)
+  else if (registryGrade === GRADE_HARNESS) harnessServerBoundSourceExecutors.add(executor)
   return executor
 }
 
@@ -544,9 +641,13 @@ module.exports = guardExportTable({
   createHarnessSourceBinderForTests,
   createServerBoundSourceExecutor,
   isTrustedServerBoundSourceExecutor,
+  // GRADE READERS — predicates, not granters. See the resolver module's note.
+  httpProbeActionRegistryGrade,
+  sourceBinderGrade,
+  serverBoundSourceExecutorGrade,
   // `fail` is deliberately ABSENT — and inert anyway, since it takes no caller text.
-  // `buildTrustedHttpProbeActionRegistry` is absent BECAUSE IT GRANTS TRUST.
-  // Both pinned by the exact-key-set test, so re-adding either reds.
+  // `buildCertifiedHttpProbeActionRegistry` is absent BECAUSE IT GRANTS THE CERTIFIED
+  // GRADE. Both pinned by the exact-key-set test, so re-adding either reds.
   __internals: {
     isPlainObject,
     hasControlCharacter,

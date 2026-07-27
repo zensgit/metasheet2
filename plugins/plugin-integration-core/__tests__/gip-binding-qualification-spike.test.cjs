@@ -50,6 +50,17 @@ const {
   createServerBoundSourceExecutor,
 } = require(path.join(__dirname, '..', 'lib', 'gip-server-bound-source-executor.cjs'))
 
+// ROUND 6 — see the twin note in the executor suite. `verifyBindingQualification`'s
+// LAST door requires a CERTIFIED-graded resolution, and none is constructible at this
+// head, so its success return is unreachable on a harness stack. Landing on
+// QUALIFICATION_GRADE_UNCERTIFIED says every earlier door (status → envelope MAC →
+// expiry → digest recompute) was REACHED AND PASSED — a strictly stronger observation
+// than `verified === true`, because a bad MAC, an expiry or a digest mismatch would
+// land on a different token and this helper would red.
+function verifyReachesTheGradeDoor(input) {
+  return rejectsWith(() => verifyBindingQualification(input), 'QUALIFICATION_GRADE_UNCERTIFIED')
+}
+
 function rejectsWith(fn, reason) {
   let caught = null
   try {
@@ -189,6 +200,10 @@ function frozenVocabulary() {
     'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED',
     'PROBE_EXECUTOR_UNTRUSTED',
     'PROBE_RESOLUTION_UNTRUSTED',
+    // B1a-3 round 6 — the LAST door on the verify path. Its own token, deliberately not
+    // merged into PROBE_RESOLUTION_UNTRUSTED: that one means "not minted by the resolver
+    // at all", this one means "minted, real, and NOT certified".
+    'QUALIFICATION_GRADE_UNCERTIFIED',
   ])
   assert.ok(Object.isFrozen(QUALIFICATION_ERROR_REASONS))
   const src = fs
@@ -380,10 +395,14 @@ async function probeBehaviour() {
     probedAt: '2026-07-23T00:00:00Z',
     expiresAt: '2026-07-24T00:00:00Z',
   })
-  const verifiedOriginal = verifyBindingQualification({
+  // The MAC must bind the ORIGINAL key bytes (a copy taken before the await). Under the
+  // grade door the success return is unreachable, so the assertion is the EXCLUSION: the
+  // original key gets past the MAC check and lands on the grade door, while the mutated
+  // key below lands on QUALIFICATION_ENVELOPE_MISMATCH. Two different tokens is exactly
+  // the discrimination this control needs — and it no longer depends on a success value.
+  verifyReachesTheGradeDoor({
     qualification: windowQual, resolution: windowStack.resolution, envelopeKey: { keyId: 'kx', secret: original }, now: '2026-07-23T12:00:00Z',
   })
-  assert.equal(verifiedOriginal.verified, true, 'MAC must bind the ORIGINAL key bytes (copy taken before await)')
   // ...and the mutated value must NOT verify (it never was the key)
   rejectsWith(() => verifyBindingQualification({
     qualification: windowQual, resolution: windowStack.resolution, envelopeKey: { keyId: 'kx', secret: Buffer.alloc(32, 9) }, now: '2026-07-23T12:00:00Z',
@@ -438,10 +457,9 @@ async function verifyBehaviour() {
     resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, probedAt: '2026-07-23T00:00:00Z', expiresAt: '2026-07-24T00:00:00Z',
   })
 
-  const ok = verifyBindingQualification({
+  verifyReachesTheGradeDoor({
     qualification, resolution: RESOLUTION, envelopeKey: ENVELOPE_KEY, now: '2026-07-23T12:00:00Z',
   })
-  assert.equal(ok.verified, true)
 
   // A caller-supplied tuple is no longer honoured on the verify path: the parameter
   // is gone, and a hand-built object carrying every public field of a real
@@ -558,7 +576,14 @@ async function verifyBehaviour() {
   assert.ok(!/input\.query/.test(probeBody), 'the probe path must never take a caller query fn')
   assert.ok(!/input\.keyColumns/.test(probeBody), 'the probe path must never take caller keyColumns')
   assert.ok(/resolution\.systemContentKey/.test(probeBody), 'the digest must bind the RESOLUTION tuple')
-  assert.ok(/isTrustedBindingResolution\(/.test(probeBody), 'the probe path must gate on resolution identity')
+  // ROUND 6 — the gate is `bindingResolutionGrade(...) !== executorGrade`, which is the
+  // same WeakSet identity test with the third answer ("harness") kept, plus an equality
+  // that `isTrustedBindingResolution` could not express. Both halves are pinned: the
+  // reader call, and the comparison against the CLOSURE-BOUND grade rather than a
+  // literal — a literal would mean the probe path chose a grade instead of inheriting one.
+  assert.ok(/bindingResolutionGrade\(/.test(probeBody), 'the probe path must gate on resolution identity')
+  assert.ok(/!== executorGrade/.test(probeBody),
+    'the probe path must MATCH the closure-bound executor grade, not test against a literal')
   // POSITIVE CONTROL for these source scans: they must be shown to FIND a token when
   // it is present, otherwise every "absent" assertion above is grepping nothing.
   assert.ok(`${src}\nasync function runReadOnlyProbe`.includes('async function runReadOnlyProbe'))
