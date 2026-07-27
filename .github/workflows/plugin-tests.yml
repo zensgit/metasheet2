@@ -257,6 +257,19 @@ jobs:
         if: matrix.node-version == '20.x'
         run: bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
 
+      # Corp-scope Phase B cannot migrate until staging proves its only managed
+      # backend and the only container publishing 18900 are the exact Phase A
+      # image. Both matrix legs execute the behavior suite; branch protection
+      # currently requires test (20.x), while test (18.x) is additional coverage.
+      # Run the wiring guard in this same job. The wiring and behavior suites
+      # assert each other's invocation, so removing either step turns the
+      # required Node 20 context red.
+      - name: DingTalk staging worker-drain CI wiring contract
+        run: node --test scripts/ops/dingtalk-worker-drain-ci-wiring.test.mjs
+
+      - name: DingTalk staging immutable worker-drain gate
+        run: node --test scripts/ops/dingtalk-staging-deploy-identity.test.mjs
+
 
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence

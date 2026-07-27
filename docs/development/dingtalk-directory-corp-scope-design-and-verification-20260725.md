@@ -161,6 +161,10 @@ Ten discriminating mutations were killed:
 Required CI is a separate head-scoped gate and is not claimed here until the pushed Phase A head
 settles.
 
+The worker-drain evidence required before Phase B is a separate operational gate. Its design and
+verification record is
+`docs/development/dingtalk-directory-worker-drain-design-and-verification-20260726.md`.
+
 ## 5. Non-goals and owner gates
 
 - Phase A does not allow equal account keys across enterprises; Phase B owns that schema change.
@@ -177,9 +181,14 @@ settles.
 
 1. review and merge Phase A;
 2. deploy Phase A with no flag changes;
-3. prove all old workers drained;
+3. build/deploy the exact Phase A SHA through the controlled-host provenance path, prove the
+   managed project and fixed staging ingress each resolve to that one backend, verify no alternate
+   staging upstream exists, then capture `WORKER_DRAIN_GATE_PASS` while an exclusive host change
+   window is held;
 4. review and merge Phase B;
-5. deploy Phase B in a controlled migration window;
+5. keep that host change window exclusive and deploy Phase B in the same controlled migration
+   window; if any privileged Docker/Compose mutation occurs after the PASS, discard the evidence
+   and repeat step 3;
 6. run the post-fix two-corp staging UAT;
 7. bind only the explicitly authorized DingTalk account to the existing MetaSheet user;
 8. verify a fresh approval-card callback stays within the same corp.
