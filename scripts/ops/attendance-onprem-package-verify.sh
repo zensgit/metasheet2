@@ -74,6 +74,68 @@ function verify_workspace_manifest() {
   fi
 }
 
+function verify_workspace_runtime_dependencies() {
+  local root="$1"
+  command -v node >/dev/null 2>&1 || die "node is required to verify packaged workspace runtime dependencies"
+
+  node - "$root" <<'NODE' || die "One or more packaged workspace runtime dependencies are missing"
+const fs = require('node:fs')
+const path = require('node:path')
+
+const root = process.argv[2]
+const consumerManifests = [
+  'packages/core-backend/package.json',
+  'plugins/plugin-attendance/package.json',
+]
+const packageRoots = ['packages', 'plugins']
+const packagedByName = new Map()
+
+for (const packageRoot of packageRoots) {
+  const absoluteRoot = path.join(root, packageRoot)
+  if (!fs.existsSync(absoluteRoot)) continue
+
+  for (const entry of fs.readdirSync(absoluteRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const manifestPath = path.join(absoluteRoot, entry.name, 'package.json')
+    if (!fs.existsSync(manifestPath)) continue
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    if (manifest.name) packagedByName.set(manifest.name, { manifest, manifestPath })
+  }
+}
+
+const failures = []
+for (const relativeManifest of consumerManifests) {
+  const manifestPath = path.join(root, relativeManifest)
+  const consumer = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+
+  for (const section of ['dependencies', 'optionalDependencies']) {
+    for (const [dependencyName, version] of Object.entries(consumer[section] || {})) {
+      if (!String(version).startsWith('workspace:')) continue
+      const packaged = packagedByName.get(dependencyName)
+      if (!packaged) {
+        failures.push(`${relativeManifest}: missing workspace runtime dependency ${dependencyName}`)
+        continue
+      }
+
+      for (const entrypointField of ['main', 'module']) {
+        const entrypoint = packaged.manifest[entrypointField]
+        if (!entrypoint) continue
+        const entrypointPath = path.resolve(path.dirname(packaged.manifestPath), entrypoint)
+        if (!fs.existsSync(entrypointPath)) {
+          failures.push(`${dependencyName}: missing ${entrypointField} entrypoint ${entrypoint}`)
+        }
+      }
+    }
+  }
+}
+
+if (failures.length > 0) {
+  for (const failure of failures) console.error(failure)
+  process.exit(1)
+}
+NODE
+}
+
 function verify_onprem_env_templates() {
   local root="$1"
   local rel
@@ -314,6 +376,7 @@ fi
 
 verify_onprem_env_templates "$pkg_root"
 verify_workspace_manifest "$pkg_root"
+verify_workspace_runtime_dependencies "$pkg_root"
 verify_web_dist_publish_entrypoints "$pkg_root"
 verify_core_backend_migration_set "$pkg_root"
 
