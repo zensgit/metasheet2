@@ -196,12 +196,14 @@ describe('activate error surface — HTTP-level leak control (behaviour, not syn
     }
 
     return invokeActivate('user-1').then((res) => {
-      // Owner ruling: unknown → 500 / ACTIVATE_FAILED / fixed generic message.
-      expect(res.statusCode).toBe(500)
-      expect(res.body).toEqual({
-        ok: false,
-        error: { code: 'ACTIVATE_FAILED', message: 'Activation failed', details: undefined },
-      })
+      // Recursive walk of the ENTIRE body FIRST — see the note in the authored-reason case: an
+      // exact-shape assertion placed ahead of it would abort the test before the walk ran.
+      for (const fragment of DRIVER_FRAGMENTS) {
+        expect(
+          findStringOccurrences(res.body, fragment),
+          `DRIVER TEXT LEAK: '${fragment}' reached the client. Full body: ${JSON.stringify(res.body)}`,
+        ).toEqual([])
+      }
 
       // The forged code must not survive either — it is legal-PREFIX, not legal.
       expect(
@@ -209,13 +211,12 @@ describe('activate error surface — HTTP-level leak control (behaviour, not syn
         `The forged code '${FORGED_CODE}' appears in the response body. A prefix test is back.`,
       ).toEqual([])
 
-      // Recursive walk of the ENTIRE body for every driver-text fragment.
-      for (const fragment of DRIVER_FRAGMENTS) {
-        expect(
-          findStringOccurrences(res.body, fragment),
-          `DRIVER TEXT LEAK: '${fragment}' reached the client. Full body: ${JSON.stringify(res.body)}`,
-        ).toEqual([])
-      }
+      // Owner ruling: unknown → 500 / ACTIVATE_FAILED / fixed generic message.
+      expect(res.statusCode).toBe(500)
+      expect(res.body).toEqual({
+        ok: false,
+        error: { code: 'ACTIVATE_FAILED', message: 'Activation failed', details: undefined },
+      })
     })
   })
 
@@ -228,6 +229,18 @@ describe('activate error surface — HTTP-level leak control (behaviour, not syn
     }
 
     return invokeActivate('user-1').then((res) => {
+      // The WALK RUNS FIRST, deliberately. A preceding exact-shape assertion would throw before
+      // the walk ever executed, so the walk would never be the thing that catches a regression —
+      // it would just be dead weight behind a sibling guard. (Found by mutation: restoring the
+      // `error.message` read reddened only the shape assertion until this was reordered.)
+      for (const fragment of DRIVER_FRAGMENTS) {
+        expect(
+          findStringOccurrences(res.body, fragment),
+          `DRIVER TEXT LEAK on an authored reason: '${fragment}' reached the client. `
+          + `Full body: ${JSON.stringify(res.body)}`,
+        ).toEqual([])
+      }
+
       expect(res.statusCode).toBe(409)
       expect(res.body).toEqual({
         ok: false,
@@ -237,12 +250,6 @@ describe('activate error surface — HTTP-level leak control (behaviour, not syn
           details: undefined,
         },
       })
-      for (const fragment of DRIVER_FRAGMENTS) {
-        expect(
-          findStringOccurrences(res.body, fragment),
-          `DRIVER TEXT LEAK on an authored reason: '${fragment}' reached the client.`,
-        ).toEqual([])
-      }
     })
   })
 
