@@ -1526,12 +1526,32 @@ async function probeAuthorityIsClosureBoundNotCallerInjected() {
 // ledger row. A hand-authored reach cannot support a set-equality claim about a
 // surface it never had to look at.
 //
+// -- ROUND 8 RETRACTION, FIRST, BECAUSE ROUND 7's VERSION OF (1) WAS FALSE ----
+// Round 7 wrote that this scan covers "every `lib/*.cjs`" and that a trust set
+// "CANNOT HIDE". THAT CLAIM IS WITHDRAWN. Three hiding constructions were EXECUTED
+// against round 7's derivation, each with all five suites PASSING and no new ledger row:
+//   * `let trustedX = new WeakSet()` — the pattern required `const`, so the declaration
+//     fell through to the exemption branch, where only DEDUPED MODULE NAMES were
+//     compared. Planted in `gip-inert-entry.cjs` — an already-listed module, and the
+//     trust-critical gate this PR introduces — it was absorbed with no new entry and
+//     INHERITED THAT MODULE'S REASON.
+//   * `const trustedY = new WeakSet() // note` — trailing text defeated the `$` anchor.
+//     Same branch, same absorption.
+//   * a set in `lib/adapters/http-adapter.cjs` — `libSources()` was a NON-RECURSIVE
+//     `readdirSync`, so nothing below `lib/` was read at all; every count stayed
+//     byte-identical to baseline.
+// And the banner printed "11 trust WeakSets" while the tree held TWELVE. All four are
+// fixed below. What replaces the retracted absolute is `(a)`, which is bounded and says
+// what it does NOT cover.
+//
 // -- WHAT IS DERIVED NOW, AND FROM WHAT --------------------------------------
-//   1. THE BRAND SET is derived by scanning every `lib/*.cjs` for `new WeakSet()`.
-//      A MODULE-SCOPE `const X = new WeakSet()` is a trust declaration; every OTHER
-//      occurrence must be listed as an explicit exemption with a reason. That scan is
-//      what catches `read-source-config-store.cjs` STRUCTURALLY — it declares one, so
-//      it cannot be missed by anyone forgetting to add it anywhere.
+//   1. THE BRAND SET is derived by scanning EVERY `.cjs` FILE UNDER `lib/`, RECURSIVELY,
+//      for the literal text `new WeakSet(`. A MODULE-SCOPE declaration — `const`, `let`
+//      or `var` at column 0, with or without trailing text — is a trust declaration;
+//      every OTHER occurrence must carry its OWN exemption entry, keyed by module AND
+//      source text and carrying its own reason, with the occurrence COUNT asserted too.
+//      That scan is what catches `read-source-config-store.cjs` STRUCTURALLY — it
+//      declares one, so it cannot be missed by anyone forgetting to add it anywhere.
 //   2. EACH DECLARATION'S PREDICATE is derived too: the scan attributes every
 //      `<identifier>.has(` to the enclosing `function`, resolves that name in the
 //      module's EXPORT TABLE, and CLASSIFIES it BEHAVIOURALLY by calling it — a
@@ -1549,8 +1569,27 @@ async function probeAuthorityIsClosureBoundNotCallerInjected() {
 // this suite does not have. So the honest claim is NOT "these are the only trust-minting
 // paths on the public surface". It is exactly this, and nothing wider:
 //
-//   (a) the set of trust WeakSet DECLARATIONS in `lib/` is exactly the declared ledger
-//       — a genuine set equality, mechanically derived, both directions load-bearing;
+//   (a) EVERY occurrence of the LITERAL TEXT `new WeakSet(` in EVERY `.cjs` file under
+//       `lib/`, RECURSIVELY, is classified — either it is a module-scope declaration
+//       (`const`/`let`/`var` at column 0) and appears VERBATIM in the declared ledger,
+//       or it carries its OWN exemption entry keyed by module AND source text with its
+//       own reason. Key set AND occurrence count are both asserted, so an occurrence
+//       cannot be absorbed by an entry another occurrence already earned. THIS CLAIM
+//       DOES NOT COVER, and this is the whole of what it does not cover:
+//         * a trust set built by anything other than that literal text — `Reflect.
+//           construct(WeakSet, [])`, a factory return, a `WeakMap`, an object-keyed
+//           `Map`, a symbol or private-field brand. The scan is textual;
+//         * any file outside `lib/`, or under it but not named `*.cjs`;
+//         * a module that requires the gate through any specifier other than the literal
+//           `require('./gip-inert-entry.cjs')` — e.g. a `../` form from a subdirectory.
+//           Such a module is not pulled into the WALK by that edge. A module LEAVING or
+//           JOINING the walk REDs (step 2 pins the derived module set against the alias
+//           table in BOTH directions); a module that SHOULD have joined and never did is
+//           the residual, and it is not covered;
+//         * checker attribution reads the FIRST `<identifier>.has(` on a line; a second
+//           on the same line is not attributed. A checker missed that way flips its
+//           row's `[kind]`, which REDs this same ledger equality by name — it narrows
+//           the reach, it does not pass silently.
 //   (b) over the DERIVED module set, with the hand-authored bounded argument pool
 //       below, the sweep reaches exactly the declared minting paths and no others;
 //   (c) a brand the sweep cannot judge (throwing `assert*` checker) or cannot reach
@@ -1560,8 +1599,15 @@ async function probeAuthorityIsClosureBoundNotCallerInjected() {
 // ---------------------------------------------------------------------------
 const fs = require('node:fs')
 
-const ANY_WEAKSET = /new WeakSet\(/
-const MODULE_SCOPE_WEAKSET = /^const\s+([A-Za-z0-9_$]+)\s*=\s*new WeakSet\(\)\s*$/
+const ANY_WEAKSET = /new WeakSet\(/g
+// ROUND 8. Round 7 wrote `/^const\s+…\s*$/` and BOTH of its bounds were shown to hide a
+// planted trust set: `const` alone let `let trustedX = new WeakSet()` fall to the
+// exemption branch, and the `$` anchor let `const trustedY = new WeakSet() // note` do
+// the same. Widened to all three declaration keywords and to tolerate trailing text.
+// The `^` anchor (NO leading whitespace) is the part that must NOT be relaxed — it is
+// the only thing distinguishing a MODULE-SCOPE declaration from a function-scope
+// bookkeeping set, and every exempt occurrence at this head is indented.
+const MODULE_SCOPE_WEAKSET = /^(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*new WeakSet\(\)/
 // Both function forms this package writes: a top-level declaration and a `const NAME =`
 // binding to a function or arrow. Matching only the first would attribute a `.has(` read
 // inside an arrow-defined checker to whatever `function` happened to precede it.
@@ -1569,13 +1615,26 @@ const FUNCTION_HEAD = /^\s*(?:function\s+([A-Za-z0-9_$]+)\s*\(|(?:const|let)\s+(
 const REQUIRES_GATE = /require\('\.\/gip-inert-entry\.cjs'\)/
 const GATE_MODULE = 'gip-inert-entry.cjs'
 
-// EXEMPTIONS — every `new WeakSet(` occurrence in `lib/` that is NOT a module-scope
-// trust declaration, named with the reason it is not one. The scan asserts this list is
-// exact, so a WeakSet introduced anywhere in `lib/` must be classified deliberately.
+// EXEMPTIONS — ONE ENTRY PER OCCURRENCE of `new WeakSet(` under `lib/` that is NOT a
+// module-scope trust declaration, keyed by `<module> :: <its source line, trimmed>` and
+// carrying ITS OWN reason.
+//
+// ROUND 8 RETRACTION: round 7 keyed this by MODULE NAME and asserted only
+// `Object.keys(…)` against DEDUPED module names, so the per-occurrence reasons it
+// advertised were never compared to anything — decorative. A second WeakSet planted in
+// an already-listed module produced no new key, INHERITED the listed module's reason,
+// and passed. Keying on the source text is what makes "classified deliberately" true:
+// a planted occurrence has different text, so it has no entry of its own and REDs.
 const DECLARED_WEAKSET_EXEMPTIONS = Object.freeze({
-  'gip-inert-entry.cjs': 'the per-call error brand inside createErrorBrand() — a FRESH set per call, '
+  'gip-inert-entry.cjs :: const branded = new WeakSet()':
+    'the per-call error brand inside createErrorBrand() — a FRESH set per call, '
     + 'disconnected from every other, so it confers no cross-module trust',
-  'payload-redaction.cjs': 'cycle-detection `seen` sets inside the sanitiser — reachability bookkeeping, not trust',
+  'payload-redaction.cjs :: }, { depth: 0, seen: new WeakSet() })':
+    'the cycle-detection `seen` set seeded by sanitizePayload() — reachability bookkeeping, not trust',
+  'payload-redaction.cjs :: const seen = state.seen || new WeakSet()':
+    'the per-call fallback `seen` set inside the recursive sanitiser — reachability bookkeeping, not trust',
+  'payload-redaction.cjs :: const sanitized = sanitizePayloadValue(value, options, { depth: 0, seen: new WeakSet() })':
+    'the cycle-detection `seen` set seeded by sanitizeValue() — reachability bookkeeping, not trust',
 })
 
 // THE DERIVED TRUST-DECLARATION LEDGER: module -> identifier -> the checker that reads
@@ -1623,11 +1682,16 @@ function deriveReach(sources) {
       const line = lines[index]
       const head = FUNCTION_HEAD.exec(line)
       if (head) currentFunction = head[1] || head[2]
-      const declared = MODULE_SCOPE_WEAKSET.exec(line)
-      if (declared) {
-        declarations.push({ module: entry.name, identifier: declared[1], line: index + 1 })
-      } else if (ANY_WEAKSET.test(line)) {
-        exemptions.push({ module: entry.name, line: index + 1 })
+      // PER OCCURRENCE, not per line. Round 7 bucketed a line ONCE, so a second
+      // `new WeakSet(` on the same line was never counted at all and the totals
+      // silently under-reported the tree.
+      const occurrences = (line.match(ANY_WEAKSET) || []).length
+      if (occurrences > 0) {
+        const declared = MODULE_SCOPE_WEAKSET.exec(line)
+        if (declared) declarations.push({ module: entry.name, identifier: declared[1], line: index + 1 })
+        for (let extra = declared ? 1 : 0; extra < occurrences; extra += 1) {
+          exemptions.push({ module: entry.name, line: index + 1, text: line.trim() })
+        }
       }
       const readMatch = /([A-Za-z0-9_$]+)\.has\(/.exec(line)
       if (readMatch && currentFunction) {
@@ -1673,21 +1737,35 @@ function deriveReach(sources) {
     declarations,
     rendered: declarations.map(render).sort(),
     exemptions,
+    // One rendered string PER OCCURRENCE — duplicates are KEPT, so a second occurrence
+    // of an already-declared shape shows up as a count difference rather than vanishing
+    // into a Set. Both halves are asserted in step 1.
+    renderedExemptions: exemptions.map((e) => `${e.module} :: ${e.text}`).sort(),
     violations,
     modules: [...modules].sort(),
     sweepable: declarations.filter((d) => d.kind === 'sweepable'),
   }
 }
 
+// ROUND 8: RECURSIVE. Round 7's `readdirSync(LIB)` read `lib/*.cjs` only, so a trust set
+// planted in `lib/adapters/http-adapter.cjs` was invisible — not exempted, not declared,
+// simply never read, with every count byte-identical to baseline. `name` is the path
+// RELATIVE to `lib/`, so root modules keep their bare basename (`require(path.join(LIB,
+// name))` and every ledger row are unchanged) and a subdirectory module is named
+// `adapters/<file>.cjs`.
 function libSources() {
-  return fs.readdirSync(LIB)
-    .filter((name) => name.endsWith('.cjs'))
-    .sort()
-    .map((name) => ({
-      name,
-      source: fs.readFileSync(path.join(LIB, name), 'utf8'),
-      table: require(path.join(LIB, name)),
-    }))
+  const walk = (dir, prefix) => fs.readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : 1))
+    .flatMap((item) => {
+      const name = prefix ? `${prefix}/${item.name}` : item.name
+      if (item.isDirectory()) return walk(path.join(dir, item.name), name)
+      return item.name.endsWith('.cjs') ? [name] : []
+    })
+  return walk(LIB, '').map((name) => ({
+    name,
+    source: fs.readFileSync(path.join(LIB, name), 'utf8'),
+    table: require(path.join(LIB, name)),
+  }))
 }
 
 // THE DECLARED LEDGER: export -> the brand it mints.
@@ -1976,11 +2054,36 @@ function trustBrandInventoryIsDerivedNotAuthored() {
   assert.deepEqual(reach.rendered, [...DECLARED_TRUST_DECLARATIONS],
     'the trust WeakSet declarations in lib/ are not the declared ledger — a brand was added, removed, '
     + 'renamed, or its checker changed shape')
-  // EVERY OTHER `new WeakSet(` occurrence must be deliberately exempted, so a trust set
-  // cannot hide by being declared somewhere the module-scope pattern does not match.
-  const exemptModules = [...new Set(reach.exemptions.map((e) => e.module))].sort()
-  assert.deepEqual(exemptModules, Object.keys(DECLARED_WEAKSET_EXEMPTIONS).sort(),
-    `an unclassified \`new WeakSet(\` appeared: ${JSON.stringify(reach.exemptions)}`)
+  // EVERY OTHER `new WeakSet(` occurrence carries its OWN exemption entry — keyed by
+  // module AND source text, with its own reason.
+  //
+  // ROUND 8 RETRACTION: round 7 said here that a trust set "cannot hide by being declared
+  // somewhere the module-scope pattern does not match". IT COULD, THREE WAYS, ALL
+  // EXECUTED: `let` fell outside the `const`-only pattern, trailing text defeated the `$`
+  // anchor, and `lib/*/` was never read. In the first two the occurrence landed in this
+  // exemption branch, which compared only DEDUPED MODULE NAMES — so a set planted in an
+  // already-listed module was absorbed with no new entry, inheriting a reason earned by
+  // something else. The narrowed statement, which is what is actually asserted:
+  //   every occurrence of the literal `new WeakSet(` in every `.cjs` file under `lib/`,
+  //   recursively, is EITHER a module-scope declaration in the ledger above OR has its
+  //   own entry here, matched on module + source text, with both the key set and the
+  //   OCCURRENCE COUNT pinned. It is textual and it does not see a trust set built by any
+  //   other expression, nor one outside `lib/**/*.cjs`; see claim (a).
+  const declaredExemptions = Object.keys(DECLARED_WEAKSET_EXEMPTIONS).sort()
+  assert.deepEqual([...new Set(reach.renderedExemptions)].sort(), declaredExemptions,
+    'an unclassified `new WeakSet(` appeared, or a declared exemption no longer exists — each occurrence '
+    + `needs its OWN entry with its OWN reason:\n  ${reach.renderedExemptions.join('\n  ')}`)
+  // COUNT, not just key set: two occurrences of an identical shape dedupe to one key, so
+  // without this a second planted copy would inherit the first one's entry.
+  assert.equal(reach.renderedExemptions.length, declaredExemptions.length,
+    `there are ${reach.renderedExemptions.length} exempt \`new WeakSet(\` occurrences but `
+    + `${declaredExemptions.length} declared exemptions — a repeated occurrence of an already-declared shape `
+    + 'must be declared once per occurrence, not absorbed by the first')
+  // And the reasons are READ, so "listed WITH A REASON" is a fact rather than decoration.
+  for (const key of declaredExemptions) {
+    assert.ok(String(DECLARED_WEAKSET_EXEMPTIONS[key] || '').trim().length > 0,
+      `the exemption ${key} carries no reason — an empty reason silences the ledger without justifying it`)
+  }
   // Brand short names must be unique, or two brands would silently share a ledger row.
   const keys = reach.sweepable.map((d) => brandKeyFor(d.checker))
   assert.equal(new Set(keys).size, keys.length, `two brands derive the same short name: ${keys.join(', ')}`)
@@ -2018,10 +2121,34 @@ function trustBrandInventoryIsDerivedNotAuthored() {
   assert.deepEqual(orderControl.rendered,
     ['synthetic-order-control.cjs.trustedShadowed -> isTrustedShadowed [sweepable]'],
     'a private assert written above an exported boolean checker must not make the brand unjudgeable')
-  console.log(`  DERIVED-REACH ${reach.declarations.length} trust WeakSets across `
-    + `${new Set(reach.declarations.map((d) => d.module)).size} modules; ${reach.sweepable.length} sweepable, `
-    + `${reach.declarations.length - reach.sweepable.length} unjudgeable (checker not exported); `
-    + `${reach.modules.length} modules in the walk`)
+  // EVERY NUMBER THE BANNER PRINTS IS PINNED FIRST. Round 7's banner printed
+  // `reach.declarations.length` — "11 trust WeakSets" — while the tree held TWELVE,
+  // because the twelfth had been absorbed by the exemption branch. A count that
+  // disagrees with the tree must FAIL; printing the smaller number is how the
+  // disagreement stayed invisible for a whole round.
+  const counts = {
+    declarations: reach.declarations.length,
+    declaringModules: new Set(reach.declarations.map((d) => d.module)).size,
+    sweepable: reach.sweepable.length,
+    unjudgeable: reach.declarations.length - reach.sweepable.length,
+    exemptOccurrences: reach.exemptions.length,
+  }
+  assert.deepEqual(counts, {
+    declarations: 11,
+    declaringModules: 6,
+    sweepable: 7,
+    unjudgeable: 4,
+    exemptOccurrences: 4,
+  }, 'the derived counts disagree with the tree — the banner below may not print a number no assertion pinned')
+  // The SIZE OF THE WALK is deliberately NOT printed here and NOT pinned by a second
+  // number: step 2 pins the walk as a SET against the alias table, which subsumes its
+  // count and, unlike a count, NAMES the module that joined or dropped out. A numeric
+  // twin here would fire first and report "7, expected 8" without saying which.
+  console.log(`  DERIVED-REACH ${counts.declarations} trust WeakSets across `
+    + `${counts.declaringModules} modules; ${counts.sweepable} sweepable, `
+    + `${counts.unjudgeable} unjudgeable (checker not exported); `
+    + `${counts.exemptOccurrences} exempt occurrences declared one-by-one; `
+    + `${counts.declarations + counts.exemptOccurrences} \`new WeakSet(\` total under lib/**`)
 }
 
 // STEP 2 — THE SWEEP, over the DERIVED module set and the DERIVED checkers.
@@ -2043,6 +2170,19 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     'gip-canonical-object-contract-registry.cjs': 'contractRegistry',
     'gip-connector-kind-registry.cjs': 'connectorKinds',
   })
+  // THE WALK IS PINNED IN BOTH DIRECTIONS. Round 7 asserted only that every DERIVED
+  // module has an alias, which is one-directional: a module DROPPING OUT of the
+  // derivation left the alias table over-wide and was absorbed in silence. EXECUTED
+  // PROOF: re-quoting the single `require('./gip-inert-entry.cjs')` in
+  // `gip-read-observability-contracts.cjs` to double quotes — semantically identical
+  // JavaScript — dropped it from the walk (8 modules -> 7, 78 exports -> 71, 608868
+  // calls -> 412084) and every suite stayed GREEN, because the only floors below are
+  // `exportCount >= 20` and `calls > 20000`. The pin below is what makes that RED, and
+  // it catches the whole class — a lazy `require` moved into a function body, a
+  // destructure rewrite, a re-export — not just the quote style.
+  assert.deepEqual(reach.modules, Object.keys(ALIASES).sort(),
+    'the derived module set is not the aliased walk — a module JOINED the derivation without an alias, or '
+    + 'DROPPED OUT of it and the walk silently shrank')
   const tables = {}
   for (const moduleName of reach.modules) {
     assert.ok(ALIASES[moduleName], `derived module ${moduleName} has no ledger alias — add one rather than dropping it`)
