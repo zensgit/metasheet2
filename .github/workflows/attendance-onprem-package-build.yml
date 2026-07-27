@@ -295,6 +295,38 @@ jobs:
               -Content ($validContent + "`nDINGTALK_CLIENT_SECRET=synthetic-secret`n") `
               -ExpectedPattern 'External integration configuration is forbidden'
             Set-Content -LiteralPath $envFile -Value $validContent -Encoding ascii
+
+            function Assert-InheritedEnvRejected {
+              param(
+                [string]$Name,
+                [string]$Value,
+                [string]$ExpectedPattern
+              )
+              Set-Item -Path ("Env:{0}" -f $Name) -Value $Value
+              try {
+                & (Join-Path $env:PACKAGE_ROOT 'scripts\ops\attendance-windows-native-preflight.ps1') `
+                  -RootDir $env:PACKAGE_ROOT `
+                  -RequireRedis $true
+                throw "Preflight unexpectedly accepted inherited env: $Name"
+              }
+              catch {
+                if ($_.Exception.Message -notmatch $ExpectedPattern) {
+                  throw
+                }
+              }
+              finally {
+                Remove-Item -Path ("Env:{0}" -f $Name) -ErrorAction SilentlyContinue
+              }
+            }
+
+            Assert-InheritedEnvRejected `
+              -Name 'ATTENDANCE_SCHEDULER_ENABLED' `
+              -Value 'true' `
+              -ExpectedPattern 'Attendance opt-in is forbidden'
+            Assert-InheritedEnvRejected `
+              -Name 'DINGTALK_CLIENT_SECRET' `
+              -Value 'inherited-synthetic-secret' `
+              -ExpectedPattern 'External integration configuration is forbidden'
           }
           finally {
             $postgres.Stop()

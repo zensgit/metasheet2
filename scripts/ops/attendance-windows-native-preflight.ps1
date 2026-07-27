@@ -91,6 +91,7 @@ $allowedAttendanceEnv = @(
 )
 $forbiddenExternalPrefixes = @(
   'DINGTALK_',
+  'ENABLE_DINGTALK_',
   'FEISHU_',
   'WECOM_',
   'MULTITABLE_EMAIL_SMTP_'
@@ -101,8 +102,10 @@ $forbiddenExternalNames = @(
   'DIRECTORY_SYNC_ALERT_WEBHOOK_SECRET',
   'ENABLE_WEBHOOK'
 )
-foreach ($name in $envValues.Keys) {
-  $value = [string]$envValues[$name]
+$effectiveProcessEnv = [System.Environment]::GetEnvironmentVariables('Process')
+foreach ($nameValue in $effectiveProcessEnv.GetEnumerator()) {
+  $name = [string]$nameValue.Key
+  $value = [string]$nameValue.Value
   if ([string]::IsNullOrWhiteSpace($value)) {
     continue
   }
