@@ -108,6 +108,8 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     'docker/app.env.attendance-windows-native.qa.example',
     [
       'JWT_SECRET=change-me',
+      'POSTGRES_DB=metasheet_windows_qa',
+      'DATABASE_URL=postgres://metasheet:change-me@127.0.0.1:5432/metasheet_windows_qa',
       'ATTENDANCE_IMPORT_UPLOAD_DIR=storage/attendance-import',
       'WINDOWS_NATIVE_GATEWAY_HOST=127.0.0.1',
       '',
@@ -160,6 +162,9 @@ function writeMinimumPackage(pkgRoot, options = {}) {
       'Assert-WindowsNativeLoopbackHost',
       'Attendance opt-in is forbidden',
       'External integration configuration is forbidden',
+      'APPROVAL_BREACH_DINGTALK_',
+      'ENABLE_ATTENDANCE_SCHEDULER_LEADER_LOCK',
+      'metasheet_windows_qa',
       '',
     ].join('\n')
   )

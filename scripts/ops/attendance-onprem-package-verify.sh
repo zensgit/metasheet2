@@ -171,6 +171,10 @@ function verify_onprem_env_templates() {
     || die "Windows native QA env must use a package-relative upload path"
   grep -q '^WINDOWS_NATIVE_GATEWAY_HOST=127.0.0.1$' "$windows_env" \
     || die "Windows native QA gateway must bind to loopback by default"
+  grep -q '^POSTGRES_DB=metasheet_windows_qa$' "$windows_env" \
+    || die "Windows native QA package must pin the dedicated database name"
+  grep -q '/metasheet_windows_qa$' "$windows_env" \
+    || die "Windows native QA DATABASE_URL must target the dedicated database"
 }
 
 function verify_windows_native_gateway() {
@@ -209,13 +213,30 @@ function verify_windows_native_gateway() {
   search_fixed_string 'External integration configuration is forbidden' \
     "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
     || die "Windows native preflight must reject external integration configuration"
+  search_fixed_string 'APPROVAL_BREACH_DINGTALK_' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must reject DingTalk breach webhooks"
+  search_fixed_string 'ENABLE_ATTENDANCE_SCHEDULER_LEADER_LOCK' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must reject the attendance leader-lock opt-in"
+  search_fixed_string 'metasheet_windows_qa' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must pin the dedicated local QA database"
   search_fixed_string "headers['x-forwarded-for'] = remoteAddress" "$gateway" \
     || die "Windows native gateway must replace client-supplied forwarding identity"
   search_fixed_string 'gateway host must be loopback' "$gateway" \
     || die "Windows native gateway must enforce a loopback listener"
-  if search_fixed_string 'wsl.exe' "${root}/scripts/ops/attendance-windows-native-"*; then
-    die "Windows native scripts must not invoke WSL"
-  fi
+  local native_dependency
+  for native_dependency in \
+    "${root}/scripts/ops/attendance-windows-native-"* \
+    "${root}/scripts/ops/attendance-onprem-deploy-run.ps1" \
+    "${root}/scripts/ops/attendance-onprem-start-pm2.ps1" \
+    "${root}/scripts/ops/attendance-onprem-publish-web-dist.ps1"
+  do
+    if grep -Eiq 'wsl\.exe|wsl[[:space:]]+-' "$native_dependency"; then
+      die "Windows native dependency must not invoke WSL: ${native_dependency#${root}/}"
+    fi
+  done
 }
 
 function verify_web_dist_publish_entrypoints() {

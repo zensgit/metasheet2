@@ -12,14 +12,15 @@ a deployment authorization, or permission to enable rollout flags.
 - Node.js 20 x64
 - pnpm 9 or newer
 - PM2 installed with `npm install --global pm2`
-- PostgreSQL reachable from Windows
+- PostgreSQL on the same Windows machine
 - PostgreSQL client tools (`psql.exe`)
 - optional: a Redis-compatible service for Redis-specific test cases
 
-The database and optional Redis-compatible service may run on the QA machine
-or on an isolated internal test network. The default launcher does not require
-Redis. Do not point this package at staging, production, or customer
-infrastructure.
+PostgreSQL must run on the QA machine and the database name must be exactly
+`metasheet_windows_qa`. The launcher rejects remote database hosts and every
+other database name before migrations. The optional Redis-compatible service
+may run on the QA machine or on an isolated internal test network. The default
+launcher does not require Redis.
 
 ## 2. Verify and extract
 
@@ -47,8 +48,9 @@ Copy-Item `
 notepad .\docker\app.env
 ```
 
-Replace all three `change-me` values. The database must be a fresh,
-QA-only database. Keep these defaults unless a port is already reserved:
+Replace all three `change-me` values. Create a fresh, empty local database
+named exactly `metasheet_windows_qa`. Keep these defaults unless a port is
+already reserved:
 
 ```text
 HOST=127.0.0.1
@@ -60,9 +62,10 @@ WINDOWS_NATIVE_GATEWAY_PORT=8080
 Do not add real DingTalk, Feishu, webhook, email, or customer credentials.
 Do not enable attendance rollout flags.
 
-The preflight enforces this boundary: the backend and gateway must bind to
-loopback, the gateway may proxy only the package-local HTTP backend, attendance
-opt-ins outside the import settings are rejected, and external delivery or
+The preflight enforces this boundary: the backend, gateway, and PostgreSQL must
+use loopback; the database name must be `metasheet_windows_qa`; the gateway may
+proxy only the package-local HTTP backend; attendance opt-ins outside the
+import settings are rejected case-insensitively; and external delivery or
 integration configuration is rejected.
 
 ## 4. Preflight and start

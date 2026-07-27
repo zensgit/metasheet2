@@ -92,6 +92,7 @@ $allowedAttendanceEnv = @(
 $forbiddenExternalPrefixes = @(
   'DINGTALK_',
   'ENABLE_DINGTALK_',
+  'APPROVAL_BREACH_DINGTALK_',
   'FEISHU_',
   'WECOM_',
   'MULTITABLE_EMAIL_SMTP_'
@@ -100,17 +101,20 @@ $forbiddenExternalNames = @(
   'ALERT_WEBHOOK_URL',
   'DIRECTORY_SYNC_ALERT_WEBHOOK',
   'DIRECTORY_SYNC_ALERT_WEBHOOK_SECRET',
-  'ENABLE_WEBHOOK'
+  'ENABLE_WEBHOOK',
+  'ENABLE_ATTENDANCE_SCHEDULER_LEADER_LOCK'
 )
 $effectiveEnv = @{}
 foreach ($nameValue in [System.Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
-  $effectiveEnv[[string]$nameValue.Key] = [string]$nameValue.Value
+  $normalizedName = ([string]$nameValue.Key).ToUpperInvariant()
+  $effectiveEnv[$normalizedName] = [string]$nameValue.Value
 }
 foreach ($name in $envValues.Keys) {
-  $effectiveEnv[[string]$name] = [string]$envValues[$name]
+  $normalizedName = ([string]$name).ToUpperInvariant()
+  $effectiveEnv[$normalizedName] = [string]$envValues[$name]
 }
 foreach ($nameValue in $effectiveEnv.GetEnumerator()) {
-  $name = [string]$nameValue.Key
+  $name = ([string]$nameValue.Key).ToUpperInvariant()
   $value = [string]$nameValue.Value
   if ([string]::IsNullOrWhiteSpace($value)) {
     continue
@@ -140,6 +144,12 @@ Assert-WindowsNativeMinimumMajor -Label 'Node.js' -Version $nodeVersion -Minimum
 Assert-WindowsNativeMinimumMajor -Label 'pnpm' -Version $pnpmVersion -MinimumMajor 9
 
 $databaseEndpoint = Resolve-WindowsNativeDatabaseEndpoint -DatabaseUrl $envValues['DATABASE_URL']
+Assert-WindowsNativeLoopbackHost `
+  -Label 'DATABASE_URL' `
+  -HostName $databaseEndpoint.HostName
+if ($databaseEndpoint.DatabaseName -ne 'metasheet_windows_qa') {
+  throw 'DATABASE_URL must target the dedicated local QA database named metasheet_windows_qa'
+}
 if (-not (Test-WindowsNativeTcpEndpoint -HostName $databaseEndpoint.HostName -Port $databaseEndpoint.Port)) {
   throw "PostgreSQL is unreachable at $($databaseEndpoint.HostName):$($databaseEndpoint.Port)"
 }

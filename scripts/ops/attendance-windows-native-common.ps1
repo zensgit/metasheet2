@@ -166,7 +166,7 @@ function Resolve-WindowsNativeDatabaseEndpoint {
 
   $match = [regex]::Match(
     $DatabaseUrl,
-    '^postgres(?:ql)?://[^@/]+@(?<host>\[[^\]]+\]|[^:/]+)(?::(?<port>\d+))?/'
+    '^postgres(?:ql)?://[^@/]+@(?<host>\[[^\]]+\]|[^:/]+)(?::(?<port>\d+))?/(?<database>[^/?#]+)(?:[?#].*)?$'
   )
   if (-not $match.Success) {
     throw 'DATABASE_URL must be an explicit postgres://user:password@host:port/database URL'
@@ -179,6 +179,7 @@ function Resolve-WindowsNativeDatabaseEndpoint {
   return @{
     HostName = $hostName
     Port = $port
+    DatabaseName = [System.Uri]::UnescapeDataString($match.Groups['database'].Value)
   }
 }
 

@@ -243,7 +243,7 @@ jobs:
           DEPLOYMENT_MODEL=onprem
           JWT_SECRET=windows-runner-synthetic-secret-20260727
           BCRYPT_SALT_ROUNDS=12
-          DATABASE_URL=postgres://qa:synthetic@127.0.0.1:55432/attendance_qa
+          DATABASE_URL=postgres://qa:synthetic@127.0.0.1:55432/metasheet_windows_qa
           REDIS_HOST=127.0.0.1
           REDIS_PORT=56379
           ATTENDANCE_IMPORT_UPLOAD_DIR=storage/attendance-import
@@ -294,6 +294,24 @@ jobs:
             Assert-PreflightRejected `
               -Content ($validContent + "`nDINGTALK_CLIENT_SECRET=synthetic-secret`n") `
               -ExpectedPattern 'External integration configuration is forbidden'
+            Assert-PreflightRejected `
+              -Content ($validContent + "`nAPPROVAL_BREACH_DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send`n") `
+              -ExpectedPattern 'External integration configuration is forbidden'
+            Assert-PreflightRejected `
+              -Content ($validContent + "`nENABLE_ATTENDANCE_SCHEDULER_LEADER_LOCK=true`n") `
+              -ExpectedPattern 'External delivery configuration is forbidden'
+            Assert-PreflightRejected `
+              -Content $validContent.Replace(
+                '127.0.0.1:55432/metasheet_windows_qa',
+                '10.0.0.8:55432/metasheet_windows_qa'
+              ) `
+              -ExpectedPattern 'DATABASE_URL must use a loopback host'
+            Assert-PreflightRejected `
+              -Content $validContent.Replace(
+                '127.0.0.1:55432/metasheet_windows_qa',
+                '127.0.0.1:55432/customer_attendance'
+              ) `
+              -ExpectedPattern 'dedicated local QA database'
             Set-Content -LiteralPath $envFile -Value $validContent -Encoding ascii
 
             function Assert-InheritedEnvRejected {
@@ -326,6 +344,14 @@ jobs:
             Assert-InheritedEnvRejected `
               -Name 'DINGTALK_CLIENT_SECRET' `
               -Value 'inherited-synthetic-secret' `
+              -ExpectedPattern 'External integration configuration is forbidden'
+            Assert-InheritedEnvRejected `
+              -Name 'attendance_scheduler_enabled' `
+              -Value 'true' `
+              -ExpectedPattern 'Attendance opt-in is forbidden'
+            Assert-InheritedEnvRejected `
+              -Name 'approval_breach_dingtalk_webhook' `
+              -Value 'https://oapi.dingtalk.com/robot/send' `
               -ExpectedPattern 'External integration configuration is forbidden'
           }
           finally {
@@ -550,7 +576,10 @@ jobs:
             'scripts\ops\attendance-windows-native-start.ps1',
             'scripts\ops\attendance-windows-native-stop.ps1',
             'scripts\ops\attendance-windows-native-healthcheck.ps1',
-            'scripts\ops\attendance-windows-native-bootstrap-admin.ps1'
+            'scripts\ops\attendance-windows-native-bootstrap-admin.ps1',
+            'scripts\ops\attendance-onprem-deploy-run.ps1',
+            'scripts\ops\attendance-onprem-start-pm2.ps1',
+            'scripts\ops\attendance-onprem-publish-web-dist.ps1'
           )
           foreach ($relative in $targets) {
             $path = Join-Path $env:PACKAGE_ROOT $relative
