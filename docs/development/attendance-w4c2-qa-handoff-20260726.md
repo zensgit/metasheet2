@@ -9,8 +9,19 @@ Refs: issue #4556（W4 主 issue，非本包完成点）· PR #4612（W4C-2 交�
 
 被测代码基线（QA 检出点）：PR #4612 head 分支
 `claude/w4c2-live-scheduled-shadow-20260725` @
-`f0fe4a4a649a96842a154d35a3cda9d6e8a60fc9`（`git rev-parse` 直贴）。
+`b0c7e2823e7bdf301fa8170281289789883cba80`（`git rev-parse` 直贴）。
 若该分支后续追加 commit，本手册按「以最新 head 重取 + 复核 §2 表落点」处理，勿默认沿用本 SHA。
+
+基线增量说明（旧钉 `f0fe4a4a649a96842a154d35a3cda9d6e8a60fc9` → 本 SHA）：逐文件 blob 比对，
+旧基线的 30 个 PR 文件中 29 个 blob 相同；差异只有两处——(a) rebase 到新 main 时
+`.github/workflows/plugin-tests.yml` 原样并入了 main 侧新增的两步 DingTalk 步骤（本 PR 侧步骤
+文字未变）；(b) 新增 golden 定义回归套件
+`packages/core-backend/src/attendance/__tests__/w4c1-fingerprint-golden.test.ts`（见 §1.2 表、
+§2.3 G24）。因此 §3 fixtures 与 §4 预期响应**不受影响**：golden 套件是无库纯单测（固定输入 →
+硬编码 hash 字面量），不触任何 DB fixture、不改任何 HTTP 面；其余被测代码 blob 逐字节未变。
+
+Windows 侧测试可直接走 **issue #4629**（W4C-2 Internal Preview QA feedback）的已验证测试包，
+不必等本 PR 合入。
 
 ## 0. 边界（先读）
 
@@ -30,7 +41,7 @@ Refs: issue #4556（W4 主 issue，非本包完成点）· PR #4612（W4C-2 交�
 
 ```bash
 git fetch origin claude/w4c2-live-scheduled-shadow-20260725
-git worktree add /tmp/w4c2-qa-checkout f0fe4a4a649a96842a154d35a3cda9d6e8a60fc9
+git worktree add /tmp/w4c2-qa-checkout b0c7e2823e7bdf301fa8170281289789883cba80
 cd /tmp/w4c2-qa-checkout && pnpm install
 ```
 
@@ -48,6 +59,7 @@ cd /tmp/w4c2-qa-checkout && pnpm install
 | `packages/core-backend/src/attendance/__tests__/w4c2-frozen-attribution.test.ts` | 单测（无库） | step `Run core-backend tests`（默认 `vitest.config.ts`） |
 | `…/__tests__/w4c2-shadow-expected-differences.test.ts` | 单测（无库） | 同上 |
 | `…/__tests__/w4c1-segment-calculator.test.ts`（W4C-1，本片有增补） | 单测（无库） | 同上 |
+| `…/__tests__/w4c1-fingerprint-golden.test.ts`（**新基线新增**，golden 定义回归门，见 §2.3） | 单测（无库） | 同上 |
 | `scripts/ops/attendance-w4c2-ci-wiring.test.mjs` | 接线守卫 | step `Attendance W4C-2 CI wiring contract`（`node --test`） |
 | `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs` | 债务台账守卫 | step `Run attendance W4C-0 Stage D §8.4 DML inventory collector`（`node --test`；需先 fetch 基线 commit `e0defbe26d7f2e1747e74aa908ca710422812bf7`） |
 
@@ -110,6 +122,25 @@ mutation 自检（记录于 #4612 body），QA 不能靠绿灯复证，只能按
 | G21 | W4 review 结果仍应用 prepared legacy projection；duplicate/DST review 不使 flag-OFF 投影过期 | review 场景打卡后读 legacy 投影 | legacy 投影与 prepared 完全一致、不因 W4 review 而变 | posture-matrix 腿 1/2 + p2-1 各 review 腿的 legacy-projection-intact 断言 | 同上 | 套件 |
 | G22 | offset-less/legacy-only 业务时间三姿态矩阵；去掉任一侧独立失败 | 同一 offset-less 时间分别打进 legacy/shadow/eligible org | legacy：200 legacy 形状 + W4 三表零行；shadow：legacy 投影保留 + 恰一条 `review_required`/`legacy_time_ingress_not_authoritative`（零 segment、无 pointer、effect none、raw+legacy-parser provenance）+ sealed op + outbox pending 1；eligible：422 `W4_ATTRIBUTION_UNSUPPORTED`，claim 随事务回滚（零 operation 行；同 org 严格时间 200 = 正控） | posture-matrix 腿 1/2/3；排他性 MD1/MD2/MD3（mutation） | 同上 | 套件 + mutation |
 | G23 | flag/state OFF 对外保持 legacy 投影/响应字节；shadow DB 证据仅存在于 shadow/eligible | legacy org 打卡逐字段比对响应；shadow org 查 W4 表 | 响应过 golden 递归 key-path + 显式值断言（`attendance-w4c2-golden-response.ts`）；legacy org W4 三表零行 | timezone-write-guard / posture-matrix / p2-1 的 golden 断言 + MF1/MF2（mutation） | 同上 | 套件 + mutation |
+
+### 2.3 基线增量补充门（非锁 §12.3 清点项，G1–G23 计数不变）
+
+新基线相对旧钉多出一个常驻回归门，编号顺延为 G24 收入本包（它不是锁 §12.3 的 bullet，
+不计入 §2.1 的 23 条清点）：
+
+| # | 证明什么 | 触发条件（QA 可执行动作） | 预期结果 | 证据落点 | workflow 步 | 覆盖 |
+|---|---|---|---|---|---|---|
+| G24 | fingerprint **定义本身**不漂移：两枚域分隔符（`SOURCE_DEFINITION_DOMAIN` / `OUTER_COMPARABLE_SOURCE_DEFINITION_DOMAIN`）+ NUL 域/负载框架、canonical JSON 序列化（key 排序 + 编码）、冻结排除集（storage 排除 {resolvedAt}，outer 排除 {resolvedAt, reasonCode}）均被硬编码 hash 字面量钉死 | 跑 `w4c1-fingerprint-golden.test.ts`（固定输入，字面量不得由被测函数重新推导） | 4 用例全过：storage/outer 两枚不同的冻结 hash、canonical JSON 冻结串、resolvedAt 双域换值不动 hash 而 reasonCode 只动 storage hash（第二枚冻结字面量） | golden 套件（`w4c1-fingerprint-golden.test.ts`） | `Run core-backend tests` | 套件 |
+
+判读纪律（抄自套件文件头，QA 必读）：此门变红**禁止**用「重算字面量」改绿——红 = 指纹定义
+变了，会使已存储的 `source_definition_fingerprint` 与所有 outer-vs-inner 等值比较失效，
+须走 owner 裁定的 v2 常量 + 迁移姿态，不是刷新字面量。此门补的是既有
+`w4c1-fingerprint-gates.test.ts` 的判别力缺口（套件文件头自述）：该文件 16 个断言
+终结符无一钉固定输出值（8 关系式、5 形状、2 判空、1 throw，盘点见 #4612 body），
+实现与测试会一起漂移——曾有 mutation 探针把 `SOURCE_DEFINITION_DOMAIN` 改成
+`…:vMUTANT` 而该文件仍全绿（9 passed）。pin 范围以套件文件头声明为准：移除现有排除集
+成员或新增「出现在 golden 输入中的 key」的排除都会翻字面量；对 golden 输入中**未出现**
+的 key 做排除是 no-op，不在本门见证范围。
 
 ## 3. 固定 fixtures（合成数据）
 
@@ -276,8 +307,9 @@ calculation/outbox 行或非 legacy 姿态 operation 行。
 - `qa-db-reset.sh`：`dropdb --if-exists` + `createdb` + 按 §1.2 的 `MIGRATION_EXCLUDE`
   跑 `pnpm --filter @metasheet/core-backend db:migrate`。内置护栏：目标主机非
   `localhost/127.0.0.1` 直接拒绝（防误指共享/远端库）；库名必须带 `w4c2_qa` 标记。
-- `qa-run-suites.sh`：对隔离库按 CI 同构参数整文件跑七个真库套件 + 两个单测文件 +
-  两个 `node --test` 守卫；结尾自动跑 `qa-residue-check.sql`。
+- `qa-run-suites.sh`：对隔离库按 CI 同构参数整文件跑七个真库套件 + 四个无库单测文件
+  （含新基线新增的 golden 套件，§2.3）+ 两个 `node --test` 守卫；结尾自动跑
+  `qa-residue-check.sql`。
 - 清库 = 重新执行 `qa-db-reset.sh`（整库 drop 重建；理由见 §5 append-only 说明）。
 
 ## 7. 薄弱环节自报（QA 使用本包前须知）
@@ -293,6 +325,9 @@ calculation/outbox 行或非 legacy 姿态 operation 行。
 5. §4 中 completed 的 reason 码本包未逐字 pin（套件亦未 pin），以套件断言为准。
 6. 本包 SQL 模板由被测套件 helper 同形抄录，若 #4612 后续修复轮改动 helper 形状，
    需以新 head 重核 §3.1。
-7. 脚本在本包交付时点仅做了 bash 语法与护栏路径自测（见 PR body 证据），未在
-   全新机器上做端到端演练——QA 首跑若遇 `pnpm install`/postgres 版本差异
-  （CI 用 Postgres 14），以 CI 步骤为准。
+7. 脚本已在基线重钉时对**新基线** `b0c7e2823e…` 做过一次端到端演练
+   （2026-07-27，macOS + Postgres 15.17 + Node 25，隔离库 `w4c2_qa`：
+   `qa-db-reset.sh` → `qa-run-suites.sh` 全绿——真库 7 文件 63 passed、
+   无库单测 4 文件 99 passed、wiring 守卫 22 pass/0 fail、collector 守卫
+   14 pass/0 fail、residue 缺陷信号全零）。但仍未在**全新机器**演练——QA 首跑若遇
+   `pnpm install`/postgres 版本差异（CI 用 Postgres 14），以 CI 步骤为准。

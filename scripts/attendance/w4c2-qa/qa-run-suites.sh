@@ -45,6 +45,7 @@ pnpm --filter @metasheet/core-backend exec vitest run \
   src/attendance/__tests__/w4c2-frozen-attribution.test.ts \
   src/attendance/__tests__/w4c2-shadow-expected-differences.test.ts \
   src/attendance/__tests__/w4c1-segment-calculator.test.ts \
+  src/attendance/__tests__/w4c1-fingerprint-golden.test.ts \
   --reporter=dot
 
 echo "== [3/4] Wiring + collector guards (node --test) =="
