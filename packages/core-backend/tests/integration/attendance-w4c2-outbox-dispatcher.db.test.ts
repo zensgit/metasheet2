@@ -46,11 +46,24 @@ describeDb('W4C-2 outbox dispatcher (lock 7.1a/12.3, real DB, true concurrency)'
 
   const seedPending = async (eventKind: string, payload: Record<string, unknown>): Promise<string> => {
     const id = randomUUID()
+    const operationId = randomUUID()
+    // W4C-2 amendment section 1.4's `fk_areo_operation` (new — W4C-0 deliberately omitted
+    // it) requires a real (org_id, entrypoint, operation_id) row to already exist before
+    // any outbox row references it. This backing row is fixture setup, inserted BEFORE
+    // each test's `businessCounts()` "before" snapshot, so it does not affect the "the
+    // dispatcher touches only the outbox table" assertion those tests make.
+    await pool.query(
+      `INSERT INTO attendance_result_operations (
+          org_id, entrypoint, operation_id, identity_source_kind, source_ref, actor_id, actor_posture,
+          capability, subject_scope, command_fingerprint, accepted_write_posture, state, response_snapshot
+        ) VALUES ($1,'live_punch',$2,'direct_live_punch','ref:w4c2ob','actor-w4c2ob','self','punch','{}'::jsonb,$3,'shadow','completed','{}'::jsonb)`,
+      [ORG, operationId, FP],
+    )
     await pool.query(
       `INSERT INTO attendance_result_event_outbox
-         (id, org_id, entrypoint, operation_id, event_kind, payload, payload_schema_version, business_key_fingerprint, delivery_state)
-       VALUES ($1, $2, 'live_punch', $3, $4, $5::jsonb, 1, $6, 'pending')`,
-      [id, ORG, randomUUID(), eventKind, JSON.stringify(payload), FP],
+         (id, org_id, entrypoint, operation_id, identity_kind, event_kind, payload, payload_schema_version, business_key_fingerprint, delivery_state)
+       VALUES ($1, $2, 'live_punch', $3, 'operation', $4, $5::jsonb, 1, $6, 'pending')`,
+      [id, ORG, operationId, eventKind, JSON.stringify(payload), FP],
     )
     return id
   }

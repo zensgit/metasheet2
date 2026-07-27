@@ -70,6 +70,9 @@ describe('W4C-0 Stage C — exported operation contract', () => {
       W4_BATCH_LIMIT_EXCEEDED: 422,
       ATTENDANCE_WRITE_NOT_AUTHORIZED: 403,
       W4_ATTRIBUTION_UNSUPPORTED: 422,
+      // W4C-2 amendment section 1.6 (PR #4617, RATIFIED): the scheduled-run (class-01)
+      // advisory-helper busy code.
+      ATTENDANCE_SCHEDULED_RUN_BUSY: 503,
     })
     const error = new AttendanceW4OperationError('ATTENDANCE_OPERATION_IN_PROGRESS', 'operation')
     expect(error.message).toBe('ATTENDANCE_OPERATION_IN_PROGRESS') // message IS the code
