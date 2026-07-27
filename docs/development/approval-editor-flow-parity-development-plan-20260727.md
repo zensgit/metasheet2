@@ -153,6 +153,11 @@ E1 不得默认引入 ELK。只有现有布局在构造的条件/并行/长标�
 | U0 | staging UAT 与 canary | 基线截图、任务脚本、缺陷分诊、回滚演练；不直接开生产 | T1 | Codex协调；owner执行真实租户动作 | U0 |
 | D0 | 三份收口文档 | 设计锁 delta、执行台账、收尾验证 MD；逐项列明未完成 owner 门 | U0 | Fable 5起草；Codex定稿 | D0 |
 
+E0 已在 exact `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
+完成。判定、可复现探针、能力矩阵及 E1 夹具约束见
+`approval-editor-flow-parity-e0-audit-20260727.md`。该完成状态只关闭
+E0 审计任务，不改变本计划和历史交互锁的 `PROPOSED` / owner-gated 状态。
+
 ### 4.1 依赖图
 
 ```mermaid
