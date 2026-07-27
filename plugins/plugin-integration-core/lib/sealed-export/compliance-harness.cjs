@@ -8,9 +8,8 @@
 // HERMETIC, precisely:
 //   - no network, no clock read, no randomness, no environment read;
 //   - the exported functions are PURE over their arguments and touch no filesystem
-//     at all — the vector set and the module source texts are PARAMETERS;
-//   - only the standalone CLI at the bottom reads files, and only two kinds: the
-//     vectors JSON and the sibling .cjs sources in this directory.
+//     at all — the vector set is a PARAMETER;
+//   - only the standalone CLI at the bottom reads a file, and only one: the vectors JSON.
 //
 // The table-as-a-parameter discipline is deliberate and is the same one
 // lifecycle.cjs uses for its reachability analysis: an engine that can only ever be
@@ -18,9 +17,17 @@
 // check below is exercised against a deliberately damaged input in
 // __tests__/sealed-export-compliance-harness.test.cjs.
 //
-// NO THROW. This module contains no `throw` statement, so failure-vocabulary.cjs
-// remains the single throw site of lib/sealed-export/ (asserted mechanically by
-// collectThrowSiteFindings, run over this file too). Every failure is a finding in
+// NO THROW — RETRACTION AND CORRECTION. An earlier revision of this header claimed this
+// module contains no `throw` statement and that the claim was "asserted mechanically by
+// collectThrowSiteFindings, run over this file too". THE MECHANICAL PART WAS FALSE. That
+// scanner blanked comments and strings with a hand-written character scan which could not
+// distinguish a regular-expression literal from division; the first `/.../` literal in
+// this file containing a quote character desynchronised it, and a real `throw` injected
+// after that line was counted ZERO. The claim happened to be true; the evidence for it was
+// not. The scanner has been replaced by a TypeScript-parser walk over ThrowStatement nodes
+// (__tests__/support/sealed-export-source-scan.cjs), which has no such blind window and
+// fails closed when a source does not parse. That scan is a STATIC SOURCE assertion, not a
+// behaviour proof. This module still contains no `throw`: every failure is a finding in
 // the returned summary.
 
 const canonicalCodec = require('./canonical-json.cjs')
@@ -257,112 +264,11 @@ function checkVectorSet(vectorSet) {
 }
 
 // ---------------------------------------------------------------------------
-// Source-level throw-site invariant (§10: "implementation requires ... a
-// source-level throw-site invariant").
-//
-// Sources are SUPPLIED, never read here, so the scanner can be pointed at synthetic
-// source text whose defect is known — which is the only way to show the scanner has
-// any power at all.
-//
-// Comments and string/template literals are blanked before the `throw` search so a
-// `throw` inside a comment or a quoted example cannot mask a real one, and the
-// vocabulary-literal search runs over the ORIGINAL text because the literals are
-// exactly what it needs to read.
+// The source-level throw-site invariant (§10) used to live here. It is now
+// __tests__/support/sealed-export-source-scan.cjs — a TypeScript-parser walk. It is a
+// TEST concern, not a runtime one, so the shipped library takes no TypeScript
+// dependency and this module no longer reads source text at all.
 // ---------------------------------------------------------------------------
-function stripCommentsAndStrings(source) {
-  let out = ''
-  let index = 0
-  const length = source.length
-  while (index < length) {
-    const two = source.slice(index, index + 2)
-    if (two === '//') {
-      while (index < length && source[index] !== '\n') { out += ' '; index += 1 }
-      continue
-    }
-    if (two === '/*') {
-      while (index < length && source.slice(index, index + 2) !== '*/') {
-        out += source[index] === '\n' ? '\n' : ' '
-        index += 1
-      }
-      out += '  '
-      index += 2
-      continue
-    }
-    const quote = source[index]
-    if (quote === '"' || quote === "'" || quote === '`') {
-      out += ' '
-      index += 1
-      while (index < length && source[index] !== quote) {
-        if (source[index] === '\\') { out += ' '; index += 1 }
-        out += source[index] === '\n' ? '\n' : ' '
-        index += 1
-      }
-      out += ' '
-      index += 1
-      continue
-    }
-    out += source[index]
-    index += 1
-  }
-  return out
-}
-
-function collectThrowSiteFindings(sources, declaredReasons, allowedThrowModule) {
-  const findings = []
-  const reasonSet = new Set(Array.isArray(declaredReasons) ? declaredReasons : [])
-  const reachedReasons = new Set()
-  const dynamicReasonSites = new Set()
-  const list = Array.isArray(sources) ? sources : []
-  let throwSiteCount = 0
-
-  for (let index = 0; index < list.length; index += 1) {
-    const entry = list[index]
-    const name = entry && typeof entry.name === 'string' ? entry.name : 'source[' + index + ']'
-    const text = entry && typeof entry.text === 'string' ? entry.text : ''
-
-    const stripped = stripCommentsAndStrings(text)
-    const throwMatches = stripped.match(/\bthrow\b/g)
-    const throwCount = throwMatches === null ? 0 : throwMatches.length
-    if (throwCount > 0) {
-      throwSiteCount += throwCount
-      if (name !== allowedThrowModule) {
-        findings.push(frozenFinding('THROW_SITE_MODULE', name, 'throw outside the single throw site'))
-      }
-    }
-
-    // Every domain reason handed to failSealedExport must be a vocabulary member.
-    const reasonPattern = /failSealedExport\(\s*(['"])([^'"]*)\1/g
-    let match = reasonPattern.exec(text)
-    while (match !== null) {
-      const reason = match[2]
-      reachedReasons.add(reason)
-      if (!reasonSet.has(reason)) {
-        findings.push(frozenFinding('THROW_SITE_REASON_UNDECLARED', name, 'reason not in vocabulary'))
-      }
-      match = reasonPattern.exec(text)
-    }
-
-    // A non-literal reason argument cannot be checked by ANY source scan. Such sites
-    // are therefore not silently tolerated and not banned either: they are ENUMERATED,
-    // and the caller is obliged to pin the enumeration and to prove behaviourally that
-    // each listed producer yields vocabulary members only. `function failSealedExport(`
-    // is the declaration, not a call site, and is excluded.
-    const declarationStripped = text.replace(/function\s+failSealedExport\s*\(/g, 'function __decl__(')
-    const dynamicPattern = /failSealedExport\(\s*(?!['"])[A-Za-z_$]/g
-    let dynamicMatch = dynamicPattern.exec(declarationStripped)
-    while (dynamicMatch !== null) {
-      dynamicReasonSites.add(name)
-      dynamicMatch = dynamicPattern.exec(declarationStripped)
-    }
-  }
-
-  return {
-    findings,
-    throwSiteCount,
-    reachedReasons: Object.freeze(Array.from(reachedReasons).sort()),
-    dynamicReasonSites: Object.freeze(Array.from(dynamicReasonSites).sort()),
-  }
-}
 
 // ---------------------------------------------------------------------------
 // The harness proper. Pure; returns a deterministic, frozen summary.
@@ -370,13 +276,8 @@ function collectThrowSiteFindings(sources, declaredReasons, allowedThrowModule) 
 function runSealedExportComplianceHarness(input) {
   const request = canonicalCodec.__internals.isStrictPlainObject(input) ? input : {}
   const vectorResult = checkVectorSet(request.vectorSet)
-  const throwResult = collectThrowSiteFindings(
-    request.sources,
-    request.declaredReasons,
-    request.allowedThrowModule,
-  )
 
-  const findings = vectorResult.findings.concat(throwResult.findings)
+  const findings = vectorResult.findings.slice()
   findings.sort((left, right) => {
     if (left.checkId !== right.checkId) return left.checkId < right.checkId ? -1 : 1
     const leftSubject = String(left.subjectId)
@@ -399,7 +300,6 @@ function runSealedExportComplianceHarness(input) {
       vectors: vectorResult.vectorCount,
       nearMisses: vectorResult.nearMissCount,
       dispositions: vectorResult.dispositions.length,
-      throwSites: throwResult.throwSiteCount,
       findings: findings.length,
     }),
     dispositionCounts: Object.freeze(dispositionCounts),
@@ -407,8 +307,6 @@ function runSealedExportComplianceHarness(input) {
       left.id < right.id ? -1 : left.id > right.id ? 1 : 0
     ))),
     nearMissCoverage: Object.freeze(Object.assign(Object.create(null), vectorResult.coverage)),
-    reachedReasons: throwResult.reachedReasons,
-    dynamicReasonSites: throwResult.dynamicReasonSites,
   })
 }
 
@@ -444,42 +342,21 @@ module.exports = {
   DISPOSITION_REFUSED_PARSE,
   DISPOSITION_REFUSED_DOMAIN,
   classifyJsonText,
-  stripCommentsAndStrings,
-  collectThrowSiteFindings,
   runSealedExportComplianceHarness,
   formatHarnessSummary,
 }
 
 // ---------------------------------------------------------------------------
 // Standalone runner. `node lib/sealed-export/compliance-harness.cjs`
-// Reads only the vectors JSON and the sibling .cjs sources in this directory.
+// Reads exactly one file: the vectors JSON.
 // ---------------------------------------------------------------------------
 if (require.main === module) {
   const fs = require('node:fs')
   const path = require('node:path')
-  const { SEALED_EXPORT_FAILURE_REASONS } = require('./failure-vocabulary.cjs')
-  const here = __dirname
-  const moduleNames = [
-    'canonical-json.cjs',
-    'compliance-harness.cjs',
-    'contracts.cjs',
-    'digests.cjs',
-    'failure-vocabulary.cjs',
-    'lifecycle.cjs',
-  ]
-  const sources = moduleNames.map((name) => ({
-    name,
-    text: fs.readFileSync(path.join(here, name), 'utf8'),
-  }))
   const vectorSet = JSON.parse(
-    fs.readFileSync(path.join(here, 'vectors', 'sealed-export-canonical-vectors.json'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, 'vectors', 'sealed-export-canonical-vectors.json'), 'utf8'),
   )
-  const summary = runSealedExportComplianceHarness({
-    vectorSet,
-    sources,
-    declaredReasons: SEALED_EXPORT_FAILURE_REASONS,
-    allowedThrowModule: 'failure-vocabulary.cjs',
-  })
+  const summary = runSealedExportComplianceHarness({ vectorSet })
   process.stdout.write(formatHarnessSummary(summary) + '\n')
   process.exitCode = summary.ok ? 0 : 1
 }

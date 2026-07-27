@@ -7,6 +7,11 @@
 //   1. an exact vocabulary pin              -> vocabularyExactPin()
 //   2. a runtime consumer pin               -> latentSurfacePin() + zeroConsumerSweep()
 //   3. a source-level throw-site invariant  -> throwSiteInvariant()
+//                                            + astThrowSiteScanHasNoBlindWindow()
+//
+// Pin 3 is a STATIC SOURCE assertion, not a behaviour proof: it establishes that throw
+// statements and the declared vocabulary are consistent in the source text. What the code
+// does at runtime is proven separately, by the pins that call the real functions.
 //
 // GOVERNANCE NOTE, deliberately load-bearing on nothing: §10 says of this set "This
 // exact set is **proposed**, not ratified", while §12 lists "failure vocabulary"
@@ -21,7 +26,18 @@ const SEALED_DIR = path.join(__dirname, '..', 'lib', 'sealed-export')
 const vocabulary = require(path.join(SEALED_DIR, 'failure-vocabulary.cjs'))
 const contracts = require(path.join(SEALED_DIR, 'contracts.cjs'))
 const lifecycle = require(path.join(SEALED_DIR, 'lifecycle.cjs'))
-const harness = require(path.join(SEALED_DIR, 'compliance-harness.cjs'))
+const { scanSealedExportThrowSites } = require(path.join(__dirname, 'support', 'sealed-export-source-scan.cjs'))
+
+// Every assertion driven by scanSealedExportThrowSites is a STATIC SOURCE assertion: it
+// proves the source text is internally consistent between its throw sites and the declared
+// vocabulary. It is NOT a behaviour proof — that class is carried by latentSurfacePin's
+// behavioural half, undeclaredReasonIsNeverEchoed and detailsCarryNoCallerValues, which
+// call the real functions.
+function scan(sources, parseOverride) {
+  return scanSealedExportThrowSites(
+    sources, vocabulary.SEALED_EXPORT_FAILURE_REASONS, 'failure-vocabulary.cjs', parseOverride,
+  )
+}
 
 // ---------------------------------------------------------------------------
 // PIN 1 — the exact §10 set, transcribed from the DOCUMENT, not from the module.
@@ -106,15 +122,11 @@ function latentSurfacePin() {
   const union = Array.from(new Set([...reached, ...unreached])).sort()
   assert.deepEqual(union, DOCUMENT_SECTION_10_REASONS.slice().sort(), 'partition union')
 
-  // The REACHED half is derived MECHANICALLY from the source, then set-compared.
+  // The REACHED half is derived MECHANICALLY from the source (AST), then set-compared.
   // Hand-matching would be the "count guard" antipattern: it would assert the
   // constant equals itself.
-  const summary = harness.runSealedExportComplianceHarness({
-    vectorSet: null,
-    sources: readSealedSources(),
-    declaredReasons: vocabulary.SEALED_EXPORT_FAILURE_REASONS,
-    allowedThrowModule: 'failure-vocabulary.cjs',
-  })
+  const summary = scan(readSealedSources())
+  assert.deepEqual(summary.findings, [], 'the source scan must be clean before deriving from it')
   // Non-literal reason arguments cannot be read by ANY source scan, so the set of
   // modules containing one is pinned by enumeration...
   assert.deepEqual(summary.dynamicReasonSites, ['contracts.cjs'],
@@ -157,86 +169,268 @@ function validateByName(objectName, input) {
 }
 
 // ---------------------------------------------------------------------------
-// PIN 3 — source-level throw-site invariant, with its own positive control.
-// A scan that only ever runs over clean source proves nothing about its power.
+// PIN 3 — source-level throw-site invariant, over a REAL PARSE, with its own positive
+// controls. A scan that only ever runs over clean source proves nothing about its power.
+//
+// STATIC, NOT BEHAVIOURAL: everything below reads source text. It shows throw statements
+// sit only in the allowed module and that every literal reason is a vocabulary member. It
+// says nothing about what the code does when run.
 // ---------------------------------------------------------------------------
 function throwSiteInvariant() {
   const sources = readSealedSources()
   assert.ok(sources.length >= 6, 'all sealed-export modules are scanned')
 
-  const clean = harness.collectThrowSiteFindings(
-    sources, vocabulary.SEALED_EXPORT_FAILURE_REASONS, 'failure-vocabulary.cjs',
-  )
-  assert.deepEqual(clean.findings, [], 'real source must satisfy the throw-site invariant')
+  const clean = scan(sources)
+  assert.deepEqual(clean.findings, [],
+    'STATIC: real source must satisfy the throw-site invariant (source consistency, not behaviour)')
   assert.ok(clean.throwSiteCount >= 1, 'the single throw site is present')
+  assert.equal(clean.parsedSources, sources.length, 'every module parsed; none was skipped')
 
   // POSITIVE CONTROL A — an undeclared reason literal is caught.
-  const undeclared = harness.collectThrowSiteFindings(
-    [{ name: 'synthetic.cjs', text: "failSealedExport('NOT_A_REAL_REASON', {})" }],
-    vocabulary.SEALED_EXPORT_FAILURE_REASONS, 'failure-vocabulary.cjs',
-  )
+  const undeclared = scan([{ name: 'synthetic.cjs', text: "failSealedExport('NOT_A_REAL_REASON', {})" }])
   assert.equal(undeclared.findings.length, 1)
   assert.equal(undeclared.findings[0].checkId, 'THROW_SITE_REASON_UNDECLARED')
 
   // POSITIVE CONTROL B — a throw outside the single throw site is caught.
-  const strayThrow = harness.collectThrowSiteFindings(
-    [{ name: 'synthetic.cjs', text: 'function f() { throw new Error("x") }' }],
-    vocabulary.SEALED_EXPORT_FAILURE_REASONS, 'failure-vocabulary.cjs',
-  )
+  const strayThrow = scan([{ name: 'synthetic.cjs', text: 'function f() { throw new Error("x") }' }])
   assert.equal(strayThrow.findings.length, 1)
   assert.equal(strayThrow.findings[0].checkId, 'THROW_SITE_MODULE')
 
   // POSITIVE CONTROL C — a declared reason in the allowed module is NOT flagged.
-  const allowed = harness.collectThrowSiteFindings(
-    [{ name: 'failure-vocabulary.cjs', text: "throw 0; failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')" }],
-    vocabulary.SEALED_EXPORT_FAILURE_REASONS, 'failure-vocabulary.cjs',
-  )
+  const allowed = scan([{
+    name: 'failure-vocabulary.cjs',
+    text: "function f() { throw 0 }\nfailSealedExport('SEALED_EXPORT_INTERNAL_ERROR')",
+  }])
   assert.deepEqual(allowed.findings, [], 'the allowed module with a declared reason is clean')
 
-  // The stripper must blank comments and strings, so a `throw` mentioned in prose or
-  // inside a quoted example cannot mask — or fabricate — a real one.
-  const masked = harness.collectThrowSiteFindings(
-    [{ name: 'synthetic.cjs', text: '// this module does not throw\nconst s = "throw"\n/* throw */' }],
-    vocabulary.SEALED_EXPORT_FAILURE_REASONS, 'failure-vocabulary.cjs',
-  )
+  // A `throw` mentioned in prose or inside a quoted example is not a throw statement.
+  const masked = scan([{
+    name: 'synthetic.cjs',
+    text: '// this module does not throw\nconst s = "throw"\n/* throw */\nconst t = `throw`\n',
+  }])
   assert.deepEqual(masked.findings, [], 'commented/quoted `throw` must not count as a throw site')
   assert.equal(masked.throwSiteCount, 0)
-  assert.equal(harness.stripCommentsAndStrings('const a = "x" // y').indexOf('x'), -1)
-  assert.equal(harness.stripCommentsAndStrings('const a = 1 // throw').indexOf('throw'), -1)
 }
 
 // ---------------------------------------------------------------------------
-// Runtime-consumer pin, second half: S1 is LATENT, so nothing outside the
-// directory may require these modules.
+// PIN 3, second half — the three properties the hand-written stripper could not hold.
+//
+// RETRACTION. The previous scanner blanked comments and strings with a character scan that
+// could not distinguish a regex literal `/.../` from division. compliance-harness.cjs then
+// contained `/failSealedExport\(\s*(['"])([^'"]*)\1/g`; the scanner read the `'` inside that
+// literal as the start of a string and blanked everything to the next `'`, desynchronising
+// for the rest of the file. A real `throw` placed after that line was counted ZERO, while
+// the module's own header asserted "no throw ... asserted mechanically". The claim was true;
+// the mechanism was blind. Controls 1-3 are the regression pins.
 // ---------------------------------------------------------------------------
-function zeroConsumerSweep() {
-  const packageRoot = path.join(__dirname, '..')
-  const skipDirectories = new Set(['node_modules', '__tests__', 'dist', '.git', 'sealed-export'])
-  const offenders = []
-  let scanned = 0
+function astThrowSiteScanHasNoBlindWindow() {
+  // CONTROL 1 — a `throw` INSIDE A REGEX LITERAL is not a throw statement.
+  const inRegex = scan([{
+    name: 'synthetic.cjs',
+    text: "const re = /throw/g\nconst also = /a throw b/\nmodule.exports = { re, also }\n",
+  }])
+  assert.deepEqual(inRegex.findings, [], 'a throw inside a regex literal must not be counted')
+  assert.equal(inRegex.throwSiteCount, 0, 'regex-literal `throw` contributes no throw site')
 
-  const walk = (directory) => {
-    const entries = fs.readdirSync(directory, { withFileTypes: true })
+  // CONTROL 2 — a REAL throw inside a TEMPLATE INTERPOLATION `${ ... }` IS counted.
+  // (A throw statement cannot sit in expression position, so it is wrapped in an IIFE —
+  // written the way real code would have to write it.)
+  const inInterpolation = scan([{
+    name: 'synthetic.cjs',
+    text: "const s = `${(() => { throw new Error('sx-interp') })()}`\nmodule.exports = { s }\n",
+  }])
+  assert.equal(inInterpolation.throwSiteCount, 1, 'a throw inside ${ } must be counted')
+  assert.equal(inInterpolation.findings.length, 1)
+  assert.equal(inInterpolation.findings[0].checkId, 'THROW_SITE_MODULE')
+
+  // CONTROL 3 — THE PROVEN BLIND WINDOW. The offending regex literal verbatim, followed by
+  // a real throw. The old scanner returned 0 here; the parse-based scan must return 1.
+  const afterRegexLine = scan([{
+    name: 'synthetic.cjs',
+    text: [
+      "const reasonPattern = /failSealedExport\\(\\s*(['\"])([^'\"]*)\\1/g",
+      'function later() { throw new Error("sx-after-regex") }',
+      'module.exports = { reasonPattern, later }',
+    ].join('\n'),
+  }])
+  assert.equal(afterRegexLine.throwSiteCount, 1,
+    'a throw AFTER the scanner\'s own regex line must be counted — this is the proven blind window')
+  assert.equal(afterRegexLine.findings.length, 1)
+  assert.equal(afterRegexLine.findings[0].checkId, 'THROW_SITE_MODULE')
+
+  // The same shape at REAL SCALE: the whole live compliance-harness.cjs source, with the
+  // offending regex literal and a throw injected into it. The live module no longer
+  // contains such a literal (the stripper that needed one is gone), so the literal is
+  // supplied here rather than assumed — otherwise this case would not discriminate.
+  const harnessText = fs.readFileSync(path.join(SEALED_DIR, 'compliance-harness.cjs'), 'utf8')
+  const injectedLines = harnessText.split('\n')
+  const anchor = injectedLines.findIndex((line) => line.indexOf('function formatHarnessSummary') >= 0)
+  assert.ok(anchor > 0, 'anchor for the injected throw must exist')
+  injectedLines.splice(
+    anchor, 0,
+    "const sxProbe = /failSealedExport\\(\\s*(['\"])([^'\"]*)\\1/g",
+    'function sxInjected() { throw new Error("sx-injected") }',
+    'module.exports.sxProbe = sxProbe',
+  )
+  const injected = scan([{ name: 'compliance-harness.cjs', text: injectedLines.join('\n') }])
+  assert.equal(injected.throwSiteCount, 1,
+    'a throw after a regex literal in the REAL module must be counted')
+  assert.equal(injected.findings.length, 1)
+  assert.equal(injected.findings[0].checkId, 'THROW_SITE_MODULE')
+
+  // FAIL-CLOSED A — a source that does not parse is a FINDING, never "zero findings".
+  const broken = scan([{ name: 'synthetic.cjs', text: 'function f( { const = ;;;)(' }])
+  assert.equal(broken.findings.length, 1, 'a parse failure must not be reported as clean')
+  assert.equal(broken.findings[0].checkId, 'SOURCE_PARSE_FAILED')
+  assert.equal(broken.parsedSources, 0)
+
+  // FAIL-CLOSED B — if parse diagnostics are not observable at all (a future compiler
+  // dropping the property), the scan refuses rather than concluding "no diagnostics".
+  const unverifiable = scan(
+    [{ name: 'synthetic.cjs', text: 'function f() { throw new Error("x") }' }],
+    () => ({}),
+  )
+  assert.equal(unverifiable.findings.length, 1)
+  assert.equal(unverifiable.findings[0].checkId, 'SOURCE_PARSE_UNVERIFIABLE')
+  assert.equal(unverifiable.throwSiteCount, 0)
+
+  // FAIL-CLOSED C — a parser that throws, and a source entry with no text, are findings.
+  const parserThrew = scan([{ name: 'synthetic.cjs', text: 'const a = 1' }], () => { throw new Error('x') })
+  assert.equal(parserThrew.findings[0].checkId, 'SOURCE_PARSE_FAILED')
+  const noText = scan([{ name: 'synthetic.cjs' }])
+  assert.equal(noText.findings[0].checkId, 'SOURCE_UNREADABLE')
+
+  // NEGATIVE CONTROL for all of the above: the same scan over healthy synthetic source is
+  // clean, so these are not "everything is a finding".
+  const healthy = scan([{ name: 'synthetic.cjs', text: 'const a = 1\nmodule.exports = { a }\n' }])
+  assert.deepEqual(healthy.findings, [])
+  assert.equal(healthy.parsedSources, 1)
+}
+
+// ---------------------------------------------------------------------------
+// Runtime-consumer pin, second half: S1 is LATENT, so nothing in the repository's runtime
+// code may import these modules — not just nothing inside this package.
+//
+// Both roots and the filesystem are PARAMETERS, so the sweep can be aimed at a synthetic
+// tree whose offender is known. Without that, "zero offenders" is a traversal result, not
+// a detection result. Nothing is written to disk: the control's filesystem is in memory.
+// ---------------------------------------------------------------------------
+const SWEEP_SKIP_DIRECTORIES = new Set([
+  'node_modules', 'dist', 'build', 'coverage', '.next', '.git', '.turbo', '.output',
+  '__tests__', 'tests', 'test', '__mocks__', 'e2e',
+  'sealed-export', // the S1 modules themselves
+])
+const SWEEP_SOURCE_FILE = /\.(cjs|mjs|js|jsx|ts|tsx|vue)$/
+const SWEEP_TEST_FILE = /\.(spec|test)\.[cm]?[jt]sx?$/
+
+// An IMPORT, not a mention. A doc comment or a chain entry naming the directory is not a
+// consumer. Both module syntaxes are covered (require / ESM), per the writer-audit rule,
+// plus the computed `path.join(..., 'sealed-export', ...)` form these very tests use.
+const SWEEP_CONSUMER_PATTERNS = [
+  /\brequire\s*\(\s*(['"`])([^'"`\n]*sealed-export[^'"`\n]*)\1/,
+  /\bimport\s*\(\s*(['"`])([^'"`\n]*sealed-export[^'"`\n]*)\1/,
+  /\bfrom\s+(['"`])([^'"`\n]*sealed-export[^'"`\n]*)\1/,
+  /\bimport\s+(['"`])([^'"`\n]*sealed-export[^'"`\n]*)\1/,
+  /\bjoin\s*\([^)\n]*(['"`])sealed-export\1/,
+]
+
+function sweepForSealedExportConsumers(roots, io) {
+  const offenders = []
+  const scannedByRoot = Object.create(null)
+
+  const walk = (directory, rootLabel) => {
+    let entries
+    try {
+      entries = io.readdirSync(directory, { withFileTypes: true })
+    } catch (error) {
+      return
+    }
     for (let index = 0; index < entries.length; index += 1) {
       const entry = entries[index]
       const full = path.join(directory, entry.name)
       if (entry.isDirectory()) {
-        if (!skipDirectories.has(entry.name)) walk(full)
+        if (SWEEP_SKIP_DIRECTORIES.has(entry.name)) continue
+        walk(full, rootLabel)
         continue
       }
-      if (!/\.(cjs|js|mjs|ts)$/.test(entry.name)) continue
-      scanned += 1
-      if (fs.readFileSync(full, 'utf8').indexOf('sealed-export') >= 0) {
-        offenders.push(path.relative(packageRoot, full))
+      if (!SWEEP_SOURCE_FILE.test(entry.name)) continue
+      if (SWEEP_TEST_FILE.test(entry.name)) continue
+      scannedByRoot[rootLabel] = (scannedByRoot[rootLabel] || 0) + 1
+      const text = io.readFileSync(full, 'utf8')
+      for (let p = 0; p < SWEEP_CONSUMER_PATTERNS.length; p += 1) {
+        if (SWEEP_CONSUMER_PATTERNS[p].test(text)) { offenders.push(full); break }
       }
     }
   }
-  walk(packageRoot)
 
-  // POSITIVE CONTROL: the sweep actually visited a meaningful number of files. A
-  // sweep that walked nothing would report zero offenders and prove nothing.
-  assert.ok(scanned > 50, 'zero-consumer sweep must actually traverse the package, scanned=' + scanned)
-  assert.deepEqual(offenders, [], 'S1 must have no runtime consumer outside lib/sealed-export/')
+  for (let index = 0; index < roots.length; index += 1) walk(roots[index].path, roots[index].label)
+  return { offenders: offenders.sort(), scannedByRoot }
+}
+
+// A directory tree held in memory, exposing just the two calls the sweep makes.
+function inMemoryFilesystem(files) {
+  const names = Object.keys(files)
+  const dirent = (name, isDirectory) => ({ name, isDirectory: () => isDirectory })
+  return {
+    readdirSync(directory) {
+      const prefix = directory.endsWith(path.sep) ? directory : directory + path.sep
+      const seen = new Map()
+      for (let index = 0; index < names.length; index += 1) {
+        if (names[index].indexOf(prefix) !== 0) continue
+        const rest = names[index].slice(prefix.length)
+        const cut = rest.indexOf(path.sep)
+        if (cut < 0) seen.set(rest, false)
+        else if (!seen.has(rest.slice(0, cut))) seen.set(rest.slice(0, cut), true)
+      }
+      if (seen.size === 0) throw new Error('ENOENT ' + directory)
+      return Array.from(seen.entries()).map(([name, isDirectory]) => dirent(name, isDirectory))
+    },
+    readFileSync(file) {
+      if (!Object.prototype.hasOwnProperty.call(files, file)) throw new Error('ENOENT ' + file)
+      return files[file]
+    },
+  }
+}
+
+function zeroConsumerSweep() {
+  const repoRoot = path.join(__dirname, '..', '..', '..')
+  const roots = [
+    { label: 'apps', path: path.join(repoRoot, 'apps') },
+    { label: 'packages', path: path.join(repoRoot, 'packages') },
+    { label: 'plugins', path: path.join(repoRoot, 'plugins') },
+  ]
+  // Fail closed on a mis-derived root: a wrong repoRoot would silently sweep nothing.
+  for (let index = 0; index < roots.length; index += 1) {
+    assert.ok(fs.existsSync(roots[index].path), 'sweep root must exist: ' + roots[index].label)
+  }
+
+  const real = sweepForSealedExportConsumers(roots, fs)
+  for (let index = 0; index < roots.length; index += 1) {
+    const label = roots[index].label
+    assert.ok((real.scannedByRoot[label] || 0) > 50,
+      'sweep must traverse ' + label + ', scanned=' + (real.scannedByRoot[label] || 0))
+  }
+  assert.deepEqual(real.offenders.map((f) => path.relative(repoRoot, f)), [],
+    'S1 must have no runtime consumer anywhere in apps/, packages/ or plugins/')
+
+  // POSITIVE CONTROL — CROSS-PACKAGE DETECTION. A synthetic consumer in a DIFFERENT
+  // package must make the sweep RED and must be NAMED. Without this the assertion above
+  // proves traversal only; nothing would ever have been fed to the predicate.
+  const syntheticRoot = path.join(path.sep, 'sx-synthetic', 'packages')
+  const consumerFile = path.join(syntheticRoot, 'core-backend', 'src', 'sx-consumer.cjs')
+  const mentionFile = path.join(syntheticRoot, 'core-backend', 'src', 'sx-mention.cjs')
+  const esmFile = path.join(syntheticRoot, 'other-package', 'src', 'sx-esm.ts')
+  const skippedTestFile = path.join(syntheticRoot, 'core-backend', 'src', 'sx-consumer.spec.ts')
+  const io = inMemoryFilesystem({
+    [consumerFile]: "const c = require('../../../plugins/plugin-integration-core/lib/sealed-export/contracts.cjs')\n",
+    [mentionFile]: '// mentions sealed-export in prose only; not a consumer\nmodule.exports = {}\n',
+    [esmFile]: "import { x } from '../../plugins/plugin-integration-core/lib/sealed-export/lifecycle.cjs'\n",
+    [skippedTestFile]: "require('../lib/sealed-export/contracts.cjs')\n",
+  })
+  const control = sweepForSealedExportConsumers([{ label: 'synthetic', path: syntheticRoot }], io)
+  assert.deepEqual(control.offenders, [consumerFile, esmFile].sort(),
+    'the sweep must NAME a cross-package consumer, in both require and ESM syntax')
+  assert.equal(control.scannedByRoot.synthetic, 3, 'the .spec file is excluded from the sweep')
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +532,27 @@ function detailsCarryNoCallerValues() {
   assert.deepEqual(throws(() => vocabulary.failSealedExport('SEALED_EXPORT_MANIFEST_INVALID',
     [1, 2])).details, {}, 'array details refused')
 
+  // The `!descriptor.enumerable` token of buildSafeDetails needs its OWN discriminating
+  // pair. The accessor case above does not supply one: a getter has no `descriptor.value`,
+  // so the value-domain guard refuses it whatever the enumerability check does — a sibling
+  // door covering for this one. These two cases differ ONLY in `enumerable`, and both carry
+  // the SAME already-accepted safe token, so nothing else can explain the difference.
+  const nonEnumerable = {}
+  Object.defineProperty(nonEnumerable, 'field', { value: 'totalRows', enumerable: false })
+  const refusedNonEnumerable = throws(() => vocabulary.failSealedExport(
+    'SEALED_EXPORT_MANIFEST_INVALID', nonEnumerable), 'non-enumerable own data property')
+  assert.equal(refusedNonEnumerable.reason, 'SEALED_EXPORT_INTERNAL_ERROR',
+    'a non-enumerable own data property must refuse the whole details object')
+  assert.deepEqual(refusedNonEnumerable.details, {})
+
+  const enumerableTwin = {}
+  Object.defineProperty(enumerableTwin, 'field', { value: 'totalRows', enumerable: true })
+  const acceptedTwin = throws(() => vocabulary.failSealedExport(
+    'SEALED_EXPORT_MANIFEST_INVALID', enumerableTwin), 'enumerable own data property')
+  assert.equal(acceptedTwin.reason, 'SEALED_EXPORT_MANIFEST_INVALID',
+    'the SAME value with enumerable:true must be accepted')
+  assert.deepEqual(acceptedTwin.details, { field: 'totalRows' })
+
   // The returned details object is owned and frozen, so a caller cannot mutate the
   // evidence surface after the fact.
   assert.ok(Object.isFrozen(safe.details))
@@ -421,6 +636,7 @@ function main() {
   vocabularyExactPin()
   latentSurfacePin()
   throwSiteInvariant()
+  astThrowSiteScanHasNoBlindWindow()
   zeroConsumerSweep()
   undeclaredReasonIsNeverEchoed()
   detailsCarryNoCallerValues()

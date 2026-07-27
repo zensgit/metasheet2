@@ -16,23 +16,15 @@ const SEALED_DIR = path.join(__dirname, '..', 'lib', 'sealed-export')
 const harness = require(path.join(SEALED_DIR, 'compliance-harness.cjs'))
 const contracts = require(path.join(SEALED_DIR, 'contracts.cjs'))
 const codec = require(path.join(SEALED_DIR, 'canonical-json.cjs'))
-const vocabulary = require(path.join(SEALED_DIR, 'failure-vocabulary.cjs'))
 
 const VECTORS_PATH = path.join(SEALED_DIR, 'vectors', 'sealed-export-canonical-vectors.json')
 const readVectors = () => JSON.parse(fs.readFileSync(VECTORS_PATH, 'utf8'))
 
-function readSources() {
-  return fs.readdirSync(SEALED_DIR).filter((n) => n.endsWith('.cjs')).sort()
-    .map((name) => ({ name, text: fs.readFileSync(path.join(SEALED_DIR, name), 'utf8') }))
-}
-
+// The source-level throw-site scan is no longer part of the harness; it lives in
+// __tests__/support/sealed-export-source-scan.cjs and is driven from
+// sealed-export-failure-vocabulary.test.cjs.
 function run(vectorSet) {
-  return harness.runSealedExportComplianceHarness({
-    vectorSet,
-    sources: readSources(),
-    declaredReasons: vocabulary.SEALED_EXPORT_FAILURE_REASONS,
-    allowedThrowModule: 'failure-vocabulary.cjs',
-  })
+  return harness.runSealedExportComplianceHarness({ vectorSet })
 }
 
 function findingIds(summary) {
@@ -155,22 +147,12 @@ function vectorsSatisfyTheContracts() {
 }
 
 // ---------------------------------------------------------------------------
-function stripperHandlesTrickySource() {
-  const strip = harness.stripCommentsAndStrings
-  // Line comments, block comments, and all three quote forms are blanked.
-  assert.equal(strip('a // throw\nb').indexOf('throw'), -1)
-  assert.equal(strip('a /* throw */ b').indexOf('throw'), -1)
-  assert.equal(strip('const s = `throw`').indexOf('throw'), -1)
-  assert.equal(strip("const s = 'throw'").indexOf('throw'), -1)
-  // An escaped quote must not end the string early and leak the rest.
-  assert.equal(strip("const s = 'a\\'throw' ").indexOf('throw'), -1)
-  // Code OUTSIDE comments and strings survives, so the stripper cannot pass by
-  // blanking everything.
-  assert.ok(strip('function f() { throw new Error("x") }').indexOf('throw') >= 0)
-  assert.ok(strip('const a = 1 // c').indexOf('const a = 1') >= 0)
-  // Line structure is preserved so offsets stay meaningful.
-  assert.equal(strip('a\n// b\nc').split('\n').length, 3)
-}
+// The hand-written comment/string stripper this file used to exercise has been DELETED,
+// together with its test. It enumerated line comments, block comments, three quote forms
+// and an escaped quote — and omitted the regex-literal case the codebase itself contains,
+// which is precisely the window that defeated it. Its replacement is a real parse, tested
+// in sealed-export-failure-vocabulary.test.cjs (astThrowSiteScanHasNoBlindWindow).
+// ---------------------------------------------------------------------------
 
 function standaloneRunnerIsDeterministicAndSignalsFailure() {
   const script = path.join(SEALED_DIR, 'compliance-harness.cjs')
@@ -218,7 +200,6 @@ function main() {
   eachCheckHasADiscriminatingDamage()
   damageActuallyChangesBehaviour()
   vectorsSatisfyTheContracts()
-  stripperHandlesTrickySource()
   standaloneRunnerIsDeterministicAndSignalsFailure()
   classifierIsTotal()
   console.log('sealed-export-compliance-harness.test.cjs OK')

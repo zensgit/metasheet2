@@ -31,8 +31,12 @@
 //
 // THROW-SITE INVARIANT: this is the ONLY module under lib/sealed-export/ that
 // contains a `throw` statement. Every refusal in every sibling module routes
-// through failSealedExport(). The invariant is enforced by a comment/string-
-// stripping source scan in the vocabulary test, not by this comment.
+// through failSealedExport(). The invariant is checked by a TypeScript-parser walk
+// over ThrowStatement nodes (__tests__/support/sealed-export-source-scan.cjs), not by
+// this comment. RETRACTION: that check was previously a hand-written comment/string
+// stripper which could not tell a regex literal from division and was proven blind to
+// real code after the first such literal; the parser replaces it. Note the scan is a
+// STATIC SOURCE assertion — it is not evidence about runtime behaviour.
 
 // ---------------------------------------------------------------------------
 // §10 vocabulary — exact set, exact spelling, exact order.

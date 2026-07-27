@@ -185,10 +185,18 @@ const CHUNK_SUBMISSION_SCHEMA = Object.freeze({
 
 // ---------------------------------------------------------------------------
 // §9.1 public values-free evidence — exactly the permitted contents, nothing else.
-// The §9.2 prohibition is enforced structurally: there is no key for a row, a value,
-// an object name, an endpoint, a path, a credential, a raw filter, a query, a
-// snapshot token, a cursor, a nonce, a signature, a key, or a raw content hash, and
-// unknown keys are refused rather than dropped.
+//
+// Precisely what is structural, and what is not. PROHIBITED KEYS and UNKNOWN KEYS are
+// enforced structurally by this schema: there is no key for a row, a value, an object
+// name, an endpoint, a path, a credential, a raw filter, a query, a snapshot token, a
+// cursor, a nonce, a signature, a key, or a raw content hash, and a key not listed here
+// is refused rather than dropped.
+//
+// The VALUE DOMAINS of `profileToken`, `cleanupOutcome` and `activePointerOutcome` remain
+// OPEN: they are plain TOKEN fields, and IDENTIFIER_CHARSET admits `.`, `:`, `-` and `_`,
+// so a value shaped like `customer.orders.line_items` is accepted today. §9.2 is therefore
+// NOT wholly enforced by structure — whatever populates those three fields carries the
+// obligation, and S1 neither supplies nor tests a populator.
 // ---------------------------------------------------------------------------
 const LIFECYCLE_EVIDENCE_SCHEMA = Object.freeze({
   profileToken: TOKEN,
