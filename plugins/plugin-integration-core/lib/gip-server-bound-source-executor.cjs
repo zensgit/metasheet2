@@ -219,8 +219,8 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 //
 //   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
 //      `buildTrustedHttpProbeActionRegistry`.
-//   2. `createHarnessSourceBinderForTests` (:364) is the SOLE writer into
-//      `trustedSourceBinders` (:358, written :438) and is publicly EXPORTED (:594) — there is no
+//   2. `createHarnessSourceBinderForTests` (:367) is the SOLE writer into
+//      `trustedSourceBinders` (:361, written :441) and is publicly EXPORTED (:597) — there is no
 //      private granter behind it at all, so it is not even "build split from trust";
 //      it is the single granting path. And unlike (1) it has NO CERTIFIED
 //      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified
@@ -239,8 +239,11 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 // ROUND 6 — THE SET IS NO LONGER READ, IT IS EXECUTED. Counting these by reading is
 // exactly how the round-5 text said ONE when there were TWO.
 // `publicSurfaceMintsExactlyTheDeclaredTrust` saturates the public surface of all four
-// modules (192,780 calls over 42 exports, including COMPOSED components records so the
-// TRANSITIVE path is visible) and pins the minting set by SET EQUALITY. This module's
+// modules — including COMPOSED components records, so the TRANSITIVE path is visible —
+// and pins the minting set by SET EQUALITY. Its call and export counts are PRINTED BY
+// THE TEST on every run and are deliberately NOT written here: a number in a comment
+// goes stale the moment an export is added, which is the exact defect class this round
+// exists to correct. This module's
 // three: `createHarnessHttpProbeActionRegistryForTests` -> httpProbeActionRegistry,
 // `createHarnessSourceBinderForTests` -> sourceBinder, and
 // `createServerBoundSourceExecutor` -> serverBoundSourceExecutor (transitive: it mints

@@ -34,9 +34,11 @@
 //
 // ⚠ SCOPE THE CLAIM HONESTLY. FOUR public exports of this module mint a trust-branded
 // object, not two, and the set is no longer a matter of reading — it is EXECUTED. The
-// round-6 saturation (`publicSurfaceMintsExactlyTheDeclaredTrust`, 192,780 calls over
-// 42 exports) enumerates the whole minting surface of the four modules and pins it by
-// SET EQUALITY. This module's four:
+// round-6 saturation (`publicSurfaceMintsExactlyTheDeclaredTrust`) enumerates the whole
+// minting surface of the four modules and pins it by SET EQUALITY. Its call and export
+// counts are PRINTED BY THE TEST on every run and are deliberately NOT written here: a
+// number in a comment goes stale the moment an export is added, which is the exact
+// defect class this round exists to correct. This module's four:
 //   * `createHarnessSystemIdentityAuthorityForTests`  -> systemIdentityAuthority
 //   * `createHarnessCanonicalObjectAuthorityForTests` -> canonicalObjectAuthority
 //   * `createCertifiedSystemIdentityAuthority`        -> systemIdentityAuthority
