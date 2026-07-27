@@ -129,6 +129,24 @@ describe('mapActivateError (activate endpoint error surface)', () => {
     }
   })
 
+  it('collapses the owner-named row verbatim: unknown / unauthenticated / non-closed', () => {
+    // Owner ruling 2026-07-27 names this row explicitly, so it gets named cases rather than
+    // relying on "structurally the same as the SQLSTATE case".
+    const generic = { status: 500, code: 'ACTIVATE_FAILED', message: 'Activation failed' }
+    for (const code of [
+      'UNAUTHENTICATED', // the route's own 401 code, were it ever to arrive as a thrown reason
+      'FORBIDDEN',
+      'ACTIVATE_', // the bare prefix itself
+      'activate_race', // right letters, wrong case — membership is exact
+      ' ACTIVATE_RACE', // leading space
+      'ACTIVATE_RACE ', // trailing space
+      '', // empty
+    ]) {
+      expect(mapActivateError(codedError(code, 'relation "user_orgs" does not exist')), code)
+        .toEqual(generic)
+    }
+  })
+
   it('never publishes a PostgreSQL SQLSTATE as the API error code, nor driver text as the message', () => {
     const pgError = codedError('42703', 'column "created_at" of relation "user_orgs" does not exist')
     const mapped = mapActivateError(pgError)
