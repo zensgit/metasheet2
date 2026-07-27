@@ -553,6 +553,13 @@ export default defineConfig({
       // no-DB job cannot skip-green it; wired whole-file into the attendance
       // real-DB step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts',
+      // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the schema/
+      // migration half: scheduled-run identity tables, the outbox discriminated union,
+      // the append-only per-target outcome side table, and their gates (1, 9, 11, 12 DB
+      // half, 14 full migration matrix, 20 side-table legs). DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it; wired whole-file into the
+      // attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
