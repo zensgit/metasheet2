@@ -540,6 +540,27 @@ export function createVerifiedAttendanceOrgIdentityV1(input: unknown): VerifiedA
   return mintOrgWitness(orgKey, writePosture)
 }
 
+/**
+ * Public rehydration entry point for a verified org witness from durable proof (`orgId` +
+ * `acceptedWritePosture`), reused by other W4-covered modules that read a frozen posture
+ * off their OWN durable row rather than re-resolving it — the W4C-2 scheduled-run identity
+ * layer's `rehydrateVerifiedAttendanceScheduledRunIdentityV1`/
+ * `mintAttendanceScheduledRunIdentityFromInsertedRowV1` constructors (section 1.4.1) are
+ * the first callers. This exposes exactly the same defensive default/posture door
+ * `mintOrgWitness` already applies inside `rehydrateVerifiedAttendanceOperationIdentityV1`
+ * below, rather than re-implementing it — "no parallel implementation" (this module's own
+ * standing rule).
+ */
+export function rehydrateVerifiedAttendanceOrgIdentityV1(durableRow: unknown): VerifiedAttendanceOrgIdentityV1 {
+  const fields = requireExactKeys(durableRow, ['orgId', 'acceptedWritePosture'], 'W4C0_ORG_DURABLE_ROW_INVALID')
+  const orgId = parseOrgKeyLexical(fields.orgId, 'W4C0_ORG_KEY_INVALID')
+  const posture = fields.acceptedWritePosture
+  if (typeof posture !== 'string' || !(ATTENDANCE_ACCEPTED_WRITE_POSTURES_V1 as readonly string[]).includes(posture)) {
+    fail('W4C0_WRITE_POSTURE_INVALID')
+  }
+  return mintOrgWitness(orgId, posture as AttendanceAcceptedWritePostureV1)
+}
+
 // ---------------------------------------------------------------------------
 // Verified operation identity (amendment sections 1 / 1.1 / 1.3).
 // ---------------------------------------------------------------------------
@@ -870,8 +891,12 @@ export function createVerifiedAttendanceCalculationTargetIdentityV1(input: unkno
 const ROLLOUT_KEY_PREFIX = 'metasheet2:attendance:segment-rollout:v1'
 const OPERATION_KEY_PREFIX = 'metasheet2:attendance:result-operation:v1'
 const TARGET_KEY_PREFIX = 'metasheet2:attendance:calculation-target:v1'
+// W4C-2 amendment section 1.6 (PR #4617, RATIFIED, OD-W4C-49=(a)): the reserved class `01`
+// scheduled-run key.
+const SCHEDULED_RUN_KEY_PREFIX = 'metasheet2:attendance:scheduled-run:v1'
 
 const LOW_62_MASK = 0x3fffffffffffffffn
+const CLASS_01_PREFIX = 0x4000000000000000n
 const CLASS_10_PREFIX = 0x8000000000000000n
 const CLASS_11_PREFIX = 0xc000000000000000n
 
@@ -959,6 +984,66 @@ export function buildAttendanceCalculationTargetAdvisoryKey(identity: VerifiedAt
 }
 
 // ---------------------------------------------------------------------------
+// W4C-2 amendment section 1.6 (PR #4617, RATIFIED, OD-W4C-49=(a)): the reserved class `01`
+// scheduled-run advisory key. `OD-W4C-49=(a)` rewrote red line W4C-R42 from "01 is
+// forbidden" to "01 is acquired only by the scheduled-run helper; any other caller
+// acquiring 01, or that helper acquiring 00/10/11, fails independently" — the class-bit
+// range check below is that helper's OWN half of that independence (the other half is
+// gate 16's rewritten disjointness test, which iterates every exported builder rather than
+// naming three by hand).
+// ---------------------------------------------------------------------------
+
+const SCHEDULED_RUN_INITIATORS = Object.freeze(['cron', 'admin_run'] as const)
+export type CanonicalAttendanceScheduledRunInitiatorV1 = (typeof SCHEDULED_RUN_INITIATORS)[number]
+
+/** Section 1.6: the run key tuple `(org, initiator, workDate)` — over the KEY, not `run_id`,
+ * because it must also serialize two concurrent starts that do not yet have an ID. */
+export type CanonicalAttendanceScheduledRunKeyV1 = Brand<
+  Readonly<{
+    orgId: CanonicalAttendanceRolloutOrgKeyV1
+    initiator: CanonicalAttendanceScheduledRunInitiatorV1
+    workDate: CanonicalAttendanceWorkDateV1
+  }>,
+  'CanonicalAttendanceScheduledRunKeyV1'
+>
+
+/** Lexical pre-lock parser — same discipline as `parseCanonicalAttendanceRolloutOrgKeyV1`
+ * (does not require a resolved posture; the class-`01` lock is acquired before class-`00`
+ * ever resolves posture for the scheduled entrypoint's own transaction). */
+export function parseCanonicalAttendanceScheduledRunKeyV1(input: unknown): CanonicalAttendanceScheduledRunKeyV1 {
+  const fields = requireExactKeys(input, ['orgId', 'initiator', 'workDate'], 'W4C0_SCHEDULED_RUN_KEY_INPUT_INVALID')
+  const orgId = parseOrgKeyLexical(fields.orgId, 'W4C0_ROLLOUT_ORG_KEY_INVALID') as CanonicalAttendanceRolloutOrgKeyV1
+  if (
+    typeof fields.initiator !== 'string' ||
+    !(SCHEDULED_RUN_INITIATORS as readonly string[]).includes(fields.initiator)
+  ) {
+    fail('W4C0_SCHEDULED_RUN_INITIATOR_INVALID')
+  }
+  const workDate = parseCanonicalAttendanceWorkDateV1(fields.workDate)
+  return frozenNullProto({
+    orgId,
+    initiator: fields.initiator as CanonicalAttendanceScheduledRunInitiatorV1,
+    workDate,
+  }) as CanonicalAttendanceScheduledRunKeyV1
+}
+
+/**
+ * Class-`01` scheduled-run key over `"metasheet2:attendance:scheduled-run:v1\0" + orgId +
+ * "\0" + initiator + "\0" + workDate` — low 62 digest bits, prefix bits `01`, signed. Same
+ * construction discipline as the three builders above (first eight digest bytes,
+ * big-endian, low 62 bits, two-bit class prefix, signed two's complement). Re-validates its
+ * input (so a raw object cannot bypass the parser) and defensively re-checks the resulting
+ * key's own class range before returning it.
+ */
+export function buildAttendanceScheduledRunAdvisoryKey(key: CanonicalAttendanceScheduledRunKeyV1): bigint {
+  const verified = parseCanonicalAttendanceScheduledRunKeyV1(key)
+  const u64 = rawDigestU64(nulJoin([SCHEDULED_RUN_KEY_PREFIX, verified.orgId, verified.initiator, verified.workDate]))
+  const signed = BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_01_PREFIX)
+  if (signed < 2n ** 62n || signed >= 2n ** 63n) fail('W4C0_SCHEDULED_RUN_KEY_CLASS_INVALID')
+  return signed
+}
+
+// ---------------------------------------------------------------------------
 // Acquisition helpers (lock sections 7.1 / 8.2 / 9) — the only lock-taking seams.
 // No try-lock, no swallowed non-timeout error, no timeout-to-continue, no
 // row-lock fallback: any SQL failure other than the helper's OWN acquisition
@@ -1005,13 +1090,15 @@ function isLockNotAvailable(error: unknown): boolean {
   )
 }
 
-function busyError(lockClass: 'rollout' | 'operation' | 'target'): AttendanceW4OperationError {
+function busyError(lockClass: 'rollout' | 'operation' | 'target' | 'scheduled_run'): AttendanceW4OperationError {
   const code =
     lockClass === 'rollout'
       ? 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY'
       : lockClass === 'operation'
         ? 'ATTENDANCE_OPERATION_IN_PROGRESS'
-        : 'ATTENDANCE_CALCULATION_TARGET_BUSY'
+        : lockClass === 'target'
+          ? 'ATTENDANCE_CALCULATION_TARGET_BUSY'
+          : 'ATTENDANCE_SCHEDULED_RUN_BUSY'
   return new AttendanceW4OperationError(code, lockClass)
 }
 
@@ -1023,7 +1110,7 @@ function busyError(lockClass: 'rollout' | 'operation' | 'target'): AttendanceW4O
  */
 async function acquireKeysWithDeadline(
   trx: AttendanceW4TransactionClientV1,
-  lockClass: 'rollout' | 'operation' | 'target',
+  lockClass: 'rollout' | 'operation' | 'target' | 'scheduled_run',
   acquisitionSql: string,
   keys: readonly bigint[],
 ): Promise<void> {
@@ -1111,6 +1198,23 @@ export async function acquireAttendanceCalculationTargetLocks(
     'SELECT pg_advisory_xact_lock($1::bigint)',
     toSortedUniqueSignedKeys(keys),
   )
+}
+
+/**
+ * W4C-2 amendment section 1.6: the ONLY place allowed to acquire the reserved class-`01`
+ * scheduled-run key. Only the scheduled entrypoint's run-creation/resume/finalization/
+ * `abandoned` transactions (a later slice, same defining module as the run identity
+ * constructors — section 1.4.1) call this; live, import, integration, request, and
+ * approval paths acquire it never. Its own budget/acquisition timeout maps to values-free
+ * `503 ATTENDANCE_SCHEDULED_RUN_BUSY` after the caller rolls back — no other `55P03`/
+ * `57014` is relabeled, no retry, no compatibility fallback, no partial DML.
+ */
+export async function acquireAttendanceScheduledRunLock(
+  trx: AttendanceW4TransactionClientV1,
+  key: CanonicalAttendanceScheduledRunKeyV1,
+): Promise<void> {
+  const signedKey = buildAttendanceScheduledRunAdvisoryKey(key)
+  await acquireKeysWithDeadline(trx, 'scheduled_run', 'SELECT pg_advisory_xact_lock($1::bigint)', [signedKey])
 }
 
 // ---------------------------------------------------------------------------
