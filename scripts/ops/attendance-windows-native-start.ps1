@@ -18,6 +18,10 @@ $envFile = Resolve-WindowsNativeEnvFile -RootDir $resolvedRoot
 $envValues = Import-WindowsNativeEnvFile -EnvFile $envFile
 $pm2Command = Resolve-WindowsNativePm2Command -RootDir $resolvedRoot
 
+# Windows PowerShell 5.1 promotes native stderr warnings to error records when
+# Stop is active. Every PM2 call below is guarded by an explicit exit-code check.
+$ErrorActionPreference = 'Continue'
+
 foreach ($appName in @('metasheet-backend', 'metasheet-windows-gateway')) {
   if ($null -ne (Get-WindowsNativePm2Process -Pm2Command $pm2Command -AppName $appName)) {
     throw "PM2 app already exists: $appName. Run windows-native-stop.bat before starting again."

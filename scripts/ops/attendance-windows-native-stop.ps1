@@ -7,6 +7,10 @@ $ErrorActionPreference = 'Stop'
 
 $resolvedRoot = Resolve-WindowsNativeRoot -Candidate $RootDir
 $pm2Command = Resolve-WindowsNativePm2Command -RootDir $resolvedRoot
+
+# PM2 writes non-fatal warnings to stderr on Windows PowerShell 5.1. Native
+# command success remains fail-closed through the explicit exit-code checks.
+$ErrorActionPreference = 'Continue'
 $changed = $false
 
 foreach ($appName in @('metasheet-windows-gateway', 'metasheet-backend')) {

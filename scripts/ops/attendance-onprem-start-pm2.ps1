@@ -409,6 +409,11 @@ New-Item -ItemType Directory -Force -Path (Join-Path $resolvedRoot 'output\logs'
 
 $pm2Command = Resolve-Pm2Command -BaseDir $resolvedRoot
 $expectedScriptPath = Join-Path $resolvedRoot 'packages\core-backend\dist\src\index.js'
+
+# Windows PowerShell 5.1 converts native stderr (including PM2 WARN lines) into
+# error records. PM2 success/failure is decided by explicit exit-code checks
+# below, so warnings must not terminate the script before those checks run.
+$ErrorActionPreference = 'Continue'
 $existingApp = Get-Pm2AppProcess -Pm2Command $pm2Command -AppName $Pm2AppName
 
 if ($null -ne $existingApp) {

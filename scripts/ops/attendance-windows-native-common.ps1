@@ -227,8 +227,16 @@ function Get-WindowsNativePm2Process {
     [string]$AppName
   )
 
-  $raw = (& $Pm2Command jlist 2>$null | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $raw = (& $Pm2Command jlist 2>$null | Out-String).Trim()
+    $pm2ExitCode = $LASTEXITCODE
+  }
+  finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  if ($pm2ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
     return $null
   }
 
@@ -275,19 +283,26 @@ function Remove-WindowsNativePm2Apps {
   )
 
   $cleanupErrors = New-Object System.Collections.Generic.List[string]
-  foreach ($appName in $AppNames) {
-    if ($null -eq (Get-WindowsNativePm2Process -Pm2Command $Pm2Command -AppName $appName)) {
-      continue
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    foreach ($appName in $AppNames) {
+      if ($null -eq (Get-WindowsNativePm2Process -Pm2Command $Pm2Command -AppName $appName)) {
+        continue
+      }
+      & $Pm2Command delete $appName *> $null
+      if ($LASTEXITCODE -ne 0) {
+        $cleanupErrors.Add("pm2 delete failed for $appName (exit $LASTEXITCODE)")
+      }
     }
-    & $Pm2Command delete $appName *> $null
+
+    & $Pm2Command save *> $null
     if ($LASTEXITCODE -ne 0) {
-      $cleanupErrors.Add("pm2 delete failed for $appName (exit $LASTEXITCODE)")
+      $cleanupErrors.Add("pm2 save failed (exit $LASTEXITCODE)")
     }
   }
-
-  & $Pm2Command save *> $null
-  if ($LASTEXITCODE -ne 0) {
-    $cleanupErrors.Add("pm2 save failed (exit $LASTEXITCODE)")
+  finally {
+    $ErrorActionPreference = $previousErrorActionPreference
   }
 
   if ($cleanupErrors.Count -gt 0) {
