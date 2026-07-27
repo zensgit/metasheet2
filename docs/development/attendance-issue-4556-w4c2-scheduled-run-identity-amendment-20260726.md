@@ -147,6 +147,49 @@
 > `a2cd9ab7c83d85495acda911a08d2f6be4bf29f9` (round 4's own pass); it does
 > not describe the document's current state after this pass's edit.
 >
+> **Round 6 correction (this pass).** An independent gate review of the PR
+> (bound to head `9ce0467e131a5911abaa0627461ce6a0f93e6fb1`) found 3 P1 and
+> 1 P2, all addressed in this revision: (P1-A) section 1.1.1 option (a) put
+> the new per-target terminal-outcome columns directly on
+> `attendance_scheduled_run_targets`, which section 1.2 declares fully
+> immutable — unimplementable as drafted. Corrected to a separate,
+> append-only side table, `attendance_scheduled_run_target_outcomes`, with
+> a deferred cross-table constraint trigger in place of the cross-table
+> `CHECK` the retracted version implied; sections 1.7 step 4 and 1.8 steps
+> 4-5 are rewritten as an explicit `O-3` fork rather than left silently
+> assuming `completed`-only. (P1-B) section 1.4.1 stated the run witness
+> is minted "only by rehydration from the committed, locked run row," which
+> the zero-`generate`-target case (section 1.9) cannot satisfy, since its
+> run-creation transaction enqueues before its own `INSERT`'s commit.
+> Corrected by naming and specifying a second, module-private-only
+> constructor (`mintAttendanceScheduledRunIdentityFromInsertedRowV1`) for
+> exactly that case, an equivalence argument correcting the "committed"
+> framing (which was already imprecise for the mainline path — section
+> 1.8 steps 7-8 enqueue before step 9's commit too), and a new gate 22
+> proving the constructor's exclusivity at the compiled-module boundary,
+> not by source grep. (P1-C) `OD-W4C-44(a)` and `OD-W4C-45(a)` named other
+> items' default answers (`abandoned`, class `01`) inside their own option
+> text without flagging the coupling; new section 3.3 states the full
+> dependency matrix, the two structural exclusions found (`44=b`/`44=c`
+> foreclosed on their own terms; `46=a` with `49=b`; `48=b` with `50=b`),
+> one cost interaction (`50=b` with `52=a`, added to section 1.7.1), and
+> the decision rule + 16-bundle count for "legal and needs no follow-up
+> round" — including confirming the externally-suggested bundle
+> `44a/45a/46a/47a/48a/49a/50a/51a/52a/53(i)` is one of the 16, without
+> ruling on it. (P2) section 1.1.1's `abandoned` state had no write-path
+> specification; new section 1.1.2 states authorization (capability +
+> posture, evaluated before any lock), org anchor, lock order (identical
+> to finalization's, introducing no new lock-order shape), audit (a new
+> closed `abandoned_by_actor_posture` column, write-once by construction
+> of the existing state machine, not a new mechanism), concurrency, and
+> idempotency (both reusing section 1.8 step 3's losing-racer branch), plus
+> gate 23. This round's diff is confined to sections 0.5's cross-reference,
+> 1.1, 1.1.1 (new 1.1.2), 1.2, 1.4.1, 1.7 step 4, 1.7.1, 1.8 steps 4-5,
+> 1.9, 1.10, section 2 (gates 11's cross-reference, 20, 22, 23, 2.1), section
+> 3 (`OD-W4C-44`/`45` rows), 3.1 (`OD-W4C-50` row), new 3.3, section 4 step
+> 3, and section 5 — it does not touch section 3.2/`O-5`'s ballot text,
+> which this round did not review and does not alter.
+>
 > Runtime posture: PR #4612 stays **Draft** under
 > **OWNER-AUTHORIZATION-HOLD**. This amendment contains **no runtime code**
 > and authorizes **no** implementation, ready-for-review transition, arming,
@@ -385,6 +428,7 @@ CREATE TABLE attendance_scheduled_runs (
   completed_user_count   integer,            -- written only at finalization
   generated_count        integer,            -- written only at finalization
   abandon_reason_code    text,
+  abandoned_by_actor_posture text,           -- closed: 'platform_admin' | 'attendance_admin'; section 1.1.2
   created_at             timestamptz NOT NULL DEFAULT now(),
   finalized_at           timestamptz,
   CONSTRAINT uq_asr_run_org       UNIQUE (run_id, org_id),
@@ -402,20 +446,27 @@ CREATE TABLE attendance_scheduled_runs (
        (state = 'running'   AND completed_user_count IS NULL
                             AND generated_count IS NULL
                             AND finalized_at IS NULL
-                            AND abandon_reason_code IS NULL)
+                            AND abandon_reason_code IS NULL
+                            AND abandoned_by_actor_posture IS NULL)
     OR (state = 'completed' AND completed_user_count = expected_user_count
                             AND generated_count IS NOT NULL
                             AND generated_count <= expected_user_count
                             AND finalized_at IS NOT NULL
-                            AND abandon_reason_code IS NULL)
+                            AND abandon_reason_code IS NULL
+                            AND abandoned_by_actor_posture IS NULL)
     OR (state = 'abandoned' AND completed_user_count IS NOT NULL
                             AND generated_count IS NULL
                             AND finalized_at IS NOT NULL
-                            AND abandon_reason_code IS NOT NULL)
+                            AND abandon_reason_code IS NOT NULL
+                            AND abandoned_by_actor_posture IS NOT NULL)
   ),
   CONSTRAINT chk_asr_abandon_reason CHECK (
     abandon_reason_code IS NULL
     OR abandon_reason_code IN ('ATTENDANCE_SCHEDULED_RUN_OPERATOR_ABANDONED')
+  ),
+  CONSTRAINT chk_asr_abandoned_by_posture CHECK (
+    abandoned_by_actor_posture IS NULL
+    OR abandoned_by_actor_posture IN ('platform_admin','attendance_admin')
   )
 );
 
@@ -423,6 +474,16 @@ CREATE UNIQUE INDEX uq_asr_one_running
   ON attendance_scheduled_runs (org_id, initiator, work_date)
   WHERE state = 'running';
 ```
+
+`chk_asr_terminal_shape`'s `completed` branch above (the equality
+`completed_user_count = expected_user_count`) is the **`O-3`/`OD-W4C-50 = (b)`**
+form — the current-draft, all-or-nothing shape. If `O-3` instead ratifies `(a)`,
+this branch is narrowed to `completed_user_count IS NOT NULL AND
+completed_user_count <= expected_user_count` (dropping the equality, since a
+`failed` target is real, permanent, and not counted in `completed_user_count`);
+section 1.1.1 states this override in full, together with the new table and
+deferred trigger it requires. The two forms are not both in force at once —
+whichever `O-3` ratifies is the one actually migrated (section 1.10).
 
 Rules:
 
@@ -449,19 +510,34 @@ Rules:
   no stuck absorbing state.
 - `abandoned` is an explicit operator remediation terminal state. It writes
   **no** outbox row and no source DML. It exists so a run whose targets can
-  never complete cannot pin the partial unique index forever.
+  never complete cannot pin the partial unique index forever. Its full
+  write path — authorization, org anchor, lock order, audit, concurrency,
+  and idempotency — is specified in section 1.1.2, not restated here.
 - Rows reject `DELETE`/`TRUNCATE`. An `UPDATE` guard trigger is implemented
   as a **generic allowlist**, not a column-by-column freeze list: it
   compares `to_jsonb(NEW)` and `to_jsonb(OLD)` with the mutable keys
   (`state`, `completed_user_count`, `generated_count`, `abandon_reason_code`,
-  `finalized_at`) removed from both sides via the jsonb `-` operator, and
-  raises unless the two remaining objects are equal. Every column not in
-  that mutable set is therefore frozen **by construction**, including any
-  column a future migration adds without also adding it to this trigger's
-  mutable set — the safe default is frozen, not mutable. The legal
-  out-of-`running`-transition check is a **separate** condition evaluated
-  by the same trigger, in addition to (not instead of) the jsonb-equality
-  check.
+  `abandoned_by_actor_posture`, `finalized_at`) removed from both sides via
+  the jsonb `-` operator, and raises unless the two remaining objects are
+  equal. Every column not in that mutable set is therefore frozen **by
+  construction**, including any column a future migration adds without also
+  adding it to this trigger's mutable set — the safe default is frozen, not
+  mutable. The legal out-of-`running`-transition check is a **separate**
+  condition evaluated by the same trigger, in addition to (not instead of)
+  the jsonb-equality check. **Being in the mutable set does not by itself
+  mean a column can be rewritten more than once**: `abandoned_by_actor_posture`
+  is in the set (it must be settable by the one `UPDATE` that performs the
+  `running -> abandoned` transition, alongside `state` itself), but because
+  the same trigger's legal-transition check already forbids every `UPDATE`
+  out of `abandoned` (there is no `abandoned -> anything` transition), and
+  the only `UPDATE` that ever sets a non-`NULL`
+  `abandoned_by_actor_posture` is that one transition, there is no second
+  legal `UPDATE` that could ever reach it again. This is a consequence of
+  the state machine, not a separate mechanism, and gate 23 (section 2) is
+  the leg that proves it rather than assumes it — the general
+  "in the mutable set" argument alone does not establish write-once-ness on
+  its own, since a future column added to the mutable set without an
+  equivalent state-machine closure would not get this property for free.
 - `expected_user_count` equals the number of `target_kind='generate'` target
   rows; `review_count` equals the number of `target_kind='review'` target
   rows. Both are frozen at creation because both are fully known then. They
@@ -476,39 +552,263 @@ Rules:
 drafted, this amendment defines **no** outcome for a `generate` target
 whose per-user operation transaction fails **deterministically** (a
 fail-closed rejection, not a transient error) — see section 0.5. Two
-options; this draft does not choose between them:
+options; this draft does not choose between them.
 
-- **(a) Add a durable per-target terminal-failure outcome.**
-  `attendance_scheduled_run_targets` gains a nullable, closed, values-free
-  `terminal_outcome` column (`'completed' | 'failed'`, non-null only once
-  the target's operation is durably terminal) and a closed
-  `failure_reason_code` (non-null iff `terminal_outcome = 'failed'`).
-  `chk_asr_terminal_shape`'s `completed` branch changes from
-  `completed_user_count = expected_user_count` to "every `generate` target
-  has a non-null `terminal_outcome`"; `completed_user_count` continues to
-  count only operations that reached a `completed` operation row (it does
-  **not** count `failed` targets), and `generated_count` is unaffected (it
-  already only counts `inserted = true` rows). **Wire compatibility is
-  preserved**: `attendance.absence.generated`'s `total` is
-  `generated_count` — a target that never inserted a row was never counted
-  by today's `generateAbsenceRecords`/`rows.length` either
+**A prior revision of option (a) put the new columns directly on
+`attendance_scheduled_run_targets`; that is retracted as unimplementable
+and is not restated below.** Section 1.2 declares target rows fully
+immutable (`UPDATE`/`DELETE`/`TRUNCATE` all refused by triggers — "the
+run's frozen plan"), and a column whose value is unknown at the row's
+insert time and is set later, by a different transaction, requires exactly
+the `UPDATE` that immutability forbids. The corrected form below leaves
+target rows untouched and adds a **separate, append-only side table**
+instead — this is the only change from the retracted version; the
+decision this section states (whether to add the outcome concept at all)
+is unchanged.
+
+- **(a) Add a durable per-target terminal-outcome side table, never a
+  column on the immutable target row.**
+
+  ```sql
+  CREATE TABLE attendance_scheduled_run_target_outcomes (
+    id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id               text NOT NULL,
+    run_id               uuid NOT NULL,
+    target_id            uuid NOT NULL,
+    terminal_outcome     text NOT NULL,        -- closed: 'completed' | 'failed'
+    failure_reason_code  text,                 -- non-null iff terminal_outcome = 'failed'
+    recorded_at          timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT uq_asrto_target         UNIQUE (org_id, target_id),
+    CONSTRAINT fk_asrto_target         FOREIGN KEY (target_id, org_id, run_id)
+      REFERENCES attendance_scheduled_run_targets (id, org_id, run_id),
+    CONSTRAINT chk_asrto_outcome       CHECK (terminal_outcome IN ('completed','failed')),
+    CONSTRAINT chk_asrto_reason_pair   CHECK ((terminal_outcome = 'failed') = (failure_reason_code IS NOT NULL)),
+    CONSTRAINT chk_asrto_reason_closed CHECK (
+      failure_reason_code IS NULL
+      OR failure_reason_code IN ('ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED')
+    )
+  );
+  ```
+
+  This table is **append-only**: exactly one row is ever inserted per
+  target (`uq_asrto_target` enforces this), and — like the target rows
+  themselves — every row refuses `UPDATE`/`DELETE`/`TRUNCATE` once
+  inserted. Rows accumulate one at a time, as each `generate` target's
+  per-user operation reaches its own terminal state over the run's
+  lifetime; the table as a whole is never rewritten, only appended to.
+
+  The FK requires section 1.2's target table to expose a matching unique
+  key over `(id, org_id, run_id)` — a composite unique constraint over a
+  superset of the existing primary key `id` (legal in PostgreSQL: `id`
+  alone already guarantees the triple is unique, the composite constraint
+  just makes it FK-referenceable). This option adds
+  `CONSTRAINT uq_asrt_id_org_run UNIQUE (id, org_id, run_id)` to section
+  1.2's `attendance_scheduled_run_targets`, in the same migration as this
+  table (section 1.10). Section 1.2's own SQL block, its immutability
+  triggers, and every existing constraint are otherwise **untouched** —
+  this is one additive constraint, not a mutability change, and if `O-3`
+  ratifies `(b)` instead, `uq_asrt_id_org_run` is never added and section
+  1.2 is exactly as originally drafted.
+
+  **Write path.** Exactly one row is inserted per `generate` target, by
+  the **same** per-user canonical operation transaction (section 1.7,
+  "Per-user execution") that seals that target's own
+  `attendance_result_operations` row — in the same transaction, after that
+  row's `claimed -> completed|canceled` transition, before commit. A
+  per-user operation that completes its calculation normally seals
+  `state='completed'` and inserts `terminal_outcome='completed'`. A
+  per-user operation that determines a **deterministic, fail-closed
+  rejection** (not a transient error — a transient error rolls the whole
+  transaction back, leaving neither an operation row nor an outcome row,
+  exactly as today, and is retried) seals `state='canceled'` — already one
+  of `attendance_result_operations`' two legal terminal states
+  (`OPERATION_STATES = ['claimed', 'completed', 'canceled']`,
+  `w4c0-operation-contract.ts`; there is **no** third, "failed",
+  operation-level state, and this option does not add one) — and inserts
+  `terminal_outcome='failed'` with a closed `failure_reason_code`.
+
+  **Authorization and exclusivity.** The only writer is a dedicated typed
+  helper, `recordAttendanceScheduledRunTargetOutcomeV1(trx,
+  operationWitness, outcome)`, gated on the **verified per-user operation
+  identity** (the same witness shape W4C-0 already requires to seal the
+  operation row itself) for the exact target it writes — a caller cannot
+  forge an outcome for a target whose operation it does not already hold a
+  verified witness for, and the helper is called from nowhere except the
+  per-user operation transaction's own seal step (section 1.7).
+
+  **Cross-table integrity is a deferred constraint trigger, not a
+  `CHECK`.** A `CHECK` constraint cannot reference another table, so
+  `chk_asr_terminal_shape` (section 1.1) cannot itself require "every
+  `generate` target has a recorded outcome" — an earlier version of this
+  option said otherwise and is wrong for the same reason the
+  target-row-column version was wrong: it named a cross-table condition a
+  single-row constraint cannot express. The corrected mechanism is a
+  **second** `DEFERRABLE INITIALLY DEFERRED` constraint trigger (the same
+  technique section 1.1's last bullet already uses to tie frozen
+  `expected_user_count`/`review_count` to target rows), fired
+  `AFTER UPDATE ON attendance_scheduled_runs FOR EACH ROW WHEN
+  (NEW.state = 'completed' AND OLD.state = 'running')`: at commit, it
+  requires every `target_kind='generate'` target row for `NEW.run_id` to
+  have exactly one row in `attendance_scheduled_run_target_outcomes`
+  (`uq_asrto_target` alone only enforces "at most one per target"; this
+  trigger enforces "at least one, for every target"), and
+  `NEW.completed_user_count` to equal the count of those rows with
+  `terminal_outcome = 'completed'`. It additionally requires, for every
+  outcome row it examines, that the corresponding per-user operation row's
+  `state` agrees (`'completed'` iff `terminal_outcome = 'completed'`,
+  `'canceled'` iff `terminal_outcome = 'failed'`) — nothing else in this
+  schema mechanically binds an outcome row's label to the operation row it
+  describes, so without this leg a caller could, through a bug rather than
+  through the typed writer above, insert a mismatched pair that no CHECK
+  would catch.
+
+  `chk_asr_terminal_shape`'s `completed` branch (section 1.1) is
+  **row-local** under this option — it does not, and structurally cannot,
+  encode "every target has an outcome" itself; that is the deferred
+  trigger's job, above. It changes from `completed_user_count =
+  expected_user_count` to `completed_user_count IS NOT NULL AND
+  completed_user_count <= expected_user_count` (dropping the equality,
+  since a `failed` target is real and permanent but is not counted in
+  `completed_user_count`). `generated_count` is unaffected (unchanged: it
+  already only counts `inserted = true` rows among the `completed` ones).
+  **Wire compatibility is preserved**: `attendance.absence.generated`'s
+  `total` is `generated_count` — a target that never inserted a row was
+  never counted by today's `generateAbsenceRecords`/`rows.length` either
   (`plugins/plugin-attendance/index.cjs:21238`), so a failed target changes
-  nothing observable in that payload. This option needs a new section 2
-  gate: a run with one deterministically-failed `generate` target and all
-  others `completed` reaches `state='completed'` and emits both run-level
-  events with correct counts; a target with neither `completed` nor
-  `failed` still blocks finalization.
+  nothing observable in that payload.
+
+  Section 1.7 step 4 and section 1.8 steps 4-5 are written as a fork on
+  this same decision directly in their own text, not restated here: under
+  `(a)`, "terminal" for a `generate` target means "has a row in
+  `attendance_scheduled_run_target_outcomes`"; under `(b)`, it means "has a
+  `completed` operation row," exactly as originally drafted. This option
+  needs gate 20 (section 2, extended): a run with one
+  deterministically-failed `generate` target and all others `completed`
+  reaches `state='completed'` and emits both run-level events with correct
+  counts; a target with no row in the outcome table still blocks
+  finalization (the deferred trigger raises); the outcome table itself is
+  proven append-only, non-forgeable, and label-consistent with its
+  operation row (gate 20's new legs, section 2).
 - **(b) Keep the all-or-nothing shape** exactly as drafted, and accept as
   an explicitly declared residual (section 5) that one user's
   deterministic, permanent failure on a `generate` target withholds both
   run-level events for the **entire** org's `work_date` until an operator
-  issues the explicit `abandoned` transition — at which point both events
-  are permanently lost for that run, not merely delayed, for every user
-  including the ones who succeeded.
+  issues the explicit `abandoned` transition (section 1.1.2) — at which
+  point both events are permanently lost for that run, not merely delayed,
+  for every user including the ones who succeeded.
+  `attendance_scheduled_run_target_outcomes` is never created under this
+  option, and section 1.10's base migration is exactly as drafted (no
+  outcome table, no `uq_asrt_id_org_run`).
 
 Section 1.8 and section 2 are written above assuming whichever option is
 chosen; no gate in this draft yet exercises the `failed` outcome, because
 it does not exist until `O-3` selects (a).
+
+#### 1.1.2 The `abandoned` transition: authorization, lock order, audit, concurrency, idempotency
+
+Section 1.1's rules name `abandoned` as "an explicit operator remediation
+terminal state" and its `chk_asr_abandon_reason`/`chk_asr_abandoned_by_posture`
+constraints close its values, but section 1.1's rules do not by themselves
+specify *how* a `running` run is transitioned to `abandoned` — who may do
+it, under what lock, with what audit trail, or what happens if two callers
+race or one caller retries. This subsection is that specification; it
+governs regardless of which side `O-3`/`OD-W4C-50` (section 1.1.1) or
+`O-4`/`OD-W4C-52` (section 1.7.1) selects, since `abandoned` remains a legal
+target of the `running` state under either option combination that keeps
+`OD-W4C-48=(a)` (section 3.3 lists the one combination — `48=(b)` — where
+this subsection does not apply because the state does not exist).
+
+**Entry point.** `abandonAttendanceScheduledRunV1(trx, callerIdentity, key:
+{orgId, runId}, reasonCode)` is the **sole intended, module-encapsulated**
+writer of the `running -> abandoned` transition — the same exclusivity
+claim shape this document makes elsewhere for typed helpers
+(`enqueueAttendanceScheduledRunEventOutboxV1` and its siblings), enforced
+by TypeScript module encapsulation, not by a DB-level mechanism that could
+stop an arbitrary raw `UPDATE` with a superficially valid
+`abandoned_by_actor_posture`/`abandon_reason_code` pair from performing
+the same transition outside this function. **This is a residual, disclosed
+rather than closed**, of the same kind as section 5's "`run_id` FK
+direction" entry: unlike gate 22's minting-factory exclusivity leg (which
+asserts the symbol is absent from the compiled module surface), this
+pass does not add an equivalent module-export-absence leg for
+`abandonAttendanceScheduledRunV1` itself — doing so is straightforward by
+the same technique and is left as a gate 23 follow-up, not specified here
+in full. It is a new, administrator-initiated surface this amendment
+adds — distinct from, and not routed through, any of the six existing
+W4-covered command entrypoints (`live_punch`, `request_create`,
+`request_pending_edit`, `request_decision`, `request_cancel`,
+`import_batch`/`integration_batch`, `manual_edit`, `recompute`,
+`import_rollback`, `ops_retirement`) and distinct from `scheduled` itself:
+it performs no source DML and is not a "command" in that closed sense, so
+it does not need, and does not get, an entry in `COMMAND_ENTRYPOINTS`.
+
+**Authorization**, evaluated **before** any lock is acquired (fail-closed,
+zero DML, zero lock contention on rejection):
+- required capability: `retirement` — the existing closed `CAPABILITIES`
+  member already used for the closest existing precedent,
+  `ops_retirement`-class command entrypoints, since abandoning a run is,
+  like retirement, an irreversible, admin-only, non-source-mutating
+  remediation action of comparable blast radius. This document does not
+  add a new capability for this action;
+- required actor posture: closed to `{platform_admin, attendance_admin}` —
+  never `self`, `scheduler`, `approval_system`, `delegated_import`, or the
+  existing `operator` posture (extending `operator`'s meaning to this
+  action is a separate decision this run-identity-focused document does
+  not make; it is out of scope here, not silently assumed).
+
+**Org anchor.** `callerIdentity` carries a verified org identity whose
+`org_id` is compared, in every statement this function issues, against the
+target run's own `org_id` — never against a caller-supplied `org_id`
+alone. Combined with the class-00 acquisition below (itself org-scoped), a
+caller authorized for org A can never lock, read-for-update, or transition
+org B's run. This is covered by gate 13 (cross-org isolation, extended
+below), not a new gate.
+
+**Lock order — identical to section 1.8's finalization order, introducing
+no fourth lock-order shape:**
+
+1. acquire class-00 org rollout **shared** for the caller's org;
+2. acquire the class-01 run key lock for `(org_id, initiator, work_date)`;
+3. `SELECT ... FOR UPDATE` the run row. If it is **not** `running`
+   (already `completed` or already `abandoned`), return the recorded
+   outcome with **zero DML** — this is not an error. A second operator's
+   concurrent or later abandon call, and the same caller re-issuing the
+   same call after it already succeeded, both take this branch: this is
+   this transition's **concurrency and idempotency** answer, and it is the
+   same branch shape as section 1.8 step 3's losing-racer path, not a
+   separate mechanism;
+4. compute `completed_user_count` from currently-recorded evidence exactly
+   as finalization's step 5 does — the count of `generate` targets whose
+   per-user operation has reached a terminal state as of this instant
+   (under `O-3=(b)`, a `completed` operation row; under `O-3=(a)`, a
+   `terminal_outcome='completed'` row in
+   `attendance_scheduled_run_target_outcomes`, section 1.1.1) — never from
+   an in-memory count;
+5. `UPDATE` the run row: `state='abandoned'`, `completed_user_count` = step
+   4's value, `abandon_reason_code` = the caller-supplied, closed code
+   (`chk_asr_abandon_reason`'s single member today), `abandoned_by_actor_posture`
+   = the caller's verified posture, `finalized_at = now()`. No outbox row,
+   no source DML, no calculation write, and no class-`11` acquisition —
+   the same restriction section 1.8's finalization transaction states for
+   itself, stated here explicitly because this is a different transaction
+   shape and gate 15 was written against finalization, not this path (see
+   gate 23 below);
+6. commit.
+
+**Audit.** `abandoned_by_actor_posture` (section 1.1) is the durable,
+values-free record of *what kind* of actor performed the transition —
+closed to the same two-member set the authorization check enforces, never
+a raw user identifier or any other user-supplied value, consistent with
+this line's values-free audit standard. This document does not define, and
+does not need to define, a separate general-purpose audit-log table for
+this action: the run row's own `abandoned_by_actor_posture` +
+`abandon_reason_code` + `finalized_at` triple is the durable fact this
+schema is responsible for, and full request-level identity/audit trail is
+whatever mechanism already covers other admin-capability actions in this
+codebase — a mechanism this run-identity-focused document has not audited
+and does not redefine (see the residual note in section 5).
+
+Section 2 gate 23 is this subsection's required-gate leg list.
 
 ### 1.2 Immutable run target rows
 
@@ -574,6 +874,13 @@ CREATE TABLE attendance_scheduled_run_targets (
   order is unspecified absent an explicit sort, and is empirically
   affected by HOT updates, autovacuum, and plan shape). This draft does
   not change that query.
+- **Conditional addition, not part of this table's base shape.** If `O-3`
+  (section 1.1.1) ratifies `(a)`, this table gains one further constraint,
+  `uq_asrt_id_org_run UNIQUE (id, org_id, run_id)`, added in the same
+  migration as section 1.1.1's new outcome table — an additive unique
+  constraint, not a change to any existing column, trigger, or the
+  immutability guarantee above. If `O-3` ratifies `(b)`, this table is
+  exactly as drafted in the SQL block above and gains nothing.
 
 #### 1.2.1 Closed review reason codes
 
@@ -837,6 +1144,10 @@ type VerifiedAttendanceScheduledRunIdentityV1 = Opaque<Readonly<{
 rehydrateVerifiedAttendanceScheduledRunIdentityV1(durableRow):
   VerifiedAttendanceScheduledRunIdentityV1
 
+// module-private — not exported from this file; see the exclusivity note below
+mintAttendanceScheduledRunIdentityFromInsertedRowV1(insertedRow):
+  VerifiedAttendanceScheduledRunIdentityV1
+
 buildAttendanceScheduledRunAdvisoryKey(
   key: CanonicalAttendanceScheduledRunKeyV1,   // (org, initiator, workDate)
 ): bigint
@@ -853,9 +1164,65 @@ enqueueAttendanceScheduledRunEventOutboxV1(
 ): Promise<void>
 ```
 
-- The run identity is minted **only** by rehydration from the committed,
-  locked run row — there is no "create" factory that trusts caller input, so
-  an outbox row cannot precede its run row.
+- The run identity is minted only from a row this module itself just wrote
+  or read under the class-`01` lock — **never** from caller-supplied
+  fields. There are exactly **two** constructors, and both are defined in,
+  and neither is exported outside, the module that also defines the
+  run-creation, resume, and finalization transactions — the module that
+  supersedes `w4c2-live-scheduled-boundary.ts`'s
+  `deriveAttendanceScheduledRunIdV1` (section 1.1's "must not survive
+  implementation" rule) — so there is no import path to either constructor
+  from outside that module, not merely an absent name on a re-exporting
+  barrel file:
+  - `rehydrateVerifiedAttendanceScheduledRunIdentityV1(durableRow)` — used
+    by the resume protocol (section 1.7) and by the finalization
+    transaction's step 3 `SELECT ... FOR UPDATE` re-read (section 1.8),
+    always over a row read under the class-`01` lock, whether or not that
+    read is in the same transaction that originally inserted the row;
+  - `mintAttendanceScheduledRunIdentityFromInsertedRowV1(insertedRow)` —
+    used **only** by section 1.7 step 5-6's run-creation transaction, over
+    the exact row its own `INSERT ... RETURNING` produced, still holding
+    the class-`01` lock acquired at step 2. This is the constructor the
+    zero-`generate`-target case (section 1.9) uses, since that case's
+    run-creation transaction is itself the finalization transaction and
+    therefore must enqueue before its own transaction's `COMMIT` — there
+    is no separately-committed row to re-read, so
+    `rehydrateVerifiedAttendanceScheduledRunIdentityV1` does not apply to
+    it.
+
+  Both constructors validate the same shape (every field
+  `VerifiedAttendanceScheduledRunIdentityV1`'s own type requires) and apply
+  the same defensive rejection of a row that fails any of the table's own
+  CHECK/FK invariants — this equalizes their trust level rather than
+  special-casing the second one.
+
+  **Equivalence argument, corrected from a prior overstatement.** A row
+  produced by this transaction's own `INSERT ... RETURNING`, while
+  class-`01` is held for the run key and no other transaction can
+  concurrently start or complete a run for the same `(org_id, initiator,
+  work_date)` (section 1.1's serialization guarantee), carries exactly the
+  same guaranteed-valid shape a later re-read under `FOR UPDATE` would
+  see — the only difference is which side of this transaction's own
+  `COMMIT` the read happens on. The retired wording above this correction
+  said the identity is minted "only by rehydration from the **committed**,
+  locked run row" — that was already imprecise for the **mainline**
+  (non-zero-target) path too: section 1.8 steps 7-8 already enqueue the
+  finalization transaction's own outbox rows **before** that same
+  transaction's `COMMIT` (step 9), over a row read at step 3, which is
+  itself not yet committed at the point of enqueue. What actually holds,
+  for both constructors, is narrower and true of both: **read under the
+  class-`01` lock, within the transaction that owns it, after the row's
+  own `INSERT`/`SELECT` has satisfied every table `CHECK`/`FK`** — not
+  "after commit." The zero-target case is not a carved-out exception to a
+  committed-row rule; it is the same rule, applied to the `INSERT`
+  statement's own `RETURNING` clause instead of a subsequent `SELECT`.
+- **Exclusivity.** `mintAttendanceScheduledRunIdentityFromInsertedRowV1` is
+  not exported from its defining module at all — not from a barrel file,
+  not from the module itself. No other call site (not the resume
+  protocol, not the recovery sweep, not the finalization transaction, not
+  test code outside the module) can reach it; gate 22 (section 2) proves
+  this at the compiled-module boundary, not by source-text grep, per this
+  document's own standing rule against source-text-only assertions.
 - `enqueueAttendanceResultEventOutboxV1` keeps its current signature and its
   `requireVerifiedAttendanceOperationIdentityV1` strictness
   (`w4c0-operation-registry.ts:820-856`); it additionally sets
@@ -864,7 +1231,10 @@ enqueueAttendanceScheduledRunEventOutboxV1(
   two run-level kinds and fail-closes on `legacy_projection_only` exactly as
   the operation enqueue does today (`W4C0_OUTBOX_LEGACY_FORBIDDEN`).
 - JSON clones, spreads, prototype lookalikes, and plain objects are rejected
-  by both, per the W4C-0 amendment's witness doctrine.
+  by both `rehydrateVerifiedAttendanceScheduledRunIdentityV1` and
+  `mintAttendanceScheduledRunIdentityFromInsertedRowV1`, per the W4C-0
+  amendment's witness doctrine — neither constructor accepts a caller-built
+  object shaped like a real row.
 
 ### 1.5 Closed event-kind set extension and the two copies
 
@@ -1023,10 +1393,17 @@ rejected **before** source DML.
    with `target_set_fingerprint`. Any difference is fail-closed remediation;
    the run is never silently re-planned;
 4. the set of users still to do is exactly the `target_kind='generate'`
-   targets whose operation row is **absent or not `completed`**, determined by
-   exact key `(org_id,'scheduled',operation_id)` — never by an in-memory
-   cursor, a process-local set, or a count. A completed operation is replayed
-   with zero DML by the existing preflight;
+   targets that are not yet **terminal** — under `O-3=(b)` (as originally
+   drafted), terminal means an operation row exists at exact key
+   `(org_id,'scheduled',operation_id)` with `state='completed'`; under
+   `O-3=(a)` (section 1.1.1), terminal means a row exists in
+   `attendance_scheduled_run_target_outcomes` for that target — never by an
+   in-memory cursor, a process-local set, or a count. A terminal target is
+   replayed with zero DML by the existing preflight (a `completed`
+   operation row under either option; under `O-3=(a)`, a `failed` outcome
+   is never retried — retrying a deterministic rejection would reproduce
+   the same rejection, so the zero-DML replay applies to it too, just
+   without re-attempting the calculation write);
 5. after the last outstanding user completes, attempt finalization
    (section 1.8).
 
@@ -1122,7 +1499,19 @@ does not choose:
   predicate extension is ever bypassed. **Operational consequence, which
   the owner must weigh, not the author:** a rollout's shadow-to-
   authoritative promotion window must avoid colliding with an in-flight
-  scheduled run, changing today's promotion-timing assumptions.
+  scheduled run, changing today's promotion-timing assumptions. **This
+  consequence is materially worse, not merely additive, if `O-3`/`OD-W4C-50`
+  is also `(b)` (section 1.1.1)**: under `50=(b)`, a single `generate`
+  target's deterministic, permanent failure leaves the run `running`
+  indefinitely until an operator explicitly abandons it (section 1.1.2) —
+  and under `52=(a)`, a `running` run blocks the org's entire
+  shadow-to-authoritative promotion. The two together mean one user's
+  unrelated failure can block an org-wide rollout promotion pending manual
+  operator intervention, not just a short, self-resolving collision window.
+  This is not an exclusion (`abandoned` is still a working exit, so no run
+  is stuck-forever), but section 3.3 lists it as an owner-relevant cost
+  **interaction**, not merely two independent tradeoffs to weigh
+  separately.
 - **(b) Do not block promotion.** Section 1.8 step 1's `shadow`-vs-
   `authoritative` mismatch branch instead becomes the **primary** path (not
   a backstop): finalization is redefined to execute **under the run's own
@@ -1176,15 +1565,26 @@ write, and **no** class-`11` target lock:
 3. `SELECT ... FOR UPDATE` the run row. If it is already `completed`, return
    its recorded outcome with **zero DML** (this is the losing racer's path,
    and it is a normal, expected outcome, not an error);
-4. re-read all target rows and, by exact key, every corresponding operation
-   row. Require every `target_kind='generate'` target to have a `completed`
-   operation row. If any is missing or not completed, finalization is not
-   admitted and the transaction ends with zero DML;
-5. fold the counts from that immutable evidence:
-   `completed_user_count` = number of completed generate-targets (which the
-   step-4 predicate makes equal to `expected_user_count`);
-   `generated_count` = number of those whose sealed `response_snapshot`
-   records `inserted = true`;
+4. re-read all target rows and, for each `target_kind='generate'` target,
+   its terminal evidence — under `O-3=(b)`, its corresponding operation row
+   at exact key; under `O-3=(a)` (section 1.1.1), its row (if any) in
+   `attendance_scheduled_run_target_outcomes`. Require every
+   `target_kind='generate'` target to be terminal — under `O-3=(b)`, its
+   operation row exists and is `completed`; under `O-3=(a)`, it has a
+   recorded outcome row (`completed` or `failed`). If any target is
+   missing its terminal evidence, or (under `O-3=(b)`) has an operation row
+   present but not `completed`, finalization is not admitted and the
+   transaction ends with zero DML;
+5. fold the counts from that immutable evidence: `completed_user_count` =
+   number of `generate`-targets whose terminal evidence is `completed`
+   (under `O-3=(b)`, the step-4 predicate makes this equal
+   `expected_user_count`; under `O-3=(a)`, it may be strictly less, since a
+   `failed` target is terminal but not counted here —
+   `chk_asr_terminal_shape`'s row-local form under `O-3=(a)`, section 1.1,
+   is written to allow this); `generated_count` = number of those whose
+   sealed `response_snapshot` records `inserted = true` (unchanged under
+   either option — a `failed` target was never sealed `completed` and so
+   is never counted here either);
 6. rebuild both payloads (section 1.5), including the `reasons` array in
    ascending target `ordinal`;
 7. insert the run-level outbox rows: always
@@ -1238,7 +1638,14 @@ payload keys, and one event per run.
   step 5 continues inline into section 1.8's steps 5-9 in the same
   transaction — there is no separate finalization transaction and no
   waiting, because `completed_user_count = expected_user_count = 0` is
-  already known to hold. This is **not** a third transaction shape; it is
+  already known to hold. The run witness this inline finalization enqueues
+  outbox rows against is obtained from
+  `mintAttendanceScheduledRunIdentityFromInsertedRowV1` (section 1.4.1)
+  over the run row's own `INSERT ... RETURNING`, not from
+  `rehydrateVerifiedAttendanceScheduledRunIdentityV1` — there is no
+  separately-committed row yet to re-read at this point, only the row this
+  same transaction just inserted, still under the class-`01` lock. This is
+  **not** a third transaction shape; it is
   section 1.8's finalization transaction, entered from the create path
   instead of a later resume path, and section 2 gates 8/15 apply to it
   exactly as written. `attendance.work_date.review_required` still emits
@@ -1318,6 +1725,30 @@ must sort after the W4C-0 `zzzz20260725120000_...` migration they depend on).
    applied migration's six-member literal, which is permanently excluded
    from parity once this migration lands (see gate 9, section 2).
 
+**Steps 7-9, conditional on `O-3`/`OD-W4C-50` (section 1.1.1) — written now
+because implementation does not start until every decision including `O-3`
+is ratified (section 4 step 2), so by the time this migration is actually
+authored the fork below is already resolved to one side, not a
+deploy-time branch:**
+
+- **If `O-3` ratifies `(a)`:** `up()` gains three further steps —
+  7. `CREATE TABLE attendance_scheduled_run_target_outcomes` with every
+     constraint section 1.1.1 states (including the `DELETE`/`TRUNCATE`
+     refusal triggers);
+  8. `ALTER TABLE attendance_scheduled_run_targets ADD CONSTRAINT
+     uq_asrt_id_org_run UNIQUE (id, org_id, run_id)` (section 1.2's
+     conditional addition);
+  9. narrow `chk_asr_terminal_shape`'s `completed` branch (section 1.1)
+     from the equality shown in that section's SQL block to
+     `completed_user_count IS NOT NULL AND completed_user_count <=
+     expected_user_count`, and add the deferred
+     `attendance_w4_run_completion_outcome_guard()` constraint trigger
+     section 1.1.1 specifies.
+- **If `O-3` ratifies `(b)`:** `up()` is exactly steps 1-6 above;
+  `attendance_scheduled_run_target_outcomes` is never created, and
+  `chk_asr_terminal_shape` keeps the equality shown in section 1.1's SQL
+  block.
+
 **Why the previous phrasing of step 5 was wrong, stated for the record.**
 An earlier draft of this step said "extend `OUTBOX_EVENT_KINDS` (migration
 copy) in lockstep with the TS copy," which reads as editing the applied
@@ -1356,17 +1787,23 @@ rejected before source DML (section 1.7) rather than adopted.
 `down()`:
 
 - refuses **before the first DDL statement** while any row exists in
-  `attendance_scheduled_runs`, `attendance_scheduled_run_targets`, or
-  `attendance_result_event_outbox`, with a `W4C2_DOWN_BLOCKED:` message
-  naming the table and count — the same shape as W4C-0's `down()` guard
-  (`zzzz20260725120000_...:1722-1755`). It never clears history to pass;
-- only on a proven-empty database does it drop the two new tables, drop the
-  two partial unique indexes and the new constraints/columns, restore
-  `operation_id NOT NULL` and the original single `uq_areo_identity`,
-  `DROP`/re-`ADD` `chk_areo_event_kind` back to its original six-member
-  form, and `CREATE OR REPLACE` `attendance_w4_outbox_update_guard()` back
-  to its original nine-column freeze-list body — leaving the W4C-0 shape
-  byte-equivalent;
+  `attendance_scheduled_runs`, `attendance_scheduled_run_targets`,
+  `attendance_result_event_outbox`, or — **only if `O-3` ratified `(a)`** —
+  `attendance_scheduled_run_target_outcomes`, with a `W4C2_DOWN_BLOCKED:`
+  message naming the table and count — the same shape as W4C-0's `down()`
+  guard (`zzzz20260725120000_...:1722-1755`). It never clears history to
+  pass;
+- only on a proven-empty database does it drop the two new tables (three,
+  under `O-3=(a)`), drop the two partial unique indexes and the new
+  constraints/columns, restore `operation_id NOT NULL` and the original
+  single `uq_areo_identity`, `DROP`/re-`ADD` `chk_areo_event_kind` back to
+  its original six-member form, and `CREATE OR REPLACE`
+  `attendance_w4_outbox_update_guard()` back to its original nine-column
+  freeze-list body — leaving the W4C-0 shape byte-equivalent. Under
+  `O-3=(a)`, it additionally drops `attendance_scheduled_run_target_outcomes`,
+  the `attendance_w4_run_completion_outcome_guard()` constraint trigger, and
+  `uq_asrt_id_org_run`, and restores `chk_asr_terminal_shape`'s `completed`
+  branch to the equality form;
 - a fresh/upgrade/replay-safe/down-empty/down-populated gate matrix applies,
   as in section 12.1.
 
@@ -1563,7 +2000,22 @@ today, but the amendment must not implement `O-3`/`O-4` without them:**
     reaches `state='completed'`, folds `completed_user_count` excluding
     the failed target, and emits both run-level events with counts
     matching option (a)'s definition (section 1.1.1); a target left with
-    neither `completed` nor `failed` still blocks finalization.
+    neither `completed` nor `failed` still blocks finalization (the
+    deferred `attendance_w4_run_completion_outcome_guard()` trigger
+    raises). **Added legs (the outcome side table itself):** a second
+    `INSERT` for a target that already has an outcome row fails
+    `uq_asrto_target`; `UPDATE`/`DELETE`/`TRUNCATE` on
+    `attendance_scheduled_run_target_outcomes` all fail; an outcome row
+    whose `terminal_outcome` disagrees with its target's operation row's
+    `state` (`'completed'` paired with an operation row that is not
+    `completed`, or `'failed'` paired with one that is not `canceled`)
+    fails the deferred trigger at commit; recording an outcome row for a
+    target via any path other than `recordAttendanceScheduledRunTargetOutcomeV1`
+    (i.e., bypassing the per-user operation witness gate) is rejected
+    before any SQL; `attendance_scheduled_run_targets` itself remains
+    immutable even after its outcome is recorded — attempting an `UPDATE`
+    on the target row post-outcome fails exactly as it did pre-outcome,
+    proving the side table did not reopen target-row mutability.
 21. *(activates on `O-4`/`OD-W4C-52` = (a))* Promotion from `shadow` to
     `authoritative` is refused, values-free and with zero DML, while any
     `attendance_scheduled_runs` row for that org is `state='running'`.
@@ -1572,6 +2024,45 @@ today, but the amendment must not implement `O-3`/`O-4` without them:**
     last target completes, still finalizes exactly once under its frozen
     `shadow` posture, folding counts and emitting events as section 1.7.1
     option (b) specifies.
+22. **Zero-`generate`-target minting factory is unreachable outside the
+    run-creation transaction, and equivalent in guarantee to rehydration.**
+    `mintAttendanceScheduledRunIdentityFromInsertedRowV1` (section 1.4.1)
+    is absent from its defining module's compiled public surface — proven
+    by importing that module's exports at test time and asserting the
+    symbol is `undefined`, not by a source-text grep. A caller-fabricated
+    plain object (JSON clone, spread, prototype lookalike) with the same
+    field shape is rejected by both run-identity constructors identically.
+    *Positive control:* a zero-`generate`-target run's inline-finalization
+    outbox rows (minted from the `INSERT ... RETURNING` row) satisfy every
+    `CHECK`/FK the section 1.4 discriminated union enforces — indistinguishable,
+    at the DB layer, from rows enqueued via
+    `rehydrateVerifiedAttendanceScheduledRunIdentityV1` on the mainline
+    path. *Negative control:* forcing the run-creation transaction to roll
+    back after the minting factory has been called in-process but before
+    `COMMIT` leaves zero outbox rows — the mint does not itself durably
+    commit anything ahead of its enclosing transaction.
+23. **`abandoned` transition: authorization, org anchor, lock order,
+    concurrency, idempotency (section 1.1.2).** An actor posture outside
+    `{platform_admin, attendance_admin}`, or one missing the `retirement`
+    capability, is rejected before any lock is acquired — zero DML, zero
+    lock-wait (a positive control instruments lock-wait counters and shows
+    zero for the rejected call). A caller authenticated for org A
+    attempting to abandon org B's run is rejected (extends gate 13). Two
+    connections attempt to abandon the same `running` run simultaneously:
+    exactly one transitions it to `abandoned` and computes
+    `completed_user_count`; the other returns the recorded outcome with
+    zero DML — same shape as gate 7, no new lock-order leg. A third call
+    against an already-`abandoned` run, and a call against an
+    already-`completed` run, both return the recorded outcome with zero
+    DML (idempotency; a `completed` run is never overwritten to
+    `abandoned`). `abandoned_by_actor_posture` cannot be changed by any
+    subsequent legal `UPDATE` — a mutation that relaxes the
+    out-of-`abandoned`-transition check while leaving the column in the
+    mutable set must make only this leg fail. The transition writes no
+    outbox row and no source DML and acquires no class-`11` lock (extends
+    gate 15 to this transaction shape explicitly, rather than assuming
+    gate 15's existing legs already cover a transaction they were not
+    written against).
 
 Section 12.3's existing scheduled gates remain in force and are amended only
 to read: run-level outbox rows are inserted in the finalization transaction
@@ -1580,15 +2071,17 @@ before their operation seal.
 
 ### 2.1 CI gate home
 
-Nineteen required gates (plus two pending gates, 20-21, inert until
-`O-3`/`O-4` rule) that are only "mutation-proven on real PostgreSQL" in
-prose, with no suite or workflow step named, is this repo's own documented
-false-green shape (real-DB integration suites that never run in any
-workflow, or that skip-green in the no-DB job). This amendment requires:
+Twenty-one required gates (plus two pending gates, 20-21, inert until
+`O-3`/`O-4` rule — the required count above includes the new gates 22-23,
+neither of which is pending on anything) that are only "mutation-proven on
+real PostgreSQL" in prose, with no suite or workflow step named, is this
+repo's own documented false-green shape (real-DB integration suites that
+never run in any workflow, or that skip-green in the no-DB job). This
+amendment requires:
 
 | Gate family | Suite location | CI gate home |
 | --- | --- | --- |
-| Gates 1-3, 5, 7-9, 11-15, 17-21 (constraint/trigger/transaction legs needing a real, committed transaction) | new `packages/core-backend/tests/integration/attendance-w4c2-scheduled-run-*.db.test.ts` file(s) | `.github/workflows/plugin-tests.yml`, job `test`, step **"Run attendance integration tests"** (whole-file wiring, alongside the existing `attendance-w4c0-*.db.test.ts` files) — **and** the same file name(s) added to `packages/core-backend/vitest.config.ts`'s `exclude` array, so the no-DB default `pnpm --filter @metasheet/core-backend test` run cannot skip-green them. A new no-DB `node --test` contract, `scripts/ops/w4c2-run-identity-ci-wiring.test.mjs` (following the established pattern of e.g. `scripts/ops/t1-org-transfer-ci-wiring.test.mjs`), asserts both wiring points exist for every `.db.test.ts` file this slice adds, and is itself run as a step in the same job. |
+| Gates 1-3, 5, 7-9, 11-15, 17-23 (constraint/trigger/transaction legs needing a real, committed transaction) | new `packages/core-backend/tests/integration/attendance-w4c2-scheduled-run-*.db.test.ts` file(s) | `.github/workflows/plugin-tests.yml`, job `test`, step **"Run attendance integration tests"** (whole-file wiring, alongside the existing `attendance-w4c0-*.db.test.ts` files) — **and** the same file name(s) added to `packages/core-backend/vitest.config.ts`'s `exclude` array, so the no-DB default `pnpm --filter @metasheet/core-backend test` run cannot skip-green them. A new no-DB `node --test` contract, `scripts/ops/w4c2-run-identity-ci-wiring.test.mjs` (following the established pattern of e.g. `scripts/ops/t1-org-transfer-ci-wiring.test.mjs`), asserts both wiring points exist for every `.db.test.ts` file this slice adds, and is itself run as a step in the same job. Gate 22's module-export-absence leg (unlike its positive/negative controls) needs no real transaction and may live in either row — placed here because its controls (legs (c)/(d)) do. |
 | Gate 4 (payload/wire freeze, pure-function legs), gate 6 (restart cursor derivation), gate 10 (resume fingerprint), gate 16 (builder disjointness) | `packages/core-backend/src/attendance/__tests__/w4c0-identity.test.ts` or a sibling `w4c2-scheduled-run-identity.test.ts` for the new builder/fingerprint math (no DB needed for pure key/fingerprint computation) | `.github/workflows/plugin-tests.yml`, job `test`, step **"Run core-backend tests"** (`pnpm --filter @metasheet/core-backend test`), which runs on both matrix legs (`18.x`, `20.x`) — but **only `test (20.x)` is a required branch-protection check** (`branches/main/protection/required_status_checks`, verified against `origin/main`, does not list `test (18.x)`). A Node-18-only regression in this step would go red without blocking merge; `test (20.x)` is the check that actually gates. The durable-row-dependent halves of gates 4 and 6 (does the *delivered* byte stream match; does the *replayed* row set match) belong in the real-DB row above instead. |
 | Gate 9's parity leg specifically | a no-DB vitest/`node --test` comparing `w4c0-operation-contract.ts:92` against the new migration's local eight-member literal | same row as above (core-backend unit step). |
 
@@ -1602,8 +2095,8 @@ mutation-proven, not just read the gate's own assertions.
 
 | Decision | Options | Recommendation |
 | --- | --- | --- |
-| `OD-W4C-44` scheduled run identity | (a) durable `attendance_scheduled_runs` row with server-minted `run_id`, frozen posture/counts/target-set fingerprint, immutable target rows, closed `running|completed|abandoned` states, and run-level outbox written in the same finalization transaction as `completed`; (b) keep the derived in-process run ID and add only outbox columns; (c) no run object — reduce the two run-level events to per-user events | **(a)** |
-| `OD-W4C-45` repeat invocation and roster drift | (a) `generation` allocated under class-`01`; a fresh invocation after a terminal run starts generation `n+1` (today's re-emit behavior preserved), while the frozen `target_set_fingerprint` guards **resume** only and any drift on resume is fail-closed remediation; (b) one run per `(org, initiator, work_date)` forever — a repeat invocation is a zero-DML replay that emits nothing; (c) include the fingerprint in the run identity so a roster change mints a different run | **(a)** |
+| `OD-W4C-44` scheduled run identity — **its option (a) below names states that are themselves the subject of `OD-W4C-48`; see section 3.3 for the exact coupling and why this is wording, not a hidden second decision** | (a) durable `attendance_scheduled_runs` row with server-minted `run_id`, frozen posture/counts/target-set fingerprint, immutable target rows, and run-level outbox written in the same finalization transaction as `completed`, with closed states per whichever `OD-W4C-48` selects (`running|completed|abandoned` under `OD-W4C-48=(a)`, this document's default and the form section 1.1's SQL block shows; `running|completed` under `OD-W4C-48=(b)`, which additionally requires the schema/gate edits section 5 already flags); (b) keep the derived in-process run ID and add only outbox columns; (c) no run object — reduce the two run-level events to per-user events | **(a)** |
+| `OD-W4C-45` repeat invocation and roster drift — **its option (a) below names a serialization mechanism that is itself the subject of `OD-W4C-46`; see section 3.3** | (a) `generation` allocated under whichever serialization mechanism `OD-W4C-46` ultimately selects (class `01` under `OD-W4C-46=(a)`/`OD-W4C-49=(a)`; the fallback mechanism under `OD-W4C-46=(b)`/`(c)` if `OD-W4C-49=(b)`, not itself fully specified by this document — section 3.3); a fresh invocation after a terminal run starts generation `n+1` (today's re-emit behavior preserved), while the frozen `target_set_fingerprint` guards **resume** only and any drift on resume is fail-closed remediation; (b) one run per `(org, initiator, work_date)` forever — a repeat invocation is a zero-DML replay that emits nothing; (c) include the fingerprint in the run identity so a roster change mints a different run | **(a)** |
 | `OD-W4C-46` advisory class for the run lock — **conditional on `O-1`/`OD-W4C-49` (section 3.1): option (a) is only available if `O-1` resolves to `(a)`; if `O-1` resolves to `(b)`, this item cannot resolve to (a) and must instead be decided between (b)/(c) (see `OD-W4C-49`'s option (b) cell for the forcing argument)** | (a) assign the reserved class `01` over `(org, initiator, work_date)`, ordered `00 → 01 → 10 → 11`, with its own values-free `503 ATTENDANCE_SCHEDULED_RUN_BUSY`; (b) reuse class `10` with a third `kind` discriminant `scheduled_run`; (c) rely on the partial unique index and row locks alone | **(a)**, contingent on `O-1=(a)` |
 | `OD-W4C-47` run-level payload and delivery order | (a) freeze both payloads byte-identically, keep the closed `reasons` vector rebuilt in target `ordinal` order, and leave inter-event delivery order unconstrained (as today's two independent `emit` calls already are); (b) additionally add a stored `delivery_ordinal` and require `attendance.absence.generated` to be delivered before `attendance.work_date.review_required` for the same run; (c) reduce `reasons` to a count | **(a)** |
 | `OD-W4C-48` non-terminal run escape hatch | (a) add the terminal `abandoned` state with a closed values-free reason code, written by an operator remediation path, emitting no event and writing no source DML; (b) `running|completed` only, and accept that an unsatisfiable run holds the partial unique index indefinitely | **(a)** |
@@ -1638,7 +2131,7 @@ one-pass ratification — see the scope note at the top of this document.
 | Decision | Options | Recommendation |
 | --- | --- | --- |
 | `OD-W4C-49` (`O-1`) — rewrite red line `W4C-R42` for class `01` | (a) rewrite `W4C-R42` (lock line 214) and the three dependent clauses (lock lines 2049-2050, 2126-2130, 2570) from "`01` is forbidden" to "`01` is acquired only by the scheduled-run helper; any other caller acquiring `01`, or that helper acquiring `00`/`10`/`11`, fails independently" — i.e. `01` becomes a fifth reserved-then-assigned class rather than staying forbidden; (b) do not rewrite the red line — class `01` stays forbidden, so `OD-W4C-46` cannot resolve to (a) (reserved class `01`) and must instead resolve to (b) (reuse class `10` with a third `kind` discriminant) or (c) (partial unique index + row locks alone, no advisory class), with section 1.6 and gate 16 rewritten to match whichever is chosen; `OD-W4C-44(c)` (no run object) remains a separate, already-rejected fallback if neither `OD-W4C-46(b)`/(c) is judged adequate | **(a)**, because both `OD-W4C-46(b)` and (c) were already argued against on their own merits (weakening the "cross-class upgrade is impossible" property, and making `23505` a control path, respectively) — reopening the red line's wording is a smaller change than accepting either of those costs |
-| `OD-W4C-50` (`O-3`) — per-`generate`-target permanent failure outcome | (a) add a durable `terminal_outcome`/`failure_reason_code` pair to target rows (section 1.1.1); `completed` no longer requires every target to succeed, only every target to reach a terminal outcome; (b) keep the all-or-nothing shape and accept, as a declared residual, that one user's permanent deterministic failure withholds both run-level events for the entire org's `work_date` until an operator abandons the run | **(a)**, because (b) makes an org-wide, permanently-lost outcome the consequence of a single user's unrelated failure, for a lock whose W4-covered posture matrix produces deterministic per-user failures routinely |
+| `OD-W4C-50` (`O-3`) — per-`generate`-target permanent failure outcome | (a) add a durable `terminal_outcome`/`failure_reason_code` pair on a new **append-only side table**, `attendance_scheduled_run_target_outcomes` — never a column on the immutable `attendance_scheduled_run_targets` row (section 1.1.1); `completed` no longer requires every target to succeed, only every target to reach a recorded outcome, checked by a deferred commit-time constraint trigger since a single-row `CHECK` cannot see another table; (b) keep the all-or-nothing shape and accept, as a declared residual, that one user's permanent deterministic failure withholds both run-level events for the entire org's `work_date` until an operator abandons the run (section 1.1.2) | **(a)**, because (b) makes an org-wide, permanently-lost outcome the consequence of a single user's unrelated failure, for a lock whose W4-covered posture matrix produces deterministic per-user failures routinely |
 | `OD-W4C-51` (`O-2`) — canonical order for `ordinal` / resume-guard shape | (a) pin the membership resolution query to `ORDER BY user_id` (or another explicit total order); `ordinal` becomes a pure function of membership; narrow gate 4's "byte-identical to pre-amendment emit" claim to key/value-set equivalence plus the new canonical order; (b) leave resolution order undefined as today; change the resume guard (section 1.7 step 3) to an order-insensitive set fingerprint; withdraw gate 10's "or one ordinal" leg | **(a)**, because the ordered fingerprint this draft already specifies (section 1.3) cannot be satisfied on resume by an unpinned membership query, and pinning without owner sign-off is not available to the author alone — a one-time, disclosed change to `reasons` ordering is preferable to shipping a resume guard that spuriously fires on a benign restart |
 | `OD-W4C-52` (`O-4`) — does a `running` run block shadow/eligible promotion | (a) extend the lock's promotion-block predicate (lock lines 2689-2690, 2250) to treat a `running` `attendance_scheduled_runs` row as blocking, same as an incomplete operation; accept the operational cost that a promotion window must avoid colliding with an in-flight scheduled run; (b) do not block promotion; instead redefine finalization (section 1.8 step 1) to execute under the run's own frozen posture rather than the currently resolved one — a considered, narrow reversal of this draft's own "posture flip is remediation, never a rebase" stance, scoped to finalization only | no recommendation — this is an operational rollout-timing tradeoff ((a)) versus a semantic reversal of a stance this same draft asserts elsewhere ((b)); both are internally consistent, and the choice is the owner's to make, not the author's |
 | `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | **Two unconditional tokens, one conditional token:** (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column — unconditional; **(ii-wide)** re-resolve before the legacy write or reorder lock §8.2 steps 3/4 (safe by construction, but reopens RATIFIED step-numbering text with an unaudited citation surface) — unconditional; **(ii-narrow)** exclude the operation's own just-written row from the resolver's `openPreviousMatches` match — **conditional**: section 3.2 demonstrates by executed counterexample that the mechanism *as specified in this document* flips both `workDate` and `shiftId` (not only `reasonCode`) when this operation's write touches a pre-existing open record it did not create; a ruling of `(ii-narrow)` authorizes the *direction* (eliminate self-observation at the resolver, not by widening the fingerprint domain) but is **void as an implementation authorization unless and until** the four preconditions in section 3.2's "Gate shape this option needs" (corrected, `matching.length === 1`-gated mechanism spec; positive control; the negative control from the counterexample above; a check-out/disappearance analysis) are supplied and gated — implementation does not start on the mechanism as currently specified | (i) over (ii-wide) among the two unconditional tokens — see reasoning in section 3.2. No recommendation is made on `(ii-narrow)`'s *direction* (that remains the owner's to prefer, per section 3.2's closing paragraph) or on whether its voidness condition will ever be satisfied — only that today's specified mechanism does not clear it |
@@ -2091,6 +2584,128 @@ document elsewhere warns against (section 3.1's framing of why
 `(ii-wide)` remains the only *unconditional* way to deliver that same
 root-cause shape today, at the structural cost described above.
 
+### 3.3 Dependency matrix and bundle legality across `OD-W4C-44..53`
+
+An independent gate review found that this document's own option cells,
+read in isolation, can name assumptions that hold only if a *different*
+item resolves a particular way — without saying so on the row itself
+(three named instances below). The purpose of this section is to make
+"is this combination of ten choices legal" a **mechanically checkable**
+question rather than one a reader has to reconstruct from ten separately-
+written cells.
+
+**Method, and the method's own blind spot, stated before the results.**
+The dependency edges below were found by reading each option's own cell
+text for an explicit reference to another item's named object (a class
+number, a state name, a lock, a prior ruling) — the same technique the
+document already used, once, for `OD-W4C-46`'s existing conditional-on-
+`O-1` annotation. This method finds **naming** couplings; it does **not**
+find couplings that arise only from two options' *consequences*
+interacting without either cell naming the other item. Section 1.7.1's
+`50(b)`-times-`52(a)` interaction, added above by this pass, was found
+that second way — by tracing what `50=(b)`'s residual (an unclosable
+`running` state pending `abandoned`) does to `52=(a)`'s cost (blocks
+promotion while any run is `running`), not by either cell naming the
+other. **This section does not claim its method finds every such
+consequence-level interaction; it claims only the edges listed below**,
+found by the two techniques just described, applied once. A different
+reviewer applying the same two techniques to the same ten cells is
+expected to reproduce these edges; finding an edge this pass missed is
+not evidence the pass was performed incorrectly, only that the search was
+not exhaustive by construction — no claim of exhaustiveness is made here.
+
+**Wording decouplings (not dependencies — a naming fix, not a legality
+constraint).** Two option cells, before this pass, hard-coded another
+item's *default* answer into their own prose, which would have made the
+cell's own text literally false the moment the owner picked the other
+item's non-default option:
+- `OD-W4C-44(a)`'s state list ("`running|completed|abandoned`") is now
+  written conditional on `OD-W4C-48` (fixed above, in section 3's table);
+- `OD-W4C-45(a)`'s "generation allocated under class-`01`" is now written
+  conditional on `OD-W4C-46`/`OD-W4C-49` (fixed above, in section 3's
+  table).
+
+Neither of these is a legality constraint on `44`/`45` themselves — `44`
+and `45` each still have exactly the same legal-option set described
+below regardless of what `48`/`46` resolve to. They are listed here
+because the review that requested this matrix named them as the kind of
+thing a dependency matrix exists to catch, even though the fix in both
+cases was wording, not a new exclusion.
+
+**What "legal" means here — two different bars, not one.** This document's
+own section 1/2 text is written to a **specific** shape for `44`, `45`,
+`47`, and `48` (their `(a)` options only) and does not carry a parallel,
+equally-complete alternative spec for their other options the way it does
+for `49`-`53`. Picking anything other than `44=a`/`45=a`/`47=a`/`48=a` (or,
+for `46`, anything other than what `49` permits) does not make this
+document's *implementation* wrong so much as **incomplete for that
+branch** — sections 1/2 as written do not cover it, and a follow-up
+amendment round would be needed before implementation could proceed on
+that branch. This is a real, if softer, form of "not authorized by this
+document," distinct from a combination that is **structurally impossible
+no matter what is written** — of which this pass found exactly two.
+
+**Structural exclusions (hard — true for any possible spec, not just this
+draft's).**
+
+| # | Excluded pair | Why |
+| --- | --- | --- |
+| D0a | `44=(b)`, any other value | This document's already-written sections 1.1-1.9 (durable row, frozen counts, resume-by-row-read, finalization-by-fold) presuppose a durable run row with an ID that outlives the process; `44(b)`'s derived in-process ID cannot carry any of that (section 3's own "fails because…" text). Not a bundling issue — `44` is not a free choice this document's own body leaves open. |
+| D0b | `44=(c)`, any other value | Foreclosed by an **external, already-ratified** decision: `44(c)` is verbatim the G-2 option `(a)` the owner already rejected (section 0.1) in favor of `(b2)`. Re-litigating it here would contradict a ruling this amendment itself takes as given. |
+| D1 | `46=(a)`, `49=(b)` | `OD-W4C-49(b)`'s own cell text states this directly: if the red line is not rewritten, class `01` remains forbidden, so `46` cannot be `(a)`. (Already annotated on `46`'s row before this pass; restated here for the matrix's completeness, not newly found.) |
+| D2 | `48=(b)`, `50=(b)` | Section 1.1's own rules assert "`running` is the only non-terminal state and is always recoverable" (no stuck absorbing state). Under `50=(b)` (all-or-nothing), a deterministically-failed target's **only** exit is the explicit `abandoned` transition (section 1.1.1's text for `50(b)`, unchanged by this pass). Under `48=(b)`, that state does not exist. The combination leaves a run with a permanently-failed target with **zero** legal exit — not merely an unrecommended residual (as `48=(b)` alone, or `50=(b)` alone, each are) but a direct contradiction of section 1.1's own asserted invariant. `48=(b)` is legal only paired with `50=(a)`. |
+
+**Interaction (not an exclusion — a cost multiplier the ballot should
+see together, not on two separate rows).**
+
+| # | Pair | Effect |
+| --- | --- | --- |
+| I1 | `50=(b)`, `52=(a)` | Not mutually exclusive (an exit still exists via `abandoned`), but the combination turns `52=(a)`'s stated cost ("a promotion window must avoid colliding with an in-flight run," section 1.7.1) into "one user's permanent, unrelated failure can block the org's shadow-to-authoritative promotion until an operator manually abandons the run" — a materially different, and materially larger, operational cost than either item's own cell states in isolation. See section 1.7.1's updated text. |
+
+**Free axes.** `47`, `51`, `52`, and `53` each have every option fully
+specified in this document (section 1.5/gate 4 for `47`; section 1.3/gate
+10 for `51`; section 1.7.1/section 1.8 step 1/gate 21 for `52`; section
+3.2 for `53`) and no naming or consequence coupling to any other item was
+found by the method above. Picking any legal value for one does not
+constrain any other's legal value, subject only to D1/D2/I1 above (none of
+which involve `47`, `51`, `53`; `52` is involved only in the non-exclusion
+interaction I1).
+
+**Decision rule.** A bundle (one choice per item, `44` through `53`) is:
+
+- **structurally illegal** iff it contains `44=(b)`, `44=(c)`, the pair
+  `(46=(a), 49=(b))`, or the pair `(48=(b), 50=(b))` (D0a/D0b/D1/D2 above);
+- otherwise **legal**, and additionally **fully authorized by this
+  document as currently drafted — no follow-up amendment round needed
+  before implementation** iff `44=a ∧ 45=a ∧ 46=a ∧ 47=a ∧ 48=a ∧ 49=a`
+  (the only branch of `44/45/47/48` this document fully specifies, paired
+  with the only value of `49` that makes `46=a` legal) **and** `53 ∈
+  {(i), (ii-wide)}` (excluding `(ii-narrow)`, which is legal to *rule*
+  this pass per section 3.2 but void as an implementation authorization
+  until its own four preconditions are met) — with `50`, `51`, `52` each
+  free between their two fully-specified options. **Exactly 16 such
+  bundles exist** (`50`, `51`, `52` each binary, `53` restricted to 2 of
+  its 3 tokens: 2×2×2×2 = 16), all legal by the rule above and all
+  requiring zero follow-up round;
+- otherwise **legal, but not immediately implementable from this document
+  alone** — some axis picked a value this document does not carry a full
+  parallel spec for (`45∈{b,c}`, `47∈{b,c}`, `48=(b)` [with `50=(a)`,
+  since `48=(b)` with `50=(b)` is D2-excluded], `46∈{b,c}` [reachable only
+  when `49=(b)`], or `53=(ii-narrow)` [conditional per section 3.2]) — a
+  follow-up round would need to write that branch's spec (or, for
+  `(ii-narrow)`, its four preconditions) before implementation proceeds on
+  it.
+
+**The reviewer-suggested bundle
+`44a/45a/46a/47a/48a/49a/50a/51a/52a/53(i)` is legal, and is one of the 16
+zero-follow-up bundles above** — it picks the fully-specified branch on
+every axis that has one, triggers neither structural exclusion (`48=a`
+means D2 does not bind), and picks an unconditional `53` token. This
+section confirms that bundle's mechanical legality; it does not rule on
+it — the choice among the 16 (or among the wider legal-but-incomplete set)
+remains the owner's, per this document's standing boundary (section 3.1's
+own framing).
+
 ## 4. Execution sequence
 
 1. Merge this document as **PROPOSED** with no runtime code. PR #4612 stays
@@ -2100,9 +2715,15 @@ root-cause shape today, at the structural cost described above.
    two-reading decisions (`49..53`, sections 3.1-3.2). Nothing below starts
    before all ten are ratified.
 3. Only then implement P1-2 on the W4C-2 branch: the migration, the two new
-   tables, the outbox discriminated union, the class-`01` builder/helper, the
-   run-scoped enqueue surface, the run/resume/finalization transactions, the
-   two closed-set copies, and all of section 2's gates.
+   tables (three, plus the deferred completion-outcome trigger, if `O-3`
+   ratifies `(a)`, section 1.1.1), the outbox discriminated union, the
+   class-`01` builder/helper, the run-scoped enqueue surface (including the
+   private `mintAttendanceScheduledRunIdentityFromInsertedRowV1` factory,
+   section 1.4.1), the run/resume/finalization transactions, the
+   `abandoned` transition (section 1.1.2), the two closed-set copies, and
+   all of section 2's gates (including the new gates 22-23; section 3.3's
+   dependency matrix determines which of gates 20-21's legs are required
+   once `O-3`/`O-4` are known).
    `OD-W4C-53`/`O-5` is implemented separately from this step, and its
    ballot has two unconditional tokens and one conditional token per
    section 3.2, each with its own implementation branch: if ratified `(i)`,
@@ -2183,3 +2804,20 @@ an accepted bound:
   1.7.1 are the full specification of both provisional fixes; section 2
   gates 20-21 are inert (not required today) until the corresponding
   decision selects a side.
+- **`50=(b)` + `52=(a)` is a cost interaction, not a fresh residual, but
+  is recorded here for visibility alongside the other cost-bearing
+  choices in this list.** See section 3.3's interaction row I1 and section
+  1.7.1's updated text: one user's permanent, unrelated failure can, under
+  that pairing, block an org-wide shadow-to-authoritative promotion until
+  an operator manually abandons the run.
+- **Abandon-transition authorization is specified at the capability/posture
+  level only.** Section 1.1.2 requires the `retirement` capability and
+  `{platform_admin, attendance_admin}` actor posture, mirroring this
+  line's existing command-envelope check, but this run-identity-focused
+  document has not read, and does not specify, the HTTP route,
+  request-validation, or session layer that would actually enforce that
+  check, nor a general-purpose audit-log table beyond the run row's own
+  `abandoned_by_actor_posture`/`abandon_reason_code`/`finalized_at`
+  fields. That wiring is implementation detail governed by however this
+  line's other admin surfaces are already authenticated — a system this
+  document does not audit.
