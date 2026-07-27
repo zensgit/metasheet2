@@ -27,6 +27,11 @@ import {
 // THIS file — the 17th guard — adds those 7, bringing the ALL-17-guards total to 30 (23 + 7); the
 // other 335 — multitable's 216 included — are outside every guard's (all 17) file list. This
 // closes attendance's own gap; it does not close "the last" gap in the workflow.
+// W4C-2 P1-2 addendum (#4556, PR #4617 amendment): an 8th file
+// (attendance-w4c2-p12-migration-schema-gates.db.test.ts) is added to FILES below, same
+// discipline as the original 7. This addendum does not re-run the 365-file/17-guard
+// cross-suite census above — that count is this comment's own historical snapshot from
+// #4612 gate4, not re-verified here.
 // This is the exact skip-green shape gate4 caught for THIS PR's own primary evidence file
 // (attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts) earlier in this same PR's history —
 // present in the run-list, but the matching vitest.config.ts exclude line was missing, so the
@@ -65,6 +70,9 @@ const FILES = Object.freeze([
   'tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts',
   'tests/integration/attendance-w4c2-p2-remediation.db.test.ts',
   'tests/integration/attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts',
+  // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the schema/
+  // migration half's own real-DB gate suite (added same discipline as the seven above).
+  'tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts',
 ])
 
 /**
