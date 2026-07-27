@@ -729,11 +729,23 @@ describeIfDatabase('W4C-2 P1-2 — scheduled-run identity migration + outbox uni
         })
         expect(String((bothNull as Error).message)).toMatch(/chk_areo_identity_exclusive|chk_areo_identity_run/)
 
+        // A REAL backing attendance_result_operations row (not just an FK-unbacked UUID) —
+        // this isolates block 6 (the NOT NULL constraint itself) from fk_areo_operation:
+        // without a real backing row, a mutation that drops NOT NULL would still be
+        // caught by the FK for the wrong reason, masking block 6's own absence.
+        const liveOpId = uuid()
+        await pool.query(
+          `INSERT INTO attendance_result_operations (
+              org_id, entrypoint, operation_id, identity_source_kind, source_ref, actor_id, actor_posture,
+              capability, subject_scope, command_fingerprint, accepted_write_posture, state, response_snapshot
+            ) VALUES ($1,'live_punch',$2,'direct_live_punch','ref:w4c2p12','actor-w4c2p12','self','punch','{}'::jsonb,$3,'shadow','completed','{}'::jsonb)`,
+          [org, liveOpId, HEX64_C],
+        )
         const nullDiscriminant = await catchInTxn(pool, async (client) => {
           await client.query(
             `INSERT INTO attendance_result_event_outbox (org_id, entrypoint, operation_id, event_kind, payload, payload_schema_version, business_key_fingerprint)
              VALUES ($1,'live_punch',$2,'attendance.punched','{}'::jsonb,1,$3)`,
-            [org, uuid(), HEX64_C],
+            [org, liveOpId, HEX64_C],
           )
         })
         expect(String((nullDiscriminant as Error).message)).toMatch(/null value in column "identity_kind"|violates not-null constraint/)
