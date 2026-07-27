@@ -1,0 +1,495 @@
+{
+  "vectorSetId": "sealed-export-canonical-vectors",
+  "vectorSetVersion": "v1",
+  "canonicalizationVersion": "sealed-export/canonical-json/v1",
+  "digestAlgorithm": "sha256",
+  "rule": [
+    "UTF-8, no BOM, no insignificant whitespace.",
+    "Object keys sorted ascending by UTF-16 code unit; duplicate keys cannot survive.",
+    "Strings use JCS/ECMA-262 minimal escaping; no Unicode normalization is applied.",
+    "Numbers are integers only, |n| <= 9007199254740991, no sign on zero, no exponent, no fraction.",
+    "Domain: null | boolean | integer | string | dense array | plain object.",
+    "canonical(bytes) holds iff serialize(parse(bytes)) === bytes."
+  ],
+  "syntheticValueNote": "Every token is a synthetic vec-* placeholder and every digest is sha256(\"sealed-export-vector:<label>\"). No customer value, identifier, endpoint, credential, path, filter or business limit appears here.",
+  "vectors": [
+    {
+      "id": "primitive.empty_object",
+      "kind": "PRIMITIVE",
+      "value": {},
+      "canonicalJsonText": "{}",
+      "canonicalSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "nonCanonicalForms": [
+        {
+          "id": "primitive.empty_object.whitespace",
+          "family": "WHITESPACE",
+          "jsonText": "{ }"
+        },
+        {
+          "id": "primitive.empty_object.newline",
+          "family": "WHITESPACE",
+          "jsonText": "{\n}"
+        }
+      ]
+    },
+    {
+      "id": "primitive.empty_array",
+      "kind": "PRIMITIVE",
+      "value": [],
+      "canonicalJsonText": "[]",
+      "canonicalSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "nonCanonicalForms": [
+        {
+          "id": "primitive.empty_array.whitespace",
+          "family": "WHITESPACE",
+          "jsonText": "[ ]"
+        }
+      ]
+    },
+    {
+      "id": "primitive.key_order",
+      "kind": "PRIMITIVE",
+      "value": {
+        "b": 1,
+        "a": 2,
+        "C": 3,
+        "_z": 4
+      },
+      "canonicalJsonText": "{\"C\":3,\"_z\":4,\"a\":2,\"b\":1}",
+      "canonicalSha256": "a3b271a386d37005157230c2c6cd56f9f9675ce8a0e6a1b8966d00b66be4371a",
+      "nonCanonicalForms": [
+        {
+          "id": "primitive.key_order.source_order",
+          "family": "KEY_ORDER",
+          "jsonText": "{\"b\":1,\"a\":2,\"C\":3,\"_z\":4}"
+        },
+        {
+          "id": "primitive.key_order.reverse",
+          "family": "KEY_ORDER",
+          "jsonText": "{\"b\":1,\"_z\":4,\"a\":2,\"C\":3}"
+        },
+        {
+          "id": "primitive.key_order.pretty",
+          "family": "WHITESPACE",
+          "jsonText": "{\n  \"C\": 3,\n  \"_z\": 4,\n  \"a\": 2,\n  \"b\": 1\n}"
+        },
+        {
+          "id": "primitive.key_order.duplicate_key",
+          "family": "DUPLICATE_KEY",
+          "jsonText": "{\"C\":3,\"_z\":4,\"a\":2,\"a\":9,\"b\":1}"
+        }
+      ]
+    },
+    {
+      "id": "primitive.numbers",
+      "kind": "PRIMITIVE",
+      "value": {
+        "n0": 0,
+        "n1": 1,
+        "nBig": 9007199254740991,
+        "nNeg": -1,
+        "n100": 100
+      },
+      "canonicalJsonText": "{\"n0\":0,\"n1\":1,\"n100\":100,\"nBig\":9007199254740991,\"nNeg\":-1}",
+      "canonicalSha256": "4bb316e3d462c1d8c5ca1196e66f2b9e7e608b692569b72d9158f13d0e74f2c7",
+      "nonCanonicalForms": [
+        {
+          "id": "primitive.numbers.trailing_zero",
+          "family": "NUMBER_FORM",
+          "jsonText": "{\"n0\":0,\"n1\":1.0,\"n100\":100,\"nBig\":9007199254740991,\"nNeg\":-1}"
+        },
+        {
+          "id": "primitive.numbers.exponent",
+          "family": "NUMBER_FORM",
+          "jsonText": "{\"n0\":0,\"n1\":1,\"n100\":1e2,\"nBig\":9007199254740991,\"nNeg\":-1}"
+        },
+        {
+          "id": "primitive.numbers.negative_zero",
+          "family": "NUMBER_FORM",
+          "jsonText": "{\"n0\":-0,\"n1\":1,\"n100\":100,\"nBig\":9007199254740991,\"nNeg\":-1}"
+        },
+        {
+          "id": "primitive.numbers.plus_sign",
+          "family": "NUMBER_FORM",
+          "jsonText": "{\"n0\":0,\"n1\":+1,\"n100\":100,\"nBig\":9007199254740991,\"nNeg\":-1}"
+        }
+      ]
+    },
+    {
+      "id": "primitive.nested",
+      "kind": "PRIMITIVE",
+      "value": {
+        "outer": {
+          "z": [
+            1,
+            2,
+            3
+          ],
+          "a": {
+            "deep": true
+          }
+        },
+        "tail": null
+      },
+      "canonicalJsonText": "{\"outer\":{\"a\":{\"deep\":true},\"z\":[1,2,3]},\"tail\":null}",
+      "canonicalSha256": "1490443aeb24a207359455e5f9ee04c6462c9db20bcec6a0199c2ba42adeb758",
+      "nonCanonicalForms": [
+        {
+          "id": "primitive.nested.reordered",
+          "family": "KEY_ORDER",
+          "jsonText": "{\"tail\":null,\"outer\":{\"z\":[1,2,3],\"a\":{\"deep\":true}}}"
+        },
+        {
+          "id": "primitive.nested.spaced",
+          "family": "WHITESPACE",
+          "jsonText": "{\"outer\": {\"a\": {\"deep\": true}, \"z\": [1, 2, 3]}, \"tail\": null}"
+        }
+      ]
+    },
+    {
+      "id": "primitive.string_escapes",
+      "kind": "PRIMITIVE",
+      "value": {
+        "s": "a\"b\\c\nd\te\u0001f/g\u001f"
+      },
+      "canonicalJsonText": "{\"s\":\"a\\\"b\\\\c\\nd\\te\\u0001f/g\\u001f\"}",
+      "canonicalSha256": "31f7b74e9fc979fdf9c927512fd4104c0f5a03a52ae6d16b2d85ceee2517388c",
+      "nonCanonicalForms": [
+        {
+          "id": "primitive.string_escapes.escaped_solidus",
+          "family": "STRING_ESCAPE",
+          "jsonText": "{\"s\":\"a\\\"b\\\\c\\nd\\te\\u0001f\\/g\\u001f\"}"
+        },
+        {
+          "id": "primitive.string_escapes.long_and_uppercase_hex_escapes",
+          "family": "STRING_ESCAPE",
+          "jsonText": "{\"s\":\"a\\\"b\\\\c\\u000Ad\\u0009e\\u0001f/g\\u001F\"}"
+        }
+      ]
+    },
+    {
+      "id": "object.export_request_envelope",
+      "kind": "EXPORT_REQUEST_ENVELOPE",
+      "value": {
+        "exportRequestId": "vec-export-request-1",
+        "nonce": "vec-nonce-1",
+        "expiry": "vec-expiry-1",
+        "scenarioVersion": "vec-scenario-v1",
+        "bindingVersion": "vec-binding-v1",
+        "roleId": "vec-role-1",
+        "actionProfileVersion": "vec-action-profile-v1",
+        "roleBindingFingerprint": "vec-role-binding-fingerprint-1",
+        "systemContentKey": "vec-system-content-key-1",
+        "approvedConfigVersionId": "vec-approved-config-v1",
+        "configContentKey": "vec-config-content-key-1",
+        "canonicalObjectVersion": "vec-canonical-object-v1",
+        "qualificationDigest": "1b585d93abcd968fbe63a26901f48b1842abbf5b65ee62181a960e04727c9179",
+        "executionMode": "vec-execution-mode-1",
+        "applyProfileVersion": "vec-apply-profile-v1",
+        "queryObjectFilterBindingDigest": "9375b890f8b4986cad397935e0c7529e4f37942b5fe4487e617773b816bb7316",
+        "expectedSourceSchemaFieldMapDigest": "2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45",
+        "tenantDomainBinding": "vec-tenant-domain-1",
+        "rowBudget": 1000,
+        "byteBudget": 100000,
+        "chunkBudget": 10
+      },
+      "canonicalJsonText": "{\"actionProfileVersion\":\"vec-action-profile-v1\",\"applyProfileVersion\":\"vec-apply-profile-v1\",\"approvedConfigVersionId\":\"vec-approved-config-v1\",\"bindingVersion\":\"vec-binding-v1\",\"byteBudget\":100000,\"canonicalObjectVersion\":\"vec-canonical-object-v1\",\"chunkBudget\":10,\"configContentKey\":\"vec-config-content-key-1\",\"executionMode\":\"vec-execution-mode-1\",\"expectedSourceSchemaFieldMapDigest\":\"2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45\",\"expiry\":\"vec-expiry-1\",\"exportRequestId\":\"vec-export-request-1\",\"nonce\":\"vec-nonce-1\",\"qualificationDigest\":\"1b585d93abcd968fbe63a26901f48b1842abbf5b65ee62181a960e04727c9179\",\"queryObjectFilterBindingDigest\":\"9375b890f8b4986cad397935e0c7529e4f37942b5fe4487e617773b816bb7316\",\"roleBindingFingerprint\":\"vec-role-binding-fingerprint-1\",\"roleId\":\"vec-role-1\",\"rowBudget\":1000,\"scenarioVersion\":\"vec-scenario-v1\",\"systemContentKey\":\"vec-system-content-key-1\",\"tenantDomainBinding\":\"vec-tenant-domain-1\"}",
+      "canonicalSha256": "5a482e8785b072fd33b82f1abf4c69ac9303908d57e0edbf8a8ef1b3c0651e50",
+      "nonCanonicalForms": [
+        {
+          "id": "object.export_request_envelope.source_order",
+          "family": "KEY_ORDER",
+          "jsonText": "{\"tenantDomainBinding\":\"vec-tenant-domain-1\",\"systemContentKey\":\"vec-system-content-key-1\",\"scenarioVersion\":\"vec-scenario-v1\",\"rowBudget\":1000,\"roleId\":\"vec-role-1\",\"roleBindingFingerprint\":\"vec-role-binding-fingerprint-1\",\"queryObjectFilterBindingDigest\":\"9375b890f8b4986cad397935e0c7529e4f37942b5fe4487e617773b816bb7316\",\"qualificationDigest\":\"1b585d93abcd968fbe63a26901f48b1842abbf5b65ee62181a960e04727c9179\",\"nonce\":\"vec-nonce-1\",\"exportRequestId\":\"vec-export-request-1\",\"expiry\":\"vec-expiry-1\",\"expectedSourceSchemaFieldMapDigest\":\"2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45\",\"executionMode\":\"vec-execution-mode-1\",\"configContentKey\":\"vec-config-content-key-1\",\"chunkBudget\":10,\"canonicalObjectVersion\":\"vec-canonical-object-v1\",\"byteBudget\":100000,\"bindingVersion\":\"vec-binding-v1\",\"approvedConfigVersionId\":\"vec-approved-config-v1\",\"applyProfileVersion\":\"vec-apply-profile-v1\",\"actionProfileVersion\":\"vec-action-profile-v1\"}"
+        },
+        {
+          "id": "object.export_request_envelope.pretty",
+          "family": "WHITESPACE",
+          "jsonText": "{\n  \"exportRequestId\": \"vec-export-request-1\",\n  \"nonce\": \"vec-nonce-1\",\n  \"expiry\": \"vec-expiry-1\",\n  \"scenarioVersion\": \"vec-scenario-v1\",\n  \"bindingVersion\": \"vec-binding-v1\",\n  \"roleId\": \"vec-role-1\",\n  \"actionProfileVersion\": \"vec-action-profile-v1\",\n  \"roleBindingFingerprint\": \"vec-role-binding-fingerprint-1\",\n  \"systemContentKey\": \"vec-system-content-key-1\",\n  \"approvedConfigVersionId\": \"vec-approved-config-v1\",\n  \"configContentKey\": \"vec-config-content-key-1\",\n  \"canonicalObjectVersion\": \"vec-canonical-object-v1\",\n  \"qualificationDigest\": \"1b585d93abcd968fbe63a26901f48b1842abbf5b65ee62181a960e04727c9179\",\n  \"executionMode\": \"vec-execution-mode-1\",\n  \"applyProfileVersion\": \"vec-apply-profile-v1\",\n  \"queryObjectFilterBindingDigest\": \"9375b890f8b4986cad397935e0c7529e4f37942b5fe4487e617773b816bb7316\",\n  \"expectedSourceSchemaFieldMapDigest\": \"2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45\",\n  \"tenantDomainBinding\": \"vec-tenant-domain-1\",\n  \"rowBudget\": 1000,\n  \"byteBudget\": 100000,\n  \"chunkBudget\": 10\n}"
+        }
+      ]
+    },
+    {
+      "id": "object.signed_manifest",
+      "kind": "SIGNED_MANIFEST",
+      "value": {
+        "exportRequestEnvelopeDigest": "5a482e8785b072fd33b82f1abf4c69ac9303908d57e0edbf8a8ef1b3c0651e50",
+        "sourceCaptureIdentity": "vec-capture-identity-1",
+        "sourceCaptureProofClass": "SOURCE_SNAPSHOT_TXN",
+        "agentImplementationVersion": "vec-agent-impl-v1",
+        "agentProtocolVersion": "vec-agent-protocol-v1",
+        "encodingVersion": "vec-encoding-v1",
+        "canonicalizationVersion": "sealed-export/canonical-json/v1",
+        "sourceSchemaDigest": "2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45",
+        "totalRows": 3,
+        "totalBytes": 42,
+        "chunks": [
+          {
+            "chunkIndex": 0,
+            "chunkDigest": "848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb",
+            "byteCount": 14
+          },
+          {
+            "chunkIndex": 1,
+            "chunkDigest": "3874e10c4695b0bf2cdff92acdbea8e0bd7cb8de6258794101f8cdd7d6d6ab52",
+            "byteCount": 14
+          },
+          {
+            "chunkIndex": 2,
+            "chunkDigest": "83234f28b79c8567bd51bac3f480f9169a7a5db9b4f83cb24cb19537aec38f9b",
+            "byteCount": 14
+          }
+        ],
+        "wholeArtifactByteDigest": "2bc0590a83f3add8cf83d058203c9adfab73511767132f662b9d17105cde634c",
+        "canonicalRowsetMultiplicityDigest": "bb096fced4692711d202d0c61012e0a2f7269f055fd02fd40ae1f1df2493f007",
+        "captureCompletionTimestamp": "vec-capture-completed-1",
+        "manifestExpiry": "vec-manifest-expiry-1",
+        "signerKeyId": "vec-signer-key-1",
+        "signatureAlgorithm": "vec-signature-algorithm-1",
+        "signature": "vec-signature-1"
+      },
+      "canonicalJsonText": "{\"agentImplementationVersion\":\"vec-agent-impl-v1\",\"agentProtocolVersion\":\"vec-agent-protocol-v1\",\"canonicalRowsetMultiplicityDigest\":\"bb096fced4692711d202d0c61012e0a2f7269f055fd02fd40ae1f1df2493f007\",\"canonicalizationVersion\":\"sealed-export/canonical-json/v1\",\"captureCompletionTimestamp\":\"vec-capture-completed-1\",\"chunks\":[{\"byteCount\":14,\"chunkDigest\":\"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\"chunkIndex\":0},{\"byteCount\":14,\"chunkDigest\":\"3874e10c4695b0bf2cdff92acdbea8e0bd7cb8de6258794101f8cdd7d6d6ab52\",\"chunkIndex\":1},{\"byteCount\":14,\"chunkDigest\":\"83234f28b79c8567bd51bac3f480f9169a7a5db9b4f83cb24cb19537aec38f9b\",\"chunkIndex\":2}],\"encodingVersion\":\"vec-encoding-v1\",\"exportRequestEnvelopeDigest\":\"5a482e8785b072fd33b82f1abf4c69ac9303908d57e0edbf8a8ef1b3c0651e50\",\"manifestExpiry\":\"vec-manifest-expiry-1\",\"signature\":\"vec-signature-1\",\"signatureAlgorithm\":\"vec-signature-algorithm-1\",\"signerKeyId\":\"vec-signer-key-1\",\"sourceCaptureIdentity\":\"vec-capture-identity-1\",\"sourceCaptureProofClass\":\"SOURCE_SNAPSHOT_TXN\",\"sourceSchemaDigest\":\"2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45\",\"totalBytes\":42,\"totalRows\":3,\"wholeArtifactByteDigest\":\"2bc0590a83f3add8cf83d058203c9adfab73511767132f662b9d17105cde634c\"}",
+      "canonicalSha256": "8a3ed876955d06f45f12773bfad575e350bce86d79c3519f58e53002a10867cc",
+      "nonCanonicalForms": [
+        {
+          "id": "object.signed_manifest.source_order",
+          "family": "KEY_ORDER",
+          "jsonText": "{\"wholeArtifactByteDigest\":\"2bc0590a83f3add8cf83d058203c9adfab73511767132f662b9d17105cde634c\",\"totalRows\":3,\"totalBytes\":42,\"sourceSchemaDigest\":\"2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45\",\"sourceCaptureProofClass\":\"SOURCE_SNAPSHOT_TXN\",\"sourceCaptureIdentity\":\"vec-capture-identity-1\",\"signerKeyId\":\"vec-signer-key-1\",\"signatureAlgorithm\":\"vec-signature-algorithm-1\",\"signature\":\"vec-signature-1\",\"manifestExpiry\":\"vec-manifest-expiry-1\",\"exportRequestEnvelopeDigest\":\"5a482e8785b072fd33b82f1abf4c69ac9303908d57e0edbf8a8ef1b3c0651e50\",\"encodingVersion\":\"vec-encoding-v1\",\"chunks\":[{\"chunkIndex\":0,\"chunkDigest\":\"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\"byteCount\":14},{\"chunkIndex\":1,\"chunkDigest\":\"3874e10c4695b0bf2cdff92acdbea8e0bd7cb8de6258794101f8cdd7d6d6ab52\",\"byteCount\":14},{\"chunkIndex\":2,\"chunkDigest\":\"83234f28b79c8567bd51bac3f480f9169a7a5db9b4f83cb24cb19537aec38f9b\",\"byteCount\":14}],\"captureCompletionTimestamp\":\"vec-capture-completed-1\",\"canonicalizationVersion\":\"sealed-export/canonical-json/v1\",\"canonicalRowsetMultiplicityDigest\":\"bb096fced4692711d202d0c61012e0a2f7269f055fd02fd40ae1f1df2493f007\",\"agentProtocolVersion\":\"vec-agent-protocol-v1\",\"agentImplementationVersion\":\"vec-agent-impl-v1\"}"
+        },
+        {
+          "id": "object.signed_manifest.pretty",
+          "family": "WHITESPACE",
+          "jsonText": "{\n  \"exportRequestEnvelopeDigest\": \"5a482e8785b072fd33b82f1abf4c69ac9303908d57e0edbf8a8ef1b3c0651e50\",\n  \"sourceCaptureIdentity\": \"vec-capture-identity-1\",\n  \"sourceCaptureProofClass\": \"SOURCE_SNAPSHOT_TXN\",\n  \"agentImplementationVersion\": \"vec-agent-impl-v1\",\n  \"agentProtocolVersion\": \"vec-agent-protocol-v1\",\n  \"encodingVersion\": \"vec-encoding-v1\",\n  \"canonicalizationVersion\": \"sealed-export/canonical-json/v1\",\n  \"sourceSchemaDigest\": \"2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45\",\n  \"totalRows\": 3,\n  \"totalBytes\": 42,\n  \"chunks\": [\n    {\n      \"chunkIndex\": 0,\n      \"chunkDigest\": \"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\n      \"byteCount\": 14\n    },\n    {\n      \"chunkIndex\": 1,\n      \"chunkDigest\": \"3874e10c4695b0bf2cdff92acdbea8e0bd7cb8de6258794101f8cdd7d6d6ab52\",\n      \"byteCount\": 14\n    },\n    {\n      \"chunkIndex\": 2,\n      \"chunkDigest\": \"83234f28b79c8567bd51bac3f480f9169a7a5db9b4f83cb24cb19537aec38f9b\",\n      \"byteCount\": 14\n    }\n  ],\n  \"wholeArtifactByteDigest\": \"2bc0590a83f3add8cf83d058203c9adfab73511767132f662b9d17105cde634c\",\n  \"canonicalRowsetMultiplicityDigest\": \"bb096fced4692711d202d0c61012e0a2f7269f055fd02fd40ae1f1df2493f007\",\n  \"captureCompletionTimestamp\": \"vec-capture-completed-1\",\n  \"manifestExpiry\": \"vec-manifest-expiry-1\",\n  \"signerKeyId\": \"vec-signer-key-1\",\n  \"signatureAlgorithm\": \"vec-signature-algorithm-1\",\n  \"signature\": \"vec-signature-1\"\n}"
+        }
+      ]
+    },
+    {
+      "id": "object.unsigned_manifest_payload",
+      "kind": "SIGNED_MANIFEST_UNSIGNED_PAYLOAD",
+      "value": {
+        "exportRequestEnvelopeDigest": "5a482e8785b072fd33b82f1abf4c69ac9303908d57e0edbf8a8ef1b3c0651e50",
+        "sourceCaptureIdentity": "vec-capture-identity-1",
+        "sourceCaptureProofClass": "SOURCE_SNAPSHOT_TXN",
+        "agentImplementationVersion": "vec-agent-impl-v1",
+        "agentProtocolVersion": "vec-agent-protocol-v1",
+        "encodingVersion": "vec-encoding-v1",
+        "canonicalizationVersion": "sealed-export/canonical-json/v1",
+        "sourceSchemaDigest": "2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45",
+        "totalRows": 3,
+        "totalBytes": 42,
+        "chunks": [
+          {
+            "chunkIndex": 0,
+            "chunkDigest": "848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb",
+            "byteCount": 14
+          },
+          {
+            "chunkIndex": 1,
+            "chunkDigest": "3874e10c4695b0bf2cdff92acdbea8e0bd7cb8de6258794101f8cdd7d6d6ab52",
+            "byteCount": 14
+          },
+          {
+            "chunkIndex": 2,
+            "chunkDigest": "83234f28b79c8567bd51bac3f480f9169a7a5db9b4f83cb24cb19537aec38f9b",
+            "byteCount": 14
+          }
+        ],
+        "wholeArtifactByteDigest": "2bc0590a83f3add8cf83d058203c9adfab73511767132f662b9d17105cde634c",
+        "canonicalRowsetMultiplicityDigest": "bb096fced4692711d202d0c61012e0a2f7269f055fd02fd40ae1f1df2493f007",
+        "captureCompletionTimestamp": "vec-capture-completed-1",
+        "manifestExpiry": "vec-manifest-expiry-1",
+        "signerKeyId": "vec-signer-key-1",
+        "signatureAlgorithm": "vec-signature-algorithm-1"
+      },
+      "canonicalJsonText": "{\"agentImplementationVersion\":\"vec-agent-impl-v1\",\"agentProtocolVersion\":\"vec-agent-protocol-v1\",\"canonicalRowsetMultiplicityDigest\":\"bb096fced4692711d202d0c61012e0a2f7269f055fd02fd40ae1f1df2493f007\",\"canonicalizationVersion\":\"sealed-export/canonical-json/v1\",\"captureCompletionTimestamp\":\"vec-capture-completed-1\",\"chunks\":[{\"byteCount\":14,\"chunkDigest\":\"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\"chunkIndex\":0},{\"byteCount\":14,\"chunkDigest\":\"3874e10c4695b0bf2cdff92acdbea8e0bd7cb8de6258794101f8cdd7d6d6ab52\",\"chunkIndex\":1},{\"byteCount\":14,\"chunkDigest\":\"83234f28b79c8567bd51bac3f480f9169a7a5db9b4f83cb24cb19537aec38f9b\",\"chunkIndex\":2}],\"encodingVersion\":\"vec-encoding-v1\",\"exportRequestEnvelopeDigest\":\"5a482e8785b072fd33b82f1abf4c69ac9303908d57e0edbf8a8ef1b3c0651e50\",\"manifestExpiry\":\"vec-manifest-expiry-1\",\"signatureAlgorithm\":\"vec-signature-algorithm-1\",\"signerKeyId\":\"vec-signer-key-1\",\"sourceCaptureIdentity\":\"vec-capture-identity-1\",\"sourceCaptureProofClass\":\"SOURCE_SNAPSHOT_TXN\",\"sourceSchemaDigest\":\"2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45\",\"totalBytes\":42,\"totalRows\":3,\"wholeArtifactByteDigest\":\"2bc0590a83f3add8cf83d058203c9adfab73511767132f662b9d17105cde634c\"}",
+      "canonicalSha256": "4d1c18885ba3290ba74e9dc19ac51eea1153d42766291f5836e555324690bfbb",
+      "nonCanonicalForms": [
+        {
+          "id": "object.unsigned_manifest_payload.pretty",
+          "family": "WHITESPACE",
+          "jsonText": "{\n  \"exportRequestEnvelopeDigest\": \"5a482e8785b072fd33b82f1abf4c69ac9303908d57e0edbf8a8ef1b3c0651e50\",\n  \"sourceCaptureIdentity\": \"vec-capture-identity-1\",\n  \"sourceCaptureProofClass\": \"SOURCE_SNAPSHOT_TXN\",\n  \"agentImplementationVersion\": \"vec-agent-impl-v1\",\n  \"agentProtocolVersion\": \"vec-agent-protocol-v1\",\n  \"encodingVersion\": \"vec-encoding-v1\",\n  \"canonicalizationVersion\": \"sealed-export/canonical-json/v1\",\n  \"sourceSchemaDigest\": \"2f19f6c6203d2c941b4dae4e8ea9e81b0636911cf4f989748cf38c12db91fa45\",\n  \"totalRows\": 3,\n  \"totalBytes\": 42,\n  \"chunks\": [\n    {\n      \"chunkIndex\": 0,\n      \"chunkDigest\": \"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\n      \"byteCount\": 14\n    },\n    {\n      \"chunkIndex\": 1,\n      \"chunkDigest\": \"3874e10c4695b0bf2cdff92acdbea8e0bd7cb8de6258794101f8cdd7d6d6ab52\",\n      \"byteCount\": 14\n    },\n    {\n      \"chunkIndex\": 2,\n      \"chunkDigest\": \"83234f28b79c8567bd51bac3f480f9169a7a5db9b4f83cb24cb19537aec38f9b\",\n      \"byteCount\": 14\n    }\n  ],\n  \"wholeArtifactByteDigest\": \"2bc0590a83f3add8cf83d058203c9adfab73511767132f662b9d17105cde634c\",\n  \"canonicalRowsetMultiplicityDigest\": \"bb096fced4692711d202d0c61012e0a2f7269f055fd02fd40ae1f1df2493f007\",\n  \"captureCompletionTimestamp\": \"vec-capture-completed-1\",\n  \"manifestExpiry\": \"vec-manifest-expiry-1\",\n  \"signerKeyId\": \"vec-signer-key-1\",\n  \"signatureAlgorithm\": \"vec-signature-algorithm-1\"\n}"
+        }
+      ]
+    },
+    {
+      "id": "object.chunk_descriptor",
+      "kind": "CHUNK_DESCRIPTOR",
+      "value": {
+        "chunkIndex": 0,
+        "chunkDigest": "848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb",
+        "byteCount": 14
+      },
+      "canonicalJsonText": "{\"byteCount\":14,\"chunkDigest\":\"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\"chunkIndex\":0}",
+      "canonicalSha256": "f5e1b7369b898159a47bf0f211978b24b76fca22599fd7e17ac52c3d613eeaf0",
+      "nonCanonicalForms": [
+        {
+          "id": "object.chunk_descriptor.source_order",
+          "family": "KEY_ORDER",
+          "jsonText": "{\"chunkIndex\":0,\"chunkDigest\":\"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\"byteCount\":14}"
+        }
+      ]
+    },
+    {
+      "id": "object.chunk_receipt",
+      "kind": "CHUNK_RECEIPT",
+      "value": {
+        "manifestDigest": "4d1c18885ba3290ba74e9dc19ac51eea1153d42766291f5836e555324690bfbb",
+        "chunkIndex": 0,
+        "chunkDigest": "848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb",
+        "byteCount": 14,
+        "acceptedAt": "vec-accepted-at-1"
+      },
+      "canonicalJsonText": "{\"acceptedAt\":\"vec-accepted-at-1\",\"byteCount\":14,\"chunkDigest\":\"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\"chunkIndex\":0,\"manifestDigest\":\"4d1c18885ba3290ba74e9dc19ac51eea1153d42766291f5836e555324690bfbb\"}",
+      "canonicalSha256": "2cad23dd2c8dfd0705fae104bbb50223740d796efb2803d8d8d89bdac1c7a013",
+      "nonCanonicalForms": [
+        {
+          "id": "object.chunk_receipt.source_order",
+          "family": "KEY_ORDER",
+          "jsonText": "{\"manifestDigest\":\"4d1c18885ba3290ba74e9dc19ac51eea1153d42766291f5836e555324690bfbb\",\"chunkIndex\":0,\"chunkDigest\":\"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\"byteCount\":14,\"acceptedAt\":\"vec-accepted-at-1\"}"
+        },
+        {
+          "id": "object.chunk_receipt.pretty",
+          "family": "WHITESPACE",
+          "jsonText": "{\n  \"manifestDigest\": \"4d1c18885ba3290ba74e9dc19ac51eea1153d42766291f5836e555324690bfbb\",\n  \"chunkIndex\": 0,\n  \"chunkDigest\": \"848752e391aebba7b06b22847e7d19cc5539bf6f7c2dd0efb950e7ef042f22eb\",\n  \"byteCount\": 14,\n  \"acceptedAt\": \"vec-accepted-at-1\"\n}"
+        }
+      ]
+    },
+    {
+      "id": "object.lifecycle_evidence",
+      "kind": "LIFECYCLE_EVIDENCE",
+      "value": {
+        "profileToken": "vec-profile-token-1",
+        "proofClassToken": "SOURCE_SNAPSHOT_TXN",
+        "status": "SUCCESS",
+        "reason": null,
+        "rowCount": 3,
+        "byteCount": 42,
+        "chunkCount": 3,
+        "duration": 0,
+        "retryCount": 0,
+        "manifestPresent": true,
+        "signingKeyPresent": true,
+        "domainIsolatedManifestDigest": "18e2468fb06cde5af2ce17f58c7571ba2e08cd9ec1e0590ca8bd279de68f65e8",
+        "domainIsolatedArtifactDigest": "95f029b456efca1748eb7a644b8bfac9a56a4a095fdcc914174456ee4062d588",
+        "domainIsolatedSchemaDigest": "943e8364a7743599fe29358f7e11fd34dfcb0dcd6ebb6db37a96f831a47482db",
+        "domainIsolatedGenerationDigest": "81e5e6921aa904b1f4f92ddc082c7e714a91d1c917a7cfb291f9aa8be80ee10d",
+        "signerLifecycleState": "ACTIVE",
+        "externalWrite": false,
+        "cleanupOutcome": "vec-cleanup-outcome-1",
+        "activePointerOutcome": "vec-active-pointer-outcome-1"
+      },
+      "canonicalJsonText": "{\"activePointerOutcome\":\"vec-active-pointer-outcome-1\",\"byteCount\":42,\"chunkCount\":3,\"cleanupOutcome\":\"vec-cleanup-outcome-1\",\"domainIsolatedArtifactDigest\":\"95f029b456efca1748eb7a644b8bfac9a56a4a095fdcc914174456ee4062d588\",\"domainIsolatedGenerationDigest\":\"81e5e6921aa904b1f4f92ddc082c7e714a91d1c917a7cfb291f9aa8be80ee10d\",\"domainIsolatedManifestDigest\":\"18e2468fb06cde5af2ce17f58c7571ba2e08cd9ec1e0590ca8bd279de68f65e8\",\"domainIsolatedSchemaDigest\":\"943e8364a7743599fe29358f7e11fd34dfcb0dcd6ebb6db37a96f831a47482db\",\"duration\":0,\"externalWrite\":false,\"manifestPresent\":true,\"profileToken\":\"vec-profile-token-1\",\"proofClassToken\":\"SOURCE_SNAPSHOT_TXN\",\"reason\":null,\"retryCount\":0,\"rowCount\":3,\"signerLifecycleState\":\"ACTIVE\",\"signingKeyPresent\":true,\"status\":\"SUCCESS\"}",
+      "canonicalSha256": "724078fb8b46bd2129a955228802d468a613d72440d1d96f899c0e2209bfc317",
+      "nonCanonicalForms": [
+        {
+          "id": "object.lifecycle_evidence.source_order",
+          "family": "KEY_ORDER",
+          "jsonText": "{\"status\":\"SUCCESS\",\"signingKeyPresent\":true,\"signerLifecycleState\":\"ACTIVE\",\"rowCount\":3,\"retryCount\":0,\"reason\":null,\"proofClassToken\":\"SOURCE_SNAPSHOT_TXN\",\"profileToken\":\"vec-profile-token-1\",\"manifestPresent\":true,\"externalWrite\":false,\"duration\":0,\"domainIsolatedSchemaDigest\":\"943e8364a7743599fe29358f7e11fd34dfcb0dcd6ebb6db37a96f831a47482db\",\"domainIsolatedManifestDigest\":\"18e2468fb06cde5af2ce17f58c7571ba2e08cd9ec1e0590ca8bd279de68f65e8\",\"domainIsolatedGenerationDigest\":\"81e5e6921aa904b1f4f92ddc082c7e714a91d1c917a7cfb291f9aa8be80ee10d\",\"domainIsolatedArtifactDigest\":\"95f029b456efca1748eb7a644b8bfac9a56a4a095fdcc914174456ee4062d588\",\"cleanupOutcome\":\"vec-cleanup-outcome-1\",\"chunkCount\":3,\"byteCount\":42,\"activePointerOutcome\":\"vec-active-pointer-outcome-1\"}"
+        },
+        {
+          "id": "object.lifecycle_evidence.pretty",
+          "family": "WHITESPACE",
+          "jsonText": "{\n  \"profileToken\": \"vec-profile-token-1\",\n  \"proofClassToken\": \"SOURCE_SNAPSHOT_TXN\",\n  \"status\": \"SUCCESS\",\n  \"reason\": null,\n  \"rowCount\": 3,\n  \"byteCount\": 42,\n  \"chunkCount\": 3,\n  \"duration\": 0,\n  \"retryCount\": 0,\n  \"manifestPresent\": true,\n  \"signingKeyPresent\": true,\n  \"domainIsolatedManifestDigest\": \"18e2468fb06cde5af2ce17f58c7571ba2e08cd9ec1e0590ca8bd279de68f65e8\",\n  \"domainIsolatedArtifactDigest\": \"95f029b456efca1748eb7a644b8bfac9a56a4a095fdcc914174456ee4062d588\",\n  \"domainIsolatedSchemaDigest\": \"943e8364a7743599fe29358f7e11fd34dfcb0dcd6ebb6db37a96f831a47482db\",\n  \"domainIsolatedGenerationDigest\": \"81e5e6921aa904b1f4f92ddc082c7e714a91d1c917a7cfb291f9aa8be80ee10d\",\n  \"signerLifecycleState\": \"ACTIVE\",\n  \"externalWrite\": false,\n  \"cleanupOutcome\": \"vec-cleanup-outcome-1\",\n  \"activePointerOutcome\": \"vec-active-pointer-outcome-1\"\n}"
+        }
+      ]
+    }
+  ],
+  "refusedJsonTexts": [
+    {
+      "id": "refused.fraction",
+      "family": "NON_INTEGER_NUMBER",
+      "jsonText": "{\"n\":1.5}"
+    },
+    {
+      "id": "refused.trailing_zero_fraction",
+      "family": "NON_INTEGER_NUMBER",
+      "jsonText": "{\"n\":1.50}"
+    },
+    {
+      "id": "refused.exponent_fraction",
+      "family": "NON_INTEGER_NUMBER",
+      "jsonText": "{\"n\":1.5e1}"
+    },
+    {
+      "id": "refused.above_safe_integer",
+      "family": "NUMBER_OUT_OF_SAFE_RANGE",
+      "jsonText": "{\"n\":9007199254740993}"
+    },
+    {
+      "id": "refused.huge_exponent",
+      "family": "NON_FINITE_NUMBER",
+      "jsonText": "{\"n\":1e400}"
+    },
+    {
+      "id": "refused.leading_zero",
+      "family": "PARSE_REFUSED",
+      "jsonText": "{\"n\":01}"
+    },
+    {
+      "id": "refused.nan",
+      "family": "PARSE_REFUSED",
+      "jsonText": "{\"n\":NaN}"
+    },
+    {
+      "id": "refused.single_quotes",
+      "family": "PARSE_REFUSED",
+      "jsonText": "{'a':1}"
+    },
+    {
+      "id": "refused.trailing_comma",
+      "family": "PARSE_REFUSED",
+      "jsonText": "{\"a\":1,}"
+    },
+    {
+      "id": "refused.trailing_content",
+      "family": "PARSE_REFUSED",
+      "jsonText": "{\"a\":1} "
+    },
+    {
+      "id": "refused.empty",
+      "family": "PARSE_REFUSED",
+      "jsonText": ""
+    },
+    {
+      "id": "refused.bom_prefix",
+      "family": "BOM",
+      "jsonText": "﻿{\"a\":1}"
+    }
+  ],
+  "distinctnessPairs": [
+    {
+      "id": "distinct.unicode_nfc_vs_nfd",
+      "family": "UNICODE_FORM",
+      "note": "no Unicode normalization is applied: NFC and NFD are different values",
+      "leftJsonText": "{\"s\":\"é\"}",
+      "rightJsonText": "{\"s\":\"é\"}"
+    },
+    {
+      "id": "distinct.key_case",
+      "family": "KEY_CASE",
+      "note": "keys sort by UTF-16 code unit, so case is significant",
+      "leftJsonText": "{\"a\":1}",
+      "rightJsonText": "{\"A\":1}"
+    },
+    {
+      "id": "distinct.number_vs_string",
+      "family": "TYPE",
+      "note": "a number and its decimal string are different values",
+      "leftJsonText": "{\"n\":1}",
+      "rightJsonText": "{\"n\":\"1\"}"
+    },
+    {
+      "id": "distinct.array_order",
+      "family": "ARRAY_ORDER",
+      "note": "array order is significant; only object keys are sorted",
+      "leftJsonText": "{\"a\":[1,2]}",
+      "rightJsonText": "{\"a\":[2,1]}"
+    },
+    {
+      "id": "distinct.empty_object_vs_array",
+      "family": "TYPE",
+      "note": "an empty object and an empty array are different values",
+      "leftJsonText": "{}",
+      "rightJsonText": "[]"
+    }
+  ]
+}
