@@ -571,6 +571,7 @@ jobs:
             'windows-native-start.bat',
             'windows-native-stop.bat',
             'windows-native-healthcheck.bat',
+            'windows-native-bootstrap-admin.bat',
             'scripts\ops\attendance-windows-native-common.ps1',
             'scripts\ops\attendance-windows-native-preflight.ps1',
             'scripts\ops\attendance-windows-native-start.ps1',
@@ -579,7 +580,8 @@ jobs:
             'scripts\ops\attendance-windows-native-bootstrap-admin.ps1',
             'scripts\ops\attendance-onprem-deploy-run.ps1',
             'scripts\ops\attendance-onprem-start-pm2.ps1',
-            'scripts\ops\attendance-onprem-publish-web-dist.ps1'
+            'scripts\ops\attendance-onprem-publish-web-dist.ps1',
+            'scripts\ops\multitable-onprem-bootstrap-admin.ps1'
           )
           foreach ($relative in $targets) {
             $path = Join-Path $env:PACKAGE_ROOT $relative

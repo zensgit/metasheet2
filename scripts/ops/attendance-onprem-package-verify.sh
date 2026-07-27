@@ -228,10 +228,12 @@ function verify_windows_native_gateway() {
     || die "Windows native gateway must enforce a loopback listener"
   local native_dependency
   for native_dependency in \
+    "${root}/windows-native-bootstrap-admin.bat" \
     "${root}/scripts/ops/attendance-windows-native-"* \
     "${root}/scripts/ops/attendance-onprem-deploy-run.ps1" \
     "${root}/scripts/ops/attendance-onprem-start-pm2.ps1" \
-    "${root}/scripts/ops/attendance-onprem-publish-web-dist.ps1"
+    "${root}/scripts/ops/attendance-onprem-publish-web-dist.ps1" \
+    "${root}/scripts/ops/multitable-onprem-bootstrap-admin.ps1"
   do
     if grep -Eiq 'wsl\.exe|wsl[[:space:]]+-' "$native_dependency"; then
       die "Windows native dependency must not invoke WSL: ${native_dependency#${root}/}"
