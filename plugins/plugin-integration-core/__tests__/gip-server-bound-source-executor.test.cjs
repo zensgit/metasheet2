@@ -1452,6 +1452,54 @@ function brandedErrorChannelIsOpenOnTheSpikeClass() {
 }
 
 // ---------------------------------------------------------------------------
+// [B1] ROUND 6 — THE AUTHORITY IS CLOSURE-BOUND, PROVEN RATHER THAN ASSUMED.
+//
+// FOUND BY MUTATION, NOT BY READING. §4's B-1 clause is two claims, and this suite only
+// executed one of them. "Two resolutions bound to different systems must not both
+// qualify from a single executor answer" was covered; "the authority to qualify must be
+// CLOSURE-BOUND, not caller-injected" was NOT. Giving
+// `executeOrderingKeyProbe(resolution)` a second parameter that overrides the
+// closure-bound components — `executeOrderingKeyProbeInternal(override || bound, ...)`
+// — left the ENTIRE suite GREEN. Every test called it with one argument, so a
+// caller-injected registry and binder had nothing to trip.
+//
+// That is the "asserted invariant is a bug" shape: the module header states authority
+// is captured at construction and that there is "no seam through which a caller could
+// pass a registry, a binder, a handle or a query", and until this test that sentence
+// was a comment. The mutation now REDs.
+// ---------------------------------------------------------------------------
+async function probeAuthorityIsClosureBoundNotCallerInjected() {
+  const stack = buildStack()
+  const rival = buildStack()
+  const resolution = await resolveAlpha(stack.resolver)
+
+  // A WELL-FORMED components record — both members genuinely trusted, so nothing but
+  // the closure binding can be what refuses it. Handing over garbage would prove only
+  // that garbage is refused.
+  const injected = { actionRegistry: rival.actionRegistry, sourceBinder: rival.sourceBinder }
+  assert.equal(executorModule.isTrustedHttpProbeActionRegistry(injected.actionRegistry), true)
+  assert.equal(executorModule.isTrustedSourceBinder(injected.sourceBinder), true)
+
+  const observation = await stack.executor.executeOrderingKeyProbe(resolution, injected)
+  assert.equal(observation.probeKind, 'ordering_key_total_order_negative')
+  assert.equal(stack.alpha.log.calls, 1, 'the CLOSURE-BOUND source must be the one that executed')
+  assert.equal(rival.alpha.log.calls, 0,
+    'a caller-supplied components record was HONOURED — authority is not closure-bound')
+  assert.equal(rival.beta.log.calls, 0)
+
+  // Same through the prober, which is the path §4 actually names: the run input is a
+  // CLOSED allowlist, so a components record cannot even be expressed there.
+  await refusesWithAsync(
+    () => stack.prober.probeFromResolution({
+      resolution, envelopeKey: ENVELOPE_KEY, probedAt: PROBED_AT, components: injected,
+    }),
+    GipQualificationError, 'PROBE_CALLER_SUPPLIED_EXECUTION_REFUSED',
+  )
+  assert.equal(rival.alpha.log.calls, 0, 'the refused run input must not have reached the rival source')
+  console.log('  [B1] authority closure-bound: injected trusted components ignored by the executor, refused by the prober')
+}
+
+// ---------------------------------------------------------------------------
 // ROUND 6, ITEM 2 — THE TRUST-MINTING SURFACE, ENUMERATED MECHANICALLY.
 //
 // -- WHAT THIS IS, AND WHAT IT IS NOT ---------------------------------------
@@ -2116,6 +2164,7 @@ async function main() {
   duplicateSystemContentKeyIsRefusedNotLastWins()
   brandedErrorChannelIsOpenOnTheSpikeClass()
   exportSurfacesArePinned()
+  await probeAuthorityIsClosureBoundNotCallerInjected()
   await publicSurfaceMintsExactlyTheDeclaredTrust()
   await addingAGrantingFactoryBackIsFound()
   noSuiteJudgesInScopeBrandsByInstanceof()
