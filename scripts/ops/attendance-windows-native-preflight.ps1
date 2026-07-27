@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 $resolvedRoot = Resolve-WindowsNativeRoot -Candidate $RootDir
 $envFile = Resolve-WindowsNativeEnvFile -RootDir $resolvedRoot
-$envValues = Import-WindowsNativeEnvFile -EnvFile $envFile
+$envValues = Import-WindowsNativeEnvFile -EnvFile $envFile -NoExport
 
 foreach ($requiredName in @(
   'DATABASE_URL',
@@ -102,8 +102,14 @@ $forbiddenExternalNames = @(
   'DIRECTORY_SYNC_ALERT_WEBHOOK_SECRET',
   'ENABLE_WEBHOOK'
 )
-$effectiveProcessEnv = [System.Environment]::GetEnvironmentVariables('Process')
-foreach ($nameValue in $effectiveProcessEnv.GetEnumerator()) {
+$effectiveEnv = @{}
+foreach ($nameValue in [System.Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+  $effectiveEnv[[string]$nameValue.Key] = [string]$nameValue.Value
+}
+foreach ($name in $envValues.Keys) {
+  $effectiveEnv[[string]$name] = [string]$envValues[$name]
+}
+foreach ($nameValue in $effectiveEnv.GetEnumerator()) {
   $name = [string]$nameValue.Key
   $value = [string]$nameValue.Value
   if ([string]::IsNullOrWhiteSpace($value)) {

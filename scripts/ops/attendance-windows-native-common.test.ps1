@@ -10,6 +10,7 @@ $testRoot = Join-Path (
 ) ("attendance-windows-native-common-test-{0}" -f [System.Guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 $fakePm2 = Join-Path $testRoot 'fake-pm2.ps1'
+$envFixture = Join-Path $testRoot 'app.env'
 
 @'
 param(
@@ -33,8 +34,23 @@ switch ($Action) {
   }
 }
 '@ | Set-Content -LiteralPath $fakePm2 -Encoding utf8
+'WINDOWS_NATIVE_IMPORT_PROBE=file-value' |
+  Set-Content -LiteralPath $envFixture -Encoding ascii
 
 try {
+  $env:WINDOWS_NATIVE_IMPORT_PROBE = 'parent-value'
+  $parsed = Import-WindowsNativeEnvFile -EnvFile $envFixture -NoExport
+  if (
+    $parsed['WINDOWS_NATIVE_IMPORT_PROBE'] -ne 'file-value' -or
+    $env:WINDOWS_NATIVE_IMPORT_PROBE -ne 'parent-value'
+  ) {
+    throw 'NoExport changed the caller process environment'
+  }
+  Import-WindowsNativeEnvFile -EnvFile $envFixture | Out-Null
+  if ($env:WINDOWS_NATIVE_IMPORT_PROBE -ne 'file-value') {
+    throw 'Normal env import did not export the parsed value'
+  }
+
   $failedClosed = $false
   try {
     Remove-WindowsNativePm2Apps `
@@ -55,5 +71,6 @@ try {
   Write-Host '[attendance-windows-native-common.test] PASS'
 }
 finally {
+  Remove-Item Env:WINDOWS_NATIVE_IMPORT_PROBE -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -28,7 +28,10 @@ function Resolve-WindowsNativeEnvFile {
 }
 
 function Import-WindowsNativeEnvFile {
-  param([string]$EnvFile)
+  param(
+    [string]$EnvFile,
+    [switch]$NoExport
+  )
 
   $values = @{}
   foreach ($rawLine in Get-Content -LiteralPath $EnvFile) {
@@ -48,7 +51,9 @@ function Import-WindowsNativeEnvFile {
       }
     }
     $values[$name] = $value
-    Set-Item -Path ("Env:{0}" -f $name) -Value $value
+    if (-not $NoExport) {
+      Set-Item -Path ("Env:{0}" -f $name) -Value $value
+    }
   }
   return $values
 }
