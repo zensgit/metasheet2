@@ -231,10 +231,37 @@ function Get-WindowsNativePm2Process {
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
     return $null
   }
+
+  $sanitizeScript = @'
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
   try {
-    return @($raw | ConvertFrom-Json) |
-      Where-Object { $_.name -eq $AppName } |
-      Select-Object -First 1
+    const appName = process.argv[1];
+    const apps = JSON.parse(input);
+    const app = apps.find((entry) => entry && entry.name === appName);
+    if (!app) return;
+    const env = app.pm2_env || {};
+    process.stdout.write(JSON.stringify({
+      name: app.name,
+      pm2_env: {
+        status: env.status || null,
+        pm_exec_path: env.pm_exec_path || null,
+        pm_cwd: env.pm_cwd || null,
+      },
+    }));
+  } catch {
+    process.exitCode = 2;
+  }
+});
+'@
+  $sanitized = ($raw | & node -e $sanitizeScript $AppName | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sanitized)) {
+    return $null
+  }
+  try {
+    return $sanitized | ConvertFrom-Json
   }
   catch {
     return $null

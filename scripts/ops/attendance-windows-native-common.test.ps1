@@ -20,7 +20,7 @@ param(
 
 switch ($Action) {
   'jlist' {
-    Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online"}},{"name":"metasheet-windows-gateway","pm2_env":{"status":"online"}}]'
+    Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","username":"lower","USERNAME":"upper"}},{"name":"metasheet-windows-gateway","pm2_env":{"status":"online","username":"lower","USERNAME":"upper"}}]'
     exit 0
   }
   'delete' {
