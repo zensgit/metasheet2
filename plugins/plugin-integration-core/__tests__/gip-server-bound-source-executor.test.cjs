@@ -1452,6 +1452,384 @@ function brandedErrorChannelIsOpenOnTheSpikeClass() {
 }
 
 // ---------------------------------------------------------------------------
+// ROUND 6, ITEM 2 — THE TRUST-MINTING SURFACE, ENUMERATED MECHANICALLY.
+//
+// -- WHAT THIS IS, AND WHAT IT IS NOT ---------------------------------------
+// It is an OPEN-SET LEDGER, not a closure assertion. It does NOT claim "no public
+// export mints trust" — that claim is FALSE at this head and writing it would be the
+// exact overclaim shape this PR keeps paying for. What it asserts is that the set of
+// publicly-reachable trust-minting paths is EXACTLY the declared eight, by set
+// equality. Both directions are load-bearing:
+//   * a NINTH granting factory appears ⇒ RED, naming the export that minted;
+//   * one of the eight is CLOSED       ⇒ RED, forcing this ledger and the PR body to
+//                                        be revised instead of going stale.
+// Same shape as `brandedErrorChannelIsOpenOnTheSpikeClass` and
+// `spikeClassHasNoUnforgeableBrand`: a residual asserted POSITIVELY is a residual that
+// cannot quietly change.
+//
+// -- HOW IT LOOKS, RATHER THAN WHO IT ASKS ----------------------------------
+// A hand-written list of "the factories I think grant trust" proves nothing — that is
+// the same reading which produced the round-5 header claiming ONE public factory when
+// there were TWO. So this SATURATES instead: seed a pool with every export of the four
+// modules plus caller-controlled attacker fixtures, call every function export with
+// every argument tuple the pool can form, feed every result back into the pool, and
+// repeat. Anything the pool ever reaches that ANY of the six trust checkers accepts is
+// recorded together with the export that produced it. TRANSITIVE trust is found the
+// same way as direct trust — `createServerBoundSourceExecutor` only mints once the pool
+// has ALREADY reached a trusted registry and a trusted binder, which is exactly the
+// property that would make a closure real if the leaves were ever closed.
+//
+// -- SCOPE, STATED ----------------------------------------------------------
+// The pool is seeded from the FOUR modules' exports plus attacker data. It does NOT
+// seed a first-party read-source config store, so `resolveApprovedBinding` — which
+// mints the sixth brand — is not reached BY THIS SWEEP; it is in the ledger anyway,
+// EXECUTED directly below. Reporting only what the sweep reached would understate the
+// surface, which is the failure this ledger exists to prevent.
+// ---------------------------------------------------------------------------
+const TRUST_CHECKERS = Object.freeze({
+  httpProbeActionRegistry: executorModule.isTrustedHttpProbeActionRegistry,
+  sourceBinder: executorModule.isTrustedSourceBinder,
+  serverBoundSourceExecutor: executorModule.isTrustedServerBoundSourceExecutor,
+  systemIdentityAuthority: resolverModule.isTrustedSystemIdentityAuthority,
+  canonicalObjectAuthority: resolverModule.isTrustedCanonicalObjectAuthority,
+  bindingResolution: resolverModule.isTrustedBindingResolution,
+})
+
+// THE DECLARED LEDGER: export -> the brand it mints.
+//
+// The two `createCertified*` entries are DECLARED, NOT DEFECTS-IN-WAITING: each mints a
+// trust-branded authority whose behaviour is entirely FIRST-PARTY and FAIL-CLOSED at
+// this head — (β) `deriveSystemContentKeyForSystemId` refuses every service because
+// `buildSystemIdentityService` has no call site, and (γ) the only trusted contract
+// registry is the EMPTY module-load instance. They carry no caller-controlled behaviour
+// or values. The four `createHarness*ForTests` entries DO carry caller-controlled
+// behaviour and values, and that is the class ITEM 2 asks to be closed.
+const DECLARED_TRUST_MINTING_PATHS = Object.freeze({
+  'executor.createHarnessHttpProbeActionRegistryForTests': 'httpProbeActionRegistry',
+  'executor.createHarnessSourceBinderForTests': 'sourceBinder',
+  'executor.createServerBoundSourceExecutor': 'serverBoundSourceExecutor',
+  'resolver.createHarnessSystemIdentityAuthorityForTests': 'systemIdentityAuthority',
+  'resolver.createHarnessCanonicalObjectAuthorityForTests': 'canonicalObjectAuthority',
+  'resolver.createCertifiedSystemIdentityAuthority': 'systemIdentityAuthority',
+  'resolver.createCertifiedCanonicalObjectAuthority': 'canonicalObjectAuthority',
+  'resolver.<resolver>.resolveApprovedBinding': 'bindingResolution',
+})
+
+// Brands a value carries. TRI-STATE ON THE CHECKER ITSELF: a checker that THROWS has
+// not answered "no", and must never be recorded as "no" (round 6, P2-C).
+function brandsHeldBy(value, violations, label) {
+  const held = []
+  for (const [brand, check] of Object.entries(TRUST_CHECKERS)) {
+    let answer
+    try {
+      answer = check(value)
+    } catch (error) {
+      violations.push(`${label}: the ${brand} checker THREW (${describeErrorSafely(error)}) — a check that failed is not a "no"`)
+      continue
+    }
+    if (answer === true) held.push(brand)
+    else if (answer !== false) violations.push(`${label}: the ${brand} checker answered ${String(answer)}, not a boolean`)
+  }
+  return held
+}
+
+function describeErrorSafely(error) {
+  try { return String(error && error.constructor && error.constructor.name) } catch (_e) { return 'unreadable' }
+}
+
+function attackerSeedPool() {
+  const hostileHandle = { execute: async () => ({ duplicateGroupsSampled: 0, nullKeyRowsSampled: 0 }) }
+  return [
+    undefined, null, 0, 1, '', 'x', true, false,
+    {}, [], () => {}, async () => {},
+    // PLAUSIBLE arguments — the point is to let a factory SUCCEED wherever it can, not
+    // to feed it only garbage it would have refused anyway.
+    [{
+      actionProfileVersion: 'attacker.profile.v1', actionId: 'a', actionVersion: 'v',
+      connectorKind: 'erp_http', sourceFieldFor: () => 'col', execute: async () => ({}),
+    }],
+    [{ systemContentKey: 'ATTACKER-SCK', credentialFactory: () => hostileHandle }],
+    [{ contractId: 'attacker', contractVersion: 'v1', canonicalObjectVersion: 'attacker/1' }],
+    { 'attacker-system': 'ATTACKER-SCK' },
+    { actionRegistry: {}, sourceBinder: {} },
+    { configStore: {}, systemIdentityAuthority: {}, canonicalObjectAuthority: {} },
+    { tenantId: 't', workspaceId: null, approvedConfigVersionId: 'cfg' },
+    { value: 1 },
+  ]
+}
+
+function functionExportsOf(label, table) {
+  const out = []
+  for (const key of Object.keys(table)) {
+    const value = table[key]
+    if (typeof value === 'function') out.push({ name: `${label}.${key}`, fn: value })
+    else if (key === '__internals' && value && typeof value === 'object') {
+      for (const inner of Object.keys(value)) {
+        if (typeof value[inner] === 'function') out.push({ name: `${label}.__internals.${inner}`, fn: value[inner] })
+      }
+    } else if (value && typeof value === 'object') {
+      for (const inner of Object.keys(value)) {
+        if (typeof value[inner] === 'function') out.push({ name: `${label}.${key}.${inner}`, fn: value[inner] })
+      }
+    }
+  }
+  return out
+}
+
+const MAX_POOL = 64
+
+// A value's admission-relevant shape: what a downstream factory's checks can see.
+function shapeOf(value) {
+  const kind = typeof value
+  if (kind === 'function') return 'function'
+  let keys = []
+  try { keys = Object.keys(value).sort() } catch (_error) { return 'unreadable' }
+  let inner = ''
+  if (Array.isArray(value)) {
+    try {
+      inner = value.length === 0 ? '[]' : `[${Object.keys(value[0] || {}).sort().join(',')}]`
+    } catch (_error) { inner = '[unreadable]' }
+    return `array${inner}`
+  }
+  return `object{${keys.join(',')}}`
+}
+
+async function saturateAndFindMintingPaths(tables, rounds) {
+  const violations = []
+  const found = new Map()
+  const seen = new Set()
+  const pool = []
+  // Every trusted value the closure has reached so far. It is what makes TRANSITIVE
+  // trust findable: a factory that admits COMPONENTS never sees a pooled value as an
+  // argument, it sees a RECORD built out of them.
+  // ONE REPRESENTATIVE PER BRAND. Every successful factory call mints a NEW trusted
+  // object, so keeping them all made composition O(n^3) over thousands and the process
+  // ran out of heap. For composition one trusted registry is interchangeable with any
+  // other — what the next factory reads is the BRAND — so the closure keeps exactly one
+  // of each and stays finite. `trustedBrandsReached` is reported so a run that reached
+  // fewer brands than the ledger declares is visible rather than silent.
+  const trustedByBrand = new Map()
+  const record = (name, value) => {
+    const brands = brandsHeldBy(value, violations, name)
+    for (const brand of brands) if (!trustedByBrand.has(brand)) trustedByBrand.set(brand, value)
+    for (const brand of brands) {
+      if (!found.has(name)) found.set(name, new Set())
+      found.get(name).add(brand)
+    }
+  }
+
+  // COMPOSITION. The first version of this sweep called every export with pooled values
+  // as ARGUMENTS and nothing else, and it therefore MISSED
+  // `createServerBoundSourceExecutor` entirely: that factory takes a RECORD whose two
+  // members must both already be trusted, and no amount of passing a trusted registry
+  // as an argument ever builds one. A sweep that misses the transitive path is a sweep
+  // that would report a closure the moment the leaves were closed, without ever having
+  // been able to see the composite. The component key sets are not secret — they are
+  // the modules' own closed-key-set checks — so the closure builds records over them
+  // from everything trusted it has reached.
+  const COMPONENT_KEY_SETS = [
+    ['actionRegistry', 'sourceBinder'],
+    ['configStore', 'systemIdentityAuthority', 'canonicalObjectAuthority'],
+  ]
+  const composeRecords = () => {
+    const out = []
+    for (const keys of COMPONENT_KEY_SETS) {
+      const candidates = [...trustedByBrand.values()]
+      const build = (index, draft) => {
+        if (index === keys.length) { out.push({ ...draft }); return }
+        for (const candidate of candidates) build(index + 1, { ...draft, [keys[index]]: candidate })
+      }
+      if (candidates.length > 0) build(0, {})
+    }
+    return out
+  }
+  // BOUNDED. Feeding every produced value back unbounded is N^2 per round over a pool
+  // that grows every round — it does not terminate in useful time and a saturation
+  // nobody can run is a saturation nobody runs. Primitives are seeded once and never
+  // re-added (they cannot carry a brand); objects and functions are capped, and the cap
+  // is asserted NOT to have been hit, so a silently truncated sweep cannot pass as a
+  // complete one.
+  let capHits = 0
+  const shapes = new Set()
+  const addToPool = (value) => {
+    if (value === null || value === undefined
+      || (typeof value !== 'object' && typeof value !== 'function')) return
+    if (seen.has(value)) return
+    // DEDUPE BY SHAPE. Feeding back every produced object is N^2 over a pool that grows
+    // every round: the first attempt produced 72,573 values and did not terminate in
+    // useful time. What matters for trust is a value's SHAPE, because that is what the
+    // next factory's admission check reads — two frozen `{size,resolve}` registries are
+    // the same candidate. One representative per shape keeps the closure honest and
+    // finite; `capHits` is asserted to be zero so a TRUNCATED sweep can never pass as a
+    // complete one.
+    const shape = shapeOf(value)
+    if (shapes.has(shape)) return
+    if (pool.length >= MAX_POOL) { capHits += 1; return }
+    shapes.add(shape)
+    seen.add(value)
+    pool.push(value)
+  }
+
+  for (const value of attackerSeedPool()) {
+    if (value === null || value === undefined
+      || (typeof value !== 'object' && typeof value !== 'function')) pool.push(value)
+    else addToPool(value)
+  }
+  const exportsList = []
+  for (const [label, table] of Object.entries(tables)) {
+    for (const key of Object.keys(table)) addToPool(table[key])
+    for (const entry of functionExportsOf(label, table)) exportsList.push(entry)
+  }
+
+  let calls = 0
+  let compositesTried = 0
+  for (let round = 0; round < rounds; round += 1) {
+    const snapshot = pool.slice()
+    const produced = []
+    for (const entry of exportsList) {
+      for (const first of snapshot) {
+        // Arity 1 AND arity 2 — a two-argument call can succeed where a one-argument
+        // call refuses, and vice versa.
+        calls += 1
+        try {
+          let single = entry.fn(first)
+          if (single && typeof single.then === 'function') single = await single
+          record(entry.name, single)
+          produced.push(single)
+        } catch (_error) { /* a refusal is the expected answer; it is not a finding */ }
+        for (const second of snapshot) {
+          calls += 1
+          try {
+            let result = entry.fn(first, second)
+            if (result && typeof result.then === 'function') result = await result
+            record(entry.name, result)
+            produced.push(result)
+          } catch (_error) { /* refused */ }
+        }
+      }
+    }
+    for (const value of produced) addToPool(value)
+    // Composites live in their OWN list and are passed as the SOLE argument, for two
+    // measured reasons:
+    //   * they must BYPASS the shape dedupe — the attacker seed pool already carries
+    //     `{ actionRegistry, sourceBinder }` filled with untrusted objects, the
+    //     IDENTICAL shape, so shape-dedupe silently dropped every trusted composite and
+    //     the sweep reported `createServerBoundSourceExecutor` as minting nothing;
+    //   * and they must NOT enter the N^2 argument pool — 6 brands compose into 252
+    //     records per round, which blew the pool cap (486 dropped) and would have made
+    //     the sweep quadratic in them for no gain: a components record is only ever
+    //     read as ONE argument.
+    const composites = composeRecords()
+    for (const entry of exportsList) {
+      for (const composite of composites) {
+        // ONE try PER CALL. Wrapping the inner loop instead would let the FIRST export
+        // that refuses abort every export after it — a sweep that stops at the first
+        // refusal reports "nothing mints" and looks like a closure.
+        calls += 1
+        try {
+          let result = entry.fn(composite)
+          if (result && typeof result.then === 'function') result = await result
+          record(entry.name, result)
+          produced.push(result)
+        } catch (_error) { /* a refusal is the expected answer, not a finding */ }
+      }
+    }
+    compositesTried += composites.length
+  }
+  return {
+    violations, found, calls, poolSize: pool.length,
+    exportCount: exportsList.length, capHits, compositesTried,
+    trustedBrandsReached: [...trustedByBrand.keys()].sort(),
+  }
+}
+
+async function publicSurfaceMintsExactlyTheDeclaredTrust() {
+  const result = await saturateAndFindMintingPaths({
+    executor: executorModule,
+    resolver: resolverModule,
+    observability: require(path.join(LIB, 'gip-read-observability-contracts.cjs')),
+    gate: require(path.join(LIB, 'gip-inert-entry.cjs')),
+  }, 3)
+
+  assert.deepEqual(result.violations, [],
+    `trust checkers must answer, not throw:\n  ${result.violations.join('\n  ')}`)
+  // The saturation must be shown to have DONE something — one that made zero calls
+  // finds zero minting paths and passes every assertion below it.
+  assert.ok(result.calls > 20000, `the saturation made too few calls (${result.calls})`)
+  assert.ok(result.exportCount >= 20, `too few function exports walked (${result.exportCount})`)
+  assert.ok(result.compositesTried > 0,
+    'the closure never built a COMPONENTS record — transitive minting would be invisible')
+  // WHICH BRANDS the closure actually reached. Without this, a sweep that reached only
+  // two brands and found only two minting paths would satisfy a set equality written
+  // for those two, and the missing five would read as "closed".
+  assert.deepEqual(result.trustedBrandsReached, [
+    'canonicalObjectAuthority', 'httpProbeActionRegistry',
+    'serverBoundSourceExecutor', 'sourceBinder', 'systemIdentityAuthority',
+  ], 'the closure must reach every brand the ledger says is publicly mintable except bindingResolution, '
+    + 'which needs a first-party config store the pool does not seed')
+  assert.equal(result.capHits, 0,
+    `the saturation pool hit its cap (${result.capHits} values dropped) — the sweep is TRUNCATED and its `
+    + 'set equality below would be a statement about a subset, not about the public surface')
+
+  const swept = {}
+  for (const [name, brands] of result.found) swept[name] = [...brands].sort().join('+')
+
+  assert.deepEqual(Object.keys(swept).sort(), [
+    'executor.createHarnessHttpProbeActionRegistryForTests',
+    'executor.createHarnessSourceBinderForTests',
+    'executor.createServerBoundSourceExecutor',
+    'resolver.createCertifiedCanonicalObjectAuthority',
+    'resolver.createCertifiedSystemIdentityAuthority',
+    'resolver.createHarnessCanonicalObjectAuthorityForTests',
+    'resolver.createHarnessSystemIdentityAuthorityForTests',
+  ], `the SATURATED public surface mints trust from a different set than declared:\n${JSON.stringify(swept, null, 2)}`)
+
+  // "We found seven names" is not "the seven mint what the ledger says they mint".
+  for (const [name, brand] of Object.entries(swept)) {
+    assert.equal(DECLARED_TRUST_MINTING_PATHS[name], brand,
+      `${name} mints ${brand}; the ledger declares ${DECLARED_TRUST_MINTING_PATHS[name]}`)
+  }
+
+  // AND THE ONE THE SWEEP CANNOT REACH, EXECUTED DIRECTLY so the ledger is complete.
+  const stack = buildStack()
+  const resolution = await resolveAlpha(stack.resolver)
+  assert.equal(resolverModule.isTrustedBindingResolution(resolution), true,
+    'resolveApprovedBinding is declared as the eighth minting path; it must actually mint')
+  assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 1,
+    'the declared ledger must be exactly the swept set plus the directly-executed resolution path')
+
+  console.log(`  TRUST-SURFACE ${result.calls} calls over ${result.exportCount} exports, pool=${result.poolSize}: `
+    + `${Object.keys(swept).length} minting paths swept + 1 executed directly = ${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
+}
+
+// ---------------------------------------------------------------------------
+// ADDING A GRANTING FACTORY BACK MUST RED — the positive control the owner named.
+//
+// Everything above asserts a SET EQUALITY. A saturation that silently reached nothing,
+// or a `found` map that is never written to, would satisfy it against nothing. So the
+// SAME saturation runs over a synthetic table carrying ONE granting factory added back,
+// and it must find it AND NAME it, and must NOT smear onto its honest sibling. This
+// runs on every CI run; it is not a substitute for mutating the real module, which is
+// recorded separately in the PR body.
+// ---------------------------------------------------------------------------
+async function addingAGrantingFactoryBackIsFound() {
+  const stack = buildStack()
+  const syntheticTable = {
+    // "A public factory whose products are trusted" reduces to exactly this.
+    reAddedGrantingFactory() { return stack.sourceBinder },
+    // Its control sibling: a public factory whose product is NOT trusted.
+    honestUntrustedFactory() { return { handleFor() { return null } } },
+  }
+  const result = await saturateAndFindMintingPaths({ synthetic: syntheticTable }, 1)
+  const names = [...result.found.keys()].sort()
+  assert.deepEqual(names, ['synthetic.reAddedGrantingFactory'],
+    `the sweep must NAME a re-added granting factory and must not smear onto its honest sibling; got ${JSON.stringify(names)}`)
+  assert.deepEqual([...result.found.get('synthetic.reAddedGrantingFactory')], ['sourceBinder'],
+    'the sweep must name WHICH brand the re-added factory mints')
+  console.log('  RE-ADD CONTROL the sweep named synthetic.reAddedGrantingFactory (sourceBinder), 0 on the honest sibling')
+}
+
+// ---------------------------------------------------------------------------
 // ROUND 6, P1-A — NO SUITE MAY JUDGE THE TWO IN-SCOPE BRANDS BY `instanceof`/`.name`.
 //
 // The behavioural proof that the brand holds lives in `forgedBrandsAreRefused()` in
@@ -1570,7 +1948,11 @@ function exportSurfacesArePinned() {
     // exist. They admit nothing and mint nothing, and they exist so that no assertion
     // anywhere has to fall back on the forgeable `instanceof`/`.name` criteria.
     'isBrandedSourceExecutorError',
+    // ROUND 6, ITEM 2. CHECKERS for the two leaf brands this module owns, added so the
+    // trust-minting surface can be ENUMERATED MECHANICALLY instead of argued in prose.
+    'isTrustedHttpProbeActionRegistry',
     'isTrustedServerBoundSourceExecutor',
+    'isTrustedSourceBinder',
   ])
   assert.deepEqual(keySet(executorModule.__internals), [
     'hasControlCharacter', 'isPlainObject', 'normalizeActionDeclaration',
@@ -1588,6 +1970,8 @@ function exportSurfacesArePinned() {
     'createHarnessSystemIdentityAuthorityForTests',
     'isBrandedApprovedBindingResolverError',
     'isTrustedBindingResolution',
+    'isTrustedCanonicalObjectAuthority',
+    'isTrustedSystemIdentityAuthority',
   ])
   assert.deepEqual(keySet(resolverModule.__internals), [
     'assertLosslessConfigBody', 'hasControlCharacter', 'isPlainObject',
@@ -1732,6 +2116,8 @@ async function main() {
   duplicateSystemContentKeyIsRefusedNotLastWins()
   brandedErrorChannelIsOpenOnTheSpikeClass()
   exportSurfacesArePinned()
+  await publicSurfaceMintsExactlyTheDeclaredTrust()
+  await addingAGrantingFactoryBackIsFound()
   noSuiteJudgesInScopeBrandsByInstanceof()
   spikeClassHasNoUnforgeableBrand()
   latentByEnumeration()

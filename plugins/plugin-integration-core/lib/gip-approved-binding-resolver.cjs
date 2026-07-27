@@ -32,15 +32,30 @@
 // prior attempt (#4596 @ 774bdb5e6 L843/L851) mint WeakSet-trusted resolutions from
 // two caller-supplied fakes.
 //
-// ⚠ SCOPE THE CLAIM HONESTLY. The two `createHarness*ForTests` constructors below are
-// PUBLIC and their products ARE attested into this module's authority WeakSets — so
-// "no public factory's products are trusted" is NOT unconditionally true here either.
-// They exist because BOTH certified authorities are unreachable at this head (RQ-2 /
-// RQ-3) and a control routed through `__internals` or an untrusted registry would make
-// this module's own provenance mutations undetectable. Containment today is LATENCY;
-// closing them is a precondition of any runtime wiring. What IS unconditional: the
-// resolution granter itself is unexported, and the exported export set is pinned by
-// exact key equality so no third seam can appear silently.
+// ⚠ SCOPE THE CLAIM HONESTLY. FOUR public exports of this module mint a trust-branded
+// object, not two, and the set is no longer a matter of reading — it is EXECUTED. The
+// round-6 saturation (`publicSurfaceMintsExactlyTheDeclaredTrust`, 192,780 calls over
+// 42 exports) enumerates the whole minting surface of the four modules and pins it by
+// SET EQUALITY. This module's four:
+//   * `createHarnessSystemIdentityAuthorityForTests`  -> systemIdentityAuthority
+//   * `createHarnessCanonicalObjectAuthorityForTests` -> canonicalObjectAuthority
+//   * `createCertifiedSystemIdentityAuthority`        -> systemIdentityAuthority
+//   * `createCertifiedCanonicalObjectAuthority`       -> canonicalObjectAuthority
+//   ( plus `resolveApprovedBinding` on a constructed resolver -> bindingResolution )
+// The two `createCertified*` are DECLARED rather than defects-in-waiting: each mints an
+// authority whose behaviour is entirely FIRST-PARTY and FAIL-CLOSED at this head — (β)
+// refuses every service and (γ)'s only trusted registry is the EMPTY module-load
+// instance — so neither carries caller-controlled behaviour or values. The two
+// `createHarness*ForTests` DO, and that is the class ITEM 2 asks to be closed.
+//
+// ⚠ ITEM 2's CLOSURE IS NOT DELIVERED, and this comment does not claim it is. Closing
+// the harness factories removes the only publicly-reachable path to a trusted
+// authority, which is the sole construction path for the executor suite's stack builder
+// — and therefore for B-1's control and the always-bind-the-first-source mutation that
+// §4's acceptance requires to stay RED. The two cannot both hold at this head; the
+// choice is the owner's. What IS unconditional here: the resolution granter itself is
+// unexported, and the export set is pinned by exact key equality so no NEW seam can
+// appear silently — the saturation REDs and NAMES it if one does.
 //
 // -- ERROR DISCIPLINE ------------------------------------------------------
 // `fail(reason)` takes ONLY a reason from the frozen vocabulary — no `message`
@@ -371,6 +386,17 @@ function isTrustedBindingResolution(value) {
   return trustedBindingResolutions.has(value)
 }
 
+// ROUND 6, ITEM 2 — CHECKERS FOR THE TWO AUTHORITY BRANDS. Predicates over objects
+// that already exist; they admit nothing and mint nothing. They exist so that the
+// trust-minting surface can be ENUMERATED MECHANICALLY rather than argued in prose.
+function isTrustedSystemIdentityAuthority(value) {
+  return trustedSystemIdentityAuthorities.has(value)
+}
+
+function isTrustedCanonicalObjectAuthority(value) {
+  return trustedCanonicalObjectAuthorities.has(value)
+}
+
 function assertTrustedBindingResolution(value) {
   if (!trustedBindingResolutions.has(value)) fail('RESOLVER_RESOLUTION_NOT_TRUSTED')
   return value
@@ -619,6 +645,8 @@ module.exports = guardExportTable({
   createHarnessSystemIdentityAuthorityForTests,
   createHarnessCanonicalObjectAuthorityForTests,
   isTrustedBindingResolution,
+  isTrustedSystemIdentityAuthority,
+  isTrustedCanonicalObjectAuthority,
   assertTrustedBindingResolution,
   isBrandedApprovedBindingResolverError,
   // `fail` is deliberately ABSENT — and inert anyway, since it takes no caller

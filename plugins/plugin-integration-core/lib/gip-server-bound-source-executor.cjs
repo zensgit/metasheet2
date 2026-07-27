@@ -219,8 +219,8 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 //
 //   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
 //      `buildTrustedHttpProbeActionRegistry`.
-//   2. `createHarnessSourceBinderForTests` (:347) is the SOLE writer into
-//      `trustedSourceBinders` (:341, written :421) and is publicly EXPORTED (:560) — there is no
+//   2. `createHarnessSourceBinderForTests` (:364) is the SOLE writer into
+//      `trustedSourceBinders` (:358, written :438) and is publicly EXPORTED (:594) — there is no
 //      private granter behind it at all, so it is not even "build split from trust";
 //      it is the single granting path. And unlike (1) it has NO CERTIFIED
 //      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified
@@ -234,9 +234,26 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 // proven by executed enumeration), and closing BOTH is a precondition of any runtime
 // wiring. Do not read the paragraph above as "no public factory confers trust here" —
 // read it as "the BUILD-ONLY factory confers nothing", which is what the mutation
-// battery proves. Mitigation that does hold: both factories sit inside the
-// exact-key-set export pin, so neither can be widened and no third one can be added
-// without reding.
+// battery proves.
+//
+// ROUND 6 — THE SET IS NO LONGER READ, IT IS EXECUTED. Counting these by reading is
+// exactly how the round-5 text said ONE when there were TWO.
+// `publicSurfaceMintsExactlyTheDeclaredTrust` saturates the public surface of all four
+// modules (192,780 calls over 42 exports, including COMPOSED components records so the
+// TRANSITIVE path is visible) and pins the minting set by SET EQUALITY. This module's
+// three: `createHarnessHttpProbeActionRegistryForTests` -> httpProbeActionRegistry,
+// `createHarnessSourceBinderForTests` -> sourceBinder, and
+// `createServerBoundSourceExecutor` -> serverBoundSourceExecutor (transitive: it mints
+// only once the closure has ALREADY reached a trusted registry AND a trusted binder,
+// which is the property that would make a real closure real).
+//
+// ⚠ ITEM 2's CLOSURE IS NOT DELIVERED. Closing these two removes the only publicly
+// reachable path to a trusted binder, which is the sole construction path for this
+// module's own suite — and therefore for B-1's control and the always-bind-the-first-
+// source mutation. The two cannot both hold at this head; the choice is the owner's.
+// Mitigation that does hold: both factories sit inside the exact-key-set export pin and
+// inside the saturation's set equality, so neither can be widened and no third one can
+// be added without reding AND BEING NAMED.
 //
 // This is the class the owner ruled on for #4610's registries — "a public factory
 // whose products are trusted is equivalent to no trust check at all" — and it is
@@ -434,6 +451,23 @@ function isTrustedServerBoundSourceExecutor(value) {
   return trustedServerBoundSourceExecutors.has(value)
 }
 
+// ROUND 6, ITEM 2 — CHECKERS FOR THE TWO LEAF BRANDS THIS MODULE OWNS.
+//
+// A checker is a predicate over an object that already exists: it admits nothing and
+// mints nothing, exactly like `isTrustedServerBoundSourceExecutor` above. They exist so
+// that the trust-minting surface can be ENUMERATED MECHANICALLY rather than argued in
+// prose — `publicSurfaceMintsExactlyTheDeclaredTrust` saturates the public export
+// surface with caller-controlled arguments and asks every checker about every value it
+// can reach. Without these two, four of the six brands were unobservable from outside
+// and "which exports mint trust" was a claim nobody could execute.
+function isTrustedHttpProbeActionRegistry(value) {
+  return trustedHttpProbeActionRegistries.has(value)
+}
+
+function isTrustedSourceBinder(value) {
+  return trustedSourceBinders.has(value)
+}
+
 const ANSWER_KEYS = Object.freeze(['duplicateGroupsSampled', 'nullKeyRowsSampled'])
 const ANSWER_KEY_SET = new Set(ANSWER_KEYS)
 
@@ -560,6 +594,8 @@ module.exports = guardExportTable({
   createHarnessSourceBinderForTests,
   createServerBoundSourceExecutor,
   isTrustedServerBoundSourceExecutor,
+  isTrustedHttpProbeActionRegistry,
+  isTrustedSourceBinder,
   isBrandedSourceExecutorError,
   // `fail` is deliberately ABSENT — and inert anyway, since it takes no caller text.
   // `buildTrustedHttpProbeActionRegistry` is absent BECAUSE IT GRANTS TRUST.
