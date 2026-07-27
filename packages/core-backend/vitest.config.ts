@@ -563,6 +563,16 @@ export default defineConfig({
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired
       // whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts',
+      // W4C-2 P1-2 third suite (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the
+      // durable delivery / lock-order / atomicity gates: gates 2/3/4 (crash-before-emit
+      // posture + dispatcher-restart exactly-once + payload/wire freeze), gate 5 (legacy
+      // zero-row leg over all four W4 surfaces), gate 6 (restart completes only unfinished
+      // users), gate 7's added abandon-while-finalizer-waits leg, gate 8 injected-failure
+      // atomicity, gate 15 lock-order/no-class-11/no-source-DML witnesses (incl. the gate
+      // 19/23 extensions), gate 17 suspended pause, and gate 22/23 controls. DATABASE_URL-
+      // gated; excluded here so the no-DB job cannot skip-green it; wired whole-file into
+      // the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
