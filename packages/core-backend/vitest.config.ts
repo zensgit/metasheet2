@@ -555,6 +555,14 @@ export default defineConfig({
       // excluded here so the no-DB job cannot skip-green it; wired whole-file into the
       // attendance real-DB step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts',
+      // W4C-2 P1-2 second half (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the
+      // run-creation/resume transaction (section 1.7), the finalization transaction
+      // (section 1.8), the O-3=(a) per-target outcome writer, the `abandoned` transition
+      // (section 1.1.2), the O-4=(a) promotion-block guard, and the recovery-sweep step
+      // function, plus TOCTOU/concurrent-finalization/concurrent-abandon real-DB legs.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired
+      // whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.

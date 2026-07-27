@@ -73,6 +73,10 @@ const FILES = Object.freeze([
   // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the schema/
   // migration half's own real-DB gate suite (added same discipline as the seven above).
   'tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts',
+  // W4C-2 P1-2 second half (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the
+  // run-creation/resume/finalization/`abandoned`/promotion-block-guard/sweep transactional
+  // half's own real-DB gate suite (same discipline as the eight above).
+  'tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts',
 ])
 
 /**

@@ -8,34 +8,66 @@
  *
  * THIS is the module section 1.4.1 requires: "There are exactly two constructors, and both
  * are defined in, and neither is exported outside, the module that ALSO defines the
- * run-creation, resume, and finalization transactions". This slice (P1-2, the schema/
- * identity/enqueue half of section 4 step 3) ships the identity type, both
- * module-private constructors, and the run-scoped enqueue surface. The run-creation,
- * resume, finalization, and `abandoned`-transition transactions (section 1.1.2, 1.7, 1.8)
- * are a LATER slice — they land IN THIS SAME FILE, not a new module, so the "neither
- * constructor is exported outside the module" exclusivity claim this file makes stays true
- * across that follow-up.
+ * run-creation, resume, and finalization transactions". This slice (P1-2 second half — the
+ * transactional half of section 4 step 3, following the schema/identity/enqueue half already
+ * on this branch) adds: the pure target-set-resolution/fingerprint functions (section 1.2's
+ * `ordinal`, section 1.3, `O-2`/`OD-W4C-51=(a)` — `ORDER BY user_id` canonical order), the
+ * run-creation/resume transaction (section 1.7), the finalization transaction (section 1.8),
+ * the `O-3=(a)` per-target outcome writer (section 1.1.1), the `abandoned` transition
+ * (section 1.1.2), and the recovery-sweep step function (section 1.7's "no stuck absorbing
+ * state"). All of it lands IN THIS SAME FILE, so the "neither constructor is exported outside
+ * the module" exclusivity claim this file makes stays true.
  *
- * ZERO caller cutover: nothing in production imports this module yet. `deriveAttendanceScheduledRunIdV1`
+ * ZERO caller cutover, unchanged from the schema half: nothing in production imports this
+ * module yet, and this slice does not wire the recovery sweep into any live tick or the
+ * run-creation transaction into the live scheduled entrypoint — that is caller-cutover work
+ * for a later slice (consistent with every other W4-covered module's own "ZERO caller
+ * cutover" doctrine: `w4c0-operation-registry.ts`, `w4c0-authorization.ts`). Membership
+ * resolution (section 1.7 step 4, "resolve membership and per-user work-date attribution
+ * exactly as today") is therefore an INJECTED async callback
+ * (`AttendanceScheduledRunMembershipResolverV1`), not a reimplementation of the legacy
+ * scheduled loop's resolver — the real resolver lives in
+ * `plugins/plugin-attendance/index.cjs`/`attendance-work-date-resolver.cjs` and is out of this
+ * slice's scope; wiring a real resolver adapter through this injection point is the same later
+ * slice that performs the caller cutover. `deriveAttendanceScheduledRunIdV1`
  * (w4c2-live-scheduled-boundary.ts) is the held branch's SUPERSEDED derivation — section
- * 1.1's "must not survive implementation" rule — and is retired when the run-creation
- * transaction (the later slice) replaces its caller; this file does not touch that
- * function.
+ * 1.1's "must not survive implementation" rule — and is retired when that later slice replaces
+ * its caller; this file does not touch that function.
  *
  * Values-free discipline: every throw is a closed code string only, never the offending
  * input bytes.
  */
+import crypto from 'node:crypto'
 import type {
   AttendanceW4TransactionClientV1,
   Brand,
+  CanonicalAttendanceRolloutOrgKeyV1,
   CanonicalAttendanceScheduledRunInitiatorV1,
+  CanonicalAttendanceScheduledRunKeyV1,
   CanonicalAttendanceWorkDateV1,
+  VerifiedAttendanceOperationIdentityV1,
   VerifiedAttendanceOrgIdentityV1,
 } from './w4c0-identity'
-import { parseCanonicalAttendanceWorkDateV1, rehydrateVerifiedAttendanceOrgIdentityV1 } from './w4c0-identity'
-import { ATTENDANCE_W4_SCHEDULED_RUN_OUTBOX_EVENT_KINDS_V1 } from './w4c0-operation-contract'
+import {
+  acquireAttendanceCalculationRolloutLock,
+  acquireAttendanceScheduledRunLock,
+  createVerifiedAttendanceOrgIdentityV1,
+  deriveAttendanceOperationCandidateIdentityV1,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  parseCanonicalAttendanceScheduledRunKeyV1,
+  parseCanonicalAttendanceWorkDateV1,
+  rehydrateVerifiedAttendanceOrgIdentityV1,
+  requireVerifiedAttendanceOperationIdentityV1,
+  resolveSegmentCalculationPosture,
+} from './w4c0-identity'
+import {
+  verifyAuthorizedAttendanceWriteContextV1,
+  type AuthorizedAttendanceWriteContextV1,
+} from './w4c0-authorization'
+import { ATTENDANCE_W4_SCHEDULED_RUN_OUTBOX_EVENT_KINDS_V1, AttendanceW4OperationError } from './w4c0-operation-contract'
 import { canonicalAttendanceJsonV1 } from './w4c0-fingerprints'
 import type { AttendanceOutboxEventInputV1 } from './w4c0-operation-registry'
+import { W4C2_SCHEDULED_REVIEW_REASON_CODES_V1 } from '../db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union'
 
 // ---------------------------------------------------------------------------
 // Values-free error type (this module's own, mirroring w4c0-identity.ts's discipline).
@@ -255,14 +287,13 @@ function mintAttendanceScheduledRunIdentityFromInsertedRowV1(
   return mintScheduledRunWitnessFromRow(insertedRow)
 }
 
-// Module-private reference so neither constructor above is flagged as dead code before the
-// run-creation/resume/finalization transactions (a later slice, same module) call them.
-// This reference does NOT create an external call path — it is itself unexported.
-const __w4c2ScheduledRunConstructors = {
-  rehydrateVerifiedAttendanceScheduledRunIdentityV1,
-  mintAttendanceScheduledRunIdentityFromInsertedRowV1,
-} as const
-void __w4c2ScheduledRunConstructors
+// Both constructors above are now called by the run-creation/resume/finalization
+// transactions below, in THIS SAME MODULE — the "neither is exported outside the module"
+// exclusivity claim (section 1.4.1) stays true: the run-creation transaction
+// (`createOrResumeAttendanceScheduledRunV1`) is the only caller of
+// `mintAttendanceScheduledRunIdentityFromInsertedRowV1`; the resume protocol and the
+// standalone finalization transaction (`finalizeAttendanceScheduledRunV1`) are the only
+// callers of `rehydrateVerifiedAttendanceScheduledRunIdentityV1`.
 
 /**
  * Read-only witness check for the run-scoped enqueue surface below — mints nothing;
@@ -323,4 +354,882 @@ export async function enqueueAttendanceScheduledRunEventOutboxV1(
       ],
     )
   }
+}
+
+// ---------------------------------------------------------------------------
+// Section 1.2/1.3: pure target-set resolution + fingerprint. `O-2`/`OD-W4C-51=(a)`
+// (RATIFIED, Bundle A): `ORDER BY user_id` pins ordinal as a deterministic function of
+// membership, so a resume recomputation is byte-identical by construction.
+// ---------------------------------------------------------------------------
+
+const NUL_BYTE = Buffer.from([0])
+
+export type AttendanceScheduledRunTargetKindV1 = 'generate' | 'review'
+
+/** Caller-supplied resolved membership entry — pre-ordering, pre-ordinal. */
+export interface AttendanceScheduledRunMemberInputV1 {
+  readonly userId: string
+  readonly targetKind: AttendanceScheduledRunTargetKindV1
+  readonly reviewReasonCode: string | null
+}
+
+/** One frozen target-plan entry, post `O-2=(a)` canonical ordering. */
+export interface AttendanceScheduledRunTargetPlanEntryV1 {
+  readonly ordinal: number
+  readonly userId: string
+  readonly targetKind: AttendanceScheduledRunTargetKindV1
+  readonly reviewReasonCode: string | null
+}
+
+/**
+ * Section 1.2/1.3, `O-2=(a)`: strict-parses each member, then sorts `ORDER BY user_id`
+ * ascending and assigns 0-based `ordinal` — a pure function of the resolved membership set,
+ * called identically by both the run-creation transaction (section 1.7 step 4-5) and the
+ * resume protocol's recomputation (section 1.7 step 3), so byte-equality between the two is
+ * not a coincidence of shared code paths happening to agree — it is the same function.
+ */
+export function resolveAttendanceScheduledRunTargetSetV1(
+  members: readonly AttendanceScheduledRunMemberInputV1[],
+): readonly AttendanceScheduledRunTargetPlanEntryV1[] {
+  const code = 'W4C2_SCHEDULED_RUN_MEMBER_INVALID'
+  if (!Array.isArray(members)) fail(code)
+  const seenUserIds = new Set<string>()
+  const validated = members.map((member) => {
+    if (typeof member !== 'object' || member === null) fail(code)
+    const fields = requireExactKeys(member, ['userId', 'targetKind', 'reviewReasonCode'], code) as unknown as AttendanceScheduledRunMemberInputV1
+    const userId = parseUuidSyntax(fields.userId, 'W4C2_SCHEDULED_RUN_MEMBER_USER_ID_INVALID')
+    if (fields.targetKind !== 'generate' && fields.targetKind !== 'review') {
+      fail('W4C2_SCHEDULED_RUN_MEMBER_TARGET_KIND_INVALID')
+    }
+    let reviewReasonCode: string | null = null
+    if (fields.targetKind === 'review') {
+      if (
+        typeof fields.reviewReasonCode !== 'string' ||
+        !(W4C2_SCHEDULED_REVIEW_REASON_CODES_V1 as readonly string[]).includes(fields.reviewReasonCode)
+      ) {
+        fail('W4C2_SCHEDULED_RUN_MEMBER_REVIEW_REASON_INVALID')
+      }
+      reviewReasonCode = fields.reviewReasonCode
+    } else if (fields.reviewReasonCode !== null) {
+      fail('W4C2_SCHEDULED_RUN_MEMBER_REVIEW_REASON_INVALID')
+    }
+    if (seenUserIds.has(userId)) fail('W4C2_SCHEDULED_RUN_MEMBER_DUPLICATE_USER')
+    seenUserIds.add(userId)
+    return { userId, targetKind: fields.targetKind, reviewReasonCode }
+  })
+  // `O-2=(a)`: ORDER BY user_id ascending — the canonical, deterministic pin.
+  const sorted = [...validated].sort((a, b) => (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0))
+  return sorted.map((entry, ordinal) => Object.freeze({ ...entry, ordinal }))
+}
+
+/**
+ * Section 1.3: the canonical NUL-separated target-set fingerprint. Order-sensitive by
+ * construction (ordinal is part of the hashed bytes) — a benign reordering across a resume is
+ * impossible once `O-2=(a)` pins `ordinal` to a deterministic function of membership, so
+ * ordinal drift alone is real evidence of corruption (gate 10's "or one ordinal" leg, kept
+ * under `(a)`).
+ */
+export function computeAttendanceScheduledRunTargetSetFingerprintV1(
+  key: { readonly orgId: string; readonly initiator: string; readonly workDate: string },
+  targets: readonly AttendanceScheduledRunTargetPlanEntryV1[],
+): string {
+  const parts: Buffer[] = [Buffer.from('metasheet2:attendance:scheduled-run-target-set:v1', 'utf8')]
+  parts.push(NUL_BYTE, Buffer.from(key.orgId, 'utf8'))
+  parts.push(NUL_BYTE, Buffer.from(key.initiator, 'utf8'))
+  parts.push(NUL_BYTE, Buffer.from(key.workDate, 'utf8'))
+  for (const target of targets) {
+    parts.push(NUL_BYTE, Buffer.from(String(target.ordinal), 'utf8'))
+    parts.push(NUL_BYTE, Buffer.from(target.userId, 'utf8'))
+    parts.push(NUL_BYTE, Buffer.from(target.targetKind, 'utf8'))
+    parts.push(NUL_BYTE, Buffer.from(target.reviewReasonCode ?? '', 'utf8'))
+  }
+  return crypto.createHash('sha256').update(Buffer.concat(parts)).digest('hex')
+}
+
+/** Section 1.5: the run-level outbox event business-key fingerprint. */
+export function computeAttendanceScheduledRunEventBusinessKeyFingerprintV1(
+  eventKind: string,
+  orgId: string,
+  workDate: string,
+  runId: string,
+): string {
+  const preimage = Buffer.concat([
+    Buffer.from('metasheet2:attendance:scheduled-run-event:v1', 'utf8'),
+    NUL_BYTE,
+    Buffer.from(eventKind, 'utf8'),
+    NUL_BYTE,
+    Buffer.from(orgId, 'utf8'),
+    NUL_BYTE,
+    Buffer.from(workDate, 'utf8'),
+    NUL_BYTE,
+    Buffer.from(runId, 'utf8'),
+  ])
+  return crypto.createHash('sha256').update(preimage).digest('hex')
+}
+
+// ---------------------------------------------------------------------------
+// Section 1.7: run-creation transaction, resume protocol.
+// ---------------------------------------------------------------------------
+
+export interface AttendanceScheduledRunKeyInputV1 {
+  readonly orgId: string
+  readonly initiator: CanonicalAttendanceScheduledRunInitiatorV1
+  readonly workDate: string
+}
+
+/**
+ * Injected membership resolver — section 1.7 step 4's "resolve membership and per-user
+ * work-date attribution exactly as today" is NOT reimplemented here (see the module
+ * docstring's caller-cutover note); the caller supplies the real resolver. Called under the
+ * class-`01` lock, inside the run-creation/resume transaction.
+ */
+export type AttendanceScheduledRunMembershipResolverV1 = (
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+  workDate: string,
+) => Promise<readonly AttendanceScheduledRunMemberInputV1[]>
+
+interface AttendanceScheduledRunRowShapeV1 {
+  run_id: string
+  org_id: string
+  entrypoint: string
+  initiator: string
+  work_date: string
+  generation: number | string
+  accepted_write_posture: string
+  target_set_fingerprint: string
+  expected_user_count: number | string
+  review_count: number | string
+  state: string
+}
+
+export type AttendanceScheduledRunStartOutcomeV1 =
+  | { readonly kind: 'org_suspended_deferred' }
+  | { readonly kind: 'org_legacy_zero_rows' }
+  | {
+      readonly kind: 'created_running'
+      readonly runId: string
+      readonly generation: number
+      readonly expectedUserCount: number
+      readonly reviewCount: number
+    }
+  | {
+      readonly kind: 'created_and_finalized'
+      readonly runId: string
+      readonly generation: number
+      readonly reviewCount: number
+      readonly generatedCount: number
+    }
+  | {
+      readonly kind: 'resumed'
+      readonly runId: string
+      readonly generation: number
+      readonly outstandingGenerateTargets: readonly {
+        readonly targetId: string
+        readonly userId: string
+        readonly operationId: string
+      }[]
+      readonly readyToFinalize: boolean
+    }
+
+async function readRunningScheduledRunForUpdateV1(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+  initiator: string,
+  workDate: string,
+): Promise<AttendanceScheduledRunRowShapeV1 | null> {
+  const result = await trx.query(
+    `SELECT run_id::text AS run_id, org_id, entrypoint, initiator, work_date::text AS work_date,
+            generation, accepted_write_posture, target_set_fingerprint, expected_user_count,
+            review_count, state
+       FROM attendance_scheduled_runs
+      WHERE org_id = $1 AND initiator = $2 AND work_date = $3::date AND state = 'running'
+      FOR UPDATE`,
+    [orgId, initiator, workDate],
+  )
+  if (result.rows.length === 0) return null
+  if (result.rows.length > 1) fail('W4C2_SCHEDULED_RUN_STATE_AMBIGUOUS')
+  return result.rows[0] as unknown as AttendanceScheduledRunRowShapeV1
+}
+
+/**
+ * Section 1.7: the run-creation transaction (steps 1-6) and, when it detects an existing
+ * `running` row at step 3, the resume protocol. Intended to run as the `body` of
+ * `runAttendanceResultOperationTransactionV1` (w4c0-operation-registry.ts) — the canonical
+ * `SERIALIZABLE` wrapper — so this function itself issues no `BEGIN`/`COMMIT`.
+ */
+export async function createOrResumeAttendanceScheduledRunV1(
+  trx: AttendanceW4TransactionClientV1,
+  key: AttendanceScheduledRunKeyInputV1,
+  resolveMembership: AttendanceScheduledRunMembershipResolverV1,
+): Promise<AttendanceScheduledRunStartOutcomeV1> {
+  const canonicalKey: CanonicalAttendanceScheduledRunKeyV1 = parseCanonicalAttendanceScheduledRunKeyV1(key)
+
+  // Step 1: class-00 shared; resolve posture.
+  await acquireAttendanceCalculationRolloutLock(trx, canonicalKey.orgId, 'shared')
+  const posture = await resolveSegmentCalculationPosture(trx, canonicalKey.orgId)
+  if (posture.writePosture === 'blocked') {
+    return { kind: 'org_suspended_deferred' }
+  }
+  if (posture.writePosture === 'legacy_projection_only') {
+    return { kind: 'org_legacy_zero_rows' }
+  }
+  const org = createVerifiedAttendanceOrgIdentityV1({ orgKey: canonicalKey.orgId, posture })
+
+  // Step 2: class-01 run key lock.
+  await acquireAttendanceScheduledRunLock(trx, canonicalKey)
+
+  // Step 3: resume detection.
+  const existing = await readRunningScheduledRunForUpdateV1(
+    trx,
+    canonicalKey.orgId,
+    canonicalKey.initiator,
+    canonicalKey.workDate,
+  )
+  if (existing) {
+    return resumeAttendanceScheduledRunV1(trx, org, existing, resolveMembership)
+  }
+
+  // Step 4: resolve membership, build the frozen plan.
+  const members = await resolveMembership(trx, canonicalKey.orgId, canonicalKey.workDate)
+  const plan = resolveAttendanceScheduledRunTargetSetV1(members)
+  const fingerprint = computeAttendanceScheduledRunTargetSetFingerprintV1(canonicalKey, plan)
+  const expectedUserCount = plan.filter((t) => t.targetKind === 'generate').length
+  const reviewCount = plan.filter((t) => t.targetKind === 'review').length
+
+  // Step 5: allocate generation, insert run + target rows.
+  const genResult = await trx.query(
+    `SELECT COALESCE(MAX(generation), 0) AS max_gen FROM attendance_scheduled_runs
+      WHERE org_id = $1 AND initiator = $2 AND work_date = $3::date`,
+    [canonicalKey.orgId, canonicalKey.initiator, canonicalKey.workDate],
+  )
+  const generation = Number((genResult.rows[0] as { max_gen: number | string }).max_gen) + 1
+
+  const insertedResult = await trx.query(
+    `INSERT INTO attendance_scheduled_runs (
+        org_id, entrypoint, initiator, work_date, generation, accepted_write_posture,
+        target_set_fingerprint, expected_user_count, review_count, state
+      ) VALUES ($1,'scheduled',$2,$3::date,$4,$5,$6,$7,$8,'running')
+      RETURNING run_id::text AS run_id, org_id, entrypoint, initiator,
+                work_date::text AS work_date, generation, accepted_write_posture`,
+    [
+      canonicalKey.orgId,
+      canonicalKey.initiator,
+      canonicalKey.workDate,
+      generation,
+      org.acceptedWritePosture,
+      fingerprint,
+      expectedUserCount,
+      reviewCount,
+    ],
+  )
+  const runRow = insertedResult.rows[0] as {
+    run_id: string
+    org_id: string
+    entrypoint: string
+    initiator: string
+    work_date: string
+    generation: number
+    accepted_write_posture: string
+  }
+  const runId = runRow.run_id
+
+  for (const target of plan) {
+    let operationId: string | null = null
+    if (target.targetKind === 'generate') {
+      const candidate = deriveAttendanceOperationCandidateIdentityV1({
+        sourceKind: 'scheduled',
+        scheduledRunId: runId,
+        userId: target.userId,
+        workDate: canonicalKey.workDate,
+      })
+      operationId = candidate.operationId
+    }
+    await trx.query(
+      `INSERT INTO attendance_scheduled_run_targets (
+          org_id, run_id, work_date, ordinal, user_id, target_kind, review_reason_code, operation_id
+        ) VALUES ($1,$2::uuid,$3::date,$4,$5::uuid,$6,$7,$8::uuid)`,
+      [
+        canonicalKey.orgId,
+        runId,
+        canonicalKey.workDate,
+        target.ordinal,
+        target.userId,
+        target.targetKind,
+        target.reviewReasonCode,
+        operationId,
+      ],
+    )
+  }
+
+  // Section 1.9: a run with zero `generate` targets has its own creation transaction BE the
+  // finalization transaction — inline, same transaction, over the just-inserted row, via the
+  // mint-from-inserted-row constructor (never rehydration: there is no separately-committed
+  // row yet to re-read).
+  if (expectedUserCount === 0) {
+    const identity = mintAttendanceScheduledRunIdentityFromInsertedRowV1({
+      runId: runRow.run_id,
+      orgId: runRow.org_id,
+      entrypoint: runRow.entrypoint,
+      initiator: runRow.initiator,
+      acceptedWritePosture: runRow.accepted_write_posture,
+      workDate: runRow.work_date,
+      generation: runRow.generation,
+      targetSetFingerprint: fingerprint,
+    })
+    const folded = await finalizeAttendanceScheduledRunCoreV1(
+      trx,
+      identity,
+      runId,
+      canonicalKey.orgId,
+      canonicalKey.workDate,
+      plan,
+      reviewCount,
+    )
+    return {
+      kind: 'created_and_finalized',
+      runId,
+      generation,
+      reviewCount: folded.reviewCount,
+      generatedCount: folded.generatedCount,
+    }
+  }
+
+  return { kind: 'created_running', runId, generation, expectedUserCount, reviewCount }
+}
+
+/**
+ * Section 1.7's resume protocol (steps 1-4; step 5's "attempt finalization" is the caller's
+ * job — this function only reports readiness). Always called under the class-`00`/class-`01`
+ * locks the run-creation transaction already holds, over the `FOR UPDATE` row it already read.
+ */
+async function resumeAttendanceScheduledRunV1(
+  trx: AttendanceW4TransactionClientV1,
+  org: VerifiedAttendanceOrgIdentityV1,
+  existing: AttendanceScheduledRunRowShapeV1,
+  resolveMembership: AttendanceScheduledRunMembershipResolverV1,
+): Promise<AttendanceScheduledRunStartOutcomeV1> {
+  // Step 2: frozen posture must equal the currently resolved posture.
+  if (org.acceptedWritePosture !== existing.accepted_write_posture) {
+    fail('W4C2_SCHEDULED_RUN_RESUME_POSTURE_MISMATCH')
+  }
+
+  // Step 3: recompute the target set; require byte equality with the frozen fingerprint.
+  const members = await resolveMembership(trx, existing.org_id, existing.work_date)
+  const plan = resolveAttendanceScheduledRunTargetSetV1(members)
+  const recomputedFingerprint = computeAttendanceScheduledRunTargetSetFingerprintV1(
+    { orgId: existing.org_id, initiator: existing.initiator, workDate: existing.work_date },
+    plan,
+  )
+  if (recomputedFingerprint !== existing.target_set_fingerprint) {
+    fail('W4C2_SCHEDULED_RUN_RESUME_TARGET_SET_DRIFT')
+  }
+
+  // Step 4: outstanding = generate targets with no row yet in the outcome table (O-3=(a)'s
+  // terminal-evidence definition) — never an in-memory cursor.
+  const outstandingResult = await trx.query(
+    `SELECT t.id::text AS target_id, t.user_id, t.operation_id::text AS operation_id
+       FROM attendance_scheduled_run_targets t
+       LEFT JOIN attendance_scheduled_run_target_outcomes o
+         ON o.org_id = t.org_id AND o.target_id = t.id
+      WHERE t.org_id = $1 AND t.run_id = $2::uuid AND t.target_kind = 'generate' AND o.id IS NULL
+      ORDER BY t.ordinal ASC`,
+    [existing.org_id, existing.run_id],
+  )
+  const outstandingGenerateTargets = outstandingResult.rows.map((row) => {
+    const r = row as { target_id: string; user_id: string; operation_id: string }
+    return { targetId: r.target_id, userId: r.user_id, operationId: r.operation_id }
+  })
+
+  return {
+    kind: 'resumed',
+    runId: existing.run_id,
+    generation: Number(existing.generation),
+    outstandingGenerateTargets,
+    readyToFinalize: outstandingGenerateTargets.length === 0,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Section 1.1.1 (O-3=(a)): the per-target terminal-outcome writer.
+// ---------------------------------------------------------------------------
+
+export type AttendanceScheduledRunTargetOutcomeInputV1 =
+  | { readonly terminalOutcome: 'completed' }
+  | { readonly terminalOutcome: 'failed'; readonly failureReasonCode: 'ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED' }
+
+/**
+ * `recordAttendanceScheduledRunTargetOutcomeV1(trx, operationWitness, outcome)` — section
+ * 1.1.1's exact name. The only writer of `attendance_scheduled_run_target_outcomes`, gated on
+ * a VERIFIED per-user operation witness for the exact target it writes: a caller cannot forge
+ * an outcome through this helper for a target whose operation it does not already hold a
+ * verified witness for. This is a TypeScript-encapsulation guarantee (module export
+ * boundary), not a DB-level one — the disclosure section 1.1.1 states explicitly.
+ */
+export async function recordAttendanceScheduledRunTargetOutcomeV1(
+  trx: AttendanceW4TransactionClientV1,
+  operationWitness: unknown,
+  outcome: AttendanceScheduledRunTargetOutcomeInputV1,
+): Promise<void> {
+  const verified: VerifiedAttendanceOperationIdentityV1 = requireVerifiedAttendanceOperationIdentityV1(operationWitness)
+  if (verified.entrypoint !== 'scheduled' || verified.kind !== 'item') {
+    fail('W4C2_SCHEDULED_RUN_OUTCOME_WITNESS_INVALID')
+  }
+
+  const invalidCode = 'W4C2_SCHEDULED_RUN_OUTCOME_INVALID'
+  if (typeof outcome !== 'object' || outcome === null) fail(invalidCode)
+  let terminalOutcome: 'completed' | 'failed'
+  let failureReasonCode: string | null
+  if ((outcome as { terminalOutcome?: unknown }).terminalOutcome === 'completed') {
+    if (Object.keys(outcome as object).length !== 1) fail(invalidCode)
+    terminalOutcome = 'completed'
+    failureReasonCode = null
+  } else if ((outcome as { terminalOutcome?: unknown }).terminalOutcome === 'failed') {
+    const keys = Object.keys(outcome as object)
+    if (keys.length !== 2 || !keys.includes('failureReasonCode')) fail(invalidCode)
+    const reason = (outcome as { failureReasonCode?: unknown }).failureReasonCode
+    if (reason !== 'ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED') fail('W4C2_SCHEDULED_RUN_OUTCOME_REASON_INVALID')
+    terminalOutcome = 'failed'
+    failureReasonCode = reason
+  } else {
+    fail(invalidCode)
+  }
+
+  const targetResult = await trx.query(
+    `SELECT id::text AS id, run_id::text AS run_id FROM attendance_scheduled_run_targets
+      WHERE org_id = $1 AND operation_id = $2::uuid AND target_kind = 'generate'`,
+    [verified.org.orgId, verified.id],
+  )
+  if (targetResult.rows.length !== 1) fail('W4C2_SCHEDULED_RUN_OUTCOME_TARGET_NOT_FOUND')
+  const targetRow = targetResult.rows[0] as { id: string; run_id: string }
+
+  await trx.query(
+    `INSERT INTO attendance_scheduled_run_target_outcomes (
+        org_id, run_id, target_id, terminal_outcome, failure_reason_code
+      ) VALUES ($1,$2::uuid,$3::uuid,$4,$5)`,
+    [verified.org.orgId, targetRow.run_id, targetRow.id, terminalOutcome, failureReasonCode],
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Section 1.8: finalization transaction (shared core + standalone entry point) plus the
+// section 1.7 "no stuck absorbing state" recovery-sweep step function.
+// ---------------------------------------------------------------------------
+
+interface AttendanceScheduledRunPlanEntryLikeV1 {
+  readonly ordinal: number
+  readonly userId: string
+  readonly targetKind: string
+  readonly reviewReasonCode: string | null
+}
+
+/**
+ * Steps 5-9 of section 1.8, shared verbatim by the zero-`generate`-target inline path
+ * (section 1.9) and the standalone finalization transaction below — "not a third transaction
+ * shape."
+ */
+async function finalizeAttendanceScheduledRunCoreV1(
+  trx: AttendanceW4TransactionClientV1,
+  identity: VerifiedAttendanceScheduledRunIdentityV1,
+  runId: string,
+  orgId: string,
+  workDate: string,
+  plan: readonly AttendanceScheduledRunPlanEntryLikeV1[],
+  reviewCount: number,
+): Promise<{ completedUserCount: number; generatedCount: number; reviewCount: number }> {
+  const generateTargets = plan.filter((t) => t.targetKind === 'generate')
+  let completedUserCount = 0
+  let generatedCount = 0
+  if (generateTargets.length > 0) {
+    const foldResult = await trx.query(
+      `SELECT count(*) FILTER (WHERE o.terminal_outcome = 'completed') AS completed_count,
+              count(*) FILTER (WHERE o.terminal_outcome = 'completed'
+                                     AND (r.response_snapshot ->> 'inserted') = 'true') AS generated_count
+         FROM attendance_scheduled_run_targets t
+         JOIN attendance_scheduled_run_target_outcomes o
+           ON o.org_id = t.org_id AND o.target_id = t.id
+         LEFT JOIN attendance_result_operations r
+           ON r.org_id = t.org_id AND r.entrypoint = 'scheduled' AND r.operation_id = t.operation_id
+        WHERE t.org_id = $1 AND t.run_id = $2::uuid AND t.target_kind = 'generate'`,
+      [orgId, runId],
+    )
+    const row = foldResult.rows[0] as { completed_count: string | number; generated_count: string | number }
+    completedUserCount = Number(row.completed_count)
+    generatedCount = Number(row.generated_count)
+  }
+
+  const reasons = plan
+    .filter((t) => t.targetKind === 'review')
+    .slice()
+    .sort((a, b) => a.ordinal - b.ordinal)
+    .map((t) => ({ userId: t.userId, reasonCode: t.reviewReasonCode }))
+
+  const ABSENCE_KIND = 'attendance.absence.generated'
+  const REVIEW_KIND = 'attendance.work_date.review_required'
+  const events: AttendanceOutboxEventInputV1[] = [
+    {
+      eventKind: ABSENCE_KIND,
+      payload: { orgId, workDate, total: generatedCount },
+      payloadSchemaVersion: 1,
+      businessKeyFingerprint: computeAttendanceScheduledRunEventBusinessKeyFingerprintV1(
+        ABSENCE_KIND,
+        orgId,
+        workDate,
+        runId,
+      ),
+    },
+  ]
+  if (reviewCount > 0) {
+    events.push({
+      eventKind: REVIEW_KIND,
+      payload: { orgId, workDate, total: reviewCount, reasons },
+      payloadSchemaVersion: 1,
+      businessKeyFingerprint: computeAttendanceScheduledRunEventBusinessKeyFingerprintV1(
+        REVIEW_KIND,
+        orgId,
+        workDate,
+        runId,
+      ),
+    })
+  }
+
+  // Steps 7-8: outbox insert(s) and the state flip are the SAME transaction (gate 8) — this
+  // function issues no BEGIN/COMMIT itself; the caller's SERIALIZABLE wrapper owns the boundary.
+  await enqueueAttendanceScheduledRunEventOutboxV1(trx, identity, events)
+
+  await trx.query(
+    `UPDATE attendance_scheduled_runs
+        SET state = 'completed', completed_user_count = $3, generated_count = $4, finalized_at = now()
+      WHERE org_id = $1 AND run_id = $2::uuid AND state = 'running'`,
+    [orgId, runId, completedUserCount, generatedCount],
+  )
+
+  return { completedUserCount, generatedCount, reviewCount }
+}
+
+export interface AttendanceScheduledRunTargetIdentifierV1 {
+  readonly orgId: string
+  readonly initiator: CanonicalAttendanceScheduledRunInitiatorV1
+  readonly workDate: string
+  readonly runId: string
+}
+
+export type AttendanceScheduledRunFinalizationOutcomeV1 =
+  | { readonly kind: 'deferred'; readonly code: 'ATTENDANCE_SCHEDULED_RUN_FINALIZATION_DEFERRED' }
+  | { readonly kind: 'not_running'; readonly state: 'completed' | 'abandoned' }
+  | { readonly kind: 'not_ready' }
+  | {
+      readonly kind: 'finalized'
+      readonly runId: string
+      readonly completedUserCount: number
+      readonly generatedCount: number
+      readonly reviewCount: number
+    }
+
+/**
+ * Section 1.8, the standalone finalization transaction (steps 1-9). Intended to run as the
+ * `body` of `runAttendanceResultOperationTransactionV1`. Never acquires class-`11`, never
+ * issues source DML (gate 15).
+ */
+export async function finalizeAttendanceScheduledRunV1(
+  trx: AttendanceW4TransactionClientV1,
+  target: AttendanceScheduledRunTargetIdentifierV1,
+): Promise<AttendanceScheduledRunFinalizationOutcomeV1> {
+  const canonicalKey = parseCanonicalAttendanceScheduledRunKeyV1({
+    orgId: target.orgId,
+    initiator: target.initiator,
+    workDate: target.workDate,
+  })
+  const runId = parseUuidSyntax(target.runId, 'W4C2_SCHEDULED_RUN_ID_INVALID')
+
+  // Step 1: class-00 shared; resolve posture; the `blocked` branch (W4C-R43) is retryable,
+  // zero-DML, and distinct from a terminal remediation outcome.
+  await acquireAttendanceCalculationRolloutLock(trx, canonicalKey.orgId, 'shared')
+  const posture = await resolveSegmentCalculationPosture(trx, canonicalKey.orgId)
+  if (posture.writePosture === 'blocked') {
+    return { kind: 'deferred', code: 'ATTENDANCE_SCHEDULED_RUN_FINALIZATION_DEFERRED' }
+  }
+
+  // Step 2: class-01 run key lock.
+  await acquireAttendanceScheduledRunLock(trx, canonicalKey)
+
+  // Step 3: SELECT ... FOR UPDATE.
+  const rowResult = await trx.query(
+    `SELECT run_id::text AS run_id, org_id, entrypoint, initiator, work_date::text AS work_date,
+            generation, accepted_write_posture, target_set_fingerprint, review_count, state
+       FROM attendance_scheduled_runs
+      WHERE org_id = $1 AND run_id = $2::uuid
+      FOR UPDATE`,
+    [canonicalKey.orgId, runId],
+  )
+  if (rowResult.rows.length === 0) fail('W4C2_SCHEDULED_RUN_NOT_FOUND')
+  const row = rowResult.rows[0] as {
+    run_id: string
+    org_id: string
+    entrypoint: string
+    initiator: string
+    work_date: string
+    generation: number
+    accepted_write_posture: string
+    target_set_fingerprint: string
+    review_count: number | string
+    state: string
+  }
+
+  // "Not running" (already completed OR already abandoned, round-7 F3 fix): return the
+  // recorded outcome with zero DML — normal, expected, never thrown.
+  if (row.state !== 'running') {
+    if (row.state !== 'completed' && row.state !== 'abandoned') fail('W4C2_SCHEDULED_RUN_STATE_INVALID')
+    return { kind: 'not_running', state: row.state as 'completed' | 'abandoned' }
+  }
+
+  // Posture-mismatch fail-closed backstop (section 1.8 step 1's third branch; `O-4=(a)`
+  // extends the promotion-block predicate so this is practically unreachable in ordinary
+  // operation, but remains the backstop this branch states).
+  if (posture.writePosture !== row.accepted_write_posture) {
+    fail('W4C2_SCHEDULED_RUN_FINALIZATION_POSTURE_MISMATCH')
+  }
+
+  // Step 4: terminal-evidence check (O-3=(a): a row in the outcome table).
+  const targetsResult = await trx.query(
+    `SELECT t.ordinal, t.user_id, t.target_kind, t.review_reason_code, o.terminal_outcome
+       FROM attendance_scheduled_run_targets t
+       LEFT JOIN attendance_scheduled_run_target_outcomes o
+         ON o.org_id = t.org_id AND o.target_id = t.id
+      WHERE t.org_id = $1 AND t.run_id = $2::uuid
+      ORDER BY t.ordinal ASC`,
+    [canonicalKey.orgId, runId],
+  )
+  const targetRows = targetsResult.rows as Array<{
+    ordinal: number
+    user_id: string
+    target_kind: string
+    review_reason_code: string | null
+    terminal_outcome: string | null
+  }>
+  const notReady = targetRows.some((t) => t.target_kind === 'generate' && t.terminal_outcome === null)
+  if (notReady) {
+    return { kind: 'not_ready' }
+  }
+
+  const identity = rehydrateVerifiedAttendanceScheduledRunIdentityV1({
+    runId: row.run_id,
+    orgId: row.org_id,
+    entrypoint: row.entrypoint,
+    initiator: row.initiator,
+    acceptedWritePosture: row.accepted_write_posture,
+    workDate: row.work_date,
+    generation: row.generation,
+    targetSetFingerprint: row.target_set_fingerprint,
+  })
+
+  const plan: AttendanceScheduledRunPlanEntryLikeV1[] = targetRows.map((t) => ({
+    ordinal: Number(t.ordinal),
+    userId: t.user_id,
+    targetKind: t.target_kind,
+    reviewReasonCode: t.review_reason_code,
+  }))
+
+  const folded = await finalizeAttendanceScheduledRunCoreV1(
+    trx,
+    identity,
+    runId,
+    canonicalKey.orgId,
+    canonicalKey.workDate,
+    plan,
+    Number(row.review_count),
+  )
+
+  return {
+    kind: 'finalized',
+    runId,
+    completedUserCount: folded.completedUserCount,
+    generatedCount: folded.generatedCount,
+    reviewCount: folded.reviewCount,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Section 1.7, "no stuck absorbing state" — the recovery-sweep scan + one-candidate step.
+// NOT wired to any live tick in this slice (module docstring) — the scan/step functions and
+// their real-DB gates are the sweep's full specification, ready for that later wiring.
+// ---------------------------------------------------------------------------
+
+export interface AttendanceScheduledRunSweepCandidateV1 {
+  readonly orgId: string
+  readonly initiator: CanonicalAttendanceScheduledRunInitiatorV1
+  readonly workDate: string
+  readonly runId: string
+}
+
+/**
+ * Section 1.7's scan predicate — `state = 'running'`, deliberately NOT scoped to today's
+ * `work_date` (a run stranded on a prior calendar day must still be visible), bounded by
+ * `limit`.
+ */
+export async function scanAttendanceScheduledRunSweepCandidatesV1(
+  trx: AttendanceW4TransactionClientV1,
+  limit: number,
+): Promise<readonly AttendanceScheduledRunSweepCandidateV1[]> {
+  if (!Number.isInteger(limit) || limit < 1) fail('W4C2_SCHEDULED_RUN_SWEEP_LIMIT_INVALID')
+  const result = await trx.query(
+    `SELECT org_id, initiator, work_date::text AS work_date, run_id::text AS run_id
+       FROM attendance_scheduled_runs
+      WHERE state = 'running'
+      ORDER BY created_at ASC
+      LIMIT $1`,
+    [limit],
+  )
+  return result.rows.map((row) => {
+    const r = row as { org_id: string; initiator: string; work_date: string; run_id: string }
+    return {
+      orgId: r.org_id,
+      initiator: r.initiator as CanonicalAttendanceScheduledRunInitiatorV1,
+      workDate: r.work_date,
+      runId: r.run_id,
+    }
+  })
+}
+
+export type AttendanceScheduledRunSweepStepOutcomeV1 =
+  | { readonly kind: 'finalized'; readonly runId: string }
+  | { readonly kind: 'not_ready'; readonly runId: string }
+  | { readonly kind: 'skipped'; readonly runId: string; readonly reason: string }
+
+/**
+ * One candidate's worth of the sweep. Section 1.7 describes two branches ("not yet terminal"
+ * -> resume; "all terminal" -> finalize) that are "already fully specified elsewhere in this
+ * section" — this function reuses `finalizeAttendanceScheduledRunV1` verbatim rather than
+ * inventing a third transaction shape: `not_ready` IS the "resume" branch's terminal-evidence
+ * signal (the actual per-user replay/execution the resume protocol's remaining steps describe
+ * is the existing, unchanged per-user execution path — out of this function's scope, per the
+ * module docstring's caller-cutover note). Intended to run as ONE candidate per its OWN
+ * `runAttendanceResultOperationTransactionV1` call, never batched, so one stuck candidate
+ * cannot block the others in the same scan.
+ */
+export async function sweepAttendanceScheduledRunCandidateV1(
+  trx: AttendanceW4TransactionClientV1,
+  candidate: AttendanceScheduledRunSweepCandidateV1,
+): Promise<AttendanceScheduledRunSweepStepOutcomeV1> {
+  const outcome = await finalizeAttendanceScheduledRunV1(trx, candidate)
+  if (outcome.kind === 'finalized') return { kind: 'finalized', runId: candidate.runId }
+  if (outcome.kind === 'not_ready') return { kind: 'not_ready', runId: candidate.runId }
+  if (outcome.kind === 'deferred') return { kind: 'skipped', runId: candidate.runId, reason: 'org_blocked' }
+  return { kind: 'skipped', runId: candidate.runId, reason: outcome.kind }
+}
+
+// ---------------------------------------------------------------------------
+// Section 1.1.2: the `abandoned` transition.
+// ---------------------------------------------------------------------------
+
+const ABANDON_ACTOR_POSTURES = ['platform_admin', 'attendance_admin'] as const
+const ABANDON_REASON_CODES = ['ATTENDANCE_SCHEDULED_RUN_OPERATOR_ABANDONED'] as const
+export type AttendanceScheduledRunAbandonReasonCodeV1 = (typeof ABANDON_REASON_CODES)[number]
+
+export interface AttendanceScheduledRunAbandonKeyV1 {
+  readonly orgId: string
+  readonly runId: string
+}
+
+export type AttendanceScheduledRunAbandonOutcomeV1 =
+  | { readonly kind: 'deferred'; readonly code: 'ATTENDANCE_SCHEDULED_RUN_ABANDON_DEFERRED' }
+  | { readonly kind: 'not_running'; readonly state: 'completed' | 'abandoned' }
+  | { readonly kind: 'abandoned'; readonly runId: string; readonly completedUserCount: number }
+
+/**
+ * Section 1.1.2: `abandonAttendanceScheduledRunV1(trx, callerIdentity, key, reasonCode)` — the
+ * sole intended writer of the `running -> abandoned` transition. Authorization is evaluated
+ * BEFORE any lock (fail-closed, zero DML, zero lock contention on rejection). `callerIdentity`
+ * is the branded `AuthorizedAttendanceWriteContextV1` witness (w4c0-authorization.ts) —
+ * reusing that module's existing digest-verified mint/verify mechanics rather than a parallel
+ * implementation.
+ */
+export async function abandonAttendanceScheduledRunV1(
+  trx: AttendanceW4TransactionClientV1,
+  callerIdentity: unknown,
+  key: AttendanceScheduledRunAbandonKeyV1,
+  reasonCode: AttendanceScheduledRunAbandonReasonCodeV1,
+): Promise<AttendanceScheduledRunAbandonOutcomeV1> {
+  const verifiedCaller: AuthorizedAttendanceWriteContextV1 = verifyAuthorizedAttendanceWriteContextV1(callerIdentity)
+
+  if (verifiedCaller.capability !== 'retirement') {
+    throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
+  }
+  if (!(ABANDON_ACTOR_POSTURES as readonly string[]).includes(verifiedCaller.actorPosture)) {
+    throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
+  }
+  if (!(ABANDON_REASON_CODES as readonly string[]).includes(reasonCode)) {
+    fail('W4C2_SCHEDULED_RUN_ABANDON_REASON_INVALID')
+  }
+
+  // Org anchor: the run's org is compared against the CALLER IDENTITY's verified org, never a
+  // caller-supplied `key.orgId` alone — a mismatch is rejected in the same not-found shape as
+  // a nonexistent run (gate 13 cross-org isolation), before any lock.
+  if (key.orgId !== verifiedCaller.orgId) {
+    throw new AttendanceW4OperationError('ATTENDANCE_SCHEDULED_RUN_NOT_FOUND')
+  }
+  const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(verifiedCaller.orgId) as CanonicalAttendanceRolloutOrgKeyV1
+  const runId = parseUuidSyntax(key.runId, 'W4C2_SCHEDULED_RUN_ID_INVALID')
+
+  // Lock order identical to finalization: class-00 shared, resolve posture.
+  await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
+  const posture = await resolveSegmentCalculationPosture(trx, orgKey)
+  if (posture.writePosture === 'blocked') {
+    return { kind: 'deferred', code: 'ATTENDANCE_SCHEDULED_RUN_ABANDON_DEFERRED' }
+  }
+
+  // A non-locking read to discover (initiator, workDate) for the class-01 key — confers no
+  // authority (same doctrine as the existing pre-lock candidate read), org-scoped.
+  const preRead = await trx.query(
+    `SELECT initiator, work_date::text AS work_date FROM attendance_scheduled_runs
+      WHERE org_id = $1 AND run_id = $2::uuid`,
+    [orgKey, runId],
+  )
+  if (preRead.rows.length === 0) throw new AttendanceW4OperationError('ATTENDANCE_SCHEDULED_RUN_NOT_FOUND')
+  const preReadRow = preRead.rows[0] as { initiator: string; work_date: string }
+
+  const canonicalKey = parseCanonicalAttendanceScheduledRunKeyV1({
+    orgId: orgKey,
+    initiator: preReadRow.initiator,
+    workDate: preReadRow.work_date,
+  })
+  await acquireAttendanceScheduledRunLock(trx, canonicalKey)
+
+  const rowResult = await trx.query(
+    `SELECT run_id::text AS run_id, state FROM attendance_scheduled_runs
+      WHERE org_id = $1 AND run_id = $2::uuid
+      FOR UPDATE`,
+    [orgKey, runId],
+  )
+  if (rowResult.rows.length === 0) throw new AttendanceW4OperationError('ATTENDANCE_SCHEDULED_RUN_NOT_FOUND')
+  const row = rowResult.rows[0] as { run_id: string; state: string }
+
+  // Idempotency / concurrency: a second call (any state other than `running`) returns the
+  // recorded outcome with zero DML — the same branch shape as finalization's losing racer.
+  if (row.state !== 'running') {
+    if (row.state !== 'completed' && row.state !== 'abandoned') fail('W4C2_SCHEDULED_RUN_STATE_INVALID')
+    return { kind: 'not_running', state: row.state as 'completed' | 'abandoned' }
+  }
+
+  // Fold completed_user_count from currently-recorded evidence, exactly as finalization step 5
+  // does — never an in-memory count.
+  const foldResult = await trx.query(
+    `SELECT count(*) FILTER (WHERE o.terminal_outcome = 'completed') AS completed_count
+       FROM attendance_scheduled_run_targets t
+       JOIN attendance_scheduled_run_target_outcomes o
+         ON o.org_id = t.org_id AND o.target_id = t.id
+      WHERE t.org_id = $1 AND t.run_id = $2::uuid AND t.target_kind = 'generate'`,
+    [orgKey, runId],
+  )
+  const completedUserCount = Number((foldResult.rows[0] as { completed_count: string | number }).completed_count)
+
+  await trx.query(
+    `UPDATE attendance_scheduled_runs
+        SET state = 'abandoned', completed_user_count = $3, abandon_reason_code = $4,
+            abandoned_by_actor_posture = $5, finalized_at = now()
+      WHERE org_id = $1 AND run_id = $2::uuid AND state = 'running'`,
+    [orgKey, runId, completedUserCount, reasonCode, verifiedCaller.actorPosture],
+  )
+
+  return { kind: 'abandoned', runId, completedUserCount }
 }

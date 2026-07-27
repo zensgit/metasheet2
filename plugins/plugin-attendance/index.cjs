@@ -21604,13 +21604,20 @@ async function runAutoAbsenceForOrgDate(db, options) {
   if (!skipDedup && key === lastAutoAbsenceKey) {
     return { skipped: true, reason: 'dedup', total: 0 }
   }
+  // W4C-2 amendment section 1.3, `O-2`/`OD-W4C-51=(a)` (RATIFIED, Bundle A, PR #4617): pin a
+  // canonical, deterministic membership order so the frozen target-set fingerprint's resume
+  // recomputation (section 1.7 step 3) is byte-identical by construction, and so the emitted
+  // `reasons` array order is reproducible across a restart rather than PostgreSQL's previously
+  // unspecified row order. `targetUsers`/`reviewRequired` below are built by a single
+  // sequential loop over `userRows`, so this ORDER BY is the entire ordering change.
   const userRows = await db.query(
     `SELECT uo.user_id
      FROM user_orgs uo
      JOIN users u ON u.id = uo.user_id
      WHERE uo.org_id = $1
        AND uo.is_active = true
-       AND u.is_active = true`,
+       AND u.is_active = true
+     ORDER BY uo.user_id ASC`,
     [orgId]
   )
   const { adapters: scheduledAdapters } = createPluginAttendanceWorkDateResolver(db)

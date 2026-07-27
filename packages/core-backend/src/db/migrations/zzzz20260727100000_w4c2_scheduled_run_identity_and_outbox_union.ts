@@ -629,6 +629,56 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     ALTER TABLE attendance_result_event_outbox
       ADD CONSTRAINT chk_areo_event_kind CHECK (event_kind IN (${sql.raw(sqlList(W4C2_OUTBOX_EVENT_KINDS_V1))}))
   `.execute(db)
+
+  // -------------------------------------------------------------------------
+  // `O-4`/`OD-W4C-52=(a)` (RATIFIED, Bundle A): extend the governing lock's promotion-block
+  // predicate (lock 12.3 lines 2689-2690 / 2250 "shadow/eligible promotion is blocked by
+  // every incomplete operation/batch...") to also treat any `attendance_scheduled_runs` row
+  // with `state='running'` as a blocking object for that org — "the same treatment an
+  // incomplete operation already gets" (amendment section 1.7.1). No application-level
+  // eligibility-predicate writer exists yet for the lock's own 8-point "effective state"
+  // list (rollout transitions are written directly against
+  // `attendance_calculation_rollout_state`, guarded only by
+  // `attendance_w4_rollout_state_guard()`'s LEGAL-TRANSITION check — verified by direct read
+  // of `zzzz20260725120000_...:1019-1058`, which contains no incomplete-operation/batch
+  // check at all); this migration adds a NEW, separate trigger on that existing table for
+  // exactly the one new dimension this amendment introduces, rather than editing the
+  // already-applied W4C-0 migration's trigger (which "must not be edited" — section 1.10's
+  // own standing rule for already-applied migrations) or attempting to build the lock's full
+  // 8-point predicate here (out of this amendment's scope). The one posture-flip edge where
+  // `accepted_write_posture` actually changes from `shadow` to `authoritative` is
+  // `eligible -> authoritative` (both `shadow` and `eligible` normalize to write posture
+  // `shadow`; `w4c0-identity.ts`'s `POSTURE_TABLE`) — gate 21(a)'s exact scope ("promotion
+  // from shadow to authoritative... while any run row for that org is running").
+  // -------------------------------------------------------------------------
+  await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4_rollout_scheduled_run_promotion_guard()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $fn$
+    DECLARE
+      running_count integer;
+    BEGIN
+      IF NEW.state = 'authoritative' AND OLD.state = 'eligible' THEN
+        SELECT count(*) INTO running_count FROM attendance_scheduled_runs
+          WHERE org_id = NEW.org_id AND state = 'running';
+        IF running_count > 0 THEN
+          RAISE EXCEPTION 'W4C2_ROLLOUT_PROMOTION_BLOCKED: cannot promote to authoritative while a scheduled run is running on %', TG_TABLE_NAME;
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$
+  `.execute(db)
+
+  await sql`
+    DROP TRIGGER IF EXISTS trg_acrs_scheduled_run_promotion_guard ON attendance_calculation_rollout_state
+  `.execute(db)
+  await sql`
+    CREATE TRIGGER trg_acrs_scheduled_run_promotion_guard
+      BEFORE UPDATE ON attendance_calculation_rollout_state
+      FOR EACH ROW EXECUTE FUNCTION attendance_w4_rollout_scheduled_run_promotion_guard()
+  `.execute(db)
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +714,12 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   }
 
   // All four W4C-2 surfaces proven empty — now (and only now) DDL teardown.
+
+  // `O-4=(a)` promotion-block guard on the (pre-existing, untouched) rollout-state table.
+  await sql`
+    DROP TRIGGER IF EXISTS trg_acrs_scheduled_run_promotion_guard ON attendance_calculation_rollout_state
+  `.execute(db)
+  await sql`DROP FUNCTION IF EXISTS attendance_w4_rollout_scheduled_run_promotion_guard()`.execute(db)
 
   // Restore chk_asr_terminal_shape's completed branch to the equality form (harmless before
   // the table itself is dropped below; kept for exact symmetry with the reverse of up()'s

@@ -73,6 +73,12 @@ describe('W4C-0 Stage C — exported operation contract', () => {
       // W4C-2 amendment section 1.6 (PR #4617, RATIFIED): the scheduled-run (class-01)
       // advisory-helper busy code.
       ATTENDANCE_SCHEDULED_RUN_BUSY: 503,
+      // W4C-2 amendment sections 1.1.2/1.7/1.8 (PR #4617, RATIFIED) — the run-creation/
+      // resume/finalization/abandoned transactional half's own closed codes.
+      ATTENDANCE_SCHEDULED_RUN_NOT_FOUND: 404,
+      ATTENDANCE_SCHEDULED_RUN_RESUME_POSTURE_MISMATCH: 409,
+      ATTENDANCE_SCHEDULED_RUN_RESUME_TARGET_SET_DRIFT: 409,
+      ATTENDANCE_SCHEDULED_RUN_FINALIZATION_POSTURE_MISMATCH: 409,
     })
     const error = new AttendanceW4OperationError('ATTENDANCE_OPERATION_IN_PROGRESS', 'operation')
     expect(error.message).toBe('ATTENDANCE_OPERATION_IN_PROGRESS') // message IS the code
