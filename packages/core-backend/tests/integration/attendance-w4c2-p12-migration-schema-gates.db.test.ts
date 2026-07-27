@@ -31,6 +31,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
+import { createRequire } from 'node:module'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import {
@@ -46,6 +47,45 @@ import { ATTENDANCE_W4_OUTBOX_EVENT_KINDS_V1 } from '../../src/attendance/w4c0-o
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
+
+// ---------------------------------------------------------------------------------------------
+// #4612 final-gate P2-2: section 1.2.1 names a THIRD copy of the review-reason closed set — the
+// work-date resolver module itself (`plugins/plugin-attendance/lib/attendance-work-date-resolver
+// .cjs`, the module that actually EMITS these codes at runtime). The two parity legs below in the
+// gate-9 describe compare the migration constant against THIS FILE's own literals only; nothing
+// required the real resolver, so adding a 12th unresolved code to its REASON map (the exact
+// drift section 1.2.1's parity obligation exists for) left every leg green. The third-copy leg
+// uses the REQUIRED .cjs as the BASE: its REASON values must partition EXACTLY into
+//   (closed set minus the three boundary-only literals)  ∪  (the nine resolved/ambiguous codes
+//    deliberately excluded from the scheduled review closed set)
+// so ANY membership change on the resolver side — a new code, a removed code, a renamed code —
+// reddens here until a human re-classifies it into the partition.
+// ---------------------------------------------------------------------------------------------
+const requireResolverCjs = createRequire(import.meta.url)
+const RESOLVER_CJS_PATH = '../../../../plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs'
+/** The three codes minted by the W4C-2 scheduled boundary itself, NOT by the resolver. */
+const W4C2_BOUNDARY_ONLY_REVIEW_CODES: readonly string[] = [
+  'WORK_DATE_ATTRIBUTION_MISMATCH',
+  'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
+  'WORK_DATE_ATTRIBUTION_UNRESOLVED',
+]
+/**
+ * Resolver codes deliberately OUTSIDE the scheduled review closed set (resolved + ambiguous
+ * dispositions never enqueue a review). A resolver-side addition to either disposition class
+ * still reddens the third-copy leg below, because the partition is asserted with exact-set
+ * equality against the live REASON map, not with membership probes.
+ */
+const RESOLVER_RESOLVED_OR_AMBIGUOUS_CODES: readonly string[] = [
+  'OPEN_PREVIOUS_NIGHT_RECORD',
+  'CURRENT_DAY_CONTAINING_SHIFT',
+  'PREVIOUS_NIGHT_CONTAINING_SHIFT',
+  'SINGLE_MATCHING_CANDIDATE',
+  'FROZEN_ATTRIBUTION',
+  'OVERTIME_EXTENDED_WINDOW',
+  'POST_SHIFT_ATTRIBUTION_TAIL',
+  'OVERLAPPING_SHIFT_WINDOWS',
+  'MULTIPLE_PUBLISHED_CANDIDATES',
+]
 
 const RUN = crypto.randomUUID().slice(0, 8)
 const NS = 'w4c2p12' + RUN
@@ -214,6 +254,31 @@ describeIfDatabase('W4C-2 P1-2 — scheduled-run identity migration + outbox uni
       ]) {
         expect((W4C2_SCHEDULED_REVIEW_REASON_CODES_V1 as readonly string[]).includes(excluded)).toBe(false)
       }
+    })
+
+    it('section 1.2.1 third-copy parity (#4612 P2-2): the REQUIRED .cjs resolver REASON map partitions exactly into (closed set minus boundary literals) plus the nine excluded resolved/ambiguous codes', () => {
+      const { REASON } = requireResolverCjs(RESOLVER_CJS_PATH) as { REASON: Record<string, string> }
+      // The frozen map's wire codes are its keys: a value drifting away from its key would
+      // silently change what the resolver emits while every key-based comparison stays green.
+      for (const [key, value] of Object.entries(REASON)) {
+        expect(value).toBe(key)
+      }
+      const reasonValues = Object.values(REASON)
+      // Partition sanity: the three boundary-only literals are minted by the scheduled boundary,
+      // never by the resolver — if the resolver ever grows one of them, the partition below is
+      // no longer a partition and a human must re-draw it.
+      for (const literal of W4C2_BOUNDARY_ONLY_REVIEW_CODES) {
+        expect(reasonValues.includes(literal)).toBe(false)
+      }
+      const fromResolver = (W4C2_SCHEDULED_REVIEW_REASON_CODES_V1 as readonly string[]).filter(
+        (code) => !W4C2_BOUNDARY_ONLY_REVIEW_CODES.includes(code),
+      )
+      expect(fromResolver.length).toBe(11)
+      // Exact-set equality with the LIVE resolver object as the base (not a second literal):
+      // adding a 12th unresolved code, removing one, or renaming one all redden this line.
+      expect([...reasonValues].sort()).toEqual(
+        [...fromResolver, ...RESOLVER_RESOLVED_OR_AMBIGUOUS_CODES].sort(),
+      )
     })
   })
 
