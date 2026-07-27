@@ -3288,3 +3288,272 @@ an accepted bound:
   fields. That wiring is implementation detail governed by however this
   line's other admin surfaces are already authenticated — a system this
   document does not audit.
+- **Section 1.1's derivation-retirement rule has no deferral in this list —
+  see section 5.1.** An exact-head adversarial review of PR #4612
+  (`…/scratchpad/p12-final-gate/verdict.md`, head
+  `2760bb8a41a5aa8dde0fcc8dbf867d679829eb46`) and its regate
+  (`…/scratchpad/p12-final-gate/regate.md`, head
+  `73f7cff2497df59ad2ff3cdff8965b13ce959780`) found that section 1.1's "the
+  held branch's `deriveAttendanceScheduledRunIdV1` derivation is
+  superseded and must not survive implementation" rule is not met on the
+  implemented head, and that — before this revision — this section
+  contained no bullet deferring that rule; the verdict names exactly two
+  closure paths, retiring the derivation inside the same PR or an
+  owner-ratified revision of this document's own text (explicitly not a
+  module docstring, test title, or PR body). Section 5.1 below states, in
+  full and as **PROPOSED**, what an owner ruling of P2-1 `(a)` would
+  ratify. Until ratified, section 1.1's rule stands unmodified and unmet
+  on PR #4612's reviewed head, and this bullet — not section 5.1 — is
+  this document's live position.
+
+### 5.1 [2026-07-27] PROPOSED amendment — P2-1 scheduled-run-identity derivation retirement deferral
+
+> Status: **PROPOSED** — pending owner ruling on P2-1 `(a)`/`(b)`. If the
+> owner rules **`(a)`** (defer) and mini-RATIFYs this section's exact
+> merged SHA, items 3-4 below take effect and govern section 4 step 3's
+> completion bar going forward. If the owner rules **`(b)`** (no defer —
+> retire the derivation before completion), this section does not take
+> effect: PR #4612 must retire `deriveAttendanceScheduledRunIdV1` from
+> `w4c2-live-scheduled-boundary.ts` before section 4 step 3's completion
+> bar is met, and this section is superseded/moot, retained only as a
+> dated historical record of the `(a)` proposal, not as live text.
+>
+> This ruling, whichever way it goes, does **not** retroactively make PR
+> #4612's reviewed head (`2760bb8a41a5aa8dde0fcc8dbf867d679829eb46` at the
+> original gate, `73f7cff2497df59ad2ff3cdff8965b13ce959780` at the regate
+> — both independently re-verified this pass, item 1 below) complete; a
+> ruling of `(a)` changes what section 4 step 3's completion bar requires
+> **going forward**, contingent on the caller-cutover slice's mechanical
+> acceptance leg (item 3.d). It authorizes no merge of PR #4612, no
+> flag/org enablement, no arming, and no closure of #4556 — those remain
+> owner decisions under section 4 step 5, unaffected by this section.
+>
+> Date: 2026-07-27. This section states the deferral's full text and
+> consequences for an owner ruling; it does not rule on P2-1 itself.
+
+1. **The finding, as recorded.** On PR #4612's implemented head
+   (originally `2760bb8a41a5aa8dde0fcc8dbf867d679829eb46`, gate verdict
+   `…/scratchpad/p12-final-gate/verdict.md`; the finding then carried
+   forward unresolved through the regate at
+   `73f7cff2497df59ad2ff3cdff8965b13ce959780`,
+   `…/scratchpad/p12-final-gate/regate.md` — of the regate's 8 P2 findings
+   from the first gate, 7 CLOSED and 1, this one, stayed OPEN), section
+   1.1's rule — "the held branch's `deriveAttendanceScheduledRunIdV1`
+   derivation is superseded and must not survive implementation" (this
+   document, line 644; restated section 1.4.1, lines 1364-1365) — is not
+   met. Independently re-verified this pass at
+   `73f7cff2497df59ad2ff3cdff8965b13ce959780`:
+   `deriveAttendanceScheduledRunIdV1` remains exported at
+   `packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts:178`
+   and is the sole source of `scheduledRunId` at that file's `:1706`,
+   reached unconditionally from every production scheduled-run initiator
+   that has a boundary (`plugins/plugin-attendance/index.cjs:43917`
+   admin-run, `:45011`/`:45183` cron) via `createLiveScheduledBoundary`
+   (`packages/core-backend/src/index.ts:2056` →
+   `index.cjs:23107-23112`). In the same tree, the module that mints this
+   document's server-side `run_id` correctly
+   (`packages/core-backend/src/attendance/w4c2-scheduled-run.ts`) has
+   **zero non-test, non-comment references** anywhere in the tree
+   (`git grep -n w4c2-scheduled-run -- '*.ts' '*.cjs' '*.js'` at
+   `73f7cff2497df59ad2ff3cdff8965b13ce959780` returns 5 hits, all
+   doc-comments/authority headers in `w4c0-operation-contract.ts`, the
+   migration file, and `table-classification.cjs` — none an import or a
+   call). The module's own header states the gap explicitly:
+   "`deriveAttendanceScheduledRunIdV1` (`w4c2-live-scheduled-boundary.ts`)
+   is the held branch's SUPERSEDED derivation — section 1.1's 'must not
+   survive implementation' rule — and is retired when that later slice
+   replaces its caller; this file does not touch that function"
+   (`w4c2-scheduled-run.ts:29-31`) — a module-docstring statement, which
+   is exactly the channel the gate verdict rules insufficient
+   (`verdict.md`, verbatim: "写进 amendment 正文，不是写进模块注释/测试标题/PR body").
+
+2. **Why the derivation cannot be retired inside PR #4612 without a
+   materially larger, separately-governed change (inseparability).**
+   Retiring `deriveAttendanceScheduledRunIdV1` from
+   `w4c2-live-scheduled-boundary.ts` is not a local substitution — the
+   boundary would instead have to mint or read a persisted
+   `attendance_scheduled_runs` row, which under this amendment's own
+   section 1.9 posture matrix (lines 1860-1867) means fully entering the
+   `shadow`/`eligible`/`authoritative` row of that table: a run row is
+   created, target rows are created, per-user operations execute, and
+   outbox rows are enqueued **only at finalization**, with emission
+   moving to "only via dispatcher" instead of whatever the boundary does
+   today. That is a change to the wire behavior of the currently-live
+   scheduled entrypoints (the P03/P04 scheduled siblings of P01 live
+   punch) that section 2's gates 4 and 5 exist specifically to police —
+   gate 4's "payload/wire freeze" (byte-identical delivered events) and
+   gate 5's "legacy posture zero-outbox leg", with its explicit
+   "removing either side of the posture split fails independently"
+   clause — and that the governing design lock
+   (`attendance-issue-4556-w4-segment-calculation-design-lock-20260724.md`)
+   places under its own section 8.1 (the canonical-writer service
+   boundary's posture-branching contract, lines 1686-1735) and section
+   12.3's W4C-2 gate list, which states in the same words as gate 5:
+   "the same live/scheduled entrypoints in `legacy_projection_only`
+   retain their existing synchronous/best-effort emit behavior and
+   create no operation, calculation, or outbox row; removing either side
+   of this posture split fails independently" (lock section 12.3, lines
+   2675-2678). Swapping only the id-minting call inside the existing
+   boundary code path, while leaving the rest of its behavior untouched,
+   would also violate this document's own section 1.2 consistency claim
+   the moment a later slice wires `w4c2-scheduled-run.ts`'s per-user
+   execution to the same boundary — both `verdict.md`'s and
+   `regate.md`'s P2-1 findings note the two id families become
+   permanently unable to match once that happens. Wiring the full
+   transactional module instead of the derivation, inside PR #4612, is
+   therefore not a smaller change than what section 4 step 3 already
+   authorizes — it is a superset of it, gated by section 2's gates 4/5
+   and lock sections 8.1/12.3, and belongs to the caller-cutover slice
+   this document's own module docstring already anticipates (item 1
+   above), not to a same-PR patch.
+
+   A narrower half-measure — minting the run row (via
+   `mintAttendanceScheduledRunIdentityFromInsertedRowV1`, section 1.4.1)
+   from the boundary without also wiring per-user execution and the
+   finalization transaction — is not a safe interim step; by this
+   document's own schema it is **strictly worse than doing nothing**:
+   section 1.1's `uq_asr_one_running` partial unique index permits at
+   most one `running` run per `(org_id, initiator, work_date)`, and a
+   run minted but never finalized stays `running` indefinitely (section
+   1.1.2's `abandoned` transition is the only exit, and it requires an
+   explicit operator action under `{platform_admin, attendance_admin}`
+   posture — see this document's own "Abandon-transition authorization"
+   bullet in section 5). Every subsequent scheduled invocation for that
+   same `(org_id, initiator, work_date)` would then be blocked until an
+   operator manually abandons the stuck row — a new production failure
+   mode with no equivalent in the derivation path it would replace. (This
+   is a reading of the specified schema, not a probe result — no run was
+   actually created and left stuck to observe this; the
+   `uq_asr_one_running` index and the `abandoned`-only exit are read
+   directly from sections 1.1/1.1.2 as ratified, not from a mutation
+   test.)
+
+3. **Deferral text — what an owner ruling of P2-1 `(a)` ratifies.** If
+   ratified:
+
+   a. Section 1.1's rule that `deriveAttendanceScheduledRunIdV1` "must
+      not survive implementation", and section 1.4.1's restatement of the
+      same rule, are treated as satisfied by section 4 step 3's P1-2
+      scope **as already implemented and gated**, with retirement of the
+      derivation itself carried forward, undischarged, as the single
+      named acceptance item of the **caller-cutover slice** — referred to
+      in this document and in `w4c2-scheduled-run.ts`'s own header only
+      as "that later slice"; this ruling fixes its identity as slice
+      **W4C-3x**, to remove the ambiguity of an unnamed "later slice".
+      (Per `regate.md`'s own per-item table, the other 7 of the 8 P2
+      items the original gate opened against this same head —
+      `P2-2`..`P2-8` — CLOSED at `73f7cff2497df59ad2ff3cdff8965b13ce959780`,
+      each with its own named mutation-proven leg; this ruling does not
+      touch those 7, and does not imply anything about the remaining P3s
+      either gate report lists.)
+   b. Until W4C-3x lands and its own gate closes, the legacy/live
+      scheduled path continues to operate exactly as implemented on PR
+      #4612's gated head, under section 2's gates 4 and 5 unchanged-bytes
+      contract — this deferral does not relax gates 4 or 5, does not
+      change `w4c2-live-scheduled-boundary.ts`'s current behavior, and
+      does not authorize any change to the live entrypoints' wire output.
+   c. Section 4 step 3's completion bar (this document) is amended, for
+      section 1.1's derivation-retirement clause only, to read: satisfied
+      when W4C-3x's own gate confirms the mechanical leg in (d) below;
+      every other enumerated item of step 3 is unaffected, and its
+      completion is governed by its own existing gates, unchanged by this
+      ruling.
+   d. W4C-3x's acceptance must include a **mechanical**, not narrative,
+      leg: (i) zero non-test, non-comment references to
+      `deriveAttendanceScheduledRunIdV1` remain in the tree outside its
+      own now-dead definition (or the definition is deleted outright) —
+      checkable by the same `git grep` scope used in item 1; and (ii)
+      `w4c2-scheduled-run.ts`'s run-creation entrypoint becomes the
+      tree's **only** production-reachable minter of a scheduled run's
+      server-side `run_id` — checkable as: non-test, non-comment
+      references to that entrypoint from `plugins/plugin-attendance/index.cjs`
+      or `packages/core-backend/src/index.ts` transition from the
+      current 0 (item 1's `git grep` result) to a nonzero count, in the
+      same change that removes the boundary's derivation call site. A
+      gate that asserts either half without the other (id retired but
+      not replaced, or replacement wired but the old call site left
+      dead-but-present) does not satisfy this clause.
+   e. Nothing in this ruling authorizes merging PR #4612, arming any
+      flag, enabling any org, deploying, or closing #4556 — section 4
+      step 5 stands unmodified.
+
+4. *(This item is carried as the section 5 bullet added above, "Section
+   1.1's derivation-retirement rule has no deferral in this list — see
+   section 5.1," rather than restated here — that bullet is what makes
+   this section reachable from section 5's own list, and is itself the
+   textual reason P2-1 could previously be closed only through a document
+   revision like this one, not through a narrower fix.)*
+
+5. **Environment fact record — exhaustive in-repo negative evidence, one
+   residual unknown.** All of the following are re-verified this pass
+   against `origin/main` `d449aa7e6d02f94df2738a77cafffa778b12fde0`
+   unless a different scope is named:
+
+   - **Zero workflow settings.**
+     `git grep -n ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` scoped to
+     `.github/workflows/*.yml` returns **zero hits** across every
+     workflow file in the tree. This includes `docker-build.yml`'s deploy
+     job, whose host-side env-file patcher (`ENV_FILE_PATH="docker/app.env"`,
+     a pre-existing host file it edits in place, not a file it ships from
+     a secret or overwrites wholesale) only ever assigns `DB_SSL`,
+     `JWT_SECRET`, `BCRYPT_SALT_ROUNDS`, `ENABLE_YJS_COLLAB`,
+     `IMAGE_OWNER`, `IMAGE_TAG` (the workflow's own `entries[...] = ...`
+     assignments) — `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` is not
+     among them, so the deploy pipeline itself neither sets nor clears
+     it, and does not ship or replace the host's env file wholesale.
+   - **`.env.example` reserved-and-commented.** `.env.example:168-177`
+     documents the variable as "reserved W4+ (#4556) org-scoped gate" and
+     states "unset/empty means OFF for every org"; the example line
+     itself is commented out (`# ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED=`).
+     `docker/app.env.example` has **zero** occurrences of the variable
+     name.
+   - **Code treats it exact-org-only; `*` does not count for W4.**
+     `packages/core-backend/src/attendance/w4c0-identity.ts:363` defines
+     `SEGMENT_CALCULATION_ALLOWLIST_ENV` as a literal, comma-separated
+     org-id allowlist;
+     `packages/core-backend/tests/integration/attendance-shift-segments-writer-matrix.db.test.ts:96/117/242`
+     sets the variable to the literal wildcard string `'*'` and asserts
+     the guard is **not** lifted for the shift-segment-writer surface
+     that shares this env key with this document's identity model — the
+     file's own header states "value cannot lift the guard" (`:5`). This
+     document's W4 posture resolution carries no independent
+     wildcard-enable path; the only route into `shadow`/`eligible`/
+     `authoritative` posture is a literal org id in that comma-separated
+     list.
+   - **Corroboration considered and withdrawn.** An earlier pass over
+     this evidence set considered citing staging-deploy migration lag as
+     weak corroborating evidence that env-gated features are not
+     casually flipped without deliberate ops action. That corroboration
+     is withdrawn here: the only available record concerns host
+     `142.171.239.56`, which is recorded elsewhere in this codebase's
+     operator notes as retired, and is 53+ days stale as of this
+     drafting; the current attendance deploy host is `23.254.236.11`
+     (per `docker-build.yml`'s `DEPLOY_HOST` usage and the several
+     `attendance-*-prod.yml` workflows that hardcode that IP as their
+     default API/web base). A stale record about a different, retired
+     host is not evidence about this variable on the host that matters,
+     and is not cited as such.
+   - **The residual unknown, stated precisely.** The above is exhaustive
+     over this repository's text: no workflow, no example file, no
+     deploy-time patcher assigns or references this variable. It
+     **cannot** rule out a manual, out-of-band edit to the live
+     `.env`/`docker/app.env` file resident on host `23.254.236.11` — no
+     in-repo mechanism writes or reads that file's runtime content over
+     the network; it is host-resident state this repository's tooling
+     only ever patches a fixed, named subset of (the six keys listed
+     above). That is the sole remaining gap, and it is not closable from
+     the repository alone.
+   - **Confirmation protocol.** Item 3 (the deferral) stands only if the
+     owner confirms `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` has
+     never been set to a non-empty value, for any org, on host
+     `23.254.236.11`'s live env file. If the owner confirms it was never
+     set, P2-1 remains at its current severity (P2, per `verdict.md`'s
+     un-escalated finding) and this deferral, once ratified, stands as
+     written. If the owner confirms it was ever set for any org, this
+     item escalates to P1 immediately per `verdict.md`'s own escalation
+     clause ("若曾对任何 org 设过，本条立即升 P1") — that org's
+     `attendance_result_operations.source_root_id` values would already
+     have been accumulating derivation-based identities the
+     caller-cutover slice's new machinery cannot match — and item 3 (the
+     deferral) does not stand as written; the ruling must be reopened
+     rather than silently carried forward.
