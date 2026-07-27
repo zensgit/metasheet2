@@ -125,3 +125,467 @@ jobs:
             echo "gh run download ${{ github.run_id }} -n attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }} -D output/playwright/ga/${{ github.run_id }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-windows-native:
+    needs: build-package
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install PM2
+        shell: pwsh
+        run: npm install --global pm2
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/windows-native-package
+
+      - name: Extract Windows package
+        id: package
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem `
+            -Path output/windows-native-package `
+            -Filter '*.zip' |
+            Sort-Object Name |
+            Select-Object -Last 1
+          if ($null -eq $zip) {
+            throw 'Windows ZIP package is missing'
+          }
+          $extract = Join-Path $env:RUNNER_TEMP 'attendance windows native package'
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $extract
+          $root = Get-ChildItem -LiteralPath $extract -Directory |
+            Select-Object -First 1
+          if ($null -eq $root) {
+            throw 'Extracted package root is missing'
+          }
+          "root=$($root.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Parse packaged PowerShell scripts
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          $scripts = @(
+            'scripts\ops\attendance-windows-native-common.ps1',
+            'scripts\ops\attendance-windows-native-preflight.ps1',
+            'scripts\ops\attendance-windows-native-start.ps1',
+            'scripts\ops\attendance-windows-native-stop.ps1',
+            'scripts\ops\attendance-windows-native-healthcheck.ps1',
+            'scripts\ops\attendance-windows-native-bootstrap-admin.ps1',
+            'scripts\ops\multitable-onprem-bootstrap-admin.ps1'
+          )
+          foreach ($relative in $scripts) {
+            $path = Join-Path $env:PACKAGE_ROOT $relative
+            [scriptblock]::Create(
+              [System.IO.File]::ReadAllText($path)
+            ) | Out-Null
+          }
+
+      - name: Prove PM2 cleanup failures are surfaced
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          & scripts/ops/attendance-windows-native-common.test.ps1 `
+            -CommonScriptPath (
+              Join-Path $env:PACKAGE_ROOT 'scripts\ops\attendance-windows-native-common.ps1'
+            )
+
+      - name: Install packaged dependencies on Windows
+        shell: pwsh
+        working-directory: ${{ steps.package.outputs.root }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Run packaged gateway behavior tests
+        shell: pwsh
+        env:
+          ATTENDANCE_WINDOWS_GATEWAY_MODULE: ${{ steps.package.outputs.root }}\scripts\ops\attendance-windows-native-gateway.mjs
+        run: node --test scripts/ops/attendance-windows-native-gateway.test.mjs
+
+      - name: Exercise Windows preflight with isolated TCP fixtures
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          $postgres = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Loopback,
+            55432
+          )
+          $redis = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Loopback,
+            56379
+          )
+          $postgres.Start()
+          $redis.Start()
+          try {
+            $envFile = Join-Path $env:PACKAGE_ROOT 'docker\app.env'
+            @'
+          NODE_ENV=production
+          HOST=127.0.0.1
+          PORT=8900
+          PRODUCT_MODE=attendance
+          DEPLOYMENT_MODEL=onprem
+          JWT_SECRET=windows-runner-synthetic-secret-20260727
+          BCRYPT_SALT_ROUNDS=12
+          DATABASE_URL=postgres://qa:synthetic@127.0.0.1:55432/metasheet_windows_qa
+          REDIS_HOST=127.0.0.1
+          REDIS_PORT=56379
+          ATTENDANCE_IMPORT_UPLOAD_DIR=storage/attendance-import
+          WINDOWS_NATIVE_GATEWAY_HOST=127.0.0.1
+          WINDOWS_NATIVE_GATEWAY_PORT=8080
+          WINDOWS_NATIVE_BACKEND_ORIGIN=http://127.0.0.1:8900
+          '@ | Set-Content -LiteralPath $envFile -Encoding ascii
+
+            & (Join-Path $env:PACKAGE_ROOT 'scripts\ops\attendance-windows-native-preflight.ps1') `
+              -RootDir $env:PACKAGE_ROOT `
+              -RequireRedis $true
+
+            $validContent = Get-Content -LiteralPath $envFile -Raw
+            function Assert-PreflightRejected {
+              param(
+                [string]$Content,
+                [string]$ExpectedPattern
+              )
+              Set-Content -LiteralPath $envFile -Value $Content -Encoding ascii
+              try {
+                & (Join-Path $env:PACKAGE_ROOT 'scripts\ops\attendance-windows-native-preflight.ps1') `
+                  -RootDir $env:PACKAGE_ROOT `
+                  -RequireRedis $true
+                throw "Preflight unexpectedly accepted: $ExpectedPattern"
+              }
+              catch {
+                if ($_.Exception.Message -notmatch $ExpectedPattern) {
+                  throw
+                }
+              }
+            }
+
+            Assert-PreflightRejected `
+              -Content $validContent.Replace(
+                'windows-runner-synthetic-secret-20260727',
+                'change-me'
+              ) `
+              -ExpectedPattern 'Placeholder value'
+            Assert-PreflightRejected `
+              -Content ($validContent -replace '(?m)^HOST=.*$', 'HOST=0.0.0.0') `
+              -ExpectedPattern 'HOST must use a loopback host'
+            Assert-PreflightRejected `
+              -Content ($validContent -replace '(?m)^WINDOWS_NATIVE_BACKEND_ORIGIN=.*$', 'WINDOWS_NATIVE_BACKEND_ORIGIN=https://staging.example.invalid') `
+              -ExpectedPattern 'WINDOWS_NATIVE_BACKEND_ORIGIN must use a loopback host'
+            Assert-PreflightRejected `
+              -Content ($validContent + "`nATTENDANCE_SCHEDULER_ENABLED=true`n") `
+              -ExpectedPattern 'Attendance opt-in is forbidden'
+            Assert-PreflightRejected `
+              -Content ($validContent + "`nDINGTALK_CLIENT_SECRET=synthetic-secret`n") `
+              -ExpectedPattern 'External integration configuration is forbidden'
+            Assert-PreflightRejected `
+              -Content ($validContent + "`nAPPROVAL_BREACH_DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send`n") `
+              -ExpectedPattern 'External integration configuration is forbidden'
+            Assert-PreflightRejected `
+              -Content ($validContent + "`nENABLE_ATTENDANCE_SCHEDULER_LEADER_LOCK=true`n") `
+              -ExpectedPattern 'External delivery configuration is forbidden'
+            Assert-PreflightRejected `
+              -Content $validContent.Replace(
+                '127.0.0.1:55432/metasheet_windows_qa',
+                '10.0.0.8:55432/metasheet_windows_qa'
+              ) `
+              -ExpectedPattern 'DATABASE_URL must use a loopback host'
+            Assert-PreflightRejected `
+              -Content $validContent.Replace(
+                '127.0.0.1:55432/metasheet_windows_qa',
+                '127.0.0.1:55432/customer_attendance'
+              ) `
+              -ExpectedPattern 'dedicated local QA database'
+            Set-Content -LiteralPath $envFile -Value $validContent -Encoding ascii
+
+            function Assert-InheritedEnvRejected {
+              param(
+                [string]$Name,
+                [string]$Value,
+                [string]$ExpectedPattern
+              )
+              Set-Item -Path ("Env:{0}" -f $Name) -Value $Value
+              try {
+                & (Join-Path $env:PACKAGE_ROOT 'scripts\ops\attendance-windows-native-preflight.ps1') `
+                  -RootDir $env:PACKAGE_ROOT `
+                  -RequireRedis $true
+                throw "Preflight unexpectedly accepted inherited env: $Name"
+              }
+              catch {
+                if ($_.Exception.Message -notmatch $ExpectedPattern) {
+                  throw
+                }
+              }
+              finally {
+                Remove-Item -Path ("Env:{0}" -f $Name) -ErrorAction SilentlyContinue
+              }
+            }
+
+            Assert-InheritedEnvRejected `
+              -Name 'ATTENDANCE_SCHEDULER_ENABLED' `
+              -Value 'true' `
+              -ExpectedPattern 'Attendance opt-in is forbidden'
+            Assert-InheritedEnvRejected `
+              -Name 'DINGTALK_CLIENT_SECRET' `
+              -Value 'inherited-synthetic-secret' `
+              -ExpectedPattern 'External integration configuration is forbidden'
+            Assert-InheritedEnvRejected `
+              -Name 'attendance_scheduler_enabled' `
+              -Value 'true' `
+              -ExpectedPattern 'Attendance opt-in is forbidden'
+            Assert-InheritedEnvRejected `
+              -Name 'approval_breach_dingtalk_webhook' `
+              -Value 'https://oapi.dingtalk.com/robot/send' `
+              -ExpectedPattern 'External integration configuration is forbidden'
+          }
+          finally {
+            $postgres.Stop()
+            $redis.Stop()
+          }
+
+      - name: Prepare isolated PostgreSQL database
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          $service = Get-Service -Name 'postgresql-x64-17' -ErrorAction Stop
+          Set-Service -Name $service.Name -StartupType Manual
+          Start-Service -Name $service.Name
+
+          $pgBin = 'C:\Program Files\PostgreSQL\17\bin'
+          if (-not (Test-Path -LiteralPath (Join-Path $pgBin 'psql.exe'))) {
+            throw "PostgreSQL client is missing: $pgBin"
+          }
+          $env:PATH = "$pgBin;$env:PATH"
+          $env:PGPASSWORD = 'root'
+
+          & psql `
+            -h 127.0.0.1 `
+            -U postgres `
+            -d postgres `
+            -v ON_ERROR_STOP=1 `
+            -c "CREATE ROLE metasheet_windows_qa LOGIN PASSWORD 'windows_native_ci_password'"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to create the Windows QA database role'
+          }
+          & createdb `
+            -h 127.0.0.1 `
+            -U postgres `
+            -O metasheet_windows_qa `
+            metasheet_windows_qa
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to create the Windows QA database'
+          }
+
+          $envFile = Join-Path $env:PACKAGE_ROOT 'docker\app.env'
+          @'
+          NODE_ENV=production
+          HOST=127.0.0.1
+          PORT=18900
+          PRODUCT_MODE=attendance
+          DEPLOYMENT_MODEL=onprem
+          JWT_SECRET=windows-native-ci-synthetic-secret-20260727
+          BCRYPT_SALT_ROUNDS=12
+          DATABASE_URL=postgres://metasheet_windows_qa:windows_native_ci_password@127.0.0.1:5432/metasheet_windows_qa
+          DB_SSL=false
+          ATTENDANCE_IMPORT_REQUIRE_TOKEN=1
+          ATTENDANCE_IMPORT_UPLOAD_DIR=storage/attendance-import
+          ATTENDANCE_IMPORT_CSV_MAX_ROWS=100000
+          ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS=180000
+          WINDOWS_NATIVE_GATEWAY_HOST=127.0.0.1
+          WINDOWS_NATIVE_GATEWAY_PORT=18080
+          WINDOWS_NATIVE_BACKEND_ORIGIN=http://127.0.0.1:18900
+          '@ | Set-Content -LiteralPath $envFile -Encoding ascii
+
+      - name: Prove failed startup leaves no PM2 residue
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          $configPath = Join-Path $env:PACKAGE_ROOT 'ecosystem.windows-native.config.cjs'
+          $originalConfig = Get-Content -LiteralPath $configPath -Raw
+          $brokenConfig = $originalConfig.Replace(
+            "script: 'scripts/ops/attendance-windows-native-gateway.mjs'",
+            "script: 'scripts/ops/missing-windows-native-gateway.mjs'"
+          )
+          if ($brokenConfig -eq $originalConfig) {
+            throw 'Unable to create the gateway failure fixture'
+          }
+          Set-Content -LiteralPath $configPath -Value $brokenConfig -Encoding utf8
+          try {
+            $failed = $false
+            try {
+              & (Join-Path $env:PACKAGE_ROOT 'scripts\ops\attendance-windows-native-start.ps1') `
+                -RootDir $env:PACKAGE_ROOT `
+                -RequireRedis $false
+            }
+            catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw 'Broken gateway fixture unexpectedly started'
+            }
+          }
+          finally {
+            Set-Content -LiteralPath $configPath -Value $originalConfig -Encoding utf8
+          }
+
+          . (Join-Path $env:PACKAGE_ROOT 'scripts\ops\attendance-windows-native-common.ps1')
+          $pm2Command = Resolve-WindowsNativePm2Command -RootDir $env:PACKAGE_ROOT
+          foreach ($name in @('metasheet-backend', 'metasheet-windows-gateway')) {
+            if ($null -ne (Get-WindowsNativePm2Process -Pm2Command $pm2Command -AppName $name)) {
+              throw "Failed startup left PM2 residue: $name"
+            }
+          }
+
+      - name: Start and verify packaged Windows runtime
+        shell: powershell
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          Push-Location $env:PACKAGE_ROOT
+          try {
+            & .\windows-native-preflight.bat
+            if ($LASTEXITCODE -ne 0) {
+              throw "windows-native-preflight.bat failed (exit $LASTEXITCODE)"
+            }
+            & .\windows-native-start.bat
+            if ($LASTEXITCODE -ne 0) {
+              throw "windows-native-start.bat failed (exit $LASTEXITCODE)"
+            }
+            & .\windows-native-healthcheck.bat
+            if ($LASTEXITCODE -ne 0) {
+              throw "windows-native-healthcheck.bat failed (exit $LASTEXITCODE)"
+            }
+            & .\windows-native-bootstrap-admin.bat `
+              'windows-native-qa@example.invalid' `
+              'Windows-Native-QA-Only-20260727' `
+              'Windows Native QA'
+            if ($LASTEXITCODE -ne 0) {
+              throw "windows-native-bootstrap-admin.bat failed (exit $LASTEXITCODE)"
+            }
+          }
+          finally {
+            Pop-Location
+          }
+
+          & node (Join-Path $env:PACKAGE_ROOT 'packages\core-backend\dist\src\db\migrate.js')
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Second migration pass failed'
+          }
+
+      - name: Capture sanitized Windows runtime diagnostics
+        if: ${{ failure() }}
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          if (
+            [string]::IsNullOrWhiteSpace($env:PACKAGE_ROOT) -or
+            -not (Test-Path -LiteralPath $env:PACKAGE_ROOT -PathType Container)
+          ) {
+            Write-Host 'Package root is unavailable; no runtime diagnostics to capture.'
+            exit 0
+          }
+
+          . (Join-Path $env:PACKAGE_ROOT 'scripts\ops\attendance-windows-native-common.ps1')
+          $pm2Command = Resolve-WindowsNativePm2Command -RootDir $env:PACKAGE_ROOT
+          foreach ($name in @('metasheet-backend', 'metasheet-windows-gateway')) {
+            $app = Get-WindowsNativePm2Process -Pm2Command $pm2Command -AppName $name
+            $status = if ($null -eq $app) {
+              'missing'
+            } else {
+              [string]$app.pm2_env.status
+            }
+            Write-Host "PM2 $name status: $status"
+          }
+
+          $redactions = @(
+            'windows_native_ci_password',
+            'windows-native-ci-synthetic-secret-20260727',
+            'Windows-Native-QA-Only-20260727'
+          )
+          Get-ChildItem `
+            -LiteralPath (Join-Path $env:PACKAGE_ROOT 'output\logs') `
+            -Filter '*.log' `
+            -ErrorAction SilentlyContinue |
+          Sort-Object Name |
+          ForEach-Object {
+            Write-Host "::group::$($_.Name)"
+            $content = (Get-Content -LiteralPath $_.FullName -Tail 200) -join "`n"
+            foreach ($secret in $redactions) {
+              $content = $content.Replace($secret, '[REDACTED]')
+            }
+            $content = $content -replace `
+              'postgres(?:ql)?://[^@\s]+@', `
+              'postgres://[REDACTED]@'
+            Write-Host $content
+            Write-Host '::endgroup::'
+          }
+
+      - name: Stop packaged Windows runtime
+        if: ${{ always() }}
+        shell: powershell
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          if (
+            -not [string]::IsNullOrWhiteSpace($env:PACKAGE_ROOT) -and
+            (Test-Path -LiteralPath $env:PACKAGE_ROOT -PathType Container)
+          ) {
+            Push-Location $env:PACKAGE_ROOT
+            try {
+              & .\windows-native-stop.bat
+              if ($LASTEXITCODE -ne 0) {
+                throw "windows-native-stop.bat failed (exit $LASTEXITCODE)"
+              }
+            }
+            finally {
+              Pop-Location
+            }
+          }
+
+      - name: Assert native entrypoints never invoke WSL
+        shell: pwsh
+        env:
+          PACKAGE_ROOT: ${{ steps.package.outputs.root }}
+        run: |
+          $targets = @(
+            'windows-native-preflight.bat',
+            'windows-native-start.bat',
+            'windows-native-stop.bat',
+            'windows-native-healthcheck.bat',
+            'windows-native-bootstrap-admin.bat',
+            'scripts\ops\attendance-windows-native-common.ps1',
+            'scripts\ops\attendance-windows-native-preflight.ps1',
+            'scripts\ops\attendance-windows-native-start.ps1',
+            'scripts\ops\attendance-windows-native-stop.ps1',
+            'scripts\ops\attendance-windows-native-healthcheck.ps1',
+            'scripts\ops\attendance-windows-native-bootstrap-admin.ps1',
+            'scripts\ops\attendance-onprem-deploy-run.ps1',
+            'scripts\ops\attendance-onprem-start-pm2.ps1',
+            'scripts\ops\attendance-onprem-publish-web-dist.ps1',
+            'scripts\ops\multitable-onprem-bootstrap-admin.ps1'
+          )
+          foreach ($relative in $targets) {
+            $path = Join-Path $env:PACKAGE_ROOT $relative
+            if (Select-String -LiteralPath $path -Pattern 'wsl.exe|wsl\s+-' -Quiet) {
+              throw "WSL invocation found in Windows native path: $relative"
+            }
+          }
