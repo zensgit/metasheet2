@@ -40,6 +40,10 @@ export const ATTENDANCE_W4_OPERATION_ERROR_CODES_V1 = Object.freeze([
   'ATTENDANCE_WRITE_NOT_AUTHORIZED', // authorization witness/capability failure (403)
   'W4_ATTRIBUTION_UNSUPPORTED', // fresh unsupported attribution (422)
   'ATTENDANCE_SCHEDULED_RUN_BUSY', // scheduled-run (class-01) helper budget/55P03 busy (503) — W4C-2 §1.6
+  'ATTENDANCE_SCHEDULED_RUN_NOT_FOUND', // finalize/abandon target run.org+run_id has no row (404) — W4C-2 §1.1.2/1.8
+  'ATTENDANCE_SCHEDULED_RUN_RESUME_POSTURE_MISMATCH', // resume step 2: frozen posture != resolved posture (409) — W4C-2 §1.7
+  'ATTENDANCE_SCHEDULED_RUN_RESUME_TARGET_SET_DRIFT', // resume step 3: recomputed fingerprint != frozen (409) — W4C-2 §1.7
+  'ATTENDANCE_SCHEDULED_RUN_FINALIZATION_POSTURE_MISMATCH', // §1.8 step 1 third branch fail-closed backstop (409) — W4C-2 §1.8/1.7.1
 ] as const)
 export type AttendanceW4OperationErrorCodeV1 = (typeof ATTENDANCE_W4_OPERATION_ERROR_CODES_V1)[number]
 
@@ -58,6 +62,10 @@ export const ATTENDANCE_W4_OPERATION_ERROR_HTTP_STATUS_V1: Readonly<
   ATTENDANCE_WRITE_NOT_AUTHORIZED: 403,
   W4_ATTRIBUTION_UNSUPPORTED: 422,
   ATTENDANCE_SCHEDULED_RUN_BUSY: 503,
+  ATTENDANCE_SCHEDULED_RUN_NOT_FOUND: 404,
+  ATTENDANCE_SCHEDULED_RUN_RESUME_POSTURE_MISMATCH: 409,
+  ATTENDANCE_SCHEDULED_RUN_RESUME_TARGET_SET_DRIFT: 409,
+  ATTENDANCE_SCHEDULED_RUN_FINALIZATION_POSTURE_MISMATCH: 409,
 })
 
 /**
