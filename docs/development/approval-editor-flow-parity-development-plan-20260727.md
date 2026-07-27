@@ -158,6 +158,13 @@ E0 已在 exact `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
 `approval-editor-flow-parity-e0-audit-20260727.md`。该完成状态只关闭
 E0 审计任务，不改变本计划和历史交互锁的 `PROPOSED` / owner-gated 状态。
 
+E1 的隔离 DOM + SVG renderer feasibility spike 已完成，真 Chromium
+三 viewport 通过，100 节点两次布局确定且约 105ms，无新生产依赖。
+但 mutation 尚未接 `approvalCanvasCommands`，drag slot 和未编辑
+round-trip 尚未证明，因此 A1 记录为 `PARTIAL`，不得据此启动 C2 或开启
+Canvas flag。详见
+`approval-editor-flow-parity-e1-renderer-spike-verification-20260727.md`。
+
 ### 4.1 依赖图
 
 ```mermaid
