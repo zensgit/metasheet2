@@ -4,12 +4,23 @@ This guide uses GitHub Actions to build/push Docker images to GHCR, then runs th
 
 ## 1) Build images on GitHub
 
-1. Push to `main` or trigger `Build and Push Docker Images` manually in Actions.
+1. Push to `main` or trigger `Build and Push Docker Images` manually in Actions. Both paths build and push immutable images; a push does not deploy production.
 2. Ensure the workflow has `packages: write` permissions (already set in `.github/workflows/docker-build.yml`).
 
 Images produced:
 - `ghcr.io/<owner>/metasheet2-backend:latest`
 - `ghcr.io/<owner>/metasheet2-web:latest`
+
+To deploy the current `main` commit after its images pass verification, run:
+
+```bash
+gh workflow run docker-build.yml \
+  --ref main \
+  -f confirm_production_deploy=DEPLOY_PRODUCTION \
+  -f drill_fail_stage=none
+```
+
+Any other event/input combination leaves the production `deploy` job skipped.
 
 ## 2) Prepare the cloud host
 

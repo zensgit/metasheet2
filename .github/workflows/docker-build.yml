@@ -8,6 +8,11 @@ on:
       - 'output/**'
   workflow_dispatch:
     inputs:
+      confirm_production_deploy:
+        description: 'Type DEPLOY_PRODUCTION to run the production deploy job; leave blank for build-only'
+        required: false
+        type: string
+        default: ''
       drill_fail_stage:
         description: 'Optional: intentionally fail deploy at a stage for summary drill (none|deploy|migrate|smoke)'
         required: false
@@ -75,8 +80,15 @@ jobs:
 
   deploy:
     needs: build
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main' &&
+        github.event.inputs.confirm_production_deploy == 'DEPLOY_PRODUCTION'
+      }}
     runs-on: ubuntu-latest
+    environment:
+      name: production
     steps:
       - uses: actions/checkout@v4
 
