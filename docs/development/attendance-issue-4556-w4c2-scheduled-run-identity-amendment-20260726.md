@@ -5,6 +5,23 @@
 >
 > Date: 2026-07-26
 >
+> **Provenance correction (post-merge erratum, 2026-07-27):** PR #4612 was
+> rebased onto `origin/main` `e4509ab71e6061e7d1188d24f9b30f09fb71c435` on
+> 2026-07-27 (force-push): its head at this document's round-7 verification
+> time, `8dfde5a7746aff3d47bb6f9db138e5f0e7b23881`, was superseded by
+> `b0c7e2823e7bdf301fa8170281289789883cba80` and is no longer an ancestor of
+> that branch. Every reference to `8dfde5a77…` below is a point-in-time
+> statement, correct when written — read it by its own round's date, not as
+> current lineage. The load-bearing verification transfers to the new head
+> by content identity: the governing-lock blob is unchanged, and the W4C-2
+> boundary file blob is identical across the rebase
+> (`5e368754b5ae690d76daed593f924c33bd5b16b8` at both heads, re-derived for
+> this erratum); the 2026-07-27 independent exact-head review additionally
+> verified the §4-step-3 wiring survives with an identical patch-id
+> (`0a288c938415cd60b044506ed34ad9be52a106cd`). Per §4 step 4, a fresh
+> exact-head independent review precedes any implementation regardless, so
+> no conclusion in this document rests on the superseded SHA being current.
+>
 > Governing lock:
 > `attendance-issue-4556-w4-segment-calculation-design-lock-20260724.md`
 > at merged commit `d6ac495b947c0b42ed7bee66d9531fbe25a486ca`
@@ -12,7 +29,8 @@
 > `origin/main` `9fdf68fa5c34d2224fbe6bd0d71b14ca78263502` (refreshed this
 > addendum; `git rev-parse origin/main` re-run, `git rev-parse
 > origin/main:<lock path>` re-confirms the same blob) and, **re-verified
-> this round-7 pass**, on PR #4612's current head
+> this round-7 pass**, on PR #4612's then-current head (superseded by
+> the 2026-07-27 rebase — see the post-merge erratum above)
 > `8dfde5a7746aff3d47bb6f9db138e5f0e7b23881` (`git rev-parse
 > refs/pull/4612/head:<lock path>` — same blob). **Provenance correction
 > (round 7):** a prior revision cited "the held W4C-2 head
