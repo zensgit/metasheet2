@@ -1823,10 +1823,10 @@ const ACTIVATE_ERROR_POLICY_LOOKUP: ReadonlyMap<string, { status: number; messag
  *
  *   What is true now: the response never reads `error.message` at all — not for authored
  *   reasons, not for unauthored ones. `.code` is the ONLY property read off the thrown value,
- *   and it is matched by exact membership in `ACTIVATE_ERROR_POLICY` (own keys only, so
- *   inherited `Object.prototype` names like `constructor` cannot match). Everything else,
- *   including a well-formed `ACTIVATE_`-looking string, collapses to
- *   `ACTIVATE_ERROR_FALLBACK` — 500 / `ACTIVATE_FAILED` / a fixed generic message.
+ *   and it is matched by exact membership via `ACTIVATE_ERROR_POLICY_LOOKUP.get()` — a `Map`,
+ *   which has no prototype chain to borrow from, so `constructor` / `toString` / `__proto__`
+ *   resolve to nothing. Everything else, including a well-formed `ACTIVATE_`-looking string,
+ *   collapses to `ACTIVATE_ERROR_FALLBACK` — 500 / `ACTIVATE_FAILED` / a fixed generic message.
  *
  * Three layers close this, and each is a different kind of evidence (see
  * `tests/unit/admin-users-activate-error-closure.test.ts` for the standing caveat that the
