@@ -32,9 +32,12 @@ import {
 import { activatePendingUser } from '../auth/user-activate'
 import type { ActivateErrorCode } from '../auth/user-activate'
 import {
+  applyMobileLoginAliasChangeOrThrow,
   assertAliasCutoverAllowed,
   backfillUserLoginAliases,
+  claimNonEmptyLoginAliasesOrThrow,
   isAuthLoginAliasCutoverEnabled,
+  LoginAliasClaimError,
 } from '../auth/login-alias-service'
 import {
   lockUsersForAccessGraphWrite,
@@ -3580,6 +3583,17 @@ export function adminUsersRouter(): Router {
           ],
         )
 
+        // Load-bearing alias writer hook: admin create always inserts activation_status=activated.
+        // Removing claimNonEmptyLoginAliasesOrThrow must fail the admin_create writer tests.
+        await claimNonEmptyLoginAliasesOrThrow({
+          userId,
+          email: cleanEmail || null,
+          username: cleanUsername,
+          mobile: cleanMobile,
+          source: 'admin_create',
+          client,
+        })
+
         if (roleId) {
           await client.query(
             `INSERT INTO user_roles (user_id, role_id)
@@ -3728,6 +3742,13 @@ export function adminUsersRouter(): Router {
       if (error instanceof AttendanceDefaultShiftNotFoundError) {
         return jsonError(res, error.status, error.code, error.message)
       }
+      if (error instanceof LoginAliasClaimError) {
+        // Fixed safe messages only — never echo error.stack / PG detail from nested drivers.
+        if (error.code === 'ALIAS_CONFLICT') {
+          return jsonError(res, 409, 'LOGIN_ALIAS_CONFLICT', error.message)
+        }
+        return jsonError(res, 500, 'LOGIN_ALIAS_FAILED', error.message)
+      }
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'USER_CREATE_SCHEMA_UNAVAILABLE', 'Required user or attendance tables are not available until migrations are applied')
       }
@@ -3785,37 +3806,172 @@ export function adminUsersRouter(): Router {
       // (strip all whitespace, map empty to NULL) before comparison so legacy
       // rows like "138 0013 8000" don't spuriously fail CAS when the client
       // sends the already-sanitised "13800138000" witness.
-      const updateResult = await query<{ id: string }>(
-        `UPDATE users
-         SET name = $1,
-             mobile = $2,
-             employee_no = $3,
-             department = $4,
-             position = $5,
-             hire_date = $6::date,
-             updated_at = NOW()
-         WHERE id = $7
-           AND (
-             $8::boolean = FALSE
-             OR NULLIF(regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g'), '')
-                IS NOT DISTINCT FROM
-                NULLIF(regexp_replace(COALESCE($9::text, ''), '\\s+', '', 'g'), '')
-           )
-         RETURNING id`,
-        [
-          nextName,
-          nextMobile,
-          nextEmployeeNo,
-          nextDepartment,
-          nextPosition,
-          nextHireDate,
-          userId,
-          hasExpectedMobile,
-          expectedMobile ?? null,
-        ],
-      )
-      if (updateResult.rows.length === 0) {
-        return jsonError(res, 409, 'PROFILE_MOBILE_CONFLICT', 'User mobile changed before update was applied')
+      //
+      // Mobile path TOCTOU fix: do NOT retire aliases from the pre-transaction
+      // profile.mobile snapshot. Lock the users row FOR UPDATE, derive the
+      // authoritative previous mobile from that locked row, then claim → update
+      // → retire in the same transaction. A concurrent mobile writer cannot make
+      // this route delete a stale prior alias.
+      // Load-bearing alias writer hook: removing applyMobileLoginAliasChangeOrThrow
+      // or the FOR UPDATE load must fail the admin_profile_mobile route/unit tests.
+      type ProfileTxnClient = {
+        query: <T extends Record<string, unknown> = Record<string, unknown>>(
+          sql: string,
+          params?: unknown[],
+        ) => Promise<{ rows: T[] }>
+      }
+
+      const runProfileUpdate = async (
+        client: ProfileTxnClient,
+        fields: {
+          name: string
+          mobile: string | null
+          employeeNo: string | null
+          department: string | null
+          position: string | null
+          hireDate: string | null
+        },
+      ) => {
+        const updateResult = await client.query<{ id: string }>(
+          `UPDATE users
+           SET name = $1,
+               mobile = $2,
+               employee_no = $3,
+               department = $4,
+               position = $5,
+               hire_date = $6::date,
+               updated_at = NOW()
+           WHERE id = $7
+             AND (
+               $8::boolean = FALSE
+               OR NULLIF(regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g'), '')
+                  IS NOT DISTINCT FROM
+                  NULLIF(regexp_replace(COALESCE($9::text, ''), '\\s+', '', 'g'), '')
+             )
+           RETURNING id`,
+          [
+            fields.name,
+            fields.mobile,
+            fields.employeeNo,
+            fields.department,
+            fields.position,
+            fields.hireDate,
+            userId,
+            hasExpectedMobile,
+            expectedMobile ?? null,
+          ],
+        )
+        if (updateResult.rows.length === 0) {
+          const err = new Error('User mobile changed before update was applied') as Error & {
+            code?: string
+          }
+          err.code = 'PROFILE_MOBILE_CONFLICT'
+          throw err
+        }
+      }
+
+      // Authoritative before/after values for audit — mobile path refreshes from the locked row.
+      let auditBefore = {
+        name: profile.name,
+        mobile: profile.mobile,
+        employeeNo: profile.employeeNo,
+        department: profile.department,
+        position: profile.position,
+        hireDate: profile.hireDate,
+      }
+      let auditAfter = {
+        name: nextName,
+        mobile: nextMobile,
+        employeeNo: nextEmployeeNo,
+        department: nextDepartment,
+        position: nextPosition,
+        hireDate: nextHireDate,
+      }
+
+      if (hasMobile) {
+        await transaction(async (client) => {
+          type LockedProfileRow = {
+            id: string
+            name: string
+            mobile: string | null
+            employeeNo: string | null
+            department: string | null
+            position: string | null
+            hireDate: string | null
+          }
+          const locked = await client.query(
+            `SELECT ${ADMIN_USER_PROFILE_SELECT}
+             FROM users
+             WHERE id = $1
+             FOR UPDATE`,
+            [userId],
+          )
+          const lockedRow = locked.rows[0] as LockedProfileRow | undefined
+          if (!lockedRow) {
+            const err = new Error('User not found') as Error & { code?: string }
+            err.code = 'NOT_FOUND'
+            throw err
+          }
+
+          // Authoritative previous mobile comes from the locked row only — never the
+          // pre-transaction snapshot (stale profile.mobile would retire the wrong alias).
+          const previousMobileFromLock = lockedRow.mobile
+          const effectiveNextName = hasName ? nextName : lockedRow.name
+          const effectiveNextMobile = nextMobile
+          const effectiveNextEmployeeNo = hasEmployeeNo ? nextEmployeeNo : lockedRow.employeeNo
+          const effectiveNextDepartment = hasDepartment ? nextDepartment : lockedRow.department
+          const effectiveNextPosition = hasPosition ? nextPosition : lockedRow.position
+          const effectiveNextHireDate = hasHireDate ? nextHireDate : lockedRow.hireDate
+
+          auditBefore = {
+            name: lockedRow.name,
+            mobile: lockedRow.mobile,
+            employeeNo: lockedRow.employeeNo,
+            department: lockedRow.department,
+            position: lockedRow.position,
+            hireDate: lockedRow.hireDate,
+          }
+          auditAfter = {
+            name: effectiveNextName,
+            mobile: effectiveNextMobile,
+            employeeNo: effectiveNextEmployeeNo,
+            department: effectiveNextDepartment,
+            position: effectiveNextPosition,
+            hireDate: effectiveNextHireDate,
+          }
+
+          await applyMobileLoginAliasChangeOrThrow({
+            userId,
+            previousMobile: previousMobileFromLock,
+            nextMobile: effectiveNextMobile,
+            source: 'admin_profile_mobile',
+            client,
+            afterNewClaim: async () => {
+              await runProfileUpdate(client, {
+                name: effectiveNextName,
+                mobile: effectiveNextMobile,
+                employeeNo: effectiveNextEmployeeNo,
+                department: effectiveNextDepartment,
+                position: effectiveNextPosition,
+                hireDate: effectiveNextHireDate,
+              })
+            },
+          })
+        })
+      } else {
+        await runProfileUpdate(
+          {
+            query: async (sql, params) => query(sql, params),
+          },
+          {
+            name: nextName,
+            mobile: nextMobile,
+            employeeNo: nextEmployeeNo,
+            department: nextDepartment,
+            position: nextPosition,
+            hireDate: nextHireDate,
+          },
+        )
       }
 
       await auditLog({
@@ -3826,22 +3982,8 @@ export function adminUsersRouter(): Router {
         resourceId: userId,
         meta: {
           adminUserId,
-          before: {
-            name: profile.name,
-            mobile: profile.mobile,
-            employeeNo: profile.employeeNo,
-            department: profile.department,
-            position: profile.position,
-            hireDate: profile.hireDate,
-          },
-          after: {
-            name: nextName,
-            mobile: nextMobile,
-            employeeNo: nextEmployeeNo,
-            department: nextDepartment,
-            position: nextPosition,
-            hireDate: nextHireDate,
-          },
+          before: auditBefore,
+          after: auditAfter,
         },
       })
 
@@ -3851,6 +3993,19 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
+      const code = (error as { code?: string } | null)?.code
+      if (code === 'NOT_FOUND') {
+        return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      }
+      if (code === 'PROFILE_MOBILE_CONFLICT') {
+        return jsonError(res, 409, 'PROFILE_MOBILE_CONFLICT', 'User mobile changed before update was applied')
+      }
+      if (error instanceof LoginAliasClaimError) {
+        if (error.code === 'ALIAS_CONFLICT') {
+          return jsonError(res, 409, 'LOGIN_ALIAS_CONFLICT', error.message)
+        }
+        return jsonError(res, 500, 'LOGIN_ALIAS_FAILED', error.message)
+      }
       return jsonError(res, 500, 'USER_PROFILE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update user profile')
     }
   })

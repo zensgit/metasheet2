@@ -51,11 +51,203 @@ export async function findUserIdByLoginAlias(rawIdentifier: string): Promise<str
   return result.rows[0].user_id
 }
 
-type AliasQueryClient = {
-  query: <T extends Record<string, unknown> = Record<string, unknown>>(
+/**
+ * Transaction client surface used by alias writers.
+ * Kept structurally loose so directory-sync / admin / OAuth transaction clients assign cleanly.
+ */
+export type AliasQueryClient = {
+  query: (
     sql: string,
     params?: unknown[],
-  ) => Promise<{ rows: T[] }>
+  ) => Promise<{ rows: Array<Record<string, unknown>> | unknown[] }>
+}
+
+/** Safe client-facing codes for activated-user identifier writers (never raw PG text). */
+export type LoginAliasWriterErrorCode = 'ALIAS_CONFLICT' | 'ALIAS_WRITE_FAILED'
+
+export type ClaimedLoginAlias = {
+  kind: LoginAliasKind
+  normalized: string
+}
+
+export type ClaimNonEmptyLoginAliasesResult =
+  | { ok: true; claimed: ClaimedLoginAlias[] }
+  | {
+      ok: false
+      code: LoginAliasWriterErrorCode
+      kind?: LoginAliasKind
+      /** Fixed safe message — never re-export claimLoginAlias/driver text. */
+      message: string
+    }
+
+const ALIAS_CONFLICT_MESSAGE = 'A login identifier is already claimed by another account'
+const ALIAS_WRITE_FAILED_MESSAGE = 'Failed to claim login alias'
+
+/** Thrown by writer paths so outer transactions roll back without leaking PG text. */
+export class LoginAliasClaimError extends Error {
+  readonly code: LoginAliasWriterErrorCode
+  readonly kind?: LoginAliasKind
+
+  constructor(code: LoginAliasWriterErrorCode, kind?: LoginAliasKind) {
+    super(code === 'ALIAS_CONFLICT' ? ALIAS_CONFLICT_MESSAGE : ALIAS_WRITE_FAILED_MESSAGE)
+    this.name = 'LoginAliasClaimError'
+    this.code = code
+    this.kind = kind
+  }
+}
+
+function mapClaimFailure(
+  claimed: { ok: false; code: string; message: string },
+  kind: LoginAliasKind,
+): Extract<ClaimNonEmptyLoginAliasesResult, { ok: false }> {
+  // Never echo claimed.message — claimLoginAlias may attach raw PostgreSQL/driver text on WRITE_FAILED.
+  if (claimed.code === 'ALIAS_CONFLICT' || claimed.code === 'ALIAS_EMPTY') {
+    // ALIAS_EMPTY after we already normalized non-empty is treated as conflict/unusable claim.
+    return {
+      ok: false,
+      code: 'ALIAS_CONFLICT',
+      kind,
+      message: ALIAS_CONFLICT_MESSAGE,
+    }
+  }
+  return {
+    ok: false,
+    code: 'ALIAS_WRITE_FAILED',
+    kind,
+    message: ALIAS_WRITE_FAILED_MESSAGE,
+  }
+}
+
+/**
+ * Fail-closed transactional helper for activated-user / identifier writers.
+ *
+ * Claims every non-empty email / username / mobile through `normalizeLoginIdentifier` +
+ * `claimLoginAlias` on the caller's transaction client. Empty / un-normalizable fields are
+ * skipped. Conflicts and write failures return fixed safe messages only (no raw PG text).
+ *
+ * Callers MUST pass `client` from an open transaction so a conflict rolls back the user write.
+ */
+export async function claimNonEmptyLoginAliases(options: {
+  userId: string
+  email?: string | null
+  username?: string | null
+  mobile?: string | null
+  source?: string
+  client: AliasQueryClient
+}): Promise<ClaimNonEmptyLoginAliasesResult> {
+  const fields: Array<{ raw: string | null | undefined; kind: LoginAliasKind }> = [
+    { raw: options.email, kind: 'email' },
+    { raw: options.username, kind: 'username' },
+    { raw: options.mobile, kind: 'mobile' },
+  ]
+  const claimed: ClaimedLoginAlias[] = []
+  for (const field of fields) {
+    if (field.raw == null || !String(field.raw).trim()) continue
+    const normalized = normalizeLoginIdentifier(field.raw)
+    if (!normalized) continue
+    const result = await claimLoginAlias({
+      userId: options.userId,
+      rawValue: field.raw,
+      kind: field.kind,
+      source: options.source ?? 'writer_claim',
+      client: options.client,
+    })
+    if (result.ok === false) {
+      return mapClaimFailure(result, field.kind)
+    }
+    claimed.push({ kind: field.kind, normalized: result.normalized })
+  }
+  return { ok: true, claimed }
+}
+
+/**
+ * Same as claimNonEmptyLoginAliases but throws LoginAliasClaimError (safe message / code).
+ * Intended for in-transaction writer hooks where failure must abort the unit of work.
+ */
+export async function claimNonEmptyLoginAliasesOrThrow(options: {
+  userId: string
+  email?: string | null
+  username?: string | null
+  mobile?: string | null
+  source?: string
+  client: AliasQueryClient
+}): Promise<ClaimedLoginAlias[]> {
+  const result = await claimNonEmptyLoginAliases(options)
+  if (result.ok === false) {
+    throw new LoginAliasClaimError(result.code, result.kind)
+  }
+  return result.claimed
+}
+
+/**
+ * Profile mobile identifier change (same transaction as users.mobile UPDATE):
+ * 1) claim the new mobile when normalized value is non-empty and differs from prior
+ * 2) run `afterNewClaim` (caller performs the profile row replace / CAS)
+ * 3) retire the prior mobile alias only if owned by this user and normalized values differ
+ *
+ * A conflict or afterNewClaim failure leaves the transaction to roll back — no partial retire.
+ */
+export async function applyMobileLoginAliasChange(options: {
+  userId: string
+  previousMobile?: string | null
+  nextMobile?: string | null
+  source?: string
+  client: AliasQueryClient
+  afterNewClaim: () => Promise<void>
+}): Promise<ClaimNonEmptyLoginAliasesResult & { retiredNormalized: string | null }> {
+  const previousNormalized = options.previousMobile
+    ? normalizeLoginIdentifier(options.previousMobile)
+    : null
+  const nextNormalized = options.nextMobile
+    ? normalizeLoginIdentifier(options.nextMobile)
+    : null
+
+  const claimed: ClaimedLoginAlias[] = []
+  if (nextNormalized && nextNormalized !== previousNormalized && options.nextMobile) {
+    const result = await claimLoginAlias({
+      userId: options.userId,
+      rawValue: options.nextMobile,
+      kind: 'mobile',
+      source: options.source ?? 'profile_mobile',
+      client: options.client,
+    })
+    if (result.ok === false) {
+      return { ...mapClaimFailure(result, 'mobile'), retiredNormalized: null }
+    }
+    claimed.push({ kind: 'mobile', normalized: result.normalized })
+  }
+
+  await options.afterNewClaim()
+
+  let retiredNormalized: string | null = null
+  if (previousNormalized && previousNormalized !== nextNormalized) {
+    // Only delete an alias owned by this user; never touch another principal's row.
+    await options.client.query(
+      `DELETE FROM user_login_aliases
+        WHERE user_id = $1
+          AND kind = 'mobile'
+          AND normalized_value = $2`,
+      [options.userId, previousNormalized],
+    )
+    retiredNormalized = previousNormalized
+  }
+
+  return { ok: true, claimed, retiredNormalized }
+}
+
+export async function applyMobileLoginAliasChangeOrThrow(options: {
+  userId: string
+  previousMobile?: string | null
+  nextMobile?: string | null
+  source?: string
+  client: AliasQueryClient
+  afterNewClaim: () => Promise<void>
+}): Promise<{ claimed: ClaimedLoginAlias[]; retiredNormalized: string | null }> {
+  const result = await applyMobileLoginAliasChange(options)
+  if (result.ok === false) {
+    throw new LoginAliasClaimError(result.code, result.kind)
+  }
+  return { claimed: result.claimed, retiredNormalized: result.retiredNormalized }
 }
 
 export async function claimLoginAlias(options: {
@@ -71,14 +263,16 @@ export async function claimLoginAlias(options: {
     return { ok: false, code: 'ALIAS_EMPTY', message: 'Identifier is empty after normalization' }
   }
   const kind = options.kind ?? inferLoginAliasKind(options.rawValue)
-  const runQuery = async <T extends Record<string, unknown> = Record<string, unknown>>(
+  const runQuery = async (
     sql: string,
     params?: unknown[],
-  ): Promise<{ rows: T[] }> => {
+  ): Promise<{ rows: Array<Record<string, unknown>> }> => {
     if (options.client) {
-      return options.client.query<T>(sql, params)
+      const result = await options.client.query(sql, params)
+      return { rows: result.rows as Array<Record<string, unknown>> }
     }
-    return query<T>(sql, params)
+    const result = await query<Record<string, unknown>>(sql, params)
+    return { rows: result.rows }
   }
   try {
     await runQuery(
@@ -87,14 +281,15 @@ export async function claimLoginAlias(options: {
        ON CONFLICT (normalized_value) DO NOTHING`,
       [options.userId, kind, normalized, options.source ?? 'claim'],
     )
-    const check = await runQuery<{ user_id: string }>(
+    const check = await runQuery(
       `SELECT user_id FROM user_login_aliases WHERE normalized_value = $1`,
       [normalized],
     )
-    if (!check.rows[0]) {
+    const ownerId = check.rows[0]?.user_id
+    if (ownerId == null) {
       return { ok: false, code: 'ALIAS_CONFLICT', message: 'Normalized identifier already claimed' }
     }
-    if (check.rows[0].user_id !== options.userId) {
+    if (String(ownerId) !== options.userId) {
       return { ok: false, code: 'ALIAS_CONFLICT', message: 'Normalized identifier already claimed' }
     }
     return { ok: true, normalized }
@@ -102,6 +297,8 @@ export async function claimLoginAlias(options: {
     return {
       ok: false,
       code: 'ALIAS_WRITE_FAILED',
+      // Intentionally may include driver text for server logs; writers must map via
+      // claimNonEmptyLoginAliases / LoginAliasClaimError and never echo this to clients.
       message: error instanceof Error ? error.message : 'alias write failed',
     }
   }

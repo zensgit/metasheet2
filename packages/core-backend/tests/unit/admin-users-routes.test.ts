@@ -79,6 +79,25 @@ vi.mock('../../src/db/pg', () => ({
     handler({ query: pgMocks.query })),
 }))
 
+// Alias full-writer hooks: default stubs keep existing create/profile once-chains green.
+// Dedicated load-bearing coverage lives in login-alias-writers*.test.ts (do not weaken those).
+const loginAliasWriterMocks = vi.hoisted(() => ({
+  claimNonEmptyLoginAliasesOrThrow: vi.fn(async () => []),
+  applyMobileLoginAliasChangeOrThrow: vi.fn(async (options: { afterNewClaim: () => Promise<void> }) => {
+    await options.afterNewClaim()
+    return { claimed: [], retiredNormalized: null }
+  }),
+}))
+
+vi.mock('../../src/auth/login-alias-service', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/auth/login-alias-service')>()
+  return {
+    ...actual,
+    claimNonEmptyLoginAliasesOrThrow: loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow,
+    applyMobileLoginAliasChangeOrThrow: loginAliasWriterMocks.applyMobileLoginAliasChangeOrThrow,
+  }
+})
+
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isAdmin,
   listUserPermissions: rbacMocks.listUserPermissions,
@@ -113,6 +132,7 @@ vi.mock('../../src/auth/dingtalk-oauth', () => ({
 
 vi.mock('../../src/attendance/w4c0-identity', () => attendanceW4Mocks)
 
+import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
 import { adminUsersRouter } from '../../src/routes/admin-users'
 
 function createMockResponse() {
@@ -208,6 +228,15 @@ describe('admin-users routes', () => {
     }
     pgMocks.query.mockReset()
     pgMocks.query.mockResolvedValue({ rows: [] })
+    loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow.mockReset()
+    loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow.mockResolvedValue([])
+    loginAliasWriterMocks.applyMobileLoginAliasChangeOrThrow.mockReset()
+    loginAliasWriterMocks.applyMobileLoginAliasChangeOrThrow.mockImplementation(
+      async (options: { afterNewClaim: () => Promise<void> }) => {
+        await options.afterNewClaim()
+        return { claimed: [], retiredNormalized: null }
+      },
+    )
     rbacMocks.isAdmin.mockReset()
     rbacMocks.isAdmin.mockResolvedValue(false)
     rbacMocks.listUserPermissions.mockReset()
@@ -508,41 +537,31 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
     rbacMocks.listUserPermissions.mockResolvedValue(['crm:admin'])
+    const profileRow = {
+      id: 'user-1',
+      email: 'alpha@example.com',
+      name: 'Alpha',
+      mobile: null as string | null,
+      employeeNo: null,
+      department: null,
+      position: null,
+      hireDate: null,
+      role: 'user',
+      is_active: true,
+      is_admin: false,
+      last_login_at: null,
+      created_at: '2026-03-12T00:00:00.000Z',
+      updated_at: '2026-03-12T00:00:00.000Z',
+    }
     pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] }) // pre-read
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] }) // FOR UPDATE lock
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] }) // UPDATE
       .mockResolvedValueOnce({
         rows: [{
-          id: 'user-1',
-          email: 'alpha@example.com',
-          name: 'Alpha',
-          mobile: null,
-          employeeNo: null,
-          department: null,
-          position: null,
-          hireDate: null,
-          role: 'user',
-          is_active: true,
-          is_admin: false,
-          last_login_at: null,
-          created_at: '2026-03-12T00:00:00.000Z',
-          updated_at: '2026-03-12T00:00:00.000Z',
-        }],
-      })
-      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'user-1',
-          email: 'alpha@example.com',
+          ...profileRow,
           name: 'Alpha Prime',
           mobile: '13800138000',
-          employeeNo: null,
-          department: null,
-          position: null,
-          hireDate: null,
-          role: 'user',
-          is_active: true,
-          is_admin: false,
-          last_login_at: null,
-          created_at: '2026-03-12T00:00:00.000Z',
           updated_at: '2026-03-13T00:00:00.000Z',
         }],
       })
@@ -556,7 +575,8 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(pgMocks.query).toHaveBeenNthCalledWith(2,
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toMatch(/FOR UPDATE/)
+    expect(pgMocks.query).toHaveBeenNthCalledWith(3,
       expect.stringContaining('UPDATE users'),
       ['Alpha Prime', '13800138000', null, null, null, null, 'user-1', true, null],
     )
@@ -714,43 +734,28 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
     rbacMocks.listUserPermissions.mockResolvedValue([])
+    const profileRow = {
+      id: 'user-1',
+      email: 'alpha@example.com',
+      name: 'Alpha',
+      mobile: '13800138000' as string | null,
+      employeeNo: null,
+      department: null,
+      position: null,
+      hireDate: null,
+      role: 'user',
+      is_active: true,
+      is_admin: false,
+      last_login_at: null,
+      created_at: '2026-03-12T00:00:00.000Z',
+      updated_at: '2026-03-12T00:00:00.000Z',
+    }
     pgMocks.query
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'user-1',
-          email: 'alpha@example.com',
-          name: 'Alpha',
-          mobile: '13800138000',
-          employeeNo: null,
-          department: null,
-          position: null,
-          hireDate: null,
-          role: 'user',
-          is_active: true,
-          is_admin: false,
-          last_login_at: null,
-          created_at: '2026-03-12T00:00:00.000Z',
-          updated_at: '2026-03-12T00:00:00.000Z',
-        }],
-      })
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] })
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] }) // FOR UPDATE
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
       .mockResolvedValueOnce({
-        rows: [{
-          id: 'user-1',
-          email: 'alpha@example.com',
-          name: 'Alpha',
-          mobile: null,
-          employeeNo: null,
-          department: null,
-          position: null,
-          hireDate: null,
-          role: 'user',
-          is_active: true,
-          is_admin: false,
-          last_login_at: null,
-          created_at: '2026-03-12T00:00:00.000Z',
-          updated_at: '2026-03-13T00:00:00.000Z',
-        }],
+        rows: [{ ...profileRow, mobile: null, updated_at: '2026-03-13T00:00:00.000Z' }],
       })
       .mockResolvedValueOnce({
         rows: [],
@@ -762,7 +767,8 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(pgMocks.query).toHaveBeenNthCalledWith(2,
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toMatch(/FOR UPDATE/)
+    expect(pgMocks.query).toHaveBeenNthCalledWith(3,
       expect.stringContaining('UPDATE users'),
       ['Alpha', null, null, null, null, null, 'user-1', true, '13800138000'],
     )
@@ -777,43 +783,32 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
     rbacMocks.listUserPermissions.mockResolvedValue([])
+    const profileRow = {
+      id: 'user-1',
+      email: 'alpha@example.com',
+      name: 'Alpha',
+      mobile: '138 0013 8000',
+      employeeNo: null,
+      department: null,
+      position: null,
+      hireDate: null,
+      role: 'user',
+      is_active: true,
+      is_admin: false,
+      last_login_at: null,
+      created_at: '2026-03-12T00:00:00.000Z',
+      updated_at: '2026-03-12T00:00:00.000Z',
+    }
     pgMocks.query
       // fetchUserProfile returns legacy dirty data with embedded whitespace.
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'user-1',
-          email: 'alpha@example.com',
-          name: 'Alpha',
-          mobile: '138 0013 8000',
-          employeeNo: null,
-          department: null,
-          position: null,
-          hireDate: null,
-          role: 'user',
-          is_active: true,
-          is_admin: false,
-          last_login_at: null,
-          created_at: '2026-03-12T00:00:00.000Z',
-          updated_at: '2026-03-12T00:00:00.000Z',
-        }],
-      })
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] })
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] }) // FOR UPDATE
       // UPDATE still matches because both sides are normalised in SQL.
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
       .mockResolvedValueOnce({
         rows: [{
-          id: 'user-1',
-          email: 'alpha@example.com',
-          name: 'Alpha',
+          ...profileRow,
           mobile: '13800138000',
-          employeeNo: null,
-          department: null,
-          position: null,
-          hireDate: null,
-          role: 'user',
-          is_active: true,
-          is_admin: false,
-          last_login_at: null,
-          created_at: '2026-03-12T00:00:00.000Z',
           updated_at: '2026-03-13T00:00:00.000Z',
         }],
       })
@@ -825,7 +820,8 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    const updateCall = pgMocks.query.mock.calls[1]
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toMatch(/FOR UPDATE/)
+    const updateCall = pgMocks.query.mock.calls[2]
     expect(String(updateCall[0])).toContain('regexp_replace')
     expect(String(updateCall[0])).toContain('IS NOT DISTINCT FROM')
     expect(updateCall[1]).toEqual(['Alpha', '13800138000', null, null, null, null, 'user-1', true, '13800138000'])
@@ -833,26 +829,26 @@ describe('admin-users routes', () => {
 
   it('returns 409 when expected mobile no longer matches current value', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
+    const profileRow = {
+      id: 'user-1',
+      email: 'alpha@example.com',
+      name: 'Alpha',
+      mobile: '13600000000',
+      employeeNo: null,
+      department: null,
+      position: null,
+      hireDate: null,
+      role: 'user',
+      is_active: true,
+      is_admin: false,
+      last_login_at: null,
+      created_at: '2026-03-12T00:00:00.000Z',
+      updated_at: '2026-03-12T00:00:00.000Z',
+    }
     pgMocks.query
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'user-1',
-          email: 'alpha@example.com',
-          name: 'Alpha',
-          mobile: '13600000000',
-          employeeNo: null,
-          department: null,
-          position: null,
-          hireDate: null,
-          role: 'user',
-          is_active: true,
-          is_admin: false,
-          last_login_at: null,
-          created_at: '2026-03-12T00:00:00.000Z',
-          updated_at: '2026-03-12T00:00:00.000Z',
-        }],
-      })
-      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] })
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] }) // FOR UPDATE
+      .mockResolvedValueOnce({ rows: [] }) // CAS UPDATE fails
 
     const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
       params: { userId: 'user-1' },
@@ -3173,6 +3169,285 @@ describe('admin-users routes', () => {
     expect(String((response.body as Record<string, any>).data.onboarding.acceptInviteUrl || '')).toBe('')
     expect(String((response.body as Record<string, any>).data.onboarding.inviteMessage)).toContain('账号：liqing')
     expect(inviteMocks.issueInviteToken).not.toHaveBeenCalled()
+  })
+
+  /**
+   * Load-bearing alias full-writer route hooks (admin_create / admin_profile_mobile).
+   * Removing claimNonEmptyLoginAliasesOrThrow / applyMobileLoginAliasChangeOrThrow from the
+   * production handlers, or swapping previousMobile back to the pre-txn snapshot, must red these.
+   */
+  it('POST /api/admin/users invokes claimNonEmptyLoginAliasesOrThrow with exact identifiers + txn client', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('SELECT id FROM users WHERE email')) return { rows: [] }
+      if (statement.includes('SELECT id FROM users WHERE lower(username)')) return { rows: [] }
+      if (statement.includes('SELECT id FROM users WHERE mobile')) return { rows: [] }
+      if (statement.includes('INSERT INTO users (')) return { rows: [] }
+      if (statement.includes('FROM users') && statement.includes('WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'user-new',
+            email: 'hook@example.com',
+            username: 'hookuser',
+            name: 'Hook User',
+            mobile: '13900139000',
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            last_login_at: null,
+            created_at: '2026-03-12T00:00:00.000Z',
+            updated_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      if (statement.includes('FROM user_roles')) return { rows: [] }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'hook@example.com',
+        username: 'hookuser',
+        mobile: '13900139000',
+        name: 'Hook User',
+        password: 'WelcomePass9A',
+        isActive: true,
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow).toHaveBeenCalledTimes(1)
+    expect(loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: 'hook@example.com',
+        username: 'hookuser',
+        mobile: '13900139000',
+        source: 'admin_create',
+        client: expect.objectContaining({ query: expect.any(Function) }),
+        userId: expect.any(String),
+      }),
+    )
+  })
+
+  it('POST /api/admin/users maps LoginAliasClaimError ALIAS_CONFLICT to safe 409', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('SELECT id FROM users')) return { rows: [] }
+      if (statement.includes('INSERT INTO users (')) return { rows: [] }
+      return { rows: [] }
+    })
+    loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow.mockRejectedValueOnce(
+      new LoginAliasClaimError('ALIAS_CONFLICT', 'email'),
+    )
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'taken@example.com',
+        name: 'Taken',
+        password: 'WelcomePass9A',
+        isActive: true,
+      },
+    })
+
+    expect(response.statusCode).toBe(409)
+    const body = response.body as Record<string, any>
+    expect(body.error?.code).toBe('LOGIN_ALIAS_CONFLICT')
+    expect(String(body.error?.message || '')).toBe('A login identifier is already claimed by another account')
+    expect(JSON.stringify(body)).not.toMatch(/DETAIL|duplicate key|5432|relation/i)
+  })
+
+  it('POST /api/admin/users maps LoginAliasClaimError ALIAS_WRITE_FAILED to safe 500', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('SELECT id FROM users')) return { rows: [] }
+      if (statement.includes('INSERT INTO users (')) return { rows: [] }
+      return { rows: [] }
+    })
+    loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow.mockRejectedValueOnce(
+      new LoginAliasClaimError('ALIAS_WRITE_FAILED', 'email'),
+    )
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'fail@example.com',
+        name: 'Fail',
+        password: 'WelcomePass9A',
+        isActive: true,
+      },
+    })
+
+    expect(response.statusCode).toBe(500)
+    const body = response.body as Record<string, any>
+    expect(body.error?.code).toBe('LOGIN_ALIAS_FAILED')
+    expect(String(body.error?.message || '')).toBe('Failed to claim login alias')
+    expect(JSON.stringify(body)).not.toMatch(/DETAIL|connection refused|5432/i)
+  })
+
+  it('PATCH profile mobile locks row FOR UPDATE and passes locked previousMobile to alias helper', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    // Pre-read is intentionally STALE (null) vs locked row (13800138000).
+    // Using profile.mobile for retire would pass null; production must use the lock.
+    const stalePreRead = {
+      id: 'user-1',
+      email: 'alpha@example.com',
+      name: 'Alpha',
+      mobile: null as string | null,
+      employeeNo: null,
+      department: null,
+      position: null,
+      hireDate: null,
+      role: 'user',
+      is_active: true,
+      is_admin: false,
+      last_login_at: null,
+      created_at: '2026-03-12T00:00:00.000Z',
+      updated_at: '2026-03-12T00:00:00.000Z',
+    }
+    const lockedRow = { ...stalePreRead, mobile: '13800138000' }
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ ...stalePreRead }] })
+      .mockResolvedValueOnce({ rows: [{ ...lockedRow }] }) // FOR UPDATE
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] }) // UPDATE
+      .mockResolvedValueOnce({
+        rows: [{ ...lockedRow, mobile: '13900139000', updated_at: '2026-03-13T00:00:00.000Z' }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: { mobile: '13900139000' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toMatch(/FOR UPDATE/)
+    expect(loginAliasWriterMocks.applyMobileLoginAliasChangeOrThrow).toHaveBeenCalledTimes(1)
+    expect(loginAliasWriterMocks.applyMobileLoginAliasChangeOrThrow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        previousMobile: '13800138000', // from lock, NOT stale null pre-read
+        nextMobile: '13900139000',
+        source: 'admin_profile_mobile',
+        client: expect.objectContaining({ query: expect.any(Function) }),
+        afterNewClaim: expect.any(Function),
+      }),
+    )
+  })
+
+  it('PATCH profile mobile maps LoginAliasClaimError ALIAS_CONFLICT to safe 409', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const profileRow = {
+      id: 'user-1',
+      email: 'alpha@example.com',
+      name: 'Alpha',
+      mobile: '13800138000',
+      employeeNo: null,
+      department: null,
+      position: null,
+      hireDate: null,
+      role: 'user',
+      is_active: true,
+      is_admin: false,
+      last_login_at: null,
+      created_at: '2026-03-12T00:00:00.000Z',
+      updated_at: '2026-03-12T00:00:00.000Z',
+    }
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] })
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] })
+    loginAliasWriterMocks.applyMobileLoginAliasChangeOrThrow.mockRejectedValueOnce(
+      new LoginAliasClaimError('ALIAS_CONFLICT', 'mobile'),
+    )
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: { mobile: '13900139000' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    const body = response.body as Record<string, any>
+    expect(body.error?.code).toBe('LOGIN_ALIAS_CONFLICT')
+    expect(JSON.stringify(body)).not.toMatch(/DETAIL|duplicate key|5432/i)
+  })
+
+  it('PATCH profile mobile maps LoginAliasClaimError ALIAS_WRITE_FAILED to safe 500', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const profileRow = {
+      id: 'user-1',
+      email: 'alpha@example.com',
+      name: 'Alpha',
+      mobile: '13800138000',
+      employeeNo: null,
+      department: null,
+      position: null,
+      hireDate: null,
+      role: 'user',
+      is_active: true,
+      is_admin: false,
+      last_login_at: null,
+      created_at: '2026-03-12T00:00:00.000Z',
+      updated_at: '2026-03-12T00:00:00.000Z',
+    }
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] })
+      .mockResolvedValueOnce({ rows: [{ ...profileRow }] })
+    loginAliasWriterMocks.applyMobileLoginAliasChangeOrThrow.mockRejectedValueOnce(
+      new LoginAliasClaimError('ALIAS_WRITE_FAILED', 'mobile'),
+    )
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: { mobile: '13900139000' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    const body = response.body as Record<string, any>
+    expect(body.error?.code).toBe('LOGIN_ALIAS_FAILED')
+    expect(JSON.stringify(body)).not.toMatch(/DETAIL|connection refused|5432/i)
+  })
+
+  it('PATCH profile mobile returns 404 when locked row is missing', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          mobile: '13800138000',
+          employeeNo: null,
+          department: null,
+          position: null,
+          hireDate: null,
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] }) // FOR UPDATE: gone
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: { mobile: '13900139000' },
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect((response.body as Record<string, any>).error?.code).toBe('NOT_FOUND')
+    expect(loginAliasWriterMocks.applyMobileLoginAliasChangeOrThrow).not.toHaveBeenCalled()
   })
 
   it('resets password and returns temporary password', async () => {
