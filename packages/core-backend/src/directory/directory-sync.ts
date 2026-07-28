@@ -44,6 +44,7 @@ import { SimpleCronExpression } from '../services/SchedulerService'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
+import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -1481,6 +1482,8 @@ export async function applyDirectoryDeprovisionPolicies(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
   options: {
     integrationId: string
+    runId: string
+    triggeredBy: string
     /** Ids of the accounts this run *transitioned* to inactive. NOT the lifetime backlog. */
     deactivatedAccountIds: string[]
     /** How many accounts the DingTalk fetch actually returned — the circuit breaker's input. */
@@ -1532,6 +1535,7 @@ export async function applyDirectoryDeprovisionPolicies(
         AND l.link_status = 'linked'
         AND l.local_user_id IS NOT NULL
       WHERE a.id = ANY($1::uuid[])
+        AND a.is_active = FALSE
         AND NOT EXISTS (
           SELECT 1
             FROM directory_account_links sibling_link
@@ -1578,57 +1582,10 @@ export async function applyDirectoryDeprovisionPolicies(
     return outcome
   }
 
-  // W4-PRE-1d item 2 (owner P2, #4530 review, issuecomment-5043752399, verbatim — "全局账号/
-  // 授权候选：保留『任意位置无活跃绑定』守卫，才允许关闭 DingTalk grant 或 users.is_active"): the
-  // pre-existing GLOBAL "no active binding ANYWHERE" guard, relocated from candidate SELECTION
-  // (where it wrongly excluded org-A-only candidacy) to here, where it gates only the
-  // grant-disable / platform-user-deactivation actions. Computed once for every non-
-  // `manual_review` org-membership candidate — manual_review never writes anything regardless,
-  // so it is excluded from this batch check entirely.
-  //
-  // Known gap (review finding, deferred — not overlooked): this is a batch-level, no-lock
-  // check-then-act read. It is taken ONCE, before the write loop below, over READ COMMITTED
-  // snapshots for every candidate in the batch. A concurrent transaction that changes this
-  // person's binding elsewhere (another org's departure completing, or a rehire committing a
-  // new linked+active account) between this read and the write loop's `INSERT`/`UPDATE` below
-  // is invisible to this snapshot — unlike `deactivateUserOrgMembershipIfNoOtherActiveBinding`'s
-  // own write-time `SELECT ... FOR UPDATE` re-read for the org-membership write, there is no
-  // equivalent write-time re-check here for the grant/platform-user writes. Concretely: (a) two
-  // concurrent last-org departures for the same person can each see the other's org as still
-  // active and both skip the grant/user-deactivate writes, leaving an enabled DingTalk grant
-  // with zero live bindings and no automatic reconciliation; (b) a same-window rehire can have
-  // its grant/user-deactivate writes applied against a now-stale "globally clear" snapshot. Both
-  // shapes are inherited from the pre-existing (pre-W4-PRE-1d) global guard, which read from an
-  // even earlier point (the old unscoped candidate SELECT) — this relocation does not widen
-  // either window. Closing it needs a lock-strategy or reconciliation-sweep design decision
-  // (e.g. a `users`-row `FOR UPDATE` re-check at write time, mirroring the org-membership
-  // helper) that is outside the owner's verbatim 4-item P2 spec this PR implements — left for
-  // the owner to scope as a follow-up, not silently dropped.
-  const nonManualReviewUserIds = Array.from(byUser.entries())
-    .filter(([, c]) => c.policy !== 'manual_review')
-    .map(([localUserId]) => localUserId)
-
-  const globallyClearUserIds = new Set<string>()
-  if (nonManualReviewUserIds.length > 0) {
-    const globalClear = await client.query(
-      `SELECT candidate_user AS local_user_id
-         FROM UNNEST($1::text[]) AS candidate_user
-        WHERE NOT EXISTS (
-          SELECT 1
-            FROM directory_account_links sibling_link
-            JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
-           WHERE sibling_link.local_user_id = candidate_user
-             AND sibling_link.link_status = 'linked'
-             AND sibling.is_active = true
-        )`,
-      [nonManualReviewUserIds],
-    )
-    for (const row of globalClear.rows as Array<{ local_user_id: string }>) {
-      globallyClearUserIds.add(row.local_user_id)
-    }
-  }
-
-  for (const [localUserId, { directoryAccountId, policy }] of byUser) {
+  const orderedCandidates = [...byUser.entries()].sort(([leftUserId], [rightUserId]) =>
+    leftUserId.localeCompare(rightUserId),
+  )
+  for (const [localUserId, { directoryAccountId, policy }] of orderedCandidates) {
     if (policy === 'manual_review') {
       outcome.manualReviewCount += 1
       // Owner 裁决② (#4522 rev3 review — issuecomment-5042388830: "manual_review 保持 active
@@ -1639,77 +1596,39 @@ export async function applyDirectoryDeprovisionPolicies(
       continue
     }
 
-    const globallyClear = globallyClearUserIds.has(localUserId)
-    outcome.affected.push({ directoryAccountId, localUserId, policy, globallyClear })
+    // D4: the helper re-reads both candidacy scopes while holding the canonical users row lock
+    // (write mode), applies the access graph, generation, and ledger on this SAME transaction
+    // client, and fails the whole sync transaction if any evidence write fails.
+    const result = await applyDirectoryDeprovisionCandidate(client, {
+      localUserId,
+      orgId,
+      integrationId: options.integrationId,
+      directoryAccountId,
+      runId: options.runId,
+      triggeredBy: options.triggeredBy,
+      policy,
+      write: options.enabled,
+    })
+    const effectTypes = new Set(result.plan.effects.map((effect) => effect.type))
+    if (effectTypes.size === 0) continue
 
-    // W4-PRE-1d: org-membership deactivation is attempted for EVERY org-membership candidate
-    // reaching this point, unconditional on `globallyClear` — the global guard governs only the
-    // grant/platform-user actions below, never this one (owner P2 item 1 vs item 2 split).
-    // Same gate as before (breaker passed + `options.enabled`), see this field's own doc-comment
-    // on `DirectoryDeprovisionOutcome` for the attempt-not-flip distinction.
-    outcome.membershipDeactivationAttemptedCount += 1
-    if (options.enabled) {
-      // W4-PRE-1c (owner 裁决②, #4522 rev3 review — the only GitHub-persisted record is the
-      // owner's own acknowledgment comment, issuecomment-5042388830: "不因单次同步缺失撤销
-      // membership；deprovision circuit-breaker 通过 + 开关启用 + 策略实际执行时同事务失活对应
-      // user_orgs；manual_review 保持 active 并暴露待人工确认状态。" No #4522 review or review-
-      // thread comment carries a longer/earlier original — this IS the citable text, not a
-      // paraphrase of something else on record): the circuit breaker already passed (we are
-      // past the abort-and-return above), the switch is on (`options.enabled`), and this
-      // policy just executed for this person — THIS moment — not the DT-OPS-01 sweep flipping
-      // `directory_accounts.is_active` alone — is "策略实际执行", and is what deactivates
-      // `user_orgs`, same transaction. Reuses #4526's own org-scoped "no other active binding"
-      // rule verbatim (`deactivateUserOrgMembershipIfNoOtherActiveBinding`) — and that helper's
-      // OWN re-read (`SELECT ... FOR UPDATE` then a fresh READ COMMITTED `NOT EXISTS`) is NOT
-      // redundant with this function's own org-scoped candidate-selection guard above, despite
-      // both checking "no other active binding in this org": the guard above is read ONCE,
-      // early, before this loop and before any write in this run; this helper re-checks AT
-      // WRITE TIME under a row lock. A concurrent transaction that commits a brand-new
-      // linked+active directory account for this SAME person in this SAME org, in the window
-      // between the guard's read and this call, is invisible to the guard's stale snapshot but
-      // IS caught by this helper's fresh re-read — the same write-skew shape #4526 itself fixed
-      // with `FOR UPDATE` for concurrent unbinds. So this check is independently load-bearing on
-      // this call path, not merely inherited defense-in-depth. `manual_review` is excluded by
-      // the `continue` above: a single missed sync, or a policy that never executes, must never
-      // itself revoke membership.
-      await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: localUserId, orgId })
+    outcome.affected.push({
+      directoryAccountId,
+      localUserId,
+      policy,
+      globallyClear: result.globallyClear,
+    })
+    if (effectTypes.has('membership_changed')) {
+      outcome.membershipDeactivationAttemptedCount += 1
     }
-
-    // W4-PRE-1d item 2: grant-disable and (for mark_inactive) platform-user deactivation are
-    // gated by the GLOBAL "no active binding ANYWHERE" guard — a person still actively employed
-    // through a DIFFERENT org's directory keeps DingTalk login and their platform account, even
-    // though THIS org's membership was just deactivated above.
-    //
-    // Known gap (review finding, deferred — see this function's `globallyClearUserIds` batch
-    // read above for the forward-direction case; this is the reverse): `globallyClear` here is
-    // the STALE batch snapshot, not re-checked at this write. If a concurrent transaction
-    // commits a brand-new linked+active directory account for this SAME person (rehire, or a
-    // new org's onboarding) in the window between that snapshot and this write, these two writes
-    // still fire against the stale `true`, closing the grant and (mark_inactive) deactivating an
-    // otherwise-currently-employed user. Same inherited-not-widened window as the guard's own
-    // doc-comment above; same deferred lock/reconciliation design decision.
-    if (globallyClear) {
+    if (result.globallyClear) {
       outcome.globalCandidateCount += 1
+    }
+    if (effectTypes.has('grant_changed')) {
       outcome.grantsDisabledCount += 1
-      if (options.enabled) {
-        await client.query(
-          `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-           VALUES ($1, $2, FALSE, $3, NOW(), NOW())
-           ON CONFLICT (provider, local_user_id)
-           DO UPDATE SET enabled = FALSE, updated_at = NOW()`,
-          [DEFAULT_PROVIDER, localUserId, 'system:directory-deprovision'],
-        )
-      }
-
-      if (policy === 'mark_inactive') {
-        outcome.usersDeactivatedCount += 1
-        if (options.enabled) {
-          await client.query(
-            `UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1::text`,
-            [localUserId],
-          )
-        }
-      }
+    }
+    if (effectTypes.has('user_changed')) {
+      outcome.usersDeactivatedCount += 1
     }
   }
 
@@ -4266,6 +4185,8 @@ export async function syncDirectoryIntegration(
       // Default-off: this only counts what it WOULD do unless explicitly enabled.
       deprovisionOutcome = await applyDirectoryDeprovisionPolicies(client, {
         integrationId,
+        runId,
+        triggeredBy,
         deactivatedAccountIds,
         // The circuit breaker's input: how many accounts DingTalk actually returned. Zero
         // means the fetch is broken, not that the company evacuated.

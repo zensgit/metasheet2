@@ -1,222 +1,336 @@
 /**
- * D3/D4 — deprovision effect ledger helpers (design lock Rev 4.2 companion §5).
+ * D4 deprovision writer.
  *
- * Immutability of identity fields is enforced by DB triggers in migration;
- * application helpers only INSERT events/effects and supersede open rows.
+ * The caller supplies the transaction client used by the directory sync. This
+ * module never opens a second transaction: user locking, write-time candidacy,
+ * access-graph changes, generation, event, and effects either commit together
+ * or all roll back.
  */
 
-import { query, transaction } from '../db/pg'
-import type { PlannedEffect } from './deprovision-planner'
+import type {
+  DirectoryDeprovisionPlan,
+  DirectoryDeprovisionPolicy,
+  PlannedEffect,
+} from './deprovision-planner'
 import { planDirectoryDeprovision } from './deprovision-planner'
 
-export type ApplyDeprovisionInput = {
+export type DirectoryTransactionClient = {
+  query: (
+    statement: string,
+    params?: unknown[],
+  ) => Promise<{ rows: Array<Record<string, unknown>> }>
+}
+
+export type ApplyDeprovisionCandidateInput = {
   localUserId: string
   orgId: string
   integrationId: string
   directoryAccountId: string
-  runId: string | null
+  runId: string
   triggeredBy: string
-  policy: 'manual_review' | 'disable_grant_only' | 'mark_inactive'
-  enabled: boolean
-  /** When false, planner runs but writer is no-op (preview mode). */
+  policy: DirectoryDeprovisionPolicy
   write: boolean
-  loadUserState: () => Promise<{
-    activationStatus: string | null
-    isActive: boolean
-    orgMembershipActive: boolean
-    dingtalkGrantEnabled: boolean
-    accessGeneration: number
-  }>
-  globallyClear?: boolean
 }
 
-export type ApplyDeprovisionResult = {
+export type ApplyDeprovisionCandidateResult = {
   applied: boolean
-  effectCount: number
-  accessGeneration: number | null
-  skipReason: string | null
   eventId: string | null
+  accessGeneration: number
+  globallyClear: boolean
+  plan: DirectoryDeprovisionPlan
 }
 
-/**
- * Apply deprovision: zero-effect → no generation++ / no ledger rows.
- * Non-zero → generation++ AND event+effects in one transaction.
- */
-export async function applyDirectoryDeprovisionPlan(
-  input: ApplyDeprovisionInput,
-): Promise<ApplyDeprovisionResult> {
-  if (!input.enabled) {
-    return {
-      applied: false,
-      effectCount: 0,
-      accessGeneration: null,
-      skipReason: 'deprovision_disabled',
-      eventId: null,
-    }
-  }
+type CandidateStateRow = {
+  activation_status: string | null
+  is_active: boolean
+  access_generation: string | number
+  linked_at_apply: boolean
+  org_membership_active: boolean
+  org_candidacy_clear: boolean
+  globally_clear: boolean
+  dingtalk_grant_enabled: boolean
+}
 
-  const state = await input.loadUserState()
+function hasEffect(
+  effects: PlannedEffect[],
+  type: PlannedEffect['type'],
+): boolean {
+  return effects.some((effect) => effect.type === type)
+}
+
+async function loadCandidateState(
+  client: DirectoryTransactionClient,
+  input: ApplyDeprovisionCandidateInput,
+): Promise<CandidateStateRow> {
+  const lockClause = input.write ? 'FOR UPDATE OF candidate_user' : ''
+  const result = await client.query(
+    `SELECT
+       candidate_user.activation_status,
+       candidate_user.is_active,
+       COALESCE(candidate_user.access_generation, 0) AS access_generation,
+       EXISTS (
+         SELECT 1
+           FROM directory_account_links source_link
+           JOIN directory_accounts source_account
+             ON source_account.id = source_link.directory_account_id
+           JOIN directory_integrations source_integration
+             ON source_integration.id = source_account.integration_id
+          WHERE source_link.directory_account_id = $2::uuid
+            AND source_link.local_user_id = candidate_user.id
+            AND source_link.link_status = 'linked'
+            AND source_account.integration_id = $3::uuid
+            AND source_account.is_active = FALSE
+            AND source_integration.org_id = $4::text
+       ) AS linked_at_apply,
+       EXISTS (
+         SELECT 1
+           FROM user_orgs membership
+          WHERE membership.user_id = candidate_user.id
+            AND membership.org_id = $4::text
+            AND COALESCE(membership.is_active, TRUE) = TRUE
+       ) AS org_membership_active,
+       NOT EXISTS (
+         SELECT 1
+           FROM directory_account_links sibling_link
+           JOIN directory_accounts sibling
+             ON sibling.id = sibling_link.directory_account_id
+           JOIN directory_integrations sibling_integration
+             ON sibling_integration.id = sibling.integration_id
+          WHERE sibling_link.local_user_id = candidate_user.id
+            AND sibling_link.link_status = 'linked'
+            AND sibling.is_active = TRUE
+            AND sibling_integration.org_id = $4::text
+       ) AS org_candidacy_clear,
+       NOT EXISTS (
+         SELECT 1
+           FROM directory_account_links sibling_link
+           JOIN directory_accounts sibling
+             ON sibling.id = sibling_link.directory_account_id
+          WHERE sibling_link.local_user_id = candidate_user.id
+            AND sibling_link.link_status = 'linked'
+            AND sibling.is_active = TRUE
+       ) AS globally_clear,
+       COALESCE((
+         SELECT grant_row.enabled
+           FROM user_external_auth_grants grant_row
+          WHERE grant_row.provider = 'dingtalk'
+            AND grant_row.local_user_id = candidate_user.id
+          LIMIT 1
+       ), FALSE) AS dingtalk_grant_enabled
+     FROM users candidate_user
+     WHERE candidate_user.id = $1::text
+     ${lockClause}`,
+    [
+      input.localUserId,
+      input.directoryAccountId,
+      input.integrationId,
+      input.orgId,
+    ],
+  )
+  const row = result.rows[0] as CandidateStateRow | undefined
+  if (!row) {
+    throw new Error(
+      `directory deprovision user not found: ${input.localUserId}`,
+    )
+  }
+  if (!row.linked_at_apply) {
+    throw new Error(
+      'directory deprovision source account is no longer linked to the candidate user',
+    )
+  }
+  return row
+}
+
+async function writeEffects(
+  client: DirectoryTransactionClient,
+  eventId: string,
+  localUserId: string,
+  generation: number,
+  effects: PlannedEffect[],
+): Promise<void> {
+  for (const effect of effects) {
+    await client.query(
+      `INSERT INTO directory_deprovision_effects (
+         event_id, local_user_id, org_id, effect_type,
+         before_active, after_active, access_generation_at_apply, status
+       ) VALUES ($1::uuid, $2::text, $3::text, $4::text, $5, $6, $7, 'applied')`,
+      [
+        eventId,
+        localUserId,
+        effect.orgId ?? null,
+        effect.type,
+        effect.beforeActive,
+        effect.afterActive,
+        generation,
+      ],
+    )
+  }
+}
+
+export async function applyDirectoryDeprovisionCandidate(
+  client: DirectoryTransactionClient,
+  input: ApplyDeprovisionCandidateInput,
+): Promise<ApplyDeprovisionCandidateResult> {
+  const state = await loadCandidateState(client, input)
   const plan = planDirectoryDeprovision({
     localUserId: input.localUserId,
-    activationStatus: state.activationStatus,
-    isActive: state.isActive,
-    orgId: input.orgId,
-    orgMembershipActive: state.orgMembershipActive,
-    dingtalkGrantEnabled: state.dingtalkGrantEnabled,
-    globallyClear: input.globallyClear !== false,
-  })
-
-  if (plan.effects.length === 0) {
-    return {
-      applied: false,
-      effectCount: 0,
-      accessGeneration: state.accessGeneration,
-      skipReason: plan.skipReason ?? 'zero_effect',
-      eventId: null,
-    }
-  }
-
-  if (!input.write) {
-    return {
-      applied: false,
-      effectCount: plan.effects.length,
-      accessGeneration: state.accessGeneration,
-      skipReason: 'preview_only',
-      eventId: null,
-    }
-  }
-
-  return writeDeprovisionLedger({
-    localUserId: input.localUserId,
-    orgId: input.orgId,
-    integrationId: input.integrationId,
-    directoryAccountId: input.directoryAccountId,
-    runId: input.runId,
-    triggeredBy: input.triggeredBy,
     policy: input.policy,
-    globallyClear: input.globallyClear !== false,
-    effects: plan.effects,
-    previousGeneration: state.accessGeneration,
+    activationStatus: state.activation_status,
+    isActive: state.is_active,
+    orgId: input.orgId,
+    orgMembershipActive:
+      state.org_membership_active && state.org_candidacy_clear,
+    dingtalkGrantEnabled: state.dingtalk_grant_enabled,
+    globallyClear: state.globally_clear,
   })
-}
+  const currentGeneration = Number(state.access_generation)
 
-async function writeDeprovisionLedger(options: {
-  localUserId: string
-  orgId: string
-  integrationId: string
-  directoryAccountId: string
-  runId: string | null
-  triggeredBy: string
-  policy: 'manual_review' | 'disable_grant_only' | 'mark_inactive'
-  globallyClear: boolean
-  effects: PlannedEffect[]
-  previousGeneration: number
-}): Promise<ApplyDeprovisionResult> {
-  let eventId: string | null = null
-  let nextGen = options.previousGeneration
+  if (!input.write || plan.effects.length === 0) {
+    return {
+      applied: false,
+      eventId: null,
+      accessGeneration: currentGeneration,
+      globallyClear: state.globally_clear,
+      plan,
+    }
+  }
 
-  await transaction(async (client) => {
-    // Per-user mutex
-    await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [options.localUserId])
+  const membershipChanged = hasEffect(plan.effects, 'membership_changed')
+  const grantChanged = hasEffect(plan.effects, 'grant_changed')
+  const userChanged = hasEffect(plan.effects, 'user_changed')
 
-    const gen = await client.query(
-      `UPDATE users
+  const generationResult = userChanged
+    ? await client.query(
+        `UPDATE users
           SET access_generation = COALESCE(access_generation, 0) + 1,
               is_active = FALSE,
               updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1::text
         RETURNING access_generation`,
-      [options.localUserId],
+        [input.localUserId],
+      )
+    : await client.query(
+        `UPDATE users
+          SET access_generation = COALESCE(access_generation, 0) + 1,
+              updated_at = NOW()
+        WHERE id = $1::text
+        RETURNING access_generation`,
+        [input.localUserId],
+      )
+  const generation = Number(
+    (
+      generationResult.rows[0] as
+        | { access_generation?: string | number }
+        | undefined
+    )?.access_generation,
+  )
+  if (!Number.isFinite(generation)) {
+    throw new Error('directory deprovision generation update returned no row')
+  }
+
+  if (membershipChanged) {
+    const membership = await client.query(
+      `UPDATE user_orgs
+          SET is_active = FALSE
+        WHERE user_id = $1::text
+          AND org_id = $2::text
+          AND COALESCE(is_active, TRUE) = TRUE
+          AND NOT EXISTS (
+            SELECT 1
+              FROM directory_account_links sibling_link
+              JOIN directory_accounts sibling
+                ON sibling.id = sibling_link.directory_account_id
+              JOIN directory_integrations sibling_integration
+                ON sibling_integration.id = sibling.integration_id
+             WHERE sibling_link.local_user_id = $1::text
+               AND sibling_link.link_status = 'linked'
+               AND sibling.is_active = TRUE
+               AND sibling_integration.org_id = $2::text
+          )
+        RETURNING user_id`,
+      [input.localUserId, input.orgId],
     )
-    nextGen = Number(gen.rows[0]?.access_generation ?? options.previousGeneration + 1)
-
-    // Supersede applied effects for this user.
-    await client.query(
-      `UPDATE directory_deprovision_effects
-          SET status = 'superseded', updated_at = NOW()
-        WHERE local_user_id = $1 AND status = 'applied'`,
-      [options.localUserId],
-    )
-
-    const ev = await client.query(
-      `INSERT INTO directory_deprovision_events (
-         org_id, integration_id, directory_account_id, local_user_id,
-         run_id, triggered_by, event_origin, link_witness_account_id,
-         link_witness_local_user_id, policy, globally_clear,
-         access_generation_at_apply, status
-       ) VALUES ($1,$2,$3,$4,$5,$6,'sync',$3,$4,$7,$8,$9,'applied')
-       RETURNING id`,
-      [
-        options.orgId,
-        options.integrationId,
-        options.directoryAccountId,
-        options.localUserId,
-        options.runId,
-        options.triggeredBy,
-        options.policy,
-        options.globallyClear,
-        nextGen,
-      ],
-    )
-
-    eventId = (ev.rows[0] as { id?: string } | undefined)?.id ?? null
-    if (!eventId) {
-      throw new Error('directory deprovision event INSERT returned no id')
-    }
-
-    for (const effect of options.effects) {
-      await client.query(
-        `INSERT INTO directory_deprovision_effects (
-           event_id, local_user_id, org_id, effect_type,
-           before_active, after_active, access_generation_at_apply, status
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'applied')`,
-        [
-          eventId,
-          options.localUserId,
-          effect.orgId ?? options.orgId,
-          effect.type,
-          effect.beforeActive,
-          effect.afterActive,
-          nextGen,
-        ],
+    if (!membership.rows[0]) {
+      throw new Error(
+        'directory deprovision membership changed after planning; transaction aborted',
       )
     }
-  })
+  }
+
+  if (grantChanged) {
+    await client.query(
+      `INSERT INTO user_external_auth_grants (
+         provider, local_user_id, enabled, granted_by, created_at, updated_at
+       ) VALUES ('dingtalk', $1::text, FALSE, 'system:directory-deprovision', NOW(), NOW())
+       ON CONFLICT (provider, local_user_id)
+       DO UPDATE SET enabled = FALSE,
+                     granted_by = EXCLUDED.granted_by,
+                     updated_at = NOW()`,
+      [input.localUserId],
+    )
+  }
+
+  await client.query(
+    `UPDATE directory_deprovision_effects
+        SET status = 'superseded', updated_at = NOW()
+      WHERE local_user_id = $1::text
+        AND status = 'applied'`,
+    [input.localUserId],
+  )
+  await client.query(
+    `UPDATE directory_deprovision_events
+        SET status = 'superseded',
+            resolved_at = NOW(),
+            resolved_by = $2::text,
+            resolve_note = 'superseded by a newer directory deprovision event',
+            updated_at = NOW()
+      WHERE local_user_id = $1::text
+        AND status = 'applied'`,
+    [input.localUserId, input.triggeredBy],
+  )
+
+  const eventResult = await client.query(
+    `INSERT INTO directory_deprovision_events (
+       org_id, integration_id, directory_account_id, local_user_id,
+       run_id, triggered_by, event_origin, link_witness_account_id,
+       link_witness_local_user_id, policy, globally_clear,
+       access_generation_at_apply, status
+     ) VALUES (
+       $1::text, $2::uuid, $3::uuid, $4::text,
+       $5::uuid, $6::text, 'sync', $3::uuid,
+       $4::text, $7::text, $8::boolean, $9, 'applied'
+     )
+     RETURNING id`,
+    [
+      input.orgId,
+      input.integrationId,
+      input.directoryAccountId,
+      input.localUserId,
+      input.runId,
+      input.triggeredBy,
+      input.policy,
+      state.globally_clear,
+      generation,
+    ],
+  )
+  const eventId = (eventResult.rows[0] as { id?: string } | undefined)?.id
+  if (!eventId) {
+    throw new Error('directory deprovision event INSERT returned no id')
+  }
+
+  await writeEffects(
+    client,
+    eventId,
+    input.localUserId,
+    generation,
+    plan.effects,
+  )
 
   return {
     applied: true,
-    effectCount: options.effects.length,
-    accessGeneration: nextGen,
-    skipReason: null,
     eventId,
+    accessGeneration: generation,
+    globallyClear: state.globally_clear,
+    plan,
   }
-}
-
-/** D5 helper — supersede open effects + bump generation (other writers). */
-export async function supersedeOpenDeprovisionEffects(userId: string): Promise<void> {
-  await transaction(async (client) => {
-    await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [userId])
-    await client.query(
-      `UPDATE users
-          SET access_generation = COALESCE(access_generation, 0) + 1,
-              updated_at = NOW()
-        WHERE id = $1`,
-      [userId],
-    )
-    await client.query(
-      `UPDATE directory_deprovision_effects
-          SET status = 'superseded', updated_at = NOW()
-        WHERE local_user_id = $1 AND status = 'applied'`,
-      [userId],
-    )
-  })
-}
-
-export async function countOpenDeprovisionEffects(userId: string): Promise<number> {
-  const r = await query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM directory_deprovision_effects
-      WHERE local_user_id = $1 AND status = 'applied'`,
-    [userId],
-  )
-  return r.rows[0]?.n ?? 0
 }

@@ -58,21 +58,41 @@ function stubClient(
         // evaluate the predicate — see the scope note.
         return { rows: candidates }
       }
-      if (/INSERT INTO user_external_auth_grants/i.test(sql) || /UPDATE users SET is_active = FALSE/i.test(sql)) {
+      if (/INSERT INTO user_external_auth_grants/i.test(sql)) {
         return { rows: [] }
       }
       if (/SELECT org_id\s+FROM directory_integrations/i.test(sql)) {
         return { rows: [{ org_id: STUB_ORG_ID }] }
       }
-      if (/FROM user_orgs WHERE user_id = \$1::text AND org_id = \$2::text\s+FOR UPDATE/i.test(sql)) {
-        return { rows: [] }
+      if (/FROM users candidate_user/i.test(sql)) {
+        const userId = String(params?.[0] ?? '')
+        return {
+          rows: [{
+            activation_status: 'activated',
+            is_active: true,
+            access_generation: 0,
+            linked_at_apply: true,
+            org_membership_active: true,
+            org_candidacy_clear: true,
+            globally_clear: !notGloballyClear.has(userId),
+            dingtalk_grant_enabled: true,
+          }],
+        }
       }
       if (/UPDATE user_orgs\s+SET is_active = FALSE/i.test(sql)) {
-        return { rows: [] }
+        return { rows: [{ user_id: String(params?.[0] ?? '') }] }
       }
-      if (/FROM UNNEST\(\$1::text\[\]\) AS candidate_user/i.test(sql)) {
-        const requested = (params?.[0] as string[] | undefined) ?? []
-        return { rows: requested.filter((id) => !notGloballyClear.has(id)).map((id) => ({ local_user_id: id })) }
+      if (/UPDATE users\s+SET access_generation/i.test(sql)) {
+        return { rows: [{ access_generation: 1 }] }
+      }
+      if (/INSERT INTO directory_deprovision_events/i.test(sql)) {
+        return { rows: [{ id: 'event-1' }] }
+      }
+      if (
+        /directory_deprovision_(?:events|effects)/i.test(sql)
+        || /INSERT INTO directory_deprovision_effects/i.test(sql)
+      ) {
+        return { rows: [] }
       }
       // Anything else is drift: a new query appeared that no test has reasoned about.
       throw new Error(`Unhandled SQL in deprovision stub:\n${sql}`)
@@ -81,7 +101,7 @@ function stubClient(
 }
 
 const wrote = (queries: string[], pattern: RegExp) => queries.some((sql) => pattern.test(sql))
-const DEACTIVATES_USER = /UPDATE users SET is_active = FALSE/i
+const DEACTIVATES_USER = /UPDATE users[\s\S]*is_active = FALSE/i
 const DEACTIVATES_USER_ORG = /UPDATE user_orgs\s+SET is_active = FALSE/i
 const DISABLES_GRANT = /INSERT INTO user_external_auth_grants/i
 
@@ -90,6 +110,8 @@ const CANDIDATE = { directory_account_id: 'acct-1', local_user_id: 'user-1', dep
 describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', () => {
   const baseOptions = {
     integrationId: 'dir-1',
+    runId: 'run-1',
+    triggeredBy: 'unit-test',
     deactivatedAccountIds: ['acct-1'],
     syncedAccountCount: 100,
     integrationDefaultPolicy: 'mark_inactive',

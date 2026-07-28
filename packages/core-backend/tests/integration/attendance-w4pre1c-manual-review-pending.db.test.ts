@@ -1,6 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { query } from '../../src/db/pg'
 import { applyDirectoryDeprovisionPolicies } from '../../src/directory/directory-sync'
+import {
+  createDirectoryDeprovisionRun,
+  deleteDirectoryDeprovisionEvidence,
+} from '../utils/directory-deprovision-fixtures'
 
 /**
  * W4-PRE-1c item B, owner case ④ ("人工复核") — owner 裁决② (#4522 rev3 review; the only
@@ -27,6 +31,7 @@ const uid = (name: string) => `w4pre1cmr-${name}-${TS}`
 describeIfDatabase('W4-PRE-1c case ④ — manual_review keeps membership ACTIVE and exposes a pending-confirmation state (real DB)', () => {
   let integrationId = ''
   let orgId = ''
+  let runId = ''
 
   const client = {
     query: (sql: string, params?: unknown[]) =>
@@ -46,9 +51,11 @@ describeIfDatabase('W4-PRE-1c case ④ — manual_review keeps membership ACTIVE
     )).rows[0]
     integrationId = row.id
     orgId = row.org_id
+    runId = await createDirectoryDeprovisionRun(integrationId)
   })
 
   afterEach(async () => {
+    await deleteDirectoryDeprovisionEvidence([integrationId])
     await query(`DELETE FROM user_external_auth_grants WHERE local_user_id LIKE $1`, [`w4pre1cmr-%-${TS}`])
     await query(`DELETE FROM user_orgs WHERE user_id LIKE $1`, [`w4pre1cmr-%-${TS}`])
     await query(`DELETE FROM directory_accounts WHERE integration_id = $1`, [integrationId]) // links cascade
@@ -77,6 +84,8 @@ describeIfDatabase('W4-PRE-1c case ④ — manual_review keeps membership ACTIVE
 
     const outcome = await applyDirectoryDeprovisionPolicies(client, {
       integrationId,
+      runId,
+      triggeredBy: 'test:w4pre1c-manual-review',
       deactivatedAccountIds: [accountId],
       syncedAccountCount: 50,
       integrationDefaultPolicy: 'manual_review',
@@ -121,6 +130,8 @@ describeIfDatabase('W4-PRE-1c case ④ — manual_review keeps membership ACTIVE
 
     const outcome = await applyDirectoryDeprovisionPolicies(client, {
       integrationId,
+      runId,
+      triggeredBy: 'test:w4pre1c-manual-review',
       deactivatedAccountIds: [accountId],
       syncedAccountCount: 50,
       integrationDefaultPolicy: 'mark_inactive',
@@ -152,6 +163,8 @@ describeIfDatabase('W4-PRE-1c case ④ — manual_review keeps membership ACTIVE
 
     const outcome = await applyDirectoryDeprovisionPolicies(client, {
       integrationId,
+      runId,
+      triggeredBy: 'test:w4pre1c-manual-review',
       deactivatedAccountIds: [accountId],
       syncedAccountCount: 50,
       integrationDefaultPolicy: 'manual_review',
