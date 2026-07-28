@@ -83,6 +83,8 @@ async function seedActivationSource(options: {
   accountCorpId?: string
   integrationCorpId?: string
   integrationStatus?: string
+  openId?: string
+  unionId?: string
 }) {
   const integrationCorpId = options.integrationCorpId ?? `corp-${ORG}`
   const integration = await query<{ id: string }>(
@@ -99,14 +101,17 @@ async function seedActivationSource(options: {
   )
   const account = await query<{ id: string }>(
     `INSERT INTO directory_accounts
-       (integration_id, provider, corp_id, external_user_id, external_key, name, is_active)
+       (integration_id, provider, corp_id, external_user_id, external_key, name,
+        open_id, union_id, is_active)
      VALUES ($1::uuid, $2, $3, 'ext-activation-source',
-             'dingtalk:activation-source:ext', 'Activation Source', $4)
+             'dingtalk:activation-source:ext', 'Activation Source', $4, $5, $6)
      RETURNING id::text AS id`,
     [
       integration.rows[0].id,
       options.accountProvider ?? 'dingtalk',
       options.accountCorpId ?? integrationCorpId,
+      options.openId ?? null,
+      options.unionId ?? null,
       options.accountActive ?? true,
     ],
   )
@@ -292,15 +297,23 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
        VALUES ($1, 'sso-source-user', 'SSO Source', 'x', FALSE, 'pending_activation', FALSE)`,
       [USER],
     )
-    const source = await seedActivationSource({ linkedUserId: USER })
+    const source = await seedActivationSource({
+      linkedUserId: USER,
+      openId: 'oauth-open-1',
+      unionId: 'oauth-union-1',
+    })
 
     await activatePendingUser({
       userId: USER,
       mode: 'sso',
       adminUserId: 'admin-test',
-      orgId: ORG,
       enableDingTalkGrant: true,
       directoryAccountId: source.accountId,
+      expectedDingTalkIdentity: {
+        corpId: `corp-${ORG}`,
+        openId: 'oauth-open-1',
+        unionId: 'oauth-union-1',
+      },
     })
 
     const committed = await query<{
@@ -326,6 +339,57 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
       is_active: true,
       membership_active: true,
       grant_enabled: true,
+    })
+  })
+
+  it('T3 SSO rejects an OAuth profile that does not match the locked source row', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'oauth-mismatch-user', 'OAuth Mismatch', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({
+      linkedUserId: USER,
+      openId: 'oauth-open-authoritative',
+      unionId: 'oauth-union-authoritative',
+    })
+
+    await expect(
+      activatePendingUser({
+        userId: USER,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        orgId: ORG,
+        enableDingTalkGrant: true,
+        directoryAccountId: source.accountId,
+        expectedDingTalkIdentity: {
+          corpId: `corp-${ORG}`,
+          openId: 'oauth-open-attacker',
+          unionId: 'oauth-union-authoritative',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INELIGIBLE' })
+
+    const residue = await query<{
+      activation_status: string
+      is_active: boolean
+      memberships: number
+      grants: number
+    }>(
+      `SELECT u.activation_status,
+              u.is_active,
+              (SELECT count(*)::int FROM user_orgs WHERE user_id = u.id) AS memberships,
+              (SELECT count(*)::int FROM user_external_auth_grants WHERE local_user_id = u.id) AS grants
+         FROM users u
+        WHERE u.id = $1`,
+      [USER],
+    )
+    expect(residue.rows[0]).toMatchObject({
+      activation_status: 'pending_activation',
+      is_active: false,
+      memberships: 0,
+      grants: 0,
     })
   })
 

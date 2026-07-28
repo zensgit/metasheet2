@@ -331,6 +331,7 @@ describe('activatePendingUser (T3)', () => {
             integration_provider: 'dingtalk',
             account_corp_id: 'corp-1',
             integration_corp_id: 'corp-1',
+            integration_org_id: 'org-1',
           },
           {
             account_active: true,
@@ -341,10 +342,12 @@ describe('activatePendingUser (T3)', () => {
             integration_provider: 'dingtalk',
             account_corp_id: 'corp-2',
             integration_corp_id: 'corp-2',
+            integration_org_id: 'org-2',
           },
         ],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
@@ -359,6 +362,9 @@ describe('activatePendingUser (T3)', () => {
       activationStatus: 'activated',
       localPasswordSet: false,
     })
+    const membershipWrite = pgMocks.query.mock.calls.find((call) =>
+      String(call[0]).includes('INSERT INTO user_orgs'))
+    expect(membershipWrite?.[1]).toEqual(['u1', 'org-2'])
   })
 
   it('rejects activate when user has no claimable identifier', async () => {

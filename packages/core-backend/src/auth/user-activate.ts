@@ -50,6 +50,12 @@ export type ActivateUserInput = {
   enableDingTalkGrant?: boolean
   /** SSO: directory account that must be active + linked to this user. */
   directoryAccountId?: string | null
+  /** OAuth SSO: provider identity that the locked directory source must still match. */
+  expectedDingTalkIdentity?: {
+    corpId: string
+    openId?: string | null
+    unionId?: string | null
+  } | null
 }
 
 export type ActivateUserResult = {
@@ -104,6 +110,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   let passwordHash: string | null = null
   let localPasswordSet = false
   let mustChangePassword = false
+  let membershipOrgId = input.orgId ?? null
 
   if (input.mode === 'temp_password') {
     temporaryPassword = input.temporaryPassword?.trim() || generateTempPassword()
@@ -134,11 +141,15 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     }
 
     if (input.mode === 'sso' || input.directoryAccountId) {
-      await assertDirectorySourceActiveForActivate(client, {
+      const sourceOrgId = await assertDirectorySourceActiveForActivate(client, {
         userId,
         directoryAccountId: input.directoryAccountId ?? null,
         requireDingTalkSso: input.mode === 'sso',
+        expectedDingTalkIdentity: input.expectedDingTalkIdentity ?? null,
       })
+      if (input.mode === 'sso') {
+        membershipOrgId = sourceOrgId
+      }
     }
 
     const updated = await client.query(
@@ -159,7 +170,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     }
 
     // Active membership for current org when provided.
-    if (input.orgId) {
+    if (membershipOrgId) {
       // `user_orgs` is (user_id, org_id, is_active, created_at) with PK (user_id, org_id) — there
       // is no `updated_at`. Writing one raised `42703` and aborted this transaction, which is why
       // the "schema variance" fallback underneath could never help: once a statement fails inside
@@ -173,7 +184,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
          VALUES ($1, $2, TRUE, NOW())
          ON CONFLICT (user_id, org_id) DO UPDATE
            SET is_active = TRUE`,
-        [userId, input.orgId],
+        [userId, membershipOrgId],
       )
     }
 
@@ -268,6 +279,9 @@ type DirectorySourceRow = {
   integration_provider: string | null
   account_corp_id: string | null
   integration_corp_id: string | null
+  account_open_id: string | null
+  account_union_id: string | null
+  integration_org_id: string | null
 }
 
 async function assertDirectorySourceActiveForActivate(
@@ -276,8 +290,9 @@ async function assertDirectorySourceActiveForActivate(
     userId: string
     directoryAccountId: string | null
     requireDingTalkSso: boolean
+    expectedDingTalkIdentity: ActivateUserInput['expectedDingTalkIdentity']
   },
-): Promise<void> {
+): Promise<string> {
   // Closed set: linked directory account must be active; integration active.
   // Explicit id: account row + link fail-closed (INNER semantics enforced in TS after LEFT JOIN
   // so we can distinguish SOURCE_MISSING account-not-found from LINK_MISMATCH).
@@ -286,7 +301,9 @@ async function assertDirectorySourceActiveForActivate(
     ? `SELECT da.id, da.is_active AS account_active, di.status AS integration_status,
               l.local_user_id, l.link_status,
               da.provider AS account_provider, di.provider AS integration_provider,
-              da.corp_id AS account_corp_id, di.corp_id AS integration_corp_id
+              da.corp_id AS account_corp_id, di.corp_id AS integration_corp_id,
+              da.open_id AS account_open_id, da.union_id AS account_union_id,
+              di.org_id AS integration_org_id
          FROM directory_accounts da
          JOIN directory_integrations di ON di.id = da.integration_id
          LEFT JOIN directory_account_links l ON l.directory_account_id = da.id
@@ -294,7 +311,9 @@ async function assertDirectorySourceActiveForActivate(
     : `SELECT da.id, da.is_active AS account_active, di.status AS integration_status,
               l.local_user_id, l.link_status,
               da.provider AS account_provider, di.provider AS integration_provider,
-              da.corp_id AS account_corp_id, di.corp_id AS integration_corp_id
+              da.corp_id AS account_corp_id, di.corp_id AS integration_corp_id,
+              da.open_id AS account_open_id, da.union_id AS account_union_id,
+              di.org_id AS integration_org_id
          FROM directory_account_links l
          JOIN directory_accounts da ON da.id = l.directory_account_id
          JOIN directory_integrations di ON di.id = da.integration_id
@@ -334,12 +353,39 @@ async function assertDirectorySourceActiveForActivate(
     const integrationProvider = String(candidate.integration_provider || '').toLowerCase()
     const accountCorp = String(candidate.account_corp_id || '').trim()
     const integrationCorp = String(candidate.integration_corp_id || '').trim()
-    return (
+    const providerAndCorpEligible = (
       accountProvider === 'dingtalk'
       && integrationProvider === 'dingtalk'
       && accountCorp.length > 0
       && accountCorp === integrationCorp
     )
+    if (!providerAndCorpEligible) return false
+
+    const expected = options.expectedDingTalkIdentity
+    if (!expected) return true
+    const expectedCorp = String(expected.corpId || '').trim()
+    const expectedOpenId = String(expected.openId || '').trim()
+    const expectedUnionId = String(expected.unionId || '').trim()
+    if (
+      expectedCorp.length === 0
+      || (expectedOpenId.length === 0 && expectedUnionId.length === 0)
+      || accountCorp !== expectedCorp
+    ) {
+      return false
+    }
+    if (
+      expectedOpenId.length > 0
+      && String(candidate.account_open_id || '').trim() !== expectedOpenId
+    ) {
+      return false
+    }
+    if (
+      expectedUnionId.length > 0
+      && String(candidate.account_union_id || '').trim() !== expectedUnionId
+    ) {
+      return false
+    }
+    return true
   }
 
   const eligibleRows = options.requireDingTalkSso
@@ -351,12 +397,18 @@ async function assertDirectorySourceActiveForActivate(
       'ACTIVATE_SOURCE_INELIGIBLE',
     )
   }
-  if (eligibleRows.some(
+  const activeEligible = eligibleRows.find(
     (candidate) =>
       candidate.account_active === true
       && String(candidate.integration_status || '').toLowerCase() === 'active',
-  )) {
-    return
+  )
+  if (activeEligible) {
+    const sourceOrgId = String(activeEligible.integration_org_id || '').trim()
+    if (sourceOrgId) return sourceOrgId
+    throwCoded(
+      'Directory source is not a DingTalk account eligible for SSO activation',
+      'ACTIVATE_SOURCE_INELIGIBLE',
+    )
   }
   if (eligibleRows.some(
     (candidate) => String(candidate.integration_status || '').toLowerCase() !== 'active',
