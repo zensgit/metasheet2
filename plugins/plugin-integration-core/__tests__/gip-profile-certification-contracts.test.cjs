@@ -18,6 +18,7 @@ const {
   GIP_CROSS_ROLE_TEMPORAL_POLICIES,
   GIP_CONSISTENCY_REQUIREMENT_STATUSES,
   GIP_PROFILE_ERROR_REASONS,
+  PAGED_READ_LEGAL_COMBINATIONS,
   GipProfileContractError,
   isValidProfileId,
   normalizeCertifiedReadActionProfile,
@@ -227,6 +228,109 @@ function crossDimensionLegality() {
   })), 'COMPLETENESS_COMBINATION_INVALID')
 }
 
+// ── 4b. Frozen PAGED_READ legal-combination table ──
+function pagedReadLegalCombinationTable() {
+  assert.deepEqual(PAGED_READ_LEGAL_COMBINATIONS, [
+    { consistencyProof: 'SOURCE_SNAPSHOT_TXN', continuationLifetime: 'CONNECTION_BOUND' },
+    { consistencyProof: 'IMMUTABLE_SNAPSHOT_TOKEN', continuationLifetime: 'DURABLE_TOKEN' },
+  ])
+  assert.ok(Object.isFrozen(PAGED_READ_LEGAL_COMBINATIONS))
+  for (const row of PAGED_READ_LEGAL_COMBINATIONS) {
+    assert.ok(Object.isFrozen(row))
+    const certified = normalizeCertifiedReadActionProfile(fixtureProfile({
+      certificate: {
+        acquisitionMode: 'PAGED_READ',
+        supportedConsistencyProofs: [row.consistencyProof],
+        continuationLifetime: row.continuationLifetime,
+        supportedCompletenessProofs: ['SHORT_PAGE'],
+      },
+    }))
+    assert.equal(certified.certificate.acquisitionMode, 'PAGED_READ')
+    assert.equal(certified.certificate.continuationLifetime, row.continuationLifetime)
+    assert.deepEqual([...certified.certificate.supportedConsistencyProofs], [row.consistencyProof])
+  }
+
+  const refusedByRule = (supportedConsistencyProofs, continuationLifetime, expectedRule) => {
+    let produced = null
+    let caught = null
+    try {
+      produced = normalizeCertifiedReadActionProfile(fixtureProfile({
+        certificate: {
+          acquisitionMode: 'PAGED_READ',
+          supportedConsistencyProofs,
+          continuationLifetime,
+          supportedCompletenessProofs: ['SHORT_PAGE'],
+        },
+      }))
+    } catch (error) {
+      caught = error
+    }
+    assert.equal(produced, null, 'an illegal PAGED_READ profile must not be silently downgraded')
+    assert.ok(caught instanceof GipProfileContractError)
+    assert.equal(caught.reason, 'ILLEGAL_CAPABILITY_COMBINATION')
+    assert.equal(caught.details.rule, expectedRule)
+    return caught
+  }
+
+  const unmapped = refusedByRule(
+    ['MONOTONIC_VERSION_PIN'],
+    'CONNECTION_BOUND',
+    'PAGED_READ_LEGAL_COMBINATION',
+  )
+  refusedByRule(
+    ['IMMUTABLE_SNAPSHOT_TOKEN'],
+    'CONNECTION_BOUND',
+    'PAGED_READ_LEGAL_COMBINATION',
+  )
+  refusedByRule(
+    ['SOURCE_SNAPSHOT_TXN'],
+    'SINGLE_REQUEST',
+    'PAGED_READ_LEGAL_COMBINATION',
+  )
+  refusedByRule(
+    ['SOURCE_SNAPSHOT_TXN', 'MONOTONIC_VERSION_PIN'],
+    'CONNECTION_BOUND',
+    'PAGED_READ_LEGAL_COMBINATION',
+  )
+  refusedByRule([], 'CONNECTION_BOUND', 'PAGED_READ_REQUIRES_CONSISTENCY_PROOF')
+
+  // Rule 5 is PAGED_READ-scoped: the ratified enterprise watermark combination
+  // remains legal, and an honest empty set remains legal for bounded single reads.
+  normalizeCertifiedReadActionProfile(fixtureProfile({
+    certificate: {
+      acquisitionMode: 'CHANGE_FEED',
+      continuationLifetime: 'DURABLE_TOKEN',
+      supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'],
+      supportedCompletenessProofs: ['DECLARED_TOTAL'],
+    },
+  }))
+  const bounded = normalizeCertifiedReadActionProfile(fixtureProfile({
+    certificate: {
+      acquisitionMode: 'BOUNDED_READ',
+      continuationLifetime: 'SINGLE_REQUEST',
+      supportedConsistencyProofs: [],
+      supportedCompletenessProofs: ['SHORT_PAGE'],
+    },
+  }))
+  assert.deepEqual([...bounded.certificate.supportedConsistencyProofs], [])
+
+  // Recovery derivation delegates to the same full validator.
+  const recoveryError = rejectsWith(() => deriveRecoveryStrategy({
+    acquisitionMode: 'PAGED_READ',
+    continuationLifetime: 'CONNECTION_BOUND',
+    supportedConsistencyProofs: ['MONOTONIC_VERSION_PIN'],
+    supportedCompletenessProofs: ['SHORT_PAGE'],
+  }), 'ILLEGAL_CAPABILITY_COMBINATION')
+  assert.equal(recoveryError.details.rule, 'PAGED_READ_LEGAL_COMBINATION')
+
+  // Public errors remain values-free: only the rule token and count are exposed.
+  const serialized = JSON.stringify({ message: unmapped.message, details: unmapped.details })
+  assert.ok(!serialized.includes('MONOTONIC_VERSION_PIN'))
+  assert.ok(!serialized.includes('SOURCE_SNAPSHOT_TXN'))
+  assert.ok(!serialized.includes('IMMUTABLE_SNAPSHOT_TOKEN'))
+  assert.equal(unmapped.details.declaredProofCount, 1)
+}
+
 // ── 5. Recovery derivation matrix (derived, never declared) ──
 function recoveryDerivation() {
   // deriveRecoveryStrategy validates the FULL certificate (review P2 fail-closed), so
@@ -396,6 +500,7 @@ function main() {
   readProfileHappyPath()
   readProfileFailClosed()
   crossDimensionLegality()
+  pagedReadLegalCombinationTable()
   recoveryDerivation()
   applyProfile()
   evidenceShapes()
