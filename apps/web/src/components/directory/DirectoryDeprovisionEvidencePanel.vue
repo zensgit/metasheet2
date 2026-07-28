@@ -282,7 +282,10 @@ async function runPreview() {
   loadingPreview.value = true
   preview.value = null
   try {
-    const response = await apiFetch(`/api/admin/directory/deprovision/preview/${encodeURIComponent(userId)}`)
+    const params = new URLSearchParams({ integrationId: props.integrationId })
+    const response = await apiFetch(
+      `/api/admin/directory/deprovision/preview/${encodeURIComponent(userId)}?${params.toString()}`,
+    )
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
       setError(body?.error?.message || body?.error?.code || '预览失败')

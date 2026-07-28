@@ -227,6 +227,11 @@ export default defineConfig({
       // wired into the approval real-DB step (both points asserted by
       // scripts/ops/directory-grant-table-ci-wiring.test.mjs).
       'tests/integration/directory-deprovision-grant-table.db.test.ts',
+      // D3 Rev 4.3 evidence-ledger migration: isolated-schema upgrade, replay with evidence,
+      // fail-before-DDL weak-data guard, FK/trigger invariants, and ownership-safe down.
+      // DATABASE_URL-gated; excluded here and wired as a whole file into the approval real-DB
+      // step, with both points pinned by directory-deprovision-ledger-ci-wiring.test.mjs.
+      'tests/integration/directory-deprovision-ledger-schema.db.test.ts',
       // DingTalk multi-corp external-key isolation: corp-scoped uniqueness, upgrade migration,
       // real-sync coexistence, and same-corp/cross-corp identity matching controls.
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a

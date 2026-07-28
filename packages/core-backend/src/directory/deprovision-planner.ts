@@ -5,10 +5,7 @@
  * Pending_activation users produce zero offboarding effects (no fake deprovision).
  */
 
-export type DeprovisionEffectType =
-  | 'clear_user_orgs'
-  | 'disable_dingtalk_grant'
-  | 'set_user_inactive'
+export type DeprovisionEffectType = 'membership_changed' | 'grant_changed' | 'user_changed'
 
 export type PlannedEffect = {
   type: DeprovisionEffectType
@@ -21,11 +18,16 @@ export type DirectoryDeprovisionPlanInput = {
   localUserId: string
   activationStatus: string | null | undefined
   isActive: boolean
-  /** Current active user_org memberships for this user. */
-  activeOrgIds: string[]
+  /** Source integration org for this event. */
+  orgId: string
+  /** Whether the source org membership is currently active. */
+  orgMembershipActive: boolean
   /** Whether DingTalk grant is currently enabled. */
   dingtalkGrantEnabled: boolean
-  /** Policy: when true, plan will clear all orgs + grant + is_active. */
+  /**
+   * No other active linked directory account exists anywhere. This gates the
+   * grant/user effects only; the source-org membership is independently scoped.
+   */
   globallyClear: boolean
 }
 
@@ -38,9 +40,7 @@ export type DirectoryDeprovisionPlan = {
 /**
  * Prospective planner: pending users never invent offboarding effects.
  */
-export function planDirectoryDeprovision(
-  input: DirectoryDeprovisionPlanInput,
-): DirectoryDeprovisionPlan {
+export function planDirectoryDeprovision(input: DirectoryDeprovisionPlanInput): DirectoryDeprovisionPlan {
   if (input.activationStatus === 'pending_activation') {
     return {
       localUserId: input.localUserId,
@@ -51,25 +51,28 @@ export function planDirectoryDeprovision(
 
   const effects: PlannedEffect[] = []
 
+  if (input.orgMembershipActive) {
+    effects.push({
+      type: 'membership_changed',
+      orgId: input.orgId,
+      beforeActive: true,
+      afterActive: false,
+    })
+  }
+
   if (input.globallyClear) {
-    for (const orgId of input.activeOrgIds) {
-      effects.push({
-        type: 'clear_user_orgs',
-        orgId,
-        beforeActive: true,
-        afterActive: false,
-      })
-    }
     if (input.dingtalkGrantEnabled) {
       effects.push({
-        type: 'disable_dingtalk_grant',
+        type: 'grant_changed',
+        orgId: null,
         beforeActive: true,
         afterActive: false,
       })
     }
     if (input.isActive) {
       effects.push({
-        type: 'set_user_inactive',
+        type: 'user_changed',
+        orgId: null,
         beforeActive: true,
         afterActive: false,
       })
