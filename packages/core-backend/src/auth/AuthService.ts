@@ -15,6 +15,7 @@ import { supportsAttendanceSelfService } from '../config/product-mode'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
+  assertAliasCutoverAllowed,
   findUserIdByLoginAlias,
   isAuthLoginAliasCutoverEnabled,
 } from './login-alias-service'
@@ -306,6 +307,10 @@ export class AuthService {
       const safeUser = this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
       return { user: safeUser, token }
     } catch (error) {
+      // Surface alias cutover misconfiguration to operators (do not swallow as null login).
+      if ((error as { code?: string } | null)?.code === 'ALIAS_CUTOVER_BLOCKED') {
+        throw error
+      }
       this.logger.error('Login error', error instanceof Error ? error : undefined)
       return null
     }
@@ -450,7 +455,11 @@ export class AuthService {
         const pool = poolManager.get()
 
         // T2b: alias-only login (no OR fallback to users.email/username/mobile).
+        // Enforce admin-alias readiness gate on every auth path that would use aliases —
+        // enabling AUTH_LOGIN_USE_ALIASES without a password-capable admin must not lock
+        // operators out while reporting ready:true elsewhere.
         if (isAuthLoginAliasCutoverEnabled()) {
+          await assertAliasCutoverAllowed()
           const userId = await findUserIdByLoginAlias(trimmedIdentifier)
           if (!userId) return null
           const byId = await pool.query(
@@ -492,10 +501,16 @@ export class AuthService {
           return this.mapAuthUserRow(result.rows[0] as UserRow)
         }
       } catch (dbError) {
+        if ((dbError as { code?: string } | null)?.code === 'ALIAS_CUTOVER_BLOCKED') {
+          throw dbError
+        }
         this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
       return null
     } catch (error) {
+      if ((error as { code?: string } | null)?.code === 'ALIAS_CUTOVER_BLOCKED') {
+        throw error
+      }
       this.logger.error('Get user by identifier error', error instanceof Error ? error : undefined)
       return null
     }

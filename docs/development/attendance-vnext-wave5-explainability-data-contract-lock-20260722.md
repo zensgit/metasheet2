@@ -814,9 +814,21 @@ admin/self，manager 由 W5-10 管」）——据此收敛为 **admin/self 双�
 
 ## 10. 完成定义与 ratify 流程
 
-**完成定义**：三切片全合 + 每片验证 MD 在 main + 红线四条各有存活的负向断言 + 章程 §9「解释完整性」
-指标（L427）以合成 org 实测记录（六类各至少一条 grounded 解释 + 一条 undeterminable fail-closed
-展示，均截图 + DOM 断言）。**证据面 values-free 义务（P2-a）**：截图仅用合成数据（真实用户数据
+**完成定义**：三切片全合（**按 owner 2026-07-24 裁决，事实为四片：W5-0 / W5-7 / W5-1 / W5-2**）+ 每片验证 MD 在 main + 红线四条各有存活的负向断言 + 章程 §9「解释完整性」
+指标（L427）以合成 org 实测记录（**六类各至少一条达到该类在本锁 RATIFIED 数据模型下诚实可达上限的
+正向解释 + 一条 `undeterminable` fail-closed 展示；①-⑤ 的正向上限为 `partial`，⑥ 为 `grounded`；
+均有截图与 DOM 断言**）。
+
+> **owner 窄 amendment（2026-07-24，#4582 owner decision，对 exact head `8ba22ac74`）**：上句取代
+> 原句「六类各至少一条 grounded 解释」。原句与本锁自身条款内部冲突——§3.1 定义
+> `confidence = grounded | partial | undeterminable`（`grounded` 是**判别联合的字面枚举值**，
+> 不作「有据可依」的形容词释义），而 §3.2 / §3.3④E2 / §3.3⑤E3 又**强制** ①-⑤ 的依据环为非冻结，
+> 且 `deriveAttendanceDecisionTraceConfidence` 要求**每环** `snapshot_frozen` 才判 `grounded`
+> ⇒ ①-⑤ 的字面 `grounded` **结构上不可达**。本 amendment 以**诚实 posture ceiling** 取代该冲突句。
+> **不授权**：新增快照写入、规则版本化、省略任何必要 basis 环、或任何 runtime 变更。
+> 同轮 owner 裁决另二项（记录同处）：本波交付计数按事实为**四片**（W5-0 / W5-7 / W5-1 / W5-2），
+> 锁中「三切片」是 W5-7 独立前置票加入前的陈旧计数；「每片验证 MD」由**一份含四个逐片验证章**的 MD
+> 满足实质要求，不要求拆成四个文件。**证据面 values-free 义务（P2-a）**：截图仅用合成数据（真实用户数据
 零入公开验证证据）；trace response body 不入验证 MD/CI artifact/测试日志（§3.1 面分级 + G2）。本锁不改变：S7 flag / scheduler env / 各引擎默认 OFF 的 operator 项
 （解释面把「关闭」如实呈现为 `not_in_effect`，不以任何形式促发开启）。
 

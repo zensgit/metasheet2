@@ -92,20 +92,33 @@ describe('login-alias-service (T2a/T2b)', () => {
     expect(sqls.filter((s) => s.includes('INSERT INTO user_login_aliases')).length).toBe(3)
   })
 
-  it('T2b gate refuses cutover without admin alias', async () => {
+  it('T2b gate refuses cutover without platform-admin alias', async () => {
     process.env.AUTH_LOGIN_USE_ALIASES = '1'
-    pgMocks.query
-      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
-      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
+    // Single query: user_roles.role_id = 'admin' join — no LIKE %admin% second path
+    pgMocks.query.mockResolvedValueOnce({ rows: [{ n: 0 }] })
     await expect(assertAliasCutoverAllowed()).rejects.toMatchObject({
       code: 'ALIAS_CUTOVER_BLOCKED',
     })
+    expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain("role_id = 'admin'")
+    expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).not.toMatch(/%admin%/)
   })
 
-  it('T2b gate allows cutover when active admin has alias', async () => {
+  it('T2b gate allows cutover only when platform admin has password+alias', async () => {
     process.env.AUTH_LOGIN_USE_ALIASES = '1'
     pgMocks.query.mockResolvedValue({ rows: [{ n: 1 }] })
     await expect(assertAliasCutoverAllowed()).resolves.toBeUndefined()
     await expect(hasActiveAdminWithPasswordAlias()).resolves.toBe(true)
+    const sql = String(pgMocks.query.mock.calls[0]?.[0] || '')
+    expect(sql).toContain("role_id = 'admin'")
+    expect(sql).toContain('password_hash')
+    expect(sql).toContain('user_login_aliases')
+  })
+
+  it('T2b readiness query requires non-empty password_hash (not just local_password_set)', async () => {
+    pgMocks.query.mockResolvedValueOnce({ rows: [{ n: 0 }] })
+    await expect(hasActiveAdminWithPasswordAlias()).resolves.toBe(false)
+    const sql = String(pgMocks.query.mock.calls[0]?.[0] || '')
+    expect(sql).toMatch(/password_hash IS NOT NULL/)
+    expect(sql).toMatch(/length\(trim\(u\.password_hash\)\) > 0/)
   })
 })
