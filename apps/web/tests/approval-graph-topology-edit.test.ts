@@ -5,9 +5,12 @@ import { parallelDynamicAssigneeConflicts } from '../src/approvals/parallelEdit'
 import { placeholderRoleNodeKeys } from '../src/approvals/approvalNodeEdit'
 import { graphValidityIssues } from '../src/approvals/graphLayout'
 import {
+  approvalEdgeInsertionTargets,
   appendApprovalNode,
   collectParallelRegionNodeKeys,
+  edgeInsertionNodeTypes,
   insertConditionGateway,
+  insertNodeIntoEdge,
   insertParallelGateway,
   removeLinearNode,
   addParallelBranch,
@@ -244,6 +247,136 @@ describe('collectParallelRegionNodeKeys + nested-parallel prevention (F4)', () =
   it('insertConditionGateway inside a parallel branch stays ALLOWED (condition-in-parallel is legal)', () => {
     const out = insertConditionGateway(PARALLEL, 'app_a')
     expect(out.nodes.some((n) => n.type === 'condition')).toBe(true)
+  })
+})
+
+describe('C3 edge insertion slots', () => {
+  it('enumerates every valid edge and offers only context-legal node types', () => {
+    expect(approvalEdgeInsertionTargets(LINEAR).map((target) => target.edgeKey))
+      .toEqual(['e-start-a1', 'e-a1-end'])
+    expect(edgeInsertionNodeTypes(LINEAR, 'e-start-a1'))
+      .toEqual(['approval', 'cc', 'condition', 'parallel'])
+
+    // Both the configured fork edge and branch-body edge are inside the parent parallel region.
+    // They can accept ordinary nodes/conditions but must never offer nested parallel.
+    expect(edgeInsertionNodeTypes(PARALLEL, 'e-fork-a')).toEqual(['approval', 'cc', 'condition'])
+    expect(edgeInsertionNodeTypes(PARALLEL, 'e-a-end')).toEqual(['approval', 'cc', 'condition'])
+    expect(edgeInsertionNodeTypes(PARALLEL, 'e-start-p')).toContain('parallel')
+  })
+
+  it('keeps a valid condition without an explicit default edge editable', () => {
+    const conditionWithoutDefault: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'condition_1', type: 'condition', name: '兼容条件', config: { branches: [] } },
+        { key: 'approval_1', type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-condition', source: 'start', target: 'condition_1' },
+        { key: 'e-condition-approval', source: 'condition_1', target: 'approval_1' },
+        { key: 'e-approval-end', source: 'approval_1', target: 'end' },
+      ],
+    }
+    expect(approvalEdgeInsertionTargets(conditionWithoutDefault).map((target) => target.edgeKey))
+      .toEqual(conditionWithoutDefault.edges.map((edge) => edge.key))
+  })
+
+  it('fails closed when any parallel branch path bypasses its configured join', () => {
+    const branchBypassesJoin: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'parallel_1', type: 'parallel', name: '并行', config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join_1' } },
+        { key: 'approval_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'approval_b', type: 'approval', name: 'B', config: { assigneeSources: [{ kind: 'dept_head' }] } },
+        { key: 'join_1', type: 'approval', name: '汇合', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['finance'] }] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-p', source: 'start', target: 'parallel_1' },
+        { key: 'e-fork-a', source: 'parallel_1', target: 'approval_a' },
+        { key: 'e-fork-b', source: 'parallel_1', target: 'approval_b' },
+        { key: 'e-a-end', source: 'approval_a', target: 'end' },
+        { key: 'e-b-join', source: 'approval_b', target: 'join_1' },
+        { key: 'e-join-end', source: 'join_1', target: 'end' },
+      ],
+    }
+    const before = snap(branchBypassesJoin)
+    expect(approvalEdgeInsertionTargets(branchBypassesJoin)).toEqual([])
+    expect(() => insertNodeIntoEdge(branchBypassesJoin, 'e-fork-b', 'approval')).toThrow(/not legal/)
+    expect(branchBypassesJoin).toEqual(before)
+  })
+
+  it.each(['approval', 'cc', 'condition', 'parallel'] as const)(
+    'inserts %s into the exact edge while preserving the original edge identity',
+    (nodeType) => {
+      const before = snap(LINEAR)
+      const out = insertNodeIntoEdge(LINEAR, 'e-start-a1', nodeType)
+      expect(LINEAR).toEqual(before)
+      const inserted = out.nodes.find((candidate) =>
+        candidate.type === nodeType && !LINEAR.nodes.some((original) => original.key === candidate.key))
+      expect(inserted).toBeTruthy()
+      expect(out.edges.find((edge) => edge.key === 'e-start-a1')).toMatchObject({
+        source: 'start',
+        target: inserted!.key,
+      })
+      expect(out.edges.some((edge) => edge.source === inserted!.key)).toBe(true)
+      expect(graphValidityIssues(out)).toEqual([])
+    },
+  )
+
+  it('preserves a configured condition branch edge key when inserting on that branch', () => {
+    const out = insertNodeIntoEdge(CONDITION, 'e-high', 'cc')
+    const inserted = out.nodes.find((candidate) => candidate.type === 'cc')!
+    expect((node(out, 'cond_1')!.config as { branches: Array<{ edgeKey: string }> }).branches[0].edgeKey)
+      .toBe('e-high')
+    expect(out.edges.find((edge) => edge.key === 'e-high')).toMatchObject({
+      source: 'cond_1',
+      target: inserted.key,
+    })
+    expect(edgeBetween(out, inserted.key, 'app_high')).toBeTruthy()
+  })
+
+  it('fails closed for stale, duplicate or context-illegal intents without mutating input', () => {
+    const before = snap(PARALLEL)
+    expect(edgeInsertionNodeTypes(PARALLEL, 'missing-edge')).toEqual([])
+    expect(() => insertNodeIntoEdge(PARALLEL, 'missing-edge', 'approval')).toThrow(/not legal/)
+    expect(() => insertNodeIntoEdge(PARALLEL, 'e-fork-a', 'parallel')).toThrow(/not legal/)
+    expect(PARALLEL).toEqual(before)
+
+    const duplicateEdgeGraph: ApprovalGraph = {
+      nodes: PARALLEL.nodes.map((entry) => snap(entry)),
+      edges: [...PARALLEL.edges.map((entry) => snap(entry)), snap(PARALLEL.edges[0])],
+    }
+    const duplicateBefore = snap(duplicateEdgeGraph)
+    expect(edgeInsertionNodeTypes(duplicateEdgeGraph, 'e-start-p')).toEqual([])
+    expect(() => insertNodeIntoEdge(duplicateEdgeGraph, 'e-start-p', 'approval')).toThrow(/not legal/)
+    expect(duplicateEdgeGraph).toEqual(duplicateBefore)
+
+    const cyclicGraph: ApprovalGraph = {
+      nodes: LINEAR.nodes.map((entry) => snap(entry)),
+      edges: [
+        ...LINEAR.edges.map((entry) => snap(entry)),
+        { key: 'e-end-a1', source: 'end', target: 'approval_1' },
+      ],
+    }
+    const cyclicBefore = snap(cyclicGraph)
+    expect(approvalEdgeInsertionTargets(cyclicGraph)).toEqual([])
+    expect(() => insertNodeIntoEdge(cyclicGraph, 'e-start-a1', 'approval')).toThrow(/not legal/)
+    expect(cyclicGraph).toEqual(cyclicBefore)
+
+    const malformedGatewayGraph: ApprovalGraph = {
+      nodes: CONDITION.nodes.map((entry) =>
+        entry.type === 'condition'
+          ? { ...snap(entry), config: { branches: [null], defaultEdgeKey: 'e-low' } as any }
+          : snap(entry)),
+      edges: CONDITION.edges.map((entry) => snap(entry)),
+    }
+    const malformedBefore = snap(malformedGatewayGraph)
+    expect(() => approvalEdgeInsertionTargets(malformedGatewayGraph)).not.toThrow()
+    expect(approvalEdgeInsertionTargets(malformedGatewayGraph)).toEqual([])
+    expect(() => insertNodeIntoEdge(malformedGatewayGraph, 'e-high', 'approval')).toThrow(/not legal/)
+    expect(malformedGatewayGraph).toEqual(malformedBefore)
   })
 })
 

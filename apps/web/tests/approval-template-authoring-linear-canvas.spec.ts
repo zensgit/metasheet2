@@ -8,7 +8,8 @@
  *  - flag OFF (and an unsupported template) keep every canvas surface absent;
  *  - merely opening/selecting leaves the draft clean and the payload byte-identical;
  *  - inspector edits land on the SAME `ApprovalStepDraft` the step cards read (not a shadow copy);
- *  - the first structural canvas edit promotes to `preservedGraph`, keeping graph + config;
+ *  - every legal edge carries a keyboard-accessible `+` menu whose choices come from the command
+ *    predicate, and the first insertion promotes to `preservedGraph` without flattening config;
  *  - the canvas cannot delete a linear draft's only approval step;
  *  - a complex graph round-trips exactly as before.
  */
@@ -320,6 +321,32 @@ function buildComplexGraph() {
   }
 }
 
+function buildParallelGraph() {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'parallel_1',
+        type: 'parallel',
+        name: '并行会签',
+        config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join_1' },
+      },
+      { key: 'approval_a', type: 'approval', name: '财务审批', config: { ...LINEAR_STEP_1_CONFIG } },
+      { key: 'approval_b', type: 'approval', name: '法务审批', config: { ...LINEAR_STEP_2_CONFIG } },
+      { key: 'join_1', type: 'approval', name: '负责人复核', config: { ...LINEAR_STEP_1_CONFIG } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e-start-p', source: 'start', target: 'parallel_1' },
+      { key: 'e-fork-a', source: 'parallel_1', target: 'approval_a' },
+      { key: 'e-fork-b', source: 'parallel_1', target: 'approval_b' },
+      { key: 'e-a-join', source: 'approval_a', target: 'join_1' },
+      { key: 'e-b-join', source: 'approval_b', target: 'join_1' },
+      { key: 'e-join-end', source: 'join_1', target: 'end' },
+    ],
+  }
+}
+
 function buildTemplate(overrides: Partial<ApprovalTemplateDetailDTO> = {}): ApprovalTemplateDetailDTO {
   return {
     id: 'tpl_linear_canvas',
@@ -395,6 +422,11 @@ function clickCanvasNode(nodeKey: string) {
   expect(node, `canvas node ${nodeKey}`).not.toBeNull()
   node!.click()
 }
+async function openEdgeInsertMenu(edgeKey: string) {
+  click(`approval-canvas-edge-insert-${edgeKey}`)
+  await flushUi()
+  expect(q(`[data-testid="approval-canvas-edge-menu-${edgeKey}"]`)).not.toBeNull()
+}
 /** Step cards use `v-show`, so "hidden" means display:none rather than removal. */
 function visibleStepRows(): HTMLElement[] {
   return all('[data-testid="approval-template-step-row"]').filter((row) => row.style.display !== 'none')
@@ -457,6 +489,55 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     expect(q('[data-testid="approval-template-step-spine"]')).not.toBeNull()
   })
 
+  it('renders one keyboard-accessible plus per legal edge and removes in-card insertion buttons', async () => {
+    routeParams = { id: 'tpl_edge_insert_controls' }
+    await mountView()
+    await flushUi()
+
+    const insertionControls = all('[data-testid^="approval-canvas-edge-insert-"]')
+    expect(insertionControls).toHaveLength(buildLinearGraph().edges.length)
+    for (const control of insertionControls) {
+      expect(control.tagName).toBe('BUTTON')
+      expect(control.getAttribute('aria-haspopup')).toBe('menu')
+      expect(control.getAttribute('aria-label')).toMatch(/^在「.+」之后插入节点$/)
+    }
+    expect(q('[data-testid^="approval-canvas-insert-"]')).toBeNull()
+    expect(q('[data-testid^="approval-canvas-insert-condition-"]')).toBeNull()
+    expect(q('[data-testid^="approval-canvas-insert-parallel-"]')).toBeNull()
+
+    await openEdgeInsertMenu('edge-approval_1-approval_2')
+    expect(all('[role="menuitem"]').map((item) => item.textContent?.trim()))
+      .toEqual(['审批', '抄送', '条件分支', '并行分支'])
+    const firstOption = q<HTMLButtonElement>('[role="menuitem"]')
+    expect(document.activeElement).toBe(firstOption)
+
+    // Native buttons map Enter/Space to click in the browser; Esc is explicitly handled and returns
+    // focus to the originating edge control.
+    firstOption!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi()
+    expect(q('[data-testid="approval-canvas-edge-menu-edge-approval_1-approval_2"]')).toBeNull()
+    expect(document.activeElement).toBe(q('[data-testid="approval-canvas-edge-insert-edge-approval_1-approval_2"]'))
+  })
+
+  it('filters nested parallel from branch-edge menus while retaining legal node types', async () => {
+    routeParams = { id: 'tpl_parallel_edge_insert' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildParallelGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    expect(all('[data-testid^="approval-canvas-edge-insert-"]')).toHaveLength(buildParallelGraph().edges.length)
+    await openEdgeInsertMenu('e-fork-a')
+    expect(q('[data-testid="approval-canvas-edge-option-e-fork-a-approval"]')).not.toBeNull()
+    expect(q('[data-testid="approval-canvas-edge-option-e-fork-a-cc"]')).not.toBeNull()
+    expect(q('[data-testid="approval-canvas-edge-option-e-fork-a-condition"]')).not.toBeNull()
+    expect(q('[data-testid="approval-canvas-edge-option-e-fork-a-parallel"]')).toBeNull()
+
+    // Outside the branch interval, parallel remains a legal positive control.
+    click('approval-canvas-edge-insert-e-start-p')
+    await flushUi()
+    expect(q('[data-testid="approval-canvas-edge-option-e-start-p-parallel"]')).not.toBeNull()
+  })
+
   it('switches directly between the form and flow workspaces while Canvas V2 is enabled', async () => {
     routeParams = { id: 'tpl_canvas_mode_switch' }
     await mountView()
@@ -515,6 +596,17 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     expect(q('[data-testid="approval-graph-canvas"]')).toBeNull()
     expect(visibleStepRows()).toHaveLength(2)
     expect(q('[data-testid="approval-template-step-spine"]')).not.toBeNull()
+  })
+
+  it('keeps edge insertion inert in read-only mode', async () => {
+    canManageTemplates.value = false
+    routeParams = { id: 'tpl_edge_insert_readonly' }
+    await mountView()
+    await flushUi()
+
+    expect(q('[data-testid="approval-canvas-workspace"]')).not.toBeNull()
+    expect(q('[data-testid^="approval-canvas-edge-insert-"]')).toBeNull()
+    expect(all('[data-testid="approval-canvas-edge"]').length).toBeGreaterThan(0)
   })
 
   it('keeps the canvas absent for an UNSUPPORTED template even with the flag on (fail-closed)', async () => {
@@ -656,11 +748,15 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     await flushUi()
     expect(q('[data-testid="approval-graph-readonly-list"]')).toBeNull()
 
-    click('approval-canvas-insert-approval_1')
+    await openEdgeInsertMenu('edge-approval_1-approval_2')
+    click('approval-canvas-edge-option-edge-approval_1-approval_2-approval')
     await flushUi()
 
     // Promoted: the canvas grew by one node and the structured view is now the graph node list.
     expect(all('[data-testid="approval-canvas-node"]')).toHaveLength(5)
+    const selectedNode = q('[data-testid="approval-canvas-node"].is-selected')
+    expect(selectedNode?.getAttribute('data-canvas-node')).not.toBeNull()
+    expect(q('[data-testid="approval-canvas-inspector"]')?.getAttribute('data-inspector-type')).toBe('approval')
     click('approval-view-list')
     await flushUi()
     expect(q('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()

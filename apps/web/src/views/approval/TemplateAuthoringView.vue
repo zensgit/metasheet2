@@ -304,6 +304,7 @@
           :canvas-surface-css="canvasSurfaceStyle"
           :canvas-layout="canvasLayout"
           :canvas-edge-lines="canvasEdgeLines"
+          :canvas-insertion-targets="canvasInsertionTargets"
           :canvas-move-target-lines="canvasMoveTargetLines"
           :canvas-minimap="canvasMinimap"
           :selected-canvas-node="selectedCanvasNode"
@@ -319,8 +320,6 @@
           :can-move-canvas-node="canMoveCanvasNode"
           :canvas-step-move-target="canvasStepMoveTarget"
           :canvas-move-target-label="canvasMoveTargetLabel"
-          :can-insert-after="canInsertAfter"
-          :can-insert-parallel-after="canInsertParallelAfter"
           :can-remove-node="canRemoveNode"
           @zoom-out="changeCanvasZoom('out')"
           @zoom-in="changeCanvasZoom('in')"
@@ -337,9 +336,7 @@
           @begin-move="beginCanvasNodeMove"
           @add-condition-branch="onAddConditionBranch"
           @add-parallel-branch="onAddParallelBranch"
-          @insert-approval-after="onInsertApprovalAfter"
-          @insert-condition-after="onInsertConditionAfter"
-          @insert-parallel-after="onInsertParallelAfter"
+          @insert-node-into-edge="onInsertNodeIntoEdge"
           @remove-node="onRemoveNode"
         />
 
@@ -1010,13 +1007,17 @@ import {
   addConditionBranch,
   addParallelBranch,
   adjacentLinearNodeMoveTarget,
+  approvalEdgeInsertionTargets,
   appendApprovalNode,
   collectParallelRegionNodeKeys,
+  edgeInsertionNodeTypes,
   insertConditionGateway,
+  insertNodeIntoEdge,
   insertParallelGateway,
   linearNodeMoveTargets,
   moveLinearNode,
   removeLinearNode,
+  type EdgeInsertableNodeType,
 } from '../../approvals/graphTopologyEdit'
 import {
   computeLayout,
@@ -1694,13 +1695,15 @@ function approvalSourceIsPlaceholder(nodeKey: string): boolean {
 // Each op runs on the EFFECTIVE graph (configs applied) and re-seeds the draft, so the structured
 // editors stay in sync. Guards mirror the engine preconditions so a shown button never throws; a
 // (defensive) throw surfaces as loadError. The interactive free-drag canvas is the gated next slice.
-function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): void {
+function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): boolean {
   try {
     draft.value = applyTopologyToDraft(draft.value, op)
+    return true
   } catch {
     // Topology helpers include internal node/edge keys in diagnostics. Those identifiers are useful
     // to developers but are not an author-facing vocabulary and must not leak into the editor banner.
     loadError.value = '该拓扑操作不适用于当前流程结构'
+    return false
   }
 }
 function onAddConditionBranch(nodeKey: string): void {
@@ -1719,6 +1722,25 @@ function onInsertConditionAfter(nodeKey: string): void {
 function onInsertParallelAfter(nodeKey: string): void {
   runTopologyOp((graph) => insertParallelGateway(graph, nodeKey))
   canvasViewMode.value = 'canvas'
+}
+function onInsertNodeIntoEdge(edgeKey: string, nodeType: EdgeInsertableNodeType): void {
+  if (readOnly.value || !edgeInsertionNodeTypes(canvasEffectiveGraph.value, edgeKey).includes(nodeType)) return
+  const existingNodeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  let insertedNodeKey: string | undefined
+  const applied = runTopologyOp((graph) => {
+    // Revalidate against the graph `applyTopologyToDraft` actually supplies. A menu opened before
+    // another edit may carry a stale edge/type pair; that intent must be a no-op, never a rewire.
+    if (!edgeInsertionNodeTypes(graph, edgeKey).includes(nodeType)) {
+      throw new Error('stale edge insertion intent')
+    }
+    const next = insertNodeIntoEdge(graph, edgeKey, nodeType)
+    insertedNodeKey = next.nodes.find((node) =>
+      node.type === nodeType && !existingNodeKeys.has(node.key))?.key
+    return next
+  })
+  if (!applied || !insertedNodeKey) return
+  canvasViewMode.value = 'canvas'
+  void selectCanvasNode(insertedNodeKey)
 }
 function onRemoveNode(nodeKey: string): void {
   runTopologyOp((graph) => removeLinearNode(graph, nodeKey))
@@ -1944,6 +1966,22 @@ const canvasEdgeLines = computed(() => {
       dropX: (x1 + x2) / 2,
       dropY: midY,
     }
+  })
+})
+const canvasInsertionTargets = computed(() => {
+  if (readOnly.value) return []
+  const linesByKey = new Map(canvasEdgeLines.value.map((line) => [line.key, line]))
+  return approvalEdgeInsertionTargets(canvasEffectiveGraph.value).flatMap((target) => {
+    const line = linesByKey.get(target.edgeKey)
+    return line
+      ? [{
+          edgeKey: target.edgeKey,
+          insertX: line.dropX,
+          insertY: line.dropY,
+          label: `在「${graphNodeLabel(target.source)}」之后插入节点`,
+          nodeTypes: target.nodeTypes,
+        }]
+      : []
   })
 })
 const canvasMoveTargets = computed(() => movingCanvasNode.value
