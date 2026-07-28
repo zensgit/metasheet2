@@ -19,6 +19,7 @@ on:
       - 'packages/core-backend/src/routes/data-sources.ts'
       - 'packages/core-backend/src/data-adapters/DataSourceManager.ts'
       - 'plugins/plugin-integration-core/lib/adapters/data-source-sql-readonly-source-adapter.cjs'
+      - 'plugins/plugin-integration-core/lib/pipeline-runner.cjs'
   push:
     branches: [main]
     paths:
@@ -28,6 +29,7 @@ on:
       - 'packages/core-backend/src/routes/data-sources.ts'
       - 'packages/core-backend/src/data-adapters/DataSourceManager.ts'
       - 'plugins/plugin-integration-core/lib/adapters/data-source-sql-readonly-source-adapter.cjs'
+      - 'plugins/plugin-integration-core/lib/pipeline-runner.cjs'
 
 permissions:
   contents: read

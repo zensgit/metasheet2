@@ -73,8 +73,9 @@ const REPO_ROOT = path.resolve(path.dirname(__filename), '../..')
 // ---------------------------------------------------------------------------
 
 // Mirrors packages/core-backend/src/data-adapters/DataSourceManager.ts
-// `SUPPORTED_DATA_SOURCE_TYPES` (pinned by commit 68bcd9a67 / #4583). Keep in sync manually —
-// this script has no automated drift guard against that file (a possible follow-up).
+// `SUPPORTED_DATA_SOURCE_TYPES` (pinned by commit 68bcd9a67 / #4583). The
+// contract test derives the authoritative keys from DEFAULT_ADAPTER_REGISTRY,
+// and the workflow reruns when DataSourceManager.ts changes.
 const SUPPORTED_DATA_SOURCE_TYPES = Object.freeze([
   'postgresql',
   'postgres',
@@ -98,12 +99,12 @@ const MIN_WINDOW_DAYS = 1
 const MAX_WINDOW_DAYS = 365
 
 // Appended to every "table/column not found" reason. information_schema only
-// reports objects visible to the connected role in the schemas on its
-// search_path — a non-'public' search_path, or a role that was never granted
-// SELECT/USAGE on the object, is indistinguishable from a genuinely absent
-// table/column, and will UNAVAILABLE that item too.
+// reports objects visible to the connected role. A role that was never granted
+// the required privileges is indistinguishable from a genuinely absent object
+// and will UNAVAILABLE that item too. Count queries explicitly qualify the same
+// public schema, so connection-level search_path cannot redirect them elsewhere.
 const SCHEMA_PROBE_CAVEAT =
-  "probed via information_schema.tables/.columns, table_schema='public', as the DATABASE_URL role — a non-public search_path or missing SELECT/USAGE privileges reports the same as a genuinely absent object"
+  "probed via information_schema.tables/.columns, table_schema='public', as the DATABASE_URL role — missing visibility/privileges report the same as a genuinely absent object"
 
 // ---------------------------------------------------------------------------
 // QUERY_ALLOWLIST — the ONLY SQL statements this script will ever execute.
@@ -113,7 +114,7 @@ const SCHEMA_PROBE_CAVEAT =
 
 const QUERY_ALLOWLIST = Object.freeze({
   'probe.table_exists': {
-    sql: `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1 LIMIT 1`,
+    sql: `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1 AND table_type = 'BASE TABLE' LIMIT 1`,
     describe: 'schema probe: does table $1 exist',
   },
   'probe.columns': {
@@ -121,40 +122,40 @@ const QUERY_ALLOWLIST = Object.freeze({
     describe: 'schema probe: which columns exist on table $1',
   },
   'count.data_sources_all_types': {
-    sql: `SELECT type, count(*)::int AS n FROM data_sources GROUP BY type`,
+    sql: `SELECT type, count(*)::bigint AS n FROM public.data_sources GROUP BY type`,
     describe: 'registered data_sources grouped by type',
   },
   'count.data_sources_active_types.with_deleted_at': {
-    sql: `SELECT type, count(*)::int AS n FROM data_sources WHERE is_active = true AND deleted_at IS NULL GROUP BY type`,
+    sql: `SELECT type, count(*)::bigint AS n FROM public.data_sources WHERE is_active = true AND deleted_at IS NULL GROUP BY type`,
     describe: 'active, non-soft-deleted data_sources grouped by type (modern schema shape)',
   },
   'count.data_sources_active_types.without_deleted_at': {
-    sql: `SELECT type, count(*)::int AS n FROM data_sources WHERE is_active = true GROUP BY type`,
+    sql: `SELECT type, count(*)::bigint AS n FROM public.data_sources WHERE is_active = true GROUP BY type`,
     describe: 'active data_sources grouped by type (is_active present, no deleted_at column)',
   },
   'count.external_systems_status_by_kind': {
-    sql: `SELECT status, count(*)::int AS n FROM integration_external_systems WHERE kind = $1 GROUP BY status`,
+    sql: `SELECT status, count(*)::bigint AS n FROM public.integration_external_systems WHERE kind = $1 GROUP BY status`,
     describe: 'integration_external_systems of a given kind, grouped by status',
   },
   'count.approved_read_source_configs_by_kind': {
-    sql: `SELECT count(*)::int AS n
-          FROM integration_read_source_configs c
-          JOIN integration_external_systems s ON s.id = c.system_id
+    sql: `SELECT count(*)::bigint AS n
+          FROM public.integration_read_source_configs c
+          JOIN public.integration_external_systems s ON s.id = c.system_id
           WHERE s.kind = $1 AND c.status = 'approved'`,
     describe: 'approved integration_read_source_configs bound to external systems of a given kind',
   },
   'count.pipelines_by_source_kind': {
-    sql: `SELECT count(*)::int AS n
-          FROM integration_pipelines p
-          JOIN integration_external_systems s ON s.id = p.source_system_id
+    sql: `SELECT count(*)::bigint AS n
+          FROM public.integration_pipelines p
+          JOIN public.integration_external_systems s ON s.id = p.source_system_id
           WHERE s.kind = $1`,
     describe: 'integration_pipelines whose source_system_id resolves to a given kind',
   },
   'count.runs_by_kind_window': {
-    sql: `SELECT count(*)::int AS n
-          FROM integration_runs r
-          JOIN integration_pipelines p ON p.id = r.pipeline_id
-          JOIN integration_external_systems s ON s.id = p.source_system_id
+    sql: `SELECT count(*)::bigint AS n
+          FROM public.integration_runs r
+          JOIN public.integration_pipelines p ON p.id = r.pipeline_id
+          JOIN public.integration_external_systems s ON s.id = p.source_system_id
           WHERE s.kind = $1 AND r.created_at >= NOW() - make_interval(days => $2::int)`,
     describe: 'integration_runs within a window, for pipelines whose source resolves to a given kind',
   },
@@ -352,17 +353,30 @@ function buildPlan(schema, { windowDays = DEFAULT_WINDOW_DAYS, kind = TARGET_KIN
 // not already exist as one of these fixed constants.
 // ---------------------------------------------------------------------------
 
+function normalizeCount(value) {
+  if (Number.isSafeInteger(value) && value >= 0) return value
+  if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)) {
+    const parsed = Number(value)
+    if (Number.isSafeInteger(parsed)) return parsed
+  }
+  throw new Error('data-source-exposure-inventory: invalid aggregate count')
+}
+
+function addCounts(left, right) {
+  return normalizeCount(left + right)
+}
+
 function bucketDataSourceTypeCounts(rows) {
   const buckets = Object.fromEntries(SUPPORTED_DATA_SOURCE_TYPES.map((t) => [t, 0]))
   buckets.other = 0
   let total = 0
   for (const row of rows) {
-    const n = Number(row.n) || 0
-    total += n
+    const n = normalizeCount(row.n)
+    total = addCounts(total, n)
     if (SUPPORTED_DATA_SOURCE_TYPES.includes(row.type)) {
-      buckets[row.type] += n
+      buckets[row.type] = addCounts(buckets[row.type], n)
     } else {
-      buckets.other += n
+      buckets.other = addCounts(buckets.other, n)
     }
   }
   return { buckets, total }
@@ -373,12 +387,12 @@ function bucketExternalSystemStatusCounts(rows) {
   buckets.unexpected = 0
   let total = 0
   for (const row of rows) {
-    const n = Number(row.n) || 0
-    total += n
+    const n = normalizeCount(row.n)
+    total = addCounts(total, n)
     if (EXTERNAL_SYSTEM_STATUSES.includes(row.status)) {
-      buckets[row.status] += n
+      buckets[row.status] = addCounts(buckets[row.status], n)
     } else {
-      buckets.unexpected += n
+      buckets.unexpected = addCounts(buckets.unexpected, n)
     }
   }
   return { buckets, total }
@@ -420,7 +434,10 @@ async function executeExternalSystemsPlan(exec, plan) {
 async function executeScalarCountPlan(exec, plan) {
   if (plan.status !== 'ok') return plan
   const { rows } = await runQuery(exec, plan.tag, plan.params)
-  const count = rows.length ? Number(rows[0].n) || 0 : 0
+  if (rows.length !== 1) {
+    throw new Error('data-source-exposure-inventory: invalid aggregate row count')
+  }
+  const count = normalizeCount(rows[0].n)
   return { status: 'ok', count }
 }
 
@@ -441,19 +458,27 @@ async function executePlan(exec, plan) {
 // silently reporting zero call sites because of a wrong repoRoot / cwd.
 // ---------------------------------------------------------------------------
 
-// Verified against the real files at authoring time:
-//   - packages/core-backend/src/routes/data-sources.ts:864
+// Verified against the real symbols at authoring time and rechecked by anchors:
+//   - plugins/plugin-integration-core/lib/pipeline-runner.cjs
+//       DATA_SOURCE_SQL_READONLY_KIND
+//   - packages/core-backend/src/routes/data-sources.ts
 //       router.post('/api/data-sources/:id/select', ...)
-//   - packages/core-backend/src/data-adapters/DataSourceManager.ts:780
+//   - packages/core-backend/src/data-adapters/DataSourceManager.ts
 //       sourceAdapter.select(...) inside DataSourceManager.select
-//   - packages/core-backend/src/data-adapters/DataSourceManager.ts:746
+//   - packages/core-backend/src/data-adapters/DataSourceManager.ts
 //       async copyData(...) — has no live in-tree caller (verified: repo-wide
 //       grep for `.copyData(` outside this file's own definition line and
 //       outside univer-meta.ts's unrelated `copyData` object-literal variable
 //       found zero call sites)
-//   - plugins/plugin-integration-core/lib/adapters/data-source-sql-readonly-source-adapter.cjs:384
+//   - plugins/plugin-integration-core/lib/adapters/data-source-sql-readonly-source-adapter.cjs
 //       api.select(...)
 const DEFAULT_ANCHORS = Object.freeze([
+  {
+    id: 'target_kind',
+    file: 'plugins/plugin-integration-core/lib/pipeline-runner.cjs',
+    pattern:
+      /const\s+DATA_SOURCE_SQL_READONLY_KIND\s*=\s*'data-source:sql-readonly'/,
+  },
   {
     id: 'select_route',
     file: 'packages/core-backend/src/routes/data-sources.ts',
@@ -484,18 +509,19 @@ const SELECT_CALL_PATTERN = /\b(?:manager|adapter|sourceAdapter|api)\.select\s*\
 const COPY_DATA_CALL_PATTERN = /\.copyData\s*\(/
 const SELECT_ROUTE_STRING_PATTERN = /'\/api\/data-sources\/:id\/select'/
 
-function walkFiles(rootAbs, extSet, out) {
+function walkFiles(rootAbs, extSet, out, failures) {
   let entries
   try {
     entries = readdirSync(rootAbs, { withFileTypes: true })
   } catch {
+    failures.push('directory_read_failed')
     return
   }
   for (const entry of entries) {
     if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name.startsWith('.')) continue
     const fullAbs = path.join(rootAbs, entry.name)
     if (entry.isDirectory()) {
-      walkFiles(fullAbs, extSet, out)
+      walkFiles(fullAbs, extSet, out, failures)
     } else if (extSet.has(path.extname(entry.name))) {
       out.push(fullAbs)
     }
@@ -533,8 +559,19 @@ function enumerateStaticCallSites({ repoRoot = REPO_ROOT, anchors = DEFAULT_ANCH
   }
 
   const files = []
+  const scanFailures = []
   for (const root of scanRoots) {
-    walkFiles(path.join(repoRoot, root), SCAN_EXTENSIONS, files)
+    walkFiles(path.join(repoRoot, root), SCAN_EXTENSIONS, files, scanFailures)
+  }
+  if (scanFailures.length > 0) {
+    return {
+      status: 'unavailable',
+      reason:
+        'one or more declared scan roots or directories could not be read — refusing to report a partial caller count',
+      anchorsVerified,
+      anchorsMissing,
+      scanFailureCount: scanFailures.length,
+    }
   }
 
   const counts = {
@@ -550,6 +587,7 @@ function enumerateStaticCallSites({ repoRoot = REPO_ROOT, anchors = DEFAULT_ANCH
     try {
       content = readFileSync(fileAbs, 'utf8')
     } catch {
+      scanFailures.push('file_read_failed')
       continue
     }
     const bucket = isTest ? 'test' : 'nonTest'
@@ -557,6 +595,16 @@ function enumerateStaticCallSites({ repoRoot = REPO_ROOT, anchors = DEFAULT_ANCH
     counts.managerOrAdapterSelectCallSites[bucket] += countMatches(codeOnly, SELECT_CALL_PATTERN)
     counts.copyDataCallSites[bucket] += countMatches(codeOnly, COPY_DATA_CALL_PATTERN)
     counts.selectRouteDefinitions[bucket] += countMatches(codeOnly, SELECT_ROUTE_STRING_PATTERN)
+  }
+  if (scanFailures.length > 0) {
+    return {
+      status: 'unavailable',
+      reason:
+        'one or more declared source files could not be read — refusing to report a partial caller count',
+      anchorsVerified,
+      anchorsMissing,
+      scanFailureCount: scanFailures.length,
+    }
   }
 
   return {
@@ -651,7 +699,10 @@ const STATIC_RESIDUAL_BLIND_SPOTS = Object.freeze([
   },
 ])
 
-function buildResidualBlindSpots(coverage) {
+function buildResidualBlindSpots(
+  coverage,
+  { staticCallSiteEnumeration = null } = {},
+) {
   const dynamic = []
   if (coverage.dataSources.status === 'unavailable') {
     dynamic.push({ id: 'data_sources_table_gap', description: coverage.dataSources.reason })
@@ -668,6 +719,15 @@ function buildResidualBlindSpots(coverage) {
       dynamic.push({ id: key, description: item.reason })
     }
   }
+  if (
+    staticCallSiteEnumeration &&
+    staticCallSiteEnumeration.status !== 'ok'
+  ) {
+    dynamic.push({
+      id: 'static_call_site_enumeration_gap',
+      description: staticCallSiteEnumeration.reason,
+    })
+  }
   return [...STATIC_RESIDUAL_BLIND_SPOTS, ...dynamic]
 }
 
@@ -680,6 +740,14 @@ function computeVerdict(coverage) {
   if (coverage.dataSources.status !== 'ok') gapReasons.push(`dataSources: ${coverage.dataSources.reason}`)
   else if (coverage.dataSources.active.status !== 'ok') gapReasons.push(`dataSources.active: ${coverage.dataSources.active.reason}`)
   if (coverage.externalSystems.status !== 'ok') gapReasons.push(`externalSystems: ${coverage.externalSystems.reason}`)
+  else if (
+    !Number.isSafeInteger(coverage.externalSystems.byStatus?.unexpected) ||
+    coverage.externalSystems.byStatus.unexpected !== 0
+  ) {
+    gapReasons.push(
+      'externalSystems: status vocabulary drift detected; unexpected bucket must be exactly zero',
+    )
+  }
   if (coverage.approvedConfigs.status !== 'ok') gapReasons.push(`approvedConfigs: ${coverage.approvedConfigs.reason}`)
   if (coverage.pipelines.status !== 'ok') gapReasons.push(`pipelines: ${coverage.pipelines.reason}`)
   if (coverage.runsWindow.status !== 'ok') gapReasons.push(`runsWindow: ${coverage.runsWindow.reason}`)
@@ -757,7 +825,9 @@ async function buildReport({ exec, windowDays = DEFAULT_WINDOW_DAYS, repoRoot = 
   const coverage = await executePlan(exec, plan)
   const staticCallSiteEnumeration = enumerateStaticCallSites({ repoRoot })
   const accessLogRecipe = buildAccessLogRecipe({ windowDays })
-  const residualBlindSpots = buildResidualBlindSpots(coverage)
+  const residualBlindSpots = buildResidualBlindSpots(coverage, {
+    staticCallSiteEnumeration,
+  })
   const { verdict, reasons } = computeVerdict({ ...coverage, staticCallSiteEnumeration })
 
   return {
@@ -912,8 +982,12 @@ function parseArgs(argv) {
         opts.dryRun = true
         break
       case '--window-days': {
-        const next = Number.parseInt(argv[++i], 10)
-        if (!Number.isFinite(next) || next < MIN_WINDOW_DAYS || next > MAX_WINDOW_DAYS) {
+        const raw = argv[++i]
+        const next =
+          typeof raw === 'string' && /^(0|[1-9][0-9]*)$/.test(raw)
+            ? Number(raw)
+            : Number.NaN
+        if (!Number.isSafeInteger(next) || next < MIN_WINDOW_DAYS || next > MAX_WINDOW_DAYS) {
           throw new Error(`--window-days must be an integer between ${MIN_WINDOW_DAYS} and ${MAX_WINDOW_DAYS}`)
         }
         opts.windowDays = next
@@ -966,12 +1040,31 @@ async function createPgExecutor(databaseUrl) {
   }
 }
 
-async function main(argv = process.argv.slice(2), env = process.env) {
+function writeClosedError(reason) {
+  process.stderr.write(`[data-source-exposure-inventory] ERROR: ${reason}\n`)
+}
+
+async function closeExecutor(executor) {
+  if (!executor) return true
+  try {
+    await executor.close()
+    return true
+  } catch {
+    writeClosedError('INVENTORY_CLEANUP_FAILED')
+    return false
+  }
+}
+
+async function main(
+  argv = process.argv.slice(2),
+  env = process.env,
+  { executorFactory = createPgExecutor } = {},
+) {
   let opts
   try {
     opts = parseArgs(argv)
-  } catch (err) {
-    process.stderr.write(`[data-source-exposure-inventory] ERROR: ${err.message}\n`)
+  } catch {
+    writeClosedError('INVENTORY_ARGUMENT_INVALID')
     return 1
   }
   if (opts.help) {
@@ -983,8 +1076,9 @@ async function main(argv = process.argv.slice(2), env = process.env) {
 
   if (opts.dryRun) {
     let executor = null
+    let exitCode = 0
     try {
-      if (databaseUrl) executor = await createPgExecutor(databaseUrl)
+      if (databaseUrl) executor = await executorFactory(databaseUrl)
       const report = await buildDryRunReport({ exec: executor ? executor.exec : null, windowDays: opts.windowDays })
       if (opts.json) {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n')
@@ -992,23 +1086,23 @@ async function main(argv = process.argv.slice(2), env = process.env) {
         process.stdout.write(renderHumanSummary(report))
         process.stdout.write('\n' + JSON.stringify(report, null, 2) + '\n')
       }
-      return 0
-    } catch (err) {
-      process.stderr.write(`[data-source-exposure-inventory] ERROR: ${err instanceof Error ? err.message : String(err)}\n`)
-      return 1
-    } finally {
-      if (executor) await executor.close()
+    } catch {
+      writeClosedError('INVENTORY_EXECUTION_FAILED')
+      exitCode = 1
     }
+    if (!(await closeExecutor(executor))) exitCode = 1
+    return exitCode
   }
 
   if (!databaseUrl) {
-    process.stderr.write('[data-source-exposure-inventory] ERROR: DATABASE_URL is required outside --dry-run\n')
+    writeClosedError('INVENTORY_DATABASE_URL_REQUIRED')
     return 2
   }
 
-  let executor
+  let executor = null
+  let exitCode = 0
   try {
-    executor = await createPgExecutor(databaseUrl)
+    executor = await executorFactory(databaseUrl)
     const report = await buildReport({ exec: executor.exec, windowDays: opts.windowDays })
     if (opts.json) {
       process.stdout.write(JSON.stringify(report, null, 2) + '\n')
@@ -1016,13 +1110,12 @@ async function main(argv = process.argv.slice(2), env = process.env) {
       process.stdout.write(renderHumanSummary(report))
       process.stdout.write('\n' + JSON.stringify(report, null, 2) + '\n')
     }
-    return 0
-  } catch (err) {
-    process.stderr.write(`[data-source-exposure-inventory] ERROR: ${err instanceof Error ? err.message : String(err)}\n`)
-    return 1
-  } finally {
-    if (executor) await executor.close()
+  } catch {
+    writeClosedError('INVENTORY_EXECUTION_FAILED')
+    exitCode = 1
   }
+  if (!(await closeExecutor(executor))) exitCode = 1
+  return exitCode
 }
 
 const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : null
@@ -1045,6 +1138,7 @@ export {
   probeColumns,
   probeSchema,
   buildPlan,
+  normalizeCount,
   bucketDataSourceTypeCounts,
   bucketExternalSystemStatusCounts,
   executePlan,

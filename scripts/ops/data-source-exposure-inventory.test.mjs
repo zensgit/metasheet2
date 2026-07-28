@@ -1,6 +1,12 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  rmSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -14,6 +20,7 @@ import {
   buildPlan,
   bucketDataSourceTypeCounts,
   bucketExternalSystemStatusCounts,
+  normalizeCount,
   executePlan,
   enumerateStaticCallSites,
   buildAccessLogRecipe,
@@ -25,6 +32,28 @@ import {
   parseArgs,
   main,
 } from './data-source-exposure-inventory.mjs'
+
+async function captureProcessWrites(callback) {
+  const originalStdoutWrite = process.stdout.write
+  const originalStderrWrite = process.stderr.write
+  let stdout = ''
+  let stderr = ''
+  process.stdout.write = (chunk) => {
+    stdout += String(chunk)
+    return true
+  }
+  process.stderr.write = (chunk) => {
+    stderr += String(chunk)
+    return true
+  }
+  try {
+    const result = await callback()
+    return { result, stdout, stderr }
+  } finally {
+    process.stdout.write = originalStdoutWrite
+    process.stderr.write = originalStderrWrite
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Fake DB harness
@@ -126,7 +155,7 @@ function normalizeSql(sql) {
 // deduplicated. Catches a swapped table name anywhere in the statement
 // (e.g. the prior NO-GO's `integration_pipeline_runs` for `integration_runs`).
 function extractTables(sql) {
-  const re = /\b(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi
+  const re = /\b(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_.]*)/gi
   const tables = new Set()
   let m
   while ((m = re.exec(sql))) tables.add(m[1].toLowerCase())
@@ -145,13 +174,16 @@ function extractQuotedLiterals(sql) {
   return out.sort()
 }
 
-// The WHERE-clause predicate text (up to GROUP BY or end of statement),
+// The WHERE-clause predicate text (up to GROUP BY, ORDER BY, LIMIT, or end),
 // whitespace-normalized. Catches an added/removed filter (status exclusion),
 // a broadened/narrowed kind scope, or a flipped window-predicate direction
 // (`>=` silently becoming `<=`).
 function extractWhereClause(sql) {
   const normalized = normalizeSql(sql)
-  const m = /\bWHERE\s+(.*?)(?:\s+GROUP BY\b|\s*$)/i.exec(normalized)
+  const m =
+    /\bWHERE\s+(.*?)(?:\s+GROUP BY\b|\s+ORDER BY\b|\s+LIMIT\b|\s*$)/i.exec(
+      normalized,
+    )
   return m ? m[1].trim() : null
 }
 
@@ -209,42 +241,67 @@ describe('assertReadOnlyAllowlist', () => {
 
 describe('QUERY_ALLOWLIST SQL semantic invariants (pins the SQL text itself, not just the plan/plumbing around it)', () => {
   const EXPECTED = {
+    'probe.table_exists': {
+      tables: ['information_schema.tables'],
+      literals: ['BASE TABLE', 'public'],
+      where:
+        "table_schema = 'public' and table_name = $1 and table_type = 'base table'",
+    },
+    'probe.columns': {
+      tables: ['information_schema.columns'],
+      literals: ['public'],
+      where: "table_schema = 'public' and table_name = $1",
+    },
     'count.data_sources_all_types': {
-      tables: ['data_sources'],
+      tables: ['public.data_sources'],
       literals: [],
       where: null,
     },
     'count.data_sources_active_types.with_deleted_at': {
-      tables: ['data_sources'],
+      tables: ['public.data_sources'],
       literals: [],
       where: 'is_active = true and deleted_at is null',
     },
     'count.data_sources_active_types.without_deleted_at': {
-      tables: ['data_sources'],
+      tables: ['public.data_sources'],
       literals: [],
       where: 'is_active = true',
     },
     'count.external_systems_status_by_kind': {
-      tables: ['integration_external_systems'],
+      tables: ['public.integration_external_systems'],
       literals: [],
       where: 'kind = $1',
     },
     'count.approved_read_source_configs_by_kind': {
-      tables: ['integration_external_systems', 'integration_read_source_configs'],
+      tables: [
+        'public.integration_external_systems',
+        'public.integration_read_source_configs',
+      ],
       literals: ['approved'],
       where: "s.kind = $1 and c.status = 'approved'",
     },
     'count.pipelines_by_source_kind': {
-      tables: ['integration_external_systems', 'integration_pipelines'],
+      tables: [
+        'public.integration_external_systems',
+        'public.integration_pipelines',
+      ],
       literals: [],
       where: 's.kind = $1',
     },
     'count.runs_by_kind_window': {
-      tables: ['integration_external_systems', 'integration_pipelines', 'integration_runs'],
+      tables: [
+        'public.integration_external_systems',
+        'public.integration_pipelines',
+        'public.integration_runs',
+      ],
       literals: [],
       where: 's.kind = $1 and r.created_at >= now() - make_interval(days => $2::int)',
     },
   }
+
+  test('every allowlisted statement has an independent semantic oracle', () => {
+    assert.deepEqual(Object.keys(EXPECTED).sort(), Object.keys(QUERY_ALLOWLIST).sort())
+  })
 
   for (const [tag, expected] of Object.entries(EXPECTED)) {
     describe(tag, () => {
@@ -278,6 +335,14 @@ describe('QUERY_ALLOWLIST SQL semantic invariants (pins the SQL text itself, not
       assert.doesNotMatch(entry.sql, /integration_pipeline_runs/i, `tag "${tag}" must not reference integration_pipeline_runs — that table does not exist`)
     }
   })
+
+  test('every aggregate count uses bigint so large inventories fail only at the JS safe-integer boundary', () => {
+    for (const [tag, entry] of Object.entries(QUERY_ALLOWLIST)) {
+      if (!tag.startsWith('count.')) continue
+      assert.match(entry.sql, /count\(\*\)::bigint\s+AS\s+n/i, tag)
+      assert.doesNotMatch(entry.sql, /count\(\*\)::int\s+AS\s+n/i, tag)
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -305,6 +370,9 @@ describe('parseArgs', () => {
     assert.throws(() => parseArgs(['--window-days', '0']), /between/)
     assert.throws(() => parseArgs(['--window-days', '9999']), /between/)
     assert.throws(() => parseArgs(['--window-days', 'DROP TABLE x']), /between/)
+    assert.throws(() => parseArgs(['--window-days', '5abc']), /between/)
+    assert.throws(() => parseArgs(['--window-days', '5.5']), /between/)
+    assert.throws(() => parseArgs(['--window-days', '1e2']), /between/)
   })
 
   test('unknown flag throws', () => {
@@ -424,11 +492,47 @@ describe('buildPlan / executePlan: missing column -> UNAVAILABLE, never a blind 
   })
 })
 
+describe('executePlan aggregate cardinality', () => {
+  for (const [label, rows] of [
+    ['zero rows', []],
+    ['multiple rows', [{ n: 1 }, { n: 2 }]],
+  ]) {
+    test(`scalar count returning ${label} fails closed`, async () => {
+      const probed = await probeSchema(
+        createFakeExec({ schema: FULL_SCHEMA, counts: {} }),
+      )
+      const plan = buildPlan(probed, { windowDays: 30 })
+      const exec = createFakeExec({
+        schema: FULL_SCHEMA,
+        counts: {
+          ...ZERO_COUNTS,
+          'count.approved_read_source_configs_by_kind': rows,
+        },
+      })
+      await assert.rejects(
+        () => executePlan(exec, plan),
+        /invalid aggregate row count/,
+      )
+    })
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Status vocabulary correctness — the exact bug class this script replaces
 // ---------------------------------------------------------------------------
 
 describe('bucketing uses the REAL status vocabulary (catches the `<> \'disabled\'` bug class)', () => {
+  test('aggregate counts accept safe bigint text and reject malformed or unsafe values', () => {
+    assert.equal(normalizeCount('2147483648'), 2147483648)
+    for (const value of ['-1', '1.5', '1e3', '007', '', Number.NaN, -1]) {
+      assert.throws(() => normalizeCount(value), /invalid aggregate count/)
+    }
+    assert.throws(
+      () => normalizeCount(String(Number.MAX_SAFE_INTEGER + 1)),
+      /invalid aggregate count/,
+    )
+  })
+
   test('external systems: inactive and error rows are NOT counted as active', () => {
     const rows = [
       { status: 'active', n: 3 },
@@ -468,9 +572,25 @@ describe('bucketing uses the REAL status vocabulary (catches the `<> \'disabled\
   })
 
   test('SUPPORTED_DATA_SOURCE_TYPES matches the pinned DataSourceManager roster', () => {
+    const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..')
+    const managerSource = readFileSync(
+      path.join(
+        repoRoot,
+        'packages/core-backend/src/data-adapters/DataSourceManager.ts',
+      ),
+      'utf8',
+    )
+    const registryBlock =
+      /export const DEFAULT_ADAPTER_REGISTRY = Object\.freeze\(\{([\s\S]*?)\}\s+as const\)/.exec(
+        managerSource,
+      )
+    assert.ok(registryBlock, 'DEFAULT_ADAPTER_REGISTRY source shape must remain parseable')
+    const registryTypes = [...registryBlock[1].matchAll(/^\s*([a-zA-Z][a-zA-Z0-9_]*)\s*:/gm)]
+      .map((match) => match[1])
+      .sort()
     assert.deepEqual(
       [...SUPPORTED_DATA_SOURCE_TYPES].sort(),
-      ['http', 'mysql', 'plm', 'postgres', 'postgresql', 'sqlserver'],
+      registryTypes,
     )
   })
 })
@@ -480,11 +600,21 @@ describe('bucketing uses the REAL status vocabulary (catches the `<> \'disabled\
 // ---------------------------------------------------------------------------
 
 describe('computeVerdict', () => {
-  function coverageFrom({ externalSystemsActive = 0, approvedConfigs = 0, pipelines = 0, runsWindow = 0, gap = null } = {}) {
+  function coverageFrom({
+    externalSystemsActive = 0,
+    externalSystemsUnexpected = 0,
+    approvedConfigs = 0,
+    pipelines = 0,
+    runsWindow = 0,
+    gap = null,
+  } = {}) {
     if (gap) {
       const ok = {
         dataSources: { status: 'ok', active: { status: 'ok' } },
-        externalSystems: { status: 'ok', byStatus: { active: 0 } },
+        externalSystems: {
+          status: 'ok',
+          byStatus: { active: 0, inactive: 0, error: 0, unexpected: 0 },
+        },
         approvedConfigs: { status: 'ok', count: 0 },
         pipelines: { status: 'ok', count: 0 },
         runsWindow: { status: 'ok', count: 0 },
@@ -495,7 +625,16 @@ describe('computeVerdict', () => {
     }
     return {
       dataSources: { status: 'ok', active: { status: 'ok' } },
-      externalSystems: { status: 'ok', kind: TARGET_KIND, byStatus: { active: externalSystemsActive, inactive: 0, error: 0, unexpected: 0 } },
+      externalSystems: {
+        status: 'ok',
+        kind: TARGET_KIND,
+        byStatus: {
+          active: externalSystemsActive,
+          inactive: 0,
+          error: 0,
+          unexpected: externalSystemsUnexpected,
+        },
+      },
       approvedConfigs: { status: 'ok', count: approvedConfigs },
       pipelines: { status: 'ok', count: pipelines },
       runsWindow: { status: 'ok', count: runsWindow },
@@ -517,6 +656,14 @@ describe('computeVerdict', () => {
   test('full coverage + nonzero runsWindow only -> MIGRATION_REQUIRED', () => {
     const { verdict } = computeVerdict(coverageFrom({ runsWindow: 1 }))
     assert.equal(verdict, 'MIGRATION_REQUIRED')
+  })
+
+  test('unknown external-system status vocabulary fails closed as INCONCLUSIVE', () => {
+    const { verdict, reasons } = computeVerdict(
+      coverageFrom({ externalSystemsUnexpected: 3 }),
+    )
+    assert.equal(verdict, 'INCONCLUSIVE')
+    assert.match(reasons.join(' '), /status vocabulary drift/)
   })
 
   test('partial coverage (one gap) -> INCONCLUSIVE, never a bare "0" / never MIGRATION_NOT_REQUIRED', () => {
@@ -864,6 +1011,22 @@ describe('enumerateStaticCallSites', () => {
     }
   })
 
+  test('fail-closed: an unreadable or missing declared scan root cannot produce a partial ok count', () => {
+    const root = makeTmpRepo()
+    try {
+      const result = enumerateStaticCallSites({
+        repoRoot: root,
+        anchors: anchorsFor(root),
+        scanRoots: ['src', 'missing-declared-root'],
+      })
+      assert.equal(result.status, 'unavailable')
+      assert.match(result.reason, /could not be read/)
+      assert.equal(result.scanFailureCount, 1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('fail-closed: an anchor file present but with drifted content also fails closed', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'ds-exposure-inventory-drift-'))
     try {
@@ -885,6 +1048,47 @@ describe('enumerateStaticCallSites', () => {
     const result = enumerateStaticCallSites({ repoRoot })
     assert.equal(result.status, 'ok', result.reason)
     assert.ok(result.scannedFileCount > 0)
+    assert.ok(result.anchorsVerified.includes('target_kind'))
+  })
+
+  test('workflow reruns for every authoritative anchor source on pull_request and push', () => {
+    const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..')
+    const workflow = readFileSync(
+      path.join(repoRoot, '.github/workflows/data-source-exposure-inventory.yml'),
+      'utf8',
+    )
+    const pullRequestBlock =
+      /\n  pull_request:\n([\s\S]*?)(?=\n  push:)/.exec(workflow)?.[1]
+    const pushBlock = /\n  push:\n([\s\S]*?)(?=\n\npermissions:)/.exec(
+      workflow,
+    )?.[1]
+    assert.ok(pullRequestBlock, 'pull_request event block must remain parseable')
+    assert.ok(pushBlock, 'push event block must remain parseable')
+
+    const eventPaths = (block) =>
+      new Set(
+        [...block.matchAll(/^\s+- '([^']+)'$/gm)].map(
+          (match) => match[1],
+        ),
+      )
+    const expectedPaths = [
+      'packages/core-backend/src/routes/data-sources.ts',
+      'packages/core-backend/src/data-adapters/DataSourceManager.ts',
+      'plugins/plugin-integration-core/lib/adapters/data-source-sql-readonly-source-adapter.cjs',
+      'plugins/plugin-integration-core/lib/pipeline-runner.cjs',
+    ]
+    for (const [eventName, block] of [
+      ['pull_request', pullRequestBlock],
+      ['push', pushBlock],
+    ]) {
+      const paths = eventPaths(block)
+      for (const expectedPath of expectedPaths) {
+        assert.ok(
+          paths.has(expectedPath),
+          `${eventName}.paths must include ${expectedPath}`,
+        )
+      }
+    }
   })
 })
 
@@ -911,6 +1115,11 @@ describe('buildReport end-to-end', () => {
       assert.equal(report.verdict, 'INCONCLUSIVE')
       assert.notEqual(report.verdict, 'MIGRATION_NOT_REQUIRED_WITHIN_COVERAGE')
       assert.match(report.verdictReasons.join(' '), /staticCallSiteEnumeration/)
+      assert.ok(
+        report.residualBlindSpots.some(
+          (spot) => spot.id === 'static_call_site_enumeration_gap',
+        ),
+      )
     } finally {
       rmSync(emptyRoot, { recursive: true, force: true })
     }
@@ -976,12 +1185,60 @@ describe('main() CLI (hermetic paths only)', () => {
   })
 
   test('an invalid flag fails with exit code 1', async () => {
-    const code = await main(['--not-a-real-flag'], {})
-    assert.equal(code, 1)
+    const sentinel = 'PRIVATE_FLAG_VALUE_MUST_NOT_LEAK'
+    const { result, stderr } = await captureProcessWrites(() =>
+      main([`--${sentinel}`], {}),
+    )
+    assert.equal(result, 1)
+    assert.match(stderr, /INVENTORY_ARGUMENT_INVALID/)
+    assert.doesNotMatch(stderr, new RegExp(sentinel))
   })
 
   test('--help exits 0', async () => {
     const code = await main(['--help'], {})
     assert.equal(code, 0)
+  })
+
+  test('driver-shaped failures are reduced to a closed values-free reason', async () => {
+    const sentinel = 'PRIVATE_DATABASE_HOST_AND_SCHEMA'
+    const { result, stderr } = await captureProcessWrites(() =>
+      main(
+        ['--json'],
+        { DATABASE_URL: 'postgres://private.invalid/db' },
+        {
+          executorFactory: async () => ({
+            exec: async () => {
+              throw new Error(sentinel)
+            },
+            close: async () => {},
+          }),
+        },
+      ),
+    )
+    assert.equal(result, 1)
+    assert.match(stderr, /INVENTORY_EXECUTION_FAILED/)
+    assert.doesNotMatch(stderr, new RegExp(sentinel))
+  })
+
+  test('executor cleanup failure is closed, values-free, and changes success to failure', async () => {
+    const sentinel = 'PRIVATE_POOL_CLOSE_DETAIL'
+    const exec = createFakeExec({ schema: FULL_SCHEMA, counts: ZERO_COUNTS })
+    const { result, stderr } = await captureProcessWrites(() =>
+      main(
+        ['--json'],
+        { DATABASE_URL: 'postgres://private.invalid/db' },
+        {
+          executorFactory: async () => ({
+            exec,
+            close: async () => {
+              throw new Error(sentinel)
+            },
+          }),
+        },
+      ),
+    )
+    assert.equal(result, 1)
+    assert.match(stderr, /INVENTORY_CLEANUP_FAILED/)
+    assert.doesNotMatch(stderr, new RegExp(sentinel))
   })
 })
