@@ -32,6 +32,34 @@ export type ApplyDeprovisionCandidateInput = {
   write: boolean
 }
 
+export type PlanDeprovisionCandidateInput = Pick<
+  ApplyDeprovisionCandidateInput,
+  | 'localUserId'
+  | 'orgId'
+  | 'integrationId'
+  | 'directoryAccountId'
+  | 'policy'
+  | 'write'
+> & {
+  /**
+   * Active account ids the preview treats as deactivated together. Apply
+   * normally passes none because the sync transaction already flipped them.
+   */
+  prospectiveDeactivatedAccountIds?: string[]
+  requireSourceInactive?: boolean
+}
+
+export type DirectoryDeprovisionCandidateSnapshot = {
+  activationStatus: string | null
+  isActive: boolean
+  accessGeneration: number
+  linkedAtApply: boolean
+  orgMembershipActive: boolean
+  orgCandidacyClear: boolean
+  globallyClear: boolean
+  dingtalkGrantEnabled: boolean
+}
+
 export type ApplyDeprovisionCandidateResult = {
   applied: boolean
   eventId: string | null
@@ -88,8 +116,21 @@ async function lockCandidateUser(
 
 async function loadCandidateState(
   client: DirectoryTransactionClient,
-  input: ApplyDeprovisionCandidateInput,
+  input: PlanDeprovisionCandidateInput,
 ): Promise<CandidateStateRow | null> {
+  // #4659 preview-mirror inputs: the preview may model account deactivations the sync has not
+  // performed yet (prospective ids), and may relax the source-inactive requirement — apply
+  // always runs with the strict defaults. NEVER a lock here in either mode: the apply path
+  // takes the users FOR UPDATE mutex FIRST as its own statement (adversarial-review P1 — the
+  // lock and this read must not share a statement/snapshot), and preview locks nothing.
+  const prospectiveDeactivatedAccountIds = Array.from(
+    new Set(
+      (input.prospectiveDeactivatedAccountIds ?? [])
+        .map((accountId) => String(accountId || '').trim())
+        .filter(Boolean),
+    ),
+  )
+  const requireSourceInactive = input.requireSourceInactive !== false
   const result = await client.query(
     `SELECT
        candidate_user.activation_status,
@@ -106,7 +147,16 @@ async function loadCandidateState(
             AND source_link.local_user_id = candidate_user.id
             AND source_link.link_status = 'linked'
             AND source_account.integration_id = $3::uuid
-            AND source_account.is_active = FALSE
+            AND (
+              ($6::boolean = TRUE AND source_account.is_active = FALSE)
+              OR (
+                $6::boolean = FALSE
+                AND (
+                  source_account.is_active = FALSE
+                  OR source_account.id = ANY($5::uuid[])
+                )
+              )
+            )
             AND source_integration.org_id = $4::text
        ) AS linked_at_apply,
        EXISTS (
@@ -126,6 +176,7 @@ async function loadCandidateState(
           WHERE sibling_link.local_user_id = candidate_user.id
             AND sibling_link.link_status = 'linked'
             AND sibling.is_active = TRUE
+            AND sibling.id <> ALL($5::uuid[])
             AND sibling_integration.org_id = $4::text
        ) AS org_candidacy_clear,
        NOT EXISTS (
@@ -136,6 +187,7 @@ async function loadCandidateState(
           WHERE sibling_link.local_user_id = candidate_user.id
             AND sibling_link.link_status = 'linked'
             AND sibling.is_active = TRUE
+            AND sibling.id <> ALL($5::uuid[])
        ) AS globally_clear,
        COALESCE((
          SELECT grant_row.enabled
@@ -151,15 +203,59 @@ async function loadCandidateState(
       input.directoryAccountId,
       input.integrationId,
       input.orgId,
+      prospectiveDeactivatedAccountIds,
+      requireSourceInactive,
     ],
   )
-  // Adversarial review of #4647 (P2): a vanished user or a concurrently-unbound source account
-  // is a PER-CANDIDATE race, not a sync-level fault — throwing here aborted the entire directory
-  // sync run (and did so even with the deprovision flag OFF, a regression main's writer did not
-  // have). Both shapes now surface as null → the caller skips this candidate with a warning.
+  // Adversarial review of #4647 (P2): a vanished user is a PER-CANDIDATE race, not a sync-level
+  // fault — null here, and the APPLY caller skips with a warning (never aborts the run). The
+  // linked_at_apply decision is the caller's: apply treats an unlinked source as the same skip,
+  // while the PLAN path (#4659 preview) throws its coded error so the API can 4xx honestly.
   const row = result.rows[0] as CandidateStateRow | undefined
-  if (!row || !row.linked_at_apply) return null
+  if (!row) return null
   return row
+}
+
+export async function planDirectoryDeprovisionCandidate(
+  client: DirectoryTransactionClient,
+  input: PlanDeprovisionCandidateInput,
+): Promise<{
+  plan: DirectoryDeprovisionPlan
+  snapshot: DirectoryDeprovisionCandidateSnapshot
+}> {
+  const state = await loadCandidateState(client, input)
+  if (!state) {
+    throw new Error(`directory deprovision user not found: ${input.localUserId}`)
+  }
+  if (!state.linked_at_apply) {
+    throw new Error(
+      'directory deprovision source account is no longer linked to the candidate user',
+    )
+  }
+  const snapshot: DirectoryDeprovisionCandidateSnapshot = {
+    activationStatus: state.activation_status,
+    isActive: state.is_active,
+    accessGeneration: Number(state.access_generation),
+    linkedAtApply: state.linked_at_apply,
+    orgMembershipActive: state.org_membership_active,
+    orgCandidacyClear: state.org_candidacy_clear,
+    globallyClear: state.globally_clear,
+    dingtalkGrantEnabled: state.dingtalk_grant_enabled,
+  }
+  return {
+    snapshot,
+    plan: planDirectoryDeprovision({
+      localUserId: input.localUserId,
+      policy: input.policy,
+      activationStatus: snapshot.activationStatus,
+      isActive: snapshot.isActive,
+      orgId: input.orgId,
+      orgMembershipActive:
+        snapshot.orgMembershipActive && snapshot.orgCandidacyClear,
+      dingtalkGrantEnabled: snapshot.dingtalkGrantEnabled,
+      globallyClear: snapshot.globallyClear,
+    }),
+  }
 }
 
 async function writeEffects(
@@ -209,7 +305,7 @@ export async function applyDirectoryDeprovisionCandidate(
     }
   }
   const state = await loadCandidateState(client, input)
-  if (!state) {
+  if (!state || !state.linked_at_apply) {
     return {
       applied: false,
       eventId: null,

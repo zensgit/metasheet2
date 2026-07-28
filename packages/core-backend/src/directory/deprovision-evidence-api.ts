@@ -5,9 +5,9 @@
 import { query, transaction } from '../db/pg'
 import { invalidateUserPerms } from '../rbac/service'
 import {
-  planDirectoryDeprovision,
-  type DirectoryDeprovisionPolicy,
+  resolveLeastDestructiveDirectoryDeprovisionPolicy,
 } from './deprovision-planner'
+import { planDirectoryDeprovisionCandidate } from './deprovision-ledger'
 import {
   evaluateDeprovisionRestoreEligibility,
   type RestoreEffectView,
@@ -27,101 +27,130 @@ export function readDeprovisionRuntimeFlags() {
 }
 
 export async function previewDeprovisionForUser(localUserId: string, integrationId: string) {
-  const user = await query<{
-    id: string
-    activation_status: string | null
-    is_active: boolean
-    access_generation: number | null
-  }>(
-    `SELECT id,
-            COALESCE(activation_status, 'activated') AS activation_status,
-            COALESCE(is_active, TRUE) AS is_active,
-            COALESCE(access_generation, 0) AS access_generation
-       FROM users WHERE id = $1`,
-    [localUserId],
-  )
-  if (!user.rows[0]) {
-    const err = new Error('User not found')
-    ;(err as Error & { code?: string }).code = 'USER_NOT_FOUND'
-    throw err
-  }
-  const u = user.rows[0]
+  return transaction(async (client) => {
+    // Preview spans user, integration, account, sibling, membership and grant reads.
+    // A read-only repeatable snapshot prevents a mixed-time plan while sync is changing
+    // those rows. This must be the first statement in the transaction.
+    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    const read = async <T extends Record<string, unknown>>(
+      statement: string,
+      params?: unknown[],
+    ): Promise<{ rows: T[] }> => {
+      const result = await client.query(statement, params)
+      return { rows: result.rows as T[] }
+    }
 
-  const integration = await query<{ org_id: string; default_deprovision_policy: string }>(
-    `SELECT org_id, default_deprovision_policy
-       FROM directory_integrations
-      WHERE id = $1::uuid`,
-    [integrationId],
-  )
-  if (!integration.rows[0]) {
-    const err = new Error('Directory integration not found')
-    ;(err as Error & { code?: string }).code = 'INTEGRATION_NOT_FOUND'
-    throw err
-  }
-  const orgId = integration.rows[0].org_id
+    const user = await read<{
+      id: string
+      activation_status: string | null
+      is_active: boolean
+      access_generation: number | null
+    }>(
+      `SELECT id,
+              activation_status,
+              COALESCE(is_active, TRUE) AS is_active,
+              COALESCE(access_generation, 0) AS access_generation
+         FROM users
+        WHERE id = $1`,
+      [localUserId],
+    )
+    if (!user.rows[0]) {
+      const err = new Error('User not found')
+      ;(err as Error & { code?: string }).code = 'USER_NOT_FOUND'
+      throw err
+    }
+    const currentUser = user.rows[0]
 
-  const membership = await query<{ active: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM user_orgs
-        WHERE user_id = $1 AND org_id = $2 AND COALESCE(is_active, TRUE) = TRUE
-     ) AS active`,
-    [localUserId, orgId],
-  )
+    const integration = await read<{
+      org_id: string
+      default_deprovision_policy: string
+    }>(
+      `SELECT org_id, default_deprovision_policy
+         FROM directory_integrations
+        WHERE id = $1::uuid`,
+      [integrationId],
+    )
+    if (!integration.rows[0]) {
+      const err = new Error('Directory integration not found')
+      ;(err as Error & { code?: string }).code = 'INTEGRATION_NOT_FOUND'
+      throw err
+    }
+    const orgId = integration.rows[0].org_id
 
-  // `user_external_auth_grants` is the table the OAuth login path reads. This used to read
-  // `user_external_identities.grant_enabled` — a column no migration creates — behind a `.catch`
-  // that turned the resulting error into "no grant", so the preview could never show a grant
-  // effect no matter what the truth was. No `.catch` either: a preview that cannot read the
-  // access graph must say so rather than quietly under-report what deprovision would take away.
-  const grant = await query<{ enabled: boolean }>(
-    `SELECT enabled
-       FROM user_external_auth_grants
-      WHERE local_user_id = $1 AND provider = 'dingtalk'
-      LIMIT 1`,
-    [localUserId],
-  )
-  const globalBinding = await query<{ active: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1
-         FROM directory_account_links l
-         JOIN directory_accounts a ON a.id = l.directory_account_id
-        WHERE l.local_user_id = $1
-          AND l.link_status = 'linked'
-          AND a.is_active = TRUE
-          AND a.integration_id <> $2::uuid
-     ) AS active`,
-    [localUserId, integrationId],
-  )
+    const prospectiveAccounts = await read<{
+      id: string
+      deprovision_policy_override: string | null
+    }>(
+      `SELECT account.id::text AS id,
+              account.deprovision_policy_override
+         FROM directory_account_links link
+         JOIN directory_accounts account
+           ON account.id = link.directory_account_id
+        WHERE link.local_user_id = $1::text
+          AND link.link_status = 'linked'
+          AND account.integration_id = $2::uuid
+          AND account.is_active = TRUE
+        ORDER BY account.id`,
+      [localUserId, integrationId],
+    )
+    const prospectiveDeactivatedAccountIds = prospectiveAccounts.rows.map(
+      (account) => account.id,
+    )
+    const policy = resolveLeastDestructiveDirectoryDeprovisionPolicy(
+      integration.rows[0].default_deprovision_policy,
+      prospectiveAccounts.rows.map(
+        (account) => account.deprovision_policy_override,
+      ),
+    )
+    if (prospectiveDeactivatedAccountIds.length === 0) {
+      return {
+        flags: readDeprovisionRuntimeFlags(),
+        user: {
+          id: currentUser.id,
+          activationStatus: currentUser.activation_status,
+          isActive: currentUser.is_active,
+          accessGeneration: Number(currentUser.access_generation ?? 0),
+        },
+        prospectiveDeactivatedAccountIds,
+        plan: {
+          localUserId,
+          skipReason: 'no_active_linked_accounts',
+          effects: [],
+        },
+      }
+    }
 
-  const storedPolicy = integration.rows[0].default_deprovision_policy
-  const policy: DirectoryDeprovisionPolicy = [
-    'manual_review',
-    'disable_grant_only',
-    'mark_inactive',
-  ].includes(storedPolicy)
-    ? (storedPolicy as DirectoryDeprovisionPolicy)
-    : 'manual_review'
-  const plan = planDirectoryDeprovision({
-    localUserId,
-    policy,
-    activationStatus: u.activation_status,
-    isActive: u.is_active,
-    orgId,
-    orgMembershipActive: membership.rows[0]?.active === true,
-    dingtalkGrantEnabled: grant.rows[0]?.enabled === true,
-    globallyClear: globalBinding.rows[0]?.active !== true,
+    const { plan, snapshot } = await planDirectoryDeprovisionCandidate(
+      {
+        query: async (statement, params) => {
+          const result = await read<Record<string, unknown>>(statement, params)
+          return { rows: result.rows }
+        },
+      },
+      {
+        localUserId,
+        orgId,
+        integrationId,
+        directoryAccountId: prospectiveDeactivatedAccountIds[0],
+        policy,
+        write: false,
+        prospectiveDeactivatedAccountIds,
+        requireSourceInactive: false,
+      },
+    )
+
+    return {
+      flags: readDeprovisionRuntimeFlags(),
+      user: {
+        id: localUserId,
+        activationStatus: snapshot.activationStatus,
+        isActive: snapshot.isActive,
+        accessGeneration: snapshot.accessGeneration,
+      },
+      prospectiveDeactivatedAccountIds,
+      plan,
+    }
   })
-
-  return {
-    flags: readDeprovisionRuntimeFlags(),
-    user: {
-      id: u.id,
-      activationStatus: u.activation_status,
-      isActive: u.is_active,
-      accessGeneration: Number(u.access_generation ?? 0),
-    },
-    plan,
-  }
 }
 
 export async function listDeprovisionEvents(options: {

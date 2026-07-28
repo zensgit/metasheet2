@@ -47,6 +47,12 @@ import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
 import {
+  DIRECTORY_DEPROVISION_POLICIES,
+  resolveDirectoryDeprovisionPolicy,
+  selectLeastDestructiveDirectoryDeprovisionPolicy,
+  type DirectoryDeprovisionPolicy,
+} from './deprovision-planner'
+import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
   type AccessGraphTransactionClient,
@@ -1320,13 +1326,11 @@ export function resolveDirectoryIdentityMatch(
  * off — the shipped default — nothing is written and the run reports exactly what it
  * WOULD have done, giving an operator the preview the roadmap asks for before enabling.
  */
-export type DirectoryDeprovisionPolicy = 'manual_review' | 'disable_grant_only' | 'mark_inactive'
-
-export const DIRECTORY_DEPROVISION_POLICIES: readonly DirectoryDeprovisionPolicy[] = [
-  'manual_review',
-  'disable_grant_only',
-  'mark_inactive',
-]
+export {
+  DIRECTORY_DEPROVISION_POLICIES,
+  resolveDirectoryDeprovisionPolicy,
+}
+export type { DirectoryDeprovisionPolicy }
 
 export function isDirectoryDeprovisionEnabled(): boolean {
   return ['true', '1', 'yes'].includes(
@@ -1338,16 +1342,6 @@ export function isDirectoryDeprovisionEnabled(): boolean {
  * An unrecognised stored value must never be interpreted as "do something destructive".
  * Anything we do not understand degrades to review-only.
  */
-export function resolveDirectoryDeprovisionPolicy(
-  integrationDefault: string | null | undefined,
-  accountOverride: string | null | undefined,
-): DirectoryDeprovisionPolicy {
-  const candidate = normalizeText(accountOverride) || normalizeText(integrationDefault)
-  return (DIRECTORY_DEPROVISION_POLICIES as readonly string[]).includes(candidate)
-    ? (candidate as DirectoryDeprovisionPolicy)
-    : 'manual_review'
-}
-
 export type DirectoryDeprovisionOutcome = {
   applied: boolean
   /**
@@ -1436,16 +1430,6 @@ type DeprovisionCandidateRow = {
   directory_account_id: string
   local_user_id: string
   deprovision_policy_override: string | null
-}
-
-/**
- * Least-destructive wins. A user reached through several departed accounts is deprovisioned
- * by the *safest* policy any of them names: if one binding says review-only, a human looks.
- */
-const DEPROVISION_POLICY_SEVERITY: Record<DirectoryDeprovisionPolicy, number> = {
-  manual_review: 0,
-  disable_grant_only: 1,
-  mark_inactive: 2,
 }
 
 /**
@@ -1577,8 +1561,17 @@ export async function applyDirectoryDeprovisionPolicies(
   for (const row of candidates.rows as DeprovisionCandidateRow[]) {
     const policy = resolveDirectoryDeprovisionPolicy(options.integrationDefaultPolicy, row.deprovision_policy_override)
     const existing = byUser.get(row.local_user_id)
-    if (!existing || DEPROVISION_POLICY_SEVERITY[policy] < DEPROVISION_POLICY_SEVERITY[existing.policy]) {
-      byUser.set(row.local_user_id, { directoryAccountId: row.directory_account_id, policy })
+    const selectedPolicy = existing
+      ? selectLeastDestructiveDirectoryDeprovisionPolicy([
+          existing.policy,
+          policy,
+        ])
+      : policy
+    if (!existing || selectedPolicy !== existing.policy) {
+      byUser.set(row.local_user_id, {
+        directoryAccountId: row.directory_account_id,
+        policy: selectedPolicy,
+      })
     }
   }
 
