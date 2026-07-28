@@ -14,7 +14,7 @@ C2-C5、F1-F3、部署、UAT 或 flag 开启。
 |---|---|---|
 | E1-b | `codex/approval-editor-e1b-command-drag-20260728` | `2955a68da` |
 | E2 | `codex/approval-editor-e2-shell-extract-20260728` | `5a9bb4db2` |
-| C1 | `codex/approval-editor-c1-unified-canvas-20260728` | `bbd436177` |
+| C1 | `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` |
 | 文档 | `codex/approval-editor-flow-parity-plan-20260727` | 本报告提交后的 head |
 
 E2 起点为 `origin/main@9da0335b4`。canonical checkout 未被修改。
@@ -150,8 +150,10 @@ vue-tsc: PASS
 3. 恢复 promote 前专属删除下限 -> 第二次删除测试 RED。
 
 Kimi 对 `8cf218f31` 做 exact-head 只读对抗复审，结论 APPROVE、无 P1/P2；
-其 P3 删除边界在最终 head `bbd436177` 修复。Codex 重新运行目标测试并
-核对 clean diff。
+其 P3 删除边界在 `bbd436177` 修复。required approval-web-guard 首跑随后
+暴露既有 inspector 删除测试使用“唯一审批节点”作为正控；`704276e1a`
+把 fixture 改为两个审批节点，保留 selection/inspector 清理断言且不弱化
+产品守卫。相关两 spec 20/20、ESLint 和 diff check 通过。
 
 ### 5.3 真浏览器
 

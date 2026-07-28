@@ -19,7 +19,7 @@ merge、部署、UAT 和 flag 是不同状态，不互相替代。
 | E1 | renderer spike | `origin/main@9da0335b4` / `codex/approval-editor-e1b-command-drag-20260728` | `6151d37cb` | Grok 4.5 Build；Kimi 做视觉 IA | Playwright、ESLint、类型、截图与 100 节点复核 | Draft PR #4643；required CI 绿 |
 | E1-b | 生产命令适配、drag、history | 基于 E1 / `codex/approval-editor-e1b-command-drag-20260728` | `2955a68da` | Grok 4.5 Build | stale focus 修复、判别变异、浏览器超时/100 节点交互稳定化 | Draft PR #4643；required CI 绿 |
 | E2 | Flow Canvas presentational shell 抽取 | `origin/main@9da0335b4` / `codex/approval-editor-e2-shell-extract-20260728` | `5a9bb4db2` | Claude Sonnet 5 | 247 测、类型、事件变异；修复静态 style 守卫误判 | Draft PR #4642；required CI 绿 |
-| C1 | 线性/复杂流程统一 Canvas 载体 | E2 head / `codex/approval-editor-c1-unified-canvas-20260728` | `bbd436177` | Claude Opus 5 实现；Kimi exact-head 只读复审 | 真实视图写回、payload/dirty、promote 保真、flag fallback、删除下限及浏览器三 viewport | Draft PR #4649；CI 运行中 |
+| C1 | 线性/复杂流程统一 Canvas 载体 | E2 head / `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` | Claude Opus 5 实现；Kimi exact-head 只读复审 | 真实视图写回、payload/dirty、promote 保真、flag fallback、删除下限及浏览器三 viewport | Draft PR #4649；CI 修复后重跑 |
 
 ## 2. E1-b 执行事实
 
@@ -92,6 +92,9 @@ E2 只修改：
 - first structural edit 使用 `applyTopologyToDraft`，不另造 promote 路径；
 - edge count、parallel region、validity 全部基于 `canvasEffectiveGraph`；
 - 删除守卫按有效图审批节点数工作，promote 后仍保留最后一个审批节点；
+- required approval-web-guard 首跑暴露旧 inspector 删除正控仍使用唯一审批
+  fixture；改为两个审批节点后，既保留删除/selection 正控，也不弱化最后节点
+  拒绝，目标 20/20；
 - 真 Chromium 在 1440 / 1024 / 390 无横向溢出或 console error；
 - 390 下 sticky bottom navigation 遮挡、卡片内按钮群和紧凑触控尺寸仍属于
   C2/C3/X1，未被 C1 结论掩盖。
