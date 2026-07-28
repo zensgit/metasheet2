@@ -422,20 +422,13 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     unmountView()
   })
 
-  it('exposes the list/canvas toggle for a linear draft and swaps the step cards for the canvas', async () => {
+  it('defaults a linear draft to the canvas and retains the auxiliary structured editor', async () => {
     routeParams = { id: 'tpl_linear_toggle' }
     await mountView()
     await flushUi()
 
-    // Default: the structured step cards, no canvas — the toggle only OFFERS the canvas.
+    // C2: Canvas V2 is the default flow surface while the flag is ON.
     expect(q('[data-testid="approval-graph-view-toggle"]')).not.toBeNull()
-    expect(q('[data-testid="approval-canvas-workspace"]')).toBeNull()
-    expect(visibleStepRows()).toHaveLength(2)
-    expect(q('[data-testid="approval-template-step-spine"]')).not.toBeNull()
-
-    click('approval-view-canvas')
-    await flushUi()
-
     expect(q('[data-testid="approval-canvas-workspace"]')).not.toBeNull()
     // start → approval_1 → approval_2 → end, exactly the graph `buildApprovalGraph` derives.
     // Compared as a set: paint order is the layout's business, node identity is the adapter's.
@@ -450,11 +443,58 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     expect(q('[data-testid="approval-template-step-spine"]')).toBeNull()
     expect(q('[data-testid="approval-graph-readonly-list"]')).toBeNull()
 
-    // …and 结构列表 brings the same cards back (the accessibility fallback stays reachable).
+    // …and 辅助编辑模式 brings the same cards back (the accessibility fallback stays reachable).
     click('approval-view-list')
     await flushUi()
     expect(q('[data-testid="approval-canvas-workspace"]')).toBeNull()
     expect(visibleStepRows()).toHaveLength(2)
+    expect(q('[data-testid="approval-template-step-spine"]')).not.toBeNull()
+  })
+
+  it('switches directly between the form and flow workspaces while Canvas V2 is enabled', async () => {
+    routeParams = { id: 'tpl_canvas_mode_switch' }
+    await mountView()
+    await flushUi()
+
+    click('approval-template-section-fields')
+    await flushUi()
+    const modeSwitch = q('[data-testid="approval-authoring-mode-switch"]')
+    expect(modeSwitch).not.toBeNull()
+    expect(modeSwitch?.getAttribute('role')).toBe('group')
+    expect(q('[data-testid="approval-authoring-mode-form"]')?.getAttribute('aria-pressed')).toBe('true')
+
+    click('approval-authoring-mode-flow')
+    await flushUi()
+    expect(q('[data-testid="approval-authoring-mode-flow"]')?.getAttribute('aria-pressed')).toBe('true')
+    expect(q('[data-testid="approval-canvas-workspace"]')).not.toBeNull()
+
+    click('approval-authoring-mode-form')
+    await flushUi()
+    expect(q('[data-testid="approval-authoring-mode-form"]')?.getAttribute('aria-pressed')).toBe('true')
+    const fieldsPanel = q('[data-testid="approval-template-add-field"]')?.closest('.template-authoring__panel') as HTMLElement | null
+    const flowPanel = q('[data-testid="approval-canvas-workspace"]')?.closest('.template-authoring__panel') as HTMLElement | null
+    expect(fieldsPanel?.style.display).not.toBe('none')
+    expect(flowPanel?.style.display).toBe('none')
+  })
+
+  it('remeasures the canvas viewport when the hidden flow section becomes visible', async () => {
+    routeParams = { id: 'tpl_canvas_viewport_reveal' }
+    await mountView()
+    await flushUi()
+
+    const viewport = q<HTMLElement>('.template-authoring__canvas-viewport')
+    expect(viewport).not.toBeNull()
+    Object.defineProperties(viewport!, {
+      clientWidth: { configurable: true, value: 640 },
+      clientHeight: { configurable: true, value: 480 },
+    })
+
+    click('approval-template-section-flow')
+    await flushUi()
+
+    const minimapWindow = q<SVGRectElement>('[data-testid="approval-canvas-minimap-window"]')
+    expect(Number(minimapWindow?.getAttribute('width'))).toBeGreaterThan(0)
+    expect(Number(minimapWindow?.getAttribute('height'))).toBeGreaterThan(0)
   })
 
   it('keeps every canvas surface absent for a linear draft while the flag is off', async () => {
@@ -464,6 +504,7 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     await flushUi()
 
     expect(q('[data-testid="approval-graph-view-toggle"]')).toBeNull()
+    expect(q('[data-testid="approval-authoring-mode-switch"]')).toBeNull()
     expect(q('[data-testid="approval-canvas-workspace"]')).toBeNull()
     expect(q('[data-testid="approval-graph-canvas"]')).toBeNull()
     expect(visibleStepRows()).toHaveLength(2)
@@ -673,7 +714,14 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     await mountView()
     await flushUi()
 
-    // Complex still defaults to the structured read-only list, never the step cards.
+    // Canvas V2 is canvas-first for both linear and preserved complex graphs.
+    expect(q('[data-testid="approval-canvas-workspace"]')).not.toBeNull()
+    expect(q('[data-testid="approval-graph-readonly-list"]')).toBeNull()
+    expect(visibleStepRows()).toHaveLength(0)
+
+    // The accessible structured fallback remains available until equivalence is proven.
+    click('approval-view-list')
+    await flushUi()
     expect(q('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()
     expect(visibleStepRows()).toHaveLength(0)
 

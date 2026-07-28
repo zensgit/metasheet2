@@ -184,7 +184,7 @@
           />
         </svg>
       </div>
-      <p class="template-authoring__hint">画布用于编排结构（增删节点 / 分支、拖动布局）。点击节点在右侧检查器编辑配置；也可切换「结构列表」。</p>
+      <p class="template-authoring__hint">画布用于编排结构（增删节点 / 分支、拖动布局）。点击节点在右侧检查器编辑配置；也可切换「辅助编辑模式」。</p>
     </div>
     <aside
       v-if="selectedCanvasInspectorNode"
