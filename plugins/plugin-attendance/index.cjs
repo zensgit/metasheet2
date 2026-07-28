@@ -21589,6 +21589,7 @@ function clearHolidaySyncSchedule() {
 // query on holiday-rest days for orgs that haven't configured any policy).
 async function runAutoAbsenceForOrgDate(db, options) {
   const { orgId, workDate, logger, emit, skipDedup = false } = options
+  const recoveryRunId = typeof options.recoveryRunId === 'string' ? options.recoveryRunId : null
   const rule = options.rule ?? await loadDefaultRule(db, orgId)
   let calendarOverrides = Array.isArray(options.calendarOverrides) ? options.calendarOverrides : null
   if (calendarOverrides === null) {
@@ -21603,11 +21604,17 @@ async function runAutoAbsenceForOrgDate(db, options) {
   }
   const holiday = await loadHoliday(db, orgId, workDate)
   // Optimization preserved ONLY when no policy can flip the holiday verdict.
-  if (calendarOverrides.length === 0 && holiday && holiday.isWorkingDay === false) {
+  if (recoveryRunId === null && calendarOverrides.length === 0 && holiday && holiday.isWorkingDay === false) {
     return { skipped: true, reason: 'holiday-rest-no-policy', total: 0 }
   }
   const key = `${orgId}:${workDate}`
-  if (!skipDedup && key === lastAutoAbsenceKey) {
+  const legacyDedupHit = !skipDedup && key === lastAutoAbsenceKey
+  const w4Boundary = options.w4Boundary ?? null
+  // Bare-module consumers have no posture-aware boundary, so retain the
+  // historical process-local dedup exactly. Production callers pass the
+  // boundary: it alone may honor this signal after proving the org is legacy;
+  // W4 postures always continue into the durable class-01 run protocol.
+  if (!w4Boundary && legacyDedupHit) {
     return { skipped: true, reason: 'dedup', total: 0 }
   }
   // W4C-2 P2-1 fix (#4612 verdict second gate round): this query intentionally carries NO
@@ -21700,7 +21707,6 @@ async function runAutoAbsenceForOrgDate(db, options) {
   // construct their own `db` (no host services port exists there, so no boundary can) — the
   // production initiators fail closed instead of taking this branch when the boundary is
   // missing (see the cron run loop and POST /api/attendance/auto-absence/run).
-  const w4Boundary = options.w4Boundary ?? null
   let rows
   let suspendedByRollout = false
   // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): for the w4
@@ -21720,7 +21726,10 @@ async function runAutoAbsenceForOrgDate(db, options) {
     // scheduler constant); cron MUST carry exactly null. The boundary rejects
     // any other combination before minting any witness.
     const adminActorId = initiator === 'admin_run' ? (options.adminActorId || null) : null
-    const outcome = await w4Boundary.executeScheduledRun({
+    if (recoveryRunId !== null && typeof w4Boundary.recoverScheduledRun !== 'function') {
+      throw new Error('W4C2_SCHEDULED_RUN_RECOVERY_BOUNDARY_UNAVAILABLE')
+    }
+    const boundaryInput = {
       orgId,
       workDate,
       timezone: rule.timezone,
@@ -21731,16 +21740,24 @@ async function runAutoAbsenceForOrgDate(db, options) {
       // `review` targets too, never a re-derivation.
       reviewTargets: reviewRequired.map((entry) => ({ userId: entry.userId, reasonCode: entry.reasonCode })),
       initiator,
-      adminActorId,
-    })
+      legacyDedupHit,
+    }
+    const outcome = recoveryRunId === null
+      ? await w4Boundary.executeScheduledRun({ ...boundaryInput, adminActorId })
+      : await w4Boundary.recoverScheduledRun({ ...boundaryInput, runId: recoveryRunId })
     if (outcome.kind === 'suspended') {
       suspendedByRollout = true
       rows = []
+    } else if (outcome.kind === 'legacy_dedup') {
+      return { skipped: true, reason: 'dedup', total: 0 }
     } else {
       rows = outcome.rows
       w4EventsHandledByDispatcher = outcome.kind === 'w4'
     }
   } else {
+    if (recoveryRunId !== null) {
+      throw new Error('W4C2_SCHEDULED_RUN_RECOVERY_BOUNDARY_UNAVAILABLE')
+    }
     rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
   }
   if (suspendedByRollout) {
@@ -45384,12 +45401,10 @@ module.exports = {
 	      // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery
 	      // sweep, "No stuck absorbing state"). Same env-gated-at-registration posture as the
 	      // outbox drain worker directly above (SAME variable, SAME reasoning: no env => no job
-	      // object exists at all => byte-identical runtime). One sweep tick per cadence — scan
-	      // plus a per-candidate finalize attempt, values-free, never throwing out of the tick
-	      // (`sweepScheduledRuns`'s own per-candidate containment; see
-	      // `w4c2-scheduled-run-ops-worker.ts` for this call's disclosed scope — it closes the
-	      // "terminal but never finalized" absorbing state, not a target-set-drift wedge, whose
-	      // exit is the admin abandon route below).
+	      // object exists at all => byte-identical runtime). All-terminal candidates finalize;
+	      // nonterminal candidates rebuild the SAME plugin-owned rule/calendar/membership
+	      // context as an ordinary run, then resume the exact scanned run id. One candidate's
+	      // failure is contained by the host worker and cannot skip later candidates.
 	      if (w4ScheduledRunSweepSchedulerUnregister) {
 	        w4ScheduledRunSweepSchedulerUnregister()
 	        w4ScheduledRunSweepSchedulerUnregister = null
@@ -45400,7 +45415,18 @@ module.exports = {
 	        && attendanceW4SegmentCalculationPort
 	        && typeof attendanceW4SegmentCalculationPort.sweepScheduledRuns === 'function'
 	      ) {
-	        w4ScheduledRunSweepRunOnce = () => attendanceW4SegmentCalculationPort.sweepScheduledRuns()
+	        w4ScheduledRunSweepRunOnce = () => attendanceW4SegmentCalculationPort.sweepScheduledRuns({
+	          recoverCandidate: (candidate) => runAutoAbsenceForOrgDate(db, {
+	            orgId: candidate.orgId,
+	            workDate: candidate.workDate,
+	            logger,
+	            emit: emitEvent,
+	            skipDedup: true,
+	            w4Boundary: w4LiveScheduledBoundary,
+	            initiator: candidate.initiator,
+	            recoveryRunId: candidate.runId,
+	          }),
+	        })
 	        w4ScheduledRunSweepSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
 	          name: 'attendance-w4-scheduled-run-sweep',
 	          run: w4ScheduledRunSweepRunOnce,

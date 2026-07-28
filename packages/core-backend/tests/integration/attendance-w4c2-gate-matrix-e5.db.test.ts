@@ -222,6 +222,8 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   const cutoverStragglerRaceOrg = randomUUID()
   const cutoverInitiatorOrg = randomUUID()
   const cutoverDispatchOrg = randomUUID()
+  const cutoverRecoveryOrg = randomUUID()
+  const cutoverAdminRecoveryOrg = randomUUID()
   // Gate 8 (owner ruling 2026-07-28, "(b-narrow)" required-gate list item 8):
   // an ALLOWLISTED org whose rollout row is `legacy` — resolves to
   // `legacy_projection_only` via `resolveSegmentCalculationPosture` (the
@@ -334,7 +336,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     )).rows
   const operationRows = async (orgId: string, entrypoint?: string) =>
     (await pool.query(
-      `SELECT operation_id::text AS operation_id, entrypoint, state, accepted_write_posture, actor_id, capability,
+      `SELECT operation_id::text AS operation_id, entrypoint, state, accepted_write_posture, actor_id, capability, source_ref,
               identity_source_kind, source_root_id::text AS source_root_id, proof_user_id, proof_work_date::text AS proof_work_date,
               resolved_record_id::text AS resolved_record_id,
               resolved_calculation_id::text AS resolved_calculation_id, response_snapshot
@@ -528,7 +530,8 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       ambOrg, isoOrg, isoOrg2, replayOrg, authzOrg, authoritativeOrg, rebaseOrg, orderOrg, schedOrg,
       adminWitnessOrg,
       cutoverRestartOrg, cutoverConcurrentOrg, cutoverStragglerOrg, cutoverStragglerControlOrg,
-      cutoverStragglerRaceOrg, cutoverInitiatorOrg, cutoverDispatchOrg, cutoverLegacyOrg,
+      cutoverStragglerRaceOrg, cutoverInitiatorOrg, cutoverDispatchOrg, cutoverRecoveryOrg,
+      cutoverAdminRecoveryOrg, cutoverLegacyOrg,
     ].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
@@ -1405,6 +1408,9 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
         reviewTargets: [],
         initiator: 'cron',
         adminActorId: null,
+        // A process-local duplicate signal must never hide a W4 running run.
+        // Both the crash and retry therefore continue through class-01.
+        legacyDedupHit: true,
       })
 
     // First attempt: userA commits (real INSERT), userB's per-user
@@ -1458,6 +1464,132 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     expect(userARowAfterRetry).toEqual(userARowBeforeRetry)
     const userBRow = opsAfterRetry.find((row) => row.proof_user_id === userB)
     expect(userBRow).toMatchObject({ state: 'completed', proof_work_date: workDate })
+  })
+
+  it('leg 9g-recovery — a fresh boundary resumes the exact stranded run and never allocates generation n+1', async () => {
+    const orgId = cutoverRecoveryOrg
+    const userA = randomUUID()
+    const userB = randomUUID()
+    await insertRolloutRow(orgId, 'shadow')
+    await insertActiveUser(userA, orgId)
+    await insertActiveUser(userB, orgId)
+    const workDate = '2026-03-07'
+
+    const firstAdapters = onceFailingAdapters(userB)
+    const firstBoundary = buildDirectScheduledBoundary(firstAdapters.adapters)
+    await expect(
+      firstBoundary.executeScheduledRun({
+        orgId,
+        workDate,
+        timezone: 'UTC',
+        targetUserIds: [userA, userB],
+        reviewTargets: [],
+        initiator: 'cron',
+        adminActorId: null,
+      }),
+    ).rejects.toThrow('W4C2_CUTOVER_SIMULATED_CRASH')
+
+    const stranded = await scheduledRunRows(orgId, workDate)
+    expect(stranded).toHaveLength(1)
+    expect(stranded[0]).toMatchObject({ generation: 1, state: 'running' })
+    const runId = stranded[0].run_id as string
+
+    // A fresh boundary instance stands in for a restarted process. The worker callback carries
+    // the scanned run id into the recovery-only entry, so it cannot fall back to ordinary
+    // create-or-resume generation allocation.
+    const recoveryAdapters = realScheduledAdapters()
+    const recoveryBoundary = buildDirectScheduledBoundary(recoveryAdapters.adapters)
+    await recoveryBoundary.recoverScheduledRun({
+      orgId,
+      workDate,
+      timezone: 'UTC',
+      targetUserIds: [userA, userB],
+      reviewTargets: [],
+      initiator: 'cron',
+      runId,
+    })
+
+    const after = await scheduledRunRows(orgId, workDate)
+    expect(after).toHaveLength(1)
+    expect(after[0]).toMatchObject({
+      run_id: runId,
+      generation: 1,
+      state: 'completed',
+      expected_user_count: 2,
+      completed_user_count: 2,
+      generated_count: 2,
+    })
+    expect((await operationRows(orgId, 'scheduled'))).toHaveLength(2)
+    expect(await recordCount(userA)).toBe(1)
+    expect(await recordCount(userB)).toBe(1)
+    // Only the outstanding user is executed by the recovery boundary.
+    expect(recoveryAdapters.absenceCallUserIds()).toEqual([userB])
+
+    // Scan/finalize race: the same stale candidate reaches recovery after another worker has
+    // already completed it. The exact-run entry is a zero-DML no-op; routing this through the
+    // ordinary create-or-resume entry would allocate generation 2 and this assertion would fail.
+    await recoveryBoundary.recoverScheduledRun({
+      orgId,
+      workDate,
+      timezone: 'UTC',
+      targetUserIds: [userA, userB],
+      reviewTargets: [],
+      initiator: 'cron',
+      runId,
+    })
+    expect(await scheduledRunRows(orgId, workDate)).toHaveLength(1)
+    expect(recoveryAdapters.absenceCallUserIds()).toEqual([userB])
+  })
+
+  it('leg 9g-admin-recovery — the registered service identity resumes an admin_run without fabricating a human actor', async () => {
+    const orgId = cutoverAdminRecoveryOrg
+    const userA = randomUUID()
+    const userB = randomUUID()
+    await insertRolloutRow(orgId, 'shadow')
+    await insertActiveUser(userA, orgId)
+    await insertActiveUser(userB, orgId)
+    const workDate = '2026-03-08'
+
+    const firstAdapters = onceFailingAdapters(userB)
+    const firstBoundary = buildDirectScheduledBoundary(firstAdapters.adapters)
+    await expect(
+      firstBoundary.executeScheduledRun({
+        orgId,
+        workDate,
+        timezone: 'UTC',
+        targetUserIds: [userA, userB],
+        reviewTargets: [],
+        initiator: 'admin_run',
+        adminActorId: schedAdminUser,
+      }),
+    ).rejects.toThrow('W4C2_CUTOVER_SIMULATED_CRASH')
+    const run = (await scheduledRunRows(orgId, workDate))[0]
+    expect(run).toMatchObject({ initiator: 'admin_run', generation: 1, state: 'running' })
+
+    const recoveryAdapters = realScheduledAdapters()
+    const recoveryBoundary = buildDirectScheduledBoundary(recoveryAdapters.adapters)
+    await recoveryBoundary.recoverScheduledRun({
+      orgId,
+      workDate,
+      timezone: 'UTC',
+      targetUserIds: [userA, userB],
+      reviewTargets: [],
+      initiator: 'admin_run',
+      runId: run.run_id,
+    })
+
+    expect(await scheduledRunRows(orgId, workDate)).toMatchObject([
+      { run_id: run.run_id, initiator: 'admin_run', generation: 1, state: 'completed' },
+    ])
+    const operations = await operationRows(orgId, 'scheduled')
+    expect(operations.find((row) => row.proof_user_id === userA)?.actor_id).toBe(schedAdminUser)
+    expect(operations.find((row) => row.proof_user_id === userB)?.actor_id).toBe(
+      ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1,
+    )
+    expect(operations.find((row) => row.proof_user_id === userB)?.source_ref).toBe(
+      'plugin-attendance:auto-absence:recovery-sweep',
+    )
+    expect(recoveryAdapters.absenceCallUserIds()).toEqual([userB])
   })
 
   it('leg 9h — concurrent same run: two simultaneous calls for the SAME (org, initiator, workDate) never duplicate the run row, the target row, or the absence insert; exactly one run, one operation, one record survive', async () => {
@@ -1883,6 +2015,28 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       const n = (await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE org_id = $1`, [orgId])).rows[0].n
       expect(n, `${table} must stay empty under legacy posture`).toBe(0)
     }
+  })
+
+  it('leg 9m-dedup — the process-local key remains a zero-DML legacy-only short circuit', async () => {
+    const orgId = randomUUID()
+    await insertRolloutRow(orgId, 'legacy')
+    const { adapters, absenceCallCount } = throwingScheduledAdapters()
+    const boundary = buildDirectScheduledBoundary(adapters)
+
+    const outcome = await boundary.executeScheduledRun({
+      orgId,
+      workDate: '2026-07-22',
+      timezone: 'UTC',
+      targetUserIds: [randomUUID()],
+      reviewTargets: [],
+      initiator: 'cron',
+      adminActorId: null,
+      legacyDedupHit: true,
+    })
+
+    expect(outcome).toEqual({ kind: 'legacy_dedup' })
+    expect(absenceCallCount()).toBe(0)
+    expect(await scheduledRunRows(orgId)).toEqual([])
   })
 
   it('leg 9m2 — P2-1 fix (#4612 verdict second gate round): a `legacy_projection_only` org with TWO W2-ambiguous members exercises the ONLY shape leg 9m\'s empty `reviewRequired: []` cannot see — the deleted `ORDER BY uo.user_id ASC` (verdict P2-1) previously changed exactly this array\'s element order versus pre-amendment `main`; asserted as an exact SET (order is, and always was, unspecified absent an explicit sort — the frozen membership-query row order was never a real contract), never a literal sequence a real row-order flake could later break', async () => {

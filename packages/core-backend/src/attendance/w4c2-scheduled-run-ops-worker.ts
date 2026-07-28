@@ -14,19 +14,12 @@
  * (the `abandoned` transition's authorization/lock-order/audit/concurrency/idempotency
  * contract).
  *
- * Sweep tick scope, disclosed (not silently assumed): section 1.7 describes TWO branches per
- * candidate — "not yet terminal" resumes the run "exactly as the resume protocol...describes",
- * "all terminal" finalizes. `sweepAttendanceScheduledRunCandidateV1` (w4c2-scheduled-run.ts)
- * implements ONLY the second branch today: it calls `finalizeAttendanceScheduledRunV1` and
- * returns its own `not_ready` outcome as the first branch's SIGNAL, per that module's own
- * comment — it does NOT itself drive per-user replay for a not-yet-terminal candidate (doing so
- * would require reconstructing the same rule/holiday/calendar context
- * `runAutoAbsenceForOrgDate` builds today, which is plugin-owned, not this module's). This
- * worker wires that function AS-IS: it closes the "last per-user commit succeeded, finalization
- * never ran" absorbing state (section 1.7's own stated motivation for the sweep, and section 2
- * gate 18's positive/negative controls, both of which are about exactly this branch), across
- * every calendar day (not just the cron's own lookback window), on a fixed cadence, without
- * waiting for a matching org/workDate cron invocation to recur.
+ * Sweep tick scope: section 1.7 describes TWO branches per candidate — "not yet terminal"
+ * resumes the exact run and "all terminal" finalizes it. The transaction-local step determines
+ * which branch applies. For the first branch, this worker requires a plugin-owned callback that
+ * rebuilds the current rule/holiday/calendar context and resumes the exact scanned `run_id`.
+ * Keeping that context outside core avoids a second policy implementation while keeping
+ * generation allocation outside the recovery path.
  *
  * It does NOT unwedge a target-set-drift candidate
  * (`W4C2_SCHEDULED_RUN_RESUME_TARGET_SET_DRIFT`) — section 1.7's own closing sentence names
@@ -44,6 +37,7 @@ import {
   sweepAttendanceScheduledRunCandidateV1,
   type AttendanceScheduledRunAbandonOutcomeV1,
   type AttendanceScheduledRunAbandonReasonCodeV1,
+  type AttendanceScheduledRunSweepCandidateV1,
 } from './w4c2-scheduled-run'
 
 // ---------------------------------------------------------------------------
@@ -60,6 +54,11 @@ export interface AttendanceScheduledRunSweepTickResultV1 {
 
 const SWEEP_DEFAULT_LIMIT = 25
 
+export interface AttendanceScheduledRunSweepOptionsV1 {
+  readonly limit?: number
+  readonly recoverCandidate: (candidate: AttendanceScheduledRunSweepCandidateV1) => Promise<void>
+}
+
 /**
  * One sweep tick: the scan runs in its OWN transaction, then EACH candidate gets its OWN fresh
  * connection and its OWN transaction — never batched (section 1.7's own comment on
@@ -72,7 +71,7 @@ const SWEEP_DEFAULT_LIMIT = 25
  */
 export async function sweepAttendanceScheduledRunsOnceV1(
   pool: Pick<Pool, 'connect'>,
-  options: { readonly limit?: number } = {},
+  options: AttendanceScheduledRunSweepOptionsV1,
 ): Promise<AttendanceScheduledRunSweepTickResultV1> {
   const limit =
     Number.isInteger(options.limit) && (options.limit as number) > 0 ? (options.limit as number) : SWEEP_DEFAULT_LIMIT
@@ -94,19 +93,32 @@ export async function sweepAttendanceScheduledRunsOnceV1(
   let errored = 0
   for (const candidate of candidates) {
     const client = (await pool.connect()) as unknown as PoolClient
+    let outcome: Awaited<ReturnType<typeof sweepAttendanceScheduledRunCandidateV1>> | null = null
     try {
-      const outcome = await runAttendanceResultOperationTransactionV1(
+      outcome = await runAttendanceResultOperationTransactionV1(
         client as unknown as AttendanceW4TransactionClientV1,
-        (trx) => sweepAttendanceScheduledRunCandidateV1(trx, candidate as never),
+        (trx) => sweepAttendanceScheduledRunCandidateV1(trx, candidate as AttendanceScheduledRunSweepCandidateV1),
       )
-      if (outcome.kind === 'finalized') finalized += 1
-      else if (outcome.kind === 'not_ready') notReady += 1
-      else skipped += 1
     } catch {
       errored += 1
     } finally {
       client.release()
     }
+    if (!outcome) continue
+    if (outcome.kind === 'finalized') {
+      finalized += 1
+      continue
+    }
+    if (outcome.kind === 'not_ready') {
+      try {
+        await options.recoverCandidate(candidate as AttendanceScheduledRunSweepCandidateV1)
+        notReady += 1
+      } catch {
+        errored += 1
+      }
+      continue
+    }
+    skipped += 1
   }
 
   return { scanned: candidates.length, finalized, notReady, skipped, errored }
