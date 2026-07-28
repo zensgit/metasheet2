@@ -20,6 +20,10 @@ import {
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+} from '../directory/access-graph-mutex'
 
 const logger = new Logger('DingTalkOAuth')
 
@@ -422,16 +426,34 @@ async function readGrantEnabled(localUserId: string): Promise<boolean | null> {
 }
 
 async function ensureGrant(localUserId: string): Promise<void> {
-  try {
-    await query(
+  await transaction(async (client) => {
+    const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
+    if (!lockedUsers.has(localUserId)) {
+      throw createPolicyError('Local user no longer exists', {
+        statusCode: 403,
+        code: 'local_user_disabled',
+      })
+    }
+    const grant = await client.query(
       `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
        VALUES ($1, $2, TRUE, $3, NOW(), NOW())
-       ON CONFLICT (provider, local_user_id) DO NOTHING`,
+       ON CONFLICT (provider, local_user_id)
+       DO UPDATE SET
+         enabled = TRUE,
+         granted_by = EXCLUDED.granted_by,
+         updated_at = NOW()
+       WHERE user_external_auth_grants.enabled IS DISTINCT FROM TRUE
+       RETURNING local_user_id`,
       [PROVIDER, localUserId, localUserId],
     )
-  } catch (error) {
-    logger.warn('Failed to persist DingTalk auth grant', error instanceof Error ? error : undefined)
-  }
+    if (grant.rows.length > 0) {
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+        userIds: [localUserId],
+        actorId: localUserId,
+        reason: 'DingTalk OAuth enabled the user grant',
+      })
+    }
+  })
 }
 
 async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserInfo): Promise<void> {
@@ -440,14 +462,27 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
   const profile = JSON.stringify(dtUser)
 
   await transaction(async (client) => {
+    const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
+    if (!lockedUsers.has(localUserId)) {
+      throw createPolicyError('Local user no longer exists', {
+        statusCode: 403,
+        code: 'local_user_disabled',
+      })
+    }
     const existingByUser = await client.query(
-      `SELECT id
+      `SELECT id,
+              external_key,
+              provider_union_id,
+              provider_open_id,
+              corp_id
        FROM user_external_identities
        WHERE provider = $1 AND local_user_id = $2
+       FOR UPDATE
        LIMIT 1`,
       [PROVIDER, localUserId],
     )
 
+    let accessGraphChanged = false
     if (existingByUser.rows.length > 0) {
       // E1 (container-login design-lock §2): the container surface carries no
       // sns openId, so a container login must never clobber the openId-derived
@@ -455,6 +490,23 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
       // move when the incoming profile actually has an openId (one-way
       // enrichment; alternating logins stay stable).
       const hasOpenId = Boolean(dtUser.openId)
+      const existing = existingByUser.rows[0]
+      const nextExternalKey = hasOpenId
+        ? externalKey
+        : String(existing.external_key ?? '').trim() || externalKey
+      const nextUnionId =
+        dtUser.unionId || existing.provider_union_id || null
+      const nextOpenId = hasOpenId
+        ? dtUser.openId || null
+        : existing.provider_open_id || null
+      const nextCorpId = hasOpenId
+        ? config.corpId || null
+        : existing.corp_id ?? config.corpId ?? null
+      accessGraphChanged =
+        (existing.external_key || '') !== nextExternalKey
+        || (existing.provider_union_id ?? null) !== nextUnionId
+        || (existing.provider_open_id ?? null) !== nextOpenId
+        || (existing.corp_id ?? null) !== nextCorpId
       await client.query(
         `UPDATE user_external_identities
          SET external_key = CASE WHEN $8::boolean THEN $3 ELSE COALESCE(NULLIF(external_key, ''), $3) END,
@@ -468,36 +520,42 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
          WHERE provider = $1 AND local_user_id = $2`,
         [PROVIDER, localUserId, externalKey, dtUser.unionId || null, dtUser.openId ?? null, config.corpId, profile, hasOpenId],
       )
-      return
+    } else {
+      const inserted = await client.query(
+        `INSERT INTO user_external_identities (
+           provider,
+           external_key,
+           provider_union_id,
+           provider_open_id,
+           corp_id,
+           local_user_id,
+           profile,
+           bound_by,
+           last_login_at,
+           created_at,
+           updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $6, NOW(), NOW(), NOW())
+         ON CONFLICT (provider, external_key) DO NOTHING
+         RETURNING id`,
+        [PROVIDER, externalKey, dtUser.unionId || null, dtUser.openId ?? null, config.corpId, localUserId, profile],
+      )
+      if (inserted.rows.length === 0) {
+        throw createPolicyError('DingTalk identity is already bound to another local user', {
+          statusCode: 409,
+          code: 'identity_already_bound',
+        })
+      }
+      accessGraphChanged = true
     }
 
-    await client.query(
-      `INSERT INTO user_external_identities (
-         provider,
-         external_key,
-         provider_union_id,
-         provider_open_id,
-         corp_id,
-         local_user_id,
-         profile,
-         bound_by,
-         last_login_at,
-         created_at,
-         updated_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $6, NOW(), NOW(), NOW())
-       ON CONFLICT (provider, external_key)
-       DO UPDATE SET
-         provider_union_id = EXCLUDED.provider_union_id,
-         provider_open_id = EXCLUDED.provider_open_id,
-         corp_id = EXCLUDED.corp_id,
-         local_user_id = EXCLUDED.local_user_id,
-         profile = EXCLUDED.profile,
-         bound_by = COALESCE(user_external_identities.bound_by, EXCLUDED.bound_by),
-         last_login_at = NOW(),
-         updated_at = NOW()`,
-      [PROVIDER, externalKey, dtUser.unionId || null, dtUser.openId ?? null, config.corpId, localUserId, profile],
-    )
+    if (accessGraphChanged) {
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+        userIds: [localUserId],
+        actorId: localUserId,
+        reason: 'DingTalk OAuth identity binding changed',
+      })
+    }
   })
 }
 
@@ -513,6 +571,8 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
   const profile = JSON.stringify(dtUser)
 
   await transaction(async (client) => {
+    const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
+    if (!lockedUsers.has(localUserId)) return
     const conflictResult = await client.query(
       `SELECT local_user_id
        FROM user_external_identities
@@ -1076,6 +1136,13 @@ export async function bindDingTalkIdentityToUser(input: {
   const unionId = dtUser.unionId || ''
 
   await transaction(async (client) => {
+    const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
+    if (!lockedUsers.has(localUserId)) {
+      throw createPolicyError('Local user no longer exists', {
+        statusCode: 403,
+        code: 'local_user_disabled',
+      })
+    }
     const conflictResult = await client.query(
       `SELECT local_user_id
        FROM user_external_identities
@@ -1097,14 +1164,26 @@ export async function bindDingTalkIdentityToUser(input: {
     }
 
     const existingByUser = await client.query(
-      `SELECT id
+      `SELECT id,
+              external_key,
+              provider_union_id,
+              provider_open_id,
+              corp_id
        FROM user_external_identities
        WHERE provider = $1 AND local_user_id = $2
+       FOR UPDATE
        LIMIT 1`,
       [PROVIDER, localUserId],
     )
 
+    let accessGraphChanged = false
     if (existingByUser.rows.length > 0) {
+      const existing = existingByUser.rows[0]
+      accessGraphChanged =
+        existing.external_key !== externalKey
+        || (existing.provider_union_id ?? null) !== (dtUser.unionId || null)
+        || (existing.provider_open_id ?? null) !== (dtUser.openId || null)
+        || (existing.corp_id ?? null) !== (config.corpId || null)
       await client.query(
         `UPDATE user_external_identities
          SET external_key = $3,
@@ -1118,7 +1197,7 @@ export async function bindDingTalkIdentityToUser(input: {
         [PROVIDER, localUserId, externalKey, dtUser.unionId || null, dtUser.openId, config.corpId, profile, boundBy],
       )
     } else {
-      await client.query(
+      const inserted = await client.query(
         `INSERT INTO user_external_identities (
            provider,
            external_key,
@@ -1131,20 +1210,96 @@ export async function bindDingTalkIdentityToUser(input: {
            created_at,
            updated_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NOW(), NOW())`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NOW(), NOW())
+         ON CONFLICT (provider, external_key) DO NOTHING
+         RETURNING id`,
         [PROVIDER, externalKey, dtUser.unionId || null, dtUser.openId, config.corpId, localUserId, profile, boundBy],
       )
+      if (inserted.rows.length === 0) {
+        throw createPolicyError('DingTalk identity is already bound to another local user', {
+          statusCode: 409,
+          code: 'identity_already_bound',
+        })
+      }
+      accessGraphChanged = true
     }
 
     if (enableGrant) {
-      await client.query(
+      const grant = await client.query(
         `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
          VALUES ($1, $2, TRUE, $3, NOW(), NOW())
          ON CONFLICT (provider, local_user_id)
-         DO UPDATE SET enabled = TRUE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+         DO UPDATE SET
+           enabled = TRUE,
+           granted_by = EXCLUDED.granted_by,
+           updated_at = NOW()
+         WHERE user_external_auth_grants.enabled IS DISTINCT FROM TRUE
+         RETURNING local_user_id`,
         [PROVIDER, localUserId, boundBy],
       )
+      accessGraphChanged ||= grant.rows.length > 0
     }
+    if (accessGraphChanged) {
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+        userIds: [localUserId],
+        actorId: boundBy,
+        reason: 'DingTalk identity bound by OAuth callback',
+      })
+    }
+  })
+}
+
+export async function unbindSelfManagedDingTalkIdentity(input: {
+  localUserId: string
+  actorId?: string
+}): Promise<boolean> {
+  const localUserId = String(input.localUserId || '').trim()
+  const actorId = String(input.actorId || '').trim() || localUserId
+  if (!localUserId) throw new Error('localUserId is required')
+
+  return transaction(async (client) => {
+    const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
+    if (!lockedUsers.has(localUserId)) {
+      throw createPolicyError('Local user no longer exists', {
+        statusCode: 403,
+        code: 'local_user_disabled',
+      })
+    }
+    const managedLink = await client.query(
+      `SELECT 1
+         FROM directory_account_links link
+         JOIN directory_accounts account
+           ON account.id = link.directory_account_id
+        WHERE link.local_user_id = $1::text
+          AND link.link_status = 'linked'
+          AND account.provider = $2::text
+        LIMIT 1`,
+      [localUserId, PROVIDER],
+    )
+    if (managedLink.rows.length > 0) {
+      throw createPolicyError(
+        'Current DingTalk identity is directory-managed. Please contact an administrator.',
+        {
+          statusCode: 409,
+          code: 'directory_managed_identity',
+        },
+      )
+    }
+
+    const removed = await client.query(
+      `DELETE FROM user_external_identities
+        WHERE provider = $1 AND local_user_id = $2
+        RETURNING id`,
+      [PROVIDER, localUserId],
+    )
+    if (removed.rows.length === 0) return false
+
+    await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+      userIds: [localUserId],
+      actorId,
+      reason: 'DingTalk identity unbound by the local user',
+    })
+    return true
   })
 }
 

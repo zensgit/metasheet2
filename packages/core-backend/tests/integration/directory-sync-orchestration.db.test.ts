@@ -37,7 +37,8 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
   getDingTalkUserDetail: clientMocks.getDingTalkUserDetail,
 }))
 
-import { query } from '../../src/db/pg'
+import { query, transaction } from '../../src/db/pg'
+import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovision-ledger'
 import {
   createDirectoryIntegration,
   DirectorySyncInProgressError,
@@ -504,7 +505,15 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
   // arms run the REAL sync over a departure.
   // -------------------------------------------------------------------------
   describe('deprovision executor wiring inside the sync run (OPS-01 call site)', () => {
-    async function seedDepartureFixture(tag: string): Promise<{ integrationId: string; localUserId: string; accountId: string; deptId: string; survivorExt: string }> {
+    async function seedDepartureFixture(tag: string): Promise<{
+      accountId: string
+      departedExternalUserId: string
+      departedUnionId: string
+      deptId: string
+      integrationId: string
+      localUserId: string
+      survivorExt: string
+    }> {
       const integration = await createDirectoryIntegration({
         name: `dso-dep-${tag}-${TS}`,
         corpId: `dso-dep-corp-${tag}-${TS}`,
@@ -523,23 +532,43 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       // Pre-linked directory account that will be ABSENT from the pull below —
       // last_seen_at predates the sync timestamp, so the sweep transitions it
       // to inactive and hands its id to the executor within the same run.
+      const departedExternalUserId = `dso-dep-ext-${tag}-${TS}`
+      const departedUnionId = `dso-dep-un-${tag}-${TS}`
       const account = await query<{ id: string }>(
         `INSERT INTO directory_accounts (
            integration_id, corp_id, external_user_id, union_id, external_key, name, is_active, last_seen_at, created_at, updated_at
          ) VALUES ($1, $2, $3, $4, $4, 'Departed', true, NOW(), NOW(), NOW())
          RETURNING id`,
-        [integration.id, `dso-dep-corp-${tag}-${TS}`, `dso-dep-ext-${tag}-${TS}`, `dso-dep-un-${tag}-${TS}`],
+        [
+          integration.id,
+          `dso-dep-corp-${tag}-${TS}`,
+          departedExternalUserId,
+          departedUnionId,
+        ],
       )
       await query(
         `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at)
          VALUES ($1, $2, 'linked', 'manual', NOW(), NOW())`,
         [account.rows[0].id, localUserId],
       )
+      await query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+        [localUserId],
+      )
+      await query(
+        `INSERT INTO user_external_auth_grants (
+           provider, local_user_id, enabled, granted_by, created_at, updated_at
+         ) VALUES ('dingtalk', $1, TRUE, 'system:test-fixture', NOW(), NOW())`,
+        [localUserId],
+      )
 
       return {
         integrationId: integration.id,
         localUserId,
         accountId: account.rows[0].id,
+        departedExternalUserId,
+        departedUnionId,
         deptId: `dso-dep-dept-${tag}-${TS}`,
         survivorExt: `dso-dep-surv-${tag}-${TS}`,
       }
@@ -555,6 +584,76 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
             { userId: fixture.survivorExt, name: 'Survivor', departmentIds: [fixture.deptId], unionId: `${fixture.survivorExt}-un` },
           ],
         },
+      }
+    }
+
+    function rehireDirectory(fixture: {
+      departedExternalUserId: string
+      departedUnionId: string
+      deptId: string
+    }): MockDirectory {
+      return {
+        departments: [{
+          id: fixture.deptId,
+          parentId: '1',
+          name: 'Rehire Ops',
+          order: 0,
+        }],
+        usersByDept: {
+          [fixture.deptId]: [{
+            userId: fixture.departedExternalUserId,
+            name: 'Returned',
+            departmentIds: [fixture.deptId],
+            unionId: fixture.departedUnionId,
+          }],
+        },
+      }
+    }
+
+    async function seedOpenEvidenceBeforeDeparture(
+      fixture: {
+        accountId: string
+        integrationId: string
+        localUserId: string
+      },
+    ): Promise<{ eventId: string; generation: number }> {
+      await query(
+        `UPDATE directory_accounts SET is_active = FALSE WHERE id = $1::uuid`,
+        [fixture.accountId],
+      )
+      const run = await query<{ id: string }>(
+        `INSERT INTO directory_sync_runs (
+           integration_id, status, triggered_by, trigger_source
+         ) VALUES ($1::uuid, 'success', 'test:d5c-prior-event', 'manual')
+         RETURNING id::text AS id`,
+        [fixture.integrationId],
+      )
+      const applied = await transaction((client) =>
+        applyDirectoryDeprovisionCandidate(client, {
+          localUserId: fixture.localUserId,
+          orgId: 'default',
+          integrationId: fixture.integrationId,
+          directoryAccountId: fixture.accountId,
+          runId: run.rows[0].id,
+          triggeredBy: 'test:d5c-prior-event',
+          policy: 'mark_inactive',
+          write: true,
+        }),
+      )
+      if (!applied.eventId) {
+        throw new Error('failed to seed prior deprovision evidence')
+      }
+
+      // Re-open only the source account. The prior event remains applied and its
+      // three after-values remain current, so the next source-state transition
+      // must supersede that evidence without inventing a replacement event.
+      await query(
+        `UPDATE directory_accounts SET is_active = TRUE WHERE id = $1::uuid`,
+        [fixture.accountId],
+      )
+      return {
+        eventId: applied.eventId,
+        generation: applied.accessGeneration,
       }
     }
 
@@ -645,7 +744,7 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       const result = await syncDirectoryIntegration(fixture.integrationId, 'system:dso-dep-off')
       const stats = result.run.stats as Record<string, unknown>
 
-      // Default-off pin: the person keeps access; no grant row appears.
+      // Default-off pin: the person keeps every pre-existing access-graph edge.
       const user = await query<{ is_active: boolean }>(`SELECT is_active FROM users WHERE id = $1`, [fixture.localUserId])
       expect(user.rows[0].is_active).toBe(true)
 
@@ -653,13 +752,143 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
         `SELECT enabled FROM user_external_auth_grants WHERE provider = 'dingtalk' AND local_user_id = $1`,
         [fixture.localUserId],
       )
-      expect(grant.rows).toHaveLength(0)
+      expect(grant.rows).toHaveLength(1)
+      expect(grant.rows[0].enabled).toBe(true)
+
+      const membership = await query<{ is_active: boolean }>(
+        `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = 'default'`,
+        [fixture.localUserId],
+      )
+      expect(membership.rows).toHaveLength(1)
+      expect(membership.rows[0].is_active).toBe(true)
 
       // But the run REPORTS what it would have done (the operator preview).
       expect(stats.deprovisionApplied).toBe(false)
       expect(stats.deprovisionCandidateCount).toBe(1)
       expect(stats.deprovisionGlobalCandidateCount).toBe(1)
+      expect(stats.deprovisionGrantsDisabledCount).toBe(1)
       expect(stats.deprovisionUsersDeactivatedCount).toBe(1)
+    })
+
+    it('supersedes prior evidence when the sync itself changes a linked account from active to inactive', async () => {
+      const fixture = await seedDepartureFixture('d5c-supersede')
+      cleanupTargets.push(fixture)
+      const prior = await seedOpenEvidenceBeforeDeparture(fixture)
+      activeDirectory = departureDirectory(fixture)
+      expect(process.env.DIRECTORY_DEPROVISION_ENABLED).toBeUndefined()
+
+      await syncDirectoryIntegration(
+        fixture.integrationId,
+        'system:d5c-sync-account-transition',
+      )
+
+      const state = await query<{
+        access_generation: string
+        account_active: boolean
+        event_status: string
+        effect_statuses: string[]
+        resolved_by: string | null
+      }>(
+        `SELECT
+           candidate_user.access_generation::text,
+           account.is_active AS account_active,
+           event.status AS event_status,
+           event.resolved_by,
+           array_agg(effect.status ORDER BY effect.effect_type)::text[] AS effect_statuses
+         FROM users candidate_user
+         JOIN directory_accounts account ON account.id = $2::uuid
+         JOIN directory_deprovision_events event
+           ON event.id = $3::uuid
+          AND event.local_user_id = candidate_user.id
+         JOIN directory_deprovision_effects effect ON effect.event_id = event.id
+        WHERE candidate_user.id = $1
+        GROUP BY
+          candidate_user.access_generation,
+          account.is_active,
+          event.status,
+          event.resolved_by`,
+        [fixture.localUserId, fixture.accountId, prior.eventId],
+      )
+      expect(state.rows).toHaveLength(1)
+      expect(state.rows[0]).toMatchObject({
+        account_active: false,
+        event_status: 'superseded',
+        effect_statuses: ['superseded', 'superseded', 'superseded'],
+        resolved_by: 'system:d5c-sync-account-transition',
+      })
+      expect(Number(state.rows[0].access_generation)).toBe(
+        prior.generation + 1,
+      )
+
+      const events = await query<{ status: string }>(
+        `SELECT status
+           FROM directory_deprovision_events
+          WHERE local_user_id = $1`,
+        [fixture.localUserId],
+      )
+      expect(events.rows).toEqual([{ status: 'superseded' }])
+    })
+
+    it('preserves applied evidence and the inactive access graph when its source account reappears for rehire review', async () => {
+      const fixture = await seedDepartureFixture('d5c-rehire')
+      cleanupTargets.push(fixture)
+      const prior = await seedOpenEvidenceBeforeDeparture(fixture)
+      activeDirectory = rehireDirectory(fixture)
+      expect(process.env.DIRECTORY_DEPROVISION_ENABLED).toBeUndefined()
+
+      await syncDirectoryIntegration(
+        fixture.integrationId,
+        'system:d5c-sync-rehire-signal',
+      )
+
+      const state = await query<{
+        access_generation: string
+        account_active: boolean
+        event_status: string
+        effect_statuses: string[]
+        grant_enabled: boolean
+        membership_active: boolean
+        user_active: boolean
+      }>(
+        `SELECT
+           candidate_user.access_generation::text,
+           candidate_user.is_active AS user_active,
+           account.is_active AS account_active,
+           event.status AS event_status,
+           grant_row.enabled AS grant_enabled,
+           membership.is_active AS membership_active,
+           array_agg(effect.status ORDER BY effect.effect_type)::text[] AS effect_statuses
+         FROM users candidate_user
+         JOIN directory_accounts account ON account.id = $2::uuid
+         JOIN directory_deprovision_events event
+           ON event.id = $3::uuid
+          AND event.local_user_id = candidate_user.id
+         JOIN directory_deprovision_effects effect ON effect.event_id = event.id
+         JOIN user_external_auth_grants grant_row
+           ON grant_row.provider = 'dingtalk'
+          AND grant_row.local_user_id = candidate_user.id
+         JOIN user_orgs membership
+           ON membership.user_id = candidate_user.id
+          AND membership.org_id = 'default'
+        WHERE candidate_user.id = $1
+        GROUP BY
+          candidate_user.access_generation,
+          candidate_user.is_active,
+          account.is_active,
+          event.status,
+          grant_row.enabled,
+          membership.is_active`,
+        [fixture.localUserId, fixture.accountId, prior.eventId],
+      )
+      expect(state.rows).toEqual([{
+        access_generation: String(prior.generation),
+        account_active: true,
+        event_status: 'applied',
+        effect_statuses: ['applied', 'applied', 'applied'],
+        grant_enabled: false,
+        membership_active: false,
+        user_active: false,
+      }])
     })
 
     // -----------------------------------------------------------------------

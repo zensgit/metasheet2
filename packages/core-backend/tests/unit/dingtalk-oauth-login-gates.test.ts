@@ -44,10 +44,41 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 
 import {
   __resetDingTalkOAuthStateStoreForTests,
+  bindDingTalkIdentityToUser,
   exchangeCodeForUser,
   exchangeEnterpriseAuthCodeForUser,
   getDingTalkRuntimeStatus,
 } from '../../src/auth/dingtalk-oauth'
+
+function createDefaultTransactionQuery() {
+  return vi.fn(async (sql: string, params: unknown[] = []) => {
+    const statement = String(sql)
+    if (/FROM users[\s\S]*FOR UPDATE/i.test(statement)) {
+      return {
+        rows: [{
+          id: String(params[0]),
+          name: 'Alpha',
+          email: 'alpha@example.com',
+          username: null,
+          mobile: '13800000000',
+          activation_status: 'activated',
+          is_active: true,
+          access_generation: 0,
+        }],
+      }
+    }
+    if (/INSERT INTO user_external_identities/i.test(statement)) {
+      return { rows: [{ id: 'identity-new' }] }
+    }
+    if (/INSERT INTO user_external_auth_grants/i.test(statement)) {
+      return { rows: [{ local_user_id: String(params[1]) }] }
+    }
+    if (/UPDATE users[\s\S]*access_generation/i.test(statement)) {
+      return { rows: [{ access_generation: 1 }] }
+    }
+    return { rows: [] }
+  })
+}
 
 describe('dingtalk oauth login gates', () => {
   beforeEach(async () => {
@@ -93,12 +124,12 @@ describe('dingtalk oauth login gates', () => {
       corpId: 'ding-corp',
       baseUrl: 'https://oapi.dingtalk.com',
     })
-    pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
-      const txQuery = vi.fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-      return callback({ query: txQuery })
-    })
+    pgMocks.transaction.mockImplementation(
+      async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) =>
+        callback({
+          query: createDefaultTransactionQuery() as unknown as typeof pgMocks.query,
+        }),
+    )
     await __resetDingTalkOAuthStateStoreForTests()
   })
 
@@ -131,10 +162,11 @@ describe('dingtalk oauth login gates', () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     const txCalls: Array<{ sql: string; params: unknown[] }> = []
     pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+      const fallback = createDefaultTransactionQuery()
       const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
         txCalls.push({ sql: String(sql), params })
         if (String(sql).includes('SELECT local_user_id')) return { rows: [] }
-        return { rows: [] }
+        return fallback(sql, params)
       })
       return callback({ query: txQuery as unknown as typeof pgMocks.query })
     })
@@ -178,12 +210,13 @@ describe('dingtalk oauth login gates', () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     const txCalls: Array<{ sql: string; params: unknown[] }> = []
     pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+      const fallback = createDefaultTransactionQuery()
       const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
         txCalls.push({ sql: String(sql), params })
         if (String(sql).includes('SELECT local_user_id')) {
           return { rows: [{ local_user_id: 'other-user' }] }
         }
-        return { rows: [] }
+        return fallback(sql, params)
       })
       return callback({ query: txQuery as unknown as typeof pgMocks.query })
     })
@@ -304,6 +337,101 @@ describe('dingtalk oauth login gates', () => {
     expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users'))).toBe(true)
   })
 
+  it('does not supersede evidence for an idempotent explicit bind', async () => {
+    const txCalls: Array<{ sql: string; params: unknown[] }> = []
+    pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+      const fallback = createDefaultTransactionQuery()
+      const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
+        const statement = String(sql)
+        txCalls.push({ sql: statement, params })
+        if (statement.includes('SELECT local_user_id')) return { rows: [] }
+        if (
+          statement.includes('SELECT id,')
+          && statement.includes('FROM user_external_identities')
+        ) {
+          return {
+            rows: [{
+              id: 'identity-1',
+              external_key: 'ding-corp:open-1',
+              provider_union_id: 'union-1',
+              provider_open_id: 'open-1',
+              corp_id: 'ding-corp',
+            }],
+          }
+        }
+        if (statement.includes('INSERT INTO user_external_auth_grants')) {
+          return { rows: [] }
+        }
+        return fallback(sql, params)
+      })
+      return callback({ query: txQuery as unknown as typeof pgMocks.query })
+    })
+
+    await bindDingTalkIdentityToUser({
+      localUserId: 'user-1',
+      boundBy: 'user-1',
+      enableGrant: true,
+      dtUser: {
+        openId: 'open-1',
+        unionId: 'union-1',
+        nick: 'Alpha',
+      },
+    })
+
+    expect(txCalls.some((call) => call.sql.includes('UPDATE user_external_identities'))).toBe(true)
+    expect(txCalls.some((call) => call.sql.includes('UPDATE directory_deprovision_events'))).toBe(false)
+    expect(txCalls.some((call) => /UPDATE users[\s\S]*access_generation/.test(call.sql))).toBe(false)
+  })
+
+  it('supersedes evidence when an explicit bind changes the canonical identity', async () => {
+    const txCalls: Array<{ sql: string; params: unknown[] }> = []
+    pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+      const fallback = createDefaultTransactionQuery()
+      const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
+        const statement = String(sql)
+        txCalls.push({ sql: statement, params })
+        if (statement.includes('SELECT local_user_id')) return { rows: [] }
+        if (
+          statement.includes('SELECT id,')
+          && statement.includes('FROM user_external_identities')
+        ) {
+          return {
+            rows: [{
+              id: 'identity-1',
+              external_key: 'ding-corp:old-open',
+              provider_union_id: 'old-union',
+              provider_open_id: 'old-open',
+              corp_id: 'ding-corp',
+            }],
+          }
+        }
+        if (statement.includes('INSERT INTO user_external_auth_grants')) {
+          return { rows: [] }
+        }
+        return fallback(sql, params)
+      })
+      return callback({ query: txQuery as unknown as typeof pgMocks.query })
+    })
+
+    await bindDingTalkIdentityToUser({
+      localUserId: 'user-1',
+      boundBy: 'admin-1',
+      enableGrant: true,
+      dtUser: {
+        openId: 'open-1',
+        unionId: 'union-1',
+        nick: 'Alpha',
+      },
+    })
+
+    const lockIndex = txCalls.findIndex((call) => /FROM users[\s\S]*FOR UPDATE/.test(call.sql))
+    const identityWriteIndex = txCalls.findIndex((call) => call.sql.includes('UPDATE user_external_identities'))
+    expect(lockIndex).toBeGreaterThanOrEqual(0)
+    expect(identityWriteIndex).toBeGreaterThan(lockIndex)
+    expect(txCalls.some((call) => call.sql.includes('UPDATE directory_deprovision_events'))).toBe(true)
+    expect(txCalls.some((call) => call.sql.includes('access_generation = COALESCE'))).toBe(true)
+  })
+
   it('reports runtime status with grant mode and allowlist details', () => {
     vi.stubEnv('DINGTALK_CLIENT_ID', 'dt-client')
     vi.stubEnv('DINGTALK_CLIENT_SECRET', 'dt-secret')
@@ -380,10 +508,24 @@ describe('dingtalk oauth login gates', () => {
       vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
       const txCalls: Array<{ sql: string; params: unknown[] }> = []
       pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+        const fallback = createDefaultTransactionQuery()
         const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
           txCalls.push({ sql: String(sql), params })
-          if (String(sql).includes('SELECT id')) return { rows: [{ id: 'identity-1' }] }
-          return { rows: [] }
+          if (
+            String(sql).includes('SELECT id,')
+            && String(sql).includes('FROM user_external_identities')
+          ) {
+            return {
+              rows: [{
+                id: 'identity-1',
+                external_key: 'ding-corp:union-1',
+                provider_union_id: 'union-1',
+                provider_open_id: null,
+                corp_id: 'ding-corp',
+              }],
+            }
+          }
+          return fallback(sql, params)
         })
         return callback({ query: txQuery as unknown as typeof pgMocks.query })
       })
@@ -408,6 +550,59 @@ describe('dingtalk oauth login gates', () => {
       expect(update!.sql).toContain('CASE WHEN $8::boolean')
       expect(update!.params[4]).toBeNull()
       expect(update!.params[7]).toBe(false)
+    })
+
+    it('supersedes evidence when a container login fills a previously missing corp scope', async () => {
+      vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
+      vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
+      const txCalls: Array<{ sql: string; params: unknown[] }> = []
+      pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+        const fallback = createDefaultTransactionQuery()
+        const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
+          const statement = String(sql)
+          txCalls.push({ sql: statement, params })
+          if (
+            statement.includes('SELECT id,')
+            && statement.includes('FROM user_external_identities')
+          ) {
+            return {
+              rows: [{
+                id: 'identity-1',
+                external_key: 'ding-corp:union-1',
+                provider_union_id: 'union-1',
+                provider_open_id: null,
+                corp_id: null,
+              }],
+            }
+          }
+          return fallback(sql, params)
+        })
+        return callback({ query: txQuery as unknown as typeof pgMocks.query })
+      })
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [{
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+            role: 'user',
+            is_active: true,
+            activation_status: 'activated',
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [{ enabled: true }] })
+
+      await exchangeEnterpriseAuthCodeForUser('auth-code-corp-fill')
+
+      expect(
+        txCalls.some((call) =>
+          call.sql.includes('UPDATE directory_deprovision_events')),
+      ).toBe(true)
+      expect(
+        txCalls.some((call) =>
+          /UPDATE users[\s\S]*access_generation/.test(call.sql)),
+      ).toBe(true)
     })
 
     it('proceeds on user/get failure when getuserinfo already carried unionid', async () => {
