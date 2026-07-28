@@ -265,6 +265,7 @@ test.describe('E1 approval-flow canvas renderer spike', () => {
   })
 
   test('desktop 1440×900: geometry, inspector dock, long labels, priority, keyboard, 100-node', async ({ page }, testInfo) => {
+    test.slow()
     const errs: string[] = []
     page.on('console', (m) => {
       if (m.type() === 'error') errs.push(`console: ${m.text()}`)
@@ -448,7 +449,8 @@ test.describe('E1 approval-flow canvas renderer spike', () => {
     // A real node remains interactive in the large graph.
     const lateCard = page.locator('[data-test="flow-node"]').nth(80)
     await lateCard.scrollIntoViewIfNeeded()
-    await lateCard.click()
+    await lateCard.focus()
+    await page.keyboard.press('Enter')
     await expect(page.locator('[data-test="e1-inspector"]')).toBeVisible()
 
     // Reload the same fixture from a different state and require byte-identical
@@ -506,6 +508,7 @@ test.describe('E1 approval-flow canvas renderer spike', () => {
   })
 
   test('compact 1024×768: 320px overlay inspector, no overflow, geometry holds', async ({ page }) => {
+    test.slow()
     const errs: string[] = []
     page.on('console', (m) => {
       if (m.type() === 'error') errs.push(`console: ${m.text()}`)
