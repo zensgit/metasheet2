@@ -178,3 +178,75 @@ WIP checkpoint 在实现车道遗留的共享库 `ms2_w4c2` 上跑出 1 条红�
 - identity 修订：`attendance-issue-4556-w4c0-identity-proof-amendment-20260725.md`
 - 授权 provenance 勘误：`attendance-issue-4556-w4-authorization-provenance-erratum-20260726.md`（PR #4613）
 - PR：#4588 / #4592 / #4595 / #4600（治理）· #4606 W4C-0 · #4607 W4C-1 · #4608 test-infra · #4612 W4C-2（held）· #4613 erratum
+
+## 10. 2026-07-29 W4C-2 恢复轮（`OD-W4C-54=(a)`）
+
+本节是 §4 门审之后发生的**增量记录**，不回写或覆盖 §4 的历史判定。
+
+### 10.1 授权与候选血缘
+
+- owner 在 PR #4669 `c-5110505124` 对合并 SHA
+  `548d9f35974cfd50a5cc4c54a76d4a3df01a198e` 作 exact-SHA RATIFY，并选择
+  `OD-W4C-54=(a)`：生产永久拒绝 allowlist 为空。
+- 该授权只覆盖 W4C-2 option-A 实现、验证和 exact-head 独立门；**不授权**
+  #4612 合并、W4C-3+、flag、部署、staging soak、客户数据或关闭 #4556。
+- fresh candidate 从上述 exact main 重建：完整重放 #4612 的 72 个片内提交，
+  再叠加 #4668 recovery 修复；recovery 在重放后的 commit 为
+  `50940b767f97ab59ff5ff7dfcea3e0d7cb130f4c`。
+- option-A 测试提交为
+  `f8f466e0372fbfa0b6e8d9ac44e7e092495e969d`。本次 option-A 增量不改生产代码。
+
+### 10.2 option-A 合同落点
+
+1. 以 TypeScript AST 扫描生产 `src/**/*.ts` 内
+   `recordAttendanceScheduledRunTargetOutcomeV1` 的直接调用；任何非对象字面量、
+   缺失 `terminalOutcome` 或值不等于字面量 `completed` 的调用都使门失败。
+   当前生产 `failed` writer callsite = **0**。
+2. failed outcome 只由真库合同 fixture 构造。fixture 必须调用具名
+   `cancelAttendanceResultOperationV1`，并在同一事务写闭集 reason code
+   `ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED`；不以 raw SQL 伪造取消。
+3. fixture 记录该事务实际执行的 SQL，并对 attendance source tables 的
+   `INSERT/UPDATE/DELETE` 做 sentinel；failed fixture 的 source DML = **0**。
+4. integrity gate 双向覆盖：
+   `canceled operation + completed outcome` 与
+   `completed operation + failed outcome` 均须在事务提交时因
+   `W4C2_RUN_COMPLETION` 失败。
+5. 既有非法 reason-code 真库腿保留：未知码与空码均拒绝。
+6. mixed run 合同 fixture 可表达 `completed + failed`，计数与 run-level event
+   正确；这证明 schema/transaction contract 可表达失败，不代表生产存在永久拒绝
+   分类器。
+
+### 10.3 实跑结果
+
+| 门 | 结果 |
+| --- | --- |
+| option-A 三个聚焦真库文件 | **79/79 PASS** |
+| W4C-2 CI 明列十个真库文件 | **155/155 PASS** |
+| #4668 recovery wiring 单测 | **3/3 PASS** |
+| W4C-2 CI wiring guard | **32/32 PASS** |
+| core-backend no-DB 全量 Vitest | **563 files / 7,842 passed / 1,651 skipped，exit 0** |
+| core-backend TypeScript type-check | **PASS** |
+| `git diff --check` | **PASS** |
+
+真库全量运行中出现过 node-cron 在 suite teardown 后访问已关闭 pool 的 stderr
+噪声，但十个文件仍为 155/155、进程 exit 0；本记录不把该噪声宣称为已修。
+
+### 10.4 判别力 mutation
+
+| mutation | 预期且实得 |
+| --- | --- |
+| 将生产 outcome writer 的 `completed` 改为 `failed` | AST allowlist 门精确翻红 |
+| 将 fixture 的具名 cancel helper 换回 raw `UPDATE ... state='canceled'` | named-cancel 门精确翻红；生命周期腿仍绿，证明该门关闭真实 false-green |
+| 在 failed fixture 注入 `attendance_records` source DML | SQL sentinel 精确翻红 |
+
+三刀均在正控后还原，最终工作树不含 mutation。
+
+### 10.5 诚实边界与停点
+
+- 生产永久拒绝 allowlist 为空，生产 scheduled outcome writer 仍全部只写
+  `completed`。`failed` 路径是 **contract-tested, not live**。
+- 在没有可重试/永久拒绝分类器时，某 target 的确定性拒绝仍可能令 run、run-level
+  event 与 promotion 保持 pinned，直到条件变化后成功，或 operator 执行 abandon。
+- 本轮不含 deploy、flag、staging soak、客户数据或客户 UAT。
+- candidate 通过 exact-head 独立门且为 0 P1/P2 后，仍必须停在 #4612 的 owner
+  合并裁点；门审结论不能替代合并授权。
