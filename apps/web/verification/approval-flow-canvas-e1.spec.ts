@@ -57,6 +57,60 @@ type PublicMetrics = {
   liveText: string
   reducedMotion: boolean
   internalTokens: string[]
+  graphJson: string
+  canUndo: boolean
+  canRedo: boolean
+  undoDepth: number
+  lastCommandOk: boolean | null
+  lastCommandCode: string | null
+  lastCommandChannel: 'pointer' | 'keyboard' | 'toolbar' | null
+  cardKeyByFocusId: Record<string, string>
+  edgeKeyByFocusId: Record<string, string>
+}
+
+type GraphSnap = {
+  nodes: Array<{ key: string; type: string; name: string; config: unknown }>
+  edges: Array<{ key: string; source: string; target: string }>
+}
+
+function parseGraph(metrics: PublicMetrics): GraphSnap {
+  return JSON.parse(metrics.graphJson) as GraphSnap
+}
+
+/** Renderer coordinates must never appear on the persisted ApprovalGraph snapshot. */
+function assertGraphHasNoCoordinates(graph: GraphSnap) {
+  const raw = JSON.stringify(graph)
+  // Fail if any node/edge object carries layout fields.
+  for (const node of graph.nodes) {
+    expect(node, `node ${node.key} must not persist coordinates`).not.toHaveProperty('x')
+    expect(node, `node ${node.key} must not persist coordinates`).not.toHaveProperty('y')
+    expect(node, `node ${node.key} must not persist coordinates`).not.toHaveProperty('width')
+    expect(node, `node ${node.key} must not persist coordinates`).not.toHaveProperty('height')
+  }
+  expect(raw).not.toMatch(/"x"\s*:/)
+  expect(raw).not.toMatch(/"y"\s*:/)
+}
+
+async function readMetrics(page: Page): Promise<PublicMetrics> {
+  return page.evaluate(() => window.__E1_CANVAS__ as PublicMetrics)
+}
+
+/** HTML5 DnD through the real drag events so pointer channel uses the shared adapter. */
+async function html5DragCardToEdge(page: Page, cardFocusId: string, edgeFocusId: string) {
+  await page.evaluate(
+    ({ fromFocus, toFocus }) => {
+      const source = document.querySelector(`[data-focus-id="${fromFocus}"]`)
+      const target = document.querySelector(`[data-focus-id="${toFocus}"]`)
+      if (!source || !target) throw new Error('drag source/target missing')
+      const dt = new DataTransfer()
+      source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }))
+      target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }))
+      target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }))
+      source.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }))
+    },
+    { fromFocus: cardFocusId, toFocus: edgeFocusId },
+  )
+  await page.waitForTimeout(80)
 }
 
 async function waitReady(page: Page): Promise<PublicMetrics> {
@@ -283,14 +337,26 @@ test.describe('E1 approval-flow canvas renderer spike', () => {
     assertNoCardOverlap(metrics)
     assertEdgesDoNotCrossCards(metrics)
 
-    // Swap priority (config.branches only) — visual order flips for rule branches.
+    // Swap priority via real reorder-condition-branches history command (not fixture swap).
+    const graphBeforePriority = metrics.graphJson
+    assertGraphHasNoCoordinates(parseGraph(metrics))
     await page.locator('[data-test="swap-priority"]').click()
+    await page.waitForTimeout(80)
     metrics = await waitReady(page)
-    expect(metrics.fixtureId).toBe('condition-priority-swapped')
+    expect(metrics.fixtureId).toBe('condition')
+    expect(metrics.lastCommandOk).toBe(true)
+    expect(metrics.lastCommandChannel).toBe('toolbar')
+    expect(metrics.canUndo).toBe(true)
+    expect(metrics.graphJson).not.toBe(graphBeforePriority)
     const swapped = [...metrics.branchLabels].sort((a, b) => a.x - b.x)
     expect(swapped[0]?.label).toContain('一千')
     expect(swapped[1]?.label).toContain('一百')
     expect(swapped[2]?.isDefault).toBe(true)
+    // Undo restores byte-identical graph (history inverse).
+    await page.locator('[data-test="undo"]').click()
+    await page.waitForTimeout(80)
+    metrics = await waitReady(page)
+    expect(metrics.graphJson).toBe(graphBeforePriority)
     await page.screenshot({ path: `${OUT}/e1-desktop-condition-priority.png` })
 
     // --- parallel all / any with nested condition ---
@@ -549,6 +615,191 @@ test.describe('E1 approval-flow canvas renderer spike', () => {
     await assertNoHorizontalOverflow(page)
 
     await page.screenshot({ path: `${OUT}/e1-narrow-390.png` })
+    expect(errs, `console/page errors:\n${errs.join('\n')}`).toEqual([])
+  })
+
+  test('E1-b: command history reorder, legal/illegal move, shared drag adapter, non-persisted coords', async ({ page }) => {
+    const errs: string[] = []
+    page.on('console', (m) => {
+      if (m.type() === 'error') errs.push(`console: ${m.text()}`)
+    })
+    page.on('pageerror', (e) => errs.push(`pageerror: ${String(e)}`))
+
+    await page.setViewportSize(VIEWPORTS.desktop)
+    await page.goto(HARNESS, { waitUntil: 'domcontentloaded' })
+    await waitReady(page)
+
+    // --- (1) Branch reorder through command API; undo restores byte-identical graph ---
+    let metrics = await selectFixture(page, 'condition')
+    const beforeReorder = metrics.graphJson
+    assertGraphHasNoCoordinates(parseGraph(metrics))
+    const condConfigBefore = parseGraph(metrics).nodes.find((node) => node.type === 'condition')
+      ?.config as { branches: Array<{ edgeKey: string }>; defaultEdgeKey: string }
+    expect(condConfigBefore.branches.map((branch) => branch.edgeKey)).toEqual(['e-mid', 'e-high'])
+
+    const reorderResult = await page.evaluate(() => window.__E1_SWAP_CONDITION_PRIORITY__?.())
+    expect(reorderResult && 'ok' in reorderResult ? reorderResult.ok : false).toBe(true)
+    await page.waitForTimeout(80)
+    metrics = await readMetrics(page)
+    expect(metrics.lastCommandOk).toBe(true)
+    expect(metrics.lastCommandChannel).toBe('toolbar')
+    expect(metrics.fixtureId).toBe('condition')
+    const condConfigAfter = parseGraph(metrics).nodes.find((node) => node.type === 'condition')
+      ?.config as { branches: Array<{ edgeKey: string }>; defaultEdgeKey: string }
+    expect(condConfigAfter.branches.map((branch) => branch.edgeKey)).toEqual(['e-high', 'e-mid'])
+    expect(condConfigAfter.defaultEdgeKey).toBe(condConfigBefore.defaultEdgeKey)
+    expect(metrics.graphJson).not.toBe(beforeReorder)
+    // Visual lane order follows config.
+    const lanes = [...metrics.branchLabels].sort((a, b) => a.x - b.x)
+    expect(lanes[0]?.label).toContain('一千')
+    expect(lanes[1]?.label).toContain('一百')
+    expect(lanes[2]?.isDefault).toBe(true)
+
+    const undoResult = await page.evaluate(() => window.__E1_UNDO__?.())
+    expect(undoResult && 'ok' in undoResult ? undoResult.ok : false).toBe(true)
+    await page.waitForTimeout(80)
+    metrics = await readMetrics(page)
+    expect(metrics.graphJson).toBe(beforeReorder)
+    assertGraphHasNoCoordinates(parseGraph(metrics))
+    await assertNoInternals(page, metrics)
+
+    // --- (2) One legal approval move onto an edge via real move-node-into-edge ---
+    metrics = await selectFixture(page, 'linear')
+    const beforeMove = metrics.graphJson
+    const preMoveApprovalFocus = metrics.cards.find((card) => card.name === '主管审批')?.focusId
+    expect(preMoveApprovalFocus, 'pre-move 主管审批 focus').toBeTruthy()
+    assertGraphHasNoCoordinates(parseGraph(metrics))
+    // Move 主管审批 (approval_1) onto the edge after 抄送 (e-cc-end).
+    const legal = await page.evaluate(() =>
+      window.__E1_MOVE_NODE_INTO_EDGE__?.('approval_1', 'e-cc-end', 'keyboard'),
+    )
+    expect(legal?.ok).toBe(true)
+    expect(legal?.code).toBeNull()
+    await page.waitForTimeout(80)
+    metrics = await readMetrics(page)
+    expect(metrics.lastCommandOk).toBe(true)
+    expect(metrics.lastCommandChannel).toBe('keyboard')
+    expect(metrics.graphJson).not.toBe(beforeMove)
+    const moved = parseGraph(metrics)
+    expect(moved.edges.some((edge) => edge.source === 'start' && edge.target === 'cc_1')).toBe(true)
+    expect(moved.edges.some((edge) => edge.source === 'cc_1' && edge.target === 'approval_1')).toBe(true)
+    expect(moved.edges.some((edge) => edge.source === 'approval_1' && edge.target === 'end')).toBe(true)
+    expect(moved.edges.some((edge) => edge.source === 'start' && edge.target === 'approval_1')).toBe(false)
+    assertGraphHasNoCoordinates(moved)
+    await expect(page.locator('[data-test="e1-live"]')).toContainText('已移动')
+    // Live region must stay values-free (no edge/node keys).
+    const liveAfterLegal = await page.locator('[data-test="e1-live"]').innerText()
+    expect(liveAfterLegal).not.toMatch(/approval_1|e-cc-end|e-start/)
+    // Selection follows history.selectionAfter (node key), not the stale pre-move focusId.
+    // Layer reorder after move would otherwise leave the inspector on a different card.
+    expect(metrics.selectedName).toBe('主管审批')
+    await expect(page.locator('[data-test="e1-inspector"]')).toBeVisible()
+    await expect(page.locator('[data-test="inspector-name"]')).toHaveText('主管审批')
+    const postMoveApproval = metrics.cards.find((card) => card.name === '主管审批')
+    expect(postMoveApproval, 'post-move 主管审批 card').toBeTruthy()
+    expect(metrics.cardKeyByFocusId[postMoveApproval!.focusId]).toBe('approval_1')
+    // Discriminating: focus id for 主管审批 can change after layer re-layout; selection must track key.
+    expect(postMoveApproval!.focusId).not.toBe(preMoveApprovalFocus)
+    const selectedFocusAfterMove = Object.entries(metrics.cardKeyByFocusId).find(
+      ([, key]) => key === 'approval_1',
+    )?.[0]
+    expect(selectedFocusAfterMove).toBe(postMoveApproval!.focusId)
+    await expect(page.locator(`[data-focus-id="${postMoveApproval!.focusId}"]`)).toBeFocused()
+    await assertNoInternals(page, metrics)
+
+    // Undo restores exact prior graph AND selectionBefore (主管审批 / approval_1).
+    await page.evaluate(() => window.__E1_UNDO__?.())
+    await page.waitForTimeout(80)
+    metrics = await readMetrics(page)
+    expect(metrics.graphJson).toBe(beforeMove)
+    expect(metrics.selectedName).toBe('主管审批')
+    await expect(page.locator('[data-test="inspector-name"]')).toHaveText('主管审批')
+    const postUndoApproval = metrics.cards.find((card) => card.name === '主管审批')
+    expect(postUndoApproval, 'post-undo 主管审批 card').toBeTruthy()
+    expect(metrics.cardKeyByFocusId[postUndoApproval!.focusId]).toBe('approval_1')
+    await expect(page.locator(`[data-focus-id="${postUndoApproval!.focusId}"]`)).toBeFocused()
+
+    // --- (3) Illegal self-slot: typed rejection, values-free copy, byte-identical graph ---
+    metrics = await selectFixture(page, 'linear')
+    const beforeIllegal = metrics.graphJson
+    const illegal = await page.evaluate(() =>
+      window.__E1_MOVE_NODE_INTO_EDGE__?.('approval_1', 'e-approval-cc', 'keyboard'),
+    )
+    expect(illegal?.ok).toBe(false)
+    expect(illegal?.code).toBe('self-slot')
+    await page.waitForTimeout(80)
+    metrics = await readMetrics(page)
+    expect(metrics.lastCommandOk).toBe(false)
+    expect(metrics.lastCommandCode).toBe('self-slot')
+    expect(metrics.graphJson).toBe(beforeIllegal)
+    expect(metrics.canUndo).toBe(false)
+    await expect(page.locator('[data-test="e1-live"]')).toHaveText('该位置不能放置此节点')
+    const liveIllegal = await page.locator('[data-test="e1-live"]').innerText()
+    expect(liveIllegal).not.toMatch(/approval_1|e-approval-cc|self-slot/)
+    // Unsupported type rejection (start) also stays values-free and non-mutating.
+    const unsupported = await page.evaluate(() =>
+      window.__E1_MOVE_NODE_INTO_EDGE__?.('start', 'e-cc-end', 'keyboard'),
+    )
+    expect(unsupported?.ok).toBe(false)
+    expect(unsupported?.code).toBe('unsupported-node-type')
+    metrics = await readMetrics(page)
+    expect(metrics.graphJson).toBe(beforeIllegal)
+    await expect(page.locator('[data-test="e1-live"]')).toHaveText('此节点类型不支持此操作')
+
+    // --- (4) Pointer/HTML5 drag uses the same adapter as keyboard activation ---
+    metrics = await selectFixture(page, 'linear')
+    const beforeDrag = metrics.graphJson
+    const approvalCard = metrics.cards.find((card) => card.type === 'approval')
+    expect(approvalCard, 'approval card').toBeTruthy()
+    // Target the insert control on e-cc-end (after 抄送).
+    const ccEndFocus = Object.entries(metrics.edgeKeyByFocusId).find(([, key]) => key === 'e-cc-end')?.[0]
+    expect(ccEndFocus, 'e-cc-end focus').toBeTruthy()
+    await html5DragCardToEdge(page, approvalCard!.focusId, ccEndFocus!)
+    metrics = await readMetrics(page)
+    expect(metrics.lastCommandOk).toBe(true)
+    expect(metrics.lastCommandChannel).toBe('pointer')
+    expect(metrics.graphJson).not.toBe(beforeDrag)
+    const afterPointer = parseGraph(metrics)
+    expect(afterPointer.edges.some((edge) => edge.source === 'cc_1' && edge.target === 'approval_1')).toBe(true)
+    // Pointer path also remaps selection via history.selectionAfter — still 主管审批.
+    expect(metrics.selectedName).toBe('主管审批')
+    await expect(page.locator('[data-test="inspector-name"]')).toHaveText('主管审批')
+
+    // Reset and exercise keyboard activation of the same adapter (`m` on edge insert).
+    metrics = await selectFixture(page, 'linear')
+    const beforeKeyboard = metrics.graphJson
+    const approvalFocus = metrics.cards.find((card) => card.type === 'approval')!.focusId
+    const edgeFocusAgain = Object.entries(metrics.edgeKeyByFocusId).find(([, key]) => key === 'e-cc-end')?.[0]
+    expect(edgeFocusAgain, 'e-cc-end focus after reset').toBeTruthy()
+    await page.locator(`[data-focus-id="${approvalFocus}"]`).click()
+    await page.locator(`[data-focus-id="${edgeFocusAgain}"]`).focus()
+    await page.keyboard.press('m')
+    await page.waitForTimeout(80)
+    metrics = await readMetrics(page)
+    expect(metrics.lastCommandOk).toBe(true)
+    expect(metrics.lastCommandChannel).toBe('keyboard')
+    expect(metrics.graphJson).not.toBe(beforeKeyboard)
+    // Same topology as pointer path.
+    const afterKeyboard = parseGraph(metrics)
+    expect(afterKeyboard.edges.map((e) => `${e.source}->${e.target}`).sort()).toEqual(
+      afterPointer.edges.map((e) => `${e.source}->${e.target}`).sort(),
+    )
+    // Keyboard path: selection/inspector still name 主管审批 after focusId reshuffle.
+    expect(metrics.selectedName).toBe('主管审批')
+    await expect(page.locator('[data-test="inspector-name"]')).toHaveText('主管审批')
+    const kbApproval = metrics.cards.find((card) => card.name === '主管审批')!
+    await expect(page.locator(`[data-focus-id="${kbApproval.focusId}"]`)).toBeFocused()
+
+    // --- (5) Renderer coordinates remain non-persisted after mutations ---
+    assertGraphHasNoCoordinates(afterKeyboard)
+    expect(metrics.cards.every((card) => typeof card.x === 'number')).toBe(true)
+    // Geometry + no-internals still hold on mutated linear graph.
+    assertNoCardOverlap(metrics)
+    assertEdgesDoNotCrossCards(metrics)
+    await assertNoInternals(page, metrics)
+    await assertNoHorizontalOverflow(page)
+
+    await page.screenshot({ path: `${OUT}/e1-b-command-drag.png` })
     expect(errs, `console/page errors:\n${errs.join('\n')}`).toEqual([])
   })
 })

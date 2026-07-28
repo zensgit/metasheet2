@@ -55,6 +55,10 @@
         background: #fff;
         cursor: pointer;
       }
+      .e1-header button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
       .e1-header button:focus-visible,
       .e1-header select:focus-visible {
         outline: 2px solid #2563eb;
@@ -123,6 +127,11 @@
         outline: 2px solid #1d4ed8;
         outline-offset: 2px;
       }
+      .e1-insert.is-drop-target {
+        background: #dbeafe;
+        border-color: #1d4ed8;
+        box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+      }
       .e1-card {
         position: absolute;
         width: 200px;
@@ -133,6 +142,16 @@
         cursor: pointer;
         z-index: 1;
         /* No action-button cluster; selection opens inspector. */
+      }
+      .e1-card.is-draggable {
+        cursor: grab;
+      }
+      .e1-card.is-draggable:active,
+      .e1-card.is-dragging {
+        cursor: grabbing;
+      }
+      .e1-card.is-dragging {
+        opacity: 0.65;
       }
       .e1-card:focus-visible {
         outline: 2px solid #2563eb;

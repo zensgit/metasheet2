@@ -2,8 +2,22 @@
 // lives outside src/ so vue-tsc + vite build ignore it). E1 isolated approval-flow
 // renderer spike: constrained vertical tree, no free-form graph, no persisted
 // coordinates, no production route wiring.
+//
+// E1-b: mutations go through the real production approvalCanvasCommands history API
+// (create / apply / undo / redo). The renderer never re-implements topology validation.
 import { computed, createApp, h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import '../src/styles/tokens.css'
+import {
+  applyApprovalCanvasCommand,
+  createApprovalCanvasHistory,
+  redoApprovalCanvasCommand,
+  undoApprovalCanvasCommand,
+  type ApprovalCanvasCommand,
+  type ApprovalCanvasCommandErrorCode,
+  type ApprovalCanvasHistory,
+  type ApprovalCanvasSelection,
+} from '../src/approvals/approvalCanvasCommands'
+import type { ApprovalGraph, ConditionNodeConfig } from '../src/types/approval'
 import {
   ALL_FIXTURES,
   collectInternalTokens,
@@ -20,11 +34,21 @@ import {
 
 type InspectorPresentation = 'dock' | 'overlay' | 'sheet'
 type SheetDetent = 'half' | 'full'
+/** Input channel for the single command adapter (pointer/HTML5 and keyboard share it). */
+type CommandChannel = 'pointer' | 'keyboard' | 'toolbar'
 
 interface InsertMenuState {
   edgeFocusId: string
+  edgeKey: string
   x: number
   y: number
+}
+
+interface CommandDispatchResult {
+  ok: boolean
+  code: ApprovalCanvasCommandErrorCode | null
+  channel: CommandChannel
+  liveText: string
 }
 
 interface E1PublicMetrics {
@@ -66,13 +90,40 @@ interface E1PublicMetrics {
   liveText: string
   reducedMotion: boolean
   internalTokens: string[]
+  /** Sole persisted model snapshot (no coordinates). Verification only. */
+  graphJson: string
+  canUndo: boolean
+  canRedo: boolean
+  undoDepth: number
+  lastCommandOk: boolean | null
+  lastCommandCode: string | null
+  lastCommandChannel: CommandChannel | null
+  /** Opaque focusId → graph key maps (window metrics only; never DOM text). */
+  cardKeyByFocusId: Record<string, string>
+  edgeKeyByFocusId: Record<string, string>
 }
 
 declare global {
   interface Window {
     __E1_CANVAS__?: E1PublicMetrics
     __E1_SELECT_FIXTURE__?: (id: E1FixtureId) => void
-    __E1_SWAP_CONDITION_PRIORITY__?: () => void
+    /** Real reorder-condition-branches via history API (no fixture swap). */
+    __E1_SWAP_CONDITION_PRIORITY__?: () => CommandDispatchResult | void
+    __E1_UNDO__?: () => CommandDispatchResult | void
+    __E1_REDO__?: () => CommandDispatchResult | void
+    /**
+     * Canonical move adapter entry (same function keyboard + pointer/HTML5 use).
+     * Channel defaults to 'keyboard' for programmatic harness hooks.
+     */
+    __E1_MOVE_NODE_INTO_EDGE__?: (
+      nodeKey: string,
+      intoEdgeKey: string,
+      channel?: CommandChannel,
+    ) => CommandDispatchResult
+    __E1_APPLY_COMMAND__?: (
+      command: ApprovalCanvasCommand,
+      channel?: CommandChannel,
+    ) => CommandDispatchResult
   }
 }
 
@@ -86,10 +137,83 @@ function prefersReducedMotion(): boolean {
   return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
 }
 
+function cloneGraph(graph: ApprovalGraph): ApprovalGraph {
+  return JSON.parse(JSON.stringify(graph)) as ApprovalGraph
+}
+
+function cloneFixture(id: E1FixtureId): E1Fixture {
+  const base = getFixture(id)
+  return JSON.parse(JSON.stringify(base)) as E1Fixture
+}
+
+/**
+ * Values-free business copy for command rejections.
+ * Never interpolates node keys, edge keys, field IDs, or raw internal messages.
+ */
+function businessCopyForError(code: ApprovalCanvasCommandErrorCode): string {
+  switch (code) {
+    case 'self-slot':
+    case 'adjacent-slot':
+    case 'ambiguous-slot':
+    case 'cycle':
+    case 'nested-parallel-invalid':
+    case 'empty-parallel-branch':
+    case 'edge-not-found':
+    case 'not-linear':
+      return '该位置不能放置此节点'
+    case 'unsupported-node-type':
+      return '此节点类型不支持此操作'
+    case 'node-not-found':
+      return '未找到可操作的节点'
+    case 'invalid-branch-order':
+    case 'default-edge-immutable':
+      return '无法调整该分支顺序'
+    case 'empty-history':
+      return '没有可撤销的操作'
+    case 'unknown-command':
+      return '操作无法完成'
+    default: {
+      const _exhaustive: never = code
+      void _exhaustive
+      return '操作无法完成'
+    }
+  }
+}
+
+function successCopyForCommand(
+  command: ApprovalCanvasCommand,
+  fixture: E1Fixture,
+  graph: ApprovalGraph,
+): string {
+  if (command.type === 'move-node-into-edge') {
+    const node = graph.nodes.find((item) => item.key === command.nodeKey)
+    const name = node?.name?.trim() || '节点'
+    return `已移动「${name}」`
+  }
+  if (command.type === 'reorder-condition-branches') {
+    const firstKey = command.orderedEdgeKeys[0]
+    const raised =
+      (firstKey && fixture.branchDisplayLabels?.[firstKey]) ||
+      graph.nodes.find((item) => item.key === command.conditionNodeKey)?.name ||
+      '分支'
+    return `已提高「${raised}」的优先级`
+  }
+  if (command.type === 'reorder-parallel-branches') {
+    return '已调整并行分支顺序'
+  }
+  return '操作已完成'
+}
+
 createApp({
   setup() {
     const fixtureId = ref<E1FixtureId>('linear')
-    const fixture = ref<E1Fixture>(getFixture('linear'))
+    const fixture = ref<E1Fixture>(cloneFixture('linear'))
+    const history = ref<ApprovalCanvasHistory>(
+      createApprovalCanvasHistory(cloneGraph(fixture.value.graph)),
+    )
+    // Keep fixture.graph as the history graph reference surface for layout.
+    fixture.value = { ...fixture.value, graph: history.value.graph }
+
     const selectedFocusId = ref<string | null>(null)
     const liveText = ref('')
     const viewportW = ref(window.innerWidth)
@@ -98,6 +222,9 @@ createApp({
     const measuredHeights = ref<Map<string, number>>(new Map())
     const surfaceEl = ref<HTMLElement | null>(null)
     const reducedMotion = ref(prefersReducedMotion())
+    const lastResult = ref<CommandDispatchResult | null>(null)
+    const draggingNodeKey = ref<string | null>(null)
+    const dragOverEdgeFocusId = ref<string | null>(null)
 
     const layout = computed<E1LayoutModel>(() =>
       computeE1Layout(fixture.value, measuredHeights.value.size ? measuredHeights.value : undefined),
@@ -123,12 +250,144 @@ createApp({
       })
     }
 
+    function syncFixtureFromHistory() {
+      fixture.value = {
+        ...fixture.value,
+        graph: history.value.graph,
+      }
+    }
+
+    /**
+     * Map history.selection (stable graph keys) onto the current layout's render-only
+     * focusId. Never stores focusIds or coordinates in history — only remaps after render.
+     */
+    function focusIdForHistorySelection(
+      selection: ApprovalCanvasSelection,
+      model: E1LayoutModel,
+    ): string | null {
+      if (selection.kind === 'none') return null
+      if (selection.kind === 'node') {
+        return model.cards.find((card) => card.nodeKey === selection.nodeKey)?.focusId ?? null
+      }
+      if (selection.kind === 'edge') {
+        return model.edges.find((edge) => edge.edgeKey === selection.edgeKey)?.focusId ?? null
+      }
+      if (selection.kind === 'condition-branch') {
+        // Prefer the gateway card so the inspector stays on the business node; fall back to branch edge.
+        return (
+          model.cards.find((card) => card.nodeKey === selection.conditionNodeKey)?.focusId ??
+          model.edges.find((edge) => edge.edgeKey === selection.edgeKey)?.focusId ??
+          null
+        )
+      }
+      if (selection.kind === 'parallel-branch') {
+        return (
+          model.cards.find((card) => card.nodeKey === selection.parallelNodeKey)?.focusId ??
+          model.edges.find((edge) => edge.edgeKey === selection.edgeKey)?.focusId ??
+          null
+        )
+      }
+      const _exhaustive: never = selection
+      void _exhaustive
+      return null
+    }
+
+    /**
+     * After apply/undo/redo, rebind selectedFocusId from history.selection using the
+     * newly computed layout. Layer-order focus IDs can change after a move; keys do not.
+     */
+    function restoreSelectionFromHistory() {
+      const focusId = focusIdForHistorySelection(history.value.selection, layout.value)
+      selectedFocusId.value = focusId
+      if (focusId) {
+        void nextTick(() => {
+          document.querySelector<HTMLElement>(`[data-focus-id="${focusId}"]`)?.focus()
+        })
+      }
+    }
+
+    function afterHistoryMutation() {
+      measuredHeights.value = new Map()
+      // Layout recomputes synchronously from the new graph; remap before paint/metrics.
+      restoreSelectionFromHistory()
+      void nextTick(() => {
+        measureAndReflow()
+        // Heights can reflow geometry but not focusId identity; remap again in case layout rebuilt.
+        restoreSelectionFromHistory()
+        publishMetrics()
+      })
+    }
+
+    /**
+     * Single command adapter for toolbar, keyboard, and pointer/HTML5 drag.
+     * Topology validity is decided only by the production command layer — never here.
+     */
+    function runCanvasCommand(
+      command: ApprovalCanvasCommand,
+      channel: CommandChannel,
+      selectionBefore?: ApprovalCanvasSelection,
+    ): CommandDispatchResult {
+      if (fixture.value.readOnly) {
+        const result: CommandDispatchResult = {
+          ok: false,
+          code: 'unsupported-node-type',
+          channel,
+          liveText: '当前为只读夹具，无法编辑',
+        }
+        lastResult.value = result
+        announce(result.liveText)
+        publishMetrics()
+        return result
+      }
+
+      const selection =
+        selectionBefore ??
+        (selectedCard.value
+          ? ({ kind: 'node', nodeKey: selectedCard.value.nodeKey } satisfies ApprovalCanvasSelection)
+          : ({ kind: 'none' } satisfies ApprovalCanvasSelection))
+
+      const applied = applyApprovalCanvasCommand(history.value, command, selection)
+      if (!applied.ok) {
+        const copy = businessCopyForError(applied.error.code)
+        const result: CommandDispatchResult = {
+          ok: false,
+          code: applied.error.code,
+          channel,
+          liveText: copy,
+        }
+        lastResult.value = result
+        // Failure returns the same history reference — graph stays byte-identical.
+        announce(copy)
+        publishMetrics()
+        return result
+      }
+
+      history.value = applied.history
+      syncFixtureFromHistory()
+      const copy = successCopyForCommand(command, fixture.value, history.value.graph)
+      const result: CommandDispatchResult = {
+        ok: true,
+        code: null,
+        channel,
+        liveText: copy,
+      }
+      lastResult.value = result
+      announce(copy)
+      afterHistoryMutation()
+      return result
+    }
+
     function selectFixture(id: E1FixtureId) {
       fixtureId.value = id
-      fixture.value = getFixture(id)
+      const next = cloneFixture(id)
+      history.value = createApprovalCanvasHistory(cloneGraph(next.graph))
+      fixture.value = { ...next, graph: history.value.graph }
       selectedFocusId.value = null
       insertMenu.value = null
       measuredHeights.value = new Map()
+      draggingNodeKey.value = null
+      dragOverEdgeFocusId.value = null
+      lastResult.value = null
       announce(`已加载夹具：${fixture.value.title}`)
       void nextTick(() => {
         measureAndReflow()
@@ -136,23 +395,117 @@ createApp({
       })
     }
 
-    /** Demo-only: swap condition branch priority via config.branches only (nodes/edges untouched). */
-    function swapConditionPriority() {
+    /**
+     * Raise the second rule branch to highest priority via reorder-condition-branches.
+     * Replaces the demo-only fixture swap; default branch is never included.
+     */
+    function swapConditionPriority(): CommandDispatchResult | void {
       if (fixture.value.readOnly) {
-        announce('当前为只读夹具，无法调整优先级')
+        const result: CommandDispatchResult = {
+          ok: false,
+          code: 'unsupported-node-type',
+          channel: 'toolbar',
+          liveText: '当前为只读夹具，无法调整优先级',
+        }
+        lastResult.value = result
+        announce(result.liveText)
+        publishMetrics()
+        return result
+      }
+      const condition = history.value.graph.nodes.find((node) => node.type === 'condition')
+      if (!condition) {
+        announce('请先加载条件分支夹具')
         return
       }
-      if (fixtureId.value === 'condition') {
-        selectFixture('condition-priority-swapped')
-        announce('已提高「金额大于等于一千」的优先级')
+      const config = condition.config as ConditionNodeConfig
+      const keys = (config.branches ?? []).map((branch) => branch.edgeKey)
+      if (keys.length < 2) {
+        announce('当前条件没有可对调的规则分支')
         return
       }
-      if (fixtureId.value === 'condition-priority-swapped') {
-        selectFixture('condition')
-        announce('已恢复「金额大于等于一百」为最高优先级')
-        return
+      const orderedEdgeKeys = [keys[1]!, keys[0]!, ...keys.slice(2)]
+      return runCanvasCommand(
+        {
+          type: 'reorder-condition-branches',
+          conditionNodeKey: condition.key,
+          orderedEdgeKeys,
+        },
+        'toolbar',
+        { kind: 'node', nodeKey: condition.key },
+      )
+    }
+
+    function undoLast(): CommandDispatchResult {
+      const undone = undoApprovalCanvasCommand(history.value)
+      if (!undone.ok) {
+        const copy = businessCopyForError(undone.error.code)
+        const result: CommandDispatchResult = {
+          ok: false,
+          code: undone.error.code,
+          channel: 'toolbar',
+          liveText: copy,
+        }
+        lastResult.value = result
+        announce(copy)
+        publishMetrics()
+        return result
       }
-      announce('请先加载条件分支夹具')
+      history.value = undone.history
+      syncFixtureFromHistory()
+      const result: CommandDispatchResult = {
+        ok: true,
+        code: null,
+        channel: 'toolbar',
+        liveText: '已撤销上一步操作',
+      }
+      lastResult.value = result
+      announce(result.liveText)
+      // selectionBefore is restored on history.selection — remap to post-undo focusIds.
+      afterHistoryMutation()
+      return result
+    }
+
+    function redoLast(): CommandDispatchResult {
+      const redone = redoApprovalCanvasCommand(history.value)
+      if (!redone.ok) {
+        const copy = businessCopyForError(redone.error.code)
+        const result: CommandDispatchResult = {
+          ok: false,
+          code: redone.error.code,
+          channel: 'toolbar',
+          liveText: copy,
+        }
+        lastResult.value = result
+        announce(copy)
+        publishMetrics()
+        return result
+      }
+      history.value = redone.history
+      syncFixtureFromHistory()
+      const result: CommandDispatchResult = {
+        ok: true,
+        code: null,
+        channel: 'toolbar',
+        liveText: '已重做上一步操作',
+      }
+      lastResult.value = result
+      announce(result.liveText)
+      // selectionAfter is restored on history.selection — remap to post-redo focusIds.
+      afterHistoryMutation()
+      return result
+    }
+
+    /** Canonical move used by pointer/HTML5 drag and keyboard activation alike. */
+    function moveNodeIntoEdge(
+      nodeKey: string,
+      intoEdgeKey: string,
+      channel: CommandChannel,
+    ): CommandDispatchResult {
+      return runCanvasCommand(
+        { type: 'move-node-into-edge', nodeKey, intoEdgeKey },
+        channel,
+        { kind: 'node', nodeKey },
+      )
     }
 
     function selectCard(card: E1CardModel) {
@@ -178,7 +531,12 @@ createApp({
         announce('当前连线不可插入')
         return
       }
-      insertMenu.value = { edgeFocusId: edge.focusId, x: edge.midX, y: edge.midY }
+      insertMenu.value = {
+        edgeFocusId: edge.focusId,
+        edgeKey: edge.edgeKey,
+        x: edge.midX,
+        y: edge.midY,
+      }
       announce(`已打开插入菜单：${edge.ariaLabel}`)
       void nextTick(() => {
         const first = document.querySelector<HTMLElement>('[data-test="insert-menu"] button')
@@ -189,9 +547,64 @@ createApp({
     function activateInsert(kind: 'approval' | 'cc') {
       const label = kind === 'approval' ? '审批' : '抄送'
       insertMenu.value = null
-      // Spike: announce activation only — mutations stay out of production graph save paths.
+      // Spike: announce activation only — insert mutations stay out of E1-b scope.
       announce(`已选择插入「${label}」节点（spike 演示，未写入业务模型）`)
       publishMetrics()
+    }
+
+    function activateMoveSelectedToEdge(edgeKey: string, channel: CommandChannel) {
+      const card = selectedCard.value
+      if (!card || (card.type !== 'approval' && card.type !== 'cc')) {
+        announce('请先选中可移动的审批或抄送节点')
+        return
+      }
+      insertMenu.value = null
+      moveNodeIntoEdge(card.nodeKey, edgeKey, channel)
+    }
+
+    function isCardDraggable(card: E1CardModel): boolean {
+      if (fixture.value.readOnly) return false
+      return card.type === 'approval' || card.type === 'cc'
+    }
+
+    function onCardDragStart(card: E1CardModel, event: DragEvent) {
+      if (!isCardDraggable(card)) {
+        event.preventDefault()
+        return
+      }
+      draggingNodeKey.value = card.nodeKey
+      selectedFocusId.value = card.focusId
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = 'move'
+        // Opaque token only — never surface graph keys in accessible DOM text.
+        event.dataTransfer.setData('text/plain', card.focusId)
+      }
+    }
+
+    function onCardDragEnd() {
+      draggingNodeKey.value = null
+      dragOverEdgeFocusId.value = null
+    }
+
+    function onEdgeDragOver(edge: E1EdgeModel, event: DragEvent) {
+      if (!draggingNodeKey.value || !edge.insertable || fixture.value.readOnly) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+      dragOverEdgeFocusId.value = edge.focusId
+    }
+
+    function onEdgeDragLeave(edge: E1EdgeModel) {
+      if (dragOverEdgeFocusId.value === edge.focusId) dragOverEdgeFocusId.value = null
+    }
+
+    function onEdgeDrop(edge: E1EdgeModel, event: DragEvent) {
+      event.preventDefault()
+      const nodeKey = draggingNodeKey.value
+      dragOverEdgeFocusId.value = null
+      draggingNodeKey.value = null
+      if (!nodeKey || !edge.insertable) return
+      // Pointer/HTML5 path — same adapter as keyboard.
+      moveNodeIntoEdge(nodeKey, edge.edgeKey, 'pointer')
     }
 
     function onCanvasKeydown(event: KeyboardEvent) {
@@ -209,6 +622,14 @@ createApp({
         return
       }
 
+      // Undo / redo (toolbar channel for chrome-equivalent keyboard shortcuts).
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault()
+        if (event.shiftKey) redoLast()
+        else undoLast()
+        return
+      }
+
       if (event.key === 'Enter' || event.key === ' ') {
         const edge = layout.value.edges.find((item) => item.focusId === focusId)
         if (edge) {
@@ -220,6 +641,17 @@ createApp({
         if (card) {
           event.preventDefault()
           selectCard(card)
+          return
+        }
+      }
+
+      // Keyboard semantic move: with a movable node selected, `m` on an edge insert
+      // uses the same adapter as pointer/HTML5 drop.
+      if (event.key === 'm' || event.key === 'M') {
+        const edge = layout.value.edges.find((item) => item.focusId === focusId)
+        if (edge?.insertable) {
+          event.preventDefault()
+          activateMoveSelectedToEdge(edge.edgeKey, 'keyboard')
           return
         }
       }
@@ -262,8 +694,8 @@ createApp({
       for (const card of layout.value.cards) {
         const el = root.querySelector<HTMLElement>(`[data-focus-id="${card.focusId}"]`)
         if (!el) continue
-        const h = el.getBoundingClientRect().height
-        if (h > 0) next.set(card.nodeKey, Math.ceil(h))
+        const measured = el.getBoundingClientRect().height
+        if (measured > 0) next.set(card.nodeKey, Math.ceil(measured))
       }
       // Only update when heights actually differ to avoid loops.
       let changed = next.size !== measuredHeights.value.size
@@ -280,6 +712,11 @@ createApp({
 
     function publishMetrics() {
       const model = layout.value
+      const cardKeyByFocusId: Record<string, string> = {}
+      const edgeKeyByFocusId: Record<string, string> = {}
+      for (const card of model.cards) cardKeyByFocusId[card.focusId] = card.nodeKey
+      for (const edge of model.edges) edgeKeyByFocusId[edge.focusId] = edge.edgeKey
+
       window.__E1_CANVAS__ = {
         ready: true,
         fixtureId: fixtureId.value,
@@ -322,6 +759,15 @@ createApp({
         liveText: liveText.value,
         reducedMotion: reducedMotion.value,
         internalTokens: collectInternalTokens(fixture.value.graph),
+        graphJson: JSON.stringify(history.value.graph),
+        canUndo: history.value.undoStack.length > 0,
+        canRedo: history.value.redoStack.length > 0,
+        undoDepth: history.value.undoStack.length,
+        lastCommandOk: lastResult.value?.ok ?? null,
+        lastCommandCode: lastResult.value?.code ?? null,
+        lastCommandChannel: lastResult.value?.channel ?? null,
+        cardKeyByFocusId,
+        edgeKeyByFocusId,
       }
     }
 
@@ -341,6 +787,12 @@ createApp({
       motionQuery?.addEventListener?.('change', onMotionChange)
       window.__E1_SELECT_FIXTURE__ = selectFixture
       window.__E1_SWAP_CONDITION_PRIORITY__ = swapConditionPriority
+      window.__E1_UNDO__ = undoLast
+      window.__E1_REDO__ = redoLast
+      window.__E1_MOVE_NODE_INTO_EDGE__ = (nodeKey, intoEdgeKey, channel = 'keyboard') =>
+        moveNodeIntoEdge(nodeKey, intoEdgeKey, channel)
+      window.__E1_APPLY_COMMAND__ = (command, channel = 'keyboard') =>
+        runCanvasCommand(command, channel)
       void nextTick(() => {
         measureAndReflow()
         publishMetrics()
@@ -351,6 +803,10 @@ createApp({
       window.removeEventListener('resize', onResize)
       delete window.__E1_SELECT_FIXTURE__
       delete window.__E1_SWAP_CONDITION_PRIORITY__
+      delete window.__E1_UNDO__
+      delete window.__E1_REDO__
+      delete window.__E1_MOVE_NODE_INTO_EDGE__
+      delete window.__E1_APPLY_COMMAND__
       delete window.__E1_CANVAS__
     })
 
@@ -369,6 +825,8 @@ createApp({
       const mode = presentation.value
       const card = selectedCard.value
       const readOnly = Boolean(fixture.value.readOnly)
+      const movableSelected =
+        card != null && (card.type === 'approval' || card.type === 'cc') && !readOnly
 
       const inspectorClass = [
         'e1-inspector',
@@ -479,8 +937,26 @@ createApp({
           h('button', {
             type: 'button',
             'data-test': 'swap-priority',
-            onClick: swapConditionPriority,
+            onClick: () => {
+              swapConditionPriority()
+            },
           }, '调整条件优先级'),
+          h('button', {
+            type: 'button',
+            'data-test': 'undo',
+            disabled: history.value.undoStack.length === 0,
+            onClick: () => {
+              undoLast()
+            },
+          }, '撤销'),
+          h('button', {
+            type: 'button',
+            'data-test': 'redo',
+            disabled: history.value.redoStack.length === 0,
+            onClick: () => {
+              redoLast()
+            },
+          }, '重做'),
           h('span', {
             'data-test': 'fixture-title',
             style: 'font-size:13px;color:#4b5563',
@@ -569,18 +1045,23 @@ createApp({
                 const paired =
                   selectedCard.value?.pairedFocusId === item.focusId ||
                   (selected && Boolean(item.pairedFocusId))
+                const draggable = isCardDraggable(item)
                 return h('div', {
                   class: [
                     'e1-card',
                     selected ? 'is-selected' : null,
                     paired ? 'is-paired' : null,
                     readOnly ? 'is-readonly' : null,
+                    draggable ? 'is-draggable' : null,
+                    draggingNodeKey.value === item.nodeKey ? 'is-dragging' : null,
                   ],
                   'data-test': 'flow-node',
                   'data-node-type': item.type,
                   'data-focus-id': item.focusId,
+                  'data-draggable': draggable ? 'true' : 'false',
                   role: 'button',
                   tabindex: 0,
+                  draggable,
                   // Business language only — never node keys / edge keys / IDs.
                   'aria-label': `${item.typeLabel}：${item.name}`,
                   title: item.name,
@@ -592,6 +1073,8 @@ createApp({
                     minHeight: `${Math.max(48, item.height - 8)}px`,
                   },
                   onClick: () => selectCard(item),
+                  onDragstart: (event: DragEvent) => onCardDragStart(item, event),
+                  onDragend: onCardDragEnd,
                 }, [
                   h('div', { class: 'e1-card__type' }, item.typeLabel),
                   h('div', { class: 'e1-card__name', 'data-test': 'node-name' }, item.name),
@@ -607,7 +1090,10 @@ createApp({
               }),
               ...model.edges.filter((edge) => edge.insertable).map((edge) => h('button', {
                 type: 'button',
-                class: 'e1-insert',
+                class: [
+                  'e1-insert',
+                  dragOverEdgeFocusId.value === edge.focusId ? 'is-drop-target' : null,
+                ],
                 'data-test': 'edge-insert',
                 'data-focus-id': edge.focusId,
                 'aria-label': edge.ariaLabel,
@@ -619,6 +1105,9 @@ createApp({
                   event.stopPropagation()
                   openInsertMenu(edge)
                 },
+                onDragover: (event: DragEvent) => onEdgeDragOver(edge, event),
+                onDragleave: () => onEdgeDragLeave(edge),
+                onDrop: (event: DragEvent) => onEdgeDrop(edge, event),
               }, '+')),
               insertMenu.value
                 ? h('div', {
@@ -642,6 +1131,17 @@ createApp({
                     'data-test': 'insert-cc',
                     onClick: () => activateInsert('cc'),
                   }, '抄送节点'),
+                  movableSelected
+                    ? h('button', {
+                      type: 'button',
+                      role: 'menuitem',
+                      'data-test': 'move-selected-here',
+                      onClick: () => {
+                        const edgeKey = insertMenu.value?.edgeKey
+                        if (edgeKey) activateMoveSelectedToEdge(edgeKey, 'keyboard')
+                      },
+                    }, '移动已选节点到此处')
+                    : null,
                 ])
                 : null,
             ]),
