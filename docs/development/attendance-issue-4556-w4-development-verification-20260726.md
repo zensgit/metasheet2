@@ -190,7 +190,8 @@ WIP checkpoint 在实现车道遗留的共享库 `ms2_w4c2` 上跑出 1 条红�
   `OD-W4C-54=(a)`：生产永久拒绝 allowlist 为空。
 - 该授权只覆盖 W4C-2 option-A 实现、验证和 exact-head 独立门；**不授权**
   #4612 合并、W4C-3+、flag、部署、staging soak、客户数据或关闭 #4556。
-- fresh candidate 从上述 exact main 重建：完整重放 #4612 的 72 个片内提交，
+- fresh candidate 从上述 exact main 重建：重放 #4612 的 72 个非 merge 片内提交
+  （原分支另有 1 个 main merge commit，由 fresh rebase 取代），
   再叠加 #4668 recovery 修复；recovery 在重放后的 commit 为
   `50940b767f97ab59ff5ff7dfcea3e0d7cb130f4c`。
 - option-A 测试提交为
@@ -198,15 +199,17 @@ WIP checkpoint 在实现车道遗留的共享库 `ms2_w4c2` 上跑出 1 条红�
 
 ### 10.2 option-A 合同落点
 
-1. 以 TypeScript AST 扫描生产 `src/**/*.ts` 内
-   `recordAttendanceScheduledRunTargetOutcomeV1` 的直接调用；任何非对象字面量、
-   缺失 `terminalOutcome` 或值不等于字面量 `completed` 的调用都使门失败。
-   当前生产 `failed` writer callsite = **0**。
+1. no-DB 单测以 TypeScript AST 扫描 core `src` 与
+   `plugins/plugin-attendance` 的生产 `.ts` / `.cjs`：任何 outcome writer
+   间接引用、非对象字面量、缺失 `terminalOutcome` 或值不等于字面量
+   `completed` 的调用都使门失败；直接 outcome-table DML 只能保留 canonical
+   writer 内唯一一处。当前生产 `failed` writer callsite = **0**。
 2. failed outcome 只由真库合同 fixture 构造。fixture 必须调用具名
    `cancelAttendanceResultOperationV1`，并在同一事务写闭集 reason code
    `ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED`；不以 raw SQL 伪造取消。
-3. fixture 记录该事务实际执行的 SQL，并对 attendance source tables 的
-   `INSERT/UPDATE/DELETE` 做 sentinel；failed fixture 的 source DML = **0**。
+3. scratch DB 对所有在场 attendance source tables 安装
+   `BEFORE INSERT OR UPDATE OR DELETE` statement trigger sentinel；正控 source
+   INSERT 必须被拒绝，而 failed fixture 成功提交且 source-table residue = **0**。
 4. integrity gate 双向覆盖：
    `canceled operation + completed outcome` 与
    `completed operation + failed outcome` 均须在事务提交时因
@@ -220,16 +223,17 @@ WIP checkpoint 在实现车道遗留的共享库 `ms2_w4c2` 上跑出 1 条红�
 
 | 门 | 结果 |
 | --- | --- |
-| option-A 三个聚焦真库文件 | **79/79 PASS** |
-| W4C-2 CI 明列十个真库文件 | **155/155 PASS** |
+| option-A no-DB allowlist guard | **2/2 PASS** |
+| option-A 三个聚焦真库文件 | **78/78 PASS** |
+| W4C-2 CI 明列十个真库文件 | **154/154 PASS** |
 | #4668 recovery wiring 单测 | **3/3 PASS** |
 | W4C-2 CI wiring guard | **32/32 PASS** |
-| core-backend no-DB 全量 Vitest | **563 files / 7,842 passed / 1,651 skipped，exit 0** |
+| core-backend no-DB 全量 Vitest | **564 files / 7,844 passed / 1,651 skipped，exit 0** |
 | core-backend TypeScript type-check | **PASS** |
 | `git diff --check` | **PASS** |
 
 真库全量运行中出现过 node-cron 在 suite teardown 后访问已关闭 pool 的 stderr
-噪声，但十个文件仍为 155/155、进程 exit 0；本记录不把该噪声宣称为已修。
+噪声，但十个文件仍为 154/154、进程 exit 0；本记录不把该噪声宣称为已修。
 
 ### 10.4 判别力 mutation
 
@@ -237,7 +241,7 @@ WIP checkpoint 在实现车道遗留的共享库 `ms2_w4c2` 上跑出 1 条红�
 | --- | --- |
 | 将生产 outcome writer 的 `completed` 改为 `failed` | AST allowlist 门精确翻红 |
 | 将 fixture 的具名 cancel helper 换回 raw `UPDATE ... state='canceled'` | named-cancel 门精确翻红；生命周期腿仍绿，证明该门关闭真实 false-green |
-| 在 failed fixture 注入 `attendance_records` source DML | SQL sentinel 精确翻红 |
+| 在 failed fixture 注入 `attendance_records` source DML | DB trigger sentinel 精确翻红 |
 
 三刀均在正控后还原，最终工作树不含 mutation。
 
