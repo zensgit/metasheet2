@@ -803,7 +803,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
 export function graphReadOnlyReason(template: ApprovalTemplateDetailDTO): string | null {
   if (unsupportedTemplateAuthoringReason(template)) return null
   if (!isComplexApprovalGraph(template.approvalGraph)) return null
-  return '该模板已启用分支流程编辑：可在画布调整流程结构，并在结构列表编辑各节点配置。'
+  return '该模板已启用分支流程编辑：可在画布调整流程结构，并在辅助编辑模式编辑各节点配置。'
 }
 
 export function draftFromTemplate(template: ApprovalTemplateDetailDTO): TemplateAuthoringDraft {

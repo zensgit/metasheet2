@@ -65,7 +65,7 @@
     <el-alert
       v-if="!unsupportedReason && graphReadOnlyMessage"
       :title="graphReadOnlyMessage"
-      description="画布编排结构；选中节点后可在右侧检查器编辑审批人、条件、并行汇聚、抄送和字段权限（与结构列表共用同一草稿）。"
+      description="画布编排结构；选中节点后可在右侧检查器编辑审批人、条件、并行汇聚、抄送和字段权限（与辅助编辑模式共用同一草稿）。"
       type="info"
       show-icon
       :closable="false"
@@ -133,6 +133,33 @@
           class="template-authoring__content"
           data-testid="approval-template-workspace-content"
         >
+      <div
+        v-if="canvasV2Enabled"
+        v-show="activeAuthoringSection === 'fields' || activeAuthoringSection === 'flow'"
+        class="template-authoring__mode-switch"
+        role="group"
+        aria-label="审批设计模式"
+        data-testid="approval-authoring-mode-switch"
+      >
+        <el-button
+          size="small"
+          :type="activeAuthoringSection === 'fields' ? 'primary' : 'default'"
+          :aria-pressed="activeAuthoringSection === 'fields'"
+          data-testid="approval-authoring-mode-form"
+          @click="selectAuthoringSection('fields')"
+        >
+          表单设计
+        </el-button>
+        <el-button
+          size="small"
+          :type="activeAuthoringSection === 'flow' ? 'primary' : 'default'"
+          :aria-pressed="activeAuthoringSection === 'flow'"
+          data-testid="approval-authoring-mode-flow"
+          @click="selectAuthoringSection('flow')"
+        >
+          流程设计
+        </el-button>
+      </div>
       <el-card
         v-if="showPresetLibrary"
         v-show="activeAuthoringSection === 'basic'"
@@ -534,17 +561,15 @@
           </div>
         </template>
 
-        <!-- Complex graphs use a canvas for topology and a structured list for node configuration. -->
-        <!-- D-6 view toggle: structured list ⇄ visual canvas. C1: available for a LINEAR draft too
-             (its structured list is the step-card stack below), so both shapes reach the same canvas
-             through the same `buildApprovalGraph` adapter. `list` stays the default either way. -->
+        <!-- C2: Canvas V2 is canvas-first while the flag is ON. The structured surface remains an
+             explicit accessible fallback until the lock's keyboard/assistive equivalence gate passes. -->
         <div v-if="canvasAvailable" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
-          <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">结构列表</el-button>
-          <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
+          <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">流程画布</el-button>
+          <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">辅助编辑模式</el-button>
         </div>
 
         <!-- D-1/D-5 visual canvas + Canvas V2 Slice A right-side inspector.
-             Topology stays on the canvas; node config reuses the SAME draft handlers as 结构列表.
+             Topology stays on the canvas; node config reuses the SAME draft handlers as 辅助编辑模式.
              ApprovalFlowCanvas is a presentational shell (E2 extraction) — this view stays the
              owner of selection/zoom/move state and every topology/command handler below. -->
         <ApprovalFlowCanvas
@@ -689,9 +714,9 @@
           </template>
         </div>
 
-        <!-- C1: the step cards ARE the structured list for a linear draft — the D-6 toggle swaps
+        <!-- C1: the step cards ARE the structured fallback for a linear draft — the D-6 toggle swaps
              them for the canvas exactly as it swaps `approval-graph-readonly-list` for a complex
-             graph, and they come back untouched on 结构列表 (nothing about the toggle edits them). -->
+             graph, and they come back untouched in 辅助编辑模式 (nothing about the toggle edits them). -->
         <div
           v-for="(step, index) in draft.steps"
           v-show="!graphReadOnly && !linearCanvasActive"
@@ -2012,7 +2037,9 @@ function canRemoveNode(node: ApprovalNode): boolean {
 // ── D-1/D-5/D-6 visual canvas. Layout and semantic move targets are pure data; drag/drop and
 // Alt+Arrow both invoke the same topology edit, so visual position never diverges from the saved graph.
 // Reuses the same topology handlers as the list and the same draft-backed right-side inspector. ──
-const canvasViewMode = ref<'list' | 'canvas'>('list')
+// C2 canvas-first: this ref only matters while the Canvas flag is available. With the flag OFF,
+// `canvasAvailable` stays false and the existing structured surface renders byte-for-byte as before.
+const canvasViewMode = ref<'list' | 'canvas'>('canvas')
 // C1: one canvas for both shapes. A preserved complex graph keeps exactly the availability it had
 // before (flag only). A LINEAR draft additionally requires an AUTHORABLE template: when
 // `unsupportedReason` is set (attachment field / unknown node / extra config keys) the whole editor
@@ -2121,8 +2148,8 @@ watch(canvasEffectiveGraph, (graph) => {
   const movingKey = movingCanvasNode.value
   if (movingKey && linearNodeMoveTargets(graph, movingKey).length === 0) cancelCanvasNodeMove()
 })
-watch([canvasViewMode, canvasLayout], async ([mode]) => {
-  if (mode !== 'canvas') return
+watch([canvasViewMode, canvasLayout, activeAuthoringSection], async ([mode, _layout, section]) => {
+  if (mode !== 'canvas' || section !== 'flow') return
   await nextTick()
   syncCanvasViewportState()
 })
@@ -3360,6 +3387,16 @@ pre {
   display: flex;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.template-authoring__mode-switch {
+  display: inline-flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
 }
 
 /* RP-3 (route-preview lock, B3-06) 试运行面板 — chip styling mirrors ApprovalNewView's RP-2 live

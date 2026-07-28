@@ -828,7 +828,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await mountView()
     await flushUi()
 
-    // List surface (default): condition branch must receive child-owned dashed border + wrap head.
+    // Canvas V2 is canvas-first; switch to the retained structured fallback to verify its styles.
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
     const listBranch = container!.querySelector(
       '[data-testid="approval-graph-readonly-list"] .template-authoring__condition-branch',
     ) as HTMLElement | null
