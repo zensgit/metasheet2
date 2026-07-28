@@ -245,11 +245,17 @@
         </el-form>
       </el-card>
 
-      <el-card v-show="activeAuthoringSection === 'fields'" class="template-authoring__panel" shadow="never">
+      <el-card
+        v-show="activeAuthoringSection === 'fields'"
+        class="template-authoring__panel"
+        :class="{ 'template-authoring__panel--form-builder': canvasV2Enabled }"
+        shadow="never"
+      >
         <template #header>
           <div class="template-authoring__panel-header">
             <strong>表单字段</strong>
             <el-button
+              v-if="!canvasV2Enabled"
               size="small"
               :disabled="readOnly"
               data-testid="approval-template-add-field"
@@ -261,22 +267,75 @@
           </div>
         </template>
 
-        <div
-          v-for="(field, index) in draft.fields"
-          :key="field.localId"
-          class="template-authoring__item"
-          data-testid="approval-template-field-row"
-          :draggable="!readOnly"
-          @dragstart="onFieldDragStart(index)"
-          @dragover.prevent
-          @drop="onFieldDrop(index)"
-        >
+        <ApprovalFormPalette
+          v-if="canvasV2Enabled"
+          :read-only="readOnly"
+          @add="appendFieldOfType"
+        />
+
+        <template v-for="(field, index) in draft.fields" :key="field.localId">
+          <button
+            v-if="canvasV2Enabled"
+            type="button"
+            class="template-authoring__field-drop-slot"
+            :class="{
+              'is-active': activeFieldDropIndex === index,
+              'is-selected': selectedFieldInsertionIndex === index,
+            }"
+            :disabled="readOnly"
+            :aria-pressed="selectedFieldInsertionIndex === index"
+            :aria-label="`选择在字段 ${index + 1} 前插入组件`"
+            :data-testid="`approval-form-drop-slot-${index}`"
+            @click="selectFieldInsertionSlot(index)"
+            @dragenter.prevent="activateFieldDropSlot(index)"
+            @dragover.prevent="activateFieldDropSlot(index)"
+            @dragleave="deactivateFieldDropSlot(index)"
+            @drop.prevent="onFieldInsertionDrop($event, index)"
+          >
+            <span aria-hidden="true">+</span>
+          </button>
+
+          <div
+            class="template-authoring__item"
+            data-testid="approval-template-field-row"
+            :draggable="!readOnly && !canvasV2Enabled"
+            @dragstart="onFieldDragStart($event, index)"
+            @dragover="onLegacyFieldDragOver"
+            @drop="onLegacyFieldDrop($event, index)"
+            @dragend="resetFieldDragState"
+          >
           <div class="template-authoring__item-toolbar">
-            <strong>字段 {{ index + 1 }}</strong>
+            <div class="template-authoring__item-title">
+              <button
+                v-if="canvasV2Enabled"
+                type="button"
+                class="template-authoring__drag-handle"
+                :disabled="readOnly"
+                :aria-label="`移动字段 ${index + 1}`"
+                aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+                title="拖动排序；也可按 Alt + 方向键"
+                data-testid="approval-form-field-drag-handle"
+                :draggable="!readOnly"
+                @dragstart.stop="onFieldDragStart($event, index)"
+                @dragend.stop="resetFieldDragState"
+                @keydown="onFieldKeyboardReorder($event, index)"
+              >
+                <el-icon><Rank /></el-icon>
+              </button>
+              <strong>字段 {{ index + 1 }}</strong>
+            </div>
             <div>
               <el-button size="small" :disabled="readOnly || index === 0" @click="moveField(index, -1)">上移</el-button>
               <el-button size="small" :disabled="readOnly || index === draft.fields.length - 1" @click="moveField(index, 1)">下移</el-button>
-              <el-button size="small" type="danger" :disabled="readOnly || draft.fields.length === 1" @click="removeField(index)">删除</el-button>
+              <el-button
+                size="small"
+                type="danger"
+                :disabled="readOnly || draft.fields.length === 1"
+                data-testid="approval-template-remove-field"
+                @click="removeField(index)"
+              >
+                删除
+              </el-button>
             </div>
           </div>
           <div class="template-authoring__grid">
@@ -541,7 +600,39 @@
               </div>
             </el-form-item>
           </div>
-        </div>
+          </div>
+        </template>
+
+        <button
+          v-if="canvasV2Enabled"
+          type="button"
+          class="template-authoring__field-drop-slot"
+          :class="{
+            'is-active': activeFieldDropIndex === draft.fields.length,
+            'is-selected': selectedFieldInsertionIndex === draft.fields.length,
+          }"
+          :disabled="readOnly"
+          :aria-pressed="selectedFieldInsertionIndex === draft.fields.length"
+          aria-label="选择在表单末尾插入组件"
+          :data-testid="`approval-form-drop-slot-${draft.fields.length}`"
+          @click="selectFieldInsertionSlot(draft.fields.length)"
+          @dragenter.prevent="activateFieldDropSlot(draft.fields.length)"
+          @dragover.prevent="activateFieldDropSlot(draft.fields.length)"
+          @dragleave="deactivateFieldDropSlot(draft.fields.length)"
+          @drop.prevent="onFieldInsertionDrop($event, draft.fields.length)"
+        >
+          <span aria-hidden="true">+</span>
+        </button>
+
+        <p
+          v-if="canvasV2Enabled"
+          class="template-authoring__form-builder-status"
+          role="status"
+          aria-live="polite"
+          data-testid="approval-form-builder-status"
+        >
+          {{ formBuilderAnnouncement }}
+        </p>
       </el-card>
 
       <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
@@ -1208,7 +1299,7 @@ import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, Rank } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useFeatureFlags } from '../../stores/featureFlags'
@@ -1232,6 +1323,7 @@ import { linearStepForNodeKey } from '../../approvals/linearCanvasCarrier'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
+import ApprovalFormPalette from '../../approvals/components/ApprovalFormPalette.vue'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
   type ApprovalNodeConfigEditorApi,
@@ -1271,7 +1363,15 @@ import {
   type TemplateAuthoringDraft,
   applyTopologyToDraft,
   moveItemToIndex,
+  nextAvailableFieldDraftIndex,
+  type AuthorableFieldType,
 } from '../../approvals/templateAuthoring'
+import {
+  APPROVAL_FORM_FIELD_MOVE_MIME,
+  APPROVAL_FORM_FIELD_TYPE_LABELS,
+  readMovedFieldIndex,
+  readPaletteFieldType,
+} from '../../approvals/formPalette'
 import {
   addConditionBranch,
   addParallelBranch,
@@ -2504,7 +2604,32 @@ function swap<T>(items: T[], index: number, delta: -1 | 1) {
 }
 
 function addField() {
-  draft.value.fields = [...draft.value.fields, createEmptyFieldDraft(draft.value.fields.length + 1)]
+  draft.value.fields = [
+    ...draft.value.fields,
+    createEmptyFieldDraft(nextAvailableFieldDraftIndex(draft.value.fields)),
+  ]
+}
+
+const formBuilderAnnouncement = ref('')
+const activeFieldDropIndex = ref<number | null>(null)
+const selectedFieldInsertionIndex = ref<number | null>(null)
+
+function insertFieldOfType(type: AuthorableFieldType, index: number) {
+  if (readOnly.value) return
+  const nextField = createEmptyFieldDraft(nextAvailableFieldDraftIndex(draft.value.fields))
+  nextField.type = type
+  const insertionIndex = Math.max(0, Math.min(index, draft.value.fields.length))
+  draft.value.fields = [
+    ...draft.value.fields.slice(0, insertionIndex),
+    nextField,
+    ...draft.value.fields.slice(insertionIndex),
+  ]
+  selectedFieldInsertionIndex.value = null
+  formBuilderAnnouncement.value = `${APPROVAL_FORM_FIELD_TYPE_LABELS[type]}已插入为字段 ${insertionIndex + 1}`
+}
+
+function appendFieldOfType(type: AuthorableFieldType) {
+  insertFieldOfType(type, selectedFieldInsertionIndex.value ?? draft.value.fields.length)
 }
 
 function removeField(index: number) {
@@ -2514,17 +2639,107 @@ function removeField(index: number) {
 
 function moveField(index: number, delta: -1 | 1) {
   draft.value.fields = swap(draft.value.fields, index, delta) ?? draft.value.fields
+  const nextIndex = index + delta
+  if (nextIndex >= 0 && nextIndex < draft.value.fields.length) {
+    formBuilderAnnouncement.value = `字段已移动到第 ${nextIndex + 1} 位`
+  }
 }
-// D-4 drag-reorder: native HTML5 drag wires to the pure `moveItemToIndex` logic. (The drag GESTURE is
-// manual/E2E QA — jsdom DragEvent is unreliable; the reorder LOGIC is unit-covered in templateAuthoring.)
+
+// D-4/F1-a: native drag carries a typed payload. The parent remains the sole owner of draft
+// creation/reorder so palette, pointer and keyboard paths all share the existing field contracts.
 const draggedFieldIndex = ref<number | null>(null)
-function onFieldDragStart(index: number) {
-  if (!readOnly.value) draggedFieldIndex.value = index
+
+function onFieldDragStart(event: DragEvent, index: number) {
+  if (readOnly.value) return
+  draggedFieldIndex.value = index
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData(APPROVAL_FORM_FIELD_MOVE_MIME, String(index))
+  }
 }
+
 function onFieldDrop(index: number) {
   if (readOnly.value || draggedFieldIndex.value === null) return
   draft.value.fields = moveItemToIndex(draft.value.fields, draggedFieldIndex.value, index)
   draggedFieldIndex.value = null
+}
+
+function onLegacyFieldDragOver(event: DragEvent) {
+  if (!canvasV2Enabled.value && !readOnly.value) event.preventDefault()
+}
+
+function onLegacyFieldDrop(event: DragEvent, index: number) {
+  if (canvasV2Enabled.value) return
+  event.preventDefault()
+  onFieldDrop(index)
+}
+
+function activateFieldDropSlot(index: number) {
+  if (!readOnly.value) activeFieldDropIndex.value = index
+}
+
+function selectFieldInsertionSlot(index: number) {
+  if (readOnly.value) return
+  if (selectedFieldInsertionIndex.value === index) {
+    selectedFieldInsertionIndex.value = null
+    formBuilderAnnouncement.value = '已取消插入位置'
+    return
+  }
+  selectedFieldInsertionIndex.value = index
+  formBuilderAnnouncement.value = `已选择第 ${index + 1} 个插入位置，请选择表单组件`
+}
+
+function deactivateFieldDropSlot(index: number) {
+  if (activeFieldDropIndex.value === index) activeFieldDropIndex.value = null
+}
+
+function resetFieldDragState() {
+  draggedFieldIndex.value = null
+  activeFieldDropIndex.value = null
+}
+
+function onFieldInsertionDrop(event: DragEvent, insertionIndex: number) {
+  if (readOnly.value) {
+    resetFieldDragState()
+    return
+  }
+
+  const paletteType = readPaletteFieldType(event.dataTransfer)
+  if (paletteType) {
+    insertFieldOfType(paletteType, insertionIndex)
+    resetFieldDragState()
+    return
+  }
+
+  const sourceIndex = readMovedFieldIndex(event.dataTransfer)
+  if (
+    sourceIndex === null
+    || draggedFieldIndex.value === null
+    || sourceIndex !== draggedFieldIndex.value
+    || sourceIndex < 0
+    || sourceIndex >= draft.value.fields.length
+  ) {
+    resetFieldDragState()
+    return
+  }
+
+  const targetIndex = insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex
+  if (targetIndex !== sourceIndex) {
+    draft.value.fields = moveItemToIndex(draft.value.fields, sourceIndex, targetIndex)
+    formBuilderAnnouncement.value = `字段已移动到第 ${targetIndex + 1} 位`
+  }
+  resetFieldDragState()
+}
+
+function onFieldKeyboardReorder(event: KeyboardEvent, index: number) {
+  if (readOnly.value || !event.altKey) return
+  if (event.key === 'ArrowUp' && index > 0) {
+    event.preventDefault()
+    moveField(index, -1)
+  } else if (event.key === 'ArrowDown' && index < draft.value.fields.length - 1) {
+    event.preventDefault()
+    moveField(index, 1)
+  }
 }
 
 // detail / sub-form (明细) sub-field authoring. Sub-fields are LEAF types only (no nested
@@ -3079,6 +3294,23 @@ onUnmounted(() => {
   box-shadow: var(--ms-shadow-card);
 }
 
+.template-authoring__panel--form-builder :deep(.el-card__body) {
+  display: grid;
+  grid-template-columns: minmax(200px, 228px) minmax(0, 1fr);
+  align-items: start;
+  gap: 0 var(--ms-space-4);
+}
+
+.template-authoring__panel--form-builder :deep(.approval-form-palette) {
+  grid-column: 1;
+}
+
+.template-authoring__panel--form-builder .template-authoring__item,
+.template-authoring__panel--form-builder .template-authoring__field-drop-slot,
+.template-authoring__panel--form-builder .template-authoring__form-builder-status {
+  grid-column: 2;
+}
+
 .template-authoring__section-actions {
   position: sticky;
   bottom: 0;
@@ -3241,6 +3473,93 @@ onUnmounted(() => {
   margin-bottom: 12px;
 }
 
+.template-authoring__item-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.template-authoring__drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--el-text-color-secondary);
+  cursor: grab;
+}
+
+.template-authoring__drag-handle:hover:not(:disabled),
+.template-authoring__drag-handle:focus-visible {
+  border-color: var(--el-border-color);
+  outline: none;
+  background: var(--el-fill-color-light);
+  color: var(--el-color-primary);
+}
+
+.template-authoring__drag-handle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.template-authoring__field-drop-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  width: 100%;
+  padding: 0;
+  margin: 4px 0;
+  border: 1px dashed transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--el-text-color-placeholder);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  transition: min-height 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.template-authoring__field-drop-slot::before,
+.template-authoring__field-drop-slot::after {
+  height: 1px;
+  flex: 1;
+  background: var(--el-border-color-lighter);
+  content: '';
+}
+
+.template-authoring__field-drop-slot span {
+  padding: 0 8px;
+}
+
+.template-authoring__field-drop-slot:hover:not(:disabled),
+.template-authoring__field-drop-slot:focus-visible,
+.template-authoring__field-drop-slot.is-active,
+.template-authoring__field-drop-slot.is-selected {
+  min-height: 44px;
+  border-color: var(--el-color-primary);
+  outline: none;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+
+.template-authoring__field-drop-slot:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.template-authoring__form-builder-status {
+  min-height: 20px;
+  margin: 4px 0 0;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
 .template-authoring__node-type {
   font-size: 12px;
   padding: 2px 8px;
@@ -3331,6 +3650,17 @@ pre {
 
   .template-authoring__step :deep(> span) {
     grid-template-columns: 28px minmax(0, 1fr);
+  }
+
+  .template-authoring__panel--form-builder :deep(.el-card__body) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .template-authoring__panel--form-builder :deep(.approval-form-palette),
+  .template-authoring__panel--form-builder .template-authoring__item,
+  .template-authoring__panel--form-builder .template-authoring__field-drop-slot,
+  .template-authoring__panel--form-builder .template-authoring__form-builder-status {
+    grid-column: 1;
   }
 }
 

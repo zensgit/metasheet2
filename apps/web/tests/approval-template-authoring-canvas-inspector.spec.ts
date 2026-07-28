@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
+import { AUTHORABLE_FIELD_TYPES } from '../src/approvals/templateAuthoring'
 import type { ApprovalTemplateDetailDTO } from '../src/types/approval'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -58,9 +59,10 @@ vi.mock('../src/approvals/permissions', () => ({
   }),
 }))
 
+const featureFlags = ref({ approvalCanvasV2: true })
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
-    features: ref({ approvalCanvasV2: true }),
+    features: featureFlags,
   }),
 }))
 
@@ -186,6 +188,18 @@ const passthrough = (name: string, tag = 'div') => defineComponent({
   },
 })
 
+const ElCard = defineComponent({
+  name: 'ElCard',
+  render() {
+    return h('section', {
+      'data-testid': (this.$attrs as any)?.['data-testid'],
+    }, [
+      this.$slots.header?.(),
+      this.$slots.default?.(),
+    ])
+  },
+})
+
 const ElAlert = defineComponent({
   name: 'ElAlert',
   props: { title: String, description: String },
@@ -223,7 +237,7 @@ function installStubs(app: VueApp<Element>) {
   app.component('ElCheckbox', ElCheckbox)
   app.component('ElAlert', ElAlert)
   app.component('ElDialog', ElDialog)
-  app.component('ElCard', passthrough('ElCard', 'section'))
+  app.component('ElCard', ElCard)
   app.component('ElForm', passthrough('ElForm', 'form'))
   app.component('ElFormItem', passthrough('ElFormItem', 'label'))
   app.component('ElIcon', passthrough('ElIcon', 'span'))
@@ -409,6 +423,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   beforeEach(() => {
     routeParams = {}
     canManageTemplates.value = true
+    featureFlags.value.approvalCanvasV2 = true
     createTemplateSpy.mockReset()
     updateTemplateSpy.mockReset()
     publishTemplateSpy.mockReset()
@@ -427,6 +442,317 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     container?.remove()
     app = null
     container = null
+  })
+
+  it('adds palette fields, inserts at an explicit drop slot, and reorders with the keyboard', async () => {
+    routeParams = { id: 'tpl_form_palette' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const palette = container!.querySelector('[data-testid="approval-form-palette"]')
+    expect(palette).not.toBeNull()
+    expect(
+      Array.from(palette!.querySelectorAll('[data-testid^="approval-form-palette-"]'))
+        .map((element) => element.getAttribute('data-testid')?.replace('approval-form-palette-', '')),
+    ).toEqual(AUTHORABLE_FIELD_TYPES)
+
+    ;(palette!.querySelector('[data-testid="approval-form-palette-textarea"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(3)
+
+    const dragData = new Map<string, string>()
+    const dataTransfer = {
+      effectAllowed: 'none',
+      setData: vi.fn((type: string, value: string) => dragData.set(type, value)),
+      getData: vi.fn((type: string) => dragData.get(type) ?? ''),
+    } as unknown as DataTransfer
+    const dragStart = new Event('dragstart', { bubbles: true, cancelable: true })
+    Object.defineProperty(dragStart, 'dataTransfer', { value: dataTransfer })
+    ;(palette!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement)
+      .dispatchEvent(dragStart)
+    expect(dataTransfer.setData).toHaveBeenCalledWith(
+      'application/x-metasheet-approval-field-type',
+      'date',
+    )
+
+    const drop = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(drop, 'dataTransfer', { value: dataTransfer })
+    ;(container!.querySelector('[data-testid="approval-form-drop-slot-0"]') as HTMLElement)
+      .dispatchEvent(drop)
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(4)
+
+    const moveData = new Map<string, string>()
+    const moveTransfer = {
+      effectAllowed: 'none',
+      setData: vi.fn((type: string, value: string) => moveData.set(type, value)),
+      getData: vi.fn((type: string) => moveData.get(type) ?? ''),
+    } as unknown as DataTransfer
+    const dragHandles = container!.querySelectorAll('[data-testid="approval-form-field-drag-handle"]')
+    const moveStart = new Event('dragstart', { bubbles: true, cancelable: true })
+    Object.defineProperty(moveStart, 'dataTransfer', { value: moveTransfer })
+    dragHandles[3]!.dispatchEvent(moveStart)
+    expect(moveTransfer.setData).toHaveBeenCalledWith(
+      'application/x-metasheet-approval-field-index',
+      '3',
+    )
+    const moveDrop = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(moveDrop, 'dataTransfer', { value: moveTransfer })
+    ;(container!.querySelector('[data-testid="approval-form-drop-slot-1"]') as HTMLElement)
+      .dispatchEvent(moveDrop)
+    await flushUi()
+
+    const firstHandle = container!.querySelector(
+      '[data-testid="approval-form-field-drag-handle"]',
+    ) as HTMLButtonElement
+    firstHandle.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    }))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields.map((field: any) => field.type)).toEqual([
+      'textarea',
+      'date',
+      'number',
+      'user',
+    ])
+    expect(container!.querySelector('[data-testid="approval-form-builder-status"]')?.textContent)
+      .toContain('第 2 位')
+  })
+
+  it('keeps forward, backward, and adjacent insertion-slot reorders exact', async () => {
+    routeParams = { id: 'tpl_form_palette_crossing' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-form-palette-textarea"]') as HTMLButtonElement).click()
+    ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const moveFieldToSlot = async (sourceIndex: number, insertionIndex: number) => {
+      const values = new Map<string, string>()
+      const dataTransfer = {
+        effectAllowed: 'none',
+        setData: vi.fn((type: string, value: string) => values.set(type, value)),
+        getData: vi.fn((type: string) => values.get(type) ?? ''),
+      } as unknown as DataTransfer
+      const start = new Event('dragstart', { bubbles: true, cancelable: true })
+      Object.defineProperty(start, 'dataTransfer', { value: dataTransfer })
+      container!.querySelectorAll('[data-testid="approval-form-field-drag-handle"]')[sourceIndex]!
+        .dispatchEvent(start)
+      const drop = new Event('drop', { bubbles: true, cancelable: true })
+      Object.defineProperty(drop, 'dataTransfer', { value: dataTransfer })
+      ;(container!.querySelector(
+        `[data-testid="approval-form-drop-slot-${insertionIndex}"]`,
+      ) as HTMLElement).dispatchEvent(drop)
+      await flushUi()
+    }
+
+    await moveFieldToSlot(0, 4)
+    await moveFieldToSlot(1, 3)
+    await moveFieldToSlot(2, 3)
+    await moveFieldToSlot(3, 0)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields.map((field: any) => field.type)).toEqual([
+      'number',
+      'user',
+      'date',
+      'textarea',
+    ])
+  })
+
+  it('lets keyboard users select an insertion slot before choosing a component', async () => {
+    routeParams = { id: 'tpl_form_palette_keyboard_insert' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const firstSlot = container!.querySelector(
+      '[data-testid="approval-form-drop-slot-0"]',
+    ) as HTMLButtonElement
+    expect(firstSlot.tagName).toBe('BUTTON')
+    expect(firstSlot.getAttribute('aria-pressed')).toBe('false')
+    firstSlot.click()
+    await flushUi()
+    expect(firstSlot.getAttribute('aria-pressed')).toBe('true')
+    firstSlot.click()
+    await flushUi()
+    expect(firstSlot.getAttribute('aria-pressed')).toBe('false')
+    firstSlot.click()
+    ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields.map((field: any) => field.type)).toEqual([
+      'date',
+      'number',
+      'user',
+    ])
+  })
+
+  it('keeps generated field ids unique after delete-then-append', async () => {
+    routeParams = { id: 'tpl_form_palette_delete_append' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'field_1', type: 'text', label: '字段 1' },
+          { id: 'field_2', type: 'text', label: '字段 2' },
+          { id: 'field_3', type: 'text', label: '字段 3' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const rows = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+    ;(rows[1]!.querySelector('[data-testid="approval-template-remove-field"]') as HTMLButtonElement).click()
+    ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields.map((field: any) => field.id)).toEqual([
+      'field_1',
+      'field_3',
+      'field_2',
+    ])
+  })
+
+  it('keeps generated field ids unique after delete-then-insert', async () => {
+    routeParams = { id: 'tpl_form_palette_delete_insert' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'field_1', type: 'text', label: '字段 1' },
+          { id: 'field_2', type: 'text', label: '字段 2' },
+          { id: 'field_3', type: 'text', label: '字段 3' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const rows = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+    ;(rows[1]!.querySelector('[data-testid="approval-template-remove-field"]') as HTMLButtonElement).click()
+    ;(container!.querySelector('[data-testid="approval-form-drop-slot-1"]') as HTMLButtonElement).click()
+    ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields.map((field: any) => field.id)).toEqual([
+      'field_1',
+      'field_2',
+      'field_3',
+    ])
+  })
+
+  it('rejects a moved-field drop when its typed payload does not match the local drag', async () => {
+    routeParams = { id: 'tpl_form_palette_drag_mismatch' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const dataTransfer = {
+      effectAllowed: 'none',
+      setData: vi.fn(),
+      getData: vi.fn(() => '1'),
+    } as unknown as DataTransfer
+    const start = new Event('dragstart', { bubbles: true, cancelable: true })
+    Object.defineProperty(start, 'dataTransfer', { value: dataTransfer })
+    ;(container!.querySelectorAll('[data-testid="approval-form-field-drag-handle"]')[0] as HTMLElement)
+      .dispatchEvent(start)
+    const drop = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(drop, 'dataTransfer', { value: dataTransfer })
+    ;(container!.querySelector('[data-testid="approval-form-drop-slot-0"]') as HTMLElement)
+      .dispatchEvent(drop)
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields.map((field: any) => field.type)).toEqual(['number', 'user'])
+  })
+
+  it('keeps palette and insertion intents inert in read-only mode', async () => {
+    routeParams = { id: 'tpl_form_palette_readonly' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    canManageTemplates.value = false
+    await flushUi()
+
+    const paletteButton = container!.querySelector(
+      '[data-testid="approval-form-palette-number"]',
+    ) as HTMLButtonElement
+    expect(paletteButton.disabled).toBe(true)
+    expect(paletteButton.draggable).toBe(false)
+    paletteButton.click()
+
+    const drop = new Event('drop', { bubbles: true, cancelable: true })
+    const dataTransfer = {
+      getData: vi.fn(() => 'number'),
+    } as unknown as DataTransfer
+    Object.defineProperty(drop, 'dataTransfer', { value: dataTransfer })
+    ;(container!.querySelector('[data-testid="approval-form-drop-slot-0"]') as HTMLElement)
+      .dispatchEvent(drop)
+    await flushUi()
+
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(2)
+  })
+
+  it('preserves the legacy add and reorder surface while Canvas V2 is off', async () => {
+    featureFlags.value.approvalCanvasV2 = false
+    routeParams = { id: 'tpl_form_palette_flag_off' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-form-palette"]')).toBeNull()
+    expect(container!.querySelector('[data-testid^="approval-form-drop-slot-"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-form-field-drag-handle"]')).toBeNull()
+
+    const addButton = container!.querySelector(
+      '[data-testid="approval-template-add-field"]',
+    ) as HTMLButtonElement
+    expect(addButton).not.toBeNull()
+    addButton.click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(3)
   })
 
   it('selecting approval/condition/cc/parallel nodes opens the matching right-side inspector', async () => {
