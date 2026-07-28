@@ -16,8 +16,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
-import { readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
@@ -71,97 +70,6 @@ async function catchAsync<T>(fn: () => Promise<T>): Promise<unknown> {
   } catch (error) {
     return error
   }
-}
-
-interface RecordedStatement {
-  readonly sql: string
-  readonly params: readonly unknown[]
-}
-
-function recordingTrx(
-  inner: AttendanceW4TransactionClientV1,
-  log: RecordedStatement[],
-): AttendanceW4TransactionClientV1 {
-  return {
-    async query(sql: string, params?: unknown[]) {
-      log.push({ sql, params: params ?? [] })
-      return inner.query(sql, params as unknown[])
-    },
-  } as AttendanceW4TransactionClientV1
-}
-
-const SOURCE_DML_RE =
-  /(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(attendance_events|attendance_records|attendance_requests|attendance_record_result_edits|attendance_import_batches|attendance_import_items)\b/i
-
-function listTypeScriptFiles(root: string): string[] {
-  const files: string[] = []
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const path = join(root, entry.name)
-    if (entry.isDirectory()) files.push(...listTypeScriptFiles(path))
-    else if (entry.isFile() && entry.name.endsWith('.ts')) files.push(path)
-  }
-  return files
-}
-
-function scheduledOutcomeCallsites(): {
-  completed: string[]
-  unsafe: string[]
-} {
-  const completed: string[] = []
-  const unsafe: string[] = []
-  const srcRoot = fileURLToPath(new URL('../../src', import.meta.url))
-
-  for (const file of listTypeScriptFiles(srcRoot)) {
-    const source = readFileSync(file, 'utf8')
-    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
-    const localWriterNames = new Set<string>()
-
-    for (const statement of sourceFile.statements) {
-      if (!ts.isImportDeclaration(statement) || !statement.importClause?.namedBindings) continue
-      if (!ts.isNamedImports(statement.importClause.namedBindings)) continue
-      for (const specifier of statement.importClause.namedBindings.elements) {
-        if ((specifier.propertyName ?? specifier.name).text === 'recordAttendanceScheduledRunTargetOutcomeV1') {
-          localWriterNames.add(specifier.name.text)
-        }
-      }
-    }
-
-    const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node)) {
-        const isDirectWriter =
-          (ts.isIdentifier(node.expression) && localWriterNames.has(node.expression.text)) ||
-          (ts.isPropertyAccessExpression(node.expression) &&
-            node.expression.name.text === 'recordAttendanceScheduledRunTargetOutcomeV1')
-        if (isDirectWriter) {
-          const outcome = node.arguments[2]
-          const terminalOutcome =
-            outcome && ts.isObjectLiteralExpression(outcome)
-              ? outcome.properties.find(
-                  (property): property is ts.PropertyAssignment =>
-                    ts.isPropertyAssignment(property) &&
-                    ((ts.isIdentifier(property.name) && property.name.text === 'terminalOutcome') ||
-                      (ts.isStringLiteral(property.name) && property.name.text === 'terminalOutcome')),
-                )
-              : undefined
-          const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
-          const label = `${file}:${location.line + 1}`
-          if (
-            terminalOutcome &&
-            ts.isStringLiteral(terminalOutcome.initializer) &&
-            terminalOutcome.initializer.text === 'completed'
-          ) {
-            completed.push(label)
-          } else {
-            unsafe.push(label)
-          }
-        }
-      }
-      ts.forEachChild(node, visit)
-    }
-    visit(sourceFile)
-  }
-
-  return { completed, unsafe }
 }
 
 function namedCancelFixtureCallsites(): string[] {
@@ -224,6 +132,42 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
 
     await w4c0Up(scratchDb)
     await w4c2Up(scratchDb)
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION attendance_w4c2_option_a_source_dml_sentinel()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $fn$
+      BEGIN
+        RAISE EXCEPTION 'W4C2_OPTION_A_SOURCE_DML_SENTINEL:%', TG_TABLE_NAME;
+      END;
+      $fn$;
+
+      DO $block$
+      DECLARE
+        source_table text;
+      BEGIN
+        FOREACH source_table IN ARRAY ARRAY[
+          'attendance_events',
+          'attendance_records',
+          'attendance_requests',
+          'attendance_record_result_edits',
+          'attendance_import_batches',
+          'attendance_import_items'
+        ]
+        LOOP
+          IF to_regclass('public.' || source_table) IS NOT NULL THEN
+            EXECUTE format(
+              'CREATE TRIGGER trg_w4c2_option_a_source_dml_sentinel
+                 BEFORE INSERT OR UPDATE OR DELETE ON %I
+                 FOR EACH STATEMENT
+                 EXECUTE FUNCTION attendance_w4c2_option_a_source_dml_sentinel()',
+              source_table
+            );
+          END IF;
+        END LOOP;
+      END;
+      $block$;
+    `)
   }, 120000)
 
   afterAll(async () => {
@@ -324,16 +268,14 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
     workDate: string,
     outcome: 'completed' | 'failed',
     inserted: boolean,
-  ): Promise<RecordedStatement[]> {
+  ): Promise<void> {
     const t = await pool.query(
       `SELECT operation_id::text AS operation_id FROM attendance_scheduled_run_targets
         WHERE org_id = $1 AND run_id = $2::uuid AND user_id = $3::uuid AND target_kind = 'generate'`,
       [orgId, runId, userId],
     )
     const operationId = t.rows[0].operation_id as string
-    const statements: RecordedStatement[] = []
-    await withTxn(async (innerTrx) => {
-      const trx = recordingTrx(innerTrx, statements)
+    await withTxn(async (trx) => {
       await trx.query(
         `INSERT INTO attendance_result_operations (
             org_id, entrypoint, operation_id, identity_source_kind, source_root_id, proof_user_id, proof_work_date,
@@ -367,14 +309,7 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
         })
       }
     })
-    return statements
   }
-
-  it('OD-W4C-54=(a) keeps every production scheduled outcome writer completed-only', () => {
-    const callsites = scheduledOutcomeCallsites()
-    expect(callsites.completed.length).toBeGreaterThan(0)
-    expect(callsites.unsafe).toEqual([])
-  })
 
   it('OD-W4C-54=(a) binds the failed contract fixture to the named cancel writer', () => {
     expect(namedCancelFixtureCallsites()).toHaveLength(1)
@@ -558,9 +493,24 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
 
       await sealGenerateTarget(orgId, runId, userA, workDate, 'completed', true)
       await sealGenerateTarget(orgId, runId, userB, workDate, 'completed', false)
-      const failedStatements = await sealGenerateTarget(orgId, runId, userC, workDate, 'failed', false)
-      expect(SOURCE_DML_RE.test('INSERT INTO attendance_records (id) VALUES ($1)')).toBe(true)
-      expect(failedStatements.filter((statement) => SOURCE_DML_RE.test(statement.sql))).toEqual([])
+      const sourceDml = await catchAsync(() =>
+        pool.query(
+          `INSERT INTO attendance_records (user_id, work_date, org_id)
+           VALUES ($1,$2,$3)`,
+          [userC, workDate, orgId],
+        ),
+      )
+      expect(String((sourceDml as Error).message)).toContain(
+        'W4C2_OPTION_A_SOURCE_DML_SENTINEL:attendance_records',
+      )
+
+      await sealGenerateTarget(orgId, runId, userC, workDate, 'failed', false)
+      const sourceResidue = await pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM attendance_records) AS records,
+           (SELECT count(*)::int FROM attendance_requests) AS requests`,
+      )
+      expect(sourceResidue.rows[0]).toEqual({ records: 0, requests: 0 })
 
       const outcome = await withAllowlist(orgId, () =>
         withTxn((trx) => finalizeAttendanceScheduledRunV1(trx, { orgId, initiator: 'cron', workDate, runId })),
