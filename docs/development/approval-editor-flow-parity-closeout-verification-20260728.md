@@ -1,12 +1,13 @@
-# 审批编辑器与流程编排 E1-b / E2 / C1 / C2 收尾验证（2026-07-28）
+# 审批编辑器与流程编排 E1-b / E2 / C1 / C2 / F1-a 收尾验证（2026-07-28）
 
 **范围状态：PR VERIFIED / REQUIRED CI PASS**
 
 **整线状态：NOT FINAL**
 
 本报告只关闭 E1-b renderer/command feasibility、E2 第一刀无行为抽取、
-C1 线性/复杂流程统一载体和 C2 canvas-first 工作区。它不宣称审批编辑器
-已对标完成，不授权 C3-C5、F1-F3、部署、UAT 或 flag 开启。
+C1 线性/复杂流程统一载体、C2 canvas-first 工作区和 F1-a 表单 palette/
+插入移动交互。它不宣称审批编辑器已对标完成，不授权 C3-C5、
+F1-b/F2/F3、部署、UAT 或 flag 开启。
 
 ## 1. Exact heads
 
@@ -16,6 +17,7 @@ C1 线性/复杂流程统一载体和 C2 canvas-first 工作区。它不宣称�
 | E2 | `codex/approval-editor-e2-shell-extract-20260728` | `5a9bb4db2` |
 | C1 | `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` |
 | C2 | `codex/approval-editor-c2-canvas-first-20260728` | `068d6e628` |
+| F1-a | `codex/approval-editor-f1-form-palette-20260728` | `6b926dce5` |
 | 文档 | `codex/approval-editor-flow-parity-plan-20260727` | 本报告提交后的 head |
 
 E2 起点为 `origin/main@9da0335b4`。canonical checkout 未被修改。
@@ -200,22 +202,69 @@ watch 和 ARIA group 语义，指定测试均精确转红。真实 Chromium 在
 对抗复审的两个 P2（不完整 tablist 语义、隐藏 Canvas 0x0 viewport）均已
 闭合，最终无 P1/P2。
 
-## 7. 残余与 owner 门
+## 7. F1-a 证据
 
-1. #4642/#4643/#4649/#4652 required CI 已绿；四者均未 merge；
+### 7.1 行为与兼容
+
+- palette 精确覆盖当前 `AUTHORABLE_FIELD_TYPES`，点击和 typed native drag
+  均可把字段加入所选插入槽；
+- 每个字段前后都有可聚焦插入槽；鼠标、键盘和触屏都可选择位置，重复点击
+  同一槽位会取消；
+- 只有字段拖拽把手可启动移动；typed payload 必须与本地 active drag
+  session 匹配，外来或 malformed payload 不改草稿；
+- 键盘 `Alt+ArrowUp/Down` 与既有上下移动按钮提供等价重排；
+- 删除后新增字段选择最小可用 `field_N`，不产生重复 ID；
+- read-only 全部 inert；Canvas flag OFF 不显示 palette、插入槽和新把手，
+  继续走旧路径。
+
+### 7.2 测试、变异与真浏览器
+
+```text
+focused palette + mounted authoring specs: 22/22 PASS
+required web tests: 359 files / 4320 tests PASS
+targeted ESLint: PASS
+vue-tsc --noEmit: PASS
+web production build: PASS
+git diff --check: PASS
+required PR checks: 3/3 PASS
+```
+
+三刀判别变异分别恢复错误的前向移动索引、恢复 `fields.length + 1` 字段
+编号、删除 typed payload 与本地 drag session 一致性检查，指定测试均
+精确转红。三轮独立子代理复审发现并推动关闭 malformed drag、前向跨越
+覆盖、palette allowlist、键盘/触屏插入点、删除空隙重复 ID 和 CI 收集等
+问题；最终 exact diff 无 P1/P2。
+
+真实 `TemplateAuthoringView` 在 Chromium 中验证：
+
+| viewport | palette / form | 插入行为 | 横向溢出 | console error |
+|---|---|---|---|---:|
+| 1440 x 1000 | 左右并列 | 日期插入字段 1 | 无 | 0 |
+| 1024 x 900 | 上下堆叠 | 插入槽可选择 | 无 | 0 |
+| 390 x 844 | 上下堆叠 | 触屏选择后插入多行文本为字段 2 | 无 | 0 |
+
+F1-a 没有抽出独立 builder，也没有提供聚焦字段的右侧属性检查器；不能把
+上述证据扩张为 F1/F2/F3 或整条表单设计器完成。
+
+## 8. 残余与 owner 门
+
+1. #4642/#4643/#4649/#4652/#4657 required CI 已绿；五者均未 merge；
 2. edge `+` 产品接线、节点按钮群移除属于 C3；
 3. 统一 drag feedback、undo/redo 属于 C4/C5；
-4. 表单仅有既有字段排序，尚无 palette 拖入和统一字段 inspector（F1-F3）；
+4. F1-a 已有 palette 点击/拖入、插入槽和字段移动；独立 builder、聚焦字段
+   右侧 inspector、完整引用保护和附件 authoring 仍属于 F1-b/F2/F3；
 5. 版本时间线/双画布 diff、路由预览整合、真实键盘/a11y 仍未完成；
 6. 390 虽无横向溢出，但 sticky bottom navigation 会遮住内容，属于 X1；
 7. production Canvas 仍默认 OFF；staging UAT 与生产 flag 为 owner 门；
 8. 结构化辅助编辑入口必须保留，直到键盘/辅助技术等价性有真浏览器证据。
 
-## 8. 结论
+## 9. 结论
 
 - `A1 renderer feasibility = PASS`；
 - `A2 first extraction = PR VERIFIED / CI PASS`；
 - `C1 unified carrier = PR VERIFIED / CI PASS`；
 - `C2 canvas-first = PR VERIFIED / CI PASS`；
+- `F1-a form palette and insertion = PR VERIFIED / CI PASS`；
 - `approval editor parity line = IN PROGRESS / NOT FINAL`；
-- 下一开发点为 C3 边 `+` 产品化，并行启动 F1 表单 palette 抽取。
+- 下一开发点为 C3 边 `+` 产品化，并行推进 F1-b 表单 builder 和右侧字段
+  inspector。

@@ -1,6 +1,6 @@
 # 审批编辑器与流程编排对标开发计划（2026-07-27）
 
-**状态：IN PROGRESS（E0 / E1 / E1-b / E2 / C1 / C2 已完成并形成待审 Draft PR；C3 以后及 F1-F3 仍在开发队列）**
+**状态：IN PROGRESS（E0 / E1 / E1-b / E2 / C1 / C2 / F1-a 已完成并形成待审 Draft PR；C3 以后及 F1-b / F2 / F3 仍在开发队列）**
 
 **事实审计基线：** `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
 
@@ -69,7 +69,7 @@
 | 节点操作 | 节点内上移/下移/移动/插入/删除按钮群 | 应改为边 `+`、上下文菜单和检查器动作 |
 | 拖拽 | 审批/抄送节点可移入合法边槽 | 缺合法槽持续高亮、统一拖拽状态机和分支拖排 UI |
 | 撤销/重做 | 命令层有逆操作/历史类型 | 顶栏未挂载统一 undo/redo |
-| 表单设计 | 已有字段拖排；新增字段靠“添加字段”按钮 | 缺控件 palette 拖入、字段插入槽和字段检查器 |
+| 表单设计 | F1-a 已提供全字段 palette 点击/拖入、显式插入槽、handle 拖排及键盘/触屏等价入口 | 独立 builder、聚焦字段的右侧属性检查器及附件 authoring 仍未完成 |
 | 检查器 | 复杂画布已有右侧检查器 | 线性流程、字段、版本差异未统一；窄屏不是正式 bottom sheet |
 | 版本比较 | 表格历史 + 变化列表 + 单画布 overlay | 缺编辑器内时间线、双画布并排和 before/after 检查器 |
 | 可访问性 | 部分按钮/键盘事件和结构列表 fallback | 缺完整键盘创作、live region、焦点恢复和真实浏览器证明 |
@@ -144,8 +144,9 @@ E1 不得默认引入 ELK。只有现有布局在构造的条件/并行/长标�
 | C3 | 边 `+` 和插入菜单 | 所有合法边槽可点/键盘插入；菜单只列合法节点类型；节点按钮群移除 | C2 | Grok | C3 |
 | C4 | 语义拖拽和分支排序 | 节点/条件优先级/并行分支拖排；合法槽高亮；非法落点 no-op + live message | C3 | Grok；Claude Opus命令复核 | C4 |
 | C5 | 统一 undo/redo | 顶栏按钮、快捷键、选择/焦点恢复；Canvas 和 inspector 共用一条历史 | C4 | Grok；Codex复核 | C5 |
-| F1 | 表单组件抽取和 palette | 左侧控件库点击/拖入、中部真实表单画布与字段插入槽、拖排/键盘等价、右侧字段属性检查器；复用表单命令层 | E2 | Sonnet 5抽取；Grok交互；Kimi K3视觉 | F1 |
-| F2 | 字段检查器与引用保护 | 字段属性、选项、明细、显隐、record-link；移动/删除依赖明确拒绝或保留 | F1 | Grok；Codex数据合同复核 | F2 |
+| F1-a | 表单 palette 和插入/移动交互 | 全字段控件库点击/拖入、显式插入槽、handle-only 拖排、键盘/触屏等价；复用现有草稿写路径 | E2,C2 | Codex实现；多代理对抗复核 | F1-a |
+| F1-b | 表单 builder 抽取和三栏工作区 | 抽出 `ApprovalFormBuilder`；左 palette、中表单、右侧聚焦字段属性检查器；旧路径和 flag OFF 等价 | F1-a | Sonnet 5抽取；Kimi K3视觉；Codex复核 | F1-b |
+| F2 | 字段检查器与引用保护 | 字段属性、选项、明细、显隐、record-link；移动/删除依赖明确拒绝或保留 | F1-b | Grok；Codex数据合同复核 | F2 |
 | F3 | 附件 authoring 兼容 | 仅在附件运行时锁和 flag 条件满足时向 palette 开放；旧模板/flag OFF 不变 | F2 | Grok；Claude Opus安全复核 | F3 |
 | V1 | 版本入口整合 | 编辑器顶栏版本时间线、发布说明和当前草稿；复用现有 API | E2 | Sonnet 5 | V1 |
 | V2 | 双画布 diff + 恢复预览 | 左历史/右当前、同步缩放、文字+轮廓变化、before/after inspector | V1,C2 | Grok + Kimi K3；Codex复核 | V2 |
@@ -195,6 +196,15 @@ C2 已在 C1 head 上完成 canvas-first 工作区。Canvas flag ON 时，线性
 P1/P2。Draft PR #4652 依赖 #4649，required CI 已全绿；未 merge、部署或
 开启 flag。
 
+F1-a 已在 C2 head 上完成表单控件 palette 与插入/移动交互。Canvas flag
+ON 时，全部当前可编辑字段类型可点击或原生拖入显式插入槽；字段本体不再
+整体可拖，只有拖拽把手启动移动会话，且键盘 `Alt+ArrowUp/Down` 与触屏/
+键盘可选择的插入槽提供等价路径。typed drag payload 必须与当前本地拖拽
+会话一致，外来、缺失或错配 payload 均 no-op；只读和 flag OFF 保持旧行为。
+删除后新增字段使用最小可用 `field_N`，不会因编号空隙产生重复 ID。Draft
+PR #4657 依赖 #4652，required CI 已全绿；尚未 merge、部署或开启 flag。
+F1-b 的独立 builder 和右侧聚焦字段检查器仍未完成。
+
 ### 4.1 依赖图
 
 ```mermaid
@@ -203,13 +213,14 @@ flowchart TD
   E0 --> E2
   E2 --> C1 --> C2 --> C3 --> C4 --> C5
   E1 --> C2
-  E2 --> F1 --> F2 --> F3
+  E2 --> F1a --> F1b --> F2 --> F3
+  C2 --> F1a
   E2 --> V1
   V1 --> V2
   C2 --> V2
   C2 --> P1
   C3 --> X1
-  F1 --> X1
+  F1b --> X1
   V2 --> X1
   C5 --> T1
   F2 --> T1
@@ -223,7 +234,7 @@ flowchart TD
 
 - **Wave 0：** E0 代码审阅与 Kimi K3 视觉研究可并行。E0 先交付 graph fixture/约束清单，Grok 才启动 E1 renderer spike；E0 的其余状态审计可继续并行。E1 只产隔离原型和数据，不做产品提交。
 - **Wave 1：** E2 单独占有 `TemplateAuthoringView.vue`。这一波不允许第二个模型同时修改该文件。
-- **Wave 2：** C1/C2 串行；F1 与 V1 可在 E2 合入后并行，因为分别拥有 form 与 version 组件。
+- **Wave 2：** C1/C2 串行；F1-a 已在 C2 head 完成；F1-b 与 V1 可在 F1-a/E2 合入后并行，因为分别拥有 form 与 version 组件。
 - **Wave 3：** C3-C5 串行；F2 和 V2 可并行；P1 在 C2 后独立进行。
 - **Wave 4：** X1 在各交互面稳定后统一收口；T1 不得由实现模型自判通过。
 - **Wave 5：** U0 和 D0 串行；UAT 失败返回对应切片，不在收尾文档里豁免。
@@ -234,7 +245,7 @@ flowchart TD
 |---|---:|---|
 | `TemplateAuthoringView.vue` | 1 | E2 抽取期间独占；之后原则上只留协调改动 |
 | `approvalCanvasCommands.ts` | 1 | C3-C5 共用一个实现 owner；审阅模型只读 |
-| `approvalFormCommands.ts` | 1 | F1-F2 共用一个实现 owner |
+| `approvalFormCommands.ts` | 1 | F1-a-F2 共用一个实现 owner |
 | `ApprovalGraphNodeConfigEditor.vue` | 1 | Canvas inspector 与辅助列表复用，不复制 |
 | `TemplateDetailView.vue` / version API | 1 | V1 先抽取，V2 不与其并行改同一文件 |
 | `ApprovalProductService.ts` / `ApprovalGraphExecutor.ts` | 1 | 本计划原则上不修改；一旦需要运行时语义立即停线并另立锁 |
@@ -310,7 +321,7 @@ flowchart TD
 - move→undo 和 reorder→undo 恢复 graph、selection 和 focus；
 - 结构列表在 S12 以前仍可到达，但不再是默认入口。
 
-### F1-F3：表单
+### F1-a-F3：表单
 
 - 每种可编辑字段可由点击和拖入添加，结果一致；
 - 字段移动不改变 ID，不静默改写 visibility/condition/assignee/permission/FWB 引用；
@@ -414,8 +425,10 @@ U0 至少包含以下 12 项，全部保存截图、录屏或网络/数据库证
 
 1. **E0：完成。** Codex exact-head 审阅，Claude Opus 只读对抗复核；
 2. **E1 / E1-b：完成。** Kimi 提供视觉 IA，Grok 构建隔离 renderer 和生产命令适配验证，Codex 复核与变异；
-3. **E2 / C1 / C2：完成待审。** Claude 负责 shell 与统一 carrier，Codex 完成 canvas-first 接线、真浏览器验证和判别变异，Kimi 复审。
+3. **E2 / C1 / C2：完成待审。** Claude 负责 shell 与统一 carrier，Codex 完成 canvas-first 接线、真浏览器验证和判别变异，Kimi 复审；
+4. **F1-a：完成待审。** Codex 完成 palette、插入槽、handle-only 拖排、键盘/触屏等价和唯一字段 ID 修复，多代理对抗复核后 required CI 全绿。
 
-本轮尚未启动 C3-C5、F1-F3 及版本/试运行收口，没有开启任何 flag，也没有
-接触审批运行时服务。下一开发点为 C3 边 `+` 产品化与 F1 表单 palette；
-不得把 C2 验证通过解释为整条编辑器已达到飞书/钉钉产品完成度。
+本轮尚未启动 C3-C5、F1-b/F2/F3 及版本/试运行收口，没有开启任何 flag，
+也没有接触审批运行时服务。下一开发点为 C3 边 `+` 产品化，并行推进
+F1-b 表单 builder/右侧字段检查器；不得把 F1-a 的拖入能力解释为整条
+编辑器已达到飞书/钉钉产品完成度。

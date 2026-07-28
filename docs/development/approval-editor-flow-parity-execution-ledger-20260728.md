@@ -21,6 +21,7 @@ merge、部署、UAT 和 flag 是不同状态，不互相替代。
 | E2 | Flow Canvas presentational shell 抽取 | `origin/main@9da0335b4` / `codex/approval-editor-e2-shell-extract-20260728` | `5a9bb4db2` | Claude Sonnet 5 | 247 测、类型、事件变异；修复静态 style 守卫误判 | Draft PR #4642；required CI 绿 |
 | C1 | 线性/复杂流程统一 Canvas 载体 | E2 head / `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` | Claude Opus 5 实现；Kimi exact-head 只读复审 | 真实视图写回、payload/dirty、promote 保真、flag fallback、删除下限及浏览器三 viewport | Draft PR #4649；required CI 绿 |
 | C2 | Canvas-first 工作区与表单/流程切换 | C1 head / `codex/approval-editor-c2-canvas-first-20260728` | `068d6e628` | Codex 实现；Kimi exact-head 对抗复审 | 默认画布、辅助模式、Form/Flow 往返、viewport 重测、ARIA、三 viewport 真浏览器 | Draft PR #4652；required CI 绿 |
+| F1-a | 表单 palette、插入槽和字段移动 | C2 head / `codex/approval-editor-f1-form-palette-20260728` | `6b926dce5` | Codex 实现；三轮独立子代理对抗复审 | 点击/typed drag 插入、handle-only 拖排、键盘/触屏等价、唯一字段 ID、三 viewport 真浏览器 | Draft PR #4657；required CI 绿 |
 
 ## 2. E1-b 执行事实
 
@@ -60,25 +61,25 @@ E2 只修改：
 
 ## 4. 状态矩阵
 
-| 面 | E1-b | E2 | C1 | C2 |
-|---|---|---|---|---|
-| 设计方向 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 |
-| 实现 | 完成 | 完成 | 完成 | 完成 |
-| 本地测试 | PASS | PASS | PASS | PASS |
-| 判别变异 | PASS | PASS | PASS（3 刀） | PASS（4 刀） |
-| 独立复审 | Codex | Codex | Kimi APPROVE，无 P1/P2；Codex复核修 P3 | Kimi APPROVE，无 P1/P2；Codex复核 |
-| 提交 | 是 | 是 | 是 | 是 |
-| push / PR | #4643 | #4642 | #4649（stacked on #4642） | #4652（stacked on #4649） |
-| required CI | PASS | PASS | PASS | PASS |
-| merge | 否 | 否 | 否 | 否 |
-| staging / UAT | 否 | 否 | 否 | 否 |
-| production flag | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF |
+| 面 | E1-b | E2 | C1 | C2 | F1-a |
+|---|---|---|---|---|---|
+| 设计方向 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 |
+| 实现 | 完成 | 完成 | 完成 | 完成 | 完成 |
+| 本地测试 | PASS | PASS | PASS | PASS | PASS |
+| 判别变异 | PASS | PASS | PASS（3 刀） | PASS（4 刀） | PASS（3 刀） |
+| 独立复审 | Codex | Codex | Kimi APPROVE，无 P1/P2；Codex复核修 P3 | Kimi APPROVE，无 P1/P2；Codex复核 | 三轮子代理复审；最终无 P1/P2 |
+| 提交 | 是 | 是 | 是 | 是 | 是 |
+| push / PR | #4643 | #4642 | #4649（stacked on #4642） | #4652（stacked on #4649） | #4657（stacked on #4652） |
+| required CI | PASS | PASS | PASS | PASS | PASS |
+| merge | 否 | 否 | 否 | 否 | 否 |
+| staging / UAT | 否 | 否 | 否 | 否 | 否 |
+| production flag | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF |
 
 ## 5. 后续顺序
 
-1. 审阅并按依赖落 #4642 -> #4649 -> #4652；#4643 是 verification-only 独立支线；
+1. 审阅并按依赖落 #4642 -> #4649 -> #4652 -> #4657；#4643 是 verification-only 独立支线；
 2. C3 把节点按钮群改为边 `+`，C4/C5 收拖拽与 undo/redo；
-3. F1 抽表单 builder，并实现左 palette 拖入 + 中画布 + 右字段检查器；
+3. F1-a 已交付 palette/插入槽；F1-b 再抽表单 builder 并形成左 palette + 中画布 + 右字段检查器；
 4. F2/F3 补字段引用保护与附件 authoring；
 5. V1/V2、P1、X1 收版本、试运行、移动端/无障碍；
 6. T1 真浏览器 required CI 全闭合后才进入 staging UAT；
@@ -116,3 +117,26 @@ E2 只修改：
 - 一次变异恢复误命中同形 `@click`，单测未暴露，真实浏览器发现按钮目标
   反转；按按钮上下文修复后重跑完整测试与浏览器矩阵。该事件证明真浏览器
   不是可省略的展示步骤。
+
+## 8. F1-a 执行事实
+
+- Canvas flag ON 时，palette 从 `AUTHORABLE_FIELD_TYPES` 派生全部当前可编辑
+  字段类型；点击与 typed native drag 都写入同一草稿字段序列；
+- 字段前、中、后都有显式插入槽；插入槽是可聚焦按钮，支持鼠标、键盘和
+  触屏选择，再由 palette 点击插入；
+- 字段移动只允许从拖拽把手启动，本地 active drag index 必须与 typed
+  payload 一致；外来、缺失、负数和错配 payload 均 no-op；
+- `Alt+ArrowUp/Down` 与上下移动按钮保留为拖拽等价路径，并声明
+  `aria-keyshortcuts`；
+- 删除后新增字段使用最小未占用 `field_N`，避免 `fields.length + 1`
+  在编号空隙下生成重复 ID；
+- read-only 时 palette、插入槽和拖拽把手均不可写；Canvas flag OFF 保持
+  旧“添加字段”和原字段拖排路径；
+- focused specs 22/22、required web test 总计 359 文件 / 4320 测试、
+  `vue-tsc`、ESLint、web build 和 diff check 全通过；
+- 三刀判别变异分别中和前向移动索引修正、恢复易重复 ID 算法、删除 typed
+  payload 与本地拖拽会话一致性检查，指定测试均精确转红；
+- 真实 Chromium 在 1440 / 1024 / 390 验证桌面左右布局、窄屏纵向布局、
+  插入槽选择、字段插入、无横向溢出和零 console error；
+- 本刀未抽出 `ApprovalFormBuilder`，也未形成聚焦字段的独立右侧属性
+  inspector；这些明确留给 F1-b，不以 #4657 提前关闭。
