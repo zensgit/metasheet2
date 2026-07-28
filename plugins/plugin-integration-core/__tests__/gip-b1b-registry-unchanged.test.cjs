@@ -3,7 +3,7 @@
 // B1b capability spike — checks that the evidence slice does not rely on an implicit
 // MySQL/SQL Server strategy or a widened certification vocabulary (definition-of-done
 // item 4, docs/development/database-system-integration-line-design-and-verification-
-// 20260724.md §4 step 2 / §7.2 "mints no certification and registers no strategy").
+// 20260724.md §4 step 2 "mints no certification and registers no strategy").
 //
 // TWO RUNTIME CONTRACT CHECKS, deliberately not overstated as a repository-wide
 // registration proof:
@@ -25,10 +25,13 @@
 // reviewed main-line changes must not make this test fail forever.
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const SPIKE_LIB = path.join(__dirname, '..', 'lib', 'gip-binding-qualification-spike.cjs')
 const CONTRACTS_LIB = path.join(__dirname, '..', 'lib', 'gip-profile-certification-contracts.cjs')
+const PACKAGE_JSON = path.join(__dirname, '..', 'package.json')
+const SQLSERVER_RCSI_TEST_COMMAND = 'node __tests__/gip-sqlserver-rcsi-total-order-strategy.test.cjs'
 
 function behaviouralProof_registryResolvesNothingNew() {
   const {
@@ -44,9 +47,10 @@ function behaviouralProof_registryResolvesNothingNew() {
     { actionProfileVersion: FIXTURE_ACTION_PROFILE_VERSION, ...postgresTotalOrderProbeStrategy },
   ])
 
-  // Shaped like what a real B1b MySQL/SQL Server strategy registration WOULD use — chosen to
-  // look exactly like what an implementer under schedule pressure might be tempted to wire in
-  // "just to get the spike passing". None of these may resolve today.
+  // Shaped like what a real B1b MySQL/SQL Server strategy registration WOULD use. This
+  // assertion is intentionally local to this PostgreSQL-only fixture registry; a later,
+  // separately reviewed module-owned registry may certify one of these coordinates without
+  // retroactively making the evidence-only spike register it here.
   const shouldStillBeUnbound = [
     'mysql.total_order_probe.v1',
     'sqlserver.total_order_probe.v1',
@@ -81,9 +85,27 @@ function behaviouralProof_frozenVocabulariesUnchanged() {
   assert.deepEqual([...GIP_CONSISTENCY_PROOFS], ['SOURCE_SNAPSHOT_TXN', 'IMMUTABLE_SNAPSHOT_TOKEN', 'MONOTONIC_VERSION_PIN'])
 }
 
+function behaviouralProof_sqlServerRcsiSuiteIsInTheExplicitChain() {
+  const pkg = JSON.parse(fs.readFileSync(PACKAGE_JSON, 'utf8'))
+  assert.equal(
+    pkg.scripts['test:gip-sqlserver-rcsi-total-order-strategy'],
+    SQLSERVER_RCSI_TEST_COMMAND,
+    'the named SQL Server RCSI certification suite command drifted or disappeared',
+  )
+  const occurrences = pkg.scripts.test
+    .split(' && ')
+    .filter((command) => command === SQLSERVER_RCSI_TEST_COMMAND)
+  assert.equal(
+    occurrences.length,
+    1,
+    'the explicit plugin test chain must execute the SQL Server RCSI certification suite exactly once',
+  )
+}
+
 async function main() {
   behaviouralProof_registryResolvesNothingNew()
   behaviouralProof_frozenVocabulariesUnchanged()
+  behaviouralProof_sqlServerRcsiSuiteIsInTheExplicitChain()
   console.log('gip-b1b-registry-unchanged.test.cjs OK')
 }
 

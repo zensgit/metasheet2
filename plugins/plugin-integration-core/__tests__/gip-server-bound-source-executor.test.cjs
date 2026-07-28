@@ -1644,9 +1644,13 @@ const DECLARED_WEAKSET_EXEMPTIONS = Object.freeze({
 // value, because "it threw" is not "no" (round 6, P2-C); one that is not exported at all
 // cannot be asked from outside the module.
 //
-// ELEVEN declarations, SEVEN of them sweepable. The seventh sweepable brand —
+// TWELVE declarations, EIGHT of them sweepable. The seventh pre-existing
+// sweepable brand —
 // `firstPartyReadSourceConfigStores` — is the one round 6's hand-authored checker table
-// omitted, and it is minted by a factory this PR changed. FOUR declarations live in
+// omitted, and it is minted by a factory this PR changed. The eighth is the
+// module-owned SQL Server RCSI strategy: its exact-coordinate resolver is executed
+// directly below because the generic attacker pool cannot infer a first-party
+// actionProfileVersion. FOUR declarations live in
 // modules BYTE-IDENTICAL to `origin/main` (`gip-system-identity-read.cjs`,
 // `gip-canonical-object-contract-registry.cjs` ×2, `gip-connector-kind-registry.cjs`);
 // each guards its set with a module-private `assert*` and exports no boolean checker, so
@@ -1663,6 +1667,7 @@ const DECLARED_TRUST_DECLARATIONS = Object.freeze([
   'gip-server-bound-source-executor.cjs.trustedHttpProbeActionRegistries -> isTrustedHttpProbeActionRegistry [sweepable]',
   'gip-server-bound-source-executor.cjs.trustedServerBoundSourceExecutors -> isTrustedServerBoundSourceExecutor [sweepable]',
   'gip-server-bound-source-executor.cjs.trustedSourceBinders -> isTrustedSourceBinder [sweepable]',
+  'gip-sqlserver-rcsi-total-order-strategy.cjs.trustedStrategies -> isCertifiedSqlServerRcsiStrategy [sweepable]',
   'gip-system-identity-read.cjs.trustedSystemIdentityServices -> assertTrustedSystemIdentityService [checker-not-exported]',
   'read-source-config-store.cjs.firstPartyReadSourceConfigStores -> isFirstPartyReadSourceConfigStore [sweepable]',
 ])
@@ -1778,7 +1783,7 @@ function libSources() {
 // or values. The four `createHarness*ForTests` entries DO carry caller-controlled
 // behaviour and values, and that is the class ITEM 2 asks to be closed.
 //
-// ROUND 7 takes the ledger from EIGHT rows to NINE, for the SEVENTH brand:
+// ROUND 7 took the ledger from EIGHT rows to NINE, for the then-SEVENTH brand:
 // `createReadSourceConfigStore` mints `firstPartyReadSourceConfigStores`. (The new row sorts
 // EIGHTH and is the ninth by count; both framings turn up in review, so both are written
 // here once.) It is not a defect either — the checker it feeds is what lets a consumer
@@ -1794,6 +1799,7 @@ const DECLARED_TRUST_MINTING_PATHS = Object.freeze({
   'resolver.createCertifiedCanonicalObjectAuthority': 'canonicalObjectAuthority',
   'store.createReadSourceConfigStore': 'readSourceConfigStore',
   'resolver.<resolver>.resolveApprovedBinding': 'bindingResolution',
+  'sqlserverRcsi.resolveCertifiedSqlServerRcsiStrategy': 'certifiedSqlServerRcsiStrategy',
 })
 
 // The brand's short name is derived from its checker, so a brand cannot be renamed in
@@ -2134,9 +2140,9 @@ function trustBrandInventoryIsDerivedNotAuthored() {
     exemptOccurrences: reach.exemptions.length,
   }
   assert.deepEqual(counts, {
-    declarations: 11,
-    declaringModules: 6,
-    sweepable: 7,
+    declarations: 12,
+    declaringModules: 7,
+    sweepable: 8,
     unjudgeable: 4,
     exemptOccurrences: 4,
   }, 'the derived counts disagree with the tree — the banner below may not print a number no assertion pinned')
@@ -2169,6 +2175,7 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     'gip-system-identity-read.cjs': 'systemIdentity',
     'gip-canonical-object-contract-registry.cjs': 'contractRegistry',
     'gip-connector-kind-registry.cjs': 'connectorKinds',
+    'gip-sqlserver-rcsi-total-order-strategy.cjs': 'sqlserverRcsi',
   })
   // THE WALK IS PINNED IN BOTH DIRECTIONS. Round 7 asserted only that every DERIVED
   // module has an alias, which is one-directional: a module DROPPING OUT of the
@@ -2193,8 +2200,8 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
   for (const declaration of reach.sweepable) {
     checkers[brandKeyFor(declaration.checker)] = byName.get(declaration.module)[declaration.checker]
   }
-  assert.equal(Object.keys(checkers).length, 7,
-    `the derived checker set must be the seven sweepable brands, got ${Object.keys(checkers).sort().join(', ')}`)
+  assert.equal(Object.keys(checkers).length, 8,
+    `the derived checker set must be the eight sweepable brands, got ${Object.keys(checkers).sort().join(', ')}`)
 
   const result = await saturateAndFindMintingPaths(tables, 3, checkers)
 
@@ -2213,7 +2220,8 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     'canonicalObjectAuthority', 'httpProbeActionRegistry', 'readSourceConfigStore',
     'serverBoundSourceExecutor', 'sourceBinder', 'systemIdentityAuthority',
   ], 'the closure must reach every sweepable brand except bindingResolution, which needs an APPROVED '
-    + 'config row the pool cannot form; it is executed directly below instead')
+    + 'config row, and certifiedSqlServerRcsiStrategy, which needs an exact first-party profile coordinate; '
+    + 'both are executed directly below instead')
   assert.equal(result.capHits, 0,
     `the saturation pool hit its cap (${result.capHits} values dropped) — the sweep is TRUNCATED, so the `
     + 'statement below would be about a subset of even this derived reach')
@@ -2238,17 +2246,26 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
       `${name} mints ${brand}; the ledger declares ${DECLARED_TRUST_MINTING_PATHS[name]}`)
   }
 
-  // AND THE ONE THE SWEEP CANNOT REACH, EXECUTED DIRECTLY so the ledger is complete.
+  // AND THE TWO THE GENERIC SWEEP CANNOT REACH, EXECUTED DIRECTLY so the ledger is
+  // complete. Neither input is attacker-inferable: one requires an APPROVED config
+  // row and the other an exact first-party actionProfileVersion.
   const stack = buildStack()
   const resolution = await resolveAlpha(stack.resolver)
   assert.equal(resolverModule.isTrustedBindingResolution(resolution), true,
     'resolveApprovedBinding is declared as the ninth minting path; it must actually mint')
-  assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 1,
-    'the declared ledger must be exactly the swept set plus the directly-executed resolution path')
+  const sqlserverRcsi = byName.get('gip-sqlserver-rcsi-total-order-strategy.cjs')
+  const sqlserverStrategy = sqlserverRcsi.resolveCertifiedSqlServerRcsiStrategy(
+    'sqlserver.total_order_probe.rcsi.v1',
+  )
+  assert.equal(sqlserverRcsi.isCertifiedSqlServerRcsiStrategy(sqlserverStrategy), true,
+    'the exact-coordinate SQL Server RCSI resolver is declared as a direct minting path; it must actually resolve '
+    + 'the one module-owned certified strategy')
+  assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 2,
+    'the declared ledger must be exactly the swept set plus the two directly-executed paths')
 
   console.log(`  TRUST-SURFACE ${result.calls} calls over ${result.exportCount} exports in `
     + `${reach.modules.length} DERIVED modules, pool=${result.poolSize}: ${Object.keys(swept).length} minting paths `
-    + `swept + 1 executed directly = ${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
+    + `swept + 2 executed directly = ${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
 }
 
 // ---------------------------------------------------------------------------

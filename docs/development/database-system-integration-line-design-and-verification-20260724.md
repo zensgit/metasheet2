@@ -623,6 +623,11 @@ preconditions rather than re-hosted.
    Builders are admitted by **module-private identity**; the SQL denylist is defence-in-depth and **may never
    be cited as the boundary** (**B-4**). Unbound ⇒ `PROBE_STRATEGY_UNBOUND` (existing, fail-closed by name).
    PostgreSQL reuses the shipped reference strategy.
+   - **2026-07-28 implementation authorization:** the first step-3 slice is limited to the
+     `(sqlserver, {2019, 2022}, rcsi_on)` total-order qualification strategy opened by exact-head
+     run `30329280423`. It is **not** a `CertifiedReadActionProfile`, carries no completeness
+     proof, remains runtime-unreachable, and does not claim `PAGED_READ`; B1c remains the only
+     place that may establish cross-page consistency.
 4. **B1c** — cross-page snapshot/session executor: design + per-dialect certification of a page-sequence
    consistency context; and the only place an explicit SNAPSHOT transaction claim may be established.
 5. **B1-observability** — counter + field-client handshake **wiring**. Separate runtime gate; owner decision
@@ -721,8 +726,7 @@ shapes, while §4 item 1's separate **"Retained"** bullet carries the resolver /
 harness — the Gate's sixth permitted bullet covers **both**, and the withdrawn clause had been the only thing
 authorizing either). On the request path it permits **validation and persistence of the two new config fields
 and nothing else**; qualification execution, external-source reads, new side effects and new routes stay
-forbidden from any request or scheduled run. Every later slice re-enters its own gate. **§4 is itself pending
-re-ratification** — until the owner re-approves it, nothing after **B1a (§4 item 1)** is scheduled by this
-document, other than the parallel on-prem track — ⟲B2-self **both phases of it, M0-A *and* the ops-gated
-M0-B**. Naming M0-A alone here would re-commit the exact fault §4's M0 note was added to prevent: deleting
-the preflight, the flag-ON window and #4437 closure from everything the document schedules.
+forbidden from any request or scheduled run. Every later slice re-enters its own gate.
+**⟲B2-self RETRACTION:** an earlier revision left a stale sentence here saying §4 was still
+pending re-ratification. That contradicted §4's owner-ratified status at `a7c562d34`; it is withdrawn.
+The parallel on-prem track still includes **both** M0-A and the separately ops-gated M0-B.
