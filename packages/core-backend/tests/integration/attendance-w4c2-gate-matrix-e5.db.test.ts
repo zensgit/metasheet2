@@ -222,6 +222,16 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   const cutoverStragglerRaceOrg = randomUUID()
   const cutoverInitiatorOrg = randomUUID()
   const cutoverDispatchOrg = randomUUID()
+  // Gate 8 (owner ruling 2026-07-28, "(b-narrow)" required-gate list item 8):
+  // an ALLOWLISTED org whose rollout row is `legacy` — resolves to
+  // `legacy_projection_only` via `resolveSegmentCalculationPosture` (the
+  // SAME branch, executeScheduledRun ~L1657, leg 7's live-punch analog
+  // already exercises for punches) rather than the "never allowlisted"
+  // `rolloutKey === null` shortcut `mergeOrg` uses — this makes the
+  // mutation target for "misroute legacy to the new machine" a single,
+  // precise line (the `posture.writePosture === 'legacy_projection_only'`
+  // branch itself), not the org-key pre-classification above it.
+  const cutoverLegacyOrg = randomUUID()
 
   const ambUser = randomUUID()
   const ambControlUser = randomUUID()
@@ -238,6 +248,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   // P1-4 remediation: the real administrator identity for leg 9's admin_run
   // calls (must be an active `users` row for the new in-transaction recheck).
   const schedAdminUser = randomUUID()
+  const cutoverLegacyUser = randomUUID()
   const mergeUser = randomUUID()
   // P1-4 remediation legs.
   const adminWitnessTargetUser = randomUUID()
@@ -517,7 +528,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       ambOrg, isoOrg, isoOrg2, replayOrg, authzOrg, authoritativeOrg, rebaseOrg, orderOrg, schedOrg,
       adminWitnessOrg,
       cutoverRestartOrg, cutoverConcurrentOrg, cutoverStragglerOrg, cutoverStragglerControlOrg,
-      cutoverStragglerRaceOrg, cutoverInitiatorOrg, cutoverDispatchOrg,
+      cutoverStragglerRaceOrg, cutoverInitiatorOrg, cutoverDispatchOrg, cutoverLegacyOrg,
     ].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
@@ -1813,6 +1824,65 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
     const pendingAfter = await scheduledRunOutboxRows(orgId)
     expect(pendingAfter.every((r) => r.delivery_state === 'delivered')).toBe(true)
+  })
+
+  it('leg 9m — gate 8, legacy byte-identity + zero run/outbox (owner red line, 2026-07-28 addendum): a `legacy_projection_only` org\'s real admin_run absence generation returns the EXACT pre-cutover response body, still fires its OWN synchronous best-effort emit (unlike leg 9\'s w4-branch directEmits===[]), and leaves all three durable run tables + the outbox at zero rows', async () => {
+    const orgId = cutoverLegacyOrg
+    const userId = cutoverLegacyUser
+    // Allowlisted (beforeAll) + rollout row `legacy` -> resolveSegmentCalculationPosture
+    // resolves `legacy_projection_only` (the SAME posture-probe branch leg 7's
+    // live-punch analog exercises), not the "never allowlisted" shortcut.
+    await insertRolloutRow(orgId, 'legacy')
+    await insertActiveUser(userId, orgId)
+    // Same rule-derived-absence date every other scheduled leg in this file uses
+    // (a past Wednesday, default working day, no shift assignment => rule source +
+    // UNSCHEDULED_NO_SHIFT => a generate target, exactly like leg 9's schedUser).
+    const workDate = '2026-07-22'
+
+    const adminToken = await mintToken(randomUUID(), 'attendance:read,attendance:write,attendance:admin')
+
+    // The caller's (index.cjs runAutoAbsenceForOrgDate) OWN synchronous
+    // best-effort emit — subscribed on the real, process-wide event bus, the
+    // exact singleton leg 9 uses to prove the W4 branch's emit stays silent.
+    const directEmits: Array<{ type: string; payload: unknown }> = []
+    const absenceSubId = eventBus.subscribe('attendance.absence.generated', (payload) => {
+      directEmits.push({ type: 'attendance.absence.generated', payload })
+    })
+    const reviewSubId = eventBus.subscribe('attendance.work_date.review_required', (payload) => {
+      directEmits.push({ type: 'attendance.work_date.review_required', payload })
+    })
+
+    const res = await autoAbsenceRun(adminToken, { orgId, workDate })
+    eventBus.unsubscribe(absenceSubId)
+    eventBus.unsubscribe(reviewSubId)
+
+    // Byte-identical response: the exact pre-cutover shape (no run/generation
+    // identity leaks into a legacy caller's response) — a full-body `toEqual`,
+    // never a subset `toMatchObject`.
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      data: { skipped: false, total: 1, targetUsers: 1, generated: 1, reviewRequired: [] },
+    })
+    expect(await recordCount(userId)).toBe(1)
+
+    // Gate 8's sharp limb: legacy keeps its EXISTING synchronous emit — the
+    // owner's "run-level events only via dispatcher" red line applies ONLY to
+    // shadow/eligible/authoritative (leg 9's w4-branch assertion), never to
+    // legacy_projection_only.
+    expect(directEmits).toEqual([
+      { type: 'attendance.absence.generated', payload: { orgId, workDate, total: 1 } },
+    ])
+
+    // Zero rows across ALL THREE durable run tables + the outbox + the W4C-0
+    // operation table (legacy never mints an operation either).
+    expect(await scheduledRunRows(orgId)).toEqual([])
+    expect((await operationRows(orgId, 'scheduled')).length).toBe(0)
+    expect(await outboxRows(orgId)).toEqual([])
+    for (const table of ['attendance_scheduled_run_targets', 'attendance_scheduled_run_target_outcomes'] as const) {
+      const n = (await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE org_id = $1`, [orgId])).rows[0].n
+      expect(n, `${table} must stay empty under legacy posture`).toBe(0)
+    }
   })
 
   it('leg 10 — P02 single-write discriminator: a merge-flipping internal punch touches attendance_records EXACTLY ONCE and lands the merged boundary', async () => {
