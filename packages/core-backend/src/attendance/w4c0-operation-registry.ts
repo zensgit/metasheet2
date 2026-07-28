@@ -1023,7 +1023,13 @@ export async function reserveAttendanceImportJobW4V1(
 // SQLSTATE 40001/40P01.
 // ---------------------------------------------------------------------------
 
-function isRetryableSqlState(error: unknown): boolean {
+// Exported (P1-2 fix, #4612 verdict second gate round): a per-target caller that wraps a SINGLE
+// call to `runAttendanceResultOperationTransactionV1` in its OWN outer retry (with backoff this
+// inner wrapper deliberately does not add — see w4c2-live-scheduled-boundary.ts's
+// `withConnectionRetryingTargetContention`) needs the SAME retryable-SQLSTATE predicate this
+// wrapper uses, so the two layers agree on exactly which errors are transient. One source, no
+// drift, matching this file's own doctrine for every other shared primitive.
+export function isRetryableSqlState(error: unknown): boolean {
   const code =
     typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
   return code === '40001' || code === '40P01'
