@@ -653,12 +653,23 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   it('deleting the selected node clears selection and closes the inspector', async () => {
     routeParams = { id: 'tpl_inspector_delete' }
-    // Must be a COMPLEX graph (cc) so the canvas toggle mounts; approval_mid is a linear
-    // mid-chain approval (1 in / 1 out) so removeLinearNode + the canvas remove button apply.
+    // Must be a COMPLEX graph (cc) so the canvas toggle mounts. Keep a second approval so
+    // approval_mid is both a linear mid-chain node (1 in / 1 out) and legally removable under
+    // the authoring floor that preserves at least one approval after deletion.
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: {
         nodes: [
           { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_first',
+            type: 'approval',
+            name: '首轮审批',
+            config: {
+              assigneeSources: [{ kind: 'requester' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+            },
+          },
           {
             key: 'approval_mid',
             type: 'approval',
@@ -678,7 +689,8 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
           { key: 'end', type: 'end', name: '结束', config: {} },
         ],
         edges: [
-          { key: 'e-s-m', source: 'start', target: 'approval_mid' },
+          { key: 'e-s-f', source: 'start', target: 'approval_first' },
+          { key: 'e-f-m', source: 'approval_first', target: 'approval_mid' },
           { key: 'e-m-c', source: 'approval_mid', target: 'cc_1' },
           { key: 'e-c-e', source: 'cc_1', target: 'end' },
         ],

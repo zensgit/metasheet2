@@ -50,6 +50,7 @@ import {
   validateApprovalNodeEdits,
   type ApprovalNodeEdits,
 } from './approvalNodeEdit'
+import { linearStepNodeKey } from './linearCanvasCarrier'
 
 export type { DetailColumnDraft } from './detailField'
 export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
@@ -1012,7 +1013,9 @@ export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph
   // whose field was deleted so a dangling fieldId can never reach the backend cross-reference.
   const fieldIds = new Set(draft.fields.map((field) => field.id.trim()).filter(Boolean))
   const approvalNodes = draft.steps.map((step, index) => ({
-    key: `approval_${index + 1}`,
+    // C1: the key convention is owned by `linearCanvasCarrier` so the canvas inspector can resolve
+    // a linear node back to THIS step (its edit carrier) without a second copy of the rule.
+    key: linearStepNodeKey(index),
     type: 'approval' as const,
     name: step.name.trim() || `审批人 ${index + 1}`,
     config: buildStepConfig(step, fieldIds),

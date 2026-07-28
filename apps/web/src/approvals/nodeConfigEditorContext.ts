@@ -15,7 +15,6 @@ import type {
   ConditionRuleOperator,
   CcNodeEdit,
   ParallelNodeEdit,
-  ApprovalNodeSourceEdit,
 } from './templateAuthoring'
 import type { FormulaInsertOption } from './conditionEdit'
 
@@ -23,13 +22,25 @@ import type { FormulaInsertOption } from './conditionEdit'
  * Shared context for G-2..G-5 node config editors. Canvas inspector and structured-list mode both
  * inject this so they mutate the SAME draft.conditionEdits / parallelEdits / ccEdits /
  * approvalNodeEdits handlers — one source of truth (Canvas V2 Slice A).
+ *
+ * C1: the approval-node accessors below are carrier-agnostic. A node from a preserved complex graph
+ * resolves to `draft.approvalNodeEdits[nodeKey]`; a node projected from a LINEAR draft resolves to
+ * the matching `draft.steps[i]` (see `linearCanvasCarrier`). Both write straight through to the
+ * draft the payload builders read — the inspector never holds a shadow copy of either.
  */
 export interface ApprovalNodeConfigEditorApi {
   readOnly: ComputedRef<boolean> | Ref<boolean> | boolean
   conditionEditFor: (nodeKey: string) => ConditionNodeEdit | undefined
   parallelEditFor: (nodeKey: string) => ParallelNodeEdit | undefined
   ccEditFor: (nodeKey: string) => CcNodeEdit | undefined
-  approvalNodeEditFor: (nodeKey: string) => ApprovalNodeSourceEdit | undefined
+  /**
+   * True when an `approval` node has an edit carrier and so renders the editable form rather than
+   * the read-only summary (a legacy complex node with no `assigneeSources` has none). This is the
+   * render gate ON PURPOSE — gating on a carrier OBJECT would silently exclude linear steps, whose
+   * carrier is not an `ApprovalNodeSourceEdit`. Says nothing about `readOnly`, which disables the
+   * controls but still renders them.
+   */
+  hasApprovalNodeEditor: (nodeKey: string) => boolean
   conditionFieldOptions: ComputedRef<Array<{ id: string; label: string }>> | Array<{ id: string; label: string }>
   userFields: ComputedRef<Array<{ id: string; label: string }>> | Array<{ id: string; label: string }>
   conditionFormulaInsertOptions: ComputedRef<FormulaInsertOption[]> | FormulaInsertOption[]
