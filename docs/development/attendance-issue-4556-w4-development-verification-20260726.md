@@ -230,7 +230,7 @@ WIP checkpoint 在实现车道遗留的共享库 `ms2_w4c2` 上跑出 1 条红�
 | W4C-2 CI wiring guard | **32/32 PASS** |
 | core-backend no-DB 全量 Vitest | **564 files / 7,844 passed / 1,651 skipped，exit 0** |
 | core-backend TypeScript type-check | **PASS** |
-| `git diff --check` | **PASS** |
+| `git diff --check origin/main...HEAD` | **PASS** |
 
 真库全量运行中出现过 node-cron 在 suite teardown 后访问已关闭 pool 的 stderr
 噪声，但十个文件仍为 154/154、进程 exit 0；本记录不把该噪声宣称为已修。

@@ -221,7 +221,6 @@ describe('buildFrozenWorkDateAttributionV2 — freeze semantics', () => {
     }
   })
 })
-
 describe('computeAttendanceWindowEvidenceFingerprintV1 — window-policy evidence freeze', () => {
   const otA = { requestId: 'ot-a', approvedEndAt: '2026-07-20T12:00:00.000Z', anchor: { kind: 'shift_end' } }
   const otB = { requestId: 'ot-b', approvedEndAt: '2026-07-20T13:00:00.000Z', anchor: null }
@@ -285,4 +284,3 @@ describe('computeAttendanceWindowEvidenceFingerprintV1 — window-policy evidenc
     expect((strictTimeThrown as { code?: string })?.code).toBe('W4C1_INSTANT_INVALID')
   })
 })
-
