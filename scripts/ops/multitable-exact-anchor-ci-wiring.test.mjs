@@ -17,6 +17,9 @@ const FILES = [
   'tests/integration/multitable-exact-anchor-apply-realdb.test.ts',
   // W2 route wiring is DB-gated too; keep its Express/auth/side-effect goldens impossible to skip-green.
   'tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+  // Closeout database guards: authority reader/writer leases and the live-link target FK migration.
+  'tests/integration/multitable-recovery-authority-stability-realdb.test.ts',
+  'tests/integration/multitable-live-link-target-fk-migration-realdb.test.ts',
 ]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 
@@ -216,7 +219,7 @@ test('placement parsers reject comment-only and wrong-step decoys', () => {
 
 function assertAuthorityWriterWaiterContract(source) {
   const start = source.indexOf('// Both production writers must be blocked')
-  const end = source.indexOf('let membershipParked = false', start)
+  const end = source.indexOf('// Membership writers have no sheet-row prerequisite', start)
   assert.ok(start >= 0 && end > start, 'authority-writer waiter contract block must exist')
   const block = source.slice(start, end)
 

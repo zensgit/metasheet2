@@ -2589,9 +2589,10 @@ export class AutomationExecutor {
         }
 
         // Clean up links FIRST (mirrors the same-base delete sinks `records.deleteRecord` /
-        // `RecordService.deleteRecord`): the FK cascade only covers the `record_id` side, so the
-        // `foreign_record_id` side must be deleted explicitly or it dangles. (This statement touches
-        // meta_links, NOT meta_records, so the cross-base write-guard regex does not match it.)
+        // `RecordService.deleteRecord`): the source-side FK cascades, while the target-side FK is
+        // deliberately NO ACTION so capture can never be bypassed by a silent database cascade.
+        // (This statement touches meta_links, NOT meta_records, so the cross-base write-guard regex
+        // does not match it.)
         await query(
           'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
           [effectiveRecordId],

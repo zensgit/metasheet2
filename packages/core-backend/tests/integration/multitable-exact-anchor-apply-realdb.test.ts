@@ -26,7 +26,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { pool } from '../../src/db/pg'
 import { resolveExactAnchor } from '../../src/multitable/exact-anchor-recovery'
-import { applyExactAnchorRecovery, pruneExpiredRecoveryTokenBurns, type ExactAnchorApplyMode } from '../../src/multitable/exact-anchor-recovery-execute'
+import {
+  applyExactAnchorRecovery,
+  lockExactAnchorRecoveryAuthorityScope,
+  pruneExpiredRecoveryTokenBurns,
+  type ExactAnchorApplyMode,
+} from '../../src/multitable/exact-anchor-recovery-execute'
 import { countInboundLinkCaptureRows, isTombstoneCaptureEnabled } from '../../src/multitable/tombstone-capture'
 import {
   hashRecoveryAuthorizationScope,
@@ -63,6 +68,7 @@ const applyArgs = (token: string, opts?: { fullRead?: typeof ALLOW_FULL_READ; pl
   sheetId: SHEET,
   actorId: ACTOR,
   evaluateFullReadAccess: opts?.fullRead ?? ALLOW_FULL_READ,
+  stabilizeAuthorization: async () => 'ready' as const,
   evaluatePlanAuthorization: opts?.planAuth ?? ALLOW_PLAN,
 })
 
@@ -453,14 +459,13 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     }
   })
 
-  test('ROW-LOCK-RACE (constructed): external FOR UPDATE on affected row parks L8; unfenced concurrent version bump ⇒ preview-drift, zero burn/writes; undo ⇒ same token applies', async () => {
+  test('ROW-LOCK-RACE (constructed): external FOR UPDATE on an affected row makes L8 fail-fast; later unfenced bump survives and recovery writes nothing; undo ⇒ same token applies', async () => {
     // v3.7 §5 step 7: sheet advisory fence alone is not enough — an unfenced writer can still UPDATE the
     // target row between liveSetHash and apply. The FULL live-set SELECT … FOR UPDATE + hash-from-locked-rows
     // must catch it.
     //
-    // Construction: hold the target row FOR UPDATE (no sheet fence) → launch L8 → prove L8 is still in-flight
-    // after a budget that is long enough for an unblocked apply to finish (so missing FOR UPDATE fails here)
-    // → concurrent version bump + COMMIT → L8 wakes and refuses preview-drift.
+    // Construction: hold the target row FOR UPDATE (no sheet fence) → launch L8 → NOWAIT must refuse
+    // preview-drift before the holder mutates. A blocking row lock here can form ABBA with a link writer.
     const { R_REV, anchorOp, seqs } = await seedWorld()
     const pv = await preview(anchorOp, 'revert')
     expect(pool).toBeTruthy()
@@ -471,15 +476,9 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
         'SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
         [R_REV, SHEET],
       )
-      let applySettled = false
-      const applying = applyExactAnchorRecovery(txn, applyArgs(pv.token)).finally(() => {
-        applySettled = true
-      })
-      // Budget >> unblocked L8 latency in this suite (~1–2s worst) so a missing row lock fails this assert
-      // (apply would finish ok:true). With FOR UPDATE, L8 must still be in-flight behind our row hold.
-      await new Promise((r) => setTimeout(r, 2500))
-      expect(applySettled).toBe(false)
-      // Concurrent unfenced write while L8 is parked on the old lock.
+      const out = await applyExactAnchorRecovery(txn, applyArgs(pv.token))
+      expect(out).toEqual({ ok: false, reason: 'preview-drift' })
+      // The holder remains free to commit after recovery has rolled back its burn and every lock.
       const sBump = String(BigInt(seqs.sNew) + 2000n)
       await holder.query(
         `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq)
@@ -490,9 +489,7 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
         `UPDATE meta_records SET data = $1::jsonb, version = 3 WHERE id = $2 AND sheet_id = $3`,
         [JSON.stringify({ [F_STR]: 'concurrent' }), R_REV, SHEET],
       )
-      await holder.query('COMMIT') // release ⇒ L8 wakes, rechecks version, refuses preview-drift
-      const out = await applying
-      expect(out).toEqual({ ok: false, reason: 'preview-drift' })
+      await holder.query('COMMIT')
       expect((await liveRow(R_REV))?.version).toBe(3)
       expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'concurrent' })
       expect(await burnCount()).toBe(0)
@@ -1447,42 +1444,211 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect(await burnCount()).toBe(0)
   })
 
-  test('PARKED-CREATE (constructed race): an unfenced INSERT committed while the apply is PARKED on the full live-set lock ⇒ preview-drift, zero burn/writes — a stale RESET delete set never commits around a new record', async () => {
+  test('GLOBAL-LOCK-ORDER: a mirror recovery fails fast on authority sheets before it can hold the other recovery target', async () => {
+    expect(pool).toBeTruthy()
+    const suffix = `${TS}_${Math.random().toString(36).slice(2, 8)}`
+    const sheetA = `sheet_lock_a_${suffix}`
+    const sheetB = `sheet_lock_b_${suffix}`
+    const fieldA = `fld_lock_a_${suffix}`
+    const fieldB = `fld_lock_b_${suffix}`
+    const recordA = `rec_lock_a_${suffix}`
+    const recordB = `rec_lock_b_${suffix}`
+    await q(
+      `INSERT INTO meta_sheets (id, base_id, name)
+       VALUES ($1,$3,'Lock A'),($2,$3,'Lock B')`,
+      [sheetA, sheetB, BASE],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES
+         ($1,$2,'to-b','link',$3::jsonb,1),
+         ($4,$5,'to-a','link',$6::jsonb,1)`,
+      [fieldA, sheetA, JSON.stringify({ foreignSheetId: sheetB }), fieldB, sheetB, JSON.stringify({ foreignSheetId: sheetA })],
+    )
+    await q(
+      `INSERT INTO meta_records (id, sheet_id, data, version)
+       VALUES ($1,$2,'{}'::jsonb,1),($3,$4,'{}'::jsonb,1)`,
+      [recordA, sheetA, recordB, sheetB],
+    )
+
+    const first = await pool!.connect()
+    const second = await pool!.connect()
+    try {
+      await first.query('BEGIN')
+      await second.query('BEGIN')
+      const firstQuery = (sql: string, params?: unknown[]) => first.query(sql, params)
+      const secondQuery = (sql: string, params?: unknown[]) => second.query(sql, params)
+      await lockExactAnchorRecoveryAuthorityScope(firstQuery, sheetA)
+      await second.query("SET LOCAL statement_timeout = '500ms'")
+      await expect(lockExactAnchorRecoveryAuthorityScope(secondQuery, sheetB)).rejects.toMatchObject({
+        code: '55P03',
+      })
+
+      // Correct order: the failed second recovery never touched recordB, so this returns immediately.
+      // Mutating the helper back to source-record-first leaves recordB locked by the aborted second
+      // transaction; this NOWAIT probe then fails until that transaction rolls back.
+      await first.query(
+        'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE NOWAIT',
+        [sheetB, recordB],
+      )
+      await first.query('COMMIT')
+      await second.query('ROLLBACK')
+    } finally {
+      await first.query('ROLLBACK').catch(() => {})
+      await second.query('ROLLBACK').catch(() => {})
+      first.release()
+      second.release()
+      await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[sheetA, sheetB]]).catch(() => {})
+      await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[sheetA, sheetB]]).catch(() => {})
+      await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[sheetA, sheetB]]).catch(() => {})
+    }
+  })
+
+  test('RECORD-NOWAIT-LINK-WRITER: recovery refuses lock contention before a source-locked cross-sheet link writer can form ABBA', async () => {
+    expect(pool).toBeTruthy()
+    const suffix = `${TS}_${Math.random().toString(36).slice(2, 8)}`
+    const sheetA = `sheet_fk_a_${suffix}`
+    const sheetB = `sheet_fk_b_${suffix}`
+    const fieldA = `fld_fk_a_${suffix}`
+    const fieldB = `fld_fk_b_${suffix}`
+    const recordA = `rec_fk_a_${suffix}`
+    const recordB = `rec_fk_b_${suffix}`
+    await q(
+      `INSERT INTO meta_sheets (id, base_id, name)
+       VALUES ($1,$3,'FK A'),($2,$3,'FK B')`,
+      [sheetA, sheetB, BASE],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1,$3,'to-b','link',$5::jsonb,1),
+              ($2,$4,'to-a','link',$6::jsonb,1)`,
+      [
+        fieldA,
+        fieldB,
+        sheetA,
+        sheetB,
+        JSON.stringify({ foreignSheetId: sheetB }),
+        JSON.stringify({ foreignSheetId: sheetA }),
+      ],
+    )
+    await q(
+      `INSERT INTO meta_records (id, sheet_id, data, version)
+       VALUES ($1,$2,'{}'::jsonb,1),($3,$4,'{}'::jsonb,1)`,
+      [recordA, sheetA, recordB, sheetB],
+    )
+    await q(
+      'INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)',
+      [`link_fk_${suffix}`, fieldA, recordA, recordB],
+    )
+
+    const writer = await pool!.connect()
+    const recovery = await pool!.connect()
+    try {
+      await writer.query('BEGIN')
+      await writer.query('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE', [recordB])
+      await recovery.query('BEGIN')
+      await writer.query("SET LOCAL deadlock_timeout = '100ms'")
+      await writer.query("SET LOCAL statement_timeout = '3s'")
+      await recovery.query("SET LOCAL deadlock_timeout = '100ms'")
+      await recovery.query("SET LOCAL statement_timeout = '3s'")
+      const recoveryPid = Number((await recovery.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+
+      let scopeSettled = false
+      const scopeOutcome = lockExactAnchorRecoveryAuthorityScope(
+        (sql, params) => recovery.query(sql, params),
+        sheetA,
+      ).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      ).finally(() => {
+        scopeSettled = true
+      })
+      let recoveryParkedOnRecord = false
+      for (let i = 0; i < 100 && !scopeSettled; i++) {
+        const state = await q(
+          `SELECT wait_event_type, query
+             FROM pg_stat_activity
+            WHERE pid = $1`,
+          [recoveryPid],
+        )
+        const row = state.rows[0] as { wait_event_type?: unknown; query?: unknown } | undefined
+        recoveryParkedOnRecord =
+          row?.wait_event_type === 'Lock' &&
+          typeof row.query === 'string' &&
+          row.query.includes('FROM meta_records record') &&
+          row.query.includes('FOR UPDATE')
+        if (recoveryParkedOnRecord) break
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      expect(scopeSettled || recoveryParkedOnRecord).toBe(true)
+
+      // Correct code has already failed 55P03 and released every row lock from the failed statement.
+      // Mutating away NOWAIT parks after locking recordA and before recordB; the writer below already
+      // holds recordB and its B→A FK requests KEY SHARE on recordA, producing the exact 40P01 ABBA.
+      const writerOutcome = writer.query(
+        `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+         VALUES ($1,$2,$3,$4)`,
+        [`link_fk_back_${suffix}`.slice(0, 50), fieldB, recordB, recordA],
+      ).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      )
+      const [scopeResult, writerResult] = await Promise.all([scopeOutcome, writerOutcome])
+
+      expect(scopeResult.ok).toBe(false)
+      expect(
+        scopeResult.ok ? undefined : (scopeResult.error as { code?: unknown }).code,
+      ).toBe('55P03')
+      expect(writerResult).toEqual({ ok: true })
+      await recovery.query('ROLLBACK')
+      await writer.query('COMMIT')
+    } finally {
+      await writer.query('ROLLBACK').catch(() => {})
+      await recovery.query('ROLLBACK').catch(() => {})
+      writer.release()
+      recovery.release()
+      await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[fieldA, fieldB]]).catch(() => {})
+      await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[sheetA, sheetB]]).catch(() => {})
+      await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[sheetA, sheetB]]).catch(() => {})
+      await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[sheetA, sheetB]]).catch(() => {})
+    }
+  })
+
+  test('POST-LOCK-PHANTOM (constructed race): an unfenced CREATE committed after the NOWAIT lock snapshot is caught by the fresh re-hash; zero burn/writes', async () => {
     const { R_REV, R_NEW, anchorOp } = await seedWorld()
     const pv = await preview(anchorOp, 'reset')
-    expect(pool).toBeTruthy()
     const R_X = `rec_parked_new_${TS}`
-    const holder = await pool!.connect()
-    try {
-      await holder.query('BEGIN')
-      await holder.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE', [R_REV, SHEET])
-      let applySettled = false
-      const applying = applyExactAnchorRecovery(txn, applyArgs(pv.token)).finally(() => { applySettled = true })
-      await new Promise((r) => setTimeout(r, 2500))
-      expect(applySettled).toBe(false) // parked on the full-set lock behind our row hold
-      // Unfenced CREATE commits while the lock statement is parked. FOR UPDATE cannot lock a phantom and
-      // the lock statement's snapshot predates this commit — ONLY the fresh post-lock re-hash can see it.
-      const sX = String((await holder.query(`SELECT nextval('meta_record_chain_seq')::text AS s`)).rows[0].s)
-      await holder.query(
-        `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq)
-         VALUES (gen_random_uuid(), $1, $2, 1, 'create', 'rest', ARRAY[]::text[], '{}'::jsonb, $3::jsonb, $4::bigint)`,
-        [SHEET, R_X, JSON.stringify({ [F_STR]: 'parked-newbie' }), sX],
-      )
-      await holder.query(
-        'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
-        [R_X, SHEET, JSON.stringify({ [F_STR]: 'parked-newbie' })],
-      )
-      await holder.query('COMMIT')
-      const out = await applying
-      expect(out).toEqual({ ok: false, reason: 'preview-drift' })
-      expect(await liveRow(R_X)).toBeDefined() // the concurrent create SURVIVED untouched
-      expect(await liveRow(R_NEW)).toBeDefined() // the reset delete set did NOT partially apply
-      expect(await burnCount()).toBe(0)
-      expect(Number(((await q(`SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }).c)).toBe(0)
-    } finally {
-      try { await holder.query('ROLLBACK') } catch { /* committed above */ }
-      holder.release()
-    }
+    let injected = false
+    const phantomTxn = <T>(fn: (query: QueryFn) => Promise<T>): Promise<T> =>
+      poolManager.get().transaction(async ({ query }) => fn((async (sql, params) => {
+        const result = await query(sql, params)
+        if (
+          !injected &&
+          sql.includes('FROM meta_records record') &&
+          sql.includes('FOR UPDATE NOWAIT')
+        ) {
+          injected = true
+          const sX = String((await q(`SELECT nextval('meta_record_chain_seq')::text AS s`)).rows[0].s)
+          await q(
+            `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq)
+             VALUES (gen_random_uuid(), $1, $2, 1, 'create', 'rest', ARRAY[]::text[], '{}'::jsonb, $3::jsonb, $4::bigint)`,
+            [SHEET, R_X, JSON.stringify({ [F_STR]: 'post-lock-newbie' }), sX],
+          )
+          await q(
+            'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+            [R_X, SHEET, JSON.stringify({ [F_STR]: 'post-lock-newbie' })],
+          )
+        }
+        return result
+      }) as QueryFn)) as Promise<T>
+
+    const out = await applyExactAnchorRecovery(phantomTxn, applyArgs(pv.token))
+    expect(injected).toBe(true)
+    expect(out).toEqual({ ok: false, reason: 'preview-drift' })
+    expect(await liveRow(R_X)).toBeDefined() // the concurrent create SURVIVED untouched
+    expect(await liveRow(R_NEW)).toBeDefined() // the reset delete set did NOT partially apply
+    expect(await burnCount()).toBe(0)
+    expect(Number(((await q(`SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }).c)).toBe(0)
     // POSITIVE control: remove the concurrent create ⇒ the same unburned token applies (reset deletes R_NEW).
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2', [SHEET, R_X])
     await q('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [R_X, SHEET])
@@ -1490,7 +1656,7 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect(await liveRow(R_NEW)).toBeUndefined()
   })
 
-  test('PARKED-BUMP non-affected (constructed race): a version bump on a row OUTSIDE the write delta committed while the apply is PARKED ⇒ preview-drift, zero burn/writes — a delta-only lock would sail past it', async () => {
+  test('CONTENDED-BUMP non-affected (constructed race): a held row outside the write delta makes recovery fail-fast before its bump; zero burn/writes', async () => {
     const { R_REV, R_NEW, anchorOp, seqs } = await seedWorld()
     const pv = await preview(anchorOp, 'revert') // R_NEW is created-after: revert KEEPS it — no write intent
     expect(pool).toBeTruthy()
@@ -1498,12 +1664,9 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     try {
       await holder.query('BEGIN')
       await holder.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE', [R_NEW, SHEET])
-      let applySettled = false
-      const applying = applyExactAnchorRecovery(txn, applyArgs(pv.token)).finally(() => { applySettled = true })
-      await new Promise((r) => setTimeout(r, 2500))
-      // A write-delta-only lock never waits on R_NEW (it is not written), and the old plain-read hash ran
-      // before this bump committed — only the FULL live-set lock parks here and re-reads the bumped truth.
-      expect(applySettled).toBe(false)
+      // A write-delta-only lock would miss R_NEW. The full live-set NOWAIT lock must reject before mutation.
+      const out = await applyExactAnchorRecovery(txn, applyArgs(pv.token))
+      expect(out).toEqual({ ok: false, reason: 'preview-drift' })
       const sBump = String(BigInt(seqs.sNew) + 3000n)
       await holder.query(
         `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq)
@@ -1512,8 +1675,6 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       )
       await holder.query('UPDATE meta_records SET version = 2 WHERE id = $1 AND sheet_id = $2', [R_NEW, SHEET])
       await holder.query('COMMIT')
-      const out = await applying
-      expect(out).toEqual({ ok: false, reason: 'preview-drift' })
       expect((await liveRow(R_REV))?.data).toEqual({ [F_STR]: 'rev-now' }) // the revert did NOT land
       expect(await burnCount()).toBe(0)
     } finally {

@@ -297,10 +297,12 @@ async function loadSameBaseMirrorConfigByField(
  *   5. BURN the token (anti-replay PK; rolled back on every later refusal).
  *   6. IN-FENCE checkpoint re-resolution (never trust the token echo).
  *   7. Composed scopeHash drift, then §5 step 7 ROW LOCKS over the FULL current live set
- *      (`ORDER BY id FOR UPDATE`, deterministic — never only the delta: a RESET delete-set escape or a
+ *      (`ORDER BY id FOR UPDATE NOWAIT`, deterministic + fail-fast — never only the delta: a RESET delete-set escape or a
  *      version bump on a "non-affected" row is still live-set drift) + liveSetHash check from the LOCKED
- *      rows, then a FRESH id/version re-hash in a NEW statement snapshot (catches an unfenced CREATE or a
- *      not-yet-locked bump committed while the lock statement was PARKED behind a concurrent writer).
+ *      rows, then a FRESH id/version re-hash in a NEW statement snapshot (catches an unfenced CREATE
+ *      committed after the lock statement snapshot). Lock contention is a retryable whole-transaction
+ *      refusal; recovery never waits while holding cross-sheet locks and therefore cannot close an ABBA
+ *      cycle with a normal link writer that already holds its source record.
  *      Malformed live truth (non-object data, non-integer/negative version) is NEVER coerced — it refuses
  *      `recovery-trust-required`, as does `ExactAnchorPlanDataError` from the plan classifier.
  *   8. Plan (L7); schema-drift whole-reject; RESURRECT fail-closed (`inbound-unprovable` — D1c link history
@@ -451,7 +453,7 @@ const isUniqueViolation = (e: unknown): boolean =>
 export function classifyExactAnchorDatabaseConflict(e: unknown): ExactAnchorApplyRefusal | null {
   if (typeof e !== 'object' || e === null) return null
   const pg = e as { code?: unknown; constraint?: unknown }
-  if (pg.code === '40P01' || pg.code === '40001') return 'preview-drift'
+  if (pg.code === '40P01' || pg.code === '40001' || pg.code === '55P03') return 'preview-drift'
   if (isLiveLinkTargetForeignKeyViolation(e)) {
     return 'link-integrity'
   }
@@ -476,12 +478,172 @@ const requireLiveVersion = (v: unknown): number => {
   return v
 }
 
+type LockedRecoveryLiveRow = {
+  id: unknown
+  sheet_id?: unknown
+  data: unknown
+  version: unknown
+  locked?: unknown
+  locked_by?: unknown
+  created_by?: unknown
+  created_at?: unknown
+  updated_at?: unknown
+}
+
+const recoveryRecordKey = (sheetId: string, recordId: string): string => `${sheetId}\u0000${recordId}`
+
+/**
+ * Establish one global sheet-then-record lock order for the complete recovery relation surface.
+ *
+ * The scope is deliberately conservative: every declared link sheet, every current inbound/outbound
+ * edge touching the source sheet, and every target id present in the composed anchor are included.
+ * All sheet rows are locked first; then source live rows plus discovered foreign rows are locked by
+ * `(sheet_id,id)`. The later plan must prove each actual link target was already in this set. No
+ * recovery may discover and lock a foreign record after it has begun authorization or mutation.
+ */
+export async function lockExactAnchorRecoveryAuthorityScope(
+  query: QueryFn,
+  sourceSheetId: string,
+  composed?: ReadonlyMap<string, RecordStateAtT>,
+): Promise<{
+  authoritySheetIds: string[]
+  liveRows: LockedRecoveryLiveRow[]
+  lockedRecordKeys: ReadonlySet<string>
+}> {
+  const linkFields = await query(
+    `SELECT id, property
+       FROM meta_fields
+      WHERE sheet_id = $1
+        AND type = 'link'`,
+    [sourceSheetId],
+  )
+  const authoritySheetIds = new Set<string>([sourceSheetId])
+  const foreignSheetByField = new Map<string, string>()
+  const requestedRecordKeys = new Map<string, { sheetId: string; recordId: string }>()
+  for (const row of linkFields.rows as Array<{ id?: unknown; property?: unknown }>) {
+    const property =
+      row.property !== null && typeof row.property === 'object' && !Array.isArray(row.property)
+        ? row.property as Record<string, unknown>
+        : undefined
+    const foreignSheetId = resolveForeignSheetIdFromProperty(property)
+    if (!foreignSheetId) continue
+    authoritySheetIds.add(foreignSheetId)
+    foreignSheetByField.set(String(row.id), foreignSheetId)
+  }
+
+  for (const state of composed?.values() ?? []) {
+    if (!state.exists || !state.data) continue
+    for (const [fieldId, foreignSheetId] of foreignSheetByField) {
+      for (const recordId of normalizeLinkIds(state.data[fieldId])) {
+        requestedRecordKeys.set(
+          recoveryRecordKey(foreignSheetId, recordId),
+          { sheetId: foreignSheetId, recordId },
+        )
+      }
+    }
+  }
+
+  const currentEdges = await query(
+    `SELECT
+       link.record_id,
+       source.sheet_id AS source_sheet_id,
+       link.foreign_record_id,
+       target.sheet_id AS target_sheet_id
+     FROM meta_links link
+     LEFT JOIN meta_records source ON source.id = link.record_id
+     LEFT JOIN meta_records target ON target.id = link.foreign_record_id
+     WHERE source.sheet_id = $1 OR target.sheet_id = $1`,
+    [sourceSheetId],
+  )
+  for (const row of currentEdges.rows as Array<{
+    record_id?: unknown
+    source_sheet_id?: unknown
+    foreign_record_id?: unknown
+    target_sheet_id?: unknown
+  }>) {
+    const sourceId = typeof row.record_id === 'string' ? row.record_id : ''
+    const sourceSheet = typeof row.source_sheet_id === 'string' ? row.source_sheet_id : ''
+    const targetId = typeof row.foreign_record_id === 'string' ? row.foreign_record_id : ''
+    const targetSheet = typeof row.target_sheet_id === 'string' ? row.target_sheet_id : ''
+    if (sourceId && sourceSheet) {
+      authoritySheetIds.add(sourceSheet)
+      requestedRecordKeys.set(
+        recoveryRecordKey(sourceSheet, sourceId),
+        { sheetId: sourceSheet, recordId: sourceId },
+      )
+    }
+    if (targetId && targetSheet) {
+      authoritySheetIds.add(targetSheet)
+      requestedRecordKeys.set(
+        recoveryRecordKey(targetSheet, targetId),
+        { sheetId: targetSheet, recordId: targetId },
+      )
+    }
+  }
+
+  const orderedAuthoritySheetIds = [...authoritySheetIds].sort()
+  const authorityRows = await query(
+    `SELECT id
+      FROM meta_sheets
+      WHERE id = ANY($1::text[])
+      ORDER BY id
+      FOR NO KEY UPDATE NOWAIT`,
+    [orderedAuthoritySheetIds],
+  )
+  const lockedAuthorityIds = new Set(
+    (authorityRows.rows as Array<{ id: unknown }>).map((row) => String(row.id)),
+  )
+  if (orderedAuthoritySheetIds.some((id) => !lockedAuthorityIds.has(id))) {
+    throw new ApplyRefusalError('forbidden')
+  }
+
+  const requested = [...requestedRecordKeys.values()].sort((left, right) =>
+    left.sheetId.localeCompare(right.sheetId) || left.recordId.localeCompare(right.recordId),
+  )
+  const lockedRows = (await query(
+    `WITH requested(sheet_id, record_id) AS (
+       SELECT * FROM unnest($2::text[], $3::text[])
+     )
+     SELECT record.sheet_id, record.id, record.data, record.version, record.locked,
+            record.locked_by, record.created_by, record.created_at, record.updated_at
+       FROM meta_records record
+      WHERE record.sheet_id = $1
+         OR EXISTS (
+           SELECT 1
+             FROM requested
+            WHERE requested.sheet_id = record.sheet_id
+              AND requested.record_id = record.id
+         )
+      ORDER BY record.sheet_id, record.id
+      FOR UPDATE NOWAIT`,
+    [
+      sourceSheetId,
+      requested.map((record) => record.sheetId),
+      requested.map((record) => record.recordId),
+    ],
+  )).rows as LockedRecoveryLiveRow[]
+  const lockedRecordKeys = new Set(
+    lockedRows.map((row) => recoveryRecordKey(String(row.sheet_id), String(row.id))),
+  )
+  const liveRows = lockedRows.filter((row) => String(row.sheet_id) === sourceSheetId)
+  return { authoritySheetIds: orderedAuthoritySheetIds, liveRows, lockedRecordKeys }
+}
+
 export interface ExactAnchorApplyInput {
   token: string
   sheetId: string
   actorId: string
   /** REQUIRED in-fence full-read adjudication (P1-2) — same contract as the preview. */
   evaluateFullReadAccess: EvaluateRecoveryFullReadAccess
+  /**
+   * REQUIRED execute-only authority stabilizer. Called after the complete sheet/record lock scope and
+   * true restorable delta are known, but before the final authorization read. It leases only the actor
+   * and person subjects implicated by that delta and holds those leases through COMMIT.
+   */
+  stabilizeAuthorization: (
+    query: QueryFn,
+    context: ExactAnchorPlanAuthContext,
+  ) => Promise<'ready' | 'busy' | 'unavailable'>
   /**
    * REQUIRED in-fence WRITE authorization over the true restorable projection delta (v3.7 §5).
    * Invoked AFTER projection and BEFORE scalar/link validation + mintOperation/any write (no-oracle).
@@ -595,22 +757,8 @@ export async function applyExactAnchorRecovery(
         created_at?: unknown
         updated_at?: unknown
       }>()
-      for (const r of (await query(
-        `SELECT id, data, version, locked, locked_by, created_by, created_at, updated_at
-         FROM meta_records WHERE sheet_id = $1
-         ORDER BY id
-         FOR UPDATE`,
-        [input.sheetId],
-      )).rows as Array<{
-        id: unknown
-        data: unknown
-        version: unknown
-        locked?: unknown
-        locked_by?: unknown
-        created_by?: unknown
-        created_at?: unknown
-        updated_at?: unknown
-      }>) {
+      const lockedScope = await lockExactAnchorRecoveryAuthorityScope(query, input.sheetId, composed)
+      for (const r of lockedScope.liveRows) {
         liveById.set(String(r.id), {
           data: requireLiveData(r.data),
           version: requireLiveVersion(r.version),
@@ -627,10 +775,11 @@ export async function applyExactAnchorRecovery(
       )
       if (liveHash !== liveSetHash) throw new ApplyRefusalError('preview-drift')
 
-      // FRESH id/version re-hash in a NEW statement snapshot. If the lock above PARKED behind a concurrent
-      // writer, rows that writer committed AFTER the lock statement's snapshot began — an unfenced CREATE
-      // (FOR UPDATE cannot lock a phantom) or a bump on a row not yet locked — are visible only to a fresh
-      // statement. Any divergence from the token ⇒ preview-drift, full rollback (burn included).
+      // FRESH id/version re-hash in a NEW statement snapshot. The NOWAIT sheet/record locks above never
+      // park behind a concurrent writer; lock contention aborts this transaction as preview-drift. An
+      // unfenced CREATE can still commit after the lock statement's snapshot (FOR UPDATE cannot lock a
+      // phantom), so the fresh statement catches that divergence before any mutation. Any mismatch
+      // rolls back the burn and every write.
       // HONESTY: fence-bypassing direct SQL committed AFTER this recheck is outside the all-writer-fence
       // model (see module doc); fenced writers cannot commit while we hold the fence.
       const recheckHash = hashExactAnchorLiveSet(
@@ -745,7 +894,7 @@ export async function applyExactAnchorRecovery(
         })
       }
 
-      // Row locks were taken over the FULL live set (ORDER BY id FOR UPDATE) before the liveSetHash check,
+      // Row locks were taken over the FULL live set (ORDER BY id FOR UPDATE NOWAIT) before the liveSetHash check,
       // so liveById already IS in-lock truth for ensureRecordNotLocked + apply. This assertion pins the
       // plan/projection invariant locally; write-time CAS remains the concurrency guard.
       for (const rw of revertWrites) {
@@ -762,32 +911,21 @@ export async function applyExactAnchorRecovery(
         deleteRecordIds,
       }
 
-      // Stabilize sheet-local permission authority before the final adjudication. All production
-      // sheet/field/record permission writers take the owning meta_sheets row lock. Actor/person RBAC,
-      // active-user, role and member-group authority is stabilized by the route adapter's DB-enforced
-      // per-user advisory protocol; no process-wide table lock is taken here.
-      // Acquiring all sheet rows in one ORDER BY avoids A->B / B->A recovery deadlocks.
-      const authoritySheetIds = new Set<string>([input.sheetId])
+      // The cross-sheet authority rows were locked before the source live-set records. Confirm that every
+      // true write target belongs to that predeclared set before final authorization touches foreign rows.
       for (const rw of revertWrites) {
         for (const lu of rw.linkUpdates) {
           const foreignSheetId = resolveForeignSheetIdFromProperty(rawPropById.get(lu.fieldId))
           if (!foreignSheetId) throw new ApplyRefusalError('forbidden')
-          authoritySheetIds.add(foreignSheetId)
+          if (!lockedScope.authoritySheetIds.includes(foreignSheetId)) {
+            throw new ApplyRefusalError('forbidden')
+          }
         }
       }
-      const orderedAuthoritySheetIds = [...authoritySheetIds].sort()
-      const authorityRows = await query(
-        `SELECT id FROM meta_sheets
-          WHERE id = ANY($1::text[])
-          ORDER BY id
-          FOR UPDATE`,
-        [orderedAuthoritySheetIds],
-      )
-      const lockedAuthorityIds = new Set(
-        (authorityRows.rows as Array<{ id: unknown }>).map((row) => String(row.id)),
-      )
-      if (orderedAuthoritySheetIds.some((id) => !lockedAuthorityIds.has(id))) {
-        throw new ApplyRefusalError('forbidden')
+      const authorityLease = await input.stabilizeAuthorization(query, authorizationContext)
+      if (authorityLease === 'busy') throw new ApplyRefusalError('preview-drift')
+      if (authorityLease === 'unavailable') {
+        throw new ApplyRefusalError('recovery-trust-required')
       }
       // REQUIRED FINAL authorization over the true restorable delta (BEFORE scalar/link validation).
       // Full-read is repeated under the authority locks; the route adapter then covers source row/field,
@@ -796,6 +934,23 @@ export async function applyExactAnchorRecovery(
       if (!(await input.evaluateFullReadAccess(query))) throw new ApplyRefusalError('forbidden')
       if (!(await input.evaluatePlanAuthorization(query, authorizationContext))) {
         throw new ApplyRefusalError('forbidden')
+      }
+
+      // Target existence is oracle-class. Only after final plan authorization may we reveal that a
+      // requested target was absent from the predeclared global record-lock set.
+      for (const rw of revertWrites) {
+        for (const lu of rw.linkUpdates) {
+          const foreignSheetId = resolveForeignSheetIdFromProperty(rawPropById.get(lu.fieldId))
+          if (!foreignSheetId) throw new ApplyRefusalError('link-integrity')
+          if (
+            lu.targetIds.some(
+              (targetId) =>
+                !lockedScope.lockedRecordKeys.has(recoveryRecordKey(foreignSheetId, targetId)),
+            )
+          ) {
+            throw new ApplyRefusalError('link-integrity')
+          }
+        }
       }
 
       // AFTER planAuth=true — sensitive validators (may distinguish shapes only for authorized writers).
@@ -847,14 +1002,13 @@ export async function applyExactAnchorRecovery(
           if (targetIds.length === 0) continue
           // Same-operation delete: a projected link target that this apply will delete becomes dangling.
           if (targetIds.some((id) => deleteIdSet.has(id))) throw new ApplyRefusalError('link-integrity')
-          // The route authorization adapter already holds these target rows FOR UPDATE through COMMIT;
-          // re-select them here to keep the kernel's existence/wrong-sheet check explicit. The database
-          // FK is the final structural guard for every link writer and target-delete path.
+          // Every target row was already locked in the global (sheet_id,id) order. Re-select without
+          // taking a new lock; the prelocked-key assertion above rejects a target that appeared later.
+          // The database FK remains the final structural guard for every link writer/target-delete path.
           const found = await query(
             `SELECT id FROM meta_records
               WHERE sheet_id = $1 AND id = ANY($2::text[])
-              ORDER BY id
-              FOR KEY SHARE`,
+              ORDER BY id`,
             [foreignSheetId, targetIds],
           )
           const foundSet = new Set((found.rows as Array<{ id: unknown }>).map((row) => String(row.id)))

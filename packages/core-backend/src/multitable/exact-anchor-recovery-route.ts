@@ -31,6 +31,7 @@ import {
 } from './exact-anchor-recovery'
 import {
   applyExactAnchorRecovery,
+  type ExactAnchorApplyInput,
   type ExactAnchorApplyRefusal,
   type ExactAnchorApplyResult,
   type ExactAnchorMutationTxnHook,
@@ -548,6 +549,7 @@ export async function executeExactAnchorRecoveryApply(
     sheetId: string
     actorId: string
     evaluateFullReadAccess: EvaluateRecoveryFullReadAccess
+    stabilizeAuthorization: ExactAnchorApplyInput['stabilizeAuthorization']
     evaluatePlanAuthorization: EvaluatePlanAuthorization
     /** optional same-transaction mutation seam (durable event enqueue) — see the L8 module. */
     onMutationApplied?: ExactAnchorMutationTxnHook

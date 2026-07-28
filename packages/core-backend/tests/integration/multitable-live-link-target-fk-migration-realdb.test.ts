@@ -16,6 +16,7 @@ import {
   down as migrateDown,
   up as migrateUp,
 } from '../../src/db/migrations/zzzz20260721120000_guard_meta_links_live_targets'
+import { up as migrateCorrection } from '../../src/db/migrations/zzzz20260728121000_correct_meta_links_live_target_fk'
 
 const dbUrl = process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -227,6 +228,68 @@ describeDb('live-link target FK migration (real DB, isolated schema)', () => {
     expect(await countConstraint()).toBe(1)
     expect(replayed?.oid).toBe(first?.oid)
     expect(replayed?.definition).toBe(first?.definition)
+  })
+
+  it('corrective migration replaces only the exact legacy CASCADE shape', async () => {
+    await sql`
+      ALTER TABLE meta_links
+        ADD CONSTRAINT ${sql.raw(LIVE_TARGET_CONSTRAINT)}
+        FOREIGN KEY (foreign_record_id)
+        REFERENCES meta_records(id)
+        ON DELETE CASCADE
+        DEFERRABLE INITIALLY IMMEDIATE
+        NOT VALID
+    `.execute(testDb)
+    const legacy = await loadConstraint()
+    expect(legacy?.confdeltype).toBe('c')
+
+    await migrateCorrection(testDb)
+    const corrected = await loadConstraint()
+    expect(corrected).toMatchObject({
+      confdeltype: 'a',
+      condeferrable: true,
+      condeferred: false,
+      convalidated: false,
+    })
+    expect(corrected?.oid).not.toBe(legacy?.oid)
+    await expect(migrateCorrection(testDb)).resolves.toBeUndefined()
+    expect(await countConstraint()).toBe(1)
+  })
+
+  it('corrective migration fails loudly on a same-name wrong-column constraint', async () => {
+    await sql`
+      ALTER TABLE meta_links
+        ADD CONSTRAINT ${sql.raw(LIVE_TARGET_CONSTRAINT)}
+        FOREIGN KEY (record_id)
+        REFERENCES meta_records(id)
+        ON DELETE CASCADE
+        DEFERRABLE INITIALLY IMMEDIATE
+        NOT VALID
+    `.execute(testDb)
+
+    await expect(migrateCorrection(testDb)).rejects.toMatchObject({
+      code: '55000',
+      message: expect.stringContaining(
+        `existing constraint ${LIVE_TARGET_CONSTRAINT} has unexpected definition`,
+      ),
+    })
+    expect((await loadConstraint())?.source_columns).toEqual(['record_id'])
+  })
+
+  it('corrective migration classifies a same-name non-FK as explicit operator-owned drift', async () => {
+    await sql`
+      ALTER TABLE meta_links
+        ADD CONSTRAINT ${sql.raw(LIVE_TARGET_CONSTRAINT)}
+        CHECK (foreign_record_id <> '')
+    `.execute(testDb)
+
+    await expect(migrateCorrection(testDb)).rejects.toMatchObject({
+      code: '55000',
+      message: expect.stringContaining(
+        `existing constraint ${LIVE_TARGET_CONSTRAINT} has unexpected definition`,
+      ),
+    })
+    expect(await countConstraint()).toBe(1)
   })
 
   it('down removes only the target guard and can be replayed', async () => {

@@ -25,7 +25,8 @@ import * as exactApply from '../../src/multitable/exact-anchor-recovery-execute'
 import * as realtimeMod from '../../src/multitable/realtime-publish'
 import { eventBus } from '../../src/integration/events/event-bus'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
-import { lockRecoveryAuthorityUsers } from '../../src/multitable/recovery-authorization-stability'
+import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
+import { acquireRecoveryAuthorityLease } from '../../src/multitable/recovery-authorization-stability'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -101,6 +102,11 @@ async function sealOp(
 async function wipe(): Promise<void> {
   // Deterministic cleanup: wipe by sheet AND by known field/record ids so orphaned
   // meta_links / notifications from a prior failed case cannot leak into the next golden.
+  await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[F_REL_LINK, F_SRC_LINK]]).catch(() => {})
+  await q(
+    `DELETE FROM meta_links WHERE record_id = ANY($1::text[]) OR foreign_record_id = ANY($1::text[])`,
+    [[REC_A, REC_B, REC_REL, REC_REL_UNRELATED, REC_TGT_ANCHOR, REC_TGT_LIVE]],
+  ).catch(() => {})
   for (const sheetId of [SHEET, REL_SHEET, TGT_SHEET]) {
     for (const t of [
       'meta_history_baselines',
@@ -110,7 +116,6 @@ async function wipe(): Promise<void> {
       'meta_records_trash',
       'meta_record_revisions',
       'meta_records',
-      'meta_links',
     ])
       await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheetId]).catch(() => {})
     await q('DELETE FROM meta_record_history_operations WHERE sheet_id = $1', [sheetId]).catch(() => {})
@@ -120,11 +125,6 @@ async function wipe(): Promise<void> {
     await q('DELETE FROM meta_record_subscriptions WHERE sheet_id = $1', [sheetId]).catch(() => {})
     await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [sheetId]).catch(() => {})
   }
-  await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[F_REL_LINK, F_SRC_LINK]]).catch(() => {})
-  await q(
-    `DELETE FROM meta_links WHERE record_id = ANY($1::text[]) OR foreign_record_id = ANY($1::text[])`,
-    [[REC_A, REC_B, REC_REL, REC_REL_UNRELATED, REC_TGT_ANCHOR, REC_TGT_LIVE]],
-  ).catch(() => {})
   await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
   await q('DELETE FROM role_permissions WHERE role_id = $1', [ROLE_RACE]).catch(() => {})
 }
@@ -328,6 +328,9 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       'INSERT INTO permissions (code, name, description) VALUES ($1,$2,$3) ON CONFLICT (code) DO NOTHING',
       [PERMISSION_RACE, 'EARW race permission', 'exact-anchor authority-lock golden'],
     )
+    for (const [table, trigger] of RECOVERY_AUTHORITY_TRIGGERS) {
+      await q(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`)
+    }
   })
 
   afterAll(async () => {
@@ -339,6 +342,9 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
     delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
     setYjsInvalidatorForRoutes(null)
+    for (const [table, trigger] of RECOVERY_AUTHORITY_TRIGGERS) {
+      await q(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`).catch(() => {})
+    }
     await wipe()
     await q('DELETE FROM formula_dependencies WHERE sheet_id = ANY($1::text[])', [[SHEET, REL_SHEET, TGT_SHEET]]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[SHEET, REL_SHEET, TGT_SHEET]]).catch(() => {})
@@ -961,6 +967,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     let sourcePermission: Promise<request.Response> | null = null
     let foreignPermission: Promise<request.Response> | null = null
     let membershipChange: Promise<void> | null = null
+    let membershipError: unknown = null
     let sourceSettled = false
     let foreignSettled = false
     let membershipSettled = false
@@ -1020,7 +1027,6 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
           .put(`/api/multitable/sheets/${TGT_SHEET}/records/${REC_TGT_ANCHOR}/permissions`)
           .send({ subjectType: 'user', subjectId: ACTOR, accessLevel: 'read' }),
       ).finally(() => { foreignSettled = true })
-      const membershipWriterPid = Number((await membershipWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
       membershipChange = (async () => {
         await membershipWriter.query('BEGIN')
         try {
@@ -1031,7 +1037,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
           await membershipWriter.query('COMMIT')
         } catch (error) {
           await membershipWriter.query('ROLLBACK').catch(() => {})
-          throw error
+          membershipError = error
         }
       })().finally(() => { membershipSettled = true })
 
@@ -1057,24 +1063,27 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       expect(sourceSettled).toBe(false)
       expect(foreignSettled).toBe(false)
       expect(authorityWaiters).toBeGreaterThanOrEqual(2)
-      let membershipParked = false
+      // Membership writers have no sheet-row prerequisite; their shared authority lease must fail
+      // immediately while recovery holds the actor's exclusive lease.
       for (let i = 0; i < 100; i++) {
-        const state = await q(
-          'SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1',
-          [membershipWriterPid],
-        )
-        membershipParked = state.rows[0]?.wait_event_type === 'Lock'
-        if (membershipParked || membershipSettled) break
+        if (membershipSettled) break
         await new Promise((resolve) => setTimeout(resolve, 20))
       }
-      expect(membershipSettled).toBe(false)
-      expect(membershipParked).toBe(true)
+      expect(membershipSettled).toBe(true)
+      expect(membershipError).toMatchObject({
+        code: '40001',
+        message: 'METASHEET_RECOVERY_AUTHORITY_BUSY',
+      })
 
       await barrier.query('SELECT pg_advisory_unlock($1::int, $2::int)', [barrierClass, barrierObject])
       expect((await applying).status).toBe(200)
       expect((await sourcePermission).status).toBe(200)
       expect((await foreignPermission).status).toBe(200)
       await membershipChange
+      await q(
+        'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [ACTOR, ROLE_RACE],
+      )
       expect((await q(
         'SELECT read_only FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_id = $3',
         [SHEET, F_STR, ACTOR],
@@ -1119,7 +1128,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     )).rows[0]?.c).toBe(0)
   })
 
-  test('AUTHORITY-LOCKS: user/role revokes park, while unrelated last-login writes remain unblocked', async () => {
+  test('AUTHORITY-LOCKS: related user/role revokes fail fast, while unrelated last-login writes remain unblocked', async () => {
     await q(
       'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
       [ACTOR, ROLE_RACE],
@@ -1135,16 +1144,12 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     const userWriter = await livePool!.connect()
     const roleWriter = await livePool!.connect()
     const unrelatedWriter = await livePool!.connect()
-    let userChange: Promise<void> | null = null
-    let roleChange: Promise<void> | null = null
-    let userSettled = false
-    let roleSettled = false
     try {
       await holder.query('BEGIN')
-      await lockRecoveryAuthorityUsers(
+      expect(await acquireRecoveryAuthorityLease(
         (sql, params) => holder.query(sql, params) as unknown as ReturnType<QueryFn>,
         [ACTOR],
-      )
+      )).toBe('ready')
 
       // The users trigger is intentionally column-scoped: session metadata must not wait behind a
       // potentially long recovery transaction.
@@ -1153,49 +1158,26 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       await unrelatedWriter.query('UPDATE users SET last_login_at = now() WHERE id = $1', [ACTOR])
       await unrelatedWriter.query('COMMIT')
 
-      const userWriterPid = Number((await userWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
-      const roleWriterPid = Number((await roleWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
-      userChange = (async () => {
-        await userWriter.query('BEGIN')
-        try {
-          await userWriter.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [ACTOR, '[]'])
-          await userWriter.query('COMMIT')
-        } catch (error) {
-          await userWriter.query('ROLLBACK').catch(() => {})
-          throw error
-        }
-      })().finally(() => { userSettled = true })
-      roleChange = (async () => {
-        await roleWriter.query('BEGIN')
-        try {
-          await roleWriter.query(
-            'DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
-            [ROLE_RACE, PERMISSION_RACE],
-          )
-          await roleWriter.query('COMMIT')
-        } catch (error) {
-          await roleWriter.query('ROLLBACK').catch(() => {})
-          throw error
-        }
-      })().finally(() => { roleSettled = true })
-
-      let bothParked = false
-      for (let i = 0; i < 100; i++) {
-        const states = await q(
-          'SELECT pid, wait_event_type FROM pg_stat_activity WHERE pid = ANY($1::int[])',
-          [[userWriterPid, roleWriterPid]],
-        )
-        bothParked = states.rows.length === 2 && states.rows.every((row) => row.wait_event_type === 'Lock')
-        if (bothParked || userSettled || roleSettled) break
-        await new Promise((resolve) => setTimeout(resolve, 20))
-      }
-      expect(userSettled).toBe(false)
-      expect(roleSettled).toBe(false)
-      expect(bothParked).toBe(true)
+      await userWriter.query('BEGIN')
+      await roleWriter.query('BEGIN')
+      await expect(
+        userWriter.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [ACTOR, '[]']),
+      ).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await expect(
+        roleWriter.query(
+          'DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
+          [ROLE_RACE, PERMISSION_RACE],
+        ),
+      ).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await userWriter.query('ROLLBACK')
+      await roleWriter.query('ROLLBACK')
 
       await holder.query('COMMIT')
-      await userChange
-      await roleChange
+      await q('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [ACTOR, '[]'])
+      await q(
+        'DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
+        [ROLE_RACE, PERMISSION_RACE],
+      )
       expect((await q('SELECT permissions FROM users WHERE id = $1', [ACTOR])).rows[0]?.permissions).toEqual([])
       expect((await q(
         'SELECT 1 FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
@@ -1203,8 +1185,6 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       )).rowCount).toBe(0)
     } finally {
       await holder.query('ROLLBACK').catch(() => {})
-      if (userChange) await userChange.catch(() => {})
-      if (roleChange) await roleChange.catch(() => {})
       await userWriter.query('ROLLBACK').catch(() => {})
       await roleWriter.query('ROLLBACK').catch(() => {})
       await unrelatedWriter.query('ROLLBACK').catch(() => {})
@@ -1221,7 +1201,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     }
   })
 
-  test('AUTHORITY-SUBJECT-LOCKS: sheet/field/record grant revokes park on user, role, and group keys', async () => {
+  test('AUTHORITY-SUBJECT-LOCKS: user, role, and group grant revokes fail fast under a recovery lease', async () => {
     await seedWorld()
     await q(
       'INSERT INTO platform_member_groups (id, name) VALUES ($1::uuid,$2) ON CONFLICT (id) DO NOTHING',
@@ -1257,100 +1237,61 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     const userWriter = await livePool!.connect()
     const roleWriter = await livePool!.connect()
     const groupWriter = await livePool!.connect()
-    let userRevoke: Promise<void> | null = null
-    let roleRevoke: Promise<void> | null = null
-    let groupRevoke: Promise<void> | null = null
-    const settled = { user: false, role: false, group: false }
     try {
       await holder.query('BEGIN')
-      await lockRecoveryAuthorityUsers(
+      expect(await acquireRecoveryAuthorityLease(
         (sql, params) => holder.query(sql, params) as unknown as ReturnType<QueryFn>,
         [ACTOR],
-      )
+      )).toBe('ready')
 
-      const userPid = Number((await userWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
-      const rolePid = Number((await roleWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
-      const groupPid = Number((await groupWriter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
-      userRevoke = (async () => {
-        await userWriter.query('BEGIN')
-        try {
-          await userWriter.query(
-            `DELETE FROM spreadsheet_permissions
-              WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
-            [SHEET, ACTOR],
-          )
-          await userWriter.query('COMMIT')
-        } catch (error) {
-          await userWriter.query('ROLLBACK').catch(() => {})
-          throw error
-        }
-      })().finally(() => { settled.user = true })
-      roleRevoke = (async () => {
-        await roleWriter.query('BEGIN')
-        try {
-          await roleWriter.query(
-            `DELETE FROM field_permissions
-              WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
-            [SHEET, F_STR, ROLE_RACE],
-          )
-          await roleWriter.query('COMMIT')
-        } catch (error) {
-          await roleWriter.query('ROLLBACK').catch(() => {})
-          throw error
-        }
-      })().finally(() => { settled.role = true })
-      groupRevoke = (async () => {
-        await groupWriter.query('BEGIN')
-        try {
-          await groupWriter.query(
-            `DELETE FROM record_permissions
-              WHERE sheet_id = $1 AND record_id = $2
-                AND subject_type = 'member-group' AND subject_id = $3`,
-            [SHEET, REC_A, GROUP_RACE],
-          )
-          await groupWriter.query('COMMIT')
-        } catch (error) {
-          await groupWriter.query('ROLLBACK').catch(() => {})
-          throw error
-        }
-      })().finally(() => { settled.group = true })
-
-      let allParked = false
-      for (let i = 0; i < 100; i++) {
-        const states = await q(
-          'SELECT pid, wait_event_type FROM pg_stat_activity WHERE pid = ANY($1::int[])',
-          [[userPid, rolePid, groupPid]],
-        )
-        allParked = states.rows.length === 3 && states.rows.every((row) => row.wait_event_type === 'Lock')
-        if (allParked || settled.user || settled.role || settled.group) break
-        await new Promise((resolve) => setTimeout(resolve, 20))
-      }
-      expect(settled).toEqual({ user: false, role: false, group: false })
-      expect(allParked).toBe(true)
-
-      await holder.query('COMMIT')
-      await Promise.all([userRevoke, roleRevoke, groupRevoke])
-      expect((await q(
-        `SELECT 1 FROM spreadsheet_permissions
+      await userWriter.query('BEGIN')
+      await roleWriter.query('BEGIN')
+      await groupWriter.query('BEGIN')
+      await expect(userWriter.query(
+        `DELETE FROM spreadsheet_permissions
           WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
         [SHEET, ACTOR],
-      )).rowCount).toBe(0)
-      expect((await q(
-        `SELECT 1 FROM field_permissions
+      )).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await expect(roleWriter.query(
+        `DELETE FROM field_permissions
           WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
         [SHEET, F_STR, ROLE_RACE],
-      )).rowCount).toBe(0)
-      expect((await q(
-        `SELECT 1 FROM record_permissions
+      )).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await expect(groupWriter.query(
+        `DELETE FROM record_permissions
           WHERE sheet_id = $1 AND record_id = $2
             AND subject_type = 'member-group' AND subject_id = $3`,
         [SHEET, REC_A, GROUP_RACE],
-      )).rowCount).toBe(0)
+      )).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await userWriter.query('ROLLBACK')
+      await roleWriter.query('ROLLBACK')
+      await groupWriter.query('ROLLBACK')
+
+      await holder.query('COMMIT')
+      await q(
+        `DELETE FROM spreadsheet_permissions
+          WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+        [SHEET, ACTOR],
+      )
+      await q(
+        `DELETE FROM field_permissions
+          WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
+        [SHEET, F_STR, ROLE_RACE],
+      )
+      await q(
+        `DELETE FROM record_permissions
+          WHERE sheet_id = $1 AND record_id = $2
+            AND subject_type = 'member-group' AND subject_id = $3`,
+        [SHEET, REC_A, GROUP_RACE],
+      )
+      expect((await q(
+        `SELECT count(*)::int AS c
+           FROM spreadsheet_permissions
+          WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+        [SHEET, ACTOR],
+      )).rows[0]?.c).toBe(0)
     } finally {
       await holder.query('ROLLBACK').catch(() => {})
-      if (userRevoke) await userRevoke.catch(() => {})
-      if (roleRevoke) await roleRevoke.catch(() => {})
-      if (groupRevoke) await groupRevoke.catch(() => {})
       await userWriter.query('ROLLBACK').catch(() => {})
       await roleWriter.query('ROLLBACK').catch(() => {})
       await groupWriter.query('ROLLBACK').catch(() => {})
@@ -1364,6 +1305,49 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
       await q('DELETE FROM platform_member_group_members WHERE group_id = $1::uuid', [GROUP_RACE]).catch(() => {})
       await q('DELETE FROM platform_member_groups WHERE id = $1::uuid', [GROUP_RACE]).catch(() => {})
+    }
+  })
+
+  test('AUTHORITY-HTTP-RETRY: permission authoring maps the fixed authority conflict to values-free 409s', async () => {
+    await seedWorld()
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
+    try {
+      await holder.query('BEGIN')
+      expect(await acquireRecoveryAuthorityLease(
+        (sql, params) => holder.query(sql, params) as unknown as ReturnType<QueryFn>,
+        [ACTOR],
+      )).toBe('ready')
+
+      const responses = await Promise.all([
+        request(app)
+          .put(`/api/multitable/sheets/${SHEET}/permissions/user/${ACTOR}`)
+          .send({ accessLevel: 'admin' }),
+        request(app)
+          .put(`/api/multitable/sheets/${SHEET}/field-permissions/${F_STR}/user/${ACTOR}`)
+          .send({ visible: true, readOnly: true }),
+        request(app)
+          .put(`/api/multitable/sheets/${SHEET}/records/${REC_A}/permissions`)
+          .send({ subjectType: 'user', subjectId: ACTOR, accessLevel: 'admin' }),
+      ])
+
+      for (const response of responses) {
+        expect(response.status).toBe(409)
+        expect(response.body).toEqual({
+          ok: false,
+          error: {
+            code: 'RECOVERY_AUTHORITY_BUSY',
+            message: 'Recovery is stabilizing permissions; retry this change.',
+          },
+        })
+      }
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      holder.release()
+      await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ACTOR]).catch(() => {})
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ACTOR]).catch(() => {})
+      await q('DELETE FROM record_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ACTOR]).catch(() => {})
     }
   })
 
@@ -1627,7 +1611,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     }
   })
 
-  test('LINK-FK-COMMIT-ORDERS: concurrent target delete either cascades a committed edge or rejects the late insert', async () => {
+  test('LINK-FK-COMMIT-ORDERS: committed edges block target delete; delete-first rejects the late insert', async () => {
     await seedWorld({ withSideEffects: true })
     await q('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [F_SRC_LINK, REC_B])
 
@@ -1638,8 +1622,8 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     let deleting: Promise<void> | null = null
     let inserting: Promise<unknown> | null = null
     try {
-      // Insert wins first: the FK's referenced-row lock parks DELETE. Once the edge commits, ON DELETE
-      // CASCADE sees and removes it in the delete transaction; no hand-written sweep order is trusted.
+      // Insert wins first: the FK's referenced-row lock parks DELETE. Once the edge commits, NO ACTION
+      // rejects target deletion until the caller explicitly removes the authoritative edge.
       await writer.query('BEGIN')
       await writer.query(
         'INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)',
@@ -1667,9 +1651,14 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       expect(deleteSettled).toBe(false)
       expect(deleteParked).toBe(true)
       await writer.query('COMMIT')
-      await deleting
-      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [REC_TGT_ANCHOR])).rowCount).toBe(0)
-      expect((await q('SELECT 1 FROM meta_links WHERE foreign_record_id = $1', [REC_TGT_ANCHOR])).rowCount).toBe(0)
+      await expect(deleting).rejects.toMatchObject({
+        code: '23503',
+        constraint: 'meta_links_foreign_record_id_fkey',
+      })
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [REC_TGT_ANCHOR])).rowCount).toBe(1)
+      expect((await q('SELECT 1 FROM meta_links WHERE foreign_record_id = $1', [REC_TGT_ANCHOR])).rowCount).toBe(1)
+      await q('DELETE FROM meta_links WHERE foreign_record_id = $1', [REC_TGT_ANCHOR])
+      await q('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [REC_TGT_ANCHOR, TGT_SHEET])
 
       // Delete wins first: a late link insert waits for the target transaction, then fails 23503 after
       // the delete commits. The FK is NOT VALID only for historical rows; every new write is enforced.

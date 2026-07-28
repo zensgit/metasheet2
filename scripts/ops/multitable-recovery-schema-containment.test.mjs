@@ -21,15 +21,16 @@ function expectedCopy() {
   return structuredClone(expectedSchemaSnapshot())
 }
 
-test('expected schema posture is exact: 9 enabled triggers, 6 functions, and one CASCADE FK', () => {
+test('expected schema posture is exact: 9 disabled triggers, 6 functions, and one NO ACTION FK', () => {
   const expected = expectedCopy()
   assert.equal(expected.authorityTriggers.length, 9)
   assert.equal(expected.authorityFunctions.length, 6)
   assert.equal(expected.metaLinksForeignKey.length, 1)
   assert.ok(
-    expected.authorityTriggers.every((trigger) => trigger.enabled === 'O'),
+    expected.authorityTriggers.every((trigger) => trigger.enabled === 'D'),
   )
-  assert.equal(expected.metaLinksForeignKey[0].deleteAction, 'c')
+  assert.equal(expected.metaLinksForeignKey[0].deleteAction, 'a')
+  assert.equal(expected.metaLinksForeignKey[0].deferrable, true)
   assert.equal(expected.metaLinksForeignKey[0].validated, false)
 
   const assessment = assessSchemaSnapshot(expected)
@@ -37,17 +38,17 @@ test('expected schema posture is exact: 9 enabled triggers, 6 functions, and one
   assert.match(renderAssessment(assessment), /^VERDICT: PASS -/m)
 })
 
-test('missing or disabled authority triggers fail closed', () => {
+test('missing or unexpectedly enabled authority triggers fail closed', () => {
   const missing = expectedCopy()
   missing.authorityTriggers.pop()
   assert.equal(assessSchemaSnapshot(missing).ok, false)
 
-  const disabled = expectedCopy()
-  disabled.authorityTriggers[0].enabled = 'D'
-  const disabledAssessment = assessSchemaSnapshot(disabled)
-  assert.equal(disabledAssessment.ok, false)
+  const enabled = expectedCopy()
+  enabled.authorityTriggers[0].enabled = 'O'
+  const enabledAssessment = assessSchemaSnapshot(enabled)
+  assert.equal(enabledAssessment.ok, false)
   assert.match(
-    renderAssessment(disabledAssessment),
+    renderAssessment(enabledAssessment),
     /recovery-authority-triggers: FAIL/,
   )
 })
@@ -69,7 +70,7 @@ test('same-name meta_links FK with the wrong column or delete action fails close
   assert.equal(assessSchemaSnapshot(wrongColumn).ok, false)
 
   const wrongDeleteAction = expectedCopy()
-  wrongDeleteAction.metaLinksForeignKey[0].deleteAction = 'a'
+  wrongDeleteAction.metaLinksForeignKey[0].deleteAction = 'c'
   const assessment = assessSchemaSnapshot(wrongDeleteAction)
   assert.equal(assessment.ok, false)
   assert.match(renderAssessment(assessment), /meta-links-live-target-fk: FAIL/)

@@ -65,8 +65,8 @@ import {
   type SheetPermissionScope,
 } from '../multitable/permission-service'
 import {
-  lockRecoveryAuthorityUsers,
-  RecoveryAuthorityUnavailableError,
+  acquireRecoveryAuthorityLease,
+  isRecoveryAuthorityBusyError,
   resolveRecoverySheetAuthority,
 } from '../multitable/recovery-authorization-stability'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
@@ -2718,9 +2718,8 @@ async function loadLinkValuesByRecord(
   if (forwardFields.length > 0) {
     const fieldIds = forwardFields.map((l) => l.fieldId)
     const linkRes = await query(
-      // repair-on-read: foreign_record_id has NO FK, so an inbound edge to a since-deleted record dangles
-      // (sheet-delete / direct-SQL / legacy). Filter dangling edges so a deleted foreign record never surfaces
-      // as a ghost link id. (deleteRecord already drops both directions in-txn; this defends the slip-throughs.)
+      // Repair-on-read remains required for historical dangling rows admitted by the target FK's
+      // NOT VALID rollout. New writes are FK-checked, but legacy ghosts must never reach a read.
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
        WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])
@@ -4292,6 +4291,16 @@ async function tryResolveView(
 
 function sendForbidden(res: Response, message = 'Insufficient permissions') {
   return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
+}
+
+function sendRecoveryAuthorityBusy(res: Response) {
+  return res.status(409).json({
+    ok: false,
+    error: {
+      code: 'RECOVERY_AUTHORITY_BUSY',
+      message: 'Recovery is stabilizing permissions; retry this change.',
+    },
+  })
 }
 
 export async function requireRecordReadable(
@@ -7572,6 +7581,7 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update sheet permission failed:', err)
@@ -8198,6 +8208,7 @@ export function univerMetaRouter(): Router {
         data: { sheetId, fieldId, subjectType, subjectId, visible: parsed.data.visible ?? true, readOnly: parsed.data.readOnly ?? false },
       })
     } catch (err) {
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update field permission failed:', err)
@@ -10222,14 +10233,32 @@ export function univerMetaRouter(): Router {
    */
   const makeFullReadEvaluator = (req: Request, sheetId: string) =>
     async (query: TrustCheckpointQueryFn): Promise<boolean> => {
-      try {
-        const { access, capabilities } = await resolveRecoverySheetAuthority(req, query, sheetId)
-        if (!access.userId || !capabilities.canManageSheetAccess) return false
-        return hasFullTableReadAccess(req, query, sheetId, access, capabilities)
-      } catch (error) {
-        if (error instanceof RecoveryAuthorityUnavailableError) return false
-        throw error
+      const { access, capabilities } = await resolveRecoverySheetAuthority(req, query, sheetId)
+      if (!access.userId || !capabilities.canManageSheetAccess) return false
+      return hasFullTableReadAccess(req, query, sheetId, access, capabilities)
+    }
+
+  const makeAuthorizationStabilizer = () =>
+    async (
+      query: TrustCheckpointQueryFn,
+      ctx: ExactAnchorPlanAuthContext,
+    ): Promise<'ready' | 'busy' | 'unavailable'> => {
+      const fields = (await loadFieldsForSheet(query, ctx.sheetId)) as UniverMetaField[]
+      const fieldById = new Map(fields.map((field) => [field.id, field]))
+      const authorityUserIds = new Set<string>([ctx.actorId])
+      for (const write of ctx.revertWrites) {
+        for (const fieldId of write.changedFieldIds) {
+          if (fieldById.get(fieldId)?.type !== 'person') continue
+          const value = write.patch[fieldId]
+          if (!Array.isArray(value)) continue
+          for (const candidate of value) {
+            if (typeof candidate !== 'string' && typeof candidate !== 'number') continue
+            const userId = String(candidate).trim()
+            if (userId) authorityUserIds.add(userId)
+          }
+        }
       }
+      return acquireRecoveryAuthorityLease(query, authorityUserIds)
     }
 
   /**
@@ -10248,30 +10277,8 @@ export function univerMetaRouter(): Router {
    */
   const makePlanAuthorization = (req: Request, sheetId: string) =>
     async (query: TrustCheckpointQueryFn, ctx: ExactAnchorPlanAuthContext): Promise<boolean> => {
-      // Freeze the actor plus every person id the recovery could assign BEFORE the final authority
-      // reads. DB triggers on RBAC/users/member-group relations acquire these same per-user locks, so
-      // deactivation/revoke/membership changes cannot commit until this destructive txn finishes.
       const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
       const fieldByIdFull = new Map(fields.map((f) => [f.id, f]))
-      const authorityUserIds = new Set<string>([ctx.actorId])
-      for (const rw of ctx.revertWrites) {
-        for (const fid of rw.changedFieldIds) {
-          if (fieldByIdFull.get(fid)?.type !== 'person') continue
-          const raw = rw.patch[fid]
-          if (!Array.isArray(raw)) continue
-          for (const candidate of raw) {
-            if (typeof candidate !== 'string' && typeof candidate !== 'number') continue
-            const userId = String(candidate).trim()
-            if (userId) authorityUserIds.add(userId)
-          }
-        }
-      }
-      try {
-        await lockRecoveryAuthorityUsers(query, authorityUserIds)
-      } catch (error) {
-        if (error instanceof RecoveryAuthorityUnavailableError) return false
-        throw error
-      }
 
       const { access, capabilities, sheetScope } = await resolveRecoverySheetAuthority(req, query, sheetId)
       if (access.userId !== ctx.actorId) return false
@@ -10784,6 +10791,7 @@ export function univerMetaRouter(): Router {
           sheetId,
           actorId,
           evaluateFullReadAccess: makeFullReadEvaluator(req, sheetId),
+          stabilizeAuthorization: makeAuthorizationStabilizer(),
           evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
           onMutationApplied: async (query, mutation: ExactAnchorAppliedMutation) => {
             appliedLinkInvalidations.push(...mutation.linkInvalidations)
@@ -11161,6 +11169,7 @@ export function univerMetaRouter(): Router {
       }
       return res.json({ ok: true, data: outcome.data })
     } catch (err) {
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update record permission failed:', err)
@@ -11234,6 +11243,7 @@ export function univerMetaRouter(): Router {
       if (isUndefinedTableError(err, 'record_permissions')) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` } })
       }
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete record permission failed:', err)
@@ -12920,11 +12930,10 @@ export function univerMetaRouter(): Router {
       } else if (!capabilities.canManageViews) {
         return sendForbidden(res)
       }
-      // Referential integrity (cross-base dangling-link repair, companion to repair-on-read): the sheet's
-      // records are about to be deleted (FK cascade on meta_sheets→meta_records). meta_links.record_id has
-      // ON DELETE CASCADE so their OUTBOUND edges go — but foreign_record_id has NO FK, so INBOUND edges from
-      // OTHER sheets pointing to these records would DANGLE. Clean those inbound edges FIRST, in the SAME
-      // transaction, before the records vanish (else the subquery can't find them) — atomic delete-edges+sheet.
+      // Referential integrity: the sheet's records are about to be deleted by the
+      // meta_sheets -> meta_records cascade. Source-side links cascade, but the target-side FK is
+      // deliberately NO ACTION; remove inbound edges explicitly in the same transaction before their
+      // targets vanish.
       await pool.transaction(async ({ query }) => {
         await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
         return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])

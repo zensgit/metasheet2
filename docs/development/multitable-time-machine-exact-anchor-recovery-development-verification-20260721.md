@@ -1,138 +1,104 @@
 # Multitable Time Machine exact-anchor recovery - development and verification
 
-Date: 2026-07-21
+Date: 2026-07-28
 
 ## 1. Status and authority
 
-Status: **IMPLEMENTED AND LOCALLY VERIFIED, DRAFT-ONLY**.
+Status: **IMPLEMENTED AND LOCALLY VERIFIED, DRAFT-ONLY; CODE DEFAULTS OFF AND
+AUTHORITY TRIGGERS DEFAULT DISABLED**.
 
-This document records the exact-anchor recovery wiring built on the only current
-authority chain:
+This document is the stable closeout ledger for the consolidated exact-anchor
+Revert/Reset implementation. It supersedes the volatile PR-head inventory that
+previously occupied this file.
 
-1. PR #4472, L6-b exact-anchor resolution, head `8ced2ef50`;
-2. PR #4474, L7 recovery planning, head
-   `5190c455ec01c13b290352037edd419888750b64`;
-3. PR #4478, L8 atomic apply, head
-   `a54718d22d078ff486dc8b02dcfa11036bcab6af`;
-4. branch `codex/timemachine-exact-anchor-route-wiring-20260721`, which wires
-   the authority chain into the backend routes and frontend.
+The delivery includes:
 
-The older #4417/#4445/#4446 token-contract stack is superseded for this work.
-It is not an implementation input and must not be merged into this chain.
+- exact committed-operation preview identity and one-time execute token;
+- Revert and Reset through one fenced transaction kernel;
+- database-fresh final authorization over the true write set;
+- deterministic multi-sheet/multi-record lock ordering;
+- a fail-fast authority lease for RBAC and permission changes;
+- exact-anchor route and frontend wiring;
+- migration, containment, CI-placement, real-DB, unit, frontend, and mutation
+  evidence.
 
-This delivery does **not** claim any merge, staging or production deployment,
-flag enablement, or customer acceptance. All runtime recovery flags remain
-code-default OFF. The local browser run used flags only in an ephemeral local
-backend process.
+It does **not** claim merge, staging acceptance, production deployment, feature
+flag enablement, authority-trigger activation, or customer acceptance. The
+operator boundary is deliberately separate.
 
-## 2. Scope delivered
+## 2. Delivered design
 
 ### 2.1 Exact recovery authority
 
-- Destructive recovery accepts one server-verifiable committed-history point:
-  `historyBatchId` or `anchorOperationId` at preview time.
-- A nonblank free-time `asOf` value is rejected. A selected history batch is
-  resolved to its terminal sealed operation; execution never treats wall-clock
-  time as a commit boundary.
-- Execute accepts only the signed preview identity. Request-supplied anchor,
-  mode, or alternate authority is rejected.
-- The token binds the recovery mode, exact operation/seq, checkpoint, actor,
+- Preview accepts `historyBatchId` or `anchorOperationId`. A free-form `asOf`
+  timestamp cannot become a destructive authority.
+- A batch resolves to its terminal sealed operation. Execution is anchored to
+  the exact causal sequence, not a wall-clock approximation.
+- The signed token binds mode, operation/sequence, checkpoint, actor,
   authorization scope, schema, live records, and authoritative live links.
-- `RECONSTRUCTION_CAUSALITY_LANDED` changes to `true` in the same reviewable
-  wiring change. This constant does not enable any runtime feature flag.
+- Apply reads the destructive mode only from verified claims. A request cannot
+  reuse a Revert token to drive Reset.
+- Token burn, plan reconstruction, validation, writes, revisions, endpoint
+  sealing, and mutation hooks share one transaction. Any later refusal rolls
+  the burn back.
 
-### 2.2 Revert and Reset semantics
+### 2.2 Revert and Reset
+
+The wired routes are:
 
 - `POST /sheets/:sheetId/revert-preview`
 - `POST /sheets/:sheetId/revert-execute`
 - `POST /sheets/:sheetId/reset-preview`
 - `POST /sheets/:sheetId/reset-execute`
 
-Revert restores records that existed at the selected operation and keeps rows
-created later. Reset additionally moves rows created after the selected
-operation to Trash. Reset requires both the warning acknowledgement and typed
-`reset`; Revert does not borrow Reset's typed-confirm contract.
+Revert restores changed values on records that are live both at the anchor and
+now. It keeps records created later. Reset additionally moves records created
+after the anchor to Trash. Reset requires acknowledgement plus typed `reset`;
+Revert does not borrow that destructive confirmation contract.
 
-Both execute paths call the same L8 transaction kernel. The transaction takes
-the canonical sheet fence, re-resolves database-fresh authority, rebuilds the
-plan under the fence, verifies the token-bound identity, writes revisions and
-outbox rows, and either commits the whole operation or writes nothing.
+Both execute routes call the same L8 kernel. The kernel proves a real
+transaction, takes the canonical writer fence, checks the trusted-history
+flags, repeats authorization under commit-held authority leases, re-resolves
+the checkpoint, reconstructs the anchor, verifies schema/live/link hashes, and
+either commits the entire plan or writes nothing.
 
-### 2.3 Deliberate fail-closed resurrection boundary
+### 2.3 Global lock order
 
-An exact-anchor plan that would resurrect a currently deleted record is
-disclosed as non-executable with `INBOUND_UNPROVABLE`. It receives no execution
-token. The implementation does not infer historical inbound links from a
-first-delete-after-time heuristic and does not silently restore a partial
-relationship graph.
+The apply path uses one global order:
 
-This is a correctness boundary, not completion of value recovery for records
-whose tombstones were never captured or whose retained evidence was purged.
+1. canonical source-sheet fence;
+2. all involved `meta_sheets`, sorted by id, `FOR NO KEY UPDATE NOWAIT`;
+3. the complete source live set plus discovered foreign records, sorted by
+   `(sheet_id, record_id)`, `FOR UPDATE NOWAIT`;
+4. user, role, then member-group authority leases;
+5. final full-read and per-write authorization;
+6. mutation.
 
-### 2.4 Authorization and oracle resistance
+`FOR NO KEY UPDATE` on sheet rows is intentional. It preserves compatibility
+with the FK `KEY SHARE` acquired by an ordinary insert into `meta_records`;
+strengthening it to `FOR UPDATE` recreates a real 40P01 cycle. `NOWAIT`
+prevents lock acquisition order from becoming another blocking edge: a
+competing recovery or writer receives a values-free retry refusal.
 
-- Preview performs the full-read and sheet-management checks before exposing
-  whether a requested exact anchor exists.
-- Execute re-runs authorization from the database rather than trusting stale
-  request/JWT/cache permissions.
-- Actor, role, member-group, direct sheet/field/record grants, and permission
-  changes share ordered advisory authority locks with recovery execute.
-- User disable/delete, role changes, group changes, and direct grant revocation
-  therefore cannot pass between the final authorization decision and commit.
-- Refusals preserve the route's no-oracle ordering and values-free response
-  posture.
+`NOWAIT` on record rows is also load-bearing. A normal link writer locks its
+source record before inserting a foreign-key-checked edge. If recovery waited
+while holding another record, the writer and recovery could form
+`writer(B -> A) / recovery(A -> B)` ABBA. Recovery instead returns a
+values-free retry refusal and rolls back the whole transaction immediately.
+Because this is a deliberately conservative whole-relation lock surface, a hot
+sheet or popular foreign target can require re-preview with bounded jittered
+backoff; staging acceptance must measure refusal rate as well as latency.
 
-### 2.5 Link, person, and schema integrity
+No foreign record is first discovered and locked after authorization starts.
+Missing targets are reported only after final authorization, preserving the
+no-oracle boundary.
 
-- Preview hydrates links from authoritative `meta_links` rows; stale JSON
-  snapshots are not trusted as link authority.
-- The live-set HMAC includes authoritative links, so a link-only drift invalidates
-  the preview identity.
-- Cross-sheet target rows and person users/roles are locked before apply.
-- `meta_links.foreign_record_id` gains an `ON DELETE CASCADE`, `NOT VALID`
-  foreign key. Historical invalid rows are tolerated for migration safety, but
-  new invalid edges cannot commit. Preview filters historical dangling edges.
-- Supported field create and field patch routes join the canonical recovery
-  fence before schema reads/writes. This closes the schema-change window between
-  the final preview check and the recovery commit.
-- Database deadlock/serialization conflicts are mapped to retry/re-preview
-  responses instead of leaking a raw 500 where the route owns the conflict.
+### 2.4 Authority stability
 
-### 2.6 Frontend wire contract
+The authority substrate consists of six functions and exactly nine triggers on
+eight platform tables:
 
-- The picker lists audited Global History points only; manual datetime input is
-  absent.
-- Revert and Reset are separate commands, each capability-gated.
-- A Reset with no post-anchor-created rows is presented as Revert rather than
-  manufacturing a destructive confirmation.
-- Reset disables submit until both acknowledgement and typed confirmation are
-  present.
-- Modal-open payload drift, sheet switch, stale preview, and double submit are
-  rejected instead of silently executing a different plan.
-- Success shows reverted and trashed counts and links directly to Trash.
-
-## 3. Database changes
-
-### 3.1 Live link target constraint
-
-`zzzz20260721120000_guard_meta_links_live_targets.ts` adds:
-
-```text
-meta_links.foreign_record_id -> meta_records.id
-ON DELETE CASCADE
-NOT VALID
-```
-
-The `NOT VALID` posture deliberately separates historical cleanup from future
-write integrity. It does not weaken enforcement for newly inserted/updated
-edges.
-
-### 3.2 Recovery authorization locks
-
-`zzzz20260721121000_add_recovery_authority_locks.ts` adds ordered advisory-lock
-functions and nine non-internal triggers across:
-
-- `users` lifecycle and permission-bearing updates;
+- `users` (two triggers);
 - `user_permissions`;
 - `user_roles`;
 - `role_permissions`;
@@ -141,175 +107,265 @@ functions and nine non-internal triggers across:
 - `field_permissions`;
 - `record_permissions`.
 
-Subject locks are ordered user, then role, then group. Recovery takes the same
-keys before the database-fresh authorization read.
+Ordinary authority writers take compatible shared transaction try-locks.
+Recovery takes exclusive transaction try-locks for only the actor/person users
+and their assigned roles/groups. Neither side waits on this advisory layer:
+
+- a writer colliding with recovery raises SQLSTATE `40001` with
+  `METASHEET_RECOVERY_AUTHORITY_BUSY`;
+- owned multitable permission routes map it to typed HTTP 409;
+- transient authority-table DDL contention returns the same retryable `busy`
+  class rather than masquerading as a missing substrate;
+- recovery returns a values-free retry/refusal and rolls back.
+
+This removes both the recovery/writer advisory ABBA and the writer/writer
+serialization imposed by the earlier blocking design.
+
+All nine triggers are installed **DISABLED**. Recovery obtains a
+`ROW EXCLUSIVE NOWAIT` schema lease, which remains compatible with ordinary
+DML and another recovery while blocking trigger DDL, and verifies the
+canonical enabled substrate before it can acquire authority keys: table,
+trigger name/type, update-column set, function identity, trigger arguments,
+function signature/language/security mode/volatility, and normalized
+executable-body fingerprint. Missing, partial, wrong-table, wrong-argument,
+wrong-function, body-drifted, or disabled posture fails closed as
+`recovery-trust-required`.
+The table lease cannot freeze a privileged concurrent
+`CREATE OR REPLACE FUNCTION`; deployment of these functions while recovery is
+running is therefore an explicit operator boundary, not a property claimed by
+the runtime fingerprint check. The canonical deployment schema is `public`;
+installations that relocate these tables/functions to another schema refuse
+closed until an explicitly reviewed schema-aware contract exists. Any reviewed
+function-body change must update the runtime fingerprint constants and make the
+real-DB positive-control suite green in the same change.
+Trigger activation is a separate operator action and is not performed by this
+delivery.
+
+### 2.5 Link integrity
+
+`meta_links.foreign_record_id` is protected by:
+
+```text
+FOREIGN KEY (foreign_record_id) REFERENCES meta_records(id)
+ON DELETE NO ACTION
+DEFERRABLE INITIALLY IMMEDIATE
+NOT VALID
+```
+
+`NOT VALID` preserves historical dangling rows for the existing filtered-read
+and repair paths while PostgreSQL enforces every new or changed edge.
+`NO ACTION` is the safety property: target deletion must explicitly capture
+and remove authoritative inbound links in the same transaction. The database
+must never silently cascade them before tombstone capture.
+
+The corrective migration replaces only the known historical CASCADE shape. A
+same-name constraint with another source column, target, action, or
+deferrability fails loudly.
+
+### 2.6 Automation lock markers
+
+Automation lock/unlock now performs:
+
+```text
+mint operation -> version marker(operation_id) -> seal operation
+```
+
+inside one transaction. Seal failure rolls back the version bump, marker, and
+endpoint. With the operation-ledger flag off, the prior marker shape remains
+and no endpoint is minted.
+
+During a rolling deploy before `meta_record_version_markers` exists, the marker
+helper deliberately skips the marker rather than poison an older transaction
+with `42P01`. That is not a trusted chain: strict recovery later refuses the
+resulting hole. The atomic marker guarantee applies once the marker migration
+is present.
+
+### 2.7 Deliberate resurrection boundary
+
+An anchor plan containing a currently deleted record is presentation-only and
+cannot mint an execute token. Apply independently refuses any such plan as
+`INBOUND_UNPROVABLE`.
+
+This is not a claim that deleted records can never be restored. Record-level
+Trash restore exists. It is a narrower statement: exact whole-sheet recovery
+does not yet have an authoritative reconstruction of all historical inbound
+edges, so it refuses to synthesize a partial graph.
+
+## 3. Database and containment posture
+
+Migrations:
+
+- `zzzz20260721120000_guard_meta_links_live_targets.ts`
+- `zzzz20260721121000_add_recovery_authority_locks.ts`
+- `zzzz20260728120000_correct_recovery_authority_locks.ts`
+- `zzzz20260728121000_correct_meta_links_live_target_fk.ts`
+
+The containment helper verifies:
+
+- all Global History flags are off;
+- exactly nine authority triggers exist and are disabled;
+- all six authority function definitions match their expected fingerprints;
+- the target FK has the exact NO ACTION/NOT VALID shape;
+- every expected backend container reports the same PASS posture.
+
+The helper is source-hash pinned in the workflow. A missing container result,
+schema read failure, trigger/function drift, unexpected enabled trigger, or FK
+drift is a non-PASS.
 
 ## 4. Verification
 
-All commands below ran from the isolated worktree. No canonical dirty checkout
-files were modified.
+All commands ran in the isolated worktree
+`/private/tmp/metasheet2-tm-closeout-20260728`. The canonical dirty checkout was
+not modified.
 
-### 4.1 Authority stack
+### 4.1 Fresh migration and replay
 
-- #4472 exact head: independent adversarial gate CLEAR.
-- #4474 exact head: independent adversarial gate CLEAR.
-- #4478 exact head: independent adversarial gate CLEAR.
-- Manual exact-head CI run `29805252119`: required jobs green.
+A new PostgreSQL 15.17 database was created with the same
+`MIGRATION_EXCLUDE` list used by `plugin-tests.yml`.
 
-### 4.2 Backend tests
+1. full migration to latest: passed;
+2. the two 2026-07-28 corrective migrations were reported as executed;
+3. second migration run: passed with no new work;
+4. containment schema inspection: PASS.
 
-- Branch-affected real-DB bundle: **24 files, 345 tests, all passed** on a
-  migrated PostgreSQL database.
-- Exact-anchor/unit bundle: **5 files, 84 tests, all passed**.
-- Backend `tsc --noEmit`: passed.
+This evidence does not reuse a database where the new constraints or triggers
+were hand-applied.
 
-The broad real-DB run was deliberately repeated on a reused database. It found
-and corrected two fixture-only assumptions:
+### 4.2 Real-DB behavior
 
-1. seven legacy route fixtures had request permissions but no database
-   permissions, which the new database-authoritative check correctly refused;
-2. the burn-retention test assumed its global sweep owned every expired row.
+One migrated database ran:
 
-The fixtures now drive request and database authority consistently. The burn
-test checks the reported global deletion delta while still pinning this
-fixture's old/mid/fresh token outcomes.
+| Suite | Result |
+| --- | ---: |
+| exact-anchor apply | 53/53 |
+| exact-anchor route wiring | 29/29 |
+| exact-anchor reconstruction | 17/17 |
+| exact-anchor plan | 10/10 |
+| L6-a sealed operation endpoint | 24/24 |
+| live-link target FK migration | 14/14 |
+| recovery authority stability | 13/13 |
+| **Total** | **160/160** |
 
-### 4.3 Frontend and ops contracts
+The suites include two-connection barriers, `pg_locks` witnesses, actual
+HTTP route writes, migration drift, rollback residue checks, and a real
+PostgreSQL deadlock discriminator.
 
-- Recovery frontend bundle: **4 files, 43 tests, all passed**.
-- Web `vue-tsc -b`: passed.
-- Flag manifest, illegal-combination matrix, exact-anchor CI placement, and
-  status helper: **46 tests, all passed**.
+### 4.3 Static, unit, frontend, and ops gates
 
-### 4.4 Migration replay
+- backend `tsc --noEmit`: passed;
+- backend unit suite: 6484/6484;
+- frontend Revert/Reset/history matrix: 57/57;
+- frontend `vue-tsc -b`: passed;
+- flag manifest, exact CI placement, status helper, and schema containment:
+  59/59.
 
-On a newly created PostgreSQL database:
+The six DB-only files are excluded from the default no-DB Vitest job and
+whole-file wired into the required PostgreSQL job. The placement contract
+rejects comment-only and wrong-step decoys.
 
-1. full migration replay passed;
-2. a second migrate had no pending work;
-3. rollback of the authority-lock migration passed;
-4. rollback of the link-target migration passed;
-5. re-applying both migrations passed.
+### 4.4 Discriminating mutations
 
-Post-replay inspection returned:
+Each mutation was isolated and restored before the positive rerun:
 
-```text
-meta_links_foreign_record_id_fkey|false|c
-recovery authority triggers: 9
-```
-
-The FK behavior was also exercised directly: a historical dangling row survives
-the migration, a new dangling insert fails with `23503`, and deleting a valid
-target cascades its edge.
-
-### 4.5 Mutation evidence
-
-Each probe was restored before the next run:
-
-| Mutated guard | Required red signal |
+| Mutation | Required red |
 | --- | --- |
-| drop live-link FK | `LINK-FK-COMMIT-ORDERS` fails |
-| drop record-permission authority trigger | `AUTHORITY-SUBJECT-LOCKS` fails |
-| omit links from live-set hash | `LIVE-LINK-AUTHORITY` accepts stale token and fails |
-| remove field-create fence | B3c returns 201 instead of the required blocked 409 |
-| remove field-patch fence | B3d returns 200 instead of the required blocked 409 |
+| sheet lock `FOR NO KEY UPDATE` -> `FOR UPDATE` | `SHEET-LOCK-FK-COMPAT` produces a real 40P01 |
+| sheet lock `NOWAIT` removed | `GLOBAL-LOCK-ORDER` times out with `57014` instead of refusing immediately with `55P03` |
+| record lock `FOR UPDATE NOWAIT` -> blocking `FOR UPDATE` | `RECORD-NOWAIT-LINK-WRITER` produces a real 40P01 |
+| authority table lease `ROW EXCLUSIVE` -> `ACCESS SHARE` | trigger DDL succeeds while recovery owns the lease; ordinary DML remains the positive control |
+| authority table lease `ROW EXCLUSIVE` -> self-conflicting `SHARE UPDATE EXCLUSIVE` | a second recovery for a disjoint subject returns `busy` |
+| authority-table `55P03` -> substrate-unavailable | transient DDL contention golden receives `unavailable` instead of `busy` |
+| exact trigger table/name check -> name-only | wrong-table same-name trigger is incorrectly accepted |
+| canonical authority schema decision ignored | wrong-table, wrong-argument, wrong-function, and drifted-body goldens all accept an unsafe lease |
+| busy-error classifier -> always false | multitable permission write returns 500 instead of typed 409 |
+| target FK `NO ACTION` -> `CASCADE` | FK migration shape golden reds |
+| automation marker drops operation ledger | W4 endpoint anchor golden reds |
 
-### 4.6 Independent review
+These probes establish that the tests protect the specific guards. They do not
+by themselves prove production reachability; reachability is separately tied
+to the actual route, trigger, and migration call sites above.
 
-- Grok Build reviewed the recovery/security delta refute-first. It found the
-  remaining schema-writer race; after the field create/patch fence fix and its
-  constructed-race goldens, its focused re-review returned CLEAR.
-- Kimi independently challenged link-FK equivalence, role/person locking,
-  authority fan-out, deadlock handling, and missing-link rollback. Its findings
-  were folded into the final production delta; Kimi's output is advisory, not a
-  substitute for the exact-head test evidence.
-- Claude Code was attempted for a read-only Opus pass, but the local OAuth
-  session was expired. No Claude result is counted as verification evidence.
+## 5. Frontend evidence boundary
 
-## 5. Browser evidence
-
-The browser smoke used a fresh local database and ephemeral backend/frontend
-processes. Runtime flags were enabled only for that local process.
-
-Verified behavior:
-
-1. the picker exposes audited history operations and no free-time input;
-2. Revert preview is non-destructive and restored `Gamma` to `Beta`;
-3. Reset with no delete set honestly degrades to Revert;
-4. after creating a post-anchor row, Reset requires checkbox plus typed
-   `reset`;
-5. execute moved the new row to Trash and reverted the survivor;
-6. Trash displayed the moved row and its Restore action.
-
-Evidence:
+The earlier browser evidence remains useful for the unchanged Revert/Reset
+interaction:
 
 - [Revert preview](./assets/multitable-time-machine-exact-anchor-20260721/revert-preview.png)
 - [Reset confirmation](./assets/multitable-time-machine-exact-anchor-20260721/reset-confirm.png)
 - [Reset success](./assets/multitable-time-machine-exact-anchor-20260721/reset-success.png)
 - [Trash after Reset](./assets/multitable-time-machine-exact-anchor-20260721/trash-after-reset.png)
 
+It was captured against the 2026-07-21 local branch, not this consolidated
+2026-07-28 head, so it is not counted as exact-head runtime proof. The current
+frontend contracts and type-check are exact-head evidence.
+
 ## 6. Flags and rollout boundary
 
-This delivery changes no environment and enables no feature. The relevant code
-defaults remain OFF:
+No environment or host was changed or inspected in this round. The code
+defaults remain off:
 
 - `MULTITABLE_ENABLE_WRITER_FENCE`
 - `MULTITABLE_HISTORY_CONTIGUITY_STRICT`
 - `MULTITABLE_ENABLE_SHEET_REVERT`
 - `MULTITABLE_ENABLE_PIT_RESET`
 - `MULTITABLE_ENABLE_PIT_UNDELETE`
+- operation-endpoint and tombstone/capture flags in the Global History
+  manifest.
 
-The operator ladder remains a separate owner action. A merge is not permission
-to enable staging or production. Reset also remains incompatible with active
-meta-revision retention under the current manifest rule.
+Authority triggers also remain disabled after migration. Enabling flags without
+the complete trigger posture causes recovery to fail closed; enabling only a
+subset of triggers is invalid.
 
-## 7. Remaining work and decisions
+Merge is not rollout authorization. Staging must follow the O-2 ladder:
+obtain the default-inert containment PASS first, activate the exact trigger set
+under a separately reviewed owner/ops procedure, run an activation-aware
+catalog/behavior probe, and only then perform browser/real-data acceptance.
+The default-inert helper intentionally fails after activation and must not be
+misrepresented as the enabled-posture probe. Production remains a separate
+owner and operator decision with rollback evidence.
 
-### 7.1 Current ratified exact-anchor scope
+## 7. Remaining product development
 
-No additional runtime slice is known inside the ratified exact-anchor
-Revert/Reset scope. What remains is process and operations:
+The default-OFF exact-anchor live-row Revert/Reset code is built and locally
+verified. A broad, retention-surviving enterprise Time Machine still requires
+separate design and implementation:
 
-1. review and land #4472 -> #4474 -> #4478 -> this wiring PR in order;
-2. rerun required CI on each real target base;
-3. perform the staging operator ladder and browser acceptance;
-4. make production enablement a separate per-flag decision with rollback
-   evidence.
-
-### 7.2 Not implemented and not implied by this delivery
-
-The following product capabilities require their own ratification and design
-lock. They must not be described as already supported:
-
-1. **Recovery after retention purge.** This needs an immutable, tenant-scoped
-   archive of checkpoint plus deltas and a single reconstruction authority. A
-   version number cannot recreate payload bytes that were permanently purged.
-2. **Recovery of data deleted before tombstone capture.** Application history
-   cannot synthesize evidence that was never stored. Only a database backup,
-   external archive, or customer-supplied source can recover it.
-3. **Executable record resurrection with historical inbound links.** The
-   current exact-anchor route intentionally refuses this as
-   `INBOUND_UNPROVABLE`. A future design must archive relationship evidence and
-   preserve permission/neighbor-consent semantics.
-4. **Large-base or whole-base asynchronous recovery.** The current synchronous
-   path retains its size ceiling and per-sheet transaction semantics. A future
-   job model needs frozen preview/hash, idempotent job identity, retries,
-   progress, conflict handling, and explicit partial-completion governance.
-5. **Cross-sheet atomic restore.** No current path promises a long transaction
-   spanning several sheets.
-
-These are the remaining gaps to a broad, retention-surviving enterprise Time
-Machine product. They are not blockers to reviewing the default-OFF
-exact-anchor Revert/Reset implementation delivered here.
+1. **Exact whole-sheet resurrection.** Archive/reconstruct historical inbound
+   relationships and preserve neighbor-consent and permission semantics.
+2. **Recovery after retention purge.** Store immutable tenant-scoped
+   checkpoints plus deltas in an archive tier. A version number alone cannot
+   recreate purged bytes.
+3. **Recovery of pre-capture physical deletion.** This requires a database
+   backup, external archive, or customer source; application history cannot
+   synthesize evidence that was never stored.
+4. **Large-base asynchronous recovery.** Add frozen preview/hash, idempotent
+   job identity, chunking, retries/resume, progress, conflicts, and explicit
+   partial-completion governance.
+5. **Cross-sheet atomic product semantics.** No current route promises a
+   long-lived transaction spanning several sheets.
+6. **Operator activation and production acceptance.** Enable the exact
+   authority-trigger set and flags only through the separately reviewed O-2
+   ladder.
 
 ## 8. Verdict
 
-The current ratified code-development target is complete as a default-OFF Draft:
-exact committed history points drive Revert and Reset through one fenced,
-database-authorized, token-bound apply path; the frontend exposes the same
-authority and destructive distinction; migrations, real-DB behavior,
-mutation probes, static checks, ops contracts, and browser flows have passed.
+The closeout branch resolves the known merge-time blockers:
 
-This is **not yet a production-complete Time Machine**. Landing, staging proof,
-production flag decisions, retention-surviving archive restore, and large-scale
-asynchronous recovery remain separate gates.
+- the proven authorization/recovery deadlock;
+- recovery/recovery record-vs-sheet lock inversion;
+- writer-wide advisory serialization;
+- cross-sheet link-writer/recovery record-lock ABBA;
+- same-name trigger/function semantic spoofing at runtime;
+- fail-open same-name FK acceptance;
+- unsafe target-side cascade;
+- missing automation operation markers;
+- CI and containment blindness to these schema contracts.
+
+The correct claim is therefore:
+
+> Exact-anchor live-row Revert/Reset is implemented and locally verified behind
+> default-off flags and default-disabled authority triggers. It is ready for
+> exact-head review as a Draft, not ready for staging or production enablement.
+
+It is not yet equivalent to a retention-surviving, large-scale, whole-history
+Time Machine product.

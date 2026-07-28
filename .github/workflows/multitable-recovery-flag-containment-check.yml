@@ -33,8 +33,8 @@ name: Multitable Recovery-Flag Containment Check
 #      missing ANY expected container ⇒ FAIL (a substring match on some unrelated container never suffices).
 #   2. Running database schema: the backend container runs the read-only, values-free schema helper.
 #      The nine recovery-authority triggers, their six function bodies, and the meta_links live-target
-#      FK must match the exact expected fingerprints and enabled posture. Missing DATABASE_URL, missing
-#      helper, catalog permission failure, disabled/missing objects, or any shape drift ⇒ FAIL.
+#      FK must match the exact default-inert fingerprints: triggers disabled and FK NO ACTION. Missing
+#      DATABASE_URL/helper/permissions, an unexpectedly enabled trigger, or any shape drift ⇒ FAIL.
 #   3. Next-restart (authoritative): the compose project's OWN config is derived from the running
 #      container's own labels (`com.docker.compose.project.config_files` /
 #      `com.docker.compose.project.working_dir`), then rendered read-only via `docker compose config` —
@@ -135,8 +135,8 @@ jobs:
           ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
           FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
-          SCHEMA_HELPER_SHA256="77d53f58d63be9e16527ddb0eaf5cf0d16e5353fffd3a5d672b70c5cae1706c6"
-          SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions and meta_links FK match the expected enabled schema posture"
+          SCHEMA_HELPER_SHA256="e7801784c6c36c2e199871bfe8cdcab9d319b8d61cd2ac428019e4d2454e8f94"
+          SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions and meta_links FK match the expected default-inert schema posture"
           fail=0
           checked=0
 

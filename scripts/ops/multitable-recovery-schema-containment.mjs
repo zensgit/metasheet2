@@ -22,9 +22,9 @@ const AUTHORITY_TRIGGER_FUNCTIONS = [
 ]
 
 const AUTHORITY_FUNCTION_NAMES = [
-  'metasheet_lock_recovery_authority_group',
-  'metasheet_lock_recovery_authority_role',
-  'metasheet_lock_recovery_authority_user',
+  'metasheet_try_recovery_authority_group',
+  'metasheet_try_recovery_authority_role',
+  'metasheet_try_recovery_authority_user',
   ...AUTHORITY_TRIGGER_FUNCTIONS,
 ]
 
@@ -37,7 +37,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     schemaName: 'public',
     tableName: 'field_permissions',
     triggerName: 'trg_field_permissions_recovery_authority_lock',
-    enabled: 'O',
+    enabled: 'D',
     triggerType: 31,
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_subject_trigger',
@@ -48,7 +48,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     schemaName: 'public',
     tableName: 'platform_member_group_members',
     triggerName: 'trg_member_group_members_recovery_authority_lock',
-    enabled: 'O',
+    enabled: 'D',
     triggerType: 31,
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
@@ -59,7 +59,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     schemaName: 'public',
     tableName: 'record_permissions',
     triggerName: 'trg_record_permissions_recovery_authority_lock',
-    enabled: 'O',
+    enabled: 'D',
     triggerType: 31,
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_subject_trigger',
@@ -70,7 +70,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     schemaName: 'public',
     tableName: 'role_permissions',
     triggerName: 'trg_role_permissions_recovery_authority_lock',
-    enabled: 'O',
+    enabled: 'D',
     triggerType: 31,
     functionSchema: 'public',
     functionName: 'metasheet_recovery_role_permission_trigger',
@@ -81,7 +81,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     schemaName: 'public',
     tableName: 'spreadsheet_permissions',
     triggerName: 'trg_spreadsheet_permissions_recovery_authority_lock',
-    enabled: 'O',
+    enabled: 'D',
     triggerType: 31,
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_subject_trigger',
@@ -92,7 +92,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     schemaName: 'public',
     tableName: 'user_permissions',
     triggerName: 'trg_user_permissions_recovery_authority_lock',
-    enabled: 'O',
+    enabled: 'D',
     triggerType: 31,
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
@@ -103,7 +103,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     schemaName: 'public',
     tableName: 'user_roles',
     triggerName: 'trg_user_roles_recovery_authority_lock',
-    enabled: 'O',
+    enabled: 'D',
     triggerType: 31,
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
@@ -114,7 +114,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     schemaName: 'public',
     tableName: 'users',
     triggerName: 'trg_users_recovery_authority_lock_lifecycle',
-    enabled: 'O',
+    enabled: 'D',
     triggerType: 15,
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
@@ -125,7 +125,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     schemaName: 'public',
     tableName: 'users',
     triggerName: 'trg_users_recovery_authority_lock_update',
-    enabled: 'O',
+    enabled: 'D',
     triggerType: 19,
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
@@ -134,36 +134,57 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
   },
 ]
 
-const LOCK_USER_BODY = `
+const TRY_LOCK_USER_BODY = `
+DECLARE
+  lock_key bigint;
 BEGIN
   IF authority_user_id IS NULL OR btrim(authority_user_id) = '' THEN
-    RETURN;
+    RETURN TRUE;
   END IF;
-  PERFORM pg_advisory_xact_lock(
-    hashtextextended('metasheet:recovery-authority:user:' || btrim(authority_user_id), 0)
+  lock_key := hashtextextended(
+    'metasheet:recovery-authority:user:' || btrim(authority_user_id),
+    0
   );
+  IF exclusive THEN
+    RETURN pg_try_advisory_xact_lock(lock_key);
+  END IF;
+  RETURN pg_try_advisory_xact_lock_shared(lock_key);
 END;
 `
 
-const LOCK_ROLE_BODY = `
+const TRY_LOCK_ROLE_BODY = `
+DECLARE
+  lock_key bigint;
 BEGIN
   IF authority_role_id IS NULL OR btrim(authority_role_id) = '' THEN
-    RETURN;
+    RETURN TRUE;
   END IF;
-  PERFORM pg_advisory_xact_lock(
-    hashtextextended('metasheet:recovery-authority:role:' || btrim(authority_role_id), 0)
+  lock_key := hashtextextended(
+    'metasheet:recovery-authority:role:' || btrim(authority_role_id),
+    0
   );
+  IF exclusive THEN
+    RETURN pg_try_advisory_xact_lock(lock_key);
+  END IF;
+  RETURN pg_try_advisory_xact_lock_shared(lock_key);
 END;
 `
 
-const LOCK_GROUP_BODY = `
+const TRY_LOCK_GROUP_BODY = `
+DECLARE
+  lock_key bigint;
 BEGIN
   IF authority_group_id IS NULL OR btrim(authority_group_id) = '' THEN
-    RETURN;
+    RETURN TRUE;
   END IF;
-  PERFORM pg_advisory_xact_lock(
-    hashtextextended('metasheet:recovery-authority:group:' || btrim(authority_group_id), 0)
+  lock_key := hashtextextended(
+    'metasheet:recovery-authority:group:' || btrim(authority_group_id),
+    0
   );
+  IF exclusive THEN
+    RETURN pg_try_advisory_xact_lock(lock_key);
+  END IF;
+  RETURN pg_try_advisory_xact_lock_shared(lock_key);
 END;
 `
 
@@ -180,7 +201,11 @@ BEGIN
      WHERE candidate IS NOT NULL AND btrim(candidate) <> ''
      ORDER BY 1
   LOOP
-    PERFORM metasheet_lock_recovery_authority_user(authority_user_id);
+    IF NOT metasheet_try_recovery_authority_user(authority_user_id, FALSE) THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '40001',
+        MESSAGE = 'METASHEET_RECOVERY_AUTHORITY_BUSY';
+    END IF;
   END LOOP;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
@@ -200,7 +225,11 @@ BEGIN
      WHERE candidate IS NOT NULL AND btrim(candidate) <> ''
      ORDER BY 1
   LOOP
-    PERFORM metasheet_lock_recovery_authority_role(affected_role_id);
+    IF NOT metasheet_try_recovery_authority_role(affected_role_id, FALSE) THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '40001',
+        MESSAGE = 'METASHEET_RECOVERY_AUTHORITY_BUSY';
+    END IF;
   END LOOP;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
@@ -211,6 +240,7 @@ const SUBJECT_TRIGGER_BODY = `
 DECLARE
   affected_subject_type text;
   affected_subject_id text;
+  acquired boolean;
 BEGIN
   FOR affected_subject_type, affected_subject_id IN
     SELECT subject_type, btrim(subject_id) AS subject_id
@@ -232,11 +262,16 @@ BEGIN
        btrim(subject_id)
   LOOP
     IF affected_subject_type = 'user' THEN
-      PERFORM metasheet_lock_recovery_authority_user(affected_subject_id);
+      acquired := metasheet_try_recovery_authority_user(affected_subject_id, FALSE);
     ELSIF affected_subject_type = 'role' THEN
-      PERFORM metasheet_lock_recovery_authority_role(affected_subject_id);
+      acquired := metasheet_try_recovery_authority_role(affected_subject_id, FALSE);
     ELSE
-      PERFORM metasheet_lock_recovery_authority_group(affected_subject_id);
+      acquired := metasheet_try_recovery_authority_group(affected_subject_id, FALSE);
+    END IF;
+    IF NOT acquired THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '40001',
+        MESSAGE = 'METASHEET_RECOVERY_AUTHORITY_BUSY';
     END IF;
   END LOOP;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
@@ -247,33 +282,33 @@ END;
 const EXPECTED_AUTHORITY_FUNCTIONS = [
   {
     schemaName: 'public',
-    functionName: 'metasheet_lock_recovery_authority_group',
-    identityArguments: 'authority_group_id text',
-    resultType: 'void',
+    functionName: 'metasheet_try_recovery_authority_group',
+    identityArguments: 'authority_group_id text, exclusive boolean',
+    resultType: 'boolean',
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
-    body: LOCK_GROUP_BODY,
+    body: TRY_LOCK_GROUP_BODY,
   },
   {
     schemaName: 'public',
-    functionName: 'metasheet_lock_recovery_authority_role',
-    identityArguments: 'authority_role_id text',
-    resultType: 'void',
+    functionName: 'metasheet_try_recovery_authority_role',
+    identityArguments: 'authority_role_id text, exclusive boolean',
+    resultType: 'boolean',
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
-    body: LOCK_ROLE_BODY,
+    body: TRY_LOCK_ROLE_BODY,
   },
   {
     schemaName: 'public',
-    functionName: 'metasheet_lock_recovery_authority_user',
-    identityArguments: 'authority_user_id text',
-    resultType: 'void',
+    functionName: 'metasheet_try_recovery_authority_user',
+    identityArguments: 'authority_user_id text, exclusive boolean',
+    resultType: 'boolean',
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
-    body: LOCK_USER_BODY,
+    body: TRY_LOCK_USER_BODY,
   },
   {
     schemaName: 'public',
@@ -314,10 +349,10 @@ const EXPECTED_META_LINKS_FOREIGN_KEY = [
     constraintName: 'meta_links_foreign_record_id_fkey',
     constraintType: 'f',
     validated: false,
-    deferrable: false,
+    deferrable: true,
     initiallyDeferred: false,
     updateAction: 'a',
-    deleteAction: 'c',
+    deleteAction: 'a',
     matchType: 's',
     targetSchema: 'public',
     targetTable: 'meta_records',
@@ -462,8 +497,8 @@ function renderAssessment(assessment) {
   }
   lines.push(
     assessment.ok
-      ? 'VERDICT: PASS - recovery authority triggers/functions and meta_links FK match the expected enabled schema posture'
-      : 'VERDICT: FAIL - recovery schema posture is missing, disabled, or fingerprint-drifted',
+      ? 'VERDICT: PASS - recovery authority triggers/functions and meta_links FK match the expected default-inert schema posture'
+      : 'VERDICT: FAIL - recovery schema posture is missing, unexpectedly enabled, or fingerprint-drifted',
   )
   return lines.join('\n')
 }

@@ -125,6 +125,21 @@ const ALLOWLIST: Record<string, Record<string, { disposition: Disposition; reaso
       disposition: 'MASKED-DOWNSTREAM',
       reason: 'GET /view intermediate `rows` build; each row.data is reassigned via filterRecordDataByFieldIds(row.data, allowedFieldIds) before the response (line ~7498)',
     },
+    '...row.data': {
+      disposition: 'INTERNAL',
+      reason:
+        'exact-anchor recovery post-commit formula/lookup hydration only; the map is consumed by ' +
+        'recalculateFormulaFields, the HTTP response never includes it, and realtime publication strips ' +
+        'recordPatches before receivers refetch under their own mask',
+    },
+  },
+  'multitable/exact-anchor-recovery-route.ts': {
+    'data: r.data': {
+      disposition: 'INTERNAL',
+      reason:
+        'exact-anchor preview planning after the full-table-read gate; raw cells stay in the internal ' +
+        'liveById plan substrate and the route returns only record ids, field ids, counts, and a signed identity',
+    },
   },
   'multitable/record-write-service.ts': {
     '...row.data': {

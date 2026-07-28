@@ -2,7 +2,8 @@
 
 > **性质：operator enablement 的决策就绪材料，不是决策。** 开启哪些 flag、何时开、开到哪个环境，
 > 均为 owner/operator 决定（O-2）。本文把散落在各设计锁里的 flag、耦合与验证步骤收拢为一份
-> 可执行的阶梯清单。代码侧前置已全部落地（见 §4 台账）。
+> 可执行的阶梯清单。默认惰性的代码侧前置已落地；exact-anchor 的 authority trigger
+> 激活仍是独立 owner/operator 动作（见 §2.8、§3 L2.5），不能由合并或 flag 自动代替。
 
 ## 1. Flag 清单（本线相关，全部默认 OFF）
 
@@ -59,6 +60,16 @@
    开 `SIDE_DOOR` 前请评估机器删除量级；trash retention 是**独立未立项 rung**（D-2 锁 OD-3 明确
    不夹带 sweep）。**监控**：`SELECT count(*) FROM meta_records_trash`（尤其 `deleted_by IS NULL`
    的 plugin 行）。
+8. **exact-anchor authority substrate 是 flag 之外的独立 schema 闸**：
+   `zzzz20260721121000_add_recovery_authority_locks.ts` 与其 corrective migration 会安装
+   **8 张表 / 9 个 trigger**，但迁移完成后全部保持 `DISABLED`。普通权限写使用 shared
+   try-lock，恢复使用 exclusive try-lock；只有 9 个 trigger 同时启用且 table/type/update
+   columns/function/arguments/body fingerprint 全部匹配 canonical schema 时，恢复执行才会继续。
+   任一缺失、错表、部分启用或仍禁用，运行时都返回 values-free
+   `recovery-trust-required`。这是 fail-closed，不是可忽略告警。
+   当前 `multitable-recovery-flag-containment-check.yml` 是**关闭态止损证据**，其 schema
+   helper 明确期望 9 个 trigger 均为 `DISABLED`；它不应在启用后被误读为 PASS 探针。
+   trigger 激活事务、启用态只读核验与回滚证据必须由 owner/ops 作为单独 O-2 载体审阅。
 
 ## 3. 建议阶梯（staging → prod，每级有验证步骤）
 
@@ -66,12 +77,15 @@
 |---|---|---|
 | L1 | staging 开 `TOMBSTONE_CAPTURE_ENABLED='true'` | 删一条被引用记录 → `meta_link_tombstones` 出现 `reason='record_delete'` 组；trash 行带 `delete_revision_id` |
 | L2 | staging 开 `RECORD_UNDELETE_INBOUND='true'` | 回收站恢复该记录 → 响应带 `inbound.replayed≥1`；邻居单元格重新显示该记录；trash 列表出现 `inboundEdgesRecoverable:true` |
+| **L2.5** | **exact-anchor 独立前置（owner/ops）**：先在所有恢复 flag OFF 时取得 default-inert containment PASS；再以一个审阅过的事务同时启用 8 表/9 trigger，禁止部分启用。函数/trigger DDL 与恢复执行不得并发。 | 按 table/name/type/update columns/function/arguments 精确核验 9/9 enabled，并核对 6 个 function 的 signature/body 与 NO ACTION FK fingerprint；构造 recovery schema lease 与普通权限 DML、另一笔不相交恢复并行成功，与 trigger DDL 并行则以 `55P03` fail-fast；构造 authority writer 与恢复 lease 冲突，writer 得 typed retry、零部分写；再构造 source-record-locked 的跨表 link writer，恢复必须以 `55P03` 映射的 values-free retry fail-fast，不能出现 `40P01`。记录热表/热门外链下的 `preview-drift` 拒绝率并采用有界抖动重试。**当前 default-inert containment helper 不能充当启用态 PASS。** |
 | L3 | staging 开 **两把闸**：`ENABLE_SHEET_REVERT='true'` **且** `ENABLE_PIT_UNDELETE='true'`（若走 PIT 面）。**#4261**：undelete-revert 在 revert-execute 内，总闸 `SHEET_REVERT` 先判，单开 UNDELETE 无效（preview `undeleteSupported=false`，execute 403 `REVERT_DISABLED`）。 | revert-execute confirm:'undelete' → 响应带 `undeleteInbound`；真库金测同形状（P3-2a/b/c） |
 | **L3.5** | **（D-2，产品语义变更——需 owner 单独确认再上 prod）staging 开 `SIDE_DOOR_DELETE_TRASH_ENABLED='true'`**（前置：L1 已开，否则只有 trash 无捕获） | 用 automation `delete_record` 删一条被引用记录 → 该记录**出现在回收站**、`inboundEdgesRecoverable:true`；restore 后邻居单元格重新显示；plugin-SDK 删除同形状（`deleted_by` 为 NULL）。**并确认可接受**：机器删除自此可被任何有 `canDeleteRecord` 的人恢复，restore 会重放事件（可能再次触发自动化）；超 cap 的机器删除会开始失败（§2.4） |
 | L4 | （可选）staging 开 retention（值=**'1'**）并设 `_DAYS` | 观察 janitor 日志；确认地板：有存活 trash 引用的组不被清（RB10 / D-2 G8 同形状——侧门锚同样受地板保护） |
 | L5 | prod 逐级重复 L1→L3（retention 与 **L3.5/D-2** 是否上 prod 各自独立决定） | 同上 + 观察 cap 拒绝率（若出现 422 / step-failed 频发→调 cap 或审视扇入）+ trash 行数增长（§2.7） |
 
-**回滚**：任意级出问题，关掉对应 flag 即回到关闭前行为（全部 flag-off 路径有金测钉死逐字节不变：RB1、P3-2a、**D-2 的 G6a-1/G6a-2 两条侧门 × 真库**）。
+**回滚**：任意级出问题，先关掉对应恢复 execute flag；确认无在途恢复事务后，再在一个事务内
+禁用全部 9 个 authority trigger，最后重跑 default-inert containment。禁止留下部分启用姿态。
+其余 flag 关掉即回到关闭前行为（全部 flag-off 路径有金测钉死逐字节不变：RB1、P3-2a、**D-2 的 G6a-1/G6a-2 两条侧门 × 真库**）。
 tombstone 数据是惰性的——关 flag 不删数据，重开后继续可用（受 retention 影响除外）。
 **D-2 关 flag 的语义**：关掉 `SIDE_DOOR` 后，侧门删除立即回到 revision-only（不再进回收站）；**已经写下的 trash 行不会消失**，仍可正常 restore（restore 侧零改动、与来源无关）。
 
@@ -85,6 +99,7 @@ tombstone 数据是惰性的——关 flag 不删数据，重开后继续可用�
 | review P3-3：batch=组/趟语义 operator 文档 | ✅ 本文 §2.3 |
 | gap-audit 残差#2：retention 单旋钮耦合入 checklist | ✅ 本文 §2.2 |
 | D-1（PIT 谎报存活修复，独立于 flag，已生效） | ✅ #3969 merged |
+| exact-anchor authority trigger 默认惰性安装 + 完整姿态运行时拒绝 | ✅ 开发验证见 `multitable-time-machine-exact-anchor-recovery-development-verification-20260721.md`；**启用仍属 O-2** |
 
 ## 5. 未做/边界（如实）
 
