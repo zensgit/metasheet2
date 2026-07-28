@@ -241,6 +241,15 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
   }
 }
 
+export function nextAvailableFieldDraftIndex(
+  fields: ReadonlyArray<Pick<FieldAuthoringDraft, 'id'>>,
+): number {
+  const occupied = new Set(fields.map((field) => field.id.trim()))
+  let index = 1
+  while (occupied.has(`field_${index}`)) index += 1
+  return index
+}
+
 export function emptyVisibilityDraft(): FieldVisibilityDraft {
   return { dependsOnFieldId: '', operator: 'eq', valueText: '' }
 }
