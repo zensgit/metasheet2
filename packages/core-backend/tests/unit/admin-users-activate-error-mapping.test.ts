@@ -174,6 +174,68 @@ describe('mapActivateError (activate endpoint error surface)', () => {
     expect(ACTIVATE_ERROR_FALLBACK.code).toBe('ACTIVATE_FAILED')
   })
 
+  /**
+   * OWNER POST-MERGE FINDING (P2, 2026-07-27), reproduced before it was fixed.
+   *
+   * `ACTIVATE_ERROR_FALLBACK` and `ACTIVATE_ERROR_POLICY` were exported and NOT recursively
+   * frozen, and `ACTIVATE_ERROR_POLICY_LOOKUP = new Map(Object.entries(ACTIVATE_ERROR_POLICY))`
+   * held THE SAME row objects. Owner's executed repro: an external importer set `ACTIVATE_RACE`
+   * to 200 plus database text and `mapActivateError()` returned it verbatim — the closure this
+   * change exists to build was runtime-mutable from any importer.
+   *
+   * The mutation is attempted through the PUBLIC export, exactly as an importer would. On a
+   * deep-frozen object a strict-mode assignment throws; that is a pass, so the attempt is
+   * caught and the BEHAVIOUR is what the assertions read.
+   */
+  it('survives the owner mutation: the policy is deep-frozen and the response never moves', () => {
+    const importerView = ACTIVATE_ERROR_POLICY as unknown as
+      Record<string, { status: number; message: string }>
+    const driverText = 'relation "user_orgs" column "secret_col" does not exist'
+
+    try {
+      importerView.ACTIVATE_RACE.status = 200
+      importerView.ACTIVATE_RACE.message = driverText
+    } catch {
+      // Frozen: the assignment threw. That is the desired outcome, not a test failure.
+    }
+    try {
+      importerView.ACTIVATE_RACE = { status: 200, message: driverText }
+    } catch {
+      // Frozen table: replacing a whole row threw.
+    }
+
+    const mapped = mapActivateError(Object.assign(new Error('x'), { code: 'ACTIVATE_RACE' }))
+    expect(mapped.status).toBe(409)
+    expect(mapped.code).toBe('ACTIVATE_RACE')
+    expect(mapped.message).toBe('User is no longer pending activation')
+    expect(mapped.message).not.toMatch(/secret_col|user_orgs|relation/i)
+
+    // The exported projection itself must also be unchanged, so a later reader of the
+    // export is not shown a value the response would never publish.
+    expect(ACTIVATE_ERROR_POLICY.ACTIVATE_RACE.status).toBe(409)
+    expect(ACTIVATE_ERROR_POLICY.ACTIVATE_RACE.message).toBe('User is no longer pending activation')
+  })
+
+  it('is deep-frozen: the table, every row, and the fallback', () => {
+    expect(Object.isFrozen(ACTIVATE_ERROR_POLICY)).toBe(true)
+    for (const [code, row] of Object.entries(ACTIVATE_ERROR_POLICY)) {
+      expect(Object.isFrozen(row), `policy row ${code} must be frozen`).toBe(true)
+    }
+    expect(Object.isFrozen(ACTIVATE_ERROR_FALLBACK)).toBe(true)
+  })
+
+  it('the fallback cannot be rewritten through its export either', () => {
+    const importerView = ACTIVATE_ERROR_FALLBACK as unknown as { status: number; message: string }
+    try {
+      importerView.status = 200
+      importerView.message = 'column "secret_col" does not exist'
+    } catch {
+      // Frozen: the assignment threw.
+    }
+    expect(mapActivateError(new Error('boom')))
+      .toEqual({ status: 500, code: 'ACTIVATE_FAILED', message: 'Activation failed' })
+  })
+
   it('returns a fresh object each call — a caller cannot mutate the shared fallback', () => {
     const first = mapActivateError(new Error('boom')) as { message: string }
     first.message = 'mutated'

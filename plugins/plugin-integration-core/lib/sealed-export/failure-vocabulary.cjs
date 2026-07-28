@@ -13,15 +13,16 @@
 //
 // PROVENANCE / GOVERNANCE STATUS OF THIS SET
 // -----------------------------------------
-// The token list below is copied byte-for-byte from §10 of
-// docs/development/stock-prep-sealed-export-manifest-capability-spike-20260727.md.
-// That section states of this exact set: "This exact set is **proposed**, not
-// ratified." §12 of the same document lists "failure vocabulary" among the things
-// S0 freezes, and issue #4636 lists "closed failure vocabulary" as an S1
-// deliverable. Those texts disagree. This module takes NO position on that
-// disagreement: it pins the §10 set byte-for-byte so any drift REDs, and the
-// question of which text governs is raised for the owner in the PR body. Nothing
-// here asserts the set has been ratified.
+// RETRACTION (2026-07-27). This header previously said of the token list below:
+// "This exact set is **proposed**, not ratified", and described §10 and §12 as
+// disagreeing texts on which this module took no position. That is NO LONGER TRUE
+// and must not be relied on: the owner RATIFIED this exact set on 2026-07-27 and
+// froze it at exactly 30 tokens. No reason may be added, removed or renamed.
+//
+// What still holds: the list is copied byte-for-byte from §10 of
+// docs/development/stock-prep-sealed-export-manifest-capability-spike-20260727.md,
+// and the module pins it so any drift REDs. What changed is only the governance
+// status — from proposed-and-disputed to RATIFIED and frozen.
 //
 // §10 rules implemented here:
 //   - every thrown domain reason is a member of SEALED_EXPORT_FAILURE_REASONS;

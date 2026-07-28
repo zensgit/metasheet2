@@ -168,10 +168,32 @@ function evidence(overrides) {
   }, overrides || {})
 }
 
+// §6.4 keys an upload session by "the immutable manifest digest", so the session key is
+// DERIVED from the manifest here, exactly the way production derives it.
+//
+// RETRACTION (2026-07-27). This fixture used to hard-code `D('manifest-session')` — an
+// arbitrary well-formed hex string that the test supplied as both the question and the
+// answer. `classifyChunkSubmission` only ever checked the FORMAT of its `manifestDigest`
+// parameter and that the submission and receipts echoed the same value, so any hex string
+// keyed any manifest and two different manifests could share one fabricated session
+// digest. A test that supplies its own answer cannot detect that class, and this one did
+// not for a whole slice. The constant is deleted; nothing below may reintroduce it.
+function sessionDigestOf(manifestObject) {
+  return contracts.computeManifestDigest(manifestObject)
+}
+
+let defaultSessionDigestCache = null
+function defaultSessionDigest() {
+  if (defaultSessionDigestCache === null) {
+    defaultSessionDigestCache = sessionDigestOf(manifest(envelope()))
+  }
+  return defaultSessionDigestCache
+}
+
 function receipt(index, overrides) {
   const descriptors = chunkDescriptors()
   return Object.assign({
-    manifestDigest: D('manifest-session'),
+    manifestDigest: defaultSessionDigest(),
     chunkIndex: index,
     chunkDigest: descriptors[index] ? descriptors[index].chunkDigest : D('unknown-chunk'),
     byteCount: descriptors[index] ? descriptors[index].byteCount : 1,
@@ -682,7 +704,7 @@ function snapshotProofIsNotRelabelled() {
 function chunkSubmissionClassification() {
   const goodEnvelope = envelope()
   const goodManifest = contracts.validateSignedManifest(manifest(goodEnvelope))
-  const sessionDigest = D('manifest-session')
+  const sessionDigest = sessionDigestOf(goodManifest)
 
   // POSITIVE CONTROL — the first chunk of an empty session is ACCEPTed.
   assert.deepEqual(
@@ -778,6 +800,147 @@ function chunkSetCompletenessRefusesDuplicatesAndUndeclared() {
 }
 
 // ---------------------------------------------------------------------------
+// §6.4 "An upload session is keyed by the immutable manifest digest" — BOUND to the
+// manifest, not merely well-formed.
+//
+// OWNER POST-MERGE FINDING (P1, 2026-07-27), reproduced here before it was fixed:
+// `classifyChunkSubmission(manifest, manifestDigest, …)` took the manifest and never
+// derived `computeManifestDigest(manifest)` from it. It checked the FORMAT of the
+// supplied digest and that the submission plus every receipt echoed the same value, so
+// any well-formed hex string was a valid session key for any manifest, and two different
+// manifests could share one fabricated session digest and both be ACCEPTed.
+// ---------------------------------------------------------------------------
+function manifestDigestIsBoundToTheManifest() {
+  const goodEnvelope = envelope()
+  const manifestA = contracts.validateSignedManifest(manifest(goodEnvelope))
+  const manifestB = contracts.validateSignedManifest(
+    manifest(goodEnvelope, { sourceCaptureIdentity: 'sx-capture-identity-b' }),
+  )
+  const digestA = sessionDigestOf(manifestA)
+  const digestB = sessionDigestOf(manifestB)
+
+  // The derivation must DISCRIMINATE: two different manifests are two different sessions.
+  // Without this the checks below could pass against a digest that is constant.
+  assert.notEqual(digestA, digestB, 'different manifests must derive different session digests')
+  assert.equal(digests.isLowerHexDigest(digestA), true)
+
+  // POSITIVE CONTROL — the derived digest keys its own manifest's session.
+  assert.deepEqual(
+    contracts.classifyChunkSubmission(manifestA, digestA, [], submission(0, { manifestDigest: digestA })),
+    { decision: 'ACCEPT', acceptedChunkCount: 1 },
+  )
+
+  // THE GAP — an arbitrary well-formed hex string that everyone agrees on is still not
+  // this manifest's digest. Before the fix this returned ACCEPT.
+  const fabricated = D('fabricated-session-key')
+  assert.equal(digests.isLowerHexDigest(fabricated), true, 'the fabricated key is well-formed hex')
+  assert.notEqual(fabricated, digestA)
+  refuses(
+    () => contracts.classifyChunkSubmission(manifestA, fabricated, [],
+      submission(0, { manifestDigest: fabricated })),
+    'SEALED_EXPORT_UPLOAD_SESSION_INVALID', 'fabricated session key, echoed by the submission',
+  )
+  // …including when accepted receipts echo it too, which is the whole "everyone agrees"
+  // shape the old check mistook for a binding.
+  refuses(
+    () => contracts.classifyChunkSubmission(manifestA, fabricated,
+      [receipt(0, { manifestDigest: fabricated })], submission(1, { manifestDigest: fabricated })),
+    'SEALED_EXPORT_UPLOAD_SESSION_INVALID', 'fabricated session key, echoed by submission and receipt',
+  )
+
+  // TWO MANIFESTS, ONE FABRICATED KEY — the owner's reproduction verbatim. Both calls
+  // returned ACCEPT before the fix.
+  refuses(
+    () => contracts.classifyChunkSubmission(manifestB, fabricated, [],
+      submission(0, { manifestDigest: fabricated })),
+    'SEALED_EXPORT_UPLOAD_SESSION_INVALID', 'the same fabricated key against a second manifest',
+  )
+
+  // A REAL digest, but of the WRONG manifest. This is the case a format check can never
+  // catch: `digestB` is a genuine manifest digest, just not this manifest's.
+  refuses(
+    () => contracts.classifyChunkSubmission(manifestA, digestB, [],
+      submission(0, { manifestDigest: digestB })),
+    'SEALED_EXPORT_UPLOAD_SESSION_INVALID', 'another manifest\'s genuine digest',
+  )
+  refuses(
+    () => contracts.classifyChunkSubmission(manifestB, digestA, [],
+      submission(0, { manifestDigest: digestA })),
+    'SEALED_EXPORT_UPLOAD_SESSION_INVALID', 'the mirror case, so neither direction is special',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// §6.2 "ordered chunk identities and digests" — an accepted receipt is evidence about a
+// MANIFEST CHUNK, so it is checked against the manifest's descriptor at that index.
+//
+// OWNER POST-MERGE FINDING (P1, 2026-07-27), reproduced here before it was fixed: the
+// replay path in `classifyChunkSubmission` compared the submission against the RECEIPT
+// only, and `assertChunkSetComplete` compared INDEX SETS only. Receipts carrying the
+// wrong `chunkDigest` and the wrong `byteCount` produced `IDEMPOTENT_REPLAY` and
+// `{ chunkCount: 2 }` respectively.
+// ---------------------------------------------------------------------------
+function receiptsAreBoundToManifestDescriptors() {
+  const goodEnvelope = envelope()
+  const goodManifest = contracts.validateSignedManifest(manifest(goodEnvelope))
+  const sessionDigest = sessionDigestOf(goodManifest)
+  const forged = { chunkDigest: D('bytes-the-manifest-never-declared'), byteCount: 999 }
+
+  // POSITIVE CONTROLS — honest receipts are still accepted by both functions, so the
+  // refusals below are not "everything is refused".
+  assert.deepEqual(
+    contracts.classifyChunkSubmission(goodManifest, sessionDigest, [receipt(0)], submission(0)),
+    { decision: 'IDEMPOTENT_REPLAY', acceptedChunkCount: 1 },
+  )
+  assert.deepEqual(
+    contracts.assertChunkSetComplete(goodManifest, [receipt(0), receipt(1)]),
+    { chunkCount: 2 },
+  )
+
+  // classifyChunkSubmission — a receipt whose bytes the manifest never declared cannot
+  // make a matching re-send an idempotent replay. Before the fix: IDEMPOTENT_REPLAY.
+  refuses(
+    () => contracts.classifyChunkSubmission(goodManifest, sessionDigest,
+      [receipt(0, forged)], submission(0, forged)),
+    'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH', 'replay against a receipt that disagrees with the descriptor',
+  )
+  // The two descriptor terms are checked SEPARATELY, so neither can cover for the other.
+  refuses(
+    () => contracts.classifyChunkSubmission(goodManifest, sessionDigest,
+      [receipt(0, { chunkDigest: D('bytes-the-manifest-never-declared') })],
+      submission(0, { chunkDigest: D('bytes-the-manifest-never-declared') })),
+    'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH', 'receipt digest alone disagreeing with the descriptor',
+  )
+  refuses(
+    () => contracts.classifyChunkSubmission(goodManifest, sessionDigest,
+      [receipt(0, { byteCount: 999 })], submission(0, { byteCount: 999 })),
+    'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH', 'receipt byte count alone disagreeing with the descriptor',
+  )
+  // …and a forged receipt is refused on the ACCEPT path too, not only on replay.
+  refuses(
+    () => contracts.classifyChunkSubmission(goodManifest, sessionDigest,
+      [receipt(0, forged)], submission(1)),
+    'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH', 'forged receipt in the accepted set of a new submission',
+  )
+
+  // assertChunkSetComplete — a complete INDEX SET of forged receipts is not a complete
+  // chunk set. Before the fix: { chunkCount: 2 }.
+  refuses(
+    () => contracts.assertChunkSetComplete(goodManifest, [receipt(0, forged), receipt(1)]),
+    'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH', 'complete index set, forged chunk digest and byte count',
+  )
+  refuses(
+    () => contracts.assertChunkSetComplete(goodManifest,
+      [receipt(0, { chunkDigest: D('bytes-the-manifest-never-declared') }), receipt(1)]),
+    'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH', 'complete index set, forged chunk digest only',
+  )
+  refuses(
+    () => contracts.assertChunkSetComplete(goodManifest, [receipt(0), receipt(1, { byteCount: 999 })]),
+    'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH', 'complete index set, forged byte count only',
+  )
+}
+
+// ---------------------------------------------------------------------------
 // §9.2: no caller value may reach the refusal surface.
 // ---------------------------------------------------------------------------
 function refusalSurfaceIsValuesFree() {
@@ -859,6 +1022,8 @@ function main() {
   snapshotProofIsNotRelabelled()
   chunkSubmissionClassification()
   chunkSetCompletenessRefusesDuplicatesAndUndeclared()
+  manifestDigestIsBoundToTheManifest()
+  receiptsAreBoundToManifestDescriptors()
   refusalSurfaceIsValuesFree()
   canonicalBytesFailClosed()
   console.log('sealed-export-contracts.test.cjs OK')
