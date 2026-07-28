@@ -1,8 +1,11 @@
-# PLM <-> ERP 物料主数据对账 V2 Charter（PROPOSED）— 2026-07-19
+# PLM <-> ERP 物料主数据对账 V2 Charter（RATIFIED）— 2026-07-19
 
-> **状态：PROPOSED / doc-only。** 本文把备料通用化计划的下一开发目标收敛为一个真实的
-> 第二场景：**PLM <-> ERP 物料主数据对账**。本文不授权运行时代码、迁移、路由、开关、
-> 实体机重跑或外部写；运行时实现须等 §10 的 owner 决策与 Charter ratify。
+> **状态：RATIFIED（owner 裁决 2026-07-21：OD-V2-1..7 全部按推荐 ratify；ratify 仅解锁 D1）。**
+> 本文把备料通用化计划的下一开发目标收敛为一个真实的第二场景：**PLM <-> ERP 物料主数据对账**。
+> ratify 只解锁 D1（独立 manifest + 冻结模板 + 闭词表 + flag/权限合同 + canonicalRowDigest
+> 确定性契约，schema-only、无 routes/runtime/migration）；D2 及以后仍须逐刀过 §7 门,ratify
+> **不自动授权** D2 及以后的运行时代码、迁移、路由、开关、实体机重跑或外部写。原始
+> PROPOSED 状态见 §12 修订记录。
 >
 > **代码锚：** `origin/main` `d83cf5875f517c3046eb43b37ab83da9e9d2fef9`（rev-5 刷新；较 rev-3 锚
 > `698997cf8…` 仅多一笔 attendance 文档提交 `#4492`,stock-prep / integration-core 面零变动;
@@ -622,18 +625,22 @@ D3a 的并发面**（指针 CAS、`runIdentityKey` 部分唯一索引与并发 d
 | OD-V2-6 | 发布姿态 | **独立 default-OFF flag；仅内部写；`externalWrite=false`** | 解锁 D1，仍不授权 ON rollout |
 | OD-V2-7 | 场景绑定与换绑 | **§2.3/§4.5/§4.6 模型整体冻结：绑定版本生命周期（supersede/revoke 拆分；`active` 为指针派生谓词非存储状态）+ 指针权威唯一 active（复合 FK；revoke 清指针同事务，切换预选替代版本 = 同事务完整 Activate 重验；partial-unique 变体不采用）+ 外部系统身份 pin（内容键单轨：`systemContentKey` 进绑定成员、bindingFingerprint、run-start pin 与 activate/commit 重验；不引入无权威来源的版本 ID）+ 四层重验 + commit 漂移拆分 + 血缘/运行双键 + 双指纹（业务摘要不裸 SHA 外显；排序元组编码 rev-4 冻结）+ 运行请求仅 scenarioInstanceId + V1 双源不 N** | 解锁 D2 绑定底座设计 |
 
-**建议裁决：七项全部按推荐 ratify。** 该裁决只解锁 D1；D2 及以后仍按 §7 逐刀过门，
-不会自动触发运行时开发、发布或实体机执行。
+**最终裁决（owner 2026-07-21）：OD-V2-1..7 七项全部按推荐 RATIFY。** 该裁决只解锁 D1；
+D2 及以后仍按 §7 逐刀过门，不会自动触发运行时开发、发布或实体机执行。
+（上文各 rev 里的「暂缓 / 待复审」等 deferred 口径均为历史过程记录,以本最终裁决为准。）
 
-## 11. Charter 退出判据
+## 11. Charter 退出判据（**全部满足 → 已 RATIFIED，owner 2026-07-21**）
 
-本 Charter 只有在以下条件同时满足后才从 PROPOSED 转为 RATIFIED：
+本 Charter 已从 PROPOSED 转为 RATIFIED；下列判据在合并时逐条满足（历史记录）：
 
-1. owner 对 OD-V2-1..7 逐项裁决；
-2. 独立 code-vs-doc 审阅确认现有 cache、P4 UOW、source capability 和 external-write 边界表述
-   与代码一致；
-3. PR 仅含文档，且无 closing keyword、secret、客户标识、业务值或运行时授权；
-4. `#4437` 状态保持独立，不以 Charter 合并代替实体机验收。
+1. ✅ owner 对 OD-V2-1..7 逐项裁决（七项按推荐 ratify，§10 最终裁决）；
+2. ✅ 独立 code-vs-doc 审阅确认现有 cache、P4 UOW、source capability 和 external-write 边界
+   表述与代码一致；
+3. ✅ PR 仅含文档，且无 closing keyword、secret、客户标识、业务值或运行时授权；
+4. ✅ `#4437` 状态保持独立，不以 Charter 合并代替实体机验收。
+
+ratify 仅解锁 D1；D1 已合入 main（PR #4507，`1f06ecea9`）。D2 及以后仍逐刀过 §7 门,ratify
+不自动授权 D2 运行时。
 
 ## 12. 本轮设计审计与验证记录
 

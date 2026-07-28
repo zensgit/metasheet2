@@ -1,6 +1,7 @@
 import type {
   MultitableAPI,
   MultitableRecordsWriteUnitOfWorkAPI,
+  MultitableRepairTransactionSurface,
   StockPreparationPersistUnitOfWorkInput,
 } from '../types/plugin'
 import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
@@ -215,6 +216,71 @@ export function createPluginScopedMultitableApi(
       resolveFieldIds: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         return multitable.provisioning.resolveFieldIds(input)
+      },
+      // W2: DB-backed existence read, scoped to the plugin's own object.
+      resolveExistingObjectFieldIds: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.objectId,
+        })
+        return multitable.provisioning.resolveExistingObjectFieldIds(input)
+      },
+      // W2: DB-backed field CONTENT read, scoped to the plugin's own object.
+      readObjectFieldsContent: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.objectId,
+        })
+        return multitable.provisioning.readObjectFieldsContent(input)
+      },
+      // W2: additive-only field write — a WRITE capability, so it must pass the same
+      // object-scope check as ensureObject/patchObjectFieldProperty (never bare-forward).
+      ensureMissingObjectFields: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.objectId,
+        })
+        return multitable.provisioning.ensureMissingObjectFields(input)
+      },
+      // W2/P2-3: forward the ATOMIC repair transaction, wrapping the tx-bound surface so
+      // scope STILL applies INSIDE the transaction. The READ/WRITE methods
+      // (resolveExistingObjectFieldIds, readObjectFieldsContent, ensureMissingObjectFields)
+      // re-check assertProjectIdAllowedForPlugin + assertObjectScope — a write capability is
+      // never bare-forwarded, even inside a host tx. `findObjectSheet` is DISCOVERY-ONLY: it
+      // gets the project-namespace check only, NOT object-scope — identical to the non-tx
+      // `findObjectSheet` forward above (object ownership is enforced by the subsequent
+      // scoped content reads, so a bare findObjectSheet cannot leak object data).
+      runObjectFieldsRepairTransaction: async (fn) => {
+        return multitable.provisioning.runObjectFieldsRepairTransaction(async (surface) => {
+          const scoped: MultitableRepairTransactionSurface = {
+            findObjectSheet: async (input) => {
+              assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+              return surface.findObjectSheet(input)
+            },
+            resolveExistingObjectFieldIds: async (input) => {
+              assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId: input.projectId, objectId: input.objectId })
+              return surface.resolveExistingObjectFieldIds(input)
+            },
+            readObjectFieldsContent: async (input) => {
+              assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId: input.projectId, objectId: input.objectId })
+              return surface.readObjectFieldsContent(input)
+            },
+            ensureMissingObjectFields: async (input) => {
+              assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId: input.projectId, objectId: input.objectId })
+              return surface.ensureMissingObjectFields(input)
+            },
+          }
+          return fn(scoped)
+        })
       },
       ensureObject: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)

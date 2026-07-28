@@ -198,3 +198,52 @@ describe('LocalStorageProvider.deleteByKey (GF5-2 — index-free, idempotent, co
     await expect(svc.deleteByKey(dirKey)).rejects.toThrow()
   })
 })
+
+/**
+ * B3-07 §7 — `uploadByKey`, the key-addressed WRITE that completes the by-key triple alongside
+ * `downloadByKey`/`deleteByKey`. It is security-load-bearing for the same reason its siblings are:
+ * it takes a caller-chosen key, so containment (G2) must be re-asserted, and it must never silently
+ * overwrite an existing object. Added to the F3 canary lane because it is a new write path into the
+ * shared storage root.
+ */
+describe('LocalStorageProvider.uploadByKey (B3-07 key-addressed write)', () => {
+  it('writes at the EXACT caller key and reads back index-free through downloadByKey', async () => {
+    const svc = makeService()
+    const key = 'approval-attachments/2026-07/fixed-key.pdf'
+    await svc.uploadByKey(key, Buffer.from('%PDF-by-key'))
+
+    // the physical layout is exactly the key — no uuid dir, no client-filename segment appended
+    expect((await fs.readFile(path.join(basePath, key))).toString()).toBe('%PDF-by-key')
+    expect((await svc.downloadByKey(key)).toString()).toBe('%PDF-by-key')
+
+    // and a FRESH service (cold index, as a separate process would have) still reads it
+    expect((await makeService().downloadByKey(key)).toString()).toBe('%PDF-by-key')
+  })
+
+  it('re-asserts containment (G2): a traversal / absolute key is refused and writes NOTHING', async () => {
+    const svc = makeService()
+    const outside = path.join(root, 'escaped.txt')
+    for (const bad of ['../escaped.txt', '../../escaped.txt', 'a/../../escaped.txt']) {
+      await expect(svc.uploadByKey(bad, Buffer.from('pwned'))).rejects.toThrow()
+    }
+    // nothing escaped the base path
+    await expect(fs.access(outside)).rejects.toThrow()
+  })
+
+  it('is exclusive-create: writing an existing key REJECTS instead of silently overwriting', async () => {
+    const svc = makeService()
+    const key = 'approval-attachments/2026-07/no-overwrite.pdf'
+    await svc.uploadByKey(key, Buffer.from('original'))
+    await expect(svc.uploadByKey(key, Buffer.from('overwritten'))).rejects.toThrow()
+    // POSITIVE CONTROL: the original bytes survived the refused second write
+    expect((await svc.downloadByKey(key)).toString()).toBe('original')
+  })
+
+  it('enforces the service upload limit (a by-key caller cannot bypass the size cap)', async () => {
+    const svc = makeService()
+    svc.setUploadLimit(8)
+    await expect(svc.uploadByKey('approval-attachments/big.bin', Buffer.alloc(9))).rejects.toThrow(/exceeds limit/)
+    // POSITIVE CONTROL: at-limit still writes
+    await expect(svc.uploadByKey('approval-attachments/ok.bin', Buffer.alloc(8))).resolves.toBeUndefined()
+  })
+})

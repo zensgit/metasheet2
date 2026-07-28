@@ -14,6 +14,12 @@ import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from
 import { supportsAttendanceSelfService } from '../config/product-mode'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
+import {
+  assertAliasCutoverAllowed,
+  findUserIdByLoginAlias,
+  isAuthLoginAliasCutoverEnabled,
+} from './login-alias-service'
+import { evaluateUserAuthenticationGate } from './user-activation'
 
 export interface User {
   id: string
@@ -26,6 +32,8 @@ export interface User {
   tenantId?: string
   is_active?: boolean
   must_change_password?: boolean
+  activation_status?: string
+  local_password_set?: boolean
   created_at: Date
   updated_at: Date
   // Index signature for compatibility with Express.Request.user
@@ -36,6 +44,9 @@ export interface User {
 interface UserRow extends User {
   password_hash: string
 }
+
+const USER_AUTH_SELECT =
+  'id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, activation_status, local_password_set, created_at, updated_at'
 
 export interface TokenPayload {
   userId: string
@@ -118,6 +129,11 @@ export class AuthService {
     return trimmed.length > 0 ? trimmed : undefined
   }
 
+  /**
+   * Dev-only exception (NODE_ENV !== production && RBAC_TOKEN_TRUST): trusts JWT claims
+   * without DB activation gate. Production never enables this path. Not a substitute for
+   * T1 fail-closed verifyToken DB path.
+   */
   private buildTrustedTokenUser(
     payload: TokenPayload & { id?: string; sub?: string; roles?: unknown; perms?: unknown; name?: unknown; email?: unknown; role?: unknown },
   ): User | null {
@@ -152,6 +168,8 @@ export class AuthService {
       permissions,
       ...(tenantId ? { tenantId } : {}),
       is_active: true,
+      activation_status: 'activated',
+      local_password_set: true,
       created_at: new Date(0),
       updated_at: new Date(0),
       roles,
@@ -185,8 +203,8 @@ export class AuthService {
         return null
       }
 
-      // 验证用户是否仍然活跃
-      if (user.role === 'disabled' || user.is_active === false) {
+      // T1: fail-closed on pending / invalid activation / inactive (shared gate).
+      if (evaluateUserAuthenticationGate(user)) {
         return null
       }
 
@@ -255,14 +273,15 @@ export class AuthService {
         return null
       }
 
-      // 验证密码
-      const isValid = await bcrypt.compare(password, user.password_hash)
-      if (!isValid) {
+      // Password usability gate before bcrypt (pending / SSO-only accounts).
+      const gate = evaluateUserAuthenticationGate(user, { requireLocalPassword: true })
+      if (gate) {
         return null
       }
 
-      // 检查用户状态
-      if (user.role === 'disabled' || user.is_active === false) {
+      // 验证密码
+      const isValid = await bcrypt.compare(password, user.password_hash)
+      if (!isValid) {
         return null
       }
 
@@ -288,6 +307,10 @@ export class AuthService {
       const safeUser = this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
       return { user: safeUser, token }
     } catch (error) {
+      // Surface alias cutover misconfiguration to operators (do not swallow as null login).
+      if ((error as { code?: string } | null)?.code === 'ALIAS_CUTOVER_BLOCKED') {
+        throw error
+      }
       this.logger.error('Login error', error instanceof Error ? error : undefined)
       return null
     }
@@ -296,6 +319,19 @@ export class AuthService {
   /**
    * 用户注册
    */
+  // W4-PRE-1 policy (§3.3 item 2 of the Wave-4 onboarding design lock, docs/development/
+  // attendance-vnext-wave4-onboarding-design-lock-20260721.md): this signature carries no org
+  // parameter and this deployment-level self-service registration path has no source of an
+  // authoritative org anywhere in its call chain — it is the design lock's own example of an
+  // "org 不可知的路径(如部署级注册)". Per the explicit ticket instruction, an org-unknowable
+  // path MUST record its policy and MUST NOT silently guess an org (e.g. defaulting to
+  // 'default' — that string is the one-time zzzz20260114110000 backfill's semantics, not a
+  // live admission default). Deliberately: this method does NOT write user_orgs. A user
+  // created here has no org membership until an org-aware admission path (POST
+  // /api/admin/users with attendanceOrgId, or directory sync admission) later adds one, or an
+  // operator backfills it explicitly. Verified by
+  // tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts (zero user_orgs rows for a
+  // user created via this path).
   async register(email: string, password: string, name: string): Promise<User | null> {
     try {
       // 检查邮箱是否已存在
@@ -304,7 +340,7 @@ export class AuthService {
         return null
       }
 
-      // 加密密码
+      // 加密密码 — self-service register is always activated + local password set
       const passwordHash = await bcrypt.hash(password, this.config.saltRounds)
       const enableAttendanceSelfService = supportsAttendanceSelfService(process.env.PRODUCT_MODE)
       const registrationPermissions = [
@@ -348,7 +384,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          'SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at FROM users WHERE id = $1',
+          `SELECT ${USER_AUTH_SELECT} FROM users WHERE id = $1`,
           [userId]
         )
 
@@ -365,6 +401,8 @@ export class AuthService {
             permissions: resolved.permissions,
             is_active: row.is_active,
             must_change_password: row.must_change_password,
+            activation_status: row.activation_status,
+            local_password_set: row.local_password_set,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -386,6 +424,8 @@ export class AuthService {
           permissions: ['*:*'],
           is_active: true,
           must_change_password: false,
+          activation_status: 'activated',
+          local_password_set: true,
           password_hash: await bcrypt.hash('dev123', this.config.saltRounds),
           created_at: new Date(),
           updated_at: new Date()
@@ -411,14 +451,31 @@ export class AuthService {
       const trimmedIdentifier = identifier.trim()
       if (!trimmedIdentifier) return null
 
-      const normalizedEmail = trimmedIdentifier.toLowerCase()
-      const normalizedUsername = trimmedIdentifier.toLowerCase()
-      const normalizedMobile = trimmedIdentifier.replace(/\s+/g, '')
-
       try {
         const pool = poolManager.get()
+
+        // T2b: alias-only login (no OR fallback to users.email/username/mobile).
+        // Enforce admin-alias readiness gate on every auth path that would use aliases —
+        // enabling AUTH_LOGIN_USE_ALIASES without a password-capable admin must not lock
+        // operators out while reporting ready:true elsewhere.
+        if (isAuthLoginAliasCutoverEnabled()) {
+          await assertAliasCutoverAllowed()
+          const userId = await findUserIdByLoginAlias(trimmedIdentifier)
+          if (!userId) return null
+          const byId = await pool.query(
+            `SELECT ${USER_AUTH_SELECT} FROM users WHERE id = $1 LIMIT 1`,
+            [userId],
+          )
+          if (!byId.rows[0]) return null
+          return this.mapAuthUserRow(byId.rows[0] as UserRow)
+        }
+
+        // T2a (default): legacy OR-column path remains until cutover.
+        const normalizedEmail = trimmedIdentifier.toLowerCase()
+        const normalizedUsername = trimmedIdentifier.toLowerCase()
+        const normalizedMobile = trimmedIdentifier.replace(/\s+/g, '')
         const result = await pool.query(
-          `SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at
+          `SELECT ${USER_AUTH_SELECT}
            FROM users
            WHERE lower(email) = $1
               OR lower(username) = $2
@@ -441,30 +498,45 @@ export class AuthService {
         }
 
         if (result.rows.length > 0) {
-          const row = result.rows[0] as UserRow
-          const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [])
-          return {
-            id: row.id,
-            email: row.email,
-            username: row.username ?? null,
-            mobile: row.mobile ?? null,
-            name: row.name,
-            role: resolved.role,
-            permissions: resolved.permissions,
-            is_active: row.is_active,
-            must_change_password: row.must_change_password,
-            password_hash: row.password_hash,
-            created_at: row.created_at,
-            updated_at: row.updated_at
-          }
+          return this.mapAuthUserRow(result.rows[0] as UserRow)
         }
       } catch (dbError) {
+        if ((dbError as { code?: string } | null)?.code === 'ALIAS_CUTOVER_BLOCKED') {
+          throw dbError
+        }
         this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
       return null
     } catch (error) {
+      if ((error as { code?: string } | null)?.code === 'ALIAS_CUTOVER_BLOCKED') {
+        throw error
+      }
       this.logger.error('Get user by identifier error', error instanceof Error ? error : undefined)
       return null
+    }
+  }
+
+  private async mapAuthUserRow(row: UserRow): Promise<(User & { password_hash: string })> {
+    const resolved = await this.resolveRbacProfile(
+      row.id,
+      row.role,
+      Array.isArray(row.permissions) ? row.permissions : [],
+    )
+    return {
+      id: row.id,
+      email: row.email,
+      username: row.username ?? null,
+      mobile: row.mobile ?? null,
+      name: row.name,
+      role: resolved.role,
+      permissions: resolved.permissions,
+      is_active: row.is_active,
+      must_change_password: row.must_change_password,
+      activation_status: row.activation_status,
+      local_password_set: row.local_password_set,
+      password_hash: row.password_hash,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
     }
   }
 
@@ -524,9 +596,14 @@ export class AuthService {
         const pool = poolManager.get()
         const permissionsJson = JSON.stringify(userData.permissions)
         const result = await pool.query(
-          `INSERT INTO users (id, email, name, password_hash, role, permissions, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
-           RETURNING id, email, name, role, permissions, must_change_password, created_at, updated_at`,
+          `INSERT INTO users (
+             id, email, name, password_hash, role, permissions,
+             activation_status, local_password_set, is_active,
+             created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'activated', TRUE, TRUE, NOW(), NOW())
+           RETURNING id, email, name, role, permissions, must_change_password,
+                     activation_status, local_password_set, is_active, created_at, updated_at`,
           [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson]
         )
 
@@ -614,7 +691,10 @@ export class AuthService {
 
       // 获取用户最新信息
       const user = await this.getUserById(userId)
-      if (!user || user.role === 'disabled' || user.is_active === false) {
+      if (!user) {
+        return null
+      }
+      if (evaluateUserAuthenticationGate(user)) {
         return null
       }
 

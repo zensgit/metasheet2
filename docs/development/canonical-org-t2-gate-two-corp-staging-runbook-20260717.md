@@ -1,5 +1,10 @@
 # T2-Gate — Two-Corp Coexistence Proof · Staging Runbook (2026-07-17)
 
+> Historical pre-fix evidence only. This runbook intentionally describes the legacy global-key
+> failure and must not be used as the post-fix acceptance procedure. The replacement is
+> `dingtalk-directory-corp-scope-staging-uat-20260725.md`, after both Phase A and Phase B satisfy
+> their deployment gates.
+
 Milestone: Canonical Org & Provider Transfer v1, Transfer MVP row **T2-Gate**（§3.4 of
 `provider-org-transfer-development-plan-20260709.md`; sequencing per
 `canonical-org-provider-transfer-v1-mvp-implementation-plan-20260713.md` §2）。
@@ -115,8 +120,8 @@ corp A run status:              _TBD_ (completed|failed|…)
 corp B run status:              _TBD_ (completed|failed|…)
 corp B duplicate_key_detected:  _TBD_ (true|false)
 corp B expected_constraint_detected: _TBD_ (true|false)
-key comparison:                 _TBD_ (corp_a_rows / corp_b_rows / distinct_keys)
-presence:                       _TBD_ (present_in_a / present_in_b / keys_all_distinct)
+key comparison:                 _TBD_ (corp_a_rows=<n> / corp_b_rows=<n> / distinct_keys=<n>)
+presence:                       _TBD_ (present_in_a=<n> / present_in_b=<n> / keys_all_distinct=<true|false>)
 verdict:                        _TBD_ (CONFIRMED / DISPROVED / INCONCLUSIVE)
 ```
 

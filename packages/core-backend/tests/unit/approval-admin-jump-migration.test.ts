@@ -47,10 +47,14 @@ describe('approval admin jump migration and bootstrap sync', () => {
   it('T-bootstrap keeps approval_schema_bootstrap action check aligned with reassign (P1-B)', async () => {
     const source = await fs.readFile(BOOTSTRAP_PATH, 'utf8')
 
-    // The scoped-admin runtime added admin reassign to the bootstrap and bumped the
-    // version; the action CHECK still permits add_sign/reduce_sign plus reassign.
-    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260702-admin-reassign'")
+    // Later schema additions may advance the bootstrap marker; keep this pin synchronized so the
+    // reassign CHECK and the latest idempotent DDL are both replayed on reused test databases.
+    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260722-template-version-restore-current-round'")
     expect(source).toContain("'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign'")
+    expect(source).toContain('ADD COLUMN IF NOT EXISTS publish_note TEXT')
+    expect(source).toContain('ADD COLUMN IF NOT EXISTS node_activation_seq INTEGER NOT NULL DEFAULT 0')
+    expect(source).toContain('ADD COLUMN IF NOT EXISTS entry_epoch INTEGER')
+    expect(source).toContain('CREATE INDEX IF NOT EXISTS idx_approval_template_versions_restored_from')
   })
 
   it('does not mutate immutable historical approval action migrations', async () => {

@@ -18,6 +18,7 @@ import {
   readDingTalkAllowedCorpIds,
 } from '../integrations/dingtalk/runtime-policy'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import { evaluateUserAuthenticationGate } from './user-activation'
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
 
 const logger = new Logger('DingTalkOAuth')
@@ -56,6 +57,7 @@ interface LocalUserRow {
   name: string
   role: string
   is_active: boolean
+  activation_status?: string | null
 }
 
 export type DingTalkOAuthIntent = 'login' | 'bind'
@@ -553,7 +555,8 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
             email,
             COALESCE(name, '') AS name,
             COALESCE(role, 'user') AS role,
-            COALESCE(is_active, TRUE) AS is_active
+            COALESCE(is_active, TRUE) AS is_active,
+            activation_status
      FROM users
      WHERE LOWER(email) = LOWER($1)
      LIMIT 1`,
@@ -570,7 +573,8 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
               u.email,
               COALESCE(u.name, '') AS name,
               COALESCE(u.role, 'user') AS role,
-              COALESCE(u.is_active, TRUE) AS is_active
+              COALESCE(u.is_active, TRUE) AS is_active,
+              u.activation_status
        FROM user_external_identities identity
        JOIN users u ON u.id = identity.local_user_id
        WHERE identity.provider = $1
@@ -604,14 +608,37 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
 }
 
 function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
-  if (localUser.role === 'disabled' || localUser.is_active === false) {
-    throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+  // Shared closed-set gate (PR #4559): only exact pending_activation | activated.
+  const denial = evaluateUserAuthenticationGate({
+    is_active: localUser.is_active,
+    role: localUser.role,
+    activation_status: localUser.activation_status,
+  })
+  if (!denial) return
+  if (denial.code === 'ACCOUNT_PENDING_ACTIVATION' || denial.code === 'ACCOUNT_ACTIVATION_INVALID') {
+    throw createPolicyError(denial.message, {
       statusCode: 403,
-      code: 'local_user_disabled',
+      code: denial.code,
     })
   }
+  throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+    statusCode: 403,
+    code: 'local_user_disabled',
+  })
 }
 
+// W4-PRE-1 policy (§3.3 item 2 of the Wave-4 onboarding design lock, docs/development/
+// attendance-vnext-wave4-onboarding-design-lock-20260721.md): DingTalk OAuth JIT admission has
+// no per-org context anywhere in this module — `readDingTalkOauthConfig()` reads a single
+// deployment-wide `DINGTALK_CORP_ID` env var, not an org-scoped value, and there is no
+// existing corp_id→org resolution primitive elsewhere in this codebase this call could reuse
+// (the directory-sync admission path resolves org from a `directory_integrations` ROW, which
+// this login flow never touches). Inventing a new corp_id→org inference here would be new
+// design surface, not a wiring fix, and risks a WRONG org being silently attached (worse than
+// none). Per the explicit ticket instruction, org-unknowable paths record policy and do NOT
+// guess. Deliberately: this function does NOT write user_orgs. Verified by
+// tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts (zero user_orgs rows for a
+// user created via this path).
 async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow> {
   const userId = crypto.randomUUID()
   // unionId first (review #3771 P2-1): the container surface has no openId, and
@@ -639,13 +666,18 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
 
   try {
     const result = await query<LocalUserRow>(
-      `INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, 'user', NOW(), NOW())
+      `INSERT INTO users (
+         id, email, name, password_hash, role,
+         activation_status, local_password_set, is_active,
+         created_at, updated_at
+       )
+       VALUES ($1, $2, $3, $4, 'user', 'activated', FALSE, TRUE, NOW(), NOW())
        RETURNING id,
                  email,
                  COALESCE(name, '') AS name,
                  COALESCE(role, 'user') AS role,
-                 COALESCE(is_active, TRUE) AS is_active`,
+                 COALESCE(is_active, TRUE) AS is_active,
+                 activation_status`,
       [userId, email, name, passwordHash],
     )
 
@@ -1114,4 +1146,14 @@ export async function bindDingTalkIdentityToUser(input: {
       )
     }
   })
+}
+
+/**
+ * W4-PRE-1 (§3.3 item 2): test-only seam so the "org-unknowable path does not silently write
+ * user_orgs" policy (see the comment on createProvisionedUser above) can be verified against a
+ * real admission, not just read as a comment. Mirrors the __directorySyncInternalsForTests
+ * pattern in directory-sync.ts — not a new production surface.
+ */
+export const __dingtalkOAuthInternalsForTests = {
+  createProvisionedUser,
 }

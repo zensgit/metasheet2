@@ -537,6 +537,262 @@ function astReferencesRequesterAttribute(ast: FormulaAst, attr: string): boolean
   }
 }
 
+function astHasDynamicDependency(ast: FormulaAst): boolean {
+  switch (ast.kind) {
+    case 'field':
+    case 'aggregate':
+    case 'requester':
+    case 'membership':
+      return true
+    case 'unary':
+      return astHasDynamicDependency(ast.expr)
+    case 'binary':
+    case 'compare':
+      return astHasDynamicDependency(ast.left) || astHasDynamicDependency(ast.right)
+    default:
+      return false
+  }
+}
+
+/**
+ * Whether a condition formula depends on request-specific data. This deliberately
+ * answers a structural question only; it does not attempt to prove that a
+ * field-dependent expression is a semantic tautology.
+ */
+export function approvalConditionFormulaHasDynamicDependency(expression: string): boolean {
+  return astHasDynamicDependency(parseFormula(expression))
+}
+
+type FormulaTruth = 'always_true' | 'always_false' | 'unknown'
+type NumericRange = { min: number; max: number }
+
+function finiteFieldBound(field: FormField, key: 'min' | 'max'): number | null {
+  const raw = field.props?.[key]
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw
+  if (typeof raw === 'string' && raw.trim()) {
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function numericRange(ast: FormulaAst, schema: FormSchema): NumericRange | null {
+  if (ast.kind === 'number') return { min: ast.value, max: ast.value }
+  if (ast.kind === 'unary' && ast.op === 'NEG') {
+    const inner = numericRange(ast.expr, schema)
+    return inner ? { min: -inner.max, max: -inner.min } : null
+  }
+  if (ast.kind !== 'field' || ast.path.length !== 1) return null
+  const field = findTopLevelField(schema, ast.path[0])
+  // An optional/missing field makes evaluation fail closed, so it cannot be
+  // proven true for every valid submission.
+  if (
+    !field
+    || field.type !== 'number'
+    || field.required !== true
+    || field.visibilityRule !== undefined
+  ) return null
+  const min = finiteFieldBound(field, 'min') ?? Number.NEGATIVE_INFINITY
+  const max = finiteFieldBound(field, 'max') ?? Number.POSITIVE_INFINITY
+  return min <= max ? { min, max } : null
+}
+
+function formulaAstEquals(left: FormulaAst, right: FormulaAst): boolean {
+  if (left.kind !== right.kind) return false
+  switch (left.kind) {
+    case 'number':
+      return right.kind === 'number' && left.value === right.value
+    case 'string':
+      return right.kind === 'string' && left.value === right.value
+    case 'boolean':
+      return right.kind === 'boolean' && left.value === right.value
+    case 'null':
+      return right.kind === 'null'
+    case 'field':
+      return right.kind === 'field'
+        && left.path.length === right.path.length
+        && left.path.every((part, index) => part === right.path[index])
+    case 'requester':
+      return right.kind === 'requester' && left.attr === right.attr
+    case 'aggregate':
+      return right.kind === 'aggregate'
+        && left.fn === right.fn
+        && left.path.length === right.path.length
+        && left.path.every((part, index) => part === right.path[index])
+    case 'membership':
+      return right.kind === 'membership'
+        && left.attr === right.attr
+        && left.elements.length === right.elements.length
+        && left.elements.every((element, index) => element === right.elements[index])
+    case 'unary':
+      return right.kind === 'unary'
+        && left.op === right.op
+        && formulaAstEquals(left.expr, right.expr)
+    case 'binary':
+      return right.kind === 'binary'
+        && left.op === right.op
+        && formulaAstEquals(left.left, right.left)
+        && formulaAstEquals(left.right, right.right)
+    case 'compare':
+      return right.kind === 'compare'
+        && left.op === right.op
+        && formulaAstEquals(left.left, right.left)
+        && formulaAstEquals(left.right, right.right)
+  }
+}
+
+function formulaAstIsTotalForSchema(ast: FormulaAst, schema: FormSchema): boolean {
+  if (
+    ast.kind === 'number'
+    || ast.kind === 'string'
+    || ast.kind === 'boolean'
+    || ast.kind === 'null'
+  ) return true
+  if (ast.kind === 'field') {
+    if (ast.path.length !== 1) return false
+    const field = findTopLevelField(schema, ast.path[0])
+    return Boolean(field && field.required === true && field.visibilityRule === undefined)
+  }
+  if (ast.kind === 'unary') return formulaAstIsTotalForSchema(ast.expr, schema)
+  if (ast.kind === 'compare') {
+    return formulaAstIsTotalForSchema(ast.left, schema)
+      && formulaAstIsTotalForSchema(ast.right, schema)
+  }
+  if (ast.kind === 'binary' && (ast.op === 'AND' || ast.op === 'OR')) {
+    return formulaAstIsTotalForSchema(ast.left, schema)
+      && formulaAstIsTotalForSchema(ast.right, schema)
+  }
+  return false
+}
+
+function formulaAstIsAlgebraicallyZero(ast: FormulaAst): boolean {
+  if (ast.kind === 'number') return ast.value === 0
+  if (ast.kind === 'unary' && ast.op === 'NEG') {
+    return formulaAstIsAlgebraicallyZero(ast.expr)
+  }
+  if (ast.kind !== 'binary') return false
+  if (ast.op === '-' && formulaAstEquals(ast.left, ast.right)) return true
+  if (ast.op === '*') {
+    return formulaAstIsAlgebraicallyZero(ast.left) || formulaAstIsAlgebraicallyZero(ast.right)
+  }
+  if (ast.op === '+') {
+    return formulaAstIsAlgebraicallyZero(ast.left) && formulaAstIsAlgebraicallyZero(ast.right)
+  }
+  return ast.op === '-'
+    && formulaAstIsAlgebraicallyZero(ast.left)
+    && formulaAstIsAlgebraicallyZero(ast.right)
+}
+
+type FormulaTruthMode = 'semantic' | 'capture-policy'
+
+function compareRangeTruth(
+  op: Extract<FormulaAst, { kind: 'compare' }>['op'],
+  left: NumericRange,
+  right: NumericRange,
+): FormulaTruth {
+  if (op === '>') {
+    if (left.min > right.max) return 'always_true'
+    if (left.max <= right.min) return 'always_false'
+  } else if (op === '>=') {
+    if (left.min >= right.max) return 'always_true'
+    if (left.max < right.min) return 'always_false'
+  } else if (op === '<') {
+    if (left.max < right.min) return 'always_true'
+    if (left.min >= right.max) return 'always_false'
+  } else if (op === '<=') {
+    if (left.max <= right.min) return 'always_true'
+    if (left.min > right.max) return 'always_false'
+  } else if (op === '==') {
+    if (left.min === left.max && right.min === right.max && left.min === right.min) return 'always_true'
+    if (left.max < right.min || right.max < left.min) return 'always_false'
+  } else if (left.max < right.min || right.max < left.min) {
+    return 'always_true'
+  } else if (left.min === left.max && right.min === right.max && left.min === right.min) {
+    return 'always_false'
+  }
+  return 'unknown'
+}
+
+function formulaTruth(
+  ast: FormulaAst,
+  schema: FormSchema,
+  mode: FormulaTruthMode,
+): FormulaTruth {
+  if (ast.kind === 'boolean') return ast.value ? 'always_true' : 'always_false'
+  if (ast.kind === 'unary' && ast.op === 'NOT') {
+    const inner = formulaTruth(ast.expr, schema, mode)
+    return inner === 'always_true' ? 'always_false' : inner === 'always_false' ? 'always_true' : 'unknown'
+  }
+  if (ast.kind === 'binary' && (ast.op === 'AND' || ast.op === 'OR')) {
+    const left = formulaTruth(ast.left, schema, mode)
+    const right = formulaTruth(ast.right, schema, mode)
+    if (ast.op === 'AND') {
+      if (
+        left === 'always_false'
+        && (mode === 'capture-policy' || formulaAstIsTotalForSchema(ast.right, schema))
+      ) return 'always_false'
+      if (
+        right === 'always_false'
+        && (mode === 'capture-policy' || formulaAstIsTotalForSchema(ast.left, schema))
+      ) return 'always_false'
+      return left === 'always_true' && right === 'always_true' ? 'always_true' : 'unknown'
+    }
+    if (
+      left === 'always_true'
+      && (mode === 'capture-policy' || formulaAstIsTotalForSchema(ast.right, schema))
+    ) return 'always_true'
+    if (
+      right === 'always_true'
+      && (mode === 'capture-policy' || formulaAstIsTotalForSchema(ast.left, schema))
+    ) return 'always_true'
+    return left === 'always_false' && right === 'always_false' ? 'always_false' : 'unknown'
+  }
+  if (ast.kind === 'compare') {
+    const identityOperands = formulaAstEquals(ast.left, ast.right)
+      || (
+        formulaAstIsAlgebraicallyZero(ast.left)
+        && formulaAstIsAlgebraicallyZero(ast.right)
+      )
+    const identityIsTotal = mode === 'capture-policy'
+      || (
+        formulaAstIsTotalForSchema(ast.left, schema)
+        && formulaAstIsTotalForSchema(ast.right, schema)
+      )
+    if (identityOperands && identityIsTotal) {
+      return ast.op === '==' || ast.op === '>=' || ast.op === '<='
+        ? 'always_true'
+        : 'always_false'
+    }
+    const left = numericRange(ast.left, schema)
+    const right = numericRange(ast.right, schema)
+    return left && right ? compareRangeTruth(ast.op, left, right) : 'unknown'
+  }
+  return 'unknown'
+}
+
+/**
+ * Conservative authoring guard for formulas that still mention a field but
+ * are guaranteed true by that required numeric field's configured bounds.
+ * Unknown is always allowed; this never guesses from sampled values.
+ */
+export function approvalConditionFormulaIsProvablyAlwaysTrue(
+  expression: string,
+  schema: FormSchema = { fields: [] },
+): boolean {
+  return formulaTruth(parseFormula(expression), schema, 'semantic') === 'always_true'
+}
+
+/**
+ * Authoring/runtime policy for formulas that become match-all whenever their
+ * referenced values are present. This is deliberately separate from semantic
+ * truth: optional fields and requester attributes may fail closed at runtime,
+ * so their self-comparisons are not true for every valid request, but they are
+ * still unsafe first-match-wins routing rules.
+ */
+export function approvalConditionFormulaHasCaptureProneIdentity(expression: string): boolean {
+  return formulaTruth(parseFormula(expression), { fields: [] }, 'capture-policy') === 'always_true'
+}
+
 /**
  * Token-aware: does the formula reference `requester.<attr>` as an actual reserved requester TOKEN —
  * not a string literal like "requester.department" or a field name that merely contains the text?

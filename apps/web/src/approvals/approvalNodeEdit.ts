@@ -1,14 +1,18 @@
 import type {
   ApprovalAssigneeSource,
   ApprovalGraph,
+  ApprovalMode,
   ApprovalNode,
   ApprovalNodeConfig,
+  AutoApprovalPolicy,
+  EmptyAssigneePolicy,
+  NodeFieldPermission,
 } from '../types/approval'
 import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../types/approval'
 
-// G-5 — approval-node editing inside a preserved complex graph. SCOPE: the approver SOURCE only
-// (`assigneeSources`). `approvalMode` / `emptyAssigneePolicy` / `autoApprovalPolicy` / any other
-// config key are PRESERVED verbatim, NOT yet editable (a later slice). The node's edges/position
+// Approval-node editing inside a preserved graph. The editor owns the fields already available in
+// the linear authoring surface: approver source, approval/empty-assignee modes, requester-merge,
+// and field permissions. Any other allowlisted config stays preserved verbatim. The node's edges
 // are TOPOLOGY — preserved byte-for-byte (G-1 anti-flatten floor). Every OTHER node/edge —
 // condition (G-2), parallel (G-3), cc (G-4), start/end — is preserved verbatim. No .vue / Element
 // Plus import, so this runs under the approval-web-guard vitest gate.
@@ -21,15 +25,14 @@ import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../types/approval'
 // The editor + `validateApprovalNodeEdits` mirror this (backend `normalizeApprovalGraph` stays the
 // sole arbiter; the preview never relaxes it).
 
-/**
- * Editable model for one approval node — the approver `assigneeSources` array ONLY, keyed by node
- * `key`, seeded 1:1 from the preserved approval nodes' existing config. The node's place in the
- * graph (edges), its `approvalMode`, `emptyAssigneePolicy`, and `autoApprovalPolicy` are NOT carried
- * here (preserved verbatim by `applyApprovalNodeEditsToGraph`).
- */
+/** Optional fields preserve absence; `null` explicitly removes autoApprovalPolicy. */
 export interface ApprovalNodeSourceEdit {
   nodeKey: string
   assigneeSources: ApprovalAssigneeSource[]
+  approvalMode?: ApprovalMode
+  emptyAssigneePolicy?: EmptyAssigneePolicy
+  autoApprovalPolicy?: AutoApprovalPolicy | null
+  fieldPermissions?: NodeFieldPermission[]
 }
 
 /** Map of approval-node source edits keyed by node key, seeded from a preserved graph. */
@@ -62,18 +65,21 @@ export function approvalNodeEditsFromGraph(graph: ApprovalGraph | undefined): Ap
   if (!graph) return edits
   for (const node of graph.nodes) {
     if (node.type !== 'approval' || !hasAssigneeSources(node.config)) continue
-    edits[node.key] = { nodeKey: node.key, assigneeSources: cloneJson(node.config.assigneeSources) }
+    edits[node.key] = {
+      nodeKey: node.key,
+      assigneeSources: cloneJson(node.config.assigneeSources),
+      ...(node.config.approvalMode !== undefined ? { approvalMode: node.config.approvalMode } : {}),
+      ...(node.config.emptyAssigneePolicy !== undefined ? { emptyAssigneePolicy: node.config.emptyAssigneePolicy } : {}),
+      ...(node.config.autoApprovalPolicy !== undefined ? { autoApprovalPolicy: cloneJson(node.config.autoApprovalPolicy) } : {}),
+      ...(node.config.fieldPermissions !== undefined ? { fieldPermissions: cloneJson(node.config.fieldPermissions) } : {}),
+    }
   }
   return edits
 }
 
 /**
- * Replace ONLY the `assigneeSources` of each edited approval node, leaving EVERY other node and ALL
- * edges byte-identical (deep-cloned so the input is never mutated). Spread-original-first keeps the
- * other config keys (`approvalMode` / `emptyAssigneePolicy` / `autoApprovalPolicy`) and byte-stable
- * key order, so an UNTOUCHED node reproduces its config exactly (the guard requires `assigneeSources`
- * already present, so the spread never adds a key). A legacy node (no `assigneeSources`) has no edit
- * and is cloned verbatim.
+ * Apply the graph editor's owned fields while leaving every other node, edge, and config field
+ * byte-identical. Optional fields only overwrite when present, preserving untouched absence.
  *
  * Composition with G-2/G-3/G-4: approval / condition / parallel / cc are DISJOINT node types and
  * each pass deep-clones everything else, so composing the four lands all edits while every
@@ -86,6 +92,14 @@ export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: Appro
     if (!edit) return cloneJson(node)
     const originalConfig = cloneJson(node.config)
     const config: ApprovalNodeConfig = { ...originalConfig, assigneeSources: cloneJson(edit.assigneeSources) }
+    if (edit.approvalMode !== undefined) config.approvalMode = edit.approvalMode
+    if (edit.emptyAssigneePolicy !== undefined) config.emptyAssigneePolicy = edit.emptyAssigneePolicy
+    if (edit.autoApprovalPolicy === null) delete config.autoApprovalPolicy
+    else if (edit.autoApprovalPolicy !== undefined) config.autoApprovalPolicy = cloneJson(edit.autoApprovalPolicy)
+    if (edit.fieldPermissions !== undefined) {
+      if (edit.fieldPermissions.length > 0) config.fieldPermissions = cloneJson(edit.fieldPermissions)
+      else delete config.fieldPermissions
+    }
     return { ...cloneJson(node), config }
   })
   return {
@@ -147,6 +161,21 @@ export function validateApprovalNodeEdits(
         } else {
           errors.push(`审批节点 ${edit.nodeKey} 的审批人来源（${source.kind}）配置无效`)
         }
+      }
+    }
+    if (edit.approvalMode !== undefined && !(['single', 'all', 'any'] as const).includes(edit.approvalMode)) {
+      errors.push(`审批节点 ${edit.nodeKey} 的审批模式无效`)
+    }
+    if (edit.emptyAssigneePolicy !== undefined && !(['error', 'auto-approve'] as const).includes(edit.emptyAssigneePolicy)) {
+      errors.push(`审批节点 ${edit.nodeKey} 的空审批人策略无效`)
+    }
+    for (const permission of edit.fieldPermissions ?? []) {
+      const fieldId = permission.fieldId.trim()
+      if (!fieldId || (fields && !fields.some((field) => field.id.trim() === fieldId))) {
+        errors.push(`审批节点 ${edit.nodeKey} 的字段权限引用了不存在的字段`)
+      }
+      if (!(['editable', 'readonly', 'hidden'] as const).includes(permission.access)) {
+        errors.push(`审批节点 ${edit.nodeKey} 的字段权限类型无效`)
       }
     }
   }

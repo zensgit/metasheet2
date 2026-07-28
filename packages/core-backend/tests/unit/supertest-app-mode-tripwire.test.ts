@@ -40,20 +40,24 @@ describe('supertest app-mode tripwire', () => {
   it('scanner is recursive: nested app-mode sites are counted (fixture discriminator)', () => {
     // Owner P2: a top-level-only scan would let tests placed in subdirectories bypass the ban.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appmode-scan-fixture-'))
-    const nested = path.join(dir, 'nested', 'deep')
-    fs.mkdirSync(nested, { recursive: true })
-    fs.writeFileSync(
-      path.join(dir, 'top.test.ts'),
-      "import request from 'supertest'\ndeclare const app: unknown\nrequest(app)\n",
-    )
-    fs.writeFileSync(
-      path.join(nested, 'hidden.test.ts'),
-      "import request from 'supertest'\ndeclare const app: unknown\nrequest(app)\nrequest(app)\n",
-    )
-    const scan = scanAppModeSites(dir)
-    expect(scan.counts['top.test.ts']).toBe(1)
-    expect(scan.counts['nested/deep/hidden.test.ts'], 'nested file must be found by the recursive walk').toBe(2)
-    expect(scan.totalSites).toBe(3)
+    try {
+      const nested = path.join(dir, 'nested', 'deep')
+      fs.mkdirSync(nested, { recursive: true })
+      fs.writeFileSync(
+        path.join(dir, 'top.test.ts'),
+        "import request from 'supertest'\ndeclare const app: unknown\nrequest(app)\n",
+      )
+      fs.writeFileSync(
+        path.join(nested, 'hidden.test.ts'),
+        "import request from 'supertest'\ndeclare const app: unknown\nrequest(app)\nrequest(app)\n",
+      )
+      const scan = scanAppModeSites(dir)
+      expect(scan.counts['top.test.ts']).toBe(1)
+      expect(scan.counts['nested/deep/hidden.test.ts'], 'nested file must be found by the recursive walk').toBe(2)
+      expect(scan.totalSites).toBe(3)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('the app-mode debt IS zero and stays zero — no regeneration channel exists', () => {

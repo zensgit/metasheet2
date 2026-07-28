@@ -1,4 +1,8 @@
 # Attendance web guard (targeted gate).
+# Pull requests intentionally have no top-level `paths` filter: this job must always create a
+# stable status so it can become a required check later. The changed-file classifier below keeps
+# unrelated PRs cheap and dependency-free while preserving the targeted Vitest gate for attendance
+# changes. Main pushes retain the existing path filter.
 #
 # Why this exists: the main PR gate (plugin-tests.yml) runs core-backend tests and only
 # `pnpm --filter @metasheet/web build` for the web app — it does NOT run apps/web vitest
@@ -57,7 +61,62 @@
 # fallback — see docs/development/attendance-bulk-balance-adjust-s6-design-lock-20260710.md,
 # #3925; DOM-level confirm-gate / exact-POST-body / cap-block / partial-failure / policy-off
 # coverage for the same slice lives in attendance-admin-regressions.spec.ts, already covered by
-# this guard).
+# this guard), and AttendanceAdminTaskHome.spec.ts (new — vNext charter §7 Wave 3 / issue
+# #4353, reclaimed from stacked draft #4414: mounted spec for the extracted four-task-group
+# admin home component — header/region semantics, link-vs-button action rendering,
+# select-section emit, empty-groups-render-nothing for parent-side permission filtering — see
+# docs/development/attendance-vnext-dingtalk-benchmark-ux-development-charter-20260720.md), and
+# attendance-experience-entrypoints.spec.ts (newly wired here — Wave 3 added real behavior to
+# this previously-ungated file: the admin/import "Management home" clear-section round trip
+# through the router and the overview anomaly-section deep link; the file's pre-existing
+# tab/section routing coverage rides along), and attendance-setup-readiness.spec.ts (W4-0 —
+# vNext Wave 4 onboarding design-lock 2026-07-21: pure discriminator matrix for the seven-step
+# setup-readiness aggregate, `attendanceSetupReadiness.ts` — full status-value domain × step
+# coverage, previewReady's ①②③⑤-only formula, and ⑥'s three-signals-never-merged contract; see
+# docs/development/attendance-vnext-wave4-onboarding-design-lock-20260721.md §3/§7/§9), and
+# AttendanceSetupReadiness.spec.ts + useAttendanceSetupReadiness.spec.ts (W4-1 — same design
+# lock §9 W4-1: mounted wizard-shell spec (seven-value status render matrix, R2 zero-hash deep
+# links, §3① role-gated step① remediation, §4.5(iii) step⑥ copy negatives, ⑦ manual activation
+# checklist, effectiveTime four-state render, AttendanceView section/task-home/deep-link wiring)
+# plus the fetch-composable spec (HTTP→discriminator folding, enum-strict body validation, §6.1
+# readiness-derived task-home badge)), and attendance-setup-templates.spec.ts (W4-2 — same design
+# lock §5/§9 W4-2: four-template FE-constant matrix vs Appendix A + 时区禁硬编码 negative
+# (attendanceSetupTemplates.ts), wizard-shell template gallery / open-template emit / ⑦ full
+# read-only impact derivation / checklist template item + §5.3 completion-claim negatives (zh AND
+# en legs), and the mounted AttendanceView §5.2 prefill contract: overwrite-confirm dialog before
+# any write, snapshot undo byte-identical restore incl. editing posture, R3 zero-write walk at
+# the mock network layer, R4 banned switch/trigger door negatives, OD-W4-7 beforeunload +
+# zero-template-storage assertions), and attendance-decision-trace.spec.ts +
+# AttendanceDecisionTrace.spec.ts + attendance-decision-trace-wiring.spec.ts (W5-1 — Wave 5
+# explainability design-lock 2026-07-22 RATIFIED §6/§9 W5-1: pure decision-trace mapping matrix
+# (six-category strict whitelist parse, posture/confidence/reasonCode closed sets, ⑤ lot
+# known/unknown union exact key set, copy doors「无法确定依据」/「当前规则（无历史版本）」+
+# 「可能不同于决策当时的规则」W5-8 gate, OD-W5-5 retention disclosure, R2 canonical query-form
+# deep links), the mounted display component render matrix (zh+en legs, zero write CTA), and the
+# AttendanceView dual-face wiring (admin section + self overview card + OD-W5-7/#4562 comp_time
+# leaveTypeCode channel via real UI triggers, R1 zero-write + R3 single-fetch negatives at the
+# mock network layer) — see
+# docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md), and
+# attendance-context-help.spec.ts + AttendanceContextHelp.spec.ts +
+# attendance-context-help-wiring.spec.ts (W5-2 — same design lock §6/§9 W5-2: pure closed-set
+# contextual-help content module (charter §4.6 four categories, one category-set per task context —
+# 'setup-wizard' ①②, 'import' ③, 'self-request-center' ④ — never all four crammed into one mount),
+# the L225 values-free per-item zero-occurrence scan, the ③ import closed-set-code reuse
+# (BlockedSpreadsheetKind / AttendanceXlsxConvertFailure) with a regression guard proving its copy
+# never collides with the REACTIVE xlsx-guard banner text elsewhere on the same always-mounted
+# section, the ④ evidence-link reuse of the W5-1 canonical deep-link builder (R2 zero-hash) and its
+# missing_punch preset, the mounted component's zh+en render matrix and R1 zero-write-CTA shape, and
+# the AttendanceSetupReadiness.vue / AttendanceView.vue wiring (real admin-rail navigation + the
+# self overview evidence-link click driving the SELF decision-trace endpoint with R1 negatives at
+# the mock network layer), and attendance-decision-trace-metric.spec.ts (Wave 5 收官验证 — the
+# design lock's §10 completion-definition 12-cell explainability metric matrix: six categories ×
+# {positive cell, undeterminable fail-closed cell}, mounted against the real component + real pure
+# module, one fixture per cell transcribed from the corresponding backend
+# `buildXxxTrace`/`deriveAttendanceDecisionTraceConfidence` builder — including the cross-cutting
+# posture-ceiling guard proving `confidence==='grounded'` is reachable for exactly one of the six
+# categories (⑥审批人来源) and never fabricated for the other five — see
+# docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md §9/§10 and
+# docs/development/attendance-vnext-wave5-explainability-development-verification-20260724.md).
 # The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
 # suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
@@ -66,49 +125,13 @@ name: Attendance Web Guard
 
 on:
   pull_request:
-    paths:
-      - 'apps/web/src/views/AttendanceView.vue'
-      - 'apps/web/src/views/attendance/**'
-      - 'apps/web/tests/attendance-admin-regressions.spec.ts'
-      - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
-      - 'apps/web/tests/useAttendanceAdminRail.spec.ts'
-      - 'apps/web/tests/useAttendanceAdminRailNavigation.spec.ts'
-      - 'apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts'
-      - 'apps/web/tests/attendance-selfservice-dashboard.spec.ts'
-      - 'apps/web/tests/attendance-caliber-transparency.spec.ts'
-      - 'apps/web/tests/attendance-punch-outcome.spec.ts'
-      - 'apps/web/tests/attendance-import-override-guard.spec.ts'
-      - 'apps/web/tests/attendance-halfday-leave-helper.spec.ts'
-      - 'apps/web/tests/attendance-schedule-bulk-apply.spec.ts'
-      - 'apps/web/tests/attendance-import-file-guard.spec.ts'
-      - 'apps/web/tests/attendance-import-preview-regression.spec.ts'
-      - 'apps/web/tests/useAttendanceAdminImportWorkflow.spec.ts'
-      - 'apps/web/tests/attendance-import-template-columns.spec.ts'
-      - 'apps/web/tests/attendance-import-header-recognition.spec.ts'
-      - 'apps/web/tests/attendance-import-xlsx-convert.spec.ts'
-      - 'apps/web/tests/useAttendanceAdminImportBatches.spec.ts'
-      - 'apps/web/src/utils/dingtalkContainer.ts'
-      - 'apps/web/tests/dingtalk-container.spec.ts'
-      - 'apps/web/tests/attendance-bulk-balance-adjust.spec.ts'
-      - 'apps/web/src/views/LoginView.vue'
-      - 'apps/web/tests/LoginView.spec.ts'
-      - 'apps/web/tests/attendance-token-ratchet.spec.ts'
-      - 'apps/web/src/views/attendance/AttendanceApprovalFlowStepsEditor.vue'
-      - 'apps/web/src/views/attendance/attendanceApprovalSteps.ts'
-      - 'apps/web/src/views/attendance/useAttendanceApprovalDirectoryReadiness.ts'
-      - 'apps/web/tests/attendance-approval-steps.spec.ts'
-      - 'apps/web/tests/AttendanceApprovalFlowStepsEditor.spec.ts'
-      - 'apps/web/src/views/attendance/reportXlsxExport.ts'
-      - 'apps/web/tests/attendance-report-xlsx-export.spec.ts'
-      - 'apps/web/tests/attendance-reports-analytics.spec.ts'
-      - 'apps/web/tests/attendance-overview-priority.spec.ts'
-      - '.github/workflows/attendance-web-guard.yml'
   push:
     branches: [main]
     paths:
       - 'apps/web/src/views/AttendanceView.vue'
       - 'apps/web/src/views/attendance/**'
       - 'apps/web/tests/attendance-admin-regressions.spec.ts'
+      - 'apps/web/tests/attendance-shift-segments.spec.ts'
       - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - 'apps/web/tests/useAttendanceAdminRail.spec.ts'
       - 'apps/web/tests/useAttendanceAdminRailNavigation.spec.ts'
@@ -141,6 +164,20 @@ on:
       - 'apps/web/tests/attendance-report-xlsx-export.spec.ts'
       - 'apps/web/tests/attendance-reports-analytics.spec.ts'
       - 'apps/web/tests/attendance-overview-priority.spec.ts'
+      - 'apps/web/tests/AttendanceAdminTaskHome.spec.ts'
+      - 'apps/web/tests/attendance-experience-entrypoints.spec.ts'
+      - 'apps/web/tests/attendance-setup-readiness.spec.ts'
+      - 'apps/web/tests/AttendanceSetupReadiness.spec.ts'
+      - 'apps/web/tests/useAttendanceSetupReadiness.spec.ts'
+      - 'apps/web/tests/attendance-setup-templates.spec.ts'
+      - 'apps/web/tests/attendance-decision-trace.spec.ts'
+      - 'apps/web/tests/AttendanceDecisionTrace.spec.ts'
+      - 'apps/web/tests/attendance-decision-trace-wiring.spec.ts'
+      - 'apps/web/tests/attendance-context-help.spec.ts'
+      - 'apps/web/tests/AttendanceContextHelp.spec.ts'
+      - 'apps/web/tests/attendance-context-help-wiring.spec.ts'
+      - 'apps/web/tests/attendance-web-guard-workflow.spec.ts'
+      - 'apps/web/tests/attendance-decision-trace-metric.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -149,29 +186,123 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect relevant attendance changes
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff-tree --root --no-commit-id --name-only -r "$HEAD_SHA")"
+          else
+            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          fi
+
+          relevant=false
+          while IFS= read -r path; do
+            case "$path" in
+              apps/web/src/views/AttendanceView.vue|\
+              apps/web/src/views/attendance/*|\
+              apps/web/tests/attendance-admin-regressions.spec.ts|\
+              apps/web/tests/attendance-shift-segments.spec.ts|\
+              apps/web/tests/attendance-admin-anchor-nav.spec.ts|\
+              apps/web/tests/useAttendanceAdminRail.spec.ts|\
+              apps/web/tests/useAttendanceAdminRailNavigation.spec.ts|\
+              apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts|\
+              apps/web/tests/attendance-selfservice-dashboard.spec.ts|\
+              apps/web/tests/attendance-caliber-transparency.spec.ts|\
+              apps/web/tests/attendance-punch-outcome.spec.ts|\
+              apps/web/tests/attendance-import-override-guard.spec.ts|\
+              apps/web/tests/attendance-halfday-leave-helper.spec.ts|\
+              apps/web/tests/attendance-schedule-bulk-apply.spec.ts|\
+              apps/web/tests/attendance-import-file-guard.spec.ts|\
+              apps/web/tests/attendance-import-preview-regression.spec.ts|\
+              apps/web/tests/useAttendanceAdminImportWorkflow.spec.ts|\
+              apps/web/tests/attendance-import-template-columns.spec.ts|\
+              apps/web/tests/attendance-import-header-recognition.spec.ts|\
+              apps/web/tests/attendance-import-xlsx-convert.spec.ts|\
+              apps/web/tests/useAttendanceAdminImportBatches.spec.ts|\
+              apps/web/src/utils/dingtalkContainer.ts|\
+              apps/web/tests/dingtalk-container.spec.ts|\
+              apps/web/tests/attendance-bulk-balance-adjust.spec.ts|\
+              apps/web/src/views/LoginView.vue|\
+              apps/web/tests/LoginView.spec.ts|\
+              apps/web/tests/attendance-token-ratchet.spec.ts|\
+              apps/web/src/views/attendance/AttendanceApprovalFlowStepsEditor.vue|\
+              apps/web/src/views/attendance/attendanceApprovalSteps.ts|\
+              apps/web/src/views/attendance/useAttendanceApprovalDirectoryReadiness.ts|\
+              apps/web/tests/attendance-approval-steps.spec.ts|\
+              apps/web/tests/AttendanceApprovalFlowStepsEditor.spec.ts|\
+              apps/web/src/views/attendance/reportXlsxExport.ts|\
+              apps/web/tests/attendance-report-xlsx-export.spec.ts|\
+              apps/web/tests/attendance-reports-analytics.spec.ts|\
+              apps/web/tests/attendance-overview-priority.spec.ts|\
+              apps/web/tests/AttendanceAdminTaskHome.spec.ts|\
+              apps/web/tests/attendance-experience-entrypoints.spec.ts|\
+              apps/web/tests/attendance-setup-readiness.spec.ts|\
+              apps/web/tests/AttendanceSetupReadiness.spec.ts|\
+              apps/web/tests/useAttendanceSetupReadiness.spec.ts|\
+              apps/web/tests/attendance-setup-templates.spec.ts|\
+              apps/web/tests/attendance-decision-trace.spec.ts|\
+              apps/web/tests/AttendanceDecisionTrace.spec.ts|\
+              apps/web/tests/attendance-decision-trace-wiring.spec.ts|\
+              apps/web/tests/attendance-context-help.spec.ts|\
+              apps/web/tests/AttendanceContextHelp.spec.ts|\
+              apps/web/tests/attendance-context-help-wiring.spec.ts|\
+              apps/web/tests/attendance-web-guard-workflow.spec.ts|\
+              .github/workflows/attendance-web-guard.yml)
+                relevant=true
+                break
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [[ "$relevant" == true ]]; then
+            echo "Attendance Web Guard: relevant changes detected for $EVENT_NAME."
+          else
+            echo "Attendance Web Guard: no relevant changes detected for $EVENT_NAME."
+          fi
+
+      - name: Report success for unrelated changes
+        if: steps.changes.outputs.relevant == 'false'
+        run: |
+          echo 'Attendance Web Guard passed: no guarded attendance web files changed.'
 
       - name: Setup Node.js 20.x
+        if: steps.changes.outputs.relevant == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 20.x
 
       - name: Setup pnpm
+        if: steps.changes.outputs.relevant == 'true'
         uses: pnpm/action-setup@v4
         with:
           version: 10.16.1
           run_install: false
 
       - name: Use empty npmrc for pnpm
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           echo "" > /tmp/empty-npmrc
           echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
 
       - name: Get pnpm store directory
+        if: steps.changes.outputs.relevant == 'true'
         id: pnpm-cache
         shell: bash
         run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
 
       - name: Setup pnpm cache
+        if: steps.changes.outputs.relevant == 'true'
         uses: actions/cache@v4
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -180,7 +311,9 @@ jobs:
             ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies
+        if: steps.changes.outputs.relevant == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority --reporter=dot
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendance-web-guard-workflow.spec --reporter=dot

@@ -634,12 +634,42 @@ components:
           format: date
         requesterShiftId:
           type: string
+          nullable: true
+          description: Null when historical evidence outlives its deleted requester shift.
         requester_shift_id:
           type: string
+          nullable: true
+          deprecated: true
+        requesterShiftLabel:
+          type: string
+          description: >-
+            Resolved requester shift name or a neutral deleted/unavailable
+            label.
+        requesterShiftStatus:
+          type: string
+          enum:
+            - available
+            - deleted
         counterpartyShiftId:
           type: string
+          nullable: true
+          description: >-
+            Null when historical evidence outlives its deleted counterparty
+            shift.
         counterparty_shift_id:
           type: string
+          nullable: true
+          deprecated: true
+        counterpartyShiftLabel:
+          type: string
+          description: >-
+            Resolved counterparty shift name or a neutral deleted/unavailable
+            label.
+        counterpartyShiftStatus:
+          type: string
+          enum:
+            - available
+            - deleted
         requesterSlotIndex:
           type: integer
         requester_slot_index:
@@ -705,6 +735,18 @@ components:
           nullable: true
         targetShiftId:
           type: string
+          nullable: true
+          description: >-
+            Null only when a historical cancelled dispatch outlives its deleted
+            target shift.
+        targetShiftLabel:
+          type: string
+          description: Resolved shift name or a neutral deleted/unavailable label.
+        targetShiftStatus:
+          type: string
+          enum:
+            - available
+            - deleted
         slotIndex:
           type: integer
           minimum: 0
@@ -1068,6 +1110,24 @@ components:
         description:
           type: string
           nullable: true
+        attendanceType:
+          type: string
+          enum:
+            - fixed_shift
+            - scheduled_shift
+            - free_time
+        attendance_type:
+          type: string
+          enum:
+            - fixed_shift
+            - scheduled_shift
+            - free_time
+          deprecated: true
+        memberCount:
+          type: integer
+        member_count:
+          type: integer
+          deprecated: true
         createdAt:
           type: string
           format: date-time
@@ -1091,6 +1151,62 @@ components:
           type: string
           format: date-time
           nullable: true
+    AttendanceCalculationGroupMembership:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+        userId:
+          type: string
+        groupId:
+          type: string
+          format: uuid
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        assignedBy:
+          type: string
+        assignedReason:
+          type: string
+        assignedCorrelationId:
+          type: string
+        closedBy:
+          type: string
+          nullable: true
+        closedReason:
+          type: string
+          nullable: true
+        closedCorrelationId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - orgId
+        - userId
+        - groupId
+        - effectiveFrom
+        - effectiveTo
+        - assignedBy
+        - assignedReason
+        - assignedCorrelationId
+        - closedBy
+        - closedReason
+        - closedCorrelationId
+        - createdAt
+        - updatedAt
     AttendancePayrollTemplate:
       type: object
       properties:
@@ -1826,6 +1942,128 @@ components:
           deprecated: true
           items:
             type: integer
+        segments:
+          type: array
+          description: >-
+            Canonical shift segments (W3 / #4556). Persisted rows when present;
+            a legacy shift without segment rows is synthesized as segment 0 from
+            its envelope. The legacy workStartTime/workEndTime/isOvernight
+            fields expose the OUTER envelope of these segments for compatibility
+            only — for a multi-segment shift (calculationMode=segments) the
+            envelope is not payable time.
+          items:
+            $ref: '#/components/schemas/AttendanceShiftSegment'
+        calculationMode:
+          type: string
+          enum:
+            - envelope
+            - segments
+        plannedMinutes:
+          type: integer
+          description: >-
+            Sum of per-segment planned minutes; breaks between segments are
+            never counted.
+        capabilities:
+          $ref: '#/components/schemas/AttendanceShiftCapabilities'
+    AttendanceShiftSegment:
+      type: object
+      properties:
+        id:
+          type: string
+          nullable: true
+          description: >-
+            Persisted segment row id; null when synthesized from the legacy
+            envelope.
+        segmentIndex:
+          type: integer
+          minimum: 0
+          maximum: 2
+        segment_index:
+          type: integer
+          deprecated: true
+        startTime:
+          type: string
+          description: Local wall-clock start time (HH:MM) in the parent shift timezone.
+        start_time:
+          type: string
+          deprecated: true
+        startDayOffset:
+          type: integer
+          enum:
+            - 0
+          description: Fixed to 0 in v1.
+        start_day_offset:
+          type: integer
+          deprecated: true
+        endTime:
+          type: string
+          description: Local wall-clock end time (HH:MM) in the parent shift timezone.
+        end_time:
+          type: string
+          deprecated: true
+        endDayOffset:
+          type: integer
+          minimum: 0
+          maximum: 1
+        end_day_offset:
+          type: integer
+          deprecated: true
+    AttendanceShiftSegmentInput:
+      type: object
+      additionalProperties: false
+      description: >-
+        One shift segment for create/update. 1..3 segments, dense indexes from
+        0, positive duration, ordered non-overlapping after day offsets, total
+        <= 24h, at most one midnight crossing. Unknown properties are rejected.
+      properties:
+        segmentIndex:
+          type: integer
+          minimum: 0
+          maximum: 2
+        startTime:
+          type: string
+          pattern: ^(?:[01]\d|2[0-3]):[0-5]\d$
+        endTime:
+          type: string
+          pattern: ^(?:[01]\d|2[0-3]):[0-5]\d$
+        startDayOffset:
+          type: integer
+          enum:
+            - 0
+        endDayOffset:
+          type: integer
+          minimum: 0
+          maximum: 1
+      required:
+        - startTime
+        - endTime
+    AttendanceShiftCapabilities:
+      type: object
+      description: >-
+        Values-safe capability projection (state and labels only). Shows that
+        authoritative segment calculation is disabled by default; while
+        disabled, multi-segment authoring is preview-only.
+      properties:
+        segmentCalculation:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            defaultEnabled:
+              type: boolean
+              enum:
+                - false
+            authoritativeResults:
+              type: boolean
+            multiSegmentAuthoring:
+              type: string
+              enum:
+                - preview_only
+                - enabled
+            flag:
+              type: string
+              enum:
+                - ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     AttendanceShiftAssignment:
       type: object
       properties:
@@ -1845,6 +2083,15 @@ components:
           type: string
         shift_id:
           type: string
+          deprecated: true
+        slotIndex:
+          type: integer
+          minimum: 0
+          maximum: 2
+        slot_index:
+          type: integer
+          minimum: 0
+          maximum: 2
           deprecated: true
         startDate:
           type: string
@@ -3549,7 +3796,7 @@ components:
       required:
         - fieldId
         - operator
-    FormField:
+    FormFieldDetailLeaf:
       type: object
       properties:
         id:
@@ -3587,6 +3834,128 @@ components:
         - id
         - type
         - label
+    RecordLinkFieldProps:
+      type: object
+      additionalProperties: false
+      properties:
+        baseId:
+          type: string
+          minLength: 1
+          pattern: .*\S.*
+          description: |
+            Pinned multitable base id (publish-time; filler cannot override).
+            Must be non-blank after trim — whitespace-only is invalid.
+        sheetId:
+          type: string
+          minLength: 1
+          pattern: .*\S.*
+          description: |
+            Pinned multitable sheet id (publish-time; filler cannot override).
+            Must be non-blank after trim — whitespace-only is invalid.
+      required:
+        - baseId
+        - sheetId
+    FormFieldGeneric:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum:
+            - text
+            - textarea
+            - number
+            - date
+            - datetime
+            - select
+            - multi-select
+            - user
+            - attachment
+            - detail
+        label:
+          type: string
+        required:
+          type: boolean
+        placeholder:
+          type: string
+        defaultValue:
+          nullable: true
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormOption'
+        props:
+          type: object
+          additionalProperties: true
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormFieldDetailLeaf'
+          description: >-
+            Detail-group leaf columns (only when type=detail). Never contains
+            record-link.
+      required:
+        - id
+        - type
+        - label
+    FormFieldRecordLink:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum:
+            - record-link
+          description: >
+            FWB-0 Layer 2 record-link field. Pins multitable base/sheet via
+            props and stores
+
+            exactly one `{ recordId }` value. Top-level only in v1 (never a
+            detail leaf).
+        label:
+          type: string
+        required:
+          type: boolean
+        placeholder:
+          type: string
+        defaultValue:
+          nullable: true
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormOption'
+        props:
+          $ref: '#/components/schemas/RecordLinkFieldProps'
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
+      required:
+        - id
+        - type
+        - label
+        - props
+    FormField:
+      oneOf:
+        - $ref: '#/components/schemas/FormFieldRecordLink'
+        - $ref: '#/components/schemas/FormFieldGeneric'
+      discriminator:
+        propertyName: type
+        mapping:
+          record-link: '#/components/schemas/FormFieldRecordLink'
+          text: '#/components/schemas/FormFieldGeneric'
+          textarea: '#/components/schemas/FormFieldGeneric'
+          number: '#/components/schemas/FormFieldGeneric'
+          date: '#/components/schemas/FormFieldGeneric'
+          datetime: '#/components/schemas/FormFieldGeneric'
+          select: '#/components/schemas/FormFieldGeneric'
+          multi-select: '#/components/schemas/FormFieldGeneric'
+          user: '#/components/schemas/FormFieldGeneric'
+          attachment: '#/components/schemas/FormFieldGeneric'
+          detail: '#/components/schemas/FormFieldGeneric'
     FormSchema:
       type: object
       properties:
@@ -4696,7 +5065,156 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: Forbidden - approvals:write permission is required.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error
+                properties:
+                  error:
+                    type: string
+                    example: Insufficient permissions
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/approvals/record-link-options:
+    get:
+      operationId: listApprovalRecordLinkOptions
+      tags:
+        - Approvals
+      summary: List candidate records for an approval record-link field
+      description: >
+        FWB-0 Layer 2 dedicated candidate picker for ordinary fillers. Scoped to
+        a
+
+        server-pinned (baseId, sheetId) pair from a form `record-link` field.
+        Requires
+
+        the same `approvals:write` permission as createApproval (not
+        read/act-only).
+
+
+        Returns only rows the actor can read, with human display labels derived
+        from
+
+        visible non-computed source fields (never a raw record id). Missing
+        sheet,
+
+        base mismatch, and unreadable target share one public refuse shape (no
+        existence
+
+        oracle). Does NOT reuse multitable `/fields/:fieldId/link-options`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: baseId
+          required: true
+          schema:
+            type: string
+          description: Pinned multitable base id from the form field props.
+        - in: query
+          name: sheetId
+          required: true
+          schema:
+            type: string
+          description: Pinned multitable sheet id from the form field props.
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: >-
+            Optional case-insensitive search against the effective display
+            label.
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - records
+                  - page
+                properties:
+                  records:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - id
+                        - display
+                      properties:
+                        id:
+                          type: string
+                          description: >-
+                            Record id (selection value only; never used as the
+                            display label).
+                        display:
+                          type: string
+                          description: >-
+                            Human label from visible source fields, or a generic
+                            placeholder.
+                  page:
+                    type: object
+                    required:
+                      - limit
+                      - offset
+                      - total
+                      - hasMore
+                    properties:
+                      limit:
+                        type: integer
+                      offset:
+                        type: integer
+                      total:
+                        type: integer
+                      hasMore:
+                        type: boolean
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden - approvals:write permission is required.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error
+                properties:
+                  error:
+                    type: string
+                    example: Insufficient permissions
+        '404':
+          description: >
+            Target sheet not found / base mismatch / unreadable (shared
+            no-oracle shape).
+
+            Body is the same approval error envelope as other 4xx routes
+
+            (`ok: false` with nested `error.code` + `error.message`; it never
+
+            distinguishes missing from denied).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approvals/pending:
@@ -7574,6 +8092,17 @@ paths:
                 is_overnight:
                   type: boolean
                   deprecated: true
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 3
+                  description: >-
+                    Canonical segments (W3). Mutually exclusive with the legacy
+                    workStartTime/workEndTime/isOvernight fields. While
+                    authoritative segment calculation is disabled for the org,
+                    multi-segment shifts are authoring preview-only.
+                  items:
+                    $ref: '#/components/schemas/AttendanceShiftSegmentInput'
                 lateGraceMinutes:
                   type: integer
                 late_grace_minutes:
@@ -7620,6 +8149,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '422':
+          description: >-
+            Typed segment rejection with zero writes:
+            ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array) or
+            ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with
+            legacy start/end fields).
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -7678,6 +8213,20 @@ paths:
                   type: string
                 workEndTime:
                   type: string
+                isOvernight:
+                  type: boolean
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 3
+                  description: >-
+                    Canonical segments (W3). Mutually exclusive with the legacy
+                    workStartTime/workEndTime/isOvernight fields in the same
+                    request. A start/end-only update on a multi-segment shift is
+                    rejected with a typed 422; a metadata-only update preserves
+                    the persisted segments.
+                  items:
+                    $ref: '#/components/schemas/AttendanceShiftSegmentInput'
                 lateGraceMinutes:
                   type: integer
                 earlyGraceMinutes:
@@ -7708,6 +8257,22 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Shift not found
+        '409':
+          description: >-
+            Typed conflict with zero writes: CONFLICT (legacy rotation-rule
+            rename ambiguity) or ATTENDANCE_SHIFT_SEGMENT_CONVERSION_BLOCKED (an
+            active assignment, rotation, pending swap, or pending/published
+            dispatch blocks converting one segment to multiple while segment
+            calculation is disabled).
+        '422':
+          description: >-
+            Typed segment rejection with zero writes:
+            ATTENDANCE_SHIFT_SEGMENTS_INVALID,
+            ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or
+            ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update
+            on a multi-segment shift).
     delete:
       summary: Delete attendance shift
       security:
@@ -7737,8 +8302,15 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Shift not found
         '409':
-          $ref: '#/components/responses/Conflict'
+          description: >-
+            Typed delete blocker with zero writes:
+            ATTENDANCE_SHIFT_DELETE_BLOCKED — the shift is still referenced by
+            any assignment row (including ended/inactive history), a rotation
+            rule, a pending swap snapshot, or a pending/published dispatch
+            target. Historical evidence is preserved.
   /api/attendance/assignments:
     x-plugin: plugin-attendance
     get:
@@ -7816,6 +8388,10 @@ paths:
                   type: string
                 shiftId:
                   type: string
+                slotIndex:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
                 startDate:
                   type: string
                   format: date
@@ -7833,6 +8409,11 @@ paths:
                 shift_id:
                   type: string
                   description: Legacy snake_case alias for shiftId.
+                slot_index:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  description: Legacy snake_case alias for slotIndex.
                 start_date:
                   type: string
                   format: date
@@ -7912,6 +8493,10 @@ paths:
                   type: string
                 shiftId:
                   type: string
+                slotIndex:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
                 startDate:
                   type: string
                   format: date
@@ -7927,6 +8512,11 @@ paths:
                   type: string
                 shift_id:
                   type: string
+                slot_index:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  description: Legacy snake_case alias for slotIndex.
                 start_date:
                   type: string
                   format: date
@@ -8390,6 +8980,153 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance-admin/calculation-group-memberships:
+    get:
+      summary: List a user's effective calculation-group membership timeline
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: orgId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: userId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Ordered, non-overlapping membership timeline
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: >-
+                            #/components/schemas/AttendanceCalculationGroupMembership
+                    required:
+                      - items
+                required:
+                  - ok
+                  - data
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          description: Calculation-group timeline read failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/attendance-admin/calculation-group-memberships/transition:
+    post:
+      summary: Transition a user to a calculation group on an inclusive effective date
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orgId:
+                  type: string
+                userId:
+                  type: string
+                targetGroupId:
+                  type: string
+                  format: uuid
+                effectiveOn:
+                  type: string
+                  format: date
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 1000
+                correlationId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+              required:
+                - orgId
+                - userId
+                - targetGroupId
+                - effectiveOn
+                - reason
+      responses:
+        '200':
+          description: Transition applied or replayed idempotently
+          headers:
+            X-Correlation-Id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      correlationId:
+                        type: string
+                      outcome:
+                        type: string
+                        enum:
+                          - transitioned
+                          - unchanged
+                      membership:
+                        $ref: >-
+                          #/components/schemas/AttendanceCalculationGroupMembership
+                    required:
+                      - correlationId
+                      - outcome
+                      - membership
+                required:
+                  - ok
+                  - data
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          description: Target user is not active in the requested organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Calculation-group transition failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/attendance/groups:
     x-plugin: plugin-attendance
     get:
@@ -8443,6 +9180,12 @@ paths:
                   type: string
                 description:
                   type: string
+                attendanceType:
+                  type: string
+                  enum:
+                    - fixed_shift
+                    - scheduled_shift
+                    - free_time
                 orgId:
                   type: string
               required:
@@ -8525,6 +9268,15 @@ paths:
                   type: string
                 description:
                   type: string
+                attendanceType:
+                  type: string
+                  enum:
+                    - fixed_shift
+                    - scheduled_shift
+                    - free_time
+                  description: >-
+                    Accepted for parity with create; runtime rejects type
+                    changes after creation (ATTENDANCE_GROUP_TYPE_LOCKED).
                 orgId:
                   type: string
       responses:

@@ -1256,6 +1256,17 @@ paths:
                 end_time: { type: string, deprecated: true }
                 isOvernight: { type: boolean }
                 is_overnight: { type: boolean, deprecated: true }
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 3
+                  description: >-
+                    Canonical segments (W3). Mutually exclusive with the legacy
+                    workStartTime/workEndTime/isOvernight fields. While authoritative
+                    segment calculation is disabled for the org, multi-segment shifts
+                    are authoring preview-only.
+                  items:
+                    $ref: '#/components/schemas/AttendanceShiftSegmentInput'
                 lateGraceMinutes: { type: integer }
                 late_grace_minutes: { type: integer, deprecated: true }
                 earlyGraceMinutes: { type: integer }
@@ -1284,6 +1295,11 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: >-
+            Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
+            (invalid segment array) or ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
+            (segments combined with legacy start/end fields).
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -1330,6 +1346,18 @@ paths:
                 timezone: { type: string }
                 workStartTime: { type: string }
                 workEndTime: { type: string }
+                isOvernight: { type: boolean }
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 3
+                  description: >-
+                    Canonical segments (W3). Mutually exclusive with the legacy
+                    workStartTime/workEndTime/isOvernight fields in the same request.
+                    A start/end-only update on a multi-segment shift is rejected with
+                    a typed 422; a metadata-only update preserves the persisted segments.
+                  items:
+                    $ref: '#/components/schemas/AttendanceShiftSegmentInput'
                 lateGraceMinutes: { type: integer }
                 earlyGraceMinutes: { type: integer }
                 roundingMinutes: { type: integer }
@@ -1350,6 +1378,20 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Shift not found
+        '409':
+          description: >-
+            Typed conflict with zero writes: CONFLICT (legacy rotation-rule rename
+            ambiguity) or ATTENDANCE_SHIFT_SEGMENT_CONVERSION_BLOCKED (an active
+            assignment, rotation, pending swap, or pending/published dispatch blocks
+            converting one segment to multiple while segment calculation is disabled).
+        '422':
+          description: >-
+            Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID,
+            ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or
+            ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a
+            multi-segment shift).
     delete:
       summary: Delete attendance shift
       security: [ { bearerAuth: [] } ]
@@ -1371,9 +1413,16 @@ paths:
                     type: object
                     properties:
                       id: { type: string }
-        '409': { $ref: '#/components/responses/Conflict' }
+        '409':
+          description: >-
+            Typed delete blocker with zero writes: ATTENDANCE_SHIFT_DELETE_BLOCKED —
+            the shift is still referenced by any assignment row (including
+            ended/inactive history), a rotation rule, a pending swap snapshot, or a
+            pending/published dispatch target. Historical evidence is preserved.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Shift not found
   /api/attendance/assignments:
     x-plugin: plugin-attendance
     get:
@@ -1432,6 +1481,10 @@ paths:
               properties:
                 userId: { type: string }
                 shiftId: { type: string }
+                slotIndex:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
                 startDate: { type: string, format: date }
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
@@ -1442,6 +1495,11 @@ paths:
                 shift_id:
                   type: string
                   description: Legacy snake_case alias for shiftId.
+                slot_index:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  description: Legacy snake_case alias for slotIndex.
                 start_date:
                   type: string
                   format: date
@@ -1508,12 +1566,21 @@ paths:
               properties:
                 userId: { type: string }
                 shiftId: { type: string }
+                slotIndex:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
                 startDate: { type: string, format: date }
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
                 orgId: { type: string }
                 user_id: { type: string }
                 shift_id: { type: string }
+                slot_index:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  description: Legacy snake_case alias for slotIndex.
                 start_date: { type: string, format: date }
                 end_date: { type: string, format: date, nullable: true }
                 is_active: { type: boolean }
@@ -1842,6 +1909,103 @@ paths:
                       to: { type: string, format: date }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance-admin/calculation-group-memberships:
+    get:
+      summary: List a user's effective calculation-group membership timeline
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: userId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Ordered, non-overlapping membership timeline
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceCalculationGroupMembership'
+                    required: [items]
+                required: [ok, data]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500':
+          description: Calculation-group timeline read failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/attendance-admin/calculation-group-memberships/transition:
+    post:
+      summary: Transition a user to a calculation group on an inclusive effective date
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orgId: { type: string }
+                userId: { type: string }
+                targetGroupId: { type: string, format: uuid }
+                effectiveOn: { type: string, format: date }
+                reason: { type: string, minLength: 1, maxLength: 1000 }
+                correlationId: { type: string, minLength: 1, maxLength: 128 }
+              required: [orgId, userId, targetGroupId, effectiveOn, reason]
+      responses:
+        '200':
+          description: Transition applied or replayed idempotently
+          headers:
+            X-Correlation-Id:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      correlationId: { type: string }
+                      outcome:
+                        type: string
+                        enum: [transitioned, unchanged]
+                      membership:
+                        $ref: '#/components/schemas/AttendanceCalculationGroupMembership'
+                    required: [correlationId, outcome, membership]
+                required: [ok, data]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: Target user is not active in the requested organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '500':
+          description: Calculation-group transition failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/attendance/groups:
     x-plugin: plugin-attendance
     get:
@@ -1883,6 +2047,9 @@ paths:
                 timezone: { type: string }
                 ruleSetId: { type: string }
                 description: { type: string }
+                attendanceType:
+                  type: string
+                  enum: [fixed_shift, scheduled_shift, free_time]
                 orgId: { type: string }
               required: [name, timezone]
       responses:
@@ -1942,6 +2109,10 @@ paths:
                 timezone: { type: string }
                 ruleSetId: { type: string }
                 description: { type: string }
+                attendanceType:
+                  type: string
+                  enum: [fixed_shift, scheduled_shift, free_time]
+                  description: Accepted for parity with create; runtime rejects type changes after creation (ATTENDANCE_GROUP_TYPE_LOCKED).
                 orgId: { type: string }
       responses:
         '200':

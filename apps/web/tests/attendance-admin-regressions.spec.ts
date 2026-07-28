@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
+import AttendanceAdminCenter from '../src/views/attendance/AttendanceAdminCenter.vue'
 import { apiFetch } from '../src/utils/api'
 import {
   canRunBatchAnomalyResolution,
@@ -843,6 +844,225 @@ describe('Attendance admin regressions', () => {
     container = null
   })
 
+  type ShiftWrite = {
+    url: string
+    method: string
+    body: Record<string, unknown>
+  }
+
+  function attendanceShiftFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: 'shift-day',
+      name: 'Day shift',
+      timezone: 'Asia/Shanghai',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      isOvernight: false,
+      lateGraceMinutes: 10,
+      earlyGraceMinutes: 10,
+      roundingMinutes: 5,
+      workingDays: [1, 2, 3, 4, 5],
+      ...overrides,
+    }
+  }
+
+  function installShiftSegmentApi(shifts: Array<Record<string, unknown>>): ShiftWrite[] {
+    const writes: ShiftWrite[] = []
+    const fallback = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (/^\/api\/attendance\/shifts(?:\?.*)?$/.test(url) && method === 'GET') {
+        return jsonResponse(200, { ok: true, data: { items: shifts, total: shifts.length } })
+      }
+      if (url === '/api/attendance/shifts' && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        writes.push({ url, method, body })
+        return jsonResponse(201, { ok: true, data: { shift: { id: 'shift-created', ...body } } })
+      }
+      if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'PUT') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        writes.push({ url, method, body })
+        return jsonResponse(200, { ok: true, data: { shift: { id: url.split('/').pop(), ...body } } })
+      }
+      if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'DELETE') {
+        writes.push({ url, method, body: {} })
+        return jsonResponse(200, { ok: true, data: { deleted: true } })
+      }
+      return fallback ? fallback(input, init) : emptyAttendanceResponse()
+    })
+    return writes
+  }
+
+  async function mountShiftAdmin(): Promise<HTMLElement> {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const shiftsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-shifts"]')
+    expect(shiftsNav).toBeTruthy()
+    shiftsNav!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-shifts')
+    expect(section).toBeTruthy()
+    return section!
+  }
+
+  it('normalizes legacy shifts, preserves ordered segments on edit, and exposes preview-only limits', async () => {
+    const splitShift = attendanceShiftFixture({
+      id: 'shift-split',
+      name: 'Split shift',
+      workStartTime: '08:00',
+      workEndTime: '17:00',
+      segments: [
+        { id: 'segment-b', segmentIndex: 1, startTime: '13:00', startDayOffset: 0, endTime: '17:00', endDayOffset: 0 },
+        { id: 'segment-a', segmentIndex: 0, startTime: '08:00', startDayOffset: 0, endTime: '12:00', endDayOffset: 0 },
+      ],
+      plannedMinutes: 480,
+      capabilities: {
+        segmentCalculation: {
+          enabled: false,
+          authoritativeResults: false,
+          multiSegmentAuthoring: 'preview_only',
+        },
+      },
+    })
+    const writes = installShiftSegmentApi([
+      attendanceShiftFixture(),
+      splitShift,
+    ])
+    const section = await mountShiftAdmin()
+
+    const rows = Array.from(section.querySelectorAll<HTMLTableRowElement>('tbody tr'))
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.querySelector('[data-attendance-shift-list-segments]')?.textContent).toContain('09:00-18:00')
+    expect(rows[1]!.querySelector('[data-attendance-shift-list-segments]')?.textContent).toContain('08:00-12:00 / 13:00-17:00')
+    expect(rows[1]!.querySelector('[data-attendance-shift-list-preview-only]')?.textContent).toContain('Preview only')
+
+    const editButton = Array.from(rows[1]!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'Edit')
+    expect(editButton).toBeTruthy()
+    editButton!.click()
+    await flushUi(3)
+
+    expect(section.querySelectorAll('[data-attendance-shift-segment-row]')).toHaveLength(2)
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start="0"]')?.value).toBe('08:00')
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start="1"]')?.value).toBe('13:00')
+    const preview = section.querySelector<HTMLElement>('[data-attendance-shift-segment-preview]')
+    expect(preview?.dataset.plannedMinutes).toBe('480')
+    expect(preview?.dataset.gapMinutes).toBe('60')
+    const warning = section.querySelector<HTMLElement>('[data-attendance-shift-segment-preview-only]')
+    expect(warning?.textContent).toContain('assigned, rotated, swapped, dispatched, published, or auto-matched')
+
+    section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
+    await flushUi(6)
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toMatchObject({
+      url: '/api/attendance/shifts/shift-split',
+      method: 'PUT',
+      body: {
+        name: 'Split shift',
+        timezone: 'Asia/Shanghai',
+        segments: [
+          { segmentIndex: 0, startTime: '08:00', startDayOffset: 0, endTime: '12:00', endDayOffset: 0 },
+          { segmentIndex: 1, startTime: '13:00', startDayOffset: 0, endTime: '17:00', endDayOffset: 0 },
+        ],
+      },
+    })
+    expect(writes[0]!.body).not.toHaveProperty('workStartTime')
+    expect(writes[0]!.body).not.toHaveProperty('workEndTime')
+    expect(writes[0]!.body).not.toHaveProperty('isOvernight')
+  })
+
+  it('adds, reorders, and removes shift segments while calculating paid time without gaps', async () => {
+    installShiftSegmentApi([])
+    const section = await mountShiftAdmin()
+    setInput(section, '[data-attendance-shift-segment-start="0"]', '08:00')
+    setInput(section, '[data-attendance-shift-segment-end="0"]', '12:00')
+    section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-add]')!.click()
+    await flushUi(2)
+    setInput(section, '[data-attendance-shift-segment-start="1"]', '13:00')
+    setInput(section, '[data-attendance-shift-segment-end="1"]', '17:00')
+    await flushUi(2)
+
+    const preview = section.querySelector<HTMLElement>('[data-attendance-shift-segment-preview]')
+    expect(preview?.dataset.plannedMinutes).toBe('480')
+    expect(preview?.dataset.gapMinutes).toBe('60')
+    expect(section.querySelector('[data-attendance-shift-segment-preview-only]')).toBeTruthy()
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-up="1"]')!.click()
+    await flushUi(2)
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start="0"]')?.value).toBe('13:00')
+    expect(section.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start="1"]')?.value).toBe('08:00')
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-remove="1"]')!.click()
+    await flushUi(2)
+    expect(section.querySelectorAll('[data-attendance-shift-segment-row]')).toHaveLength(1)
+    expect(section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-remove="0"]')?.disabled).toBe(true)
+  })
+
+  it('blocks overlapping segments before any write and emits the exact create payload after correction', async () => {
+    const writes = installShiftSegmentApi([])
+    const section = await mountShiftAdmin()
+    setInput(section, '#attendance-shift-name', 'Split shift')
+    const timezone = section.querySelector<HTMLSelectElement>('#attendance-shift-timezone')
+    expect(timezone).toBeTruthy()
+    timezone!.value = 'Asia/Shanghai'
+    timezone!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section, '[data-attendance-shift-segment-start="0"]', '09:00')
+    setInput(section, '[data-attendance-shift-segment-end="0"]', '12:00')
+    section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-add]')!.click()
+    await flushUi(2)
+    setInput(section, '[data-attendance-shift-segment-start="1"]', '11:00')
+    setInput(section, '[data-attendance-shift-segment-end="1"]', '17:00')
+    await flushUi(2)
+
+    expect(section.querySelector('[data-attendance-shift-segment-errors]')?.textContent).toContain('overlaps or is out of order')
+    section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
+    await flushUi(3)
+    expect(writes).toEqual([])
+
+    setInput(section, '[data-attendance-shift-segment-start="1"]', '13:00')
+    await flushUi(2)
+    expect(section.querySelector('[data-attendance-shift-segment-errors]')).toBeNull()
+    section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
+    await flushUi(6)
+
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toEqual({
+      url: '/api/attendance/shifts',
+      method: 'POST',
+      body: {
+        name: 'Split shift',
+        timezone: 'Asia/Shanghai',
+        segments: [
+          { segmentIndex: 0, startTime: '09:00', startDayOffset: 0, endTime: '12:00', endDayOffset: 0 },
+          { segmentIndex: 1, startTime: '13:00', startDayOffset: 0, endTime: '17:00', endDayOffset: 0 },
+        ],
+        lateGraceMinutes: 10,
+        earlyGraceMinutes: 10,
+        roundingMinutes: 5,
+        workingDays: [1, 2, 3, 4, 5],
+      },
+    })
+  })
+
+  it('states the reference-blocking shift deletion contract before calling the API', async () => {
+    const writes = installShiftSegmentApi([attendanceShiftFixture()])
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const section = await mountShiftAdmin()
+    const deleteButton = Array.from(section.querySelectorAll<HTMLButtonElement>('tbody tr button'))
+      .find(button => button.textContent?.trim() === 'Delete')
+    expect(deleteButton).toBeTruthy()
+    deleteButton!.click()
+    await flushUi(2)
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining(
+      'blocked while assignments, rotation rules, pending swaps, or pending/published dispatches',
+    ))
+    expect(writes).toEqual([])
+    confirm.mockRestore()
+  })
+
   it('does not preload admin-only attendance data on the employee overview surface', async () => {
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
@@ -1263,6 +1483,51 @@ describe('Attendance admin regressions', () => {
     const meCall = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).find(u => u.includes('/leave-balances/me'))
     expect(meCall).toBeTruthy()
     expect(meCall).not.toContain('userId=')
+  })
+
+  it('W3/4353 admin-forbidden: a 403 admin surface shows the permission notice and never renders the task home (charter §7)', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance') || url.includes('/api/admin') || url.includes('/api/permissions')) {
+        return jsonResponse(403, { ok: false, error: { code: 'FORBIDDEN', message: 'forbidden' } })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(32)
+
+    expect(container!.textContent).toContain('Admin permissions required to manage attendance settings.')
+    expect(container!.querySelector('[data-admin-task-home]')).toBeNull()
+    expect(container!.querySelector('[data-admin-task-action]')).toBeNull()
+  })
+
+  it('W3/4353 wiring: AttendanceAdminCenter re-emits clear-section from the real return-home flow (review P3-1)', async () => {
+    // Mounts the REAL wrapper (not a mock): entering with an explicit section keeps the task home
+    // closed; clicking Management home must propagate clear-section through AdminCenter to its
+    // parent. A regression that drops the template re-emit turns exactly this leg red.
+    const onClearSection = vi.fn()
+    app = createApp(AttendanceAdminCenter, {
+      initialSectionId: 'attendance-admin-groups',
+      onClearSection,
+    })
+    app.mount(container!)
+    await flushUi(16)
+
+    // Task home lives under v-show: with an explicit section it must be present-but-hidden.
+    const homeContext = container!.querySelector('[data-admin-home-context]') as HTMLElement
+    expect(homeContext).toBeTruthy()
+    expect(homeContext.style.display).toBe('none')
+    const returnHome = [...container!.querySelectorAll('button')].find(b => (b.textContent || '').includes('Management home'))
+    expect(returnHome, 'expected the Management home button').toBeTruthy()
+    returnHome!.click()
+    await flushUi(4)
+
+    expect(onClearSection).toHaveBeenCalledTimes(1)
+    expect((container!.querySelector('[data-admin-home-context]') as HTMLElement).style.display).not.toBe('none')
   })
 
   it('admin notification deliveries — reminds selected owed-punch candidates with an authoritative confirm snapshot', async () => {
@@ -1906,6 +2171,160 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     // the structured code maps to its human line, not a raw "raw"/generic failure
     expect(card.querySelector('[data-annual-ops-error-adjust]')?.textContent || '').toContain('not an active member')
+  })
+
+  // ===== OD-W5-7 comp_time balance UI leaveTypeCode parameterization =====
+  // docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md §9
+  // backlog table, decision (b): parameterize the three `leaveTypeCode='annual'` hardcodes
+  // (loadAnnualSelfBalance, loadAnnualLeaveBalance, previewAnnualAdjust) so a future caller
+  // (W5-1 comp_time UI) can request a non-annual leave-type balance through the SAME read path.
+  // No UI exists yet to drive a non-'annual' code (that wiring is W5-1's, out of scope here) —
+  // the three functions are defineExpose'd from AttendanceView.vue for this reason only; the
+  // "byte-stable" tests below still exercise the real UI triggers (mount / button clicks) with
+  // ZERO arguments to prove the default path is untouched end-to-end.
+  describe('OD-W5-7 leaveTypeCode parameterization', () => {
+    const balanceSummaryPayload = (leaveTypeCode: string, userId: string) => ({
+      ok: true,
+      data: {
+        userId,
+        summary: { leaveTypeCode, grantedMinutes: 2400, remainingMinutes: 1800, exhaustedMinutes: 600, expiredMinutes: 0 },
+        activeLots: [],
+        recentEvents: [],
+        eventLimit: 50,
+      },
+    })
+
+    // -- site 1: loadAnnualSelfBalance (self-service /me, mount auto-fetch) --
+
+    it('byte-stable: overview mount auto-fetch (zero args) issues the exact pre-parameterization /me URL', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances/me')) return jsonResponse(200, balanceSummaryPayload('annual', 'self'))
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'overview' })
+      app.mount(container!)
+      await flushUi(10)
+      const meCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.includes('/leave-balances/me'))
+      expect(meCalls).toEqual(['/api/attendance/leave-balances/me?leaveTypeCode=annual'])
+    })
+
+    it('comp_time channel: loadAnnualSelfBalance(\'comp_time\') issues the exact comp_time /me URL (mock-layer assertion)', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances/me')) {
+          const parsed = new URL(url, 'http://localhost')
+          return jsonResponse(200, balanceSummaryPayload(parsed.searchParams.get('leaveTypeCode') || '', 'self'))
+        }
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'overview' })
+      const vm: any = app.mount(container!)
+      await flushUi(10) // let the mount-time default ('annual') auto-fetch settle first
+      vi.mocked(apiFetch).mockClear()
+      await vm.loadAnnualSelfBalance('comp_time')
+      await flushUi(4)
+      const meCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.includes('/leave-balances/me'))
+      expect(meCalls).toEqual(['/api/attendance/leave-balances/me?leaveTypeCode=comp_time'])
+    })
+
+    // -- site 2: loadAnnualLeaveBalance (admin console lookup) --
+
+    it('byte-stable: admin lookup button click (zero args) issues the exact pre-parameterization query', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances')) return jsonResponse(200, balanceSummaryPayload('annual', 'u1'))
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(8)
+      container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
+      await flushUi(4)
+      const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
+      const input = section.querySelector<HTMLInputElement>('#attendance-annual-balance-user')!
+      input.value = 'u1'
+      input.dispatchEvent(new Event('input'))
+      await flushUi(2)
+      section.querySelector<HTMLButtonElement>('.attendance__admin-actions button')!.click()
+      await flushUi(4)
+      const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u1&leaveTypeCode=annual'])
+    })
+
+    it('comp_time channel: loadAnnualLeaveBalance(\'comp_time\') issues the exact comp_time admin-lookup query (mock-layer assertion)', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances')) {
+          const parsed = new URL(url, 'http://localhost')
+          return jsonResponse(200, balanceSummaryPayload(parsed.searchParams.get('leaveTypeCode') || '', 'u1'))
+        }
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'admin' })
+      const vm: any = app.mount(container!)
+      await flushUi(8)
+      container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
+      await flushUi(4)
+      const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
+      const input = section.querySelector<HTMLInputElement>('#attendance-annual-balance-user')!
+      input.value = 'u1'
+      input.dispatchEvent(new Event('input'))
+      await flushUi(2)
+      vi.mocked(apiFetch).mockClear()
+      await vm.loadAnnualLeaveBalance('comp_time')
+      await flushUi(4)
+      const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u1&leaveTypeCode=comp_time'])
+    })
+
+    // -- site 3: previewAnnualAdjust (manual-adjustment card, client preview) --
+
+    it('byte-stable: manual-adjust Preview click (zero args) issues the exact pre-parameterization query', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances')) return jsonResponse(200, balanceSummaryPayload('annual', 'u2'))
+        if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(8)
+      const section = await openOpsSection()
+      const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+      const inputs = card.querySelectorAll<HTMLInputElement>('input')
+      inputs[0].value = 'u2'; inputs[0].dispatchEvent(new Event('input'))
+      await flushUi(2)
+      Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Preview'))!.click()
+      await flushUi(4)
+      const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u2&leaveTypeCode=annual'])
+    })
+
+    it('comp_time channel: previewAnnualAdjust(\'comp_time\') issues the exact comp_time preview query (mock-layer assertion)', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input) => {
+        const url = String(input)
+        if (url.includes('/api/attendance/leave-balances')) {
+          const parsed = new URL(url, 'http://localhost')
+          return jsonResponse(200, balanceSummaryPayload(parsed.searchParams.get('leaveTypeCode') || '', 'u2'))
+        }
+        if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+        return emptyAttendanceResponse()
+      })
+      app = createApp(AttendanceView, { mode: 'admin' })
+      const vm: any = app.mount(container!)
+      await flushUi(8)
+      const section = await openOpsSection()
+      const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+      const inputs = card.querySelectorAll<HTMLInputElement>('input')
+      inputs[0].value = 'u2'; inputs[0].dispatchEvent(new Event('input'))
+      await flushUi(2)
+      vi.mocked(apiFetch).mockClear()
+      await vm.previewAnnualAdjust('comp_time')
+      await flushUi(4)
+      const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u2&leaveTypeCode=comp_time'])
+    })
   })
 
   // ===== #3925 S6 bulk annual-leave balance adjustment (design-lock 2026-07-10) =====
@@ -5844,6 +6263,21 @@ describe('Attendance admin regressions', () => {
           assignmentIds: ['assignment-a', 'assignment-b'],
           request: { status: 'approved', reason: 'Previous coverage' },
         },
+        {
+          requestId: 'dispatch-deleted-shift',
+          requestStatus: 'cancelled',
+          userId: 'user-history',
+          targetScheduleGroupId: 'sg-dispatch',
+          targetShiftId: null,
+          targetShiftLabel: 'Deleted or unavailable shift',
+          targetShiftStatus: 'deleted',
+          slotIndex: 0,
+          startDate: '2026-06-17',
+          endDate: '2026-06-17',
+          publishStatus: 'cancelled',
+          assignmentIds: [],
+          request: { status: 'cancelled', reason: 'Historical coverage' },
+        },
       ],
       total: 250,
       page: 1,
@@ -5872,10 +6306,11 @@ describe('Attendance admin regressions', () => {
       return parsed.searchParams.get('page') === '1'
         && parsed.searchParams.get('pageSize') === '200'
     })).toBe(true)
-    expect(section.querySelector('[data-attendance-schedule-dispatch-cap]')?.textContent).toContain('Showing first 1 of 250')
+    expect(section.querySelector('[data-attendance-schedule-dispatch-cap]')?.textContent).toContain('Showing first 2 of 250')
     expect(section.querySelector('[data-attendance-schedule-dispatch-row]')?.textContent).toContain('Branch A')
     expect(section.querySelector('[data-attendance-schedule-dispatch-row]')?.textContent).toContain('Day Shift')
     expect(section.querySelector('[data-attendance-schedule-dispatch-row]')?.textContent).toContain('assignment-a, assignment-b')
+    expect(section.textContent).toContain('Deleted or unavailable shift')
 
     const groupSelect = section.querySelector<HTMLSelectElement>('[data-attendance-schedule-dispatch-group]')!
     expect(Array.from(groupSelect.options).map(option => option.value)).toEqual(['', 'sg-dispatch'])
@@ -5948,6 +6383,26 @@ describe('Attendance admin regressions', () => {
         status: 'pending',
         metadata: {},
       },
+      {
+        id: 'request-dispatch-deleted-shift',
+        work_date: '2026-06-22',
+        request_type: 'schedule_dispatch',
+        requested_in_at: null,
+        requested_out_at: null,
+        reason: 'Historical dispatch',
+        status: 'cancelled',
+        metadata: {
+          scheduleDispatch: {
+            targetScheduleGroupId: 'sg-branch-a',
+            targetShiftId: null,
+            targetShiftLabel: 'Deleted or unavailable shift',
+            targetShiftStatus: 'deleted',
+            startDate: '2026-06-22',
+            endDate: '2026-06-22',
+            slotIndex: 0,
+          },
+        },
+      },
     ]
 
     app = createApp(AttendanceView, { mode: 'overview' })
@@ -5956,11 +6411,12 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('[data-schedule-dispatch-requests]')!
     expect(section).toBeTruthy()
-    expect(section.querySelectorAll('[data-schedule-dispatch-request-row]')).toHaveLength(1)
+    expect(section.querySelectorAll('[data-schedule-dispatch-request-row]')).toHaveLength(2)
     expect(section.textContent).toContain('2026-06-20 - 2026-06-21')
     expect(section.textContent).toContain('sg-branch-a')
     expect(section.textContent).toContain('shift-day')
     expect(section.textContent).toContain('Temporary branch support')
+    expect(section.textContent).toContain('Deleted or unavailable shift')
     expect(section.textContent).not.toContain('Annual leave')
     const buttons = Array.from(section.querySelectorAll<HTMLButtonElement>('button')).map(button => button.textContent || '')
     expect(buttons.join(' ')).toContain('Reload')

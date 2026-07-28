@@ -41,6 +41,16 @@
  *     the caller's loop surfaces it via `onTickError` and retries next tick. A DB error on the HEARTBEAT renew
  *     is caught per-row and surfaced via `onHeartbeatError` (the row is left for reclaim), so a transient blip
  *     mid-delivery does not fail the whole tick.
+ *   - **A row this tick already claimed is never re-claimed by a later slot of the same tick** (#4497 P1). The
+ *     non-resolving dispositions (heartbeat DB error / mid-flight lease loss) leave the row `in_progress` on its
+ *     ORIGINAL lease, so a handler that outran the lease made the row instantly reclaimable — by THIS tick's own
+ *     next slot, which ran the adapter a second time (a duplicate external operation, not cross-worker
+ *     at-least-once). The claim now excludes the pairs this pass already took and scans past them.
+ *   - **A terminal write is lease-guarded, not fence-only**: `completeConsumer`/`poisonConsumer` also require the
+ *     lease to still be held, so a handler result produced after our lease expired (but before a competitor
+ *     reclaimed) is NOT applied — it is left `in_progress` for a legitimate reclaim and counted as `lostLease`
+ *     (the same shape directory-sync's completion write uses). `rescheduleConsumer` stays unguarded: it is the
+ *     non-terminal safe outcome.
  *   - **Backoff is deterministic exponential with a cap** (no Math.random — reproducible in tests; jitter can
  *     be layered later without changing the persisted contract), floored so a rescheduled row cannot be
  *     re-claimed within the same tick (retry stays a future-tick event, not an intra-tick spin).
@@ -469,6 +479,15 @@ export async function runDispatchTick(
   //   row. That is NOT "no work" — healthy rows may be queued behind it — so an empty result with a claim-time
   //   poison CONTINUES to the next slot (bounded by the budget) instead of breaking (#4334 review: head-of-line
   //   block). The poison is counted + surfaced so the terminal transition is observable.
+  //
+  //   A row this tick has ALREADY claimed is never claimed again by a later slot of the SAME tick (#4497 P1).
+  //   Backoff protects a RESCHEDULED row (MIN_RETRY_BASE_MS), but the non-resolving dispositions leave the row
+  //   `in_progress` with its ORIGINAL lease: a heartbeat DB error (or a mid-flight lease loss) after a handler
+  //   that outran the lease makes the row reclaimable at once, and the very next slot re-claimed it and ran the
+  //   adapter a SECOND time inside one tick — a duplicate external operation for a real adapter (observed as
+  //   heartbeatErrors=2 for a single seeded row). The exclusion is per-tick and per-caller only: concurrent
+  //   workers still compete normally, and the claim scans past an excluded row to the next candidate.
+  const claimedThisTick: { outboxId: string; consumerKey: string }[] = []
   const maxRowsPerTick = opts.batchSize ?? 50
   for (let slot = 0; slot < maxRowsPerTick; slot++) {
     if (opts.shouldStop?.()) break // graceful stop: don't claim/start new adapter work once stopping
@@ -478,6 +497,7 @@ export async function runDispatchTick(
       batchSize: 1,
       leaseMs,
       maxAttempts: opts.maxAttempts,
+      excludeRows: claimedThisTick,
       now: opts.now,
       onClaimTimePoison: (info) => {
         poisonedThisSlot += 1
@@ -495,6 +515,9 @@ export async function runDispatchTick(
       break
     }
     result.claimed += 1
+    // Register BEFORE dispatch: from this instant the row is off-limits to every later slot of this tick,
+    // whatever disposition it ends in (including the non-resolving ones that leave it `in_progress`).
+    claimedThisTick.push({ outboxId: row.outboxId, consumerKey: row.consumerKey })
     const adapter = registry.get(row.consumerKey)
     if (!adapter) {
       // Cannot happen (claim is scoped to registry keys) unless the registry mutated mid-tick; leave the

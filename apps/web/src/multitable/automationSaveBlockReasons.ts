@@ -56,6 +56,12 @@ export interface SaveBlockDeleteRecordSnapshot {
   acknowledged: boolean
 }
 
+export interface SaveBlockFwbWritebackSnapshot {
+  mappingCount: number
+  confirmed: boolean
+  readOnly: boolean
+}
+
 export interface SaveBlockActionSnapshot {
   index: number
   type: AutomationActionType
@@ -63,6 +69,7 @@ export interface SaveBlockActionSnapshot {
   personMessage?: SaveBlockPersonMessageSnapshot
   email?: SaveBlockEmailSnapshot
   deleteRecord?: SaveBlockDeleteRecordSnapshot
+  fwbWriteback?: SaveBlockFwbWritebackSnapshot
 }
 
 export interface SaveBlockReasonsInput {
@@ -74,6 +81,12 @@ export interface SaveBlockReasonsInput {
   approvalCompletedBlockReason: string
   /** '' when the current trigger isn't approval.task_created, or that trigger has no block reason. */
   approvalTaskCreatedBlockReason: string
+  /**
+   * Non-empty when a write_approval_form_values action is present under a non-approval.completed
+   * trigger (FWB0 D11 placement). Independent of triggerType so it still blocks save after a
+   * mid-edit trigger change.
+   */
+  fwbWrongTriggerBlockReason?: string
   webhookSecretPresent: boolean
   ruleHasId: boolean
   savedWebhookSecretConfigured: boolean
@@ -109,6 +122,14 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
       key: 'approvalCompletedBlockReason',
       message: input.approvalCompletedBlockReason,
       anchor: '[data-field="approvalCompletedBlockReason"]',
+    })
+  }
+
+  if (input.fwbWrongTriggerBlockReason) {
+    reasons.push({
+      key: 'fwbWrongTrigger',
+      message: input.fwbWrongTriggerBlockReason,
+      anchor: '[data-testid="fwb-readonly-status"]',
     })
   }
 
@@ -310,6 +331,30 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
           : `"${label}" requires the delete-confirmation checkbox before saving.`,
         anchor: `${scope} [data-field="deleteRecordAck"]`,
       })
+    }
+
+    if (action.fwbWriteback) {
+      const fwb = action.fwbWriteback
+      // Read-only (flag OFF / wrong trigger) preserves a persisted confirmed action — only block when
+      // the author can edit and has not completed the server confirmation round-trip yet.
+      if (!fwb.readOnly && !fwb.confirmed) {
+        reasons.push({
+          key: `action-${action.index}-fwbConfirm`,
+          message: zh
+            ? `「${label}」需先完成服务端映射确认才能保存。`
+            : `"${label}" requires a completed server mapping confirmation before saving.`,
+          anchor: `${scope} [data-testid="fwb-request-confirmation"]`,
+        })
+      }
+      if (!fwb.readOnly && fwb.mappingCount < 1) {
+        reasons.push({
+          key: `action-${action.index}-fwbMappings`,
+          message: zh
+            ? `「${label}」至少需要一条字段映射。`
+            : `"${label}" needs at least one field mapping.`,
+          anchor: `${scope} [data-testid="fwb-add-mapping"]`,
+        })
+      }
     }
   }
 

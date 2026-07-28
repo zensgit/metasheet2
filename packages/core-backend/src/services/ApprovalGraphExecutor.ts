@@ -14,7 +14,13 @@ import type {
   RuntimeGraph,
 } from '../types/approval-product'
 import { ServiceError } from './ApprovalBridgeService'
-import { evaluateApprovalConditionFormula, type RequesterFormulaContext } from './ApprovalConditionFormula'
+import {
+  approvalConditionFormulaHasCaptureProneIdentity,
+  approvalConditionFormulaHasDynamicDependency,
+  evaluateApprovalConditionFormula,
+  type RequesterFormulaContext,
+} from './ApprovalConditionFormula'
+import { isValidIsoCalendarDate } from '../utils/calendar-date'
 
 export interface ApprovalGraphAssignment {
   assignmentType: 'user' | 'role'
@@ -325,7 +331,19 @@ function evaluateRule(rule: ConditionRule, formData: Record<string, unknown>): b
   }
 }
 
-function validateFieldType(field: FormField, value: unknown): string | null {
+export interface ApprovalFormValidationOptions {
+  /**
+   * The attachment runtime is default-OFF. Keep the pre-feature string/object contract while it is
+   * disabled; only the enabled production path accepts the staged attachment-id array.
+   */
+  attachmentValueMode?: 'legacy' | 'ids'
+}
+
+function validateFieldType(
+  field: FormField,
+  value: unknown,
+  options: ApprovalFormValidationOptions,
+): string | null {
   if (value === undefined || value === null) {
     return null
   }
@@ -334,12 +352,34 @@ function validateFieldType(field: FormField, value: unknown): string | null {
     case 'text':
     case 'textarea':
     case 'user':
-    case 'attachment':
       return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+    case 'attachment':
+      if (options.attachmentValueMode !== 'ids') {
+        return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+      }
+      // #4195 §4.4/§8: an attachment field's submitted value IS the ordered array of staged
+      // approval_attachments.id strings (frozen verbatim into form_snapshot at create; the create
+      // txn then binds exactly these ids or fails whole). Anything else is rejected fail-closed —
+      // the legacy string/record acceptance predated the ratified array-of-ids contract and could
+      // freeze an uninterpretable value into the immutable snapshot.
+      return Array.isArray(value) && value.every((entry) => typeof entry === 'string' && entry.trim().length > 0)
+        ? null
+        : `${field.id} must be an array of attachment ids`
     case 'number':
-      return typeof value === 'number' && Number.isFinite(value) ? null : `${field.id} must be a number`
+      if (typeof value !== 'number' || !Number.isFinite(value)) return `${field.id} must be a number`
+      return Number.isInteger(value) && !Number.isSafeInteger(value)
+        ? `${field.id} must be a lossless number`
+        : null
     case 'date':
+      // Date-ONLY (floating civil date): exactly one real calendar string `YYYY-MM-DD`
+      // (leap-year validated, lexically — never via Date.parse, which would smuggle in
+      // locale strings, datetime suffixes, and instant semantics). No trim: the form
+      // transport passes values through untouched, so padded variants are rejected.
+      return typeof value === 'string' && isValidIsoCalendarDate(value)
+        ? null
+        : `${field.id} must be a date value`
     case 'datetime':
+      // Instant semantics (unchanged): any Date.parse-able string or a valid Date object.
       if (typeof value === 'string') {
         return Number.isNaN(Date.parse(value.trim())) ? `${field.id} must be a date value` : null
       }
@@ -360,8 +400,54 @@ function validateFieldType(field: FormField, value: unknown): string | null {
         return `${field.id} must contain only configured options`
       }
       return null
+    case 'record-link': {
+      // FWB-0 Layer 2 structural shape only (sync): exactly one `{ recordId: non-blank string }`.
+      // No arrays, free-text ids, or extra keys (incl. target base/sheet overrides). Filler read
+      // authorization is an async check outside this function (assembleCreationContext).
+      const parsed = parseRecordLinkFormValue(value)
+      return parsed.ok
+        ? null
+        : `${field.id} must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)`
+    }
     default:
       return null
+  }
+}
+
+/**
+ * FWB-0 Layer 2 — structural parse for a record-link form value.
+ * Legal shape is exactly one object `{ recordId: non-blank string }` (trimmed).
+ * Rejects arrays, free-text, empty ids, and extra keys (no target override smuggling).
+ */
+export function parseRecordLinkFormValue(
+  value: unknown,
+): { ok: true; recordId: string } | { ok: false } {
+  if (!isRecord(value)) return { ok: false }
+  const keys = Object.keys(value)
+  if (keys.length !== 1 || keys[0] !== 'recordId') return { ok: false }
+  const recordId = typeof value.recordId === 'string' ? value.recordId.trim() : ''
+  if (!recordId) return { ok: false }
+  return { ok: true, recordId }
+}
+
+/**
+ * FWB-0 Layer 2 — rewrite every valid top-level record-link value to the canonical
+ * `{ recordId: trimmed }` shape in-place. Does NOT loosen structural validation: invalid
+ * values are left untouched (validateApprovalFormData already rejects them). Call after
+ * successful validation and before graph execution / form_snapshot persistence so a value
+ * authorized as `rec-1` is never frozen as `{ recordId: '  rec-1  ' }`.
+ */
+export function canonicalizeRecordLinkFormData(
+  formSchema: FormSchema,
+  formData: Record<string, unknown>,
+): void {
+  for (const field of formSchema.fields ?? []) {
+    if (field.type !== 'record-link') continue
+    const raw = formData[field.id]
+    if (raw === undefined || raw === null) continue
+    const parsed = parseRecordLinkFormValue(raw)
+    if (!parsed.ok) continue
+    formData[field.id] = { recordId: parsed.recordId }
   }
 }
 
@@ -425,8 +511,27 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
       }
       return errors
     }
-    case 'date':
+    case 'date': {
+      // Date-ONLY min/max: compare validated `YYYY-MM-DD` calendar strings directly
+      // (lexicographic order IS chronological order for fixed-width ISO dates) — no epoch
+      // conversion, so the result is identical in every timezone. The VALUE is already
+      // type-validated before constraints run; a defensively re-checked invalid value and
+      // admin-configured min/max props that are not themselves valid calendar dates are
+      // treated as non-enforced (same precedent as an invalid `pattern` regex above).
+      if (typeof value !== 'string' || !isValidIsoCalendarDate(value)) return []
+      const errors: string[] = []
+      const min = getFieldPropString(field, 'min')
+      const max = getFieldPropString(field, 'max')
+      if (min && isValidIsoCalendarDate(min) && value < min) {
+        errors.push(`${field.id} must be on or after ${min}`)
+      }
+      if (max && isValidIsoCalendarDate(max) && value > max) {
+        errors.push(`${field.id} must be on or before ${max}`)
+      }
+      return errors
+    }
     case 'datetime': {
+      // Instant semantics (unchanged): normalize both sides to comparable epochs.
       const valueComparable = normalizeComparableValue(value)
       if (valueComparable === null) return []
 
@@ -454,7 +559,15 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
 // fields; per-row `visibilityRule` decides which cells are required; messages are row-addressed
 // (`items[1].qty is required`). Unknown cells are dropped by pruneHiddenFormData before this
 // runs, matching the top-level prune-then-validate behavior.
-function validateDetailFieldValue(field: FormField, value: unknown): string[] {
+//
+// Attachment top-level-only (flag-ON / attachmentValueMode:'ids'): an attachment-typed leaf inside
+// a detail group is rejected. Flag-OFF / legacy mode keeps detail-leaf attachment values
+// legacy-valid (string/record) for byte compatibility with pre-feature snapshots.
+function validateDetailFieldValue(
+  field: FormField,
+  value: unknown,
+  options: ApprovalFormValidationOptions,
+): string[] {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) return [`${field.id} must be a list`]
   const errors: string[] = []
@@ -465,6 +578,15 @@ function validateDetailFieldValue(field: FormField, value: unknown): string[] {
     errors.push(`${field.id} allows at most ${field.maxRows} row(s)`)
   }
   const columns = field.columns ?? []
+  // Control 2 of "both controls" when attachments are ON: attachment leaves are top-level only.
+  if (options.attachmentValueMode === 'ids') {
+    for (const column of columns) {
+      if (column.type === 'attachment') {
+        errors.push(`${field.id}.${column.id} attachment fields are not allowed inside detail rows`)
+      }
+    }
+    if (errors.length > 0) return errors
+  }
   const subSchema: FormSchema = { fields: columns }
   value.forEach((row, rowIndex) => {
     const prefix = `${field.id}[${rowIndex}]`
@@ -480,7 +602,7 @@ function validateDetailFieldValue(field: FormField, value: unknown): string[] {
         errors.push(`${prefix}.${column.id} is required`)
         continue
       }
-      const typeError = validateFieldType(column, cell)
+      const typeError = validateFieldType(column, cell, options)
       if (typeError) {
         errors.push(`${prefix}.${typeError}`)
         continue
@@ -491,7 +613,11 @@ function validateDetailFieldValue(field: FormField, value: unknown): string[] {
   return errors
 }
 
-export function validateApprovalFormData(formSchema: FormSchema, formData: Record<string, unknown>): string[] {
+export function validateApprovalFormData(
+  formSchema: FormSchema,
+  formData: Record<string, unknown>,
+  options: ApprovalFormValidationOptions = {},
+): string[] {
   const errors: string[] = []
   const visibleFieldIds = getVisibleFormFieldIds(formSchema, formData)
 
@@ -505,10 +631,10 @@ export function validateApprovalFormData(formSchema: FormSchema, formData: Recor
       continue
     }
     if (field.type === 'detail') {
-      errors.push(...validateDetailFieldValue(field, value))
+      errors.push(...validateDetailFieldValue(field, value, options))
       continue
     }
-    const typeError = validateFieldType(field, value)
+    const typeError = validateFieldType(field, value, options)
     if (typeError) {
       errors.push(typeError)
       continue
@@ -1057,6 +1183,29 @@ export class ApprovalGraphExecutor {
       : []
 
     for (const branch of branches) {
+      // Defense-in-depth for LEGACY stored graphs: a rules-mode branch with ZERO rules must NOT
+      // match — `[].every(...)` is vacuously true, which would make the branch capture ALL traffic
+      // (first-match-wins) and dead-code the default edge. Authoring + create/update/publish now
+      // reject this shape (`validateConditionBranchRules`), so from valid graphs this is
+      // unreachable; for a pre-existing stored graph the branch is skipped and routing falls
+      // through to later branches / the default edge (the intended "else" mechanism).
+      if (!branch.formula && branch.rules.length === 0) continue
+      // Legacy stored formulas must not silently change a fail-closed evaluation into a
+      // default-route approval. New authoring rejects both shapes; old rows fail closed
+      // here so an absent optional field/requester context cannot be treated as no-match.
+      if (
+        branch.formula
+        && (
+          !approvalConditionFormulaHasDynamicDependency(branch.formula.expression)
+          || approvalConditionFormulaHasCaptureProneIdentity(branch.formula.expression)
+        )
+      ) {
+        throw new ServiceError(
+          'Stored condition formula is unsafe for routing',
+          409,
+          'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
+        )
+      }
       const result = branch.formula
         ? evaluateApprovalConditionFormula(branch.formula.expression, this.formData, this.options.requesterContext ?? null)
         : (() => {

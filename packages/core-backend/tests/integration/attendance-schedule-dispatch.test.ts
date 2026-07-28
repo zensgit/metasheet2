@@ -1,10 +1,27 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
 import http from 'http'
 import { randomUUID } from 'crypto'
+import { createRequire } from 'module'
 import { Pool } from 'pg'
+import {
+  snapshotAttendanceSettingsRow,
+  restoreAttendanceSettingsRow,
+  type AttendanceSettingsRowSnapshot,
+} from '../utils/attendance-settings-row'
+
+// Same-process handle on the attendance plugin module (CJS require cache — the server started in
+// beforeAll loads the SAME module instance), used to drop its 60s module-level settings cache after
+// each test so the row restore below is what the next test actually reads.
+const requireCjs = createRequire(import.meta.url)
+function resetAttendanceSettingsCache(): void {
+  const plugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+    resetAttendanceSettingsCacheForTests?: () => void
+  }
+  plugin.resetAttendanceSettingsCacheForTests?.()
+}
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 
@@ -43,6 +60,11 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
+  // Shared-DB isolation for the deployment-wide `system_configs` 'attendance.settings' row: this
+  // suite both WRITES it (saveAttendanceSettings below) and was the recorded VICTIM of another
+  // suite's leaked shiftCompliance state (W4 wave-verification MD §7.5). Snapshot once, restore
+  // the EXACT prior row after every test (see tests/utils/attendance-settings-row.ts).
+  let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
@@ -175,9 +197,24 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
+    settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
+  })
+
+  afterEach(async () => {
+    // Exact-restore the settings row after EVERY test (including failed ones — the in-test
+    // `finally` restores only rewrite a hardcoded baseline, which is NOT the pre-suite state and
+    // can itself CREATE a row that never existed), then drop the plugin's 60s settings cache so
+    // the next test re-reads the restored row instead of a cache primed by this test's PUTs.
+    if (pool) {
+      await restoreAttendanceSettingsRow(pool, settingsRowSnapshot)
+    }
+    resetAttendanceSettingsCache()
   })
 
   afterAll(async () => {
+    if (pool) {
+      await restoreAttendanceSettingsRow(pool, settingsRowSnapshot).catch(() => undefined)
+    }
     await cleanupPrefix('dispatch-').catch(() => undefined)
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) await (server as unknown as { stop: () => Promise<void> }).stop()
     await pool?.end().catch(() => undefined)

@@ -293,7 +293,35 @@
 
       <div class="attendance__card attendance__card--selfservice" data-selfservice-card="annual-balance">
         <div class="attendance__requests-header">
-          <div><h3>{{ tr('My annual leave', '我的年假') }}</h3></div>
+          <div>
+            <h3 data-self-balance-title>
+              {{ balanceLeaveType === 'comp_time' ? tr('My comp time', '我的调休') : tr('My annual leave', '我的年假') }}
+            </h3>
+          </div>
+          <!-- W5-1 / OD-W5-7: leave-type toggle drives the #4562-parameterized read path. The two
+               buttons carry ONLY closed-set literals; the parent re-validates before fetching. -->
+          <div class="attendance-ew__balance-toggle" role="group" :aria-label="tr('Leave type', '假期类型')">
+            <button
+              type="button"
+              class="attendance__btn"
+              :class="{ 'attendance__btn--primary': balanceLeaveType === 'annual' }"
+              data-self-balance-type="annual"
+              :aria-pressed="balanceLeaveType === 'annual'"
+              @click="$emit('changeBalanceLeaveType', 'annual')"
+            >
+              {{ tr('Annual leave', '年假') }}
+            </button>
+            <button
+              type="button"
+              class="attendance__btn"
+              :class="{ 'attendance__btn--primary': balanceLeaveType === 'comp_time' }"
+              data-self-balance-type="comp_time"
+              :aria-pressed="balanceLeaveType === 'comp_time'"
+              @click="$emit('changeBalanceLeaveType', 'comp_time')"
+            >
+              {{ tr('Comp time', '调休') }}
+            </button>
+          </div>
         </div>
         <p v-if="annualSelfBalanceLoading" class="attendance__field-hint">{{ tr('Loading...', '加载中...') }}</p>
         <p v-else-if="annualSelfBalanceError" class="attendance__error" data-annual-self-balance-error>{{ annualSelfBalanceError }}</p>
@@ -307,7 +335,21 @@
             {{ tr('Expired', '已过期') }} {{ annualSelfBalanceSummary.expiredMinutes }}
           </small>
         </div>
-        <p v-else class="attendance__field-hint">{{ tr('No annual leave balance yet.', '暂无年假余额。') }}</p>
+        <p v-else class="attendance__field-hint">
+          {{ balanceLeaveType === 'comp_time' ? tr('No comp-time balance yet.', '暂无调休余额。') : tr('No annual leave balance yet.', '暂无年假余额。') }}
+        </p>
+        <!-- W5-1 self face entry (⑤ comp_time trace): canonical query-form deep link (R2 — zero
+             hash); the click is intercepted for the in-page preset + scroll, the href itself stays
+             a real, shareable canonical link. Read-only entry: 查看依据 never carries a write. -->
+        <p v-if="balanceLeaveType === 'comp_time' && balanceTraceHref" class="attendance__field-hint">
+          <a
+            :href="balanceTraceHref"
+            data-self-balance-trace-link
+            @click.prevent="$emit('openBalanceTrace')"
+          >
+            {{ tr('View basis (decision trace)', '查看依据（决策轨迹）') }}
+          </a>
+        </p>
       </div>
 
       <div class="attendance__card attendance__card--selfservice attendance-ew__tools-deemphasized" data-selfservice-card="rules">
@@ -472,6 +514,13 @@ defineProps<{
   annualSelfBalanceLoading: boolean
   annualSelfBalanceError: string | null
   annualSelfBalanceSummary: AnnualBalanceSummary | null
+  // W5-1 / OD-W5-7 (#4562 leaveTypeCode channel): which leave-type balance the card shows.
+  // Closed set 'annual' | 'comp_time' — the PARENT validates before fetching (UI 输入自验);
+  // this component only re-emits the literal the toggle button carries.
+  balanceLeaveType: 'annual' | 'comp_time'
+  // Canonical query-form deep link into the self decision-trace section (R2: never hash-form) —
+  // rendered as the「查看依据」entry on the comp_time face only (⑤ trace is comp_time-scoped).
+  balanceTraceHref: string
   // Tools band: rules (de-emphasized, not removed — lock §4.3 item 4)
   selfRulesLoading: boolean
   selfRulesError: string | null
@@ -494,6 +543,10 @@ defineEmits<{
   'update:punchOutdoorNoteDraft': [value: string]
   statusAction: []
   selfServiceAction: [action: WorkspaceSelfServiceActionKey]
+  // W5-1: balance leave-type toggle (payload = closed-set literal; parent validates) +
+  // the「查看依据」in-page entry into the self decision-trace section.
+  changeBalanceLeaveType: [code: 'annual' | 'comp_time']
+  openBalanceTrace: []
 }>()
 </script>
 
@@ -614,6 +667,17 @@ defineEmits<{
   border: 1px solid #d0d0d0;
   background: #fff;
   cursor: pointer;
+}
+
+/* W5-1: annual/comp_time balance toggle (compact segmented pair). */
+.attendance-ew__balance-toggle {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.attendance-ew__balance-toggle .attendance__btn {
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 .attendance__btn--primary {

@@ -2,7 +2,10 @@ import { randomUUID } from 'crypto'
 
 import { Logger } from '../core/logger'
 import { pool } from '../db/pg'
-import type { ApprovalActionRequest, UnifiedApprovalDTO } from './approval-bridge-types'
+import type {
+  ApprovalActionRequest,
+  UnifiedApprovalDTO,
+} from './approval-bridge-types'
 import { ApprovalBridgeService } from './ApprovalBridgeService'
 
 const logger = new Logger('AfterSalesApprovalBridgeService')
@@ -12,6 +15,110 @@ const logger = new Logger('AfterSalesApprovalBridgeService')
 // For after-sales v1 these names intentionally point to the same stable value.
 export const REFUND_WORKFLOW_KEY = 'after-sales-refund'
 const DEFAULT_ASSIGNMENT_ROLES = ['finance', 'supervisor'] as const
+
+/**
+ * Closed subject surface for after-sales refund plugin/callbacks.
+ * Mirrors AfterSalesRefundApprovalCommand.subject field names only — never an
+ * open index signature. Project each named field; never spread dto.subject
+ * (legacy subject_snapshot may carry recordId / formSnapshot / nested extras).
+ */
+export interface AfterSalesRefundSubjectSummary {
+  projectId: string | null
+  ticketId: string | null
+  ticketNo: string | null
+  title: string | null
+  refundAmount: number | null
+  currency: string | null
+}
+
+/**
+ * Narrow plugin/callback surface for after-sales refund approvals.
+ *
+ * Plugin-after-sales only consumes id/status/subject (plus stable bridge metadata).
+ * Never forward a full UnifiedApprovalDTO (formSnapshot / formSchema / record-link
+ * ids) into plugin returns or onDecision/onApproved/onRejected callbacks — those
+ * would leak authorized linked record ids once after-sales uses template forms.
+ * Normal HTTP approval action responses stay on UnifiedApprovalDTO unchanged.
+ */
+export interface AfterSalesApprovalSummary {
+  id: string
+  sourceSystem: string
+  workflowKey: string | null
+  businessKey: string | null
+  title: string | null
+  status: string
+  subject: AfterSalesRefundSubjectSummary | null
+  currentStep: number | null
+  totalSteps: number | null
+  updatedAt: string
+}
+
+function optionalTrimmedString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function optionalFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+/**
+ * Project subject_snapshot / dto.subject to the closed refund subject summary.
+ * Field-by-field only — never Object.assign / spread (blocks recordId leaks).
+ * Currency defaults to 'CNY' when a subject object is present but currency is
+ * missing/blank (parity with normalizeCommand submit path).
+ */
+export function toAfterSalesRefundSubjectSummary(
+  subject: unknown,
+): AfterSalesRefundSubjectSummary | null {
+  if (!subject || typeof subject !== 'object' || Array.isArray(subject)) return null
+  const raw = subject as Record<string, unknown>
+  const currencyRaw = optionalTrimmedString(raw.currency)
+  return {
+    projectId: optionalTrimmedString(raw.projectId),
+    ticketId: optionalTrimmedString(raw.ticketId),
+    ticketNo: optionalTrimmedString(raw.ticketNo),
+    title: optionalTrimmedString(raw.title),
+    refundAmount: optionalFiniteNumber(raw.refundAmount),
+    // Present subject object → currency defaults to CNY when absent (command parity).
+    currency: currencyRaw ?? 'CNY',
+  }
+}
+
+/**
+ * Project a UnifiedApprovalDTO down to the explicit after-sales summary.
+ * Drops formSnapshot, formSchema, assignments, requester, policy, and every
+ * other field that is not on AfterSalesApprovalSummary. Subject is closed.
+ */
+export function toAfterSalesApprovalSummary(
+  dto: UnifiedApprovalDTO,
+): AfterSalesApprovalSummary {
+  return {
+    id: dto.id,
+    sourceSystem: dto.sourceSystem,
+    workflowKey: dto.workflowKey ?? null,
+    businessKey: dto.businessKey ?? null,
+    title: dto.title ?? null,
+    status: dto.status,
+    subject: toAfterSalesRefundSubjectSummary(dto.subject),
+    currentStep: dto.currentStep ?? null,
+    totalSteps: dto.totalSteps ?? null,
+    updatedAt: dto.updatedAt,
+  }
+}
+
+/**
+ * Explicit no-viewer sentinel for internal bridge loads.
+ * Pass this (not an omitted argument) so callers cannot confuse "no viewer" with
+ * "use ambient viewer authority" or invent a synthetic actor.
+ */
+export const AFTER_SALES_NO_VIEWER: null = null
 
 type QueryResultLike<T = unknown> = {
   rows: T[]
@@ -71,15 +178,15 @@ export interface AfterSalesRefundApprovalDecisionInput extends AfterSalesRefundA
 
 export interface AfterSalesRefundApprovalCallbacks {
   onDecision?: (
-    approval: UnifiedApprovalDTO,
+    approval: AfterSalesApprovalSummary,
     decision: AfterSalesRefundApprovalDecisionInput,
   ) => Promise<void> | void
   onApproved?: (
-    approval: UnifiedApprovalDTO,
+    approval: AfterSalesApprovalSummary,
     decision: AfterSalesRefundApprovalDecisionInput,
   ) => Promise<void> | void
   onRejected?: (
-    approval: UnifiedApprovalDTO,
+    approval: AfterSalesApprovalSummary,
     decision: AfterSalesRefundApprovalDecisionInput,
   ) => Promise<void> | void
 }
@@ -87,12 +194,12 @@ export interface AfterSalesRefundApprovalCallbacks {
 export interface AfterSalesRefundApprovalSubmitResult {
   created: boolean
   approvalId: string
-  approval: UnifiedApprovalDTO
+  approval: AfterSalesApprovalSummary
 }
 
 export interface AfterSalesRefundApprovalDecisionResult {
   approvalId: string
-  approval: UnifiedApprovalDTO
+  approval: AfterSalesApprovalSummary
   decision: 'approved' | 'rejected'
 }
 
@@ -278,15 +385,28 @@ export class AfterSalesApprovalBridgeService {
     private readonly callbacks: AfterSalesRefundApprovalCallbacks = {},
   ) {}
 
+  /**
+   * Internal no-viewer load of the full DTO, then project to the narrow plugin summary.
+   * Always passes AFTER_SALES_NO_VIEWER explicitly (never omit viewerUserId).
+   */
+  private async loadApprovalSummaryForPlugin(
+    approvalId: string,
+  ): Promise<AfterSalesApprovalSummary | null> {
+    // Explicit null: internal plugin path has no authenticated viewer and must not invent one.
+    const full = await this.approvalBridge.getApproval(approvalId, AFTER_SALES_NO_VIEWER)
+    if (!full) return null
+    return toAfterSalesApprovalSummary(full)
+  }
+
   async getRefundApproval(
     input: string | AfterSalesRefundApprovalQueryInput,
-  ): Promise<UnifiedApprovalDTO | null> {
+  ): Promise<AfterSalesApprovalSummary | null> {
     const approvalId = await this.lookupRefundApprovalId(input)
     if (!approvalId) {
       return null
     }
 
-    return this.approvalBridge.getApproval(approvalId)
+    return this.loadApprovalSummaryForPlugin(approvalId)
   }
 
   private async lookupRefundApprovalId(
@@ -322,6 +442,8 @@ export class AfterSalesApprovalBridgeService {
       throw new Error('Refund approval not found')
     }
 
+    // dispatchAction returns the full HTTP UnifiedApprovalDTO (unchanged for normal action
+    // responses). Plugin/callback paths only receive the narrow summary projection.
     const updatedApproval = await this.approvalBridge.dispatchAction(
       approvalId,
       {
@@ -335,22 +457,23 @@ export class AfterSalesApprovalBridgeService {
         userAgent: input.userAgent,
       },
     )
+    const summary = toAfterSalesApprovalSummary(updatedApproval)
 
     if (this.callbacks.onDecision) {
-      await this.callbacks.onDecision(updatedApproval, input)
+      await this.callbacks.onDecision(summary, input)
     }
 
-    const callback = updatedApproval.status === 'approved'
+    const callback = summary.status === 'approved'
       ? this.callbacks.onApproved
       : this.callbacks.onRejected
     if (callback) {
-      await callback(updatedApproval, input)
+      await callback(summary, input)
     }
 
     return {
-      approvalId: updatedApproval.id,
-      approval: updatedApproval,
-      decision: updatedApproval.status === 'approved' ? 'approved' : 'rejected',
+      approvalId: summary.id,
+      approval: summary,
+      decision: summary.status === 'approved' ? 'approved' : 'rejected',
     }
   }
 
@@ -374,7 +497,10 @@ export class AfterSalesApprovalBridgeService {
     )
     const existingId = existing.rows[0]?.id
     if (existingId) {
-      const approval = await this.approvalBridge.getApproval(existingId)
+      const approval = await this.loadApprovalSummaryForPlugin(existingId)
+      if (!approval) {
+        throw new Error('Existing refund approval could not be loaded')
+      }
       return {
         created: false,
         approvalId: existingId,
@@ -447,7 +573,7 @@ export class AfterSalesApprovalBridgeService {
       }
     })
 
-    const approval = await this.approvalBridge.getApproval(approvalId)
+    const approval = await this.loadApprovalSummaryForPlugin(approvalId)
     if (!approval) {
       logger.error(`Created refund approval ${approvalId} but failed to load it back`)
       throw new Error('Approval created but could not be loaded')

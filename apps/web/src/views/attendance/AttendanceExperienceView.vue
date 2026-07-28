@@ -40,9 +40,11 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
+import type { LocationQueryRaw } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
+import { confirmAttendanceSetupPrefillLeave } from './attendanceSetupPrefillLeaveGuard'
 import AttendanceOverview from './AttendanceOverview.vue'
 import AttendanceReportsView from './AttendanceReportsView.vue'
 import AttendanceAdminCenter from './AttendanceAdminCenter.vue'
@@ -50,10 +52,31 @@ import AttendanceWorkflowDesigner from './AttendanceWorkflowDesigner.vue'
 
 type AttendanceTab = 'overview' | 'reports' | 'admin' | 'import' | 'workflow'
 
+// vNext charter §7 Wave 3 (issue #4353, reclaimed from stacked draft #4414):
+// the admin task home's Anomalies entry deep-links here, so every known
+// overview section id (not just `requests`) must survive the round trip
+// through the route query.
+const ATTENDANCE_OVERVIEW_SECTION_IDS = new Set([
+  'attendance-overview-requests',
+  'attendance-overview-anomalies',
+  'attendance-overview-request-report',
+  'attendance-overview-records',
+  // W5-1 (Wave 5 explainability design-lock §6/§9 W5-1): the self face of the read-only
+  // decision-trace surface — canonical `?section=attendance-overview-decision-trace` query deep
+  // link (R2: query form, never hash).
+  'attendance-overview-decision-trace',
+])
+
 const route = useRoute()
 const router = useRouter()
 const { hasFeature, loadProductFeatures } = useFeatureFlags()
 const { isZh } = useLocale()
+
+// W4-2 OD-W4-7② (切区确认 leg): an applied-but-unsaved template prefill lives in the admin
+// host's in-memory forms (AttendanceView). Leaving the /attendance route unmounts everything —
+// beforeunload never fires on SPA navigation, so ask here before vue-router proceeds.
+const setupPrefillLeaveTr = (en: string, zh: string): string => (isZh.value ? zh : en)
+onBeforeRouteLeave(() => confirmAttendanceSetupPrefillLeave(setupPrefillLeaveTr))
 
 const activeTab = ref<AttendanceTab>('overview')
 const featuresReady = ref(false)
@@ -123,7 +146,7 @@ const desktopOnlyMessage = computed(() => {
 
 const overviewInitialSectionId = computed(() => {
   const section = Array.isArray(route.query.section) ? route.query.section[0] : route.query.section
-  return section === 'attendance-overview-requests' ? section : ''
+  return typeof section === 'string' && ATTENDANCE_OVERVIEW_SECTION_IDS.has(section) ? section : ''
 })
 
 const overviewInitialRequestId = computed(() => {
@@ -180,14 +203,20 @@ const activeView = computed(() => {
       return {
         component: AttendanceAdminCenter,
         key: 'attendance-admin',
-        props: { initialSectionId: adminInitialSectionId.value },
+        props: {
+          initialSectionId: adminInitialSectionId.value,
+          onClearSection: returnToAdminHome,
+        },
       }
     case 'import':
       if (!canAccessAdmin.value) return null
       return {
         component: AttendanceAdminCenter,
         key: 'attendance-import',
-        props: { initialSectionId: 'attendance-admin-import' },
+        props: {
+          initialSectionId: 'attendance-admin-import',
+          onClearSection: returnToAdminHome,
+        },
       }
     case 'workflow':
       if (!canAccessWorkflow.value) return null
@@ -234,10 +263,25 @@ function syncFromRoute(): void {
 
 async function selectTab(tab: AttendanceTab): Promise<void> {
   const nextTab = ensureTabAllowed(tab)
+  // W4-2 OD-W4-7② (切区确认 leg): switching top tabs swaps `component :is` and unmounts the
+  // admin host — an applied-but-unsaved template prefill would be discarded silently (no
+  // beforeunload, no route leave). Same confirm as the route-leave guard above.
+  if (nextTab !== activeTab.value && !confirmAttendanceSetupPrefillLeave(setupPrefillLeaveTr)) {
+    return
+  }
   activeTab.value = nextTab
 
   // Keep this page-level state isolated to `tab`.
   const query = nextTab === 'overview' ? {} : { tab: nextTab }
+  await router.replace({ query })
+}
+
+// Admin center's "Management home" return action (vNext charter §7 Wave 3):
+// keep the `admin`/`import` tab but drop any deep-linked `section`, so a
+// route refresh does not re-open the section the operator just left.
+async function returnToAdminHome(): Promise<void> {
+  const query: LocationQueryRaw = { ...route.query, tab: 'admin' }
+  delete query.section
   await router.replace({ query })
 }
 

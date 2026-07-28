@@ -19,6 +19,26 @@ export interface ProductFeatures {
    * byte-identical for every tenant that has not opted in.
    */
   approvalMobile: boolean
+  /**
+   * B3-07 (#4195) — approval attachment upload pipeline gate. Mirrors the backend's
+   * APPROVAL_ATTACHMENTS_ENABLED master flag (D5, default OFF): the fill view replaces the B2-28
+   * honest-disabled placeholder with the real uploader ONLY when the backend session payload (or an
+   * authorized dev override) explicitly enables it. No role/mode inference — flag OFF keeps the
+   * placeholder + submit-time strip byte-identical.
+   */
+  approvalAttachments: boolean
+  /**
+   * Approval Canvas V2 authoring surface. Default OFF and enabled only by an explicit backend
+   * session value or the existing authorized development override.
+   */
+  approvalCanvasV2: boolean
+  /**
+   * FWB production authoring (`write_approval_form_values` / create-from-approval). Mirrors the
+   * backend APPROVAL_FWB_WRITEBACK_ENABLED master flag (default OFF). The automation rule editor
+   * offers NEW FWB actions only when this is true AND the trigger is approval.completed; a
+   * previously persisted FWB action remains visible as read-only while the flag is off.
+   */
+  approvalFwbWriteback: boolean
   mode: ProductMode
 }
 
@@ -50,6 +70,9 @@ const DEFAULT_FEATURES: ProductFeatures = {
   attendanceImport: false,
   plm: false,
   approvalMobile: false,
+  approvalAttachments: false,
+  approvalCanvasV2: false,
+  approvalFwbWriteback: false,
   mode: 'platform',
 }
 
@@ -132,7 +155,7 @@ function needsPluginInference(features: Partial<ProductFeatures>): boolean {
   return typeof features.attendance !== 'boolean' || typeof features.workflow !== 'boolean'
 }
 
-function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
+export function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
   const featuresNode =
     payload?.data?.features ||
     payload?.features ||
@@ -172,6 +195,24 @@ function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
         ? featuresNode.approvalMobile
         : typeof featuresNode.approval_mobile === 'boolean'
           ? featuresNode.approval_mobile
+          : undefined,
+    approvalAttachments:
+      typeof featuresNode.approvalAttachments === 'boolean'
+        ? featuresNode.approvalAttachments
+        : typeof featuresNode.approval_attachments === 'boolean'
+          ? featuresNode.approval_attachments
+          : undefined,
+    approvalCanvasV2:
+      typeof featuresNode.approvalCanvasV2 === 'boolean'
+        ? featuresNode.approvalCanvasV2
+        : typeof featuresNode.approval_canvas_v2 === 'boolean'
+          ? featuresNode.approval_canvas_v2
+          : undefined,
+    approvalFwbWriteback:
+      typeof featuresNode.approvalFwbWriteback === 'boolean'
+        ? featuresNode.approvalFwbWriteback
+        : typeof featuresNode.approval_fwb_writeback === 'boolean'
+          ? featuresNode.approval_fwb_writeback
           : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
@@ -275,6 +316,24 @@ function resolveFeatures(
     backend.approvalMobile,
   )
 
+  // B3-07: same default-OFF discipline — only an explicit backend/override boolean enables it.
+  const approvalAttachments = boolOrDefault(
+    override.approvalAttachments,
+    backend.approvalAttachments,
+  )
+
+  // Canvas V2 follows the same explicit-only rollout discipline as approval attachments/mobile.
+  const approvalCanvasV2 = boolOrDefault(
+    override.approvalCanvasV2,
+    backend.approvalCanvasV2,
+  )
+
+  // FWB authoring: same default-OFF discipline — only an explicit backend/override boolean enables it.
+  const approvalFwbWriteback = boolOrDefault(
+    override.approvalFwbWriteback,
+    backend.approvalFwbWriteback,
+  )
+
   return {
     attendance,
     workflow,
@@ -282,6 +341,9 @@ function resolveFeatures(
     attendanceImport,
     plm,
     approvalMobile,
+    approvalAttachments,
+    approvalCanvasV2,
+    approvalFwbWriteback,
     mode,
   }
 }

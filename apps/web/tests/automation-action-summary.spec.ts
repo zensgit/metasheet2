@@ -130,6 +130,22 @@ describe('automationActionSummary (G-B2-25)', () => {
     })
   })
 
+  describe('write_approval_form_values', () => {
+    it('distinguishes create and update mode in the collapsed summary', () => {
+      const create: ActionSummarySnapshot = {
+        type: 'write_approval_form_values',
+        fwbWriteback: { mappingCount: 2, confirmed: true, mode: 'create' },
+      }
+      const update: ActionSummarySnapshot = {
+        type: 'write_approval_form_values',
+        fwbWriteback: { mappingCount: 1, confirmed: false, mode: 'update' },
+      }
+      expect(summarizeAutomationAction(create, true)).toBe('审批数据回写：新建记录 · 2 项映射（已确认）')
+      expect(summarizeAutomationAction(update, false))
+        .toBe('Write back approval data: update linked record · 1 field mapping（unconfirmed）')
+    })
+  })
+
   describe('send_email', () => {
     it('flags zero recipients', () => {
       const snapshot: ActionSummarySnapshot = { type: 'send_email', email: { recipientCount: 0, subjectTemplate: 'Hi' } }

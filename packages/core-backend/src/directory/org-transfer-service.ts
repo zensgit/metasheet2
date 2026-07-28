@@ -271,6 +271,12 @@ export async function createOrgTransfer(input: CreateOrgTransferInput): Promise<
     // pass its apply-time recheck and commit directory writes after this freeze becomes active.
     // Default freeze_source_sync=true on the row makes create itself a freeze activation.
     return await transaction(async (client) => {
+      // T2 lock-correctness P2 (PB4-3 idiom): the pool wrapper issues a bare BEGIN, so under a
+      // repeatable-read default_transaction_isolation this transaction's snapshot would be
+      // frozen by the lock-acquisition SELECT itself, before the lock is granted. Freeze
+      // writers pin READ COMMITTED as the first statement — same as the sync local-apply
+      // side — so post-lock reads observe state committed while waiting on the shared key.
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
       await acquireSourceSyncFreezeLock(client, source.id)
       const inserted = await client.query(
         `INSERT INTO provider_org_transfers
@@ -498,6 +504,11 @@ export async function setOrgTransferSourceSyncFreeze(
   freezeSourceSync: boolean
 ): Promise<OrgTransferSummary> {
   return transaction(async (client) => {
+    // T2 lock-correctness P2 (see createOrgTransfer): pin BEFORE the source probe — the probe
+    // is this transaction's first snapshot-taking query, and SET TRANSACTION ISOLATION LEVEL
+    // must precede it. Under a repeatable-read default the post-lock lockTransfer/UPDATE
+    // would otherwise run against a pre-lock snapshot.
+    await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     // Derive immutable source id first (no row lock yet) so the shared freeze lock is keyed
     // correctly before we serialize on the transfer row.
     const sourceProbe = await client.query(

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { ApprovalGraphExecutor, validateApprovalFormData, pruneHiddenFormData } from '../../src/services/ApprovalGraphExecutor'
+import {
+  ApprovalGraphExecutor,
+  canonicalizeRecordLinkFormData,
+  pruneHiddenFormData,
+  validateApprovalFormData,
+} from '../../src/services/ApprovalGraphExecutor'
 import type { FormSchema, RuntimeGraph } from '../../src/types/approval-product'
 
 describe('ApprovalGraphExecutor', () => {
@@ -134,6 +139,122 @@ describe('ApprovalGraphExecutor', () => {
     }
 
     expect(() => new ApprovalGraphExecutor(runtimeGraph, { amount: 0 }).resolveInitialState()).toThrow(/division by zero/)
+  })
+
+  it('skips a LEGACY empty-rules branch instead of match-all (defense-in-depth for stored graphs)', () => {
+    // A rules-mode branch with `rules: []` is rejected at authoring/create/update/publish
+    // (validateConditionBranchRules), but a graph STORED before that gate may still carry one.
+    // `[].every(...)` is vacuously true — without the runtime guard the empty branch would capture
+    // EVERY request (first-match-wins) and dead-code both the later branch and the default edge.
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              { edgeKey: 'edge-empty', rules: [] }, // legacy vacuous branch — must never match
+              { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+            ],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'empty-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['ghost'] } },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-empty', source: 'route', target: 'empty-review' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-empty-end', source: 'empty-review', target: 'end' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    // A matching request routes via the LATER, real branch — not the empty one.
+    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 5000 }).resolveInitialState().currentNodeKey).toBe('high-review')
+    // A non-matching request falls through to the default edge — the intended "else" mechanism.
+    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 10 }).resolveInitialState().currentNodeKey).toBe('low-review')
+  })
+
+  it('rejects a LEGACY literal-only formula instead of silently taking another route', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              { edgeKey: 'edge-static', rules: [], formula: { expression: '1 == 1' } },
+              { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+            ],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'static-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['ghost'] } },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-static', source: 'route', target: 'static-review' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-static-end', source: 'static-review', target: 'end' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, { amount: 5000 }).resolveInitialState()).toThrowError(
+      expect.objectContaining({ code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE', statusCode: 409 }),
+    )
+  })
+
+  it('rejects a LEGACY identity formula instead of masking missing data with the default route', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              { edgeKey: 'edge-identity', rules: [], formula: { expression: '{amount} == {amount}' } },
+              { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+            ],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'identity-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['ghost'] } },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-identity', source: 'route', target: 'identity-review' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-identity-end', source: 'identity-review', target: 'end' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {}).resolveInitialState()).toThrowError(
+      expect.objectContaining({ code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE', statusCode: 409 }),
+    )
   })
 
   it('routes a requester.department branch from threaded requesterContext, fail-closed on absent (RA-1a)', () => {
@@ -916,6 +1037,52 @@ describe('ApprovalGraphExecutor', () => {
 })
 
 describe('validateApprovalFormData', () => {
+  test('number fields reject unsafe integers instead of freezing a rounded snapshot value', () => {
+    const schema = { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] } as never
+    expect(validateApprovalFormData(schema, { amount: 9007199254740993 }))
+      .toEqual(['amount must be a lossless number'])
+    expect(validateApprovalFormData(schema, { amount: Number.MAX_SAFE_INTEGER })).toEqual([])
+  })
+
+  it('keeps the pre-feature attachment contract while the runtime flag is OFF', () => {
+    const schema: FormSchema = { fields: [{ id: 'files', type: 'attachment', label: 'Files' }] }
+    expect(validateApprovalFormData(schema, { files: 'legacy-file-reference' })).toEqual([])
+    expect(validateApprovalFormData(schema, { files: ['att_new'] }))
+      .toEqual(['files must be a string'])
+  })
+
+  it('accepts only staged attachment-id arrays in the enabled attachment mode', () => {
+    const schema: FormSchema = { fields: [{ id: 'files', type: 'attachment', label: 'Files' }] }
+    expect(validateApprovalFormData(schema, { files: ['att_a', 'att_b'] }, { attachmentValueMode: 'ids' }))
+      .toEqual([])
+    expect(validateApprovalFormData(schema, { files: 'legacy-file-reference' }, { attachmentValueMode: 'ids' }))
+      .toEqual(['files must be an array of attachment ids'])
+  })
+
+  it('detail-leaf attachment: legacy-valid while OFF; top-level-only enforced when ON (both controls)', () => {
+    // A historical/frozen schema that somehow carries attachment inside a detail group.
+    const schema: FormSchema = {
+      fields: [{
+        id: 'items',
+        type: 'detail',
+        label: '明细',
+        columns: [
+          { id: 'name', type: 'text', label: 'name' },
+          { id: 'proof', type: 'attachment', label: 'proof' },
+        ],
+      }],
+    }
+    // Flag OFF / legacy: detail-leaf attachment values remain legacy-valid (string/record).
+    expect(validateApprovalFormData(schema, {
+      items: [{ name: 'row', proof: 'legacy-file-reference' }],
+    })).toEqual([])
+    // Flag ON / ids: top-level-only control rejects attachment leaves inside detail.
+    const on = validateApprovalFormData(schema, {
+      items: [{ name: 'row', proof: ['att_1'] }],
+    }, { attachmentValueMode: 'ids' })
+    expect(on).toContain('items.proof attachment fields are not allowed inside detail rows')
+  })
+
   it('reports required, type, and option errors', () => {
     const formSchema: FormSchema = {
       fields: [
@@ -1077,6 +1244,85 @@ describe('validateApprovalFormData', () => {
     ])
   })
 
+  it('date fields accept ONLY a strict real-calendar YYYY-MM-DD string (floating civil date)', () => {
+    const schema: FormSchema = { fields: [{ id: 'due', type: 'date', label: 'Due' }] }
+    // Accepts real calendar dates, leap-year validated — never via Date.parse.
+    expect(validateApprovalFormData(schema, { due: '2026-07-15' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2024-02-29' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2000-02-29' })).toEqual([])
+    // Rejects impossible dates, datetime strings, locale strings, epoch numbers, Date
+    // objects, and surrounding-whitespace variants (the form transport does not trim).
+    const rejected: Array<[string, unknown]> = [
+      ['non-leap Feb 29', '2026-02-29'],
+      ['century non-leap Feb 29', '1900-02-29'],
+      ['April 31', '2026-04-31'],
+      ['month 13', '2026-13-01'],
+      ['ISO datetime', '2026-07-15T10:00:00Z'],
+      ['datetime with offset', '2026-07-15T23:30:00+08:00'],
+      ['space-separated datetime', '2026-07-15 10:00:00'],
+      ['locale string', '7/15/2026'],
+      ['epoch-ms number', Date.UTC(2026, 6, 15)],
+      ['Date object', new Date(Date.UTC(2026, 6, 15))],
+      ['left whitespace', ' 2026-07-15'],
+      ['right whitespace', '2026-07-15 '],
+      ['single-digit month', '2026-7-15'],
+      ['year zero', '0000-01-01'],
+    ]
+    for (const [label, value] of rejected) {
+      expect(validateApprovalFormData(schema, { due: value }), label)
+        .toEqual(['due must be a date value'])
+    }
+  })
+
+  it('datetime fields keep instant semantics (positive control — unchanged behavior)', () => {
+    const schema: FormSchema = { fields: [{ id: 'meet', type: 'datetime', label: 'Meet' }] }
+    expect(validateApprovalFormData(schema, { meet: '2026-07-15T10:00:00Z' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-07-15 10:00:00' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-07-15' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: new Date(Date.UTC(2026, 6, 15)) })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: 'not-a-date' }))
+      .toEqual(['meet must be a date value'])
+    expect(validateApprovalFormData(schema, { meet: 1752573600000 }))
+      .toEqual(['meet must be a date value'])
+  })
+
+  it('date min/max compares validated YYYY-MM-DD calendar strings directly (timezone-stable)', () => {
+    const schema: FormSchema = {
+      fields: [{
+        id: 'due',
+        type: 'date',
+        label: 'Due',
+        props: { min: '2026-04-10', max: '2026-04-12' },
+      }],
+    }
+    // Boundaries are inclusive and identical in every timezone (pure string comparison —
+    // an epoch-converting mutation reds this under TZ=America/Los_Angeles / Asia/Taipei).
+    expect(validateApprovalFormData(schema, { due: '2026-04-10' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2026-04-12' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2026-04-11' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2026-04-09' }))
+      .toEqual(['due must be on or after 2026-04-10'])
+    expect(validateApprovalFormData(schema, { due: '2026-04-13' }))
+      .toEqual(['due must be on or before 2026-04-12'])
+  })
+
+  it('datetime min/max keeps instant semantics (positive control — unchanged behavior)', () => {
+    const schema: FormSchema = {
+      fields: [{
+        id: 'meet',
+        type: 'datetime',
+        label: 'Meet',
+        props: { min: '2026-04-10T00:00:00Z', max: '2026-04-12T00:00:00Z' },
+      }],
+    }
+    expect(validateApprovalFormData(schema, { meet: '2026-04-10T00:00:00Z' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-04-11T12:00:00Z' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-04-09T23:59:59Z' }))
+      .toEqual(['meet must be on or after 2026-04-10T00:00:00Z'])
+    expect(validateApprovalFormData(schema, { meet: '2026-04-12T00:00:01Z' }))
+      .toEqual(['meet must be on or before 2026-04-12T00:00:00Z'])
+  })
+
   // P1-B 加签 — buildAddSignAssignments returns one active user row per target
   // id at the current node, stamped {addedBy, addSign:true} and deliberately
   // carrying NO resolvedFrom (so it reads as a static, non-resolver assignment).
@@ -1188,6 +1434,84 @@ describe('validateApprovalFormData — detail (明细) rows (C-2)', () => {
   it('applies per-row visibility: a hidden required sub-field is not required, but required when visible', () => {
     expect(validateApprovalFormData(detailSchema, { items: [{ product: 'A', qty: 1 }] })).toEqual([])
     expect(validateApprovalFormData(detailSchema, { items: [{ product: 'special', qty: 1 }] })).toEqual(['items[0].note is required'])
+  })
+})
+
+describe('validateApprovalFormData — record-link value shape (FWB-0 Layer 2)', () => {
+  const schema: FormSchema = {
+    fields: [{
+      id: 'linked',
+      type: 'record-link',
+      label: '关联记录',
+      required: true,
+      props: { baseId: 'base_a', sheetId: 'sheet_a' },
+    }],
+  }
+
+  it('accepts exactly one { recordId: non-blank string }', () => {
+    expect(validateApprovalFormData(schema, { linked: { recordId: 'rec_1' } })).toEqual([])
+    expect(validateApprovalFormData(schema, { linked: { recordId: '  rec_2  ' } })).toEqual([])
+  })
+
+  it('rejects arrays, free-text, empty id, and extra target overrides (fail-closed)', () => {
+    expect(validateApprovalFormData(schema, { linked: 'rec_1' })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: ['rec_1'] })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: { recordId: '' } })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: { recordId: 'a', sheetId: 'override' } })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: { recordIds: ['a', 'b'] } })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+  })
+
+  it('required empty still surfaces required (not a type error)', () => {
+    expect(validateApprovalFormData(schema, {})).toEqual(['linked is required'])
+  })
+})
+
+describe('canonicalizeRecordLinkFormData — FWB-0 Layer 2', () => {
+  it('rewrites padded recordId to the exact trimmed canonical object in-place', () => {
+    const schema: FormSchema = {
+      fields: [
+        {
+          id: 'linked',
+          type: 'record-link',
+          label: '关联',
+          props: { baseId: 'b', sheetId: 's' },
+        },
+        { id: 'reason', type: 'text', label: '事由' },
+      ],
+    }
+    const formData: Record<string, unknown> = {
+      linked: { recordId: '  rec-1  ' },
+      reason: 'keep',
+    }
+    canonicalizeRecordLinkFormData(schema, formData)
+    expect(formData.linked).toEqual({ recordId: 'rec-1' })
+    expect(formData.reason).toBe('keep')
+  })
+
+  it('does not loosen structural validation — invalid shapes stay untouched', () => {
+    const schema: FormSchema = {
+      fields: [{
+        id: 'linked',
+        type: 'record-link',
+        label: '关联',
+        props: { baseId: 'b', sheetId: 's' },
+      }],
+    }
+    const invalid: Record<string, unknown> = {
+      linked: { recordId: 'a', sheetId: 'smuggle' },
+    }
+    canonicalizeRecordLinkFormData(schema, invalid)
+    expect(invalid.linked).toEqual({ recordId: 'a', sheetId: 'smuggle' })
   })
 })
 

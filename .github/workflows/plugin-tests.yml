@@ -88,6 +88,7 @@ jobs:
       - name: Run DingTalk closeout env-contract test (DT-CLOSE-02)
         run: |
           node --test scripts/ops/dingtalk-closeout-env-contract.test.mjs
+          node --test scripts/ops/directory-grant-table-ci-wiring.test.mjs
 
       - name: Run DingTalk OAuth-stability metrics-only contract test (DT-CLOSE-01B)
         run: |
@@ -96,6 +97,10 @@ jobs:
       - name: Run DingTalk OAuth-stability metrics-only full-script test (DT-CLOSE-01B)
         run: |
           node --test scripts/ops/dingtalk-oauth-stability-metrics-only-fullscript.test.mjs
+
+      - name: Run DingTalk OAuth-stability ARG_MAX payload-handoff test (DT-CLOSE-01C)
+        run: |
+          node --test scripts/ops/dingtalk-oauth-stability-argmax-payload.test.mjs
 
       - name: Run DingTalk OAuth-stability summary + workflow contract tests (DT-CLOSE-01B)
         run: |
@@ -124,6 +129,10 @@ jobs:
           $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
             scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   test:
@@ -236,12 +245,59 @@ jobs:
       - name: Stock-preparation P4 repair CI wiring contract
         run: node --test scripts/ops/stock-preparation-p4-repair-ci-wiring.test.mjs
 
+      # Approval data-closure real-DB suites use the same two-point contract: excluded from the
+      # default no-DB collection and invoked as whole files in a required real-DB step.
+      - name: Approval data-closure CI wiring contract
+        run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
+
+      # #4604 owner HOLD: multitable-onprem-package-build.yml is workflow_dispatch only and
+      # only ever exercises the verify script against a NORMAL package — it never proves the
+      # loopback-config negative case. Without an automated caller, deleting the loopback
+      # regex or its main-flow call site in scripts/ops/multitable-onprem-package-verify.sh
+      # still left every PR required check green. This step is that automated caller: pure
+      # bash, no DB, no pnpm install needed, so it runs early in the no-DB block. Gated to the
+      # 20.x leg only so it lands inside the required `test (20.x)` context (18.x is not
+      # required) rather than doubling the run for no reason — a failure here reds a required
+      # check on any PR touching the verify script.
+      - name: Multitable on-prem loopback-verify CI wiring contract (#4604)
+        if: matrix.node-version == '20.x'
+        run: bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
+
+      # Corp-scope Phase B cannot migrate until staging proves its only managed
+      # backend and the only container publishing 18900 are the exact Phase A
+      # image. Both matrix legs execute the behavior suite; branch protection
+      # currently requires test (20.x), while test (18.x) is additional coverage.
+      # Run the wiring guard in this same job. The wiring and behavior suites
+      # assert each other's invocation, so removing either step turns the
+      # required Node 20 context red.
+      - name: DingTalk staging worker-drain CI wiring contract
+        run: node --test scripts/ops/dingtalk-worker-drain-ci-wiring.test.mjs
+
+      - name: DingTalk staging immutable worker-drain gate
+        run: node --test scripts/ops/dingtalk-staging-deploy-identity.test.mjs
+
 
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
       - name: Prod health probe monitor contract
         run: node --test scripts/ops/prod-health-probe-state.test.mjs
+
+      # DT-CLOSE-01C: the ARG_MAX / E2BIG payload-handoff regression of the scheduled
+      # "DingTalk OAuth Stability Recording (Lite)" workflow (rc=126). This drives the real
+      # dingtalk-oauth-stability-check.sh against a PATH-shimmed ssh whose /metrics/prom response is
+      # larger than the machine's own `getconf ARG_MAX`, and includes a red-under-revert mutation.
+      # It lives in the REQUIRED `test` job — on BOTH matrix legs — so a revert to the env-var
+      # handoff cannot land green; the K3 WISE offline PoC job keeps running it next to its five
+      # sibling OAuth-stability suites. Hermetic: no DB, no network, no docker; ~5s wall clock.
+      # `bash --version` is echoed because the rc==126 assertion is gated on bash >= 4 (bash 3.2
+      # collapses every `set -e` abort to 1); printing the interpreter makes it observable in the
+      # step log that the pin actually executed here rather than being silently skipped.
+      - name: DingTalk OAuth-stability ARG_MAX payload-handoff regression (DT-CLOSE-01C)
+        run: |
+          bash --version | head -1
+          getconf ARG_MAX
+          node --test scripts/ops/dingtalk-oauth-stability-argmax-payload.test.mjs
 
       # #4210 T9: the stock-preparation one-click acceptance script's cross-platform contract + behavioural
       # tests are pure pwsh 7 + tar + node. Run once in the required 20.x arm. The package's target-shell
@@ -253,6 +309,8 @@ jobs:
         run: |
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -291,6 +349,56 @@ jobs:
           name: install-log-${{ matrix.node-version }}
           path: install.log
 
+      - name: Run attendance calculation-group W1 contract
+        run: |
+          node --test scripts/ops/attendance-calculation-group-membership-w1-contract.test.mjs
+
+      # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
+      # EXCLUDE constraint on purpose and proves the runtime integrity guard is
+      # independently load-bearing. Keep whole-file execution explicit.
+      - name: Run attendance calculation-group W1 timeline-integrity unit
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-calculation-group-membership-timeline-integrity.test.ts \
+            --reporter=dot
+
+      # #4556 W2: shared work-date resolver unit matrix (overlap precedence, attribution tail,
+      # free_time/unscheduled/explicit-import hard stop, overtimeAttributionV1 freeze/legacy,
+      # six-adapter parity). Explicit whole-file gate so it cannot drift out of the default suite.
+      - name: Run attendance work-date resolver W2 unit
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-work-date-resolver-w2.test.ts \
+            tests/unit/attendance-live-punch-work-date.test.ts \
+            --reporter=dot
+
+      # #4556 W3: canonical shift segment service unit matrix (segment validation,
+      # envelope derivation, dual-read synthesis, capability flag, assignability
+      # guard, historical-label redaction). Explicit whole-file gate so it cannot
+      # drift out of the default suite.
+      - name: Run attendance shift segments W3 unit
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-shift-segments-service.test.ts \
+            --reporter=dot
+
+      # #4556 W4C-0 Stage D: section 8.4 source/effect/result mechanical bypass guard. A
+      # node:test (.test.mjs) file — invisible to both `pnpm --filter core-backend test` and
+      # vitest.config.ts's exclude list — so it must be named explicitly here or it silently
+      # never runs. Scans the exact-head worktree for new/renamed/unclassified attendance DML
+      # against the pinned e0defbe26 debt baseline and its curated P01-P28/X01-X05 entries, and
+      # re-proves the pinned baseline artifact is byte-reproducible from that ref.
+      - name: Run attendance W4C-0 Stage D §8.4 DML inventory collector
+        run: |
+          # The byte-reproducibility leg re-generates the baseline manifest FROM the pinned
+          # commit itself (git ls-tree against e0defbe26…). actions/checkout is a shallow
+          # clone, so that commit object is absent — fetch exactly that one commit first.
+          # Deliberately NOT a conditional skip: a skip here would let the reproducibility
+          # leg silently never run in CI (skip-shaped-green).
+          git fetch --no-tags --depth=1 origin e0defbe26d7f2e1747e74aa908ca710422812bf7 || \
+            git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7
+          node --test scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs
+
       - name: Run linting
         if: matrix.node-version == '20.x'
         run: |
@@ -322,6 +430,24 @@ jobs:
             tests/unit/storageServiceLocalProvider.test.ts \
             tests/unit/filesStorageKey.test.ts \
             tests/unit/filesAcl.test.ts \
+            --reporter=dot
+
+      - name: Run B3-07 approval-attachment unit canaries
+        # The approval-attachment pipeline's no-DB units (route contracts, storage containment + the
+        # shared-substrate object-store adapter, boot/O3 storage resolution, fail-closed scanner seam,
+        # validation allowlist, GC drain, reconciler) are repeated as explicit canaries here so their
+        # ownership remains visible and robust if broader default discovery changes. Wired as WHOLE
+        # FILE runs (a name filter matching zero tests exits green and hides regressions).
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/approval-attachment-routes.test.ts \
+            tests/unit/approval-attachment-storage.test.ts \
+            tests/unit/approval-attachment-s3.test.ts \
+            tests/unit/approval-attachment-scan.test.ts \
+            tests/unit/approval-attachment-runtime.test.ts \
+            tests/unit/approval-attachment-validation.test.ts \
+            tests/unit/approval-attachment-gc-drain.test.ts \
+            tests/unit/approval-attachment-reconciler.test.ts \
             --reporter=dot
 
       - name: Start Postgres
@@ -421,6 +547,7 @@ jobs:
             --reporter=verbose
 
       - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep) + D-6 config-restore-execute metaFieldCache invalidation golden + F2 attachment-download read-gate row-deny/field-mask security regression guard + AI-fields S1 write-provenance/batch-grouping goldens + A6-3-3a automation branch-local-wait suspend/resume goldens + Phase C2 cross-base automation governed DELETE/LOCK goldens + C1 automation real-time fan-out goldens + duplicate/clone record route security goldens + T3-6 approval-record multitable projection goldens — six previously skip-green DB-gated specs now actually executing + D-1c §0.6 HISTORY_INCOMPLETE fail-closed precheck goldens G-HI-1..4 + D-1c W0 slice ① form-submit CREATE/EDIT public-form revision goldens, incl. zero-row concurrent-delete fail-closed + D-1c W0 slice ② plugin-SDK createRecord/patchRecord revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ③ automation create_record/update_record revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ④ approval resultWriteback revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ⑤ (FINAL) attachment-delete cell-strip revision goldens, incl. zero-row concurrent-delete fail-closed + W0 tail field-undelete rehydration revision goldens (version-bump + emit-at-new-version, W0-1 contiguity/content-projection positive control, zero-row concurrent-delete fail-closed — un-pends the last OD-6 KNOWN_REVISION_GAPS entry) + W0-1 L4 all-writer canonical fence goldens (module fence-before-check/durable-block claim-reclaim-refuse/CHECK closed-set, per-fenced-family production-wiring refusal for REST create/patch/delete + bulk + plugin patch + plugin recoverable delete, partial-fence gap exposure for plugin create + auto-number backfill, flag-off parity, constructed TOCTOU race via pg_blocking_pids, exact-bigint synthetic-seq ordering) + W0-1 v3.7 L5 trust-checkpoint schema goldens (building→active state machine, partial-unique one-active guard + concurrent double-activation race, seq-based + display-T totally-ordered selection across the 2^53 boundary, floor-clamped retention prune, non-forgeable server-owned system_kind, P3-2 fail-closed strict-enablement precondition) + W0-1 L6-a sealed operation-endpoint ledger goldens (endpoint-last exact count/max validation, DEFERRABLE-FK write-events-but-never-seal fails at COMMIT, append-after-seal refusal, endpoint-before-events refusal, legacy-NULL exemption, exact-bigint 2^53 neighbours, G-BATCH-ENDPOINT bulk multi-row anchor + REST create/patch mint-under-fence wiring, G-MULTIOP one-commit-N-transactions batch↔operation decouple, §F2 UPDATE-immutability, §H1 DELETE-immutability + retention-only deletion, §H2 whole-operation atomic retention prune, §H3 fail-closed schema probe, flag-off parity))
+        id: multitable-real-db-integration
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -461,6 +588,9 @@ jobs:
             tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts \
             tests/integration/multitable-fieldperm-write-gate-patch-realdb.test.ts \
             tests/integration/multitable-patch-batchid-echo-realdb.test.ts \
+            tests/integration/stock-prep-substrate-p1a-realdb.test.ts \
+            tests/integration/stock-prep-w2-additive-fields-realdb.test.ts \
+            tests/integration/stock-prep-w2-scoped-repair-realdb.test.ts \
             tests/integration/multitable-lock12-partialsuccess-shared-batch-realdb.test.ts \
             tests/integration/multitable-permmatrix-b3-mgmt-403-matrix-realdb.test.ts \
             tests/integration/multitable-w13-fieldperm-writegate-bridge-realdb.test.ts \
@@ -639,6 +769,11 @@ jobs:
             tests/integration/multitable-automation-execution-ledger-realdb.test.ts \
             tests/integration/multitable-automation-outbound-intent-realdb.test.ts \
             tests/integration/multitable-fwb-write-action-realdb.test.ts \
+            tests/integration/multitable-fwb-activation-realdb.test.ts \
+            tests/integration/multitable-fwb-update-activation-realdb.test.ts \
+            tests/integration/approval-attachment-gc-realdb.test.ts \
+            tests/integration/approval-attachment-bind-reconcile-realdb.test.ts \
+            tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts \
             tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts \
@@ -661,6 +796,7 @@ jobs:
             --reporter=dot
 
       - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
+        id: approval-real-db-integration
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
         # gate is robust (a name filter that matches zero tests would exit green and hide
         # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
@@ -680,6 +816,7 @@ jobs:
             tests/integration/approval-routing-policy-equivalence.db.test.ts \
             tests/integration/directory-binding-sync-hook.db.test.ts \
             tests/integration/approval-postgate-acceptance.api.test.ts \
+            tests/integration/approval-template-authoring-uat.api.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
             tests/integration/directory-sync-admission-orphan-guard.db.test.ts \
@@ -689,10 +826,12 @@ jobs:
             tests/integration/approval-delegation-seam.db.test.ts \
             tests/integration/approval-delegation-api.db.test.ts \
             tests/integration/approval-detail-subform.db.test.ts \
+            tests/integration/approval-record-link.db.test.ts \
             tests/integration/approval-common-template-presets.api.test.ts \
             tests/integration/approval-amount-total-check.api.test.ts \
             tests/integration/approval-wp1-parallel-gateway.api.test.ts \
             tests/integration/approval-bridge-redaction-regression.test.ts \
+            tests/integration/approval-attachment-pipeline-realdb.test.ts \
             tests/integration/approval-metrics-people-teams.test.ts \
             tests/integration/approval-node-sla-remind.test.ts \
             tests/integration/approval-node-timeout-effects.test.ts \
@@ -707,10 +846,13 @@ jobs:
             tests/integration/directory-sync-preview-apply-parity.db.test.ts \
             tests/integration/directory-sync-alert-coverage.db.test.ts \
             tests/integration/directory-deprovision-selection.db.test.ts \
+            tests/integration/directory-deprovision-grant-table.db.test.ts \
             tests/integration/directory-sync-run-lease.db.test.ts \
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
             tests/integration/directory-org-transfer-source-freeze.db.test.ts \
+            tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
+            tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \
             tests/integration/directory-sync-schedule-timezone.db.test.ts \
             tests/integration/directory-local-provider-bootstrap.db.test.ts \
@@ -809,6 +951,30 @@ jobs:
             tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts \
             tests/integration/attendance-approval-dept-head-s7-3.db.test.ts \
             tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts \
+            tests/integration/attendance-w4pre1-user-orgs-admission.db.test.ts \
+            tests/integration/attendance-w4pre1-user-orgs-directory-sync.db.test.ts \
+            tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts \
+            tests/integration/attendance-w4pre1b-user-orgs-lifecycle.db.test.ts \
+            tests/integration/attendance-w4pre1b-user-orgs-sync-automatch.db.test.ts \
+            tests/integration/attendance-w4pre1b-user-orgs-backfill-migration.db.test.ts \
+            tests/integration/attendance-w4pre1b-directory-readiness-gate.db.test.ts \
+            tests/integration/attendance-w4pre1b-admin-users-explicit-org.db.test.ts \
+            tests/integration/attendance-w4pre1b-api-tokens-org-member-access.db.test.ts \
+            tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts \
+            tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts \
+            tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts \
+            tests/integration/attendance-w4pre1c-departure-permission-negative.db.test.ts \
+            tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts \
+            tests/integration/attendance-setup-readiness-w4-0.db.test.ts \
+            tests/integration/attendance-decision-trace-w5-0.db.test.ts \
+            tests/integration/attendance-calculation-group-membership-w1.db.test.ts \
+            tests/integration/attendance-work-date-resolver-w2.db.test.ts \
+            tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts \
+            tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts \
+            tests/integration/attendance-w4c0-operation-registry.db.test.ts \
+            tests/integration/attendance-w4c0-db-gates-e1.db.test.ts \
+            tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts \
+            tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
@@ -822,6 +988,7 @@ jobs:
             tests/integration/multitable-automation-producer-emit-realdb.test.ts \
             tests/integration/multitable-automation-producer-family2-realdb.test.ts \
             tests/integration/multitable-durable-startup-failclosed.db.test.ts \
+            tests/integration/multitable-p2-fwb-eight-scenario-matrix.test.ts \
             tests/integration/multitable-automation-producer-family5-realdb.test.ts \
             tests/integration/multitable-automation-producer-family4-realdb.test.ts \
             tests/integration/multitable-automation-producer-family1-realdb.test.ts \
@@ -835,6 +1002,8 @@ jobs:
             tests/integration/attendance-schedule-dispatch.test.ts \
             tests/integration/attendance-makeup-punch-policy.test.ts \
             tests/integration/attendance-result-edit.test.ts \
+            tests/integration/attendance-shift-segments-migration.db.test.ts \
+            tests/integration/attendance-shift-segments-writer-matrix.db.test.ts \
             --reporter=dot
 
       - name: Upload test results

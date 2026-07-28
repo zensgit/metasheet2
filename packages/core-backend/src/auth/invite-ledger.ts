@@ -97,11 +97,26 @@ export async function recordInvite(options: {
   }
 }
 
+type InviteLedgerQueryClient = {
+  query: <T extends InviteLedgerRow = InviteLedgerRow>(
+    sql: string,
+    params?: unknown[],
+  ) => Promise<{ rows: T[] }>
+}
+
+/**
+ * Mark invite accepted. Pass `client` to run inside an open transaction
+ * (e.g. invite/accept user UPDATE + ledger consume must commit together).
+ */
 export async function markInviteAccepted(inviteToken: string, options: {
   consumedBy: string
+  client?: InviteLedgerQueryClient
 }): Promise<InviteLedgerEntry | null> {
   try {
-    const result = await query<InviteLedgerRow>(
+    const run = options.client
+      ? options.client.query.bind(options.client)
+      : query
+    const result = await run(
       `UPDATE user_invites
        SET status = 'accepted',
            accepted_at = NOW(),
@@ -112,7 +127,7 @@ export async function markInviteAccepted(inviteToken: string, options: {
        RETURNING id, user_id, email, preset_id, product_mode, role_id, invited_by, invite_token, status, accepted_at, consumed_by, last_sent_at, created_at, updated_at`,
       [inviteToken, options.consumedBy],
     )
-    const row = result.rows[0]
+    const row = result.rows[0] as InviteLedgerRow | undefined
     return row ? mapInviteLedgerRow(row) : null
   } catch (error) {
     if (isDatabaseSchemaError(error)) return null

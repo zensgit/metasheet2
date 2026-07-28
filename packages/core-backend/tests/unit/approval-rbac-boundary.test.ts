@@ -365,6 +365,44 @@ describe('Approval RBAC boundary verification', () => {
       expect(res.status).toBe(200)
     })
 
+    // FWB-0 Layer 2 P2-2: record-link-options uses approvals:write (same as create), not read/act.
+    it('GET /api/approvals/record-link-options with only approvals:read → 403', async () => {
+      const res = await request(pinned.url())
+        .get('/api/approvals/record-link-options?baseId=b1&sheetId=s1')
+      expect(res.status).toBe(403)
+    })
+
+    it('GET /api/approvals/record-link-options with only approvals:act → 403', async () => {
+      authState.user = actorUser()
+      const res = await request(pinned.url())
+        .get('/api/approvals/record-link-options?baseId=b1&sheetId=s1')
+      expect(res.status).toBe(403)
+    })
+
+    it('GET /api/approvals/record-link-options with approvals:write reaches the handler (not 403)', async () => {
+      authState.user = writerUser()
+      // Handler runs after RBAC; with empty DB mocks it should fail closed as 404 target unavailable
+      // (NOT 403 from the write guard).
+      const res = await request(pinned.url())
+        .get('/api/approvals/record-link-options?baseId=b1&sheetId=s1')
+      expect(res.status).not.toBe(403)
+      expect([400, 404, 503]).toContain(res.status)
+    })
+
+    it('GET /api/approvals/record-link-options allows legacy users.permissions write grant', async () => {
+      // jwtAuth may surface permissions from legacy users.permissions onto req.user.permissions;
+      // rbacGuard trusts requestUserHasResolvedPermission before table lookups.
+      authState.user = {
+        id: 'u-legacy-write',
+        name: 'Legacy Writer',
+        permissions: ['approvals:write'],
+      }
+      const res = await request(pinned.url())
+        .get('/api/approvals/record-link-options?baseId=b1&sheetId=s1')
+      expect(res.status).not.toBe(403)
+      expect([400, 404, 503]).toContain(res.status)
+    })
+
     it('GET /api/approvals/:id with approvals:read reaches the handler', async () => {
       const res = await request(pinned.url()).get('/api/approvals/apr-1')
       expect(res.status).toBe(404)

@@ -32,6 +32,7 @@ import type {
   NodeTimeoutConfig,
   NodeTimeoutEffect,
   PublishApprovalTemplateRequest,
+  RestoreApprovalTemplateVersionRequest,
   RuntimeGraph,
   RuntimePolicy,
   UpdateApprovalTemplateRequest,
@@ -44,13 +45,23 @@ import {
   type ApprovalGraphAutoApprovalEvent,
   type ApprovalGraphResolution,
   type ParallelInstanceState,
+  canonicalizeRecordLinkFormData,
   pruneHiddenFormData,
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
+import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
+import {
+  ApprovalAttachmentBindError,
+  bindAttachmentsOnSubmit,
+  collectAttachmentIdsByField,
+} from './approval-attachment-reconciler'
 import {
   ApprovalConditionFormulaError,
+  approvalConditionFormulaHasCaptureProneIdentity,
+  approvalConditionFormulaHasDynamicDependency,
+  approvalConditionFormulaIsProvablyAlwaysTrue,
   assertApprovalConditionFormulaValidForSchema,
   extractRequesterRoleLiterals,
   formulaReferencesRequesterAttribute,
@@ -87,6 +98,22 @@ import { isDurableDeliveryEnabled } from '../multitable/automation-durable-deliv
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
 import { supersedeDingTalkApprovalCardDeliveriesForInstance } from '../integrations/dingtalk/approval-card-deliveries'
+import {
+  sortRecordLinkSubmitCandidates,
+  validateRecordLinkAtSubmit,
+} from '../multitable/approval-fwb-record-link'
+import {
+  probeRecordLinkReadableForUser,
+  projectRecordLinkFormSnapshotForViewer,
+} from './approval-record-link-read-projection'
+import {
+  loadApprovalTemplateVisibilityActorOnQuery,
+  lockRecordLinkActorAuthorityRowsOnQuery,
+  lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
+  lockRecordLinkMultiTargetCreatePathOnQuery,
+  resolveRecordLinkTargetAuthOnQuery,
+  userHasApprovalsWriteOnQuery,
+} from './approval-record-link-txn-auth'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
@@ -171,6 +198,7 @@ type TemplateVersionRow = {
    * published-without-a-note version, or any version predating the column.
    */
   publish_note?: string | null
+  restored_from_version_id?: string | null
   created_at: Date
   updated_at: Date
 }
@@ -350,13 +378,16 @@ const FORM_FIELD_TYPES = new Set([
   'user',
   'attachment',
   'detail',
+  // FWB-0 Layer 2: top-level only (explicitly excluded from DETAIL_LEAF below).
+  'record-link',
 ])
 
-// Leaf sub-field types allowed inside a `detail` group's columns (everything except `detail`
-// itself — one nesting level only). `attachment` is permitted at the type/contract layer;
-// the authoring UI (C-3) governs which are offered.
+// Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
+// this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
+// contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
+// nested link semantics are undefined — top-level only).
 const DETAIL_LEAF_FIELD_TYPES = new Set(
-  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail'),
+  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail' && type !== 'record-link'),
 )
 
 const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
@@ -716,6 +747,34 @@ function normalizeFormField(
     failValidation(context, `formSchema.fields[${index}].props must be an object`)
   }
 
+  // FWB-0 Layer 2: record-link is top-level only; pin non-blank props.baseId + props.sheetId.
+  // OpenAPI RecordLinkFieldProps is additionalProperties:false — only baseId/sheetId allowed.
+  // Fail closed on any other key (do not silently drop author input). Creator read authorization
+  // against those pins is enforced at publish (async capability check).
+  let pinnedProps: Record<string, unknown> | undefined
+  if (value.type === 'record-link') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] record-link cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    if (props) {
+      const extraKeys = Object.keys(props).filter((key) => key !== 'baseId' && key !== 'sheetId')
+      if (extraKeys.length > 0) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] record-link props may only contain baseId and sheetId (unknown: ${extraKeys.join(', ')})`,
+        )
+      }
+    }
+    const baseId = props && typeof props.baseId === 'string' ? props.baseId.trim() : ''
+    const sheetId = props && typeof props.sheetId === 'string' ? props.sheetId.trim() : ''
+    if (!baseId || !sheetId) {
+      failValidation(context, `formSchema.fields[${index}] record-link requires non-blank props.baseId and props.sheetId`)
+    }
+    // Canonicalize: only the two trimmed pins (never spread residual props).
+    pinnedProps = { baseId, sheetId }
+  }
+
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
   const detail = normalizeDetailFieldParts(value, index, context, nested)
 
@@ -734,7 +793,11 @@ function normalizeFormField(
           })),
         }
       : {}),
-    ...(isRecord(value.props) ? { props: { ...value.props } } : {}),
+    ...(pinnedProps
+      ? { props: pinnedProps }
+      : isRecord(value.props)
+        ? { props: { ...value.props } }
+        : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]
@@ -801,6 +864,13 @@ function assertFormSchema(value: unknown, context: ValidationContext = REQUEST_V
   const fields = value.fields.map((field, index) => normalizeFormField(field, index, context))
   if (new Set(fields.map((field) => field.id)).size !== fields.length) {
     failValidation(context, 'formSchema field ids must be unique')
+  }
+  if (isApprovalAttachmentsEnabled()) {
+    for (const field of fields) {
+      if (field.type === 'detail' && field.columns?.some((column) => column.type === 'attachment')) {
+        failValidation(context, 'attachment fields are not allowed inside detail groups')
+      }
+    }
   }
   validateFormFieldVisibilityRules(fields, context)
 
@@ -921,6 +991,15 @@ function validateFormFieldVisibilityRules(
       failValidation(
         context,
         `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a detail field (its value is a list)`,
+      )
+    }
+    // FWB-0 Layer 2 P1-2: record-link values are objects (`{ recordId }`). Simple visibility
+    // operators compare against scalar strings and would silently fail-open / never match.
+    // v1 fail-closed: reject record-link as a visibility dependency (save/publish).
+    if (target.type === 'record-link') {
+      failValidation(
+        context,
+        `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a record-link field (v1)`,
       )
     }
   })
@@ -1279,6 +1358,318 @@ function validateNodeTimeoutConfigs(approvalGraph: ApprovalGraph): void {
   }
 }
 
+/**
+ * Fingerprint of a DYNAMIC assignee source: equal fingerprints ⇒ the sources PROVABLY resolve to
+ * the same user(s) for every request (same kind + same parameters). Static kinds return null —
+ * duplicate static assignees across parallel branches are already rejected inside
+ * `normalizeApprovalGraph` (`collectBranchAssignees`). FE mirror:
+ * apps/web/src/approvals/parallelEdit.ts `dynamicAssigneeSourceFingerprint` — keep in lockstep.
+ */
+function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): string | null {
+  switch (source.kind) {
+    case 'requester':
+    case 'direct_manager':
+    case 'dept_head':
+      return source.kind
+    case 'continuous_managers':
+      return `continuous_managers:${source.levels}`
+    case 'manager_at_level':
+      return `manager_at_level:${source.level}`
+    case 'form_field_user':
+      return `form_field_user:${source.fieldId}`
+    case 'static_user':
+    case 'static_role':
+      // Statics are owned by collectBranchAssignees' duplicate check, not this gate.
+      return null
+    default: {
+      const _exhaustive: never = source
+      return _exhaustive
+    }
+  }
+}
+
+/**
+ * Publish preflight: reject a parallel gateway whose branches carry PROVABLY-IDENTICAL dynamic
+ * assignee sources. Such branches resolve to the same user(s) on EVERY request, so fan-out's
+ * `assertNoActiveAssignmentConflicts` raises the typed 409
+ * `APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT` for 100% of instances — authoring was false-green.
+ * Raised here with the SAME code (status 400: an authoring-time config error, like
+ * `APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED`) so the shape can never reach a published definition.
+ *
+ * Only provably-identical sources are flagged: DIFFERENT kinds (requester vs direct_manager) or
+ * DIFFERENT parameters (manager_at_level 1 vs 2) may still collide for SOME org shapes and remain
+ * the runtime guard's job — publish cannot know the org. Deliberately publish-scoped (NOT
+ * create/update, NOT normalize): stored drafts must stay readable and re-saveable while being
+ * fixed. The caller skips it when the publish policy carries `autoApproval.mergeAdjacentApprover`
+ * — the same exemption `allowParallelDuplicateAssignees` grants the static check, because the
+ * merge machinery legitimately absorbs same-approver overlap.
+ *
+ * Traversal (review #4433 owner P2): the walk enumerates EVERY runtime-reachable path inside a
+ * branch — NOT just the first-outgoing-edge chain. Condition successors match
+ * `resolveConditionTarget` / `collectBranchAssignees`: configured `branches[].edgeKey` +
+ * `defaultEdgeKey` when present; when default is ABSENT, configured rule edges plus the first
+ * outgoing fallback. Stray outgoing edges beyond that fallback are never walked. Linear nodes follow
+ * the first outgoing edge. The branch's fingerprint set is the UNION over all condition paths up
+ * to the join node, and a conflict is flagged when SOME path through one branch and SOME path
+ * through another carry the identical dynamic source — exactly the pairings for which the runtime
+ * 409 is reachable. Cycles are cut with a per-branch visited set. A nested parallel node
+ * (normalize rejects it on authoring paths; a legacy graph could still carry one) is treated
+ * defensively as a PASS-THROUGH fan-out over its configured `branches` edgeKeys (all
+ * simultaneously active). Fingerprints are deduped WITHIN a branch first (sequential same-source
+ * nodes — or the same source on two ALTERNATIVE paths of one branch — are not a parallel
+ * conflict) and then compared across branches. FE mirror: apps/web/src/approvals/parallelEdit.ts
+ * `parallelDynamicAssigneeConflicts` — SAME traversal, keep in lockstep.
+ */
+function assertNoParallelDynamicAssigneeConflicts(approvalGraph: ApprovalGraph): void {
+  const edgeByKey = new Map(approvalGraph.edges.map((edge) => [edge.key, edge]))
+  const outgoingBySource = new Map<string, ApprovalGraph['edges']>()
+  for (const edge of approvalGraph.edges) {
+    const existing = outgoingBySource.get(edge.source)
+    if (existing) existing.push(edge)
+    else outgoingBySource.set(edge.source, [edge])
+  }
+  const nodeByKey = new Map(approvalGraph.nodes.map((node) => [node.key, node]))
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'parallel') continue
+    const parallelConfig = node.config as { branches: string[]; joinNodeKey: string }
+    const seenAcrossBranches = new Map<string, string>()
+    for (const branchEdgeKey of parallelConfig.branches) {
+      const branchFingerprints = new Map<string, string>()
+      const entryKey = edgeByKey.get(branchEdgeKey)?.target
+      // FIFO worklist in edge-declaration order (deterministic carrier node per fingerprint); the
+      // visited set both cuts cycles and bounds the walk to each node at most once per branch.
+      const queue: string[] = entryKey === undefined ? [] : [entryKey]
+      const visited = new Set<string>()
+      for (let head = 0; head < queue.length; head += 1) {
+        const currentKey = queue[head]
+        if (currentKey === parallelConfig.joinNodeKey || visited.has(currentKey)) continue
+        visited.add(currentKey)
+        const current = nodeByKey.get(currentKey)
+        if (!current) continue
+        if (current.type === 'approval') {
+          const sources = (current.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+          for (const source of sources) {
+            const fingerprint = dynamicAssigneeSourceFingerprint(source)
+            if (fingerprint && !branchFingerprints.has(fingerprint)) branchFingerprints.set(fingerprint, current.key)
+          }
+        }
+        const targets = runtimeSuccessorTargets(current, edgeByKey, outgoingBySource)
+        for (const target of targets) queue.push(target)
+      }
+      for (const [fingerprint, carrierNodeKey] of branchFingerprints) {
+        const priorNodeKey = seenAcrossBranches.get(fingerprint)
+        if (priorNodeKey !== undefined) {
+          throw new ServiceError(
+            `approvalGraph parallel node ${node.key} has branches whose approvers provably resolve identically (${fingerprint}) — every request would fail with a parallel assignment conflict`,
+            400,
+            'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+            { nodeKey: node.key, source: fingerprint, conflictingNodeKeys: [priorNodeKey, carrierNodeKey] },
+          )
+        }
+        seenAcrossBranches.set(fingerprint, carrierNodeKey)
+      }
+    }
+  }
+}
+
+/**
+ * Runtime-possible successor node keys for a walk that must match
+ * `ApprovalGraphExecutor.resolveConditionTarget` / `firstTargetForNode`:
+ *   - condition: declared branches[].edgeKey + defaultEdgeKey (when set); if default is
+ *     ABSENT, also the first outgoing fallback. Other stray edges are ignored. EdgeKeys that do not
+ *     resolve to an edge sourced by this node are skipped (authoring's collectBranchAssignees
+ *     fails hard on the same shape; this helper is also used by the publish dynamic-conflict
+ *     walk where a skip is safe).
+ *   - parallel (defensive nested): configured branches[] edgeKeys only.
+ *   - linear: first outgoing edge only.
+ */
+function runtimeSuccessorTargets(
+  node: ApprovalGraph['nodes'][number],
+  edgeByKey: Map<string, ApprovalGraph['edges'][number]>,
+  outgoingBySource: Map<string, ApprovalGraph['edges']>,
+): string[] {
+  if (node.type === 'condition') {
+    const config = node.config as {
+      branches?: Array<{ edgeKey?: string }>
+      defaultEdgeKey?: string
+    }
+    const declaredKeys: string[] = []
+    const seenKeys = new Set<string>()
+    const pushKey = (raw: string | undefined): void => {
+      if (typeof raw !== 'string') return
+      const key = raw.trim()
+      if (!key || seenKeys.has(key)) return
+      seenKeys.add(key)
+      declaredKeys.push(key)
+    }
+    for (const branch of config.branches ?? []) {
+      pushKey(branch.edgeKey)
+    }
+    const hasDefault = typeof config.defaultEdgeKey === 'string' && config.defaultEdgeKey.trim().length > 0
+    if (hasDefault) {
+      pushKey(config.defaultEdgeKey)
+    }
+
+    const targets: string[] = []
+    for (const edgeKey of declaredKeys) {
+      const edge = edgeByKey.get(edgeKey)
+      if (!edge || edge.source !== node.key) continue
+      targets.push(edge.target)
+    }
+    if (!hasDefault) {
+      const firstEdge = outgoingBySource.get(node.key)?.[0]
+      if (firstEdge && !seenKeys.has(firstEdge.key)) {
+        targets.push(firstEdge.target)
+      }
+    }
+    return targets
+  }
+
+  if (node.type === 'parallel') {
+    const config = node.config as { branches?: string[] }
+    const targets: string[] = []
+    for (const branchEdgeKey of config.branches ?? []) {
+      const edge = edgeByKey.get(branchEdgeKey)
+      if (edge && edge.source === node.key) targets.push(edge.target)
+    }
+    return targets
+  }
+
+  const firstEdge = outgoingBySource.get(node.key)?.[0]
+  return firstEdge ? [firstEdge.target] : []
+}
+
+/**
+ * Reject a rules-mode condition branch whose `rules` array is EMPTY. The runtime
+ * (`ApprovalGraphExecutor.resolveConditionTarget`) evaluates a rules-mode branch as
+ * `branch.rules.every(...)`, which is vacuously TRUE over `[]` — an empty branch silently captures
+ * ALL traffic (first-match-wins) and dead-codes the default edge and every later branch. The
+ * fall-through "else" is the node's `defaultEdgeKey` — a separate mechanism — so an empty rules
+ * array in a non-formula branch is never legitimate. A formula branch may carry `rules: []`
+ * only when its parsed AST depends on request-specific form/requester data. A literal-only
+ * formula is another match-all capture shape and is rejected by the same choke points.
+ *
+ * Deliberately NOT inside `normalizeApprovalGraph`: `asApprovalGraph` re-normalizes STORED rows on
+ * plain reads, and a retroactive reject there could brick reads of existing templates. Instead this
+ * raises its own code directly (status 400) at the create / update / publish choke points, exactly
+ * like `validateNodeTimeoutConfigs`, so all three surface the same error while stored-graph READS
+ * stay unaffected (the runtime additionally fails closed on legacy graphs: an empty rules-mode
+ * branch never matches).
+ */
+function validateConditionBranchRules(approvalGraph: ApprovalGraph, formSchema: FormSchema): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'condition') continue
+    const config = node.config as { branches?: unknown }
+    if (!Array.isArray(config.branches)) continue
+    config.branches.forEach((branch, branchIndex) => {
+      if (!isRecord(branch)) return
+      const formula = isRecord(branch.formula) ? branch.formula : null
+      const formulaExpression = formula && typeof formula.expression === 'string'
+        ? formula.expression
+        : null
+      const hasDynamicFormula = formulaExpression !== null
+        && approvalConditionFormulaHasDynamicDependency(formulaExpression)
+      const rules = branch.rules
+      if (formulaExpression === null && Array.isArray(rules) && rules.length === 0) {
+        throw new ServiceError(
+          `approvalGraph node ${node.key} condition branch ${branchIndex + 1} has no rules and no formula — an empty rules branch would match every request`,
+          400,
+          'APPROVAL_CONDITION_BRANCH_RULES_EMPTY',
+          { nodeKey: node.key, branchIndex },
+        )
+      }
+      if (formulaExpression !== null && !hasDynamicFormula) {
+        throw new ServiceError(
+          'Condition formula must depend on request data',
+          400,
+          'APPROVAL_CONDITION_FORMULA_STATIC',
+          { branchIndex },
+        )
+      }
+      if (
+        formulaExpression !== null
+        && hasDynamicFormula
+        && approvalConditionFormulaHasCaptureProneIdentity(formulaExpression)
+      ) {
+        throw new ServiceError(
+          'Condition formula uses a capture-prone identity',
+          400,
+          'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
+          { branchIndex },
+        )
+      }
+      if (
+        formulaExpression !== null
+        && hasDynamicFormula
+        && approvalConditionFormulaIsProvablyAlwaysTrue(formulaExpression, formSchema)
+      ) {
+        throw new ServiceError(
+          'Condition formula must not capture every valid request',
+          400,
+          'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE',
+          { branchIndex },
+        )
+      }
+    })
+  }
+}
+
+/**
+ * FWB-0 Layer 2 P1-2: simple condition rules compare form values to scalar strings with `===`.
+ * A record-link value is `{ recordId: string }` — comparisons would silently never match.
+ * v1 fail-closed: reject any condition rule (or formula field ref) that targets a record-link field
+ * at create/update/publish. Formula type-inference already marks record-link unsupported; this
+ * guard makes the simple-rules path equally fail-closed with an explicit message.
+ */
+function validateRecordLinkNotUsedInConditions(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  const recordLinkFieldIds = new Set(
+    (formSchema.fields ?? [])
+      .filter((field) => field.type === 'record-link')
+      .map((field) => field.id),
+  )
+  if (recordLinkFieldIds.size === 0) return
+
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'condition') continue
+    const config = node.config as {
+      branches?: Array<{ rules?: Array<{ fieldId?: string }>; formula?: { expression?: string } }>
+    }
+    if (!Array.isArray(config.branches)) continue
+    config.branches.forEach((branch, branchIndex) => {
+      if (!branch || typeof branch !== 'object') return
+      const rules = Array.isArray(branch.rules) ? branch.rules : []
+      for (const rule of rules) {
+        const fieldId = typeof rule?.fieldId === 'string' ? rule.fieldId.trim() : ''
+        if (fieldId && recordLinkFieldIds.has(fieldId)) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} condition branch ${branchIndex + 1} cannot reference record-link field ${fieldId} (v1)`,
+          )
+        }
+      }
+      // Formula path: reject explicit `{fieldId}` references to record-link fields with a clear
+      // message (type inference would also fail; keep the error explicit for authors).
+      const expression = typeof branch.formula?.expression === 'string' ? branch.formula.expression : ''
+      if (expression) {
+        for (const fieldId of recordLinkFieldIds) {
+          // Token-aware enough for authoring: `{fieldId}` or `{ fieldId }` field refs.
+          const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
+          if (re.test(expression)) {
+            failValidation(
+              context,
+              `approvalGraph node ${node.key} condition branch ${branchIndex + 1} formula cannot reference record-link field ${fieldId} (v1)`,
+            )
+          }
+        }
+      }
+    })
+  }
+}
+
 function normalizeApprovalGraph(
   value: unknown,
   context: ValidationContext,
@@ -1534,7 +1925,13 @@ function normalizeApprovalGraph(
       if (!edge || edge.source !== node.key) {
         failValidation(
           context,
-          `approvalGraph parallel node ${node.key} references unknown branch edge ${branchEdgeKey}`,
+          'approvalGraph parallel gateway references an invalid branch edge',
+        )
+      }
+      if (edge.target === parallelConfig.joinNodeKey) {
+        failValidation(
+          context,
+          'approvalGraph parallel branch must contain at least one body node',
         )
       }
     }
@@ -1542,14 +1939,15 @@ function normalizeApprovalGraph(
     if (!joinNode) {
       failValidation(
         context,
-        `approvalGraph parallel node ${node.key} references unknown join node ${parallelConfig.joinNodeKey}`,
+        'approvalGraph parallel gateway references an invalid join node',
       )
     }
 
-    // Collect the approval-node assignees reachable from each branch start up to
-    // the join node. Reject duplicate assigneeIds across branches because the
-    // active-assignment unique index cannot hold two active rows for the same
-    // user at once. Nested parallel is explicitly rejected in v1.
+    // Stored graphs keep the historical first-edge compatibility check here.
+    // New writes and publish additionally run validateAllParallelBranchPaths via
+    // assertApprovalGraph; keeping the strict gate out of normalizeApprovalGraph
+    // prevents a newly-tightened rule from bricking ordinary reads or in-flight
+    // instances created from a previously accepted graph.
     const assigneesPerBranch: Array<Set<string>> = []
     for (const branchEdgeKey of parallelConfig.branches) {
       const edge = edgeMap.get(branchEdgeKey)!
@@ -1569,7 +1967,7 @@ function normalizeApprovalGraph(
           if (seen.has(assignee)) {
             failValidation(
               context,
-              `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+              'approvalGraph parallel branches must not contain the same approver',
             )
           }
           seen.add(assignee)
@@ -1581,6 +1979,40 @@ function normalizeApprovalGraph(
   return { nodes, edges }
 }
 
+/**
+ * Structural walk of ONE parallel branch: prove every runtime-possible path from
+ * `startNodeKey` reaches `joinNodeKey`, and collect static assignees along the way
+ * (UNION over all paths — feeds the cross-branch duplicate-approver check).
+ *
+ * Runtime semantics (mirrored here so create/update/publish catch shapes that would
+ * only fail mid-request) — see `ApprovalGraphExecutor.resolveConditionTarget`:
+ *   - condition nodes: successors are the DEDUPLICATED set of
+ *     `config.branches[].edgeKey` plus `config.defaultEdgeKey` when present.
+ *     Each declared edgeKey must exist AND have `source ===` this condition node
+ *     (`targetForEdge` is a global key lookup, so a key owned by another node is
+ *     malformed and must fail authoring rather than route elsewhere). When
+ *     default is ABSENT, also include the first outgoing edge
+ *     (`firstTargetForNode` fallback). Stray outgoing edges NOT referenced by
+ *     config are NOT runtime-possible and must not be walked (they must not
+ *     false-fail a valid branch).
+ *   - linear nodes (approval/cc/start/…): follow the first outgoing edge only,
+ *     matching `firstTargetForNode`.
+ *   - reject end / unknown / nested parallel / cycle / dead-end before join with
+ *     the same failValidation messages as before (stable codes via ValidationContext).
+ *
+ * Complexity (tri-color / memoized per branch — required: no graph node-count cap):
+ *   - VISITING (gray): node is on the active DFS stack → true back-edge / cycle.
+ *   - DONE (black): node-to-join subgraph already proven; return the memoized static-
+ *     assignee set (self ∪ descendants) without rewalking.
+ *   - Convergent DAG diamonds therefore cost O(V+E) per branch, not O(paths). A pure
+ *     path-local rewalk is exponential on layered diamonds (2^N path recomputations of
+ *     the shared tail) and is rejected by the layered-DAG regression test.
+ *
+ * Mutation: reverting the condition arm to `outgoing[current][0]` only REDs the
+ * exact golden in approval-product-service.test.ts (default edge → end while the
+ * first rules edge joins). Dropping DONE memoization REDs the layered-diamond
+ * acceptance (or hangs) while leaving the golden green.
+ */
 function collectBranchAssignees(
   startNodeKey: string,
   joinNodeKey: string,
@@ -1601,9 +2033,167 @@ function collectBranchAssignees(
   while (currentKey) {
     if (currentKey === joinNodeKey) return assignees
     if (visited.has(currentKey)) {
-      failValidation(context, `approvalGraph parallel branch contains a cycle near ${currentKey}`)
+      failValidation(context, 'approvalGraph parallel branch contains a cycle')
     }
     visited.add(currentKey)
+    const node = nodeByKey.get(currentKey)
+    if (!node) {
+      failValidation(context, 'approvalGraph parallel branch references an invalid node')
+    }
+    if (node.type === 'parallel') {
+      failValidation(context, 'approvalGraph parallel branches cannot contain a nested parallel gateway')
+    }
+    if (node.type === 'end') {
+      failValidation(context, `approvalGraph parallel branch must reach join before end (at ${node.key})`)
+    }
+    if (node.type === 'approval') {
+      const config = node.config as {
+        assigneeIds?: string[]
+        assigneeSources?: ApprovalAssigneeSource[]
+        approvalMode?: ApprovalMode
+      }
+      if (config.approvalMode === 'threshold') {
+        throw new ServiceError(
+          "approvalGraph approvalMode 'threshold' is not supported inside a parallel region",
+          400,
+          'APPROVAL_THRESHOLD_IN_PARALLEL',
+        )
+      }
+      config.assigneeIds?.forEach((assignee) => assignees.add(assignee))
+      for (const source of config.assigneeSources ?? []) {
+        if (source.kind === 'static_user') source.userIds.forEach((assignee) => assignees.add(assignee))
+        if (source.kind === 'static_role') source.roleIds.forEach((assignee) => assignees.add(assignee))
+      }
+    }
+    currentKey = outgoing.get(currentKey)?.[0]?.target ?? null
+  }
+  failValidation(
+    context,
+    'approvalGraph parallel branch never reaches its configured join',
+  )
+}
+
+function collectAllBranchAssignees(
+  startNodeKey: string,
+  joinNodeKey: string,
+  nodeByKey: Map<string, ApprovalGraph['nodes'][number]>,
+  edges: ApprovalGraph['edges'],
+  context: ValidationContext,
+): Set<string> {
+  const outgoing = new Map<string, ApprovalGraph['edges']>()
+  const edgeByKey = new Map<string, ApprovalGraph['edges'][number]>()
+  for (const edge of edges) {
+    const existing = outgoing.get(edge.source) || []
+    existing.push(edge)
+    outgoing.set(edge.source, existing)
+    edgeByKey.set(edge.key, edge)
+  }
+
+  // Per-branch tri-color state. The explicit stack avoids JS call-stack overflow
+  // on a valid deeply-nested condition chain while preserving O(V+E) memoization.
+  const visitState = new Map<string, 'visiting' | 'done'>()
+  const doneMemo = new Map<string, Set<string>>()
+
+  const localApprovalAssignees = (node: ApprovalGraph['nodes'][number]): string[] => {
+    if (node.type !== 'approval') return []
+    const approvalConfig = node.config as {
+      assigneeIds?: string[]
+      assigneeSources?: ApprovalAssigneeSource[]
+      approvalMode?: ApprovalMode
+    }
+    // T2-4: threshold mode is linear-only in v1 — reject a 'threshold' approval node nested
+    // inside a parallel region (distinct ServiceError code, mirrors the nested-parallel guard).
+    if (approvalConfig.approvalMode === 'threshold') {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
+        400,
+        'APPROVAL_THRESHOLD_IN_PARALLEL',
+      )
+    }
+    const local: string[] = []
+    for (const assignee of approvalConfig.assigneeIds ?? []) {
+      local.push(assignee)
+    }
+    for (const source of approvalConfig.assigneeSources ?? []) {
+      if (source.kind === 'static_user') {
+        source.userIds.forEach((assignee) => local.push(assignee))
+      }
+      if (source.kind === 'static_role') {
+        source.roleIds.forEach((assignee) => local.push(assignee))
+      }
+    }
+    return local
+  }
+
+  /**
+   * Runtime-possible condition successors — mirrors resolveConditionTarget's edge
+   * selection (rules arms + default, else firstTarget), with authoring ownership
+   * checks so a mis-owned edgeKey cannot silently route via global key lookup.
+   */
+  const conditionSuccessorTargets = (node: ApprovalGraph['nodes'][number]): string[] => {
+    const config = node.config as {
+      branches?: Array<{ edgeKey?: string }>
+      defaultEdgeKey?: string
+    }
+    const declaredKeys: string[] = []
+    const seenKeys = new Set<string>()
+    const pushKey = (raw: string | undefined): void => {
+      if (typeof raw !== 'string') return
+      const key = raw.trim()
+      if (!key || seenKeys.has(key)) return
+      seenKeys.add(key)
+      declaredKeys.push(key)
+    }
+    for (const branch of config.branches ?? []) {
+      pushKey(branch.edgeKey)
+    }
+    const hasDefault = typeof config.defaultEdgeKey === 'string' && config.defaultEdgeKey.trim().length > 0
+    if (hasDefault) {
+      pushKey(config.defaultEdgeKey)
+    }
+
+    const targets: string[] = []
+    for (const edgeKey of declaredKeys) {
+      const edge = edgeByKey.get(edgeKey)
+      // Global targetForEdge would still return a foreign-source edge's target; reject
+      // that malformed config at authoring instead of treating it as a legal route.
+      if (!edge || edge.source !== node.key) {
+        failValidation(
+          context,
+          `approvalGraph parallel branch condition ${node.key} references invalid edge ${edgeKey}`,
+        )
+      }
+      targets.push(edge.target)
+    }
+
+    // resolveConditionTarget: default ABSENT → firstTargetForNode fallback only.
+    // Stray outgoing edges beyond the first are never selected when default is set,
+    // and when default is absent only the first outgoing is the fallback — never a
+    // non-declared non-first edge.
+    if (!hasDefault) {
+      const firstEdge = outgoing.get(node.key)?.[0]
+      if (firstEdge && !seenKeys.has(firstEdge.key)) {
+        targets.push(firstEdge.target)
+      }
+    }
+    return targets
+  }
+
+  interface WalkFrame {
+    key: string
+    targets: string[]
+    nextTargetIndex: number
+    result: Set<string>
+  }
+
+  const stack: WalkFrame[] = []
+  const pushNode = (currentKey: string): void => {
+    if (currentKey === joinNodeKey) return
+    if (visitState.get(currentKey) === 'visiting') {
+      failValidation(context, `approvalGraph parallel branch contains a cycle near ${currentKey}`)
+    }
+    if (visitState.get(currentKey) === 'done') return
+
     const node = nodeByKey.get(currentKey)
     if (!node) {
       failValidation(context, `approvalGraph parallel branch references unknown node ${currentKey}`)
@@ -1612,50 +2202,96 @@ function collectBranchAssignees(
       failValidation(context, `approvalGraph parallel branch cannot contain nested parallel node ${node.key}`)
     }
     if (node.type === 'end') {
+      failValidation(context, `approvalGraph parallel branch must reach join before end (at ${node.key})`)
+    }
+
+    const targets = node.type === 'condition'
+      ? conditionSuccessorTargets(node)
+      : (outgoing.get(currentKey)?.[0] ? [outgoing.get(currentKey)![0].target] : [])
+    if (targets.length === 0) {
       failValidation(
         context,
-        `approvalGraph parallel branch must reach join before end (at ${node.key})`,
+        `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
       )
     }
-    if (node.type === 'approval') {
-      const approvalConfig = node.config as {
-        assigneeIds?: string[]
-        assigneeSources?: ApprovalAssigneeSource[]
-        approvalMode?: ApprovalMode
+
+    visitState.set(currentKey, 'visiting')
+    stack.push({
+      key: currentKey,
+      targets,
+      nextTargetIndex: 0,
+      result: new Set(localApprovalAssignees(node)),
+    })
+  }
+
+  pushNode(startNodeKey)
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1]
+    if (frame.nextTargetIndex < frame.targets.length) {
+      const target = frame.targets[frame.nextTargetIndex]
+      frame.nextTargetIndex += 1
+      if (target === joinNodeKey) continue
+      const targetState = visitState.get(target)
+      if (targetState === 'visiting') {
+        failValidation(context, `approvalGraph parallel branch contains a cycle near ${target}`)
       }
-      // T2-4: threshold mode is linear-only in v1 — reject a 'threshold' approval node nested
-      // inside a parallel region (distinct ServiceError code, mirrors the nested-parallel guard).
-      if (approvalConfig.approvalMode === 'threshold') {
-        throw new ServiceError(
-          `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
-          400,
-          'APPROVAL_THRESHOLD_IN_PARALLEL',
-        )
+      if (targetState === 'done') {
+        for (const assignee of doneMemo.get(target) ?? []) frame.result.add(assignee)
+        continue
       }
-      for (const assignee of approvalConfig.assigneeIds ?? []) {
-        assignees.add(assignee)
+      pushNode(target)
+      continue
+    }
+
+    stack.pop()
+    visitState.set(frame.key, 'done')
+    doneMemo.set(frame.key, frame.result)
+    const parent = stack[stack.length - 1]
+    if (parent) {
+      for (const assignee of frame.result) parent.result.add(assignee)
+    }
+  }
+
+  return doneMemo.get(startNodeKey) ?? new Set()
+}
+
+function validateAllParallelBranchPaths(
+  approvalGraph: ApprovalGraph,
+  context: ValidationContext,
+  options: { allowParallelDuplicateAssignees?: boolean } = {},
+): void {
+  const edgeMap = new Map(approvalGraph.edges.map((edge) => [edge.key, edge]))
+  const nodeByKey = new Map(approvalGraph.nodes.map((node) => [node.key, node]))
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'parallel') continue
+    const config = node.config as { branches: string[]; joinNodeKey: string }
+    const assigneesPerBranch = config.branches.map((branchEdgeKey) => {
+      const edge = edgeMap.get(branchEdgeKey)
+      if (!edge || edge.source !== node.key) {
+        failValidation(context, `approvalGraph parallel node ${node.key} references unknown branch edge ${branchEdgeKey}`)
       }
-      for (const source of approvalConfig.assigneeSources ?? []) {
-        if (source.kind === 'static_user') {
-          source.userIds.forEach((assignee) => assignees.add(assignee))
+      return collectAllBranchAssignees(
+        edge.target,
+        config.joinNodeKey,
+        nodeByKey,
+        approvalGraph.edges,
+        context,
+      )
+    })
+    if (options.allowParallelDuplicateAssignees) continue
+    const seen = new Set<string>()
+    for (const branchAssignees of assigneesPerBranch) {
+      for (const assignee of branchAssignees) {
+        if (seen.has(assignee)) {
+          failValidation(
+            context,
+            `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+          )
         }
-        if (source.kind === 'static_role') {
-          source.roleIds.forEach((assignee) => assignees.add(assignee))
-        }
+        seen.add(assignee)
       }
     }
-    // Walk the first outgoing edge — condition nodes aren't explored for every
-    // branch here (the form-data isn't available at template validation
-    // time), so duplicate detection is conservative across the statically
-    // reachable first-edge path. Condition branches inside parallel remain
-    // legal at runtime; this check only flags obvious overlaps.
-    const nextEdge = outgoing.get(currentKey)?.[0]
-    currentKey = nextEdge?.target ?? null
   }
-  failValidation(
-    context,
-    `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
-  )
 }
 
 function asApprovalGraph(value: Record<string, unknown>): ApprovalGraph {
@@ -1700,6 +2336,7 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
     runtimeGraph: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph) : null,
     publishedDefinitionId: bundle.publishedDefinition?.id || null,
     publishNote: bundle.version.publish_note ?? null,
+    restoredFromVersionId: bundle.version.restored_from_version_id ?? null,
     createdAt: bundle.version.created_at.toISOString(),
     updatedAt: bundle.version.updated_at.toISOString(),
   }
@@ -1973,7 +2610,9 @@ function assertApprovalGraph(
   context: ValidationContext = REQUEST_VALIDATION_CONTEXT,
   options?: { allowParallelDuplicateAssignees?: boolean },
 ): ApprovalGraph {
-  return normalizeApprovalGraph(value, context, options)
+  const graph = normalizeApprovalGraph(value, context, options)
+  validateAllParallelBranchPaths(graph, context, options)
+  return graph
 }
 
 function asFormSchema(value: Record<string, unknown>): FormSchema {
@@ -2011,7 +2650,10 @@ function asRuntimeGraph(value: Record<string, unknown>): RuntimeGraph {
   }
 
   const policy = assertRuntimePolicy(value.policy, STORED_RUNTIME_CONTEXT)
-  const graph = assertApprovalGraph(
+  // Published runtime graphs may predate the all-path authoring gate. Preserve
+  // their historical first-edge validation so reads and in-flight execution do
+  // not become retroactively unavailable after a validator tightening.
+  const graph = normalizeApprovalGraph(
     {
       nodes: value.nodes,
       edges: value.edges,
@@ -2886,9 +3528,120 @@ export class ApprovalProductService {
       status: row.status,
       publishNote: row.publish_note ?? null,
       publishedDefinitionId: row.published_definition_id ?? null,
+      restoredFromVersionId: row.restored_from_version_id ?? null,
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),
     }))
+  }
+
+  async restoreTemplateVersion(
+    templateId: string,
+    versionId: string,
+    request: RestoreApprovalTemplateVersionRequest,
+  ): Promise<ApprovalTemplateVersionDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const expectedLatestVersionId = normalizeRequiredString(
+      request.expectedLatestVersionId,
+      'expectedLatestVersionId',
+    )
+    let client: ApprovalDbClient | null = null
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      const templateResult = await client.query<TemplateRow>(
+        `SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE`,
+        [templateId],
+      )
+      const template = templateResult.rows[0]
+      if (!template) {
+        throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+      }
+      if (template.latest_version_id !== expectedLatestVersionId) {
+        throw new ServiceError(
+          'Approval template changed since version history was loaded',
+          409,
+          'APPROVAL_TEMPLATE_VERSION_STALE',
+        )
+      }
+      if (versionId === template.latest_version_id) {
+        throw new ServiceError(
+          'The selected version is already the latest version',
+          409,
+          'APPROVAL_TEMPLATE_VERSION_ALREADY_LATEST',
+        )
+      }
+
+      const sourceResult = await client.query<TemplateVersionRow>(
+        `SELECT *
+         FROM approval_template_versions
+         WHERE id = $1 AND template_id = $2`,
+        [versionId, templateId],
+      )
+      const source = sourceResult.rows[0]
+      if (!source) {
+        throw new ServiceError(
+          'Approval template version not found',
+          404,
+          'APPROVAL_TEMPLATE_VERSION_NOT_FOUND',
+        )
+      }
+
+      // Revalidate the historical snapshot against today's authoring contract before copying it.
+      // The new row is always a draft; publishing remains a separate, explicit operation.
+      const formSchema = assertFormSchema(source.form_schema)
+      const approvalGraph = assertApprovalGraph(source.approval_graph)
+      validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+      validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+      validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+      validateNodeTimeoutConfigs(approvalGraph)
+      validateConditionBranchRules(approvalGraph, formSchema)
+
+      const maxVersionResult = await client.query<{ max_version: string }>(
+        `SELECT COALESCE(MAX(version), 0)::text AS max_version
+         FROM approval_template_versions
+         WHERE template_id = $1`,
+        [templateId],
+      )
+      const nextVersion = Number.parseInt(maxVersionResult.rows[0]?.max_version || '0', 10) + 1
+      const restoredResult = await client.query<TemplateVersionRow>(
+        `INSERT INTO approval_template_versions (
+           template_id, version, status, form_schema, approval_graph, restored_from_version_id
+         )
+         VALUES ($1, $2, 'draft', $3, $4, $5)
+         RETURNING *`,
+        [
+          templateId,
+          nextVersion,
+          JSON.stringify(formSchema),
+          JSON.stringify(approvalGraph),
+          source.id,
+        ],
+      )
+      const restoredVersion = restoredResult.rows[0]
+
+      const updatedTemplateResult = await client.query<TemplateRow>(
+        `UPDATE approval_templates
+         SET latest_version_id = $1, updated_at = now()
+         WHERE id = $2
+         RETURNING *`,
+        [restoredVersion.id, templateId],
+      )
+      const updatedTemplate = updatedTemplateResult.rows[0]
+      await client.query('COMMIT')
+
+      return toApprovalTemplateVersionDetailDTO({
+        template: updatedTemplate,
+        version: restoredVersion,
+        publishedDefinition: null,
+      })
+    } catch (error) {
+      await rollbackQuietly(client)
+      throw error
+    } finally {
+      client?.release()
+    }
   }
 
   async createTemplate(request: CreateApprovalTemplateRequest): Promise<ApprovalTemplateDetailDTO> {
@@ -2907,7 +3660,9 @@ export class ApprovalProductService {
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
+    validateConditionBranchRules(approvalGraph, formSchema)
 
     let client: ApprovalDbClient | null = null
     try {
@@ -3059,11 +3814,19 @@ export class ApprovalProductService {
         const nextVersion = Number.parseInt(maxVersionResult.rows[0]?.max_version || '0', 10) + 1
 
         const nextFormSchema = formSchema ?? asFormSchema(latestVersion.form_schema)
-        const nextApprovalGraph = approvalGraph ?? asApprovalGraph(latestVersion.approval_graph)
+        // A form-only edit still creates a NEW template version. Re-validate the
+        // copied historical graph under current authoring rules before writing it;
+        // ordinary reads remain on asApprovalGraph's compatibility path.
+        const nextApprovalGraph = assertApprovalGraph(
+          approvalGraph ?? asApprovalGraph(latestVersion.approval_graph),
+          REQUEST_VALIDATION_CONTEXT,
+        )
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateRecordLinkNotUsedInConditions(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
+        validateConditionBranchRules(nextApprovalGraph, nextFormSchema)
 
         const versionResult = await client.query<TemplateVersionRow>(
           `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
@@ -3161,7 +3924,21 @@ export class ApprovalProductService {
       )
 
       const formSchema = asFormSchema(version.form_schema)
-      const approvalGraph = asApprovalGraph(version.approval_graph)
+      const storedApprovalGraph = asApprovalGraph(version.approval_graph)
+      // Publishing is a write choke point: historical drafts stay readable, but
+      // must satisfy the current all-runtime-path contract before activation.
+      const approvalGraph = assertApprovalGraph(
+        storedApprovalGraph,
+        REQUEST_VALIDATION_CONTEXT,
+        { allowParallelDuplicateAssignees: policy.autoApproval?.mergeAdjacentApprover === true },
+      )
+      // FWB-0 Layer 2: publisher must be able to READ every record-link target sheet (pinned props).
+      // Fail-closed before freezing the published definition.
+      await this.assertRecordLinkTargetsReadableByCreator(
+        formSchema,
+        typeof request.actorUserId === 'string' ? request.actorUserId : '',
+        client.query.bind(client),
+      )
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       // RA-1b CURATED-VOCABULARY — THE HARD GATE. Only when the graph actually routes on requester.role do
@@ -3171,11 +3948,20 @@ export class ApprovalProductService {
         ? await fetchCuratedApprovalRoleIds(client.query.bind(client))
         : null
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
+      validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateConditionBranchRules(approvalGraph, formSchema)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
       // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
       assertNoUnconfiguredPlaceholderRoles(approvalGraph)
+      // F2 preflight: parallel branches with provably-identical DYNAMIC approver sources 409 every
+      // request at fan-out — reject at publish with the runtime's own code. Exempt when the publish
+      // policy's mergeAdjacentApprover absorbs same-approver overlap (mirrors the
+      // allowParallelDuplicateAssignees exemption the static duplicate check gets in asRuntimeGraph).
+      if (policy.autoApproval?.mergeAdjacentApprover !== true) {
+        assertNoParallelDynamicAssigneeConflicts(approvalGraph)
+      }
       const runtimeGraph = buildRuntimeGraph(approvalGraph, policy)
 
       const publishedDefinitionResult = await client.query<PublishedDefinitionRow>(
@@ -3428,6 +4214,16 @@ export class ApprovalProductService {
       throw new ServiceError('Approval template has no version to clone', 400, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
     }
 
+    // Stored versions remain readable under the historical compatibility rules, but
+    // cloning creates a new draft version and must satisfy the current authoring gate.
+    const formSchema = assertFormSchema(source.version.form_schema)
+    const approvalGraph = assertApprovalGraph(source.version.approval_graph)
+    validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNodeTimeoutConfigs(approvalGraph)
+    validateConditionBranchRules(approvalGraph, formSchema)
+
     const newName = `${source.template.name} (副本)`
 
     for (let attempt = 0; attempt < TEMPLATE_CLONE_KEY_ATTEMPTS; attempt += 1) {
@@ -3459,8 +4255,8 @@ export class ApprovalProductService {
            RETURNING *`,
           [
             template.id,
-            JSON.stringify(source.version.form_schema),
-            JSON.stringify(source.version.approval_graph),
+            JSON.stringify(formSchema),
+            JSON.stringify(approvalGraph),
           ],
         )
         const version = versionResult.rows[0]
@@ -3507,6 +4303,253 @@ export class ApprovalProductService {
   }
 
   /**
+   * FWB-0 Layer 2 publish-time: every record-link field's pinned baseId/sheetId must resolve to a
+   * real sheet in that base, and the publisher must have BOTH base-read AND sheet-read.
+   *
+   * Runs on the publish transaction client only (no global RBAC cache). Targets are processed in
+   * deterministic order (baseId, sheetId, fieldId). Each target: lock authority rows, then
+   * constant-shape dual base+sheet auth (same stages for missing/mismatch/unreadable). One
+   * values-free public message for all refuse outcomes.
+   */
+  private async assertRecordLinkTargetsReadableByCreator(
+    formSchema: FormSchema,
+    creatorUserId: string,
+    queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>,
+  ): Promise<void> {
+    const recordLinkFields = (formSchema.fields ?? []).filter((field) => field.type === 'record-link')
+    if (recordLinkFields.length === 0) return
+    if (!creatorUserId.trim()) {
+      throw new ServiceError(
+        'record-link publish requires publisher identity',
+        400,
+        'VALIDATION_ERROR',
+      )
+    }
+    const unavailable = 'record-link target is not readable'
+    // Collect pins first; lock ALL targets in global phases (bases → sheets → actor once →
+    // sheet grants) BEFORE any auth re-read. Shared authority locks let peer publishes proceed;
+    // global phases retain one canonical order across every caller.
+    const targets = recordLinkFields
+      .map((field, index) => ({
+        fieldId: field.id,
+        order: index,
+        baseId: typeof field.props?.baseId === 'string' ? field.props.baseId.trim() : '',
+        sheetId: typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : '',
+      }))
+      .sort((a, b) => {
+        if (a.baseId !== b.baseId) return a.baseId < b.baseId ? -1 : 1
+        if (a.sheetId !== b.sheetId) return a.sheetId < b.sheetId ? -1 : 1
+        if (a.fieldId !== b.fieldId) return a.fieldId < b.fieldId ? -1 : 1
+        return a.order - b.order
+      })
+
+    for (const target of targets) {
+      if (!target.baseId || !target.sheetId) {
+        throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+      }
+    }
+
+    try {
+      await lockRecordLinkMultiTargetAuthorityPhasedOnQuery(queryFn, {
+        userId: creatorUserId,
+        targets: targets.map((t) => ({ baseId: t.baseId, sheetId: t.sheetId })),
+      })
+      for (const target of targets) {
+        const auth = await resolveRecordLinkTargetAuthOnQuery(queryFn, {
+          userId: creatorUserId,
+          baseId: target.baseId,
+          sheetId: target.sheetId,
+        })
+        if (!auth.ok) {
+          throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+        }
+      }
+    } catch (err) {
+      if (err instanceof ServiceError) throw err
+      throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+    }
+  }
+
+  /**
+   * FWB-0 Layer 2 submit-time authz (confused-deputy close): filler must READ every linked record.
+   * Missing / base-mismatch / unreadable / row-denied share one values-free error (no existence oracle)
+   * and run a constant-shape helper pipeline (see probeRecordLinkReadableForUser).
+   *
+   * P1-3 multi-link: EVERY configured link with a submitted value runs the full fixed pipeline
+   * before a single public refusal is emitted (no early return on the first failure that would
+   * form a depth/count oracle between two candidate links).
+   *
+   * Final in-txn path (lockTargetRows / lockAuthorityRows):
+   *   1) Collect valid targets
+   *   2) Globally phased multi-target locks via lockRecordLinkMultiTargetCreatePathOnQuery
+   *      (all bases → all sheets → actor once → sheet grants → row-auth/records)
+   *   3) Re-read every authorization WITHOUT further lock acquisition
+   * Global phases keep one canonical lock order; shared authority locks avoid serializing peer
+   * creates. Pre-txn / preview skip locks.
+   *
+   * Shared by createApproval (pre-txn + final in-txn recheck) and route-preview.
+   *
+   * @param options.queryFn — DB handle; final create recheck MUST pass the transaction client.
+   * @param options.lockTargetRows — after phased locks, revalidate approvals:write (DB/admin only)
+   *   and treat the path as the final create recheck (row/record locks already taken in phase 5).
+   * @param options.lockAuthorityRows — enable multi-target authority phases. Independent of
+   *   lockTargetRows. When omitted, defaults to lockTargetRows.
+   * @param options.transcripts — optional per-link ordered helper transcripts for parity tests
+   *   (one transcript per candidate in canonical lock order, not formSchema order).
+   * @param options.sortCandidates — when false, skip canonical sort of re-read order
+   *   (MUTATION/test only). Production always sorts (default true).
+   * @param options.interleavedAuthorityLocks — MUTATION ONLY. Restores per-candidate
+   *   interleaving so phase-order tests can distinguish the production path.
+   *
+   * Note: authority-row FOR SHARE blocks concurrent UPDATE/DELETE on every DB source the final
+   * re-read consumes while allowing peer approval creates to read the same authority concurrently
+   * (see RECORD_LINK_AUTHORITY_LOCK_ORDER). Final write is DB/admin only.
+   */
+  private async assertRecordLinksReadableAtSubmit(
+    formSchema: FormSchema,
+    formData: Record<string, unknown>,
+    fillerUserId: string,
+    options: {
+      queryFn?: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
+      lockTargetRows?: boolean
+      /** Independent of lockTargetRows. Omit to default to lockTargetRows. */
+      lockAuthorityRows?: boolean
+      transcripts?: string[][]
+      /**
+       * Canonical multi-link re-read order. Default true. Set false only in mutation/tests.
+       */
+      sortCandidates?: boolean
+      /**
+       * MUTATION ONLY: restore interleaved per-candidate locking for phase-order tests.
+       * Never true on production create/preview paths.
+       */
+      interleavedAuthorityLocks?: boolean
+    } = {},
+  ): Promise<string | null> {
+    if (!pool && !options.queryFn) return 'Database not available'
+    const unavailable = 'linked record is not readable'
+
+    // Normalize ALL candidate links first (no per-link early return).
+    type LinkCandidate = {
+      fieldId: string
+      sheetId: string
+      recordId: string
+      baseId: string
+      shapeOk: boolean
+    }
+    const links: LinkCandidate[] = []
+    for (const field of formSchema.fields ?? []) {
+      if (field.type !== 'record-link') continue
+      const raw = formData[field.id]
+      if (raw === undefined || raw === null) continue
+      const sheetId = typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : ''
+      const baseId = typeof field.props?.baseId === 'string' ? field.props.baseId.trim() : ''
+      let recordId = ''
+      let shapeOk = false
+      if (typeof raw === 'object' && !Array.isArray(raw) && raw !== null) {
+        const recordIdRaw = (raw as { recordId?: unknown }).recordId
+        recordId = typeof recordIdRaw === 'string' ? recordIdRaw.trim() : ''
+        const keys = Object.keys(raw as object)
+        shapeOk = keys.length === 1 && keys[0] === 'recordId' && recordId.length > 0
+          && sheetId.length > 0 && baseId.length > 0
+      }
+      links.push({
+        fieldId: field.id,
+        sheetId: sheetId || '_invalid_sheet',
+        recordId: recordId || '_invalid_record',
+        baseId: baseId || '_invalid_base',
+        shapeOk,
+      })
+    }
+    if (links.length === 0) return null
+
+    const orderedLinks = options.sortCandidates === false
+      ? links
+      : sortRecordLinkSubmitCandidates(links)
+
+    const queryFn = options.queryFn
+      ?? ((sqlText: string, params?: unknown[]) => pool!.query(sqlText, params))
+
+    const lockTargetRows = options.lockTargetRows === true
+    const lockAuthorityRows = options.lockAuthorityRows === undefined
+      ? lockTargetRows
+      : options.lockAuthorityRows === true
+    const interleaved = options.interleavedAuthorityLocks === true
+
+    // Global multi-target lock BEFORE any per-link auth re-read (create final path).
+    if (lockAuthorityRows || lockTargetRows) {
+      const shapeOkTargets = orderedLinks
+        .filter((l) => l.shapeOk)
+        .map((l) => ({ baseId: l.baseId, sheetId: l.sheetId, recordId: l.recordId }))
+      if (shapeOkTargets.length > 0) {
+        if (lockTargetRows) {
+          await lockRecordLinkMultiTargetCreatePathOnQuery(
+            queryFn,
+            { userId: fillerUserId, targets: shapeOkTargets },
+            { interleavedPerCandidate: interleaved },
+          )
+        } else {
+          await lockRecordLinkMultiTargetAuthorityPhasedOnQuery(
+            queryFn,
+            {
+              userId: fillerUserId,
+              targets: shapeOkTargets.map((t) => ({ baseId: t.baseId, sheetId: t.sheetId })),
+            },
+            { interleavedPerCandidate: interleaved },
+          )
+        }
+      }
+    }
+
+    // Run the fixed pipeline for EVERY link (including shape-invalid — still full depth).
+    // Locks already held: probes re-read only (no further lock acquisition).
+    let anyFailed = false
+    for (const link of orderedLinks) {
+      const transcript = options.transcripts ? [] as string[] : undefined
+      let readable = false
+      if (link.shapeOk) {
+        // Locks (when requested) were acquired once for all targets above. Per-link probe
+        // re-reads only — never re-enters per-candidate lock acquisition.
+        readable = await probeRecordLinkReadableForUser(
+          queryFn,
+          {
+            userId: fillerUserId,
+            baseId: link.baseId,
+            sheetId: link.sheetId,
+            recordId: link.recordId,
+            lockTargetRow: false,
+            lockAuthorityRows: false,
+            requireApprovalsWrite: lockTargetRows,
+          },
+          transcript,
+        )
+      } else if (transcript) {
+        for (const step of [
+          'lock_authority',
+          'lock_row_auth',
+          'sheet_membership',
+          'record_exists',
+          'base_readable',
+          'sheet_capabilities',
+          'row_deny_strict',
+          ...(lockTargetRows ? (['approvals_write'] as const) : []),
+        ]) {
+          transcript.push(step)
+        }
+      }
+      if (transcript && options.transcripts) options.transcripts.push(transcript)
+      const result = await validateRecordLinkAtSubmit(
+        { fillerCanReadRecord: async () => readable },
+        fillerUserId,
+        link.sheetId,
+        link.recordId,
+      )
+      if (!result.ok) anyFailed = true
+    }
+    return anyFailed ? unavailable : null
+  }
+
+  /**
    * RP-1 (route-preview lock, RATIFIED — RP-0): the SINGLE assembly shared by createApproval and
    * the read-only route preview. Everything from template-bundle load through executor
    * construction lives here so preview can NEVER drift from create (the same normalization,
@@ -3543,6 +4586,7 @@ export class ApprovalProductService {
     runtimeGraph: RuntimeGraph
     requesterSnapshot: ApprovalRequesterSnapshot
     executor: ApprovalGraphExecutor
+    attachmentsEnabled: boolean
   }> {
     if (!pool) throw new Error('Database not available')
 
@@ -3589,13 +4633,45 @@ export class ApprovalProductService {
         if (!allowedFieldIds.has(key)) delete normalizedFormData[key]
       }
     }
-    const validationErrors = validateApprovalFormData(formSchema, normalizedFormData)
+    const attachmentsEnabled = isApprovalAttachmentsEnabled()
+    const validationErrors = validateApprovalFormData(formSchema, normalizedFormData, {
+      attachmentValueMode: attachmentsEnabled ? 'ids' : 'legacy',
+    })
     if (validationErrors.length > 0) {
       throw new ServiceError(
         'Approval form data is invalid',
         400,
         'VALIDATION_ERROR',
         { errors: validationErrors },
+      )
+    }
+
+    // FWB-0 Layer 2: freeze the canonical `{ recordId: trimmed }` shape after structural
+    // validation so graph execution + form_snapshot never persist padded ids that were
+    // authorized only after trim.
+    canonicalizeRecordLinkFormData(formSchema, normalizedFormData)
+
+    // FWB-0 Layer 2: submit-time record-link authz (confused-deputy close). Filler must READ every
+    // linked record; missing and unreadable share one values-free fail-closed shape (no existence
+    // oracle). Runs on the SAME assembleCreationContext substrate as create + route-preview so
+    // preview cannot drift from create.
+    //
+    // Dry-run identity contract (B3-06): when an admin previews AS a sample requester, the
+    // record-link read check uses the SAMPLE requester (requesterOverride), not the admin actor —
+    // otherwise the dry-run would authorize under the author's privileges and hide filler-denied
+    // links. Create/B3-05 have no override, so this is byte-identical to actor.userId there.
+    const recordLinkFillerUserId = options.requesterOverride?.userId?.trim() || actor.userId
+    const recordLinkAuthzError = await this.assertRecordLinksReadableAtSubmit(
+      formSchema,
+      normalizedFormData,
+      recordLinkFillerUserId,
+    )
+    if (recordLinkAuthzError) {
+      throw new ServiceError(
+        'Approval form data is invalid',
+        400,
+        'VALIDATION_ERROR',
+        { errors: [recordLinkAuthzError] },
       )
     }
 
@@ -3833,7 +4909,15 @@ export class ApprovalProductService {
         roles: requesterSnapshot.directoryRoles ?? [],
       },
     })
-    return { bundle, formSchema, normalizedFormData, runtimeGraph, requesterSnapshot, executor }
+    return {
+      bundle,
+      formSchema,
+      normalizedFormData,
+      runtimeGraph,
+      requesterSnapshot,
+      executor,
+      attachmentsEnabled,
+    }
   }
 
   /**
@@ -3973,7 +5057,15 @@ export class ApprovalProductService {
   async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
     // RP-1: prefix extracted verbatim into assembleCreationContext (shared with previewApprovalRoute).
-    const { bundle, normalizedFormData, runtimeGraph, requesterSnapshot, executor } =
+    const {
+      bundle,
+      formSchema,
+      normalizedFormData,
+      runtimeGraph,
+      requesterSnapshot,
+      executor,
+      attachmentsEnabled,
+    } =
       await this.assembleCreationContext(request, actor)
     const instanceId = crypto.randomUUID()
     const initialResolution = executor.resolveInitialState()
@@ -3994,6 +5086,59 @@ export class ApprovalProductService {
     try {
       client = await pool.connect()
       await client.query('BEGIN')
+
+      // FWB-0 Layer 2 P1-4: final write-boundary revalidation on the TRANSACTION client
+      // immediately before insert. Locks every authority source the subsequent re-read
+      // consumes, the sheet+record row-auth advisory (record_permissions phantoms), and the
+      // target record FOR UPDATE, then re-reads multitable target auth and approvals:write
+      // through that same queryFn — DB/admin only (no actor.permissions / JWT as final write
+      // authority). Concurrent DELETE/INSERT on locked sources either blocks or is observed
+      // as empty — never authorize from the pre-txn precheck alone.
+      const finalRecordLinkAuthzError = await this.assertRecordLinksReadableAtSubmit(
+        formSchema,
+        normalizedFormData,
+        actor.userId,
+        {
+          queryFn: (sqlText, params) => client!.query(sqlText, params),
+          lockTargetRows: true,
+          // Explicit independent authority lock (mutation surface: set false → race goldens RED).
+          lockAuthorityRows: true,
+        },
+      )
+      if (finalRecordLinkAuthzError) {
+        throw new ServiceError(
+          'Approval form data is invalid',
+          400,
+          'VALIDATION_ERROR',
+          { errors: [finalRecordLinkAuthzError] },
+        )
+      }
+
+      const templateVisibleAtWrite = await this.templateVisibleAtCreateBoundary(
+        client,
+        bundle.template.id,
+        bundle.version.id,
+        actor.userId,
+      )
+      if (!templateVisibleAtWrite) {
+        throw new ServiceError(
+          'Approval template not found',
+          404,
+          'APPROVAL_TEMPLATE_NOT_FOUND',
+        )
+      }
+
+      // The record-link probe checks this for each linked record, but templates without a
+      // record-link field must receive the same DB-only final write check. Actor authority rows
+      // are already locked by templateVisibleAtCreateBoundary, so a concurrent revoke cannot land
+      // between this read and the instance insert.
+      const canWriteApprovalAtBoundary = await userHasApprovalsWriteOnQuery(
+        (sqlText, params) => client!.query(sqlText, params),
+        actor.userId,
+      )
+      if (!canWriteApprovalAtBoundary) {
+        throw new ServiceError('Forbidden', 403, 'FORBIDDEN')
+      }
 
       await client.query(
         `INSERT INTO approval_instances
@@ -4027,6 +5172,42 @@ export class ApprovalProductService {
           initial.currentNodeKey,
         ],
       )
+
+      // B3-07 §4.4 form-freeze bind (flag-gated, #4195): bind the submitter's staged (unbound)
+      // attachment uploads to this instance INSIDE the create transaction — the same txn that froze
+      // the id arrays into form_snapshot above, so a half-bound state is impossible. Any unbindable
+      // id (missing / foreign / already bound / GC-claimed) throws → the WHOLE create rolls back
+      // (fail-closed, G4). Flag OFF ⇒ zero behavior: no attachment values reach normalizedFormData
+      // (B2-28 strips them client-side and no upload endpoint exists to mint ids), and this block
+      // does not run.
+      if (attachmentsEnabled) {
+        const attachmentIdsByField = (() => {
+          try {
+            return collectAttachmentIdsByField(formSchema, normalizedFormData)
+          } catch {
+            throw new ServiceError('Approval attachment references are invalid', 400, 'APPROVAL_ATTACHMENT_BIND_FAILED')
+          }
+        })()
+        if (Object.keys(attachmentIdsByField).length > 0) {
+          try {
+            await bindAttachmentsOnSubmit(
+              client,
+              actor.userId,
+              actor.tenantId?.trim() || 'default',
+              instanceId,
+              attachmentIdsByField,
+            )
+          } catch (error) {
+            // Cap/count/total violations are 413; other unbindable ids stay 400. Values-free body either way.
+            const status = error instanceof ApprovalAttachmentBindError ? error.httpStatus : 400
+            throw new ServiceError(
+              'Approval attachments could not be bound',
+              status,
+              status === 413 ? 'APPROVAL_ATTACHMENT_CAP_EXCEEDED' : 'APPROVAL_ATTACHMENT_BIND_FAILED',
+            )
+          }
+        }
+      }
 
       // ACTIVATION (nodeEntryEpoch §4·A): initial node activation mints a fresh epoch. The
       // same-transaction auto-approval cascade at this node carries that same epoch (§7).
@@ -4145,7 +5326,7 @@ export class ApprovalProductService {
       emitApprovalCompletionEvent(completionEvent)
     }
 
-    const approval = await this.getApproval(instanceId)
+    const approval = await this.getApproval(instanceId, actor.userId)
     if (!approval) {
       throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
     }
@@ -4394,7 +5575,7 @@ export class ApprovalProductService {
     if (jumpEvent) {
       eventBus.emit('approval.admin_jumped', jumpEvent)
     }
-    const approval = await this.getApproval(id)
+    const approval = await this.getApproval(id, actor.userId)
     if (!approval) {
       throw new ServiceError('Approval not found after jump', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
@@ -5115,7 +6296,7 @@ export class ApprovalProductService {
           metadata: { nodeKey: currentNodeKey },
         }, actor)
         await client.query('COMMIT')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'transfer') {
@@ -5147,7 +6328,7 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'add_sign') {
@@ -5207,7 +6388,7 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'reduce_sign') {
@@ -5274,7 +6455,7 @@ export class ApprovalProductService {
           targetUserId: targetAssignmentUserId,
         }, actor)
         await client.query('COMMIT')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'revoke') {
@@ -5349,7 +6530,7 @@ export class ApprovalProductService {
         await client.query('COMMIT')
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (instance.status !== 'pending') {
@@ -5453,7 +6634,7 @@ export class ApprovalProductService {
         if (resolution.currentNodeKey) {
           this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
         }
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'reject') {
@@ -5502,7 +6683,7 @@ export class ApprovalProductService {
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'rejected')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId))!
       }
 
       const approvalMode = executor.getApprovalMode(currentNodeKey)
@@ -5552,7 +6733,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id))!
+          return (await this.getApproval(id, actor.userId))!
         }
       } else if (approvalMode === 'any') {
         // Deactivate actor's own assignment first.
@@ -5698,7 +6879,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id))!
+          return (await this.getApproval(id, actor.userId))!
         }
         // Threshold reached on THIS approval (first-N-wins) — cancel the remaining pending
         // siblings, reusing the 'any' first-wins sibling-cancel path + audit metadata.
@@ -5983,7 +7164,7 @@ export class ApprovalProductService {
       client?.release()
     }
 
-    const approval = await this.getApproval(id)
+    const approval = await this.getApproval(id, actor.userId)
     if (!approval) {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
@@ -6060,7 +7241,7 @@ export class ApprovalProductService {
     })
   }
 
-  async getApproval(id: string): Promise<UnifiedApprovalDTO | null> {
+  async getApproval(id: string, viewerUserId?: string | null): Promise<UnifiedApprovalDTO | null> {
     if (!pool) throw new Error('Database not available')
 
     const result = await pool.query<ApprovalInstanceRow>(
@@ -6086,7 +7267,7 @@ export class ApprovalProductService {
       if (versionResult.rows[0]) frozenFormSchema = asFormSchema(versionResult.rows[0].form_schema)
     }
 
-    return toUnifiedApprovalDTO(
+    const dto = toUnifiedApprovalDTO(
       row,
       assignmentsResult.rows.map((assignment) => ({
         id: assignment.id,
@@ -6099,6 +7280,20 @@ export class ApprovalProductService {
       })),
       frozenFormSchema,
     )
+
+    // FWB-0 Layer 2 P1-1: no viewer is a deny-all viewer. Every current HTTP path passes the
+    // authenticated actor explicitly; making omission fail closed prevents a future call site from
+    // exposing stored linked ids by accidentally using the one-argument form.
+    if (dto.formSnapshot) {
+      const queryFn = (sqlText: string, params?: unknown[]) => pool!.query(sqlText, params)
+      dto.formSnapshot = await projectRecordLinkFormSnapshotForViewer(
+        dto.formSnapshot,
+        frozenFormSchema,
+        viewerUserId ?? null,
+        queryFn,
+      )
+    }
+    return dto
   }
 
   async isTemplateRuntimeInstance(id: string): Promise<boolean> {
@@ -6186,6 +7381,35 @@ export class ApprovalProductService {
       version,
       publishedDefinition: publishedResult.rows[0] || null,
     }
+  }
+
+  /**
+   * Final create-boundary template visibility check. The actor and template row are both read on
+   * the approval transaction after actor authority locks, so a stale request manager grant or a
+   * concurrent visibility edit cannot authorize the instance insert.
+   */
+  private async templateVisibleAtCreateBoundary(
+    client: ApprovalDbClient,
+    templateId: string,
+    expectedActiveVersionId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const queryFn = (sqlText: string, params?: unknown[]) => client.query(sqlText, params)
+    await lockRecordLinkActorAuthorityRowsOnQuery(queryFn, userId)
+    const visibilityActor = await loadApprovalTemplateVisibilityActorOnQuery(queryFn, userId)
+    if (!visibilityActor) return false
+
+    const conditions = ["id = $1", "status = 'published'", 'active_version_id = $2']
+    const params: unknown[] = [templateId, expectedActiveVersionId]
+    applyTemplateVisibilityFilter(conditions, params, 3, visibilityActor)
+    const result = await client.query<{ id: string }>(
+      `SELECT id
+       FROM approval_templates
+       WHERE ${conditions.join(' AND ')}
+       FOR SHARE`,
+      params,
+    )
+    return Boolean(result.rows[0])
   }
 
   private async deactivateAllActiveAssignments(

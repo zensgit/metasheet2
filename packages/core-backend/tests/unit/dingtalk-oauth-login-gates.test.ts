@@ -113,6 +113,8 @@ describe('dingtalk oauth login gates', () => {
           email: 'alpha@example.com',
           name: 'Alpha',
           role: 'user',
+          is_active: true,
+          activation_status: 'activated',
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
@@ -144,6 +146,7 @@ describe('dingtalk oauth login gates', () => {
           name: 'Alpha',
           role: 'user',
           is_active: true,
+          activation_status: 'activated',
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
@@ -192,6 +195,7 @@ describe('dingtalk oauth login gates', () => {
           name: 'Alpha',
           role: 'user',
           is_active: true,
+          activation_status: 'activated',
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
@@ -216,6 +220,8 @@ describe('dingtalk oauth login gates', () => {
           email: 'alpha@example.com',
           name: 'Alpha',
           role: 'user',
+          is_active: true,
+          activation_status: 'activated',
         }],
       })
       .mockResolvedValueOnce({ rows: [{ enabled: true }] })
@@ -284,6 +290,7 @@ describe('dingtalk oauth login gates', () => {
           name: 'Alpha',
           role: 'user',
           is_active: true,
+          activation_status: 'activated',
         }],
       }) // INSERT INTO users
 
@@ -342,7 +349,14 @@ describe('dingtalk oauth login gates', () => {
       pgMocks.query
         .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({
-          rows: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user' }],
+          rows: [{
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+            role: 'user',
+            is_active: true,
+            activation_status: 'activated',
+          }],
         })
         .mockResolvedValueOnce({ rows: [{ enabled: true }] })
 
@@ -376,7 +390,14 @@ describe('dingtalk oauth login gates', () => {
       pgMocks.query
         .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({
-          rows: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user' }],
+          rows: [{
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+            role: 'user',
+            is_active: true,
+            activation_status: 'activated',
+          }],
         })
         .mockResolvedValueOnce({ rows: [{ enabled: true }] })
 
@@ -395,7 +416,14 @@ describe('dingtalk oauth login gates', () => {
       clientMocks.getDingTalkUserDetail.mockRejectedValue(new Error('boom'))
       pgMocks.query
         .mockResolvedValueOnce({
-          rows: [{ id: 'user-9', email: 'nine@example.com', name: 'Nine', role: 'user', is_active: true }],
+          rows: [{
+            id: 'user-9',
+            email: 'nine@example.com',
+            name: 'Nine',
+            role: 'user',
+            is_active: true,
+            activation_status: 'activated',
+          }],
         })
         .mockResolvedValueOnce({ rows: [{ enabled: true }] })
 

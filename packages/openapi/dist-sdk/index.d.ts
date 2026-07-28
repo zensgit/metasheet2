@@ -416,6 +416,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals/record-link-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List candidate records for an approval record-link field
+         * @description FWB-0 Layer 2 dedicated candidate picker for ordinary fillers. Scoped to a
+         *     server-pinned (baseId, sheetId) pair from a form `record-link` field. Requires
+         *     the same `approvals:write` permission as createApproval (not read/act-only).
+         *
+         *     Returns only rows the actor can read, with human display labels derived from
+         *     visible non-computed source fields (never a raw record id). Missing sheet,
+         *     base mismatch, and unreadable target share one public refuse shape (no existence
+         *     oracle). Does NOT reuse multitable `/fields/:fieldId/link-options`.
+         */
+        get: operations["listApprovalRecordLinkOptions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/approvals/pending": {
         parameters: {
             query?: never;
@@ -714,6 +741,50 @@ export interface paths {
          *     highest SLA breach rate.
          */
         get: operations["getApprovalMetricsReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/metrics/people": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get approval metrics aggregated by requester (person)
+         * @description Requires the `approvals:analytics` permission (a person-level performance ranking is an
+         *     HR/ops-analytics lens, gated separately from approval administration). Aggregates approval
+         *     metrics by the requester (person), Top-100 by volume. A null key is the unattributed bucket.
+         */
+        get: operations["getApprovalMetricsByPerson"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/metrics/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get approval metrics aggregated by requester department (team)
+         * @description Admin-only. Aggregates approval metrics by the requester's frozen department
+         *     (directoryDepartment with a department fallback), Top-100 by volume. A null key is
+         *     the unattributed bucket.
+         */
+        get: operations["getApprovalMetricsByTeam"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2384,6 +2455,8 @@ export interface paths {
                         isOvernight?: boolean;
                         /** @deprecated */
                         is_overnight?: boolean;
+                        /** @description Canonical segments (W3). Mutually exclusive with the legacy workStartTime/workEndTime/isOvernight fields. While authoritative segment calculation is disabled for the org, multi-segment shifts are authoring preview-only. */
+                        segments?: components["schemas"]["AttendanceShiftSegmentInput"][];
                         lateGraceMinutes?: number;
                         /** @deprecated */
                         late_grace_minutes?: number;
@@ -2416,6 +2489,13 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array) or ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with legacy start/end fields). */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -2477,6 +2557,9 @@ export interface paths {
                         timezone?: string;
                         workStartTime?: string;
                         workEndTime?: string;
+                        isOvernight?: boolean;
+                        /** @description Canonical segments (W3). Mutually exclusive with the legacy workStartTime/workEndTime/isOvernight fields in the same request. A start/end-only update on a multi-segment shift is rejected with a typed 422; a metadata-only update preserves the persisted segments. */
+                        segments?: components["schemas"]["AttendanceShiftSegmentInput"][];
                         lateGraceMinutes?: number;
                         earlyGraceMinutes?: number;
                         roundingMinutes?: number;
@@ -2501,6 +2584,27 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Shift not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Typed conflict with zero writes: CONFLICT (legacy rotation-rule rename ambiguity) or ATTENDANCE_SHIFT_SEGMENT_CONVERSION_BLOCKED (an active assignment, rotation, pending swap, or pending/published dispatch blocks converting one segment to multiple while segment calculation is disabled). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID, ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a multi-segment shift). */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
@@ -2532,7 +2636,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
-                409: components["responses"]["Conflict"];
+                /** @description Shift not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Typed delete blocker with zero writes: ATTENDANCE_SHIFT_DELETE_BLOCKED — the shift is still referenced by any assignment row (including ended/inactive history), a rotation rule, a pending swap snapshot, or a pending/published dispatch target. Historical evidence is preserved. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -2602,6 +2719,7 @@ export interface paths {
                     "application/json": {
                         userId: string;
                         shiftId: string;
+                        slotIndex?: number;
                         /** Format: date */
                         startDate: string;
                         /** Format: date */
@@ -2612,6 +2730,8 @@ export interface paths {
                         user_id?: string;
                         /** @description Legacy snake_case alias for shiftId. */
                         shift_id?: string;
+                        /** @description Legacy snake_case alias for slotIndex. */
+                        slot_index?: number;
                         /**
                          * Format: date
                          * @description Legacy snake_case alias for startDate.
@@ -2677,6 +2797,7 @@ export interface paths {
                     "application/json": {
                         userId?: string;
                         shiftId?: string;
+                        slotIndex?: number;
                         /** Format: date */
                         startDate?: string;
                         /** Format: date */
@@ -2685,6 +2806,8 @@ export interface paths {
                         orgId?: string;
                         user_id?: string;
                         shift_id?: string;
+                        /** @description Legacy snake_case alias for slotIndex. */
+                        slot_index?: number;
                         /** Format: date */
                         start_date?: string;
                         /** Format: date */
@@ -3144,6 +3267,145 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance-admin/calculation-group-memberships": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List a user's effective calculation-group membership timeline */
+        get: {
+            parameters: {
+                query: {
+                    orgId: string;
+                    userId: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ordered, non-overlapping membership timeline */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                items: components["schemas"]["AttendanceCalculationGroupMembership"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Calculation-group timeline read failed */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance-admin/calculation-group-memberships/transition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Transition a user to a calculation group on an inclusive effective date */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        orgId: string;
+                        userId: string;
+                        /** Format: uuid */
+                        targetGroupId: string;
+                        /** Format: date */
+                        effectiveOn: string;
+                        reason: string;
+                        correlationId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Transition applied or replayed idempotently */
+                200: {
+                    headers: {
+                        "X-Correlation-Id"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                correlationId: string;
+                                /** @enum {string} */
+                                outcome: "transitioned" | "unchanged";
+                                membership: components["schemas"]["AttendanceCalculationGroupMembership"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                /** @description Target user is not active in the requested organization */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Calculation-group transition failed */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/groups": {
         parameters: {
             query?: never;
@@ -3198,6 +3460,8 @@ export interface paths {
                         timezone: string;
                         ruleSetId?: string;
                         description?: string;
+                        /** @enum {string} */
+                        attendanceType?: "fixed_shift" | "scheduled_shift" | "free_time";
                         orgId?: string;
                     };
                 };
@@ -3281,6 +3545,11 @@ export interface paths {
                         timezone?: string;
                         ruleSetId?: string;
                         description?: string;
+                        /**
+                         * @description Accepted for parity with create; runtime rejects type changes after creation (ATTENDANCE_GROUP_TYPE_LOCKED).
+                         * @enum {string}
+                         */
+                        attendanceType?: "fixed_shift" | "scheduled_shift" | "free_time";
                         orgId?: string;
                     };
                 };
@@ -14368,6 +14637,10 @@ export interface components {
             sheetId?: string | null;
             viewId?: string | null;
             recordId?: string | null;
+            baseName?: string | null;
+            sheetName?: string | null;
+            viewName?: string | null;
+            fieldName?: string | null;
         };
         CommentInboxResponse: {
             /** @example true */
@@ -14574,10 +14847,22 @@ export interface components {
             counterpartyWorkDate?: string;
             /** Format: date */
             counterparty_work_date?: string;
-            requesterShiftId?: string;
-            requester_shift_id?: string;
-            counterpartyShiftId?: string;
-            counterparty_shift_id?: string;
+            /** @description Null when historical evidence outlives its deleted requester shift. */
+            requesterShiftId?: string | null;
+            /** @deprecated */
+            requester_shift_id?: string | null;
+            /** @description Resolved requester shift name or a neutral deleted/unavailable label. */
+            requesterShiftLabel?: string;
+            /** @enum {string} */
+            requesterShiftStatus?: "available" | "deleted";
+            /** @description Null when historical evidence outlives its deleted counterparty shift. */
+            counterpartyShiftId?: string | null;
+            /** @deprecated */
+            counterparty_shift_id?: string | null;
+            /** @description Resolved counterparty shift name or a neutral deleted/unavailable label. */
+            counterpartyShiftLabel?: string;
+            /** @enum {string} */
+            counterpartyShiftStatus?: "available" | "deleted";
             requesterSlotIndex?: number;
             requester_slot_index?: number;
             counterpartySlotIndex?: number;
@@ -14611,7 +14896,12 @@ export interface components {
             targetScheduleGroupId?: string;
             targetAttendanceGroupId?: string | null;
             targetDepartmentRef?: string | null;
-            targetShiftId?: string;
+            /** @description Null only when a historical cancelled dispatch outlives its deleted target shift. */
+            targetShiftId?: string | null;
+            /** @description Resolved shift name or a neutral deleted/unavailable label. */
+            targetShiftLabel?: string;
+            /** @enum {string} */
+            targetShiftStatus?: "available" | "deleted";
             slotIndex?: number;
             /** Format: date */
             startDate?: string;
@@ -14795,6 +15085,16 @@ export interface components {
             timezone?: string;
             ruleSetId?: string | null;
             description?: string | null;
+            /** @enum {string} */
+            attendanceType?: "fixed_shift" | "scheduled_shift" | "free_time";
+            /**
+             * @deprecated
+             * @enum {string}
+             */
+            attendance_type?: "fixed_shift" | "scheduled_shift" | "free_time";
+            memberCount?: number;
+            /** @deprecated */
+            member_count?: number;
             /** Format: date-time */
             createdAt?: string | null;
             /** Format: date-time */
@@ -14807,6 +15107,28 @@ export interface components {
             userId?: string;
             /** Format: date-time */
             createdAt?: string | null;
+        };
+        AttendanceCalculationGroupMembership: {
+            /** Format: uuid */
+            id: string;
+            orgId: string;
+            userId: string;
+            /** Format: uuid */
+            groupId: string;
+            /** Format: date */
+            effectiveFrom: string;
+            /** Format: date */
+            effectiveTo: string | null;
+            assignedBy: string;
+            assignedReason: string;
+            assignedCorrelationId: string;
+            closedBy: string | null;
+            closedReason: string | null;
+            closedCorrelationId: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
         };
         AttendancePayrollTemplate: {
             id?: string;
@@ -15131,6 +15453,60 @@ export interface components {
             workingDays?: number[];
             /** @deprecated */
             working_days?: number[];
+            /** @description Canonical shift segments (W3 / #4556). Persisted rows when present; a legacy shift without segment rows is synthesized as segment 0 from its envelope. The legacy workStartTime/workEndTime/isOvernight fields expose the OUTER envelope of these segments for compatibility only — for a multi-segment shift (calculationMode=segments) the envelope is not payable time. */
+            segments?: components["schemas"]["AttendanceShiftSegment"][];
+            /** @enum {string} */
+            calculationMode?: "envelope" | "segments";
+            /** @description Sum of per-segment planned minutes; breaks between segments are never counted. */
+            plannedMinutes?: number;
+            capabilities?: components["schemas"]["AttendanceShiftCapabilities"];
+        };
+        AttendanceShiftSegment: {
+            /** @description Persisted segment row id; null when synthesized from the legacy envelope. */
+            id?: string | null;
+            segmentIndex?: number;
+            /** @deprecated */
+            segment_index?: number;
+            /** @description Local wall-clock start time (HH:MM) in the parent shift timezone. */
+            startTime?: string;
+            /** @deprecated */
+            start_time?: string;
+            /**
+             * @description Fixed to 0 in v1.
+             * @enum {integer}
+             */
+            startDayOffset?: 0;
+            /** @deprecated */
+            start_day_offset?: number;
+            /** @description Local wall-clock end time (HH:MM) in the parent shift timezone. */
+            endTime?: string;
+            /** @deprecated */
+            end_time?: string;
+            endDayOffset?: number;
+            /** @deprecated */
+            end_day_offset?: number;
+        };
+        /** @description One shift segment for create/update. 1..3 segments, dense indexes from 0, positive duration, ordered non-overlapping after day offsets, total <= 24h, at most one midnight crossing. Unknown properties are rejected. */
+        AttendanceShiftSegmentInput: {
+            segmentIndex?: number;
+            startTime: string;
+            endTime: string;
+            /** @enum {integer} */
+            startDayOffset?: 0;
+            endDayOffset?: number;
+        };
+        /** @description Values-safe capability projection (state and labels only). Shows that authoritative segment calculation is disabled by default; while disabled, multi-segment authoring is preview-only. */
+        AttendanceShiftCapabilities: {
+            segmentCalculation?: {
+                enabled?: boolean;
+                /** @enum {boolean} */
+                defaultEnabled?: false;
+                authoritativeResults?: boolean;
+                /** @enum {string} */
+                multiSegmentAuthoring?: "preview_only" | "enabled";
+                /** @enum {string} */
+                flag?: "ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED";
+            };
         };
         AttendanceShiftAssignment: {
             id?: string;
@@ -15143,6 +15519,9 @@ export interface components {
             shiftId?: string;
             /** @deprecated */
             shift_id?: string;
+            slotIndex?: number;
+            /** @deprecated */
+            slot_index?: number;
             /** Format: date */
             startDate?: string;
             /**
@@ -15837,7 +16216,7 @@ export interface components {
             /** @description Candidate values for the in operator. */
             values?: unknown[];
         };
-        FormField: {
+        FormFieldDetailLeaf: {
             id: string;
             /** @enum {string} */
             type: "text" | "textarea" | "number" | "date" | "datetime" | "select" | "multi-select" | "user" | "attachment";
@@ -15851,6 +16230,55 @@ export interface components {
             };
             visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
         };
+        RecordLinkFieldProps: {
+            /**
+             * @description Pinned multitable base id (publish-time; filler cannot override).
+             *     Must be non-blank after trim — whitespace-only is invalid.
+             */
+            baseId: string;
+            /**
+             * @description Pinned multitable sheet id (publish-time; filler cannot override).
+             *     Must be non-blank after trim — whitespace-only is invalid.
+             */
+            sheetId: string;
+        };
+        FormFieldGeneric: {
+            id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "text" | "textarea" | "number" | "date" | "datetime" | "select" | "multi-select" | "user" | "attachment" | "detail";
+            label: string;
+            required?: boolean;
+            placeholder?: string;
+            defaultValue?: unknown;
+            options?: components["schemas"]["FormOption"][];
+            props?: {
+                [key: string]: unknown;
+            };
+            visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+            /** @description Detail-group leaf columns (only when type=detail). Never contains record-link. */
+            columns?: components["schemas"]["FormFieldDetailLeaf"][];
+        };
+        FormFieldRecordLink: {
+            id: string;
+            /**
+             * @description FWB-0 Layer 2 record-link field. Pins multitable base/sheet via props and stores
+             *     exactly one `{ recordId }` value. Top-level only in v1 (never a detail leaf).
+             *      (enum property replaced by openapi-typescript)
+             * @enum {string}
+             */
+            type: "record-link";
+            label: string;
+            required?: boolean;
+            placeholder?: string;
+            defaultValue?: unknown;
+            options?: components["schemas"]["FormOption"][];
+            props: components["schemas"]["RecordLinkFieldProps"];
+            visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+        };
+        FormField: components["schemas"]["FormFieldRecordLink"] | components["schemas"]["FormFieldGeneric"];
         FormSchema: {
             fields: components["schemas"]["FormField"][];
         };
@@ -16231,7 +16659,89 @@ export interface operations {
             };
             400: components["responses"]["ValidationError"];
             401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
+            /** @description Forbidden - approvals:write permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example Insufficient permissions */
+                        error: string;
+                    };
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listApprovalRecordLinkOptions: {
+        parameters: {
+            query: {
+                /** @description Pinned multitable base id from the form field props. */
+                baseId: string;
+                /** @description Pinned multitable sheet id from the form field props. */
+                sheetId: string;
+                /** @description Optional case-insensitive search against the effective display label. */
+                search?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        records: {
+                            /** @description Record id (selection value only; never used as the display label). */
+                            id: string;
+                            /** @description Human label from visible source fields, or a generic placeholder. */
+                            display: string;
+                        }[];
+                        page: {
+                            limit: number;
+                            offset: number;
+                            total: number;
+                            hasMore: boolean;
+                        };
+                    };
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            /** @description Forbidden - approvals:write permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example Insufficient permissions */
+                        error: string;
+                    };
+                };
+            };
+            /**
+             * @description Target sheet not found / base mismatch / unreadable (shared no-oracle shape).
+             *     Body is the same approval error envelope as other 4xx routes
+             *     (`ok: false` with nested `error.code` + `error.message`; it never
+             *     distinguishes missing from denied).
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             503: components["responses"]["ServiceUnavailable"];
         };
     };
@@ -16743,6 +17253,96 @@ export interface operations {
                                 p95DurationSeconds?: number | null;
                             }[];
                         };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getApprovalMetricsByPerson: {
+        parameters: {
+            query?: {
+                since?: string;
+                until?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example true */
+                        ok: boolean;
+                        data: {
+                            key?: string | null;
+                            name?: string | null;
+                            total?: number;
+                            approved?: number;
+                            rejected?: number;
+                            revoked?: number;
+                            avgDurationSeconds?: number | null;
+                            slaBreachRate?: number;
+                        }[];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getApprovalMetricsByTeam: {
+        parameters: {
+            query?: {
+                since?: string;
+                until?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example true */
+                        ok: boolean;
+                        data: {
+                            key?: string | null;
+                            name?: string | null;
+                            total?: number;
+                            approved?: number;
+                            rejected?: number;
+                            revoked?: number;
+                            avgDurationSeconds?: number | null;
+                            slaBreachRate?: number;
+                        }[];
                     };
                 };
             };

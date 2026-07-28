@@ -10,6 +10,8 @@ import {
   patchObjectFieldProperty,
   getObjectField,
   resolveObjectFieldIds,
+  buildObjectFieldsRepairSurface,
+  runObjectFieldsRepairTransactionWith,
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
 
@@ -503,5 +505,87 @@ describe('multitable provisioning helper', () => {
       groupFieldId: 'status',
       cardFieldIds: ['ticketNo', 'title', 'priority'],
     })
+  })
+})
+
+describe('buildObjectFieldsRepairSurface (W2/P2-3 atomic repair surface)', () => {
+  it('binds every method to the ONE passed query — no method escapes to another connection', async () => {
+    // The atomicity guarantee is that all four repair methods share a single (tx-bound)
+    // query. This exercises the SHIPPED surface-builder (index.ts uses the same function),
+    // so a future divergence — one method wired to a different connection — is caught here
+    // and in the real-DB rollback test, not left to a hand-mirrored copy (review P3).
+    const sqls: string[] = []
+    const spy: MultitableProvisioningQueryFn = async (sql: string) => {
+      sqls.push(sql)
+      return { rows: [], rowCount: 0 }
+    }
+    const surface = buildObjectFieldsRepairSurface(spy)
+
+    await surface.findObjectSheet({ projectId: 'tenant_1:plugin', objectId: 'obj' })
+    await surface.resolveExistingObjectFieldIds({ projectId: 'tenant_1:plugin', objectId: 'obj', fieldIds: ['a'] })
+    await surface.readObjectFieldsContent({ projectId: 'tenant_1:plugin', objectId: 'obj', fieldIds: ['a'] })
+    // Non-empty fields so ensureMissingObjectFields actually emits an INSERT — otherwise the
+    // WRITE binding is not pinned hermetically (review NIT: an empty-fields ensure emits zero
+    // SQL, so a write-method escape would leave this test green).
+    await surface.ensureMissingObjectFields({
+      projectId: 'tenant_1:plugin',
+      objectId: 'obj',
+      fields: [{ id: 'newField', name: 'New Field', type: 'string' }],
+    })
+
+    const joined = sqls.join(' ; ').toLowerCase()
+    // findObjectSheet routed through the spy (meta_sheets) …
+    expect(joined).toMatch(/meta_sheets/)
+    // … resolveExistingObjectFieldIds + readObjectFieldsContent (meta_fields SELECT) …
+    expect(joined).toMatch(/from meta_fields/)
+    // … and ensureMissingObjectFields (meta_fields INSERT) — the WRITE binding, pinned.
+    expect(joined).toMatch(/insert into meta_fields/)
+    // All four DB-touching methods used the injected query.
+    expect(sqls.length).toBeGreaterThanOrEqual(4)
+  })
+})
+
+describe('runObjectFieldsRepairTransactionWith (W2/P2-3 atomic glue)', () => {
+  it('builds the surface from the tx query and propagates a verify throw so the caller rolls back', async () => {
+    const sqls: string[] = []
+    let committed = false
+    let rolledBack = false
+    // Fake transaction runner: commits when `run` resolves, "rolls back" (records + rethrows)
+    // when `run` throws. This is exactly the contract index.ts fulfils with
+    // poolManager.get().transaction — so testing over it tests the shipped glue's shape.
+    const withTxQuery = async <R>(run: (q: MultitableProvisioningQueryFn) => Promise<R>): Promise<R> => {
+      const spy: MultitableProvisioningQueryFn = async (sql: string) => {
+        sqls.push(sql)
+        return { rows: [], rowCount: 0 }
+      }
+      try {
+        const r = await run(spy)
+        committed = true
+        return r
+      } catch (e) {
+        rolledBack = true
+        throw e
+      }
+    }
+
+    // Happy path: fn receives a surface bound to the tx query; the runner commits.
+    const ok = await runObjectFieldsRepairTransactionWith(withTxQuery, async (surface) => {
+      await surface.findObjectSheet({ projectId: 'tenant_1:plugin', objectId: 'obj' })
+      return 'done'
+    })
+    expect(ok).toBe('done')
+    expect(committed).toBe(true)
+    expect(sqls.join(' ')).toMatch(/meta_sheets/) // surface really used the tx query
+
+    // Verify-throw path: fn throws → the throw propagates OUT so the caller's tx rolls back
+    // (a runner that swallowed the throw would leave committed=true here).
+    committed = false
+    await expect(
+      runObjectFieldsRepairTransactionWith(withTxQuery, async () => {
+        throw new Error('verify failed')
+      }),
+    ).rejects.toThrow('verify failed')
+    expect(rolledBack).toBe(true)
+    expect(committed).toBe(false)
   })
 })

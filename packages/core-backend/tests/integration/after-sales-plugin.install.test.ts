@@ -1427,11 +1427,6 @@ describe('after-sales plugin install integration', () => {
               status?: string
               workflowKey?: string | null
               businessKey?: string | null
-              assignments?: Array<{
-                assigneeId?: string
-                sourceStep?: number
-                isActive?: boolean
-              }>
             }
           }
         }
@@ -1440,8 +1435,7 @@ describe('after-sales plugin install integration', () => {
           body.data?.approval?.status === 'pending' &&
           body.data?.approval?.workflowKey === 'after-sales-refund' &&
           body.data?.approval?.businessKey ===
-            `after-sales:${PROJECT_ID}:ticket:${createdTicketId}:refund` &&
-          (body.data?.approval?.assignments?.length || 0) === 2
+            `after-sales:${PROJECT_ID}:ticket:${createdTicketId}:refund`
         )
       },
       { timeoutMs: 5000, intervalMs: 100 },
@@ -1456,11 +1450,6 @@ describe('after-sales plugin install integration', () => {
           status?: string
           workflowKey?: string | null
           businessKey?: string | null
-          assignments?: Array<{
-            assigneeId?: string
-            sourceStep?: number
-            isActive?: boolean
-          }>
         }
       }
     }
@@ -1469,22 +1458,34 @@ describe('after-sales plugin install integration', () => {
       status: 'pending',
       workflowKey: 'after-sales-refund',
       businessKey: `after-sales:${PROJECT_ID}:ticket:${createdTicketId}:refund`,
-      assignments: [
-        {
-          assigneeId: 'finance',
-          sourceStep: 1,
-          isActive: true,
-        },
-        {
-          assigneeId: 'supervisor',
-          sourceStep: 2,
-          isActive: true,
-        },
-      ],
     })
+    expect(refundStatusBody.data?.approval).not.toHaveProperty('assignments')
 
     const approvalId = refundStatusBody.data?.approval?.id
     expect(approvalId).toBeTruthy()
+    const assignmentRows = await pool.query<{
+      assignee_id: string
+      source_step: number
+      is_active: boolean
+    }>(
+      `SELECT assignee_id, source_step, is_active
+         FROM approval_assignments
+        WHERE instance_id = $1
+        ORDER BY source_step ASC`,
+      [approvalId],
+    )
+    expect(assignmentRows.rows).toEqual([
+      {
+        assignee_id: 'finance',
+        source_step: 1,
+        is_active: true,
+      },
+      {
+        assignee_id: 'supervisor',
+        source_step: 2,
+        is_active: true,
+      },
+    ])
 
     const approveRes = await requestJson(
       `${baseUrl}/api/approvals/${approvalId}/actions`,

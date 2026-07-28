@@ -1,4 +1,5 @@
 import type {
+  ApprovalAssigneeSource,
   ApprovalGraph,
   ApprovalNode,
   ParallelJoinMode,
@@ -135,7 +136,156 @@ export function validateParallelEdits(edits: ParallelEdits): string[] {
   const errors: string[] = []
   for (const edit of Object.values(edits)) {
     if (!isParallelJoinMode(edit.joinMode)) {
-      errors.push(`并行节点 ${edit.nodeKey} 的汇聚模式无效`)
+      errors.push('并行节点的汇聚模式无效')
+    }
+  }
+  return errors
+}
+
+/**
+ * Fingerprint of a DYNAMIC assignee source: same fingerprint ⇒ the source PROVABLY resolves to the
+ * same user(s) for every request (same kind + same parameters). Static sources return null — the
+ * backend already rejects duplicate static assignees across parallel branches at save time.
+ * MUST stay in lockstep with the backend `dynamicAssigneeSourceFingerprint`
+ * (ApprovalProductService.ts) so authoring flags exactly what publish rejects.
+ */
+function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): string | null {
+  switch (source.kind) {
+    case 'requester':
+    case 'direct_manager':
+    case 'dept_head':
+      return source.kind
+    case 'continuous_managers':
+      return `continuous_managers:${source.levels}`
+    case 'manager_at_level':
+      return `manager_at_level:${source.level}`
+    case 'form_field_user':
+      return `form_field_user:${source.fieldId.trim()}`
+    case 'static_user':
+    case 'static_role':
+      return null
+    default: {
+      const _exhaustive: never = source
+      return _exhaustive
+    }
+  }
+}
+
+function runtimeSuccessorTargets(
+  node: ApprovalNode,
+  edgeByKey: Map<string, ApprovalGraph['edges'][number]>,
+  outgoingBySource: Map<string, ApprovalGraph['edges']>,
+): string[] {
+  if (node.type === 'condition') {
+    const config = node.config as {
+      branches?: Array<{ edgeKey?: string }>
+      defaultEdgeKey?: string
+    }
+    const declaredKeys: string[] = []
+    const seenKeys = new Set<string>()
+    const pushKey = (raw: string | undefined): void => {
+      const key = typeof raw === 'string' ? raw.trim() : ''
+      if (!key || seenKeys.has(key)) return
+      seenKeys.add(key)
+      declaredKeys.push(key)
+    }
+    for (const branch of config.branches ?? []) pushKey(branch.edgeKey)
+    const hasDefault = typeof config.defaultEdgeKey === 'string' && config.defaultEdgeKey.trim().length > 0
+    if (hasDefault) pushKey(config.defaultEdgeKey)
+
+    const targets: string[] = []
+    for (const edgeKey of declaredKeys) {
+      const edge = edgeByKey.get(edgeKey)
+      if (edge?.source === node.key) targets.push(edge.target)
+    }
+    if (!hasDefault) {
+      const firstEdge = outgoingBySource.get(node.key)?.[0]
+      if (firstEdge && !seenKeys.has(firstEdge.key)) targets.push(firstEdge.target)
+    }
+    return targets
+  }
+
+  if (node.type === 'parallel') {
+    const config = node.config as { branches?: string[] }
+    return (config.branches ?? []).flatMap((edgeKey) => {
+      const edge = edgeByKey.get(edgeKey)
+      return edge?.source === node.key ? [edge.target] : []
+    })
+  }
+
+  const firstEdge = outgoingBySource.get(node.key)?.[0]
+  return firstEdge ? [firstEdge.target] : []
+}
+
+/**
+ * Publish-preflight PREVIEW (surfaced in the publish checklist, NOT the save gate): flag a parallel
+ * gateway whose branches carry PROVABLY-IDENTICAL dynamic assignee sources. At runtime the fan-out
+ * raises a typed 409 (`APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT`) whenever two branches resolve
+ * to the same user — for identical dynamic sources (requester×requester, direct_manager×direct_manager,
+ * same-parameter manager levels / form fields) that is EVERY request, so the template is unpublishable
+ * in practice. The backend publish gate (`assertNoParallelDynamicAssigneeConflicts`) rejects the same
+ * shape with the same code; this mirror surfaces it BEFORE the rejected request. Only
+ * provably-identical sources are flagged — DIFFERENT kinds or DIFFERENT parameters may still collide
+ * for some org shapes and stay the runtime guard's job.
+ *
+ * Traversal (review #4433 owner P2, mirror-ports the backend EXACTLY): within each branch the walk
+ * enumerates EVERY runtime-reachable path — a condition node follows its configured rule edges and
+ * default edge; without a default it additionally follows the runtime's first-outgoing fallback.
+ * Stray outgoing edges are ignored. Every other linear node follows its first outgoing edge. The
+ * branch's fingerprint set is the UNION over all condition paths up to the join node,
+ * and a conflict is flagged when SOME path through one branch and SOME path through another carry
+ * the identical dynamic source — exactly the pairings for which the runtime 409 is reachable.
+ * Cycles are cut with a per-branch visited set; an unexpectedly nested parallel (unauthorable via
+ * the canvas F4 guard, but a legacy graph could carry one on a non-first condition path) is
+ * defensively a pass-through over its configured branch edges. Deduped within a branch first —
+ * sequential same-source nodes, or the same
+ * source on two ALTERNATIVE paths of ONE branch, are not a parallel conflict.
+ */
+export function parallelDynamicAssigneeConflicts(graph: ApprovalGraph): string[] {
+  const errors: string[] = []
+  const edgeByKey = new Map(graph.edges.map((edge) => [edge.key, edge]))
+  const outgoingBySource = new Map<string, ApprovalGraph['edges']>()
+  for (const edge of graph.edges) {
+    const edges = outgoingBySource.get(edge.source)
+    if (edges) edges.push(edge)
+    else outgoingBySource.set(edge.source, [edge])
+  }
+  const nodeByKey = new Map(graph.nodes.map((node) => [node.key, node]))
+  for (const node of graph.nodes) {
+    if (node.type !== 'parallel' || !isParallelConfig(node.config)) continue
+    const config = node.config
+    const seenAcrossBranches = new Set<string>()
+    for (const branchEdgeKey of config.branches) {
+      const branchFingerprints = new Set<string>()
+      const entryKey = edgeByKey.get(branchEdgeKey)?.target
+      // FIFO worklist in edge-declaration order (deterministic report order); the visited set both
+      // cuts cycles and bounds the walk to each node at most once per branch.
+      const queue: string[] = entryKey === undefined ? [] : [entryKey]
+      const visited = new Set<string>()
+      for (let head = 0; head < queue.length; head += 1) {
+        const currentKey = queue[head]
+        if (currentKey === config.joinNodeKey || visited.has(currentKey)) continue
+        visited.add(currentKey)
+        const current = nodeByKey.get(currentKey)
+        if (!current) continue
+        if (current.type === 'approval') {
+          const sources = (current.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+          for (const source of sources) {
+            const fingerprint = dynamicAssigneeSourceFingerprint(source)
+            if (fingerprint) branchFingerprints.add(fingerprint)
+          }
+        }
+        for (const target of runtimeSuccessorTargets(current, edgeByKey, outgoingBySource)) {
+          queue.push(target)
+        }
+      }
+      for (const fingerprint of branchFingerprints) {
+        if (seenAcrossBranches.has(fingerprint)) {
+          errors.push('多个并行分支使用了相同的动态审批人来源，发起审批时会因重复审批人失败，请为各分支配置不同的审批人')
+        } else {
+          seenAcrossBranches.add(fingerprint)
+        }
+      }
     }
   }
   return errors

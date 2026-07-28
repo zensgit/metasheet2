@@ -13,7 +13,7 @@ import {
   validateApprovalNodeEdits,
 } from '../src/approvals/approvalNodeEdit'
 
-// G-5 — approval-node editing (approver SOURCE only: `assigneeSources`). PURE-LOGIC tests (no .vue)
+// Approval-node editing inside the graph authoring model. PURE-LOGIC tests (no .vue)
 // so they run under approval-web-guard. The GATE is topology + cross-phase + WITHIN-NODE
 // preservation: editing one approval node's source must leave every OTHER node + the FULL edge list
 // byte-identical, must COMPOSE with condition/parallel/cc edits, must keep that node's OWN
@@ -100,7 +100,13 @@ const node = (g: ApprovalGraph, key: string) => g.nodes.find((n) => n.key === ke
 describe('approvalNodeEditsFromGraph (seed)', () => {
   it('seeds one entry per approval node that HAS assigneeSources', () => {
     expect(approvalNodeEditsFromGraph(APPROVAL_GRAPH)).toEqual({
-      approval_1: { nodeKey: 'approval_1', assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }] },
+      approval_1: {
+        nodeKey: 'approval_1',
+        assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+        autoApprovalPolicy: { mergeWithRequester: true },
+      },
     })
   })
   it('does NOT seed a legacy approval node (no assigneeSources array) — stays read-only', () => {
@@ -126,6 +132,22 @@ describe('G-5 topology-preservation — editing an approver source keeps everyth
     expect(cfg.emptyAssigneePolicy).toBe('error')
     expect(cfg.autoApprovalPolicy).toEqual({ mergeWithRequester: true }) // preserved, not dropped
     expect(cfg.assigneeSources).toEqual([{ kind: 'dept_head' }])
+  })
+  it('edits mode, empty policy, requester merge, and field permissions without touching topology', () => {
+    const edits = approvalNodeEditsFromGraph(APPROVAL_GRAPH)
+    edits.approval_1.approvalMode = 'any'
+    edits.approval_1.emptyAssigneePolicy = 'auto-approve'
+    edits.approval_1.autoApprovalPolicy = null
+    edits.approval_1.fieldPermissions = [{ fieldId: 'amount', access: 'hidden' }]
+    const rebuilt = applyApprovalNodeEditsToGraph(APPROVAL_GRAPH, edits)
+    const cfg = node(rebuilt, 'approval_1').config as Record<string, unknown>
+    expect(cfg).toMatchObject({
+      approvalMode: 'any',
+      emptyAssigneePolicy: 'auto-approve',
+      fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }],
+    })
+    expect(cfg.autoApprovalPolicy).toBeUndefined()
+    expect(rebuilt.edges).toEqual(APPROVAL_GRAPH.edges)
   })
   it('does not mutate the input graph', () => {
     const before = clone(APPROVAL_GRAPH)

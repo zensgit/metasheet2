@@ -10,8 +10,12 @@ const crypto = require('node:crypto')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
+  HUMAN_PRESERVED_FIELD_IDS,
   buildSheetStructureFromTemplate,
 } = require('./stock-preparation-templates.cjs')
+
+// W2 canonical repair: namespace positive control for a repaired-in field.
+const { assertExtensionFieldIdValid } = require('./stock-preparation-extension-namespace.cjs')
 
 const CANONICAL_FIELD_MAP_MODE = 'canonical'
 const SANDBOX_FIELD_MAP_MODE = 'sandbox'
@@ -423,8 +427,156 @@ async function ensureStockPreparationTarget(input = {}) {
   }
 }
 
+// Shared REPAIR_MUTATED_EXISTING_FIELD guard (MVP + canonical): a pre-existing field
+// whose name/type/property changed across the additive write is a contract violation —
+// coarse details (objectId + count only; never echo field content).
+function assertNoExistingFieldMutated(beforeContent, afterContent, objectId) {
+  let mutated = 0
+  for (const fieldId of Object.keys(beforeContent)) {
+    const before = beforeContent[fieldId]
+    const after = afterContent[fieldId]
+    if (!after || JSON.stringify(before) !== JSON.stringify(after)) mutated += 1
+  }
+  if (mutated > 0) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'REPAIR_MUTATED_EXISTING_FIELD',
+      'repair mutated an existing field; the additive primitive must never touch a pre-existing column',
+      { objectId, mutatedFieldCount: mutated },
+    )
+  }
+}
+
+// W2/P2-3 canonical repair runs its whole read/write/verify body inside ONE host
+// transaction via runObjectFieldsRepairTransaction (atomic fail-close). The tx-bound
+// surface it receives provides findObjectSheet/resolveExistingObjectFieldIds/
+// readObjectFieldsContent/ensureMissingObjectFields — so the host must expose the
+// transaction runner, not the bare per-call methods.
+function getCanonicalRepairApi(context) {
+  const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+  if (!provisioning || typeof provisioning.runObjectFieldsRepairTransaction !== 'function') {
+    throw new StockPreparationTargetProvisioningError(
+      503,
+      'CANONICAL_REPAIR_API_UNAVAILABLE',
+      'stock-preparation canonical repair requires multitable.provisioning.runObjectFieldsRepairTransaction (atomic repair)',
+      { requiredMethods: ['runObjectFieldsRepairTransaction'] },
+    )
+  }
+  return provisioning
+}
+
+// W2 template-evolution rung — canonical main-table repair. This is where the
+// human-field-reject guard is LOAD-BEARING: the canonical main carries the 8
+// HUMAN_PRESERVED_FIELD_IDS, so a repair that could add a human column would be a
+// back door around the apply-writer ownership wall's vocab. Same discipline as the
+// MVP repair: admin-gated, missing-set-only, plm_system/ext_ only, ensure's
+// TARGET_SCHEMA_INCOMPLETE throw left untouched; existing columns untouched by the
+// DO-NOTHING primitive (proven at the primitive layer, W2 realdb test).
+async function repairStockPreparationCanonicalTarget(input = {}) {
+  const context = input.context || {}
+  const provisioning = getCanonicalRepairApi(context)
+  assertAdminPermission(input.permission)
+  const projectId = requiredString(input.projectId, 'projectId')
+  // Repair ONLY heals against the FROZEN canonical template — input.template is
+  // deliberately ignored so a caller can never inject an arbitrary field into the
+  // additive primitive (review P2: repair must not be a field-injection vector;
+  // unlike ensure, which legitimately takes a caller template for a fresh table).
+  const template = normalizeStockPreparationTemplate(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
+  const modePrefix = optionalString(input.modePrefix) || 'canonical'
+  // ATOMIC repair (round-5 review P2-3): the entire read → additive-write → re-read →
+  // verify sequence runs inside ONE host transaction. Any verify throw (mutated /
+  // incomplete / concurrent-appeared) propagates out and ROLLS BACK the additive write —
+  // this is a true atomic fail-close, not a post-commit detection canary. Pure prep (admin
+  // gate above, template + ownership below) needs no tx; every DB touch goes through `tx`.
+  const result = await provisioning.runObjectFieldsRepairTransaction(async (tx) => {
+    const sheet = await tx.findObjectSheet({ projectId, objectId: template.objectId })
+    if (!sheet) {
+      throw new StockPreparationTargetProvisioningError(
+        409,
+        'CANONICAL_REPAIR_TARGET_ABSENT',
+        'stock-preparation canonical repair requires an already-provisioned target',
+        { objectId: template.objectId },
+      )
+    }
+    const fieldIds = templateFieldIds(template)
+    const resolved = await tx.resolveExistingObjectFieldIds({ projectId, objectId: template.objectId, fieldIds })
+    const missingIds = missingLogicalFields(template, resolved)
+    // BEFORE snapshot of the EXISTING fields' content (name/type/property/order) — the
+    // REPAIR_MUTATED_EXISTING_FIELD control (design lock §3.3-4): the additive write must
+    // not touch any pre-existing column. Now inside the SAME transaction as the write and
+    // the after-snapshot, so a throw rolls the write back (atomic fail-close).
+    const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
+    const beforeContent = await tx.readObjectFieldsContent({ projectId, objectId: template.objectId, fieldIds: existingIds })
+    const humanSet = new Set(HUMAN_PRESERVED_FIELD_IDS)
+    const descriptor = buildStockPreparationTargetDescriptor({ template, description: input.description })
+    const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
+    const missingDescriptors = []
+    for (const id of missingIds) {
+      const ownership = ownershipById.get(id)
+      if (humanSet.has(id) || ownership === 'human_preserved') {
+        throw new StockPreparationTargetProvisioningError(
+          422,
+          'REPAIR_HUMAN_FIELD_FORBIDDEN',
+          'repair may not add a human_preserved column; grow the human whitelist through its own design gate',
+          { objectId: template.objectId, fieldId: id },
+        )
+      }
+      if (ownership !== 'plm_system') {
+        assertExtensionFieldIdValid(id, { templateFieldIds: fieldIds })
+      }
+      const found = descriptor.fields.find((field) => field.id === id)
+      if (found) missingDescriptors.push(found)
+    }
+    const writeResult = await tx.ensureMissingObjectFields({
+      projectId,
+      objectId: template.objectId,
+      fields: missingDescriptors,
+    })
+    // CONCURRENCY fail-close (round-5 review P2): we submitted ONLY this round's missing
+    // set, so a skipped-existing id means a competing writer inserted that column between
+    // our resolve and our write. We neither added it nor content-verified its row against
+    // the frozen descriptor, so `ready` would be UNPROVEN (id-exists ≠ shape-correct). Fail
+    // closed — repair is idempotent, a retry after the race settles re-verifies.
+    if (writeResult.skippedExistingFieldIds.length) {
+      throw new StockPreparationTargetProvisioningError(
+        409,
+        'REPAIR_CONCURRENT_FIELD_APPEARED',
+        'a missing field was inserted by a concurrent writer during repair; retry after it settles',
+        { objectId: template.objectId, skippedExistingFieldCount: writeResult.skippedExistingFieldIds.length },
+      )
+    }
+    // POST-WRITE completeness re-verify: `ready:true` must be PROVEN, never asserted.
+    const resolvedAfter = await tx.resolveExistingObjectFieldIds({ projectId, objectId: template.objectId, fieldIds })
+    const stillMissing = missingLogicalFields(template, resolvedAfter)
+    if (stillMissing.length) {
+      throw new StockPreparationTargetProvisioningError(
+        409,
+        'CANONICAL_REPAIR_INCOMPLETE',
+        'canonical repair did not reach a complete schema; a field is still missing after the additive write',
+        { objectId: template.objectId, missingFieldCount: stillMissing.length },
+      )
+    }
+    // AFTER snapshot: every pre-existing field must be byte-for-byte unchanged.
+    assertNoExistingFieldMutated(beforeContent, await tx.readObjectFieldsContent({ projectId, objectId: template.objectId, fieldIds: existingIds }), template.objectId)
+    return writeResult
+  })
+  return {
+    ready: true,
+    mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
+    evidence: {
+      action: 'stock_preparation_canonical_repair',
+      mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
+      addedFieldCount: result.addedFieldIds.length,
+      skippedExistingFieldCount: result.skippedExistingFieldIds.length,
+      schemaCompleteAfter: true,
+      templateVersion: template.version,
+    },
+  }
+}
+
 module.exports = {
   CANONICAL_FIELD_MAP_MODE,
+  repairStockPreparationCanonicalTarget,
   SANDBOX_FIELD_MAP_MODE,
   CANONICAL_KEY_FIELD,
   REQUIRED_PERMISSION,
@@ -447,5 +599,6 @@ module.exports = {
     sandboxStockPreparationTemplate,
     assertAdminPermission,
     getProvisioningApi,
+    assertNoExistingFieldMutated,
   },
 }

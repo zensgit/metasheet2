@@ -1,6 +1,7 @@
 import type { FormField, FormFieldType, FormOption, FormSchema } from '../types/approval'
 import { getVisibleFormFields, isEmptyValue, pruneHiddenFormData } from './fieldVisibility'
 import { isRowDerivationActive } from './lineDerivation'
+import { formatRecordLinkDisplay } from './recordLinkField'
 
 /**
  * Pure (Element-Plus-free) helpers for the `detail` / sub-form (明细/子表单) field type.
@@ -17,8 +18,9 @@ import { isRowDerivationActive } from './lineDerivation'
 
 /**
  * Leaf sub-field types allowed inside a `detail` group's `columns` — the 8 authorable scalar
- * types (everything except `attachment`, which is not authorable, and `detail`, which would
- * nest). Mirrors backend `DETAIL_LEAF_FIELD_TYPES`.
+ * types (everything except `attachment`, which is not authorable; `detail`, which would nest;
+ * and `record-link`, which is FWB-0 Layer 2 top-level-only). Mirrors backend
+ * `DETAIL_LEAF_FIELD_TYPES` (which derives from FORM_FIELD_TYPES and excludes detail + record-link).
  */
 export const DETAIL_LEAF_FIELD_TYPES: readonly FormFieldType[] = [
   'text',
@@ -432,13 +434,42 @@ function formatDisplayDate(value: unknown): string {
 }
 
 /**
+ * Flag-OFF / legacy attachment display: when the new attachment pipeline is OFF, frozen snapshot
+ * values may still be plain strings (B2-28 era notes) or objects `{ name | fileName | filename }`.
+ * Render those without calling the attachment refs endpoint. Opaque id arrays from the new pipeline
+ * are NOT formatted here — they resolve through `attachmentRefs.ts` when the flag is ON.
+ */
+export function formatLegacyAttachmentValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '-'
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((entry) => formatLegacyAttachmentValue(entry))
+      .filter((part) => part && part !== '-')
+    return parts.length > 0 ? parts.join('、') : '-'
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    for (const key of ['fileName', 'filename', 'name', 'label', 'title'] as const) {
+      const candidate = obj[key]
+      if (typeof candidate === 'string' && candidate.trim()) return candidate
+    }
+    // Avoid dumping "[object Object]" — a nameless legacy object still surfaces as a stable placeholder.
+    return '附件'
+  }
+  return String(value)
+}
+
+/**
  * Formats a single scalar snapshot value for display, driven by its frozen schema field type.
  * null/undefined/'' always render as '-' regardless of type. `select` maps the stored value to
  * its option label, falling back to the raw value when no option matches (e.g. an option
  * renamed/removed after the instance was created); `multi-select` maps each stored value the
  * same way and joins with '、'; `date` uses `formatDisplayDate` (pass-through on unparsable);
- * `number` localizes finite values via zh-CN grouping. Everything else (text/textarea/user/
- * attachment) stringifies as-is.
+ * `number` localizes finite values via zh-CN grouping. Everything else (text/textarea/user)
+ * stringifies as-is. `attachment` uses `formatLegacyAttachmentValue` so flag-OFF legacy
+ * string/object snapshots remain readable without the new refs endpoint.
  */
 function formatDisplayValue(field: FormField, value: unknown): string {
   if (value === null || value === undefined || value === '') return '-'
@@ -455,6 +486,19 @@ function formatDisplayValue(field: FormField, value: unknown): string {
     case 'number': {
       const num = Number(value)
       return Number.isFinite(num) ? num.toLocaleString('zh-CN') : String(value)
+    }
+    case 'attachment':
+      return formatLegacyAttachmentValue(value)
+    case 'record-link': {
+      // FWB-0 Layer 2: never echo raw recordId (no id oracle). Detail snapshots have no
+      // human summary channel here — generic selected-record label when present.
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const recordId = (value as { recordId?: unknown }).recordId
+        if (typeof recordId === 'string' && recordId.trim()) {
+          return formatRecordLinkDisplay(null)
+        }
+      }
+      return '-'
     }
     default:
       return String(value)
@@ -473,17 +517,33 @@ function formatDisplayValue(field: FormField, value: unknown): string {
  * schema-ordered entries, using the raw key as label — so unexpected data is surfaced, not
  * silently dropped.
  */
+export interface BuildDisplayFieldsOptions {
+  /**
+   * When true (flag ON), attachment fields are excluded here and render via the refs-resolved
+   * attachment block instead. When false/undefined (flag OFF default), legacy attachment
+   * string/object snapshot values still render inline without calling the new endpoint.
+   */
+  attachmentPipelineEnabled?: boolean
+}
+
 export function buildDisplayFields(
   formSchema: FormSchema | null | undefined,
   formSnapshot: Record<string, unknown> | null | undefined,
+  options: BuildDisplayFieldsOptions = {},
 ): DisplayField[] {
   const snapshot = formSnapshot ?? {}
   const fields = formSchema?.fields ?? []
   const knownFieldIds = new Set(fields.map((field) => field.id))
   const result: DisplayField[] = []
+  const pipelineOn = options.attachmentPipelineEnabled === true
 
   for (const field of fields) {
     if (field.type === 'detail') continue
+    // B3-07 §8 (flag ON): an attachment field's snapshot value is an array of opaque
+    // `approval_attachments.id` REFERENCES. Stringifying them here would print raw ids as if they
+    // were the reader's data. They resolve through `attachmentRefs.ts` in their own block.
+    // Flag OFF (default): keep rendering legacy string/object values inline — no new endpoint.
+    if (field.type === 'attachment' && pipelineOn) continue
     if (!Object.prototype.hasOwnProperty.call(snapshot, field.id)) continue
     result.push({
       key: field.id,

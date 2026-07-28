@@ -47,19 +47,22 @@ const detailField: FormField = {
 }
 
 describe('detailField — leaf-type guard', () => {
-  it('exposes exactly the 8 leaf types (no detail, no attachment)', () => {
+  it('exposes exactly the 8 leaf types (no detail, no attachment, no record-link)', () => {
     expect([...DETAIL_LEAF_FIELD_TYPES].sort()).toEqual(
       ['date', 'datetime', 'multi-select', 'number', 'select', 'text', 'textarea', 'user'].sort(),
     )
     expect(DETAIL_LEAF_FIELD_TYPES).not.toContain('detail')
     expect(DETAIL_LEAF_FIELD_TYPES).not.toContain('attachment')
+    // FWB-0 Layer 2: record-link is top-level only (mirrors backend DETAIL_LEAF exclusion).
+    expect(DETAIL_LEAF_FIELD_TYPES).not.toContain('record-link')
   })
 
-  it('isDetailLeafFieldType rejects detail/attachment, accepts leaves', () => {
+  it('isDetailLeafFieldType rejects detail/attachment/record-link, accepts leaves', () => {
     expect(isDetailLeafFieldType('text')).toBe(true)
     expect(isDetailLeafFieldType('multi-select')).toBe(true)
     expect(isDetailLeafFieldType('detail')).toBe(false)
     expect(isDetailLeafFieldType('attachment')).toBe(false)
+    expect(isDetailLeafFieldType('record-link')).toBe(false)
   })
 
   it('isDetailField only true for type detail', () => {
@@ -421,6 +424,45 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
     const fields = buildDisplayFields(displaySchema, { items: [{ x: '1' }], fld_reason: 'r' })
     expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
     expect(fields.some((f) => f.key === 'items')).toBe(false)
+  })
+
+  it('flag OFF (default): renders legacy attachment string/object values inline without the refs pipeline', () => {
+    const schema: FormSchema = {
+      fields: [
+        { id: 'fld_reason', type: 'text', label: '事由' },
+        { id: 'files', type: 'attachment', label: '附件' },
+      ],
+    }
+    // string legacy value (B2-28 era notes frozen into the snapshot)
+    const asString = buildDisplayFields(schema, {
+      fld_reason: '出差',
+      files: 'legacy-file-reference',
+    })
+    expect(asString).toEqual([
+      { key: 'fld_reason', label: '事由', value: '出差' },
+      { key: 'files', label: '附件', value: 'legacy-file-reference' },
+    ])
+    // object legacy value with a fileName
+    const asObject = buildDisplayFields(schema, {
+      files: { fileName: 'scan.pdf', size: 12 },
+    })
+    expect(asObject.find((f) => f.key === 'files')?.value).toBe('scan.pdf')
+  })
+
+  it('flag ON: excludes attachment fields from scalar display (refs block owns them)', () => {
+    const schema: FormSchema = {
+      fields: [
+        { id: 'fld_reason', type: 'text', label: '事由' },
+        { id: 'files', type: 'attachment', label: '附件' },
+      ],
+    }
+    const fields = buildDisplayFields(
+      schema,
+      { fld_reason: 'x', files: ['att_1'] },
+      { attachmentPipelineEnabled: true },
+    )
+    expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
+    expect(fields.some((f) => f.key === 'files')).toBe(false)
   })
 
   it('renders null/undefined/empty-string scalar values as \'-\' regardless of field type', () => {

@@ -8,6 +8,7 @@ type ReadonlyItemsRef = Readonly<Ref<AdminSectionNavItem[]> | ComputedRef<AdminS
 type UseAttendanceAdminRailNavigationOptions = {
   showAdmin: ReadonlyBoolRef
   adminForbidden: ReadonlyBoolRef
+  adminNavigationEnabled?: ReadonlyBoolRef
   adminFocusCurrentSectionOnly?: ReadonlyBoolRef
   previousAdminSectionId?: ReadonlyStringRef
   nextAdminSectionId?: ReadonlyStringRef
@@ -23,6 +24,7 @@ type UseAttendanceAdminRailNavigationOptions = {
 export function useAttendanceAdminRailNavigation({
   showAdmin,
   adminForbidden,
+  adminNavigationEnabled,
   adminFocusCurrentSectionOnly,
   previousAdminSectionId,
   nextAdminSectionId,
@@ -39,6 +41,16 @@ export function useAttendanceAdminRailNavigation({
   let adminHashSyncReady = false
   let adminHashRestoreCompleted = false
   let adminHashRestorePending = false
+
+  // vNext charter §7 Wave 3: when the admin task home is open (`adminNavigationEnabled`
+  // false), the section workspace it sits behind must stay inert — no hash restore
+  // from a remembered section, no scroll-spy, no Alt+arrow keyboard nav — otherwise a
+  // hidden shell would silently mutate `adminActiveSectionId` or scroll behind the
+  // task home. Defaults to enabled when the caller does not pass the flag at all,
+  // preserving pre-Wave-3 behavior for any other consumer of this composable.
+  function isAdminNavigationEnabled(): boolean {
+    return adminNavigationEnabled?.value ?? true
+  }
 
   function resolveAdminKeyboardTarget(direction: 'previous' | 'next'): string | null {
     const candidate = direction === 'previous'
@@ -111,7 +123,7 @@ export function useAttendanceAdminRailNavigation({
 
   async function restoreAdminSectionFromHash(maxAttempts = 4): Promise<boolean> {
     if (adminHashRestoreCompleted || adminHashRestorePending) return false
-    const restoreId = readAdminSectionHash() ?? readLastKnownAdminSection()
+    const restoreId = readAdminSectionHash() ?? (isAdminNavigationEnabled() ? readLastKnownAdminSection() : null)
     if (!restoreId) return false
     adminHashRestorePending = true
     try {
@@ -136,7 +148,9 @@ export function useAttendanceAdminRailNavigation({
     if (typeof window === 'undefined' || adminForbidden.value || !showAdmin.value) return
     const elements = resolveAdminSectionElements()
     if (elements.length === 0) return
-    const initialId = readAdminSectionHash() ?? readLastKnownAdminSection() ?? elements[0].id
+    const initialId = readAdminSectionHash()
+      ?? (isAdminNavigationEnabled() ? readLastKnownAdminSection() : null)
+      ?? elements[0].id
     adminActiveSectionId.value = initialId
     if (typeof window.IntersectionObserver === 'undefined') return
     adminSectionObserver = new window.IntersectionObserver(
@@ -198,12 +212,12 @@ export function useAttendanceAdminRailNavigation({
     if (content instanceof HTMLElement) {
       content.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
-    if (adminFocusCurrentSectionOnly?.value) return
+    if (!isAdminNavigationEnabled() || adminFocusCurrentSectionOnly?.value) return
     target.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
   function handleAdminSectionKeyboardNavigation(event: KeyboardEvent): void {
-    if (!showAdmin.value || adminForbidden.value) return
+    if (!showAdmin.value || adminForbidden.value || !isAdminNavigationEnabled()) return
     if (!event.altKey || event.metaKey || event.ctrlKey) return
     if (event.defaultPrevented || isInteractiveAdminKeyboardTarget(event.target)) return
     const direction = event.key === 'ArrowUp'
@@ -273,12 +287,12 @@ export function useAttendanceAdminRailNavigation({
   })
 
   watch(adminActiveSectionId, id => {
-    if (!showAdmin.value || !adminHashSyncReady || !isKnownAdminSectionId(id)) return
+    if (!showAdmin.value || !isAdminNavigationEnabled() || !adminHashSyncReady || !isKnownAdminSectionId(id)) return
     syncAdminSectionHash(id)
   })
 
   watch(adminActiveSectionId, id => {
-    if (!showAdmin.value || !isKnownAdminSectionId(id)) return
+    if (!showAdmin.value || !isAdminNavigationEnabled() || !isKnownAdminSectionId(id)) return
     void syncActiveAdminNavLinkIntoView(id)
   })
 

@@ -50,9 +50,13 @@ import {
   getObjectFieldId as getProvisionedObjectFieldId,
   resolveObjectFieldIds as resolveProvisionedObjectFieldIds,
   ensureObject as ensureMultitableObject,
+  ensureMissingObjectFields as ensureMissingMultitableObjectFields,
+  resolveExistingObjectFieldIds as resolveExistingMultitableObjectFieldIds,
+  readObjectFieldsContent as readMultitableObjectFieldsContent,
   ensureView as ensureMultitableView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
+  runObjectFieldsRepairTransactionWith,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
 import {
@@ -87,6 +91,10 @@ import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
+import {
+  approvalAttachmentRefsJsonParser,
+  isApprovalAttachmentsEnabled,
+} from './routes/approval-attachments'
 import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
@@ -281,6 +289,7 @@ export class MetaSheetServer {
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
+  private stopApprovalAttachmentWorkers?: () => void | Promise<void>
   private automationService?: AutomationService
   // Owner P1 (head 1d3854c7a): explicit readiness bit for the durable fail-closed chain. TRUE only after
   // the FULL AutomationService init sequence (constructor + init() + loadAndRegisterAllScheduled()) has
@@ -520,6 +529,86 @@ export class MetaSheetServer {
                 descriptor,
               })
             })
+          },
+          // W2: DB-backed field existence — repair discovers genuinely-missing
+          // template fields from meta_fields (resolveFieldIds is compute-only and
+          // never omits a field, so it cannot drive a repair).
+          resolveExistingObjectFieldIds: async ({ projectId, objectId, fieldIds }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return resolveExistingMultitableObjectFieldIds({ query: txQuery, projectId, objectId, fieldIds })
+            })
+          },
+          // W2: DB-backed field CONTENT read (repair's before/after mutation snapshot).
+          readObjectFieldsContent: async ({ projectId, objectId, fieldIds }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return readMultitableObjectFieldsContent({ query: txQuery, projectId, objectId, fieldIds })
+            })
+          },
+          // W2 template-evolution rung: ADDITIVE-ONLY missing-field provisioning
+          // (DO NOTHING) so an already-provisioned table can gain a new template
+          // column without the DO-UPDATE overwrite `ensureObject` would inflict.
+          ensureMissingObjectFields: async ({ projectId, objectId, fields }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMissingMultitableObjectFields({
+                query: txQuery,
+                projectId,
+                objectId,
+                fields,
+              })
+            })
+          },
+          // W2/P2-3 (round-5 review): ATOMIC repair transaction. Runs the caller's whole
+          // read → additive-write → re-read → verify sequence inside ONE DB transaction, so
+          // a thrown verify (mutated/incomplete/race) ROLLS BACK the additive write instead
+          // of leaving it committed. All four surface methods are bound to the SAME tx query;
+          // this is what upgrades the before/after guards from post-commit canaries (safe
+          // only because the wired write is append-only DO NOTHING) to a true atomic
+          // fail-close — the W3-entry gate for wiring repair into production routes.
+          runObjectFieldsRepairTransaction: async (fn) => {
+            // The whole runner is the tested glue runObjectFieldsRepairTransactionWith over
+            // the poolManager transaction primitive: ONE transaction, surface built from its
+            // query, throw ⇒ rollback. No atomicity logic lives inline here.
+            return runObjectFieldsRepairTransactionWith(
+              (run) =>
+                poolManager.get().transaction(async ({ query }) => {
+                  const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                    const result = await query(sql, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                    }
+                  }
+                  return run(txQuery)
+                }),
+              fn,
+            )
           },
           ensureView: async ({ projectId, sheetId, descriptor }) => {
             return poolManager.get().transaction(async ({ query }) => {
@@ -1159,6 +1248,13 @@ export class MetaSheetServer {
     // narrower body limit than the general API. Parse this prefix before the global JSON parser.
     this.app.use('/api/multitable/automation/webhooks', automationWebhookJsonParser)
 
+    // `/refs` has a 64 KB contract. This exact-path parser MUST run before the global 10 MB parser;
+    // mounting it only in the late attachment router is ineffective once `req.body` already exists.
+    // Flag OFF remains a byte-for-byte no-op: no parser and therefore no attachment-specific refusal.
+    if (isApprovalAttachmentsEnabled()) {
+      this.app.post('/api/approval/attachments/refs', approvalAttachmentRefsJsonParser)
+    }
+
     // Body parsing
     this.app.use(express.json({ limit: '10mb' }))
     this.app.use(express.urlencoded({ extended: true }))
@@ -1521,7 +1617,7 @@ export class MetaSheetServer {
   }
 
   private async handleAfterSalesApprovalDecisionCallback(
-    approval: UnifiedApprovalDTO,
+    approval: import('./services/AfterSalesApprovalBridgeService').AfterSalesApprovalSummary,
     decision: {
       action: 'approve' | 'reject'
       actorId: string
@@ -1537,6 +1633,8 @@ export class MetaSheetServer {
     }
 
     try {
+      // Plugin callback receives the narrow AfterSalesApprovalSummary only (no formSnapshot /
+      // formSchema / record-link ids). Normal HTTP action DTOs stay UnifiedApprovalDTO.
       await handler({
         approval,
         projectId: approval.subject?.projectId,
@@ -2104,6 +2202,15 @@ export class MetaSheetServer {
         this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
+    shutdownTasks.push(Promise.resolve().then(async () => {
+      try {
+        // stop awaits any in-flight GC/purge/reconcile tick before the pool closes.
+        await this.stopApprovalAttachmentWorkers?.()
+        this.stopApprovalAttachmentWorkers = undefined
+      } catch (err) {
+        this.logger.warn(`Approval attachment workers stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
         if (this.yjsCleanupTimer) {
@@ -2631,6 +2738,29 @@ export class MetaSheetServer {
         throw e
       }
       this.logger.error('Durable delivery dispatch loop initialization failed (flag OFF — nothing suppressed, legacy path delivers); continuing', e as Error)
+    }
+
+    // B3-07 approval attachment pipeline (#4195 §7/§9) — flag-gated boot: route mount + GC sweep +
+    // purge drain + bucket reconciler. APPROVAL_ATTACHMENTS_ENABLED OFF ⇒ bootApprovalAttachmentRuntime
+    // returns null: nothing mounts, nothing ticks, byte-identical startup (D5/G1). Flag ON ⇒ the boot
+    // resolves storage per the ratified O3 decision (production requires the built-in S3-compatible
+    // provider's complete bucket+region configuration; otherwise uploads/downloads fail closed 503;
+    // dev/test probe a local-FS root) and a FAILED probe/boot ABORTS startup — the same doctrine as
+    // durableBootFailureDisposition (flag ON means a storage-less boot is an outage, not a degrade).
+    try {
+      const { bootApprovalAttachmentRuntime } = await import('./services/approval-attachment-runtime')
+      const attachmentRuntime = await bootApprovalAttachmentRuntime({ db: poolManager.get(), logger: this.logger })
+      if (attachmentRuntime) {
+        this.app.use(attachmentRuntime.router)
+        if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+          this.stopApprovalAttachmentWorkers = attachmentRuntime.startWorkers()
+        }
+        this.logger.info('Approval attachment pipeline initialized (APPROVAL_ATTACHMENTS_ENABLED)')
+      }
+    } catch (e) {
+      // Only reachable flag-ON (flag-OFF returns null before anything fallible) ⇒ always fail-closed.
+      this.logger.error('Approval attachment runtime boot FAILED with APPROVAL_ATTACHMENTS_ENABLED=true — aborting startup (fail-closed: an unusable blob store must not boot a live upload surface)', e as Error)
+      throw e
     }
 
     // AI usage ledger retention sweep (ladder #9): a periodic bounded DELETE of

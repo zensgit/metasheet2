@@ -673,6 +673,33 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(helpers.getAttendanceRecordReportFieldValue(row, 'punch_result_out_3')).toBe('')
   })
 
+  it('maps time-only overnight multi-punch fields onto D and D+1', () => {
+    const sourceValues: Record<string, unknown> = {
+      clockIn2: '23:00',
+      clockOut2: '05:30',
+      clockIn3: '23:30',
+      clockOut3: '06:00',
+    }
+    const punchMeta = helpers.buildAttendanceImportMultiPunchMeta({
+      valueFor: (key: string) => sourceValues[key],
+      workDate: '2026-07-24',
+      rule: {
+        timezone: 'UTC',
+        workStartTime: '22:00',
+        workEndTime: '06:00',
+        isOvernight: true,
+      },
+      clearMissing: true,
+    })
+
+    expect(punchMeta).toMatchObject({
+      clockIn2: '2026-07-24T23:00:00.000Z',
+      clockOut2: '2026-07-25T05:30:00.000Z',
+      clockIn3: '2026-07-24T23:30:00.000Z',
+      clockOut3: '2026-07-25T06:00:00.000Z',
+    })
+  })
+
   it('generates dynamic leave/overtime subtype fields with collision-safe stable codes', () => {
     const used = new Set(['leave_type_annual_duration'])
     const leave = helpers.buildAttendanceLeaveSubtypeReportFieldDefinitions([

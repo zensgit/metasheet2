@@ -11,6 +11,7 @@ import {
   switchLocalPrimaryDepartment,
 } from '../../src/directory/local-directory-org'
 import { resolveApprovalRequesterOrgRelations } from '../../src/services/ApprovalDirectoryOrg'
+import { grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 /**
  * Canonical Org MVP — B6 (approval-routing local/DingTalk REAL-DB EQUIVALENCE), §10.1 + design
@@ -67,6 +68,7 @@ async function canListen(): Promise<boolean> {
   })
 }
 async function tok(base: string, userId: string): Promise<string> {
+  await grantApprovalWriteForIntegrationActor(userId)
   const res = await fetch(`${base}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`)
   return ((await res.json()) as { token: string }).token
 }

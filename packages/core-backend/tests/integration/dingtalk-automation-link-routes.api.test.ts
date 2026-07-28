@@ -19,6 +19,7 @@ const OTHER_SHEET_FORM_VIEW_ID = 'view_form_other_sheet'
 const INTERNAL_VIEW_ID = 'view_internal_grid'
 const MISSING_INTERNAL_VIEW_ID = 'view_internal_missing'
 const RULE_ID = 'rule_dingtalk_links'
+const ACTOR_ID = 'admin_1'
 
 type ViewRow = {
   id: string
@@ -1171,7 +1172,7 @@ describe('DingTalk automation link route validation', () => {
         publicFormViewId: VALID_FORM_VIEW_ID,
         internalViewId: INTERNAL_VIEW_ID,
       }),
-    }))
+    }), ACTOR_ID)
     expect(res.body.data.rule.actionConfig).toEqual(expect.objectContaining({
       titleTemplate: 'Please fill',
       bodyTemplate: 'Open form',
@@ -1515,7 +1516,7 @@ describe('DingTalk automation link route validation', () => {
           }),
         }),
       ]),
-    }))
+    }), ACTOR_ID)
     expect(res.body.data.rule.actions).toEqual([
       expect.objectContaining({
         type: 'send_dingtalk_group_message',
@@ -1577,7 +1578,7 @@ describe('DingTalk automation link route validation', () => {
     expect(automationService.getRule).not.toHaveBeenCalled()
     expect(automationService.updateRule).toHaveBeenCalledWith(RULE_ID, SHEET_ID, expect.objectContaining({
       enabled: false,
-    }))
+    }), ACTOR_ID)
     expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(false)
   })
 })

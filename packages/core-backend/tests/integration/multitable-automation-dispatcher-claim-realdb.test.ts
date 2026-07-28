@@ -242,6 +242,57 @@ describeIfDatabase('P2 durable-delivery S2-a — claim engine / fence-CAS (real 
     expect((await readRow(outboxId, consumerKey)).last_error).toBe('adapter_timeout')
   })
 
+  // [#4497 P1] Terminal writes are fence-CAS **and** still-holding-the-lease. Fence-CAS alone leaves the window
+  // where our lease EXPIRED but no competitor has reclaimed yet: writing `done`/`dead_letter` there applies a
+  // result produced without ownership and races the reclaimer entitled to the row (the same reason
+  // directory-sync's completion write guards its terminal UPDATE and aborts on a miss).
+  test('LEASE-GUARD: complete/poison are refused once the lease expired; the reclaim path still resolves', async () => {
+    const a = await seedRow()
+    const [ca] = await claimDueConsumers(db(), { consumerKeys: [a.consumerKey] })
+    await expireLease(a.outboxId, a.consumerKey)
+    expect(await completeConsumer(db(), a.outboxId, a.consumerKey, ca.fence)).toBe(false)
+    expect(await readRow(a.outboxId, a.consumerKey)).toMatchObject({ status: 'in_progress' }) // not `done`
+    const b = await seedRow()
+    const [cb] = await claimDueConsumers(db(), { consumerKeys: [b.consumerKey] })
+    await expireLease(b.outboxId, b.consumerKey)
+    expect(await poisonConsumer(db(), b.outboxId, b.consumerKey, cb.fence, 'permanent_rejection')).toBe(false)
+    expect(await readRow(b.outboxId, b.consumerKey)).toMatchObject({ status: 'in_progress' }) // event not dropped
+    // POSITIVE CONTROL: with the lease actually HELD (a fresh reclaim) both terminals still work — the guard is
+    // "refuse a write we no longer own", not "refuse everything".
+    const [ra] = await claimDueConsumers(db(), { consumerKeys: [a.consumerKey] })
+    expect(await completeConsumer(db(), a.outboxId, a.consumerKey, ra.fence)).toBe(true)
+    expect(await readRow(a.outboxId, a.consumerKey)).toMatchObject({ status: 'done', lease_null: true })
+    const [rb] = await claimDueConsumers(db(), { consumerKeys: [b.consumerKey] })
+    expect(await poisonConsumer(db(), b.outboxId, b.consumerKey, rb.fence, 'permanent_rejection')).toBe(true)
+    expect(await readRow(b.outboxId, b.consumerKey)).toMatchObject({ status: 'dead_letter', lease_null: true })
+  })
+
+  // [#4497 P1] `excludeRows` is what stops a caller re-claiming a row it is already handling in this pass. It
+  // must EXCLUDE the pair (not the outbox id, not the key alone) and must SCAN PAST it, never head-of-line block.
+  test('excludeRows: an already-handled pair is not re-claimed; the scan takes the next row instead', async () => {
+    const held = await seedRow()
+    const next = await seedRow()
+    const keys = [held.consumerKey, next.consumerKey]
+    const [c] = await claimDueConsumers(db(), { consumerKeys: keys, batchSize: 1 })
+    expect(c.outboxId).toBe(held.outboxId) // seeded first → oldest updated_at → the head
+    await expireLease(held.outboxId, held.consumerKey) // reclaimable again as far as the lease is concerned
+    const excluded = await claimDueConsumers(db(), {
+      consumerKeys: keys,
+      batchSize: 10,
+      excludeRows: [{ outboxId: held.outboxId, consumerKey: held.consumerKey }],
+    })
+    expect(excluded.map((x) => x.outboxId)).toEqual([next.outboxId]) // skipped past the excluded pair
+    expect(await readRow(held.outboxId, held.consumerKey)).toMatchObject({ status: 'in_progress', attempts: 1 }) // untouched
+    // without the exclusion the very same call DOES re-claim it (attempts 1→2) — the exclusion is load-bearing.
+    const reclaimed = await claimDueConsumers(db(), { consumerKeys: keys, batchSize: 10 })
+    expect(reclaimed.map((x) => x.outboxId)).toEqual([held.outboxId])
+    expect(await readRow(held.outboxId, held.consumerKey)).toMatchObject({ attempts: 2 })
+    // a malformed entry THROWS (silently dropping it would silently re-open the hole)
+    await expect(
+      claimDueConsumers(db(), { consumerKeys: keys, excludeRows: [{ outboxId: '', consumerKey: held.consumerKey }] }),
+    ).rejects.toThrow(/excludeRows/)
+  })
+
   test('resolveDisposition (pure): success→complete; retryable→reschedule; permanent→poison', () => {
     expect(resolveDisposition('success')).toBe('complete')
     expect(resolveDisposition('retryable_failure')).toBe('reschedule')

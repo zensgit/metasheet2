@@ -25,8 +25,17 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import { GRAPH_LAYOUT_NODE_HEIGHT } from '../src/approvals/graphLayout'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
+const confirmSpy = vi.fn().mockResolvedValue(undefined)
+const messageSuccessSpy = vi.fn()
+const messageErrorSpy = vi.fn()
+
+vi.mock('element-plus', () => ({
+  ElMessage: { success: messageSuccessSpy, error: messageErrorSpy },
+  ElMessageBox: { confirm: confirmSpy },
+}))
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -81,12 +90,17 @@ vi.mock('../src/approvals/permissions', () => ({
 // API mock — listTemplateVersions is the unit under test; the rest inert.
 // ---------------------------------------------------------------------------
 const listTemplateVersionsSpy = vi.fn()
+const getTemplateVersionSpy = vi.fn()
+const restoreTemplateVersionSpy = vi.fn()
 
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
     ...actual,
     listTemplateVersions: (templateId: string) => listTemplateVersionsSpy(templateId),
+    getTemplateVersion: (templateId: string, versionId: string) => getTemplateVersionSpy(templateId, versionId),
+    restoreTemplateVersion: (templateId: string, versionId: string, request: unknown) =>
+      restoreTemplateVersionSpy(templateId, versionId, request),
     getTemplateUsage: vi.fn().mockResolvedValue({ templateId: 'tpl-1', instanceCount: 0, activeInstanceCount: 0 }),
   }
 })
@@ -192,6 +206,21 @@ const ElEmpty = defineComponent({
   },
 })
 
+const ElSegmented = defineComponent({
+  name: 'ElSegmented',
+  props: { modelValue: String, options: Array },
+  emits: ['update:modelValue'],
+  render() {
+    return h('div', { ...this.$attrs }, (this.options as Array<{ label: string; value: string }> | undefined)?.map((option) =>
+      h('button', {
+        type: 'button',
+        'data-selected': this.modelValue === option.value ? 'true' : 'false',
+        onClick: () => this.$emit('update:modelValue', option.value),
+      }, option.label),
+    ))
+  },
+})
+
 function installStubs(app: VueApp<Element>) {
   app.directive('loading', {})
   app.component('ElTable', ElTable)
@@ -199,6 +228,7 @@ function installStubs(app: VueApp<Element>) {
   app.component('ElTag', ElTag)
   app.component('ElAlert', ElAlert)
   app.component('ElEmpty', ElEmpty)
+  app.component('ElSegmented', ElSegmented)
   app.component('ElButton', passthrough('ElButton', 'button'))
   app.component('ElInput', passthrough('ElInput', 'input'))
   app.component('ElSelect', passthrough('ElSelect'))
@@ -239,6 +269,7 @@ const VERSION_ROWS = [
     status: 'draft',
     publishNote: null,
     publishedDefinitionId: null,
+    restoredFromVersionId: null,
     createdAt: '2026-07-08T00:00:00.000Z',
     updatedAt: '2026-07-08T00:00:00.000Z',
   },
@@ -249,10 +280,38 @@ const VERSION_ROWS = [
     status: 'published',
     publishNote: '首次发布：差旅基础流程',
     publishedDefinitionId: 'pub-1',
+    restoredFromVersionId: null,
     createdAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-01T00:00:00.000Z',
   },
 ]
+
+function versionDetail(versionId: string, version: number) {
+  const isLatest = version === 2
+  return {
+    id: versionId,
+    templateId: 'tpl-1',
+    version,
+    status: isLatest ? 'draft' : 'published',
+    formSchema: {
+      fields: isLatest
+        ? [{ id: 'amount', type: 'number', label: '报销金额' }]
+        : [{ id: 'amount', type: 'number', label: '金额' }],
+    },
+    approvalGraph: {
+      nodes: isLatest
+        ? [{ key: 'approve', type: 'approval', name: '财务审批', config: { approvalMode: 'all' } }]
+        : [{ key: 'approve', type: 'approval', name: '主管审批', config: { approvalMode: 'single' } }],
+      edges: [],
+    },
+    runtimeGraph: null,
+    publishedDefinitionId: isLatest ? null : 'pub-1',
+    publishNote: null,
+    restoredFromVersionId: null,
+    createdAt: `2026-07-0${version}T00:00:00.000Z`,
+    updatedAt: `2026-07-0${version}T00:00:00.000Z`,
+  }
+}
 
 let container: HTMLElement | null = null
 let app: VueApp<Element> | null = null
@@ -279,6 +338,15 @@ describe('B3-09 template version history (TemplateDetailView)', () => {
     mockCanManageTemplates.value = true
     listTemplateVersionsSpy.mockReset()
     listTemplateVersionsSpy.mockResolvedValue(VERSION_ROWS)
+    getTemplateVersionSpy.mockReset()
+    getTemplateVersionSpy.mockImplementation((_templateId: string, versionId: string) =>
+      Promise.resolve(versionDetail(versionId, versionId === 'ver-2' ? 2 : 1)),
+    )
+    restoreTemplateVersionSpy.mockReset()
+    confirmSpy.mockReset()
+    confirmSpy.mockResolvedValue(undefined)
+    messageSuccessSpy.mockClear()
+    messageErrorSpy.mockClear()
     loadTemplateSpy.mockClear()
     pushSpy.mockClear()
   })
@@ -330,5 +398,81 @@ describe('B3-09 template version history (TemplateDetailView)', () => {
     expect(alert!.textContent).toContain('boom')
     // the rest of the detail page still renders
     expect(container!.textContent).toContain('差旅审批')
+  })
+
+  it('loads adjacent snapshots on demand and renders their structural changes', async () => {
+    await mountView()
+
+    const compare = container!.querySelector('[data-testid="template-version-compare-ver-2"]') as HTMLButtonElement
+    expect(compare).not.toBeNull()
+    compare.click()
+    await vi.waitFor(() => {
+      expect(container!.querySelector('[data-testid="template-version-diff"]')?.textContent).toContain('v1 -> v2')
+    })
+    await nextTick()
+
+    expect(getTemplateVersionSpy).toHaveBeenCalledWith('tpl-1', 'ver-2')
+    expect(getTemplateVersionSpy).toHaveBeenCalledWith('tpl-1', 'ver-1')
+    const diff = container!.querySelector('[data-testid="template-version-diff"]')
+    expect(diff?.textContent).toContain('表单字段 1')
+    expect(diff?.textContent).toContain('流程节点 1')
+    expect(diff?.textContent).toContain('报销金额')
+    expect(diff?.textContent).toContain('财务审批')
+
+    const canvasMode = Array.from(diff!.querySelectorAll('button')).find((button) => button.textContent === '流程画布')
+    expect(canvasMode).toBeDefined()
+    canvasMode!.click()
+    await nextTick()
+
+    const overlay = diff!.querySelector('[data-testid="template-version-graph-overlay"]')
+    expect(overlay).not.toBeNull()
+    const changedNode = overlay!.querySelector('[data-testid="template-version-overlay-node"]') as HTMLElement
+    expect(changedNode.textContent).toContain('财务审批')
+    expect(changedNode.classList.contains('is-changed')).toBe(true)
+    expect(changedNode.style.minHeight).toBe(`${GRAPH_LAYOUT_NODE_HEIGHT}px`)
+  })
+
+  it('restores an older version as a new draft using the visible latest-version anchor', async () => {
+    const restored = {
+      ...versionDetail('ver-3', 3),
+      version: 3,
+      status: 'draft',
+      restoredFromVersionId: 'ver-1',
+    }
+    restoreTemplateVersionSpy.mockResolvedValue(restored)
+    listTemplateVersionsSpy
+      .mockResolvedValueOnce(VERSION_ROWS)
+      .mockResolvedValueOnce([
+        {
+          id: 'ver-3',
+          templateId: 'tpl-1',
+          version: 3,
+          status: 'draft',
+          publishNote: null,
+          publishedDefinitionId: null,
+          restoredFromVersionId: 'ver-1',
+          createdAt: '2026-07-09T00:00:00.000Z',
+          updatedAt: '2026-07-09T00:00:00.000Z',
+        },
+        ...VERSION_ROWS,
+      ])
+    await mountView()
+
+    const restore = container!.querySelector('[data-testid="template-version-restore-ver-1"]') as HTMLButtonElement
+    expect(restore).not.toBeNull()
+    restore.click()
+    await vi.waitFor(() => {
+      expect(messageSuccessSpy).toHaveBeenCalledWith('已恢复为草稿 v3')
+    })
+    await nextTick()
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining('当前已发布版本和运行中的审批不会改变'),
+      '恢复 v1',
+      expect.objectContaining({ confirmButtonText: '恢复为新草稿' }),
+    )
+    expect(restoreTemplateVersionSpy).toHaveBeenCalledWith('tpl-1', 'ver-1', {
+      expectedLatestVersionId: 'ver-2',
+    })
   })
 })

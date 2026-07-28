@@ -24,11 +24,20 @@ export function formDraftKey(userId: string, templateId: string): string {
 }
 
 /** Drift guard: field ids + types, order-independent. Attachment fields are excluded — they are
- *  never draft-persisted (no working uploader; refs would be meaningless across sessions). */
+ *  never draft-persisted (no working uploader; refs would be meaningless across sessions).
+ *  FWB-0 Layer 2: record-link pins (baseId+sheetId) are part of the signature so a repinned
+ *  target invalidates drafts that still hold a prior recordId for the old sheet. */
 export function formSchemaSignature(schema: FormSchema): string {
   return (schema.fields ?? [])
     .filter((field) => field.type !== 'attachment')
-    .map((field) => `${field.id}:${field.type}`)
+    .map((field) => {
+      if (field.type === 'record-link') {
+        const baseId = typeof field.props?.baseId === 'string' ? field.props.baseId.trim() : ''
+        const sheetId = typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : ''
+        return `${field.id}:record-link:${baseId}:${sheetId}`
+      }
+      return `${field.id}:${field.type}`
+    })
     .sort()
     .join('|')
 }

@@ -151,8 +151,16 @@ async function requireOrgMemberAccess(res: Response, userId: string, orgId: stri
     res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'orgId is required' } })
     return false
   }
+  // W4-PRE-1b item E (owner CHANGES_REQUESTED on the W4 re-ratify PR #4522, 2026-07-21): same
+  // shape/same finding as attendance-admin.ts's `canReadAttendanceDirectoryReadiness` — a
+  // deactivated platform account (`users.is_active=false`) must not keep DingTalk-group-
+  // destination org access via a `user_orgs` row that is still `is_active=true`.
   const result = await query(
-    'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true LIMIT 1',
+    `SELECT 1
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1 AND uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
+     LIMIT 1`,
     [userId, orgId],
   )
   if (!result.rows.length) {

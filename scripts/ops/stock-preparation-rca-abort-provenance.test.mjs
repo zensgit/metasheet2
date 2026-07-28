@@ -27,6 +27,10 @@ import {
   buildProvenanceFetchImpl,
   classifyElapsedNs,
   classifyHttpStatusClass,
+  classifyAuthReadStatusClass,
+  classifyAuthReadReasonClass,
+  classifyAuthReadContractClass,
+  AUTH_READ_REASON_CODES,
   classifyNodeMajor,
   classifyRejection,
   classifyTypeErrorBoundary,
@@ -698,6 +702,132 @@ test('runDiagnostic classifies 4xx/5xx and TypeError CONNECT outcomes', async ()
   assert.equal(refused.authReadResult, 'TYPE_ERROR')
   assert.equal(refused.typeErrorBoundary, 'CONNECT')
   assert.equal(refused.abortProvenance, 'NONE')
+})
+
+// ── v2 acceleration: 4XX sub-classification (one dispositive run) ─────────────────────────────────
+
+test('classifyAuthReadStatusClass splits 401/403/404/409 from other 4xx', () => {
+  assert.equal(classifyAuthReadStatusClass(200), 'HTTP_2XX')
+  assert.equal(classifyAuthReadStatusClass(204), 'HTTP_2XX')
+  assert.equal(classifyAuthReadStatusClass(401), 'HTTP_401')
+  assert.equal(classifyAuthReadStatusClass(403), 'HTTP_403')
+  assert.equal(classifyAuthReadStatusClass(404), 'HTTP_404')
+  assert.equal(classifyAuthReadStatusClass(409), 'HTTP_409')
+  assert.equal(classifyAuthReadStatusClass(400), 'HTTP_4XX_OTHER')
+  assert.equal(classifyAuthReadStatusClass(429), 'HTTP_4XX_OTHER')
+  assert.equal(classifyAuthReadStatusClass(500), 'HTTP_5XX')
+  assert.equal(classifyAuthReadStatusClass(302), 'OTHER')
+  assert.equal(classifyAuthReadStatusClass(undefined), 'UNAVAILABLE')
+})
+
+test('classifyAuthReadReasonClass binds reason to the EXACT (status, code) pair (review P2)', () => {
+  // 2xx has no reason; non-integer status -> UNAVAILABLE.
+  assert.equal(classifyAuthReadReasonClass(200, { ok: true }), 'NONE')
+  assert.equal(classifyAuthReadReasonClass(undefined, { error: { code: 'FORBIDDEN' } }), 'UNAVAILABLE')
+  assert.equal(classifyAuthReadReasonClass(NaN, { error: { code: 'FORBIDDEN' } }), 'UNAVAILABLE')
+  // The three real pairs pass through.
+  assert.deepEqual([...AUTH_READ_REASON_CODES], ['UNAUTHORIZED', 'PASSWORD_CHANGE_REQUIRED', 'FORBIDDEN'])
+  assert.equal(classifyAuthReadReasonClass(401, { ok: false, error: { code: 'UNAUTHORIZED' } }), 'UNAUTHORIZED')
+  assert.equal(classifyAuthReadReasonClass(403, { ok: false, error: { code: 'PASSWORD_CHANGE_REQUIRED' } }), 'PASSWORD_CHANGE_REQUIRED')
+  assert.equal(classifyAuthReadReasonClass(403, { ok: false, error: { code: 'FORBIDDEN' } }), 'FORBIDDEN')
+  // The reviewer's contradictions: recognized code + wrong status -> INCONSISTENT, never the code.
+  assert.equal(classifyAuthReadReasonClass(404, { ok: false, error: { code: 'FORBIDDEN' } }), 'INCONSISTENT')
+  assert.equal(classifyAuthReadReasonClass(401, { ok: false, error: { code: 'PASSWORD_CHANGE_REQUIRED' } }), 'INCONSISTENT')
+  assert.equal(classifyAuthReadReasonClass(403, { ok: false, error: { code: 'UNAUTHORIZED' } }), 'INCONSISTENT')
+  // The plugin 401 UNAUTHENTICATED is unreachable behind the global gate — not a
+  // recognized branch; it folds to OTHER, not a named reason.
+  assert.equal(classifyAuthReadReasonClass(401, { ok: false, error: { code: 'UNAUTHENTICATED' } }), 'OTHER')
+  // Unknown / business-shaped / absent codes fold to OTHER — no free-text surfaces.
+  assert.equal(classifyAuthReadReasonClass(403, { ok: false, error: { code: 'MAT-001-SECRET' } }), 'OTHER')
+  assert.equal(classifyAuthReadReasonClass(404, { ok: false, error: {} }), 'OTHER')
+  assert.equal(classifyAuthReadReasonClass(404, null), 'OTHER')
+  assert.equal(classifyAuthReadReasonClass(400, { error: { code: 42 } }), 'OTHER')
+})
+
+test('classifyAuthReadContractClass: a bare 200 is NOT healthy unless the success contract holds (review P1)', () => {
+  const ok = { ok: true, data: { adapters: [], routes: [] } }
+  assert.equal(classifyAuthReadContractClass(200, ok), 'VALID')
+  assert.equal(classifyAuthReadContractClass(204, ok), 'VALID')
+  // 200 login/HTML page -> parses to null -> INVALID (the P1 repro).
+  assert.equal(classifyAuthReadContractClass(200, null), 'RESPONSE_CONTRACT_INVALID')
+  // 200 { ok:false } -> INVALID.
+  assert.equal(classifyAuthReadContractClass(200, { ok: false, error: { code: 'X' } }), 'RESPONSE_CONTRACT_INVALID')
+  // 200 with ok:true but missing/mis-typed data arrays -> INVALID.
+  assert.equal(classifyAuthReadContractClass(200, { ok: true }), 'RESPONSE_CONTRACT_INVALID')
+  assert.equal(classifyAuthReadContractClass(200, { ok: true, data: { adapters: [] } }), 'RESPONSE_CONTRACT_INVALID')
+  assert.equal(classifyAuthReadContractClass(200, { ok: true, data: { adapters: 'x', routes: [] } }), 'RESPONSE_CONTRACT_INVALID')
+  assert.equal(classifyAuthReadContractClass(200, { ok: 'true', data: { adapters: [], routes: [] } }), 'RESPONSE_CONTRACT_INVALID')
+  // Non-2xx has no success contract to judge.
+  assert.equal(classifyAuthReadContractClass(403, { ok: false }), 'UNAVAILABLE')
+  assert.equal(classifyAuthReadContractClass(undefined, ok), 'UNAVAILABLE')
+})
+
+test('runDiagnostic v2: one run is dispositive — the four 4XX sub-classes come through end to end', async () => {
+  const run = (status, code) =>
+    runDiagnostic({
+      args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+      verifyImpl: VERIFY_PASS,
+      importImpl: REAL_HELPER_IMPORT,
+      fetchDelegate: async () => jsonResponse(status, JSON.stringify({ ok: false, error: { code } })),
+      timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+    })
+  const tokenBad = await run(401, 'UNAUTHORIZED')
+  assert.equal(tokenBad.authReadStatusClass, 'HTTP_401')
+  assert.equal(tokenBad.authReadReasonClass, 'UNAUTHORIZED')
+  const pwChange = await run(403, 'PASSWORD_CHANGE_REQUIRED')
+  assert.equal(pwChange.authReadStatusClass, 'HTTP_403')
+  assert.equal(pwChange.authReadReasonClass, 'PASSWORD_CHANGE_REQUIRED')
+  const forbidden = await run(403, 'FORBIDDEN')
+  assert.equal(forbidden.authReadStatusClass, 'HTTP_403')
+  assert.equal(forbidden.authReadReasonClass, 'FORBIDDEN')
+
+  // GENUINE success arm: 200 with the real status contract -> VALID (fast-track eligible).
+  const ok = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: VERIFY_PASS,
+    importImpl: REAL_HELPER_IMPORT,
+    fetchDelegate: async () => jsonResponse(200, JSON.stringify({ ok: true, data: { adapters: [], routes: [] } })),
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(ok.authReadResult, 'HTTP_2XX')
+  assert.equal(ok.authReadStatusClass, 'HTTP_2XX')
+  assert.equal(ok.authReadReasonClass, 'NONE')
+  assert.equal(ok.authReadContractClass, 'VALID')
+  assert.equal(ok.executionState, 'DIAGNOSTIC_COMPLETE')
+
+  // P1 repro: a 200 login/HTML page (body parses to null) must NOT read as a
+  // healthy API — the contract field flags it and the fast-track cannot fire.
+  const htmlPage = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: VERIFY_PASS,
+    importImpl: REAL_HELPER_IMPORT,
+    fetchDelegate: async () => ({ status: 200, text: async () => '<html><body>login</body></html>' }),
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(htmlPage.authReadStatusClass, 'HTTP_2XX')
+  assert.equal(htmlPage.authReadContractClass, 'RESPONSE_CONTRACT_INVALID', 'a 200 HTML page is not a healthy API')
+
+  // 200 { ok:false } must also fail the success contract.
+  const okFalse = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: VERIFY_PASS,
+    importImpl: REAL_HELPER_IMPORT,
+    fetchDelegate: async () => jsonResponse(200, JSON.stringify({ ok: false })),
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(okFalse.authReadContractClass, 'RESPONSE_CONTRACT_INVALID')
+
+  // transport rejection: no HTTP response to sub-classify.
+  const aborted = await runDiagnostic({
+    args: { helperPath: 'x/stock-preparation-prep-line-extended-smoke.mjs', baseUrl: BASE_URL, tenantId: '' },
+    verifyImpl: VERIFY_PASS,
+    importImpl: REAL_HELPER_IMPORT,
+    fetchDelegate: async () => { throw makeDomError('AbortError') },
+    timerProbeOverrides: { sleepTargetMs: 40, minSleepMs: 20, maxSleepMs: 4000, abortTimerMs: 2000 },
+  })
+  assert.equal(aborted.authReadStatusClass, 'UNAVAILABLE')
+  assert.equal(aborted.authReadReasonClass, 'UNAVAILABLE')
+  assert.equal(aborted.authReadContractClass, 'UNAVAILABLE')
 })
 
 // ── Pathname shape ───────────────────────────────────────────────────────────────────────────────

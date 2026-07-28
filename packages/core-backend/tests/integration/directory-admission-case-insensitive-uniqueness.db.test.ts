@@ -53,16 +53,19 @@ describeIfDatabase('P2-1 directory admission case-insensitive uniqueness + batch
   }) {
     const external = `oa-p21-${opts.tag}-${TS}`
     const externalKey = opts.unionId || external
-    const id = (await query<{ id: string }>(
+    const row = (await query<{ id: string; corp_id: string }>(
       `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile, is_active)
-       VALUES ($1, 'dingtalk', 'corpP21', $2, $3, NULL, $4, 'Fixture P2-1', $5, $6, true) RETURNING id::text AS id`,
+       SELECT $1::uuid, 'dingtalk', corp_id, $2, $3, NULL, $4, 'Fixture P2-1', $5, $6, true
+       FROM directory_integrations
+       WHERE id = $1::uuid
+       RETURNING id::text AS id, corp_id`,
       [integrationId, external, opts.unionId, externalKey, opts.email, opts.mobile],
-    )).rows[0].id
+    )).rows[0]
     return {
-      id,
+      id: row.id,
       integration_id: integrationId,
       provider: 'dingtalk',
-      corp_id: 'corpP21',
+      corp_id: row.corp_id,
       external_user_id: external,
       union_id: opts.unionId,
       open_id: null as string | null,

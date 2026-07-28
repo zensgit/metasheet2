@@ -35,6 +35,21 @@ import { isValidIanaTimeZone } from './automation-timezone'
 import { DurableSinkBusyError, isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
 import { claimEventFiresLease, markEventFiresDone } from './automation-event-fires-lease'
+import {
+  FWB_ACTION_TYPE,
+  buildProductionFwbGateChecks,
+  canUserWriteFwbTargetFields,
+  collectFwbActionConfigs,
+  deriveFwbConfirmationHash,
+  hasUnavailableFwbNumberMapping,
+  isFwbTargetFieldTypeCompatible,
+  normalizeFwbMappings,
+  normalizeFwbUpdateRecordLinkFieldId,
+  parseFwbWriteMode,
+  resolveRecordLinkTargetFromSchema,
+} from './approval-fwb-activation'
+import { isAdmin as rbacIsAdmin } from '../rbac/service'
+import { resolveSheetCapabilitiesForUser } from './sheet-capabilities'
 
 /** S6 event-delivery lease window: long enough to cover a normal executeRule, short enough that a crashed
  *  worker's row is reclaimable promptly. Only consulted on the durable-delivery (flag ON) lease path. */
@@ -70,12 +85,19 @@ import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
 import {
   AutomationApprovalBridgeService,
   hasPermissionCode,
-  listRbacPermissionCodes,
   type AutomationApprovalBridgeRow,
 } from './automation-approval-bridge-service'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
 import type { ApprovalTaskCreatedEventV1 } from '../services/ApprovalTaskCreatedEvent'
 import { applyTemplateVisibilityFilter, type ApprovalTemplateVisibilityActor } from '../services/ApprovalProductService'
+import {
+  isAdminOnQuery,
+  loadApprovalTemplateVisibilityActorOnQuery,
+} from '../services/approval-record-link-txn-auth'
+import {
+  automationTemplateVisibleToUser,
+  automationUserHasApprovalRead,
+} from './automation-approval-template-access'
 import { metrics } from '../metrics/metrics'
 import {
   normalizeDingTalkAutomationActionInputs,
@@ -118,12 +140,19 @@ const VALID_TRIGGER_TYPES = new Set([
 // start_approval → approval.completed → start_approval loop (Q4a).
 const APPROVAL_COMPLETED_TRIGGER = 'approval.completed'
 const APPROVAL_COMPLETED_OUTCOMES: ReadonlySet<string> = new Set(['approved', 'rejected', 'revoked', 'cancelled'])
-const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES: ReadonlySet<string> = new Set([
+const APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES: ReadonlySet<string> = new Set([
   'send_notification',
   'send_webhook',
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
+])
+// FWB activation (FWB0 lock D11): write_approval_form_values joins the approval.completed allowlist ONLY —
+// task_created keeps the side-effect-only set (spreading the shared base below, NOT this set, so the FWB
+// action cannot leak onto pending-task rules).
+const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES: ReadonlySet<string> = new Set([
+  ...APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES,
+  FWB_ACTION_TYPE,
 ])
 const APPROVAL_COMPLETION_TRIGGER_EVENT_TYPES: readonly string[] = [
   'approval.approved',
@@ -131,6 +160,21 @@ const APPROVAL_COMPLETION_TRIGGER_EVENT_TYPES: readonly string[] = [
   'approval.revoked',
   'approval.cancelled',
 ]
+
+function hasRetryableFwbFailure(execution: AutomationExecution): boolean {
+  return execution.steps.some((step) => {
+    if (step.actionType !== FWB_ACTION_TYPE || step.status !== 'failed') return false
+    const error = typeof step.error === 'string' ? step.error : ''
+    // `fwb_rejected:*` is the closed deterministic-refusal namespace (config, authority, frozen
+    // source identity, or absent source row). Retrying the same immutable completion event cannot
+    // change it; only an operator edit/new event can. Infrastructure failures use the separate
+    // `fwb_execution_failed` value and remain reclaimable.
+    if (error.startsWith('fwb_rejected:') || error.startsWith('write_approval_form_values requires')) return false
+    // Infrastructure/transaction failures remain retryable. The durable event-fires lease must not
+    // be marked done until a later execution succeeds.
+    return true
+  })
+}
 // ── A-2a approval.task_created trigger (one-tap lock #3594 implementation decision, owner-ratified
 // 2026-07-05). Same dedicated template-keyed dispatch as approval.completed: routed by REQUIRED
 // trigger_config.templateId; record-less; v1 allows ONLY non-record-targeting side effects (no record
@@ -140,7 +184,7 @@ const APPROVAL_TASK_CREATED_TRIGGER = 'approval.task_created'
 // on every other trigger because its recipient comes from the pending-task event.
 const APPROVAL_CARD_ACTION_TYPE = 'send_dingtalk_approval_card'
 const APPROVAL_TASK_CREATED_ALLOWED_ACTION_TYPES: ReadonlySet<string> = new Set([
-  ...APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES,
+  ...APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES,
   APPROVAL_CARD_ACTION_TYPE,
 ])
 
@@ -865,6 +909,26 @@ export class AutomationService {
       }),
       fetchFn,
       notificationService,
+      // FWB activation (§11 Q6): construct the REAL four-gate set from the CURRENT write
+      // transaction. Pool/cached permission reads here would reopen a revoke-after-check race.
+      fwbGateChecksFactory: (transactionQuery) => buildProductionFwbGateChecks({
+        queryFn: transactionQuery,
+        isAdminFn: (userId) => isAdminOnQuery(transactionQuery, userId),
+        canReadTemplateFn: async (userId, templateId) => {
+          const actor = await loadApprovalTemplateVisibilityActorOnQuery(transactionQuery, userId)
+          if (!actor || !hasPermissionCode(actor.permissions, 'approvals:read')) return false
+          const conditions = ['id = $1']
+          const params: unknown[] = [templateId]
+          applyTemplateVisibilityFilter(conditions, params, 2, actor)
+          const visible = await transactionQuery(
+            `SELECT id FROM approval_templates
+              WHERE ${conditions.join(' AND ')}
+              LIMIT 1 FOR SHARE`,
+            params,
+          )
+          return visible.rows.length > 0
+        },
+      }),
     }
     this.executor = new AutomationExecutor(deps)
     this.logService = new AutomationLogService()
@@ -1035,6 +1099,20 @@ export class AutomationService {
     )
     if (approvalCompletedError) throw new AutomationRuleValidationError(approvalCompletedError)
 
+    // FWB activation (FWB0 §11 Q6): placement + D1 outcome lock + mapping/schema/confirmation + creator
+    // authority — all fail-closed at save, independent of the runtime flag.
+    const fwbSaveError = await this.validateFwbActionAtSave(
+      sheetId,
+      input.triggerType,
+      (input.triggerConfig ?? null) as Record<string, unknown> | null,
+      input.actionType,
+      (input.actionConfig ?? null) as Record<string, unknown> | null,
+      actionsForValidation,
+      input.createdBy ?? null,
+      input.createdBy ?? null,
+    )
+    if (fwbSaveError) throw new AutomationRuleValidationError(fwbSaveError)
+
     const approvalTaskCreatedError = await this.validateApprovalTaskCreatedRuleAtSave(
       input.triggerType,
       (input.triggerConfig ?? null) as Record<string, unknown> | null,
@@ -1128,7 +1206,12 @@ export class AutomationService {
    * Update an existing automation rule.
    * Returns the updated rule, or null if not found.
    */
-  async updateRule(ruleId: string, sheetId: string, input: UpdateRuleInput): Promise<AutomationRule | null> {
+  async updateRule(
+    ruleId: string,
+    sheetId: string,
+    input: UpdateRuleInput,
+    authoringActorId?: string | null,
+  ): Promise<AutomationRule | null> {
     if (input.triggerType !== undefined && !VALID_TRIGGER_TYPES.has(input.triggerType)) {
       throw new AutomationRuleValidationError(`Invalid trigger_type: ${input.triggerType}`)
     }
@@ -1307,6 +1390,8 @@ export class AutomationService {
       || input.actions !== undefined
       || input.executionMode !== undefined
       || input.conditions !== undefined
+      || input.name !== undefined
+      || input.enabled !== undefined
     ) {
       const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
       if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
@@ -1322,6 +1407,18 @@ export class AutomationService {
         : existingForApproval.execution_mode ?? null
       const nextConditions = input.conditions !== undefined ? input.conditions : existingForApproval.conditions ?? null
       const approvalActions = collectNestedAutomationActions(nextActionType, nextActionConfig, nextActions, nextExecutionMode)
+      const previousActionConfig = (existingForApproval.action_config ?? {}) as Record<string, unknown>
+      const previousActions = collectNestedAutomationActions(
+        existingForApproval.action_type,
+        previousActionConfig,
+        existingForApproval.actions ?? null,
+        existingForApproval.execution_mode ?? null,
+      )
+      const previousFwbConfirmationHashes = new Set(
+        collectFwbActionConfigs(existingForApproval.action_type, previousActionConfig, previousActions)
+          .map((config) => typeof config.confirmationHash === 'string' ? config.confirmationHash.trim() : '')
+          .filter(Boolean),
+      )
       // A-2b: placement gate runs for EVERY resulting shape (a card action smuggled onto a
       // non-task_created rule via a partial update must not survive either).
       const cardPlacementError = validateApprovalCardActionPlacement(nextTriggerType, nextActionType, approvalActions)
@@ -1346,6 +1443,20 @@ export class AutomationService {
         )
         if (approvalTaskCreatedError) throw new AutomationRuleValidationError(approvalTaskCreatedError)
       }
+      // FWB activation: the same fail-closed save gate for every resulting shape of a partial update.
+      const fwbUpdateError = await this.validateFwbActionAtSave(
+        existingForApproval.sheet_id,
+        nextTriggerType,
+        nextTriggerConfig,
+        nextActionType,
+        (nextActionConfig ?? null) as Record<string, unknown> | null,
+        approvalActions,
+        existingForApproval.created_by,
+        authoringActorId,
+        previousFwbConfirmationHashes,
+        existingForApproval.enabled === false && input.enabled === true,
+      )
+      if (fwbUpdateError) throw new AutomationRuleValidationError(fwbUpdateError)
     }
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
@@ -1390,27 +1501,15 @@ export class AutomationService {
   }
 
   /**
-   * Enable or disable a rule.
+   * Enable or disable a rule through the same resulting-shape validation as every other edit.
    */
-  async setRuleEnabled(ruleId: string, enabled: boolean): Promise<AutomationRule | null> {
-    const result = await this.db
-      .updateTable('automation_rules')
-      .set({ enabled, updated_at: new Date().toISOString() } as never)
-      .where('id', '=', ruleId)
-      .returningAll()
-      .execute()
-
-    if (result.length === 0) return null
-
-    const rule = this.mapRow(result[0])
-
-    if (enabled) {
-      this.registerSchedule(rule)
-    } else {
-      this.unregisterSchedule(ruleId)
-    }
-
-    return rule
+  async setRuleEnabled(
+    ruleId: string,
+    sheetId: string,
+    enabled: boolean,
+    authoringActorId?: string | null,
+  ): Promise<AutomationRule | null> {
+    return this.updateRule(ruleId, sheetId, { enabled }, authoringActorId)
   }
 
   // ── Schedule registration ───────────────────────────────────────────────
@@ -1857,6 +1956,272 @@ export class AutomationService {
   }
 
   /**
+   * FWB activation save gate (FWB0 lock, RATIFIED; §11 Q6). Applies IFF the rule carries a
+   * `write_approval_form_values` action (top-level or nested). Fail-closed, flag-independent:
+   *   - placement: approval.completed rules ONLY (D11 — the allowlist above admits it there alone);
+   *   - D1: an EXPLICIT trigger_config.outcomes must be exactly ["approved"] (absent = allowed at save;
+   *     the executor additionally hard-gates on the approved outcome, so a broader filter can never
+   *     write back a rejection);
+   *   - mapping structure via `normalizeFwbMappings` (empty/duplicate/unsupported/select-without-options);
+   *   - mode contract: absent/`create` (FWB-1) or `update` (FWB-2); unknown modes rejected;
+   *   - FWB-2: one non-blank `recordLinkFieldId`; target base/sheet DERIVED from the pinned active
+   *     template version's top-level record-link field props (never client-supplied target ids);
+   *   - target-schema truth: every targetFieldId exists on the resolved target sheet, its
+   *     meta_fields.type equals the declared targetType, and select options are ⊆ the field's
+   *     configured option values (D6 closed vocabulary — `select_option_not_on_field`);
+   *   - source truth: every formFieldId exists in the currently active template version, and the
+   *     action explicitly binds that version; a new publish therefore requires confirmation again;
+   *   - Q6 gate 3: the submitted confirmationHash equals the server-derived hash over the
+   *     mode-appropriate subject (create hashes omit mode/recordLinkFieldId for byte-compat;
+   *     update binds mode + recordLinkFieldId + derived target) — any drift invalidates;
+   *   - Q6 gate 1 at save: the actual creator/modifier/enabler is a platform admin OR holds
+   *     canManageSheetAccess on the target sheet; source/target data authority remains bound to the
+   *     persisted rule creator and is re-checked at execute time.
+   */
+  private async validateFwbActionAtSave(
+    sheetId: string,
+    triggerType: string,
+    triggerConfig: Record<string, unknown> | null,
+    actionType: string,
+    actionConfig: Record<string, unknown> | null,
+    nestedActions: AutomationAction[],
+    createdBy: string | null,
+    authoringActorId: string | null | undefined,
+    previousConfirmationHashes: ReadonlySet<string> = new Set(),
+    requireFreshReceipt = false,
+  ): Promise<string | null> {
+    const configs = collectFwbActionConfigs(actionType, actionConfig, nestedActions)
+    if (configs.length === 0) return null
+    if (triggerType !== APPROVAL_COMPLETED_TRIGGER) {
+      return `action ${FWB_ACTION_TYPE} is only allowed on approval.completed rules (FWB0 D11)`
+    }
+    const templateIdRaw = (triggerConfig ?? {}).templateId
+    const templateId = typeof templateIdRaw === 'string' ? templateIdRaw.trim() : ''
+    // templateId presence/existence/visibility are already enforced by validateApprovalCompletedRuleAtSave
+    // (which runs first); an empty id here would have thrown there.
+    const outcomesRaw = (triggerConfig ?? {}).outcomes
+    if (outcomesRaw !== undefined) {
+      const ok = Array.isArray(outcomesRaw) && outcomesRaw.length === 1 && outcomesRaw[0] === 'approved'
+      if (!ok) {
+        return `${FWB_ACTION_TYPE} requires trigger_config.outcomes = ["approved"] (FWB0 D1 — writeback fires on approved completions only)`
+      }
+    }
+    const versionResult = await this.queryFn(
+      `SELECT t.active_version_id, v.form_schema
+         FROM approval_templates t
+         JOIN approval_template_versions v ON v.id = t.active_version_id
+        WHERE t.id = $1`,
+      [templateId],
+    )
+    const versionRow = versionResult.rows[0] as {
+      active_version_id?: unknown
+      form_schema?: unknown
+    } | undefined
+    const activeVersionId = typeof versionRow?.active_version_id === 'string'
+      ? versionRow.active_version_id
+      : ''
+    if (!activeVersionId) return `${FWB_ACTION_TYPE} source template has no active version`
+    const rawSchema = typeof versionRow?.form_schema === 'string'
+      ? (() => { try { return JSON.parse(versionRow.form_schema as string) as unknown } catch { return null } })()
+      : versionRow?.form_schema
+    const schema = rawSchema && typeof rawSchema === 'object' && !Array.isArray(rawSchema)
+      ? rawSchema as { fields?: unknown }
+      : null
+    const sourceFieldIds = new Set(
+      (Array.isArray(schema?.fields) ? schema.fields : [])
+        .map((field) => field && typeof field === 'object' && !Array.isArray(field)
+          ? (field as { id?: unknown }).id
+          : null)
+        .filter((id): id is string => typeof id === 'string' && /[!-~]/.test(id)),
+    )
+    const ruleSheetResult = await this.queryFn('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])
+    const ruleBaseId = (ruleSheetResult.rows[0] as { base_id?: unknown } | undefined)?.base_id
+    if (typeof ruleBaseId !== 'string' || !ruleBaseId) {
+      return `${FWB_ACTION_TYPE} target sheet is unavailable`
+    }
+    // Per-config resolved targets (create → rule sheet; update → derived record-link sheet).
+    // Authority checks below run against every distinct target.
+    type ResolvedTarget = {
+      targetSheetId: string
+      targetBaseId: string
+      mode: 'create' | 'update'
+      targetFieldIds: string[]
+    }
+    const resolvedTargets: ResolvedTarget[] = []
+    const confirmationHashes = new Set<string>()
+    for (const config of configs) {
+      const modeParsed = parseFwbWriteMode(config.mode)
+      if (!modeParsed.ok) {
+        return `${FWB_ACTION_TYPE} mapping config invalid: unknown_mode`
+      }
+      const mode = modeParsed.mode
+
+      const normalized = normalizeFwbMappings(config.mappings)
+      if (!normalized.ok) {
+        return `${FWB_ACTION_TYPE} mapping config invalid: ${(normalized as { issue: string }).issue}`
+      }
+      if (hasUnavailableFwbNumberMapping(normalized.mappings)) {
+        return `${FWB_ACTION_TYPE} mapping invalid: exact_number_mapping_unavailable`
+      }
+      for (const mapping of normalized.mappings) {
+        if (!sourceFieldIds.has(mapping.formFieldId)) {
+          return `${FWB_ACTION_TYPE} mapping invalid: unknown_form_field`
+        }
+      }
+      const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
+        ? config.sourceTemplateVersionId.trim()
+        : ''
+      if (confirmedVersionId !== activeVersionId) {
+        return `${FWB_ACTION_TYPE} sourceTemplateVersionId must match the active template version`
+      }
+
+      let targetSheetId = sheetId
+      let targetBaseId = ruleBaseId
+      let recordLinkFieldId: string | undefined
+      if (mode === 'update') {
+        const linkField = normalizeFwbUpdateRecordLinkFieldId(config.recordLinkFieldId)
+        if (linkField.ok === false) {
+          return `${FWB_ACTION_TYPE} mapping config invalid: ${linkField.issue}`
+        }
+        const derived = resolveRecordLinkTargetFromSchema(rawSchema, linkField.recordLinkFieldId)
+        if (!derived) {
+          return `${FWB_ACTION_TYPE} mapping invalid: unknown_record_link_field`
+        }
+        // Membership: pinned sheet must still live in the pinned base (no client-supplied override).
+        const membership = await this.queryFn(
+          'SELECT base_id FROM meta_sheets WHERE id = $1',
+          [derived.sheetId],
+        )
+        const liveBase = (membership.rows[0] as { base_id?: unknown } | undefined)?.base_id
+        if (typeof liveBase !== 'string' || liveBase !== derived.baseId) {
+          return `${FWB_ACTION_TYPE} target sheet is unavailable`
+        }
+        targetSheetId = derived.sheetId
+        targetBaseId = derived.baseId
+        recordLinkFieldId = linkField.recordLinkFieldId
+      }
+
+      // target-schema truth on the resolved target sheet (FWB-1 = rule sheet; FWB-2 = record-link pin)
+      const targetIds = normalized.mappings.map((m) => m.targetFieldId)
+      const fieldRes = await this.queryFn(
+        'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+        [targetSheetId, targetIds],
+      )
+      const byId = new Map<string, { type: string; property: unknown }>()
+      for (const row of fieldRes.rows as Array<{ id: string; type: string; property: unknown }>) {
+        byId.set(row.id, { type: row.type, property: row.property })
+      }
+      for (const m of normalized.mappings) {
+        const field = byId.get(m.targetFieldId)
+        if (!field) return `${FWB_ACTION_TYPE} mapping invalid: unknown_target_field`
+        if (!isFwbTargetFieldTypeCompatible(field.type, m.targetType)) {
+          return `${FWB_ACTION_TYPE} mapping invalid: target_type_mismatch`
+        }
+        if (m.targetType === 'select') {
+          const property = typeof field.property === 'string'
+            ? (() => { try { return JSON.parse(field.property as string) as Record<string, unknown> } catch { return {} } })()
+            : (field.property && typeof field.property === 'object' ? field.property as Record<string, unknown> : {})
+          const options = Array.isArray((property as { options?: unknown }).options)
+            ? ((property as { options: unknown[] }).options)
+            : []
+          const allowed = new Set(
+            options
+              .map((o) => (o && typeof o === 'object' ? (o as { value?: unknown }).value : undefined))
+              .filter((v): v is string => typeof v === 'string'),
+          )
+          for (const opt of m.selectOptions ?? []) {
+            if (!allowed.has(opt)) return `${FWB_ACTION_TYPE} mapping invalid: select_option_not_on_field`
+          }
+        }
+      }
+
+      // Q6 gate 3: recorded confirmation = hash over the canonicalized subject (create omits mode keys)
+      const stored = typeof config.confirmationHash === 'string' ? config.confirmationHash : ''
+      const expected = deriveFwbConfirmationHash({
+        templateId,
+        sourceTemplateVersionId: confirmedVersionId,
+        targetBaseId,
+        targetSheetId,
+        mappings: normalized.mappings,
+        ...(mode === 'update'
+          ? { mode: 'update' as const, recordLinkFieldId }
+          : {}),
+      })
+      if (stored !== expected) {
+        return `${FWB_ACTION_TYPE} actionConfig.confirmationHash must match the server-derived confirmation hash (FWB0 §11 Q6 gate 3)`
+      }
+      resolvedTargets.push({ targetSheetId, targetBaseId, mode, targetFieldIds: targetIds })
+      confirmationHashes.add(stored)
+    }
+
+    // Q6 gate 1 at save binds the authorization to the actor performing this create/modify/enable,
+    // while the data-plane identity remains the persisted rule creator. Checked per resolved target.
+    if (!authoringActorId) return `${FWB_ACTION_TYPE} rules require an authenticated authoring actor`
+    const authoringAdmin = await rbacIsAdmin(authoringActorId).catch(() => false)
+    if (!authoringAdmin) {
+      for (const target of resolvedTargets) {
+        const resolved = await resolveSheetCapabilitiesForUser(this.queryFn, target.targetSheetId, authoringActorId).catch(() => null)
+        if (!resolved || !resolved.capabilities.canManageSheetAccess) {
+          return `${FWB_ACTION_TYPE} rules require the creator, modifier, or enabler to be a platform admin or hold canManageSheetAccess on the target sheet (FWB0 §11 Q6 gate 1)`
+        }
+      }
+    }
+
+    // A digest is reproducible and therefore is not itself proof that the author saw and accepted
+    // the disclosure. Require a server-persisted receipt for this actor and exact canonical subject.
+    // Receipts may be reused for the same subject; any template/version/target/mapping change yields
+    // a different hash and requires a fresh confirmation. A persisted unchanged hash remains editable
+    // after audit retention removes its original receipt, except that disabled -> enabled is a fresh
+    // activation decision and must be confirmed again. The hash is the durable rule contract while
+    // operation_audit_logs remains a bounded audit surface rather than a permanent business ledger.
+    for (const confirmationHash of confirmationHashes) {
+      if (!requireFreshReceipt && previousConfirmationHashes.has(confirmationHash)) continue
+      const receipt = await this.queryFn(
+        `SELECT 1
+           FROM operation_audit_logs
+          WHERE actor_id = $1
+            AND actor_type = 'user'
+            AND action = 'automation.fwb_confirm'
+            AND resource_type = 'automation_fwb_confirmation'
+            AND resource_id = $2
+            AND COALESCE(meta->>'confirmationHash', metadata->>'confirmationHash') = $3
+          LIMIT 1`,
+        [authoringActorId, sheetId, confirmationHash],
+      ).catch(() => ({ rows: [] }))
+      if (receipt.rows.length === 0) {
+        return `${FWB_ACTION_TYPE} requires an actor-bound server confirmation receipt for the current mapping subject`
+      }
+    }
+
+    // Q6 gate 2 and the canonical field-write spine: the persisted creator must still be able to
+    // create a record and write every mapped target field. Hidden, computed, schema-readonly, and
+    // per-subject read-only fields all fail closed through the same helpers used by REST/Yjs writes.
+    // The resolved target loop keeps creator authority mode-aware (create vs edit) and per target.
+    if (!createdBy) return `${FWB_ACTION_TYPE} rules require an authenticated creator`
+    for (const target of resolvedTargets) {
+      const creatorResolved = await resolveSheetCapabilitiesForUser(this.queryFn, target.targetSheetId, createdBy).catch(() => null)
+      if (target.mode === 'update') {
+        if (!creatorResolved?.capabilities.canEditRecord) {
+          return `${FWB_ACTION_TYPE} rules require the creator to hold target-sheet edit-record authority (FWB0 §11 Q6 gate 2)`
+        }
+      } else if (!creatorResolved?.capabilities.canCreateRecord) {
+        return `${FWB_ACTION_TYPE} rules require the creator to hold target-sheet create-record authority (FWB0 §11 Q6 gate 2)`
+      }
+      const targetFieldsWritable = await canUserWriteFwbTargetFields(
+        this.queryFn,
+        createdBy,
+        target.targetSheetId,
+        target.targetFieldIds,
+        target.mode,
+      ).catch(() => false)
+      if (!targetFieldsWritable) {
+        return `${FWB_ACTION_TYPE} mappings contain one or more target fields that are not writable by the rule creator`
+      }
+    }
+    return null
+  }
+
+  /**
    * T1-3 save-time validation for `approval.completed` rules. Returns an error string or null.
    * Ballot decisions: Q1 templateId REQUIRED + must reference an existing approval template (null-template
    * completions are v1 out-of-contract); Q2 the creator must hold `approvals:read` (re-checked at fire time);
@@ -1966,14 +2331,7 @@ export class AutomationService {
 
   /** T1-3 Q2 leg 1: the creator must hold `approvals:read` — checked at save AND re-checked at fire (fail-closed). */
   private async approvalCompletedCreatorAuthorized(createdBy: string | null): Promise<boolean> {
-    if (!createdBy) return false
-    try {
-      const codes = await listRbacPermissionCodes(createdBy)
-      return hasPermissionCode(codes, 'approvals:read')
-    } catch (err) {
-      logger.warn('approval.completed creator permission check failed; denying (fail-closed)', err instanceof Error ? err : undefined)
-      return false
-    }
+    return automationUserHasApprovalRead(this.queryFn, createdBy)
   }
 
   /**
@@ -1986,47 +2344,7 @@ export class AutomationService {
    * lookup error and on a missing/inactive creator.
    */
   private async approvalTemplateVisibleToCreator(templateId: string, createdBy: string | null): Promise<boolean> {
-    if (!createdBy) return false
-    try {
-      const userResult = await this.queryFn(
-        `SELECT role, department, is_admin FROM users WHERE id = $1 AND is_active = TRUE`,
-        [createdBy],
-      )
-      const user = userResult.rows[0] as { role?: string | null; department?: string | null; is_admin?: boolean | null } | undefined
-      if (!user) return false
-      const roleRows = await this.queryFn(
-        `SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`,
-        [createdBy],
-      )
-      const roles = new Set<string>()
-      if (typeof user.role === 'string' && user.role.trim()) roles.add(user.role.trim())
-      for (const row of roleRows.rows as Array<{ role_id?: string | null; name?: string | null }>) {
-        if (typeof row.role_id === 'string' && row.role_id.trim()) roles.add(row.role_id.trim())
-        if (typeof row.name === 'string' && row.name.trim()) roles.add(row.name.trim())
-      }
-      const codes = await listRbacPermissionCodes(createdBy)
-      const actor: ApprovalTemplateVisibilityActor = {
-        userId: createdBy,
-        departmentIds: typeof user.department === 'string' && user.department.trim() ? [user.department.trim()] : [],
-        roles: [...roles],
-        permissions: codes,
-        isTemplateManager:
-          hasPermissionCode(codes, 'approval-templates:manage')
-          || user.is_admin === true
-          || roles.has('admin'),
-      }
-      const conditions: string[] = ['id = $1']
-      const params: unknown[] = [templateId]
-      applyTemplateVisibilityFilter(conditions, params, 2, actor)
-      const visible = await this.queryFn(
-        `SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`,
-        params,
-      )
-      return visible.rows.length > 0
-    } catch (err) {
-      logger.warn('approval.completed template visibility check failed; denying (fail-closed)', err instanceof Error ? err : undefined)
-      return false
-    }
+    return automationTemplateVisibleToUser(this.queryFn, templateId, createdBy)
   }
 
   private rejectInboundWebhook(ruleId: string, reason: InboundWebhookRejectReason): InboundWebhookDispatchResult {
@@ -2659,6 +2977,7 @@ export class AutomationService {
 
     this.kickEventDedupLedgerSweepIfDue(Date.now())
     const outcome = event.transition.toStatus
+    let retryableFailure = false
     for (const rule of rules) {
       if (!approvalCompletedConfiguredOutcomes(rule.trigger_config).has(outcome)) continue
       // Q2 fire-time re-check (both legs): deny + skip when the creator no longer holds approvals:read OR
@@ -2687,11 +3006,23 @@ export class AutomationService {
           transition: event.transition,
           requester: event.requester,
         }
-        await this.runWithEventDedup(rule.id, `approval.completed:${event.eventId}`, () => this.executeRule(toExecutorRule(rule), payload))
+        await this.runWithEventDedup(rule.id, `approval.completed:${event.eventId}`, async () => {
+          const execution = await this.executeRule(toExecutorRule(rule), payload)
+          if (hasRetryableFwbFailure(execution)) {
+            throw new Error('approval_completed_fwb_retryable_failure')
+          }
+          return execution
+        })
       } catch (err) {
         logger.error(`approval.completed rule ${rule.id} failed`, err instanceof Error ? err : undefined)
+        if (
+          isDurableDeliveryEnabled()
+          && err instanceof Error
+          && err.message === 'approval_completed_fwb_retryable_failure'
+        ) retryableFailure = true
       }
     }
+    if (retryableFailure) throw new Error('approval_completed_trigger_retryable_failure')
   }
 
   /**

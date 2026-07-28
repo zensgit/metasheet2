@@ -13,7 +13,6 @@ import type { IConfigService, ILogger } from '../di/identifiers'
 // like `username` are left as-is (matching the codebase's encrypt-secrets-only
 // convention).
 const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
-export const SUPPORTED_DATA_SOURCE_TYPES = ['postgresql', 'postgres', 'http', 'sqlserver', 'mysql', 'plm'] as const
 export const DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED'
 export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED'
 
@@ -39,6 +38,36 @@ class ManagedPLMAdapter extends PLMAdapter {
     super(emptyConfigService, consoleLogger, config)
   }
 }
+
+// ── The ONE built-in adapter registry ────────────────────────────────────────────────────────
+// Both the public supported-type list AND the runtime registration are DERIVED from this object,
+// so a type cannot be registered without appearing in SUPPORTED_DATA_SOURCE_TYPES, nor listed as
+// supported without being registered. These were previously two hand-maintained lists (a literal
+// tuple + six `registerAdapterType` calls) that could silently drift: adding a runtime adapter and
+// forgetting the constant would leave it publicly unsupported AND invisible to any test that pins
+// coverage against the constant. Declared after ManagedPLMAdapter because it references that class.
+// A4: public support is intentionally narrowed to the verified runtime set.
+// FROZEN at runtime (not just `as const`, which is compile-time only). Another module could
+// otherwise assign/delete/replace an entry at runtime and re-open the very drift this single source
+// closes: registration iterates this object and SUPPORTED_DATA_SOURCE_TYPES is derived from its
+// keys, so a runtime mutation would desync registered adapters from the public supported set.
+export const DEFAULT_ADAPTER_REGISTRY = Object.freeze({
+  postgresql: PostgresAdapter,
+  postgres: PostgresAdapter, // accepted alias of postgresql — same adapter class
+  http: HTTPAdapter,
+  sqlserver: MSSQLAdapter,
+  mysql: MySQLAdapter,
+  plm: ManagedPLMAdapter,
+} as const)
+
+export type SupportedDataSourceType = keyof typeof DEFAULT_ADAPTER_REGISTRY
+
+// DERIVED at runtime from the registry above — not a second hand-written list — and itself FROZEN,
+// so a caller cannot push/splice a type into the "supported" set without a corresponding adapter.
+// The assertion restores the non-empty-tuple shape `z.enum` requires (routes/data-sources.ts); it
+// is sound by construction because the registry is a non-empty frozen literal with string keys.
+export const SUPPORTED_DATA_SOURCE_TYPES = Object.freeze(Object.keys(DEFAULT_ADAPTER_REGISTRY)) as unknown as
+  readonly [SupportedDataSourceType, ...SupportedDataSourceType[]]
 
 function optionIsTrue(options: AdapterOptions | undefined, key: string): boolean {
   return options?.[key] === true
@@ -257,13 +286,11 @@ export class DataSourceManager extends EventEmitter {
   }
 
   private registerDefaultAdapters(): void {
-    // A4: public support is intentionally narrowed to the verified runtime set.
-    this.registerAdapterType('postgresql', PostgresAdapter as unknown as AdapterConstructor)
-    this.registerAdapterType('postgres', PostgresAdapter as unknown as AdapterConstructor)
-    this.registerAdapterType('http', HTTPAdapter as unknown as AdapterConstructor)
-    this.registerAdapterType('sqlserver', MSSQLAdapter as unknown as AdapterConstructor)
-    this.registerAdapterType('mysql', MySQLAdapter as unknown as AdapterConstructor)
-    this.registerAdapterType('plm', ManagedPLMAdapter as unknown as AdapterConstructor)
+    // Derived from DEFAULT_ADAPTER_REGISTRY — the same object SUPPORTED_DATA_SOURCE_TYPES is
+    // derived from, so registration and public support cannot drift apart.
+    for (const [type, AdapterClass] of Object.entries(DEFAULT_ADAPTER_REGISTRY)) {
+      this.registerAdapterType(type, AdapterClass as unknown as AdapterConstructor)
+    }
   }
 
   registerAdapterType(type: string, adapterClass: AdapterConstructor): void {

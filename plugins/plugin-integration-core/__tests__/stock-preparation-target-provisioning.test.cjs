@@ -19,6 +19,7 @@ const {
   inspectStockPreparationSandboxTarget,
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationSandboxTarget,
+  repairStockPreparationCanonicalTarget,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
 
 const LOGICAL_FIELD_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id)
@@ -58,6 +59,28 @@ function createContext({
       }
       return out
     },
+    // W2: DB-backed existence — only EXISTING (non-missing) fields resolve.
+    async resolveExistingObjectFieldIds(input) {
+      calls.resolveExistingObjectFieldIds = calls.resolveExistingObjectFieldIds || []
+      calls.resolveExistingObjectFieldIds.push(input)
+      const out = {}
+      for (const fieldId of input.fieldIds || []) {
+        if (!currentMissing.has(fieldId)) out[fieldId] = `fld_${fieldId}`
+      }
+      return out
+    },
+    // W2: DB-backed content — stable {name,type,property} for existing fields.
+    async readObjectFieldsContent(input) {
+      calls.readObjectFieldsContent = calls.readObjectFieldsContent || []
+      calls.readObjectFieldsContent.push(input)
+      const out = {}
+      // Fake mirrors the REAL provisioning surface: content snapshot carries `order` too
+      // (round-5 review P3 — `order` is part of the mutation-guard's column identity).
+      for (const fieldId of input.fieldIds || []) {
+        if (!currentMissing.has(fieldId)) out[fieldId] = { name: fieldId, type: 'text', property: {}, order: 0 }
+      }
+      return out
+    },
     async ensureObject(input) {
       calls.ensureObject.push({
         projectId: input.projectId,
@@ -84,6 +107,34 @@ function createContext({
           order: index,
         })),
       }
+    },
+    async ensureMissingObjectFields(input) {
+      calls.ensureMissingObjectFields = calls.ensureMissingObjectFields || []
+      calls.ensureMissingObjectFields.push(input)
+      const addedFieldIds = []
+      const skippedExistingFieldIds = []
+      for (const field of input.fields || []) {
+        if (currentMissing.has(field.id)) {
+          currentMissing.delete(field.id)
+          addedFieldIds.push(`fld_${field.id}`)
+        } else {
+          skippedExistingFieldIds.push(`fld_${field.id}`)
+        }
+      }
+      return { addedFieldIds, skippedExistingFieldIds }
+    },
+    // W2/P2-3: atomic repair runner. The surface forwards to THIS provisioning object's
+    // CURRENT methods, so a per-test override (e.g. readObjectFieldsContent /
+    // ensureMissingObjectFields set after createContext) is honored inside the repair body.
+    async runObjectFieldsRepairTransaction(fn) {
+      const p = this
+      calls.runObjectFieldsRepairTransaction = (calls.runObjectFieldsRepairTransaction || 0) + 1
+      return fn({
+        findObjectSheet: (i) => p.findObjectSheet(i),
+        resolveExistingObjectFieldIds: (i) => p.resolveExistingObjectFieldIds(i),
+        readObjectFieldsContent: (i) => p.readObjectFieldsContent(i),
+        ensureMissingObjectFields: (i) => p.ensureMissingObjectFields(i),
+      })
     },
   }
   const records = {
@@ -388,6 +439,139 @@ async function main() {
   assert.equal(JSON.stringify(sandboxIncompleteError.details).includes(sandboxObjectId), false, 'sandbox incomplete error hides object id')
   assert.equal(sandboxIncompleteCalls.ensureObject.length, 0, 'incomplete sandbox target is not repaired in place')
   assert.equal(sandboxIncompleteCalls.records.length, 0, 'incomplete sandbox path never uses records API')
+
+  // ---- W2 canonical repair (main table has the 8 human fields — the reject guard is load-bearing here) ----
+  {
+    // (a) repair adds a missing plm_system field on the existing canonical target.
+    const { context, calls } = createContext({ sheetExists: true, missingFields: ['path'] })
+    const repaired = await repairStockPreparationCanonicalTarget({ context, projectId: 'proj_x', permission: 'admin' })
+    assert.equal(repaired.mode, 'canonical_repaired')
+    assert.equal(repaired.evidence.addedFieldCount, 1)
+    assert.equal((calls.ensureMissingObjectFields || []).length, 1, 'canonical repair uses the additive-only primitive')
+
+    // (b) LOAD-BEARING: repair REJECTS a missing human_preserved field. The main table's
+    //     8 human fields must never grow via a repair back door.
+    const humanCtx = createContext({ sheetExists: true, missingFields: ['materialType'] })
+    let humanErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: humanCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      humanErr = error
+    }
+    assert.ok(humanErr instanceof StockPreparationTargetProvisioningError, 'human-field repair rejected')
+    assert.equal(humanErr.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
+    assert.equal((humanCtx.calls.ensureMissingObjectFields || []).length, 0, 'no additive write when a human field is in the repair set')
+
+    // (b2) POST-WRITE completeness re-verify: if the additive write does NOT actually
+    //      leave the schema complete (a field still missing on re-read), repair must
+    //      FAIL CLOSED — never report ready:true unproven (review P1).
+    const incompleteCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    // Neuter the additive write so 'path' stays missing after "repair".
+    incompleteCtx.context.api.multitable.provisioning.ensureMissingObjectFields = async () => ({ addedFieldIds: [], skippedExistingFieldIds: [] })
+    let incompleteErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: incompleteCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      incompleteErr = error
+    }
+    assert.ok(incompleteErr instanceof StockPreparationTargetProvisioningError, 'incomplete repair fails closed')
+    assert.equal(incompleteErr.code, 'CANONICAL_REPAIR_INCOMPLETE')
+
+    // (b3) REPAIR_MUTATED_EXISTING_FIELD: if the additive write mutates an existing
+    //      field's content (name/type/property), the before/after snapshot must catch it.
+    const mutateCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    const prov = mutateCtx.context.api.multitable.provisioning
+    let readCount = 0
+    prov.readObjectFieldsContent = async (input) => {
+      // First (before) read: baseline; second (after) read: an existing field mutated.
+      readCount += 1
+      const out = {}
+      for (const fieldId of input.fieldIds || []) {
+        out[fieldId] = { name: fieldId, type: readCount >= 2 ? 'number' : 'text', property: {} }
+      }
+      return out
+    }
+    let mutatedErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: mutateCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      mutatedErr = error
+    }
+    assert.ok(mutatedErr instanceof StockPreparationTargetProvisioningError, 'mutated existing field fails closed')
+    assert.equal(mutatedErr.code, 'REPAIR_MUTATED_EXISTING_FIELD')
+
+    // (b4) round-5 review P2: a field from THIS round's missing set that returns as
+    //      skipped-existing = a concurrent writer inserted an UNVERIFIED row → fail closed
+    //      (id-exists ≠ shape-correct). Canonical path must discriminate this too.
+    const raceCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    raceCtx.context.api.multitable.provisioning.ensureMissingObjectFields = async (input) => ({
+      addedFieldIds: [],
+      skippedExistingFieldIds: (input.fields || []).map((f) => `fld_${f.id}`),
+    })
+    let raceErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: raceCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      raceErr = error
+    }
+    assert.ok(raceErr instanceof StockPreparationTargetProvisioningError, 'concurrent skipped field fails closed')
+    assert.equal(raceErr.code, 'REPAIR_CONCURRENT_FIELD_APPEARED')
+
+    // (b5) round-5 review P3: `order` is part of the snapshotted column identity — an
+    //      order-ONLY change across the additive write must ALSO fail closed (landed pin).
+    const orderCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    let orderRead = 0
+    orderCtx.context.api.multitable.provisioning.readObjectFieldsContent = async (input) => {
+      orderRead += 1
+      const out = {}
+      for (const fieldId of input.fieldIds || []) out[fieldId] = { name: fieldId, type: 'text', property: {}, order: orderRead >= 2 ? 99 : 1 }
+      return out
+    }
+    let orderErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: orderCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      orderErr = error
+    }
+    assert.ok(orderErr instanceof StockPreparationTargetProvisioningError, 'order-only change fails closed')
+    assert.equal(orderErr.code, 'REPAIR_MUTATED_EXISTING_FIELD')
+
+    // (c) absent target fails closed.
+    const absentCtx = createContext({ sheetExists: false })
+    let absentErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: absentCtx.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      absentErr = error
+    }
+    assert.ok(absentErr instanceof StockPreparationTargetProvisioningError && absentErr.code === 'CANONICAL_REPAIR_TARGET_ABSENT')
+
+    // (d) non-admin rejected before provisioning access.
+    const rbacCtx = createContext({ sheetExists: true, missingFields: ['path'] })
+    let deniedErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: rbacCtx.context, projectId: 'proj_x', permission: 'write' })
+    } catch (error) {
+      deniedErr = error
+    }
+    assert.ok(deniedErr, 'non-admin canonical repair rejected')
+    assert.equal(rbacCtx.calls.findObjectSheet.length, 0, 'admin gate precedes provisioning reads')
+
+    // (e) API contract pin (round-5 review P3): a provisioning WITHOUT the atomic runner
+    //     runObjectFieldsRepairTransaction must fail closed with a clean 503, never reach
+    //     the repair body and call `undefined(...)`. Guards the getCanonicalRepairApi contract.
+    const noRunner = createContext({ sheetExists: true, missingFields: ['path'] })
+    delete noRunner.context.api.multitable.provisioning.runObjectFieldsRepairTransaction
+    let unavailErr = null
+    try {
+      await repairStockPreparationCanonicalTarget({ context: noRunner.context, projectId: 'proj_x', permission: 'admin' })
+    } catch (error) {
+      unavailErr = error
+    }
+    assert.ok(unavailErr instanceof StockPreparationTargetProvisioningError, 'missing atomic runner fails closed')
+    assert.equal(unavailErr.code, 'CANONICAL_REPAIR_API_UNAVAILABLE')
+    assert.equal(noRunner.calls.findObjectSheet.length, 0, 'API check precedes any provisioning read')
+  }
 
   console.log('stock-preparation-target-provisioning.test.cjs OK')
 }

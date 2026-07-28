@@ -89,6 +89,7 @@ export interface Database {
   attendance_schedule_dispatch_requests: AttendanceScheduleDispatchRequestsTable
   attendance_rules: AttendanceRulesTable
   attendance_shifts: AttendanceShiftsTable
+  attendance_shift_segments: AttendanceShiftSegmentsTable
   attendance_shift_assignments: AttendanceShiftAssignmentsTable
   attendance_holidays: AttendanceHolidaysTable
   attendance_leave_types: AttendanceLeaveTypesTable
@@ -746,6 +747,10 @@ export interface UsersTable {
   mobile: string | null
   password_hash: string
   must_change_password: boolean
+  /** T1: pending_activation | activated */
+  activation_status: string
+  /** T1: whether password_hash is a usable local login secret */
+  local_password_set: boolean
   role: string
   permissions: JSONColumnType<string[]>
   avatar_url: string | null
@@ -950,6 +955,7 @@ export interface ApprovalTemplateVersionsTable {
   status: 'draft' | 'published' | 'archived'
   form_schema: JsonObjectColumn
   approval_graph: JsonObjectColumn
+  restored_from_version_id: ColumnType<string | null, string | null | undefined, string | null>
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -1126,7 +1132,7 @@ export interface AttendanceScheduleDispatchRequestsTable {
   target_schedule_group_id: string
   target_attendance_group_id: string | null
   target_department_ref: string | null
-  target_shift_id: string
+  target_shift_id: string | null
   slot_index: number
   start_date: ColumnType<string, string | undefined, string>
   end_date: ColumnType<string, string | undefined, string>
@@ -1166,6 +1172,20 @@ export interface AttendanceShiftsTable {
   early_grace_minutes: number
   rounding_minutes: number
   working_days: JSONColumnType<number[] | null>
+  is_overnight: Generated<boolean>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceShiftSegmentsTable {
+  id: Generated<string>
+  org_id: string
+  shift_id: string
+  segment_index: number
+  start_time: string
+  start_day_offset: Generated<number>
+  end_time: string
+  end_day_offset: Generated<number>
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

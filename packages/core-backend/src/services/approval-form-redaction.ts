@@ -37,20 +37,26 @@ export interface RedactableRuntimeGraph {
  * The snapshot is shallow-cloned only when at least one field is actually
  * removed, so the default/no-hidden path stays allocation-free and byte-stable.
  */
-export function redactHiddenFormFields(
-  formSnapshot: Record<string, unknown> | null,
+/**
+ * The set of field ids the active node(s) mark `access: 'hidden'` — the single, shared derivation
+ * of "which fields are hidden at this instance's active node(s)". Both the snapshot redaction below
+ * AND the attachment download byte-gate (§4.2 gate 2 / G7) consume THIS function, so the echoed
+ * snapshot and the byte path can never drift on what "hidden" means (no separate hidden decision).
+ * Pure, allocation-cheap (empty Set on any degenerate input), never throws.
+ */
+export function collectHiddenFieldIds(
   runtimeGraph: RedactableRuntimeGraph | null,
   activeNodeKeys: ReadonlyArray<string | null | undefined>,
-): Record<string, unknown> | null {
-  if (!formSnapshot || !runtimeGraph) return formSnapshot
-  if (!Array.isArray(runtimeGraph.nodes) || runtimeGraph.nodes.length === 0) return formSnapshot
-
+): Set<string> {
+  const hiddenFieldIds = new Set<string>()
+  if (!runtimeGraph || !Array.isArray(runtimeGraph.nodes) || runtimeGraph.nodes.length === 0) {
+    return hiddenFieldIds
+  }
   const activeKeys = new Set(
     activeNodeKeys.filter((key): key is string => typeof key === 'string' && key.length > 0),
   )
-  if (activeKeys.size === 0) return formSnapshot
+  if (activeKeys.size === 0) return hiddenFieldIds
 
-  const hiddenFieldIds = new Set<string>()
   for (const node of runtimeGraph.nodes) {
     if (!node || typeof node.key !== 'string' || !activeKeys.has(node.key)) continue
     const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] } | undefined)?.fieldPermissions
@@ -61,7 +67,17 @@ export function redactHiddenFormFields(
       }
     }
   }
+  return hiddenFieldIds
+}
 
+export function redactHiddenFormFields(
+  formSnapshot: Record<string, unknown> | null,
+  runtimeGraph: RedactableRuntimeGraph | null,
+  activeNodeKeys: ReadonlyArray<string | null | undefined>,
+): Record<string, unknown> | null {
+  if (!formSnapshot || !runtimeGraph) return formSnapshot
+
+  const hiddenFieldIds = collectHiddenFieldIds(runtimeGraph, activeNodeKeys)
   if (hiddenFieldIds.size === 0) return formSnapshot
 
   // Only clone when at least one hidden field is actually present in the snapshot.

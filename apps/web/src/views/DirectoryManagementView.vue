@@ -1174,7 +1174,7 @@
             <p class="directory-admin__hint">
               本地用户：{{ item.account.localUser ? describeLocalUserIdentifier(item.account.localUser) : '未绑定' }} ·
               外部用户：{{ item.account.externalUserId }} ·
-              部门：{{ item.account.departmentPaths.join('，') || '未分配部门' }}
+              部门：{{ (item.account.departmentPaths || []).join('，') || '未分配部门' }}
             </p>
             <p v-if="item.kind === 'pending_binding' && item.recommendationStatus" class="directory-admin__hint">
               推荐判断：{{ item.recommendationStatus.message }}
@@ -1687,7 +1687,7 @@
             </div>
 
             <p class="directory-admin__hint">
-              部门：{{ account.departmentPaths.join('，') || '未分配部门' }}
+              部门：{{ (account.departmentPaths || []).join('，') || '未分配部门' }}
             </p>
             <div v-if="account.localUser?.id" class="directory-admin__actions">
               <router-link
@@ -1970,6 +1970,11 @@
             <p v-if="run.errorMessage" class="directory-admin__status directory-admin__status--error">{{ run.errorMessage }}</p>
           </article>
         </section>
+
+        <DirectoryDeprovisionEvidencePanel
+          v-if="selectedIntegration"
+          :integration-id="selectedIntegration.id"
+        />
       </section>
     </div>
   </section>
@@ -1978,6 +1983,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
+import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
@@ -2464,7 +2470,7 @@ const draft = reactive<DirectoryDraft>({
   memberGroupDefaultNamespacesText: '',
   status: 'active',
   scheduleCron: '',
-  defaultDeprovisionPolicy: 'mark_inactive',
+  defaultDeprovisionPolicy: 'manual_review',
   syncEnabled: false,
 })
 
@@ -2875,7 +2881,7 @@ function resetDraft() {
   draft.memberGroupDefaultNamespacesText = ''
   draft.status = 'active'
   draft.scheduleCron = ''
-  draft.defaultDeprovisionPolicy = 'mark_inactive'
+  draft.defaultDeprovisionPolicy = 'manual_review'
   draft.syncEnabled = false
 }
 
@@ -4555,10 +4561,30 @@ async function pollAsyncRun(integrationId: string, runId: string, token: number)
   const run = items.find((item) => item.id === runId)
   if (run && run.status !== 'running') {
     stopRunPolling()
+    // DISPLAY TRUTH (B1 rework): the success summary is an ALLOWLIST — reachable only by an
+    // explicit 'completed'. Every other terminal value, including ones this build has never
+    // heard of, must fall through to the fail-safe `else` and say the sync did NOT complete.
+    // Blocklisting the known-bad states instead ("not running, not failed, no errorMessage
+    // ⇒ 完成") is exactly how the deliberate 'aborted' state rendered as SUCCESS: the admin
+    // is not going to retry on their own, and the message never corrects itself.
     if (run.status === 'failed' || run.errorMessage) {
       setStatus(`后台同步失败（运行 ${runId}）：${run.errorMessage || '未知错误'}`, 'error')
-    } else {
+    } else if (run.status === 'aborted') {
+      // 'aborted' is written by exactly one backend path — markSyncAbortedByFreeze, i.e. the
+      // apply-time recheck found an active org transfer and rolled the apply back (deliberate
+      // state, no alert, error_message stays NULL). The reason lives in the run's `meta`, which
+      // this runs payload does not carry, so the wording is derived from the status alone.
+      setStatus(
+        `后台同步已中止（运行 ${runId}）：该集成的来源正被进行中的组织迁移冻结，本次同步未写入任何数据。请先完成或取消该迁移，然后重新发起同步。`,
+        'error',
+      )
+    } else if (run.status === 'completed') {
       setStatus(buildAsyncRunSummary(run))
+    } else {
+      setStatus(
+        `后台同步以未识别的终态结束（运行 ${runId}，状态 ${run.status}），无法确认是否成功，请前往下方运行记录核对后再决定是否重试。`,
+        'error',
+      )
     }
     await refreshAfterDirectorySync(integrationId)
     return

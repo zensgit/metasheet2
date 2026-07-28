@@ -28,6 +28,8 @@ const TARGET_FILES = [
   'src/views/approval/TemplateAuthoringView.vue',
   'src/views/approval/TemplateCenterView.vue',
   'src/views/approval/TemplateDetailView.vue',
+  // FWB record-link picker is part of the approval authoring surface and starts token-only.
+  'src/approvals/components/ApprovalRecordLinkPicker.vue',
   'src/views/AutomationExecutionsView.vue',
   'src/views/WorkflowHubView.vue',
   'src/views/WorkflowDesigner.vue',

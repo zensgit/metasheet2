@@ -1320,6 +1320,10 @@ describe('AutomationExecutor', () => {
         expect(sql).toContain('org_id IS NULL AND created_by = $3')
         expect(sql).toContain('FROM user_orgs uo')
         expect(sql).toContain('uo.org_id = dg.org_id')
+        // #4526 review fix: a deactivated platform account must not keep org-scoped DingTalk
+        // destination access via a still-active user_orgs row — dual is_active filter.
+        expect(sql).toContain('JOIN users u ON u.id = uo.user_id')
+        expect(sql).toContain('u.is_active = true')
         expect(params).toEqual([['dt_other_sheet'], 'sheet_1', 'user_1'])
       }
       return { rows: [], rowCount: 0 }
@@ -3976,6 +3980,13 @@ describe('AutomationService — Rule CRUD', () => {
   })
 
   it('setRuleEnabled enables a rule', async () => {
+    const existingRow = {
+      id: 'atr_1', sheet_id: 'sheet_1', name: 'Rule',
+      trigger_type: 'schedule.cron', trigger_config: { expression: '*/5 * * * *' },
+      action_type: 'update_record', action_config: {},
+      enabled: false, created_at: new Date(), updated_at: new Date(),
+      created_by: 'u1', conditions: null, actions: null,
+    }
     const updatedRow = {
       id: 'atr_1', sheet_id: 'sheet_1', name: 'Rule',
       trigger_type: 'schedule.cron', trigger_config: { expression: '*/5 * * * *' },
@@ -3983,15 +3994,16 @@ describe('AutomationService — Rule CRUD', () => {
       enabled: true, created_at: new Date(), updated_at: new Date(),
       created_by: 'u1', conditions: null, actions: null,
     }
+    dbExecuteTakeFirstResults.push(existingRow)
     dbExecuteResults.push([updatedRow])
-    const rule = await service.setRuleEnabled('atr_1', true)
+    const rule = await service.setRuleEnabled('atr_1', 'sheet_1', true, 'u1')
     expect(rule).not.toBeNull()
     expect(rule!.enabled).toBe(true)
   })
 
   it('setRuleEnabled returns null when rule not found', async () => {
-    dbExecuteResults.push([])
-    const rule = await service.setRuleEnabled('nonexistent', false)
+    dbExecuteTakeFirstResults.push(undefined)
+    const rule = await service.setRuleEnabled('nonexistent', 'sheet_1', false, 'u1')
     expect(rule).toBeNull()
   })
 

@@ -567,10 +567,34 @@ components:
         counterparty_work_date:
           type: string
           format: date
-        requesterShiftId: { type: string }
-        requester_shift_id: { type: string }
-        counterpartyShiftId: { type: string }
-        counterparty_shift_id: { type: string }
+        requesterShiftId:
+          type: string
+          nullable: true
+          description: Null when historical evidence outlives its deleted requester shift.
+        requester_shift_id:
+          type: string
+          nullable: true
+          deprecated: true
+        requesterShiftLabel:
+          type: string
+          description: Resolved requester shift name or a neutral deleted/unavailable label.
+        requesterShiftStatus:
+          type: string
+          enum: [available, deleted]
+        counterpartyShiftId:
+          type: string
+          nullable: true
+          description: Null when historical evidence outlives its deleted counterparty shift.
+        counterparty_shift_id:
+          type: string
+          nullable: true
+          deprecated: true
+        counterpartyShiftLabel:
+          type: string
+          description: Resolved counterparty shift name or a neutral deleted/unavailable label.
+        counterpartyShiftStatus:
+          type: string
+          enum: [available, deleted]
         requesterSlotIndex: { type: integer }
         requester_slot_index: { type: integer }
         counterpartySlotIndex: { type: integer }
@@ -623,7 +647,16 @@ components:
         targetDepartmentRef:
           type: string
           nullable: true
-        targetShiftId: { type: string }
+        targetShiftId:
+          type: string
+          nullable: true
+          description: Null only when a historical cancelled dispatch outlives its deleted target shift.
+        targetShiftLabel:
+          type: string
+          description: Resolved shift name or a neutral deleted/unavailable label.
+        targetShiftStatus:
+          type: string
+          enum: [available, deleted]
         slotIndex:
           type: integer
           minimum: 0
@@ -973,6 +1006,18 @@ components:
         description:
           type: string
           nullable: true
+        attendanceType:
+          type: string
+          enum: [fixed_shift, scheduled_shift, free_time]
+        attendance_type:
+          type: string
+          enum: [fixed_shift, scheduled_shift, free_time]
+          deprecated: true
+        memberCount:
+          type: integer
+        member_count:
+          type: integer
+          deprecated: true
         createdAt:
           type: string
           format: date-time
@@ -996,6 +1041,62 @@ components:
           type: string
           format: date-time
           nullable: true
+    AttendanceCalculationGroupMembership:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+        userId:
+          type: string
+        groupId:
+          type: string
+          format: uuid
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        assignedBy:
+          type: string
+        assignedReason:
+          type: string
+        assignedCorrelationId:
+          type: string
+        closedBy:
+          type: string
+          nullable: true
+        closedReason:
+          type: string
+          nullable: true
+        closedCorrelationId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - orgId
+        - userId
+        - groupId
+        - effectiveFrom
+        - effectiveTo
+        - assignedBy
+        - assignedReason
+        - assignedCorrelationId
+        - closedBy
+        - closedReason
+        - closedCorrelationId
+        - createdAt
+        - updatedAt
     AttendancePayrollTemplate:
       type: object
       properties:
@@ -1661,6 +1762,114 @@ components:
           deprecated: true
           items:
             type: integer
+        segments:
+          type: array
+          description: >-
+            Canonical shift segments (W3 / #4556). Persisted rows when present;
+            a legacy shift without segment rows is synthesized as segment 0 from
+            its envelope. The legacy workStartTime/workEndTime/isOvernight fields
+            expose the OUTER envelope of these segments for compatibility only —
+            for a multi-segment shift (calculationMode=segments) the envelope is
+            not payable time.
+          items:
+            $ref: '#/components/schemas/AttendanceShiftSegment'
+        calculationMode:
+          type: string
+          enum: [envelope, segments]
+        plannedMinutes:
+          type: integer
+          description: Sum of per-segment planned minutes; breaks between segments are never counted.
+        capabilities:
+          $ref: '#/components/schemas/AttendanceShiftCapabilities'
+    AttendanceShiftSegment:
+      type: object
+      properties:
+        id:
+          type: string
+          nullable: true
+          description: Persisted segment row id; null when synthesized from the legacy envelope.
+        segmentIndex:
+          type: integer
+          minimum: 0
+          maximum: 2
+        segment_index:
+          type: integer
+          deprecated: true
+        startTime:
+          type: string
+          description: Local wall-clock start time (HH:MM) in the parent shift timezone.
+        start_time:
+          type: string
+          deprecated: true
+        startDayOffset:
+          type: integer
+          enum: [0]
+          description: Fixed to 0 in v1.
+        start_day_offset:
+          type: integer
+          deprecated: true
+        endTime:
+          type: string
+          description: Local wall-clock end time (HH:MM) in the parent shift timezone.
+        end_time:
+          type: string
+          deprecated: true
+        endDayOffset:
+          type: integer
+          minimum: 0
+          maximum: 1
+        end_day_offset:
+          type: integer
+          deprecated: true
+    AttendanceShiftSegmentInput:
+      type: object
+      additionalProperties: false
+      description: >-
+        One shift segment for create/update. 1..3 segments, dense indexes from 0,
+        positive duration, ordered non-overlapping after day offsets, total <= 24h,
+        at most one midnight crossing. Unknown properties are rejected.
+      properties:
+        segmentIndex:
+          type: integer
+          minimum: 0
+          maximum: 2
+        startTime:
+          type: string
+          pattern: '^(?:[01]\d|2[0-3]):[0-5]\d$'
+        endTime:
+          type: string
+          pattern: '^(?:[01]\d|2[0-3]):[0-5]\d$'
+        startDayOffset:
+          type: integer
+          enum: [0]
+        endDayOffset:
+          type: integer
+          minimum: 0
+          maximum: 1
+      required: [startTime, endTime]
+    AttendanceShiftCapabilities:
+      type: object
+      description: >-
+        Values-safe capability projection (state and labels only). Shows that
+        authoritative segment calculation is disabled by default; while disabled,
+        multi-segment authoring is preview-only.
+      properties:
+        segmentCalculation:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            defaultEnabled:
+              type: boolean
+              enum: [false]
+            authoritativeResults:
+              type: boolean
+            multiSegmentAuthoring:
+              type: string
+              enum: [preview_only, enabled]
+            flag:
+              type: string
+              enum: [ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED]
     AttendanceShiftAssignment:
       type: object
       properties:
@@ -1680,6 +1889,15 @@ components:
           type: string
         shift_id:
           type: string
+          deprecated: true
+        slotIndex:
+          type: integer
+          minimum: 0
+          maximum: 2
+        slot_index:
+          type: integer
+          minimum: 0
+          maximum: 2
           deprecated: true
         startDate:
           type: string
@@ -3246,7 +3464,9 @@ components:
           items: {}
           description: Candidate values for the in operator.
       required: [fieldId, operator]
-    FormField:
+    # Detail leaf columns: same field surface as FormField but WITHOUT record-link / nested detail
+    # (v1: record-link is top-level only; detail cannot nest).
+    FormFieldDetailLeaf:
       type: object
       properties:
         id:
@@ -3272,6 +3492,113 @@ components:
         visibilityRule:
           $ref: '#/components/schemas/FormFieldVisibilityRule'
       required: [id, type, label]
+    # Server-pinned multitable target for type=record-link (both required, non-blank at publish).
+    # pattern rejects whitespace-only (backend trims then rejects empty); minLength alone is not enough.
+    RecordLinkFieldProps:
+      type: object
+      additionalProperties: false
+      properties:
+        baseId:
+          type: string
+          minLength: 1
+          # Must contain at least one non-whitespace char (OAS/JSON Schema ECMA-262 pattern).
+          pattern: '.*\S.*'
+          description: |
+            Pinned multitable base id (publish-time; filler cannot override).
+            Must be non-blank after trim — whitespace-only is invalid.
+        sheetId:
+          type: string
+          minLength: 1
+          pattern: '.*\S.*'
+          description: |
+            Pinned multitable sheet id (publish-time; filler cannot override).
+            Must be non-blank after trim — whitespace-only is invalid.
+      required: [baseId, sheetId]
+    # Non-record-link form fields: free-form props. type enum excludes record-link so it cannot
+    # overlap FormFieldRecordLink (invalid oneOf when both members accept the same payload).
+    FormFieldGeneric:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [text, textarea, number, date, datetime, select, multi-select, user, attachment, detail]
+        label:
+          type: string
+        required:
+          type: boolean
+        placeholder:
+          type: string
+        defaultValue:
+          nullable: true
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormOption'
+        props:
+          type: object
+          additionalProperties: true
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormFieldDetailLeaf'
+          description: Detail-group leaf columns (only when type=detail). Never contains record-link.
+      required: [id, type, label]
+    # record-link only: props MUST be strict RecordLinkFieldProps (baseId + sheetId required).
+    # additionalProperties:false — no columns/minRows/maxRows/unknown outer keys (top-level only;
+    # runtime rejects detail-only keys on non-detail fields).
+    FormFieldRecordLink:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [record-link]
+          description: |
+            FWB-0 Layer 2 record-link field. Pins multitable base/sheet via props and stores
+            exactly one `{ recordId }` value. Top-level only in v1 (never a detail leaf).
+        label:
+          type: string
+        required:
+          type: boolean
+        placeholder:
+          type: string
+        defaultValue:
+          nullable: true
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormOption'
+        props:
+          $ref: '#/components/schemas/RecordLinkFieldProps'
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
+      required: [id, type, label, props]
+    # Discriminated union: record-link requires RecordLinkFieldProps; other types use free-form props.
+    # Avoids invalid overlapping oneOf on a single FormField.props field.
+    FormField:
+      oneOf:
+        - $ref: '#/components/schemas/FormFieldRecordLink'
+        - $ref: '#/components/schemas/FormFieldGeneric'
+      discriminator:
+        propertyName: type
+        mapping:
+          record-link: '#/components/schemas/FormFieldRecordLink'
+          text: '#/components/schemas/FormFieldGeneric'
+          textarea: '#/components/schemas/FormFieldGeneric'
+          number: '#/components/schemas/FormFieldGeneric'
+          date: '#/components/schemas/FormFieldGeneric'
+          datetime: '#/components/schemas/FormFieldGeneric'
+          select: '#/components/schemas/FormFieldGeneric'
+          multi-select: '#/components/schemas/FormFieldGeneric'
+          user: '#/components/schemas/FormFieldGeneric'
+          attachment: '#/components/schemas/FormFieldGeneric'
+          detail: '#/components/schemas/FormFieldGeneric'
     FormSchema:
       type: object
       properties:

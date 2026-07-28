@@ -10,6 +10,27 @@ const { z } = require('zod')
 const { createRuleEngine } = require('./engine/index.cjs')
 const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
 const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
+const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolver.cjs')
+const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
+const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
+const {
+  DEFAULT_ATTRIBUTION_TAIL_MINUTES,
+  MAX_ATTRIBUTION_TAIL_MINUTES,
+  OVERTIME_ATTRIBUTION_KEY,
+  FROZEN_ATTRIBUTION_KEY,
+  REASON: WORK_DATE_REASON,
+  clampAttributionTailMinutes,
+  normalizeWorkDateAttributionSetting,
+  parseOvertimeAttributionV1,
+  buildOvertimeAttributionV1,
+  parseFrozenWorkDateAttribution,
+  buildFrozenWorkDateAttribution,
+  createAttendanceWorkDateResolver,
+} = attendanceWorkDateResolverLib
+const {
+  OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+  createAllWorkDateAdapters,
+} = attendanceWorkDateAdaptersLib
 
 const DEFAULT_ORG_ID = 'default'
 const DEFAULT_RULE = {
@@ -509,6 +530,11 @@ const DEFAULT_SETTINGS = {
       maxUsersPerRun: 100,
     },
   },
+  // W2 / #4556: post-shift work-date attribution tail. Separate from late/early grace and from
+  // auto-shift maxToleranceMinutes (R5 / OD-4556-6). Default 120 minutes.
+  workDateAttribution: {
+    postShiftTailMinutes: DEFAULT_ATTRIBUTION_TAIL_MINUTES,
+  },
 }
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
@@ -718,19 +744,20 @@ function resolveImportMultiPunchSourceValue(valueFor, aliases) {
   return undefined
 }
 
-function normalizeImportMultiPunchDateTime(value, workDate, timezone) {
-  const parsed = parseImportedDateTime(value, workDate, timezone)
+function normalizeImportMultiPunchDateTime(value, workDate, rule) {
+  const parsed = parseImportedPunchDateTime(value, workDate, rule)
   if (parsed instanceof Date && !Number.isNaN(parsed.getTime())) return parsed.toISOString()
   return typeof value === 'string' ? value.trim() : value
 }
 
 function buildAttendanceImportMultiPunchMeta(options = {}) {
-  const { valueFor, workDate, timezone, clearMissing = true } = options
+  const { valueFor, workDate, rule, timezone, clearMissing = true } = options
+  const punchRule = rule ?? { timezone }
   const meta = {}
   for (const source of ATTENDANCE_MULTI_PUNCH_TIME_SOURCES) {
     const value = resolveImportMultiPunchSourceValue(valueFor, source.aliases)
     if (value !== undefined) {
-      meta[source.metaKey] = normalizeImportMultiPunchDateTime(value, workDate, timezone)
+      meta[source.metaKey] = normalizeImportMultiPunchDateTime(value, workDate, punchRule)
     } else if (clearMissing) {
       meta[source.metaKey] = null
     }
@@ -6580,6 +6607,39 @@ function parseImportedDateTime(value, workDate, timeZone) {
   return parseDateInput(text)
 }
 
+function parseImportedPunchDateTime(value, workDate, rule) {
+  const timezone = rule?.timezone
+  const workStartTime = normalizeTimeString(rule?.workStartTime ?? rule?.work_start_time)
+  const workEndTime = normalizeTimeString(rule?.workEndTime ?? rule?.work_end_time)
+  const isOvernight = Boolean(
+    workStartTime
+    && workEndTime
+    && resolveOvernightFlag(
+      rule?.isOvernight ?? rule?.is_overnight,
+      workStartTime,
+      workEndTime,
+    ),
+  )
+
+  const parsed = parseImportedDateTime(value, workDate, timezone)
+  if (!parsed || !isOvernight || !workStartTime || !workDate) return parsed
+  if (value instanceof Date) return parsed
+  const text = String(value ?? '').trim()
+  if (!text || /\d{4}-\d{2}-\d{2}/.test(text)) return parsed
+  const timeMatch = text.match(/\d{1,2}:\d{2}(?::\d{2})?/)
+  const clockTime = normalizeTimeString(timeMatch?.[0])
+  if (!clockTime || clockTime >= workStartTime) return parsed
+  const nextDate = addDaysToDateKey(workDate, 1)
+  return nextDate ? buildZonedDate(nextDate, timeMatch[0], timezone) : parsed
+}
+
+function parseImportedPunchDateTimes({ firstInValue, lastOutValue, workDate, rule }) {
+  return {
+    firstInAt: parseImportedPunchDateTime(firstInValue, workDate, rule),
+    lastOutAt: parseImportedPunchDateTime(lastOutValue, workDate, rule),
+  }
+}
+
 function normalizeTimeString(value) {
   if (!value || typeof value !== 'string') return null
   const match = value.trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/)
@@ -8127,6 +8187,7 @@ function mapShiftRow(row) {
   const workStartTime = row.work_start_time ?? DEFAULT_SHIFT.workStartTime
   const workEndTime = row.work_end_time ?? DEFAULT_SHIFT.workEndTime
   const isOvernight = resolveOvernightFlag(row.is_overnight, workStartTime, workEndTime)
+  const rawSegmentCount = row.shift_segment_count ?? row.segment_count
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -8147,7 +8208,171 @@ function mapShiftRow(row) {
     rounding_minutes: Number(row.rounding_minutes ?? DEFAULT_SHIFT.roundingMinutes),
     workingDays: normalizeWorkingDays(row.working_days),
     working_days: normalizeWorkingDays(row.working_days),
+    segmentCount: rawSegmentCount == null ? null : Number(rawSegmentCount),
   }
+}
+
+// W3 (#4556): one canonical shift service for every shift create/update/read/delete
+// and for the reference-writer assignability guard. Lazy singleton: the factory deps
+// (HttpError, resolveShiftTiming, mapShiftRow, ...) are module-scope definitions that
+// must exist before first use; routes only call this at request time.
+let attendanceShiftService = null
+function getAttendanceShiftService() {
+  if (!attendanceShiftService) {
+    attendanceShiftService = attendanceShiftServiceLib.createAttendanceShiftService({
+      HttpError,
+      randomUUID,
+      resolveShiftTiming,
+      normalizeWorkingDays,
+      mapShiftRow,
+      DEFAULT_SHIFT,
+      DEFAULT_ORG_ID,
+      normalizeLegacyRotationRulesForShiftName,
+    })
+  }
+  return attendanceShiftService
+}
+
+function assertWorkContextSegmentCalculationAllowed(orgId, workContext) {
+  if (!workContext || workContext.source === 'rule') return
+  const shift = workContext.rule
+  getAttendanceShiftService().assertSegmentCalculationAllowed({
+    orgId,
+    shiftId: shift?.id,
+    segmentCount: shift?.segmentCount,
+    producer: 'attendance calculation',
+  })
+}
+
+function respondAttendanceShiftServiceError(res, error) {
+  if (!(error instanceof HttpError)) return false
+  res.status(error.status).json({
+    ok: false,
+    error: {
+      code: error.code,
+      message: error.message,
+      ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+    },
+  })
+  return true
+}
+
+// W3 erratum: historical evidence rows (rejected swap snapshots, cancelled dispatch
+// snapshots) that can no longer resolve their shift must expose a neutral
+// deleted/unavailable label and never the raw UUID. Resolvable shifts keep their id
+// and gain a display label.
+const SHIFT_REFERENCE_DELETED_LABEL = attendanceShiftServiceLib.SHIFT_REFERENCE_DELETED_LABEL
+
+async function applyShiftReferenceLabelsToMappedRows(db, orgId, mappedRows, fieldSpecs) {
+  const rows = Array.isArray(mappedRows) ? mappedRows : []
+  const ids = []
+  for (const row of rows) {
+    for (const spec of fieldSpecs) {
+      const value = row?.[spec.idFields[0]]
+      if (value) ids.push(value)
+    }
+  }
+  const lookup = await getAttendanceShiftService().loadShiftNameLookup(db, orgId, ids)
+  const scrubNestedPath = (row, pathKeys) => {
+    if (!Array.isArray(pathKeys) || pathKeys.length === 0) return
+    let cursor = row
+    for (let index = 0; index < pathKeys.length - 1; index += 1) {
+      cursor = cursor?.[pathKeys[index]]
+      if (!cursor || typeof cursor !== 'object') return
+    }
+    if (cursor[pathKeys[pathKeys.length - 1]] !== undefined) {
+      cursor[pathKeys[pathKeys.length - 1]] = null
+    }
+  }
+  for (const row of rows) {
+    for (const spec of fieldSpecs) {
+      const value = row?.[spec.idFields[0]]
+      if (!value) {
+        // Dispatch targets are required at create; a null id therefore means the
+        // shift was deleted (the W3 FK is ON DELETE SET NULL — the evidence row is
+        // preserved, the unresolvable pointer is cleared).
+        if (spec.nullMeansDeleted) {
+          row[spec.labelField] = SHIFT_REFERENCE_DELETED_LABEL
+          row[spec.statusField] = 'deleted'
+          for (const metadataIdPath of spec.metadataIdPaths ?? []) {
+            scrubNestedPath(row, metadataIdPath)
+          }
+        }
+        continue
+      }
+      if (lookup.has(String(value))) {
+        row[spec.labelField] = lookup.get(String(value)) || SHIFT_REFERENCE_DELETED_LABEL
+        row[spec.statusField] = 'available'
+      } else {
+        for (const idField of spec.idFields) row[idField] = null
+        row[spec.labelField] = SHIFT_REFERENCE_DELETED_LABEL
+        row[spec.statusField] = 'deleted'
+        for (const metadataIdPath of spec.metadataIdPaths ?? []) {
+          scrubNestedPath(row, metadataIdPath)
+        }
+      }
+    }
+  }
+  return rows
+}
+
+const SHIFT_SWAP_SHIFT_LABEL_SPECS = Object.freeze([
+  Object.freeze({ idFields: ['requesterShiftId', 'requester_shift_id'], labelField: 'requesterShiftLabel', statusField: 'requesterShiftStatus' }),
+  Object.freeze({ idFields: ['counterpartyShiftId', 'counterparty_shift_id'], labelField: 'counterpartyShiftLabel', statusField: 'counterpartyShiftStatus' }),
+])
+const SCHEDULE_DISPATCH_SHIFT_LABEL_SPECS = Object.freeze([
+  Object.freeze({
+    idFields: ['targetShiftId'],
+    labelField: 'targetShiftLabel',
+    statusField: 'targetShiftStatus',
+    nullMeansDeleted: true,
+    metadataIdPaths: [
+      ['request', 'metadata', 'scheduleDispatch', 'targetShiftId'],
+      ['request', 'metadata', 'scheduleDispatch', 'target_shift_id'],
+    ],
+  }),
+])
+
+async function applyScheduleDispatchMetadataLabelsToRequests(db, orgId, mappedRows) {
+  const rows = Array.isArray(mappedRows) ? mappedRows : []
+  const requestIds = rows
+    .filter(row => row?.request_type === 'schedule_dispatch' && row?.id)
+    .map(row => row.id)
+  if (requestIds.length === 0) return rows
+
+  const detailRows = await db.query(
+    `SELECT request_id, target_shift_id
+       FROM attendance_schedule_dispatch_requests
+      WHERE org_id = $1
+        AND request_id = ANY($2::uuid[])`,
+    [orgId, requestIds]
+  )
+  const detailByRequestId = new Map(detailRows.map(row => [String(row.request_id), row]))
+  const targetIds = detailRows.map(row => row.target_shift_id).filter(Boolean)
+  const shiftLookup = await getAttendanceShiftService().loadShiftNameLookup(db, orgId, targetIds)
+
+  for (const row of rows) {
+    const detail = detailByRequestId.get(String(row?.id ?? ''))
+    const metadata = normalizeMetadata(row.metadata)
+    const dispatch = metadata.scheduleDispatch
+    if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch)) continue
+    // Fail closed for an orphaned schedule_dispatch request as well. The detail
+    // row is the org-scoped source of truth; trusting a metadata-only UUID when
+    // that row is missing would reintroduce the raw-id fallback this W3 read
+    // hardening is meant to eliminate.
+    const targetShiftId = detail?.target_shift_id ? String(detail.target_shift_id) : null
+    if (targetShiftId && shiftLookup.has(targetShiftId)) {
+      dispatch.targetShiftLabel = shiftLookup.get(targetShiftId) || SHIFT_REFERENCE_DELETED_LABEL
+      dispatch.targetShiftStatus = 'available'
+      continue
+    }
+    if (Object.prototype.hasOwnProperty.call(dispatch, 'targetShiftId')) dispatch.targetShiftId = null
+    if (Object.prototype.hasOwnProperty.call(dispatch, 'target_shift_id')) dispatch.target_shift_id = null
+    dispatch.targetShiftLabel = SHIFT_REFERENCE_DELETED_LABEL
+    dispatch.targetShiftStatus = 'deleted'
+    row.metadata = metadata
+  }
+  return rows
 }
 
 function mapAttendanceGroupRow(row) {
@@ -9071,6 +9296,7 @@ function mapShiftFromAssignmentRow(row) {
     early_grace_minutes: row.shift_early_grace_minutes,
     rounding_minutes: row.shift_rounding_minutes,
     working_days: row.shift_working_days,
+    shift_segment_count: row.shift_segment_count,
   })
 }
 
@@ -10375,6 +10601,13 @@ async function softDeactivateAttendanceGroupFixedScheduleManagedRows(db, input, 
 }
 
 async function applyAttendanceGroupFixedSchedule(db, input) {
+  // W3 erratum: typed 422 + zero writes when a multi-segment shift is applied while
+  // authoritative segment calculation is OFF for the org.
+  await getAttendanceShiftService().assertShiftReferenceAllowed(db, {
+    orgId: input.orgId,
+    shiftId: input.shiftId,
+    producer: 'fixed_schedule_apply',
+  })
   const result = await buildAttendanceGroupFixedSchedulePlan(db, input, { lockTargets: true })
   if (!result.ok) return result
   const plan = result.data
@@ -10414,6 +10647,13 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
 }
 
 async function rebuildAttendanceGroupFixedSchedule(db, input) {
+  // W3 erratum: typed 422 + zero writes when a multi-segment shift is rebuilt while
+  // authoritative segment calculation is OFF for the org.
+  await getAttendanceShiftService().assertShiftReferenceAllowed(db, {
+    orgId: input.orgId,
+    shiftId: input.shiftId,
+    producer: 'fixed_schedule_rebuild',
+  })
   const result = await buildAttendanceGroupFixedSchedulePlan(db, input, {
     lockTargets: true,
     lockManagedRowsForProducerKey: true,
@@ -12669,6 +12909,9 @@ function normalizeSettings(raw) {
     attendanceResultEditPolicy: normalizeAttendanceResultEditPolicySetting(raw.attendanceResultEditPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
     reportSync: normalizeAttendanceReportSyncSetting(raw.reportSync),
+    workDateAttribution: normalizeWorkDateAttributionSetting(
+      raw.workDateAttribution ?? raw.work_date_attribution,
+    ),
   }
 }
 
@@ -13709,6 +13952,11 @@ function mergeSettings(base, update) {
         ...(update?.reportSync?.scheduledTrigger || {}),
       },
     },
+    // W2 / #4556: attribution tail is independent of grace/tolerance; partial merge preserves default.
+    workDateAttribution: {
+      ...(base?.workDateAttribution || {}),
+      ...(update?.workDateAttribution || {}),
+    },
   })
 }
 
@@ -14053,9 +14301,12 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
               s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
-              s.working_days AS shift_working_days
+              s.working_days AS shift_working_days,
+              (SELECT COUNT(*)::int
+                 FROM attendance_shift_segments seg
+                WHERE seg.org_id = a.org_id AND seg.shift_id = a.shift_id) AS shift_segment_count
        FROM attendance_shift_assignments a
-       JOIN attendance_shifts s ON s.id = a.shift_id
+       JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
        WHERE a.org_id = $1
          AND a.user_id = $2
          AND a.is_active = true
@@ -14083,7 +14334,13 @@ async function loadShiftById(db, orgId, shiftId) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
-      'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2 LIMIT 1',
+      `SELECT s.*,
+              (SELECT COUNT(*)::int
+                 FROM attendance_shift_segments seg
+                WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS segment_count
+         FROM attendance_shifts s
+        WHERE s.id = $1 AND s.org_id = $2
+        LIMIT 1`,
       [shiftId, targetOrg]
     )
     if (!rows.length) return null
@@ -14143,7 +14400,12 @@ async function loadShiftReferenceLookup(db, orgId, options = {}) {
   let rows
   if (!ids.length && !names.length) {
     rows = await db.query(
-      'SELECT * FROM attendance_shifts WHERE org_id = $1',
+      `SELECT s.*,
+              (SELECT COUNT(*)::int
+                 FROM attendance_shift_segments seg
+                WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS segment_count
+         FROM attendance_shifts s
+        WHERE s.org_id = $1`,
       [targetOrg]
     )
   } else {
@@ -14151,16 +14413,20 @@ async function loadShiftReferenceLookup(db, orgId, options = {}) {
     const predicates = []
     if (ids.length) {
       params.push(ids)
-      predicates.push(`id = ANY($${params.length}::uuid[])`)
+      predicates.push(`s.id = ANY($${params.length}::uuid[])`)
     }
     if (names.length) {
       params.push(names)
-      predicates.push(`name = ANY($${params.length}::text[])`)
+      predicates.push(`s.name = ANY($${params.length}::text[])`)
     }
     rows = await db.query(
-      `SELECT * FROM attendance_shifts
-       WHERE org_id = $1
-         AND (${predicates.join(' OR ')})`,
+      `SELECT s.*,
+              (SELECT COUNT(*)::int
+                 FROM attendance_shift_segments seg
+                WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS segment_count
+         FROM attendance_shifts s
+        WHERE s.org_id = $1
+          AND (${predicates.join(' OR ')})`,
       params
     )
   }
@@ -14310,7 +14576,7 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
               r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
               r.is_active AS rotation_is_active
        FROM attendance_rotation_assignments a
-       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id AND r.org_id = a.org_id
        WHERE a.org_id = $1
          AND a.user_id = $2
          AND a.is_active = true
@@ -14365,6 +14631,7 @@ async function resolveWorkContext(options) {
     isWorkingDay,
     source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
   }
+  assertWorkContextSegmentCalculationAllowed(orgId, context)
   // Step 5: layer calendarPolicy.overrides on top of profile/holiday. D4
   // pinned: only hit the DB when we actually have overrides to match, and
   // accept caller-provided overrides/scopeContext to avoid redundant
@@ -14391,6 +14658,482 @@ async function resolveWorkContext(options) {
     })
   }
   return context
+}
+
+function getPunchShiftWindow(context, workDate, fallbackTimezone) {
+  const rule = context?.rule
+  const workStartTime = normalizeTimeString(rule?.workStartTime ?? rule?.work_start_time)
+  const workEndTime = normalizeTimeString(rule?.workEndTime ?? rule?.work_end_time)
+  if (!workStartTime || !workEndTime) return null
+  const timezone = typeof rule?.timezone === 'string' && rule.timezone.trim()
+    ? rule.timezone.trim()
+    : fallbackTimezone
+  const isOvernight = resolveOvernightFlag(rule?.isOvernight ?? rule?.is_overnight, workStartTime, workEndTime)
+  const endDate = isOvernight ? addDaysToDateKey(workDate, 1) : workDate
+  const startAt = buildZonedDate(workDate, workStartTime, timezone)
+  const endAt = buildZonedDate(endDate, workEndTime, timezone)
+  if (!startAt || !endAt || endAt.getTime() <= startAt.getTime()) return null
+  return { startAt, endAt, timezone, isOvernight }
+}
+
+function isPunchWithinShiftWindow(occurredAt, context, workDate, fallbackTimezone) {
+  const window = getPunchShiftWindow(context, workDate, fallbackTimezone)
+  if (!window || !(occurredAt instanceof Date) || Number.isNaN(occurredAt.getTime())) return false
+  const occurredAtMs = occurredAt.getTime()
+  return occurredAtMs >= window.startAt.getTime() && occurredAtMs <= window.endAt.getTime()
+}
+
+/**
+ * Org-scoped published shift + rotation candidates for the shared work-date resolver.
+ * Returns ALL published slots for the requested work dates (no LIMIT 1 / row-order winner).
+ * Each row is an atomic (workDate, shiftId, segmentIndex=null, absolute window inputs).
+ */
+async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const dates = Array.isArray(workDates)
+    ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
+    : []
+  if (!userId || dates.length === 0) return []
+
+  const candidates = []
+
+  // Direct / temporary published assignments — all slots, org-scoped join on shifts.
+  try {
+    const assignmentRows = await db.query(
+      `SELECT a.id AS assignment_id, a.org_id, a.user_id, a.shift_id, a.slot_index,
+              a.start_date, a.end_date, a.assignment_kind,
+              s.name AS shift_name, s.timezone AS shift_timezone,
+              s.work_start_time AS shift_work_start_time, s.work_end_time AS shift_work_end_time,
+              s.is_overnight AS shift_is_overnight
+       FROM attendance_shift_assignments a
+       JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
+       WHERE a.org_id = $1
+         AND a.user_id = $2
+         AND a.is_active = true
+         AND COALESCE(a.publish_status, 'published') = 'published'
+         AND a.start_date <= $3::date
+         AND (a.end_date IS NULL OR a.end_date >= $4::date)
+       ORDER BY a.user_id, a.slot_index ASC NULLS FIRST, a.start_date DESC, a.created_at DESC`,
+      [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
+    )
+    for (const row of assignmentRows || []) {
+      for (const workDate of dates) {
+        const start = normalizeDateOnly(row.start_date)
+        const end = row.end_date == null ? null : normalizeDateOnly(row.end_date)
+        if (start && start > workDate) continue
+        if (end && end < workDate) continue
+        if (!row.shift_id) continue
+        if (explicitShiftId && String(row.shift_id) !== String(explicitShiftId)) continue
+        candidates.push({
+          orgId: row.org_id,
+          userId: row.user_id,
+          workDate,
+          shiftId: String(row.shift_id),
+          segmentIndex: null,
+          assignmentId: String(row.assignment_id),
+          source: 'shift',
+          timezone: row.shift_timezone,
+          workStartTime: row.shift_work_start_time,
+          workEndTime: row.shift_work_end_time,
+          isOvernight: row.shift_is_overnight,
+        })
+      }
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+
+  // Published rotation assignments — resolve the sequence slot per workDate (org-scoped).
+  try {
+    const rotationRows = await db.query(
+      `SELECT a.id AS assignment_id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date,
+              r.name AS rotation_name, r.timezone AS rotation_timezone,
+              r.shift_sequence AS rotation_shift_sequence, r.is_active AS rotation_is_active
+       FROM attendance_rotation_assignments a
+       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id AND r.org_id = a.org_id
+       WHERE a.org_id = $1
+         AND a.user_id = $2
+         AND a.is_active = true
+         AND COALESCE(a.publish_status, 'published') = 'published'
+         AND r.is_active = true
+         AND a.start_date <= $3::date
+         AND (a.end_date IS NULL OR a.end_date >= $4::date)
+       ORDER BY a.start_date DESC, a.created_at DESC`,
+      [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
+    )
+    for (const row of rotationRows || []) {
+      const rotation = mapRotationRuleFromAssignmentRow(row)
+      if (!rotation?.shiftSequence?.length) continue
+      for (const workDate of dates) {
+        const start = normalizeDateOnly(row.start_date)
+        const end = row.end_date == null ? null : normalizeDateOnly(row.end_date)
+        if (start && start > workDate) continue
+        if (end && end < workDate) continue
+        const offset = diffDays(row.start_date, workDate)
+        if (offset < 0) continue
+        const index = offset % rotation.shiftSequence.length
+        const shiftRef = rotation.shiftSequence[index]
+        if (!shiftRef) {
+          throw new Error('ATTENDANCE_ROTATION_SHIFT_REFERENCE_INVALID')
+        }
+        const shift = await loadShiftByReference(db, targetOrg, shiftRef)
+        if (!shift?.id) {
+          throw new Error('ATTENDANCE_ROTATION_SHIFT_REFERENCE_INVALID')
+        }
+        if (explicitShiftId && String(shift.id) !== String(explicitShiftId)) continue
+        // Cross-org shift reference must fail closed at resolver layer; tag org from assignment.
+        candidates.push({
+          orgId: row.org_id,
+          userId: row.user_id,
+          workDate,
+          shiftId: String(shift.id),
+          segmentIndex: null,
+          assignmentId: String(row.assignment_id),
+          source: 'rotation',
+          timezone: shift.timezone ?? rotation.timezone,
+          workStartTime: shift.workStartTime ?? shift.work_start_time,
+          workEndTime: shift.workEndTime ?? shift.work_end_time,
+          isOvernight: shift.isOvernight ?? shift.is_overnight,
+        })
+      }
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+
+  return candidates
+}
+
+async function loadOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const dates = Array.isArray(workDates)
+    ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
+    : []
+  if (!userId || dates.length === 0) return []
+  try {
+    const rows = await db.query(
+      `SELECT user_id, org_id, work_date, first_in_at, last_out_at, status
+       FROM attendance_records
+       WHERE org_id = $1
+         AND user_id = $2
+         AND work_date = ANY($3::date[])
+         AND first_in_at IS NOT NULL
+         AND last_out_at IS NULL`,
+      [targetOrg, userId, dates]
+    )
+    return (rows || []).map((row) => ({
+      orgId: row.org_id,
+      userId: row.user_id,
+      workDate: normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10),
+      firstInAt: row.first_in_at,
+      lastOutAt: row.last_out_at,
+      status: row.status,
+    }))
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
+}
+
+async function loadApprovedOvertimeWindowsForWorkDateResolver(db, { orgId, userId, workDates }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const dates = Array.isArray(workDates)
+    ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
+    : []
+  if (!userId || dates.length === 0) return []
+  try {
+    const rows = await db.query(
+      `SELECT id, org_id, user_id, work_date, requested_in_at, requested_out_at, metadata, status
+       FROM attendance_requests
+       WHERE org_id = $1
+         AND user_id = $2
+         AND work_date = ANY($3::date[])
+         AND request_type = 'overtime'
+         AND status = 'approved'`,
+      [targetOrg, userId, dates]
+    )
+    return (rows || []).map((row) => {
+      const metadata = normalizeMetadata(row.metadata)
+      const anchor = parseOvertimeAttributionV1(
+        metadata?.[OVERTIME_ATTRIBUTION_KEY] ?? metadata?.overtimeAttributionV1,
+      )
+      return {
+        requestId: row.id,
+        orgId: row.org_id,
+        userId: row.user_id,
+        workDate: normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10),
+        shiftId: anchor?.shiftId || null,
+        approvedStartAt: row.requested_in_at ? new Date(row.requested_in_at) : null,
+        approvedEndAt: row.requested_out_at ? new Date(row.requested_out_at) : null,
+        // Legacy approved without anchor never extends (OD-4556-7 / R6).
+        anchor,
+      }
+    })
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
+}
+
+async function loadWorkDateAttributionTailMinutes(db) {
+  try {
+    const rows = await db.query(
+      'SELECT value FROM system_configs WHERE key = $1',
+      [SETTINGS_KEY],
+    )
+    if (!rows.length) return DEFAULT_ATTRIBUTION_TAIL_MINUTES
+    const stored = rows[0]?.value
+    const raw = typeof stored === 'string' ? JSON.parse(stored) : stored
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('ATTENDANCE_SETTINGS_SOURCE_INVALID')
+    }
+    const normalized = normalizeWorkDateAttributionSetting(
+      raw.workDateAttribution ?? raw.work_date_attribution,
+    )
+    return clampAttributionTailMinutes(
+      normalized.postShiftTailMinutes,
+      DEFAULT_ATTRIBUTION_TAIL_MINUTES,
+    )
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return DEFAULT_ATTRIBUTION_TAIL_MINUTES
+    throw error
+  }
+}
+
+function createPluginAttendanceWorkDateResolver(db) {
+  const resolver = createAttendanceWorkDateResolver({
+    toWorkDate,
+    buildZonedDate,
+    addDaysToDateKey,
+    normalizeTimeString,
+    resolveOvernightFlag,
+    async loadPublishedCandidates(args) {
+      return loadPublishedCandidatesForWorkDateResolver(db, args)
+    },
+    async loadOpenRecords(args) {
+      return loadOpenRecordsForWorkDateResolver(db, args)
+    },
+    async loadApprovedOvertimeWindows(args) {
+      return loadApprovedOvertimeWindowsForWorkDateResolver(db, args)
+    },
+    async getAttributionTailMinutes() {
+      return loadWorkDateAttributionTailMinutes(db)
+    },
+  })
+  const adapters = createAllWorkDateAdapters(resolver)
+  return { resolver, adapters }
+}
+
+const IMPORT_LEGACY_UNRESOLVED_WORK_DATE_REASONS = new Set([
+  WORK_DATE_REASON.NO_MATCHING_SHIFT,
+  WORK_DATE_REASON.FREE_TIME_NO_SHIFT,
+  WORK_DATE_REASON.UNSCHEDULED_NO_SHIFT,
+  WORK_DATE_REASON.EXPLICIT_IMPORT_REQUIRES_SHIFT,
+  WORK_DATE_REASON.NO_PUBLISHED_CANDIDATE,
+])
+
+const LIVE_CALENDAR_FALLBACK_WORK_DATE_REASONS = new Set([
+  WORK_DATE_REASON.NO_MATCHING_SHIFT,
+  WORK_DATE_REASON.FREE_TIME_NO_SHIFT,
+  WORK_DATE_REASON.UNSCHEDULED_NO_SHIFT,
+  WORK_DATE_REASON.NO_PUBLISHED_CANDIDATE,
+])
+
+async function resolveImportRowWorkDateAttribution(options) {
+  const {
+    db,
+    orgId,
+    userId,
+    workDate,
+    firstInAt,
+    lastOutAt,
+    timezone,
+    explicitShiftId,
+  } = options
+  if (!userId || !workDate || (!firstInAt && !lastOutAt)) {
+    return { resolution: null, frozenAttribution: null }
+  }
+  const { adapters } = createPluginAttendanceWorkDateResolver(db)
+  const resolution = await adapters.import.resolveImportWorkDate({
+    orgId,
+    userId,
+    occurredAt: firstInAt || lastOutAt,
+    timezone,
+    calendarWorkDate: workDate,
+    explicitWorkDate: workDate,
+    explicitShiftId: explicitShiftId || null,
+  })
+  if (resolution.kind === 'ambiguous') {
+    throw new HttpError(
+      422,
+      'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
+      'Multiple shift windows match this import row; no record was written',
+    )
+  }
+  if (resolution.kind === 'resolved') {
+    if (String(resolution.workDate) !== String(workDate)) {
+      throw new HttpError(
+        422,
+        'WORK_DATE_ATTRIBUTION_MISMATCH',
+        `Resolved workDate ${resolution.workDate} does not match imported workDate ${workDate}`,
+      )
+    }
+    const frozenAttribution = buildFrozenWorkDateAttribution(resolution, { orgId, userId })
+    if (!frozenAttribution) {
+      throw new Error('WORK_DATE_ATTRIBUTION_SNAPSHOT_INVALID')
+    }
+    return { resolution, frozenAttribution }
+  }
+  if (!IMPORT_LEGACY_UNRESOLVED_WORK_DATE_REASONS.has(resolution.reasonCode)) {
+    const code = resolution.reasonCode === WORK_DATE_REASON.EXPLICIT_SHIFT_MISMATCH
+      ? 'WORK_DATE_ATTRIBUTION_EXPLICIT_SHIFT_MISMATCH'
+      : 'WORK_DATE_ATTRIBUTION_UNRESOLVED'
+    throw new HttpError(
+      422,
+      code,
+      `Unable to resolve import work date: ${resolution.reasonCode}`,
+    )
+  }
+  return { resolution, frozenAttribution: null }
+}
+
+function assertResolvedWorkDateMatches({
+  resolution,
+  expectedWorkDate,
+  ambiguousCode = 'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
+  mismatchCode = 'WORK_DATE_ATTRIBUTION_MISMATCH',
+}) {
+  if (resolution?.kind === 'ambiguous') {
+    throw new HttpError(422, ambiguousCode, 'Multiple shift windows match; no attendance result was written')
+  }
+  if (
+    resolution?.kind === 'resolved'
+    && String(resolution.workDate) !== String(expectedWorkDate)
+  ) {
+    throw new HttpError(
+      422,
+      mismatchCode,
+      `Resolved workDate ${resolution.workDate} does not match ${expectedWorkDate}`,
+    )
+  }
+}
+
+async function rehydrateResolvedWorkDateContext({
+  db,
+  orgId,
+  userId,
+  resolution,
+  defaultRule,
+}) {
+  const baseContext = await resolveWorkContext({
+    db,
+    orgId,
+    userId,
+    workDate: resolution.workDate,
+    defaultRule,
+  })
+  const resolvedShift = await loadShiftById(db, orgId, resolution.shiftId)
+  if (!resolvedShift) {
+    throw new Error('WORK_DATE_RESOLVED_SHIFT_NOT_FOUND')
+  }
+  return {
+    ...baseContext,
+    rule: resolvedShift,
+    source: resolution.evidenceSnapshot?.winner?.source || baseContext.source,
+  }
+}
+
+/**
+ * Live-punch bridge: shared resolver (#4556 W2) folding #4558 overnight re-anchor.
+ * Returns the legacy { workDate, context, timezone } shape plus optional resolution.
+ */
+async function resolvePunchWorkDateByShiftWindow(options) {
+  const {
+    db,
+    orgId,
+    userId,
+    occurredAt,
+    workDate,
+    context,
+    defaultRule,
+    timezone,
+  } = options
+
+  if (!userId || !workDate || !(occurredAt instanceof Date) || Number.isNaN(occurredAt.getTime())) {
+    return { workDate, context, timezone, resolution: null }
+  }
+
+  const { resolver, adapters } = createPluginAttendanceWorkDateResolver(db)
+  const resolution = await adapters.live.resolvePunchWorkDate({
+    orgId,
+    userId,
+    occurredAt,
+    timezone,
+    calendarWorkDate: workDate,
+    groupAttendanceType: options.groupAttendanceType || null,
+  })
+
+  if (resolution.kind === 'resolved') {
+    const nextContext = await rehydrateResolvedWorkDateContext({
+      db,
+      orgId,
+      userId,
+      resolution,
+      defaultRule,
+    })
+    const nextTimezone = typeof nextContext?.rule?.timezone === 'string'
+      && nextContext.rule.timezone.trim()
+      ? nextContext.rule.timezone.trim()
+      : timezone
+    return {
+      workDate: resolution.workDate,
+      context: nextContext,
+      timezone: nextTimezone,
+      resolution,
+      shiftId: resolution.shiftId,
+      reasonCode: resolution.reasonCode,
+    }
+  }
+
+  // Ambiguous / unresolved: do not silently fall back to inventing a winner.
+  // Live punch keeps the calendar workDate only when the current context already contains
+  // the punch in its strict window (same-day match); otherwise keep calendar date without
+  // previous-day steal (fail-closed relative to overnight re-anchor).
+  if (resolution.kind === 'ambiguous') {
+    return {
+      workDate,
+      context,
+      timezone,
+      resolution,
+      ambiguous: true,
+    }
+  }
+
+  if (!LIVE_CALENDAR_FALLBACK_WORK_DATE_REASONS.has(resolution.reasonCode)) {
+    throw new HttpError(
+      422,
+      'WORK_DATE_ATTRIBUTION_UNRESOLVED',
+      `Unable to resolve punch work date: ${resolution.reasonCode}`,
+    )
+  }
+
+  // Unresolved (no matching published shift / free_time / unscheduled): calendar date stays.
+  // Callers that require shiftId must inspect resolution.reasonCode.
+  return {
+    workDate,
+    context,
+    timezone,
+    resolution,
+  }
+}
+
+// Keep pure helpers reachable for unit tests without a live DB.
+function getSharedWorkDateResolverForTests(deps) {
+  return createAttendanceWorkDateResolver(deps)
+}
+
+function getSharedWorkDateAdaptersForTests(resolver) {
+  return createAllWorkDateAdapters(resolver)
 }
 
 async function loadHolidayMapByDates(db, orgId, workDates) {
@@ -14430,9 +15173,12 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
             s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
             s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
             s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
-            s.working_days AS shift_working_days
+            s.working_days AS shift_working_days,
+            (SELECT COUNT(*)::int
+               FROM attendance_shift_segments seg
+              WHERE seg.org_id = a.org_id AND seg.shift_id = a.shift_id) AS shift_segment_count
      FROM attendance_shift_assignments a
-     JOIN attendance_shifts s ON s.id = a.shift_id
+     JOIN attendance_shifts s ON s.id = a.shift_id AND s.org_id = a.org_id
      WHERE a.org_id = $1
        AND a.user_id = ANY($2::text[])
        AND a.is_active = true
@@ -15104,6 +15850,15 @@ async function applyAutoShiftMatchingItems(db, {
         skipped.push(mapAutoShiftApplySkipped(item, 'shift_not_found'))
         continue
       }
+      // W3 erratum: typed 422 + zero writes when the matched candidate is a
+      // multi-segment shift and authoritative segment calculation is OFF for the org.
+      // Throws (rolling back the whole apply) instead of skipping — the erratum
+      // requires automatic matching to fail closed, not to silently skip.
+      await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+        orgId,
+        shiftId: item.candidateShiftId,
+        producer: 'auto_shift_matching',
+      })
 
       const assignmentRows = await trx.query(
         `INSERT INTO attendance_shift_assignments
@@ -16588,6 +17343,7 @@ function resolveWorkContextFromPrefetch(options) {
     isWorkingDay,
     source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
   }
+  assertWorkContextSegmentCalculationAllowed(orgId, context)
   // Step 5: apply calendarPolicy.overrides when the prefetch carries both
   // the policy list and the user's scope context. D5 pinned: when either
   // is missing (old fixtures that build prefetched manually), behave
@@ -19261,6 +20017,38 @@ async function applyAttendanceResultEdit(trx, options) {
 
   // (6) Apply §3.5a normalization and re-write the record through the consistency helper (statusOverride +
   // overrideMetrics fully shadow computeMetrics; meta tiers are recomputed from the FINAL lateMinutes).
+  // W2 recompute adapter: preserve frozen work-date attribution (never re-resolve against current schedule).
+  const recordMetaForRecompute = normalizeMetadata(record?.meta)
+  const rawFrozenForRecompute = recordMetaForRecompute?.[FROZEN_ATTRIBUTION_KEY]
+    ?? recordMetaForRecompute?.workDateAttributionV1
+    ?? null
+  const frozenForRecompute = parseFrozenWorkDateAttribution(rawFrozenForRecompute)
+  const { adapters: recomputeAdapters } = createPluginAttendanceWorkDateResolver(trx)
+  const recomputeResolution = await recomputeAdapters.recompute.resolveRecomputeWorkDate({
+    orgId,
+    userId: record.user_id,
+    occurredAt: record.first_in_at
+      ? new Date(record.first_in_at)
+      : (record.last_out_at ? new Date(record.last_out_at) : null),
+    timezone,
+    calendarWorkDate: workDate,
+    frozenAttribution: rawFrozenForRecompute,
+    recordMeta: recordMetaForRecompute,
+  })
+  assertResolvedWorkDateMatches({
+    resolution: recomputeResolution,
+    expectedWorkDate: workDate,
+    ambiguousCode: 'ATTENDANCE_RESULT_EDIT_WORK_DATE_AMBIGUOUS',
+    mismatchCode: 'ATTENDANCE_RESULT_EDIT_WORK_DATE_MISMATCH',
+  })
+  const recomputeMeta = recomputeResolution.kind === 'resolved'
+    ? {
+        [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+          recomputeResolution,
+          { orgId, userId: record.user_id },
+        ),
+      }
+    : (frozenForRecompute ? { [FROZEN_ATTRIBUTION_KEY]: frozenForRecompute } : undefined)
   const metrics = applyResultEditMetricNormalization(targetStatus, record, overrideMetrics)
   const updated = await upsertAttendanceRecord({
     userId: record.user_id,
@@ -19280,6 +20068,7 @@ async function applyAttendanceResultEdit(trx, options) {
     isWorkday: record.is_workday !== false,
     leaveMinutes: 0,
     overtimeMinutes: 0,
+    meta: recomputeMeta,
     existingRow: record,
     client: trx,
   })
@@ -20394,7 +21183,9 @@ async function runAutoAbsenceForOrgDate(db, options) {
        AND u.is_active = true`,
     [orgId]
   )
+  const { adapters: scheduledAdapters } = createPluginAttendanceWorkDateResolver(db)
   const targetUsers = []
+  const reviewRequired = []
   for (const row of userRows) {
     const context = await resolveWorkContext({
       db,
@@ -20406,7 +21197,45 @@ async function runAutoAbsenceForOrgDate(db, options) {
       calendarOverrides,
     })
     if (!context.isWorkingDay) continue
-    targetUsers.push(row.user_id)
+    const scheduledRule = context.rule || rule
+    const scheduledTimezone = scheduledRule.timezone || rule.timezone || 'UTC'
+    const scheduledResolution = await scheduledAdapters.scheduled.resolveScheduledWorkDate({
+      orgId,
+      userId: row.user_id,
+      timezone: scheduledTimezone,
+      calendarWorkDate: workDate,
+    })
+    if (scheduledResolution.kind === 'resolved') {
+      if (String(scheduledResolution.workDate) === String(workDate)) {
+        targetUsers.push(row.user_id)
+      } else {
+        reviewRequired.push({
+          userId: row.user_id,
+          reasonCode: 'WORK_DATE_ATTRIBUTION_MISMATCH',
+        })
+      }
+      continue
+    }
+    if (scheduledResolution.kind === 'ambiguous') {
+      reviewRequired.push({
+        userId: row.user_id,
+        reasonCode: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
+      })
+      continue
+    }
+    // Legacy rule-only schedules remain calendar-derived. Assigned/group schedules fail closed
+    // when the shared resolver cannot establish one exact work date.
+    if (
+      context.source === 'rule'
+      && scheduledResolution.reasonCode === WORK_DATE_REASON.UNSCHEDULED_NO_SHIFT
+    ) {
+      targetUsers.push(row.user_id)
+    } else {
+      reviewRequired.push({
+        userId: row.user_id,
+        reasonCode: scheduledResolution.reasonCode || 'WORK_DATE_ATTRIBUTION_UNRESOLVED',
+      })
+    }
   }
   const rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
   if (!skipDedup) lastAutoAbsenceKey = key
@@ -20416,11 +21245,25 @@ async function runAutoAbsenceForOrgDate(db, options) {
       workDate,
       total: rows.length,
     })
+    if (reviewRequired.length > 0) {
+      emit('attendance.work_date.review_required', {
+        orgId,
+        workDate,
+        total: reviewRequired.length,
+        reasons: reviewRequired,
+      })
+    }
   }
   if (logger && rows.length > 0) {
     logger.info(`Auto absence generated for ${workDate}`, { orgId, total: rows.length })
   }
-  return { skipped: false, total: rows.length, targetUsers: targetUsers.length, generated: rows.length }
+  return {
+    skipped: false,
+    total: rows.length,
+    targetUsers: targetUsers.length,
+    generated: rows.length,
+    reviewRequired,
+  }
 }
 
 function scheduleAutoAbsence({ db, logger, emit }) {
@@ -21333,6 +22176,38 @@ module.exports = {
   // exported nested one bag down, so the top-level optional call silently no-op'd
   // and the 60s settings cache leaked across tests in the shared attendance suite.
   resetAttendanceSettingsCacheForTests,
+  __attendanceShiftServiceForTests: {
+    lib: attendanceShiftServiceLib,
+    getService: getAttendanceShiftService,
+  },
+  __attendanceLivePunchWorkDateForTests: {
+    getPunchShiftWindow,
+    isPunchWithinShiftWindow,
+    parseImportedPunchDateTimes,
+    resolvePunchWorkDateByShiftWindow,
+  },
+  __attendanceWorkDateResolverForTests: {
+    createPluginAttendanceWorkDateResolver,
+    createAttendanceWorkDateResolver: getSharedWorkDateResolverForTests,
+    createAllWorkDateAdapters: getSharedWorkDateAdaptersForTests,
+    loadPublishedCandidatesForWorkDateResolver,
+    loadOpenRecordsForWorkDateResolver,
+    loadApprovedOvertimeWindowsForWorkDateResolver,
+    DEFAULT_ATTRIBUTION_TAIL_MINUTES,
+    OVERTIME_ATTRIBUTION_KEY,
+    FROZEN_ATTRIBUTION_KEY,
+    OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+    WORK_DATE_REASON,
+    parseOvertimeAttributionV1,
+    buildOvertimeAttributionV1,
+    parseFrozenWorkDateAttribution,
+    buildFrozenWorkDateAttribution,
+    normalizeWorkDateAttributionSetting,
+    clampAttributionTailMinutes,
+    runAutoAbsenceForOrgDate,
+    lib: attendanceWorkDateResolverLib,
+    adaptersLib: attendanceWorkDateAdaptersLib,
+  },
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
   },
@@ -22752,6 +23627,10 @@ module.exports = {
           maxUsersPerRun: z.number().int().min(1).max(100).optional(),
         }).optional(),
       }).optional(),
+      // W2 / #4556: bounded post-shift attribution tail (default 120). Separate from grace.
+      workDateAttribution: z.object({
+        postShiftTailMinutes: z.number().int().min(0).max(MAX_ATTRIBUTION_TAIL_MINUTES).optional(),
+      }).optional(),
     })
 
     const autoShiftMatchingPreviewSchema = z.object({
@@ -22793,12 +23672,21 @@ module.exports = {
       photoFileId: z.string().min(1).optional(),
     })
 
+    const shiftSegmentInputSchema = z.object({
+      segmentIndex: z.number().int().min(0).max(2).optional(),
+      startTime: z.string(),
+      endTime: z.string(),
+      startDayOffset: z.number().int().min(0).max(0).optional(),
+      endDayOffset: z.number().int().min(0).max(1).optional(),
+    }).strict()
+
     const shiftCreateSchema = z.object({
       name: z.string().trim().min(1).max(200),
       timezone: z.string().optional(),
       workStartTime: z.string().optional(),
       workEndTime: z.string().optional(),
       isOvernight: z.boolean().optional(),
+      segments: z.array(shiftSegmentInputSchema).min(1).max(3).optional(),
       lateGraceMinutes: z.number().int().min(0).optional(),
       earlyGraceMinutes: z.number().int().min(0).optional(),
       roundingMinutes: z.number().int().min(0).optional(),
@@ -24918,8 +25806,22 @@ module.exports = {
 	            ? baseRuleForMetrics
 	            : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-	          const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-	          const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+	          const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+	            firstInValue: valueFor('firstInAt'),
+	            lastOutValue: valueFor('lastOutAt'),
+	            workDate,
+	            rule: ruleForMetrics,
+	          })
+	          const importAttribution = await resolveImportRowWorkDateAttribution({
+	            db: trx,
+	            orgId,
+	            userId: rowUserId,
+	            workDate,
+	            firstInAt,
+	            lastOutAt,
+		            timezone: ruleForMetrics.timezone,
+	            explicitShiftId: valueFor('shiftId') || valueFor('shift_id') || null,
+	          })
 	          const statusRaw = valueFor('status')
 	          const statusOverride = statusRaw != null ? resolveStatusOverride(statusRaw, statusMap) : null
 
@@ -25059,7 +25961,7 @@ module.exports = {
 	          meta = attachAttendanceImportMultiPunchMeta(meta, {
 	            valueFor,
 	            workDate,
-	            timezone: ruleForMetrics.timezone,
+	            rule: ruleForMetrics,
 	            clearMissing: (payload.mode ?? 'override') === 'override',
 	          })
 	          if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
@@ -25071,6 +25973,10 @@ module.exports = {
 	              overrides: engineAdjustment.meta?.overrides ?? null,
 	              base: engineAdjustment.meta?.base ?? null,
 	            }
+	          }
+	          if (importAttribution.frozenAttribution) {
+	            meta = meta ?? {}
+	            meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
 	          }
 
 	          const snapshot = {
@@ -25412,6 +26318,34 @@ module.exports = {
             }
           }
 
+          const punchWorkDate = await resolvePunchWorkDateByShiftWindow({
+            db,
+            orgId,
+            userId,
+            occurredAt,
+            workDate,
+            context,
+            defaultRule: baseRule,
+            timezone,
+          })
+          // Actionable ambiguity: never silently pick calendar date or row order (R5 / OD-4556-8).
+          if (punchWorkDate.resolution?.kind === 'ambiguous') {
+            res.status(422).json({
+              ok: false,
+              error: {
+                code: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
+                message: 'Multiple shift windows match this punch; refuse silent work-date choice',
+                reasonCode: punchWorkDate.resolution.reasonCode,
+                candidates: punchWorkDate.resolution.candidates,
+              },
+            })
+            return
+          }
+          workDate = punchWorkDate.workDate
+          context = punchWorkDate.context
+          timezone = punchWorkDate.timezone
+          const punchWorkDateResolution = punchWorkDate.resolution || null
+
           // Punch-policy S1 (#2203): block a punch on a day with no schedule when the org opted into
           // unscheduled.mode='block'. workDate is the FINAL (tz-recalculated) date. Default 'allow' and
           // the primitive's fixed/free applicability guard mean this never blocks by default (no regression).
@@ -25621,6 +26555,23 @@ module.exports = {
             )
 
             const protectedRecord = await loadAttendanceRecordForUpdate(trx, { userId, orgId, workDate })
+            // Freeze work-date attribution on first resolved write; later corrections/recomputes
+            // preserve this snapshot rather than re-resolving against current schedule.
+            const existingMeta = normalizeMetadata(protectedRecord?.meta)
+            const alreadyFrozen = parseFrozenWorkDateAttribution(
+              existingMeta?.[FROZEN_ATTRIBUTION_KEY] ?? existingMeta?.workDateAttributionV1,
+            )
+            let recordMeta
+            if (alreadyFrozen) {
+              recordMeta = { [FROZEN_ATTRIBUTION_KEY]: alreadyFrozen }
+            } else if (punchWorkDateResolution?.kind === 'resolved') {
+              recordMeta = {
+                [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+                  punchWorkDateResolution,
+                  { orgId, userId },
+                ),
+              }
+            }
             let record = await upsertAttendanceRecord({
               userId,
               orgId,
@@ -25633,6 +26584,7 @@ module.exports = {
               isWorkday: context.isWorkingDay,
               leaveMinutes: 0,
               overtimeMinutes: 0,
+              meta: recordMeta,
               existingRow: protectedRecord,
               client: trx,
             })
@@ -25649,7 +26601,7 @@ module.exports = {
               protectedRecord,
             })
 
-            return { event: event[0], record }
+            return { event: event[0], record, workDateResolution: punchWorkDateResolution }
           })
 
           emitEvent('attendance.punched', {
@@ -27336,6 +28288,15 @@ module.exports = {
         throw new HttpError(409, 'SHIFT_SWAP_SOURCE_CHANGED', 'Shift-swap source shift no longer exists')
       }
 
+      // W3 erratum: final approval creates replacement assignments referencing both
+      // shifts — a multi-segment shift fails closed with a typed 422 and zero writes
+      // while segment calculation is OFF for the org.
+      await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(client, {
+        orgId,
+        shiftRefs: [requesterSource.shiftId, counterpartySource.shiftId],
+        producer: 'shift_swap_final_approval',
+      })
+
       const settings = await getSettings(client)
       const multiShiftDay = normalizeMultiShiftDaySetting(settings?.multiShiftDay)
       await client.query(
@@ -27686,6 +28647,15 @@ module.exports = {
       if (!targetShift) {
         throw new HttpError(409, 'SCHEDULE_DISPATCH_TARGET_UNAVAILABLE', 'Target shift is no longer available')
       }
+
+      // W3 erratum: final approval creates a published assignment referencing the
+      // target shift — a multi-segment target fails closed with a typed 422 and
+      // zero writes while segment calculation is OFF for the org.
+      await getAttendanceShiftService().assertShiftReferenceAllowed(client, {
+        orgId,
+        shiftId: detail.target_shift_id,
+        producer: 'schedule_dispatch_final_approval',
+      })
 
       await assertScheduleDispatchScopeAllowed(client, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget({
         userId: detail.user_id,
@@ -28051,6 +29021,63 @@ module.exports = {
           requestedOutAt: requestedOutSource,
         })
         if (overtimeSegmentation) metadata.overtimeSegmentation = overtimeSegmentation
+
+        // W2 / #4556: freeze overtimeAttributionV1 from exactly one org-scoped published candidate.
+        // Pending updates preserve the existing anchor; legacy pending without anchor fails closed
+        // before any side effects (OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED).
+        // Create calls this with a shell `{ org_id, user_id }` (no id/status); updates pass a real row.
+        const existingAnchor = parseOvertimeAttributionV1(
+          existingMetadata?.[OVERTIME_ATTRIBUTION_KEY] ?? existingMetadata?.overtimeAttributionV1,
+        )
+        const isExistingPersistedRequest = Boolean(existingRequest?.id)
+        if (existingAnchor) {
+          // Preserve frozen anchor on pending updates and non-pending reads.
+          metadata[OVERTIME_ATTRIBUTION_KEY] = existingAnchor
+        } else if (isExistingPersistedRequest) {
+          // Legacy pending (or any persisted row) without anchor: refuse before side effects.
+          throw new HttpError(
+            422,
+            OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+            'Legacy overtime request is missing overtimeAttributionV1; refuse mutation before side effects',
+            singleValidationDetail(
+              'metadata.overtimeAttributionV1',
+              'Required frozen attribution snapshot is missing on this pending overtime request',
+            ),
+          )
+        } else {
+          const createUserId = existingRequest?.user_id
+            || (typeof parsedData.userId === 'string' ? parsedData.userId : null)
+          if (!createUserId) {
+            throw new HttpError(
+              422,
+              OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+              'Cannot freeze overtime attribution without a subject userId',
+            )
+          }
+          const { adapters } = createPluginAttendanceWorkDateResolver(db)
+          const freeze = await adapters.overtime.freezeRequestCreationAnchor({
+            orgId,
+            userId: createUserId,
+            workDate,
+          })
+          if (!freeze.ok || !freeze.anchor) {
+            const code = freeze.result?.kind === 'ambiguous'
+              ? 'OVERTIME_ATTRIBUTION_AMBIGUOUS'
+              : OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED
+            throw new HttpError(
+              422,
+              code,
+              freeze.result?.kind === 'ambiguous'
+                ? 'Multiple published shift candidates for overtime attribution; refuse row-order inference'
+                : 'No single org-scoped published shift candidate to freeze for overtime attribution',
+              singleValidationDetail(
+                'workDate',
+                freeze.result?.reasonCode || WORK_DATE_REASON.NO_PUBLISHED_CANDIDATE,
+              ),
+            )
+          }
+          metadata[OVERTIME_ATTRIBUTION_KEY] = freeze.anchor
+        }
       }
 
       return {
@@ -28285,7 +29312,12 @@ module.exports = {
             params
           )
 
-          res.json({ ok: true, success: true, data: { items: rows.map(mapAttendanceRequestRow), total, page, pageSize } })
+          const items = await applyScheduleDispatchMetadataLabelsToRequests(
+            db,
+            orgId,
+            rows.map(mapAttendanceRequestRow)
+          )
+          res.json({ ok: true, success: true, data: { items, total, page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -28314,16 +29346,22 @@ module.exports = {
         }
 
         try {
+          const orgId = getOrgId(req)
           const rows = await db.query(
-            'SELECT * FROM attendance_requests WHERE id = $1',
-            [requestId]
+            'SELECT * FROM attendance_requests WHERE id = $1 AND org_id = $2',
+            [requestId, orgId]
           )
           if (rows.length === 0) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
             return
           }
           await ensureAttendanceRequestAccess(rows[0], requesterId, 'view request')
-          res.json({ ok: true, data: { request: mapAttendanceRequestRow(rows[0]) } })
+          const requests = await applyScheduleDispatchMetadataLabelsToRequests(
+            db,
+            orgId,
+            [mapAttendanceRequestRow(rows[0])]
+          )
+          res.json({ ok: true, data: { request: requests[0] } })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -28388,6 +29426,13 @@ module.exports = {
             if (!shiftRows.length) {
               throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
             }
+            // W3 erratum: typed 422 + zero writes when the dispatch targets a
+            // multi-segment shift while segment calculation is OFF for the org.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: input.targetShiftId,
+              producer: 'schedule_dispatch_create',
+            })
             const settings = await getSettings(trx)
             const slotResolution = resolveScheduleDispatchSlotIndex(settings, input.slotIndex)
 
@@ -28609,7 +29654,13 @@ module.exports = {
               LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
             rowParams
           )
-          res.json({ ok: true, data: { items: rows.map(mapScheduleDispatchRequestRow), total: Number(countRows[0]?.total ?? 0), page, pageSize } })
+          const dispatchItems = await applyShiftReferenceLabelsToMappedRows(
+            db,
+            orgId,
+            rows.map(mapScheduleDispatchRequestRow),
+            SCHEDULE_DISPATCH_SHIFT_LABEL_SPECS
+          )
+          res.json({ ok: true, data: { items: dispatchItems, total: Number(countRows[0]?.total ?? 0), page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule-dispatch tables missing' } })
@@ -28640,7 +29691,13 @@ module.exports = {
             return
           }
           await assertScheduleDispatchScopeAllowed(db, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget(detail))
-          res.json({ ok: true, data: { scheduleDispatch: mapScheduleDispatchRequestRow(detail) } })
+          const dispatchItem = await applyShiftReferenceLabelsToMappedRows(
+            db,
+            orgId,
+            [mapScheduleDispatchRequestRow(detail)],
+            SCHEDULE_DISPATCH_SHIFT_LABEL_SPECS
+          )
+          res.json({ ok: true, data: { scheduleDispatch: dispatchItem[0] } })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -28817,6 +29874,15 @@ module.exports = {
             const counterpartyRow = lockedSourceRows.get(counterpartyAssignmentId)
             const requesterSource = normalizeShiftSwapSourceSnapshot(requesterRow, 'requesterAssignmentId')
             const counterpartySource = normalizeShiftSwapSourceSnapshot(counterpartyRow, 'counterpartyAssignmentId')
+
+            // W3 erratum: the swap snapshots both shift ids — a multi-segment shift
+            // fails closed with a typed 422 and zero writes while segment
+            // calculation is OFF for the org.
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: [requesterSource.shiftId, counterpartySource.shiftId],
+              producer: 'shift_swap_create',
+            })
 
             if (requesterSource.userId !== actorUserId) {
               const allowed = await canAccessOtherUsers(actorUserId)
@@ -29042,7 +30108,13 @@ module.exports = {
               LIMIT $3 OFFSET $4`,
             [orgId, targetUserId, pageSize, offset]
           )
-          res.json({ ok: true, data: { items: rows.map(mapShiftSwapRequestRow), total: Number(countRows[0]?.total ?? 0), page, pageSize } })
+          const swapItems = await applyShiftReferenceLabelsToMappedRows(
+            db,
+            orgId,
+            rows.map(mapShiftSwapRequestRow),
+            SHIFT_SWAP_SHIFT_LABEL_SPECS
+          )
+          res.json({ ok: true, data: { items: swapItems, total: Number(countRows[0]?.total ?? 0), page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
@@ -29076,7 +30148,13 @@ module.exports = {
             return
           }
           await ensureShiftSwapAccess(detail, requesterId, 'view shift-swap request')
-          res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow(detail) } })
+          const swapItem = await applyShiftReferenceLabelsToMappedRows(
+            db,
+            orgId,
+            [mapShiftSwapRequestRow(detail)],
+            SHIFT_SWAP_SHIFT_LABEL_SPECS
+          )
+          res.json({ ok: true, data: { shiftSwap: swapItem[0] } })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -29603,6 +30681,36 @@ module.exports = {
             : 'rejected'
           const newVersion = Number(approval.version ?? 0) + 1
           const resolvedAt = new Date()
+          let finalOvertimeAnchor = null
+
+          // W2: final overtime approval must validate its creation-frozen anchor before any
+          // approval/request/accounting write. Throwing here leaves the whole transaction untouched.
+          if (action === 'approve' && isFinalApproval && requestType === 'overtime') {
+            finalOvertimeAnchor = parseOvertimeAttributionV1(
+              requestMetadata?.[OVERTIME_ATTRIBUTION_KEY]
+              ?? requestMetadata?.overtimeAttributionV1,
+            )
+            if (!finalOvertimeAnchor) {
+              throw new HttpError(
+                422,
+                OVERTIME_ATTRIBUTION_SNAPSHOT_REQUIRED,
+                'Overtime approval is missing a valid frozen work-date attribution snapshot',
+              )
+            }
+            const requestWorkDate = normalizeDateOnly(requestRow.work_date)
+              ?? String(requestRow.work_date ?? '').slice(0, 10)
+            if (
+              String(finalOvertimeAnchor.orgId) !== String(orgId)
+              || String(finalOvertimeAnchor.userId) !== String(requestRow.user_id)
+              || String(finalOvertimeAnchor.workDate) !== String(requestWorkDate)
+            ) {
+              throw new HttpError(
+                422,
+                'OVERTIME_ATTRIBUTION_SNAPSHOT_MISMATCH',
+                'Overtime attribution snapshot does not match the request subject and work date',
+              )
+            }
+          }
 
           const nextStepIndex = isFinalApproval ? currentStepIndex : currentStepIndex + 1
           // S7-1 §4.1 runtime fail-closed — step-advance: if the step about to become active is dynamic
@@ -29670,6 +30778,9 @@ module.exports = {
           )
 
           const nextMetadata = { ...requestMetadata }
+          if (finalOvertimeAnchor) {
+            nextMetadata[OVERTIME_ATTRIBUTION_KEY] = finalOvertimeAnchor
+          }
           let scheduleDispatchFinalization = null
           if (requestType === 'schedule_dispatch' && action === 'approve' && isFinalApproval) {
             scheduleDispatchFinalization = await finalizeScheduleDispatchRequest(trx, {
@@ -29962,6 +31073,42 @@ module.exports = {
               const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
               const updateFirstInAt = requestRow.requested_in_at ? new Date(requestRow.requested_in_at) : null
               const updateLastOutAt = requestRow.requested_out_at ? new Date(requestRow.requested_out_at) : null
+              // W2: correction preserves frozen work-date attribution (does not re-resolve against current schedule).
+              const existingCorrectionRow = await loadAttendanceRecordForUpdate(trx, {
+                userId: requestRow.user_id,
+                orgId,
+                workDate: requestRow.work_date,
+              })
+              const existingCorrectionMeta = normalizeMetadata(existingCorrectionRow?.meta)
+              const rawFrozenAttribution = existingCorrectionMeta?.[FROZEN_ATTRIBUTION_KEY]
+                ?? existingCorrectionMeta?.workDateAttributionV1
+                ?? null
+              const frozenAttribution = parseFrozenWorkDateAttribution(rawFrozenAttribution)
+              const { adapters: correctionAdapters } = createPluginAttendanceWorkDateResolver(trx)
+              const correctionResolution = await correctionAdapters.correction.resolveCorrectionWorkDate({
+                orgId,
+                userId: requestRow.user_id,
+                occurredAt: updateFirstInAt || updateLastOutAt || null,
+                timezone,
+                calendarWorkDate: requestRow.work_date,
+                frozenAttribution: rawFrozenAttribution,
+                recordMeta: existingCorrectionMeta,
+              })
+              assertResolvedWorkDateMatches({
+                resolution: correctionResolution,
+                expectedWorkDate: normalizeDateOnly(requestRow.work_date)
+                  ?? String(requestRow.work_date ?? '').slice(0, 10),
+                ambiguousCode: 'ATTENDANCE_CORRECTION_WORK_DATE_AMBIGUOUS',
+                mismatchCode: 'ATTENDANCE_CORRECTION_WORK_DATE_MISMATCH',
+              })
+              const correctionMeta = correctionResolution.kind === 'resolved'
+                ? {
+                    [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+                      correctionResolution,
+                      { orgId, userId: requestRow.user_id },
+                    ),
+                  }
+                : (frozenAttribution ? { [FROZEN_ATTRIBUTION_KEY]: frozenAttribution } : undefined)
               record = await upsertAttendanceRecord({
                 userId: requestRow.user_id,
                 orgId,
@@ -29975,10 +31122,33 @@ module.exports = {
                 isWorkday: context.isWorkingDay,
                 leaveMinutes: approvedMinutes.leaveMinutes,
                 overtimeMinutes: approvedMinutes.overtimeMinutes,
+                meta: correctionMeta,
+                existingRow: existingCorrectionRow,
                 client: trx,
               })
             } else if (requestType === 'leave' || requestType === 'overtime') {
               const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
+              const overtimeRecordMeta = requestType === 'overtime' && finalOvertimeAnchor
+                ? {
+                    [OVERTIME_ATTRIBUTION_KEY]: finalOvertimeAnchor,
+                    [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+                      {
+                        kind: 'resolved',
+                        orgId,
+                        userId: requestRow.user_id,
+                        workDate: finalOvertimeAnchor.workDate,
+                        shiftId: finalOvertimeAnchor.shiftId,
+                        segmentIndex: null,
+                        reasonCode: WORK_DATE_REASON.OVERTIME_EXTENDED_WINDOW,
+                        evidenceSnapshot: {
+                          overtimeAttributionV1: finalOvertimeAnchor,
+                          requestId,
+                        },
+                      },
+                      { orgId, userId: requestRow.user_id },
+                    ),
+                  }
+                : undefined
               record = await upsertAttendanceRecord({
                 userId: requestRow.user_id,
                 orgId,
@@ -29992,6 +31162,7 @@ module.exports = {
                 isWorkday: context.isWorkingDay,
                 leaveMinutes: approvedMinutes.leaveMinutes,
                 overtimeMinutes: approvedMinutes.overtimeMinutes,
+                meta: overtimeRecordMeta,
                 client: trx,
               })
             } else if (requestType === 'outdoor_punch') {
@@ -30391,7 +31562,7 @@ module.exports = {
               page,
               pageSize,
             },
-          })
+		          })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -31251,25 +32422,38 @@ module.exports = {
             isActive: parsed.data.isActive ?? true,
           }
 
-          const rows = await db.query(
-            `INSERT INTO attendance_rotation_rules
-             (id, org_id, name, timezone, shift_sequence, is_active)
-             VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-             RETURNING *`,
-            [
-              randomUUID(),
+          // W3 erratum: the guard and the reference-creating insert share one
+          // transaction and the canonical shift lock protocol (FOR SHARE on every
+          // sequenced shift), so a concurrent shift delete cannot slip between the
+          // check and the write. Multi-segment sequence members fail closed with a
+          // typed 422 and zero writes while segment calculation is OFF.
+          const rows = await db.transaction(async (trx) => {
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
               orgId,
-              payload.name,
-              payload.timezone,
-              JSON.stringify(payload.shiftSequence),
-              payload.isActive,
-            ]
-          )
+              shiftRefs: payload.shiftSequence,
+              producer: 'rotation_rule_create',
+            })
+            return trx.query(
+              `INSERT INTO attendance_rotation_rules
+               (id, org_id, name, timezone, shift_sequence, is_active)
+               VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+               RETURNING *`,
+              [
+                randomUUID(),
+                orgId,
+                payload.name,
+                payload.timezone,
+                JSON.stringify(payload.shiftSequence),
+                payload.isActive,
+              ]
+            )
+          })
 
           const rule = mapRotationRuleRow(rows[0])
           emitEvent('attendance.rotationRule.created', { orgId, rotationRuleId: rule.id })
           res.status(201).json({ ok: true, data: rule })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -31331,29 +32515,40 @@ module.exports = {
             isActive: parsed.data.isActive ?? existing.is_active,
           }
 
-          const rows = await db.query(
-            `UPDATE attendance_rotation_rules
-             SET name = $3,
-                 timezone = $4,
-                 shift_sequence = $5::jsonb,
-                 is_active = $6,
-                 updated_at = now()
-             WHERE id = $1 AND org_id = $2
-             RETURNING *`,
-            [
-              ruleId,
+          // W3 erratum: guard + update share one transaction and the canonical
+          // shift lock protocol; multi-segment sequence members fail closed with a
+          // typed 422 and zero writes while segment calculation is OFF.
+          const rows = await db.transaction(async (trx) => {
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
               orgId,
-              payload.name,
-              payload.timezone,
-              JSON.stringify(payload.shiftSequence),
-              payload.isActive,
-            ]
-          )
+              shiftRefs: payload.shiftSequence,
+              producer: 'rotation_rule_update',
+            })
+            return trx.query(
+              `UPDATE attendance_rotation_rules
+               SET name = $3,
+                   timezone = $4,
+                   shift_sequence = $5::jsonb,
+                   is_active = $6,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2
+               RETURNING *`,
+              [
+                ruleId,
+                orgId,
+                payload.name,
+                payload.timezone,
+                JSON.stringify(payload.shiftSequence),
+                payload.isActive,
+              ]
+            )
+          })
 
           const rule = mapRotationRuleRow(rows[0])
           emitEvent('attendance.rotationRule.updated', { orgId, rotationRuleId: rule.id })
           res.json({ ok: true, data: rule })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -31571,6 +32766,15 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: rotation assignments reference shifts indirectly through
+            // the rule's shift_sequence — every sequenced shift must pass the
+            // canonical assignability guard (typed 422 + zero writes for a
+            // multi-segment shift while segment calculation is OFF).
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: ruleRows[0]?.shift_sequence,
+              producer: 'rotation_assignment_write',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
               orgId,
@@ -31608,6 +32812,7 @@ module.exports = {
           const rotation = mapRotationRuleRow(ruleRows[0])
           res.status(201).json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -31705,6 +32910,15 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: rotation assignments reference shifts indirectly through
+            // the rule's shift_sequence — every sequenced shift must pass the
+            // canonical assignability guard (typed 422 + zero writes for a
+            // multi-segment shift while segment calculation is OFF).
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: ruleRows[0]?.shift_sequence,
+              producer: 'rotation_assignment_write',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
               orgId,
@@ -31760,6 +32974,7 @@ module.exports = {
           const rotation = mapRotationRuleRow(ruleRows[0])
           res.json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -31886,6 +33101,15 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: rotation assignments reference shifts indirectly through
+            // the rule's shift_sequence — every sequenced shift must pass the
+            // canonical assignability guard (typed 422 + zero writes for a
+            // multi-segment shift while segment calculation is OFF).
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: ruleRows[0]?.shift_sequence,
+              producer: 'rotation_assignment_write',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
               orgId,
@@ -31930,6 +33154,7 @@ module.exports = {
           emitEvent('attendance.rotationAssignment.created', { orgId, rotationAssignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -32028,6 +33253,15 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: rotation assignments reference shifts indirectly through
+            // the rule's shift_sequence — every sequenced shift must pass the
+            // canonical assignability guard (typed 422 + zero writes for a
+            // multi-segment shift while segment calculation is OFF).
+            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+              orgId,
+              shiftRefs: ruleRows[0]?.shift_sequence,
+              producer: 'rotation_assignment_write',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
               orgId,
@@ -32092,6 +33326,7 @@ module.exports = {
           emitEvent('attendance.rotationAssignment.updated', { orgId, rotationAssignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -33520,8 +34755,12 @@ module.exports = {
               ? baseRuleForMetrics
               : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-            const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-            const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+            const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+              firstInValue: valueFor('firstInAt'),
+              lastOutValue: valueFor('lastOutAt'),
+              workDate,
+              rule: ruleForMetrics,
+            })
             const statusRaw = valueFor('status')
             const statusOverride = statusRaw != null
               ? resolveStatusOverride(statusRaw, statusMap)
@@ -34410,8 +35649,22 @@ module.exports = {
                 ? baseRuleForMetrics
                 : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+              const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+                firstInValue: valueFor('firstInAt'),
+                lastOutValue: valueFor('lastOutAt'),
+                workDate,
+                rule: ruleForMetrics,
+              })
+              const importAttribution = await resolveImportRowWorkDateAttribution({
+                db: trx,
+                orgId,
+                userId: rowUserId,
+                workDate,
+                firstInAt,
+                lastOutAt,
+	              timezone: ruleForMetrics.timezone,
+                explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
+              })
               const statusRaw = valueFor('status')
               const statusOverride = statusRaw != null
                 ? resolveStatusOverride(statusRaw, statusMap)
@@ -34563,10 +35816,14 @@ module.exports = {
               meta = attachAttendanceImportMultiPunchMeta(meta, {
                 valueFor,
                 workDate,
-                timezone: ruleForMetrics.timezone,
+                rule: ruleForMetrics,
                 clearMissing: (parsed.data.mode ?? 'override') === 'override',
               })
-	              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
+              if (importAttribution.frozenAttribution) {
+                meta = meta ?? {}
+                meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
+              }
+		              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
 	                meta = meta ?? {}
 	                meta.engine = {
 	                  appliedRules: engineResult.appliedRules,
@@ -35411,8 +36668,22 @@ module.exports = {
                 ? baseRuleForMetrics
                 : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+              const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+                firstInValue: valueFor('firstInAt'),
+                lastOutValue: valueFor('lastOutAt'),
+                workDate,
+                rule: ruleForMetrics,
+              })
+              const importAttribution = await resolveImportRowWorkDateAttribution({
+                db: trx,
+                orgId,
+                userId: rowUserId,
+                workDate,
+                firstInAt,
+                lastOutAt,
+                timezone: ruleForMetrics.timezone,
+                explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
+              })
               const statusRaw = valueFor('status')
               const statusOverride = statusRaw != null
                 ? resolveStatusOverride(statusRaw, statusMap)
@@ -35564,9 +36835,13 @@ module.exports = {
               meta = attachAttendanceImportMultiPunchMeta(meta, {
                 valueFor,
                 workDate,
-                timezone: ruleForMetrics.timezone,
+                rule: ruleForMetrics,
                 clearMissing: (parsed.data.mode ?? 'override') === 'override',
               })
+              if (importAttribution.frozenAttribution) {
+                meta = meta ?? {}
+                meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
+              }
               if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
                 meta = meta ?? {}
                 meta.engine = {
@@ -35656,12 +36931,16 @@ module.exports = {
 	              meta: responseMeta,
 	            },
 	          })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance import failed', error)
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance import failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
         }
       }
@@ -36172,8 +37451,22 @@ module.exports = {
                       ? baseRuleForMetrics
                       : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
-                    const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
-                    const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
+                    const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
+                      firstInValue: valueFor('firstInAt'),
+                      lastOutValue: valueFor('lastOutAt'),
+                      workDate,
+                      rule: ruleForMetrics,
+                    })
+                    const importAttribution = await resolveImportRowWorkDateAttribution({
+                      db: trx,
+                      orgId,
+                      userId: rowUserId,
+                      workDate,
+                      firstInAt,
+                      lastOutAt,
+                      timezone: ruleForMetrics.timezone,
+                      explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
+                    })
                     const statusRaw = valueFor('status')
                     const statusOverride = statusRaw != null
                       ? resolveStatusOverride(statusRaw, statusMap)
@@ -36281,9 +37574,13 @@ module.exports = {
                     meta = attachAttendanceImportMultiPunchMeta(meta, {
                       valueFor,
                       workDate,
-                      timezone: ruleForMetrics.timezone,
+                      rule: ruleForMetrics,
                       clearMissing: (parsedImport.data.mode ?? 'override') === 'override',
                     })
+                    if (importAttribution.frozenAttribution) {
+                      meta = meta ?? {}
+                      meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
+                    }
 
                     const record = await upsertAttendanceRecord({
                       userId: rowUserId,
@@ -36389,7 +37686,7 @@ module.exports = {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
           }
-          if (run?.id) {
+	          if (run?.id) {
             try {
               await db.query(
                 'UPDATE attendance_integrations SET last_sync_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2',
@@ -36410,10 +37707,14 @@ module.exports = {
                 finishedAt: new Date().toISOString(),
               })
             } catch (runError) {
-              logger.warn('Attendance integration failure recording failed', runError)
-            }
-          }
-          logger.error('Attendance integration sync failed', error)
+	              logger.warn('Attendance integration failure recording failed', runError)
+	            }
+	          }
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance integration sync failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: (error?.message || 'Integration sync failed') } })
         }
       })
@@ -38417,6 +39718,7 @@ module.exports = {
           }
           res.status(201).json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -38501,6 +39803,7 @@ module.exports = {
           }
           res.json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -39706,29 +41009,9 @@ module.exports = {
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
-          const countRows = await db.query(
-            'SELECT COUNT(*)::int AS total FROM attendance_shifts WHERE org_id = $1',
-            [orgId]
-          )
-          const total = Number(countRows[0]?.total ?? 0)
-
-          const rows = await db.query(
-            `SELECT * FROM attendance_shifts
-             WHERE org_id = $1
-             ORDER BY created_at DESC
-             LIMIT $2 OFFSET $3`,
-            [orgId, pageSize, offset]
-          )
-
-          res.json({
-            ok: true,
-            data: {
-              items: rows.map(mapShiftRow),
-              total,
-              page,
-              pageSize,
-            },
-          })
+          // W3: parent-first pagination, then one batched segment hydration for the page.
+          const data = await getAttendanceShiftService().listShifts(db, { orgId, page, pageSize, offset })
+          res.json({ ok: true, data })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -39752,7 +41035,8 @@ module.exports = {
         }
 
         try {
-          const shift = await loadShiftById(db, orgId, shiftId)
+          // W3: dual-read — persisted segments when present, legacy envelope synthesis otherwise.
+          const shift = await getAttendanceShiftService().readShift(db, { orgId, shiftId })
           if (!shift) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
             return
@@ -39780,51 +41064,16 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const shiftTiming = resolveShiftTiming({
-          workStartTime: parsed.data.workStartTime ?? DEFAULT_SHIFT.workStartTime,
-          workEndTime: parsed.data.workEndTime ?? DEFAULT_SHIFT.workEndTime,
-          explicitOvernight: parsed.data.isOvernight,
-        })
-        if (shiftTiming.error) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: shiftTiming.error } })
-          return
-        }
-        const payload = {
-          name: parsed.data.name ?? DEFAULT_SHIFT.name,
-          timezone: parsed.data.timezone ?? DEFAULT_SHIFT.timezone,
-          workStartTime: shiftTiming.workStartTime,
-          workEndTime: shiftTiming.workEndTime,
-          isOvernight: shiftTiming.isOvernight,
-          lateGraceMinutes: parsed.data.lateGraceMinutes ?? DEFAULT_SHIFT.lateGraceMinutes,
-          earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? DEFAULT_SHIFT.earlyGraceMinutes,
-          roundingMinutes: parsed.data.roundingMinutes ?? DEFAULT_SHIFT.roundingMinutes,
-          workingDays: normalizeWorkingDays(parsed.data.workingDays ?? DEFAULT_SHIFT.workingDays),
-        }
 
         try {
-          const rows = await db.query(
-            `INSERT INTO attendance_shifts
-             (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-             RETURNING *`,
-            [
-              randomUUID(),
-              orgId,
-              payload.name,
-              payload.timezone,
-              payload.workStartTime,
-              payload.workEndTime,
-              payload.isOvernight,
-              payload.lateGraceMinutes,
-              payload.earlyGraceMinutes,
-              payload.roundingMinutes,
-              JSON.stringify(payload.workingDays),
-            ]
-          )
-          const shift = mapShiftRow(rows[0])
+          // W3: one canonical writer — segments (validated) or a synthesized segment 0
+          // from the legacy envelope are persisted together with the shift row in one
+          // transaction; the legacy envelope is always derived from the segments.
+          const shift = await getAttendanceShiftService().createShift(db, { orgId, input: parsed.data })
           emitEvent('attendance.shift.created', { orgId, shiftId: shift.id })
           res.status(201).json({ ok: true, data: shift })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -39853,89 +41102,15 @@ module.exports = {
         }
 
         try {
-          const existingRows = await db.query(
-            'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
-            [shiftId, orgId]
-          )
-          if (!existingRows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
-            return
-          }
-
-          const existing = existingRows[0]
-          const workingDays = parsed.data.workingDays
-            ? normalizeWorkingDays(parsed.data.workingDays)
-            : normalizeWorkingDays(existing.working_days)
-          const shiftTiming = resolveShiftTiming({
-            workStartTime: parsed.data.workStartTime ?? existing.work_start_time,
-            workEndTime: parsed.data.workEndTime ?? existing.work_end_time,
-            explicitOvernight: parsed.data.isOvernight,
-            fallbackOvernight: existing.is_overnight,
-          })
-          if (shiftTiming.error) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: shiftTiming.error } })
-            return
-          }
-
-          const payload = {
-            name: parsed.data.name ?? existing.name,
-            timezone: parsed.data.timezone ?? existing.timezone,
-            workStartTime: shiftTiming.workStartTime,
-            workEndTime: shiftTiming.workEndTime,
-            isOvernight: shiftTiming.isOvernight,
-            lateGraceMinutes: parsed.data.lateGraceMinutes ?? existing.late_grace_minutes,
-            earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? existing.early_grace_minutes,
-            roundingMinutes: parsed.data.roundingMinutes ?? existing.rounding_minutes,
-            workingDays,
-          }
-
-          if (payload.name !== existing.name) {
-            const normalizationResult = await normalizeLegacyRotationRulesForShiftName(db, orgId, shiftId, existing.name)
-            if (normalizationResult.ambiguous) {
-              res.status(409).json({
-                ok: false,
-                error: {
-                  code: 'CONFLICT',
-                  message: 'Cannot rename shift while legacy rotation rules still reference a duplicate shift name',
-                },
-              })
-              return
-            }
-          }
-
-          const rows = await db.query(
-            `UPDATE attendance_shifts
-             SET name = $3,
-                 timezone = $4,
-                 work_start_time = $5,
-                 work_end_time = $6,
-                 is_overnight = $7,
-                 late_grace_minutes = $8,
-                 early_grace_minutes = $9,
-                 rounding_minutes = $10,
-                 working_days = $11::jsonb,
-                 updated_at = now()
-             WHERE id = $1 AND org_id = $2
-             RETURNING *`,
-            [
-              shiftId,
-              orgId,
-              payload.name,
-              payload.timezone,
-              payload.workStartTime,
-              payload.workEndTime,
-              payload.isOvernight,
-              payload.lateGraceMinutes,
-              payload.earlyGraceMinutes,
-              payload.roundingMinutes,
-              JSON.stringify(payload.workingDays),
-            ]
-          )
-
-          const shift = mapShiftRow(rows[0])
+          // W3: one canonical writer. A segments array replaces all segments and
+          // re-derives the envelope; legacy start/end fields update the envelope and
+          // segment 0 together (rejected on multi-segment shifts); a metadata-only
+          // PUT preserves the persisted segments and envelope.
+          const shift = await getAttendanceShiftService().updateShift(db, { orgId, shiftId, patch: parsed.data })
           emitEvent('attendance.shift.updated', { orgId, shiftId: shift.id })
           res.json({ ok: true, data: shift })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -39958,58 +41133,18 @@ module.exports = {
         }
 
         try {
-          const shiftRows = await db.query(
-            'SELECT id, name FROM attendance_shifts WHERE id = $1 AND org_id = $2',
-            [shiftId, orgId]
-          )
-          if (!shiftRows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
-            return
-          }
-
-          const shift = shiftRows[0]
-          const usageRows = await db.query(
-            `SELECT
-               EXISTS (
-                 SELECT 1
-                 FROM attendance_shift_assignments a
-                 WHERE a.org_id = $1
-                   AND a.shift_id = $2
-                   AND a.is_active = true
-                   AND (a.end_date IS NULL OR a.end_date >= CURRENT_DATE)
-               ) AS has_active_assignment,
-               EXISTS (
-                 SELECT 1
-                 FROM attendance_rotation_rules r
-                 WHERE r.org_id = $1
-                   AND EXISTS (
-                     SELECT 1
-                     FROM jsonb_array_elements_text(COALESCE(r.shift_sequence, '[]'::jsonb)) AS seq(shift_ref)
-                     WHERE seq.shift_ref = $2::text
-                        OR seq.shift_ref = $3::text
-                   )
-               ) AS has_rotation_rule_reference`,
-            [orgId, shiftId, shift.name]
-          )
-          const usage = usageRows[0] ?? {}
-          if (usage.has_active_assignment || usage.has_rotation_rule_reference) {
-            res.status(409).json({
-              ok: false,
-              error: {
-                code: 'CONFLICT',
-                message: 'Shift is still referenced by active assignments or rotation rules',
-              },
-            })
-            return
-          }
-
-          const rows = await db.query(
-            'DELETE FROM attendance_shifts WHERE id = $1 AND org_id = $2 RETURNING id',
-            [shiftId, orgId]
-          )
+          // W3 erratum: canonical transactional delete. Locks the shift row FOR UPDATE
+          // (reference writers lock it FOR SHARE), then returns a typed 409 with zero
+          // writes for every durable blocker — any assignment row (including
+          // ended/inactive history), rotation-rule references, pending swap snapshots,
+          // and pending/published dispatch targets. Historical evidence rows
+          // (rejected swaps, cancelled dispatches, auto-write candidates) never block
+          // and remain stored.
+          const result = await getAttendanceShiftService().deleteShift(db, { orgId, shiftId })
           emitEvent('attendance.shift.deleted', { orgId, shiftId })
-          res.json({ ok: true, data: { id: shiftId } })
+          res.json({ ok: true, data: result })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -40225,6 +41360,7 @@ module.exports = {
             },
           })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance auto-shift apply tables missing' } })
@@ -40409,6 +41545,13 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: typed 422 + zero writes when a multi-segment shift is
+            // referenced while authoritative segment calculation is OFF for the org.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: payload.shiftId,
+              producer: 'draft_assignment_create',
+            })
             const replacementValidation = await validateTemporaryShiftReplacement(trx, { orgId, payload, temporary })
             if (!replacementValidation.ok) return { temporaryError: replacementValidation.error }
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
@@ -40467,6 +41610,7 @@ module.exports = {
           const shift = mapShiftRow(shiftRows[0])
           res.status(201).json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -40589,6 +41733,12 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: payload.shiftId,
+              producer: 'draft_assignment_update',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
               orgId,
@@ -40649,6 +41799,7 @@ module.exports = {
           const shift = mapShiftRow(shiftRows[0])
           res.json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -40789,6 +41940,12 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: payload.shiftId,
+              producer: 'assignment_create',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
               orgId,
@@ -40837,6 +41994,7 @@ module.exports = {
           emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -40960,6 +42118,12 @@ module.exports = {
 
           const result = await db.transaction(async (trx) => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
+            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+              orgId,
+              shiftId: payload.shiftId,
+              producer: 'assignment_update',
+            })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
               orgId,
@@ -41029,6 +42193,7 @@ module.exports = {
           emitEvent('attendance.assignment.updated', { orgId, assignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -41346,6 +42511,40 @@ module.exports = {
               }
             }
 
+            // W3 erratum: publication turns preview drafts into active references.
+            // A draft created while its shift was single-segment must still fail
+            // closed here (typed 422, zero writes) if the shift became multi-segment
+            // before publication while segment calculation is OFF for the org.
+            const publicationShiftService = getAttendanceShiftService()
+            for (const row of lockedRows) {
+              if (row.kind === 'shift') {
+                await publicationShiftService.assertShiftReferenceAllowed(trx, {
+                  orgId,
+                  shiftId: row.shift_id,
+                  producer: 'schedule_publication',
+                })
+              }
+            }
+            const publicationRuleIds = Array.from(new Set(
+              lockedRows
+                .filter(row => row.kind === 'rotation')
+                .map(row => row.rotation_rule_id)
+                .filter(Boolean)
+            ))
+            if (publicationRuleIds.length) {
+              const publicationRuleRows = await trx.query(
+                'SELECT id, shift_sequence FROM attendance_rotation_rules WHERE org_id = $1 AND id = ANY($2::uuid[])',
+                [orgId, publicationRuleIds]
+              )
+              for (const ruleRow of publicationRuleRows) {
+                await publicationShiftService.assertShiftSequenceReferenceAllowed(trx, {
+                  orgId,
+                  shiftRefs: ruleRow.shift_sequence ?? [],
+                  producer: 'schedule_publication',
+                })
+              }
+            }
+
             for (const row of lockedRows) {
               await enforceAttendanceSchedulePublicationConflicts(trx, row, settings)
             }
@@ -41460,6 +42659,7 @@ module.exports = {
             res.json({ ok: true, data: error.result })
             return
           }
+          if (respondAttendanceShiftServiceError(res, error)) return
           if (respondAttendanceSchedulePublishRouteError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
@@ -42736,8 +43936,13 @@ module.exports = {
          WHERE org_id = $1 AND user_id = $2 AND leave_type_code = $3 AND status = 'active'`,
         [orgId, userId, leaveTypeCode]
       )
+      // W5-0 (OD-W5-9=(a), design-lock 2026-07-22 §2/§7): project `overtime_source` — the column has
+      // been on `attendance_leave_balances` since v1-1b (`zzzz20260624160000`), but this SELECT never
+      // read it, so per-source bank provenance was invisible even to admin. Purely additive: legacy
+      // NULLs pass through unchanged (no per-source lot is fabricated a value); every existing key
+      // above is untouched (compat regression: `attendance-plugin.test.ts` ④/年假 L5a cases).
       const activeLots = await db.query(
-        `SELECT id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, status, granted_at, expires_at
+        `SELECT id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, status, granted_at, expires_at, overtime_source
          FROM attendance_leave_balances
          WHERE org_id = $1 AND user_id = $2 AND leave_type_code = $3 AND status = 'active'
          ORDER BY expires_at ASC NULLS LAST, granted_at ASC, id ASC`,

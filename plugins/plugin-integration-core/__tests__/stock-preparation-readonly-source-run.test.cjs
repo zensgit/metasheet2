@@ -535,12 +535,15 @@ async function testBridgeClampedSourceCannotReportReady() {
     const parsed = new URL(url)
     const body = JSON.parse(options.body)
     queries.push({ pathname: parsed.pathname, body })
-    // The real agent protocol: it honours the limit it is handed and offers no continuation.
+    // The real agent protocol: it honours the limit it is handed, ECHOES that applied limit
+    // in data.limit (bridge-agent-readonly.ps1 §/query), and offers no continuation. Adapter
+    // v2 fails closed unless the echo is present and equals the request, so the fixture must
+    // carry it — this is faithful to the real agent, not test-greening.
     return {
       ok: true,
       status: 200,
       async text() {
-        return JSON.stringify({ records: agentRows.slice(0, body.limit), done: true })
+        return JSON.stringify({ records: agentRows.slice(0, body.limit), limit: body.limit, done: true })
       },
     }
   }
@@ -594,13 +597,17 @@ async function testBridgeClampedSourceCannotReportReady() {
 // A bridge source SMALL enough to fit under the clamp is provably complete and still works.
 async function testBridgeSourceUnderTheClampStillSucceeds() {
   const agentRows = bomRows(7)
-  const fetchImpl = async (url, options) => ({
-    ok: true,
-    status: 200,
-    async text() {
-      return JSON.stringify({ records: agentRows.slice(0, JSON.parse(options.body).limit), done: true })
-    },
-  })
+  const fetchImpl = async (url, options) => {
+    const appliedLimit = JSON.parse(options.body).limit
+    return {
+      ok: true,
+      status: 200,
+      // echo the applied limit (real agent + adapter v2 applied-limit verification)
+      async text() {
+        return JSON.stringify({ records: agentRows.slice(0, appliedLimit), limit: appliedLimit, done: true })
+      },
+    }
+  }
   const result = await runPlmBomReadonlySource({
     permission: 'admin',
     projectId: 'business_project_bridge_small',
@@ -645,8 +652,9 @@ async function testKeyedModeSendsItsPageBoundToTheSource() {
     return {
       ok: true,
       status: 200,
+      // echo the applied limit (real agent + adapter v2 applied-limit verification)
       async text() {
-        return JSON.stringify({ records: agentRows.slice(0, body.limit), done: true })
+        return JSON.stringify({ records: agentRows.slice(0, body.limit), limit: body.limit, done: true })
       },
     }
   }
