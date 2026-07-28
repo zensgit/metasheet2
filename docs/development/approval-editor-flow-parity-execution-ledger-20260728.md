@@ -15,10 +15,11 @@ merge、部署、UAT 和 flag 是不同状态，不互相替代。
 
 | ID | 交付 | 基线 / 分支 | 提交 | 实现模型 | Codex 复核 | 当前状态 |
 |---|---|---|---|---|---|---|
-| E0 | exact-head 审计 | `d449aa7e6` / `codex/approval-editor-flow-parity-plan-20260727` | `1941e2f0c` | Claude Opus 5 只读反例 + Codex | 代码、测试、flag、设计锁逐项核对 | 文档已提交；未 push |
-| E1 | renderer spike | `origin/main@9da0335b4` / `codex/approval-editor-e1b-command-drag-20260728` | `6151d37cb` | Grok 4.5 Build；Kimi 做视觉 IA | Playwright、ESLint、类型、截图与 100 节点复核 | verification-only；未 push |
-| E1-b | 生产命令适配、drag、history | 基于 E1 / `codex/approval-editor-e1b-command-drag-20260728` | `1303d7ba7` | Grok 4.5 Build | 发现并修复移动后 stale focus id；补判别变异 | verification-only；未 push |
-| E2 | Flow Canvas presentational shell 抽取 | `origin/main@9da0335b4` / `codex/approval-editor-e2-shell-extract-20260728` | `ffe0c6229` | Claude Sonnet 5 | 清理 4 个 lint 残差；247 测、类型、事件变异 | local verified；未 push |
+| E0 | exact-head 审计 | `d449aa7e6` / `codex/approval-editor-flow-parity-plan-20260727` | `1941e2f0c` | Claude Opus 5 只读反例 + Codex | 代码、测试、flag、设计锁逐项核对 | Draft PR #4644；required CI 绿 |
+| E1 | renderer spike | `origin/main@9da0335b4` / `codex/approval-editor-e1b-command-drag-20260728` | `6151d37cb` | Grok 4.5 Build；Kimi 做视觉 IA | Playwright、ESLint、类型、截图与 100 节点复核 | Draft PR #4643；required CI 绿 |
+| E1-b | 生产命令适配、drag、history | 基于 E1 / `codex/approval-editor-e1b-command-drag-20260728` | `2955a68da` | Grok 4.5 Build | stale focus 修复、判别变异、浏览器超时/100 节点交互稳定化 | Draft PR #4643；required CI 绿 |
+| E2 | Flow Canvas presentational shell 抽取 | `origin/main@9da0335b4` / `codex/approval-editor-e2-shell-extract-20260728` | `5a9bb4db2` | Claude Sonnet 5 | 247 测、类型、事件变异；修复静态 style 守卫误判 | Draft PR #4642；required CI 绿 |
+| C1 | 线性/复杂流程统一 Canvas 载体 | E2 head / `codex/approval-editor-c1-unified-canvas-20260728` | `bbd436177` | Claude Opus 5 实现；Kimi exact-head 只读复审 | 真实视图写回、payload/dirty、promote 保真、flag fallback、删除下限及浏览器三 viewport | Draft PR #4649；CI 运行中 |
 
 ## 2. E1-b 执行事实
 
@@ -58,25 +59,39 @@ E2 只修改：
 
 ## 4. 状态矩阵
 
-| 面 | E1-b | E2 |
-|---|---|---|
-| 设计方向 | 已由 delta 计划约束 | 已由 delta 计划约束 |
-| 实现 | 完成 | 完成 |
-| 本地测试 | PASS | PASS |
-| 判别变异 | PASS | PASS |
-| 提交 | 是 | 是 |
-| push | 否 | 否 |
-| required CI | 未运行 | 未运行 |
-| merge | 否 | 否 |
-| staging / UAT | 否 | 否 |
-| production flag | 保持 OFF | 保持 OFF |
+| 面 | E1-b | E2 | C1 |
+|---|---|---|---|
+| 设计方向 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 |
+| 实现 | 完成 | 完成 | 完成 |
+| 本地测试 | PASS | PASS | PASS |
+| 判别变异 | PASS | PASS | PASS（3 刀） |
+| 独立复审 | Codex | Codex | Kimi APPROVE，无 P1/P2；Codex复核修 P3 |
+| 提交 | 是 | 是 | 是 |
+| push / PR | #4643 | #4642 | #4649（stacked on #4642） |
+| required CI | PASS | PASS | 运行中 |
+| merge | 否 | 否 | 否 |
+| staging / UAT | 否 | 否 | 否 |
+| production flag | 保持 OFF | 保持 OFF | 保持 OFF |
 
 ## 5. 后续顺序
 
-1. 对 E1-b、E2 做 owner review；决定是否 push / 开 PR；
-2. 合入 E2 后才启动 C1 线性/复杂图统一 adapter；
-3. C1 的未编辑 round-trip 和旧图保真通过后，才启动 C2 canvas-first；
-4. E0 的 required CI、业务错误文案和表单命令绕过问题分别小刀关闭；
-5. F1 在 E2 后抽表单 builder，再做 palette 拖入；
+1. 审阅并按依赖落 #4642 -> #4649；#4643 是 verification-only 独立支线；
+2. C2 接通 canvas-first，C3 把节点按钮群改为边 `+`，C4/C5 收拖拽与 undo/redo；
+3. F1 抽表单 builder，并实现左 palette 拖入 + 中画布 + 右字段检查器；
+4. F2/F3 补字段引用保护与附件 authoring；
+5. V1/V2、P1、X1 收版本、试运行、移动端/无障碍；
 6. T1 真浏览器 required CI 全闭合后才进入 staging UAT；
 7. production flag 和结构化辅助入口退役始终由 owner 单独决定。
+
+## 6. C1 执行事实
+
+- 线性 node key 规则只有 `linearCanvasCarrier.ts` 一处权威；
+- inspector 的 source、ids、field、level、mode、empty policy、self-approval
+  与 field permissions 全部写回 `ApprovalStepDraft`；
+- view toggle 和 selection 不写 draft；保存 payload 只读 draft；
+- first structural edit 使用 `applyTopologyToDraft`，不另造 promote 路径；
+- edge count、parallel region、validity 全部基于 `canvasEffectiveGraph`；
+- 删除守卫按有效图审批节点数工作，promote 后仍保留最后一个审批节点；
+- 真 Chromium 在 1440 / 1024 / 390 无横向溢出或 console error；
+- 390 下 sticky bottom navigation 遮挡、卡片内按钮群和紧凑触控尺寸仍属于
+  C2/C3/X1，未被 C1 结论掩盖。

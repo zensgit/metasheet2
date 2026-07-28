@@ -1,18 +1,20 @@
-# 审批编辑器与流程编排 E1-b / E2 收尾验证（2026-07-28）
+# 审批编辑器与流程编排 E1-b / E2 / C1 收尾验证（2026-07-28）
 
-**范围状态：LOCAL VERIFIED**
+**范围状态：PR VERIFIED（C1 required CI 仍在运行）**
 
 **整线状态：NOT FINAL**
 
-本报告只关闭 E1-b renderer/command feasibility 与 E2 第一刀无行为抽取。
-它不宣称审批编辑器已对标完成，不授权 C1/C2、部署、UAT 或 flag 开启。
+本报告只关闭 E1-b renderer/command feasibility、E2 第一刀无行为抽取和
+C1 线性/复杂流程统一载体。它不宣称审批编辑器已对标完成，不授权
+C2-C5、F1-F3、部署、UAT 或 flag 开启。
 
 ## 1. Exact heads
 
 | 切片 | 分支 | exact head |
 |---|---|---|
-| E1-b | `codex/approval-editor-e1b-command-drag-20260728` | `1303d7ba7` |
-| E2 | `codex/approval-editor-e2-shell-extract-20260728` | `ffe0c6229` |
+| E1-b | `codex/approval-editor-e1b-command-drag-20260728` | `2955a68da` |
+| E2 | `codex/approval-editor-e2-shell-extract-20260728` | `5a9bb4db2` |
+| C1 | `codex/approval-editor-c1-unified-canvas-20260728` | `bbd436177` |
 | 文档 | `codex/approval-editor-flow-parity-plan-20260727` | 本报告提交后的 head |
 
 E2 起点为 `origin/main@9da0335b4`。canonical checkout 未被修改。
@@ -111,24 +113,75 @@ handler 的事件透传。
 | 严重度 | 发现 | 处置 |
 |---|---|---|
 | P2 | E1-b 第一版在 move 后保留 render focus id，可能选错 inspector 节点 | 改用 history stable key 重映射 focus id；Playwright + mutation |
+| P3 | C1 线性流程 promote 后，原 `steps.length` 删除下限失效，可继续删到 start→end | 改按 effective graph 的 approval node 数量守卫；中和回旧逻辑后 exact test RED |
 | P3 | E2 抽取后父组件残留 3 个常量 import 和 1 个 helper | 删除机械残差；lint 转绿 |
 | P3 | Claude Sonnet 卡在 Playwright MCP 启动，不是产品测试 | 终止悬挂 MCP；Codex 独立运行全部验证，不采信未完成模型声明 |
 
 最终审阅未发现新的 P1/P2。
 
-## 5. 残余与 owner 门
+## 5. C1 证据
 
-1. E1-b/E2 尚未 push、开 PR、跑 required CI 或 merge；
-2. edge `+` 插入仍是 spike 演示，生产接线属于 C3；
-3. C1 的统一线性/复杂图 adapter 尚未开发；
-4. E0 的表单 command 绕过、required CI 收集和业务文案缺口仍未关闭；
-5. production Canvas 仍默认 OFF；
-6. staging UAT 与生产 flag 为 owner 门；
-7. 结构化辅助编辑入口必须保留，直到键盘/辅助技术等价性有真浏览器证据。
+### 5.1 数据与拓扑
 
-## 6. 结论
+- 线性 Canvas inspector 不创建 shadow edit，全部写回已有
+  `ApprovalStepDraft`；
+- 仅打开/选中/切换 Canvas 不置 dirty，保存 payload byte-identical；
+- 首次插入/移动通过 `applyTopologyToDraft` promote，原审批节点的 key、name、
+  source ids、mode、empty policy、auto approval policy 和 field permissions
+  保持；
+- flag OFF 回到结构列表；unsupported template 不开放 Canvas；
+- `topologyEdgeCount`、parallel-region 和 validity 读取 effective graph；
+- 最后审批节点删除下限在 promote 前后都成立。
+
+### 5.2 测试与变异
+
+```text
+C1 mounted production-view spec: 9/9 PASS
+authoring / inspector / topology / viewport focused battery: 124/124 PASS
+style guard: 83/83 PASS
+targeted ESLint: PASS
+vue-tsc: PASS
+```
+
+三刀判别变异：
+
+1. 中和 linear carrier lookup -> inspector write-through tests RED；
+2. 恢复 preservedGraph-only edge count -> promotion/delete positive controls RED；
+3. 恢复 promote 前专属删除下限 -> 第二次删除测试 RED。
+
+Kimi 对 `8cf218f31` 做 exact-head 只读对抗复审，结论 APPROVE、无 P1/P2；
+其 P3 删除边界在最终 head `bbd436177` 修复。Codex 重新运行目标测试并
+核对 clean diff。
+
+### 5.3 真浏览器
+
+真实 `TemplateAuthoringView` 在 Chromium 中验证：
+
+| viewport | Canvas | graph region | inspector | 横向溢出 |
+|---|---:|---:|---:|---|
+| 1440 | 1078 x 554 | 666 x 478 | 400 x 554 | 无 |
+| 1024 | 918 x 572 | 506 x 478 | 400 x 538 | 无 |
+| 390 | 300 x 1003 | 300 x 478 | 300 x 401 | 无 |
+
+console error 为 0。Canvas inspector 勾选“自审合并”后切回结构列表，同一
+checkbox 保持选中；只在真实编辑后 header 才变为“有未保存更改”。
+
+## 6. 残余与 owner 门
+
+1. #4642/#4643 required CI 已绿，#4649 required CI 待结算；三者均未 merge；
+2. 默认仍是结构列表；canvas-first 属于 C2；
+3. edge `+` 产品接线、节点按钮群移除属于 C3；
+4. 统一 drag feedback、undo/redo 属于 C4/C5；
+5. 表单仅有既有字段排序，尚无 palette 拖入和统一字段 inspector（F1-F3）；
+6. 版本时间线/双画布 diff、路由预览整合、真实键盘/a11y 仍未完成；
+7. 390 虽无横向溢出，但 sticky bottom navigation 会遮住内容，属于 X1；
+8. production Canvas 仍默认 OFF；staging UAT 与生产 flag 为 owner 门；
+9. 结构化辅助编辑入口必须保留，直到键盘/辅助技术等价性有真浏览器证据。
+
+## 7. 结论
 
 - `A1 renderer feasibility = PASS`；
-- `A2 first extraction = IMPLEMENTED + LOCAL VERIFIED`；
+- `A2 first extraction = PR VERIFIED / CI PASS`；
+- `C1 unified carrier = IMPLEMENTED + LOCAL/BROWSER/ADVERSARIAL VERIFIED`；
 - `approval editor parity line = IN PROGRESS / NOT FINAL`；
-- 下一开发授权点为：先审合 E1-b/E2，再单独授权 C1。
+- 下一开发点为 C2/C3 canvas-first 产品化，并行启动 F1 表单 palette 抽取。

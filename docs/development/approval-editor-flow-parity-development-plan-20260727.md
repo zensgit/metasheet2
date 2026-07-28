@@ -1,6 +1,6 @@
 # 审批编辑器与流程编排对标开发计划（2026-07-27）
 
-**状态：IN PROGRESS（仅 E0 / E1 / E1-b / E2 已获准并在隔离分支完成；C1 以后仍未授权）**
+**状态：IN PROGRESS（E0 / E1 / E1-b / E2 / C1 已完成并形成待审 Draft PR；C2 以后仍在开发队列）**
 
 **事实审计基线：** `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
 
@@ -144,7 +144,7 @@ E1 不得默认引入 ELK。只有现有布局在构造的条件/并行/长标�
 | C3 | 边 `+` 和插入菜单 | 所有合法边槽可点/键盘插入；菜单只列合法节点类型；节点按钮群移除 | C2 | Grok | C3 |
 | C4 | 语义拖拽和分支排序 | 节点/条件优先级/并行分支拖排；合法槽高亮；非法落点 no-op + live message | C3 | Grok；Claude Opus命令复核 | C4 |
 | C5 | 统一 undo/redo | 顶栏按钮、快捷键、选择/焦点恢复；Canvas 和 inspector 共用一条历史 | C4 | Grok；Codex复核 | C5 |
-| F1 | 表单组件抽取和 palette | 控件面板点击/拖入、字段插入槽、拖排/键盘等价；复用表单命令层 | E2 | Sonnet 5抽取；Grok交互；Kimi K3视觉 | F1 |
+| F1 | 表单组件抽取和 palette | 左侧控件库点击/拖入、中部真实表单画布与字段插入槽、拖排/键盘等价、右侧字段属性检查器；复用表单命令层 | E2 | Sonnet 5抽取；Grok交互；Kimi K3视觉 | F1 |
 | F2 | 字段检查器与引用保护 | 字段属性、选项、明细、显隐、record-link；移动/删除依赖明确拒绝或保留 | F1 | Grok；Codex数据合同复核 | F2 |
 | F3 | 附件 authoring 兼容 | 仅在附件运行时锁和 flag 条件满足时向 palette 开放；旧模板/flag OFF 不变 | F2 | Grok；Claude Opus安全复核 | F3 |
 | V1 | 版本入口整合 | 编辑器顶栏版本时间线、发布说明和当前草稿；复用现有 API | E2 | Sonnet 5 | V1 |
@@ -174,7 +174,17 @@ E2 已在 `origin/main@9da0335b4` 的隔离分支完成第一刀无行为抽取�
 `ApprovalFlowCanvas.vue` 只接收派生 props 并发出 typed intents，业务状态、
 保存/发布和拓扑命令仍由父层拥有。13 个审批 authoring 测试文件
 247/247、ESLint、`vue-tsc` 通过；中和 drop intent 后拖放断言精确转红。
-状态仅为 `IMPLEMENTED + LOCAL VERIFIED`，尚未 push、CI、merge 或部署。
+修复静态 style 守卫误判后，Draft PR #4642 的 required CI 已全绿；尚未
+merge 或部署。
+
+C1 已在 E2 head 上完成线性/复杂流程统一载体。线性 Canvas inspector
+直接写现有 `ApprovalStepDraft`，只查看/切换画布不会生成 shadow carrier、
+不会置 dirty，也不会改变 save payload；首次拓扑编辑通过既有命令层
+promote 为 graph，并保留审批来源、ids、审批/空值/自审策略及字段权限。
+feature flag OFF 和 unsupported template 继续 fail-closed 回结构列表。
+Kimi exact-head 对抗复审为 APPROVE、无 P1/P2；其发现的 promote 后可继续
+删除最后审批节点边界已修复并由判别变异钉死。Draft PR #4649 依赖 #4642，
+尚未 merge、部署或开启 flag。
 
 ### 4.1 依赖图
 
