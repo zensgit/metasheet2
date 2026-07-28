@@ -51,25 +51,43 @@ export async function findUserIdByLoginAlias(rawIdentifier: string): Promise<str
   return result.rows[0].user_id
 }
 
+type AliasQueryClient = {
+  query: <T extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ) => Promise<{ rows: T[] }>
+}
+
 export async function claimLoginAlias(options: {
   userId: string
   rawValue: string
   kind?: LoginAliasKind
   source?: string
+  /** When set, runs inside caller's transaction (T3 activate must claim before commit). */
+  client?: AliasQueryClient
 }): Promise<{ ok: true; normalized: string } | { ok: false; code: string; message: string }> {
   const normalized = normalizeLoginIdentifier(options.rawValue)
   if (!normalized) {
     return { ok: false, code: 'ALIAS_EMPTY', message: 'Identifier is empty after normalization' }
   }
   const kind = options.kind ?? inferLoginAliasKind(options.rawValue)
+  const runQuery = async <T extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }> => {
+    if (options.client) {
+      return options.client.query<T>(sql, params)
+    }
+    return query<T>(sql, params)
+  }
   try {
-    await query(
+    await runQuery(
       `INSERT INTO user_login_aliases (user_id, kind, normalized_value, source)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (normalized_value) DO NOTHING`,
       [options.userId, kind, normalized, options.source ?? 'claim'],
     )
-    const check = await query<{ user_id: string }>(
+    const check = await runQuery<{ user_id: string }>(
       `SELECT user_id FROM user_login_aliases WHERE normalized_value = $1`,
       [normalized],
     )
@@ -178,39 +196,27 @@ async function recordCollision(c: AliasCollision): Promise<void> {
 }
 
 /**
- * T2b gate: at least one active platform admin with a usable password and an alias.
+ * T2b gate: at least one **platform** admin with a usable local password AND a login alias.
+ *
+ * Mirrors `rbac/service.isAdmin`: only `user_roles.role_id = 'admin'` counts.
+ * Does NOT treat attendance_admin / crm_admin / name LIKE '%admin%' as platform admin
+ * (those would false-green cutover while real platform admins still lack aliases).
+ * Usable password: local_password_set, non-empty password_hash, activated + is_active.
  */
 export async function hasActiveAdminWithPasswordAlias(): Promise<boolean> {
   const result = await query<{ n: number }>(
     `SELECT count(*)::int AS n
        FROM users u
        JOIN user_login_aliases a ON a.user_id = u.id
+       JOIN user_roles ur ON ur.user_id = u.id AND ur.role_id = 'admin'
       WHERE u.is_active = TRUE
-        AND COALESCE(u.role, '') IN ('admin', 'platform_admin')
         AND COALESCE(u.local_password_set, TRUE) = TRUE
         AND COALESCE(u.activation_status, 'activated') = 'activated'
         AND u.password_hash IS NOT NULL
-        AND length(u.password_hash) > 0`,
+        AND length(trim(u.password_hash)) > 0
+        AND u.password_hash NOT LIKE 'unusable:%'`,
   )
-  // Also accept RBAC admin via user_roles if role column not admin
-  if ((result.rows[0]?.n ?? 0) > 0) return true
-
-  const rbac = await query<{ n: number }>(
-    `SELECT count(*)::int AS n
-       FROM users u
-       JOIN user_login_aliases a ON a.user_id = u.id
-       JOIN user_roles ur ON ur.user_id = u.id
-       JOIN roles r ON r.id = ur.role_id
-      WHERE u.is_active = TRUE
-        AND COALESCE(u.local_password_set, TRUE) = TRUE
-        AND COALESCE(u.activation_status, 'activated') = 'activated'
-        AND (
-          lower(r.name) LIKE '%admin%'
-          OR lower(r.id) LIKE '%admin%'
-        )`,
-  ).catch(() => ({ rows: [{ n: 0 }] }))
-
-  return (rbac.rows[0]?.n ?? 0) > 0
+  return (result.rows[0]?.n ?? 0) > 0
 }
 
 /**

@@ -88,6 +88,7 @@ jobs:
       - name: Run DingTalk closeout env-contract test (DT-CLOSE-02)
         run: |
           node --test scripts/ops/dingtalk-closeout-env-contract.test.mjs
+          node --test scripts/ops/directory-grant-table-ci-wiring.test.mjs
 
       - name: Run DingTalk OAuth-stability metrics-only contract test (DT-CLOSE-01B)
         run: |
@@ -321,6 +322,19 @@ jobs:
       - name: Multitable on-prem loopback-verify CI wiring contract (#4604)
         if: matrix.node-version == '20.x'
         run: bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
+
+      # Corp-scope Phase B cannot migrate until staging proves its only managed
+      # backend and the only container publishing 18900 are the exact Phase A
+      # image. Both matrix legs execute the behavior suite; branch protection
+      # currently requires test (20.x), while test (18.x) is additional coverage.
+      # Run the wiring guard in this same job. The wiring and behavior suites
+      # assert each other's invocation, so removing either step turns the
+      # required Node 20 context red.
+      - name: DingTalk staging worker-drain CI wiring contract
+        run: node --test scripts/ops/dingtalk-worker-drain-ci-wiring.test.mjs
+
+      - name: DingTalk staging immutable worker-drain gate
+        run: node --test scripts/ops/dingtalk-staging-deploy-identity.test.mjs
 
 
       # The production monitor invokes the same state helper covered here.
@@ -888,6 +902,7 @@ jobs:
             tests/integration/directory-sync-preview-apply-parity.db.test.ts \
             tests/integration/directory-sync-alert-coverage.db.test.ts \
             tests/integration/directory-deprovision-selection.db.test.ts \
+            tests/integration/directory-deprovision-grant-table.db.test.ts \
             tests/integration/directory-sync-run-lease.db.test.ts \
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
