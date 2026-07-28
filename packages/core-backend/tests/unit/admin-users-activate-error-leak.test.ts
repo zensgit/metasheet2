@@ -52,6 +52,8 @@ vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn() }))
 
 vi.mock('../../src/auth/user-activate', () => ({
   activatePendingUser: activateMocks.activatePendingUser,
+  isActivateMode: (value: unknown) =>
+    value === 'temp_password' || value === 'sso' || value === 'admin_no_password',
 }))
 
 import { adminUsersRouter } from '../../src/routes/admin-users'

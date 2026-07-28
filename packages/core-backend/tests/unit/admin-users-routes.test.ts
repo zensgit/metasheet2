@@ -67,6 +67,8 @@ vi.mock('../../src/middleware/auth', () => ({
 // catch reverting ACTIVATE_ALIAS_FAILED → 409 or echoing raw driver text.
 vi.mock('../../src/auth/user-activate', () => ({
   activatePendingUser: activateMocks.activatePendingUser,
+  isActivateMode: (value: unknown) =>
+    value === 'temp_password' || value === 'sso' || value === 'admin_no_password',
 }))
 
 vi.mock('../../src/db/pg', () => ({
@@ -3990,5 +3992,137 @@ describe('admin-users routes', () => {
     expect(body.ok).toBe(false)
     expect(body.error?.code).toBe('ACTIVATE_ALIAS_CONFLICT')
     expect(body.error?.message).toMatch(/already claimed/i)
+  })
+
+  it('POST activate rejects an unknown mode before calling the activation service', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users/:id/activate', {
+      params: { id: 'pending-user-3' },
+      body: { mode: 'passwordish' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'ACTIVATE_REQUEST_INVALID' },
+    })
+    expect(activateMocks.activatePendingUser).not.toHaveBeenCalled()
+  })
+
+  it('POST bulk activate validates every item before the first activation write', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users/activate/bulk', {
+      body: {
+        items: [
+          { userId: 'pending-user-1', mode: 'temp_password' },
+          { userId: 'pending-user-2', mode: 'not-a-mode' },
+        ],
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'ACTIVATE_REQUEST_INVALID' },
+    })
+    expect(activateMocks.activatePendingUser).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('POST bulk activate rejects duplicate users before the first activation write', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users/activate/bulk', {
+      body: {
+        items: [
+          { userId: 'pending-user-1', mode: 'temp_password' },
+          { userId: 'pending-user-1', mode: 'sso' },
+        ],
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'ACTIVATE_BULK_DUPLICATE_USER' },
+    })
+    expect(activateMocks.activatePendingUser).not.toHaveBeenCalled()
+  })
+
+  it('POST bulk activate keeps item transactions independent and returns only safe failures', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    activateMocks.activatePendingUser
+      .mockResolvedValueOnce({
+        userId: 'pending-user-1',
+        activationStatus: 'activated',
+        isActive: true,
+        temporaryPassword: 'TempPass9A!',
+        localPasswordSet: true,
+      })
+      .mockRejectedValueOnce(Object.assign(
+        new Error('DETAIL: union id secret connection refused 5432'),
+        { code: 'ACTIVATE_SOURCE_INELIGIBLE' },
+      ))
+
+    const response = await invokeRoute('post', '/api/admin/users/activate/bulk', {
+      body: {
+        items: [
+          {
+            userId: 'pending-user-1',
+            mode: 'temp_password',
+            temporaryPassword: 'TempPass9A!',
+          },
+          {
+            userId: 'pending-user-2',
+            mode: 'sso',
+            directoryAccountId: 'account-2',
+          },
+        ],
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        successCount: 1,
+        failureCount: 1,
+        items: [
+          {
+            userId: 'pending-user-1',
+            ok: true,
+            result: {
+              activationStatus: 'activated',
+              temporaryPassword: 'TempPass9A!',
+            },
+          },
+          {
+            userId: 'pending-user-2',
+            ok: false,
+            error: {
+              status: 409,
+              code: 'ACTIVATE_SOURCE_INELIGIBLE',
+              message: 'Directory source is not eligible for DingTalk SSO activation',
+            },
+          },
+        ],
+      },
+    })
+    expect(activateMocks.activatePendingUser).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify(response.body)).not.toMatch(/DETAIL|union id secret|connection refused|5432/i)
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
+    expect(auditMocks.auditLog).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        resourceId: 'bulk-activate',
+        meta: {
+          source: 'admin_activate_bulk',
+          requestedCount: 2,
+          successCount: 1,
+          failureCount: 1,
+        },
+      }),
+    )
   })
 })

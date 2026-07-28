@@ -16,7 +16,7 @@ vi.mock('../../src/auth/login-alias-service', () => ({
   claimLoginAlias: vi.fn(async () => ({ ok: true, normalized: 'x' })),
 }))
 
-import { activatePendingUser } from '../../src/auth/user-activate'
+import { activatePendingUser, isActivateMode } from '../../src/auth/user-activate'
 
 describe('activatePendingUser (T3)', () => {
   beforeEach(async () => {
@@ -28,6 +28,17 @@ describe('activatePendingUser (T3)', () => {
     const { claimLoginAlias } = await import('../../src/auth/login-alias-service')
     vi.mocked(claimLoginAlias).mockReset()
     vi.mocked(claimLoginAlias).mockResolvedValue({ ok: true, normalized: 'x' })
+  })
+
+  it('keeps the runtime activation mode set closed', () => {
+    expect(['temp_password', 'sso', 'admin_no_password'].map(isActivateMode)).toEqual([
+      true,
+      true,
+      true,
+    ])
+    for (const value of ['', 'passwordish', 'SSO', null, 1, {}, []]) {
+      expect(isActivateMode(value)).toBe(false)
+    }
   })
 
   it('promotes pending → activated with temp password in one transaction', async () => {
@@ -167,6 +178,10 @@ describe('activatePendingUser (T3)', () => {
           integration_status: 'active',
           local_user_id: 'u1',
           link_status: 'linked',
+          account_provider: 'dingtalk',
+          integration_provider: 'dingtalk',
+          account_corp_id: 'corp-1',
+          integration_corp_id: 'corp-1',
         }],
       })
 
@@ -177,6 +192,173 @@ describe('activatePendingUser (T3)', () => {
         directoryAccountId: 'da-1',
       }),
     ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INACTIVE' })
+  })
+
+  it('rejects an explicit account whose link row is missing or unlinked', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: null,
+          username: 'x',
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          account_active: true,
+          integration_status: 'active',
+          local_user_id: null,
+          link_status: null,
+          account_provider: 'dingtalk',
+          integration_provider: 'dingtalk',
+          account_corp_id: 'corp-1',
+          integration_corp_id: 'corp-1',
+        }],
+      })
+
+    await expect(
+      activatePendingUser({
+        userId: 'u1',
+        mode: 'sso',
+        directoryAccountId: 'da-1',
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_MISSING' })
+  })
+
+  it('rejects an explicit account linked to another local user', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: null,
+          username: 'x',
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          account_active: true,
+          integration_status: 'active',
+          local_user_id: 'u-other',
+          link_status: 'linked',
+          account_provider: 'dingtalk',
+          integration_provider: 'dingtalk',
+          account_corp_id: 'corp-1',
+          integration_corp_id: 'corp-1',
+        }],
+      })
+
+    await expect(
+      activatePendingUser({
+        userId: 'u1',
+        mode: 'sso',
+        directoryAccountId: 'da-1',
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_LINK_MISMATCH' })
+  })
+
+  it.each([
+    {
+      label: 'account provider is not DingTalk',
+      account_provider: 'local',
+      integration_provider: 'dingtalk',
+      account_corp_id: 'corp-1',
+      integration_corp_id: 'corp-1',
+    },
+    {
+      label: 'account and integration corp ids differ',
+      account_provider: 'dingtalk',
+      integration_provider: 'dingtalk',
+      account_corp_id: 'corp-a',
+      integration_corp_id: 'corp-b',
+    },
+  ])('rejects SSO when $label', async (source) => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: null,
+          username: 'x',
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          account_active: true,
+          integration_status: 'active',
+          local_user_id: 'u1',
+          link_status: 'linked',
+          ...source,
+        }],
+      })
+
+    await expect(
+      activatePendingUser({
+        userId: 'u1',
+        mode: 'sso',
+        directoryAccountId: 'da-1',
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INELIGIBLE' })
+  })
+
+  it('accepts an implicit SSO source when at least one linked DingTalk source is active', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: null,
+          username: 'x',
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            account_active: false,
+            integration_status: 'active',
+            local_user_id: 'u1',
+            link_status: 'linked',
+            account_provider: 'dingtalk',
+            integration_provider: 'dingtalk',
+            account_corp_id: 'corp-1',
+            integration_corp_id: 'corp-1',
+          },
+          {
+            account_active: true,
+            integration_status: 'active',
+            local_user_id: 'u1',
+            link_status: 'linked',
+            account_provider: 'dingtalk',
+            integration_provider: 'dingtalk',
+            account_corp_id: 'corp-2',
+            integration_corp_id: 'corp-2',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
+
+    await expect(
+      activatePendingUser({
+        userId: 'u1',
+        mode: 'sso',
+      }),
+    ).resolves.toMatchObject({
+      userId: 'u1',
+      activationStatus: 'activated',
+      localPasswordSet: false,
+    })
   })
 
   it('rejects activate when user has no claimable identifier', async () => {

@@ -70,6 +70,10 @@ describe('mapActivateError (activate endpoint error surface)', () => {
       status: 409,
       message: 'Directory link points to a different user',
     },
+    ACTIVATE_SOURCE_INELIGIBLE: {
+      status: 409,
+      message: 'Directory source is not eligible for DingTalk SSO activation',
+    },
   }
 
   it('maps every authored reason to the RULED status and OUR message, never the thrown text', () => {
@@ -94,7 +98,7 @@ describe('mapActivateError (activate endpoint error surface)', () => {
 
   it('asserts the RULED transcription covers exactly the policy table (no silent drift)', () => {
     expect(Object.keys(RULED).sort()).toEqual(Object.keys(ACTIVATE_ERROR_POLICY).sort())
-    expect(Object.keys(RULED)).toHaveLength(11)
+    expect(Object.keys(RULED)).toHaveLength(12)
   })
 
   it('collapses an unauthored but ACTIVATE_-shaped code — the fail-open the owner reproduced', () => {
