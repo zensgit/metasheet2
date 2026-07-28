@@ -29,6 +29,7 @@ import request from 'supertest'
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { eventBus } from '../../src/integration/events/event-bus'
 import {
@@ -187,7 +188,7 @@ async function resetExecute(d: string, fixture: ExactAnchorHistoryFixture): Prom
   expect(token).toBeTruthy()
   const x = await request(app).post(`/api/multitable/sheets/${RESET_SHEET}/reset-execute`)
     .send({ previewIdentity: token, confirm: 'reset' })
-  expect(x.status).toBe(200)
+  expect(x.status, JSON.stringify(x.body)).toBe(200)
   expect(x.body?.data?.revertedCount).toBe(2)
   expect(x.body?.data?.deletedRecordIds).toEqual([d])
 }
@@ -225,8 +226,16 @@ describeIfDatabase('P1#2d producer family 5 (univer-meta routes) — durable REP
         [userId, JSON.stringify(permissions)],
       )
     }
+    // Exact-anchor execute refuses unless the complete authority-trigger substrate is enabled.
+    // This suite opts in explicitly and restores the migration's default-disabled posture below.
+    for (const [table, trigger] of RECOVERY_AUTHORITY_TRIGGERS) {
+      await q(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`)
+    }
   })
   afterAll(async () => {
+    for (const [table, trigger] of RECOVERY_AUTHORITY_TRIGGERS) {
+      await q(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`).catch(() => {})
+    }
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
     delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
