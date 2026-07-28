@@ -108,6 +108,14 @@ import {
   computeAttendanceOuterSourceDefinitionFingerprintV1,
 } from './attendance/w4c2-live-scheduled-boundary'
 import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
+// W4C-2 P1-1 fix (#4612 verdict second gate round): the recovery-sweep tick and admin-abandon
+// connection wrappers (amendment sections 1.7 / 1.1.2) — same least-privilege posture as every
+// other `attendanceW4SegmentCalculation` port method below.
+import {
+  sweepAttendanceScheduledRunsOnceV1,
+  abandonScheduledRunOnceV1,
+  type AttendanceScheduledRunAdminAbandonInputV1,
+} from './attendance/w4c2-scheduled-run-ops-worker'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2093,6 +2101,32 @@ export class MetaSheetServer {
                     client.release()
                   }
                 },
+                // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7 "No
+                // stuck absorbing state — recovery sweep, fully specified"). ONE sweep tick —
+                // scan plus a per-candidate finalize attempt, never batched into one
+                // transaction. See `sweepAttendanceScheduledRunsOnceV1`'s own module comment
+                // for this function's disclosed scope (it closes the "terminal but never
+                // finalized" absorbing state; it does not itself resume a target-set-drift
+                // candidate — that is `abandonScheduledRun` below).
+                sweepScheduledRuns: async (options?: { limit?: number }) =>
+                  sweepAttendanceScheduledRunsOnceV1(poolManager.get().getInternalPool(), {
+                    limit: options?.limit,
+                  }),
+                // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the
+                // `abandoned` transition). `adminActorId` is the route's OWN authenticated actor
+                // id (already RBAC-gated by `withPermission('attendance:admin', ...)` at the
+                // call site) — never a request-body-supplied identity — matching the SAME
+                // P1-4 discipline `admin_run`'s scheduled-run initiator already follows.
+                abandonScheduledRun: async (input: {
+                  orgId: string
+                  runId: string
+                  adminActorId: string
+                  reasonCode: string
+                }) =>
+                  abandonScheduledRunOnceV1(
+                    poolManager.get().getInternalPool(),
+                    input as unknown as AttendanceScheduledRunAdminAbandonInputV1,
+                  ),
               }
             : undefined,
         automationRegistry,

@@ -1168,6 +1168,35 @@ export interface PluginServices {
       emit: (delivery: { eventKind: string; payload: unknown; payloadSchemaVersion: number }) => void | Promise<void>
       batchLimit?: number
     }): Promise<{ claimed: number; delivered: number; failed: number }>
+    /**
+     * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery sweep).
+     * ONE sweep tick over `state='running'` scheduled-run rows, cross-`workDate`, bounded by
+     * `limit`. See `sweepAttendanceScheduledRunsOnceV1`'s own module comment for this call's
+     * disclosed scope: it closes the "terminal but never finalized" absorbing state; it does
+     * NOT resume a target-set-drift candidate (that exit is `abandonScheduledRun` below).
+     */
+    sweepScheduledRuns(options?: { limit?: number }): Promise<{
+      scanned: number
+      finalized: number
+      notReady: number
+      skipped: number
+      errored: number
+    }>
+    /**
+     * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the `abandoned`
+     * transition). `adminActorId` MUST be the route's own authenticated actor id — never a
+     * request-body-supplied value.
+     */
+    abandonScheduledRun(input: {
+      orgId: string
+      runId: string
+      adminActorId: string
+      reasonCode: string
+    }): Promise<
+      | { kind: 'deferred'; code: 'ATTENDANCE_SCHEDULED_RUN_ABANDON_DEFERRED' }
+      | { kind: 'not_running'; state: 'completed' | 'abandoned' }
+      | { kind: 'abandoned'; runId: string; completedUserCount: number }
+    >
   }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService

@@ -95,6 +95,7 @@ import {
 import {
   attendanceResultOperationPreflightV1,
   enqueueAttendanceResultEventOutboxV1,
+  isRetryableSqlState,
   runAttendanceResultOperationTransactionV1,
   sealAttendanceResultOperationV1,
 } from './w4c0-operation-registry'
@@ -953,6 +954,54 @@ export function createAttendanceLiveScheduledBoundaryV1(
     }
   }
 
+  // W4C-2 P1-2 fix (#4612 verdict second gate round, real two-OS-process repro): under genuine
+  // concurrent SERIALIZABLE access to the SAME run's per-target claim insert
+  // (`insertClaimedItemRow`, w4c0-operation-registry.ts), `runAttendanceResultOperationTransactionV1`
+  // already retries a SINGLE call up to `W4_TRANSACTION_MAX_RETRIES` (2) times on SQLSTATE
+  // 40001/40P01 -- but with NO backoff between those inner attempts, so two racers stepping
+  // through the same claim in near lockstep re-collide on every retry instead of de-correlating
+  // (measured: 4/10 fresh two-process iterations still escaped a raw 40001 past that inner
+  // wrapper). This is a SEPARATE, OUTER, bounded retry around ONE per-target call — each outer
+  // attempt gets its own fresh connection and its own fresh inner 3-attempt sequence — with
+  // jittered backoff BETWEEN outer attempts so the two racers' schedules diverge. It exists
+  // ONLY around the per-target claim call site (verified by call-site-tagged repro: every
+  // observed escape stack traced to `attendanceResultOperationPreflightV1` from THIS module's
+  // per-target loop below; the probe/create-resume/finalization SERIALIZABLE transactions in
+  // this same function did not escape in the same repro).
+  //
+  // Deliberately NOT a lock held across the per-user loop: section 1.7 of the ratified amendment
+  // states "Per-user execution is unchanged from the held branch...A per-user transaction must
+  // not update the run row, so per-user work never contends on it" — a lock spanning multiple
+  // per-user transactions would contradict that sentence, not satisfy it. Retrying is safe
+  // because a per-target claim insert has no observable side effect outside its own transaction:
+  // it has either not committed at all, or the whole transaction (including the claim) already
+  // rolled back — never a partial write a retry could duplicate.
+  const W4C2_TARGET_CLAIM_MAX_OUTER_RETRIES = 4
+  async function withConnectionRetryingTargetContention<T>(
+    body: (client: AttendanceW4TransactionClientV1) => Promise<T>,
+  ): Promise<T> {
+    let attempt = 0
+    for (;;) {
+      try {
+        return await withConnection(body)
+      } catch (error) {
+        if (!isRetryableSqlState(error)) throw error
+        if (attempt >= W4C2_TARGET_CLAIM_MAX_OUTER_RETRIES) {
+          // Retries exhausted: map to a closed, typed, RETRYABLE W4 error rather than letting
+          // the raw pg SQLSTATE escape. `W4_ERROR_NAMES` (index.cjs) already recognizes
+          // `AttendanceW4LiveScheduledBoundaryError` by name, so the admin route responds 503
+          // (never a raw 500) and the cron caller's own per-(org, workDate) isolation (index.cjs
+          // `scheduleAutoAbsence`) contains this to the one contended org/date, never the whole
+          // tick.
+          boundaryFail('W4C2_SCHEDULED_RUN_TARGET_CONTENDED', 503)
+        }
+        attempt += 1
+        const backoffMs = Math.min(200, 15 * attempt) + Math.floor(Math.random() * 20)
+        await new Promise((resolve) => setTimeout(resolve, backoffMs))
+      }
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Live punch.
   // -------------------------------------------------------------------------
@@ -1779,7 +1828,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
       })
       const authorization =
         cronAuthorization ?? adminRunScheduledAuthorization(orgKey, adminActorId as string, userId)
-      const outcome = await withConnection((client) =>
+      const outcome = await withConnectionRetryingTargetContention((client) =>
         runAttendanceResultOperationTransactionV1(client, async (trx) => {
           const preflight = await attendanceResultOperationPreflightV1(trx, authorization, envelope.registryInput)
           if (preflight.kind === 'replay') {

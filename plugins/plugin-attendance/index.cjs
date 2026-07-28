@@ -555,6 +555,12 @@ let annualLeaveAccrualSchedulerUnregister = null
 // test probe reads it to prove "no env => no worker => byte-identical runtime".
 let w4OutboxDrainSchedulerUnregister = null
 let w4OutboxDrainRunOnce = null
+// W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery sweep).
+// Same env-gated-at-registration posture as the outbox drain worker directly above: no env =>
+// no job object exists at all => byte-identical runtime. `w4ScheduledRunSweepRunOnce` is
+// non-null ONLY when the activate-time env gate passed.
+let w4ScheduledRunSweepSchedulerUnregister = null
+let w4ScheduledRunSweepRunOnce = null
 // W4C-2 remediation P2 (#4612 review "腿1"): test-only synchronization point that
 // fires on the POST /api/attendance/punch route AFTER its own pre-boundary
 // work-date resolution has already succeeded and BEFORE the canonical
@@ -21604,20 +21610,31 @@ async function runAutoAbsenceForOrgDate(db, options) {
   if (!skipDedup && key === lastAutoAbsenceKey) {
     return { skipped: true, reason: 'dedup', total: 0 }
   }
-  // W4C-2 amendment section 1.3, `O-2`/`OD-W4C-51=(a)` (RATIFIED, Bundle A, PR #4617): pin a
-  // canonical, deterministic membership order so the frozen target-set fingerprint's resume
-  // recomputation (section 1.7 step 3) is byte-identical by construction, and so the emitted
-  // `reasons` array order is reproducible across a restart rather than PostgreSQL's previously
-  // unspecified row order. `targetUsers`/`reviewRequired` below are built by a single
-  // sequential loop over `userRows`, so this ORDER BY is the entire ordering change.
+  // W4C-2 P2-1 fix (#4612 verdict second gate round): this query intentionally carries NO
+  // `ORDER BY` — restored to the exact pre-amendment (main) shape, byte-identical for the
+  // `legacy_projection_only` posture's `targetUsers`/`reviewRequired`/`reasons` construction
+  // (they are built by a single sequential loop over `userRows`, so row order is the entire
+  // ordering change; PostgreSQL's row order here was, and remains, unspecified absent an
+  // explicit sort).
+  //
+  // `O-2`/`OD-W4C-51=(a)` (RATIFIED, Bundle A, PR #4617) does NOT require pinning THIS query:
+  // it requires the frozen target-set fingerprint's resume recomputation (amendment section
+  // 1.7 step 3) to be a deterministic function of membership, and that is already, separately,
+  // guaranteed by `resolveAttendanceScheduledRunTargetSetV1`'s own explicit
+  // `sort((a, b) => a.userId < b.userId ...)` (w4c2-scheduled-run.ts) — a pure, in-process sort
+  // applied to whatever order this query returns. A prior revision of this comment claimed an
+  // `ORDER BY uo.user_id ASC` here was required for that fingerprint's byte-stability; that
+  // claim was never true (the fingerprint's ordinal comes from the TS-side sort, never from
+  // SQL row order) and, once added, silently changed the `legacy_projection_only` posture's
+  // byte-identical-to-main red line (verdict P2-1) — removing it restores that red line with
+  // zero effect on the W4 branch's frozen ordinal/fingerprint.
   const userRows = await db.query(
     `SELECT uo.user_id
      FROM user_orgs uo
      JOIN users u ON u.id = uo.user_id
      WHERE uo.org_id = $1
        AND uo.is_active = true
-       AND u.is_active = true
-     ORDER BY uo.user_id ASC`,
+       AND u.is_active = true`,
     [orgId]
   )
   const { adapters: scheduledAdapters } = createPluginAttendanceWorkDateResolver(db)
@@ -21776,23 +21793,43 @@ function scheduleAutoAbsence({ db, logger, emit, w4Boundary }) {
   const delay = next.getTime() - now.getTime()
 
   const run = async () => {
+    // W4C-2 (#4556 lock §12.3): the cron initiator (P03) never bypasses the canonical
+    // writer — a missing boundary is fail-closed (no silent direct insert), values-free.
+    if (!w4Boundary) {
+      logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
+      return
+    }
+    // P1-1 fix, item 3 (#4612 verdict second gate round): the org-list query itself is a
+    // single legitimate whole-tick failure (nothing per-org to isolate before org ids exist).
+    // Everything AFTER this point is isolated PER (org, offset) below — a prior revision wrapped
+    // the entire double loop in ONE try, so a single org's `AttendanceW4ScheduledRunIdentityError`
+    // (e.g. the target-set-drift fail-closed remediation, amendment section 1.7 step 3) or the
+    // new `W4C2_SCHEDULED_RUN_TARGET_CONTENDED` retry-exhaustion outcome (P1-2 fix) aborted the
+    // REST of that tick's orgs and lookback days too, repeating every day the stuck workDate
+    // stayed inside the lookback window.
+    let orgIds
     try {
-      // W4C-2 (#4556 lock §12.3): the cron initiator (P03) never bypasses the canonical
-      // writer — a missing boundary is fail-closed (no silent direct insert), values-free.
-      if (!w4Boundary) {
-        logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
-        return
-      }
-      const lookbackDays = settings.autoAbsence.lookbackDays || 1
       const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
-      const orgIds = orgRows.length > 0
+      orgIds = orgRows.length > 0
         ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
         : [DEFAULT_ORG_ID]
-      for (const orgId of orgIds) {
-        const rule = await loadDefaultRule(db, orgId)
-        for (let offset = 1; offset <= lookbackDays; offset += 1) {
-          const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
-          const workDate = toWorkDate(targetDate, rule.timezone)
+    } catch (error) {
+      logger.error('Auto absence job failed (org list)', error)
+      return
+    }
+    const lookbackDays = settings.autoAbsence.lookbackDays || 1
+    for (const orgId of orgIds) {
+      let rule
+      try {
+        rule = await loadDefaultRule(db, orgId)
+      } catch (error) {
+        logger.error('Auto absence job failed for org (rule load)', { orgId, error })
+        continue
+      }
+      for (let offset = 1; offset <= lookbackDays; offset += 1) {
+        const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
+        const workDate = toWorkDate(targetDate, rule.timezone)
+        try {
           await runAutoAbsenceForOrgDate(db, {
             orgId,
             workDate,
@@ -21802,10 +21839,15 @@ function scheduleAutoAbsence({ db, logger, emit, w4Boundary }) {
             w4Boundary,
             initiator: 'cron',
           })
+        } catch (error) {
+          // Values-free: orgId/workDate are already-logged identifiers elsewhere in this
+          // module (e.g. "Auto absence generated for ${workDate}" a few lines below), never
+          // the offending business value. One org/date's failure (drift wedge, target-set
+          // contention exhaustion, or any other error) must not skip the remaining orgs/dates
+          // in this tick.
+          logger.error('Auto absence job failed for org/date', { orgId, workDate, error })
         }
       }
-    } catch (error) {
-      logger.error('Auto absence job failed', error)
     }
   }
 
@@ -43952,6 +43994,69 @@ module.exports = {
       })
     )
 
+    // P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the `abandoned`
+    // transition): the actual exit for a scheduled run wedged by target-set drift
+    // (`W4C2_SCHEDULED_RUN_RESUME_TARGET_SET_DRIFT`, section 1.7 step 3) or by any other
+    // "cannot progress" condition — section 1.7's own closing sentence: "A run that cannot
+    // progress...is closed by the explicit `abandoned` transition." Section 1.1.2's own
+    // authorization/lock-order/org-anchor/audit/concurrency/idempotency contract lives
+    // entirely inside `abandonAttendanceScheduledRunV1` (via the host port); this route
+    // supplies only the RBAC gate, the route's own authenticated actor id, and pure request
+    // data — same posture as `POST /api/attendance/auto-absence/run` immediately above.
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/auto-absence/scheduled-runs/:runId/abandon',
+      withPermission('attendance:admin', async (req, res) => {
+        const paramsSchema = z.object({ runId: z.string().uuid() })
+        const parsedParams = paramsSchema.safeParse(req.params ?? {})
+        if (!parsedParams.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsedParams.error.message } })
+          return
+        }
+        const bodySchema = z.object({
+          orgId: z.string().optional(),
+          reasonCode: z.literal('ATTENDANCE_SCHEDULED_RUN_OPERATOR_ABANDONED').optional(),
+        })
+        const parsedBody = bodySchema.safeParse(req.body ?? {})
+        if (!parsedBody.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsedBody.error.message } })
+          return
+        }
+        const targetOrgId = parsedBody.data.orgId || getOrgId(req) || DEFAULT_ORG_ID
+        const reasonCode = parsedBody.data.reasonCode || 'ATTENDANCE_SCHEDULED_RUN_OPERATOR_ABANDONED'
+        if (!attendanceW4SegmentCalculationPort || typeof attendanceW4SegmentCalculationPort.abandonScheduledRun !== 'function') {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
+        try {
+          // The route's OWN authenticated actor id (already RBAC-gated by withPermission
+          // above) is the real administrator identity that enters the abandon transition's
+          // audit fields — never a request-body-supplied identity (same P1-4 discipline the
+          // admin_run scheduled-run initiator already follows).
+          const outcome = await attendanceW4SegmentCalculationPort.abandonScheduledRun({
+            orgId: targetOrgId,
+            runId: parsedParams.data.runId,
+            adminActorId: getUserId(req),
+            reasonCode,
+          })
+          res.json({ ok: true, data: outcome })
+        } catch (error) {
+          if (respondIfW4BoundaryError(res, error)) {
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Scheduled-run abandon failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to abandon scheduled run' } })
+        }
+      })
+    )
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/holidays/sync',
@@ -45276,6 +45381,31 @@ module.exports = {
 	          run: w4OutboxDrainRunOnce,
 	        }) ?? null
 	      }
+	      // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery
+	      // sweep, "No stuck absorbing state"). Same env-gated-at-registration posture as the
+	      // outbox drain worker directly above (SAME variable, SAME reasoning: no env => no job
+	      // object exists at all => byte-identical runtime). One sweep tick per cadence — scan
+	      // plus a per-candidate finalize attempt, values-free, never throwing out of the tick
+	      // (`sweepScheduledRuns`'s own per-candidate containment; see
+	      // `w4c2-scheduled-run-ops-worker.ts` for this call's disclosed scope — it closes the
+	      // "terminal but never finalized" absorbing state, not a target-set-drift wedge, whose
+	      // exit is the admin abandon route below).
+	      if (w4ScheduledRunSweepSchedulerUnregister) {
+	        w4ScheduledRunSweepSchedulerUnregister()
+	        w4ScheduledRunSweepSchedulerUnregister = null
+	      }
+	      w4ScheduledRunSweepRunOnce = null
+	      if (
+	        w4OutboxDrainEnvGate
+	        && attendanceW4SegmentCalculationPort
+	        && typeof attendanceW4SegmentCalculationPort.sweepScheduledRuns === 'function'
+	      ) {
+	        w4ScheduledRunSweepRunOnce = () => attendanceW4SegmentCalculationPort.sweepScheduledRuns()
+	        w4ScheduledRunSweepSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
+	          name: 'attendance-w4-scheduled-run-sweep',
+	          run: w4ScheduledRunSweepRunOnce,
+	        }) ?? null
+	      }
 	    } catch (error) {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
@@ -45311,6 +45441,11 @@ module.exports = {
 	      w4OutboxDrainSchedulerUnregister = null
 	    }
 	    w4OutboxDrainRunOnce = null
+	    if (w4ScheduledRunSweepSchedulerUnregister) {
+	      w4ScheduledRunSweepSchedulerUnregister()
+	      w4ScheduledRunSweepSchedulerUnregister = null
+	    }
+	    w4ScheduledRunSweepRunOnce = null
 	    if (annualLeaveAccrualSchedulerUnregister) {
 	      annualLeaveAccrualSchedulerUnregister()
 	      annualLeaveAccrualSchedulerUnregister = null

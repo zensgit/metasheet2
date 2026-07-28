@@ -1885,6 +1885,67 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
   })
 
+  it('leg 9m2 — P2-1 fix (#4612 verdict second gate round): a `legacy_projection_only` org with TWO W2-ambiguous members exercises the ONLY shape leg 9m\'s empty `reviewRequired: []` cannot see — the deleted `ORDER BY uo.user_id ASC` (verdict P2-1) previously changed exactly this array\'s element order versus pre-amendment `main`; asserted as an exact SET (order is, and always was, unspecified absent an explicit sort — the frozen membership-query row order was never a real contract), never a literal sequence a real row-order flake could later break', async () => {
+    const orgId = randomUUID()
+    const genUser = randomUUID()
+    const ambUserA = randomUUID()
+    const ambUserB = randomUUID()
+    const ambShiftA1 = randomUUID()
+    const ambShiftA2 = randomUUID()
+    const ambShiftB1 = randomUUID()
+    const ambShiftB2 = randomUUID()
+    try {
+      await insertRolloutRow(orgId, 'legacy')
+      await insertActiveUser(genUser, orgId)
+      await insertActiveUser(ambUserA, orgId)
+      await insertActiveUser(ambUserB, orgId)
+      // Same "natural OVERLAPPING_SHIFT_WINDOWS shape, not a synthetic resolver stub" fixture
+      // leg 9's schedAmbUser already uses (this file's own `insertShift`/`insertAssignment`
+      // helpers) — TWO independently-ambiguous members, so `reviewRequired` has 2 elements and
+      // their RELATIVE order is an observable fact, not a length-1 blind spot.
+      await insertShift(ambShiftA1, orgId, 'w4c2-e5-leg9m2-a1', '09:00', '18:00')
+      await insertShift(ambShiftA2, orgId, 'w4c2-e5-leg9m2-a2', '08:00', '17:00')
+      await insertAssignment(orgId, ambUserA, ambShiftA1, 0)
+      await insertAssignment(orgId, ambUserA, ambShiftA2, 1)
+      await insertShift(ambShiftB1, orgId, 'w4c2-e5-leg9m2-b1', '09:00', '18:00')
+      await insertShift(ambShiftB2, orgId, 'w4c2-e5-leg9m2-b2', '08:00', '17:00')
+      await insertAssignment(orgId, ambUserB, ambShiftB1, 0)
+      await insertAssignment(orgId, ambUserB, ambShiftB2, 1)
+      const workDate = '2026-07-22'
+
+      const adminToken = await mintToken(randomUUID(), 'attendance:read,attendance:write,attendance:admin')
+      const res = await autoAbsenceRun(adminToken, { orgId, workDate })
+
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data).toMatchObject({ skipped: false, total: 1, targetUsers: 1, generated: 1 })
+      expect(res.body.data.reviewRequired).toHaveLength(2)
+      // Exact SET (not sequence): both ambiguous members present, each with the correct
+      // reason code, regardless of which physical row order Postgres happened to return.
+      expect(new Set(res.body.data.reviewRequired.map((r: { userId: string }) => r.userId))).toEqual(
+        new Set([ambUserA, ambUserB]),
+      )
+      for (const entry of res.body.data.reviewRequired) {
+        expect(entry.reasonCode).toBe('WORK_DATE_ATTRIBUTION_AMBIGUOUS')
+        expect([ambUserA, ambUserB]).toContain(entry.userId)
+      }
+      expect(await recordCount(genUser)).toBe(1)
+      expect(await recordCount(ambUserA)).toBe(0)
+      expect(await recordCount(ambUserB)).toBe(0)
+
+      // Same zero-durable-rows invariant leg 9m already asserts — this leg's ONLY new claim is
+      // the reviewRequired SET/length, not a re-test of gate 8's durable-table isolation.
+      expect(await scheduledRunRows(orgId)).toEqual([])
+      expect(await outboxRows(orgId)).toEqual([])
+    } finally {
+      for (const userId of [genUser, ambUserA, ambUserB]) {
+        await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
+        await pool?.query('DELETE FROM users WHERE id = $1', [userId]).catch(() => undefined)
+      }
+      await pool?.query('DELETE FROM attendance_calculation_rollout_state WHERE org_id = $1', [orgId]).catch(() => undefined)
+    }
+  })
+
   it('leg 10 — P02 single-write discriminator: a merge-flipping internal punch touches attendance_records EXACTLY ONCE and lands the merged boundary', async () => {
     // Enable the merge policy (deployment-wide setting; restored below and the
     // whole row is exact-restored in afterAll).
