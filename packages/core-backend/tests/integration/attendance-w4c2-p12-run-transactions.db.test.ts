@@ -16,8 +16,12 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import ts from 'typescript'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c2Up } from '../../src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union'
 import {
@@ -36,7 +40,10 @@ import {
 import { sweepAttendanceScheduledRunsOnceV1 } from '../../src/attendance/w4c2-scheduled-run-ops-worker'
 import { createVerifiedAttendanceOperationIdentityV1, createVerifiedAttendanceOrgIdentityV1, resolveSegmentCalculationPosture } from '../../src/attendance/w4c0-identity'
 import { createAuthorizedAttendanceWriteContextV1 } from '../../src/attendance/w4c0-authorization'
-import { runAttendanceResultOperationTransactionV1 } from '../../src/attendance/w4c0-operation-registry'
+import {
+  cancelAttendanceResultOperationV1,
+  runAttendanceResultOperationTransactionV1,
+} from '../../src/attendance/w4c0-operation-registry'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -64,6 +71,116 @@ async function catchAsync<T>(fn: () => Promise<T>): Promise<unknown> {
   } catch (error) {
     return error
   }
+}
+
+interface RecordedStatement {
+  readonly sql: string
+  readonly params: readonly unknown[]
+}
+
+function recordingTrx(
+  inner: AttendanceW4TransactionClientV1,
+  log: RecordedStatement[],
+): AttendanceW4TransactionClientV1 {
+  return {
+    async query(sql: string, params?: unknown[]) {
+      log.push({ sql, params: params ?? [] })
+      return inner.query(sql, params as unknown[])
+    },
+  } as AttendanceW4TransactionClientV1
+}
+
+const SOURCE_DML_RE =
+  /(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(attendance_events|attendance_records|attendance_requests|attendance_record_result_edits|attendance_import_batches|attendance_import_items)\b/i
+
+function listTypeScriptFiles(root: string): string[] {
+  const files: string[] = []
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) files.push(...listTypeScriptFiles(path))
+    else if (entry.isFile() && entry.name.endsWith('.ts')) files.push(path)
+  }
+  return files
+}
+
+function scheduledOutcomeCallsites(): {
+  completed: string[]
+  unsafe: string[]
+} {
+  const completed: string[] = []
+  const unsafe: string[] = []
+  const srcRoot = fileURLToPath(new URL('../../src', import.meta.url))
+
+  for (const file of listTypeScriptFiles(srcRoot)) {
+    const source = readFileSync(file, 'utf8')
+    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+    const localWriterNames = new Set<string>()
+
+    for (const statement of sourceFile.statements) {
+      if (!ts.isImportDeclaration(statement) || !statement.importClause?.namedBindings) continue
+      if (!ts.isNamedImports(statement.importClause.namedBindings)) continue
+      for (const specifier of statement.importClause.namedBindings.elements) {
+        if ((specifier.propertyName ?? specifier.name).text === 'recordAttendanceScheduledRunTargetOutcomeV1') {
+          localWriterNames.add(specifier.name.text)
+        }
+      }
+    }
+
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const isDirectWriter =
+          (ts.isIdentifier(node.expression) && localWriterNames.has(node.expression.text)) ||
+          (ts.isPropertyAccessExpression(node.expression) &&
+            node.expression.name.text === 'recordAttendanceScheduledRunTargetOutcomeV1')
+        if (isDirectWriter) {
+          const outcome = node.arguments[2]
+          const terminalOutcome =
+            outcome && ts.isObjectLiteralExpression(outcome)
+              ? outcome.properties.find(
+                  (property): property is ts.PropertyAssignment =>
+                    ts.isPropertyAssignment(property) &&
+                    ((ts.isIdentifier(property.name) && property.name.text === 'terminalOutcome') ||
+                      (ts.isStringLiteral(property.name) && property.name.text === 'terminalOutcome')),
+                )
+              : undefined
+          const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+          const label = `${file}:${location.line + 1}`
+          if (
+            terminalOutcome &&
+            ts.isStringLiteral(terminalOutcome.initializer) &&
+            terminalOutcome.initializer.text === 'completed'
+          ) {
+            completed.push(label)
+          } else {
+            unsafe.push(label)
+          }
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sourceFile)
+  }
+
+  return { completed, unsafe }
+}
+
+function namedCancelFixtureCallsites(): string[] {
+  const file = fileURLToPath(import.meta.url)
+  const sourceFile = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
+  const callsites: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'cancelAttendanceResultOperationV1'
+    ) {
+      const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+      callsites.push(`${file}:${location.line + 1}`)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return callsites
 }
 
 describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned transactions (real DB)', () => {
@@ -207,14 +324,16 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
     workDate: string,
     outcome: 'completed' | 'failed',
     inserted: boolean,
-  ): Promise<void> {
+  ): Promise<RecordedStatement[]> {
     const t = await pool.query(
       `SELECT operation_id::text AS operation_id FROM attendance_scheduled_run_targets
         WHERE org_id = $1 AND run_id = $2::uuid AND user_id = $3::uuid AND target_kind = 'generate'`,
       [orgId, runId, userId],
     )
     const operationId = t.rows[0].operation_id as string
-    await withTxn(async (trx) => {
+    const statements: RecordedStatement[] = []
+    await withTxn(async (innerTrx) => {
+      const trx = recordingTrx(innerTrx, statements)
       await trx.query(
         `INSERT INTO attendance_result_operations (
             org_id, entrypoint, operation_id, identity_source_kind, source_root_id, proof_user_id, proof_work_date,
@@ -241,19 +360,25 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
         )
         await recordAttendanceScheduledRunTargetOutcomeV1(trx, identity, { terminalOutcome: 'completed' })
       } else {
-        await trx.query(
-          `UPDATE attendance_result_operations
-              SET state = 'canceled', version = version + 1, updated_at = now()
-            WHERE org_id = $1 AND entrypoint = 'scheduled' AND operation_id = $2::uuid AND state = 'claimed'`,
-          [orgId, operationId],
-        )
+        await cancelAttendanceResultOperationV1(trx, identity)
         await recordAttendanceScheduledRunTargetOutcomeV1(trx, identity, {
           terminalOutcome: 'failed',
           failureReasonCode: 'ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED',
         })
       }
     })
+    return statements
   }
+
+  it('OD-W4C-54=(a) keeps every production scheduled outcome writer completed-only', () => {
+    const callsites = scheduledOutcomeCallsites()
+    expect(callsites.completed.length).toBeGreaterThan(0)
+    expect(callsites.unsafe).toEqual([])
+  })
+
+  it('OD-W4C-54=(a) binds the failed contract fixture to the named cancel writer', () => {
+    expect(namedCancelFixtureCallsites()).toHaveLength(1)
+  })
 
   // ===========================================================================================
   // 1. Pure ordinal/fingerprint (51=a): unit-shaped, co-located here for real-schema round trip.
@@ -407,10 +532,10 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
   })
 
   // ===========================================================================================
-  // 3. Full lifecycle: create -> per-user outcomes -> finalize; gate 20's O-3=(a) failed-target leg.
+  // 3. Full lifecycle: create -> per-user outcomes -> finalize; gate 20's contract-only failed-target leg.
   // ===========================================================================================
-  describe('section 1.7/1.8/1.1.1 — full lifecycle including a deterministically-failed target', () => {
-    it('a run with one failed and two completed generate targets reaches completed, excludes the failed target from completed_user_count, and emits both events', async () => {
+  describe('section 1.7/1.8/1.1.1 — failed-outcome representation contract', () => {
+    it('a contract fixture uses the named cancel writer with zero source DML and finalizes a mixed run', async () => {
       const orgId = orgIdFor('lifecycle1')
       await setRolloutState(orgId, 'shadow')
       const workDate = '2026-02-04'
@@ -433,7 +558,9 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
 
       await sealGenerateTarget(orgId, runId, userA, workDate, 'completed', true)
       await sealGenerateTarget(orgId, runId, userB, workDate, 'completed', false)
-      await sealGenerateTarget(orgId, runId, userC, workDate, 'failed', false)
+      const failedStatements = await sealGenerateTarget(orgId, runId, userC, workDate, 'failed', false)
+      expect(SOURCE_DML_RE.test('INSERT INTO attendance_records (id) VALUES ($1)')).toBe(true)
+      expect(failedStatements.filter((statement) => SOURCE_DML_RE.test(statement.sql))).toEqual([])
 
       const outcome = await withAllowlist(orgId, () =>
         withTxn((trx) => finalizeAttendanceScheduledRunV1(trx, { orgId, initiator: 'cron', workDate, runId })),
@@ -983,8 +1110,8 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
   // ===========================================================================================
   // 8. Terminal-failure does not stall an unrelated org's own run (positive control).
   // ===========================================================================================
-  describe('terminal-failure blast radius', () => {
-    it('a deterministically-failed target in org A finalizes org A (O-3=(a)) and never touches org B, which finalizes independently and concurrently', async () => {
+  describe('failed-outcome contract fixture blast radius', () => {
+    it('a contract-only failed target in org A finalizes org A and never touches org B, which finalizes independently and concurrently', async () => {
       const orgA = orgIdFor('blastA')
       const orgB = orgIdFor('blastB')
       await setRolloutState(orgA, 'shadow')

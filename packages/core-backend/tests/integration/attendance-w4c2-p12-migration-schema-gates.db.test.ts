@@ -922,7 +922,7 @@ describeIfDatabase('W4C-2 P1-2 — scheduled-run identity migration + outbox uni
         expect(caught).toBeUndefined()
       })
 
-      it('completion guard: 1 completed + 1 deterministically-failed(canceled) target with completed_user_count=1 commits (O-3=(a) shape)', async () => {
+      it('completion guard: 1 completed + 1 contract-fixture failed(canceled) target with completed_user_count=1 commits', async () => {
         const org = `${NS}-completefail`
         const workDate = '2026-09-18'
         const u1 = uuid()
@@ -991,24 +991,54 @@ describeIfDatabase('W4C-2 P1-2 — scheduled-run identity migration + outbox uni
         expect(String((caught as Error).message)).toMatch(/W4C2_RUN_COMPLETION/)
       })
 
-      it('completion guard: an outcome label disagreeing with its operation row state blocks finalization (canceled op paired with completed outcome)', async () => {
-        const org = `${NS}-labelmismatch`
-        const workDate = '2026-09-21'
-        const u1 = uuid()
-        const { runId, opIds } = await makeRunWithGenerateTargets(pool, org, workDate, 'cron', [u1])
-        await insertOperationRow(pool, org, opIds[0], 'canceled', runId, u1, workDate)
-        const targets = await pool.query(`SELECT id::text AS id FROM attendance_scheduled_run_targets WHERE org_id=$1 AND run_id=$2`, [org, runId])
-        await pool.query(
-          `INSERT INTO attendance_scheduled_run_target_outcomes (org_id, run_id, target_id, terminal_outcome) VALUES ($1,$2,$3,'completed')`,
-          [org, runId, targets.rows[0].id],
-        )
-        const caught = await catchInTxn(pool, async (client) => {
-          await client.query(
-            `UPDATE attendance_scheduled_runs SET state='completed', completed_user_count=1, generated_count=1, finalized_at=now() WHERE run_id=$1`,
-            [runId],
+      it('completion guard: both canceled/completed and completed/failed operation-outcome mismatches fail at commit', async () => {
+        const cases = [
+          {
+            label: 'canceled-completed',
+            operationState: 'canceled' as const,
+            terminalOutcome: 'completed' as const,
+            failureReasonCode: null,
+            completedUserCount: 1,
+          },
+          {
+            label: 'completed-failed',
+            operationState: 'completed' as const,
+            terminalOutcome: 'failed' as const,
+            failureReasonCode: 'ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED',
+            completedUserCount: 0,
+          },
+        ]
+        expect(cases.map((mismatch) => mismatch.label)).toEqual([
+          'canceled-completed',
+          'completed-failed',
+        ])
+
+        for (const mismatch of cases) {
+          const org = `${NS}-labelmismatch-${mismatch.label}`
+          const workDate = '2026-09-21'
+          const userId = uuid()
+          const { runId, opIds } = await makeRunWithGenerateTargets(pool, org, workDate, 'cron', [userId])
+          await insertOperationRow(pool, org, opIds[0], mismatch.operationState, runId, userId, workDate)
+          const targets = await pool.query(
+            `SELECT id::text AS id FROM attendance_scheduled_run_targets WHERE org_id=$1 AND run_id=$2`,
+            [org, runId],
           )
-        })
-        expect(String((caught as Error).message)).toMatch(/W4C2_RUN_COMPLETION/)
+          await pool.query(
+            `INSERT INTO attendance_scheduled_run_target_outcomes
+              (org_id, run_id, target_id, terminal_outcome, failure_reason_code)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [org, runId, targets.rows[0].id, mismatch.terminalOutcome, mismatch.failureReasonCode],
+          )
+          const caught = await catchInTxn(pool, async (client) => {
+            await client.query(
+              `UPDATE attendance_scheduled_runs
+                  SET state='completed', completed_user_count=$2, generated_count=$2, finalized_at=now()
+                WHERE run_id=$1`,
+              [runId, mismatch.completedUserCount],
+            )
+          })
+          expect(String((caught as Error).message)).toMatch(/W4C2_RUN_COMPLETION/)
+        }
       })
 
       it('completion guard (LEFT JOIN, not INNER): an outcome row whose target has NO matching operation row at all is caught, not silently dropped from the count', async () => {

@@ -65,7 +65,10 @@ import {
   parseCanonicalAttendanceScheduledRunKeyV1,
 } from '../../src/attendance/w4c0-identity'
 import { createAuthorizedAttendanceWriteContextV1 } from '../../src/attendance/w4c0-authorization'
-import { runAttendanceResultOperationTransactionV1 } from '../../src/attendance/w4c0-operation-registry'
+import {
+  cancelAttendanceResultOperationV1,
+  runAttendanceResultOperationTransactionV1,
+} from '../../src/attendance/w4c0-operation-registry'
 import {
   dispatchAttendanceResultEventOutboxV1,
   type AttendanceOutboxDeliveryV1,
@@ -294,12 +297,7 @@ describeIfDatabase('W4C-2 P1-2 — durable delivery / lock-order / atomicity gat
         )
         await recordAttendanceScheduledRunTargetOutcomeV1(trx, identity, { terminalOutcome: 'completed' })
       } else {
-        await trx.query(
-          `UPDATE attendance_result_operations
-              SET state = 'canceled', version = version + 1, updated_at = now()
-            WHERE org_id = $1 AND entrypoint = 'scheduled' AND operation_id = $2::uuid AND state = 'claimed'`,
-          [orgId, operationId],
-        )
+        await cancelAttendanceResultOperationV1(trx, identity)
         await recordAttendanceScheduledRunTargetOutcomeV1(trx, identity, {
           terminalOutcome: 'failed',
           failureReasonCode: 'ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED',
