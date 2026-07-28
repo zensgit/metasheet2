@@ -21686,6 +21686,15 @@ async function runAutoAbsenceForOrgDate(db, options) {
   const w4Boundary = options.w4Boundary ?? null
   let rows
   let suspendedByRollout = false
+  // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): for the w4
+  // branch (shadow/eligible/authoritative), run-level events are inserted
+  // into the durable outbox by the boundary's own finalization transaction
+  // and delivered ONLY via the dispatcher (owner red line, 2026-07-28
+  // addendum) — this caller's own synchronous `emit(...)` calls below MUST
+  // NOT also fire for that branch (double delivery). `legacy_projection_only`
+  // is UNCHANGED: it keeps the existing synchronous best-effort emit with
+  // byte-identical bytes, exactly as before this cutover.
+  let w4EventsHandledByDispatcher = false
   if (w4Boundary) {
     const initiator = options.initiator === 'admin_run' ? 'admin_run' : 'cron'
     // W4C-2 remediation P1-4 (#4612 gate finding): admin_run MUST carry the
@@ -21699,6 +21708,11 @@ async function runAutoAbsenceForOrgDate(db, options) {
       workDate,
       timezone: rule.timezone,
       targetUserIds: targetUsers,
+      // Same pre-resolved review list this function already computed above
+      // (attendance-work-date-resolver.cjs, unchanged) — the durable run's
+      // own target set (w4c2-scheduled-run.ts section 1.2/1.3) covers
+      // `review` targets too, never a re-derivation.
+      reviewTargets: reviewRequired.map((entry) => ({ userId: entry.userId, reasonCode: entry.reasonCode })),
       initiator,
       adminActorId,
     })
@@ -21707,6 +21721,7 @@ async function runAutoAbsenceForOrgDate(db, options) {
       rows = []
     } else {
       rows = outcome.rows
+      w4EventsHandledByDispatcher = outcome.kind === 'w4'
     }
   } else {
     rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
@@ -21717,7 +21732,7 @@ async function runAutoAbsenceForOrgDate(db, options) {
     return { skipped: true, reason: 'segment_calculation_suspended', total: 0 }
   }
   if (!skipDedup) lastAutoAbsenceKey = key
-  if (emit) {
+  if (emit && !w4EventsHandledByDispatcher) {
     emit('attendance.absence.generated', {
       orgId,
       workDate,
@@ -23129,6 +23144,10 @@ module.exports = {
       'AttendanceW4AuthorizationError',
       'AttendanceW4LiveScheduledBoundaryError',
       'AttendanceW4MergePolicyError',
+      // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the
+      // durable run-creation/resume/outcome/finalization machine's own
+      // values-free error class (w4c2-scheduled-run.ts).
+      'AttendanceW4ScheduledRunIdentityError',
     ])
     const respondIfW4BoundaryError = (res, error) => {
       if (!error || typeof error !== 'object' || !W4_ERROR_NAMES.has(error.name)) return false

@@ -125,13 +125,18 @@ import {
 } from '../../src/attendance/w4c0-operation-registry'
 import type { AttendanceW4TransactionClientV1, VerifiedAttendanceOperationIdentityV1 } from '../../src/attendance/w4c0-identity'
 import {
-  deriveAttendanceScheduledRunIdV1,
   createAttendanceLiveScheduledBoundaryV1,
   AttendanceW4LiveScheduledBoundaryError,
   type AttendanceW4LiveScheduledLegacyAdaptersV1,
   type AttendanceW4BoundaryConnectionV1,
 } from '../../src/attendance/w4c2-live-scheduled-boundary'
 import { AttendanceW4OperationError } from '../../src/attendance/w4c0-operation-contract'
+import {
+  abandonAttendanceScheduledRunV1,
+  createOrResumeAttendanceScheduledRunV1,
+  requireAttendanceScheduledRunRunningBeforeSourceDmlV1,
+} from '../../src/attendance/w4c2-scheduled-run'
+import { dispatchAttendanceResultEventOutboxV1 } from '../../src/attendance/w4c2-outbox-dispatcher'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -205,6 +210,16 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   const mergeOrg = randomUUID()
   // P1-4 remediation legs (direct boundary construction, no HTTP route).
   const adminWitnessOrg = randomUUID()
+  // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)") new-gate orgs
+  // (leg 9g-9k) — each MUST be on the allowlist below (w4c0 posture doctrine:
+  // persisted rollout row AND exact env entry) or it resolves structurally
+  // `legacy_projection_only` regardless of the row this file inserts.
+  const cutoverRestartOrg = randomUUID()
+  const cutoverConcurrentOrg = randomUUID()
+  const cutoverStragglerOrg = randomUUID()
+  const cutoverStragglerControlOrg = randomUUID()
+  const cutoverInitiatorOrg = randomUUID()
+  const cutoverDispatchOrg = randomUUID()
 
   const ambUser = randomUUID()
   const ambControlUser = randomUUID()
@@ -339,6 +354,79 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
        FROM attendance_result_event_outbox WHERE org_id = $1 ORDER BY created_at`,
       [orgId],
     )).rows
+  /** A raw pool connection released after `body` settles — for direct-API constructions below. */
+  async function withConnDirect<T>(body: (client: unknown) => Promise<T>): Promise<T> {
+    const client = await pool.connect()
+    try {
+      return await body(client)
+    } finally {
+      client.release()
+    }
+  }
+  /** W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)") new-gate helper. */
+  const scheduledRunRows = async (orgId: string, workDate?: string) =>
+    (await pool.query(
+      `SELECT run_id::text AS run_id, initiator, work_date::text AS work_date, generation, state,
+              expected_user_count, review_count, completed_user_count, generated_count
+         FROM attendance_scheduled_runs
+        WHERE org_id = $1 AND ($2::date IS NULL OR work_date = $2::date)
+        ORDER BY generation ASC`,
+      [orgId, workDate ?? null],
+    )).rows
+  const scheduledRunOutboxRows = async (orgId: string) =>
+    (await pool.query(
+      `SELECT id::text AS id, scheduled_run_id::text AS scheduled_run_id, event_kind, payload, delivery_state
+         FROM attendance_result_event_outbox
+        WHERE org_id = $1 AND identity_kind = 'scheduled_run' ORDER BY created_at`,
+      [orgId],
+    )).rows
+  /**
+   * A "real" (not throwing-stub) scheduled legacy adapter set for the caller-
+   * cutover gates below: `applyScheduledAbsenceLegacy` performs the SAME
+   * NOT-EXISTS-guarded absence INSERT `generateAbsenceRecords`
+   * (plugins/plugin-attendance/index.cjs) does, over the plugin-shaped
+   * `trx.query` wrapper; `resolveScheduledCandidate` always reports
+   * `unresolved` (the calculation-engine half is out of scope for these
+   * wiring gates — `attributionFromResolution` maps it to a closed
+   * `unsupported` review, never a crash, never `buildShadowFrozenContext`).
+   */
+  function realScheduledAdapters(): {
+    adapters: AttendanceW4LiveScheduledLegacyAdaptersV1
+    absenceCallCount: () => number
+    absenceCallUserIds: () => string[]
+  } {
+    let n = 0
+    const seenUserIds: string[] = []
+    const unreached = (name: string) => async () => {
+      throw new Error(`W4C2_CUTOVER_STUB_${name}_MUST_NOT_BE_REACHED`)
+    }
+    const adapters: AttendanceW4LiveScheduledLegacyAdaptersV1 = {
+      applyLivePunchLegacy: unreached('applyLivePunchLegacy') as never,
+      applyScheduledAbsenceLegacy: async (trx, args) => {
+        n += 1
+        seenUserIds.push(...args.userIds)
+        return trx.query(
+          `INSERT INTO attendance_records
+             (user_id, org_id, work_date, timezone, work_minutes, late_minutes, early_leave_minutes, status, is_workday, created_at, updated_at)
+           SELECT uo.user_id, $2, $1, $3, 0, 0, 0, 'absent', true, now(), now()
+           FROM user_orgs uo
+           JOIN users u ON u.id = uo.user_id
+           WHERE uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
+             AND uo.user_id = ANY($4)
+             AND NOT EXISTS (
+               SELECT 1 FROM attendance_records r
+               WHERE r.user_id = uo.user_id AND r.work_date = $1 AND r.org_id = $2
+             )
+           RETURNING user_id`,
+          [args.workDate, args.orgId, args.timezone, args.userIds],
+        ) as unknown as Promise<Array<{ user_id: string }>>
+      },
+      resolveLiveCandidate: unreached('resolveLiveCandidate') as never,
+      resolveScheduledCandidate: async () => ({ kind: 'unresolved' }),
+      buildShadowFrozenContext: unreached('buildShadowFrozenContext') as never,
+    }
+    return { adapters, absenceCallCount: () => n, absenceCallUserIds: () => seenUserIds.slice() }
+  }
 
   /** Live-punch registry envelope with the boundary's exact payload shape. */
   function livePunchEnvelope(orgId: string, userId: string, operationId: string, occurredAt: string) {
@@ -366,7 +454,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   }
 
   function scheduledEnvelope(orgId: string, userId: string, workDate: string) {
-    const runId = deriveAttendanceScheduledRunIdV1({ initiator: 'admin_run', orgId, workDate })
+    // Fixture-only run id: this helper builds a module-level preflight
+    // envelope shape (leg 5c/5d), not a durable run — any well-formed UUID
+    // serves; the durable `run_id` is now always server-minted (see leg 9).
+    const runId = randomUUID()
     return normalizeAttendanceSourceOperationEnvelopeV1({
       schemaVersion: 1,
       orgId,
@@ -423,6 +514,8 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = [
       ambOrg, isoOrg, isoOrg2, replayOrg, authzOrg, authoritativeOrg, rebaseOrg, orderOrg, schedOrg,
       adminWitnessOrg,
+      cutoverRestartOrg, cutoverConcurrentOrg, cutoverStragglerOrg, cutoverStragglerControlOrg,
+      cutoverInitiatorOrg, cutoverDispatchOrg,
     ].join(',')
 
     const repoRoot = path.join(__dirname, '../../../../')
@@ -1084,7 +1177,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     expect(outbox[0]).toMatchObject({ operation_id: operationId, event_kind: 'attendance.punched', delivery_state: 'pending' })
   })
 
-  it('leg 9 — durable scheduled-run replay: the second administrator run replays per-user with zero DML on the SAME deterministic operation; W2-ambiguous user gets no parent/result; skipDedup cannot bypass the registry', async () => {
+  it('leg 9 — durable scheduled-run: the real admin_run entry point creates a durable run whose server-minted run_id anchors the sealed operation; a repeat administrator call after completion is idempotent at the data layer across a NEW generation (ratified OD-W4C-45=(a) cross-generation cost); W2-ambiguous user gets no parent/result; skipDedup cannot bypass the registry', async () => {
     // W4C-2 remediation P1-4 (#4612 gate finding): admin_run now mints its
     // witness from the ROUTE's real authenticated actor id (platform_admin
     // posture, requireActiveUser only — see adminRunScheduledAuthorization's
@@ -1093,7 +1186,6 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     // before any source DML.
     const adminToken = await mintToken(schedAdminUser, 'attendance:read,attendance:write,attendance:admin')
     const workDate = '2026-07-22'
-    const expectedRunId = deriveAttendanceScheduledRunIdV1({ initiator: 'admin_run', orgId: schedOrg, workDate })
 
     // Run 1: schedUser (rule-derived, no shift) generates ONE absent record and
     // ONE sealed scheduled operation; schedAmbUser resolves AMBIGUOUS and is
@@ -1109,13 +1201,33 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     expect(await recordCount(schedAmbUser)).toBe(0)
     expect((await calculationRowsForUser(schedAmbUser)).length).toBe(0)
 
+    // The durable run row itself: server-minted run_id (generation 1),
+    // completed with the expected folded counts.
+    const runsAfterFirst = await scheduledRunRows(schedOrg, workDate)
+    expect(runsAfterFirst.length).toBe(1)
+    expect(runsAfterFirst[0]).toMatchObject({
+      initiator: 'admin_run',
+      generation: 1,
+      state: 'completed',
+      expected_user_count: 1,
+      review_count: 1,
+      completed_user_count: 1,
+      generated_count: 1,
+    })
+    const firstRunId = runsAfterFirst[0].run_id
+
     const opsAfterFirst = await operationRows(schedOrg, 'scheduled')
     expect(opsAfterFirst.length).toBe(1)
     expect(opsAfterFirst[0]).toMatchObject({
       state: 'completed',
       accepted_write_posture: 'shadow',
       identity_source_kind: 'scheduled',
-      source_root_id: expectedRunId,
+      // The operation's source_root_id anchors to the run this file's OWN
+      // durable-run query just read back — never a value pre-derived by a
+      // pure function of (initiator, orgId, workDate); that derivation
+      // (`deriveAttendanceScheduledRunIdV1`) was retired by the caller
+      // cutover (owner ruling 2026-07-28, "(b-narrow)").
+      source_root_id: firstRunId,
       proof_user_id: schedUser,
       proof_work_date: workDate,
       // P1-4: the real administrator identity, NOT the internal scheduler
@@ -1153,19 +1265,418 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     })
 
     // Run 2 — the route ALWAYS bypasses the in-process dedup key
-    // (skipDedup:true), so only the durable registry can deduplicate this run.
-    // Every consulted input (operation row, deterministic runId, records) is
-    // DB-resident: this second run is exactly what a freshly restarted process
-    // would execute, and it must replay with ZERO new DML.
+    // (skipDedup:true). Generation 1 already left `running` (it is
+    // `completed`), so `createOrResumeAttendanceScheduledRunV1` does not
+    // resume it — per section 1.7 step 3 ("if a `running` row exists, this
+    // is a resume; otherwise ... allocate `generation`") a SECOND terminal-
+    // then-repeated call for the SAME (org, initiator, workDate) mints a NEW
+    // generation, ratified as `OD-W4C-45=(a)`'s accepted cross-generation
+    // cost (amendment's own "Declared residuals": every per-user
+    // `operation_id` derives from `(run_id, user_id, work_date)`, so a new
+    // `run_id` means a genuinely new operation identity for generation 2 —
+    // never a replay of generation 1's operation). The absence INSERT stays
+    // guarded by `NOT EXISTS` regardless (data-layer idempotency,
+    // independent of the run-identity layer), so the OBSERVABLE response is
+    // unchanged from the pre-cutover behavior this leg originally pinned:
+    // `generated: 0, total: 0`, and schedUser's `attendance_records`/
+    // `attendance_record_calculations` row counts stay exactly 1.
     const second = await autoAbsenceRun(adminToken, { orgId: schedOrg, workDate })
     expect(second.status).toBe(200)
     expect(second.body?.data).toMatchObject({ skipped: false, generated: 0, total: 0 })
     expect(await recordCount(schedUser)).toBe(1)
+
+    const runsAfterSecond = await scheduledRunRows(schedOrg, workDate)
+    expect(runsAfterSecond.length).toBe(2)
+    expect(runsAfterSecond[1]).toMatchObject({
+      initiator: 'admin_run',
+      generation: 2,
+      state: 'completed',
+      expected_user_count: 1,
+      review_count: 1,
+      completed_user_count: 1,
+      // The absence row already exists (generation 1's), so generation 2's
+      // own INSERT..SELECT NOT EXISTS inserts nothing.
+      generated_count: 0,
+    })
+    expect(runsAfterSecond[1].run_id).not.toBe(firstRunId)
+
     const opsAfterSecond = await operationRows(schedOrg, 'scheduled')
-    expect(opsAfterSecond.length).toBe(1)
-    expect(opsAfterSecond[0].operation_id).toBe(firstOperationId)
+    expect(opsAfterSecond.length).toBe(2)
+    const secondOp = opsAfterSecond.find((row) => row.operation_id !== firstOperationId)
+    expect(secondOp).toMatchObject({
+      state: 'completed',
+      accepted_write_posture: 'shadow',
+      source_root_id: runsAfterSecond[1].run_id,
+      proof_user_id: schedUser,
+      proof_work_date: workDate,
+      response_snapshot: { inserted: false },
+    })
+    // Generation 2's `inserted: false` means the shadow-calculation branch
+    // never runs (`if (inserted) { ... }`) — schedUser's calculation count
+    // stays exactly the ONE generation-1 row.
     expect((await calculationRowsForUser(schedUser)).length).toBe(1)
     expect(await recordCount(schedAmbUser)).toBe(0)
+  })
+
+  // -------------------------------------------------------------------------
+  // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)") — new
+  // required gates: restart resume, concurrent same run, straggler
+  // (gate 12 pre-DML fail-closed), two initiator types, two run-level events
+  // exactly-once via dispatcher. Direct boundary construction (own
+  // `createAttendanceLiveScheduledBoundaryV1` instance + real pool
+  // connection), matching the established P1-4 legs' style above — this
+  // proves the BOUNDARY's own wiring, driven through its one real production
+  // entry point (`executeScheduledRun`), independent of route reachability.
+  // -------------------------------------------------------------------------
+
+  function onceFailingAdapters(failUserId: string): {
+    adapters: AttendanceW4LiveScheduledLegacyAdaptersV1
+    absenceCallUserIds: () => string[]
+  } {
+    const real = realScheduledAdapters()
+    let failed = false
+    const adapters: AttendanceW4LiveScheduledLegacyAdaptersV1 = {
+      ...real.adapters,
+      applyScheduledAbsenceLegacy: async (trx, args) => {
+        if (!failed && args.userIds.includes(failUserId)) {
+          failed = true
+          throw new Error('W4C2_CUTOVER_SIMULATED_CRASH')
+        }
+        return real.adapters.applyScheduledAbsenceLegacy(trx, args)
+      },
+    }
+    return { adapters, absenceCallUserIds: real.absenceCallUserIds }
+  }
+
+  it('leg 9g — restart/partial-completion: a crash after k of n users commit resumes the SAME run from durable evidence on retry; the already-terminal user replays with zero new DML, the crashed user completes on retry, folded counts equal an uninterrupted control', async () => {
+    const orgId = cutoverRestartOrg
+    const userA = randomUUID()
+    const userB = randomUUID()
+    await insertRolloutRow(orgId, 'shadow')
+    await insertActiveUser(userA, orgId)
+    await insertActiveUser(userB, orgId)
+    const workDate = '2026-03-01'
+
+    const { adapters, absenceCallUserIds } = onceFailingAdapters(userB)
+    const boundary = buildDirectScheduledBoundary(adapters)
+    const call = () =>
+      boundary.executeScheduledRun({
+        orgId,
+        workDate,
+        timezone: 'UTC',
+        targetUserIds: [userA, userB],
+        reviewTargets: [],
+        initiator: 'cron',
+        adminActorId: null,
+      })
+
+    // First attempt: userA commits (real INSERT), userB's per-user
+    // transaction throws BEFORE its own commit (simulated crash) — the whole
+    // call rejects, but userA's work is durable (own, already-committed
+    // transaction), never rolled back by userB's failure. The failing stub
+    // throws BEFORE delegating to the real adapter, so only the SUCCEEDED
+    // call (userA) is recorded here — userB's crashed attempt never reached
+    // the real absence INSERT at all (proven independently below by the
+    // operation-row count staying at 1).
+    await expect(call()).rejects.toThrow('W4C2_CUTOVER_SIMULATED_CRASH')
+    expect(absenceCallUserIds()).toEqual([userA])
+
+    const runsAfterCrash = await scheduledRunRows(orgId, workDate)
+    expect(runsAfterCrash.length).toBe(1)
+    expect(runsAfterCrash[0]).toMatchObject({ generation: 1, state: 'running' })
+    const opsAfterCrash = await operationRows(orgId, 'scheduled')
+    expect(opsAfterCrash.length).toBe(1)
+    expect(opsAfterCrash[0].proof_user_id).toBe(userA)
+    const userARowBeforeRetry = opsAfterCrash[0]
+
+    // Retry (a freshly restarted process would call this exact same shape —
+    // `runAutoAbsenceForOrgDate` re-resolves the SAME membership and calls
+    // the boundary again): resumes generation 1 (NOT a new generation, since
+    // it is still `running`), replays userA with zero new DML, and completes
+    // ONLY userB this time.
+    const retry = await call()
+    expect(retry.kind).toBe('w4')
+    expect(retry.runId).toBe(runsAfterCrash[0].run_id)
+    // userA's absence adapter is NOT called again — the resume protocol
+    // derives its work list from `outstandingGenerateTargets` (targets with
+    // no row yet in `attendance_scheduled_run_target_outcomes`), which
+    // excludes the already-terminal userA entirely; only userB (this time
+    // not forced to throw) is attempted.
+    expect(absenceCallUserIds()).toEqual([userA, userB])
+
+    const runsAfterRetry = await scheduledRunRows(orgId, workDate)
+    expect(runsAfterRetry.length).toBe(1)
+    expect(runsAfterRetry[0]).toMatchObject({
+      generation: 1,
+      state: 'completed',
+      expected_user_count: 2,
+      completed_user_count: 2,
+      generated_count: 2,
+    })
+    const opsAfterRetry = await operationRows(orgId, 'scheduled')
+    expect(opsAfterRetry.length).toBe(2)
+    // userA's row is byte-congruent with its pre-retry snapshot (same
+    // operation_id, same sealed content) — the replay wrote nothing new.
+    const userARowAfterRetry = opsAfterRetry.find((row) => row.proof_user_id === userA)
+    expect(userARowAfterRetry).toEqual(userARowBeforeRetry)
+    const userBRow = opsAfterRetry.find((row) => row.proof_user_id === userB)
+    expect(userBRow).toMatchObject({ state: 'completed', proof_work_date: workDate })
+  })
+
+  it('leg 9h — concurrent same run: two simultaneous calls for the SAME (org, initiator, workDate) never duplicate the run row, the target row, or the absence insert; exactly one run, one operation, one record survive', async () => {
+    const orgId = cutoverConcurrentOrg
+    const userA = randomUUID()
+    await insertRolloutRow(orgId, 'shadow')
+    await insertActiveUser(userA, orgId)
+    const workDate = '2026-03-02'
+
+    const { adapters } = realScheduledAdapters()
+    const boundary = buildDirectScheduledBoundary(adapters)
+    const call = () =>
+      boundary.executeScheduledRun({
+        orgId,
+        workDate,
+        timezone: 'UTC',
+        targetUserIds: [userA],
+        reviewTargets: [],
+        initiator: 'cron',
+        adminActorId: null,
+      })
+
+    const [first, second] = await Promise.all([call(), call()])
+    expect(first.kind).toBe('w4')
+    expect(second.kind).toBe('w4')
+    if (first.kind !== 'w4' || second.kind !== 'w4') throw new Error('unreachable')
+    // Both racers converge on the SAME durable run — the class-01 lock plus
+    // the `state='running'` resume predicate serializes them (w4c2-scheduled-
+    // run.ts section 1.7), never two independent generation-1 rows.
+    expect(second.runId).toBe(first.runId)
+
+    const runs = await scheduledRunRows(orgId, workDate)
+    expect(runs.length).toBe(1)
+    expect(runs[0]).toMatchObject({ generation: 1, state: 'completed', expected_user_count: 1, generated_count: 1 })
+    const ops = await operationRows(orgId, 'scheduled')
+    expect(ops.length).toBe(1)
+    expect(await recordCount(userA)).toBe(1)
+  })
+
+  it('leg 9i — straggler (gate 12, first half): a per-user operation transaction whose durable run is abandoned before it reaches source DML is rejected BEFORE the absence INSERT — the writer-side check (recordAttendanceScheduledRunTargetOutcomeV1) is not the only door', async () => {
+    const orgId = cutoverStragglerOrg
+    const userA = randomUUID()
+    await insertRolloutRow(orgId, 'shadow')
+    await insertActiveUser(userA, orgId)
+    const workDate = '2026-03-03'
+
+    // Build a running run directly (bypassing the boundary), matching the
+    // p12-run-transactions.db.test.ts direct-API style, so the abandon can
+    // land BEFORE any per-user transaction ever opens — the deterministic
+    // shape of the race this check exists for (an operator abandons a run
+    // between its per-user transactions; section 1.7's fail-closed rule).
+    const created = await withConnDirect(async (client) =>
+      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, (trx) =>
+        createOrResumeAttendanceScheduledRunV1(
+          trx,
+          { orgId, initiator: 'cron', workDate },
+          async () => [{ userId: userA, targetKind: 'generate', reviewReasonCode: null }],
+        ),
+      ),
+    )
+    if (created.kind !== 'created_running') throw new Error('expected created_running')
+
+    const abandonCaller = createAuthorizedAttendanceWriteContextV1({
+      actorId: 'w4c2-e5-cutover-operator',
+      actorPosture: 'platform_admin',
+      tokenSubjectUserId: 'w4c2-e5-cutover-operator',
+      orgId,
+      subjectScope: { kind: 'explicit_users', userIds: ['w4c2-e5-cutover-operator'] },
+      capability: 'retirement',
+      sourceRef: 'w4c2-e5:leg9i-straggler-abandon',
+    })
+    const abandoned = await withConnDirect(async (client) =>
+      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, (trx) =>
+        abandonAttendanceScheduledRunV1(
+          trx,
+          abandonCaller,
+          { orgId, runId: created.runId },
+          'ATTENDANCE_SCHEDULED_RUN_OPERATOR_ABANDONED',
+        ),
+      ),
+    )
+    expect(abandoned.kind).toBe('abandoned')
+
+    // The straggler: a per-user operation transaction for userA that reaches
+    // this run's per-user machinery AFTER the abandon already committed.
+    // `requireAttendanceScheduledRunRunningBeforeSourceDmlV1` is exercised
+    // exactly as the boundary calls it — before any source DML — over the
+    // SAME `runId` the abandoned row now carries.
+    const { adapters, absenceCallCount } = realScheduledAdapters()
+    let rejected: unknown
+    await withConnDirect(async (client) =>
+      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, async (trx) => {
+        try {
+          await requireAttendanceScheduledRunRunningBeforeSourceDmlV1(trx, orgId, created.runId)
+        } catch (error) {
+          rejected = error
+        }
+      }),
+    )
+    expect(String((rejected as { code?: string })?.code)).toBe('W4C2_SCHEDULED_RUN_NOT_RUNNING_BEFORE_SOURCE_DML')
+    // The negative control this leg's own name requires: a 'running' run's
+    // check passes (zero throw) — proving the rejection above is
+    // discriminating on run state, not a guard that always fires.
+    const runningOrgId = cutoverStragglerControlOrg
+    const runningUser = randomUUID()
+    await insertRolloutRow(runningOrgId, 'shadow')
+    await insertActiveUser(runningUser, runningOrgId)
+    const runningCreated = await withConnDirect(async (client) =>
+      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, (trx) =>
+        createOrResumeAttendanceScheduledRunV1(
+          trx,
+          { orgId: runningOrgId, initiator: 'cron', workDate },
+          async () => [{ userId: runningUser, targetKind: 'generate', reviewReasonCode: null }],
+        ),
+      ),
+    )
+    if (runningCreated.kind !== 'created_running') throw new Error('expected created_running')
+    let passed = false
+    await withConnDirect(async (client) =>
+      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, async (trx) => {
+        await requireAttendanceScheduledRunRunningBeforeSourceDmlV1(trx, runningOrgId, runningCreated.runId)
+        passed = true
+      }),
+    )
+    expect(passed).toBe(true)
+    // Zero absence-adapter calls: this leg never drives the boundary's own
+    // for-loop (it exercises the check in isolation, over real committed
+    // rows), so the counting stub confirms nothing extraneous ran.
+    expect(absenceCallCount()).toBe(0)
+  })
+
+  it('leg 9j — two initiator types: cron and admin_run for the SAME (org, workDate) are INDEPENDENT durable runs (initiator is part of the run key) — neither blocks, replays, or corrupts the other', async () => {
+    const orgId = cutoverInitiatorOrg
+    const userA = randomUUID()
+    const adminActor = randomUUID()
+    await insertRolloutRow(orgId, 'shadow')
+    await insertActiveUser(userA, orgId)
+    await insertActiveUser(adminActor, orgId)
+    const workDate = '2026-03-04'
+
+    const { adapters, absenceCallCount } = realScheduledAdapters()
+    const boundary = buildDirectScheduledBoundary(adapters)
+
+    const cronResult = await boundary.executeScheduledRun({
+      orgId,
+      workDate,
+      timezone: 'UTC',
+      targetUserIds: [userA],
+      reviewTargets: [],
+      initiator: 'cron',
+      adminActorId: null,
+    })
+    const adminResult = await boundary.executeScheduledRun({
+      orgId,
+      workDate,
+      timezone: 'UTC',
+      targetUserIds: [userA],
+      reviewTargets: [],
+      initiator: 'admin_run',
+      adminActorId: adminActor,
+    })
+    expect(cronResult.kind).toBe('w4')
+    expect(adminResult.kind).toBe('w4')
+    if (cronResult.kind !== 'w4' || adminResult.kind !== 'w4') throw new Error('unreachable')
+    expect(cronResult.runId).not.toBe(adminResult.runId)
+
+    const runs = await scheduledRunRows(orgId, workDate)
+    expect(runs.length).toBe(2)
+    expect(runs.map((r) => r.initiator).sort()).toEqual(['admin_run', 'cron'])
+    for (const run of runs) {
+      expect(run).toMatchObject({ generation: 1, state: 'completed', expected_user_count: 1 })
+    }
+    // Both initiators' operations target the SAME userA/workDate but are
+    // TWO DISTINCT operations (different `operation_id`, since it derives
+    // from `(run_id, userId, workDate)` and the two runs have different
+    // `run_id`s) — the absence row itself stays singular (NOT EXISTS), so
+    // only the FIRST-processed initiator's call actually inserts it.
+    const ops = await operationRows(orgId, 'scheduled')
+    expect(ops.length).toBe(2)
+    expect(new Set(ops.map((o) => o.operation_id)).size).toBe(2)
+    expect(await recordCount(userA)).toBe(1)
+    expect(absenceCallCount()).toBe(2)
+  })
+
+  it('leg 9k — two run-level events exactly-once via the dispatcher: draining the SAME real run twice delivers `attendance.absence.generated` and `attendance.work_date.review_required` exactly once each, never twice, never via direct emit', async () => {
+    const orgId = cutoverDispatchOrg
+    const userGenerate = randomUUID()
+    const reviewUser = randomUUID()
+    await insertRolloutRow(orgId, 'shadow')
+    await insertActiveUser(userGenerate, orgId)
+    const workDate = '2026-03-05'
+
+    const { adapters } = realScheduledAdapters()
+    const boundary = buildDirectScheduledBoundary(adapters)
+    const result = await boundary.executeScheduledRun({
+      orgId,
+      workDate,
+      timezone: 'UTC',
+      targetUserIds: [userGenerate],
+      reviewTargets: [{ userId: reviewUser, reasonCode: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS' }],
+      initiator: 'cron',
+      adminActorId: null,
+    })
+    expect(result.kind).toBe('w4')
+
+    // Finalization already committed both run-level rows to the outbox
+    // (never via a direct `emit(...)` — this direct-boundary construction
+    // path has no caller-side emit at all to accidentally double-fire).
+    const pendingBefore = await scheduledRunOutboxRows(orgId)
+    expect(pendingBefore.length).toBe(2)
+    expect(pendingBefore.map((r) => r.event_kind).sort()).toEqual([
+      'attendance.absence.generated',
+      'attendance.work_date.review_required',
+    ])
+    expect(pendingBefore.every((r) => r.delivery_state === 'pending')).toBe(true)
+
+    const delivered: Array<{ eventKind: string; payload: unknown }> = []
+    const raw = await pool.connect()
+    try {
+      const outcome = await dispatchAttendanceResultEventOutboxV1(raw as unknown as AttendanceW4TransactionClientV1, {
+        emit: async (delivery) => {
+          delivered.push({ eventKind: delivery.eventKind, payload: delivery.payload })
+        },
+      })
+      expect(outcome.delivered).toBeGreaterThanOrEqual(2)
+    } finally {
+      raw.release()
+    }
+    const ourDeliveries = delivered.filter(
+      (d) => (d.payload as { orgId?: string })?.orgId === orgId,
+    )
+    expect(ourDeliveries.length).toBe(2)
+    const absenceEvent = ourDeliveries.find((d) => d.eventKind === 'attendance.absence.generated')
+    expect(absenceEvent?.payload).toMatchObject({ orgId, workDate, total: 1 })
+    const reviewEvent = ourDeliveries.find((d) => d.eventKind === 'attendance.work_date.review_required')
+    expect(reviewEvent?.payload).toMatchObject({
+      orgId,
+      workDate,
+      total: 1,
+      reasons: [{ userId: reviewUser, reasonCode: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS' }],
+    })
+
+    // A second drain delivers NOTHING further for this org — the one-way
+    // pending -> delivered state machine, not a re-send.
+    const raw2 = await pool.connect()
+    try {
+      const secondDelivered: unknown[] = []
+      await dispatchAttendanceResultEventOutboxV1(raw2 as unknown as AttendanceW4TransactionClientV1, {
+        emit: async (delivery) => { secondDelivered.push(delivery) },
+      })
+      expect(secondDelivered.filter((d: any) => d.payload?.orgId === orgId).length).toBe(0)
+    } finally {
+      raw2.release()
+    }
+    const pendingAfter = await scheduledRunOutboxRows(orgId)
+    expect(pendingAfter.every((r) => r.delivery_state === 'delivered')).toBe(true)
   })
 
   it('leg 10 — P02 single-write discriminator: a merge-flipping internal punch touches attendance_records EXACTLY ONCE and lands the merged boundary', async () => {
@@ -1291,6 +1802,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
         workDate: '2026-07-10',
         timezone: 'UTC',
         targetUserIds: [adminWitnessTargetUser],
+        reviewTargets: [],
         initiator: 'admin_run',
         adminActorId: ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1,
       }),
@@ -1316,6 +1828,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
         workDate,
         timezone: 'UTC',
         targetUserIds: [adminWitnessTargetUser],
+        reviewTargets: [],
         initiator: 'admin_run',
         adminActorId: adminWitnessStaleAdmin,
       }),
@@ -1333,6 +1846,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       workDate,
       timezone: 'UTC',
       targetUserIds: [adminWitnessTargetUser],
+      reviewTargets: [],
       initiator: 'admin_run',
       adminActorId: adminWitnessRealAdmin,
     })
@@ -1363,6 +1877,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
         workDate: '2026-07-12',
         timezone: 'UTC',
         targetUserIds: [randomUUID()],
+        reviewTargets: [],
         initiator: 'cron',
         adminActorId: adminWitnessRealAdmin,
       }),
@@ -1393,6 +1908,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
         workDate: '2026-07-13',
         timezone: 'UTC',
         targetUserIds: [adminWitnessTargetUser],
+        reviewTargets: [],
         initiator: 'admin_run',
         adminActorId: null,
       }),

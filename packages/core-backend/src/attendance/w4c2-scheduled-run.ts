@@ -18,21 +18,25 @@
  * state"). All of it lands IN THIS SAME FILE, so the "neither constructor is exported outside
  * the module" exclusivity claim this file makes stays true.
  *
- * ZERO caller cutover, unchanged from the schema half: nothing in production imports this
- * module yet, and this slice does not wire the recovery sweep into any live tick or the
- * run-creation transaction into the live scheduled entrypoint — that is caller-cutover work
- * for a later slice (consistent with every other W4-covered module's own "ZERO caller
- * cutover" doctrine: `w4c0-operation-registry.ts`, `w4c0-authorization.ts`). Membership
+ * Caller cutover (owner ruling 2026-07-28, "(b-narrow)"): `w4c2-live-scheduled-boundary.ts`'s
+ * `executeScheduledRun` now drives `createOrResumeAttendanceScheduledRunV1` /
+ * `recordAttendanceScheduledRunTargetOutcomeV1` / `finalizeAttendanceScheduledRunV1` for the
+ * `shadow`/`eligible`/`authoritative` posture branch, from both production initiators (the
+ * cron tick and the `POST /api/attendance/auto-absence/run` admin route, both funneling
+ * through `plugins/plugin-attendance/index.cjs`'s `runAutoAbsenceForOrgDate`). Membership
  * resolution (section 1.7 step 4, "resolve membership and per-user work-date attribution
- * exactly as today") is therefore an INJECTED async callback
- * (`AttendanceScheduledRunMembershipResolverV1`), not a reimplementation of the legacy
- * scheduled loop's resolver — the real resolver lives in
- * `plugins/plugin-attendance/index.cjs`/`attendance-work-date-resolver.cjs` and is out of this
- * slice's scope; wiring a real resolver adapter through this injection point is the same later
- * slice that performs the caller cutover. `deriveAttendanceScheduledRunIdV1`
- * (w4c2-live-scheduled-boundary.ts) is the held branch's SUPERSEDED derivation — section
- * 1.1's "must not survive implementation" rule — and is retired when that later slice replaces
- * its caller; this file does not touch that function.
+ * exactly as today") stays the injected async callback
+ * (`AttendanceScheduledRunMembershipResolverV1`) this file always specified — the boundary's
+ * closure wraps the SAME pre-resolved `(generate, review)` lists `runAutoAbsenceForOrgDate`
+ * already computes via `attendance-work-date-resolver.cjs`, unchanged, so this file still does
+ * not reimplement that resolver. The held branch's SUPERSEDED derivation,
+ * `deriveAttendanceScheduledRunIdV1` (formerly `w4c2-live-scheduled-boundary.ts`), is retired
+ * by this cutover (section 1.1's "must not survive implementation" rule) — `runId` is now
+ * always the server-minted `attendance_scheduled_runs.run_id` this module's own
+ * `INSERT ... RETURNING`/resume read produces. The recovery sweep (`scanAttendance-
+ * ScheduledRunSweepCandidatesV1`/`sweepAttendanceScheduledRunCandidateV1`) is still NOT wired
+ * to any live tick — that remains a separate, disclosed residual (the dispatcher's own
+ * "zero-caller posture" doctrine: scheduling is the caller's concern, not this module's).
  *
  * Values-free discipline: every throw is a closed code string only, never the offending
  * input bytes.
@@ -823,6 +827,34 @@ export async function recordAttendanceScheduledRunTargetOutcomeV1(
       ) VALUES ($1,$2::uuid,$3::uuid,$4,$5)`,
     [verified.org.orgId, targetRow.run_id, targetRow.id, terminalOutcome, failureReasonCode],
   )
+}
+
+/**
+ * Section 1.7's fail-closed rule, first half (the caller-cutover slice that wires the
+ * durable machine into the live scheduled entrypoint, `w4c2-live-scheduled-boundary.ts`):
+ * "a scheduled per-user operation whose `source_root_id` has no committed
+ * `attendance_scheduled_runs` row, or whose run is not `running`, is rejected **before**
+ * source DML." `recordAttendanceScheduledRunTargetOutcomeV1` above already closes the
+ * SAME check for its own `INSERT` (the writer's own DML) — this is the earlier half, called
+ * by the per-user operation transaction immediately after the operation identity is minted
+ * and BEFORE the boundary's own legacy-DML adapter call, so a straggler (a per-user
+ * transaction that reaches this point after the run has already left `running` — abandoned,
+ * or completed once every other target already finalized it) can never write the absence
+ * row at all, not merely fail to record its outcome afterward. Values-free: the caller's
+ * `runId`/`orgId` are never echoed in the rejection.
+ */
+export async function requireAttendanceScheduledRunRunningBeforeSourceDmlV1(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+  runId: string,
+): Promise<void> {
+  const result = await trx.query(
+    `SELECT state FROM attendance_scheduled_runs WHERE org_id = $1 AND run_id = $2::uuid`,
+    [orgId, runId],
+  )
+  if (result.rows.length !== 1) fail('W4C2_SCHEDULED_RUN_NOT_RUNNING_BEFORE_SOURCE_DML')
+  const state = (result.rows[0] as { state: string }).state
+  if (state !== 'running') fail('W4C2_SCHEDULED_RUN_NOT_RUNNING_BEFORE_SOURCE_DML')
 }
 
 // ---------------------------------------------------------------------------
