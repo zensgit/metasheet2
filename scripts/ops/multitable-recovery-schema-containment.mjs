@@ -342,25 +342,6 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
   },
 ]
 
-const EXPECTED_META_LINKS_FOREIGN_KEY = [
-  {
-    sourceSchema: 'public',
-    sourceTable: 'meta_links',
-    constraintName: 'meta_links_foreign_record_id_fkey',
-    constraintType: 'f',
-    validated: false,
-    deferrable: true,
-    initiallyDeferred: false,
-    updateAction: 'a',
-    deleteAction: 'a',
-    matchType: 's',
-    targetSchema: 'public',
-    targetTable: 'meta_records',
-    sourceColumns: ['foreign_record_id'],
-    targetColumns: ['id'],
-  },
-]
-
 function normalizeWhitespace(value) {
   return String(value ?? '')
     .replace(/\s+/g, ' ')
@@ -398,29 +379,6 @@ function canonicalFunction(row) {
   }
 }
 
-function canonicalForeignKey(row) {
-  return {
-    sourceSchema: String(row.sourceSchema ?? row.source_schema ?? ''),
-    sourceTable: String(row.sourceTable ?? row.source_table ?? ''),
-    constraintName: String(row.constraintName ?? row.constraint_name ?? ''),
-    constraintType: String(row.constraintType ?? row.constraint_type ?? ''),
-    validated: Boolean(row.validated),
-    deferrable: Boolean(row.deferrable),
-    initiallyDeferred: Boolean(row.initiallyDeferred ?? row.initially_deferred),
-    updateAction: String(row.updateAction ?? row.update_action ?? ''),
-    deleteAction: String(row.deleteAction ?? row.delete_action ?? ''),
-    matchType: String(row.matchType ?? row.match_type ?? ''),
-    targetSchema: String(row.targetSchema ?? row.target_schema ?? ''),
-    targetTable: String(row.targetTable ?? row.target_table ?? ''),
-    sourceColumns: [...(row.sourceColumns ?? row.source_columns ?? [])].map(
-      String,
-    ),
-    targetColumns: [...(row.targetColumns ?? row.target_columns ?? [])].map(
-      String,
-    ),
-  }
-}
-
 function sortByJson(rows) {
   return [...rows].sort((left, right) =>
     JSON.stringify(left).localeCompare(JSON.stringify(right)),
@@ -435,9 +393,6 @@ function canonicalSnapshot(snapshot) {
     authorityFunctions: sortByJson(
       (snapshot.authorityFunctions ?? []).map(canonicalFunction),
     ),
-    metaLinksForeignKey: sortByJson(
-      (snapshot.metaLinksForeignKey ?? []).map(canonicalForeignKey),
-    ),
   }
 }
 
@@ -445,7 +400,6 @@ function expectedSchemaSnapshot() {
   return canonicalSnapshot({
     authorityTriggers: EXPECTED_AUTHORITY_TRIGGERS,
     authorityFunctions: EXPECTED_AUTHORITY_FUNCTIONS,
-    metaLinksForeignKey: EXPECTED_META_LINKS_FOREIGN_KEY,
   })
 }
 
@@ -466,11 +420,6 @@ function assessSchemaSnapshot(snapshot) {
       id: 'recovery-authority-functions',
       actual: actual.authorityFunctions,
       expected: expected.authorityFunctions,
-    },
-    {
-      id: 'meta-links-live-target-fk',
-      actual: actual.metaLinksForeignKey,
-      expected: expected.metaLinksForeignKey,
     },
   ].map((check) => ({
     id: check.id,
@@ -497,7 +446,7 @@ function renderAssessment(assessment) {
   }
   lines.push(
     assessment.ok
-      ? 'VERDICT: PASS - recovery authority triggers/functions and meta_links FK match the expected default-inert schema posture'
+      ? 'VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture'
       : 'VERDICT: FAIL - recovery schema posture is missing, unexpectedly enabled, or fingerprint-drifted',
   )
   return lines.join('\n')
@@ -574,52 +523,10 @@ async function queryRecoverySchemaSnapshot(databaseUrl) {
       [AUTHORITY_FUNCTION_NAMES],
     )
 
-    const foreignKey = await client.query(
-      `SELECT
-         source_ns.nspname AS source_schema,
-         source.relname AS source_table,
-         con.conname AS constraint_name,
-         con.contype AS constraint_type,
-         con.convalidated AS validated,
-         con.condeferrable AS deferrable,
-         con.condeferred AS initially_deferred,
-         con.confupdtype AS update_action,
-         con.confdeltype AS delete_action,
-         con.confmatchtype AS match_type,
-         target_ns.nspname AS target_schema,
-         target.relname AS target_table,
-         ARRAY(
-           SELECT attr.attname::text
-             FROM unnest(con.conkey) WITH ORDINALITY AS selected(attnum, position)
-             JOIN pg_catalog.pg_attribute attr
-               ON attr.attrelid = con.conrelid
-              AND attr.attnum = selected.attnum
-            ORDER BY selected.position
-         ) AS source_columns,
-         ARRAY(
-           SELECT attr.attname::text
-             FROM unnest(con.confkey) WITH ORDINALITY AS selected(attnum, position)
-             JOIN pg_catalog.pg_attribute attr
-               ON attr.attrelid = con.confrelid
-              AND attr.attnum = selected.attnum
-            ORDER BY selected.position
-         ) AS target_columns
-       FROM pg_catalog.pg_constraint con
-       JOIN pg_catalog.pg_class source ON source.oid = con.conrelid
-       JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
-       JOIN pg_catalog.pg_class target ON target.oid = con.confrelid
-       JOIN pg_catalog.pg_namespace target_ns ON target_ns.oid = target.relnamespace
-      WHERE source_ns.nspname = 'public'
-        AND source.relname = 'meta_links'
-        AND con.conname = 'meta_links_foreign_record_id_fkey'
-      ORDER BY source_ns.nspname, source.relname, con.conname`,
-    )
-
     await client.query('COMMIT')
     return {
       authorityTriggers: triggers.rows,
       authorityFunctions: functions.rows,
-      metaLinksForeignKey: foreignKey.rows,
     }
   } catch (error) {
     if (client) await client.query('ROLLBACK').catch(() => {})
@@ -675,7 +582,6 @@ export {
   AUTHORITY_TRIGGER_FUNCTIONS,
   EXPECTED_AUTHORITY_FUNCTIONS,
   EXPECTED_AUTHORITY_TRIGGERS,
-  EXPECTED_META_LINKS_FOREIGN_KEY,
   assessSchemaSnapshot,
   canonicalSnapshot,
   expectedSchemaSnapshot,

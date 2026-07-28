@@ -143,24 +143,18 @@ delivery.
 
 ### 2.5 Link integrity
 
-`meta_links.foreign_record_id` is protected by:
+Recovery reconstruction and apply hydrate link cells from the authoritative
+`meta_links` relation, omit dangling targets exactly like the normal read
+projection, lock every live source/target record in the global record order,
+and re-hash after those locks. Duplicate authoritative edges fail closed.
 
-```text
-FOREIGN KEY (foreign_record_id) REFERENCES meta_records(id)
-ON DELETE NO ACTION
-DEFERRABLE INITIALLY IMMEDIATE
-NOT VALID
-```
-
-`NOT VALID` preserves historical dangling rows for the existing filtered-read
-and repair paths while PostgreSQL enforces every new or changed edge.
-`NO ACTION` is the safety property: target deletion must explicitly capture
-and remove authoritative inbound links in the same transaction. The database
-must never silently cascade them before tombstone capture.
-
-The corrective migration replaces only the known historical CASCADE shape. A
-same-name constraint with another source column, target, action, or
-deferrability fails loudly.
+This delivery deliberately does **not** add a foreign key from
+`meta_links.foreign_record_id` to `meta_records.id`. The first exact-head CI
+attempt proved that such an unflagged platform constraint changes existing
+dangling-link repair, config rollback, and restore fixtures across ten test
+files. A future FK proposal therefore needs its own platform-wide compatibility
+design, migration/replay evidence, and capture-before-delete proof. It must not
+be smuggled into the default-off Time Machine closeout.
 
 ### 2.6 Automation lock markers
 
@@ -195,22 +189,19 @@ edges, so it refuses to synthesize a partial graph.
 
 Migrations:
 
-- `zzzz20260721120000_guard_meta_links_live_targets.ts`
 - `zzzz20260721121000_add_recovery_authority_locks.ts`
 - `zzzz20260728120000_correct_recovery_authority_locks.ts`
-- `zzzz20260728121000_correct_meta_links_live_target_fk.ts`
 
 The containment helper verifies:
 
 - all Global History flags are off;
 - exactly nine authority triggers exist and are disabled;
 - all six authority function definitions match their expected fingerprints;
-- the target FK has the exact NO ACTION/NOT VALID shape;
 - every expected backend container reports the same PASS posture.
 
 The helper is source-hash pinned in the workflow. A missing container result,
-schema read failure, trigger/function drift, unexpected enabled trigger, or FK
-drift is a non-PASS.
+schema read failure, trigger/function drift, or unexpected enabled trigger is
+a non-PASS.
 
 ## 4. Verification
 
@@ -224,12 +215,12 @@ A new PostgreSQL 15.17 database was created with the same
 `MIGRATION_EXCLUDE` list used by `plugin-tests.yml`.
 
 1. full migration to latest: passed;
-2. the two 2026-07-28 corrective migrations were reported as executed;
+2. the 2026-07-28 corrective authority migration was reported as executed;
 3. second migration run: passed with no new work;
 4. containment schema inspection: PASS.
 
-This evidence does not reuse a database where the new constraints or triggers
-were hand-applied.
+This evidence does not reuse a database where the new triggers were
+hand-applied.
 
 ### 4.2 Real-DB behavior
 
@@ -238,13 +229,12 @@ One migrated database ran:
 | Suite | Result |
 | --- | ---: |
 | exact-anchor apply | 53/53 |
-| exact-anchor route wiring | 29/29 |
+| exact-anchor route wiring | 28/28 |
 | exact-anchor reconstruction | 17/17 |
 | exact-anchor plan | 10/10 |
 | L6-a sealed operation endpoint | 24/24 |
-| live-link target FK migration | 14/14 |
 | recovery authority stability | 13/13 |
-| **Total** | **160/160** |
+| **Total** | **145/145** |
 
 The suites include two-connection barriers, `pg_locks` witnesses, actual
 HTTP route writes, migration drift, rollback residue checks, and a real
@@ -257,9 +247,9 @@ PostgreSQL deadlock discriminator.
 - frontend Revert/Reset/history matrix: 64/64;
 - frontend `vue-tsc -b`: passed;
 - flag manifest, exact CI placement, status helper, and schema containment:
-  59/59.
+  56/56.
 
-The six DB-only files are excluded from the default no-DB Vitest job and
+The five DB-only files are excluded from the default no-DB Vitest job and
 whole-file wired into the required PostgreSQL job. The placement contract
 rejects comment-only and wrong-step decoys.
 
@@ -278,7 +268,6 @@ Each mutation was isolated and restored before the positive rerun:
 | exact trigger table/name check -> name-only | wrong-table same-name trigger is incorrectly accepted |
 | canonical authority schema decision ignored | wrong-table, wrong-argument, wrong-function, and drifted-body goldens all accept an unsafe lease |
 | busy-error classifier -> always false | multitable permission write returns 500 instead of typed 409 |
-| target FK `NO ACTION` -> `CASCADE` | FK migration shape golden reds |
 | automation marker drops operation ledger | W4 endpoint anchor golden reds |
 
 These probes establish that the tests protect the specific guards. They do not
@@ -356,10 +345,14 @@ The closeout branch resolves the known merge-time blockers:
 - writer-wide advisory serialization;
 - cross-sheet link-writer/recovery record-lock ABBA;
 - same-name trigger/function semantic spoofing at runtime;
-- fail-open same-name FK acceptance;
-- unsafe target-side cascade;
 - missing automation operation markers;
-- CI and containment blindness to these schema contracts.
+- CI and containment blindness to the authority schema contract.
+
+The first exact-head CI attempt also rejected an unflagged
+`meta_links.foreign_record_id` FK after it broke 18 existing integration
+behaviors. The FK and its migrations were removed from this delivery; that is a
+scope correction, not a claim that cross-base link integrity needs no future
+work.
 
 The correct claim is therefore:
 

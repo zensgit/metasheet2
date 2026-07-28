@@ -30,6 +30,10 @@ import {
   pruneSealedHistoryOperations,
   type ExactAnchorHistoryFixture,
 } from '../utils/exact-anchor-history-fixture'
+import {
+  disableRecoveryAuthorityTriggers,
+  enableRecoveryAuthorityTriggers,
+} from '../utils/recovery-authority-trigger-posture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -81,6 +85,7 @@ async function resetSheetBHistory(): Promise<void> {
 
 describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration (real DB)', () => {
   beforeAll(async () => {
+    await enableRecoveryAuthorityTriggers(q)
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as express.Request & { user?: unknown }).user = currentUser; next() })
@@ -115,6 +120,7 @@ describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration
   })
 
   afterAll(async () => {
+    await disableRecoveryAuthorityTriggers(q)
     await pruneSealedHistoryOperations(SB).catch(() => {})
     await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_A_LINK, FLD_B_MIRROR]]).catch(() => {})
     for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_recovery_token_burns', 'meta_records_trash', 'meta_record_revisions', 'meta_records']) {

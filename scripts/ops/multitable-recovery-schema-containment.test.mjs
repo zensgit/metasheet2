@@ -21,17 +21,13 @@ function expectedCopy() {
   return structuredClone(expectedSchemaSnapshot())
 }
 
-test('expected schema posture is exact: 9 disabled triggers, 6 functions, and one NO ACTION FK', () => {
+test('expected schema posture is exact: 9 disabled triggers and 6 functions', () => {
   const expected = expectedCopy()
   assert.equal(expected.authorityTriggers.length, 9)
   assert.equal(expected.authorityFunctions.length, 6)
-  assert.equal(expected.metaLinksForeignKey.length, 1)
   assert.ok(
     expected.authorityTriggers.every((trigger) => trigger.enabled === 'D'),
   )
-  assert.equal(expected.metaLinksForeignKey[0].deleteAction, 'a')
-  assert.equal(expected.metaLinksForeignKey[0].deferrable, true)
-  assert.equal(expected.metaLinksForeignKey[0].validated, false)
 
   const assessment = assessSchemaSnapshot(expected)
   assert.equal(assessment.ok, true)
@@ -62,18 +58,6 @@ test('authority function-body drift changes the fingerprint and fails closed', (
     renderAssessment(assessment),
     /recovery-authority-functions: FAIL/,
   )
-})
-
-test('same-name meta_links FK with the wrong column or delete action fails closed', () => {
-  const wrongColumn = expectedCopy()
-  wrongColumn.metaLinksForeignKey[0].sourceColumns = ['record_id']
-  assert.equal(assessSchemaSnapshot(wrongColumn).ok, false)
-
-  const wrongDeleteAction = expectedCopy()
-  wrongDeleteAction.metaLinksForeignKey[0].deleteAction = 'c'
-  const assessment = assessSchemaSnapshot(wrongDeleteAction)
-  assert.equal(assessment.ok, false)
-  assert.match(renderAssessment(assessment), /meta-links-live-target-fk: FAIL/)
 })
 
 test('missing DATABASE_URL is non-PASS without exposing unrelated environment values', async () => {

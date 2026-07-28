@@ -46,6 +46,10 @@ import {
   pruneSealedHistoryOperations,
   type ExactAnchorHistoryFixture,
 } from '../utils/exact-anchor-history-fixture'
+import {
+  disableRecoveryAuthorityTriggers,
+  enableRecoveryAuthorityTriggers,
+} from '../utils/recovery-authority-trigger-posture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -157,6 +161,7 @@ async function expectAllFourRefuseWithZeroWrites(sheet: string, mutate: () => Pr
 
 describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)', () => {
   beforeAll(async () => {
+    await enableRecoveryAuthorityTriggers(q)
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
@@ -176,6 +181,7 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
     )
   })
   afterAll(async () => {
+    await disableRecoveryAuthorityTriggers(q)
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     delete process.env.MULTITABLE_ENABLE_WRITER_FENCE

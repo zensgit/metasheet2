@@ -38,6 +38,10 @@ import {
   pruneSealedHistoryOperations,
   type ExactAnchorHistoryFixture,
 } from '../utils/exact-anchor-history-fixture'
+import {
+  disableRecoveryAuthorityTriggers,
+  enableRecoveryAuthorityTriggers,
+} from '../utils/recovery-authority-trigger-posture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -119,6 +123,7 @@ async function fixtureDeleteTarget(tag: string): Promise<{ F: string; D: string;
 
 describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capture (real DB)', () => {
   beforeAll(async () => {
+    await enableRecoveryAuthorityTriggers(q)
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
@@ -139,6 +144,7 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
   })
 
   afterAll(async () => {
+    await disableRecoveryAuthorityTriggers(q)
     delete process.env[RESET_FLAG]
     delete process.env[CAPTURE_FLAG]
     delete process.env[INBOUND_FLAG]

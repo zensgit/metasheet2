@@ -30,6 +30,10 @@ import {
   pruneSealedHistoryOperations,
   type ExactAnchorHistoryFixture,
 } from '../utils/exact-anchor-history-fixture'
+import {
+  disableRecoveryAuthorityTriggers,
+  enableRecoveryAuthorityTriggers,
+} from '../utils/recovery-authority-trigger-posture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -110,6 +114,7 @@ async function seed(): Promise<void> {
 
 describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
   beforeAll(async () => {
+    await enableRecoveryAuthorityTriggers(q)
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: curRoles, perms: curPerms }; next() })
@@ -125,6 +130,7 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     )
   })
   afterAll(async () => {
+    await disableRecoveryAuthorityTriggers(q)
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
     delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
     delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT

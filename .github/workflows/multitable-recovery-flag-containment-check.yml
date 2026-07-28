@@ -135,8 +135,8 @@ jobs:
           ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
           FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
-          SCHEMA_HELPER_SHA256="e7801784c6c36c2e199871bfe8cdcab9d319b8d61cd2ac428019e4d2454e8f94"
-          SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions and meta_links FK match the expected default-inert schema posture"
+          SCHEMA_HELPER_SHA256="cd017cd6e754d0e7d802b9ae27a116769969ef5078e811391d3bde6ef68f0182"
+          SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture"
           fail=0
           checked=0
 

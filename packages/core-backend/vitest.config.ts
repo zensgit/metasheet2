@@ -560,10 +560,9 @@ export default defineConfig({
       // including auth races and post-commit side effects. Real Postgres only; the shared
       // exact-anchor CI wiring contract pins both this exclusion and the whole-file CI entry.
       'tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
-      // Time Machine closeout guards: per-subject authority leases and the live-target FK migration.
-      // Both are DATABASE_URL-gated and pinned by the shared exact-anchor CI wiring contract.
+      // Time Machine closeout guard: per-subject authority leases. It is DATABASE_URL-gated and
+      // pinned by the shared exact-anchor CI wiring contract.
       'tests/integration/multitable-recovery-authority-stability-realdb.test.ts',
-      'tests/integration/multitable-live-link-target-fk-migration-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into

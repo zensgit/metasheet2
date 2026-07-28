@@ -99,6 +99,10 @@ import {
   pruneSealedHistoryOperations,
   type ExactAnchorHistoryFixture,
 } from '../utils/exact-anchor-history-fixture'
+import {
+  disableRecoveryAuthorityTriggers,
+  enableRecoveryAuthorityTriggers,
+} from '../utils/recovery-authority-trigger-posture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -589,6 +593,7 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
   }
 
   beforeAll(async () => {
+    await enableRecoveryAuthorityTriggers(q)
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: RACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
@@ -605,6 +610,7 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
   })
 
   afterAll(async () => {
+    await disableRecoveryAuthorityTriggers(q)
     delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
