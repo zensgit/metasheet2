@@ -126,6 +126,14 @@ import type {
   FrozenAttendanceContextV1,
 } from './w4c0-write-boundary-types'
 import { buildFrozenWorkDateAttributionV2 } from './w4c2-frozen-attribution'
+import {
+  createOrResumeAttendanceScheduledRunV1,
+  finalizeAttendanceScheduledRunV1,
+  recordAttendanceScheduledRunTargetOutcomeV1,
+  requireAttendanceScheduledRunRunningBeforeSourceDmlV1,
+  type AttendanceScheduledRunMemberInputV1,
+  type AttendanceScheduledRunMembershipResolverV1,
+} from './w4c2-scheduled-run'
 
 // ---------------------------------------------------------------------------
 // Errors.
@@ -147,56 +155,20 @@ function boundaryFail(code: string, httpStatus = 422): never {
 }
 
 // ---------------------------------------------------------------------------
-// Scheduled run identity (W4C-2 discretionary namespace — declared in the PR).
-// runId = UUIDv5(namespace, initiator NUL orgId NUL workDate): deterministic
-// across process restarts, distinct per initiator, per org, per work date.
+// Scheduled run initiators.
+//
+// W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the run
+// identity itself is no longer derived here. `deriveAttendanceScheduledRunIdV1`
+// (the held branch's UUIDv5-over-(initiator,orgId,workDate) derivation) is
+// RETIRED — section 1.1's "must not survive implementation" rule — because
+// `runId` is now always the server-minted `attendance_scheduled_runs.run_id`
+// row `createOrResumeAttendanceScheduledRunV1` (w4c2-scheduled-run.ts)
+// produces (a fresh `gen_random_uuid()` per run-creation `INSERT`, re-read on
+// resume), never recomputed from these three fields.
 // ---------------------------------------------------------------------------
-
-export const ATTENDANCE_W4C2_SCHEDULED_RUN_NAMESPACE_V1 = '0b9c9c2e-51f4-4f56-9a2e-6c1f0d3e8a72'
 
 const SCHEDULED_INITIATORS = Object.freeze(['cron', 'admin_run'] as const)
 export type AttendanceScheduledRunInitiatorV1 = (typeof SCHEDULED_INITIATORS)[number]
-
-function uuidToBytes(canonicalUuid: string): Buffer {
-  return Buffer.from(canonicalUuid.replace(/-/g, ''), 'hex')
-}
-
-function uuidv5(namespaceUuid: string, nameBytes: Buffer): string {
-  const digest = crypto
-    .createHash('sha1')
-    .update(Buffer.concat([uuidToBytes(namespaceUuid), nameBytes]))
-    .digest()
-    .subarray(0, 16)
-  digest[6] = (digest[6] & 0x0f) | 0x50
-  digest[8] = (digest[8] & 0x3f) | 0x80
-  const hex = digest.toString('hex')
-  return (
-    hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20)
-  )
-}
-
-export function deriveAttendanceScheduledRunIdV1(input: {
-  readonly initiator: AttendanceScheduledRunInitiatorV1
-  readonly orgId: string
-  readonly workDate: string
-}): string {
-  if (!(SCHEDULED_INITIATORS as readonly string[]).includes(input.initiator)) {
-    boundaryFail('W4C2_SCHEDULED_INITIATOR_INVALID')
-  }
-  const orgKey = parseCanonicalAttendanceOrgKeyV1(input.orgId) as string
-  const workDate = parseCanonicalAttendanceWorkDateV1(input.workDate) as string
-  const NUL = Buffer.from([0])
-  return uuidv5(
-    ATTENDANCE_W4C2_SCHEDULED_RUN_NAMESPACE_V1,
-    Buffer.concat([
-      Buffer.from(input.initiator, 'utf8'),
-      NUL,
-      Buffer.from(orgKey, 'utf8'),
-      NUL,
-      Buffer.from(workDate, 'utf8'),
-    ]),
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Plugin-shaped transaction wrapper (adapters expect `query -> rows[]`).
@@ -491,6 +463,18 @@ export interface AttendanceScheduledRunBoundaryInputV1 {
   readonly adminActorId: string | null
   readonly isWorkday?: boolean
   readonly holidayKind?: string | null
+  /**
+   * W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the SAME
+   * `reviewRequired` list `runAutoAbsenceForOrgDate` already resolves via
+   * `attendance-work-date-resolver.cjs` (unchanged), passed through so the
+   * durable run's own target set (w4c2-scheduled-run.ts section 1.2/1.3)
+   * covers `review` targets as well as `generate` ones — a run with zero
+   * `generate` targets but a nonzero review count still creates and
+   * inline-finalizes (section 1.9). Required (never omitted) so a caller
+   * cannot silently starve the run of its review half; an org with no
+   * review-required users passes an empty array.
+   */
+  readonly reviewTargets: readonly { readonly userId: string; readonly reasonCode: string }[]
 }
 
 export type AttendanceScheduledRunBoundaryResultV1 =
@@ -498,6 +482,7 @@ export type AttendanceScheduledRunBoundaryResultV1 =
   | { readonly kind: 'suspended' }
   | {
       readonly kind: 'w4'
+      readonly runId: string | null
       readonly rows: Array<{ user_id: string }>
       readonly perUser: Array<{
         readonly userId: string
@@ -1700,14 +1685,79 @@ export function createAttendanceLiveScheduledBoundaryV1(
     const cronAuthorization = input.initiator === 'cron' ? cronScheduledAuthorization(orgKey) : null
     const adminActorId = input.adminActorId
 
-    // W4 posture: one durable scheduled operation per user with a
-    // deterministic run identity — durable replay survives restart and the
-    // caller's in-memory dedup can never bypass the registry.
-    const runId = deriveAttendanceScheduledRunIdV1({ initiator: input.initiator, orgId: orgKey, workDate })
+    // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the durable
+    // run-creation/resume transaction (w4c2-scheduled-run.ts section 1.7) is the
+    // FIRST step of the w4 branch — it re-resolves posture and the class-00/
+    // class-01 locks independently of the probe above (the same "re-check
+    // inside the owning transaction" doctrine every other posture read in this
+    // file already follows). The injected membership resolver wraps the SAME
+    // pre-resolved (generate, review) lists the caller already computed —
+    // `runAutoAbsenceForOrgDate` in index.cjs — never a re-derivation.
+    const membersForRun: AttendanceScheduledRunMemberInputV1[] = [
+      ...targetUserIds.map((userId) => ({ userId, targetKind: 'generate' as const, reviewReasonCode: null })),
+      ...input.reviewTargets.map((rt) => ({
+        userId: rt.userId,
+        targetKind: 'review' as const,
+        reviewReasonCode: rt.reasonCode,
+      })),
+    ]
+    const resolveMembership: AttendanceScheduledRunMembershipResolverV1 = async () => membersForRun
+
+    const startOutcome = await withConnection((client) =>
+      runAttendanceResultOperationTransactionV1(client, (trx) =>
+        createOrResumeAttendanceScheduledRunV1(
+          trx,
+          { orgId: orgKey, initiator: input.initiator, workDate },
+          resolveMembership,
+        ),
+      ),
+    )
+
+    if (startOutcome.kind === 'org_suspended_deferred') {
+      return { kind: 'suspended' }
+    }
+    if (startOutcome.kind === 'org_legacy_zero_rows') {
+      // Posture raced to `legacy_projection_only` between the outer probe and
+      // the run-creation transaction (section 1.7 step 1): the SAME null-ID
+      // legacy contract the probe's own legacy branch above takes — a single
+      // batch INSERT..SELECT, zero W4 rows, no per-user split.
+      if (targetUserIds.length === 0) return { kind: 'legacy', rows: [] }
+      const rows = await withConnection((client) =>
+        runAttendanceResultOperationTransactionV1(client, (trx) =>
+          adapters.applyScheduledAbsenceLegacy(pluginShapedTrx(trx), {
+            orgId: orgKey,
+            workDate,
+            timezone: input.timezone,
+            userIds: targetUserIds,
+          }),
+        ),
+      )
+      return { kind: 'legacy', rows: rows as Array<{ user_id: string }> }
+    }
+    if (startOutcome.kind === 'created_and_finalized') {
+      // Section 1.9: zero `generate` targets — the run-creation transaction
+      // WAS the finalization transaction; there is no per-user work and
+      // nothing left to do here.
+      return { kind: 'w4', runId: startOutcome.runId, rows: [], perUser: [] }
+    }
+
+    const runId = startOutcome.runId
+    // 'created_running' (first attempt this generation): every generate
+    // target is outstanding by definition. 'resumed': only the durable
+    // registry's own outstanding-set (section 1.7 step 4, "no row yet in
+    // `attendance_scheduled_run_target_outcomes`") — NEVER re-looping the
+    // caller's full `targetUserIds` on resume, which would re-attempt
+    // already-terminal targets and hit `uq_asrto_target` on the duplicate
+    // outcome insert.
+    const pendingUserIds: readonly string[] =
+      startOutcome.kind === 'created_running'
+        ? targetUserIds
+        : startOutcome.outstandingGenerateTargets.map((t) => t.userId)
+
     const perUser: Array<{ userId: string; mode: 'replay' | 'executed' | 'legacy_compat'; inserted: boolean }> = []
     const insertedRows: Array<{ user_id: string }> = []
 
-    for (const userId of targetUserIds) {
+    for (const userId of pendingUserIds) {
       const envelope = normalizeAttendanceSourceOperationEnvelopeV1({
         schemaVersion: 1,
         orgId: orgKey,
@@ -1740,21 +1790,32 @@ export function createAttendanceLiveScheduledBoundaryV1(
           if (preflight.kind === 'suspended') {
             throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
           }
-          const pluginTrx = pluginShapedTrx(trx)
           if (preflight.kind === 'legacy_no_operation') {
-            // Posture raced back to legacy between probe and this transaction:
-            // the null-ID legacy contract applies (no operation row).
-            const rows = await adapters.applyScheduledAbsenceLegacy(pluginTrx, {
-              orgId: orgKey,
-              workDate,
-              timezone: input.timezone,
-              userIds: [userId],
-            })
-            return { mode: 'legacy_compat' as const, inserted: rows.length === 1 }
+            // Structurally unreachable for the 'scheduled' command kind:
+            // w4c0-source-commands.ts always derives a non-null
+            // `{sourceKind:'scheduled', scheduledRunId, ...}` source for it,
+            // so `plan.sourced.length === 0` (this branch's own precondition)
+            // never holds here — kept only because
+            // `attendanceResultOperationPreflightV1`'s result type is shared
+            // across every entrypoint. A durable run has no representation
+            // for a null-ID legacy operation (every target row binds a real
+            // `operation_id`), so this fails closed rather than silently
+            // reusing the live-punch sibling's null-ID contract.
+            boundaryFail('W4C2_SCHEDULED_RUN_LEGACY_NO_OPERATION_UNREACHABLE')
           }
+          const pluginTrx = pluginShapedTrx(trx)
           const org = preflight.org
           const identity = preflight.itemIdentities[0] as VerifiedAttendanceOperationIdentityV1
           const isLegacyCompat = org.acceptedWritePosture === 'legacy_projection_only'
+
+          // Gate 12, first half (section 1.7's fail-closed rule; the second
+          // half — the outcome writer's own straggler rejection — is
+          // `recordAttendanceScheduledRunTargetOutcomeV1`'s own
+          // `run_state !== 'running'` check below): a per-user operation
+          // transaction whose durable run is not (or no longer) `running` —
+          // raced abandon, or finalized by a concurrent racer for the same
+          // run — is rejected BEFORE the source DML, never after.
+          await requireAttendanceScheduledRunRunningBeforeSourceDmlV1(trx, orgKey, runId)
 
           const rows = await adapters.applyScheduledAbsenceLegacy(pluginTrx, {
             orgId: orgKey,
@@ -1768,6 +1829,14 @@ export function createAttendanceLiveScheduledBoundaryV1(
             await sealAttendanceResultOperationV1(trx, identity, {
               responseSnapshot: { inserted },
             })
+            // The run row this target belongs to is frozen at `shadow`/
+            // `eligible`/`authoritative` (this is the w4 branch); a posture
+            // race down to `legacy_projection_only` for THIS org-wide check
+            // only changes how the operation itself is sealed (legacy_compat:
+            // no calculation, no outbox), never whether the run can still
+            // progress toward finalization — so the terminal outcome is
+            // still recorded here, same as the full-execution branch below.
+            await recordAttendanceScheduledRunTargetOutcomeV1(trx, identity, { terminalOutcome: 'completed' })
             return { mode: 'legacy_compat' as const, inserted }
           }
 
@@ -1850,6 +1919,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
             responseSnapshot: { inserted },
             resolvedCalculationId: calculationId,
           })
+          await recordAttendanceScheduledRunTargetOutcomeV1(trx, identity, { terminalOutcome: 'completed' })
           return { mode: 'executed' as const, inserted }
         }),
       )
@@ -1859,7 +1929,21 @@ export function createAttendanceLiveScheduledBoundaryV1(
       }
     }
 
-    return { kind: 'w4', rows: insertedRows, perUser }
+    // Attempt finalization now that every target this call was responsible
+    // for has a terminal outcome (or already did, for a fully-resumed call
+    // with `pendingUserIds = []`). `deferred` (org suspended mid-flight),
+    // `not_ready` (another racer's target is still outstanding), and
+    // `not_running` (a concurrent racer already finalized, or an operator
+    // abandoned it) are all legitimate, silent, values-free outcomes here —
+    // a later call (retry, resume, or the recovery sweep) finalizes it; this
+    // call still returns its own per-user work either way.
+    await withConnection((client) =>
+      runAttendanceResultOperationTransactionV1(client, (trx) =>
+        finalizeAttendanceScheduledRunV1(trx, { orgId: orgKey, initiator: input.initiator, workDate, runId }),
+      ),
+    )
+
+    return { kind: 'w4', runId, rows: insertedRows, perUser }
   }
 
   return { executeLivePunch, executeScheduledRun }

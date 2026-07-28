@@ -12,10 +12,15 @@
  * is NO third behavior that "re-derives" a window from current policy — the
  * negative legs here pin that refusal for every unexplained-end shape.
  *
- * Scheduled run identity: UUIDv5 over a NUL-separated (initiator, orgId,
- * workDate) name in the W4C-2 discretionary namespace — golden-pinned so a
- * namespace or derivation-order drift (which would silently break durable
- * replay across deploys) fails loudly.
+ * Scheduled run identity: formerly a UUIDv5 derivation golden-pinned in this
+ * file (`deriveAttendanceScheduledRunIdV1`); retired by the W4C-2 caller
+ * cutover (owner ruling 2026-07-28, "(b-narrow)") — `runId` is now always the
+ * server-minted `attendance_scheduled_runs.run_id` row
+ * `createOrResumeAttendanceScheduledRunV1` (w4c2-scheduled-run.ts) produces,
+ * never a pure function of (initiator, orgId, workDate). Its dedicated
+ * describe block below is removed with it (section 1.1's "must not survive
+ * implementation" rule); the durable row's own identity/lifecycle gates live
+ * in `attendance-w4c2-p12-run-transactions.db.test.ts`.
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -25,11 +30,6 @@ import {
   computeAttendanceWindowEvidenceFingerprintV1,
   type AttendanceFrozenAttributionBuildInputV1,
 } from '../w4c2-frozen-attribution'
-import {
-  ATTENDANCE_W4C2_SCHEDULED_RUN_NAMESPACE_V1,
-  AttendanceW4LiveScheduledBoundaryError,
-  deriveAttendanceScheduledRunIdV1,
-} from '../w4c2-live-scheduled-boundary'
 
 // Asia/Shanghai (no DST): 2026-07-20 09:00 => 01:00Z, 18:00 => 10:00Z.
 const ABS_START = '2026-07-20T01:00:00.000Z'
@@ -286,47 +286,3 @@ describe('computeAttendanceWindowEvidenceFingerprintV1 — window-policy evidenc
   })
 })
 
-describe('deriveAttendanceScheduledRunIdV1 — deterministic durable run identity', () => {
-  it('golden pins: derivation is stable across processes and deploys (namespace + NUL-name order)', () => {
-    // Recomputing these from the constants (instead of pinning) would make the
-    // leg self-confirming; the literals below were produced by an independent
-    // RFC-4122 v5 computation over namespace 0b9c9c2e-51f4-4f56-9a2e-6c1f0d3e8a72.
-    expect(ATTENDANCE_W4C2_SCHEDULED_RUN_NAMESPACE_V1).toBe('0b9c9c2e-51f4-4f56-9a2e-6c1f0d3e8a72')
-    expect(
-      deriveAttendanceScheduledRunIdV1({ initiator: 'cron', orgId: 'default', workDate: '2026-07-22' }),
-    ).toBe('3477855b-403c-5fa1-9268-eb21b45c44cb')
-    expect(
-      deriveAttendanceScheduledRunIdV1({ initiator: 'admin_run', orgId: 'default', workDate: '2026-07-22' }),
-    ).toBe('268051a3-3f83-5c14-a315-19e1d3265554')
-  })
-
-  it('is deterministic per input and distinct per initiator, org, and work date', () => {
-    const a1 = deriveAttendanceScheduledRunIdV1({ initiator: 'cron', orgId: 'default', workDate: '2026-07-22' })
-    const a2 = deriveAttendanceScheduledRunIdV1({ initiator: 'cron', orgId: 'default', workDate: '2026-07-22' })
-    expect(a2).toBe(a1)
-    // RFC-4122 v5 shape.
-    expect(a1).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
-    const byInitiator = deriveAttendanceScheduledRunIdV1({ initiator: 'admin_run', orgId: 'default', workDate: '2026-07-22' })
-    const byDate = deriveAttendanceScheduledRunIdV1({ initiator: 'cron', orgId: 'default', workDate: '2026-07-23' })
-    const org = '7a4a5f2e-0b6f-4d0a-9c39-1a2b3c4d5e6f'
-    const byOrg = deriveAttendanceScheduledRunIdV1({ initiator: 'cron', orgId: org, workDate: '2026-07-22' })
-    expect(new Set([a1, byInitiator, byDate, byOrg]).size).toBe(4)
-  })
-
-  it('rejects a non-closed initiator and a non-canonical org key/work date before deriving anything', () => {
-    let initiatorError: unknown
-    try {
-      deriveAttendanceScheduledRunIdV1({ initiator: 'manual' as never, orgId: 'default', workDate: '2026-07-22' })
-    } catch (error) {
-      initiatorError = error
-    }
-    expect(initiatorError).toBeInstanceOf(AttendanceW4LiveScheduledBoundaryError)
-    expect((initiatorError as AttendanceW4LiveScheduledBoundaryError).code).toBe('W4C2_SCHEDULED_INITIATOR_INVALID')
-    expect(() =>
-      deriveAttendanceScheduledRunIdV1({ initiator: 'cron', orgId: 'not-an-org', workDate: '2026-07-22' }),
-    ).toThrow()
-    expect(() =>
-      deriveAttendanceScheduledRunIdV1({ initiator: 'cron', orgId: 'default', workDate: '2026-7-22' }),
-    ).toThrow()
-  })
-})
