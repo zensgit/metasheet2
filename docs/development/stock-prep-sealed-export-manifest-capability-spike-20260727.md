@@ -476,9 +476,17 @@ would require their own design and implementation authorization.
 Private artifacts require tenant isolation, access audit, encryption at rest and
 in transit, explicit retention, deletion evidence, and operator access policy.
 
-## 10. Proposed closed failure vocabulary
+## 10. Closed failure vocabulary — RATIFIED for S1
 
-This exact set is **proposed**, not ratified:
+**Owner ruling, 2026-07-27.** This exact 30-token set is the **ratified closed vocabulary for S1**.
+
+**Retraction of the previous text.** This section previously read *"This exact set is **proposed**, not
+ratified"*, which contradicted §12 (listing the failure vocabulary among what S0 ratifies) and the S0 merge
+message. That wording is **withdrawn**; the set below is ratified.
+
+**Scope of this ratification — it freezes the vocabulary and nothing else.** It does **not** authorize S2 or
+any later slice, runtime wiring, profile certification, deployment, or rollout. Those remain separately
+owner-gated.
 
 ```text
 SEALED_EXPORT_PROFILE_UNCERTIFIED
