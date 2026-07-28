@@ -1,8 +1,10 @@
 # 审批编辑器与流程编排对标开发计划（2026-07-27）
 
-**状态：PROPOSED，等待 owner 确认后执行**
+**状态：IN PROGRESS（仅 E0 / E1 / E1-b / E2 已获准并在隔离分支完成；C1 以后仍未授权）**
 
-**核对基线：** `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
+**事实审计基线：** `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
+
+**E2 实现基线：** `origin/main@9da0335b4`（2026-07-28）
 
 **范围：** 审批模板编辑器、表单设计器、流程画布、节点检查器、路由试运行、版本查看/比较/恢复、浏览器验收和灰度启用。
 
@@ -160,10 +162,19 @@ E0 审计任务，不改变本计划和历史交互锁的 `PROPOSED` / owner-gat
 
 E1 的隔离 DOM + SVG renderer feasibility spike 已完成，真 Chromium
 三 viewport 通过，100 节点两次布局确定且约 105ms，无新生产依赖。
-但 mutation 尚未接 `approvalCanvasCommands`，drag slot 和未编辑
-round-trip 尚未证明，因此 A1 记录为 `PARTIAL`，不得据此启动 C2 或开启
-Canvas flag。详见
+E1-b 又把分支重排、合法/非法节点移动、undo/redo、HTML5 drag 和键盘
+移动接到生产 `approvalCanvasCommands`，并证明 renderer 坐标不进入
+`ApprovalGraph`。稳定键选择恢复的判别变异会使 Playwright 精确转红。
+因此 A1 的 renderer feasibility 门记录为 `PASS`；该 PASS 不等于 C1-C5
+产品接线完成，也不授权开启 Canvas flag。详见
 `approval-editor-flow-parity-e1-renderer-spike-verification-20260727.md`。
+
+E2 已在 `origin/main@9da0335b4` 的隔离分支完成第一刀无行为抽取：
+`TemplateAuthoringView.vue` 从 3732 行降为 3340 行，新
+`ApprovalFlowCanvas.vue` 只接收派生 props 并发出 typed intents，业务状态、
+保存/发布和拓扑命令仍由父层拥有。13 个审批 authoring 测试文件
+247/247、ESLint、`vue-tsc` 通过；中和 drop intent 后拖放断言精确转红。
+状态仅为 `IMPLEMENTED + LOCAL VERIFIED`，尚未 push、CI、merge 或部署。
 
 ### 4.1 依赖图
 
@@ -363,9 +374,14 @@ U0 至少包含以下 12 项，全部保存截图、录屏或网络/数据库证
 
 执行中持续维护三份文档：
 
-1. **设计锁 delta**：只记录本计划相对 2026-07-21 锁的 owner 决策、renderer 选择和明确非目标；
-2. **执行台账**：每个 ID 的 PR、SHA、实现模型、复核模型、测试命令、CI URL、合入和 flag 状态；
-3. **收尾验证 MD**：merged-main exact SHA、浏览器证据、UAT、残余风险和 owner-only 开关。
+1. **设计锁 delta**：本文；只记录相对 2026-07-21 锁的 owner 决策、
+   renderer 选择和明确非目标；
+2. **执行台账**：
+   `approval-editor-flow-parity-execution-ledger-20260728.md`；记录每个 ID
+   的 SHA、实现模型、复核模型、测试、CI、合入和 flag 状态；
+3. **收尾验证 MD**：
+   `approval-editor-flow-parity-closeout-verification-20260728.md`；记录
+   exact head、浏览器证据、判别变异、残余风险和 owner-only 开关。
 
 禁止在 T1/U0 前把文档状态写成 `FINAL`。正确中间状态为：
 
@@ -375,10 +391,12 @@ U0 至少包含以下 12 项，全部保存截图、录屏或网络/数据库证
 
 ## 11. 首轮执行建议
 
-确认本计划后，只启动以下三项：
+以下三项已按隔离车道执行：
 
-1. **E0：** Codex 在独立 worktree 对当前 `origin/main` 做全链审阅和基线截图；
-2. **E1：** Kimi K3 出两套高保真 IA，Grok 做 Vue Flow+现有 layout 与现 renderer 的一次性 spike；
-3. **E2 准备：** Sonnet 5 只读给出 3732 行热文件的抽取边界，等 E0/E1 裁决后才提交代码。
+1. **E0：完成。** Codex exact-head 审阅，Claude Opus 只读对抗复核；
+2. **E1 / E1-b：完成。** Kimi 提供视觉 IA，Grok 构建隔离 renderer 和生产命令适配验证，Codex 复核与变异；
+3. **E2 第一刀：完成。** Claude Sonnet 5 做 presentational shell 抽取，Codex 清理、扩测和事件透传变异。
 
-首轮不启动 C2 以后功能，不开启任何 flag，不接触审批运行时服务。这样先固定产品表面和 renderer，再并行实施，能最大限度避免在 3732 行热文件上重复返工。
+本轮没有启动 C1/C2 以后功能，没有开启任何 flag，也没有接触审批运行时
+服务。下一步必须先审合 E1-b/E2，再由 owner 单独授权 C1；不得把本轮
+验证通过解释为整条编辑器已达到飞书/钉钉产品完成度。

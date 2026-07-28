@@ -1,8 +1,9 @@
 # 审批编辑器与流程画布 E1 Renderer Spike 验证
 
-**状态：** SPIKE COMPLETE / A1 PARTIAL
+**状态：** SPIKE + E1-b COMPLETE / A1 PASS（仅 renderer feasibility）
 **基线：** `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
 **实验分支：** `codex/approval-editor-e1-renderer-spike-20260727`
+**E1-b 分支：** `codex/approval-editor-e1b-command-drag-20260728`
 **日期：** 2026-07-27
 **产品代码、路由、依赖、flag：** 零改动
 
@@ -46,6 +47,21 @@ Grok Bridge 本地 server 未成功启动，且主机 DNS 对 Grok CLI endpoint 
 
 实现保持坐标、选中态、sheet 状态只存在于 render model；夹具中的
 `ApprovalGraph` 不写入坐标。
+
+### 2.1 E1-b：生产命令适配与拖拽判别
+
+E1-b 在同一 verification harness 中增加：
+
+- 分支优先级调整调用生产 `reorder-condition-branches`；
+- 合法/非法节点移动调用生产 `move-node-into-edge`；
+- undo/redo 调用生产 history API，不复制逆操作；
+- HTML5 drag 与键盘 `m` 共用同一个 command adapter；
+- typed error 只映射为 values-free 业务文案；
+- history selection 用稳定 node/edge key 恢复当前 render focus id；
+- mutation 后序列化 graph 仍不含 `x/y/width/height`。
+
+E1-b 提交为 `1303d7ba7`。它仍是 verification-only，不是生产路由接线；
+边 `+` 插入菜单仍只演示选择，不写业务模型，留给 C3。
 
 ## 3. Fail-first 记录
 
@@ -91,11 +107,12 @@ pnpm exec playwright test \
 结果：
 
 ```text
-chromium: 3 passed
+chromium: 4 passed
 desktop 1440x900: PASS
 compact 1024x768: PASS
 narrow 390x844: PASS
 mixed-100 render: first=105.53ms repeat=105.15ms
+E1-b command/drag/history: PASS
 ```
 
 浏览器断言包括：
@@ -122,6 +139,12 @@ mixed-100 render: first=105.53ms repeat=105.15ms
 - `apps/web/verification-output/e1-desktop-mixed-100.png`
 - `apps/web/verification-output/e1-compact-1024.png`
 - `apps/web/verification-output/e1-narrow-390.png`
+- `apps/web/verification-output/e1-b-command-drag.png`
+
+E1-b 判别变异把 `restoreSelectionFromHistory` 的稳定键映射中和后，
+Playwright 在 `selectedName` 精确转红（期望“主管审批”，实际 `null`）；
+恢复后同一用例重新转绿。该证据证明测试钉住的是“拓扑变化后 selection /
+focus / inspector 仍指向同一业务节点”，不是只检查最终边集合。
 
 静态门：
 
@@ -149,27 +172,17 @@ vue-tsc --noEmit: PASS
 
 ## 6. 未关闭项
 
-### A1-1 mutation 尚未接生产命令代数
+### A1-1 edge `+` 插入尚未接生产命令
 
-实验中的 edge `+` 只打开菜单并播报选择，不写 graph。它证明可供性与
-键盘路径，不证明 `approvalCanvasCommands`、undo、保真或保存。
+E1-b 已用生产命令证明 reorder、constrained move、typed rejection 与
+undo/redo。实验中的 edge `+` 仍只打开菜单并播报选择，不写 graph。
 
-**关闭条件：** E1-b 在隔离 harness 中挂一个 command adapter，至少用同一
-命令入口完成 insert、branch reorder 和 constrained move；拒绝路径必须
-保持 graph byte-identical。
+**关闭条件：** C3 在生产组件用同一命令入口完成 insert；拒绝路径保持
+graph byte-identical。
 
-### A1-2 drag slot 尚无真浏览器证据
+### A1-2 生产组件 round-trip 与 CI
 
-实验有 edge insertion control，没有 pointer/drag hit-test。生产代码已有
-受约束 drag，但本实验 renderer 尚未证明合法槽高亮、非法落点 no-op 和
-焦点恢复。
-
-**关闭条件：** E1-b 增加一个合法拖动、一个非法拖动和键盘等价测试，
-不得在 renderer 复制拓扑判断。
-
-### A1-3 round-trip 与 CI 未证明
-
-实验不调用 hydrate/save，不在 required CI。未编辑 byte-identical、
+E1-b 不调用 hydrate/save，也不在 required CI。未编辑 byte-identical、
 unknown config 保真、required web-tests 两点接线仍属于后续产品切片。
 
 ### P3 视觉密度
@@ -181,15 +194,15 @@ unknown config 保真、required web-tests 两点接线仍属于后续产品切�
 ## 7. Gate 结论
 
 - **E1 可行性 spike：PASS。**
-- **A1 生产晋级门：PARTIAL。**
-- **允许并行启动 E2 无行为抽取：是，E2 只依赖 E0。**
-- **允许启动 C2 canvas-first：否，先关闭 E1-b 与 C1 round-trip。**
+- **A1 renderer feasibility 门：PASS。**
+- **E2 无行为抽取：已在独立分支完成，本报告不替代其 A2 证据。**
+- **允许启动 C2 canvas-first：否，先审合 E2 并关闭 C1 round-trip。**
 - **允许开启 staging/production Canvas flag：否。**
 
 下一执行顺序：
 
-1. E1-b：command adapter + drag hit-test；
-2. E2：`TemplateAuthoringView.vue` 无行为抽取，可与 E1-b 并行；
-3. E0 P2-2/P2-3/P2-4 可独立小 PR 先关闭；
-4. E0 P2-1 与 E2/F1 合并规划，避免两次修改热文件；
-5. C1 在 E1-b 与 E2 后开始。
+1. 审合 E1-b verification 与 E2 无行为抽取；
+2. E0 P2-2/P2-3/P2-4 可独立小 PR 关闭；
+3. E0 P2-1 与 F1 合并规划，避免再次堆回父组件；
+4. owner 单独授权后启动 C1；
+5. C1 通过前不启动 C2、不调整 Canvas flag。
