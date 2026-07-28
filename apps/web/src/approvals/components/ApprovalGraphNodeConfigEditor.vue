@@ -326,9 +326,11 @@
 
     <!-- G-5: editable approval node — approver SOURCE only (assigneeSources[0]). The node's
          approvalMode / emptyAssigneePolicy / autoApprovalPolicy + edges are preserved. Legacy
-         nodes (no assigneeSources) aren't seeded → fall to the read-only summary below. -->
+         nodes (no assigneeSources) aren't seeded → fall to the read-only summary below.
+         C1: the same form serves a LINEAR draft's step nodes, whose carrier is the step draft —
+         hence the carrier-agnostic `hasApprovalNodeEditor` gate. -->
     <div
-      v-else-if="node.type === 'approval' && approvalNodeEditFor(node.key)"
+      v-else-if="node.type === 'approval' && hasApprovalNodeEditor(node.key)"
       class="template-authoring__approval-node"
       data-testid="approval-node-editor"
       :data-approval-node="node.key"
@@ -561,7 +563,7 @@ const formulaRoles = computed(() => unwrap(api.formulaRoles))
 const conditionEditFor = api.conditionEditFor
 const parallelEditFor = api.parallelEditFor
 const ccEditFor = api.ccEditFor
-const approvalNodeEditFor = api.approvalNodeEditFor
+const hasApprovalNodeEditor = api.hasApprovalNodeEditor
 const conditionOperatorLabel = api.conditionOperatorLabel
 const liveBranchSummary = api.liveBranchSummary
 const conditionRuleValueText = api.conditionRuleValueText

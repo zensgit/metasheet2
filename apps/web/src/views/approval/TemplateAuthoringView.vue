@@ -535,8 +535,10 @@
         </template>
 
         <!-- Complex graphs use a canvas for topology and a structured list for node configuration. -->
-        <!-- D-6 view toggle: structured list ⇄ visual canvas (complex graphs only) -->
-        <div v-if="graphReadOnly && canvasV2Enabled" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
+        <!-- D-6 view toggle: structured list ⇄ visual canvas. C1: available for a LINEAR draft too
+             (its structured list is the step-card stack below), so both shapes reach the same canvas
+             through the same `buildApprovalGraph` adapter. `list` stays the default either way. -->
+        <div v-if="canvasAvailable" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
           <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">结构列表</el-button>
           <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
         </div>
@@ -546,7 +548,7 @@
              ApprovalFlowCanvas is a presentational shell (E2 extraction) — this view stays the
              owner of selection/zoom/move state and every topology/command handler below. -->
         <ApprovalFlowCanvas
-          v-if="graphReadOnly && canvasV2Enabled && canvasViewMode === 'canvas'"
+          v-if="canvasAvailable && canvasViewMode === 'canvas'"
           ref="flowCanvasRef"
           :read-only="readOnly"
           :canvas-validity="canvasValidity"
@@ -594,7 +596,7 @@
           @remove-node="onRemoveNode"
         />
 
-        <div v-if="graphReadOnly && (!canvasV2Enabled || canvasViewMode === 'list')" data-testid="approval-graph-readonly-list">
+        <div v-if="graphReadOnly && (!canvasAvailable || canvasViewMode === 'list')" data-testid="approval-graph-readonly-list">
           <div
             v-for="node in graphPreviewNodes"
             :key="node.key"
@@ -659,7 +661,7 @@
              straight from draft.steps (see linearStepSpine.ts). Not editable here; clicking a step
              chip scrolls to and briefly highlights the matching card below. -->
         <div
-          v-if="!graphReadOnly"
+          v-if="!graphReadOnly && !linearCanvasActive"
           class="template-authoring__spine"
           data-testid="approval-template-step-spine"
         >
@@ -687,9 +689,12 @@
           </template>
         </div>
 
+        <!-- C1: the step cards ARE the structured list for a linear draft — the D-6 toggle swaps
+             them for the canvas exactly as it swaps `approval-graph-readonly-list` for a complex
+             graph, and they come back untouched on 结构列表 (nothing about the toggle edits them). -->
         <div
           v-for="(step, index) in draft.steps"
-          v-show="!graphReadOnly"
+          v-show="!graphReadOnly && !linearCanvasActive"
           :id="`approval-step-card-${step.localId}`"
           :key="step.localId"
           class="template-authoring__item"
@@ -1198,6 +1203,7 @@ import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary
 import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
+import { linearStepForNodeKey } from '../../approvals/linearCanvasCarrier'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
@@ -1803,30 +1809,60 @@ function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
 // (`draft.approvalNodeEdits[nodeKey].assigneeSources`) is seeded 1:1 + carried through
 // `applyApprovalNodeEditsToGraph` (every other node + all edges byte-identical). Any extra sources
 // (index 1+) are preserved verbatim. Shared with the canvas inspector via provide/inject.
+//
+// C1: every accessor below is CARRIER-AGNOSTIC. For a LINEAR draft the canvas node's carrier is the
+// step draft itself (`linearStepForNode`), so the inspector writes the very fields the step card
+// writes — `buildApprovalGraph`/`buildStepConfig` then emit them, and merely LOOKING at the canvas
+// seeds nothing (no `approvalNodeEdits` entry is created for a linear draft, so opening the canvas
+// can not dirty the draft or move the payload).
 function approvalNodeEditFor(nodeKey: string): ApprovalNodeSourceEdit | undefined {
   return draft.value.approvalNodeEdits?.[nodeKey]
+}
+/** The step a linear draft's canvas node edits — `undefined` for a promoted/complex draft. */
+function linearStepForNode(nodeKey: string): ApprovalStepDraft | undefined {
+  if (draft.value.preservedGraph) return undefined
+  return linearStepForNodeKey(draft.value.steps, nodeKey)
+}
+/** Render gate for the editable approval form (see `hasApprovalNodeEditor` in the shared API). */
+function hasApprovalNodeEditor(nodeKey: string): boolean {
+  return Boolean(linearStepForNode(nodeKey) ?? approvalNodeEditFor(nodeKey))
 }
 function approvalNodeFirstSource(nodeKey: string): ApprovalAssigneeSource | undefined {
   return approvalNodeEditFor(nodeKey)?.assigneeSources[0]
 }
 function approvalNodeMode(nodeKey: string): ApprovalMode {
+  const step = linearStepForNode(nodeKey)
+  if (step) return step.approvalMode
   return approvalNodeEditFor(nodeKey)?.approvalMode ?? 'single'
 }
 function setApprovalNodeMode(nodeKey: string, mode: ApprovalMode): void {
+  const step = linearStepForNode(nodeKey)
+  if (step) { step.approvalMode = mode; return }
   const edit = approvalNodeEditFor(nodeKey)
   if (edit) edit.approvalMode = mode
 }
 function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
+  const step = linearStepForNode(nodeKey)
+  if (step) return step.emptyAssigneePolicy
   return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
 }
 function setApprovalNodeEmptyPolicy(nodeKey: string, policy: EmptyAssigneePolicy): void {
+  const step = linearStepForNode(nodeKey)
+  if (step) { step.emptyAssigneePolicy = policy; return }
   const edit = approvalNodeEditFor(nodeKey)
   if (edit) edit.emptyAssigneePolicy = policy
 }
 function approvalNodeMergeWithRequester(nodeKey: string): boolean {
+  // Linear carrier: `mergeWithRequester` is its own boolean field; the three non-merge
+  // `autoApprovalPolicy` sub-fields live in `originalAutoApprovalPolicy` and `buildStepConfig`
+  // recomposes them — so the toggle stays the only authored sub-field on both carriers.
+  const step = linearStepForNode(nodeKey)
+  if (step) return step.mergeWithRequester
   return Boolean(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy?.mergeWithRequester)
 }
 function setApprovalNodeMergeWithRequester(nodeKey: string, enabled: boolean): void {
+  const step = linearStepForNode(nodeKey)
+  if (step) { step.mergeWithRequester = enabled; return }
   const edit = approvalNodeEditFor(nodeKey)
   if (!edit) return
   const policy = edit.autoApprovalPolicy && edit.autoApprovalPolicy !== null
@@ -1837,9 +1873,14 @@ function setApprovalNodeMergeWithRequester(nodeKey: string, enabled: boolean): v
   edit.autoApprovalPolicy = Object.keys(policy).length > 0 ? policy : null
 }
 function approvalNodeFieldAccess(nodeKey: string, fieldId: string): NodeFieldAccess {
+  const step = linearStepForNode(nodeKey)
+  if (step) return stepFieldAccess(step, fieldId)
   return approvalNodeEditFor(nodeKey)?.fieldPermissions?.find((permission) => permission.fieldId === fieldId)?.access ?? 'editable'
 }
 function setApprovalNodeFieldAccess(nodeKey: string, fieldId: string, access: NodeFieldAccess): void {
+  const step = linearStepForNode(nodeKey)
+  // Same `setStepFieldPermission` write the step card's select performs (absent === editable).
+  if (step) { onStepFieldAccessChange(step, fieldId, access); return }
   const edit = approvalNodeEditFor(nodeKey)
   if (!edit) return
   const next = (edit.fieldPermissions ?? []).filter((permission) => permission.fieldId !== fieldId)
@@ -1853,9 +1894,17 @@ function setApprovalNodeSource(nodeKey: string, source: ApprovalAssigneeSource):
   edit.assigneeSources = [source, ...edit.assigneeSources.slice(1)]
 }
 function approvalSourceKind(nodeKey: string): ApprovalAssigneeSourceKind {
+  const step = linearStepForNode(nodeKey)
+  if (step) return step.sourceKind
   return approvalNodeFirstSource(nodeKey)?.kind ?? 'requester'
 }
 function setApprovalSourceKind(nodeKey: string, kind: ApprovalAssigneeSourceKind): void {
+  // Linear carrier: set ONLY `sourceKind`, exactly as the step card's `v-model="step.sourceKind"`
+  // does — the per-kind carriers (`idsText` / `fieldId` / `levels` / `level`) survive a kind switch
+  // there, and `sourceFromStep` reads only the one the new kind needs. The complex branch below
+  // builds a FRESH source object because its carrier holds no per-kind siblings to preserve.
+  const step = linearStepForNode(nodeKey)
+  if (step) { step.sourceKind = kind; return }
   const next: ApprovalAssigneeSource =
     kind === 'static_user' ? { kind, userIds: [] }
       : kind === 'static_role' ? { kind, roleIds: [] }
@@ -1866,6 +1915,10 @@ function setApprovalSourceKind(nodeKey: string, kind: ApprovalAssigneeSourceKind
   setApprovalNodeSource(nodeKey, next)
 }
 function approvalSourceIds(nodeKey: string): string[] {
+  const step = linearStepForNode(nodeKey)
+  // The step's `idsText` is the SOLE carrier (parsed only at save time), so the picker reads the
+  // same `stepIds` projection the step card's picker reads.
+  if (step) return step.sourceKind === 'static_user' || step.sourceKind === 'static_role' ? stepIds(step) : []
   const source = approvalNodeFirstSource(nodeKey)
   if (source?.kind === 'static_user') return source.userIds
   if (source?.kind === 'static_role') return source.roleIds
@@ -1915,8 +1968,13 @@ function onRemoveNode(nodeKey: string): void {
   // Canvas V2 Slice A: deleting the selected node clears selection and closes the inspector.
   if (selectedCanvasNode.value === nodeKey) clearCanvasSelection()
 }
+// C1: count edges on the EFFECTIVE graph, not `preservedGraph` alone. A linear draft has no
+// `preservedGraph` yet renders real nodes on the canvas — a preservedGraph-only count would report 0
+// edges for every one of them and silently hide every insert/remove affordance (and, for a guard
+// read as "no outgoing edge", could offer an op the engine then rejects). `canvasEffectiveGraph` is
+// the same graph the canvas draws and the same one the topology op runs on.
 function topologyEdgeCount(nodeKey: string, dir: 'source' | 'target'): number {
-  return (draft.value.preservedGraph?.edges ?? []).filter((edge) => edge[dir] === nodeKey).length
+  return canvasEffectiveGraph.value.edges.filter((edge) => edge[dir] === nodeKey).length
 }
 function canInsertAfter(node: ApprovalNode): boolean {
   return node.type !== 'end' && topologyEdgeCount(node.key, 'source') === 1
@@ -1925,7 +1983,7 @@ function canInsertAfter(node: ApprovalNode): boolean {
 // parallel node"), and the canvas lock requires guiding toward valid shapes rather than building a
 // 422. Condition-in-parallel stays legal, so only the +并行 affordance is gated by region membership.
 const parallelRegionKeys = computed<Set<string>>(() =>
-  collectParallelRegionNodeKeys(draft.value.preservedGraph ?? { nodes: [], edges: [] }),
+  collectParallelRegionNodeKeys(canvasEffectiveGraph.value),
 )
 function canInsertParallelAfter(node: ApprovalNode): boolean {
   return canInsertAfter(node) && !parallelRegionKeys.value.has(node.key)
@@ -1935,6 +1993,11 @@ function canRemoveNode(node: ApprovalNode): boolean {
     && topologyEdgeCount(node.key, 'target') === 1
     && topologyEdgeCount(node.key, 'source') === 1
   if (!isLinearRemovable) return false
+  // C1: keep the linear editor's own floor. The step card disables 删除 at `steps.length === 1`, and
+  // `validateTemplateApprovalFlow` only enforces 至少需要一个审批步骤 while the draft is linear — so
+  // removing the last step ON THE CANVAS would promote to an approver-less start→end graph that no
+  // longer trips that check. `removeLinearNode` itself permits it, so the guard belongs here.
+  if (!draft.value.preservedGraph && draft.value.steps.length <= 1) return false
   try {
     removeLinearNode(buildApprovalGraph(draft.value), node.key)
     return true
@@ -1947,6 +2010,21 @@ function canRemoveNode(node: ApprovalNode): boolean {
 // Alt+Arrow both invoke the same topology edit, so visual position never diverges from the saved graph.
 // Reuses the same topology handlers as the list and the same draft-backed right-side inspector. ──
 const canvasViewMode = ref<'list' | 'canvas'>('list')
+// C1: one canvas for both shapes. A preserved complex graph keeps exactly the availability it had
+// before (flag only). A LINEAR draft additionally requires an AUTHORABLE template: when
+// `unsupportedReason` is set (attachment field / unknown node / extra config keys) the whole editor
+// is locked and `steps` is a lossy projection of a graph we must not offer a structural surface for
+// — unknown config stays fail-closed. `graphReadOnly` (preservedGraph presence) is the
+// linear-vs-graph-authoring discriminator, NOT a canvas gate.
+const canvasAvailable = computed(() => (
+  canvasV2Enabled.value && (graphReadOnly.value || !unsupportedReason.value)
+))
+// True while a LINEAR draft is showing the canvas instead of its structured step cards. The step
+// cards + flow spine are the structured list for a linear draft, so the toggle swaps them exactly
+// as it swaps `approval-graph-readonly-list` for a complex one. Always false with the flag off.
+const linearCanvasActive = computed(() => (
+  canvasAvailable.value && !graphReadOnly.value && canvasViewMode.value === 'canvas'
+))
 const selectedCanvasNode = ref<string | null>(null)
 const flowCanvasRef = ref<InstanceType<typeof ApprovalFlowCanvas> | null>(null)
 const movingCanvasNode = ref<string | null>(null)
@@ -1958,7 +2036,13 @@ const CANVAS_MINIMAP_W = 220
 const CANVAS_MINIMAP_H = 120
 const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(draft.value))
 const canvasLayout = computed<GraphLayout>(() => computeLayout(canvasEffectiveGraph.value))
-const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? graphValidityIssues(canvasEffectiveGraph.value) : []))
+// C1: validity now reads the effective graph for BOTH shapes. This does not move publish gating for
+// a linear draft (`publishApprovalFlowIssues` consumes it): every check in `graphValidityIssues`
+// is vacuous on a `buildApprovalGraph` linear chain — no parallel node, positionally-unique node and
+// edge keys, no dangling endpoint, forward- and backward-reachable, acyclic — so it stays `[]` for
+// any linear draft. Dropping the branch keeps the alert describing exactly the graph the canvas
+// draws, for whichever shape is on screen.
+const canvasValidity = computed<string[]>(() => graphValidityIssues(canvasEffectiveGraph.value))
 const canvasZoomLabel = computed(() => `${Math.round(canvasZoom.value * 100)}%`)
 const canvasStageStyle = computed(() => ({
   width: `${Math.round(canvasLayout.value.width * canvasZoom.value)}px`,
@@ -2151,6 +2235,8 @@ function onCanvasNodeDragStart(event: DragEvent, nodeKey: string): void {
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
 }
 function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
+  const step = linearStepForNode(nodeKey)
+  if (step) { setStepIds(step, ids); return }
   const kind = approvalSourceKind(nodeKey)
   if (kind === 'static_user') setApprovalNodeSource(nodeKey, { kind, userIds: ids })
   else if (kind === 'static_role') setApprovalNodeSource(nodeKey, { kind, roleIds: ids })
@@ -2168,19 +2254,37 @@ function setApprovalSourceIdsFromPicker(nodeKey: string, ids: string[]): void {
   setApprovalSourceIds(nodeKey, ids)
 }
 function approvalSourceFieldId(nodeKey: string): string {
+  const step = linearStepForNode(nodeKey)
+  if (step) return step.sourceKind === 'form_field_user' ? step.fieldId : ''
   const source = approvalNodeFirstSource(nodeKey)
   return source?.kind === 'form_field_user' ? source.fieldId : ''
 }
 function setApprovalSourceFieldId(nodeKey: string, fieldId: string): void {
+  const step = linearStepForNode(nodeKey)
+  if (step) { step.fieldId = fieldId; return }
   setApprovalNodeSource(nodeKey, { kind: 'form_field_user', fieldId })
 }
 function approvalSourceLevel(nodeKey: string): number {
+  // The step carries BOTH level carriers at all times (`level` for manager_at_level, `levels` for
+  // continuous_managers) — read the one the current kind means, mirroring `sourceFromStep`.
+  const step = linearStepForNode(nodeKey)
+  if (step) {
+    if (step.sourceKind === 'manager_at_level') return step.level
+    if (step.sourceKind === 'continuous_managers') return step.levels
+    return 1
+  }
   const source = approvalNodeFirstSource(nodeKey)
   if (source?.kind === 'manager_at_level') return source.level
   if (source?.kind === 'continuous_managers') return source.levels
   return 1
 }
 function setApprovalSourceLevel(nodeKey: string, value: number): void {
+  const step = linearStepForNode(nodeKey)
+  if (step) {
+    if (step.sourceKind === 'manager_at_level') step.level = value
+    else if (step.sourceKind === 'continuous_managers') step.levels = value
+    return
+  }
   const kind = approvalSourceKind(nodeKey)
   if (kind === 'manager_at_level') setApprovalNodeSource(nodeKey, { kind, level: value })
   else if (kind === 'continuous_managers') setApprovalNodeSource(nodeKey, { kind, levels: value })
@@ -2253,6 +2357,9 @@ function syncAllStepOptions(): void {
 // G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to complex-graph
 // approval-node assignee sources (approvalNodeEdits is keyed by nodeKey).
 function syncApprovalNodeOptions(nodeKey: string): void {
+  // C1: a linear node's ids live on the step, so reuse the step-card sync (identical semantics).
+  const step = linearStepForNode(nodeKey)
+  if (step) { syncStepOptions(step); return }
   const kind = approvalSourceKind(nodeKey)
   if (kind === 'static_user') {
     for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
@@ -2292,7 +2399,7 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   conditionEditFor,
   parallelEditFor,
   ccEditFor,
-  approvalNodeEditFor,
+  hasApprovalNodeEditor,
   conditionFieldOptions,
   userFields,
   conditionFormulaInsertOptions,
