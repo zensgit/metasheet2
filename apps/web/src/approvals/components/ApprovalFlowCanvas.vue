@@ -35,11 +35,11 @@
           tabindex="0"
           @scroll="emit('viewport-scroll')"
         >
-          <div class="template-authoring__canvas-stage" :style="canvasStageStyle">
+          <div class="template-authoring__canvas-stage" :style="canvasStageCss">
             <div
               class="template-authoring__canvas"
               data-testid="approval-graph-canvas"
-              :style="canvasSurfaceStyle"
+              :style="canvasSurfaceCss"
             >
               <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height">
                 <defs>
@@ -243,8 +243,8 @@ defineProps<{
   readOnly: boolean
   canvasValidity: string[]
   canvasZoomLabel: string
-  canvasStageStyle: Record<string, string>
-  canvasSurfaceStyle: Record<string, string>
+  canvasStageCss: Record<string, string>
+  canvasSurfaceCss: Record<string, string>
   canvasLayout: GraphLayout
   canvasEdgeLines: CanvasEdgeLine[]
   canvasMoveTargetLines: CanvasEdgeLine[]
