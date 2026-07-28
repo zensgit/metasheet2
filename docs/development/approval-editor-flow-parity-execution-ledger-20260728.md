@@ -20,7 +20,7 @@ merge、部署、UAT 和 flag 是不同状态，不互相替代。
 | E1-b | 生产命令适配、drag、history | 基于 E1 / `codex/approval-editor-e1b-command-drag-20260728` | `2955a68da` | Grok 4.5 Build | stale focus 修复、判别变异、浏览器超时/100 节点交互稳定化 | Draft PR #4643；required CI 绿 |
 | E2 | Flow Canvas presentational shell 抽取 | `origin/main@9da0335b4` / `codex/approval-editor-e2-shell-extract-20260728` | `5a9bb4db2` | Claude Sonnet 5 | 247 测、类型、事件变异；修复静态 style 守卫误判 | Draft PR #4642；required CI 绿 |
 | C1 | 线性/复杂流程统一 Canvas 载体 | E2 head / `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` | Claude Opus 5 实现；Kimi exact-head 只读复审 | 真实视图写回、payload/dirty、promote 保真、flag fallback、删除下限及浏览器三 viewport | Draft PR #4649；required CI 绿 |
-| C2 | Canvas-first 工作区与表单/流程切换 | C1 head / `codex/approval-editor-c2-canvas-first-20260728` | `068d6e628` | Codex 实现；Kimi exact-head 对抗复审 | 默认画布、辅助模式、Form/Flow 往返、viewport 重测、ARIA、三 viewport 真浏览器 | Draft PR #4652；required CI 运行中 |
+| C2 | Canvas-first 工作区与表单/流程切换 | C1 head / `codex/approval-editor-c2-canvas-first-20260728` | `068d6e628` | Codex 实现；Kimi exact-head 对抗复审 | 默认画布、辅助模式、Form/Flow 往返、viewport 重测、ARIA、三 viewport 真浏览器 | Draft PR #4652；required CI 绿 |
 
 ## 2. E1-b 执行事实
 
@@ -69,7 +69,7 @@ E2 只修改：
 | 独立复审 | Codex | Codex | Kimi APPROVE，无 P1/P2；Codex复核修 P3 | Kimi APPROVE，无 P1/P2；Codex复核 |
 | 提交 | 是 | 是 | 是 | 是 |
 | push / PR | #4643 | #4642 | #4649（stacked on #4642） | #4652（stacked on #4649） |
-| required CI | PASS | PASS | PASS | 运行中 |
+| required CI | PASS | PASS | PASS | PASS |
 | merge | 否 | 否 | 否 | 否 |
 | staging / UAT | 否 | 否 | 否 | 否 |
 | production flag | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF |

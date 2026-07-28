@@ -1,6 +1,6 @@
 # 审批编辑器与流程编排 E1-b / E2 / C1 / C2 收尾验证（2026-07-28）
 
-**范围状态：PR VERIFIED（C2 required CI 仍在运行）**
+**范围状态：PR VERIFIED / REQUIRED CI PASS**
 
 **整线状态：NOT FINAL**
 
@@ -202,7 +202,7 @@ watch 和 ARIA group 语义，指定测试均精确转红。真实 Chromium 在
 
 ## 7. 残余与 owner 门
 
-1. #4642/#4643/#4649 required CI 已绿，#4652 required CI 待结算；四者均未 merge；
+1. #4642/#4643/#4649/#4652 required CI 已绿；四者均未 merge；
 2. edge `+` 产品接线、节点按钮群移除属于 C3；
 3. 统一 drag feedback、undo/redo 属于 C4/C5；
 4. 表单仅有既有字段排序，尚无 palette 拖入和统一字段 inspector（F1-F3）；
@@ -216,6 +216,6 @@ watch 和 ARIA group 语义，指定测试均精确转红。真实 Chromium 在
 - `A1 renderer feasibility = PASS`；
 - `A2 first extraction = PR VERIFIED / CI PASS`；
 - `C1 unified carrier = PR VERIFIED / CI PASS`；
-- `C2 canvas-first = IMPLEMENTED + LOCAL/BROWSER/ADVERSARIAL VERIFIED / CI RUNNING`；
+- `C2 canvas-first = PR VERIFIED / CI PASS`；
 - `approval editor parity line = IN PROGRESS / NOT FINAL`；
 - 下一开发点为 C3 边 `+` 产品化，并行启动 F1 表单 palette 抽取。

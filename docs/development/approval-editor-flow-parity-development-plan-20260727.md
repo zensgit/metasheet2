@@ -192,7 +192,7 @@ C2 已在 C1 head 上完成 canvas-first 工作区。Canvas flag ON 时，线性
 重新测量 viewport，避免 0x0 缩略图状态。真实 Chromium 在 1440 / 1024 /
 390 验证默认画布、表单往返、辅助模式和零横向溢出；四刀判别变异分别钉住
 默认模式、模式切换、viewport 重测和 ARIA group 语义。Kimi 对抗复审无
-P1/P2。Draft PR #4652 依赖 #4649；required CI 仍在运行，未 merge、部署或
+P1/P2。Draft PR #4652 依赖 #4649，required CI 已全绿；未 merge、部署或
 开启 flag。
 
 ### 4.1 依赖图
