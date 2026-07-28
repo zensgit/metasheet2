@@ -227,6 +227,16 @@ const READ_CERTIFICATE_FIELDS = Object.freeze([
 // (= profileId); the action/queryPreset version is pinned INSIDE this definition and
 // is never an independent digest input (review P2: two implementations must not each
 // compute their own digest).
+//
+// PAGED_READ needs one consistency context spanning the page sequence. The table is
+// scoped to PAGED_READ so the ratified CHANGE_FEED watermark combination remains
+// legal. MONOTONIC_VERSION_PIN deliberately has no PAGED_READ row: it can detect
+// drift, but cannot make separately-read pages belong to one snapshot.
+const PAGED_READ_LEGAL_COMBINATIONS = Object.freeze([
+  Object.freeze({ consistencyProof: 'SOURCE_SNAPSHOT_TXN', continuationLifetime: 'CONNECTION_BOUND' }),
+  Object.freeze({ consistencyProof: 'IMMUTABLE_SNAPSHOT_TOKEN', continuationLifetime: 'DURABLE_TOKEN' }),
+])
+
 // Frozen cross-dimension legality (scale-D0 §2) — shared so deriveRecoveryStrategy
 // re-checks it too (review P2: derivation must never grant a resume strategy to a
 // schema-ILLEGAL certificate). Reads only membership of already-frozen closed sets.
@@ -251,6 +261,27 @@ function assertCertificateCrossDimensionLegal({ acquisitionMode, continuationLif
     const watermarkAnchor = acquisitionMode === 'CHANGE_FEED' && consistency.includes('MONOTONIC_VERSION_PIN')
     if (!immutableAnchor && !watermarkAnchor) {
       fail('ILLEGAL_CAPABILITY_COMBINATION', 'DURABLE_TOKEN continuation requires a durable consistency anchor', { rule: 'DURABLE_TOKEN_REQUIRES_DURABLE_ANCHOR' })
+    }
+  }
+  // 5. Every PAGED_READ proof must anchor the declared continuation lifetime.
+  // Refuse instead of silently downgrading to BOUNDED_READ: callers needing bounded
+  // semantics certify a separate bounded profile.
+  if (acquisitionMode === 'PAGED_READ') {
+    if (consistency.length === 0) {
+      fail('ILLEGAL_CAPABILITY_COMBINATION', 'PAGED_READ requires a consistency proof from the frozen legal-combination table', {
+        rule: 'PAGED_READ_REQUIRES_CONSISTENCY_PROOF',
+      })
+    }
+    for (const proof of consistency) {
+      const anchored = PAGED_READ_LEGAL_COMBINATIONS.some(
+        (row) => row.consistencyProof === proof && row.continuationLifetime === continuationLifetime,
+      )
+      if (!anchored) {
+        fail('ILLEGAL_CAPABILITY_COMBINATION', 'PAGED_READ combination is outside the frozen legal-combination table', {
+          rule: 'PAGED_READ_LEGAL_COMBINATION',
+          declaredProofCount: consistency.length,
+        })
+      }
     }
   }
 }
@@ -567,6 +598,7 @@ module.exports = {
   GIP_CROSS_ROLE_TEMPORAL_POLICIES,
   GIP_CONSISTENCY_REQUIREMENT_STATUSES,
   GIP_PROFILE_ERROR_REASONS,
+  PAGED_READ_LEGAL_COMBINATIONS,
   GipProfileContractError,
   isValidProfileId,
   normalizeCertifiedReadActionProfile,
