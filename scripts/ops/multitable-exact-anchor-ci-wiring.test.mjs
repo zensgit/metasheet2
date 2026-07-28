@@ -213,3 +213,60 @@ test('placement parsers reject comment-only and wrong-step decoys', () => {
   assert.equal(stepHasEnvKey(realStep, 'DATABASE_URL'), false)
   assert.equal(wholeFileVitestArgs(realStep).includes(file), false)
 })
+
+function assertAuthorityWriterWaiterContract(source) {
+  const start = source.indexOf('// Both production writers must be blocked')
+  const end = source.indexOf('let membershipParked = false', start)
+  assert.ok(start >= 0 && end > start, 'authority-writer waiter contract block must exist')
+  const block = source.slice(start, end)
+
+  assert.match(
+    block,
+    /query LIKE 'SELECT 1 FROM meta_sheets WHERE id = \$1 FOR UPDATE%'/,
+    'waiter probe must recognize the exact-anchor branch FOR UPDATE writer',
+  )
+  assert.match(
+    block,
+    /query LIKE 'SELECT id FROM meta_sheets WHERE id = \$1 FOR SHARE%'/,
+    'waiter probe must recognize the main authority helper FOR SHARE writer',
+  )
+  assert.match(
+    block,
+    /expect\(authorityWaiters\)\.toBeGreaterThanOrEqual\(2\)/,
+    'the golden must still require both independent authority writers to park',
+  )
+  assert.doesNotMatch(
+    block,
+    /expect\(authorityWaiters\)\.toBeGreaterThanOrEqual\(1\)/,
+    'weakening the dual-writer guarantee to one waiter is forbidden',
+  )
+}
+
+test('authority waiter matcher covers FOR UPDATE and FOR SHARE while preserving the >=2 guarantee', () => {
+  const routeTest = readFileSync(
+    join(
+      repoRoot,
+      'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+    ),
+    'utf8',
+  )
+  assertAuthorityWriterWaiterContract(routeTest)
+})
+
+test('authority waiter contract rejects the tempting >=1 weakening', () => {
+  const routeTest = readFileSync(
+    join(
+      repoRoot,
+      'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+    ),
+    'utf8',
+  )
+  const weakened = routeTest.replace(
+    'expect(authorityWaiters).toBeGreaterThanOrEqual(2)',
+    'expect(authorityWaiters).toBeGreaterThanOrEqual(1)',
+  )
+  assert.throws(
+    () => assertAuthorityWriterWaiterContract(weakened),
+    /both independent authority writers|weakening the dual-writer guarantee/,
+  )
+})

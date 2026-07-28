@@ -5,8 +5,8 @@ name: Multitable Recovery-Flag Containment Check
 # `MULTITABLE_ENABLE_PIT_RESET` must stay off until the W0-1 correction lock (#4262) is built and gated.
 # Code-default-off is NOT evidence about the environment; this workflow produces the ops-side evidence leg.
 #
-# READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` + `docker inspect` + `docker compose config`
-# reads. No writes, no restarts, no config edits.
+# READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` + catalog-only database reads +
+# `docker inspect` + `docker compose config`. No writes, no restarts, no config edits.
 #
 # `target` is a fixed `choice` input (staging | production | both) — NEVER free text. `choice` is a
 # UI-only guardrail (the REST API can still send an arbitrary string), so TARGET is re-validated with an
@@ -28,10 +28,14 @@ name: Multitable Recovery-Flag Containment Check
 # `ssh-keyscan -H <host>`, optionally piped through `base64`). Missing `DEPLOY_KNOWN_HOSTS` fails the job
 # closed with an explicit error — it is never silently treated as "skip verification".
 #
-# Two verification legs, both fail-closed:
+# Three verification legs, all fail-closed:
 #   1. Running env: every expected container must be observed running and have its live env checked;
 #      missing ANY expected container ⇒ FAIL (a substring match on some unrelated container never suffices).
-#   2. Next-restart (authoritative): the compose project's OWN config is derived from the running
+#   2. Running database schema: the backend container runs the read-only, values-free schema helper.
+#      The nine recovery-authority triggers, their six function bodies, and the meta_links live-target
+#      FK must match the exact expected fingerprints and enabled posture. Missing DATABASE_URL, missing
+#      helper, catalog permission failure, disabled/missing objects, or any shape drift ⇒ FAIL.
+#   3. Next-restart (authoritative): the compose project's OWN config is derived from the running
 #      container's own labels (`com.docker.compose.project.config_files` /
 #      `com.docker.compose.project.working_dir`), then rendered read-only via `docker compose config` —
 #      this covers env_file AND compose YAML/override merges, not just a directory's top-level `.env*`
@@ -131,6 +135,8 @@ jobs:
           ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
           FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
+          SCHEMA_HELPER_SHA256="77d53f58d63be9e16527ddb0eaf5cf0d16e5353fffd3a5d672b70c5cae1706c6"
+          SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions and meta_links FK match the expected enabled schema posture"
           fail=0
           checked=0
 
@@ -203,7 +209,36 @@ jobs:
               fi
             done
 
-            # Leg 2: authoritative next-restart check. Derive the compose project's OWN config from the
+            # Leg 2: live database schema. The helper runs inside the backend container so it observes
+            # the service's own DATABASE_URL without ever exporting or printing it. Its output contract
+            # is values-free: object counts, deterministic fingerprints, and PASS/FAIL only. Missing DB
+            # access/permissions/helper are hard failures, and exit 0 alone is insufficient: the exact
+            # helper source hash and PASS sentinel must both match this reviewed workflow revision.
+            schema_out="$(mktemp)"
+            helper_sha="$(docker exec "$name" sha256sum scripts/ops/multitable-recovery-schema-containment.mjs 2>/dev/null | awk '{print $1}' || true)"
+            if [ "$helper_sha" != "$SCHEMA_HELPER_SHA256" ]; then
+              echo "VERDICT: FAIL — schema containment helper is missing or differs from the reviewed fingerprint for $name"
+              rm -f "$schema_out"
+              fail=1
+              continue
+            fi
+            if ! docker exec "$name" node scripts/ops/multitable-recovery-schema-containment.mjs >"$schema_out" 2>&1; then
+              echo "VERDICT: FAIL — schema containment helper failed for $name (DB/helper/permission observation unavailable)"
+              sed 's/^/   schema: /' "$schema_out"
+              rm -f "$schema_out"
+              fail=1
+              continue
+            fi
+            sed 's/^/   schema: /' "$schema_out"
+            if ! grep -qxF "$SCHEMA_PASS_LINE" "$schema_out"; then
+              echo "VERDICT: FAIL — schema containment helper did not emit its exact PASS sentinel for $name"
+              rm -f "$schema_out"
+              fail=1
+              continue
+            fi
+            rm -f "$schema_out"
+
+            # Leg 3: authoritative next-restart check. Derive the compose project's OWN config from the
             # running container's own compose labels (covers env_file AND compose YAML/override merges,
             # not just a directory's top-level .env* files), then render the fully-resolved config
             # read-only with `docker compose config` and verdict against that rendering.
@@ -268,7 +303,7 @@ jobs:
           echo "== summary =="
           echo "containers expected: $checked"
           if [ "$fail" -ne 0 ]; then echo "VERDICT: FAIL — containment breached or observation broken (see above)"; exit 1; fi
-          echo "VERDICT: PASS — both recovery flags inactive in every expected container's running env AND in its rendered next-restart compose config"
+          echo "VERDICT: PASS — recovery flags inactive in running/next-restart config AND database recovery schema matches its expected enabled fingerprint"
           REMOTE
 
       - name: Upload report

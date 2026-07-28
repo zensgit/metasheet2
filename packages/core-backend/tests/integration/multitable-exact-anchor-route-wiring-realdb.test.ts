@@ -1045,7 +1045,10 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
             WHERE datname = current_database()
               AND state = 'active'
               AND wait_event_type = 'Lock'
-              AND query LIKE 'SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE%'`,
+              AND (
+                query LIKE 'SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE%'
+                OR query LIKE 'SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE%'
+              )`,
         )
         authorityWaiters = Number(waiting.rows[0]?.c ?? 0)
         if (authorityWaiters >= 2 || sourceSettled || foreignSettled) break
