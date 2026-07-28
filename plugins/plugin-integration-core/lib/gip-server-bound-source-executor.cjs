@@ -13,11 +13,12 @@
 //     ratified text still schedules it and ⟲OD3 (#4619) proposing its removal is
 //     UNRULED — this slice therefore builds nothing in a second package. The fence
 //     is `plugins/plugin-integration-core/`.
-//   * NO certification is minted. NO strategy is registered. §4 step 2 — the real
-//     MySQL / SQL Server capability spike — has not run.
-//   * B-4 is NOT fully closed by this slice. §4 step 1.5's own text says "B-4 is
-//     closed by 1.4's builder identity AND BY STEP 3", and step 3 has not run. What
-//     lands here is the builder-identity half only.
+//   * NO certification is minted. NO SQL strategy is registered here. §4 step 2 has
+//     since produced real-engine evidence, but this executor remains the HTTP-only
+//     B1a surface and deliberately consumes none of that SQL evidence.
+//   * B-4 is NOT fully closed by this HTTP slice. §4 step 3 now opens only the
+//     separate SQL Server RCSI strategy; what lands here remains 1.4's HTTP
+//     builder-identity half.
 //
 // -- Q2 / DECISION (ε) IS UNRULED, AND THIS IS WHAT THIS MODULE ASSUMED ------
 // The §4.0 decision roster carries FOUR decisions — (α), (β), (γ), (δ) — and no (ε).
@@ -247,8 +248,8 @@ function assertClosedKeySet(value, allowedKeys, extraKeyReason) {
 //
 //   1. `createHarnessHttpProbeActionRegistryForTests` (below) wraps
 //      `buildTrustedHttpProbeActionRegistry`.
-//   2. `createHarnessSourceBinderForTests` (:395) is the SOLE writer into
-//      `trustedSourceBinders` (:389, written :469) and is publicly EXPORTED (:625) — there is no
+//   2. `createHarnessSourceBinderForTests` (:396) is the SOLE writer into
+//      `trustedSourceBinders` (:390, written :470) and is publicly EXPORTED (:626) — there is no
 //      private granter behind it at all, so it is not even "build split from trust";
 //      it is the single granting path. And unlike (1) it has NO CERTIFIED
 //      COUNTERPART: `CERTIFIED_HTTP_PROBE_ACTION_REGISTRY` exists, and NO certified
@@ -569,9 +570,9 @@ async function executeOrderingKeyProbeInternal(bound, resolution) {
     probeKind: 'ordering_key_total_order_negative',
     // `http_action`, NOT `http_certified_action`. This token is bound into the
     // qualification digest, and B-5's doctrine is that "'certified' requires a
-    // VERIFIED guarantee, not an honest label". The certified registry SHIPS EMPTY
-    // and §4 step 2 has not run, so NOTHING is certified at this head — writing
-    // "certified" into the digest would be an overclaim, and renaming it after a
+    // VERIFIED guarantee, not an honest label". This HTTP registry still SHIPS EMPTY
+    // and consumes none of step 2's separate SQL-engine evidence; writing "certified"
+    // into this digest would be an overclaim, and renaming it after a
     // qualification exists would be a digest-lineage change.
     probeTransport: 'http_action',
     probeActionId: action.actionId,
