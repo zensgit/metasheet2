@@ -1171,11 +1171,18 @@ export interface PluginServices {
     /**
      * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery sweep).
      * ONE sweep tick over `state='running'` scheduled-run rows, cross-`workDate`, bounded by
-     * `limit`. See `sweepAttendanceScheduledRunsOnceV1`'s own module comment for this call's
-     * disclosed scope: it closes the "terminal but never finalized" absorbing state; it does
-     * NOT resume a target-set-drift candidate (that exit is `abandonScheduledRun` below).
+     * `limit`. `recoverCandidate` must rebuild plugin-owned scheduling context and resume the
+     * exact scanned run; the host never silently treats `not_ready` as completed work.
      */
-    sweepScheduledRuns(options?: { limit?: number }): Promise<{
+    sweepScheduledRuns(options: {
+      limit?: number
+      recoverCandidate(candidate: {
+        orgId: string
+        initiator: 'cron' | 'admin_run'
+        workDate: string
+        runId: string
+      }): Promise<void>
+    }): Promise<{
       scanned: number
       finalized: number
       notReady: number

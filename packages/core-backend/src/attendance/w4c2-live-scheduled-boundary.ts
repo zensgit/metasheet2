@@ -132,6 +132,7 @@ import {
   finalizeAttendanceScheduledRunV1,
   recordAttendanceScheduledRunTargetOutcomeV1,
   requireAttendanceScheduledRunRunningBeforeSourceDmlV1,
+  resumeAttendanceScheduledRunByExactIdV1,
   type AttendanceScheduledRunMemberInputV1,
   type AttendanceScheduledRunMembershipResolverV1,
 } from './w4c2-scheduled-run'
@@ -444,6 +445,12 @@ export interface AttendanceScheduledRunBoundaryInputV1 {
   readonly targetUserIds: readonly string[]
   readonly initiator: AttendanceScheduledRunInitiatorV1
   /**
+   * Process-local duplicate signal from the plugin caller. It is honored only
+   * after this boundary resolves `legacy_projection_only`; W4 postures ignore
+   * it and continue through the durable class-01 run protocol.
+   */
+  readonly legacyDedupHit?: boolean
+  /**
    * W4C-2 remediation P1-4 (#4612 gate finding): the real host-authenticated
    * administrator identity for `initiator: 'admin_run'` — plain route-supplied
    * data (the ROUTE already performed its `attendance:admin` permission check
@@ -478,8 +485,16 @@ export interface AttendanceScheduledRunBoundaryInputV1 {
   readonly reviewTargets: readonly { readonly userId: string; readonly reasonCode: string }[]
 }
 
+export type AttendanceScheduledRunRecoveryBoundaryInputV1 = Omit<
+  AttendanceScheduledRunBoundaryInputV1,
+  'adminActorId'
+> & {
+  readonly runId: string
+}
+
 export type AttendanceScheduledRunBoundaryResultV1 =
   | { readonly kind: 'legacy'; readonly rows: Array<{ user_id: string }> }
+  | { readonly kind: 'legacy_dedup' }
   | { readonly kind: 'suspended' }
   | {
       readonly kind: 'w4'
@@ -495,6 +510,9 @@ export type AttendanceScheduledRunBoundaryResultV1 =
 export interface AttendanceW4LiveScheduledBoundaryV1 {
   executeLivePunch(input: AttendanceLivePunchBoundaryInputV1): Promise<AttendanceLivePunchBoundaryResultV1>
   executeScheduledRun(input: AttendanceScheduledRunBoundaryInputV1): Promise<AttendanceScheduledRunBoundaryResultV1>
+  recoverScheduledRun(
+    input: AttendanceScheduledRunRecoveryBoundaryInputV1,
+  ): Promise<AttendanceScheduledRunBoundaryResultV1>
 }
 
 export interface AttendanceW4BoundaryConnectionV1 {
@@ -516,6 +534,7 @@ const SCHEDULED_SOURCE_REF: Record<AttendanceScheduledRunInitiatorV1, string> = 
   cron: 'plugin-attendance:auto-absence:cron',
   admin_run: 'plugin-attendance:auto-absence:admin-run',
 })
+const SCHEDULED_RECOVERY_SOURCE_REF = 'plugin-attendance:auto-absence:recovery-sweep'
 const SCHEDULED_ABSENCE_SOURCE: Record<AttendanceScheduledRunInitiatorV1, string> = Object.freeze({
   cron: 'cron_auto_absence',
   admin_run: 'admin_auto_absence_run',
@@ -1589,7 +1608,10 @@ export function createAttendanceLiveScheduledBoundaryV1(
    * intentionally waives per-subject predicates; the scheduler's target-user
    * list itself is not caller-authorization-bearing).
    */
-  function cronScheduledAuthorization(orgId: string): AuthorizedAttendanceWriteContextV1 {
+  function internalScheduledAuthorization(
+    orgId: string,
+    sourceRef: string,
+  ): AuthorizedAttendanceWriteContextV1 {
     return createAuthorizedAttendanceWriteContextV1({
       actorId: ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1,
       actorPosture: 'scheduler',
@@ -1597,7 +1619,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
       orgId,
       subjectScope: { kind: 'org_scheduler' },
       capability: 'scheduled',
-      sourceRef: SCHEDULED_SOURCE_REF.cron,
+      sourceRef,
     })
   }
 
@@ -1649,8 +1671,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
     })
   }
 
-  async function executeScheduledRun(
+  async function executeScheduledRunInternal(
     input: AttendanceScheduledRunBoundaryInputV1,
+    recoveryRunId: string | null,
   ): Promise<AttendanceScheduledRunBoundaryResultV1> {
     if (!(SCHEDULED_INITIATORS as readonly string[]).includes(input.initiator)) {
       boundaryFail('W4C2_SCHEDULED_INITIATOR_INVALID')
@@ -1662,11 +1685,16 @@ export function createAttendanceLiveScheduledBoundaryV1(
     // input reaches it), not a new business-input rejection surface on the
     // byte-identical legacy response, so it does not conflict with this
     // module's "legacy admits no new rejection surface" doctrine.
-    if (input.initiator === 'cron' && input.adminActorId !== null) {
-      boundaryFail('W4C2_SCHEDULED_WITNESS_INITIATOR_MISMATCH')
-    }
-    if (input.initiator === 'admin_run' && (typeof input.adminActorId !== 'string' || input.adminActorId.length === 0)) {
-      boundaryFail('W4C2_SCHEDULED_ADMIN_WITNESS_REQUIRED')
+    if (recoveryRunId === null) {
+      if (input.initiator === 'cron' && input.adminActorId !== null) {
+        boundaryFail('W4C2_SCHEDULED_WITNESS_INITIATOR_MISMATCH')
+      }
+      if (
+        input.initiator === 'admin_run'
+        && (typeof input.adminActorId !== 'string' || input.adminActorId.length === 0)
+      ) {
+        boundaryFail('W4C2_SCHEDULED_ADMIN_WITNESS_REQUIRED')
+      }
     }
     const workDate = parseCanonicalAttendanceWorkDateV1(input.workDate) as string
     const targetUserIds = [...input.targetUserIds].map(String)
@@ -1687,6 +1715,12 @@ export function createAttendanceLiveScheduledBoundaryV1(
     const probe = await withConnection((client) =>
       runAttendanceResultOperationTransactionV1(client, async (trx) => {
         if (rolloutKey === null) {
+          if (recoveryRunId !== null) {
+            boundaryFail('W4C2_SCHEDULED_RUN_RECOVERY_ORG_INVALID')
+          }
+          if (input.legacyDedupHit === true) {
+            return { mode: 'legacy_dedup' as const, rows: [] as Array<{ user_id: string }> }
+          }
           if (targetUserIds.length === 0) {
             return { mode: 'legacy' as const, rows: [] as Array<{ user_id: string }> }
           }
@@ -1704,6 +1738,12 @@ export function createAttendanceLiveScheduledBoundaryV1(
           return { mode: 'suspended' as const, rows: [] as Array<{ user_id: string }> }
         }
         if (posture.writePosture === 'legacy_projection_only') {
+          if (recoveryRunId !== null) {
+            return { mode: 'w4' as const, rows: [] as Array<{ user_id: string }> }
+          }
+          if (input.legacyDedupHit === true) {
+            return { mode: 'legacy_dedup' as const, rows: [] as Array<{ user_id: string }> }
+          }
           if (targetUserIds.length === 0) {
             return { mode: 'legacy' as const, rows: [] as Array<{ user_id: string }> }
           }
@@ -1723,15 +1763,21 @@ export function createAttendanceLiveScheduledBoundaryV1(
     )
 
     if (probe.mode === 'suspended') return { kind: 'suspended' }
+    if (probe.mode === 'legacy_dedup') return { kind: 'legacy_dedup' }
     if (probe.mode === 'legacy') return { kind: 'legacy', rows: probe.rows }
 
-    // W4 path only below: `cron` mints ONE org-scoped witness reused across
-    // every target user (no per-subject identity); `admin_run` mints a FRESH
-    // witness per user from the real host-authenticated admin identity
-    // (validated non-null/non-scheduler above) — see cronScheduledAuthorization
-    // / adminRunScheduledAuthorization. Both are SQL-rechecked inside every
-    // per-user registry transaction before any source/result DML.
-    const cronAuthorization = input.initiator === 'cron' ? cronScheduledAuthorization(orgKey) : null
+    // W4 path only below: an ordinary `cron` run and a recovery sweep use the
+    // registered internal scheduler identity; an ordinary `admin_run` mints a
+    // FRESH witness per user from the real host-authenticated admin identity.
+    // Recovery preserves the durable run initiator but records its own recovery
+    // source ref, never fabricating a human actor. Every witness is SQL-rechecked
+    // inside each per-user registry transaction before any source/result DML.
+    const recoveryAuthorization =
+      recoveryRunId === null ? null : internalScheduledAuthorization(orgKey, SCHEDULED_RECOVERY_SOURCE_REF)
+    const cronAuthorization =
+      recoveryRunId === null && input.initiator === 'cron'
+        ? internalScheduledAuthorization(orgKey, SCHEDULED_SOURCE_REF.cron)
+        : null
     const adminActorId = input.adminActorId
 
     // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the durable
@@ -1753,13 +1799,20 @@ export function createAttendanceLiveScheduledBoundaryV1(
     const resolveMembership: AttendanceScheduledRunMembershipResolverV1 = async () => membersForRun
 
     const startOutcome = await withConnection((client) =>
-      runAttendanceResultOperationTransactionV1(client, (trx) =>
-        createOrResumeAttendanceScheduledRunV1(
+      runAttendanceResultOperationTransactionV1(client, (trx) => {
+        if (recoveryRunId !== null) {
+          return resumeAttendanceScheduledRunByExactIdV1(
+            trx,
+            { orgId: orgKey, initiator: input.initiator, workDate, runId: recoveryRunId },
+            resolveMembership,
+          )
+        }
+        return createOrResumeAttendanceScheduledRunV1(
           trx,
           { orgId: orgKey, initiator: input.initiator, workDate },
           resolveMembership,
-        ),
-      ),
+        )
+      }),
     )
 
     if (startOutcome.kind === 'org_suspended_deferred') {
@@ -1770,6 +1823,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
       // the run-creation transaction (section 1.7 step 1): the SAME null-ID
       // legacy contract the probe's own legacy branch above takes — a single
       // batch INSERT..SELECT, zero W4 rows, no per-user split.
+      if (input.legacyDedupHit === true) return { kind: 'legacy_dedup' }
       if (targetUserIds.length === 0) return { kind: 'legacy', rows: [] }
       const rows = await withConnection((client) =>
         runAttendanceResultOperationTransactionV1(client, (trx) =>
@@ -1787,6 +1841,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
       // Section 1.9: zero `generate` targets — the run-creation transaction
       // WAS the finalization transaction; there is no per-user work and
       // nothing left to do here.
+      return { kind: 'w4', runId: startOutcome.runId, rows: [], perUser: [] }
+    }
+    if (startOutcome.kind === 'not_running') {
       return { kind: 'w4', runId: startOutcome.runId, rows: [], perUser: [] }
     }
 
@@ -1827,7 +1884,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
         batch: null,
       })
       const authorization =
-        cronAuthorization ?? adminRunScheduledAuthorization(orgKey, adminActorId as string, userId)
+        recoveryAuthorization
+        ?? cronAuthorization
+        ?? adminRunScheduledAuthorization(orgKey, adminActorId as string, userId)
       const outcome = await withConnectionRetryingTargetContention((client) =>
         runAttendanceResultOperationTransactionV1(client, async (trx) => {
           const preflight = await attendanceResultOperationPreflightV1(trx, authorization, envelope.registryInput)
@@ -1995,5 +2054,31 @@ export function createAttendanceLiveScheduledBoundaryV1(
     return { kind: 'w4', runId, rows: insertedRows, perUser }
   }
 
-  return { executeLivePunch, executeScheduledRun }
+  async function executeScheduledRun(
+    input: AttendanceScheduledRunBoundaryInputV1,
+  ): Promise<AttendanceScheduledRunBoundaryResultV1> {
+    return executeScheduledRunInternal(input, null)
+  }
+
+  async function recoverScheduledRun(
+    input: AttendanceScheduledRunRecoveryBoundaryInputV1,
+  ): Promise<AttendanceScheduledRunBoundaryResultV1> {
+    return executeScheduledRunInternal(
+      {
+        orgId: input.orgId,
+        workDate: input.workDate,
+        timezone: input.timezone,
+        targetUserIds: input.targetUserIds,
+        initiator: input.initiator,
+        adminActorId: null,
+        isWorkday: input.isWorkday,
+        holidayKind: input.holidayKind,
+        reviewTargets: input.reviewTargets,
+        legacyDedupHit: false,
+      },
+      input.runId,
+    )
+  }
+
+  return { executeLivePunch, executeScheduledRun, recoverScheduledRun }
 }

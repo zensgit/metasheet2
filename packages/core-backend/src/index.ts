@@ -2102,15 +2102,22 @@ export class MetaSheetServer {
                   }
                 },
                 // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7 "No
-                // stuck absorbing state — recovery sweep, fully specified"). ONE sweep tick —
-                // scan plus a per-candidate finalize attempt, never batched into one
-                // transaction. See `sweepAttendanceScheduledRunsOnceV1`'s own module comment
-                // for this function's disclosed scope (it closes the "terminal but never
-                // finalized" absorbing state; it does not itself resume a target-set-drift
-                // candidate — that is `abandonScheduledRun` below).
-                sweepScheduledRuns: async (options?: { limit?: number }) =>
+                // stuck absorbing state — recovery sweep, fully specified"). ONE sweep tick:
+                // all-terminal candidates finalize in core; nonterminal candidates call back
+                // into the plugin to rebuild current scheduling context and resume the exact
+                // scanned run id.
+                sweepScheduledRuns: async (options: {
+                  limit?: number
+                  recoverCandidate(candidate: {
+                    orgId: string
+                    initiator: 'cron' | 'admin_run'
+                    workDate: string
+                    runId: string
+                  }): Promise<void>
+                }) =>
                   sweepAttendanceScheduledRunsOnceV1(poolManager.get().getInternalPool(), {
-                    limit: options?.limit,
+                    limit: options.limit,
+                    recoverCandidate: options.recoverCandidate,
                   }),
                 // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the
                 // `abandoned` transition). `adminActorId` is the route's OWN authenticated actor

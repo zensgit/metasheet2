@@ -33,10 +33,10 @@
  * `deriveAttendanceScheduledRunIdV1` (formerly `w4c2-live-scheduled-boundary.ts`), is retired
  * by this cutover (section 1.1's "must not survive implementation" rule) — `runId` is now
  * always the server-minted `attendance_scheduled_runs.run_id` this module's own
- * `INSERT ... RETURNING`/resume read produces. The recovery sweep (`scanAttendance-
- * ScheduledRunSweepCandidatesV1`/`sweepAttendanceScheduledRunCandidateV1`) is still NOT wired
- * to any live tick — that remains a separate, disclosed residual (the dispatcher's own
- * "zero-caller posture" doctrine: scheduling is the caller's concern, not this module's).
+ * `INSERT ... RETURNING`/resume read produces. The recovery sweep is wired through the
+ * plugin-owned scheduler context builder: it resumes the exact scanned `run_id`, never the
+ * ordinary create-or-resume entry point, so a scan/finalize race cannot create generation
+ * `n+1`.
  *
  * Values-free discipline: every throw is a closed code string only, never the offending
  * input bytes.
@@ -536,6 +536,14 @@ export type AttendanceScheduledRunStartOutcomeV1 =
       readonly readyToFinalize: boolean
     }
 
+export interface AttendanceScheduledRunExactResumeKeyV1 extends AttendanceScheduledRunKeyInputV1 {
+  readonly runId: string
+}
+
+export type AttendanceScheduledRunExactResumeOutcomeV1 =
+  | AttendanceScheduledRunStartOutcomeV1
+  | { readonly kind: 'not_running'; readonly runId: string; readonly state: 'completed' | 'abandoned' }
+
 async function readRunningScheduledRunForUpdateV1(
   trx: AttendanceW4TransactionClientV1,
   orgId: string,
@@ -550,6 +558,26 @@ async function readRunningScheduledRunForUpdateV1(
       WHERE org_id = $1 AND initiator = $2 AND work_date = $3::date AND state = 'running'
       FOR UPDATE`,
     [orgId, initiator, workDate],
+  )
+  if (result.rows.length === 0) return null
+  if (result.rows.length > 1) fail('W4C2_SCHEDULED_RUN_STATE_AMBIGUOUS')
+  return result.rows[0] as unknown as AttendanceScheduledRunRowShapeV1
+}
+
+async function readScheduledRunByExactIdV1(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+  runId: string,
+  forUpdate: boolean,
+): Promise<AttendanceScheduledRunRowShapeV1 | null> {
+  const result = await trx.query(
+    `SELECT run_id::text AS run_id, org_id, entrypoint, initiator, work_date::text AS work_date,
+            generation, accepted_write_posture, target_set_fingerprint, expected_user_count,
+            review_count, state
+       FROM attendance_scheduled_runs
+      WHERE org_id = $1 AND run_id = $2::uuid
+      ${forUpdate ? 'FOR UPDATE' : ''}`,
+    [orgId, runId],
   )
   if (result.rows.length === 0) return null
   if (result.rows.length > 1) fail('W4C2_SCHEDULED_RUN_STATE_AMBIGUOUS')
@@ -700,6 +728,54 @@ export async function createOrResumeAttendanceScheduledRunV1(
   }
 
   return { kind: 'created_running', runId, generation, expectedUserCount, reviewCount }
+}
+
+/**
+ * Recovery-only exact-run resume. Unlike `createOrResumeAttendanceScheduledRunV1`, this
+ * function can never allocate a generation. The pre-lock read only discovers and verifies
+ * the durable class-01 key; authority is established by the class-00/class-01 locks and the
+ * second `FOR UPDATE` read.
+ */
+export async function resumeAttendanceScheduledRunByExactIdV1(
+  trx: AttendanceW4TransactionClientV1,
+  key: AttendanceScheduledRunExactResumeKeyV1,
+  resolveMembership: AttendanceScheduledRunMembershipResolverV1,
+): Promise<AttendanceScheduledRunExactResumeOutcomeV1> {
+  const canonicalKey = parseCanonicalAttendanceScheduledRunKeyV1({
+    orgId: key.orgId,
+    initiator: key.initiator,
+    workDate: key.workDate,
+  })
+  const runId = parseUuidSyntax(key.runId, 'W4C2_SCHEDULED_RUN_ID_INVALID')
+  requireRfc4122VariantVersion(runId, 'W4C2_SCHEDULED_RUN_ID_INVALID')
+
+  await acquireAttendanceCalculationRolloutLock(trx, canonicalKey.orgId, 'shared')
+  const posture = await resolveSegmentCalculationPosture(trx, canonicalKey.orgId)
+  if (posture.writePosture === 'blocked') {
+    return { kind: 'org_suspended_deferred' }
+  }
+
+  const preRead = await readScheduledRunByExactIdV1(trx, canonicalKey.orgId, runId, false)
+  if (!preRead) fail('W4C2_SCHEDULED_RUN_NOT_FOUND')
+  if (preRead.initiator !== canonicalKey.initiator || preRead.work_date !== canonicalKey.workDate) {
+    fail('W4C2_SCHEDULED_RUN_RECOVERY_KEY_MISMATCH')
+  }
+
+  await acquireAttendanceScheduledRunLock(trx, canonicalKey)
+  const existing = await readScheduledRunByExactIdV1(trx, canonicalKey.orgId, runId, true)
+  if (!existing) fail('W4C2_SCHEDULED_RUN_NOT_FOUND')
+  if (existing.initiator !== canonicalKey.initiator || existing.work_date !== canonicalKey.workDate) {
+    fail('W4C2_SCHEDULED_RUN_RECOVERY_KEY_MISMATCH')
+  }
+  if (existing.state !== 'running') {
+    if (existing.state !== 'completed' && existing.state !== 'abandoned') {
+      fail('W4C2_SCHEDULED_RUN_STATE_INVALID')
+    }
+    return { kind: 'not_running', runId, state: existing.state }
+  }
+
+  const org = createVerifiedAttendanceOrgIdentityV1({ orgKey: canonicalKey.orgId, posture })
+  return resumeAttendanceScheduledRunV1(trx, org, existing, resolveMembership)
 }
 
 /**
@@ -1097,8 +1173,6 @@ export async function finalizeAttendanceScheduledRunV1(
 
 // ---------------------------------------------------------------------------
 // Section 1.7, "no stuck absorbing state" — the recovery-sweep scan + one-candidate step.
-// NOT wired to any live tick in this slice (module docstring) — the scan/step functions and
-// their real-DB gates are the sweep's full specification, ready for that later wiring.
 // ---------------------------------------------------------------------------
 
 export interface AttendanceScheduledRunSweepCandidateV1 {
@@ -1147,9 +1221,8 @@ export type AttendanceScheduledRunSweepStepOutcomeV1 =
  * -> resume; "all terminal" -> finalize) that are "already fully specified elsewhere in this
  * section" — this function reuses `finalizeAttendanceScheduledRunV1` verbatim rather than
  * inventing a third transaction shape: `not_ready` IS the "resume" branch's terminal-evidence
- * signal (the actual per-user replay/execution the resume protocol's remaining steps describe
- * is the existing, unchanged per-user execution path — out of this function's scope, per the
- * module docstring's caller-cutover note). Intended to run as ONE candidate per its OWN
+ * signal. The worker then invokes the plugin-owned context builder and its recovery-only
+ * exact-run boundary for the actual per-user replay. Intended to run as ONE candidate per its OWN
  * `runAttendanceResultOperationTransactionV1` call, never batched, so one stuck candidate
  * cannot block the others in the same scan.
  */

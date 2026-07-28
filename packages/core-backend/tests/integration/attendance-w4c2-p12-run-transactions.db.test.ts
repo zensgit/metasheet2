@@ -27,11 +27,13 @@ import {
   abandonAttendanceScheduledRunV1,
   scanAttendanceScheduledRunSweepCandidatesV1,
   sweepAttendanceScheduledRunCandidateV1,
+  resumeAttendanceScheduledRunByExactIdV1,
   resolveAttendanceScheduledRunTargetSetV1,
   computeAttendanceScheduledRunTargetSetFingerprintV1,
   type AttendanceScheduledRunMemberInputV1,
   type AttendanceScheduledRunMembershipResolverV1,
 } from '../../src/attendance/w4c2-scheduled-run'
+import { sweepAttendanceScheduledRunsOnceV1 } from '../../src/attendance/w4c2-scheduled-run-ops-worker'
 import { createVerifiedAttendanceOperationIdentityV1, createVerifiedAttendanceOrgIdentityV1, resolveSegmentCalculationPosture } from '../../src/attendance/w4c0-identity'
 import { createAuthorizedAttendanceWriteContextV1 } from '../../src/attendance/w4c0-authorization'
 import { runAttendanceResultOperationTransactionV1 } from '../../src/attendance/w4c0-operation-registry'
@@ -1072,6 +1074,241 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
         withTxn((trx) => sweepAttendanceScheduledRunCandidateV1(trx, { orgId, initiator: 'cron', workDate, runId: created.runId })),
       )
       expect(stepOutcome).toEqual({ kind: 'not_ready', runId: created.runId })
+    })
+
+    it.each(['cron', 'admin_run'] as const)(
+      'resumes the exact scanned %s run without allocating a new generation',
+      async (initiator) => {
+        const orgId = orgIdFor(`sweep-exact-${initiator}`)
+        await setRolloutState(orgId, 'shadow')
+        const workDate = initiator === 'cron' ? '2026-02-20' : '2026-02-21'
+        const userA = uuid()
+        const members = [{ userId: userA, targetKind: 'generate' as const, reviewReasonCode: null }]
+        const created = await withAllowlist(orgId, () =>
+          withTxn((trx) =>
+            createOrResumeAttendanceScheduledRunV1(
+              trx,
+              { orgId, initiator, workDate },
+              memberResolverFor(members),
+            ),
+          ),
+        )
+        if (created.kind !== 'created_running') throw new Error('expected created_running')
+
+        const resumed = await withAllowlist(orgId, () =>
+          withTxn((trx) =>
+            resumeAttendanceScheduledRunByExactIdV1(
+              trx,
+              { orgId, initiator, workDate, runId: created.runId },
+              memberResolverFor(members),
+            ),
+          ),
+        )
+        expect(resumed).toMatchObject({
+          kind: 'resumed',
+          runId: created.runId,
+          generation: 1,
+          readyToFinalize: false,
+        })
+        const runs = await pool.query(
+          `SELECT run_id::text AS run_id, generation, state
+             FROM attendance_scheduled_runs
+            WHERE org_id = $1 AND initiator = $2 AND work_date = $3::date`,
+          [orgId, initiator, workDate],
+        )
+        expect(runs.rows).toEqual([{ run_id: created.runId, generation: 1, state: 'running' }])
+      },
+    )
+
+    it('returns not_running when the scanned run finalized before recovery and never creates generation n+1', async () => {
+      const orgId = orgIdFor('sweep-finalize-race')
+      await setRolloutState(orgId, 'shadow')
+      const workDate = '2026-02-22'
+      const userA = uuid()
+      const members = [{ userId: userA, targetKind: 'generate' as const, reviewReasonCode: null }]
+      const created = await withAllowlist(orgId, () =>
+        withTxn((trx) =>
+          createOrResumeAttendanceScheduledRunV1(
+            trx,
+            { orgId, initiator: 'cron', workDate },
+            memberResolverFor(members),
+          ),
+        ),
+      )
+      if (created.kind !== 'created_running') throw new Error('expected created_running')
+      await sealGenerateTarget(orgId, created.runId, userA, workDate, 'completed', true)
+      await withAllowlist(orgId, () =>
+        withTxn((trx) =>
+          finalizeAttendanceScheduledRunV1(trx, {
+            orgId,
+            initiator: 'cron',
+            workDate,
+            runId: created.runId,
+          }),
+        ),
+      )
+
+      const raced = await withAllowlist(orgId, () =>
+        withTxn((trx) =>
+          resumeAttendanceScheduledRunByExactIdV1(
+            trx,
+            { orgId, initiator: 'cron', workDate, runId: created.runId },
+            memberResolverFor(members),
+          ),
+        ),
+      )
+      expect(raced).toEqual({ kind: 'not_running', runId: created.runId, state: 'completed' })
+      const count = await pool.query(
+        `SELECT count(*)::int AS n, max(generation)::int AS max_generation
+           FROM attendance_scheduled_runs
+          WHERE org_id = $1 AND initiator = 'cron' AND work_date = $2::date`,
+        [orgId, workDate],
+      )
+      expect(count.rows[0]).toEqual({ n: 1, max_generation: 1 })
+    })
+
+    it('fails closed on membership drift and leaves the exact run running', async () => {
+      const orgId = orgIdFor('sweep-drift')
+      await setRolloutState(orgId, 'shadow')
+      const workDate = '2026-02-23'
+      const userA = uuid()
+      const userB = uuid()
+      const created = await withAllowlist(orgId, () =>
+        withTxn((trx) =>
+          createOrResumeAttendanceScheduledRunV1(
+            trx,
+            { orgId, initiator: 'cron', workDate },
+            memberResolverFor([{ userId: userA, targetKind: 'generate', reviewReasonCode: null }]),
+          ),
+        ),
+      )
+      if (created.kind !== 'created_running') throw new Error('expected created_running')
+
+      const error = await withAllowlist(orgId, () =>
+        catchAsync(() =>
+          withTxn((trx) =>
+            resumeAttendanceScheduledRunByExactIdV1(
+              trx,
+              { orgId, initiator: 'cron', workDate, runId: created.runId },
+              memberResolverFor([
+                { userId: userA, targetKind: 'generate', reviewReasonCode: null },
+                { userId: userB, targetKind: 'generate', reviewReasonCode: null },
+              ]),
+            ),
+          ),
+        ),
+      )
+      expect(String((error as { code?: string })?.code)).toBe('W4C2_SCHEDULED_RUN_RESUME_TARGET_SET_DRIFT')
+      expect(
+        (await pool.query('SELECT state FROM attendance_scheduled_runs WHERE run_id = $1::uuid', [created.runId]))
+          .rows[0].state,
+      ).toBe('running')
+    })
+
+    it('defers exact recovery while suspended, then resumes the same run after unblocking', async () => {
+      const orgId = orgIdFor('sweep-suspended')
+      await setRolloutState(orgId, 'authoritative')
+      const workDate = '2026-02-25'
+      const userA = uuid()
+      const members = [{ userId: userA, targetKind: 'generate' as const, reviewReasonCode: null }]
+      const created = await withAllowlist(orgId, () =>
+        withTxn((trx) =>
+          createOrResumeAttendanceScheduledRunV1(
+            trx,
+            { orgId, initiator: 'cron', workDate },
+            memberResolverFor(members),
+          ),
+        ),
+      )
+      if (created.kind !== 'created_running') throw new Error('expected created_running')
+
+      await setRolloutState(orgId, 'suspended')
+      const deferred = await withAllowlist(orgId, () =>
+        withTxn((trx) =>
+          resumeAttendanceScheduledRunByExactIdV1(
+            trx,
+            { orgId, initiator: 'cron', workDate, runId: created.runId },
+            memberResolverFor(members),
+          ),
+        ),
+      )
+      expect(deferred).toEqual({ kind: 'org_suspended_deferred' })
+      expect(
+        (await pool.query('SELECT state FROM attendance_scheduled_runs WHERE run_id = $1::uuid', [created.runId]))
+          .rows[0].state,
+      ).toBe('running')
+
+      await setRolloutState(orgId, 'authoritative')
+      const resumed = await withAllowlist(orgId, () =>
+        withTxn((trx) =>
+          resumeAttendanceScheduledRunByExactIdV1(
+            trx,
+            { orgId, initiator: 'cron', workDate, runId: created.runId },
+            memberResolverFor(members),
+          ),
+        ),
+      )
+      expect(resumed).toMatchObject({ kind: 'resumed', runId: created.runId, generation: 1 })
+      const runs = await pool.query(
+        `SELECT run_id::text AS run_id, generation, state
+           FROM attendance_scheduled_runs
+          WHERE org_id = $1 AND initiator = 'cron' AND work_date = $2::date`,
+        [orgId, workDate],
+      )
+      expect(runs.rows).toEqual([{ run_id: created.runId, generation: 1, state: 'running' }])
+    })
+
+    it('contains one recovery callback failure and still finalizes a later all-terminal candidate', async () => {
+      const orgError = orgIdFor('sweep-worker-error')
+      const orgFinal = orgIdFor('sweep-worker-final')
+      await setRolloutState(orgError, 'shadow')
+      await setRolloutState(orgFinal, 'shadow')
+      const workDate = '2026-02-24'
+      const userError = uuid()
+      const userFinal = uuid()
+      const [errorRun, finalRun] = await withAllowlist([orgError, orgFinal], () =>
+        Promise.all([
+          withTxn((trx) =>
+            createOrResumeAttendanceScheduledRunV1(
+              trx,
+              { orgId: orgError, initiator: 'cron', workDate },
+              memberResolverFor([{ userId: userError, targetKind: 'generate', reviewReasonCode: null }]),
+            ),
+          ),
+          withTxn((trx) =>
+            createOrResumeAttendanceScheduledRunV1(
+              trx,
+              { orgId: orgFinal, initiator: 'cron', workDate },
+              memberResolverFor([{ userId: userFinal, targetKind: 'generate', reviewReasonCode: null }]),
+            ),
+          ),
+        ]),
+      )
+      if (errorRun.kind !== 'created_running' || finalRun.kind !== 'created_running') {
+        throw new Error('expected created_running')
+      }
+      await sealGenerateTarget(orgFinal, finalRun.runId, userFinal, workDate, 'completed', true)
+
+      const callbackRuns: string[] = []
+      const result = await withAllowlist([orgError, orgFinal], () =>
+        sweepAttendanceScheduledRunsOnceV1(pool, {
+          limit: 500,
+          async recoverCandidate(candidate) {
+            callbackRuns.push(candidate.runId)
+            if (candidate.runId === errorRun.runId) throw new Error('W4C2_TEST_RECOVERY_FAILURE')
+          },
+        }),
+      )
+      expect(callbackRuns).toContain(errorRun.runId)
+      expect(result.errored).toBeGreaterThanOrEqual(1)
+      expect(
+        (await pool.query('SELECT state FROM attendance_scheduled_runs WHERE run_id = $1::uuid', [finalRun.runId]))
+          .rows[0].state,
+      ).toBe('completed')
+      expect(
+        (await pool.query('SELECT state FROM attendance_scheduled_runs WHERE run_id = $1::uuid', [errorRun.runId]))
+          .rows[0].state,
+      ).toBe('running')
     })
   })
 
