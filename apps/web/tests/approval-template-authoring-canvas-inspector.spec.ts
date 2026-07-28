@@ -21,6 +21,10 @@ const PARENT_AUTHORING_SOURCE = readFileSync(
   join(HERE, '../src/views/approval/TemplateAuthoringView.vue'),
   'utf8',
 )
+const FLOW_CANVAS_SOURCE = readFileSync(
+  join(HERE, '../src/approvals/components/ApprovalFlowCanvas.vue'),
+  'utf8',
+)
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -775,7 +779,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       await flushUi()
 
       expect(scrollIntoViewSpy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' })
-      expect(PARENT_AUTHORING_SOURCE).toMatch(
+      // E2 extraction: the canvas workspace (incl. this scroll-margin-top) now lives in the
+      // child ApprovalFlowCanvas.vue, not the parent — see the ownership check further below.
+      expect(FLOW_CANVAS_SOURCE).toMatch(
         /\.template-authoring__canvas-inspector\s*\{[\s\S]*?scroll-margin-top:\s*164px/,
       )
     } finally {
@@ -800,8 +806,10 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(CHILD_EDITOR_SOURCE).toMatch(/\.template-authoring__grid\s*\{/)
     // Parent no longer owns the G-2 condition rules (moved to the child SFC).
     expect(PARENT_AUTHORING_SOURCE).not.toMatch(/\.template-authoring__condition-branch\s*\{/)
-    // Desktop inspector is wide enough for ms-w-360 controls (~400px).
-    expect(PARENT_AUTHORING_SOURCE).toMatch(/\.template-authoring__canvas-inspector\s*\{[\s\S]*?width:\s*400px/)
+    // Desktop inspector is wide enough for ms-w-360 controls (~400px). E2 extraction: the whole
+    // canvas workspace (incl. the inspector shell) moved to ApprovalFlowCanvas.vue.
+    expect(FLOW_CANVAS_SOURCE).toMatch(/\.template-authoring__canvas-inspector\s*\{[\s\S]*?width:\s*400px/)
+    expect(PARENT_AUTHORING_SOURCE).not.toMatch(/\.template-authoring__canvas-workspace\s*\{/)
 
     routeParams = { id: 'tpl_inspector_styles' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
