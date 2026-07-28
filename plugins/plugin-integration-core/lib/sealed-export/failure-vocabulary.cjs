@@ -4,8 +4,9 @@
 //
 // LATENT: nothing in this directory is wired to a route, scheduler, flag, package
 // entry point or any runtime path. The zero-consumer sweep in
-// __tests__/sealed-export-failure-vocabulary.test.cjs checks this repository-wide —
-// it walks the runtime code of apps/, packages/ and plugins/ (test trees excluded)
+// __tests__/sealed-export-failure-vocabulary.test.cjs checks this across the three
+// declared application source roots — it walks the runtime code of apps/, packages/
+// and plugins/ (test trees excluded); scripts/, tools/ and ops/ are NOT swept
 // and looks for an IMPORT of this directory in either module syntax, not a mention.
 // Its own detection power is shown by a synthetic cross-package consumer that must
 // make it RED by name.
