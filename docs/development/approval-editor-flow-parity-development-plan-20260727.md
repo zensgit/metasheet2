@@ -1,6 +1,6 @@
 # 审批编辑器与流程编排对标开发计划（2026-07-27）
 
-**状态：IN PROGRESS（E0 / E1 / E1-b / E2 / C1 已完成并形成待审 Draft PR；C2 以后仍在开发队列）**
+**状态：IN PROGRESS（E0 / E1 / E1-b / E2 / C1 / C2 已完成并形成待审 Draft PR；C3 以后及 F1-F3 仍在开发队列）**
 
 **事实审计基线：** `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
 
@@ -63,9 +63,9 @@
 
 | 用户面 | 当前 `main` | 对标差距 |
 |---|---|---|
-| 信息架构 | 左侧“基础/表单/流程/发布”四步导航 | 表单与流程不是同一工作区内的直接模式切换 |
-| 线性流程 | 旧步骤卡片 + 只读横向脊柱 | 新模板默认看不到真正流程画布 |
-| 复杂流程 | flag ON 后可切换列表/画布；默认 `list` | 未做到 canvas-first |
+| 信息架构 | C2 在 Canvas flag ON 时提供表单/流程直接模式切换 | shell、字段 builder 和版本工作区仍待继续拆分 |
+| 线性流程 | C1 派生统一 Canvas carrier；C2 默认进入流程画布 | 边 `+`、统一历史和拖拽反馈仍未产品化 |
+| 复杂流程 | flag ON 后默认 Canvas；结构视图保留为“辅助编辑模式” | 节点按钮群、分支拖排和 undo/redo 尚未收口 |
 | 节点操作 | 节点内上移/下移/移动/插入/删除按钮群 | 应改为边 `+`、上下文菜单和检查器动作 |
 | 拖拽 | 审批/抄送节点可移入合法边槽 | 缺合法槽持续高亮、统一拖拽状态机和分支拖排 UI |
 | 撤销/重做 | 命令层有逆操作/历史类型 | 顶栏未挂载统一 undo/redo |
@@ -184,7 +184,16 @@ promote 为 graph，并保留审批来源、ids、审批/空值/自审策略及�
 feature flag OFF 和 unsupported template 继续 fail-closed 回结构列表。
 Kimi exact-head 对抗复审为 APPROVE、无 P1/P2；其发现的 promote 后可继续
 删除最后审批节点边界已修复并由判别变异钉死。Draft PR #4649 依赖 #4642，
-尚未 merge、部署或开启 flag。
+required CI 已全绿；尚未 merge、部署或开启 flag。
+
+C2 已在 C1 head 上完成 canvas-first 工作区。Canvas flag ON 时，线性与复杂
+流程都默认进入流程画布，表单/流程可在同一工作区直接切换；原结构视图改名
+为“辅助编辑模式”并保留为可访问回退。隐藏挂载 Canvas 在返回流程模式时会
+重新测量 viewport，避免 0x0 缩略图状态。真实 Chromium 在 1440 / 1024 /
+390 验证默认画布、表单往返、辅助模式和零横向溢出；四刀判别变异分别钉住
+默认模式、模式切换、viewport 重测和 ARIA group 语义。Kimi 对抗复审无
+P1/P2。Draft PR #4652 依赖 #4649；required CI 仍在运行，未 merge、部署或
+开启 flag。
 
 ### 4.1 依赖图
 
@@ -405,8 +414,8 @@ U0 至少包含以下 12 项，全部保存截图、录屏或网络/数据库证
 
 1. **E0：完成。** Codex exact-head 审阅，Claude Opus 只读对抗复核；
 2. **E1 / E1-b：完成。** Kimi 提供视觉 IA，Grok 构建隔离 renderer 和生产命令适配验证，Codex 复核与变异；
-3. **E2 第一刀：完成。** Claude Sonnet 5 做 presentational shell 抽取，Codex 清理、扩测和事件透传变异。
+3. **E2 / C1 / C2：完成待审。** Claude 负责 shell 与统一 carrier，Codex 完成 canvas-first 接线、真浏览器验证和判别变异，Kimi 复审。
 
-本轮没有启动 C1/C2 以后功能，没有开启任何 flag，也没有接触审批运行时
-服务。下一步必须先审合 E1-b/E2，再由 owner 单独授权 C1；不得把本轮
-验证通过解释为整条编辑器已达到飞书/钉钉产品完成度。
+本轮尚未启动 C3-C5、F1-F3 及版本/试运行收口，没有开启任何 flag，也没有
+接触审批运行时服务。下一开发点为 C3 边 `+` 产品化与 F1 表单 palette；
+不得把 C2 验证通过解释为整条编辑器已达到飞书/钉钉产品完成度。

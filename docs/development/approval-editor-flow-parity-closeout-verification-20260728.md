@@ -1,12 +1,12 @@
-# 审批编辑器与流程编排 E1-b / E2 / C1 收尾验证（2026-07-28）
+# 审批编辑器与流程编排 E1-b / E2 / C1 / C2 收尾验证（2026-07-28）
 
-**范围状态：PR VERIFIED（C1 required CI 仍在运行）**
+**范围状态：PR VERIFIED（C2 required CI 仍在运行）**
 
 **整线状态：NOT FINAL**
 
-本报告只关闭 E1-b renderer/command feasibility、E2 第一刀无行为抽取和
-C1 线性/复杂流程统一载体。它不宣称审批编辑器已对标完成，不授权
-C2-C5、F1-F3、部署、UAT 或 flag 开启。
+本报告只关闭 E1-b renderer/command feasibility、E2 第一刀无行为抽取、
+C1 线性/复杂流程统一载体和 C2 canvas-first 工作区。它不宣称审批编辑器
+已对标完成，不授权 C3-C5、F1-F3、部署、UAT 或 flag 开启。
 
 ## 1. Exact heads
 
@@ -15,6 +15,7 @@ C2-C5、F1-F3、部署、UAT 或 flag 开启。
 | E1-b | `codex/approval-editor-e1b-command-drag-20260728` | `2955a68da` |
 | E2 | `codex/approval-editor-e2-shell-extract-20260728` | `5a9bb4db2` |
 | C1 | `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` |
+| C2 | `codex/approval-editor-c2-canvas-first-20260728` | `068d6e628` |
 | 文档 | `codex/approval-editor-flow-parity-plan-20260727` | 本报告提交后的 head |
 
 E2 起点为 `origin/main@9da0335b4`。canonical checkout 未被修改。
@@ -168,22 +169,53 @@ Kimi 对 `8cf218f31` 做 exact-head 只读对抗复审，结论 APPROVE、无 P1
 console error 为 0。Canvas inspector 勾选“自审合并”后切回结构列表，同一
 checkbox 保持选中；只在真实编辑后 header 才变为“有未保存更改”。
 
-## 6. 残余与 owner 门
+## 6. C2 证据
 
-1. #4642/#4643 required CI 已绿，#4649 required CI 待结算；三者均未 merge；
-2. 默认仍是结构列表；canvas-first 属于 C2；
-3. edge `+` 产品接线、节点按钮群移除属于 C3；
-4. 统一 drag feedback、undo/redo 属于 C4/C5；
-5. 表单仅有既有字段排序，尚无 palette 拖入和统一字段 inspector（F1-F3）；
-6. 版本时间线/双画布 diff、路由预览整合、真实键盘/a11y 仍未完成；
-7. 390 虽无横向溢出，但 sticky bottom navigation 会遮住内容，属于 X1；
-8. production Canvas 仍默认 OFF；staging UAT 与生产 flag 为 owner 门；
-9. 结构化辅助编辑入口必须保留，直到键盘/辅助技术等价性有真浏览器证据。
+### 6.1 行为与回退
 
-## 7. 结论
+- Canvas flag ON 时线性与复杂流程默认进入真正 Canvas；
+- 表单/流程在同一工作区用 segmented control 往返；
+- 原结构视图保留为“辅助编辑模式”，切回后原有步骤仍在；
+- Canvas 从隐藏状态显示时重新测量 viewport；
+- flag OFF 不出现新切换器，保持旧路径。
+
+### 6.2 测试、变异与真浏览器
+
+```text
+17 authoring/canvas/graph files: 260/260 PASS
+focused mounted specs: 22/22 PASS
+targeted ESLint: PASS
+vue-tsc --noEmit: PASS
+git diff --check: PASS
+```
+
+四刀判别变异分别中和 Canvas 默认值、Form/Flow action、viewport reveal
+watch 和 ARIA group 语义，指定测试均精确转红。真实 Chromium 在
+1440 / 1024 / 390 验证默认 Canvas、Form -> Flow -> Form、辅助模式恢复、
+无横向溢出和零 console error。
+
+变异恢复阶段曾误命中另一个同形 `@click`，导致表单/流程按钮目标反转；
+单测运行时点未覆盖该恢复错误，真浏览器交互发现并阻止发布。按按钮上下文
+修复后，完整测试、类型、lint 和浏览器矩阵全部重跑。Kimi exact-head
+对抗复审的两个 P2（不完整 tablist 语义、隐藏 Canvas 0x0 viewport）均已
+闭合，最终无 P1/P2。
+
+## 7. 残余与 owner 门
+
+1. #4642/#4643/#4649 required CI 已绿，#4652 required CI 待结算；四者均未 merge；
+2. edge `+` 产品接线、节点按钮群移除属于 C3；
+3. 统一 drag feedback、undo/redo 属于 C4/C5；
+4. 表单仅有既有字段排序，尚无 palette 拖入和统一字段 inspector（F1-F3）；
+5. 版本时间线/双画布 diff、路由预览整合、真实键盘/a11y 仍未完成；
+6. 390 虽无横向溢出，但 sticky bottom navigation 会遮住内容，属于 X1；
+7. production Canvas 仍默认 OFF；staging UAT 与生产 flag 为 owner 门；
+8. 结构化辅助编辑入口必须保留，直到键盘/辅助技术等价性有真浏览器证据。
+
+## 8. 结论
 
 - `A1 renderer feasibility = PASS`；
 - `A2 first extraction = PR VERIFIED / CI PASS`；
-- `C1 unified carrier = IMPLEMENTED + LOCAL/BROWSER/ADVERSARIAL VERIFIED`；
+- `C1 unified carrier = PR VERIFIED / CI PASS`；
+- `C2 canvas-first = IMPLEMENTED + LOCAL/BROWSER/ADVERSARIAL VERIFIED / CI RUNNING`；
 - `approval editor parity line = IN PROGRESS / NOT FINAL`；
-- 下一开发点为 C2/C3 canvas-first 产品化，并行启动 F1 表单 palette 抽取。
+- 下一开发点为 C3 边 `+` 产品化，并行启动 F1 表单 palette 抽取。

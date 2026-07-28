@@ -19,7 +19,8 @@ merge、部署、UAT 和 flag 是不同状态，不互相替代。
 | E1 | renderer spike | `origin/main@9da0335b4` / `codex/approval-editor-e1b-command-drag-20260728` | `6151d37cb` | Grok 4.5 Build；Kimi 做视觉 IA | Playwright、ESLint、类型、截图与 100 节点复核 | Draft PR #4643；required CI 绿 |
 | E1-b | 生产命令适配、drag、history | 基于 E1 / `codex/approval-editor-e1b-command-drag-20260728` | `2955a68da` | Grok 4.5 Build | stale focus 修复、判别变异、浏览器超时/100 节点交互稳定化 | Draft PR #4643；required CI 绿 |
 | E2 | Flow Canvas presentational shell 抽取 | `origin/main@9da0335b4` / `codex/approval-editor-e2-shell-extract-20260728` | `5a9bb4db2` | Claude Sonnet 5 | 247 测、类型、事件变异；修复静态 style 守卫误判 | Draft PR #4642；required CI 绿 |
-| C1 | 线性/复杂流程统一 Canvas 载体 | E2 head / `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` | Claude Opus 5 实现；Kimi exact-head 只读复审 | 真实视图写回、payload/dirty、promote 保真、flag fallback、删除下限及浏览器三 viewport | Draft PR #4649；CI 修复后重跑 |
+| C1 | 线性/复杂流程统一 Canvas 载体 | E2 head / `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` | Claude Opus 5 实现；Kimi exact-head 只读复审 | 真实视图写回、payload/dirty、promote 保真、flag fallback、删除下限及浏览器三 viewport | Draft PR #4649；required CI 绿 |
+| C2 | Canvas-first 工作区与表单/流程切换 | C1 head / `codex/approval-editor-c2-canvas-first-20260728` | `068d6e628` | Codex 实现；Kimi exact-head 对抗复审 | 默认画布、辅助模式、Form/Flow 往返、viewport 重测、ARIA、三 viewport 真浏览器 | Draft PR #4652；required CI 运行中 |
 
 ## 2. E1-b 执行事实
 
@@ -59,24 +60,24 @@ E2 只修改：
 
 ## 4. 状态矩阵
 
-| 面 | E1-b | E2 | C1 |
-|---|---|---|---|
-| 设计方向 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 |
-| 实现 | 完成 | 完成 | 完成 |
-| 本地测试 | PASS | PASS | PASS |
-| 判别变异 | PASS | PASS | PASS（3 刀） |
-| 独立复审 | Codex | Codex | Kimi APPROVE，无 P1/P2；Codex复核修 P3 |
-| 提交 | 是 | 是 | 是 |
-| push / PR | #4643 | #4642 | #4649（stacked on #4642） |
-| required CI | PASS | PASS | 运行中 |
-| merge | 否 | 否 | 否 |
-| staging / UAT | 否 | 否 | 否 |
-| production flag | 保持 OFF | 保持 OFF | 保持 OFF |
+| 面 | E1-b | E2 | C1 | C2 |
+|---|---|---|---|---|
+| 设计方向 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 |
+| 实现 | 完成 | 完成 | 完成 | 完成 |
+| 本地测试 | PASS | PASS | PASS | PASS |
+| 判别变异 | PASS | PASS | PASS（3 刀） | PASS（4 刀） |
+| 独立复审 | Codex | Codex | Kimi APPROVE，无 P1/P2；Codex复核修 P3 | Kimi APPROVE，无 P1/P2；Codex复核 |
+| 提交 | 是 | 是 | 是 | 是 |
+| push / PR | #4643 | #4642 | #4649（stacked on #4642） | #4652（stacked on #4649） |
+| required CI | PASS | PASS | PASS | 运行中 |
+| merge | 否 | 否 | 否 | 否 |
+| staging / UAT | 否 | 否 | 否 | 否 |
+| production flag | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF |
 
 ## 5. 后续顺序
 
-1. 审阅并按依赖落 #4642 -> #4649；#4643 是 verification-only 独立支线；
-2. C2 接通 canvas-first，C3 把节点按钮群改为边 `+`，C4/C5 收拖拽与 undo/redo；
+1. 审阅并按依赖落 #4642 -> #4649 -> #4652；#4643 是 verification-only 独立支线；
+2. C3 把节点按钮群改为边 `+`，C4/C5 收拖拽与 undo/redo；
 3. F1 抽表单 builder，并实现左 palette 拖入 + 中画布 + 右字段检查器；
 4. F2/F3 补字段引用保护与附件 authoring；
 5. V1/V2、P1、X1 收版本、试运行、移动端/无障碍；
@@ -98,3 +99,20 @@ E2 只修改：
 - 真 Chromium 在 1440 / 1024 / 390 无横向溢出或 console error；
 - 390 下 sticky bottom navigation 遮挡、卡片内按钮群和紧凑触控尺寸仍属于
   C2/C3/X1，未被 C1 结论掩盖。
+
+## 7. C2 执行事实
+
+- Canvas flag ON 时 `canvasViewMode` 默认 `canvas`，线性与复杂图一致；
+- “结构列表”改名“辅助编辑模式”，仍可切换且没有退役可访问回退；
+- 表单/流程 segmented control 使用 `role="group"` 与 `aria-pressed`，真实
+  production view 验证 Form -> Flow -> Form 往返；
+- Canvas 从隐藏状态重新显示时重测 viewport，避免隐藏挂载产生 0x0 minimap；
+- flag OFF 不出现新模式切换，不改变旧页面路径；
+- 17 个 authoring/canvas/graph 文件 260/260、focused mounted 22/22、
+  ESLint、`vue-tsc`、diff check 全通过；
+- 四刀变异分别中和默认 Canvas、模式切换、viewport watch 和 group 语义，
+  指定测试均精确转红；
+- 真 Chromium 1440 / 1024 / 390 均无横向溢出、console error 为 0；
+- 一次变异恢复误命中同形 `@click`，单测未暴露，真实浏览器发现按钮目标
+  反转；按按钮上下文修复后重跑完整测试与浏览器矩阵。该事件证明真浏览器
+  不是可省略的展示步骤。
