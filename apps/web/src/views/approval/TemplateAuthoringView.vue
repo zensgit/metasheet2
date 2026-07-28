@@ -1993,11 +1993,14 @@ function canRemoveNode(node: ApprovalNode): boolean {
     && topologyEdgeCount(node.key, 'target') === 1
     && topologyEdgeCount(node.key, 'source') === 1
   if (!isLinearRemovable) return false
-  // C1: keep the linear editor's own floor. The step card disables 删除 at `steps.length === 1`, and
-  // `validateTemplateApprovalFlow` only enforces 至少需要一个审批步骤 while the draft is linear — so
-  // removing the last step ON THE CANVAS would promote to an approver-less start→end graph that no
-  // longer trips that check. `removeLinearNode` itself permits it, so the guard belongs here.
-  if (!draft.value.preservedGraph && draft.value.steps.length <= 1) return false
+  // C1: keep at least one approval node on the effective graph. The first topology edit promotes a
+  // linear draft to `preservedGraph`; a guard based only on `steps.length` would disappear at that
+  // boundary and allow a second delete to produce start→end. `removeLinearNode` itself permits that
+  // shape, so the authoring affordance must retain the same floor before and after promotion.
+  if (
+    node.type === 'approval'
+    && canvasEffectiveGraph.value.nodes.filter((candidate) => candidate.type === 'approval').length <= 1
+  ) return false
   try {
     removeLinearNode(buildApprovalGraph(draft.value), node.key)
     return true

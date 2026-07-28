@@ -639,7 +639,7 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     expect(targetOf('approval_2')).toBe('end')
   })
 
-  it('never offers a canvas delete for a linear draft with a single approval step', async () => {
+  it('never offers a canvas delete for the last approval before or after graph promotion', async () => {
     routeParams = { id: 'tpl_linear_last_step' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildSingleStepLinearGraph() as any }))
     await mountView()
@@ -651,13 +651,20 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     expect(q('[data-testid="approval-canvas-remove-approval_1"]')).toBeNull()
     unmountView()
 
-    // Two steps → removable again (proves the guard is step-count scoped, not a blanket disable).
+    // Two steps → removable again (positive control: this is not a blanket disable).
     getTemplateSpy.mockResolvedValue(buildTemplate())
     await mountView()
     await flushUi()
     click('approval-view-canvas')
     await flushUi()
     expect(q('[data-testid="approval-canvas-remove-approval_1"]')).not.toBeNull()
+
+    // The delete promotes the draft to preservedGraph. The remaining approval must retain the same
+    // floor after that carrier transition; otherwise a second click can create start→end.
+    click('approval-canvas-remove-approval_1')
+    await flushUi()
+    expect(all('[data-testid="approval-canvas-node"]')).toHaveLength(3)
+    expect(q('[data-testid="approval-canvas-remove-approval_2"]')).toBeNull()
   })
 
   it('leaves the preserved complex graph round-trip unchanged', async () => {
