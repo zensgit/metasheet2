@@ -253,8 +253,8 @@ PostgreSQL deadlock discriminator.
 ### 4.3 Static, unit, frontend, and ops gates
 
 - backend `tsc --noEmit`: passed;
-- backend unit suite: 6484/6484;
-- frontend Revert/Reset/history matrix: 57/57;
+- backend unit suite: 6487/6487;
+- frontend Revert/Reset/history matrix: 64/64;
 - frontend `vue-tsc -b`: passed;
 - flag manifest, exact CI placement, status helper, and schema containment:
   59/59.
