@@ -83,7 +83,10 @@ describeIfDatabase('W4-PRE-1b — user_orgs lifecycle: bind/unbind/rebind/local 
     return (
       await query<{ id: string }>(
         `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, is_active)
-         VALUES ($1, 'dingtalk', 'corp', $2, $3, $4, $5, 'Fixture', true) RETURNING id::text AS id`,
+         SELECT $1, 'dingtalk', integration.corp_id, $2, $3, $4, $5, 'Fixture', true
+           FROM directory_integrations integration
+          WHERE integration.id = $1
+         RETURNING id::text AS id`,
         [integrationId, external, `${NS}-union-${tag}`, `${NS}-open-${tag}`, external],
       )
     ).rows[0].id

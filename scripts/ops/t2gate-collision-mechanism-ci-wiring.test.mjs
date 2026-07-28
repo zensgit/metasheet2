@@ -15,11 +15,8 @@ import {
   wholeFileVitestArgs,
 } from './ci-realdb-step-contract.mjs'
 
-// T2-Gate CI two-point wiring contract. The collision-mechanism suite is the CI-provable half of
-// the §3.4 two-corp question: the (provider, external_key) unique index, the bare-unionId
-// derivation, and the wholesale second-corp sync failure signature (closed classifications:
-// duplicate_key_detected + expected_constraint_detected — never raw error_message in operator
-// evidence; see t2gate-runbook-values-free-contract.test.mjs, co-run by the same no-DB CI step).
+// Two-point wiring contract for the real-DB multi-corp directory-key suite. The historical filename
+// is retained to avoid silently dropping its required-gate placement.
 //
 // Two load-bearing placements (both must hold or CI can stay green while the suite never runs):
 //   (1) exact quoted path inside the real `test.exclude` array of vitest.config.ts

@@ -44,6 +44,40 @@ import {
 } from '../../src/directory/directory-sync'
 
 describe('bindDirectoryAccount', () => {
+  function installTransactionMock(
+    clientQuery: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>,
+    accountOverrides: Record<string, unknown> = {},
+    missingAccountIds: ReadonlySet<string> = new Set(),
+  ): void {
+    pgMocks.transaction.mockImplementation(async (handler) => handler({
+      query: async (sql: string, params?: unknown[]) => {
+        if (/FROM directory_accounts account\s+JOIN directory_integrations integration/.test(String(sql))) {
+          const accountId = String(params?.[0] ?? 'account-1')
+          if (missingAccountIds.has(accountId)) return { rows: [] }
+          return {
+            rows: [{
+              id: accountId,
+              integration_id: 'dir-1',
+              provider: 'dingtalk',
+              corp_id: 'dingcorp',
+              external_user_id: '0447654442691174',
+              union_id: 'union-1',
+              open_id: 'open-1',
+              external_key: 'union-1',
+              name: '林岚',
+              email: null,
+              mobile: '13900001234',
+              integration_provider: 'dingtalk',
+              integration_corp_id: 'dingcorp',
+              ...accountOverrides,
+            }],
+          }
+        }
+        return clientQuery(sql, params)
+      },
+    }))
+  }
+
   beforeEach(() => {
     pgMocks.query.mockReset()
     pgMocks.transaction.mockReset()
@@ -69,7 +103,7 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery)
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -252,7 +286,7 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery, { open_id: null })
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -464,7 +498,7 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery)
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -561,7 +595,7 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery)
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -672,7 +706,7 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery)
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -766,7 +800,7 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery, { open_id: null })
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -845,6 +879,7 @@ describe('bindDirectoryAccount', () => {
     expect(String(conflictIdentityCall?.[0])).toContain('$3::text IS NOT NULL')
     expect(String(conflictIdentityCall?.[0])).toContain('provider_union_id = $3::text')
     expect(String(conflictIdentityCall?.[0])).toContain('$6::text IS NOT NULL')
+    expect(String(conflictIdentityCall?.[0])).toContain('external_key = $7::text')
     expect(String(conflictLinkCall?.[0])).toContain('l.directory_account_id <> $3::uuid')
     expect(String(linkCall?.[0])).toContain('VALUES ($1::uuid, $2::text')
     expect(clientQuery).not.toHaveBeenCalledWith(
@@ -920,25 +955,13 @@ describe('bindDirectoryAccount', () => {
       if (String(sql).includes('FOR UPDATE OF l')) {
         return { rows: [{ local_user_id: 'user-1', local_user_email: 'alpha@example.com', local_user_name: 'Alpha' }] }
       }
+      if (String(sql).includes('FROM user_external_identities') && String(sql).includes('FOR UPDATE')) {
+        return { rows: [{ id: '11111111-1111-4111-8111-111111111111', corp_id: 'dingcorp' }] }
+      }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery)
     pgMocks.query
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'account-1',
-          integration_id: 'dir-1',
-          provider: 'dingtalk',
-          corp_id: 'dingcorp',
-          external_user_id: '0447654442691174',
-          union_id: 'union-1',
-          open_id: 'open-1',
-          external_key: 'union-1',
-          name: '林岚',
-          email: null,
-          mobile: '13900001234',
-        }],
-      })
       .mockResolvedValueOnce({
         rows: [{
           integration_id: 'dir-1',
@@ -976,8 +999,12 @@ describe('bindDirectoryAccount', () => {
       ['dingtalk', 'user-1', 'admin-1'],
     )
     expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('FROM user_external_identities'),
+      ['dingtalk', 'user-1', 'dingcorp:open-1', 'union-1', 'open-1', 'union-1'],
+    )
+    expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining('DELETE FROM user_external_identities'),
-      ['dingtalk', 'user-1', 'dingcorp:open-1'],
+      [['11111111-1111-4111-8111-111111111111']],
     )
     expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO directory_account_links'),
@@ -1014,7 +1041,7 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery)
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -1088,24 +1115,9 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery, {}, new Set(['account-2']))
     pgMocks.query
-      // account-1 loads, unbinds, and reloads its summary
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'account-1',
-          integration_id: 'dir-1',
-          provider: 'dingtalk',
-          corp_id: 'dingcorp',
-          external_user_id: 'ext-1',
-          union_id: 'union-1',
-          open_id: 'open-1',
-          external_key: 'union-1',
-          name: '林岚',
-          email: null,
-          mobile: null,
-        }],
-      })
+      // account-1 unbinds and reloads its summary
       .mockResolvedValueOnce({
         rows: [{
           integration_id: 'dir-1',
@@ -1132,9 +1144,6 @@ describe('bindDirectoryAccount', () => {
           department_paths: [],
         }],
       })
-      // account-2 does not exist → unbindDirectoryAccount throws
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
 
     const outcome = await batchUnbindDirectoryAccounts(['account-1', 'account-2'], {
       adminUserId: 'admin-1',
@@ -1146,8 +1155,9 @@ describe('bindDirectoryAccount', () => {
     expect(outcome.failed).toEqual([
       { accountId: 'account-2', error: expect.stringMatching(/not found/i) },
     ])
-    // account-1 really did commit (its transaction ran).
-    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    // account-1 committed; account-2 opened its authoritative lookup transaction and failed
+    // before any mutation.
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(2)
   })
 
   it('batch-admits no-email directory accounts with generated usernames and grant disabled by default', async () => {
@@ -1161,7 +1171,7 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery)
     pgMocks.query
       // batch service preloads account-1 to derive name/username
       .mockResolvedValueOnce({
@@ -1355,7 +1365,7 @@ describe('bindDirectoryAccount', () => {
       }
       return { rows: [] }
     })
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    installTransactionMock(clientQuery)
     pgMocks.query
       // account-1: loads with no previous link, resolves the local user, binds, and reloads its summary
       .mockResolvedValueOnce({

@@ -7,9 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // absence sweep would treat every account/department still tagged with the OLD corp as "no
 // longer seen" and mark them inactive — silently mass-deactivating the previous organization.
 // A "block only if it already has synced records" rule leaves a first-sync TOCTOU window, so the
-// rule is absolute: once corp_id is set, an ordinary PUT can never change it — with NO record
-// probe and NO production bypass. These tests pin that, and the paths that must NOT be blocked
-// (initial set, same corp resent).
+// rule is absolute: an ordinary PUT can never set, clear, or change corp_id — with NO record
+// probe and NO production bypass. A legacy empty row must be deleted/recreated or repaired by
+// the dedicated migration path; a generic update cannot safely retag existing or racing children.
 
 const pgMocks = vi.hoisted(() => ({
   query: vi.fn(),
@@ -128,16 +128,18 @@ describe('updateDirectoryIntegration — corp_id immutable-once-set guard (org-t
     )
   })
 
-  it('does not block an initial corp_id set (current corp empty)', async () => {
+  it('blocks an initial corp_id set on a legacy empty row without probing or updating', async () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [integrationRow(null)] })
+      // Positive control for the guard mutation: if the blocker is removed, the ordinary update
+      // completes instead of failing because the mock has no second response.
       .mockResolvedValueOnce({ rows: [updatedRow('corpB')] })
 
-    const result = await updateDirectoryIntegration('dir-1', baseInput('corpB') as never)
+    await expect(updateDirectoryIntegration('dir-1', baseInput('corpB') as never))
+      .rejects.toBeInstanceOf(DirectoryTenantChangeBlockedError)
 
-    expect(result?.corpId).toBe('corpB')
-    expect(pgMocks.query).toHaveBeenNthCalledWith(
-      2,
+    expect(pgMocks.query).toHaveBeenCalledTimes(1)
+    expect(pgMocks.query).not.toHaveBeenCalledWith(
       expect.stringContaining('UPDATE directory_integrations'),
       expect.anything(),
     )

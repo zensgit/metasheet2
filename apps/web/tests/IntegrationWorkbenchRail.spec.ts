@@ -3,6 +3,13 @@ import { createApp, defineComponent, h, nextTick, type App as VueApp, type Compo
 import IntegrationWorkbenchRail, {
   type IntegrationWorkbenchRailGroup,
 } from '../src/components/integration/IntegrationWorkbenchRail.vue'
+// integration-guard flake fix (sibling of the IntegrationWorkbenchView.spec.ts fix, same root cause):
+// a dynamic `await import(...)` inside a test body (here, inside the `mountView()` helper called
+// from 3 tests below) charges the imported SFC's first-time resolve/transform cost against THAT
+// test's own testTimeout. IntegrationWorkbenchView.vue is the same ~5100-line SFC as the sibling
+// fix. Hoisting to a static top-level import moves the one-time cost into this file's own
+// collect/transform phase instead (not testTimeout-bounded).
+import IntegrationWorkbenchViewForChromeTest from '../src/views/IntegrationWorkbenchView.vue'
 
 // IU-2a (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2):
 // Workbench chrome — PageShell + sticky left rail + anchor navigation, zero behavior/logic
@@ -138,10 +145,9 @@ describe('IntegrationWorkbenchView — IU-2a chrome integration', () => {
   })
 
   async function mountView(): Promise<void> {
-    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
     container = document.createElement('div')
     document.body.appendChild(container)
-    app = createApp(View as Component)
+    app = createApp(IntegrationWorkbenchViewForChromeTest as Component)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {

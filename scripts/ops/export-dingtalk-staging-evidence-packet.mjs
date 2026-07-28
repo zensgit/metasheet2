@@ -96,7 +96,22 @@ const requiredPacketFiles = [
   {
     path: 'scripts/ops/deploy-dingtalk-staging.sh',
     kind: 'script',
-    description: 'validates env, resolves image tag, runs docker compose, and checks backend health',
+    description: 'deploys one attested immutable backend and emits the values-free worker-drain gate',
+  },
+  {
+    path: 'scripts/ops/dingtalk-staging-deploy-identity.test.mjs',
+    kind: 'test',
+    description: 'required hermetic behavior test for image provenance and worker-drain refusal paths',
+  },
+  {
+    path: 'scripts/ops/dingtalk-worker-drain-ci-wiring.test.mjs',
+    kind: 'test',
+    description: 'mutually pins the behavior suite and wiring guard into the Node 18/20 test matrix; branch protection requires the Node 20 context',
+  },
+  {
+    path: 'docs/development/dingtalk-directory-worker-drain-design-and-verification-20260726.md',
+    kind: 'verification',
+    description: 'Phase A to Phase B worker-drain gate contract, evidence, and operational boundary',
   },
   {
     path: 'scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs',
@@ -633,24 +648,25 @@ ${screenshotGateLine}
 1. Read \`docs/development/dingtalk-staging-canary-deploy-20260408.md\`.
 2. Copy \`docker/app.staging.env.example\` to \`docker/app.staging.env\` and fill real secrets on the server only.
 3. Validate the env with \`bash scripts/ops/validate-env-file.sh docker/app.staging.env\`.
-4. Deploy a pinned tag with \`DEPLOY_IMAGE_TAG=<tag> bash scripts/ops/deploy-dingtalk-staging.sh\`.
-5. Execute \`docs/development/dingtalk-staging-execution-checklist-20260408.md\`.
-6. Execute \`docs/dingtalk-remote-smoke-checklist-20260422.md\` for P4 DingTalk form/group/person coverage.
-7. Run the session orchestrator with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --output-dir <session-dir>\`.
-8. If needed, debug individual steps with \`dingtalk-p4-smoke-preflight.mjs\` and \`dingtalk-p4-remote-smoke.mjs\`.
-9. Check remaining evidence gaps with \`node scripts/ops/dingtalk-p4-smoke-status.mjs --session-dir <session-dir>\`.
-10. Record manual DingTalk-client/admin checks with \`node scripts/ops/dingtalk-p4-evidence-record.mjs --session-dir <session-dir> ...\`.
-11. Prefer \`node scripts/ops/dingtalk-p4-final-closeout.mjs --session-dir <session-dir> --packet-output-dir <packet-dir>\` after all manual evidence is complete.
-12. If debugging manually, finalize smoke evidence with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>\`.
-13. Re-run \`dingtalk-p4-smoke-status.mjs\` to confirm the status moved to \`handoff_pending\`.
-14. Run \`node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir> --output-dir <packet-dir>\` after finalization passes.
-15. Re-run \`node scripts/ops/dingtalk-p4-smoke-status.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
-16. Generate final docs with \`node scripts/ops/dingtalk-p4-final-docs.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
-17. For public-form mobile acceptance, create a kit with \`node scripts/ops/dingtalk-public-form-mobile-signoff.mjs --init-kit <mobile-kit-dir>\`.
-18. Track remaining checks with \`node scripts/ops/dingtalk-public-form-mobile-signoff.mjs --todo <mobile-kit-dir>/mobile-signoff.json --output-dir <mobile-kit-dir>/todo\`.
-19. Record each real DingTalk mobile result with the suggested \`--record ... --compile-when-ready\` command until strict output is written.
-20. Package screenshots with \`node scripts/ops/dingtalk-screenshot-archive.mjs --input <screenshot-dir> --output-dir <screenshot-archive-dir>\`.
-21. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass --include-mobile-signoff <mobile-compiled-dir> --require-mobile-signoff-pass --include-screenshot-archive <screenshot-archive-dir> --require-screenshot-archive-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
+4. Build the exact SHA with an absolute private \`IMAGE_PROVENANCE_FILE\`.
+5. Deploy that SHA with \`DEPLOY_EXPECTED_COMMIT\` and \`DEPLOY_IMAGE_PROVENANCE_FILE\`, then require \`WORKER_DRAIN_GATE_PASS\`.
+6. For a Phase A to Phase B cutover, keep the host change window exclusive through migration; any out-of-band Docker change invalidates the PASS.
+7. Execute \`docs/development/dingtalk-staging-execution-checklist-20260408.md\`.
+8. Execute \`docs/dingtalk-remote-smoke-checklist-20260422.md\` for P4 DingTalk form/group/person coverage.
+9. Run the session orchestrator with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --output-dir <session-dir>\`.
+10. If needed, debug individual steps with \`dingtalk-p4-smoke-preflight.mjs\` and \`dingtalk-p4-remote-smoke.mjs\`.
+11. Check remaining evidence gaps with \`node scripts/ops/dingtalk-p4-smoke-status.mjs --session-dir <session-dir>\`.
+12. Record manual DingTalk-client/admin checks with \`node scripts/ops/dingtalk-p4-evidence-record.mjs --session-dir <session-dir> ...\`.
+13. Prefer \`node scripts/ops/dingtalk-p4-final-closeout.mjs --session-dir <session-dir> --packet-output-dir <packet-dir>\` after all manual evidence is complete.
+14. If debugging manually, finalize smoke evidence with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>\`.
+15. Re-run \`dingtalk-p4-smoke-status.mjs\` to confirm the status moved to \`handoff_pending\`.
+16. Run \`node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir> --output-dir <packet-dir>\` after finalization passes.
+17. Re-run \`dingtalk-p4-smoke-status.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
+18. Generate final docs with \`node scripts/ops/dingtalk-p4-final-docs.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
+19. For public-form mobile acceptance, create a kit with \`node scripts/ops/dingtalk-public-form-mobile-signoff.mjs --init-kit <mobile-kit-dir>\`.
+20. Track remaining checks with \`node scripts/ops/dingtalk-public-form-mobile-signoff.mjs --todo <mobile-kit-dir>/mobile-signoff.json --output-dir <mobile-kit-dir>/todo\`, then record each real DingTalk mobile result with the suggested \`--record ... --compile-when-ready\` command until strict output is written.
+21. Package screenshots with \`node scripts/ops/dingtalk-screenshot-archive.mjs --input <screenshot-dir> --output-dir <screenshot-archive-dir>\`.
+22. Re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass --include-mobile-signoff <mobile-compiled-dir> --require-mobile-signoff-pass --include-screenshot-archive <screenshot-archive-dir> --require-screenshot-archive-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
 
 ## Non-Goals
 
