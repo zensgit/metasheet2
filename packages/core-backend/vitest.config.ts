@@ -214,6 +214,11 @@ export default defineConfig({
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green; whole-file wired
       // into the approval real-DB step in plugin-tests.yml.
       'tests/integration/invite-accept-concurrency-rollback.db.test.ts',
+      // Grant/membership real-table writes + restore granted_by / missing membership DRIFT
+      // (PR #4581). DATABASE_URL-gated; excluded so no-DB job cannot skip-green; whole-file
+      // wired into the approval real-DB step (both points asserted by
+      // scripts/ops/directory-grant-table-ci-wiring.test.mjs).
+      'tests/integration/directory-deprovision-grant-table.db.test.ts',
       // DingTalk multi-corp external-key isolation: corp-scoped uniqueness, upgrade migration,
       // real-sync coexistence, and same-corp/cross-corp identity matching controls.
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a

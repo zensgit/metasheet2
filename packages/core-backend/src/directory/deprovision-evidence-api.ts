@@ -48,13 +48,18 @@ export async function previewDeprovisionForUser(localUserId: string) {
     [localUserId],
   ).catch(() => ({ rows: [] as Array<{ org_id: string }> }))
 
+  // `user_external_auth_grants` is the table the OAuth login path reads. This used to read
+  // `user_external_identities.grant_enabled` — a column no migration creates — behind a `.catch`
+  // that turned the resulting error into "no grant", so the preview could never show a grant
+  // effect no matter what the truth was. No `.catch` either: a preview that cannot read the
+  // access graph must say so rather than quietly under-report what deprovision would take away.
   const grant = await query<{ enabled: boolean }>(
-    `SELECT COALESCE(grant_enabled, FALSE) AS enabled
-       FROM user_external_identities
+    `SELECT enabled
+       FROM user_external_auth_grants
       WHERE local_user_id = $1 AND provider = 'dingtalk'
       LIMIT 1`,
     [localUserId],
-  ).catch(() => ({ rows: [] as Array<{ enabled: boolean }> }))
+  )
 
   const plan = planDirectoryDeprovision({
     localUserId,
@@ -106,7 +111,7 @@ export async function listDeprovisionEvents(options: {
        ORDER BY e.created_at DESC
        LIMIT $${params.length}`,
     params,
-  ).catch(() => ({ rows: [] }))
+  )
   return result.rows
 }
 
@@ -119,7 +124,7 @@ export async function listDeprovisionEffects(eventId: string) {
       WHERE event_id = $1
       ORDER BY created_at ASC`,
     [eventId],
-  ).catch(() => ({ rows: [] }))
+  )
   return result.rows
 }
 
@@ -228,12 +233,16 @@ export async function restoreDeprovisionEvent(options: {
       // after false → no active membership
       currentMatchesAfter[e.id] = (org.rows[0]?.n ?? 0) === 0
     } else if (e.effect_type === 'disable_dingtalk_grant') {
+      // This is a DRIFT GATE, so it must fail closed. Reading the phantom column and catching the
+      // error yielded "no grant", which reads as "current state matches after_active=false" — the
+      // gate was satisfied *by the read failing*, so it could never fire, and a grant that was
+      // genuinely still enabled sailed straight through as if there were no drift.
       const g = await query<{ enabled: boolean }>(
-        `SELECT COALESCE(grant_enabled, FALSE) AS enabled
-           FROM user_external_identities
+        `SELECT enabled
+           FROM user_external_auth_grants
           WHERE local_user_id = $1 AND provider = 'dingtalk' LIMIT 1`,
         [event.local_user_id],
-      ).catch(() => ({ rows: [{ enabled: false }] }))
+      )
       currentMatchesAfter[e.id] = g.rows[0]?.enabled !== true
     } else {
       currentMatchesAfter[e.id] = true
@@ -266,18 +275,41 @@ export async function restoreDeprovisionEvent(options: {
           [event.local_user_id],
         )
       } else if (e.effect_type === 'clear_user_orgs' && e.org_id) {
-        await client.query(
-          `UPDATE user_orgs SET is_active = TRUE, updated_at = NOW()
-            WHERE user_id = $1 AND org_id = $2`,
+        // `user_orgs` is (user_id, org_id, is_active, created_at) — there is no `updated_at`.
+        // Setting one raised `42703`, which the `.catch` hid; the aborted transaction then failed
+        // the very next statement with `25P02`, so restoring ANY event carrying a membership
+        // effect — which is every real deprovision event — rolled back entirely. The sibling
+        // writer in `directory-sync.ts` gets this right; only this path invented the column.
+        // Same reasoning as the grant leg: a restore that cannot give membership back must fail
+        // loudly, not report a success the admin will act on.
+        const mem = await client.query(
+          `UPDATE user_orgs SET is_active = TRUE
+            WHERE user_id = $1 AND org_id = $2
+            RETURNING user_id`,
           [event.local_user_id, e.org_id],
-        ).catch(() => {})
+        )
+        if (!mem.rows[0]) {
+          const err = new Error(
+            `membership row missing for org ${e.org_id}; cannot reverse clear_user_orgs`,
+          )
+          ;(err as Error & { code?: string }).code = 'DRIFT_CONFLICT'
+          throw err
+        }
       } else if (e.effect_type === 'disable_dingtalk_grant') {
+        // Upsert, not UPDATE: deprovision may have created the disabled row itself, and a restore
+        // that silently matched zero rows would report success while the person stayed locked
+        // out. The `.catch` is gone for the same reason it was wrong on the read — it could not
+        // make the failure harmless, only turn it into `25P02` on the next statement, which is
+        // what made every event carrying a grant effect unrestorable.
         await client.query(
-          `UPDATE user_external_identities
-              SET grant_enabled = TRUE, updated_at = NOW()
-            WHERE local_user_id = $1 AND provider = 'dingtalk'`,
-          [event.local_user_id],
-        ).catch(() => {})
+          `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+           VALUES ('dingtalk', $1, TRUE, $2, NOW(), NOW())
+           ON CONFLICT (provider, local_user_id)
+           DO UPDATE SET enabled = TRUE,
+                         granted_by = EXCLUDED.granted_by,
+                         updated_at = NOW()`,
+          [event.local_user_id, `restore:${options.adminUserId}`],
+        )
       }
       await client.query(
         `UPDATE directory_deprovision_effects
