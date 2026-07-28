@@ -102,6 +102,7 @@ jobs:
           node --test scripts/ops/directory-grant-table-ci-wiring.test.mjs
           node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
           node --test scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs
+          node --test scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs
 
       - name: Run DingTalk OAuth-stability metrics-only contract test (DT-CLOSE-01B)
         run: |
@@ -1101,6 +1102,7 @@ jobs:
             tests/integration/directory-deprovision-ledger-schema.db.test.ts \
             tests/integration/directory-deprovision-writer-ledger.db.test.ts \
             tests/integration/directory-deprovision-race-supersede.db.test.ts \
+            tests/integration/directory-access-graph-mutex.db.test.ts \
             tests/integration/directory-sync-run-lease.db.test.ts \
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \

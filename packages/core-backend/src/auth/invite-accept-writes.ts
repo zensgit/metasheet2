@@ -10,6 +10,10 @@
  */
 
 import { transaction } from '../db/pg'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+} from '../directory/access-graph-mutex'
 import { markInviteAccepted } from './invite-ledger'
 
 export const INVITE_LEDGER_CONSUME_FAILED = 'INVITE_LEDGER_CONSUME_FAILED'
@@ -34,6 +38,14 @@ export function inviteAcceptWriteErrorCode(error: unknown): string | undefined {
  */
 export async function applyInviteAcceptanceWrites(input: InviteAcceptWriteInput): Promise<void> {
   await transaction(async (client) => {
+    const locked = await lockUsersForAccessGraphWrite(client, [input.userId])
+    const lockedUser = locked.get(input.userId)
+    if (!lockedUser) {
+      throw Object.assign(new Error('Invite target could not be updated'), {
+        code: INVITE_TARGET_UPDATE_MISMATCH,
+      })
+    }
+
     const ledger = await markInviteAccepted(input.inviteToken, {
       consumedBy: input.userId,
       client,
@@ -60,6 +72,14 @@ export async function applyInviteAcceptanceWrites(input: InviteAcceptWriteInput)
     if (!updated.rows[0]) {
       throw Object.assign(new Error('Invite target could not be updated'), {
         code: INVITE_TARGET_UPDATE_MISMATCH,
+      })
+    }
+
+    if (!lockedUser.isActive) {
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+        userIds: [input.userId],
+        actorId: input.userId,
+        reason: 'superseded by invite acceptance activation',
       })
     }
   })

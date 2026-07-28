@@ -8,6 +8,10 @@
 import * as bcrypt from 'bcryptjs'
 import { transaction } from '../db/pg'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+} from '../directory/access-graph-mutex'
 import { claimLoginAlias } from './login-alias-service'
 import { buildUnusablePasswordHash } from './user-activation'
 
@@ -92,25 +96,12 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   }
 
   await transaction(async (client) => {
-    const locked = await client.query(
-      `SELECT id, email, username, mobile, activation_status, is_active
-         FROM users
-        WHERE id = $1
-        FOR UPDATE`,
-      [userId],
-    )
-    const user = locked.rows[0] as
-      | {
-          id: string
-          email: string | null
-          username: string | null
-          mobile: string | null
-          activation_status: string
-          is_active: boolean
-        }
-      | undefined
-    if (!user) throwCoded('User not found', 'ACTIVATE_USER_NOT_FOUND')
-    if (user.activation_status !== 'pending_activation') {
+    const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
+    const user = lockedUsers.get(userId)
+    if (!user) {
+      throwCoded('User not found', 'ACTIVATE_USER_NOT_FOUND')
+    }
+    if (user.activationStatus !== 'pending_activation') {
       throwCoded(
         'User is not pending_activation',
         'ACTIVATE_NOT_PENDING',
@@ -225,6 +216,12 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
         'ACTIVATE_ALIAS_REQUIRED',
       )
     }
+
+    await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+      userIds: [userId],
+      actorId: input.adminUserId ?? userId,
+      reason: 'superseded by pending-user activation',
+    })
   })
 
   return {
