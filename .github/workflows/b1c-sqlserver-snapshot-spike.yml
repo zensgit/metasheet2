@@ -1,0 +1,157 @@
+name: B1c SQL Server snapshot page-sequence spike (evidence only)
+
+# EVIDENCE ONLY. This workflow runs against ephemeral first-party SQL Server containers.
+# It does not certify a profile, register a runtime executor, activate a binding, connect to
+# a customer system, or authorize deployment/rollout.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'packages/core-backend/scripts/spike-b1c-*.ts'
+      - 'packages/core-backend/scripts/spike-b1b-shared.ts'
+      - 'packages/core-backend/package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/b1c-sqlserver-snapshot-spike.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  sqlserver-snapshot-spike:
+    name: B1c SQL Server ${{ matrix.mssql }} explicit SNAPSHOT page sequence
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mssql: ['2019', '2022']
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.mssql }}-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'Spike!Probe2026'
+          SA_PASSWORD: 'Spike!Probe2026'
+        ports:
+          - 1433:1433
+    env:
+      MSSQL_HOST: 127.0.0.1
+      MSSQL_PORT: '1433'
+      MSSQL_USERNAME: sa
+      MSSQL_PASSWORD: 'Spike!Probe2026'
+      MSSQL_ENCRYPT: 'true'
+      MSSQL_TRUST_SERVER_CERTIFICATE: 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run pure B1c schema, gate, transaction-binding, and loss-posture tests
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest run
+          scripts/spike-b1c-shared.test.ts
+          scripts/spike-b1c-gate-check.test.ts
+          scripts/spike-b1c-sqlserver.test.ts
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 40); do
+            if pnpm --filter @metasheet/core-backend exec node -e "
+              const sql = require('mssql');
+              new sql.ConnectionPool({server:'127.0.0.1',port:1433,user:'sa',password:'Spike!Probe2026',database:'master',options:{encrypt:true,trustServerCertificate:true},connectionTimeout:3000})
+                .connect().then(p => p.close()).then(() => process.exit(0)).catch(() => process.exit(1));
+            "; then
+              echo "SQL Server ready on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: SQL Server not ready yet; sleeping 5s"
+            sleep 5
+          done
+          echo "SQL Server never became ready within timeout"
+          exit 1
+
+      - name: Run B1c SQL Server explicit SNAPSHOT page-sequence spike
+        env:
+          B1C_MSSQL_DECLARED_MAJOR_VERSION: ${{ matrix.mssql }}
+          B1B_SEED_ALLOW_WRITE: 'true'
+          B1C_EVIDENCE_DIR: ${{ github.workspace }}/b1c-evidence-${{ matrix.mssql }}
+        run: pnpm --filter @metasheet/core-backend exec tsx scripts/spike-b1c-sqlserver.ts
+
+      - name: Upload values-free B1c evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b1c-sqlserver-snapshot-evidence-${{ matrix.mssql }}
+          path: b1c-evidence-${{ matrix.mssql }}/
+          if-no-files-found: warn
+          retention-days: 14
+
+  gate-check:
+    name: B1c gate-check (evidence only, no certification)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [sqlserver-snapshot-spike]
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download B1c evidence artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: b1c-sqlserver-snapshot-evidence-*
+          path: b1c-evidence-combined
+          merge-multiple: true
+
+      - name: Ensure evidence directory exists
+        run: mkdir -p b1c-evidence-combined
+
+      - name: Compute values-free B1c evidence verdicts
+        env:
+          B1C_EVIDENCE_DIR: ${{ github.workspace }}/b1c-evidence-combined
+          B1C_DECLARED_CELLS: >-
+            [
+              {"dialect":"sqlserver","engineMajorVersion":"2019","capabilityPosture":"explicit_snapshot_transaction"},
+              {"dialect":"sqlserver","engineMajorVersion":"2022","capabilityPosture":"explicit_snapshot_transaction"}
+            ]
+        run: pnpm --filter @metasheet/core-backend exec tsx scripts/spike-b1c-gate-check.ts
