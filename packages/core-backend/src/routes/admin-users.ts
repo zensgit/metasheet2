@@ -1751,11 +1751,11 @@ async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise
  * asserts set equality between the reasons thrown at `throwCoded` call sites and the policy
  * table's keys, and folding the fallback into the table would make that equality vacuous.
  */
-export const ACTIVATE_ERROR_FALLBACK = {
+export const ACTIVATE_ERROR_FALLBACK = Object.freeze({
   status: 500,
   code: 'ACTIVATE_FAILED',
   message: 'Activation failed',
-} as const
+} as const)
 
 /**
  * Closed policy table: every authored activation reason → the status and the message we publish.
@@ -1770,7 +1770,7 @@ export const ACTIVATE_ERROR_FALLBACK = {
  * Messages are authored HERE, not inherited from the thrown Error. The thrown message stays
  * useful for server-side logs; it is simply never part of the response.
  */
-export const ACTIVATE_ERROR_POLICY: Record<ActivateErrorCode, { status: number; message: string }> = {
+const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; message: string }> = {
   ACTIVATE_USER_REQUIRED: { status: 400, message: 'A target user id is required to activate' },
   ACTIVATE_USER_NOT_FOUND: { status: 404, message: 'User not found' },
   ACTIVATE_NOT_PENDING: { status: 409, message: 'User is not pending activation' },
@@ -1789,14 +1789,41 @@ export const ACTIVATE_ERROR_POLICY: Record<ActivateErrorCode, { status: number; 
   ACTIVATE_LINK_MISMATCH: { status: 409, message: 'Directory link points to a different user' },
 }
 
+type ActivatePolicyRow = Readonly<{ status: number; message: string }>
+
+/** A row the holder owns: a fresh frozen copy, never the source object. */
+function frozenPolicyRow(row: { status: number; message: string }): ActivatePolicyRow {
+  return Object.freeze({ status: row.status, message: row.message })
+}
+
 /**
  * Lookup view of the table above. A `Map` rather than an object index: a Map has no prototype
  * chain to borrow from, so a thrown `.code` of `'constructor'` / `'toString'` / `'__proto__'`
  * cannot resolve to a row, and the response path needs no computed property access at all
  * (which keeps the AST scan's "no computed read on the response path" rule strict).
+ *
+ * OWNER POST-MERGE FINDING (P2, 2026-07-27): this was `new Map(Object.entries(ACTIVATE_ERROR_POLICY))`
+ * over an EXPORTED, non-frozen table — so the Map held the very row objects any importer could
+ * reach. Owner's executed repro: setting `ACTIVATE_RACE` to 200 plus database text through the
+ * public export made `mapActivateError()` return it verbatim, defeating the closure this table
+ * exists to build. The source table is now module-private, the Map holds its own frozen copies,
+ * and the export is a frozen projection.
  */
-const ACTIVATE_ERROR_POLICY_LOOKUP: ReadonlyMap<string, { status: number; message: string }> =
-  new Map(Object.entries(ACTIVATE_ERROR_POLICY))
+const ACTIVATE_ERROR_POLICY_LOOKUP: ReadonlyMap<string, ActivatePolicyRow> = new Map(
+  Object.entries(ACTIVATE_ERROR_POLICY_SOURCE).map(([code, row]) => [code, frozenPolicyRow(row)]),
+)
+
+/**
+ * The published, DEEP-FROZEN projection. Exported only because the closure and mapping tests
+ * need to read the table's keys and rows; it is not the object the response path reads, and
+ * mutating it changes nothing.
+ */
+export const ACTIVATE_ERROR_POLICY: Readonly<Record<ActivateErrorCode, ActivatePolicyRow>> =
+  Object.freeze(
+    Object.fromEntries(
+      Object.entries(ACTIVATE_ERROR_POLICY_SOURCE).map(([code, row]) => [code, frozenPolicyRow(row)]),
+    ),
+  ) as Readonly<Record<ActivateErrorCode, ActivatePolicyRow>>
 
 /**
  * Error surface for `POST /api/admin/users/:id/activate`.
