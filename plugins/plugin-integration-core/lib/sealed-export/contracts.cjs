@@ -679,8 +679,39 @@ function verifyRowsetAgainstManifest(manifest, rows) {
 // no tombstone is consulted — those are S3/S4 and are out of scope, which is why
 // SEALED_EXPORT_MANIFEST_REPLAYED stays in the S1-unreached partition.
 // ---------------------------------------------------------------------------
+// §6.2 binds "ordered chunk identities and digests", so a receipt is checked against the
+// manifest descriptor AT ITS INDEX — never against another receipt, another submission or
+// an index set. The two descriptor terms are compared in SEPARATE guards on purpose: a
+// single combined condition lets one term cover for the other under mutation.
+//
+// An index the manifest never declared is UNDECLARED first. There is no descriptor to
+// compare against at all, and reporting a digest mismatch would misname the defect.
+function assertReceiptMatchesDescriptor(manifest, receipt) {
+  if (receipt.chunkIndex >= manifest.chunks.length) {
+    failSealedExport('SEALED_EXPORT_CHUNK_UNDECLARED', { chunkIndex: receipt.chunkIndex })
+  }
+  const descriptor = manifest.chunks[receipt.chunkIndex]
+  if (!constantTimeEqualDigest(receipt.chunkDigest, descriptor.chunkDigest)) {
+    failSealedExport('SEALED_EXPORT_CHUNK_DIGEST_MISMATCH', { chunkIndex: receipt.chunkIndex })
+  }
+  if (receipt.byteCount !== descriptor.byteCount) {
+    failSealedExport('SEALED_EXPORT_CHUNK_DIGEST_MISMATCH', { chunkIndex: receipt.chunkIndex })
+  }
+}
+
 function classifyChunkSubmission(manifest, manifestDigest, acceptedReceipts, submission) {
   if (!isLowerHexDigest(manifestDigest)) {
+    failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID', { field: 'manifestDigest' })
+  }
+  // Owner post-merge finding (P1, 2026-07-27): this function took `manifest` and never
+  // derived its digest. It checked only that the supplied key was well-formed hex and
+  // that the submission and every receipt echoed the SAME value — so any hex string
+  // keyed any manifest, and two different manifests could share one fabricated session
+  // digest and both be ACCEPTed. "Everyone agrees on X" is not "X is this manifest".
+  // The session key is now DERIVED from the manifest and compared in constant time; a
+  // caller-supplied digest that is not this manifest's fails closed.
+  const derivedManifestDigest = computeManifestDigest(manifest)
+  if (!constantTimeEqualDigest(derivedManifestDigest, manifestDigest)) {
     failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID', { field: 'manifestDigest' })
   }
   const validSubmission = validateChunkSubmission(submission)
@@ -700,6 +731,12 @@ function classifyChunkSubmission(manifest, manifestDigest, acceptedReceipts, sub
     if (acceptedByIndex.has(receipt.chunkIndex)) {
       failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID', { chunkIndex: receipt.chunkIndex })
     }
+    // Owner post-merge finding (P1, 2026-07-27): an accepted receipt is evidence about a
+    // MANIFEST CHUNK, and nothing compared it to one. A receipt carrying a chunkDigest
+    // and byteCount the manifest never declared was accepted into the session, which is
+    // what let a matching re-send return IDEMPOTENT_REPLAY. §6.2 binds "ordered chunk
+    // identities and digests", so the descriptor at that index is the authority.
+    assertReceiptMatchesDescriptor(manifest, receipt)
     acceptedByIndex.set(receipt.chunkIndex, receipt)
   }
   // §6.4 resume "asks only for accepted receipt indexes"; an accepted set with a hole
@@ -729,6 +766,13 @@ function classifyChunkSubmission(manifest, manifestDigest, acceptedReceipts, sub
       })
     }
     // §6.4: an identical re-send "is an idempotent replay and does not increment counts".
+    //
+    // The comparison above is submission-against-RECEIPT, and that is sufficient here
+    // ONLY because every receipt was bound to the manifest descriptor in the accept loop
+    // above: identical-to-a-descriptor-bound-receipt therefore means descriptor-bound.
+    // Do NOT add a second submission-against-descriptor comparison here as a belt — two
+    // doors for one property cover for each other and make the neuter probes for either
+    // one non-discriminating.
     return Object.freeze({
       decision: 'IDEMPOTENT_REPLAY',
       acceptedChunkCount: acceptedByIndex.size,
@@ -762,7 +806,8 @@ function assertChunkSetComplete(manifest, acceptedReceipts) {
     failSealedExport('SEALED_EXPORT_CHUNK_SET_INCOMPLETE', { declaredCount: manifest.chunks.length })
   }
   for (let index = 0; index < acceptedReceipts.length; index += 1) {
-    const receiptIndex = validateChunkReceipt(acceptedReceipts[index]).chunkIndex
+    const receipt = validateChunkReceipt(acceptedReceipts[index])
+    const receiptIndex = receipt.chunkIndex
     // S1 harness finding: a bare Set silently COLLAPSED a duplicated receipt index,
     // so [0,0,1] against a two-chunk manifest returned complete. §10 names
     // CHUNK_DUPLICATE_CONFLICT for exactly this; closed means refused, not deduped.
@@ -771,9 +816,13 @@ function assertChunkSetComplete(manifest, acceptedReceipts) {
     }
     // S1 harness finding: a receipt for an index the manifest never declared was
     // silently tolerated because the completeness loop only walked manifest indexes.
-    if (receiptIndex >= manifest.chunks.length) {
-      failSealedExport('SEALED_EXPORT_CHUNK_UNDECLARED', { chunkIndex: receiptIndex })
-    }
+    //
+    // Owner post-merge finding (P1, 2026-07-27): this loop then compared INDEX SETS and
+    // nothing else, so a complete set of receipts carrying the wrong chunkDigest and the
+    // wrong byteCount returned { chunkCount: 2 }. A complete index set is not a complete
+    // chunk set. The undeclared-index refusal now lives in the shared descriptor guard,
+    // which reports it with the same reason and the same detail.
+    assertReceiptMatchesDescriptor(manifest, receipt)
     seen.add(receiptIndex)
   }
   for (let index = 0; index < manifest.chunks.length; index += 1) {

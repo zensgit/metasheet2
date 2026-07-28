@@ -23,8 +23,18 @@
 // scanner blanked comments and strings with a hand-written character scan which could not
 // distinguish a regular-expression literal from division; the first `/.../` literal in
 // this file containing a quote character desynchronised it, and a real `throw` injected
-// after that line was counted ZERO. The claim happened to be true; the evidence for it was
-// not. The scanner has been replaced by a TypeScript-parser walk over ThrowStatement nodes
+// after that line was counted ZERO.
+//
+// SECOND RETRACTION (2026-07-27), narrowing the first: this text used to say the scanner
+// blanked "everything after" the offending line. That overstates it. The blind window was
+// BOUNDED — the scanner re-synchronised at a later quote character — so the damage ran
+// from the offending literal to that point, not to the end of the file. The confirmed
+// defect is a bounded blind window, and it was enough to hide a real throw; it was not a
+// permanent desynchronisation, and describing it as one made the old evidence sound worse
+// than it was rather than describing it accurately.
+//
+// The claim happened to be true; the evidence for it was not. The scanner has been
+// replaced by a TypeScript-parser walk over ThrowStatement nodes
 // (__tests__/support/sealed-export-source-scan.cjs), which has no such blind window and
 // fails closed when a source does not parse. That scan is a STATIC SOURCE assertion, not a
 // behaviour proof. This module still contains no `throw`: every failure is a finding in

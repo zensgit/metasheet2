@@ -13,10 +13,12 @@
 // statements and the declared vocabulary are consistent in the source text. What the code
 // does at runtime is proven separately, by the pins that call the real functions.
 //
-// GOVERNANCE NOTE, deliberately load-bearing on nothing: §10 says of this set "This
-// exact set is **proposed**, not ratified", while §12 lists "failure vocabulary"
-// among what S0 freezes. This file takes NO position; it pins the §10 list so any
-// drift REDs. Nothing here asserts the set has been ratified.
+// GOVERNANCE NOTE — RETRACTION (2026-07-27). This note previously read: §10 says of
+// this set "This exact set is **proposed**, not ratified", while §12 lists "failure
+// vocabulary" among what S0 freezes; this file takes NO position. That is NO LONGER
+// TRUE. The owner RATIFIED this exact set on 2026-07-27 and froze it at exactly 30
+// tokens; no reason may be added, removed or renamed. The pin below is unchanged —
+// it still transcribes §10 from the DOCUMENT so any drift REDs.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -218,10 +220,15 @@ function throwSiteInvariant() {
 // RETRACTION. The previous scanner blanked comments and strings with a character scan that
 // could not distinguish a regex literal `/.../` from division. compliance-harness.cjs then
 // contained `/failSealedExport\(\s*(['"])([^'"]*)\1/g`; the scanner read the `'` inside that
-// literal as the start of a string and blanked everything to the next `'`, desynchronising
-// for the rest of the file. A real `throw` placed after that line was counted ZERO, while
-// the module's own header asserted "no throw ... asserted mechanically". The claim was true;
-// the mechanism was blind. Controls 1-3 are the regression pins.
+// literal as the start of a string and blanked from there to the next `'`. A real `throw`
+// placed inside that window was counted ZERO, while the module's own header asserted "no
+// throw ... asserted mechanically". The claim was true; the mechanism was blind.
+//
+// SECOND RETRACTION (2026-07-27), narrowing the first: this text used to add "desynchronising
+// for the rest of the file". That overstates it. The window was BOUNDED — the scanner
+// re-synchronised at a later quote — so the blindness ran from the offending literal to that
+// point, not to the end of the file. Bounded was already enough to hide a real throw.
+// Controls 1-3 are the regression pins.
 // ---------------------------------------------------------------------------
 function astThrowSiteScanHasNoBlindWindow() {
   // CONTROL 1 — a `throw` INSIDE A REGEX LITERAL is not a throw statement.
@@ -305,6 +312,146 @@ function astThrowSiteScanHasNoBlindWindow() {
   const healthy = scan([{ name: 'synthetic.cjs', text: 'const a = 1\nmodule.exports = { a }\n' }])
   assert.deepEqual(healthy.findings, [])
   assert.equal(healthy.parsedSources, 1)
+}
+
+// ---------------------------------------------------------------------------
+// PIN 3, third half — the scan matches the BINDING, not the call NAME.
+//
+// OWNER POST-MERGE FINDING (P2, 2026-07-27). `calleeName` handled only `ts.isIdentifier`
+// and `ts.isPropertyAccessExpression`, so the scan matched a call by the name written at
+// the call site. A direct undeclared reason REDed, but a renamed destructure and an
+// element access both produced ZERO findings:
+//     const { failSealedExport: fail } = ...; fail('NOT_DECLARED')
+//     v['failSealedExport']('NOT_DECLARED')
+// Enumerating call forms is the same non-converging mistake as the hand-written stripper,
+// so the scan now RESOLVES the binding — every local name bound to failSealedExport,
+// renames included — and fails LOUD on any call shape it cannot statically resolve.
+// Silence on an unresolvable shape is the defect.
+// ---------------------------------------------------------------------------
+function astScanMatchesBindingsNotNames() {
+  const REQUIRE = "require('./failure-vocabulary.cjs')"
+
+  // SHAPE 1 — the direct call. This one always worked; it is here so the three shapes
+  // are compared side by side rather than asserted apart.
+  const direct = scan([{
+    name: 'synthetic.cjs',
+    text: 'const { failSealedExport } = ' + REQUIRE + "\nfailSealedExport('NOT_DECLARED')\n",
+  }])
+  assert.equal(direct.findings.length, 1, 'direct call: exactly one finding')
+  assert.equal(direct.findings[0].checkId, 'THROW_SITE_REASON_UNDECLARED')
+
+  // SHAPE 2 — the RENAMED DESTRUCTURE. Zero findings before the fix.
+  const renamed = scan([{
+    name: 'synthetic.cjs',
+    text: 'const { failSealedExport: fail } = ' + REQUIRE + "\nfail('NOT_DECLARED')\n",
+  }])
+  assert.equal(renamed.findings.length, 1, 'renamed destructure must be resolved to the binding')
+  assert.equal(renamed.findings[0].checkId, 'THROW_SITE_REASON_UNDECLARED')
+
+  // SHAPE 2b — an alias of the alias. Resolution is transitive or it is name matching
+  // with extra steps.
+  const aliasChain = scan([{
+    name: 'synthetic.cjs',
+    text: 'const { failSealedExport: fail } = ' + REQUIRE
+      + "\nconst deeper = fail\ndeeper('NOT_DECLARED')\n",
+  }])
+  assert.equal(aliasChain.findings.length, 1, 'an alias of an alias must resolve')
+  assert.equal(aliasChain.findings[0].checkId, 'THROW_SITE_REASON_UNDECLARED')
+
+  // SHAPE 2c — a member alias: `const fail = vocabulary.failSealedExport`.
+  const memberAlias = scan([{
+    name: 'synthetic.cjs',
+    text: 'const v = ' + REQUIRE + "\nconst fail = v.failSealedExport\nfail('NOT_DECLARED')\n",
+  }])
+  assert.equal(memberAlias.findings.length, 1, 'a member alias must resolve')
+  assert.equal(memberAlias.findings[0].checkId, 'THROW_SITE_REASON_UNDECLARED')
+
+  // SHAPE 3 — ELEMENT ACCESS with a static string. Zero findings before the fix.
+  const elementAccess = scan([{
+    name: 'synthetic.cjs',
+    text: 'const v = ' + REQUIRE + "\nv['failSealedExport']('NOT_DECLARED')\n",
+  }])
+  assert.equal(elementAccess.findings.length, 1, 'static element access must be resolved')
+  assert.equal(elementAccess.findings[0].checkId, 'THROW_SITE_REASON_UNDECLARED')
+
+  // SHAPE 4 — UNRESOLVABLE. A computed callee cannot be read by any static scan. The
+  // scan must say so LOUDLY; reporting nothing would be indistinguishable from clean.
+  const computed = scan([{
+    name: 'synthetic.cjs',
+    text: 'const v = ' + REQUIRE + "\nconst name = 'failSealedExport'\nv[name]('NOT_DECLARED')\n",
+  }])
+  assert.equal(computed.findings.length, 1, 'an unresolvable callee must produce a finding, not silence')
+  assert.equal(computed.findings[0].checkId, 'THROW_SITE_CALLEE_UNRESOLVABLE')
+
+  // …and the same for a callee that is itself the result of a call.
+  const callOfCall = scan([{
+    name: 'synthetic.cjs',
+    text: 'const v = ' + REQUIRE + "\npick(v)('NOT_DECLARED')\n",
+  }])
+  assert.equal(callOfCall.findings.length, 1, 'a call-of-call callee is unresolvable')
+  assert.equal(callOfCall.findings[0].checkId, 'THROW_SITE_CALLEE_UNRESOLVABLE')
+
+  // NEGATIVE CONTROL — a rename of something that is NOT failSealedExport must stay
+  // clean. Without this, "flag every one-string-argument call" would pass everything above.
+  const otherBinding = scan([{
+    name: 'synthetic.cjs',
+    text: 'const { isDeclaredFailureReason: fail } = ' + REQUIRE + "\nfail('NOT_DECLARED')\n",
+  }])
+  assert.deepEqual(otherBinding.findings, [], 'a rename of a different export must not be matched')
+
+  // NEGATIVE CONTROL — a DECLARED reason through a rename is clean, and its reason is
+  // still collected, so binding resolution did not shrink reachedReasons.
+  const declaredThroughAlias = scan([{
+    name: 'synthetic.cjs',
+    text: 'const { failSealedExport: fail } = ' + REQUIRE
+      + "\nfail('SEALED_EXPORT_MANIFEST_INVALID')\n",
+  }])
+  assert.deepEqual(declaredThroughAlias.findings, [], 'a declared reason through an alias is clean')
+  assert.deepEqual(declaredThroughAlias.reachedReasons, ['SEALED_EXPORT_MANIFEST_INVALID'],
+    'a reason reached through an alias must still be collected')
+
+  // A dynamic reason through an alias is still an enumerated dynamic site, not silence.
+  const dynamicThroughAlias = scan([{
+    name: 'synthetic.cjs',
+    text: 'const { failSealedExport: fail } = ' + REQUIRE + '\nfail(pickReason(), {})\n',
+  }])
+  assert.deepEqual(dynamicThroughAlias.dynamicReasonSites, ['synthetic.cjs'],
+    'a computed reason through an alias must be enumerated')
+
+  // An IIFE callee is a literal function, statically known not to be failSealedExport.
+  // It must NOT be reported as unresolvable, or CONTROL 2 above would be a false alarm.
+  const iife = scan([{
+    name: 'synthetic.cjs',
+    text: 'const s = (function () { return 1 })()\nmodule.exports = { s }\n',
+  }])
+  assert.deepEqual(iife.findings, [], 'an immediately-invoked function literal is resolvable')
+
+  // ESCAPE — a binding handed out as a VALUE leaves this resolver's reach. Beyond the
+  // owner's named finding, and reported for the same reason: an escape that is silently
+  // ignored is a hole shaped exactly like the one being closed.
+  const escapes = scan([{
+    name: 'synthetic.cjs',
+    text: 'const { failSealedExport } = ' + REQUIRE + '\nmodule.exports = { failSealedExport }\n',
+  }])
+  assert.equal(escapes.findings.length, 1, 'a bound name used as a value must be reported')
+  assert.equal(escapes.findings[0].checkId, 'THROW_SITE_BINDING_ESCAPES')
+
+  // …and a computed member read OF THE VOCABULARY MODULE is an unreadable binding form.
+  const computedAlias = scan([{
+    name: 'synthetic.cjs',
+    text: 'const v = ' + REQUIRE + "\nconst k = 'failSealedExport'\nconst fail = v[k]\nfail('X')\n",
+  }])
+  assert.equal(computedAlias.findings.length, 1, 'a computed alias off the vocabulary module is reported')
+  assert.equal(computedAlias.findings[0].checkId, 'THROW_SITE_BINDING_UNRESOLVABLE')
+
+  // NEGATIVE CONTROL for that rule — an ordinary computed read (an array index) is NOT a
+  // binding attempt. Flagging every `bytes[index]` would drown the scan in noise and is
+  // why the receiver must resolve to the vocabulary module.
+  const arrayIndex = scan([{
+    name: 'synthetic.cjs',
+    text: 'const bytes = [1, 2]\nconst index = 1\nconst one = bytes[index]\nmodule.exports = { one }\n',
+  }])
+  assert.deepEqual(arrayIndex.findings, [], 'an array index must not be read as an alias attempt')
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +784,7 @@ function main() {
   latentSurfacePin()
   throwSiteInvariant()
   astThrowSiteScanHasNoBlindWindow()
+  astScanMatchesBindingsNotNames()
   zeroConsumerSweep()
   undeclaredReasonIsNeverEchoed()
   detailsCarryNoCallerValues()
