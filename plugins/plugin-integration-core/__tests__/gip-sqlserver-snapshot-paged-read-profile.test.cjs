@@ -545,8 +545,10 @@ function profileHasNoStaticRuntimeConsumer() {
   }
   assert.deepEqual(
     consumers,
-    [],
-    'the SQL Server snapshot profile gained a runtime consumer',
+    [
+      'plugins/plugin-integration-core/lib/gip-sqlserver-snapshot-page-sequence-executor.cjs',
+    ],
+    'the SQL Server snapshot profile must have exactly one latent executor consumer',
   )
 }
 
@@ -561,11 +563,14 @@ function packageTestChainIncludesBothSuites() {
     'node __tests__/gip-sqlserver-snapshot-page-sequence-strategy.test.cjs'
   const profileCommand =
     'node __tests__/gip-sqlserver-snapshot-paged-read-profile.test.cjs'
+  const executorCommand =
+    'node __tests__/gip-sqlserver-snapshot-page-sequence-executor.test.cjs'
   const mainChain = packageJson.scripts.test.split(' && ')
 
-  assert.deepEqual(mainChain.slice(-2), [
+  assert.deepEqual(mainChain.slice(-3), [
     strategyCommand,
     profileCommand,
+    executorCommand,
   ])
   assert.equal(
     packageJson.scripts[
@@ -578,6 +583,12 @@ function packageTestChainIncludesBothSuites() {
       'test:gip-sqlserver-snapshot-paged-read-profile'
     ],
     profileCommand,
+  )
+  assert.equal(
+    packageJson.scripts[
+      'test:gip-sqlserver-snapshot-page-sequence-executor'
+    ],
+    executorCommand,
   )
 }
 

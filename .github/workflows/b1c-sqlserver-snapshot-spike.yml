@@ -12,6 +12,17 @@ on:
       - 'packages/core-backend/scripts/spike-b1c-*.ts'
       - 'packages/core-backend/scripts/spike-b1b-shared.ts'
       - 'packages/core-backend/package.json'
+      - 'plugins/plugin-integration-core/lib/gip-canonical-json.cjs'
+      - 'plugins/plugin-integration-core/lib/gip-inert-entry.cjs'
+      - 'plugins/plugin-integration-core/lib/gip-profile-certification-contracts.cjs'
+      - 'plugins/plugin-integration-core/lib/gip-sqlserver-snapshot-page-sequence-executor.cjs'
+      - 'plugins/plugin-integration-core/lib/gip-sqlserver-snapshot-page-sequence-strategy.cjs'
+      - 'plugins/plugin-integration-core/lib/gip-sqlserver-snapshot-paged-read-profile.cjs'
+      - 'plugins/plugin-integration-core/scripts/run-gip-sqlserver-snapshot-page-sequence-executor.cjs'
+      - 'plugins/plugin-integration-core/scripts/verify-b1c-sqlserver-snapshot-executor-evidence.cjs'
+      - 'plugins/plugin-integration-core/__tests__/gip-sqlserver-snapshot-page-sequence-executor.test.cjs'
+      - 'plugins/plugin-integration-core/__tests__/gip-sqlserver-snapshot-paged-read-profile.test.cjs'
+      - 'plugins/plugin-integration-core/package.json'
       - 'pnpm-lock.yaml'
       - '.github/workflows/b1c-sqlserver-snapshot-spike.yml'
 
@@ -67,11 +78,13 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run pure B1c schema, gate, transaction-binding, and loss-posture tests
-        run: >-
-          pnpm --filter @metasheet/core-backend exec vitest run
-          scripts/spike-b1c-shared.test.ts
-          scripts/spike-b1c-gate-check.test.ts
-          scripts/spike-b1c-sqlserver.test.ts
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            scripts/spike-b1c-shared.test.ts \
+            scripts/spike-b1c-gate-check.test.ts \
+            scripts/spike-b1c-sqlserver.test.ts
+          pnpm --filter plugin-integration-core \
+            test:gip-sqlserver-snapshot-page-sequence-executor
 
       - name: Wait for SQL Server
         run: |
@@ -96,6 +109,14 @@ jobs:
           B1B_SEED_ALLOW_WRITE: 'true'
           B1C_EVIDENCE_DIR: ${{ github.workspace }}/b1c-evidence-${{ matrix.mssql }}
         run: pnpm --filter @metasheet/core-backend exec tsx scripts/spike-b1c-sqlserver.ts
+
+      - name: Run latent B1c SQL Server SNAPSHOT executor path
+        env:
+          B1C_MSSQL_DECLARED_MAJOR_VERSION: ${{ matrix.mssql }}
+          B1C_EVIDENCE_DIR: ${{ github.workspace }}/b1c-evidence-${{ matrix.mssql }}
+        run: >-
+          pnpm --filter plugin-integration-core
+          evidence:gip-sqlserver-snapshot-page-sequence-executor
 
       - name: Upload values-free B1c evidence
         if: always()
@@ -155,3 +176,10 @@ jobs:
               {"dialect":"sqlserver","engineMajorVersion":"2022","capabilityPosture":"explicit_snapshot_transaction"}
             ]
         run: pnpm --filter @metasheet/core-backend exec tsx scripts/spike-b1c-gate-check.ts
+
+      - name: Verify latent executor evidence artifacts
+        env:
+          B1C_EVIDENCE_DIR: ${{ github.workspace }}/b1c-evidence-combined
+        run: >-
+          pnpm --filter plugin-integration-core
+          verify:gip-sqlserver-snapshot-page-sequence-executor-evidence

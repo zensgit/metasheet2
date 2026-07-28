@@ -2183,6 +2183,8 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     'gip-sqlserver-rcsi-total-order-strategy.cjs': 'sqlserverRcsi',
     'gip-sqlserver-snapshot-page-sequence-strategy.cjs':
       'sqlserverSnapshot',
+    'gip-sqlserver-snapshot-page-sequence-executor.cjs':
+      'sqlserverSnapshotExecutor',
   })
   // THE WALK IS PINNED IN BOTH DIRECTIONS. Round 7 asserted only that every DERIVED
   // module has an alias, which is one-directional: a module DROPPING OUT of the
