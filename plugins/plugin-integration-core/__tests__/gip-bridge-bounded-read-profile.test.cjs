@@ -37,6 +37,62 @@ const {
   GipProfileContractError,
 } = require(path.join(__dirname, '..', 'lib', 'gip-profile-certification-contracts.cjs'))
 
+// B1a-3 §4 step 1.5 RE-POINT: `verifyBindingQualification` no longer accepts a
+// caller-supplied `expectedInputs` tuple — both probe AND verify re-enter through the
+// resolver (§3.1 L371). This suite's digest-binding section is re-pointed at GENUINE
+// resolutions minted by the approved-binding resolver over the REAL config store. The
+// property under test is unchanged: `actionProfileVersion` binds into the digest, so
+// an old-lineage qualification does not verify against the current profile.
+const { createReadSourceConfigStore, __internals: bridgeStoreInternals } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
+const { validateReadSourceConfig: validateBridgeReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
+const {
+  createApprovedBindingResolver,
+  createHarnessSystemIdentityAuthorityForTests,
+  createHarnessCanonicalObjectAuthorityForTests,
+} = require(path.join(__dirname, '..', 'lib', 'gip-approved-binding-resolver.cjs'))
+
+// Mints a GENUINE resolution whose actionProfileVersion is the one under test.
+async function resolutionForProfile(actionProfileVersion) {
+  const body = {
+    version: 1,
+    systemId: 'sys-bridge',
+    object: 'obj_fixture',
+    mode: 'list_page',
+    requiredKind: 'erp_http',
+    operations: ['read'],
+    readPath: 'api/bridge',
+    readMethod: 'GET',
+    containerPaths: ['Data'],
+    fieldMap: [{ source: 'Id', target: 'id' }],
+    orderingKeySpec: [{ fieldId: 'id', direction: 'ASC' }],
+    actionProfileVersion,
+  }
+  const validated = validateBridgeReadSourceConfig(body)
+  assert.ok(validated.valid, `bridge fixture must validate: ${JSON.stringify(validated.errors)}`)
+  const stored = JSON.parse(JSON.stringify(validated.normalized))
+  stored.version = 1
+  const row = {
+    id: 'cfg-bridge', tenant_id: 't-1', workspace_id: null, system_id: 'sys-bridge',
+    object: 'obj_fixture', mode: 'list_page', config: stored,
+    content_key: bridgeStoreInternals.contentKeyFor(validated.normalized), version: 1, status: 'approved',
+  }
+  const db = {
+    async selectOne(_t, where) { return Object.keys(where).every((k) => row[k] === where[k]) ? row : null },
+    async select() { return [] },
+    async insertOne() { return null },
+    async updateRow() { return null },
+    async transaction(fn) { return fn(this) },
+  }
+  const resolver = createApprovedBindingResolver({
+    configStore: createReadSourceConfigStore({ db }),
+    systemIdentityAuthority: createHarnessSystemIdentityAuthorityForTests({ 'sys-bridge': 'sys_fixture' }),
+    canonicalObjectAuthority: createHarnessCanonicalObjectAuthorityForTests([
+      { contractId: 'obj_fixture', contractVersion: actionProfileVersion, canonicalObjectVersion: 'material.v1' },
+    ]),
+  })
+  return resolver.resolveApprovedBinding({ tenantId: 't-1', workspaceId: null, approvedConfigVersionId: 'cfg-bridge' })
+}
+
 const {
   computeQualificationDigest,
   computeEnvelopeMac,
@@ -460,13 +516,19 @@ async function adapterReachabilityPin() {
 //   single BOUNDED_READ has no cross-page order, so it is intentionally NOT exercised.
 //   What IS exercised: this profile's actionProfileVersion binds into the qualification
 //   digest (the input-binding property the run layer relies on).
-function qualificationDigestBinding() {
+async function qualificationDigestBinding() {
   const envelopeKey = { keyId: 'kbr2026', secret: Buffer.alloc(32, 5) }
+  // The five digest inputs now come FROM A GENUINE RESOLUTION rather than from a
+  // hand-written tuple — which is exactly the property §4 step 1.5 turned on.
+  const resolution = await resolutionForProfile(BRIDGE_BOUNDED_READ_PROFILE.actionProfileVersion)
   const inputs = {
-    actionProfileVersion: BRIDGE_BOUNDED_READ_PROFILE.actionProfileVersion,
-    systemContentKey: 'sys_fixture', configContentKey: 'cfg_fixture',
-    objectKey: 'obj_fixture', canonicalObjectVersion: 'material.v1',
+    actionProfileVersion: resolution.actionProfileVersion,
+    systemContentKey: resolution.systemContentKey,
+    configContentKey: resolution.configContentKey,
+    objectKey: resolution.objectKey,
+    canonicalObjectVersion: resolution.canonicalObjectVersion,
   }
+  assert.equal(inputs.actionProfileVersion, BRIDGE_BOUNDED_READ_PROFILE.actionProfileVersion)
   const evidence = { profileVersion: BRIDGE_BOUNDED_READ_PROFILE.actionProfileVersion, usedCompletenessProofs: ['SHORT_PAGE'] }
   const qualificationDigest = computeQualificationDigest({ ...inputs, evidence })
   const expiresAt = '2027-01-01T00:00:00Z'
@@ -478,7 +540,7 @@ function qualificationDigestBinding() {
     evidence,
     expiresAt,
   }
-  const verified = verifyBindingQualification({ qualification, expectedInputs: inputs, envelopeKey, now: '2026-07-23T00:00:00Z' })
+  const verified = verifyBindingQualification({ qualification, resolution, envelopeKey, now: '2026-07-23T00:00:00Z' })
   assert.equal(verified.verified, true)
   assert.equal(verified.qualificationDigest, qualificationDigest)
 
@@ -508,16 +570,20 @@ function qualificationDigestBinding() {
   }
   let oldCaught = null
   try {
-    verifyBindingQualification({ qualification: oldQualification, expectedInputs: inputs, envelopeKey, now: '2026-07-23T00:00:00Z' })
+    verifyBindingQualification({ qualification: oldQualification, resolution, envelopeKey, now: '2026-07-23T00:00:00Z' })
   } catch (error) { oldCaught = error }
   assert.ok(oldCaught instanceof GipQualificationError && oldCaught.reason === 'QUALIFICATION_DIGEST_MISMATCH',
     'an old v1 qualification must NOT verify against the current v2 profile — the fail-open lineage is invalidated')
 
   // input binding still holds generally: any OTHER version (a hypothetical future v3) also fails.
+  const futureResolution = await resolutionForProfile('bridge.bounded_read.v3')
   let caught = null
   try {
+    // A DIFFERENT profile version is now demonstrated with a SECOND GENUINE
+    // resolution rather than by editing a caller tuple — strictly stronger, since
+    // the caller tuple no longer exists.
     verifyBindingQualification({
-      qualification, expectedInputs: { ...inputs, actionProfileVersion: 'bridge.bounded_read.v3' },
+      qualification, resolution: futureResolution,
       envelopeKey, now: '2026-07-23T00:00:00Z',
     })
   } catch (error) { caught = error }
@@ -533,7 +599,7 @@ async function main() {
   adjudication()
   driftGuard()
   await adapterReachabilityPin()
-  qualificationDigestBinding()
+  await qualificationDigestBinding()
   console.log('gip-bridge-bounded-read-profile.test.cjs OK')
 }
 
