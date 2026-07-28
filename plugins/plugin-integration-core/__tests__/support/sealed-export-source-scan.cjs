@@ -61,7 +61,7 @@ try {
   )
 }
 
-const SEALED_EXPORT_SOURCE_SCAN_VERSION = 'sealed-export/source-scan/ast-binding-v2'
+const SEALED_EXPORT_SOURCE_SCAN_VERSION = 'sealed-export/source-scan/ast-binding-v3'
 
 const FAIL_SEALED_EXPORT = 'failSealedExport'
 
@@ -75,9 +75,11 @@ function defaultParse(name, text) {
 
 // Parent pointers are NOT requested from the parser (a parseOverride may return anything),
 // so the parent is threaded explicitly by the walker.
-function walkWithParent(node, parent, visit) {
-  visit(node, parent)
-  node.forEachChild((child) => walkWithParent(child, node, visit))
+function walkWithParent(node, parent, visit, ancestors = []) {
+  visit(node, parent, ancestors)
+  ancestors.push(node)
+  node.forEachChild((child) => walkWithParent(child, node, visit, ancestors))
+  ancestors.pop()
 }
 
 // Strip parentheses / `as T` / `<T>x` / `x!` so `(fail)('X')` still resolves to `fail`.
@@ -244,18 +246,68 @@ function collectVocabularyNamespaces(sourceFile) {
 
 // A bound name used anywhere other than as a callee, a declaration/binding name, a member
 // NAME, or the right-hand side of an alias, has escaped this resolver's reach.
-function isTrackedUse(node, parent, bound) {
+function isTrackedUse(node, parent, ancestors, bound) {
   if (parent === null) return true
-  if (ts.isCallExpression(parent) && unwrap(parent.expression) === node) return true
-  if (ts.isVariableDeclaration(parent)) return true
+  const { outer, use } = outerUse(node, parent, ancestors)
+  if (use && ts.isCallExpression(use) && unwrap(use.expression) === unwrap(outer)) return true
+  if (ts.isVariableDeclaration(parent) && parent.name === node) return true
+  if (use && ts.isVariableDeclaration(use) && use.initializer
+    && unwrap(use.initializer) === unwrap(outer)) return true
   if (ts.isBindingElement(parent)) return true
   if (ts.isImportSpecifier(parent) || ts.isImportClause(parent)) return true
   if (ts.isFunctionDeclaration(parent) || ts.isFunctionExpression(parent)) return true
   if (ts.isPropertyAccessExpression(parent) && parent.name === node) return true
-  if (ts.isBinaryExpression(parent)
-    && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+  if (use && ts.isBinaryExpression(use)
+    && use.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
     // Either side of an alias assignment is tracked; the left side is added to `bound`.
-    return ts.isIdentifier(unwrap(parent.left)) ? bound.has(unwrap(parent.left).text) : false
+    return ts.isIdentifier(unwrap(use.left)) ? bound.has(unwrap(use.left).text) : false
+  }
+  return false
+}
+
+function isTransparentExpressionWrapper(node, child) {
+  return node.expression === child && (
+    ts.isParenthesizedExpression(node)
+    || (ts.isAsExpression && ts.isAsExpression(node))
+    || ts.isNonNullExpression(node)
+    || (ts.isTypeAssertionExpression && ts.isTypeAssertionExpression(node))
+  )
+}
+
+// Returns the first use outside transparent expression wrappers. The parser is intentionally
+// created without parent pointers, so the explicit ancestor stack from walkWithParent() is the
+// only trustworthy way to distinguish `(v.failSealedExport)('X')` from an escaping value.
+function outerUse(node, parent, ancestors) {
+  let outer = node
+  let use = parent
+  let ancestorIndex = ancestors.length - 2
+  while (use && isTransparentExpressionWrapper(use, outer)) {
+    outer = use
+    use = ancestorIndex >= 0 ? ancestors[ancestorIndex] : null
+    ancestorIndex -= 1
+  }
+  return { outer, use }
+}
+
+// A static member read of failSealedExport is safe for this syntactic resolver only when the
+// member is called directly or is captured by one of the alias forms collectFailBindings() owns.
+// `.call/.apply/.bind`, Reflect.apply, arguments, returns and container storage all move the
+// function value outside that model and therefore must be reported as an escape.
+function isTrackedMemberUse(node, parent, ancestors, bound) {
+  const { outer, use } = outerUse(node, parent, ancestors)
+  if (use === null) return false
+  if (ts.isCallExpression(use) && unwrap(use.expression) === unwrap(outer)) return true
+  if (ts.isVariableDeclaration(use)
+    && use.initializer
+    && unwrap(use.initializer) === unwrap(outer)
+    && ts.isIdentifier(use.name)) {
+    return bound.has(use.name.text)
+  }
+  if (ts.isBinaryExpression(use)
+    && use.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    && unwrap(use.right) === unwrap(outer)
+    && ts.isIdentifier(unwrap(use.left))) {
+    return bound.has(unwrap(use.left).text)
   }
   return false
 }
@@ -332,12 +384,18 @@ function scanSealedExportThrowSites(sources, declaredReasons, allowedThrowModule
     let throwCount = 0
     const seenUnresolvableCallee = new Set()
     const seenEscape = new Set()
-    walkWithParent(sourceFile, null, (node, parent) => {
+    walkWithParent(sourceFile, null, (node, parent, ancestors) => {
       if (ts.isThrowStatement(node)) throwCount += 1
 
       if (ts.isIdentifier(node) && bound.has(node.text) && !isDeclaringModule
-        && !isTrackedUse(node, parent, bound)) {
+        && !isTrackedUse(node, parent, ancestors, bound)) {
         seenEscape.add(node.text)
+      }
+
+      const member = staticMemberRead(node)
+      if (member.kind === 'static' && member.name === FAIL_SEALED_EXPORT && !isDeclaringModule
+        && !isTrackedMemberUse(node, parent, ancestors, bound)) {
+        seenEscape.add(FAIL_SEALED_EXPORT)
       }
 
       if (!ts.isCallExpression(node)) return

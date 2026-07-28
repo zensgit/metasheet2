@@ -436,6 +436,43 @@ function astScanMatchesBindingsNotNames() {
   assert.equal(escapes.findings.length, 1, 'a bound name used as a value must be reported')
   assert.equal(escapes.findings[0].checkId, 'THROW_SITE_BINDING_ESCAPES')
 
+  // A member read is itself a function value. Direct invocation and the two alias forms
+  // above are the only uses this resolver follows; invocation helpers and containers escape
+  // that model and must fail loud rather than looking like a clean source file.
+  const assertMemberEscape = (label, body) => {
+    const result = scan([{
+      name: 'synthetic.cjs',
+      text: 'const v = ' + REQUIRE + '\n' + body + '\n',
+    }])
+    assert.equal(result.findings.length, 1, label + ': exactly one escape finding')
+    assert.equal(result.findings[0].checkId, 'THROW_SITE_BINDING_ESCAPES', label)
+  }
+  assertMemberEscape('.call', "v.failSealedExport.call(null, 'NOT_DECLARED')")
+  assertMemberEscape('.apply', "v.failSealedExport.apply(null, ['NOT_DECLARED'])")
+  assertMemberEscape('.bind', "const fail = v.failSealedExport.bind(null)\nfail('NOT_DECLARED')")
+  assertMemberEscape('Reflect.apply', "Reflect.apply(v.failSealedExport, null, ['NOT_DECLARED'])")
+  assertMemberEscape('array storage', 'const values = [v.failSealedExport]\nmodule.exports = values')
+  assertMemberEscape('object storage', 'const values = { fail: v.failSealedExport }\nmodule.exports = values')
+
+  // Wrapper syntax must not turn the two supported forms into false escapes.
+  const wrappedDirect = scan([{
+    name: 'synthetic.cjs',
+    text: 'const v = ' + REQUIRE + ";\n(v.failSealedExport)('SEALED_EXPORT_MANIFEST_INVALID')\n",
+  }])
+  assert.deepEqual(wrappedDirect.findings, [], 'a parenthesized direct call remains resolved')
+  const wrappedAlias = scan([{
+    name: 'synthetic.cjs',
+    text: 'const v = ' + REQUIRE
+      + "\nconst fail = (v.failSealedExport)\nfail('SEALED_EXPORT_MANIFEST_INVALID')\n",
+  }])
+  assert.deepEqual(wrappedAlias.findings, [], 'a parenthesized alias remains resolved')
+  const wrappedIdentifier = scan([{
+    name: 'synthetic.cjs',
+    text: 'const { failSealedExport: fail } = ' + REQUIRE
+      + ";\n(fail)('SEALED_EXPORT_MANIFEST_INVALID')\n",
+  }])
+  assert.deepEqual(wrappedIdentifier.findings, [], 'a parenthesized bound identifier remains resolved')
+
   // …and a computed member read OF THE VOCABULARY MODULE is an unreadable binding form.
   const computedAlias = scan([{
     name: 'synthetic.cjs',
