@@ -51,6 +51,14 @@ const workNotificationMocks = vi.hoisted(() => ({
   testDingTalkWorkNotificationAgentId: vi.fn(),
 }))
 
+const deprovisionMocks = vi.hoisted(() => ({
+  listDeprovisionEffects: vi.fn(),
+  listDeprovisionEvents: vi.fn(),
+  previewDeprovisionForUser: vi.fn(),
+  readDeprovisionRuntimeFlags: vi.fn(),
+  restoreDeprovisionEvent: vi.fn(),
+}))
+
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isRbacAdmin,
 }))
@@ -128,6 +136,14 @@ vi.mock('../../src/integrations/dingtalk/approval-card-config', () => ({
   generateApprovalCardLinkSecret: approvalCardConfigMocks.generateApprovalCardLinkSecret,
   getApprovalCardConfigStatus: approvalCardConfigMocks.getApprovalCardConfigStatus,
   saveApprovalCardPublicAppUrl: approvalCardConfigMocks.saveApprovalCardPublicAppUrl,
+}))
+
+vi.mock('../../src/directory/deprovision-evidence-api', () => ({
+  listDeprovisionEffects: deprovisionMocks.listDeprovisionEffects,
+  listDeprovisionEvents: deprovisionMocks.listDeprovisionEvents,
+  previewDeprovisionForUser: deprovisionMocks.previewDeprovisionForUser,
+  readDeprovisionRuntimeFlags: deprovisionMocks.readDeprovisionRuntimeFlags,
+  restoreDeprovisionEvent: deprovisionMocks.restoreDeprovisionEvent,
 }))
 
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
@@ -233,6 +249,39 @@ describe('adminDirectoryRouter', () => {
     approvalCardConfigMocks.generateApprovalCardLinkSecret.mockReset()
     approvalCardConfigMocks.getApprovalCardConfigStatus.mockReset()
     approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockReset()
+    deprovisionMocks.listDeprovisionEffects.mockReset()
+    deprovisionMocks.listDeprovisionEvents.mockReset()
+    deprovisionMocks.previewDeprovisionForUser.mockReset()
+    deprovisionMocks.readDeprovisionRuntimeFlags.mockReset()
+    deprovisionMocks.restoreDeprovisionEvent.mockReset()
+  })
+
+  it('maps a superseded or already-restored deprovision event to 409 without auditing success', async () => {
+    deprovisionMocks.restoreDeprovisionEvent.mockRejectedValue(
+      Object.assign(new Error('Deprovision event is no longer applied'), {
+        code: 'EVENT_NOT_APPLIED',
+      }),
+    )
+
+    const response = await invokeRoute(
+      'post',
+      '/deprovision/events/:eventId/restore',
+      {
+        params: { eventId: 'event-1' },
+        body: { mode: 'rehire' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'EVENT_NOT_APPLIED',
+        message: 'Deprovision event is no longer applied',
+      },
+    })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
   describe('approval-card config (CFG-2)', () => {

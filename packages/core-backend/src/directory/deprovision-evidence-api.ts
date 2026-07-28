@@ -3,6 +3,7 @@
  */
 
 import { query, transaction } from '../db/pg'
+import { invalidateUserPerms } from '../rbac/service'
 import {
   planDirectoryDeprovision,
   type DirectoryDeprovisionPolicy,
@@ -169,40 +170,29 @@ export async function listDeprovisionEffects(eventId: string) {
   return result.rows
 }
 
-async function loadEventBundle(eventId: string) {
-  const ev = await query<{
-    id: string
-    local_user_id: string
-    access_generation_at_apply: number
-    status: string
-    directory_account_id: string
-  }>(
-    `SELECT id, local_user_id, access_generation_at_apply, status, directory_account_id
-       FROM directory_deprovision_events WHERE id = $1`,
-    [eventId],
-  )
-  if (!ev.rows[0]) {
-    const err = new Error('Deprovision event not found')
-    ;(err as Error & { code?: string }).code = 'EVENT_NOT_FOUND'
-    throw err
-  }
-  const effects = await listDeprovisionEffects(eventId)
-  return { event: ev.rows[0], effects }
+type RestoreEventRow = {
+  access_generation_at_apply: string | number
+  directory_account_id: string
+  id: string
+  integration_id: string
+  local_user_id: string
+  status: string
 }
 
-async function isDirectorySourceActive(directoryAccountId: string): Promise<boolean> {
-  const r = await query<{ account_active: boolean; integration_status: string }>(
-    `SELECT COALESCE(da.is_active, FALSE) AS account_active,
-            COALESCE(di.status, '') AS integration_status
-       FROM directory_accounts da
-       JOIN directory_integrations di ON di.id = da.integration_id
-      WHERE da.id::text = $1 OR da.id = $1::uuid
-      LIMIT 1`,
-    [directoryAccountId],
-  ).catch(() => ({ rows: [] as Array<{ account_active: boolean; integration_status: string }> }))
-  const row = r.rows[0]
-  if (!row) return false
-  return row.account_active === true && String(row.integration_status).toLowerCase() === 'active'
+type RestoreEffectRow = {
+  access_generation_at_apply: string | number
+  after_active: boolean
+  before_active: boolean
+  effect_type: string
+  id: string
+  org_id: string | null
+  status: string
+}
+
+function restoreError(code: string, message: string): Error {
+  const error = new Error(message)
+  ;(error as Error & { code?: string }).code = code
+  return error
 }
 
 /**
@@ -228,166 +218,360 @@ export async function restoreDeprovisionEvent(options: {
     }
   }
 
-  const { event, effects } = await loadEventBundle(options.eventId)
-  const applied = effects.filter((e: any) => e.status === 'applied') as Array<{
-    id: string
-    status: string
-    after_active: boolean
-    access_generation_at_apply: number
-    effect_type: string
-    org_id: string | null
-  }>
-
-  const user = await query<{ is_active: boolean; access_generation: number }>(
-    `SELECT COALESCE(is_active, TRUE) AS is_active,
-            COALESCE(access_generation, 0) AS access_generation
-       FROM users WHERE id = $1`,
-    [event.local_user_id],
-  )
-  if (!user.rows[0]) {
-    const err = new Error('User not found')
-    ;(err as Error & { code?: string }).code = 'USER_NOT_FOUND'
-    throw err
-  }
-
-  const sourceActive = await isDirectorySourceActive(event.directory_account_id)
-
-  const effectViews: RestoreEffectView[] = applied.map((e) => ({
-    id: e.id,
-    status: e.status,
-    afterActive: e.after_active,
-    accessGenerationAtApply: Number(e.access_generation_at_apply),
-    effectType: e.effect_type,
-  }))
-
-  const currentMatchesAfter: Record<string, boolean> = {}
-  for (const e of applied) {
-    if (e.effect_type === 'user_changed') {
-      // after_active false means user should still be inactive for restore eligibility
-      currentMatchesAfter[e.id] = user.rows[0].is_active === false
-    } else if (e.effect_type === 'membership_changed') {
-      // DRIFT GATE — must fail closed. Swallowing this read turned a failed query into
-      // "0 active memberships", which reads as "current state matches after_active=false":
-      // the gate was satisfied BY ITS OWN FAILURE and could never fire on this leg. Same
-      // defect class as the phantom grant column fixed in #4587; a gate read that cannot
-      // complete must abort the restore, not wave it through.
-      const org = await query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM user_orgs
-          WHERE user_id = $1 AND org_id = $2 AND COALESCE(is_active, TRUE) = TRUE`,
-        [event.local_user_id, e.org_id],
-      )
-      // after false → no active membership
-      currentMatchesAfter[e.id] = (org.rows[0]?.n ?? 0) === 0
-    } else if (e.effect_type === 'grant_changed') {
-      // This is a DRIFT GATE, so it must fail closed. Reading the phantom column and catching the
-      // error yielded "no grant", which reads as "current state matches after_active=false" — the
-      // gate was satisfied *by the read failing*, so it could never fire, and a grant that was
-      // genuinely still enabled sailed straight through as if there were no drift.
-      const g = await query<{ enabled: boolean }>(
-        `SELECT enabled
-           FROM user_external_auth_grants
-          WHERE local_user_id = $1 AND provider = 'dingtalk' LIMIT 1`,
-        [event.local_user_id],
-      )
-      currentMatchesAfter[e.id] = g.rows[0]?.enabled !== true
-    } else {
-      const err = new Error(`Unsupported deprovision effect type: ${e.effect_type}`)
-      ;(err as Error & { code?: string }).code = 'EFFECT_TYPE_UNSUPPORTED'
-      throw err
+  const restored = await transaction(async (client) => {
+    // Event identity is DB-immutable. Read only the owner first so the canonical
+    // users-row mutex remains the first blocking lock shared with every other
+    // access-graph writer.
+    const ownerResult = await client.query(
+      `SELECT local_user_id
+         FROM directory_deprovision_events
+        WHERE id = $1::uuid`,
+      [options.eventId],
+    )
+    const eventOwner = String(ownerResult.rows[0]?.local_user_id ?? '')
+    if (!eventOwner) {
+      throw restoreError('EVENT_NOT_FOUND', 'Deprovision event not found')
     }
-  }
 
-  const eligibility = evaluateDeprovisionRestoreEligibility({
-    mode: options.mode,
-    directorySourceActive: sourceActive,
-    currentUserAccessGeneration: Number(user.rows[0].access_generation),
-    eventAccessGeneration: Number(event.access_generation_at_apply),
-    effects: effectViews,
-    currentMatchesAfter,
-  })
+    const userResult = await client.query(
+      `SELECT id,
+              email,
+              username,
+              mobile,
+              activation_status,
+              COALESCE(is_active, TRUE) AS is_active,
+              COALESCE(access_generation, 0) AS access_generation
+         FROM users
+        WHERE id = $1::text
+        FOR UPDATE`,
+      [eventOwner],
+    )
+    const user = userResult.rows[0] as
+      | {
+          access_generation: string | number
+          activation_status: string | null
+          email: string | null
+          id: string
+          is_active: boolean
+          mobile: string | null
+          username: string | null
+        }
+      | undefined
+    if (!user) throw restoreError('USER_NOT_FOUND', 'User not found')
 
-  if (eligibility.ok === false) {
-    const err = new Error(eligibility.message)
-    ;(err as Error & { code?: string }).code =
-      eligibility.code === 'DRIFT' ? 'DRIFT_CONFLICT' : eligibility.code
-    throw err
-  }
+    const eventResult = await client.query(
+      `SELECT id::text AS id,
+              integration_id::text AS integration_id,
+              directory_account_id::text AS directory_account_id,
+              local_user_id,
+              access_generation_at_apply,
+              status
+         FROM directory_deprovision_events
+        WHERE id = $1::uuid
+        FOR UPDATE`,
+      [options.eventId],
+    )
+    const event = eventResult.rows[0] as RestoreEventRow | undefined
+    if (!event) {
+      throw restoreError('EVENT_NOT_FOUND', 'Deprovision event not found')
+    }
+    if (event.local_user_id !== eventOwner) {
+      throw restoreError(
+        'DRIFT_CONFLICT',
+        'Deprovision event owner changed while acquiring the user mutex',
+      )
+    }
+    if (event.status !== 'applied') {
+      throw restoreError(
+        'EVENT_NOT_APPLIED',
+        'Deprovision event is no longer applied',
+      )
+    }
 
-  await transaction(async (client) => {
-    await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [event.local_user_id])
+    const effectsResult = await client.query(
+      `SELECT id::text AS id,
+              effect_type,
+              org_id,
+              before_active,
+              after_active,
+              access_generation_at_apply,
+              status
+         FROM directory_deprovision_effects
+        WHERE event_id = $1::uuid
+        ORDER BY id
+        FOR UPDATE`,
+      [options.eventId],
+    )
+    const effects = effectsResult.rows as RestoreEffectRow[]
+    const applied = effects.filter((effect) => effect.status === 'applied')
+    if (effects.some((effect) => effect.status !== 'applied')) {
+      throw restoreError(
+        'EVENT_NOT_APPLIED',
+        'Deprovision event has effects that are no longer applied',
+      )
+    }
 
-    for (const e of applied) {
-      if (e.effect_type === 'user_changed') {
-        await client.query(
-          `UPDATE users SET is_active = TRUE, updated_at = NOW() WHERE id = $1`,
+    let sourceActive = false
+    if (options.mode === 'rehire') {
+      const sourceResult = await client.query(
+        `SELECT account.is_active AS account_active,
+                integration.status AS integration_status,
+                link.link_status = 'linked' AS link_matches
+           FROM directory_accounts account
+           JOIN directory_integrations integration
+             ON integration.id = account.integration_id
+           JOIN directory_account_links link
+             ON link.directory_account_id = account.id
+            AND link.local_user_id = $3::text
+          WHERE account.id = $1::uuid
+            AND integration.id = $2::uuid
+          FOR SHARE OF account, integration, link`,
+        [
+          event.directory_account_id,
+          event.integration_id,
+          event.local_user_id,
+        ],
+      )
+      const source = sourceResult.rows[0] as
+        | {
+            account_active: boolean
+            integration_status: string
+            link_matches: boolean
+          }
+        | undefined
+      sourceActive =
+        source?.account_active === true
+        && String(source.integration_status).toLowerCase() === 'active'
+        && source.link_matches === true
+    }
+
+    const currentMatchesAfter: Record<string, boolean> = {}
+    for (const effect of applied) {
+      if (effect.effect_type === 'user_changed') {
+        currentMatchesAfter[effect.id] =
+          user.is_active === effect.after_active
+      } else if (effect.effect_type === 'membership_changed') {
+        if (!effect.org_id) {
+          throw restoreError(
+            'EFFECT_TYPE_UNSUPPORTED',
+            'membership_changed effect is missing org_id',
+          )
+        }
+        const membership = await client.query(
+          `SELECT COALESCE(is_active, TRUE) AS is_active
+             FROM user_orgs
+            WHERE user_id = $1::text AND org_id = $2::text`,
+          [event.local_user_id, effect.org_id],
+        )
+        currentMatchesAfter[effect.id] =
+          (membership.rows[0]?.is_active === true) === effect.after_active
+      } else if (effect.effect_type === 'grant_changed') {
+        const grant = await client.query(
+          `SELECT enabled
+             FROM user_external_auth_grants
+            WHERE local_user_id = $1::text
+              AND provider = 'dingtalk'
+            LIMIT 1`,
           [event.local_user_id],
         )
-      } else if (e.effect_type === 'membership_changed' && e.org_id) {
-        // `user_orgs` is (user_id, org_id, is_active, created_at) — there is no `updated_at`.
-        // Setting one raised `42703`, which the `.catch` hid; the aborted transaction then failed
-        // the very next statement with `25P02`, so restoring ANY event carrying a membership
-        // effect — which is every real deprovision event — rolled back entirely. The sibling
-        // writer in `directory-sync.ts` gets this right; only this path invented the column.
-        // Same reasoning as the grant leg: a restore that cannot give membership back must fail
-        // loudly, not report a success the admin will act on.
-        const mem = await client.query(
-          `UPDATE user_orgs SET is_active = TRUE
-            WHERE user_id = $1 AND org_id = $2
-            RETURNING user_id`,
-          [event.local_user_id, e.org_id],
-        )
-        if (!mem.rows[0]) {
-          const err = new Error(
-            `membership row missing for org ${e.org_id}; cannot reverse membership_changed`,
-          )
-          ;(err as Error & { code?: string }).code = 'DRIFT_CONFLICT'
-          throw err
-        }
-      } else if (e.effect_type === 'grant_changed') {
-        // Upsert, not UPDATE: deprovision may have created the disabled row itself, and a restore
-        // that silently matched zero rows would report success while the person stayed locked
-        // out. The `.catch` is gone for the same reason it was wrong on the read — it could not
-        // make the failure harmless, only turn it into `25P02` on the next statement, which is
-        // what made every event carrying a grant effect unrestorable.
-        await client.query(
-          `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-           VALUES ('dingtalk', $1, TRUE, $2, NOW(), NOW())
-           ON CONFLICT (provider, local_user_id)
-           DO UPDATE SET enabled = TRUE,
-                         granted_by = EXCLUDED.granted_by,
-                         updated_at = NOW()`,
-          [event.local_user_id, `restore:${options.adminUserId}`],
+        currentMatchesAfter[effect.id] =
+          (grant.rows[0]?.enabled === true) === effect.after_active
+      } else {
+        throw restoreError(
+          'EFFECT_TYPE_UNSUPPORTED',
+          `Unsupported deprovision effect type: ${effect.effect_type}`,
         )
       }
-      await client.query(
-        `UPDATE directory_deprovision_effects
-            SET status = 'reversed', reversed_at = NOW(), updated_at = NOW()
-          WHERE id = $1`,
-        [e.id],
+    }
+
+    const effectViews: RestoreEffectView[] = effects.map((effect) => ({
+      id: effect.id,
+      status: effect.status,
+      afterActive: effect.after_active,
+      accessGenerationAtApply: Number(effect.access_generation_at_apply),
+      effectType: effect.effect_type,
+    }))
+    const eventGeneration = Number(event.access_generation_at_apply)
+    const eligibility = evaluateDeprovisionRestoreEligibility({
+      mode: options.mode,
+      directorySourceActive: sourceActive,
+      currentUserAccessGeneration: Number(user.access_generation),
+      eventAccessGeneration: eventGeneration,
+      effects: effectViews,
+      currentMatchesAfter,
+    })
+    if (eligibility.ok === false) {
+      throw restoreError(
+        eligibility.code === 'DRIFT'
+          ? 'DRIFT_CONFLICT'
+          : eligibility.code,
+        eligibility.message,
       )
     }
 
-    await client.query(
+    for (const effect of applied) {
+      if (effect.effect_type === 'user_changed') {
+        const changed = await client.query(
+          `UPDATE users
+              SET is_active = $2::boolean, updated_at = NOW()
+            WHERE id = $1::text
+              AND COALESCE(is_active, TRUE) IS NOT DISTINCT FROM $3::boolean
+            RETURNING id`,
+          [event.local_user_id, effect.before_active, effect.after_active],
+        )
+        if (!changed.rows[0]) {
+          throw restoreError(
+            'DRIFT_CONFLICT',
+            'User active state changed before restore',
+          )
+        }
+      } else if (effect.effect_type === 'membership_changed') {
+        const changed = await client.query(
+          `UPDATE user_orgs
+              SET is_active = $3::boolean
+            WHERE user_id = $1::text
+              AND org_id = $2::text
+              AND COALESCE(is_active, TRUE) IS NOT DISTINCT FROM $4::boolean
+            RETURNING user_id`,
+          [
+            event.local_user_id,
+            effect.org_id,
+            effect.before_active,
+            effect.after_active,
+          ],
+        )
+        if (!changed.rows[0]) {
+          throw restoreError(
+            'DRIFT_CONFLICT',
+            `membership row missing or changed for org ${effect.org_id}`,
+          )
+        }
+      } else if (effect.effect_type === 'grant_changed') {
+        const changed = await client.query(
+          `INSERT INTO user_external_auth_grants (
+             provider, local_user_id, enabled, granted_by, created_at, updated_at
+           ) VALUES ('dingtalk', $1::text, $2::boolean, $3::text, NOW(), NOW())
+           ON CONFLICT (provider, local_user_id)
+           DO UPDATE SET enabled = EXCLUDED.enabled,
+                         granted_by = EXCLUDED.granted_by,
+                         updated_at = NOW()
+                 WHERE user_external_auth_grants.enabled
+                       IS NOT DISTINCT FROM $4::boolean
+           RETURNING local_user_id`,
+          [
+            event.local_user_id,
+            effect.before_active,
+            `restore:${options.adminUserId}`,
+            effect.after_active,
+          ],
+        )
+        if (!changed.rows[0]) {
+          throw restoreError(
+            'DRIFT_CONFLICT',
+            'DingTalk grant state changed before restore',
+          )
+        }
+      }
+
+      const reversed = await client.query(
+        `UPDATE directory_deprovision_effects
+            SET status = 'reversed',
+                reversed_at = NOW(),
+                reversed_by = $3::text,
+                updated_at = NOW()
+          WHERE id = $1::uuid
+            AND event_id = $2::uuid
+            AND status = 'applied'
+            AND access_generation_at_apply = $4::bigint
+          RETURNING id`,
+        [
+          effect.id,
+          options.eventId,
+          options.adminUserId,
+          eventGeneration,
+        ],
+      )
+      if (!reversed.rows[0]) {
+        throw restoreError(
+          'DRIFT_CONFLICT',
+          `effect ${effect.id} changed before restore`,
+        )
+      }
+    }
+
+    const generation = await client.query(
       `UPDATE users
           SET access_generation = COALESCE(access_generation, 0) + 1,
               updated_at = NOW()
-        WHERE id = $1`,
-      [event.local_user_id],
+        WHERE id = $1::text
+          AND COALESCE(access_generation, 0) = $2::bigint
+        RETURNING access_generation`,
+      [event.local_user_id, eventGeneration],
     )
+    if (!generation.rows[0]) {
+      throw restoreError(
+        'DRIFT_CONFLICT',
+        'access_generation changed before restore completion',
+      )
+    }
 
-    await client.query(
+    const resolved = await client.query(
       `UPDATE directory_deprovision_events
-          SET status = 'fully_resolved', updated_at = NOW()
-        WHERE id = $1`,
-      [options.eventId],
+          SET status = 'fully_resolved',
+              resolved_at = NOW(),
+              resolved_by = $2::text,
+              resolve_note = $3::text,
+              restore_mode = $4::text,
+              updated_at = NOW()
+        WHERE id = $1::uuid
+          AND status = 'applied'
+          AND access_generation_at_apply = $5::bigint
+        RETURNING id`,
+      [
+        options.eventId,
+        options.adminUserId,
+        options.mode === 'admin_force'
+          ? options.note!.trim()
+          : 'rehire restore after the directory source became active',
+        options.mode,
+        eventGeneration,
+      ],
     )
+    if (!resolved.rows[0]) {
+      throw restoreError(
+        'DRIFT_CONFLICT',
+        'Deprovision event changed before restore completion',
+      )
+    }
+
+    return {
+      event,
+      effectsReversed: applied.map((effect) => effect.effect_type),
+      localUser: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        mobile: user.mobile,
+        isActive:
+          applied.find((effect) => effect.effect_type === 'user_changed')
+            ?.before_active ?? user.is_active,
+        activationStatus: user.activation_status,
+      },
+      restoredEffectCount: applied.length,
+    }
   })
+  invalidateUserPerms(restored.event.local_user_id)
 
   return {
     eventId: options.eventId,
-    mode: options.mode,
-    restoredEffectCount: applied.length,
-    localUserId: event.local_user_id,
+    restoreMode: options.mode,
+    restoredEffectCount: restored.restoredEffectCount,
+    localUserId: restored.event.local_user_id,
+    localUser: restored.localUser,
+    effectsReversed: restored.effectsReversed,
+    passwordUnchanged: true,
+    passwordResetHint:
+      'Use the existing administrator password-reset flow when local credentials need to change.',
     note: options.note ?? null,
     adminUserId: options.adminUserId,
   }

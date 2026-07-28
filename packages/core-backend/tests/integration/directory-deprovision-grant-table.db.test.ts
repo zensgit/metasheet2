@@ -1,6 +1,8 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import { Client } from 'pg'
 import { query } from '../../src/db/pg'
 import { activatePendingUser } from '../../src/auth/user-activate'
+import { supersedeDeprovisionEvidenceForAccessGraphWrite } from '../../src/directory/access-graph-mutex'
 import { restoreDeprovisionEvent } from '../../src/directory/deprovision-evidence-api'
 
 /**
@@ -109,6 +111,96 @@ const grantRow = async (): Promise<{ enabled: boolean; granted_by: string | null
 
 const grantEnabled = async (): Promise<boolean | undefined> => (await grantRow())?.enabled
 
+async function waitForRestoreWaiters(
+  holderPid: number,
+  expected: number,
+  timeoutMs = 8_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const waiting = await query<{ blocked: number; rooted: number }>(
+      `SELECT
+         count(*) FILTER (
+           WHERE wait_event_type = 'Lock'
+             AND query ILIKE '%activation_status%'
+             AND query ILIKE '%FROM users%'
+             AND query ILIKE '%FOR UPDATE%'
+         )::int AS blocked,
+         count(*) FILTER (
+           WHERE $1 = ANY(pg_blocking_pids(pid))
+             AND query ILIKE '%activation_status%'
+             AND query ILIKE '%FROM users%'
+             AND query ILIKE '%FOR UPDATE%'
+         )::int AS rooted
+       FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND state = 'active'
+         AND pid <> pg_backend_pid()`,
+      [holderPid],
+    )
+    if (
+      (waiting.rows[0]?.blocked ?? 0) >= expected
+      && (waiting.rows[0]?.rooted ?? 0) >= 1
+    ) {
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(
+    `timed out waiting for ${expected} restore transaction(s) queued behind holder ${holderPid}`,
+  )
+}
+
+async function waitForQueryBlockedOnHolder(
+  holderPid: number,
+  queryPattern: string,
+  timeoutMs = 8_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const waiting = await query<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND $1 = ANY(pg_blocking_pids(pid))
+          AND query ILIKE $2`,
+      [holderPid, queryPattern],
+    )
+    if ((waiting.rows[0]?.n ?? 0) >= 1) return
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(
+    `timed out waiting for query ${queryPattern} blocked by holder ${holderPid}`,
+  )
+}
+
+async function withLockedUser<T>(
+  callback: (holder: Client, holderPid: number) => Promise<T>,
+): Promise<T> {
+  const holder = new Client({ connectionString: process.env.DATABASE_URL })
+  await holder.connect()
+  try {
+    await holder.query('BEGIN')
+    const pid = await holder.query<{ pid: number }>(
+      'SELECT pg_backend_pid() AS pid',
+    )
+    await holder.query(
+      `SELECT id FROM users WHERE id = $1 FOR UPDATE`,
+      [USER],
+    )
+    return await callback(holder, pid.rows[0].pid)
+  } finally {
+    try {
+      await holder.query('ROLLBACK')
+    } catch {
+      // The callback may already have committed the holder.
+    }
+    await holder.end()
+  }
+}
+
 describeIfDatabase('DingTalk grant/membership writes target the real tables (real DB)', () => {
   beforeEach(cleanup)
   afterAll(cleanup)
@@ -157,6 +249,16 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
       eventId, mode: 'rehire', adminUserId: 'admin-test',
     })
     expect(result.restoredEffectCount).toBe(1)
+    expect(result).toMatchObject({
+      restoreMode: 'rehire',
+      effectsReversed: ['membership_changed'],
+      passwordUnchanged: true,
+      localUser: {
+        id: USER,
+        isActive: true,
+        activationStatus: 'activated',
+      },
+    })
 
     // Before the fix this whole call aborted with 25P02 (`user_orgs.updated_at` does not exist),
     // so the membership stayed FALSE — for EVERY real deprovision event, since every candidate
@@ -234,6 +336,327 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
     const effects = await query<{ status: string }>(
       `SELECT status FROM directory_deprovision_effects WHERE local_user_id = $1`, [USER])
     expect(effects.rows.map((r) => r.status)).toEqual(['applied'])
+  })
+
+  it('a grant writer racing after eligibility is preserved by the write-point drift guard', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by)
+       VALUES ('dingtalk', $1, FALSE, 'system:directory-deprovision')`,
+      [USER],
+    )
+    const seeded = await seedDirectory({ sourceActive: true })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'grant_changed', orgId: null }],
+      3,
+    )
+    const holder = new Client({ connectionString: process.env.DATABASE_URL })
+    await holder.connect()
+    try {
+      await holder.query('BEGIN')
+      const pid = await holder.query<{ pid: number }>(
+        'SELECT pg_backend_pid() AS pid',
+      )
+      await holder.query(
+        `UPDATE user_external_auth_grants
+            SET enabled = TRUE, granted_by = 'concurrent-writer'
+          WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [USER],
+      )
+
+      const restore = restoreDeprovisionEvent({
+        eventId,
+        mode: 'rehire',
+        adminUserId: 'admin-test',
+      })
+      await waitForQueryBlockedOnHolder(
+        pid.rows[0].pid,
+        '%INSERT INTO user_external_auth_grants%',
+      )
+      await holder.query('COMMIT')
+
+      await expect(restore).rejects.toMatchObject({ code: 'DRIFT_CONFLICT' })
+    } finally {
+      try {
+        await holder.query('ROLLBACK')
+      } catch {
+        // The holder may already be committed.
+      }
+      await holder.end()
+    }
+
+    expect(await grantRow()).toMatchObject({
+      enabled: true,
+      granted_by: 'concurrent-writer',
+    })
+    const state = await query<{
+      access_generation: string
+      effect_status: string
+      event_status: string
+    }>(
+      `SELECT users.access_generation::text,
+              event.status AS event_status,
+              effect.status AS effect_status
+         FROM users
+         JOIN directory_deprovision_events event
+           ON event.local_user_id = users.id
+         JOIN directory_deprovision_effects effect
+           ON effect.event_id = event.id
+        WHERE users.id = $1`,
+      [USER],
+    )
+    expect(state.rows[0]).toMatchObject({
+      access_generation: '3',
+      event_status: 'applied',
+      effect_status: 'applied',
+    })
+  })
+
+  it('rehire requires the exact source account to remain actively linked to the same user', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, FALSE)`,
+      [USER, ORG],
+    )
+    const seeded = await seedDirectory({ sourceActive: true })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'membership_changed', orgId: ORG }],
+      3,
+    )
+    await query(
+      `UPDATE directory_account_links
+          SET link_status = 'unlinked'
+        WHERE directory_account_id = $1::uuid
+          AND local_user_id = $2`,
+      [seeded.accountId, USER],
+    )
+
+    await expect(
+      restoreDeprovisionEvent({
+        eventId,
+        mode: 'rehire',
+        adminUserId: 'admin-test',
+      }),
+    ).rejects.toMatchObject({ code: 'SOURCE_INACTIVE' })
+
+    const membership = await query<{ is_active: boolean }>(
+      `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`,
+      [USER, ORG],
+    )
+    expect(membership.rows[0]?.is_active).toBe(false)
+    const event = await query<{ status: string }>(
+      `SELECT status FROM directory_deprovision_events WHERE id = $1::uuid`,
+      [eventId],
+    )
+    expect(event.rows[0]?.status).toBe('applied')
+  })
+
+  it('admin force may restore an inactive source only with explicit confirmation and provenance', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, FALSE)`,
+      [USER, ORG],
+    )
+    const seeded = await seedDirectory({ sourceActive: false })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'membership_changed', orgId: ORG }],
+      3,
+    )
+
+    await expect(
+      restoreDeprovisionEvent({
+        eventId,
+        mode: 'admin_force',
+        adminUserId: 'admin-test',
+        confirm: false,
+        note: 'confirmed source remains inactive',
+      }),
+    ).rejects.toMatchObject({ code: 'FORCE_CONFIRM_REQUIRED' })
+
+    const result = await restoreDeprovisionEvent({
+      eventId,
+      mode: 'admin_force',
+      adminUserId: 'admin-test',
+      confirm: true,
+      note: 'confirmed source remains inactive',
+    })
+    expect(result.restoreMode).toBe('admin_force')
+
+    const event = await query<{
+      resolve_note: string
+      resolved_by: string
+      restore_mode: string
+      status: string
+    }>(
+      `SELECT status, resolved_by, resolve_note, restore_mode
+         FROM directory_deprovision_events
+        WHERE id = $1::uuid`,
+      [eventId],
+    )
+    expect(event.rows[0]).toMatchObject({
+      status: 'fully_resolved',
+      resolved_by: 'admin-test',
+      resolve_note: 'confirmed source remains inactive',
+      restore_mode: 'admin_force',
+    })
+  })
+
+  it('a concurrent access-graph writer supersedes evidence before a blocked restore can act', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, FALSE)`,
+      [USER, ORG],
+    )
+    const seeded = await seedDirectory({ sourceActive: true })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'membership_changed', orgId: ORG }],
+      3,
+    )
+
+    await withLockedUser(async (holder, holderPid) => {
+      const restore = restoreDeprovisionEvent({
+        eventId,
+        mode: 'rehire',
+        adminUserId: 'admin-test',
+      })
+      await waitForRestoreWaiters(holderPid, 1)
+
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(holder, {
+        userIds: [USER],
+        actorId: 'concurrent-admin',
+        reason: 'concurrent admin access update',
+      })
+      await holder.query('COMMIT')
+
+      await expect(restore).rejects.toMatchObject({
+        code: 'EVENT_NOT_APPLIED',
+      })
+    })
+
+    const state = await query<{
+      access_generation: string
+      event_status: string
+      effect_status: string
+      membership_active: boolean
+    }>(
+      `SELECT u.access_generation::text,
+              event.status AS event_status,
+              effect.status AS effect_status,
+              membership.is_active AS membership_active
+         FROM users u
+         JOIN directory_deprovision_events event
+           ON event.local_user_id = u.id
+         JOIN directory_deprovision_effects effect
+           ON effect.event_id = event.id
+         JOIN user_orgs membership
+           ON membership.user_id = u.id
+          AND membership.org_id = $2
+        WHERE u.id = $1`,
+      [USER, ORG],
+    )
+    expect(state.rows[0]).toMatchObject({
+      access_generation: '4',
+      event_status: 'superseded',
+      effect_status: 'superseded',
+      membership_active: false,
+    })
+  })
+
+  it('two blocked restores linearize to exactly one reversal with complete resolution provenance', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, FALSE)`,
+      [USER, ORG],
+    )
+    const seeded = await seedDirectory({ sourceActive: true })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'membership_changed', orgId: ORG }],
+      3,
+    )
+
+    const outcomes = await withLockedUser(async (holder, holderPid) => {
+      const calls = Array.from({ length: 2 }, () =>
+        restoreDeprovisionEvent({
+          eventId,
+          mode: 'rehire',
+          adminUserId: 'admin-test',
+        }),
+      )
+      await waitForRestoreWaiters(holderPid, 2)
+      await holder.query('COMMIT')
+      return Promise.allSettled(calls)
+    })
+
+    const successes = outcomes.filter(
+      (outcome) => outcome.status === 'fulfilled',
+    )
+    const failures = outcomes.filter(
+      (outcome): outcome is PromiseRejectedResult =>
+        outcome.status === 'rejected',
+    )
+    expect(successes).toHaveLength(1)
+    expect(failures).toHaveLength(1)
+    expect(failures[0].reason).toMatchObject({ code: 'EVENT_NOT_APPLIED' })
+
+    const state = await query<{
+      access_generation: string
+      effect_status: string
+      event_status: string
+      resolved_by: string
+      restore_mode: string
+      reversed_by: string
+    }>(
+      `SELECT users.access_generation::text,
+              event.status AS event_status,
+              event.resolved_by,
+              event.restore_mode,
+              effect.status AS effect_status,
+              effect.reversed_by
+         FROM users
+         JOIN directory_deprovision_events event
+           ON event.local_user_id = users.id
+         JOIN directory_deprovision_effects effect
+           ON effect.event_id = event.id
+        WHERE users.id = $1`,
+      [USER],
+    )
+    expect(state.rows[0]).toMatchObject({
+      access_generation: '4',
+      event_status: 'fully_resolved',
+      resolved_by: 'admin-test',
+      restore_mode: 'rehire',
+      effect_status: 'reversed',
+      reversed_by: 'admin-test',
+    })
   })
 
   it('alias conflict rolls back users/membership/grant (real Postgres transaction)', async () => {
