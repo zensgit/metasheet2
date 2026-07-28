@@ -23,7 +23,6 @@ export type ActivateUserInput = {
   enableDingTalkGrant?: boolean
   /** SSO: directory account that must be active + linked to this user. */
   directoryAccountId?: string | null
-  claimAliases?: boolean
 }
 
 export type ActivateUserResult = {
@@ -34,7 +33,32 @@ export type ActivateUserResult = {
   localPasswordSet: boolean
 }
 
-function throwCoded(message: string, code: string): never {
+/**
+ * Closed set of activation failure reasons this module is allowed to throw.
+ *
+ * This is the authored-reason set. `ACTIVATE_FAILED` is deliberately NOT a member: it is the
+ * response layer's fallback for everything unauthored, and admitting it here would make the
+ * throw-site/policy-table set equality in
+ * `tests/unit/admin-users-activate-error-closure.test.ts` trivially satisfiable.
+ *
+ * Adding a reason without adding its policy-table row is a compile error at the table's
+ * `Record<ActivateErrorCode, …>` type (see `ACTIVATE_ERROR_POLICY` in `routes/admin-users.ts`);
+ * throwing a reason that is not a member is a compile error here at `throwCoded`.
+ */
+export type ActivateErrorCode =
+  | 'ACTIVATE_USER_REQUIRED'
+  | 'ACTIVATE_USER_NOT_FOUND'
+  | 'ACTIVATE_NOT_PENDING'
+  | 'ACTIVATE_RACE'
+  | 'ACTIVATE_ALIAS_CONFLICT'
+  | 'ACTIVATE_ALIAS_REQUIRED'
+  | 'ACTIVATE_ALIAS_FAILED'
+  | 'ACTIVATE_SOURCE_MISSING'
+  | 'ACTIVATE_SOURCE_INACTIVE'
+  | 'ACTIVATE_INTEGRATION_INACTIVE'
+  | 'ACTIVATE_LINK_MISMATCH'
+
+function throwCoded(message: string, code: ActivateErrorCode): never {
   const err = new Error(message)
   ;(err as Error & { code?: string }).code = code
   throw err
@@ -119,50 +143,89 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
 
     // Active membership for current org when provided.
     if (input.orgId) {
+      // `user_orgs` is (user_id, org_id, is_active, created_at) with PK (user_id, org_id) — there
+      // is no `updated_at`. Writing one raised `42703` and aborted this transaction, which is why
+      // the "schema variance" fallback underneath could never help: once a statement fails inside
+      // a transaction, Postgres rejects every later statement with `25P02`, the fallback
+      // included. The net effect was that activating a pending user WITH an org — the ordinary
+      // case — could not succeed at all; it died at COMMIT. Writing the real shape is the fix,
+      // and the fallback goes with it: a second guess at the schema is not a substitute for
+      // matching it.
       await client.query(
-        `INSERT INTO user_orgs (user_id, org_id, is_active, created_at, updated_at)
-         VALUES ($1, $2, TRUE, NOW(), NOW())
+        `INSERT INTO user_orgs (user_id, org_id, is_active, created_at)
+         VALUES ($1, $2, TRUE, NOW())
          ON CONFLICT (user_id, org_id) DO UPDATE
-           SET is_active = TRUE, updated_at = NOW()`,
+           SET is_active = TRUE`,
         [userId, input.orgId],
-      ).catch(async () => {
-        // Schema variance: try minimal shape
-        await client.query(
-          `INSERT INTO user_orgs (user_id, org_id, is_active)
-           VALUES ($1, $2, TRUE)
-           ON CONFLICT DO NOTHING`,
-          [userId, input.orgId],
-        ).catch(() => {
-          /* membership optional if table shape differs */
-        })
-      })
+      )
     }
 
     if (input.enableDingTalkGrant === true) {
+      // The DingTalk grant lives in `user_external_auth_grants` — the table `dingtalk-oauth.ts`
+      // reads to decide whether a login is allowed. This wrote `user_external_identities
+      // .grant_enabled`, a column no migration creates, inside a `.catch`: activation reported
+      // success while the person was never actually granted DingTalk login. Same upsert shape the
+      // OAuth bind path uses.
+      //
+      // The swallow is gone with it. Inside a transaction a failed statement poisons the
+      // connection, so catching the rejection does not make the failure harmless — it only moves
+      // the error to whichever innocent statement runs next, as `25P02`.
       await client.query(
-        `UPDATE user_external_identities
-            SET grant_enabled = TRUE, updated_at = NOW()
-          WHERE local_user_id = $1 AND provider = 'dingtalk'`,
-        [userId],
-      ).catch(() => {
-        /* grant column may be named differently — non-fatal for unit/mock */
+        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+         VALUES ('dingtalk', $1, TRUE, $2, NOW(), NOW())
+         ON CONFLICT (provider, local_user_id)
+         DO UPDATE SET enabled = TRUE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+        [userId, `activate:${input.adminUserId ?? 'system'}`],
+      )
+    }
+
+    // Alias claims are MANDATORY inside the same transaction as activation.
+    // No client opt-out: post-commit / optional claim left "activated + password issued
+    // but cannot log in" under AUTH_LOGIN_USE_ALIASES. Fail closed → full activate rollback.
+    const fields: Array<{ raw: string | null; kind: 'email' | 'username' | 'mobile' }> = [
+      { raw: user.email, kind: 'email' },
+      { raw: user.username, kind: 'username' },
+      { raw: user.mobile, kind: 'mobile' },
+    ]
+    let claimedAny = false
+    for (const field of fields) {
+      if (!field.raw || !String(field.raw).trim()) continue
+      const claimed = await claimLoginAlias({
+        userId,
+        rawValue: field.raw,
+        kind: field.kind,
+        source: 't3_activate',
+        client,
       })
+      if (claimed.ok === false) {
+        // Never echo claim.message (may contain raw PostgreSQL text). Map codes only:
+        // CONFLICT / REQUIRED → client 409; WRITE_FAILED → 500 ACTIVATE_ALIAS_FAILED.
+        if (claimed.code === 'ALIAS_CONFLICT') {
+          throwCoded(
+            `Login alias for ${field.kind} is already claimed by another account`,
+            'ACTIVATE_ALIAS_CONFLICT',
+          )
+        }
+        if (claimed.code === 'ALIAS_EMPTY') {
+          throwCoded(
+            `Login alias for ${field.kind} is empty after normalization`,
+            'ACTIVATE_ALIAS_REQUIRED',
+          )
+        }
+        throwCoded(
+          'Failed to claim login alias during activation',
+          'ACTIVATE_ALIAS_FAILED',
+        )
+      }
+      claimedAny = true
+    }
+    if (!claimedAny) {
+      throwCoded(
+        'Activation requires at least one claimable login identifier (email, username, or mobile)',
+        'ACTIVATE_ALIAS_REQUIRED',
+      )
     }
   })
-
-  // Alias claims post-commit (T2a table may be empty before cutover); best-effort.
-  if (input.claimAliases !== false) {
-    const locked = await import('../db/pg').then((m) =>
-      m.query<{ email: string | null; username: string | null; mobile: string | null }>(
-        `SELECT email, username, mobile FROM users WHERE id = $1`,
-        [userId],
-      ),
-    )
-    const row = locked.rows[0]
-    if (row?.email) await claimLoginAlias({ userId, rawValue: row.email, kind: 'email', source: 't3_activate' })
-    if (row?.username) await claimLoginAlias({ userId, rawValue: row.username, kind: 'username', source: 't3_activate' })
-    if (row?.mobile) await claimLoginAlias({ userId, rawValue: row.mobile, kind: 'mobile', source: 't3_activate' })
-  }
 
   return {
     userId,
