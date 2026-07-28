@@ -305,6 +305,20 @@ async function main(): Promise<void> {
   let reader: MssqlConnectionPool | null = null
   let writer: MssqlConnectionPool | null = null
   const records: SpikeRecord[] = []
+  function persistEvidence(recordsToPersist: readonly SpikeRecord[]): void {
+    const evidenceDir = env.B1B_EVIDENCE_DIR
+    if (!evidenceDir) return
+    fs.mkdirSync(evidenceDir, { recursive: true })
+    // ONE file per phase (§1.4: Phase A and Phase B are separate certification units) —
+    // never one file holding an array, which the gate-check does not parse as multiple
+    // records.
+    for (const record of recordsToPersist) {
+      fs.writeFileSync(
+        path.join(evidenceDir, evidenceFileName('sqlserver', declaredMajorVersion, record.phase)),
+        JSON.stringify(record, null, 2)
+      )
+    }
+  }
   // CP-1: the ACTUAL statement text readerSelectsProbeRow() issues in each phase, captured at
   // the call site (never a hand-typed duplicate elsewhere) — see that function's own comment.
   const issuedProbeStatements: { phaseA: string[]; phaseB: string[] } = { phaseA: [], phaseB: [] }
@@ -663,10 +677,9 @@ async function main(): Promise<void> {
     const spikeScopedPool = await openPinnedPool(spikeDb)
     let mutationIssuedFromSpikeDbThrew = false
     try {
-      const currentDb = await scalar<string>(spikeScopedPool, 'SELECT DB_NAME() AS v')
-      if (currentDb !== 'master') {
-        throw new Error('simulated: toggle attempted from a non-master connection')
-      }
+      // Call the SAME helper as the real toggle. A copied `DB_NAME()` predicate here would
+      // let toggleRcsi() lose its own master guard while this mutation continued to pass.
+      await toggleRcsi(spikeScopedPool, 'OFF', spikeDb, true)
     } catch {
       mutationIssuedFromSpikeDbThrew = true
     }
@@ -898,14 +911,48 @@ async function main(): Promise<void> {
     // could not have changed either OUTCOME token by this point, since both are already
     // computed above, but it means the write-then-gate order never matched MySQL's gate-then-
     // write order the way it should have). If a control failed to invert anywhere in the run,
-    // BOTH phases are recorded as INCONCLUSIVE with the tracker (mirroring
-    // spike-b1b-mysql.ts's STOP-4 handling for its own single phase) and the original
-    // control-failure error is rethrown — no record is emitted, pushed, or written in that case.
+    // BOTH phases are recorded and persisted as INCONCLUSIVE before the original
+    // control-failure error is rethrown. The always-upload artifact can therefore distinguish
+    // "ran but controls failed" from ABSENT.
     try {
       log.assertAllPassed('sqlserver')
     } catch (controlFailure) {
       tracker.emit('phaseA', 'INCONCLUSIVE')
       tracker.emit('phaseB', 'INCONCLUSIVE')
+      const failedSummary = log.summary()
+      const failedAt = new Date().toISOString()
+      const inconclusiveRecords: SpikeRecord[] = [
+        {
+          evidenceSchemaVersion: 1,
+          dialect: 'sqlserver',
+          engineMajorVersion: declaredMajorVersion,
+          phase: 'phaseA',
+          capabilityPosture: 'default_rc_no_rcsi',
+          outcome: 'INCONCLUSIVE',
+          sameConnection: phaseAX1aHolds,
+          controlsTotal: failedSummary.total,
+          controlsInverted: failedSummary.passed,
+          observationsTaken,
+          recordedAt: failedAt,
+        },
+        {
+          evidenceSchemaVersion: 1,
+          dialect: 'sqlserver',
+          engineMajorVersion: declaredMajorVersion,
+          phase: 'phaseB',
+          capabilityPosture: 'rcsi_on',
+          outcome: 'INCONCLUSIVE',
+          sameConnection: phaseBX1aHolds,
+          controlsTotal: failedSummary.total,
+          controlsInverted: failedSummary.passed,
+          observationsTaken,
+          recordedAt: failedAt,
+        },
+      ]
+      persistEvidence(inconclusiveRecords)
+      for (const record of inconclusiveRecords) {
+        console.log('[b1b-sqlserver] RECORD (values-free):', JSON.stringify(record, null, 2))
+      }
       console.error('[b1b-sqlserver] a mutation/control failed to invert:', (controlFailure as Error).message)
       throw controlFailure
     }
@@ -913,16 +960,7 @@ async function main(): Promise<void> {
     tracker.emit('phaseB', phaseBOutcome)
     records.push(phaseARecord, phaseBRecord)
 
-    const evidenceDir = env.B1B_EVIDENCE_DIR
-    if (evidenceDir) {
-      fs.mkdirSync(evidenceDir, { recursive: true })
-      // ONE file per phase (§1.4: Phase A and Phase B are separate certification units) —
-      // never one file holding an array, which the gate-check does not parse as multiple
-      // records.
-      for (const record of records) {
-        fs.writeFileSync(path.join(evidenceDir, evidenceFileName('sqlserver', declaredMajorVersion, record.phase)), JSON.stringify(record, null, 2))
-      }
-    }
+    persistEvidence(records)
     for (const record of records) {
       console.log('[b1b-sqlserver] RECORD (values-free):', JSON.stringify(record, null, 2))
     }

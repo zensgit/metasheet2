@@ -36,6 +36,25 @@ export function isOutcomeToken(value: unknown): value is OutcomeToken {
   return typeof value === 'string' && OUTCOME_TOKEN_SET.has(value)
 }
 
+export function classifyMysqlPreconditions(
+  innoDb: boolean,
+  autocommit: boolean,
+  isolationAtLeastReadCommitted: boolean
+): OutcomeToken {
+  return innoDb && autocommit && isolationAtLeastReadCommitted
+    ? 'MYSQL_PRECONDITIONS_PROVEN'
+    : 'MYSQL_PRECONDITIONS_UNESTABLISHED'
+}
+
+export function mysqlVersionMatchesDeclaredMajor(
+  observedVersion: string,
+  declaredMajorVersion: string
+): boolean {
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(declaredMajorVersion)) return false
+  const observed = /^(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[.-]|$)/.exec(observedVersion)
+  return observed !== null && `${observed[1]}.${observed[2]}` === declaredMajorVersion
+}
+
 // §3: "The vocabulary contains no member expressing 'explicit SNAPSHOT transaction proven.'"
 // (S-8's vocabulary door). Pinned by a dedicated test asserting this string never appears —
 // see spike-b1b-gate-check.test.ts.
@@ -63,7 +82,7 @@ export interface SpikeRecord {
   // S-6: never merged with the other SQL Server posture into one "SQL Server" verdict.
   readonly separateProfile?: boolean
   // X-1: reported as the equality VERDICT, never the raw session identifier (§6.2).
-  readonly sameConnection?: boolean
+  readonly sameConnection: boolean
   // Count-only (values-free), populated from the SAME MutationLog.summary() snapshot
   // controlsInverted comes from: the TOTAL number of mutation/control checks that had run by
   // that point, vs controlsInverted's PASSED subset of them. Structurally required (not
@@ -78,14 +97,156 @@ export interface SpikeRecord {
   readonly recordedAt: string
 }
 
-export function assertValidSpikeRecord(record: SpikeRecord): void {
+const SPIKE_RECORD_KEYS = Object.freeze([
+  'evidenceSchemaVersion',
+  'dialect',
+  'engineMajorVersion',
+  'phase',
+  'capabilityPosture',
+  'outcome',
+  'statementScoped',
+  'separateProfile',
+  'sameConnection',
+  'controlsTotal',
+  'controlsInverted',
+  'observationsTaken',
+  'recordedAt',
+] as const)
+const SPIKE_RECORD_KEY_SET: ReadonlySet<string> = new Set(SPIKE_RECORD_KEYS)
+
+function assertPlainDataObject(value: unknown): asserts value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('spike-b1b internal: evidence record must be a plain object')
+  }
+  let prototype: object | null
+  let keys: readonly PropertyKey[]
+  let descriptors: PropertyDescriptorMap
+  try {
+    prototype = Object.getPrototypeOf(value)
+    keys = Reflect.ownKeys(value)
+    descriptors = Object.getOwnPropertyDescriptors(value)
+  } catch {
+    throw new Error('spike-b1b internal: evidence record shape is not inspectable')
+  }
+  if (prototype !== Object.prototype) {
+    throw new Error('spike-b1b internal: evidence record must use the ordinary object prototype')
+  }
+  for (const key of keys) {
+    if (typeof key !== 'string' || !SPIKE_RECORD_KEY_SET.has(key)) {
+      throw new Error('spike-b1b internal: evidence record contains an unknown field')
+    }
+    const descriptor = descriptors[key]
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+      throw new Error('spike-b1b internal: evidence record fields must be enumerable data properties')
+    }
+  }
+  for (const required of SPIKE_RECORD_KEYS) {
+    if (
+      required !== 'statementScoped' &&
+      required !== 'separateProfile' &&
+      !Object.prototype.hasOwnProperty.call(value, required)
+    ) {
+      throw new Error(`spike-b1b internal: evidence record is missing required field ${required}`)
+    }
+  }
+}
+
+function assertBoundedIdentifier(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 64 || !/^[A-Za-z0-9._-]+$/.test(value)) {
+    throw new Error(`spike-b1b internal: ${field} must be a bounded identifier`)
+  }
+}
+
+function assertCanonicalUtcTimestamp(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || value.length > 32) {
+    throw new Error('spike-b1b internal: recordedAt must be a canonical UTC timestamp')
+  }
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) {
+    throw new Error('spike-b1b internal: recordedAt must be a canonical UTC timestamp')
+  }
+  const canonical = new Date(timestamp).toISOString()
+  if (value !== canonical && value !== canonical.replace('.000Z', 'Z')) {
+    throw new Error('spike-b1b internal: recordedAt must be a canonical UTC timestamp')
+  }
+}
+
+function assertCoordinateAndOutcome(record: SpikeRecord): void {
+  if (record.dialect === 'mysql') {
+    if (record.phase !== 'preconditions' || record.capabilityPosture !== 'default') {
+      throw new Error('spike-b1b internal: MySQL evidence uses an uncertified phase/posture coordinate')
+    }
+    if (
+      record.outcome !== 'MYSQL_PRECONDITIONS_PROVEN' &&
+      record.outcome !== 'MYSQL_PRECONDITIONS_UNESTABLISHED' &&
+      record.outcome !== 'INCONCLUSIVE'
+    ) {
+      throw new Error('spike-b1b internal: MySQL evidence uses an outcome from another dialect')
+    }
+    if (record.statementScoped !== undefined || record.separateProfile !== undefined) {
+      throw new Error('spike-b1b internal: MySQL evidence carries SQL Server-only qualifiers')
+    }
+    if (record.outcome === 'MYSQL_PRECONDITIONS_PROVEN' && record.sameConnection !== true) {
+      throw new Error('spike-b1b internal: MySQL opening evidence did not prove same-connection execution')
+    }
+    return
+  }
+
+  if (record.phase === 'phaseA' && record.capabilityPosture === 'default_rc_no_rcsi') {
+    if (record.outcome !== 'SQLSERVER_DEFAULT_RC_NO_RCSI_CERTIFICATION_REFUSED' && record.outcome !== 'INCONCLUSIVE') {
+      throw new Error('spike-b1b internal: SQL Server phaseA evidence uses an incompatible outcome')
+    }
+    if (record.statementScoped !== undefined || record.separateProfile !== undefined) {
+      throw new Error('spike-b1b internal: SQL Server phaseA evidence carries phaseB-only qualifiers')
+    }
+    return
+  }
+
+  if (record.phase === 'phaseB' && record.capabilityPosture === 'rcsi_on') {
+    if (
+      record.outcome !== 'SQLSERVER_RCSI_STATEMENT_SNAPSHOT_PROVEN' &&
+      record.outcome !== 'SQLSERVER_SINGLE_STATEMENT_SNAPSHOT_UNOBTAINABLE' &&
+      record.outcome !== 'INCONCLUSIVE'
+    ) {
+      throw new Error('spike-b1b internal: SQL Server phaseB evidence uses an incompatible outcome')
+    }
+    if (record.outcome === 'SQLSERVER_RCSI_STATEMENT_SNAPSHOT_PROVEN') {
+      if (record.sameConnection !== true || record.statementScoped !== true || record.separateProfile !== true) {
+        throw new Error(
+          'spike-b1b internal: SQL Server opening evidence lacks same-connection, statement-scope, or separate-profile proof'
+        )
+      }
+    } else if (record.statementScoped !== undefined || record.separateProfile !== undefined) {
+      throw new Error('spike-b1b internal: non-opening SQL Server evidence carries opening-only qualifiers')
+    }
+    return
+  }
+
+  throw new Error('spike-b1b internal: SQL Server evidence uses an uncertified phase/posture coordinate')
+}
+
+export function assertValidSpikeRecord(record: unknown): asserts record is SpikeRecord {
+  assertPlainDataObject(record)
+  if (record.evidenceSchemaVersion !== 1) {
+    throw new Error('spike-b1b internal: unsupported evidenceSchemaVersion')
+  }
   if (!isOutcomeToken(record.outcome)) {
-    throw new Error(
-      `spike-b1b internal: outcome token outside the frozen vocabulary: ${JSON.stringify(record.outcome)}`
-    )
+    throw new Error('spike-b1b internal: outcome token outside the frozen vocabulary')
   }
   if (record.dialect !== 'mysql' && record.dialect !== 'sqlserver') {
-    throw new Error(`spike-b1b internal: unknown dialect ${JSON.stringify(record.dialect)}`)
+    throw new Error('spike-b1b internal: unknown dialect')
+  }
+  assertBoundedIdentifier(record.engineMajorVersion, 'engineMajorVersion')
+  assertBoundedIdentifier(record.phase, 'phase')
+  assertBoundedIdentifier(record.capabilityPosture, 'capabilityPosture')
+  if (typeof record.sameConnection !== 'boolean') {
+    throw new Error('spike-b1b internal: sameConnection must be boolean')
+  }
+  if (
+    (Object.prototype.hasOwnProperty.call(record, 'statementScoped') && typeof record.statementScoped !== 'boolean') ||
+    (Object.prototype.hasOwnProperty.call(record, 'separateProfile') && typeof record.separateProfile !== 'boolean')
+  ) {
+    throw new Error('spike-b1b internal: optional proof qualifiers must be boolean when present')
   }
   if (!Number.isInteger(record.controlsTotal) || record.controlsTotal < 0) {
     throw new Error('spike-b1b internal: controlsTotal must be a non-negative integer (count-only)')
@@ -100,6 +261,15 @@ export function assertValidSpikeRecord(record: SpikeRecord): void {
   }
   if (!Number.isInteger(record.observationsTaken) || record.observationsTaken < 0) {
     throw new Error('spike-b1b internal: observationsTaken must be a non-negative integer (count-only)')
+  }
+  assertCanonicalUtcTimestamp(record.recordedAt)
+  assertCoordinateAndOutcome(record as SpikeRecord)
+  if (
+    (record.outcome === 'MYSQL_PRECONDITIONS_PROVEN' ||
+      record.outcome === 'SQLSERVER_RCSI_STATEMENT_SNAPSHOT_PROVEN') &&
+    record.observationsTaken < 1
+  ) {
+    throw new Error('spike-b1b internal: opening evidence must include at least one observation')
   }
 }
 

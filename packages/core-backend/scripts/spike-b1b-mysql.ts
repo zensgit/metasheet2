@@ -20,7 +20,9 @@ import {
   MutationLog,
   assertSelectOnly as sharedAssertSelectOnly,
   assertWriteOptIn as sharedAssertWriteOptIn,
+  classifyMysqlPreconditions,
   evidenceFileName,
+  mysqlVersionMatchesDeclaredMajor,
   type OutcomeToken,
   type SpikeRecord,
 } from './spike-b1b-shared'
@@ -259,7 +261,12 @@ async function main(): Promise<void> {
     const [versionRows] = (await reader.query('SELECT VERSION() AS v')) as [Array<{ v: string }>, unknown]
     const observedVersion = countObservation(String(versionRows[0]!.v))
     console.log('[b1b-mysql] observed VERSION():', observedVersion, '| declared major version:', declaredMajorVersion)
-    log.check('X-2-baseline', `observed VERSION() "${observedVersion}" matches the declared matrix cell "${declaredMajorVersion}"`, 'GREEN', observedVersion.startsWith(declaredMajorVersion))
+    log.check(
+      'X-2-baseline',
+      `observed VERSION() "${observedVersion}" matches the declared matrix cell "${declaredMajorVersion}"`,
+      'GREEN',
+      mysqlVersionMatchesDeclaredMajor(observedVersion, declaredMajorVersion)
+    )
     // MUTATION: simulate the OBSERVATION a genuinely different (undeclared) MySQL major
     // version would actually report — a real, plausible VERSION() shape for a version this
     // spike has never declared+run (there is only one declared entry, '8.0', in
@@ -275,7 +282,7 @@ async function main(): Promise<void> {
       'X-2-mutation-wrong-declared-label',
       'MUTATION: simulate the OBSERVATION a different (undeclared) MySQL major version would report -> must NOT match the declared "8.0" needle (needle unchanged, only the observation is synthetic)',
       'RED',
-      simulatedUndeclaredVersionObservation.startsWith(declaredMajorVersion)
+      mysqlVersionMatchesDeclaredMajor(simulatedUndeclaredVersionObservation, declaredMajorVersion)
     )
 
     // ── M-1: probe table storage engine is InnoDB (+ M-1c control pair) ────────────────────
@@ -289,7 +296,7 @@ async function main(): Promise<void> {
       return rows[0]?.ENGINE === 'InnoDB'
     }
     const m1Baseline = await engineIsInnoDB(INNODB_TABLE)
-    log.check('M-1-baseline', 'the probe table (bound to the SAME identifier the probe statements use) reports ENGINE=InnoDB', 'GREEN', m1Baseline)
+    console.log('[b1b-mysql] M-1 capability observation (InnoDB):', m1Baseline)
     // ONE call, ONE control — M-1-mutation-misbound-table and M-1c-control-pair-myisam-sibling
     // previously called `engineIsInnoDB(MYISAM_SIBLING_TABLE)` TWICE under two different names
     // for the exact same assertion (a misbound-table read and CP-2's negative half describe the
@@ -311,7 +318,7 @@ async function main(): Promise<void> {
       return Number(rows[0]!.ac) === 1
     }
     const m2Baseline = await autocommitOn('SESSION')
-    log.check('M-2-baseline', '@@SESSION.autocommit is ON by default', 'GREEN', m2Baseline)
+    console.log('[b1b-mysql] M-2 capability observation (session autocommit):', m2Baseline)
 
     await reader.query('SET SESSION autocommit = 0')
     log.check(
@@ -358,7 +365,7 @@ async function main(): Promise<void> {
       return index >= ISOLATION_ORDER.indexOf('READ-COMMITTED')
     }
     const m3Baseline = await isolationAtLeastReadCommitted('ordered')
-    log.check('M-3-baseline', `default session isolation (MySQL default REPEATABLE-READ) is >= READ COMMITTED via ${isolationVariable}`, 'GREEN', m3Baseline)
+    console.log('[b1b-mysql] M-3 capability observation (isolation >= READ COMMITTED):', m3Baseline)
 
     await reader.query('SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED')
     log.check(
@@ -409,9 +416,11 @@ async function main(): Promise<void> {
     log.check('M-3c-control-pair-restore-green', 'restoring the default (>= RC) posture makes the assertion green again (same connection)', 'GREEN', await isolationAtLeastReadCommitted('ordered'))
     const m3 = m3Baseline
 
-    // ── M-4 ⚠ BATTERY-ADDED (dirty-read refutation) — implemented, mutation-tested, but kept
-    // NON-load-bearing for MYSQL_PRECONDITIONS_PROVEN because the battery's own §4.2 formula is
-    // "(∧ M-4 if ratified)" and §10(ii) records it as awaiting owner ratification. Runs against
+    // ── M-4 ⚠ BATTERY-ADDED (dirty-read refutation) — implemented and mutation-tested, but
+    // not a direct conjunct in MYSQL_PRECONDITIONS_PROVEN because the battery's own §4.2
+    // formula is "(∧ M-4 if ratified)" and §10(ii) records it as awaiting owner ratification.
+    // Its controls still participate in the run-level integrity gate: a broken control makes
+    // the evidence INCONCLUSIVE rather than allowing a stronger token through. Runs against
     // the SAME reader connection (X-1) with a DISTINCT writer connection (X-1b).
     async function readProbeName(): Promise<string> {
       const rows = await readerQuery(reader!, `SELECT name FROM \`${INNODB_TABLE}\` WHERE id = 1`)
@@ -476,15 +485,17 @@ async function main(): Promise<void> {
 
     // ── M-5: aggregate outcome ──────────────────────────────────────────────────────────────
     let outcome: OutcomeToken
+    let controlFailure: unknown
     try {
       log.assertAllPassed('mysql-preconditions')
-      // M-4 is battery-added / unratified (§10(ii)) -> excluded from the formula on purpose.
-      outcome = m1 && m2 && m3 ? 'MYSQL_PRECONDITIONS_PROVEN' : 'MYSQL_PRECONDITIONS_UNESTABLISHED'
-    } catch (controlFailure) {
-      // A control that failed to invert is INCONCLUSIVE, never UNESTABLISHED (STOP-4).
-      tracker.emit('preconditions', 'INCONCLUSIVE')
-      console.error('[b1b-mysql] a mutation/control failed to invert:', (controlFailure as Error).message)
-      throw controlFailure
+      // M-4 is battery-added / unratified (§10(ii)) -> excluded as a direct formula conjunct.
+      outcome = classifyMysqlPreconditions(m1, m2, m3)
+    } catch (error) {
+      // A control that failed to invert is INCONCLUSIVE, never UNESTABLISHED (STOP-4). Emit
+      // and persist that distinction before rethrowing so the always-upload artifact cannot
+      // collapse "ran but controls failed" into ABSENT at the gate-check.
+      outcome = 'INCONCLUSIVE'
+      controlFailure = error
     }
     tracker.emit('preconditions', outcome)
 
@@ -509,6 +520,10 @@ async function main(): Promise<void> {
     }
     console.log('[b1b-mysql] RECORD (values-free):', JSON.stringify(record, null, 2))
     console.log('[b1b-mysql] mutation/control summary:', JSON.stringify(summary))
+    if (controlFailure !== undefined) {
+      console.error('[b1b-mysql] a mutation/control failed to invert:', (controlFailure as Error).message)
+      throw controlFailure
+    }
   } catch (error) {
     primaryError = error
     throw error

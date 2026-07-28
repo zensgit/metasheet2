@@ -52,7 +52,7 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -proot -h 127.0.0.1"
+          --health-cmd="mysqladmin ping -uroot -p'Spike!Probe2026' -h 127.0.0.1"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=20

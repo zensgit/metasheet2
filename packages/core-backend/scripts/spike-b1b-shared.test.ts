@@ -5,8 +5,10 @@ import {
   assertRowLabel,
   assertSelectOnly,
   assertWriteOptIn,
+  classifyMysqlPreconditions,
   evidenceFileName,
   isOutcomeToken,
+  mysqlVersionMatchesDeclaredMajor,
 } from './spike-b1b-shared'
 
 // B1b capability spike — pure, DB-free tests for the shared harness mechanics (X-3's own
@@ -96,6 +98,46 @@ describe('MutationLog — baseline/mutated pairing (§1.3: a control that fails 
     log.check('a', 'x', 'GREEN', true)
     log.check('b', 'y', 'RED', false)
     expect(() => log.assertAllPassed('mysql')).not.toThrow()
+  })
+})
+
+describe('classifyMysqlPreconditions — capability result is distinct from harness integrity', () => {
+  it('opens only when all three measured preconditions hold', () => {
+    expect(classifyMysqlPreconditions(true, true, true)).toBe('MYSQL_PRECONDITIONS_PROVEN')
+  })
+
+  it.each([
+    [false, true, true],
+    [true, false, true],
+    [true, true, false],
+    [false, false, false],
+  ])(
+    'records a complete but non-opening run as UNESTABLISHED (%s, %s, %s)',
+    (innoDb, autocommit, isolation) => {
+      expect(classifyMysqlPreconditions(innoDb, autocommit, isolation)).toBe(
+        'MYSQL_PRECONDITIONS_UNESTABLISHED'
+      )
+    }
+  )
+})
+
+describe('mysqlVersionMatchesDeclaredMajor — exact major.minor identity', () => {
+  it.each(['8.0', '8.0.36', '8.0.36-log', '8.0-innovation'])(
+    'accepts a valid 8.0 VERSION() shape: %s',
+    observed => {
+      expect(mysqlVersionMatchesDeclaredMajor(observed, '8.0')).toBe(true)
+    }
+  )
+
+  it.each(['8.01.2', '8.1.0', '80.0.1', '8.0evil', 'not-a-version'])(
+    'rejects a version that only shares a textual prefix or is malformed: %s',
+    observed => {
+      expect(mysqlVersionMatchesDeclaredMajor(observed, '8.0')).toBe(false)
+    }
+  )
+
+  it.each(['8', '08.0', '8.00', '8.0.0'])('rejects a malformed declared major version: %s', declared => {
+    expect(mysqlVersionMatchesDeclaredMajor('8.0.36', declared)).toBe(false)
   })
 })
 

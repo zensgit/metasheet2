@@ -13,7 +13,6 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import {
   B1B_OUTCOME_TOKENS,
-  isOutcomeToken,
   assertValidSpikeRecord,
   type Dialect,
   type OutcomeToken,
@@ -47,32 +46,82 @@ function cellKey(cell: GateCell): string {
   return `${cell.dialect}::${cell.engineMajorVersion}::${cell.capabilityPosture}`
 }
 
+const GATE_CELL_KEYS: ReadonlySet<string> = new Set(['dialect', 'engineMajorVersion', 'capabilityPosture'])
+
+function assertValidGateCell(cell: unknown): asserts cell is GateCell {
+  if (typeof cell !== 'object' || cell === null || Array.isArray(cell)) {
+    throw new Error('spike-b1b-gate-check: each declared cell must be a plain object')
+  }
+  let prototype: object | null
+  let keys: readonly PropertyKey[]
+  try {
+    prototype = Object.getPrototypeOf(cell)
+    keys = Reflect.ownKeys(cell)
+  } catch {
+    throw new Error('spike-b1b-gate-check: declared cell shape is not inspectable')
+  }
+  if (prototype !== Object.prototype) {
+    throw new Error('spike-b1b-gate-check: each declared cell must use the ordinary object prototype')
+  }
+  if (keys.length !== GATE_CELL_KEYS.size || keys.some(key => typeof key !== 'string' || !GATE_CELL_KEYS.has(key))) {
+    throw new Error('spike-b1b-gate-check: declared cell fields must exactly match the closed schema')
+  }
+  const candidate = cell as Record<string, unknown>
+  if (candidate.dialect !== 'mysql' && candidate.dialect !== 'sqlserver') {
+    throw new Error('spike-b1b-gate-check: declared cell uses an unknown dialect')
+  }
+  for (const field of ['engineMajorVersion', 'capabilityPosture'] as const) {
+    const value = candidate[field]
+    if (typeof value !== 'string' || value.length < 1 || value.length > 64 || !/^[A-Za-z0-9._-]+$/.test(value)) {
+      throw new Error(`spike-b1b-gate-check: declared cell ${field} must be a bounded identifier`)
+    }
+  }
+  if (
+    (candidate.dialect === 'mysql' && candidate.capabilityPosture !== 'default') ||
+    (candidate.dialect === 'sqlserver' &&
+      candidate.capabilityPosture !== 'default_rc_no_rcsi' &&
+      candidate.capabilityPosture !== 'rcsi_on')
+  ) {
+    throw new Error('spike-b1b-gate-check: declared cell uses an unsupported capability posture')
+  }
+}
+
 // Pure — no filesystem, no process. This is the function CP-7 exercises directly with
 // synthetic records; the CLI below is a thin, untested-by-CP-7 shell around it.
-export function computeGateVerdict(
-  records: readonly SpikeRecord[],
-  declaredCells: readonly GateCell[]
-): GateVerdict[] {
-  if (declaredCells.length === 0) {
+export function computeGateVerdict(records: readonly SpikeRecord[], declaredCells: readonly GateCell[]): GateVerdict[] {
+  if (!Array.isArray(records) || !Array.isArray(declaredCells) || declaredCells.length === 0) {
     throw new Error('spike-b1b-gate-check: at least one declared cell is required')
   }
+
+  const declaredByKey = new Map<string, GateCell>()
+  for (const cell of declaredCells) {
+    assertValidGateCell(cell)
+    const key = cellKey(cell)
+    if (declaredByKey.has(key)) {
+      throw new Error(`spike-b1b-gate-check: declared cell appears more than once: ${key}`)
+    }
+    declaredByKey.set(key, cell)
+  }
+
+  const recordsByKey = new Map<string, SpikeRecord>()
+  for (const record of records) {
+    assertValidSpikeRecord(record)
+    const key = cellKey(record)
+    if (!declaredByKey.has(key)) {
+      throw new Error(`spike-b1b-gate-check: evidence record belongs to an undeclared cell: ${key}`)
+    }
+    if (recordsByKey.has(key)) {
+      throw new Error(`spike-b1b-gate-check: multiple records for one cell: ${key}`)
+    }
+    recordsByKey.set(key, record)
+  }
+
   return declaredCells.map(cell => {
-    const matches = records.filter(
-      record =>
-        record.dialect === cell.dialect &&
-        record.engineMajorVersion === cell.engineMajorVersion &&
-        record.capabilityPosture === cell.capabilityPosture
-    )
-    if (matches.length === 0) {
+    const key = cellKey(cell)
+    const record = recordsByKey.get(key)
+    if (!record) {
       return { ...cell, open: false, reason: 'ABSENT' }
     }
-    if (matches.length > 1) {
-      // Ambiguous evidence for one certification unit is itself an incompleteness (§1.3) —
-      // never silently pick one; the CLI wrapper turns this into a non-zero exit.
-      throw new Error(`spike-b1b-gate-check: multiple records for one cell: ${cellKey(cell)}`)
-    }
-    const record = matches[0]
-    assertValidSpikeRecord(record)
     const opens = OPENING_TOKENS.has(record.outcome)
     // Control-inversion gate (§1.3, generalized to THIS gate-check): an OPENING outcome whose
     // own counts show controls did NOT fully invert (some ran but failed, or none ran at all)
@@ -81,12 +130,12 @@ export function computeGateVerdict(
     // check, this function would still report open=true. Never silently resolved (same
     // discipline as the "multiple records" ambiguity above) — malformed/inconsistent evidence
     // throws rather than opening. A record produced by a REAL, uncorrupted run can never trip
-    // this: spike-b1b-mysql.ts/spike-b1b-sqlserver.ts both call log.assertAllPassed() (which
-    // throws before any record is emitted or written) BEFORE reaching an opening outcome, so
-    // controlsInverted === controlsTotal always holds on a genuine green run.
+    // this: spike-b1b-mysql.ts/spike-b1b-sqlserver.ts both call log.assertAllPassed() before
+    // reaching an opening outcome. A failed control is persisted as INCONCLUSIVE and the job
+    // then fails; only a genuine green run can emit an opening token.
     if (opens && (record.controlsTotal < 1 || record.controlsInverted !== record.controlsTotal)) {
       throw new Error(
-        `spike-b1b-gate-check: record for ${cellKey(cell)} claims opening outcome "${record.outcome}" but its ` +
+        `spike-b1b-gate-check: record for ${key} claims opening outcome "${record.outcome}" but its ` +
           `own counts show controls did not fully invert (controlsInverted=${record.controlsInverted}, ` +
           `controlsTotal=${record.controlsTotal}) — refusing to open on internally inconsistent evidence`
       )
@@ -108,12 +157,8 @@ export function readEvidenceRecords(evidenceDir: string): SpikeRecord[] {
     } catch (error) {
       throw new Error(`spike-b1b-gate-check: ${name} is not valid JSON: ${(error as Error).message}`)
     }
-    const record = parsed as SpikeRecord
-    if (!isOutcomeToken(record.outcome)) {
-      throw new Error(`spike-b1b-gate-check: ${name} carries an outcome outside the frozen vocabulary`)
-    }
-    assertValidSpikeRecord(record)
-    return record
+    assertValidSpikeRecord(parsed)
+    return parsed
   })
 }
 
@@ -130,8 +175,9 @@ anything itself; §4 step 3 (behind the owner) is expected to cite this verdict.
 
 Exit code is decoupled from the verdict (battery §1.3): 0 for any successfully COMPUTED
 verdict set (open or non-open alike) — a non-open verdict is the expected, successful shape
-for this spike, not a failure. Non-zero only for malformed input: unreadable evidence, a
-token outside the frozen vocabulary, or more than one record for one cell.
+for this spike, not a failure. Non-zero only for malformed or ambiguous input: unreadable
+evidence, a record outside the closed schema or declared cell set, duplicate cells/records,
+or an opening token whose proof qualifiers and control counts are incomplete.
 
 Frozen vocabulary: ${B1B_OUTCOME_TOKENS.join(', ')}`)
 }
