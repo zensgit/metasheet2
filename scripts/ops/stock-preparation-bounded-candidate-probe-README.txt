@@ -17,9 +17,10 @@ approved config followed by the normal flag-OFF preflight.
 The count is deliberately capped at `limit + 1`. That is sufficient to distinguish a short scope
 from a full/over-limit scope without counting an arbitrarily large matching set.
 
-The v2 diagnostic contract separates the source-count path into credential, connection, statement,
-and result stages. It publishes only closed stage states and closed failure reasons; raw exception
-codes, driver messages, SQL text, endpoints, object/field names, and credentials are discarded.
+The v3 diagnostic contract separates the source-count path into credential, connection, statement,
+and result stages. A failed statement is additionally mapped from SQL error numbers into a closed
+sourceCountFailureClass. Raw error numbers, driver messages, SQL text, endpoints, object/field
+names, and credentials are discarded.
 
 Required private inputs
 -----------------------
@@ -101,6 +102,11 @@ Interpretation:
   count statement was attempted.
 - failureReason=SOURCE_COUNT_STATEMENT_FAILED:
   the source connection opened, but the bounded count statement did not complete.
+  sourceCountFailureClass reports exactly one values-free class:
+  SELECT_PERMISSION, OBJECT_OR_COLUMN_RESOLUTION, PARAMETER_OR_TYPE, SYNTAX_OR_DIALECT,
+  TIMEOUT_OR_RESOURCE, or OTHER. NONE and NOT_RUN are reserved for non-failing tuples.
+  If one SQL exception carries multiple classified errors, that displayed order is the frozen
+  precedence.
 - failureReason=SOURCE_COUNT_RESULT_INVALID:
   the bounded count statement completed but did not return the required non-negative INT64 shape.
 - executionState=BLOCKED or boundedCandidateSignal=INCONCLUSIVE:

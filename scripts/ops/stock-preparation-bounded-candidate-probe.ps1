@@ -44,6 +44,14 @@ $script:Pm2EnvironmentAllowlist = @(
   'PROGRAMW6432', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'TERM', 'TMP', 'USERPROFILE',
   'WINDIR'
 )
+$script:SourceCountFailureNumberSets = [ordered]@{
+  SELECT_PERMISSION = @(229, 297)
+  OBJECT_OR_COLUMN_RESOLUTION = @(207, 208, 4104, 4121)
+  PARAMETER_OR_TYPE = @(137, 174, 201, 206, 241, 242, 245, 257, 8114, 8115)
+  SYNTAX_OR_DIALECT = @(102, 105, 156, 170, 195, 319)
+  TIMEOUT_OR_RESOURCE = @(-2, 701, 1101, 1105, 1204, 1205, 1222, 8645, 8651, 10928, 10929)
+}
+$script:SourceCountFailureClasses = @($script:SourceCountFailureNumberSets.Keys) + @('OTHER')
 
 $script:ResultVocabulary = [ordered]@{
   executionState = @('COMPLETE', 'BLOCKED')
@@ -71,6 +79,7 @@ $script:ResultVocabulary = [ordered]@{
   sourceConnection = @('PASS', 'FAIL', 'NOT_RUN')
   sourceCountStatementAttempted = @('YES', 'NO')
   sourceCountStatement = @('PASS', 'FAIL', 'NOT_RUN')
+  sourceCountFailureClass = @('NONE', 'NOT_RUN') + $script:SourceCountFailureClasses
   sourceCountResult = @('PASS', 'FAIL', 'NOT_RUN')
   filtersApplied = @('PASS', 'FAIL', 'NOT_RUN')
   appliedLimitEcho = @('PASS', 'FAIL', 'NOT_RUN')
@@ -97,6 +106,7 @@ function New-DiscoveryResult {
     sourceConnection = 'NOT_RUN'
     sourceCountStatementAttempted = 'NO'
     sourceCountStatement = 'NOT_RUN'
+    sourceCountFailureClass = 'NOT_RUN'
     sourceCountResult = 'NOT_RUN'
     filtersApplied = 'NOT_RUN'
     appliedLimitEcho = 'NOT_RUN'
@@ -415,6 +425,46 @@ function Invoke-ProbeCountCommand {
   return $command.ExecuteScalar()
 }
 
+function Resolve-SourceCountFailureClass {
+  param([int[]]$ErrorNumbers)
+  foreach ($className in $script:SourceCountFailureNumberSets.Keys) {
+    foreach ($number in @($ErrorNumbers)) {
+      if ($script:SourceCountFailureNumberSets[$className] -contains $number) {
+        return $className
+      }
+    }
+  }
+  return 'OTHER'
+}
+
+function Get-SourceCountFailureClass {
+  param($ErrorRecord)
+  try {
+    $numbers = @()
+    $current = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+      $ErrorRecord.Exception
+    } else {
+      $ErrorRecord
+    }
+    for ($depth = 0; $depth -lt 8 -and $null -ne $current; $depth += 1) {
+      if ($current -is [System.Data.SqlClient.SqlException]) {
+        $countBeforeCurrentException = $numbers.Count
+        foreach ($sqlError in @($current.Errors)) {
+          $numbers += [int]$sqlError.Number
+        }
+        if ($numbers.Count -eq $countBeforeCurrentException) {
+          $numbers += [int]$current.Number
+        }
+      }
+      if (-not ($current -is [System.Exception])) { break }
+      $current = $current.InnerException
+    }
+    return Resolve-SourceCountFailureClass -ErrorNumbers $numbers
+  } catch {
+    return 'OTHER'
+  }
+}
+
 function Close-ProbeSqlConnection {
   param($Connection)
   $Connection.Close()
@@ -431,6 +481,7 @@ function New-SourceCountObservation {
     sourceConnection = 'NOT_RUN'
     sourceCountStatementAttempted = 'NO'
     sourceCountStatement = 'NOT_RUN'
+    sourceCountFailureClass = 'NOT_RUN'
     sourceCountResult = 'NOT_RUN'
   }
 }
@@ -443,7 +494,8 @@ function Test-SourceCountObservation {
   $keys = @(
     'state', 'failureReason', 'count', 'sourceCredentialEnv',
     'sourceConnectionAttempted', 'sourceConnection',
-    'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountResult'
+    'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountFailureClass',
+    'sourceCountResult'
   )
   if ($Observation.Keys.Count -ne $keys.Count) { return $false }
   foreach ($key in $keys) {
@@ -460,6 +512,7 @@ function Test-SourceCountObservation {
     $Observation.sourceConnection -eq 'PASS' -and
     $Observation.sourceCountStatementAttempted -eq 'YES' -and
     $Observation.sourceCountStatement -eq 'PASS' -and
+    $Observation.sourceCountFailureClass -eq 'NONE' -and
     $Observation.sourceCountResult -eq 'PASS'
   )
   if ($isSuccess) { return $true }
@@ -473,6 +526,7 @@ function Test-SourceCountObservation {
         $Observation.sourceConnection -eq 'NOT_RUN' -and
         $Observation.sourceCountStatementAttempted -eq 'NO' -and
         $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
         $Observation.sourceCountResult -eq 'NOT_RUN'
       )
     }
@@ -483,6 +537,7 @@ function Test-SourceCountObservation {
         $Observation.sourceConnection -eq 'FAIL' -and
         $Observation.sourceCountStatementAttempted -eq 'NO' -and
         $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
         $Observation.sourceCountResult -eq 'NOT_RUN'
       )
     }
@@ -493,6 +548,7 @@ function Test-SourceCountObservation {
         $Observation.sourceConnection -eq 'PASS' -and
         $Observation.sourceCountStatementAttempted -eq 'YES' -and
         $Observation.sourceCountStatement -eq 'FAIL' -and
+        $script:SourceCountFailureClasses -contains $Observation.sourceCountFailureClass -and
         $Observation.sourceCountResult -eq 'NOT_RUN'
       )
     }
@@ -503,6 +559,7 @@ function Test-SourceCountObservation {
         $Observation.sourceConnection -eq 'PASS' -and
         $Observation.sourceCountStatementAttempted -eq 'YES' -and
         $Observation.sourceCountStatement -eq 'PASS' -and
+        $Observation.sourceCountFailureClass -eq 'NONE' -and
         $Observation.sourceCountResult -eq 'FAIL'
       )
     }
@@ -542,9 +599,11 @@ function Invoke-SamePredicateCount {
     try {
       $value = & $script:SourceCountCommandProvider $connection $Config $FilterValue
       $observation.sourceCountStatement = 'PASS'
+      $observation.sourceCountFailureClass = 'NONE'
     } catch {
       $observation.failureReason = 'SOURCE_COUNT_STATEMENT_FAILED'
       $observation.sourceCountStatement = 'FAIL'
+      $observation.sourceCountFailureClass = Get-SourceCountFailureClass -ErrorRecord $_
       return $observation
     }
 
@@ -821,7 +880,8 @@ function Invoke-BoundedCandidateDiscovery {
     }
     foreach ($name in @(
       'sourceCredentialEnv', 'sourceConnectionAttempted', 'sourceConnection',
-      'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountResult'
+      'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountFailureClass',
+      'sourceCountResult'
     )) {
       $result[$name] = $countObservation[$name]
     }

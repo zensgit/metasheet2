@@ -35,6 +35,40 @@ $filterEnv = 'METASHEET_DISCOVERY_FILTER_TEST'
 $privateValue = 'PRIVATE-BOM-42'
 $privateError = 'PRIVATE-SQL-ERROR-TEXT'
 
+function New-FixtureSqlException {
+  param(
+    [int[]]$Numbers,
+    [string]$Message
+  )
+  Add-Type -AssemblyName System.Data
+  $flags = [System.Reflection.BindingFlags]::Instance -bor
+    [System.Reflection.BindingFlags]::NonPublic
+  $errorConstructor = [System.Data.SqlClient.SqlError].GetConstructors($flags) |
+    Where-Object { $_.GetParameters().Count -in @(8, 9) } |
+    Sort-Object { $_.GetParameters().Count } -Descending |
+    Select-Object -First 1
+  $exceptionConstructor = [System.Data.SqlClient.SqlException].GetConstructors($flags) |
+    Where-Object { $_.GetParameters().Count -eq 4 } |
+    Select-Object -First 1
+  $addMethod = [System.Data.SqlClient.SqlErrorCollection].GetMethod('Add', $flags)
+  if ($null -eq $errorConstructor -or $null -eq $exceptionConstructor -or $null -eq $addMethod) {
+    throw 'TEST_SQL_EXCEPTION_FACTORY_UNAVAILABLE'
+  }
+  $errors = [Activator]::CreateInstance([System.Data.SqlClient.SqlErrorCollection], $true)
+  foreach ($number in @($Numbers)) {
+    $arguments = if ($errorConstructor.GetParameters().Count -eq 9) {
+      @([int]$number, [byte]0, [byte]0, 'private-server', $Message, 'private-proc', 1, [uint32]0, $null)
+    } else {
+      @([int]$number, [byte]0, [byte]0, 'private-server', $Message, 'private-proc', 1, $null)
+    }
+    $sqlError = $errorConstructor.Invoke([object[]]$arguments)
+    [void]$addMethod.Invoke($errors, [object[]]@($sqlError))
+  }
+  return $exceptionConstructor.Invoke(
+    [object[]]@($Message, $errors, $null, [guid]::NewGuid())
+  )
+}
+
 function Write-FixtureConfig {
   param([string]$Path, [string]$FieldName = 'ProjectId')
   $json = @"
@@ -85,6 +119,7 @@ function New-FixtureCountObservation {
     sourceConnection = 'NOT_RUN'
     sourceCountStatementAttempted = 'NO'
     sourceCountStatement = 'NOT_RUN'
+    sourceCountFailureClass = 'NOT_RUN'
     sourceCountResult = 'NOT_RUN'
   }
   switch ($FailureReason) {
@@ -96,6 +131,7 @@ function New-FixtureCountObservation {
       $observation.sourceConnection = 'PASS'
       $observation.sourceCountStatementAttempted = 'YES'
       $observation.sourceCountStatement = 'PASS'
+      $observation.sourceCountFailureClass = 'NONE'
       $observation.sourceCountResult = 'PASS'
     }
     'SOURCE_CREDENTIAL_UNAVAILABLE' {
@@ -112,6 +148,7 @@ function New-FixtureCountObservation {
       $observation.sourceConnection = 'PASS'
       $observation.sourceCountStatementAttempted = 'YES'
       $observation.sourceCountStatement = 'FAIL'
+      $observation.sourceCountFailureClass = 'OTHER'
     }
     'SOURCE_COUNT_RESULT_INVALID' {
       $observation.sourceCredentialEnv = 'PASS'
@@ -119,6 +156,7 @@ function New-FixtureCountObservation {
       $observation.sourceConnection = 'PASS'
       $observation.sourceCountStatementAttempted = 'YES'
       $observation.sourceCountStatement = 'PASS'
+      $observation.sourceCountFailureClass = 'NONE'
       $observation.sourceCountResult = 'FAIL'
     }
     default { throw 'TEST_FAILURE_REASON_INVALID' }
@@ -278,6 +316,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $possible.sourceConnection -eq 'PASS' -and
     $possible.sourceCountStatementAttempted -eq 'YES' -and
     $possible.sourceCountStatement -eq 'PASS' -and
+    $possible.sourceCountFailureClass -eq 'NONE' -and
     $possible.sourceCountResult -eq 'PASS' -and
     $possible.pageRelationToLimit -eq 'LT' -and
     $possible.countRelationToLimit -eq 'LT' -and
@@ -291,6 +330,9 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $possibleText -notmatch [regex]::Escape($privateValue) -and
     $possibleText -notmatch 'BomView|ProjectId|fixture-server|fixture-db' -and
     $possibleText -notmatch [regex]::Escape($configPath) -and
+    @($possibleText -split '\r?\n' | Where-Object {
+      $_ -eq 'sourceCountFailureClass=NONE'
+    }).Count -eq 1 -and
     -not (@($possibleText -split '\r?\n') | Where-Object { $_ -match '^[^=]+=(3|7)$' })
   )
   Check 'filter input is scrubbed after success' (
@@ -437,6 +479,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $connectionFailure.sourceConnection -eq 'FAIL' -and
     $connectionFailure.sourceCountStatementAttempted -eq 'NO' -and
     $connectionFailure.sourceCountStatement -eq 'NOT_RUN' -and
+    $connectionFailure.sourceCountFailureClass -eq 'NOT_RUN' -and
     $connectionFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 1 -and
     $script:SourceStatementCalls -eq 0 -and
@@ -445,11 +488,86 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $connectionFailureText -notmatch [regex]::Escape($privateError)
   )
 
+  $classificationCases = @(
+    [pscustomobject]@{
+      name = 'permission'
+      numbers = [int[]]@(229)
+      expected = 'SELECT_PERMISSION'
+    },
+    [pscustomobject]@{
+      name = 'object or column resolution'
+      numbers = [int[]]@(208)
+      expected = 'OBJECT_OR_COLUMN_RESOLUTION'
+    },
+    [pscustomobject]@{
+      name = 'parameter or type'
+      numbers = [int[]]@(245)
+      expected = 'PARAMETER_OR_TYPE'
+    },
+    [pscustomobject]@{
+      name = 'syntax or dialect'
+      numbers = [int[]]@(102)
+      expected = 'SYNTAX_OR_DIALECT'
+    },
+    [pscustomobject]@{
+      name = 'timeout or resource'
+      numbers = [int[]]@(-2)
+      expected = 'TIMEOUT_OR_RESOURCE'
+    },
+    [pscustomobject]@{
+      name = 'unclassified'
+      numbers = [int[]]@(50000)
+      expected = 'OTHER'
+    }
+  )
+  foreach ($case in $classificationCases) {
+    $sqlException = New-FixtureSqlException -Numbers $case.numbers -Message $privateError
+    $actualClass = $null
+    try {
+      throw $sqlException
+    } catch {
+      $actualClass = Get-SourceCountFailureClass -ErrorRecord $_
+    }
+    Check "SQL error classification closes $($case.name) without driver text" (
+      $actualClass -eq $case.expected
+    )
+  }
+
+  $nonSqlClass = $null
+  try {
+    throw $privateError
+  } catch {
+    $nonSqlClass = Get-SourceCountFailureClass -ErrorRecord $_
+  }
+  Check 'non-SQL statement errors fail closed to OTHER' ($nonSqlClass -eq 'OTHER')
+
+  $wrappedClass = $null
+  $wrappedSqlException = New-FixtureSqlException -Numbers ([int[]]@(207)) -Message $privateError
+  try {
+    throw ([System.Exception]::new('PRIVATE-WRAPPER', $wrappedSqlException))
+  } catch {
+    $wrappedClass = Get-SourceCountFailureClass -ErrorRecord $_
+  }
+  Check 'SQL error classification traverses a wrapper without publishing wrapper text' (
+    $wrappedClass -eq 'OBJECT_OR_COLUMN_RESOLUTION' -and
+    $wrappedClass -notmatch 'PRIVATE'
+  )
+
+  $multiErrorClass = $null
+  try {
+    throw (New-FixtureSqlException -Numbers ([int[]]@(50000, 208, 229)) -Message $privateError)
+  } catch {
+    $multiErrorClass = Get-SourceCountFailureClass -ErrorRecord $_
+  }
+  Check 'SQL error classification examines the full collection with frozen precedence' (
+    $multiErrorClass -eq 'SELECT_PERMISSION'
+  )
+
   Reset-Fixture
   $script:SourceCountCommandProvider = {
     param($Connection, $Config, $Value)
     $script:SourceStatementCalls += 1
-    throw $privateError
+    throw (New-FixtureSqlException -Numbers ([int[]]@(208)) -Message $privateError)
   }
   $statementFailure = Invoke-FixtureProbe
   $statementFailureText = Format-DiscoveryResultBlock -Result $statementFailure
@@ -459,6 +577,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $statementFailure.sourceConnection -eq 'PASS' -and
     $statementFailure.sourceCountStatementAttempted -eq 'YES' -and
     $statementFailure.sourceCountStatement -eq 'FAIL' -and
+    $statementFailure.sourceCountFailureClass -eq 'OBJECT_OR_COLUMN_RESOLUTION' -and
     $statementFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 1 -and
     $script:SourceStatementCalls -eq 1 -and
@@ -479,6 +598,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $resultFailure.sourceCredentialEnv -eq 'PASS' -and
     $resultFailure.sourceConnection -eq 'PASS' -and
     $resultFailure.sourceCountStatement -eq 'PASS' -and
+    $resultFailure.sourceCountFailureClass -eq 'NONE' -and
     $resultFailure.sourceCountResult -eq 'FAIL' -and
     $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 0
@@ -510,9 +630,17 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
   $illegalCredentialObservation = New-FixtureCountObservation `
     -FailureReason 'SOURCE_CREDENTIAL_UNAVAILABLE'
   $illegalCredentialObservation.sourceConnectionAttempted = 'YES'
+  $illegalStatementObservation = New-FixtureCountObservation `
+    -FailureReason 'SOURCE_COUNT_STATEMENT_FAILED'
+  $illegalStatementObservation.sourceCountFailureClass = 'NONE'
+  $illegalNotRunObservation = New-FixtureCountObservation `
+    -FailureReason 'SOURCE_COUNT_STATEMENT_FAILED'
+  $illegalNotRunObservation.sourceCountFailureClass = 'NOT_RUN'
   Check 'source-count observation validator rejects cross-stage contradictory tuples' (
     -not (Test-SourceCountObservation -Observation $illegalSuccessObservation) -and
-    -not (Test-SourceCountObservation -Observation $illegalCredentialObservation)
+    -not (Test-SourceCountObservation -Observation $illegalCredentialObservation) -and
+    -not (Test-SourceCountObservation -Observation $illegalStatementObservation) -and
+    -not (Test-SourceCountObservation -Observation $illegalNotRunObservation)
   )
 
   Reset-Fixture

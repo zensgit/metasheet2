@@ -34,7 +34,7 @@ test('builder emits the one-shot values-free discovery contract with complete ch
     )
     assert.equal(
       provenance.contract,
-      'stock-preparation-bounded-candidate-discovery-sidecar-v2',
+      'stock-preparation-bounded-candidate-discovery-sidecar-v3',
     )
     assert.equal(provenance.sourceGitCommit, SOURCE_SHA)
     assert.equal(provenance.targetShell, 'Windows PowerShell 5.1')
@@ -44,7 +44,7 @@ test('builder emits the one-shot values-free discovery contract with complete ch
     assert.equal(provenance.flagOn, false)
     assert.equal(provenance.externalWrite, false)
     assert.equal(provenance.valuesFreePublicOutput, true)
-    assert.equal(provenance.sourceCountDiagnostics, 'closed-stage-v2')
+    assert.equal(provenance.sourceCountDiagnostics, 'closed-sql-error-class-v3')
     assert.equal(
       provenance.frozenHelperSha256['stock-preparation-rca-window-pm2-sample.mjs'],
       '09cc76024bd98fd4ce86cfa834eea3b94680482d0d0970600da008a19a6731ec',
