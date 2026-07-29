@@ -4,9 +4,10 @@
   One-shot, flag-OFF bounded-candidate discovery for the readonly SQL Server bridge.
 .DESCRIPTION
   Reads the existing bridge allowlist/config without modifying it, verifies the stock-preparation
-  feature flag is OFF, executes one source-free bound-limit control, one parameterized COUNT_BIG
-  query capped at limit + 1 over the same source predicate, and one allowlisted bridge
-  equality-filter query only after both SQL statements pass.
+  feature flag is OFF, executes one source-free bound-limit control, one values-free schema-only
+  column type classification on the same connection, one parameterized COUNT_BIG query capped at
+  limit + 1 over the same source predicate only when the type relation is DIRECT_CLASS, and one
+  allowlisted bridge equality-filter query only after the count statement passes.
 
   The fixed stdout block is values-free. This probe can identify a possible bounded candidate; it
   is not a completeness proof and does not replace approved-config preflight.
@@ -53,12 +54,16 @@ $script:SourceCountFailureNumberSets = [ordered]@{
   TIMEOUT_OR_RESOURCE = @(-2, 701, 1101, 1105, 1204, 1205, 1222, 8645, 8651, 10928, 10929)
 }
 $script:SourceCountFailureClasses = @($script:SourceCountFailureNumberSets.Keys) + @('OTHER')
+$script:SourceColumnTypeClasses = @(
+  'TEXT', 'INTEGER', 'BOOLEAN', 'GUID', 'DATE_TIME', 'DECIMAL', 'BINARY', 'OTHER'
+)
+$script:SourceTypeRelations = @('DIRECT_CLASS', 'CROSS_CLASS', 'UNKNOWN', 'NOT_RUN')
 
 $script:ResultVocabulary = [ordered]@{
   executionState = @('COMPLETE', 'BLOCKED')
   failedStage = @(
     'NONE', 'PRECONDITION', 'PM2_CHECK', 'CONFIG_READ', 'INPUT_VALIDATE',
-    'SOURCE_BOUND_LIMIT_CONTROL', 'SOURCE_COUNT', 'BRIDGE_QUERY',
+    'SOURCE_BOUND_LIMIT_CONTROL', 'SOURCE_COLUMN_METADATA', 'SOURCE_COUNT', 'BRIDGE_QUERY',
     'CONSISTENCY_CHECK', 'CLEANUP', 'INTERNAL'
   )
   failureReason = @(
@@ -68,6 +73,8 @@ $script:ResultVocabulary = [ordered]@{
     'OBJECT_NOT_ALLOWLISTED', 'FILTER_NOT_ALLOWLISTED', 'FILTER_VALUE_UNAVAILABLE',
     'SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_CONNECTION_FAILED',
     'SOURCE_BOUND_LIMIT_CONTROL_FAILED', 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID',
+    'SOURCE_COLUMN_METADATA_FAILED', 'SOURCE_COLUMN_METADATA_RESULT_INVALID',
+    'SOURCE_TYPE_RELATION_CROSS_CLASS', 'SOURCE_TYPE_RELATION_UNKNOWN',
     'SOURCE_COUNT_STATEMENT_FAILED', 'SOURCE_COUNT_RESULT_INVALID',
     'BRIDGE_QUERY_FAILED', 'BRIDGE_FILTER_UNCONFIRMED',
     'BRIDGE_LIMIT_UNCONFIRMED', 'BRIDGE_RESULT_INVALID', 'OBSERVATION_MISMATCH',
@@ -86,6 +93,12 @@ $script:ResultVocabulary = [ordered]@{
   sourceParameterFailureRole = @(
     'NONE', 'NOT_RUN', 'BOUND_LIMIT', 'PREDICATE_OR_SOURCE', 'UNDETERMINED'
   )
+  requestedFilterValueType = @('STRING', 'INT64', 'BOOLEAN', 'NOT_RUN')
+  sourceColumnMetadataAttempted = @('YES', 'NO')
+  sourceColumnMetadata = @('PASS', 'FAIL', 'NOT_RUN')
+  sourceColumnMetadataFailureClass = @('NONE', 'NOT_RUN') + $script:SourceCountFailureClasses
+  sourceColumnTypeClass = @('NOT_RUN') + $script:SourceColumnTypeClasses
+  sourceTypeRelation = $script:SourceTypeRelations
   sourceCountStatementAttempted = @('YES', 'NO')
   sourceCountStatement = @('PASS', 'FAIL', 'NOT_RUN')
   sourceCountFailureClass = @('NONE', 'NOT_RUN') + $script:SourceCountFailureClasses
@@ -117,6 +130,12 @@ function New-DiscoveryResult {
     sourceBoundLimitControl = 'NOT_RUN'
     sourceBoundLimitControlFailureClass = 'NOT_RUN'
     sourceParameterFailureRole = 'NOT_RUN'
+    requestedFilterValueType = 'NOT_RUN'
+    sourceColumnMetadataAttempted = 'NO'
+    sourceColumnMetadata = 'NOT_RUN'
+    sourceColumnMetadataFailureClass = 'NOT_RUN'
+    sourceColumnTypeClass = 'NOT_RUN'
+    sourceTypeRelation = 'NOT_RUN'
     sourceCountStatementAttempted = 'NO'
     sourceCountStatement = 'NOT_RUN'
     sourceCountFailureClass = 'NOT_RUN'
@@ -410,6 +429,56 @@ function New-SamePredicateCountSpec {
   }
 }
 
+function New-ColumnMetadataSpec {
+  param($Config)
+  $source = ConvertTo-QuotedSource -Value $Config.source
+  $field = ConvertTo-QuotedIdentifier -Value $Config.filterField
+  return [ordered]@{
+    sql = "SELECT TOP (0) $field FROM $source"
+  }
+}
+
+function Resolve-SourceColumnTypeClass {
+  param([string]$DataTypeName)
+  if ([string]::IsNullOrWhiteSpace($DataTypeName)) { return 'OTHER' }
+  $normalized = $DataTypeName.Trim().ToLowerInvariant()
+  if (@('char', 'varchar', 'nchar', 'nvarchar') -contains $normalized) { return 'TEXT' }
+  if (@('tinyint', 'smallint', 'int', 'bigint') -contains $normalized) { return 'INTEGER' }
+  if ($normalized -eq 'bit') { return 'BOOLEAN' }
+  if ($normalized -eq 'uniqueidentifier') { return 'GUID' }
+  if (@(
+    'date', 'time', 'smalldatetime', 'datetime', 'datetime2', 'datetimeoffset'
+  ) -contains $normalized) { return 'DATE_TIME' }
+  if (@(
+    'decimal', 'numeric', 'smallmoney', 'money'
+  ) -contains $normalized) { return 'DECIMAL' }
+  if (@(
+    'binary', 'varbinary', 'image', 'timestamp', 'rowversion'
+  ) -contains $normalized) { return 'BINARY' }
+  return 'OTHER'
+}
+
+function Resolve-SourceTypeRelation {
+  param(
+    [string]$RequestedType,
+    [string]$SourceTypeClass
+  )
+  if (
+    [string]::IsNullOrWhiteSpace($SourceTypeClass) -or
+    $SourceTypeClass -eq 'NOT_RUN' -or
+    $SourceTypeClass -eq 'OTHER'
+  ) {
+    return 'UNKNOWN'
+  }
+  $isDirect = (
+    ($RequestedType -eq 'STRING' -and $SourceTypeClass -eq 'TEXT') -or
+    ($RequestedType -eq 'INT64' -and $SourceTypeClass -eq 'INTEGER') -or
+    ($RequestedType -eq 'BOOLEAN' -and $SourceTypeClass -eq 'BOOLEAN')
+  )
+  if ($isDirect) { return 'DIRECT_CLASS' }
+  return 'CROSS_CLASS'
+}
+
 function Open-ProbeSqlConnection {
   param(
     $Config,
@@ -473,6 +542,38 @@ function Invoke-ProbeCountCommand {
     -Config $Config `
     -Sql $spec.sql `
     -Parameters $spec.parameters
+}
+
+function Invoke-ProbeColumnMetadataCommand {
+  param(
+    $Connection,
+    $Config
+  )
+  $spec = New-ColumnMetadataSpec -Config $Config
+  $command = $null
+  $reader = $null
+  try {
+    $command = $Connection.CreateCommand()
+    $command.CommandType = [System.Data.CommandType]::Text
+    $command.CommandTimeout = $Config.database.queryTimeoutSec
+    $command.CommandText = $spec.sql
+    $reader = $command.ExecuteReader([System.Data.CommandBehavior]::SchemaOnly)
+    $fieldCount = [int]$reader.FieldCount
+    if ($fieldCount -ne 1) { return '' }
+    $typeName = $reader.GetDataTypeName(0)
+    if ($null -eq $typeName -or $typeName -is [System.DBNull]) { return '' }
+    return [string]$typeName
+  } finally {
+    try {
+      if ($null -ne $reader) {
+        $reader.Dispose()
+      }
+    } finally {
+      if ($null -ne $command) {
+        $command.Dispose()
+      }
+    }
+  }
 }
 
 function Resolve-BoundLimitControlFailureRole {
@@ -549,6 +650,12 @@ function New-SourceCountObservation {
     sourceBoundLimitControl = 'NOT_RUN'
     sourceBoundLimitControlFailureClass = 'NOT_RUN'
     sourceParameterFailureRole = 'NOT_RUN'
+    requestedFilterValueType = 'NOT_RUN'
+    sourceColumnMetadataAttempted = 'NO'
+    sourceColumnMetadata = 'NOT_RUN'
+    sourceColumnMetadataFailureClass = 'NOT_RUN'
+    sourceColumnTypeClass = 'NOT_RUN'
+    sourceTypeRelation = 'NOT_RUN'
     sourceCountStatementAttempted = 'NO'
     sourceCountStatement = 'NOT_RUN'
     sourceCountFailureClass = 'NOT_RUN'
@@ -566,6 +673,9 @@ function Test-SourceCountObservation {
     'sourceConnectionAttempted', 'sourceConnection',
     'sourceBoundLimitControlAttempted', 'sourceBoundLimitControl',
     'sourceBoundLimitControlFailureClass', 'sourceParameterFailureRole',
+    'requestedFilterValueType',
+    'sourceColumnMetadataAttempted', 'sourceColumnMetadata',
+    'sourceColumnMetadataFailureClass', 'sourceColumnTypeClass', 'sourceTypeRelation',
     'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountFailureClass',
     'sourceCountResult'
   )
@@ -573,6 +683,44 @@ function Test-SourceCountObservation {
   foreach ($key in $keys) {
     if (-not $Observation.Contains($key)) { return $false }
   }
+
+  $requestedTypeOk = @('STRING', 'INT64', 'BOOLEAN', 'NOT_RUN') -contains `
+    $Observation.requestedFilterValueType
+  $metadataFailureClassOk = (
+    $Observation.sourceColumnMetadataFailureClass -eq 'NONE' -or
+    $Observation.sourceColumnMetadataFailureClass -eq 'NOT_RUN' -or
+    $script:SourceCountFailureClasses -contains $Observation.sourceColumnMetadataFailureClass
+  )
+  $typeClassOk = (
+    $Observation.sourceColumnTypeClass -eq 'NOT_RUN' -or
+    $script:SourceColumnTypeClasses -contains $Observation.sourceColumnTypeClass
+  )
+  $relationOk = $script:SourceTypeRelations -contains $Observation.sourceTypeRelation
+  if (-not ($requestedTypeOk -and $metadataFailureClassOk -and $typeClassOk -and $relationOk)) {
+    return $false
+  }
+
+  $directClassOk = (
+    (
+      $Observation.requestedFilterValueType -eq 'STRING' -and
+      $Observation.sourceColumnTypeClass -eq 'TEXT'
+    ) -or
+    (
+      $Observation.requestedFilterValueType -eq 'INT64' -and
+      $Observation.sourceColumnTypeClass -eq 'INTEGER'
+    ) -or
+    (
+      $Observation.requestedFilterValueType -eq 'BOOLEAN' -and
+      $Observation.sourceColumnTypeClass -eq 'BOOLEAN'
+    )
+  )
+  $metadataPassDirect = (
+    $Observation.sourceColumnMetadataAttempted -eq 'YES' -and
+    $Observation.sourceColumnMetadata -eq 'PASS' -and
+    $Observation.sourceColumnMetadataFailureClass -eq 'NONE' -and
+    $Observation.sourceTypeRelation -eq 'DIRECT_CLASS' -and
+    $directClassOk
+  )
 
   $isSuccess = (
     $Observation.state -eq 'COMPLETE' -and
@@ -586,6 +734,7 @@ function Test-SourceCountObservation {
     $Observation.sourceBoundLimitControl -eq 'PASS' -and
     $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
     $Observation.sourceParameterFailureRole -eq 'NONE' -and
+    $metadataPassDirect -and
     $Observation.sourceCountStatementAttempted -eq 'YES' -and
     $Observation.sourceCountStatement -eq 'PASS' -and
     $Observation.sourceCountFailureClass -eq 'NONE' -and
@@ -593,6 +742,14 @@ function Test-SourceCountObservation {
   )
   if ($isSuccess) { return $true }
   if ($Observation.state -ne 'BLOCKED' -or $null -ne $Observation['count']) { return $false }
+
+  $metadataNotRun = (
+    $Observation.sourceColumnMetadataAttempted -eq 'NO' -and
+    $Observation.sourceColumnMetadata -eq 'NOT_RUN' -and
+    $Observation.sourceColumnMetadataFailureClass -eq 'NOT_RUN' -and
+    $Observation.sourceColumnTypeClass -eq 'NOT_RUN' -and
+    $Observation.sourceTypeRelation -eq 'NOT_RUN'
+  )
 
   switch ($Observation.failureReason) {
     'SOURCE_CREDENTIAL_UNAVAILABLE' {
@@ -604,6 +761,8 @@ function Test-SourceCountObservation {
         $Observation.sourceBoundLimitControl -eq 'NOT_RUN' -and
         $Observation.sourceBoundLimitControlFailureClass -eq 'NOT_RUN' -and
         $Observation.sourceParameterFailureRole -eq 'NOT_RUN' -and
+        $Observation.requestedFilterValueType -ne 'NOT_RUN' -and
+        $metadataNotRun -and
         $Observation.sourceCountStatementAttempted -eq 'NO' -and
         $Observation.sourceCountStatement -eq 'NOT_RUN' -and
         $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
@@ -619,6 +778,8 @@ function Test-SourceCountObservation {
         $Observation.sourceBoundLimitControl -eq 'NOT_RUN' -and
         $Observation.sourceBoundLimitControlFailureClass -eq 'NOT_RUN' -and
         $Observation.sourceParameterFailureRole -eq 'NOT_RUN' -and
+        $Observation.requestedFilterValueType -ne 'NOT_RUN' -and
+        $metadataNotRun -and
         $Observation.sourceCountStatementAttempted -eq 'NO' -and
         $Observation.sourceCountStatement -eq 'NOT_RUN' -and
         $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
@@ -636,6 +797,8 @@ function Test-SourceCountObservation {
         $Observation.sourceBoundLimitControl -eq 'FAIL' -and
         $script:SourceCountFailureClasses -contains $Observation.sourceBoundLimitControlFailureClass -and
         $Observation.sourceParameterFailureRole -eq $role -and
+        $Observation.requestedFilterValueType -ne 'NOT_RUN' -and
+        $metadataNotRun -and
         $Observation.sourceCountStatementAttempted -eq 'NO' -and
         $Observation.sourceCountStatement -eq 'NOT_RUN' -and
         $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
@@ -651,6 +814,94 @@ function Test-SourceCountObservation {
         $Observation.sourceBoundLimitControl -eq 'FAIL' -and
         $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
         $Observation.sourceParameterFailureRole -eq 'UNDETERMINED' -and
+        $Observation.requestedFilterValueType -ne 'NOT_RUN' -and
+        $metadataNotRun -and
+        $Observation.sourceCountStatementAttempted -eq 'NO' -and
+        $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
+        $Observation.sourceCountResult -eq 'NOT_RUN'
+      )
+    }
+    'SOURCE_COLUMN_METADATA_FAILED' {
+      return (
+        $Observation.sourceCredentialEnv -eq 'PASS' -and
+        $Observation.sourceConnectionAttempted -eq 'YES' -and
+        $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'YES' -and
+        $Observation.sourceBoundLimitControl -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+        $Observation.sourceParameterFailureRole -eq 'NONE' -and
+        $Observation.requestedFilterValueType -ne 'NOT_RUN' -and
+        $Observation.sourceColumnMetadataAttempted -eq 'YES' -and
+        $Observation.sourceColumnMetadata -eq 'FAIL' -and
+        $script:SourceCountFailureClasses -contains $Observation.sourceColumnMetadataFailureClass -and
+        $Observation.sourceColumnTypeClass -eq 'NOT_RUN' -and
+        $Observation.sourceTypeRelation -eq 'UNKNOWN' -and
+        $Observation.sourceCountStatementAttempted -eq 'NO' -and
+        $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
+        $Observation.sourceCountResult -eq 'NOT_RUN'
+      )
+    }
+    'SOURCE_COLUMN_METADATA_RESULT_INVALID' {
+      return (
+        $Observation.sourceCredentialEnv -eq 'PASS' -and
+        $Observation.sourceConnectionAttempted -eq 'YES' -and
+        $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'YES' -and
+        $Observation.sourceBoundLimitControl -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+        $Observation.sourceParameterFailureRole -eq 'NONE' -and
+        $Observation.requestedFilterValueType -ne 'NOT_RUN' -and
+        $Observation.sourceColumnMetadataAttempted -eq 'YES' -and
+        $Observation.sourceColumnMetadata -eq 'FAIL' -and
+        $Observation.sourceColumnMetadataFailureClass -eq 'NONE' -and
+        $Observation.sourceColumnTypeClass -eq 'NOT_RUN' -and
+        $Observation.sourceTypeRelation -eq 'UNKNOWN' -and
+        $Observation.sourceCountStatementAttempted -eq 'NO' -and
+        $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
+        $Observation.sourceCountResult -eq 'NOT_RUN'
+      )
+    }
+    'SOURCE_TYPE_RELATION_CROSS_CLASS' {
+      return (
+        $Observation.sourceCredentialEnv -eq 'PASS' -and
+        $Observation.sourceConnectionAttempted -eq 'YES' -and
+        $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'YES' -and
+        $Observation.sourceBoundLimitControl -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+        $Observation.sourceParameterFailureRole -eq 'NONE' -and
+        $Observation.requestedFilterValueType -ne 'NOT_RUN' -and
+        $Observation.sourceColumnMetadataAttempted -eq 'YES' -and
+        $Observation.sourceColumnMetadata -eq 'PASS' -and
+        $Observation.sourceColumnMetadataFailureClass -eq 'NONE' -and
+        $script:SourceColumnTypeClasses -contains $Observation.sourceColumnTypeClass -and
+        $Observation.sourceColumnTypeClass -ne 'OTHER' -and
+        $Observation.sourceTypeRelation -eq 'CROSS_CLASS' -and
+        -not $directClassOk -and
+        $Observation.sourceCountStatementAttempted -eq 'NO' -and
+        $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
+        $Observation.sourceCountResult -eq 'NOT_RUN'
+      )
+    }
+    'SOURCE_TYPE_RELATION_UNKNOWN' {
+      return (
+        $Observation.sourceCredentialEnv -eq 'PASS' -and
+        $Observation.sourceConnectionAttempted -eq 'YES' -and
+        $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'YES' -and
+        $Observation.sourceBoundLimitControl -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+        $Observation.sourceParameterFailureRole -eq 'NONE' -and
+        $Observation.requestedFilterValueType -ne 'NOT_RUN' -and
+        $Observation.sourceColumnMetadataAttempted -eq 'YES' -and
+        $Observation.sourceColumnMetadata -eq 'PASS' -and
+        $Observation.sourceColumnMetadataFailureClass -eq 'NONE' -and
+        $Observation.sourceColumnTypeClass -eq 'OTHER' -and
+        $Observation.sourceTypeRelation -eq 'UNKNOWN' -and
         $Observation.sourceCountStatementAttempted -eq 'NO' -and
         $Observation.sourceCountStatement -eq 'NOT_RUN' -and
         $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
@@ -668,6 +919,7 @@ function Test-SourceCountObservation {
         $Observation.sourceBoundLimitControl -eq 'PASS' -and
         $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
         $Observation.sourceParameterFailureRole -eq $role -and
+        $metadataPassDirect -and
         $Observation.sourceCountStatementAttempted -eq 'YES' -and
         $Observation.sourceCountStatement -eq 'FAIL' -and
         $script:SourceCountFailureClasses -contains $Observation.sourceCountFailureClass -and
@@ -683,6 +935,7 @@ function Test-SourceCountObservation {
         $Observation.sourceBoundLimitControl -eq 'PASS' -and
         $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
         $Observation.sourceParameterFailureRole -eq 'NONE' -and
+        $metadataPassDirect -and
         $Observation.sourceCountStatementAttempted -eq 'YES' -and
         $Observation.sourceCountStatement -eq 'PASS' -and
         $Observation.sourceCountFailureClass -eq 'NONE' -and
@@ -696,9 +949,15 @@ function Test-SourceCountObservation {
 function Invoke-SamePredicateCount {
   param(
     $Config,
-    $FilterValue
+    $FilterValue,
+    [string]$FilterValueType
   )
   $observation = New-SourceCountObservation
+  if (@('STRING', 'INT64', 'BOOLEAN') -notcontains $FilterValueType) {
+    $observation.failureReason = 'SOURCE_COUNT_RESULT_INVALID'
+    return $observation
+  }
+  $observation.requestedFilterValueType = $FilterValueType
   $username = [Environment]::GetEnvironmentVariable($Config.database.usernameEnvVar)
   $password = [Environment]::GetEnvironmentVariable($Config.database.passwordEnvVar)
   if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrEmpty($password)) {
@@ -742,11 +1001,61 @@ function Invoke-SamePredicateCount {
       if ([long]$controlValue -ne 1L) { throw 'CONTROL_INVALID' }
       $observation.sourceBoundLimitControl = 'PASS'
       $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceParameterFailureRole = 'NONE'
     } catch {
       $observation.failureReason = 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID'
       $observation.sourceBoundLimitControl = 'FAIL'
       $observation.sourceBoundLimitControlFailureClass = 'NONE'
       $observation.sourceParameterFailureRole = 'UNDETERMINED'
+      return $observation
+    }
+
+    $observation.sourceColumnMetadataAttempted = 'YES'
+    $rawTypeName = $null
+    try {
+      $rawTypeName = & $script:SourceColumnMetadataCommandProvider $connection $Config
+    } catch {
+      $observation.failureReason = 'SOURCE_COLUMN_METADATA_FAILED'
+      $observation.sourceColumnMetadata = 'FAIL'
+      $observation.sourceColumnMetadataFailureClass = Get-SourceCountFailureClass -ErrorRecord $_
+      $observation.sourceColumnTypeClass = 'NOT_RUN'
+      $observation.sourceTypeRelation = 'UNKNOWN'
+      return $observation
+    }
+
+    try {
+      if ($null -eq $rawTypeName -or $rawTypeName -is [System.DBNull]) {
+        throw 'METADATA_INVALID'
+      }
+      $typeNameText = [string]$rawTypeName
+      if ([string]::IsNullOrWhiteSpace($typeNameText)) { throw 'METADATA_INVALID' }
+      $typeClass = Resolve-SourceColumnTypeClass -DataTypeName $typeNameText
+      if ($script:SourceColumnTypeClasses -notcontains $typeClass) {
+        throw 'METADATA_INVALID'
+      }
+      $relation = Resolve-SourceTypeRelation `
+        -RequestedType $FilterValueType `
+        -SourceTypeClass $typeClass
+      $observation.sourceColumnMetadata = 'PASS'
+      $observation.sourceColumnMetadataFailureClass = 'NONE'
+      $observation.sourceColumnTypeClass = $typeClass
+      $observation.sourceTypeRelation = $relation
+    } catch {
+      $observation.failureReason = 'SOURCE_COLUMN_METADATA_RESULT_INVALID'
+      $observation.sourceColumnMetadata = 'FAIL'
+      $observation.sourceColumnMetadataFailureClass = 'NONE'
+      $observation.sourceColumnTypeClass = 'NOT_RUN'
+      $observation.sourceTypeRelation = 'UNKNOWN'
+      return $observation
+    }
+
+    if ($observation.sourceTypeRelation -eq 'CROSS_CLASS') {
+      $observation.failureReason = 'SOURCE_TYPE_RELATION_CROSS_CLASS'
+      return $observation
+    }
+    if ($observation.sourceTypeRelation -ne 'DIRECT_CLASS') {
+      $observation.failureReason = 'SOURCE_TYPE_RELATION_UNKNOWN'
+      $observation.sourceTypeRelation = 'UNKNOWN'
       return $observation
     }
 
@@ -934,6 +1243,10 @@ $script:SourceBoundLimitControlCommandProvider = {
   param($Connection, $Config)
   Invoke-ProbeBoundLimitControlCommand -Connection $Connection -Config $Config
 }
+$script:SourceColumnMetadataCommandProvider = {
+  param($Connection, $Config)
+  Invoke-ProbeColumnMetadataCommand -Connection $Connection -Config $Config
+}
 $script:SourceCountCommandProvider = {
   param($Connection, $Config, $Value)
   Invoke-ProbeCountCommand -Connection $Connection -Config $Config -FilterValue $Value
@@ -943,7 +1256,10 @@ $script:SourceConnectionCleanupProvider = {
   Close-ProbeSqlConnection -Connection $Connection
 }
 $script:Pm2SampleProvider = { param($HelperPath) Get-Pm2FlagOffSample -HelperPath $HelperPath }
-$script:CountProvider = { param($Config, $Value) Invoke-SamePredicateCount -Config $Config -FilterValue $Value }
+$script:CountProvider = {
+  param($Config, $Value, $ValueType)
+  Invoke-SamePredicateCount -Config $Config -FilterValue $Value -FilterValueType $ValueType
+}
 $script:BridgePageProvider = { param($Config, $Value) Invoke-BridgeFilteredPage -Config $Config -FilterValue $Value }
 
 function Invoke-BoundedCandidateDiscovery {
@@ -1033,7 +1349,7 @@ function Invoke-BoundedCandidateDiscovery {
     $script:ProbeRunCount += 1
     $result.probeRunCount = 'ONE'
     try {
-      $countObservation = & $script:CountProvider $config $filterValue
+      $countObservation = & $script:CountProvider $config $filterValue $RequestedFilterValueType
       if (-not (Test-SourceCountObservation -Observation $countObservation)) {
         throw 'SOURCE_COUNT_OBSERVATION_INVALID'
       }
@@ -1045,6 +1361,9 @@ function Invoke-BoundedCandidateDiscovery {
       'sourceCredentialEnv', 'sourceConnectionAttempted', 'sourceConnection',
       'sourceBoundLimitControlAttempted', 'sourceBoundLimitControl',
       'sourceBoundLimitControlFailureClass', 'sourceParameterFailureRole',
+      'requestedFilterValueType',
+      'sourceColumnMetadataAttempted', 'sourceColumnMetadata',
+      'sourceColumnMetadataFailureClass', 'sourceColumnTypeClass', 'sourceTypeRelation',
       'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountFailureClass',
       'sourceCountResult'
     )) {
@@ -1057,6 +1376,13 @@ function Invoke-BoundedCandidateDiscovery {
         $countObservation.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID'
       ) {
         'SOURCE_BOUND_LIMIT_CONTROL'
+      } elseif (
+        $countObservation.failureReason -eq 'SOURCE_COLUMN_METADATA_FAILED' -or
+        $countObservation.failureReason -eq 'SOURCE_COLUMN_METADATA_RESULT_INVALID' -or
+        $countObservation.failureReason -eq 'SOURCE_TYPE_RELATION_CROSS_CLASS' -or
+        $countObservation.failureReason -eq 'SOURCE_TYPE_RELATION_UNKNOWN'
+      ) {
+        'SOURCE_COLUMN_METADATA'
       } else {
         'SOURCE_COUNT'
       }

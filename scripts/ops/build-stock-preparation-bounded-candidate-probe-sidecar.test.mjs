@@ -34,7 +34,7 @@ test('builder emits the one-shot values-free discovery contract with complete ch
     )
     assert.equal(
       provenance.contract,
-      'stock-preparation-bounded-candidate-discovery-sidecar-v4',
+      'stock-preparation-bounded-candidate-discovery-sidecar-v5',
     )
     assert.equal(provenance.sourceGitCommit, SOURCE_SHA)
     assert.equal(provenance.targetShell, 'Windows PowerShell 5.1')
@@ -44,7 +44,7 @@ test('builder emits the one-shot values-free discovery contract with complete ch
     assert.equal(provenance.flagOn, false)
     assert.equal(provenance.externalWrite, false)
     assert.equal(provenance.valuesFreePublicOutput, true)
-    assert.equal(provenance.sourceCountDiagnostics, 'closed-parameter-isolation-v4')
+    assert.equal(provenance.sourceCountDiagnostics, 'closed-predicate-type-class-v5')
     assert.equal(
       provenance.frozenHelperSha256['stock-preparation-rca-window-pm2-sample.mjs'],
       '09cc76024bd98fd4ce86cfa834eea3b94680482d0d0970600da008a19a6731ec',
@@ -114,20 +114,33 @@ test('probe stdout is emitted only through the closed result formatter', () => {
   )
   assert.match(script, /SELECT COUNT_BIG\(1\) FROM \(SELECT TOP \(@p1\)/)
   assert.match(script, /FROM \$source WHERE \$field = @p0/)
+  assert.match(script, /SELECT TOP \(0\) \$field FROM \$source/)
+  assert.match(script, /CommandBehavior\]::SchemaOnly/)
+  assert.match(script, /GetDataTypeName\(0\)/)
   assert.match(script, /value = \(\[long\]\$Config\.limit \+ 1L\)/)
   assert.match(script, /AddWithValue\(\$parameter\.name, \$parameter\.value\)/)
   assert.match(script, /function Invoke-ProbeScalarCommand/)
+  assert.match(script, /function Invoke-ProbeColumnMetadataCommand/)
   assert.match(script, /sourceBoundLimitControlAttempted/)
   assert.match(script, /sourceParameterFailureRole/)
+  assert.match(script, /sourceColumnMetadataAttempted/)
+  assert.match(script, /sourceTypeRelation/)
   assert.match(script, /SOURCE_BOUND_LIMIT_CONTROL_FAILED/)
   assert.match(script, /SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID/)
+  assert.match(script, /SOURCE_COLUMN_METADATA_FAILED/)
+  assert.match(script, /SOURCE_TYPE_RELATION_CROSS_CLASS/)
   assert.match(script, /PREDICATE_OR_SOURCE/)
   assert.doesNotMatch(script, /SOURCE_COUNT_FAILED/)
+  assert.doesNotMatch(script, /sys\.columns|OBJECT_ID/)
   for (const reason of [
     'SOURCE_CREDENTIAL_UNAVAILABLE',
     'SOURCE_CONNECTION_FAILED',
     'SOURCE_BOUND_LIMIT_CONTROL_FAILED',
     'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID',
+    'SOURCE_COLUMN_METADATA_FAILED',
+    'SOURCE_COLUMN_METADATA_RESULT_INVALID',
+    'SOURCE_TYPE_RELATION_CROSS_CLASS',
+    'SOURCE_TYPE_RELATION_UNKNOWN',
     'SOURCE_COUNT_STATEMENT_FAILED',
     'SOURCE_COUNT_RESULT_INVALID',
   ]) {

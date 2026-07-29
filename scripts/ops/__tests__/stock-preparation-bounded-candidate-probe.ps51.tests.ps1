@@ -110,7 +110,11 @@ function New-FixtureCountObservation {
     [string]$FailureReason = 'NONE',
     [long]$Count = 0L,
     [string]$SourceCountFailureClass = 'OTHER',
-    [string]$SourceBoundLimitControlFailureClass = 'OTHER'
+    [string]$SourceBoundLimitControlFailureClass = 'OTHER',
+    [string]$RequestedFilterValueType = 'STRING',
+    [string]$SourceColumnTypeClass = 'TEXT',
+    [string]$SourceColumnMetadataFailureClass = 'OTHER',
+    [string]$SourceTypeRelation = 'DIRECT_CLASS'
   )
   $observation = [ordered]@{
     state = 'BLOCKED'
@@ -123,6 +127,12 @@ function New-FixtureCountObservation {
     sourceBoundLimitControl = 'NOT_RUN'
     sourceBoundLimitControlFailureClass = 'NOT_RUN'
     sourceParameterFailureRole = 'NOT_RUN'
+    requestedFilterValueType = $RequestedFilterValueType
+    sourceColumnMetadataAttempted = 'NO'
+    sourceColumnMetadata = 'NOT_RUN'
+    sourceColumnMetadataFailureClass = 'NOT_RUN'
+    sourceColumnTypeClass = 'NOT_RUN'
+    sourceTypeRelation = 'NOT_RUN'
     sourceCountStatementAttempted = 'NO'
     sourceCountStatement = 'NOT_RUN'
     sourceCountFailureClass = 'NOT_RUN'
@@ -139,6 +149,11 @@ function New-FixtureCountObservation {
       $observation.sourceBoundLimitControl = 'PASS'
       $observation.sourceBoundLimitControlFailureClass = 'NONE'
       $observation.sourceParameterFailureRole = 'NONE'
+      $observation.sourceColumnMetadataAttempted = 'YES'
+      $observation.sourceColumnMetadata = 'PASS'
+      $observation.sourceColumnMetadataFailureClass = 'NONE'
+      $observation.sourceColumnTypeClass = $SourceColumnTypeClass
+      $observation.sourceTypeRelation = 'DIRECT_CLASS'
       $observation.sourceCountStatementAttempted = 'YES'
       $observation.sourceCountStatement = 'PASS'
       $observation.sourceCountFailureClass = 'NONE'
@@ -176,6 +191,62 @@ function New-FixtureCountObservation {
       $observation.sourceBoundLimitControlFailureClass = 'NONE'
       $observation.sourceParameterFailureRole = 'UNDETERMINED'
     }
+    'SOURCE_COLUMN_METADATA_FAILED' {
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'PASS'
+      $observation.sourceBoundLimitControlAttempted = 'YES'
+      $observation.sourceBoundLimitControl = 'PASS'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceParameterFailureRole = 'NONE'
+      $observation.sourceColumnMetadataAttempted = 'YES'
+      $observation.sourceColumnMetadata = 'FAIL'
+      $observation.sourceColumnMetadataFailureClass = $SourceColumnMetadataFailureClass
+      $observation.sourceColumnTypeClass = 'NOT_RUN'
+      $observation.sourceTypeRelation = 'UNKNOWN'
+    }
+    'SOURCE_COLUMN_METADATA_RESULT_INVALID' {
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'PASS'
+      $observation.sourceBoundLimitControlAttempted = 'YES'
+      $observation.sourceBoundLimitControl = 'PASS'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceParameterFailureRole = 'NONE'
+      $observation.sourceColumnMetadataAttempted = 'YES'
+      $observation.sourceColumnMetadata = 'FAIL'
+      $observation.sourceColumnMetadataFailureClass = 'NONE'
+      $observation.sourceColumnTypeClass = 'NOT_RUN'
+      $observation.sourceTypeRelation = 'UNKNOWN'
+    }
+    'SOURCE_TYPE_RELATION_CROSS_CLASS' {
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'PASS'
+      $observation.sourceBoundLimitControlAttempted = 'YES'
+      $observation.sourceBoundLimitControl = 'PASS'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceParameterFailureRole = 'NONE'
+      $observation.sourceColumnMetadataAttempted = 'YES'
+      $observation.sourceColumnMetadata = 'PASS'
+      $observation.sourceColumnMetadataFailureClass = 'NONE'
+      $observation.sourceColumnTypeClass = $SourceColumnTypeClass
+      $observation.sourceTypeRelation = 'CROSS_CLASS'
+    }
+    'SOURCE_TYPE_RELATION_UNKNOWN' {
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'PASS'
+      $observation.sourceBoundLimitControlAttempted = 'YES'
+      $observation.sourceBoundLimitControl = 'PASS'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceParameterFailureRole = 'NONE'
+      $observation.sourceColumnMetadataAttempted = 'YES'
+      $observation.sourceColumnMetadata = 'PASS'
+      $observation.sourceColumnMetadataFailureClass = 'NONE'
+      $observation.sourceColumnTypeClass = 'OTHER'
+      $observation.sourceTypeRelation = 'UNKNOWN'
+    }
     'SOURCE_COUNT_STATEMENT_FAILED' {
       $observation.sourceCredentialEnv = 'PASS'
       $observation.sourceConnectionAttempted = 'YES'
@@ -183,6 +254,11 @@ function New-FixtureCountObservation {
       $observation.sourceBoundLimitControlAttempted = 'YES'
       $observation.sourceBoundLimitControl = 'PASS'
       $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceColumnMetadataAttempted = 'YES'
+      $observation.sourceColumnMetadata = 'PASS'
+      $observation.sourceColumnMetadataFailureClass = 'NONE'
+      $observation.sourceColumnTypeClass = $SourceColumnTypeClass
+      $observation.sourceTypeRelation = 'DIRECT_CLASS'
       $observation.sourceCountStatementAttempted = 'YES'
       $observation.sourceCountStatement = 'FAIL'
       $observation.sourceCountFailureClass = $SourceCountFailureClass
@@ -200,6 +276,11 @@ function New-FixtureCountObservation {
       $observation.sourceBoundLimitControl = 'PASS'
       $observation.sourceBoundLimitControlFailureClass = 'NONE'
       $observation.sourceParameterFailureRole = 'NONE'
+      $observation.sourceColumnMetadataAttempted = 'YES'
+      $observation.sourceColumnMetadata = 'PASS'
+      $observation.sourceColumnMetadataFailureClass = 'NONE'
+      $observation.sourceColumnTypeClass = $SourceColumnTypeClass
+      $observation.sourceTypeRelation = 'DIRECT_CLASS'
       $observation.sourceCountStatementAttempted = 'YES'
       $observation.sourceCountStatement = 'PASS'
       $observation.sourceCountFailureClass = 'NONE'
@@ -216,12 +297,14 @@ function Reset-Fixture {
   $script:BridgeCalls = 0
   $script:SourceConnectionCalls = 0
   $script:SourceControlCalls = 0
+  $script:SourceMetadataCalls = 0
   $script:SourceStatementCalls = 0
   $script:SourceCleanupCalls = 0
   $script:SourceCallOrder = @()
   $script:OpenConnection = $null
   $script:MockCount = 3L
   $script:MockControlValue = 1L
+  $script:MockMetadataTypeName = 'nvarchar'
   $script:MockPageCount = 3
   $script:MockPageLimit = 7
   $script:MockFiltersApplied = $true
@@ -235,10 +318,13 @@ function Reset-Fixture {
     }
   }
   $script:CountProvider = {
-    param($Config, $Value)
+    param($Config, $Value, $ValueType)
     $script:CountCalls += 1
     if ($Value -ne $privateValue) { throw $privateError }
-    return Invoke-SamePredicateCount -Config $Config -FilterValue $Value
+    return Invoke-SamePredicateCount `
+      -Config $Config `
+      -FilterValue $Value `
+      -FilterValueType $ValueType
   }
   $script:SourceConnectionProvider = {
     param($Config, $Username, $Password)
@@ -261,6 +347,18 @@ function Reset-Fixture {
       throw $privateError
     }
     return [long]$script:MockControlValue
+  }
+  $script:SourceColumnMetadataCommandProvider = {
+    param($Connection, $Config)
+    $script:SourceMetadataCalls += 1
+    $script:SourceCallOrder += 'metadata'
+    if ($null -eq $Connection -or
+      $null -eq $script:OpenConnection -or
+      $Connection.id -cne $script:OpenConnection.id -or
+      $Connection.state -ne 'open') {
+      throw $privateError
+    }
+    return [string]$script:MockMetadataTypeName
   }
   $script:SourceCountCommandProvider = {
     param($Connection, $Config, $Value)
@@ -336,6 +434,61 @@ function New-FixtureScalarConnection {
   }
   $command | Add-Member -MemberType ScriptMethod -Name ExecuteScalar -Value {
     return $this.ScalarValue
+  }
+  $connection = [pscustomobject]@{ Command = $command }
+  $connection | Add-Member -MemberType ScriptMethod -Name CreateCommand -Value {
+    return $this.Command
+  }
+  return $connection
+}
+
+function New-FixtureSchemaOnlyConnection {
+  param(
+    [int]$FieldCount = 1,
+    [string]$DataTypeName = 'nvarchar',
+    [switch]$ThrowOnExecute,
+    [switch]$ThrowOnGetDataTypeName
+  )
+  Add-Type -AssemblyName System.Data
+  $reader = [pscustomobject]@{
+    FieldCount = $FieldCount
+    DataTypeName = $DataTypeName
+    ThrowOnGetDataTypeName = [bool]$ThrowOnGetDataTypeName
+    ReadCalled = $false
+    Disposed = $false
+  }
+  $reader | Add-Member -MemberType ScriptMethod -Name GetDataTypeName -Value {
+    param([int]$Ordinal)
+    if ($this.ThrowOnGetDataTypeName) { throw 'PRIVATE-METADATA-TYPE-ERROR' }
+    if ($Ordinal -ne 0) { throw 'PRIVATE-ORDINAL-ERROR' }
+    return $this.DataTypeName
+  }
+  $reader | Add-Member -MemberType ScriptMethod -Name Read -Value {
+    $this.ReadCalled = $true
+    return $false
+  }
+  $reader | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+    $this.Disposed = $true
+  }
+  $command = [pscustomobject]@{
+    CommandType = $null
+    CommandTimeout = 0
+    CommandText = ''
+    Reader = $reader
+    ThrowOnExecute = [bool]$ThrowOnExecute
+    LastBehavior = $null
+    Disposed = $false
+  }
+  $command | Add-Member -MemberType ScriptMethod -Name ExecuteReader -Value {
+    param($Behavior)
+    $this.LastBehavior = $Behavior
+    if ($this.ThrowOnExecute) {
+      throw (New-FixtureSqlException -Numbers ([int[]]@(208)) -Message 'PRIVATE-METADATA-SQL-ERROR')
+    }
+    return $this.Reader
+  }
+  $command | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+    $this.Disposed = $true
   }
   $connection = [pscustomobject]@{ Command = $command }
   $connection | Add-Member -MemberType ScriptMethod -Name CreateCommand -Value {
@@ -421,6 +574,12 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $possible.sourceBoundLimitControl -eq 'PASS' -and
     $possible.sourceBoundLimitControlFailureClass -eq 'NONE' -and
     $possible.sourceParameterFailureRole -eq 'NONE' -and
+    $possible.requestedFilterValueType -eq 'STRING' -and
+    $possible.sourceColumnMetadataAttempted -eq 'YES' -and
+    $possible.sourceColumnMetadata -eq 'PASS' -and
+    $possible.sourceColumnMetadataFailureClass -eq 'NONE' -and
+    $possible.sourceColumnTypeClass -eq 'TEXT' -and
+    $possible.sourceTypeRelation -eq 'DIRECT_CLASS' -and
     $possible.sourceCountStatementAttempted -eq 'YES' -and
     $possible.sourceCountStatement -eq 'PASS' -and
     $possible.sourceCountFailureClass -eq 'NONE' -and
@@ -430,15 +589,17 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $script:CountCalls -eq 1 -and
     $script:SourceConnectionCalls -eq 1 -and
     $script:SourceControlCalls -eq 1 -and
+    $script:SourceMetadataCalls -eq 1 -and
     $script:SourceStatementCalls -eq 1 -and
     $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 1 -and
-    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,count,cleanup'
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,metadata,count,cleanup'
   )
   Check 'successful output is closed and omits private value, source, field, host, path, and counts' (
     $possibleText -notmatch [regex]::Escape($privateValue) -and
     $possibleText -notmatch 'BomView|ProjectId|fixture-server|fixture-db' -and
     $possibleText -notmatch [regex]::Escape($configPath) -and
+    $possibleText -notmatch 'nvarchar|varchar|uniqueidentifier' -and
     @($possibleText -split '\r?\n' | Where-Object {
       $_ -eq 'sourceCountFailureClass=NONE'
     }).Count -eq 1 -and
@@ -447,6 +608,12 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     }).Count -eq 1 -and
     @($possibleText -split '\r?\n' | Where-Object {
       $_ -eq 'sourceParameterFailureRole=NONE'
+    }).Count -eq 1 -and
+    @($possibleText -split '\r?\n' | Where-Object {
+      $_ -eq 'sourceTypeRelation=DIRECT_CLASS'
+    }).Count -eq 1 -and
+    @($possibleText -split '\r?\n' | Where-Object {
+      $_ -eq 'sourceColumnTypeClass=TEXT'
     }).Count -eq 1 -and
     -not (@($possibleText -split '\r?\n') | Where-Object { $_ -match '^[^=]+=(3|7)$' })
   )
@@ -559,11 +726,16 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $credentialFailure.sourceBoundLimitControl -eq 'NOT_RUN' -and
     $credentialFailure.sourceBoundLimitControlFailureClass -eq 'NOT_RUN' -and
     $credentialFailure.sourceParameterFailureRole -eq 'NOT_RUN' -and
+    $credentialFailure.requestedFilterValueType -eq 'STRING' -and
+    $credentialFailure.sourceColumnMetadataAttempted -eq 'NO' -and
+    $credentialFailure.sourceColumnMetadata -eq 'NOT_RUN' -and
+    $credentialFailure.sourceTypeRelation -eq 'NOT_RUN' -and
     $credentialFailure.sourceCountStatementAttempted -eq 'NO' -and
     $credentialFailure.sourceCountStatement -eq 'NOT_RUN' -and
     $credentialFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 0 -and
     $script:SourceControlCalls -eq 0 -and
+    $script:SourceMetadataCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:BridgeCalls -eq 0 -and
     $credentialFailureText -notmatch 'fixture-user|fixture-password'
@@ -579,9 +751,11 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $passwordFailure.sourceConnectionAttempted -eq 'NO' -and
     $passwordFailure.sourceBoundLimitControlAttempted -eq 'NO' -and
     $passwordFailure.sourceParameterFailureRole -eq 'NOT_RUN' -and
+    $passwordFailure.sourceColumnMetadataAttempted -eq 'NO' -and
     $passwordFailure.sourceCountStatementAttempted -eq 'NO' -and
     $script:SourceConnectionCalls -eq 0 -and
     $script:SourceControlCalls -eq 0 -and
+    $script:SourceMetadataCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:SourceCleanupCalls -eq 0 -and
     $script:BridgeCalls -eq 0
@@ -605,12 +779,15 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $connectionFailure.sourceBoundLimitControl -eq 'NOT_RUN' -and
     $connectionFailure.sourceBoundLimitControlFailureClass -eq 'NOT_RUN' -and
     $connectionFailure.sourceParameterFailureRole -eq 'NOT_RUN' -and
+    $connectionFailure.sourceColumnMetadataAttempted -eq 'NO' -and
+    $connectionFailure.sourceTypeRelation -eq 'NOT_RUN' -and
     $connectionFailure.sourceCountStatementAttempted -eq 'NO' -and
     $connectionFailure.sourceCountStatement -eq 'NOT_RUN' -and
     $connectionFailure.sourceCountFailureClass -eq 'NOT_RUN' -and
     $connectionFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 1 -and
     $script:SourceControlCalls -eq 0 -and
+    $script:SourceMetadataCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:SourceCleanupCalls -eq 0 -and
     $script:BridgeCalls -eq 0 -and
@@ -709,16 +886,19 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $statementFailure.sourceBoundLimitControl -eq 'PASS' -and
     $statementFailure.sourceBoundLimitControlFailureClass -eq 'NONE' -and
     $statementFailure.sourceParameterFailureRole -eq 'NONE' -and
+    $statementFailure.sourceColumnMetadata -eq 'PASS' -and
+    $statementFailure.sourceTypeRelation -eq 'DIRECT_CLASS' -and
     $statementFailure.sourceCountStatementAttempted -eq 'YES' -and
     $statementFailure.sourceCountStatement -eq 'FAIL' -and
     $statementFailure.sourceCountFailureClass -eq 'OBJECT_OR_COLUMN_RESOLUTION' -and
     $statementFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 1 -and
     $script:SourceControlCalls -eq 1 -and
+    $script:SourceMetadataCalls -eq 1 -and
     $script:SourceStatementCalls -eq 1 -and
     $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 0 -and
-    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,count,cleanup' -and
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,metadata,count,cleanup' -and
     $statementFailureText -notmatch [regex]::Escape($privateError)
   )
 
@@ -762,6 +942,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $malformedObservation.sourceCredentialEnv -eq 'NOT_RUN' -and
     $malformedObservation.sourceConnectionAttempted -eq 'NO' -and
     $malformedObservation.sourceBoundLimitControlAttempted -eq 'NO' -and
+    $malformedObservation.sourceColumnMetadataAttempted -eq 'NO' -and
     $malformedObservation.sourceCountStatementAttempted -eq 'NO' -and
     $script:BridgeCalls -eq 0
   )
@@ -814,12 +995,15 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $controlParameterFailure.sourceBoundLimitControl -eq 'FAIL' -and
     $controlParameterFailure.sourceBoundLimitControlFailureClass -eq 'PARAMETER_OR_TYPE' -and
     $controlParameterFailure.sourceParameterFailureRole -eq 'BOUND_LIMIT' -and
+    $controlParameterFailure.sourceColumnMetadataAttempted -eq 'NO' -and
+    $controlParameterFailure.sourceTypeRelation -eq 'NOT_RUN' -and
     $controlParameterFailure.sourceCountStatementAttempted -eq 'NO' -and
     $controlParameterFailure.sourceCountStatement -eq 'NOT_RUN' -and
     $controlParameterFailure.sourceCountFailureClass -eq 'NOT_RUN' -and
     $controlParameterFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 1 -and
     $script:SourceControlCalls -eq 1 -and
+    $script:SourceMetadataCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 0 -and
@@ -840,7 +1024,9 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $controlSyntaxFailure.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_FAILED' -and
     $controlSyntaxFailure.sourceBoundLimitControlFailureClass -eq 'SYNTAX_OR_DIALECT' -and
     $controlSyntaxFailure.sourceParameterFailureRole -eq 'BOUND_LIMIT' -and
+    $controlSyntaxFailure.sourceColumnMetadataAttempted -eq 'NO' -and
     $controlSyntaxFailure.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceMetadataCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 0
@@ -858,7 +1044,9 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $controlOtherFailure.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_FAILED' -and
     $controlOtherFailure.sourceBoundLimitControlFailureClass -eq 'SELECT_PERMISSION' -and
     $controlOtherFailure.sourceParameterFailureRole -eq 'UNDETERMINED' -and
+    $controlOtherFailure.sourceColumnMetadataAttempted -eq 'NO' -and
     $controlOtherFailure.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceMetadataCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:SourceCleanupCalls -eq 1
   )
@@ -873,8 +1061,10 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $controlResultInvalid.sourceBoundLimitControl -eq 'FAIL' -and
     $controlResultInvalid.sourceBoundLimitControlFailureClass -eq 'NONE' -and
     $controlResultInvalid.sourceParameterFailureRole -eq 'UNDETERMINED' -and
+    $controlResultInvalid.sourceColumnMetadataAttempted -eq 'NO' -and
     $controlResultInvalid.sourceCountStatementAttempted -eq 'NO' -and
     $script:SourceControlCalls -eq 1 -and
+    $script:SourceMetadataCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 0
@@ -909,13 +1099,15 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $actualParameterAfterControl.failureReason -eq 'SOURCE_COUNT_STATEMENT_FAILED' -and
     $actualParameterAfterControl.sourceBoundLimitControl -eq 'PASS' -and
     $actualParameterAfterControl.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+    $actualParameterAfterControl.sourceTypeRelation -eq 'DIRECT_CLASS' -and
     $actualParameterAfterControl.sourceCountFailureClass -eq 'PARAMETER_OR_TYPE' -and
     $actualParameterAfterControl.sourceParameterFailureRole -eq 'PREDICATE_OR_SOURCE' -and
     $script:SourceControlCalls -eq 1 -and
+    $script:SourceMetadataCalls -eq 1 -and
     $script:SourceStatementCalls -eq 1 -and
     $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 0 -and
-    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,count,cleanup' -and
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,metadata,count,cleanup' -and
     $actualParameterAfterControlText -notmatch [regex]::Escape($privateError)
   )
 
@@ -944,6 +1136,17 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     )) -and
     (Test-SourceCountObservation -Observation (
       New-FixtureCountObservation -FailureReason 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID'
+    )) -and
+    (Test-SourceCountObservation -Observation (
+      New-FixtureCountObservation -FailureReason 'SOURCE_COLUMN_METADATA_FAILED' `
+        -SourceColumnMetadataFailureClass 'OBJECT_OR_COLUMN_RESOLUTION'
+    )) -and
+    (Test-SourceCountObservation -Observation (
+      New-FixtureCountObservation -FailureReason 'SOURCE_TYPE_RELATION_CROSS_CLASS' `
+        -SourceColumnTypeClass 'INTEGER'
+    )) -and
+    (Test-SourceCountObservation -Observation (
+      New-FixtureCountObservation -FailureReason 'SOURCE_TYPE_RELATION_UNKNOWN'
     )) -and
     (Test-SourceCountObservation -Observation (
       New-FixtureCountObservation -FailureReason 'SOURCE_COUNT_STATEMENT_FAILED' `
@@ -1056,6 +1259,311 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $countConnection.Command.Parameters.added[0].value -eq $privateValue -and
     $countConnection.Command.Parameters.added[1].name -eq '@p1' -and
     $countConnection.Command.Parameters.added[1].value -eq 8L
+  )
+
+  $metadataSpec = New-ColumnMetadataSpec -Config $config
+  Check 'column metadata SQL is TOP 0 over quoted identifiers only' (
+    $metadataSpec.sql -eq 'SELECT TOP (0) [ProjectId] FROM [dbo].[BomView]' -and
+    $metadataSpec.sql -notmatch 'sys\.columns|OBJECT_ID|@p0|@p1' -and
+    $metadataSpec.sql -notmatch [regex]::Escape($privateValue)
+  )
+  $schemaConnection = New-FixtureSchemaOnlyConnection -FieldCount 1 -DataTypeName 'nvarchar'
+  $schemaTypeName = Invoke-ProbeColumnMetadataCommand `
+    -Connection $schemaConnection `
+    -Config $config
+  Check 'schema-only metadata reader uses SchemaOnly, one field, and never Read()' (
+    $schemaTypeName -eq 'nvarchar' -and
+    $schemaConnection.Command.CommandType -eq [System.Data.CommandType]::Text -and
+    $schemaConnection.Command.CommandTimeout -eq 15 -and
+    $schemaConnection.Command.CommandText -eq $metadataSpec.sql -and
+    $schemaConnection.Command.LastBehavior -eq [System.Data.CommandBehavior]::SchemaOnly -and
+    -not $schemaConnection.Command.Reader.ReadCalled -and
+    $schemaConnection.Command.Reader.Disposed -and
+    $schemaConnection.Command.Disposed
+  )
+
+  $typeClassCases = @(
+    [pscustomobject]@{ name = 'char'; expected = 'TEXT' },
+    [pscustomobject]@{ name = 'varchar'; expected = 'TEXT' },
+    [pscustomobject]@{ name = 'nchar'; expected = 'TEXT' },
+    [pscustomobject]@{ name = 'nvarchar'; expected = 'TEXT' },
+    [pscustomobject]@{ name = 'tinyint'; expected = 'INTEGER' },
+    [pscustomobject]@{ name = 'smallint'; expected = 'INTEGER' },
+    [pscustomobject]@{ name = 'int'; expected = 'INTEGER' },
+    [pscustomobject]@{ name = 'bigint'; expected = 'INTEGER' },
+    [pscustomobject]@{ name = 'bit'; expected = 'BOOLEAN' },
+    [pscustomobject]@{ name = 'uniqueidentifier'; expected = 'GUID' },
+    [pscustomobject]@{ name = 'date'; expected = 'DATE_TIME' },
+    [pscustomobject]@{ name = 'time'; expected = 'DATE_TIME' },
+    [pscustomobject]@{ name = 'smalldatetime'; expected = 'DATE_TIME' },
+    [pscustomobject]@{ name = 'datetime'; expected = 'DATE_TIME' },
+    [pscustomobject]@{ name = 'datetime2'; expected = 'DATE_TIME' },
+    [pscustomobject]@{ name = 'datetimeoffset'; expected = 'DATE_TIME' },
+    [pscustomobject]@{ name = 'decimal'; expected = 'DECIMAL' },
+    [pscustomobject]@{ name = 'numeric'; expected = 'DECIMAL' },
+    [pscustomobject]@{ name = 'smallmoney'; expected = 'DECIMAL' },
+    [pscustomobject]@{ name = 'money'; expected = 'DECIMAL' },
+    [pscustomobject]@{ name = 'real'; expected = 'OTHER' },
+    [pscustomobject]@{ name = 'float'; expected = 'OTHER' },
+    [pscustomobject]@{ name = 'binary'; expected = 'BINARY' },
+    [pscustomobject]@{ name = 'varbinary'; expected = 'BINARY' },
+    [pscustomobject]@{ name = 'image'; expected = 'BINARY' },
+    [pscustomobject]@{ name = 'timestamp'; expected = 'BINARY' },
+    [pscustomobject]@{ name = 'rowversion'; expected = 'BINARY' },
+    [pscustomobject]@{ name = 'xml'; expected = 'OTHER' },
+    [pscustomobject]@{ name = 'geometry'; expected = 'OTHER' }
+  )
+  $typeClassAllMatch = $true
+  foreach ($case in $typeClassCases) {
+    if ((Resolve-SourceColumnTypeClass -DataTypeName $case.name) -cne $case.expected) {
+      $typeClassAllMatch = $false
+      break
+    }
+  }
+  Check 'every closed source column type class maps exactly and unknown names are OTHER' (
+    $typeClassAllMatch
+  )
+
+  Check 'DIRECT_CLASS is only STRING+TEXT, INT64+INTEGER, BOOLEAN+BOOLEAN' (
+    (Resolve-SourceTypeRelation -RequestedType 'STRING' -SourceTypeClass 'TEXT') -eq 'DIRECT_CLASS' -and
+    (Resolve-SourceTypeRelation -RequestedType 'INT64' -SourceTypeClass 'INTEGER') -eq 'DIRECT_CLASS' -and
+    (Resolve-SourceTypeRelation -RequestedType 'BOOLEAN' -SourceTypeClass 'BOOLEAN') -eq 'DIRECT_CLASS' -and
+    (Resolve-SourceTypeRelation -RequestedType 'STRING' -SourceTypeClass 'INTEGER') -eq 'CROSS_CLASS' -and
+    (Resolve-SourceTypeRelation -RequestedType 'INT64' -SourceTypeClass 'TEXT') -eq 'CROSS_CLASS' -and
+    (Resolve-SourceTypeRelation -RequestedType 'STRING' -SourceTypeClass 'GUID') -eq 'CROSS_CLASS' -and
+    (Resolve-SourceTypeRelation -RequestedType 'STRING' -SourceTypeClass 'OTHER') -eq 'UNKNOWN'
+  )
+
+  Reset-Fixture
+  $script:SourceColumnMetadataCommandProvider = {
+    param($Connection, $Config)
+    $script:SourceMetadataCalls += 1
+    $script:SourceCallOrder += 'metadata'
+    throw (New-FixtureSqlException -Numbers ([int[]]@(208)) -Message $privateError)
+  }
+  $metadataFailure = Invoke-FixtureProbe
+  $metadataFailureText = Format-DiscoveryResultBlock -Result $metadataFailure
+  Check 'metadata exception fails closed before count/bridge and cleans up' (
+    $metadataFailure.failedStage -eq 'SOURCE_COLUMN_METADATA' -and
+    $metadataFailure.failureReason -eq 'SOURCE_COLUMN_METADATA_FAILED' -and
+    $metadataFailure.sourceBoundLimitControl -eq 'PASS' -and
+    $metadataFailure.sourceColumnMetadataAttempted -eq 'YES' -and
+    $metadataFailure.sourceColumnMetadata -eq 'FAIL' -and
+    $metadataFailure.sourceColumnMetadataFailureClass -eq 'OBJECT_OR_COLUMN_RESOLUTION' -and
+    $metadataFailure.sourceColumnTypeClass -eq 'NOT_RUN' -and
+    $metadataFailure.sourceTypeRelation -eq 'UNKNOWN' -and
+    $metadataFailure.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceControlCalls -eq 1 -and
+    $script:SourceMetadataCalls -eq 1 -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 1 -and
+    $script:BridgeCalls -eq 0 -and
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,metadata,cleanup' -and
+    $metadataFailureText -notmatch [regex]::Escape($privateError) -and
+    $metadataFailureText -notmatch '208|SqlException|nvarchar'
+  )
+
+  Reset-Fixture
+  $script:MockMetadataTypeName = ''
+  $metadataMalformedEmpty = Invoke-FixtureProbe
+  Check 'empty metadata type name is RESULT_INVALID with UNKNOWN relation' (
+    $metadataMalformedEmpty.failedStage -eq 'SOURCE_COLUMN_METADATA' -and
+    $metadataMalformedEmpty.failureReason -eq 'SOURCE_COLUMN_METADATA_RESULT_INVALID' -and
+    $metadataMalformedEmpty.sourceColumnMetadata -eq 'FAIL' -and
+    $metadataMalformedEmpty.sourceColumnMetadataFailureClass -eq 'NONE' -and
+    $metadataMalformedEmpty.sourceTypeRelation -eq 'UNKNOWN' -and
+    $metadataMalformedEmpty.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:BridgeCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 1
+  )
+
+  $schemaMalformed = New-FixtureSchemaOnlyConnection -FieldCount 2 -DataTypeName 'nvarchar'
+  $schemaMalformedType = Invoke-ProbeColumnMetadataCommand `
+    -Connection $schemaMalformed `
+    -Config $config
+  Check 'metadata FieldCount other than 1 yields empty type for RESULT_INVALID gating' (
+    $schemaMalformedType -eq '' -and
+    -not $schemaMalformed.Command.Reader.ReadCalled -and
+    $schemaMalformed.Command.Reader.Disposed -and
+    $schemaMalformed.Command.Disposed
+  )
+
+  $schemaExecuteFailure = New-FixtureSchemaOnlyConnection -ThrowOnExecute
+  $schemaExecuteFailureCaught = $false
+  try {
+    [void](Invoke-ProbeColumnMetadataCommand `
+      -Connection $schemaExecuteFailure `
+      -Config $config)
+  } catch {
+    $schemaExecuteFailureCaught = $true
+  }
+  Check 'metadata command is disposed when ExecuteReader fails before a reader exists' (
+    $schemaExecuteFailureCaught -and
+    -not $schemaExecuteFailure.Command.Reader.Disposed -and
+    $schemaExecuteFailure.Command.Disposed
+  )
+
+  $schemaTypeFailure = New-FixtureSchemaOnlyConnection -ThrowOnGetDataTypeName
+  $schemaTypeFailureCaught = $false
+  try {
+    [void](Invoke-ProbeColumnMetadataCommand `
+      -Connection $schemaTypeFailure `
+      -Config $config)
+  } catch {
+    $schemaTypeFailureCaught = $true
+  }
+  Check 'metadata reader and command are disposed when GetDataTypeName fails' (
+    $schemaTypeFailureCaught -and
+    $schemaTypeFailure.Command.Reader.Disposed -and
+    $schemaTypeFailure.Command.Disposed
+  )
+
+  Reset-Fixture
+  $script:MockMetadataTypeName = 'int'
+  $crossClass = Invoke-FixtureProbe
+  $crossClassText = Format-DiscoveryResultBlock -Result $crossClass
+  Check 'CROSS_CLASS relation blocks count and bridge without claiming config error text' (
+    $crossClass.failedStage -eq 'SOURCE_COLUMN_METADATA' -and
+    $crossClass.failureReason -eq 'SOURCE_TYPE_RELATION_CROSS_CLASS' -and
+    $crossClass.requestedFilterValueType -eq 'STRING' -and
+    $crossClass.sourceColumnMetadata -eq 'PASS' -and
+    $crossClass.sourceColumnTypeClass -eq 'INTEGER' -and
+    $crossClass.sourceTypeRelation -eq 'CROSS_CLASS' -and
+    $crossClass.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceMetadataCalls -eq 1 -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:BridgeCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 1 -and
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,metadata,cleanup' -and
+    $crossClassText -notmatch 'config error|implementation defect' -and
+    $crossClassText -notmatch 'nvarchar|bigint|uniqueidentifier|\bint\b' -and
+    @($crossClassText -split '\r?\n' | Where-Object {
+      $_ -eq 'sourceTypeRelation=CROSS_CLASS'
+    }).Count -eq 1 -and
+    @($crossClassText -split '\r?\n' | Where-Object {
+      $_ -eq 'sourceColumnTypeClass=INTEGER'
+    }).Count -eq 1
+  )
+
+  Reset-Fixture
+  $script:MockMetadataTypeName = 'xml'
+  $unknownRelation = Invoke-FixtureProbe
+  $unknownRelationText = Format-DiscoveryResultBlock -Result $unknownRelation
+  Check 'OTHER source class maps UNKNOWN and blocks count/bridge' (
+    $unknownRelation.failedStage -eq 'SOURCE_COLUMN_METADATA' -and
+    $unknownRelation.failureReason -eq 'SOURCE_TYPE_RELATION_UNKNOWN' -and
+    $unknownRelation.sourceColumnTypeClass -eq 'OTHER' -and
+    $unknownRelation.sourceTypeRelation -eq 'UNKNOWN' -and
+    $unknownRelation.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:BridgeCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 1 -and
+    $unknownRelationText -notmatch 'xml'
+  )
+
+  Reset-Fixture
+  [Environment]::SetEnvironmentVariable($filterEnv, '42', 'Process')
+  $script:MockMetadataTypeName = 'bigint'
+  $script:CountProvider = {
+    param($Config, $Value, $ValueType)
+    $script:CountCalls += 1
+    if ($Value -ne 42L -or $ValueType -ne 'INT64') { throw $privateError }
+    return Invoke-SamePredicateCount `
+      -Config $Config `
+      -FilterValue $Value `
+      -FilterValueType $ValueType
+  }
+  $script:SourceCountCommandProvider = {
+    param($Connection, $Config, $Value)
+    $script:SourceStatementCalls += 1
+    $script:SourceCallOrder += 'count'
+    if ($Value -ne 42L) { throw $privateError }
+    return [long]$script:MockCount
+  }
+  $script:BridgePageProvider = {
+    param($Config, $Value)
+    $script:BridgeCalls += 1
+    if ($Value -ne 42L) { throw $privateError }
+    return [ordered]@{
+      filtersApplied = $script:MockFiltersApplied
+      limit = $script:MockPageLimit
+      recordCount = $script:MockPageCount
+    }
+  }
+  $int64Direct = Invoke-BoundedCandidateDiscovery `
+    -BridgeConfigPath $configPath `
+    -RequestedObjectId 'bom' `
+    -RequestedFilterField 'ProjectId' `
+    -RequestedFilterValueType 'INT64' `
+    -RequestedFilterValueEnvVar $filterEnv `
+    -Root $opsDir
+  Check 'INT64+INTEGER is DIRECT_CLASS and permits the unchanged count path' (
+    $int64Direct.executionState -eq 'COMPLETE' -and
+    $int64Direct.requestedFilterValueType -eq 'INT64' -and
+    $int64Direct.sourceColumnTypeClass -eq 'INTEGER' -and
+    $int64Direct.sourceTypeRelation -eq 'DIRECT_CLASS' -and
+    $script:SourceStatementCalls -eq 1 -and
+    $script:BridgeCalls -eq 1 -and
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,metadata,count,cleanup'
+  )
+
+  Reset-Fixture
+  [Environment]::SetEnvironmentVariable($filterEnv, 'true', 'Process')
+  $script:MockMetadataTypeName = 'bit'
+  $script:CountProvider = {
+    param($Config, $Value, $ValueType)
+    $script:CountCalls += 1
+    if ($Value -ne $true -or $ValueType -ne 'BOOLEAN') { throw $privateError }
+    return Invoke-SamePredicateCount `
+      -Config $Config `
+      -FilterValue $Value `
+      -FilterValueType $ValueType
+  }
+  $script:SourceCountCommandProvider = {
+    param($Connection, $Config, $Value)
+    $script:SourceStatementCalls += 1
+    $script:SourceCallOrder += 'count'
+    if ($Value -ne $true) { throw $privateError }
+    return [long]$script:MockCount
+  }
+  $script:BridgePageProvider = {
+    param($Config, $Value)
+    $script:BridgeCalls += 1
+    if ($Value -ne $true) { throw $privateError }
+    return [ordered]@{
+      filtersApplied = $script:MockFiltersApplied
+      limit = $script:MockPageLimit
+      recordCount = $script:MockPageCount
+    }
+  }
+  $boolDirect = Invoke-BoundedCandidateDiscovery `
+    -BridgeConfigPath $configPath `
+    -RequestedObjectId 'bom' `
+    -RequestedFilterField 'ProjectId' `
+    -RequestedFilterValueType 'BOOLEAN' `
+    -RequestedFilterValueEnvVar $filterEnv `
+    -Root $opsDir
+  Check 'BOOLEAN+BOOLEAN is DIRECT_CLASS and permits the unchanged count path' (
+    $boolDirect.executionState -eq 'COMPLETE' -and
+    $boolDirect.requestedFilterValueType -eq 'BOOLEAN' -and
+    $boolDirect.sourceColumnTypeClass -eq 'BOOLEAN' -and
+    $boolDirect.sourceTypeRelation -eq 'DIRECT_CLASS' -and
+    $script:SourceStatementCalls -eq 1 -and
+    $script:BridgeCalls -eq 1
+  )
+
+  $illegalMetadataRole = New-FixtureCountObservation `
+    -FailureReason 'SOURCE_COLUMN_METADATA_FAILED' `
+    -SourceColumnMetadataFailureClass 'PARAMETER_OR_TYPE'
+  $illegalMetadataRole.sourceTypeRelation = 'DIRECT_CLASS'
+  $illegalCrossAsDirect = New-FixtureCountObservation `
+    -FailureReason 'SOURCE_TYPE_RELATION_CROSS_CLASS' `
+    -SourceColumnTypeClass 'INTEGER'
+  $illegalCrossAsDirect.sourceTypeRelation = 'DIRECT_CLASS'
+  Check 'metadata and relation observation validator rejects contradictory tuples' (
+    -not (Test-SourceCountObservation -Observation $illegalMetadataRole) -and
+    -not (Test-SourceCountObservation -Observation $illegalCrossAsDirect)
   )
 
   $validPayload = '{"object":"bom","records":[{"id":1}],"limit":7,"filtersApplied":true}' |

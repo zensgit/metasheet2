@@ -7,10 +7,11 @@ Run one discovery-only probe on the Windows entity machine while the stock-prepa
 The probe compares:
 
 1. one source-free bound-limit parameter control on the source connection;
-2. one parameterized COUNT_BIG query over at most `limit + 1` matches from the same configured
-   source and predicate; and
-3. one allowlisted equality-filter query through the running readonly bridge, only after both SQL
-   statements pass.
+2. one values-free schema-only column type classification on that same opened connection;
+3. one parameterized COUNT_BIG query over at most `limit + 1` matches from the same configured
+   source and predicate, only when the type relation is DIRECT_CLASS; and
+4. one allowlisted equality-filter query through the running readonly bridge, only after the count
+   statement passes.
 
 It does not deploy or restart anything, mutate the bridge config, enable a feature flag, write to
 the source, or produce acceptance evidence. A POSSIBLE result only permits preparation of a new
@@ -19,15 +20,23 @@ approved config followed by the normal flag-OFF preflight.
 The count is deliberately capped at `limit + 1`. That is sufficient to distinguish a short scope
 from a full/over-limit scope without counting an arbitrarily large matching set.
 
-The v4 diagnostic contract separates the source-count path into credential, connection, a
-source-free bound-limit control, the real same-predicate count statement, and result stages. The
-control runs on the same opened connection before the real count and binds only Config.limit+1
-through the same scalar AddWithValue binder. A failed statement (control or actual) is mapped from
-SQL error numbers into a closed failure class. When isolation is possible, sourceParameterFailureRole
-reports BOUND_LIMIT or PREDICATE_OR_SOURCE; otherwise NONE, NOT_RUN, or UNDETERMINED. Raw error
-numbers, driver messages, SQL text, endpoints, object/field names, and credentials are discarded.
-A control PASS does not exonerate the filter value or its type; it only isolates the bound-limit
-binding path from the predicate/source path for PARAMETER_OR_TYPE failures.
+The v5 diagnostic contract preserves the v4 source-count path (credential, connection, source-free
+bound-limit control, real same-predicate count, and result stages) and inserts a closed type-class
+gate after a control PASS. The metadata step reuses the already-open connection and runs only the
+internally generated query `SELECT TOP (0) [filterField] FROM [source]` with
+CommandBehavior.SchemaOnly. It consumes only FieldCount and GetDataTypeName; it never reads rows
+or row values, never queries sys.columns/OBJECT_ID, and never emits the exact driver type name.
+The exact driver type name is mapped in-process to one closed class:
+
+  TEXT, INTEGER, BOOLEAN, GUID, DATE_TIME, DECIMAL, BINARY, or OTHER.
+
+The relation field is one of DIRECT_CLASS, CROSS_CLASS, UNKNOWN, or NOT_RUN. DIRECT_CLASS is only
+STRING+TEXT, INT64+INTEGER, or BOOLEAN+BOOLEAN. DIRECT_CLASS permits the unchanged real count SQL.
+CROSS_CLASS and UNKNOWN fail closed before the real count. CROSS_CLASS is not claimed as a proven
+config error; DIRECT_CLASS is not claimed as a proven implementation defect. Raw error numbers,
+driver messages, SQL text, endpoints, object/field names, credentials, and exact type names are
+discarded. A control PASS does not exonerate the filter value or its type; it only isolates the
+bound-limit binding path from the predicate/source path for PARAMETER_OR_TYPE failures.
 
 Required private inputs
 -----------------------
@@ -91,7 +100,8 @@ Run the command once. On any failure, stop and do not retry without a new mainta
 Public result
 -------------
 Only the fixed STOCK_PREPARATION_BOUNDED_DISCOVERY block may be posted publicly. It contains no
-object, field, predicate, count, host, source, path, row, credential, or driver error text.
+object, field, predicate, count, host, source, path, row, credential, driver error text, or exact
+SQL type name.
 
 Interpretation:
 - boundedCandidateSignal=POSSIBLE:
@@ -103,21 +113,36 @@ Interpretation:
   the private count was equal to or greater than the verified bridge limit. Do not use this scope.
 - failureReason=SOURCE_CREDENTIAL_UNAVAILABLE:
   the configured SQL-auth username or password environment value was absent in this parent process;
-  no source connection, bound-limit control, or count statement was attempted.
+  no source connection, bound-limit control, metadata read, or count statement was attempted.
 - failureReason=SOURCE_CONNECTION_FAILED:
   credential environment values were present, but the source connection could not be opened; no
-  bound-limit control or count statement was attempted.
+  bound-limit control, metadata read, or count statement was attempted.
 - failureReason=SOURCE_BOUND_LIMIT_CONTROL_FAILED:
   the source connection opened, but the source-free bound-limit control statement did not complete.
   sourceBoundLimitControlFailureClass reports exactly one values-free class (same closed set as
   sourceCountFailureClass). PARAMETER_OR_TYPE and SYNTAX_OR_DIALECT map
-  sourceParameterFailureRole=BOUND_LIMIT; other control classes map UNDETERMINED. The real count and
-  bridge query are not attempted; the connection is still closed.
+  sourceParameterFailureRole=BOUND_LIMIT; other control classes map UNDETERMINED. Metadata, real
+  count, and bridge query are not attempted; the connection is still closed.
 - failureReason=SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID:
-  the bound-limit control completed but did not return exactly INT64 1. Role is UNDETERMINED; the
-  real count and bridge query are not attempted.
+  the bound-limit control completed but did not return exactly INT64 1. Role is UNDETERMINED;
+  metadata, real count, and bridge query are not attempted.
+- failureReason=SOURCE_COLUMN_METADATA_FAILED:
+  control passed, but the schema-only column metadata read did not complete.
+  sourceColumnMetadataFailureClass reports one values-free class from the same closed set used by
+  source-count failures. sourceTypeRelation=UNKNOWN. The real count and bridge query are not
+  attempted.
+- failureReason=SOURCE_COLUMN_METADATA_RESULT_INVALID:
+  the metadata command completed but did not yield exactly one usable column type name.
+  sourceTypeRelation=UNKNOWN. The real count and bridge query are not attempted.
+- failureReason=SOURCE_TYPE_RELATION_CROSS_CLASS:
+  metadata passed and mapped to a known closed source class that is not the direct pair for the
+  requested probe type. sourceTypeRelation=CROSS_CLASS. This is a values-free diagnostic gate, not
+  a proven config error. The real count and bridge query are not attempted.
+- failureReason=SOURCE_TYPE_RELATION_UNKNOWN:
+  metadata passed but the source class could not be related as DIRECT_CLASS or CROSS_CLASS
+  (sourceColumnTypeClass=OTHER). The real count and bridge query are not attempted.
 - failureReason=SOURCE_COUNT_STATEMENT_FAILED:
-  the bound-limit control passed, but the real bounded count statement did not complete.
+  control and DIRECT_CLASS metadata passed, but the real bounded count statement did not complete.
   sourceCountFailureClass reports exactly one values-free class:
   SELECT_PERMISSION, OBJECT_OR_COLUMN_RESOLUTION, PARAMETER_OR_TYPE, SYNTAX_OR_DIALECT,
   TIMEOUT_OR_RESOURCE, or OTHER. NONE and NOT_RUN are reserved for non-failing tuples.
@@ -135,4 +160,6 @@ The bridge page and COUNT_BIG run on separate connections. Their equality is a d
 not a snapshot-consistency proof. Only the later approved-config preflight can establish the
 SHORT_PAGE proof used by the current runtime. Matching credential variable names do not prove that
 two separately started processes inherited identical values; operators must verify that private
-deployment fact before the authorized run.
+deployment fact before the authorized run. DIRECT_CLASS only means the closed type pair is in the
+current allowlist for attempting the existing count binder. It is not a SQL compatibility proof or
+proof that the count will succeed.
