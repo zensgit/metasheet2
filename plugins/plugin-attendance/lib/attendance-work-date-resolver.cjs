@@ -683,6 +683,13 @@ function createAttendanceWorkDateResolver(deps = {}) {
       assignmentId: row.assignmentId == null ? null : String(row.assignmentId),
       isOvernight,
       extendedByOvertime,
+      // W4C-2 (#4556): wall-time/zone provenance retained for the strict V2
+      // freeze rebuild. Internal candidate fields only — serializeCandidate /
+      // serializeAmbiguousCandidate project explicit fields, so nothing here
+      // reaches any existing payload.
+      workStartTime,
+      workEndTime,
+      timezone,
     }
   }
 
@@ -876,6 +883,23 @@ function createAttendanceWorkDateResolver(deps = {}) {
       throw new Error('APPROVED_OVERTIME_SOURCE_INVALID')
     }
 
+    // W4C-2 (#4556): opt-in additive out-params for the canonical boundary's
+    // V2 freeze. `includeFullWinner !== true` leaves every result byte-identical.
+    const includeFullWinner = input.includeFullWinner === true
+    const attachFullWinner = (result) => {
+      if (!includeFullWinner || !result || result.kind !== 'resolved') return result
+      const fullWinner = candidates.find(
+        (candidate) => String(candidate.workDate) === String(result.workDate)
+          && String(candidate.shiftId) === String(result.shiftId),
+      ) || null
+      return {
+        ...result,
+        fullWinner,
+        attributionTailMinutes,
+        approvedOvertimeWindows,
+      }
+    }
+
     const candidates = []
     for (const row of rawCandidates) {
       const normalized = normalizeCandidateRow(row, attributionTailMinutes, approvedOvertimeWindows, {
@@ -933,7 +957,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       )
       if (scheduledCandidates.length === 1) {
         const winner = scheduledCandidates[0]
-        return resolvedResult({
+        return attachFullWinner(resolvedResult({
           workDate: winner.workDate,
           shiftId: winner.shiftId,
           segmentIndex: winner.segmentIndex,
@@ -946,7 +970,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
             matchingCount: 1,
             channel,
           },
-        })
+        }))
       }
       if (scheduledCandidates.length > 1) {
         return ambiguousResult({
@@ -996,7 +1020,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       throw new Error('OPEN_RECORD_SOURCE_INVALID')
     }
 
-    return selectAmongMatchingCandidates({
+    return attachFullWinner(selectAmongMatchingCandidates({
       matching,
       occurredAt,
       calendarWorkDate,
@@ -1004,7 +1028,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       attributionTailMinutes,
       orgId,
       userId,
-    })
+    }))
   }
 
   return {

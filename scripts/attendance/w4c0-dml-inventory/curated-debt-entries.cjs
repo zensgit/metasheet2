@@ -39,13 +39,26 @@ const CURATED_DEBT_ENTRIES = [
   // ---------------------------------------------------------------------------------------
   // P01-P28: section 1.1's illustrative current execution-path inventory.
   // ---------------------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------------------
+  // P01-P04 — REMOVED BY THE W4C-2 CANONICAL ADAPTER CUTOVER (lock §12.3: "P01 live, P02 merge
+  // second-pass, P03 cron absence, and P04 administrator-run absence inventory entries are
+  // removed independently"). Each entry stays in this list with `canonicalizedBy: 'W4C-2'` and
+  // KEEPS its claim predicate over the (renamed) adapter-owned sites, so the §8.4 unclaimed=0
+  // detection is not bypassed: the DML text still exists (as the closed legacy adapters the
+  // boundary executes), and a new/renamed writer site still fails CI. The P02 second mutable
+  // post-upsert pass no longer exists on the live path at all — the pure host-port
+  // `applyMergePolicyPure` decision precedes the single record write.
+  // ---------------------------------------------------------------------------------------
   {
     id: 'P01',
     title: 'Live POST /api/attendance/punch: event insert, then upsertAttendanceRecord.',
     owningSlice: 'W4C-2',
     sharedHook: false,
+    canonicalizedBy: 'W4C-2',
     claims: (site) =>
-      bySymbol(PLUGIN, /^op$/)(site) || bySymbol(PLUGIN, /^upsertAttendanceRecord$/)(site),
+      bySymbol(PLUGIN, /^applyLivePunchProjectionLegacyV1$/)(site) ||
+      bySymbol(PLUGIN, /^op$/)(site) ||
+      bySymbol(PLUGIN, /^upsertAttendanceRecord$/)(site),
   },
   {
     id: 'P02',
@@ -53,6 +66,7 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-2',
     sharedHook: false,
     confidence: 'heuristic',
+    canonicalizedBy: 'W4C-2',
     // Not independently visible as its own census group in this scan (its UPDATE statement's
     // nearest-preceding-symbol match lands on a different local closure) — see Stage D handoff
     // "未竟" note. Kept as a named zero-claim entry rather than omitted, so a future regeneration
@@ -64,6 +78,7 @@ const CURATED_DEBT_ENTRIES = [
     title: "Scheduled cron callback: runAutoAbsenceForOrgDate -> generateAbsenceRecords direct record insert.",
     owningSlice: 'W4C-2',
     sharedHook: false,
+    canonicalizedBy: 'W4C-2',
     claims: bySymbol(PLUGIN, /^generateAbsenceRecords$/),
   },
   {
@@ -71,6 +86,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Administrator POST /api/attendance/auto-absence/run: the same direct absence writer through a separate initiator.',
     owningSlice: 'W4C-2',
     sharedHook: false,
+    canonicalizedBy: 'W4C-2',
     // Intentionally claims the SAME site as P03 — one function, two initiators, two debt ids
     // (design lock section 1.1 line 92, verbatim).
     claims: bySymbol(PLUGIN, /^generateAbsenceRecords$/),

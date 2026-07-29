@@ -504,6 +504,80 @@ export default defineConfig({
       // excluded here so the no-DB job cannot skip-green it; wired whole-file into
       // the attendance real-DB step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts',
+      // #4556 W4C-2 (#4607 P3-4): strict IANA timezone WRITE-route guard for
+      // default-rule/shift zones through the host-provided
+      // attendanceW4SegmentCalculation port (lock 12.2 last sentence), boot-level
+      // against the real plugin server. DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-timezone-write-guard.db.test.ts',
+      // #4556 W4C-2: outbox dispatcher gates (crash-after-commit-before-emit,
+      // restart, TRUE two-connection concurrent dispatch, emit-failure backoff)
+      // against real Postgres. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it; wired whole-file into the attendance real-DB
+      // step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-outbox-dispatcher.db.test.ts',
+      // #4556 W4C-2: canonical live/scheduled boundary WIRING gates (route-level,
+      // real MetaSheetServer + plugin activate). DATABASE_URL-gated; excluded here
+      // so the no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml (two-point wiring; the exclusion was
+      // missed when the suite landed and is backfilled by Stage E).
+      'tests/integration/attendance-w4c2-live-scheduled-boundary.db.test.ts',
+      // #4556 W4C-2 (#4612 gate4 P3-3): genuine live-punch race + admin_run
+      // authorization (real DB, route-level). DATABASE_URL-gated; excluded here so
+      // the no-DB job cannot skip-green it; already wired whole-file into the
+      // `Run attendance integration tests` step in plugin-tests.yml — this exclude
+      // line was the missing SECOND point of that two-point wiring (gate4 finding:
+      // present in the run-list but absent here, so the no-DB job's
+      // "Run core-backend tests" step collected and skip-greened it every PR).
+      'tests/integration/attendance-w4c2-p2-remediation.db.test.ts',
+      // #4556 W4C-2 (#4612 gate3/gate4 P2-1 remediation): canonical/shadow
+      // live-punch freeze-step anchor correctness (real DB, route-level + real
+      // two-connection races — this is the PR's OWN main-line suite, L1-L7 +
+      // Groups D/D-overnight/E/F/F2/G). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it; already wired whole-file into the
+      // `Run attendance integration tests` step in plugin-tests.yml — this exclude
+      // line was the missing SECOND point (gate4 P3-3: the PR's own primary
+      // evidence file was skip-green in the no-DB lane every PR up to this point).
+      'tests/integration/attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts',
+      // #4556 W4C-2: three-posture matrix + V2 freeze + env-gated outbox drain
+      // (route-level, real DB). DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml (two-point wiring; exclusion backfilled by Stage E).
+      'tests/integration/attendance-w4c2-posture-matrix.db.test.ts',
+      // #4556 W4C-2 Stage E: §12.3 residual gate matrix (W2 ambiguity review shape,
+      // V2-cast storage backstop, same-org/cross-org isolation, forged-witness
+      // zero-SQL legs, inactive membership, authoritative fail-closed, posture
+      // no-rebase, outbox-before-seal SQL-order probe, durable scheduled replay,
+      // P02 single-write discriminator). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts',
+      // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the schema/
+      // migration half: scheduled-run identity tables, the outbox discriminated union,
+      // the append-only per-target outcome side table, and their gates (1, 9, 11, 12 DB
+      // half, 14 full migration matrix, 20 side-table legs). DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it; wired whole-file into the
+      // attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts',
+      // W4C-2 P1-2 second half (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the
+      // run-creation/resume transaction (section 1.7), the finalization transaction
+      // (section 1.8), the O-3=(a) per-target outcome writer, the `abandoned` transition
+      // (section 1.1.2), the O-4=(a) promotion-block guard, and the recovery-sweep step
+      // function, plus TOCTOU/concurrent-finalization/concurrent-abandon real-DB legs.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired
+      // whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts',
+      // W4C-2 P1-2 third suite (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the
+      // durable delivery / lock-order / atomicity gates: gates 2/3/4 (crash-before-emit
+      // posture + dispatcher-restart exactly-once + payload/wire freeze), gate 5 (legacy
+      // zero-row leg over all four W4 surfaces), gate 6 (restart completes only unfinished
+      // users), gate 7's added abandon-while-finalizer-waits leg, gate 8 injected-failure
+      // atomicity, gate 15 lock-order/no-class-11/no-source-DML witnesses (incl. the gate
+      // 19/23 extensions), gate 17 suspended pause, and gate 22/23 controls. DATABASE_URL-
+      // gated; excluded here so the no-DB job cannot skip-green it; wired whole-file into
+      // the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.

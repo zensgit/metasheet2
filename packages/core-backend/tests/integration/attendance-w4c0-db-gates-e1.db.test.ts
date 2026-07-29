@@ -636,7 +636,15 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
         params: [org, batchId],
         pattern: /W4C0_IMMUTABLE/,
       },
-      { sql: 'TRUNCATE attendance_result_operations', params: [], pattern: /W4C0_IMMUTABLE/ },
+      {
+        // W4C-2 amendment section 1.4's new `fk_areo_operation` (attendance_result_event_outbox
+        // -> attendance_result_operations) means Postgres's own FK-safety check now refuses a
+        // bare (non-CASCADE) TRUNCATE of this table BEFORE our trigger ever runs — TRUNCATE is
+        // still refused, just by a different, earlier mechanism than the W4C0_IMMUTABLE trigger.
+        sql: 'TRUNCATE attendance_result_operations',
+        params: [],
+        pattern: /W4C0_IMMUTABLE|cannot truncate a table referenced in a foreign key constraint/,
+      },
       { sql: 'TRUNCATE attendance_result_operation_batches CASCADE', params: [], pattern: /W4C0_IMMUTABLE/ },
     ]
     for (const leg of refusals) {
@@ -1232,18 +1240,27 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
   it('outbox: invalid event kind/duplicate identity/illegal transitions/immutability; delivered rows are terminal', async () => {
     const org = uuid()
     const opId = uuid()
+    // W4C-2 amendment section 1.4's `fk_areo_operation` (new — W4C-0 deliberately omitted
+    // it) requires a real (org_id, entrypoint, operation_id) row to exist first.
+    await pool.query(
+      `INSERT INTO attendance_result_operations (
+          org_id, entrypoint, operation_id, identity_source_kind, source_ref, actor_id, actor_posture,
+          capability, subject_scope, command_fingerprint, accepted_write_posture, state, response_snapshot
+        ) VALUES ($1,'live_punch',$2::uuid,'direct_live_punch','ref:e1','actor-e1','self','punch','{}'::jsonb,$3,'shadow','completed','{}'::jsonb)`,
+      [org, opId, HEX64_B],
+    )
     const insertEvent = (eventKind: string, operationId = opId) =>
       pool.query(
         `INSERT INTO attendance_result_event_outbox
-           (org_id, entrypoint, operation_id, event_kind, payload, payload_schema_version, business_key_fingerprint)
-         VALUES ($1, 'live_punch', $2::uuid, $3, '{"v":1}'::jsonb, 1, $4) RETURNING id::text AS id`,
+           (org_id, entrypoint, operation_id, identity_kind, event_kind, payload, payload_schema_version, business_key_fingerprint)
+         VALUES ($1, 'live_punch', $2::uuid, 'operation', $3, '{"v":1}'::jsonb, 1, $4) RETURNING id::text AS id`,
         [org, operationId, eventKind, HEX64_A],
       )
     const { rows } = await insertEvent('attendance.punched')
     const outboxId = rows[0].id as string
 
-    await expect(insertEvent('attendance.not-a-kind', uuid())).rejects.toThrow(/chk_areo_event_kind/)
-    await expect(insertEvent('attendance.punched')).rejects.toThrow(/uq_areo_identity|duplicate key/)
+    await expect(insertEvent('attendance.not-a-kind')).rejects.toThrow(/chk_areo_event_kind/)
+    await expect(insertEvent('attendance.punched')).rejects.toThrow(/uq_areo_operation_identity/)
 
     const refusals: Array<{ sql: string; params: unknown[]; pattern: RegExp }> = [
       {

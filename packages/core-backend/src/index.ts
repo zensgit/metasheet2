@@ -99,6 +99,23 @@ import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, F
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
+// W4C-2 (#4556): the single strict IANA validator behind the plugin-attendance
+// `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
+import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
+import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
+import {
+  createAttendanceLiveScheduledBoundaryV1,
+  computeAttendanceOuterSourceDefinitionFingerprintV1,
+} from './attendance/w4c2-live-scheduled-boundary'
+import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
+// W4C-2 P1-1 fix (#4612 verdict second gate round): the recovery-sweep tick and admin-abandon
+// connection wrappers (amendment sections 1.7 / 1.1.2) — same least-privilege posture as every
+// other `attendanceW4SegmentCalculation` port method below.
+import {
+  sweepAttendanceScheduledRunsOnceV1,
+  abandonScheduledRunOnceV1,
+  type AttendanceScheduledRunAdminAbandonInputV1,
+} from './attendance/w4c2-scheduled-run-ops-worker'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2022,6 +2039,103 @@ export class MetaSheetServer {
         // description; every other plugin gets undefined and the consumer's fail-closed path.
         approvalAssigneeResolver:
           manifest.name === 'plugin-attendance' ? this.buildApprovalAssigneeResolverPort() : undefined,
+        // W4C-2 (#4556 lock §12.2 last sentence; #4607 P3-4): host-provided strict W4
+        // segment-calculation port. Least-privilege like approvalAssigneeResolver —
+        // only plugin-attendance receives it; every other plugin gets undefined and the
+        // consumer's fail-closed path. `validateIanaTimezone` is the ONE strict IANA
+        // validator (`w4c1-strict-time`); the plugin never re-implements it, so
+        // default-rule/shift timezone writes and the calculator share a single source.
+        attendanceW4SegmentCalculation:
+          manifest.name === 'plugin-attendance'
+            ? {
+                validateIanaTimezone: (zone: unknown) => validateAttendanceIanaTimezoneV1(zone),
+                // W4C-2 (lock 4.4): the ONE pure frozen in/out merge-policy
+                // decision. The plugin's canonical live adapter consumes this
+                // instead of the removed second mutable post-upsert pass — the
+                // plugin never copies the branch logic, one source, no drift.
+                applyMergePolicyPure: (input: unknown) =>
+                  applyAttendanceInOutMergePolicyPureV1(
+                    input as Parameters<typeof applyAttendanceInOutMergePolicyPureV1>[0],
+                  ),
+                // W4C-2: canonical live/scheduled write boundary (lock 8.1).
+                // The factory captures a dedicated-connection provider over the
+                // core pool; the plugin injects its legacy adapters once at
+                // activate and cuts P01-P04 over to the returned boundary.
+                createLiveScheduledBoundary: (config: {
+                  legacyAdapters: import('./attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
+                }) =>
+                  createAttendanceLiveScheduledBoundaryV1({
+                    legacyAdapters: config.legacyAdapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second
+                // round) — lock §8.2 step 7 second clause. Pure; no DB
+                // access; wraps the module's own private
+                // `attributionFromResolution` so the plugin can only ever
+                // ask "what fingerprint would THIS resolution+context
+                // produce", never reach the raw builder/fingerprint
+                // primitives for arbitrary data.
+                computeOuterSourceDefinitionFingerprintV1: (input: unknown) =>
+                  computeAttendanceOuterSourceDefinitionFingerprintV1(
+                    input as Parameters<typeof computeAttendanceOuterSourceDefinitionFingerprintV1>[0],
+                  ),
+                // W4C-2: one outbox drain pass (lock 7.1a delivery side).
+                drainResultEventOutbox: async (options: {
+                  emit: (delivery: {
+                    eventKind: string
+                    payload: unknown
+                    payloadSchemaVersion: number
+                  }) => void | Promise<void>
+                  batchLimit?: number
+                }) => {
+                  const client = await poolManager.get().getInternalPool().connect()
+                  try {
+                    return await dispatchAttendanceResultEventOutboxV1(client, {
+                      emit: options.emit,
+                      batchLimit: options.batchLimit,
+                    })
+                  } finally {
+                    client.release()
+                  }
+                },
+                // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7 "No
+                // stuck absorbing state — recovery sweep, fully specified"). ONE sweep tick:
+                // all-terminal candidates finalize in core; nonterminal candidates call back
+                // into the plugin to rebuild current scheduling context and resume the exact
+                // scanned run id.
+                sweepScheduledRuns: async (options: {
+                  limit?: number
+                  recoverCandidate(candidate: {
+                    orgId: string
+                    initiator: 'cron' | 'admin_run'
+                    workDate: string
+                    runId: string
+                  }): Promise<void>
+                }) =>
+                  sweepAttendanceScheduledRunsOnceV1(poolManager.get().getInternalPool(), {
+                    limit: options.limit,
+                    recoverCandidate: options.recoverCandidate,
+                  }),
+                // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the
+                // `abandoned` transition). `adminActorId` is the route's OWN authenticated actor
+                // id (already RBAC-gated by `withPermission('attendance:admin', ...)` at the
+                // call site) — never a request-body-supplied identity — matching the SAME
+                // P1-4 discipline `admin_run`'s scheduled-run initiator already follows.
+                abandonScheduledRun: async (input: {
+                  orgId: string
+                  runId: string
+                  adminActorId: string
+                  reasonCode: string
+                }) =>
+                  abandonScheduledRunOnceV1(
+                    poolManager.get().getInternalPool(),
+                    input as unknown as AttendanceScheduledRunAdminAbandonInputV1,
+                  ),
+              }
+            : undefined,
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,

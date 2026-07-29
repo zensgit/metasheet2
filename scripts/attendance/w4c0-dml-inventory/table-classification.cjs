@@ -113,6 +113,15 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_import_rollback_closures: 'w4_canonical',
   attendance_calculation_rollout_state: 'w4_canonical',
   attendance_calculation_rollout_events: 'w4_canonical',
+
+  // --- w4_canonical: W4C-2 P1-2 scheduled-run tables (#4556, PR #4617 amendment §1.1/§1.1.1,
+  // RATIFIED bundle A). Written only by the canonical scheduled-run module
+  // (packages/core-backend/src/attendance/w4c2-scheduled-run.ts) and the P1-2 migration —
+  // both already covered by W4_CANONICAL_PATH_PREFIXES below; adding the tables here closes
+  // the classification set the Stage D collector enforces fail-closed. -----------------------
+  attendance_scheduled_runs: 'w4_canonical',
+  attendance_scheduled_run_targets: 'w4_canonical',
+  attendance_scheduled_run_target_outcomes: 'w4_canonical',
 })
 
 // Buckets whose DML sites require an individual curated P0x (or later-slice) debt-ID match.
@@ -125,7 +134,15 @@ const BUCKET_ALLOWLISTED_BUCKETS = Object.freeze(['operational', 'reference'])
 // the scanned file's repo-relative path starts with one of these. Anything else is a hard fail.
 const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   'packages/core-backend/src/attendance/w4c0-',
+  // W4C-2 (#4556 lock §8.1): the canonical live/scheduled write boundary and the durable
+  // outbox dispatcher are canonical-boundary modules — they are the ONLY non-w4c0 writers of
+  // the w4_canonical tables (shadow calculations/segments, outbox claim/deliver flips).
+  'packages/core-backend/src/attendance/w4c2-',
   'packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_',
+  // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED): the scheduled-run identity + outbox
+  // discriminated-union migration's own backfill DML (UPDATE attendance_result_event_outbox
+  // SET identity_kind = 'operation' ...), same precedent as the W4C-0 migration file above.
+  'packages/core-backend/src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union',
 ])
 
 function classifyTable(tableName) {

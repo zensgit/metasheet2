@@ -10,6 +10,7 @@
  * tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts.
  */
 import { afterEach, describe, expect, it } from 'vitest'
+import * as w4c0Identity from '../w4c0-identity'
 import {
   ATTENDANCE_IMPORT_ITEM_NAMESPACE_V1,
   ATTENDANCE_INTEGRATION_ITEM_NAMESPACE_V1,
@@ -20,17 +21,21 @@ import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceResultOperationLocks,
+  acquireAttendanceScheduledRunLock,
   buildAttendanceCalculationRolloutAdvisoryKey,
   buildAttendanceCalculationTargetAdvisoryKey,
   buildAttendanceResultOperationAdvisoryKey,
+  buildAttendanceScheduledRunAdvisoryKey,
   createVerifiedAttendanceCalculationTargetIdentityV1,
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
   parseCanonicalAttendanceOrgKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
+  parseCanonicalAttendanceScheduledRunKeyV1,
   parseCanonicalAttendanceUserIdV1,
   parseCanonicalAttendanceWorkDateV1,
   rehydrateVerifiedAttendanceOperationIdentityV1,
+  rehydrateVerifiedAttendanceOrgIdentityV1,
   resolveSegmentCalculationPosture,
   type AttendanceOperationIdentityDurableRowV1,
   type AttendanceW4TransactionClientV1,
@@ -66,7 +71,12 @@ const GOLDEN_ROLLOUT_KEY_ORG = 2207163269983992351n
 const GOLDEN_OPERATION_KEY_ITEM = -9078275941089543826n
 const GOLDEN_OPERATION_KEY_BATCH = -4625420971228601305n
 const GOLDEN_TARGET_KEY = -4551290893819917091n
+// W4C-2 amendment section 1.6 (PR #4617, RATIFIED): the fourth (class-01, scheduled-run)
+// builder's golden, over (orgId=ORG, initiator='cron', workDate=SCHED_DATE).
+const GOLDEN_SCHEDULED_RUN_KEY = 5091242802921227206n
 
+const CLASS_01_MIN = 2n ** 62n
+const CLASS_01_MAX_EXCLUSIVE = 2n ** 63n
 const CLASS_10_MIN = -(2n ** 63n)
 const CLASS_11_MIN = -(2n ** 62n)
 
@@ -711,7 +721,7 @@ describe('rehydration from durable proof', () => {
 // ---------------------------------------------------------------------------
 
 describe('advisory key builders and acquisition helpers', () => {
-  it('pins the exact signed-bigint goldens for all three key classes', async () => {
+  it('pins the exact signed-bigint goldens for all four key classes', async () => {
     expect(buildAttendanceCalculationRolloutAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1('default'))).toBe(
       GOLDEN_ROLLOUT_KEY_DEFAULT,
     )
@@ -735,19 +745,97 @@ describe('advisory key builders and acquisition helpers', () => {
     expect(buildAttendanceResultOperationAdvisoryKey(batch)).toBe(GOLDEN_OPERATION_KEY_BATCH)
     const target = createVerifiedAttendanceCalculationTargetIdentityV1({ org, userId: SCHED_USER, workDate: SCHED_DATE })
     expect(buildAttendanceCalculationTargetAdvisoryKey(target)).toBe(GOLDEN_TARGET_KEY)
+    const runKey = parseCanonicalAttendanceScheduledRunKeyV1({ orgId: ORG, initiator: 'cron', workDate: SCHED_DATE })
+    expect(buildAttendanceScheduledRunAdvisoryKey(runKey)).toBe(GOLDEN_SCHEDULED_RUN_KEY)
   })
 
-  it('keeps the two-bit classes disjoint: 00 rollout, 10 operation, 11 target, 01 never', async () => {
+  // W4C-2 amendment section 1.6 (PR #4617, RATIFIED, gate 16): rewritten to (a) enumerate
+  // every builder the module EXPORTS rather than naming three/four by hand, (b) assert the
+  // run builder's key lands in [2^62, 2^63) and every OTHER builder's key does not, (c) fail
+  // if an exported builder has no registered class expectation — so a future fifth builder
+  // cannot repeat the gap the pre-amendment hand-written list had (adding this amendment's
+  // fourth builder would NOT have failed the old hand-written-list form).
+  const CLASS_EXPECTATIONS: Readonly<
+    Record<string, { readonly min: bigint; readonly maxExclusive: bigint; readonly invoke: () => bigint }>
+  > = {
+    buildAttendanceCalculationRolloutAdvisoryKey: {
+      min: 0n,
+      maxExclusive: CLASS_01_MIN,
+      invoke: () => buildAttendanceCalculationRolloutAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1(ORG)),
+    },
+    buildAttendanceScheduledRunAdvisoryKey: {
+      min: CLASS_01_MIN,
+      maxExclusive: CLASS_01_MAX_EXCLUSIVE,
+      invoke: () =>
+        buildAttendanceScheduledRunAdvisoryKey(
+          parseCanonicalAttendanceScheduledRunKeyV1({ orgId: ORG, initiator: 'cron', workDate: SCHED_DATE }),
+        ),
+    },
+    buildAttendanceResultOperationAdvisoryKey: {
+      min: CLASS_10_MIN,
+      maxExclusive: CLASS_11_MIN,
+      invoke: () => GOLDEN_OPERATION_KEY_ITEM,
+    },
+    buildAttendanceCalculationTargetAdvisoryKey: {
+      min: CLASS_11_MIN,
+      maxExclusive: 0n,
+      invoke: () => GOLDEN_TARGET_KEY,
+    },
+  }
+
+  function exportedAdvisoryKeyBuilderNames(): string[] {
+    return Object.keys(w4c0Identity).filter((name) => /^build.*AdvisoryKey$/.test(name))
+  }
+
+  it('gate 16: enumerates every exported build*AdvisoryKey builder (not a hand-written list) and asserts each key falls in exactly one class range', () => {
+    const names = exportedAdvisoryKeyBuilderNames()
+    // Sanity: the enumeration itself must find all four real builders, not silently zero.
+    expect(names.sort()).toEqual(
+      [
+        'buildAttendanceCalculationRolloutAdvisoryKey',
+        'buildAttendanceCalculationTargetAdvisoryKey',
+        'buildAttendanceResultOperationAdvisoryKey',
+        'buildAttendanceScheduledRunAdvisoryKey',
+      ].sort(),
+    )
+    for (const name of names) {
+      const expectation = CLASS_EXPECTATIONS[name]
+      // (c): an exported builder with no registered class expectation fails the gate rather
+      // than passing silently.
+      if (!expectation) {
+        throw new Error(`exported builder ${name} has no registered class-range expectation — add one`)
+      }
+      const key = expectation.invoke()
+      expect(key >= expectation.min && key < expectation.maxExclusive).toBe(true)
+      // Every OTHER registered builder's own range must NOT contain this key.
+      for (const [otherName, other] of Object.entries(CLASS_EXPECTATIONS)) {
+        if (otherName === name) continue
+        expect(key >= other.min && key < other.maxExclusive).toBe(false)
+      }
+    }
+  })
+
+  it('gate 16 regression proof: a synthetic fifth builder with a deliberately wrong class assignment is caught by the cross-check (not passed silently)', () => {
+    // The run key (real class 01) misregistered under class 00's range — the exact shape a
+    // future fifth builder with a copy-paste class-prefix bug would produce.
+    const runKey = CLASS_EXPECTATIONS.buildAttendanceScheduledRunAdvisoryKey.invoke()
+    const buggyExpectation = { min: 0n, maxExclusive: CLASS_01_MIN }
+    expect(runKey >= buggyExpectation.min && runKey < buggyExpectation.maxExclusive).toBe(false)
+  })
+
+  it('keeps the two-bit classes disjoint: 00 rollout, 10 operation, 11 target, 01 scheduled-run only', async () => {
     // class 00: [0, 2^62)
-    expect(GOLDEN_ROLLOUT_KEY_DEFAULT >= 0n && GOLDEN_ROLLOUT_KEY_DEFAULT < 2n ** 62n).toBe(true)
-    expect(GOLDEN_ROLLOUT_KEY_ORG >= 0n && GOLDEN_ROLLOUT_KEY_ORG < 2n ** 62n).toBe(true)
+    expect(GOLDEN_ROLLOUT_KEY_DEFAULT >= 0n && GOLDEN_ROLLOUT_KEY_DEFAULT < CLASS_01_MIN).toBe(true)
+    expect(GOLDEN_ROLLOUT_KEY_ORG >= 0n && GOLDEN_ROLLOUT_KEY_ORG < CLASS_01_MIN).toBe(true)
+    // class 01: [2^62, 2^63) — assigned to the scheduled-run builder (OD-W4C-49=(a))
+    expect(GOLDEN_SCHEDULED_RUN_KEY >= CLASS_01_MIN && GOLDEN_SCHEDULED_RUN_KEY < CLASS_01_MAX_EXCLUSIVE).toBe(true)
     // class 10: [-2^63, -2^62)
     for (const key of [GOLDEN_OPERATION_KEY_ITEM, GOLDEN_OPERATION_KEY_BATCH]) {
       expect(key >= CLASS_10_MIN && key < CLASS_11_MIN).toBe(true)
     }
     // class 11: [-2^62, 0)
     expect(GOLDEN_TARGET_KEY >= CLASS_11_MIN && GOLDEN_TARGET_KEY < 0n).toBe(true)
-    // forced equal raw digests still yield three distinct PostgreSQL keys (class bits)
+    // forced equal raw digests still yield four distinct PostgreSQL keys (class bits)
     __setAttendanceW4DigestSeamForTests(() => Buffer.alloc(32, 0x5a))
     try {
       const rolloutKey = buildAttendanceCalculationRolloutAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1(ORG))
@@ -761,10 +849,14 @@ describe('advisory key builders and acquisition helpers', () => {
       const operationKey = buildAttendanceResultOperationAdvisoryKey(operation)
       const target = createVerifiedAttendanceCalculationTargetIdentityV1({ org, userId: SCHED_USER, workDate: SCHED_DATE })
       const targetKey = buildAttendanceCalculationTargetAdvisoryKey(target)
-      expect(new Set([rolloutKey, operationKey, targetKey]).size).toBe(3)
-      // 01 class (range [2^62, 2^63)) is reserved and never produced
+      const runKey = buildAttendanceScheduledRunAdvisoryKey(
+        parseCanonicalAttendanceScheduledRunKeyV1({ orgId: ORG, initiator: 'cron', workDate: SCHED_DATE }),
+      )
+      expect(new Set([rolloutKey, operationKey, targetKey, runKey]).size).toBe(4)
+      // Only the run key lands in the 01 class range under forced-equal raw digests too.
+      expect(runKey >= CLASS_01_MIN && runKey < CLASS_01_MAX_EXCLUSIVE).toBe(true)
       for (const key of [rolloutKey, operationKey, targetKey]) {
-        expect(key >= 2n ** 62n && key < 2n ** 63n).toBe(false)
+        expect(key >= CLASS_01_MIN && key < CLASS_01_MAX_EXCLUSIVE).toBe(false)
       }
     } finally {
       __setAttendanceW4DigestSeamForTests(null)
@@ -960,6 +1052,69 @@ describe('advisory key builders and acquisition helpers', () => {
     await expect(
       acquireAttendanceCalculationTargetLocks(acquisitionOnlyFailure('40P01'), [target]),
     ).rejects.toMatchObject({ code: '40P01' })
+
+    const runKey = parseCanonicalAttendanceScheduledRunKeyV1({ orgId: ORG, initiator: 'cron', workDate: SCHED_DATE })
+    await expect(
+      acquireAttendanceScheduledRunLock(acquisitionOnlyFailure('57014'), runKey),
+    ).rejects.toMatchObject({ code: '57014' })
+  })
+
+  it('scheduled-run helper (section 1.6): acquires the exact class-01 golden key with the deadline protocol; its own 55P03 maps to values-free 503 ATTENDANCE_SCHEDULED_RUN_BUSY, lockClass=scheduled_run', async () => {
+    const runKey = parseCanonicalAttendanceScheduledRunKeyV1({ orgId: ORG, initiator: 'cron', workDate: SCHED_DATE })
+    const trx = stubTrx()
+    await acquireAttendanceScheduledRunLock(trx, runKey)
+    const acquisitions = trx.calls.filter((call) => call.sqlText.includes('pg_advisory'))
+    expect(acquisitions).toEqual([
+      { sqlText: 'SELECT pg_advisory_xact_lock($1::bigint)', params: [GOLDEN_SCHEDULED_RUN_KEY.toString()] },
+    ])
+
+    const busyStub: AttendanceW4TransactionClientV1 = {
+      async query(sqlText: string) {
+        if (sqlText.includes('pg_advisory')) {
+          const e = new Error('lock not available') as Error & { code?: string }
+          e.code = '55P03'
+          throw e
+        }
+        return { rows: [] }
+      },
+    }
+    await expect(acquireAttendanceScheduledRunLock(busyStub, runKey)).rejects.toMatchObject({
+      code: 'ATTENDANCE_SCHEDULED_RUN_BUSY',
+      httpStatus: 503,
+      lockClass: 'scheduled_run',
+    })
+
+    // pre-lock isolation: the run-key builder re-validates its lexical input; a raw string
+    // (not the parsed tuple shape) cannot bypass the parser.
+    expectCode(
+      () => buildAttendanceScheduledRunAdvisoryKey(`{${ORG}}` as never),
+      'W4C0_SCHEDULED_RUN_KEY_INPUT_INVALID',
+    )
+  })
+
+  it('rehydrateVerifiedAttendanceOrgIdentityV1 (reused by the W4C-2 scheduled-run identity layer): mints an org witness from durable proof and re-applies the default/posture door on every reload', () => {
+    const witness = rehydrateVerifiedAttendanceOrgIdentityV1({ orgId: ORG, acceptedWritePosture: 'shadow' })
+    expect(witness.orgId).toBe(ORG)
+    expect(witness.acceptedWritePosture).toBe('shadow')
+    // amendment gate 1's default/posture door: `default` + shadow|authoritative is rejected
+    // even on a durable-reload path, not only on first mint.
+    expectCode(
+      () => rehydrateVerifiedAttendanceOrgIdentityV1({ orgId: 'default', acceptedWritePosture: 'shadow' }),
+      'W4C0_DEFAULT_ORG_POSTURE_REJECTED',
+    )
+    expectCode(
+      () => rehydrateVerifiedAttendanceOrgIdentityV1({ orgId: ORG, acceptedWritePosture: 'not-a-posture' }),
+      'W4C0_WRITE_POSTURE_INVALID',
+    )
+    // partial/extra-field shapes are rejected (JSON-clone/spread forgery resistance).
+    expectCode(
+      () => rehydrateVerifiedAttendanceOrgIdentityV1({ orgId: ORG }),
+      'W4C0_ORG_DURABLE_ROW_INVALID',
+    )
+    expectCode(
+      () => rehydrateVerifiedAttendanceOrgIdentityV1({ orgId: ORG, acceptedWritePosture: 'shadow', extra: 1 }),
+      'W4C0_ORG_DURABLE_ROW_INVALID',
+    )
   })
 
   it('deadline uses a monotonic clock, not wall-clock — per-key budgets strictly decrease (gate P2-2)', async () => {

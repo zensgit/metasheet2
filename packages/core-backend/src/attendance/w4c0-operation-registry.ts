@@ -48,7 +48,7 @@ import {
 } from './w4c0-identity'
 import {
   requireAuthorizedCapabilityForEntrypointV1,
-  recheckAttendanceAuthorizationInTransactionV1,
+  recheckAttendanceActorLivenessInTransactionV1,
   type AuthorizedAttendanceWriteContextV1,
 } from './w4c0-authorization'
 import {
@@ -59,6 +59,7 @@ import {
 } from './w4c0-fingerprints'
 import {
   ATTENDANCE_W4_OUTBOX_EVENT_KINDS_V1,
+  ATTENDANCE_W4_SCHEDULED_RUN_OUTBOX_EVENT_KINDS_V1,
   AttendanceW4OperationError,
   W4_MAX_BATCH_ITEMS,
   W4_TRANSACTION_LOCK_TIMEOUT_MS,
@@ -578,7 +579,7 @@ export async function attendanceResultOperationPreflightV1(
   if (auth.orgId !== plan.orgKey) {
     throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
   }
-  await recheckAttendanceAuthorizationInTransactionV1(trx, auth)
+  await recheckAttendanceActorLivenessInTransactionV1(trx, auth)
 
   // Step 1 (cont.): non-locking read of exact keys in stable order — an
   // all-completed congruent replay returns with zero DML even under suspension.
@@ -833,15 +834,22 @@ export async function enqueueAttendanceResultEventOutboxV1(
     if (!(ATTENDANCE_W4_OUTBOX_EVENT_KINDS_V1 as readonly string[]).includes(event.eventKind)) {
       fail('W4C0_OUTBOX_EVENT_KIND_INVALID')
     }
+    // W4C-2 amendment section 1.4.1: the per-user (operation-identity) enqueue surface
+    // rejects the two run-level kinds even though they are now members of the eight-member
+    // closed set above — this is one half of gate 1's "a run-level kind with
+    // identity_kind='operation' fails" leg, enforced at the TS boundary before any SQL.
+    if ((ATTENDANCE_W4_SCHEDULED_RUN_OUTBOX_EVENT_KINDS_V1 as readonly string[]).includes(event.eventKind)) {
+      fail('W4C0_OUTBOX_EVENT_KIND_INVALID')
+    }
     if (!Number.isInteger(event.payloadSchemaVersion) || event.payloadSchemaVersion < 1) {
       fail('W4C0_OUTBOX_EVENTS_INVALID')
     }
     requireHex64(event.businessKeyFingerprint, 'W4C0_OUTBOX_EVENTS_INVALID')
     await trx.query(
       `INSERT INTO attendance_result_event_outbox (
-          org_id, entrypoint, operation_id, event_kind, payload,
+          org_id, entrypoint, operation_id, identity_kind, event_kind, payload,
           payload_schema_version, business_key_fingerprint, delivery_state
-        ) VALUES ($1,$2,$3::uuid,$4,$5::jsonb,$6,$7,'pending')`,
+        ) VALUES ($1,$2,$3::uuid,'operation',$4,$5::jsonb,$6,$7,'pending')`,
       [
         verified.org.orgId,
         verified.entrypoint,
@@ -1015,7 +1023,13 @@ export async function reserveAttendanceImportJobW4V1(
 // SQLSTATE 40001/40P01.
 // ---------------------------------------------------------------------------
 
-function isRetryableSqlState(error: unknown): boolean {
+// Exported (P1-2 fix, #4612 verdict second gate round): a per-target caller that wraps a SINGLE
+// call to `runAttendanceResultOperationTransactionV1` in its OWN outer retry (with backoff this
+// inner wrapper deliberately does not add — see w4c2-live-scheduled-boundary.ts's
+// `withConnectionRetryingTargetContention`) needs the SAME retryable-SQLSTATE predicate this
+// wrapper uses, so the two layers agree on exactly which errors are transient. One source, no
+// drift, matching this file's own doctrine for every other shared primitive.
+export function isRetryableSqlState(error: unknown): boolean {
   const code =
     typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
   return code === '40001' || code === '40P01'

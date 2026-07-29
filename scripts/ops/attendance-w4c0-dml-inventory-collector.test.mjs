@@ -23,6 +23,7 @@ const { buildRawCensus, classifyCensus, scanFileForDmlSites, isCanonicalBoundary
 )
 const { classifyTrackedSites } = require(path.join(toolDir, 'classify-tracked-sites.cjs'))
 const { CURATED_DEBT_ENTRIES } = require(path.join(toolDir, 'curated-debt-entries.cjs'))
+const { TABLE_BUCKETS } = require(path.join(toolDir, 'table-classification.cjs'))
 
 const PINNED_REF = 'e0defbe26d7f2e1747e74aa908ca710422812bf7'
 const BASELINE_ARTIFACT_RELPATH = 'docs/development/attendance-w4c0-dml-debt-baseline-e0defbe26.json'
@@ -201,4 +202,110 @@ test('canonical boundary helper agrees with the classifier on in/out-of-boundary
 // -------------------------------------------------------------------------------------------
 test('this collector test file has an explicit CI execution step', () => {
   assert.match(readWorkflow(), new RegExp(THIS_TEST_FILENAME.replaceAll('.', '\\.')))
+})
+
+// -------------------------------------------------------------------------------------------
+// 6. W4C-2 cutover markers (lock §12.3: "P01 live, P02 merge second-pass, P03 cron absence,
+//    and P04 administrator-run absence inventory entries are removed independently"). Each of
+//    the four entries must INDEPENDENTLY carry the removed-by-adapter marker; no other entry
+//    may be silently marked; and the claim predicates still cover the adapter-owned sites so
+//    unclaimed=0 detection is not bypassed by the removal.
+// -------------------------------------------------------------------------------------------
+test('W4C-2: P01, P02, P03, P04 each independently carry canonicalizedBy=W4C-2 — and only they do', () => {
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  // Four independent assertions — removing any ONE marker fails on its own line.
+  assert.equal(byId.get('P01')?.canonicalizedBy, 'W4C-2', 'P01 (live punch) must be removed-by-adapter')
+  assert.equal(byId.get('P02')?.canonicalizedBy, 'W4C-2', 'P02 (merge second-pass) must be removed-by-adapter')
+  assert.equal(byId.get('P03')?.canonicalizedBy, 'W4C-2', 'P03 (cron absence) must be removed-by-adapter')
+  assert.equal(byId.get('P04')?.canonicalizedBy, 'W4C-2', 'P04 (administrator absence run) must be removed-by-adapter')
+  const marked = CURATED_DEBT_ENTRIES.filter((entry) => entry.canonicalizedBy != null)
+    .map((entry) => `${entry.id}:${entry.canonicalizedBy}`)
+    .sort()
+  assert.deepEqual(
+    marked,
+    ['P01:W4C-2', 'P02:W4C-2', 'P03:W4C-2', 'P04:W4C-2'],
+    'exactly the four W4C-2 entries are canonicalized — no other debt id may borrow the marker',
+  )
+})
+
+test('W4C-2: the canonical adapter symbols are claimed by exactly the expected entries', () => {
+  const syntheticLive = {
+    relPath: 'plugins/plugin-attendance/index.cjs',
+    enclosingSymbol: 'applyLivePunchProjectionLegacyV1',
+    table: 'attendance_events',
+    verb: 'insert',
+    bucket: 'business',
+    key: 'synthetic-live',
+    line: 1,
+  }
+  const syntheticAbsence = {
+    relPath: 'plugins/plugin-attendance/index.cjs',
+    enclosingSymbol: 'generateAbsenceRecords',
+    table: 'attendance_records',
+    verb: 'insert',
+    bucket: 'business',
+    key: 'synthetic-absence',
+    line: 2,
+  }
+  const { claimsByEntryId, unclaimed } = classifyTrackedSites([syntheticLive, syntheticAbsence])
+  assert.deepEqual(unclaimed, [], 'the adapter-owned sites must remain claimed (unclaimed=0 not bypassed)')
+  assert.deepEqual(
+    (claimsByEntryId.get('P01') || []).map((site) => site.key),
+    ['synthetic-live'],
+    'P01 claims the live adapter site',
+  )
+  // One function, two initiators, two debt ids (lock section 1.1): P03 AND P04 both claim it.
+  assert.deepEqual((claimsByEntryId.get('P03') || []).map((site) => site.key), ['synthetic-absence'])
+  assert.deepEqual((claimsByEntryId.get('P04') || []).map((site) => site.key), ['synthetic-absence'])
+})
+
+// -------------------------------------------------------------------------------------------
+// 7. W4C-2 P1-2 (#4556, PR #4617 amendment) wrong-bucket drift guard (#4612 final-gate P2-5):
+//    the collector's classification suite covered ABSENCE (an unclassified table fails) but not
+//    WRONG BUCKET — re-classifying `attendance_scheduled_runs` from `w4_canonical` to
+//    `operational` left all prior legs green, silently disarming the canonical-boundary hard
+//    fail (ATTENDANCE_W4C0_DML_OUTSIDE_CANONICAL_BOUNDARY) for that table. Same exact-set shape
+//    as the debt-ID exclusivity assertion in section 6: three per-table legs (each of the three
+//    new tables reddens on its own line) + one exact-set leg over the WHOLE w4_canonical bucket
+//    (so demoting ANY canonical table — the nine W4C-0 ones included — reddens too, and a table
+//    smuggled INTO the bucket to widen the path-prefix allowlist's reach also reddens).
+// -------------------------------------------------------------------------------------------
+test('W4C-2 P1-2: the three scheduled-run tables are w4_canonical, and the w4_canonical bucket is exactly the twelve known tables', () => {
+  // Three independent assertions — flipping any ONE table's bucket fails on its own line.
+  assert.equal(
+    TABLE_BUCKETS.attendance_scheduled_runs,
+    'w4_canonical',
+    'attendance_scheduled_runs must stay canonical-boundary-only (wrong-bucket drift, not just absence)',
+  )
+  assert.equal(
+    TABLE_BUCKETS.attendance_scheduled_run_targets,
+    'w4_canonical',
+    'attendance_scheduled_run_targets must stay canonical-boundary-only (wrong-bucket drift, not just absence)',
+  )
+  assert.equal(
+    TABLE_BUCKETS.attendance_scheduled_run_target_outcomes,
+    'w4_canonical',
+    'attendance_scheduled_run_target_outcomes must stay canonical-boundary-only (wrong-bucket drift, not just absence)',
+  )
+  const bucketMembers = Object.keys(TABLE_BUCKETS)
+    .filter((table) => TABLE_BUCKETS[table] === 'w4_canonical')
+    .sort()
+  assert.deepEqual(
+    bucketMembers,
+    [
+      'attendance_calculation_rollout_events',
+      'attendance_calculation_rollout_state',
+      'attendance_import_rollback_closures',
+      'attendance_record_calculations',
+      'attendance_record_segments',
+      'attendance_request_calculation_snapshots',
+      'attendance_result_event_outbox',
+      'attendance_result_operation_batches',
+      'attendance_result_operations',
+      'attendance_scheduled_run_target_outcomes',
+      'attendance_scheduled_run_targets',
+      'attendance_scheduled_runs',
+    ],
+    'the w4_canonical bucket is an exact closed set — a demotion OR a smuggled addition both redden here',
+  )
 })

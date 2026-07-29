@@ -1102,6 +1102,109 @@ export interface PluginServices {
       | { status: 'unimplemented' }
     >
   }
+  /**
+   * W4C-2 (#4556 lock 12.2 last sentence; #4607 P3-4) — host→plugin, narrow,
+   * least-privilege W4 segment-calculation port. Same posture as
+   * `approvalAssigneeResolver`: core-backend is the PROVIDER, ONLY
+   * plugin-attendance receives it; every other plugin gets undefined and the
+   * consumer fail-closes. `validateIanaTimezone` is the single strict W4 IANA
+   * validator (`w4c1-strict-time.validateAttendanceIanaTimezoneV1`) — it
+   * throws on non-IANA input (offset forms, whitespace, unknown zones) and
+   * returns the zone unchanged otherwise. Default-rule and shift timezone
+   * WRITE routes must consult it so a persisted invalid zone can never become
+   * a future W4 calculation input; the plugin never copies the validator.
+   */
+  attendanceW4SegmentCalculation?: {
+    validateIanaTimezone(zone: unknown): string
+    /**
+     * W4C-2 — the ONE pure frozen in/out merge-policy decision (lock 4.4: "it
+     * removes only the second mutable post-upsert pass"). The canonical live
+     * adapter computes the decision BEFORE its single record write; the plugin
+     * never re-implements the branch logic.
+     */
+    applyMergePolicyPure(input: unknown): {
+      readonly changed: boolean
+      readonly nextFirstInAtMs: number | null
+      readonly nextLastOutAtMs: number | null
+    }
+    /**
+     * W4C-2 — canonical live/scheduled write boundary factory (lock 8.1). The
+     * plugin calls this ONCE at activate, injecting its legacy execution
+     * closures (event insert + record upsert + merge lift, absence
+     * INSERT..SELECT, in-transaction W2 resolvers, frozen-context loader).
+     * Routes then submit pure data envelopes; no per-request callback exists.
+     */
+    createLiveScheduledBoundary(config: {
+      legacyAdapters: import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
+    }): import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledBoundaryV1
+    /**
+     * W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round) — lock
+     * §8.2 step 7 second clause ("source-definition fingerprint equality").
+     * Pure; no DB access. The route calls this with its OWN pre-transaction
+     * W2 resolution (same shape `resolveLiveCandidate`/`resolveScheduledCandidate`
+     * return) and frozen context (same shape `buildShadowFrozenContext`
+     * returns, built by the route over its own non-transactional
+     * connection) to obtain a fingerprint comparable to the freeze step's
+     * own in-transaction one. This is the ONLY way the plugin can reach the
+     * source-definition fingerprint domain — it cannot compute one for
+     * arbitrary data, only for a resolution+context shape it already
+     * produces via its own adapters.
+     */
+    computeOuterSourceDefinitionFingerprintV1(input: {
+      readonly orgId: string
+      readonly userId: string
+      readonly source: 'live_resolution' | 'scheduled_resolution'
+      readonly nowIso: string
+      readonly resolution: unknown
+      readonly context: unknown
+    }): string | null
+    /**
+     * W4C-2 — one drain pass over the durable result-event outbox (lock 7.1a).
+     * The plugin schedules this ONLY under the same env gate as the posture
+     * allowlist (`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` non-empty): no
+     * env => no worker => byte-identical runtime.
+     */
+    drainResultEventOutbox(options: {
+      emit: (delivery: { eventKind: string; payload: unknown; payloadSchemaVersion: number }) => void | Promise<void>
+      batchLimit?: number
+    }): Promise<{ claimed: number; delivered: number; failed: number }>
+    /**
+     * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery sweep).
+     * ONE sweep tick over `state='running'` scheduled-run rows, cross-`workDate`, bounded by
+     * `limit`. `recoverCandidate` must rebuild plugin-owned scheduling context and resume the
+     * exact scanned run; the host never silently treats `not_ready` as completed work.
+     */
+    sweepScheduledRuns(options: {
+      limit?: number
+      recoverCandidate(candidate: {
+        orgId: string
+        initiator: 'cron' | 'admin_run'
+        workDate: string
+        runId: string
+      }): Promise<void>
+    }): Promise<{
+      scanned: number
+      finalized: number
+      notReady: number
+      skipped: number
+      errored: number
+    }>
+    /**
+     * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the `abandoned`
+     * transition). `adminActorId` MUST be the route's own authenticated actor id — never a
+     * request-body-supplied value.
+     */
+    abandonScheduledRun(input: {
+      orgId: string
+      runId: string
+      adminActorId: string
+      reasonCode: string
+    }): Promise<
+      | { kind: 'deferred'; code: 'ATTENDANCE_SCHEDULED_RUN_ABANDON_DEFERRED' }
+      | { kind: 'not_running'; state: 'completed' | 'abandoned' }
+      | { kind: 'abandoned'; runId: string; completedUserCount: number }
+    >
+  }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService
   rbacProvisioning: PluginRbacProvisioningService
