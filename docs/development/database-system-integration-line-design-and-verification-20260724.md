@@ -1,5 +1,30 @@
 # Database & System Integration Line — Design and Verification (2026-07-24)
 
+## 0. Current delivery state — 2026-07-29 snapshot (RECORD ONLY)
+
+This block updates **delivery status only**. It does not amend the ratified contracts, change the §4 order,
+open a runtime gate, authorize an entity-machine run, or authorize merge / arming / deployment / rollout.
+For current landed status it supersedes older phrases below such as "redo not started"; for contract,
+capability, scope and order, the upstream locks and ratified §4 continue to win.
+
+| §4 track | landed evidence | remaining boundary |
+|---|---|---|
+| **1. B1a authority substrate** | config v2 via #4601 (`cd2670695`); system-identity read and closed connector-kind / canonical-contract registries via #4610 (`3f60b3d7`); HTTP-only server-bound executor, legacy probe retirement and contract shapes via #4625 (`ebf84f249`) | Landed code is not a runtime consumer and does not authorize customer-source access, activation, arming or rollout. The real per-deployment alias / contract inventory and backfill remain ops-gated results, not outputs of the hermetic tool. |
+| **2. B1b capability spike** | first-party real-engine evidence via #4620 (`ed7a73953`) | Evidence is capability-specific: it does not certify a database brand or a customer deployment. |
+| **3. B1b certification** | first SQL Server RCSI total-order qualification slice via #4661 (`1369bea45`); PAGED_READ legal-combination guard via #4663 (`cea00b4af`) | The qualification is runtime-unreachable and is not itself PAGED_READ, activation or rollout. Other dialect / capability cells remain separate certification gates. |
+| **4. B1c** | SQL Server SNAPSHOT page-sequence real-engine evidence via #4664 (`10056f823`); latent profile via #4665 (`5d785e399`); latent executor via #4667 (`e007188d6`) | This is the first latent SQL Server SNAPSHOT slice only. It has no runtime consumer, customer binding, deployment or flag authorization. |
+| **5. B1-observability** | contract shapes exist from B1a; safe CI wiring landed via #4614 (`4faf9349d`) | Runtime counter / handshake wiring remains an unopened, separate runtime gate. `integration-guard` is now a strict required `main` context (GitHub branch-protection API, observed 2026-07-29); that governance fact does not open the runtime gate. |
+| **6. Customer migration** | schema-probing, values-free inventory tool landed via #4594 (`dd693d8ca`) | A tool is not a result. Each deployment still needs authorized inventory, versioned-config migration where required, and re-qualification before enforcement. |
+| **7. B2 enforcement** | #4591 remains Draft and intentionally last | Do not merge before item 5 wiring, item 6 customer migration and fresh strict checks against then-current `main`. |
+| **Parallel M0 / stock preparation** | M0-A build / verification record landed via #4604 (`4be09076d`). Diagnostics v3 and v4 were each consumed fail-closed. Draft #4675 at `6738d2a46d32528abb6e17d6897dbfeeb027923c` is the current v5 metadata-only candidate; its package SHA-256 is `9d5a1d08cec8bbf90c5295861dbe618aed152237030600c45700ec36dba7801f`, with 16/16 fresh checks and independent 0 P1 / 0 P2 review. | #4437 and test-only #4628 remain open with `overallAcceptance=FAIL`. Owner one-run authorization for that exact v5 head + package is still pending. Until it is posted on #4628: `entityMachineAuthorization=WITHHELD`, `nextTestMachineAction=STOP_AND_WAIT`; no retry, config mutation, preflight, flag-ON, deployment or external write. |
+
+**Current shortest path.** The customer-value critical path is not more platform code: (1) owner authorizes
+exactly one v5 flag-OFF run bound to the head and package above; (2) the test machine returns the complete
+values-free block once; (3) engineering follows #4628's closed result tree; and only a result that reaches
+the bounded-candidate gate can proceed to a separately authorized preflight / flag-ON window. In parallel,
+the platform line waits at the explicit B1-observability runtime gate; customer migration follows it, and
+#4591 remains last.
+
 **Status, per section** (⟲B2-self — an earlier blanket "§2–§6 are PROPOSED" was wrong: a *proposed* fence bounds nothing, and §5 is code fact): **§1** = RECORD of landed, verified facts (head-scoped SHAs). **§2** = owner-set route **with decisions already taken** (package policy (b); B1-observability not opened early; M0-A authorized). **§3** = design, ⟲-absorbed. **§4** = the single authoritative slice order, **RATIFIED** (owner, 2026-07-25, @ `a7c562d34`). **§5** = session-verified code fact, same evidentiary grade as §1. **§6** = **binding** fences. The document itself ships no code. What its approval unlocks is defined in **Gate** immediately below — a bounded **authority-substrate** gate, **not** "latent only". **§4 is the single authoritative slice order** and is **RATIFIED** (owner, 2026-07-25, @ `a7c562d34`).
 
 **Gate (owner, 2026-07-24; ⟲B2 REVISED).** The earlier wording — *"unlocks only the B1a latent contract + harness slice"* — is **WITHDRAWN as self-contradictory**: §3.0's boundaries cannot be met inside a latent slice. A real **config v2** changes a **live approved-config validation path**, and the identity read / canonical contract registry / server-bound source executor add **internal derivation and connection paths**. Calling that "contract + harness only" would have let production-path changes land under a gate that never authorized them. The gate is therefore renamed for what it actually is:
@@ -111,9 +136,11 @@ PASS). The rest of this paragraph describes M0-B's acceptance content. Config ow
 
 ## 3. B1 design (REVISED — owner findings absorbed)
 
-### 3.0 ⟲B — B1a REDO REQUIRED: six boundaries frozen (redo NOT started)
+### 3.0 ⟲B — B1a redo design and historical findings (current implementation status: §0)
 
-**Status.** ⟲B2-self Stated per slice — an earlier revision lumped both PRs together as "the first B1a
+**Historical status at ratification.** The "not started" statements in this subsection describe the
+2026-07-24 design snapshot; they are not the current delivery status. See §0 for the landed redo slices.
+⟲B2-self Stated per slice — an earlier revision lumped both PRs together as "the first B1a
 attempt", which #4597 is not:
 - **First B1a attempt: #4596 `774bdb5e6` — HELD; redo REQUIRED and NOT STARTED.**
 - **First B1b attempt: #4597 `d0313feec`** (stacked on it) — **HELD, and superseded by §4 steps 2-3**, which
