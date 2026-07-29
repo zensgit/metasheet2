@@ -408,6 +408,21 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
   )
 
   Reset-Fixture
+  [Environment]::SetEnvironmentVariable('METASHEET_BRIDGE_SQL_PASSWORD', $null, 'Process')
+  $passwordFailure = Invoke-FixtureProbe
+  Check 'missing SQL-auth password blocks before connection or statement attempt' (
+    $passwordFailure.failedStage -eq 'SOURCE_COUNT' -and
+    $passwordFailure.failureReason -eq 'SOURCE_CREDENTIAL_UNAVAILABLE' -and
+    $passwordFailure.sourceCredentialEnv -eq 'FAIL' -and
+    $passwordFailure.sourceConnectionAttempted -eq 'NO' -and
+    $passwordFailure.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceConnectionCalls -eq 0 -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 0 -and
+    $script:BridgeCalls -eq 0
+  )
+
+  Reset-Fixture
   $script:SourceConnectionProvider = {
     param($Config, $Username, $Password)
     $script:SourceConnectionCalls += 1
@@ -425,6 +440,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $connectionFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 1 -and
     $script:SourceStatementCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 0 -and
     $script:BridgeCalls -eq 0 -and
     $connectionFailureText -notmatch [regex]::Escape($privateError)
   )

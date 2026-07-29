@@ -389,8 +389,13 @@ function Open-ProbeSqlConnection {
     -Username $Username `
     -Password $Password
   $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
-  $connection.Open()
-  return $connection
+  try {
+    $connection.Open()
+    return $connection
+  } catch {
+    $connection.Dispose()
+    throw
+  }
 }
 
 function Invoke-ProbeCountCommand {
