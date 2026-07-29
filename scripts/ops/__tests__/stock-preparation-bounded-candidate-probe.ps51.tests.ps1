@@ -364,11 +364,17 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     -RequestedObjectId 'bom' `
     -RequestedFilterField 'ProjectId'
   $spec = New-SamePredicateCountSpec -Config $config -FilterValue $privateValue
-  Check 'same-predicate count SQL parameterizes the private filter value' (
-    $spec.sql -eq 'SELECT COUNT_BIG(1) FROM [dbo].[BomView] WHERE [ProjectId] = @p0' -and
+  Check 'same-predicate count is capped at limit plus one and parameterizes private inputs' (
+    $spec.sql -eq (
+      'SELECT COUNT_BIG(1) FROM (SELECT TOP (@p1) 1 AS [probe_marker] ' +
+      'FROM [dbo].[BomView] WHERE [ProjectId] = @p0) AS [bounded_probe]'
+    ) -and
     $spec.sql -notmatch [regex]::Escape($privateValue) -and
-    $spec.parameterName -eq '@p0' -and
-    $spec.parameterValue -eq $privateValue
+    @($spec.parameters).Count -eq 2 -and
+    $spec.parameters[0].name -eq '@p0' -and
+    $spec.parameters[0].value -eq $privateValue -and
+    $spec.parameters[1].name -eq '@p1' -and
+    $spec.parameters[1].value -eq 8L
   )
 
   $validPayload = '{"object":"bom","records":[{"id":1}],"limit":7,"filtersApplied":true}' |

@@ -5,7 +5,7 @@
 .DESCRIPTION
   Reads the existing bridge allowlist/config without modifying it, verifies the stock-preparation
   feature flag is OFF, executes one allowlisted bridge equality-filter query, and executes one
-  parameterized COUNT_BIG query over the same source predicate.
+  parameterized COUNT_BIG query capped at limit + 1 over the same source predicate.
 
   The fixed stdout block is values-free. This probe can identify a possible bounded candidate; it
   is not a completeness proof and does not replace approved-config preflight.
@@ -353,9 +353,14 @@ function New-SamePredicateCountSpec {
   $source = ConvertTo-QuotedSource -Value $Config.source
   $field = ConvertTo-QuotedIdentifier -Value $Config.filterField
   return [ordered]@{
-    sql = "SELECT COUNT_BIG(1) FROM $source WHERE $field = @p0"
-    parameterName = '@p0'
-    parameterValue = $FilterValue
+    sql = (
+      "SELECT COUNT_BIG(1) FROM (SELECT TOP (@p1) 1 AS [probe_marker] " +
+      "FROM $source WHERE $field = @p0) AS [bounded_probe]"
+    )
+    parameters = @(
+      [ordered]@{ name = '@p0'; value = $FilterValue },
+      [ordered]@{ name = '@p1'; value = ([long]$Config.limit + 1L) }
+    )
   }
 }
 
@@ -373,7 +378,9 @@ function Invoke-SamePredicateCount {
     $command.CommandType = [System.Data.CommandType]::Text
     $command.CommandTimeout = $Config.database.queryTimeoutSec
     $command.CommandText = $spec.sql
-    [void]$command.Parameters.AddWithValue($spec.parameterName, $spec.parameterValue)
+    foreach ($parameter in @($spec.parameters)) {
+      [void]$command.Parameters.AddWithValue($parameter.name, $parameter.value)
+    }
     $value = $command.ExecuteScalar()
     if ($null -eq $value -or $value -is [System.DBNull]) { throw 'COUNT_INVALID' }
     $count = [long]$value

@@ -7,11 +7,15 @@ Run one discovery-only probe on the Windows entity machine while the stock-prepa
 The probe compares:
 
 1. one allowlisted equality-filter query through the running readonly bridge; and
-2. one parameterized COUNT_BIG query over the same configured source and predicate.
+2. one parameterized COUNT_BIG query over at most `limit + 1` matches from the same configured
+   source and predicate.
 
 It does not deploy or restart anything, mutate the bridge config, enable a feature flag, write to
 the source, or produce acceptance evidence. A POSSIBLE result only permits preparation of a new
 approved config followed by the normal flag-OFF preflight.
+
+The count is deliberately capped at `limit + 1`. That is sufficient to distinguish a short scope
+from a full/over-limit scope without counting an arbitrarily large matching set.
 
 Required private inputs
 -----------------------
