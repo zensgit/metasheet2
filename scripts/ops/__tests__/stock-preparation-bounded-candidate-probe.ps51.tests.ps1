@@ -71,10 +71,68 @@ function Write-FixtureConfig {
   Set-Content -LiteralPath $Path -Value $json -Encoding UTF8
 }
 
+function New-FixtureCountObservation {
+  param(
+    [string]$FailureReason = 'NONE',
+    [long]$Count = 0L
+  )
+  $observation = [ordered]@{
+    state = 'BLOCKED'
+    failureReason = $FailureReason
+    count = $null
+    sourceCredentialEnv = 'NOT_RUN'
+    sourceConnectionAttempted = 'NO'
+    sourceConnection = 'NOT_RUN'
+    sourceCountStatementAttempted = 'NO'
+    sourceCountStatement = 'NOT_RUN'
+    sourceCountResult = 'NOT_RUN'
+  }
+  switch ($FailureReason) {
+    'NONE' {
+      $observation.state = 'COMPLETE'
+      $observation['count'] = $Count
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'PASS'
+      $observation.sourceCountStatementAttempted = 'YES'
+      $observation.sourceCountStatement = 'PASS'
+      $observation.sourceCountResult = 'PASS'
+    }
+    'SOURCE_CREDENTIAL_UNAVAILABLE' {
+      $observation.sourceCredentialEnv = 'FAIL'
+    }
+    'SOURCE_CONNECTION_FAILED' {
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'FAIL'
+    }
+    'SOURCE_COUNT_STATEMENT_FAILED' {
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'PASS'
+      $observation.sourceCountStatementAttempted = 'YES'
+      $observation.sourceCountStatement = 'FAIL'
+    }
+    'SOURCE_COUNT_RESULT_INVALID' {
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'PASS'
+      $observation.sourceCountStatementAttempted = 'YES'
+      $observation.sourceCountStatement = 'PASS'
+      $observation.sourceCountResult = 'FAIL'
+    }
+    default { throw 'TEST_FAILURE_REASON_INVALID' }
+  }
+  return $observation
+}
+
 function Reset-Fixture {
   $script:ProbeRunCount = 0
   $script:CountCalls = 0
   $script:BridgeCalls = 0
+  $script:SourceConnectionCalls = 0
+  $script:SourceStatementCalls = 0
+  $script:SourceCleanupCalls = 0
   $script:MockCount = 3L
   $script:MockPageCount = 3
   $script:MockPageLimit = 7
@@ -92,7 +150,25 @@ function Reset-Fixture {
     param($Config, $Value)
     $script:CountCalls += 1
     if ($Value -ne $privateValue) { throw $privateError }
-    return $script:MockCount
+    return Invoke-SamePredicateCount -Config $Config -FilterValue $Value
+  }
+  $script:SourceConnectionProvider = {
+    param($Config, $Username, $Password)
+    $script:SourceConnectionCalls += 1
+    if ($Username -ne 'fixture-user' -or $Password -ne 'fixture-password') {
+      throw $privateError
+    }
+    return [pscustomobject]@{ state = 'open' }
+  }
+  $script:SourceCountCommandProvider = {
+    param($Connection, $Config, $Value)
+    $script:SourceStatementCalls += 1
+    if ($Connection.state -ne 'open' -or $Value -ne $privateValue) { throw $privateError }
+    return [long]$script:MockCount
+  }
+  $script:SourceConnectionCleanupProvider = {
+    param($Connection)
+    $script:SourceCleanupCalls += 1
   }
   $script:BridgePageProvider = {
     param($Config, $Value)
@@ -105,6 +181,16 @@ function Reset-Fixture {
     }
   }
   [Environment]::SetEnvironmentVariable($filterEnv, $privateValue, 'Process')
+  [Environment]::SetEnvironmentVariable(
+    'METASHEET_BRIDGE_SQL_USERNAME',
+    'fixture-user',
+    'Process'
+  )
+  [Environment]::SetEnvironmentVariable(
+    'METASHEET_BRIDGE_SQL_PASSWORD',
+    'fixture-password',
+    'Process'
+  )
 }
 
 function Invoke-FixtureProbe {
@@ -187,9 +273,18 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
   Check 'bounded non-empty candidate completes with one count and one bridge query' (
     $possible.executionState -eq 'COMPLETE' -and
     $possible.boundedCandidateSignal -eq 'POSSIBLE' -and
+    $possible.sourceCredentialEnv -eq 'PASS' -and
+    $possible.sourceConnectionAttempted -eq 'YES' -and
+    $possible.sourceConnection -eq 'PASS' -and
+    $possible.sourceCountStatementAttempted -eq 'YES' -and
+    $possible.sourceCountStatement -eq 'PASS' -and
+    $possible.sourceCountResult -eq 'PASS' -and
     $possible.pageRelationToLimit -eq 'LT' -and
     $possible.countRelationToLimit -eq 'LT' -and
     $script:CountCalls -eq 1 -and
+    $script:SourceConnectionCalls -eq 1 -and
+    $script:SourceStatementCalls -eq 1 -and
+    $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 1
   )
   Check 'successful output is closed and omits private value, source, field, host, path, and counts' (
@@ -294,16 +389,114 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
   Write-FixtureConfig -Path $configPath
 
   Reset-Fixture
+  [Environment]::SetEnvironmentVariable('METASHEET_BRIDGE_SQL_USERNAME', $null, 'Process')
+  $credentialFailure = Invoke-FixtureProbe
+  $credentialFailureText = Format-DiscoveryResultBlock -Result $credentialFailure
+  Check 'missing SQL-auth environment blocks before connection or statement attempt' (
+    $credentialFailure.failedStage -eq 'SOURCE_COUNT' -and
+    $credentialFailure.failureReason -eq 'SOURCE_CREDENTIAL_UNAVAILABLE' -and
+    $credentialFailure.sourceCredentialEnv -eq 'FAIL' -and
+    $credentialFailure.sourceConnectionAttempted -eq 'NO' -and
+    $credentialFailure.sourceConnection -eq 'NOT_RUN' -and
+    $credentialFailure.sourceCountStatementAttempted -eq 'NO' -and
+    $credentialFailure.sourceCountStatement -eq 'NOT_RUN' -and
+    $credentialFailure.sourceCountResult -eq 'NOT_RUN' -and
+    $script:SourceConnectionCalls -eq 0 -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:BridgeCalls -eq 0 -and
+    $credentialFailureText -notmatch 'fixture-user|fixture-password'
+  )
+
+  Reset-Fixture
+  $script:SourceConnectionProvider = {
+    param($Config, $Username, $Password)
+    $script:SourceConnectionCalls += 1
+    throw $privateError
+  }
+  $connectionFailure = Invoke-FixtureProbe
+  $connectionFailureText = Format-DiscoveryResultBlock -Result $connectionFailure
+  Check 'connection-open failure is distinct, closed, and skips the count statement' (
+    $connectionFailure.failureReason -eq 'SOURCE_CONNECTION_FAILED' -and
+    $connectionFailure.sourceCredentialEnv -eq 'PASS' -and
+    $connectionFailure.sourceConnectionAttempted -eq 'YES' -and
+    $connectionFailure.sourceConnection -eq 'FAIL' -and
+    $connectionFailure.sourceCountStatementAttempted -eq 'NO' -and
+    $connectionFailure.sourceCountStatement -eq 'NOT_RUN' -and
+    $connectionFailure.sourceCountResult -eq 'NOT_RUN' -and
+    $script:SourceConnectionCalls -eq 1 -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:BridgeCalls -eq 0 -and
+    $connectionFailureText -notmatch [regex]::Escape($privateError)
+  )
+
+  Reset-Fixture
+  $script:SourceCountCommandProvider = {
+    param($Connection, $Config, $Value)
+    $script:SourceStatementCalls += 1
+    throw $privateError
+  }
+  $statementFailure = Invoke-FixtureProbe
+  $statementFailureText = Format-DiscoveryResultBlock -Result $statementFailure
+  Check 'count-statement failure is distinct, closed, and cleans up the connection' (
+    $statementFailure.failureReason -eq 'SOURCE_COUNT_STATEMENT_FAILED' -and
+    $statementFailure.sourceCredentialEnv -eq 'PASS' -and
+    $statementFailure.sourceConnection -eq 'PASS' -and
+    $statementFailure.sourceCountStatementAttempted -eq 'YES' -and
+    $statementFailure.sourceCountStatement -eq 'FAIL' -and
+    $statementFailure.sourceCountResult -eq 'NOT_RUN' -and
+    $script:SourceConnectionCalls -eq 1 -and
+    $script:SourceStatementCalls -eq 1 -and
+    $script:SourceCleanupCalls -eq 1 -and
+    $script:BridgeCalls -eq 0 -and
+    $statementFailureText -notmatch [regex]::Escape($privateError)
+  )
+
+  Reset-Fixture
+  $script:SourceCountCommandProvider = {
+    param($Connection, $Config, $Value)
+    $script:SourceStatementCalls += 1
+    return '3'
+  }
+  $resultFailure = Invoke-FixtureProbe
+  Check 'non-int64 count result is a distinct closed failure after statement success' (
+    $resultFailure.failureReason -eq 'SOURCE_COUNT_RESULT_INVALID' -and
+    $resultFailure.sourceCredentialEnv -eq 'PASS' -and
+    $resultFailure.sourceConnection -eq 'PASS' -and
+    $resultFailure.sourceCountStatement -eq 'PASS' -and
+    $resultFailure.sourceCountResult -eq 'FAIL' -and
+    $script:SourceCleanupCalls -eq 1 -and
+    $script:BridgeCalls -eq 0
+  )
+
+  Reset-Fixture
   $script:CountProvider = {
     param($Config, $Value)
     $script:CountCalls += 1
-    throw $privateError
+    return [ordered]@{
+      state = 'COMPLETE'
+      failureReason = 'NONE'
+      count = 3L
+      sourceCredentialEnv = 'PASS'
+    }
   }
-  $countFailure = Invoke-FixtureProbe
-  $countFailureText = Format-DiscoveryResultBlock -Result $countFailure
-  Check 'driver failure maps to a closed reason and never leaks private error text' (
-    $countFailure.failureReason -eq 'SOURCE_COUNT_FAILED' -and
-    $countFailureText -notmatch [regex]::Escape($privateError)
+  $malformedObservation = Invoke-FixtureProbe
+  Check 'malformed source-count observation fails as INTERNAL and cannot claim a source stage' (
+    $malformedObservation.failedStage -eq 'INTERNAL' -and
+    $malformedObservation.failureReason -eq 'UNEXPECTED' -and
+    $malformedObservation.sourceCredentialEnv -eq 'NOT_RUN' -and
+    $malformedObservation.sourceConnectionAttempted -eq 'NO' -and
+    $malformedObservation.sourceCountStatementAttempted -eq 'NO' -and
+    $script:BridgeCalls -eq 0
+  )
+
+  $illegalSuccessObservation = New-FixtureCountObservation -Count 3L
+  $illegalSuccessObservation.sourceConnection = 'FAIL'
+  $illegalCredentialObservation = New-FixtureCountObservation `
+    -FailureReason 'SOURCE_CREDENTIAL_UNAVAILABLE'
+  $illegalCredentialObservation.sourceConnectionAttempted = 'YES'
+  Check 'source-count observation validator rejects cross-stage contradictory tuples' (
+    -not (Test-SourceCountObservation -Observation $illegalSuccessObservation) -and
+    -not (Test-SourceCountObservation -Observation $illegalCredentialObservation)
   )
 
   Reset-Fixture
@@ -435,6 +628,8 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
   )
 } finally {
   [Environment]::SetEnvironmentVariable($filterEnv, $null, 'Process')
+  [Environment]::SetEnvironmentVariable('METASHEET_BRIDGE_SQL_USERNAME', $null, 'Process')
+  [Environment]::SetEnvironmentVariable('METASHEET_BRIDGE_SQL_PASSWORD', $null, 'Process')
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 

@@ -17,6 +17,10 @@ approved config followed by the normal flag-OFF preflight.
 The count is deliberately capped at `limit + 1`. That is sufficient to distinguish a short scope
 from a full/over-limit scope without counting an arbitrarily large matching set.
 
+The v2 diagnostic contract separates the source-count path into credential, connection, statement,
+and result stages. It publishes only closed stage states and closed failure reasons; raw exception
+codes, driver messages, SQL text, endpoints, object/field names, and credentials are discarded.
+
 Required private inputs
 -----------------------
 - Path to the bridge's existing config JSON.
@@ -89,6 +93,16 @@ Interpretation:
   the predicate returned no rows. It is not a usable acceptance candidate.
 - boundedCandidateSignal=NOT_BOUNDED:
   the private count was equal to or greater than the verified bridge limit. Do not use this scope.
+- failureReason=SOURCE_CREDENTIAL_UNAVAILABLE:
+  the configured SQL-auth username or password environment value was absent in this parent process;
+  no source connection or count statement was attempted.
+- failureReason=SOURCE_CONNECTION_FAILED:
+  credential environment values were present, but the source connection could not be opened; no
+  count statement was attempted.
+- failureReason=SOURCE_COUNT_STATEMENT_FAILED:
+  the source connection opened, but the bounded count statement did not complete.
+- failureReason=SOURCE_COUNT_RESULT_INVALID:
+  the bounded count statement completed but did not return the required non-negative INT64 shape.
 - executionState=BLOCKED or boundedCandidateSignal=INCONCLUSIVE:
   stop. Do not retry or enter a flag-ON window.
 

@@ -61,7 +61,7 @@ export function buildSidecar({ outputDir, sourceSha }) {
   }
 
   const provenance = {
-    contract: 'stock-preparation-bounded-candidate-discovery-sidecar-v1',
+    contract: 'stock-preparation-bounded-candidate-discovery-sidecar-v2',
     sourceGitCommit: sourceSha,
     targetShell: 'Windows PowerShell 5.1',
     requestedRunCount: 1,
@@ -70,6 +70,7 @@ export function buildSidecar({ outputDir, sourceSha }) {
     flagOn: false,
     externalWrite: false,
     valuesFreePublicOutput: true,
+    sourceCountDiagnostics: 'closed-stage-v2',
     frozenHelperSha256: { [PM2_HELPER.name]: PM2_HELPER.sha256 },
   }
   fs.writeFileSync(

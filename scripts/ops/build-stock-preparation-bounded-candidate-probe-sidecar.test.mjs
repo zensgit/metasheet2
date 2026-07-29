@@ -32,6 +32,10 @@ test('builder emits the one-shot values-free discovery contract with complete ch
     const provenance = JSON.parse(
       fs.readFileSync(path.join(packageDir, 'BUILD_PROVENANCE.json'), 'utf8'),
     )
+    assert.equal(
+      provenance.contract,
+      'stock-preparation-bounded-candidate-discovery-sidecar-v2',
+    )
     assert.equal(provenance.sourceGitCommit, SOURCE_SHA)
     assert.equal(provenance.targetShell, 'Windows PowerShell 5.1')
     assert.equal(provenance.requestedRunCount, 1)
@@ -40,6 +44,7 @@ test('builder emits the one-shot values-free discovery contract with complete ch
     assert.equal(provenance.flagOn, false)
     assert.equal(provenance.externalWrite, false)
     assert.equal(provenance.valuesFreePublicOutput, true)
+    assert.equal(provenance.sourceCountDiagnostics, 'closed-stage-v2')
     assert.equal(
       provenance.frozenHelperSha256['stock-preparation-rca-window-pm2-sample.mjs'],
       '09cc76024bd98fd4ce86cfa834eea3b94680482d0d0970600da008a19a6731ec',
@@ -107,4 +112,13 @@ test('probe stdout is emitted only through the closed result formatter', () => {
   assert.match(script, /FROM \$source WHERE \$field = @p0/)
   assert.match(script, /value = \(\[long\]\$Config\.limit \+ 1L\)/)
   assert.match(script, /AddWithValue\(\$parameter\.name, \$parameter\.value\)/)
+  assert.doesNotMatch(script, /SOURCE_COUNT_FAILED/)
+  for (const reason of [
+    'SOURCE_CREDENTIAL_UNAVAILABLE',
+    'SOURCE_CONNECTION_FAILED',
+    'SOURCE_COUNT_STATEMENT_FAILED',
+    'SOURCE_COUNT_RESULT_INVALID',
+  ]) {
+    assert.match(script, new RegExp(reason))
+  }
 })

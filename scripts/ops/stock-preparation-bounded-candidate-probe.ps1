@@ -56,7 +56,9 @@ $script:ResultVocabulary = [ordered]@{
     'PM2_NOT_ONLINE', 'PM2_FLAG_NOT_OFF', 'PM2_TOKEN_PRESENT', 'CONFIG_INVALID',
     'SOURCE_PRINCIPAL_PARITY_UNPROVEN',
     'OBJECT_NOT_ALLOWLISTED', 'FILTER_NOT_ALLOWLISTED', 'FILTER_VALUE_UNAVAILABLE',
-    'SOURCE_COUNT_FAILED', 'BRIDGE_QUERY_FAILED', 'BRIDGE_FILTER_UNCONFIRMED',
+    'SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_CONNECTION_FAILED',
+    'SOURCE_COUNT_STATEMENT_FAILED', 'SOURCE_COUNT_RESULT_INVALID',
+    'BRIDGE_QUERY_FAILED', 'BRIDGE_FILTER_UNCONFIRMED',
     'BRIDGE_LIMIT_UNCONFIRMED', 'BRIDGE_RESULT_INVALID', 'OBSERVATION_MISMATCH',
     'FILTER_INPUT_SCRUB_FAILED', 'UNEXPECTED'
   )
@@ -64,6 +66,12 @@ $script:ResultVocabulary = [ordered]@{
   configMutation = @('false')
   externalWrite = @('false')
   probeRunCount = @('ZERO', 'ONE')
+  sourceCredentialEnv = @('PASS', 'FAIL', 'NOT_RUN')
+  sourceConnectionAttempted = @('YES', 'NO')
+  sourceConnection = @('PASS', 'FAIL', 'NOT_RUN')
+  sourceCountStatementAttempted = @('YES', 'NO')
+  sourceCountStatement = @('PASS', 'FAIL', 'NOT_RUN')
+  sourceCountResult = @('PASS', 'FAIL', 'NOT_RUN')
   filtersApplied = @('PASS', 'FAIL', 'NOT_RUN')
   appliedLimitEcho = @('PASS', 'FAIL', 'NOT_RUN')
   samePredicateCount = @('PASS', 'FAIL', 'NOT_RUN')
@@ -84,6 +92,12 @@ function New-DiscoveryResult {
     configMutation = 'false'
     externalWrite = 'false'
     probeRunCount = 'ZERO'
+    sourceCredentialEnv = 'NOT_RUN'
+    sourceConnectionAttempted = 'NO'
+    sourceConnection = 'NOT_RUN'
+    sourceCountStatementAttempted = 'NO'
+    sourceCountStatement = 'NOT_RUN'
+    sourceCountResult = 'NOT_RUN'
     filtersApplied = 'NOT_RUN'
     appliedLimitEcho = 'NOT_RUN'
     samePredicateCount = 'NOT_RUN'
@@ -327,7 +341,11 @@ function Read-ProbeConfig {
 }
 
 function New-ProbeConnectionString {
-  param($Config)
+  param(
+    $Config,
+    [string]$Username,
+    [string]$Password
+  )
   $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
   $builder['Data Source'] = $Config.database.server
   $builder['Initial Catalog'] = $Config.database.database
@@ -335,13 +353,8 @@ function New-ProbeConnectionString {
   $builder['Application Name'] = 'MetaSheetBoundedCandidateDiscovery'
   $builder['Encrypt'] = [bool]$Config.database.encrypt
   $builder['TrustServerCertificate'] = [bool]$Config.database.trustServerCertificate
-  $username = [Environment]::GetEnvironmentVariable($Config.database.usernameEnvVar)
-  $password = [Environment]::GetEnvironmentVariable($Config.database.passwordEnvVar)
-  if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrEmpty($password)) {
-    throw 'CREDENTIAL_UNAVAILABLE'
-  }
-  $builder['User ID'] = $username
-  $builder['Password'] = $password
+  $builder['User ID'] = $Username
+  $builder['Password'] = $Password
   return $builder.ConnectionString
 }
 
@@ -364,31 +377,191 @@ function New-SamePredicateCountSpec {
   }
 }
 
+function Open-ProbeSqlConnection {
+  param(
+    $Config,
+    [string]$Username,
+    [string]$Password
+  )
+  Add-Type -AssemblyName System.Data
+  $connectionString = New-ProbeConnectionString `
+    -Config $Config `
+    -Username $Username `
+    -Password $Password
+  $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
+  $connection.Open()
+  return $connection
+}
+
+function Invoke-ProbeCountCommand {
+  param(
+    $Connection,
+    $Config,
+    $FilterValue
+  )
+  $spec = New-SamePredicateCountSpec -Config $Config -FilterValue $FilterValue
+  $command = $Connection.CreateCommand()
+  $command.CommandType = [System.Data.CommandType]::Text
+  $command.CommandTimeout = $Config.database.queryTimeoutSec
+  $command.CommandText = $spec.sql
+  foreach ($parameter in @($spec.parameters)) {
+    [void]$command.Parameters.AddWithValue($parameter.name, $parameter.value)
+  }
+  return $command.ExecuteScalar()
+}
+
+function Close-ProbeSqlConnection {
+  param($Connection)
+  $Connection.Close()
+  $Connection.Dispose()
+}
+
+function New-SourceCountObservation {
+  return [ordered]@{
+    state = 'BLOCKED'
+    failureReason = 'SOURCE_COUNT_RESULT_INVALID'
+    count = $null
+    sourceCredentialEnv = 'NOT_RUN'
+    sourceConnectionAttempted = 'NO'
+    sourceConnection = 'NOT_RUN'
+    sourceCountStatementAttempted = 'NO'
+    sourceCountStatement = 'NOT_RUN'
+    sourceCountResult = 'NOT_RUN'
+  }
+}
+
+function Test-SourceCountObservation {
+  param($Observation)
+  if ($null -eq $Observation -or -not ($Observation -is [System.Collections.IDictionary])) {
+    return $false
+  }
+  $keys = @(
+    'state', 'failureReason', 'count', 'sourceCredentialEnv',
+    'sourceConnectionAttempted', 'sourceConnection',
+    'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountResult'
+  )
+  if ($Observation.Keys.Count -ne $keys.Count) { return $false }
+  foreach ($key in $keys) {
+    if (-not $Observation.Contains($key)) { return $false }
+  }
+
+  $isSuccess = (
+    $Observation.state -eq 'COMPLETE' -and
+    $Observation.failureReason -eq 'NONE' -and
+    $Observation['count'] -is [long] -and
+    [long]$Observation['count'] -ge 0 -and
+    $Observation.sourceCredentialEnv -eq 'PASS' -and
+    $Observation.sourceConnectionAttempted -eq 'YES' -and
+    $Observation.sourceConnection -eq 'PASS' -and
+    $Observation.sourceCountStatementAttempted -eq 'YES' -and
+    $Observation.sourceCountStatement -eq 'PASS' -and
+    $Observation.sourceCountResult -eq 'PASS'
+  )
+  if ($isSuccess) { return $true }
+  if ($Observation.state -ne 'BLOCKED' -or $null -ne $Observation['count']) { return $false }
+
+  switch ($Observation.failureReason) {
+    'SOURCE_CREDENTIAL_UNAVAILABLE' {
+      return (
+        $Observation.sourceCredentialEnv -eq 'FAIL' -and
+        $Observation.sourceConnectionAttempted -eq 'NO' -and
+        $Observation.sourceConnection -eq 'NOT_RUN' -and
+        $Observation.sourceCountStatementAttempted -eq 'NO' -and
+        $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountResult -eq 'NOT_RUN'
+      )
+    }
+    'SOURCE_CONNECTION_FAILED' {
+      return (
+        $Observation.sourceCredentialEnv -eq 'PASS' -and
+        $Observation.sourceConnectionAttempted -eq 'YES' -and
+        $Observation.sourceConnection -eq 'FAIL' -and
+        $Observation.sourceCountStatementAttempted -eq 'NO' -and
+        $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountResult -eq 'NOT_RUN'
+      )
+    }
+    'SOURCE_COUNT_STATEMENT_FAILED' {
+      return (
+        $Observation.sourceCredentialEnv -eq 'PASS' -and
+        $Observation.sourceConnectionAttempted -eq 'YES' -and
+        $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceCountStatementAttempted -eq 'YES' -and
+        $Observation.sourceCountStatement -eq 'FAIL' -and
+        $Observation.sourceCountResult -eq 'NOT_RUN'
+      )
+    }
+    'SOURCE_COUNT_RESULT_INVALID' {
+      return (
+        $Observation.sourceCredentialEnv -eq 'PASS' -and
+        $Observation.sourceConnectionAttempted -eq 'YES' -and
+        $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceCountStatementAttempted -eq 'YES' -and
+        $Observation.sourceCountStatement -eq 'PASS' -and
+        $Observation.sourceCountResult -eq 'FAIL'
+      )
+    }
+    default { return $false }
+  }
+}
+
 function Invoke-SamePredicateCount {
   param(
     $Config,
     $FilterValue
   )
-  Add-Type -AssemblyName System.Data
-  $spec = New-SamePredicateCountSpec -Config $Config -FilterValue $FilterValue
-  $connection = New-Object System.Data.SqlClient.SqlConnection((New-ProbeConnectionString -Config $Config))
+  $observation = New-SourceCountObservation
+  $username = [Environment]::GetEnvironmentVariable($Config.database.usernameEnvVar)
+  $password = [Environment]::GetEnvironmentVariable($Config.database.passwordEnvVar)
+  if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrEmpty($password)) {
+    $observation.failureReason = 'SOURCE_CREDENTIAL_UNAVAILABLE'
+    $observation.sourceCredentialEnv = 'FAIL'
+    return $observation
+  }
+  $observation.sourceCredentialEnv = 'PASS'
+  $observation.sourceConnectionAttempted = 'YES'
+
+  $connection = $null
   try {
-    $connection.Open()
-    $command = $connection.CreateCommand()
-    $command.CommandType = [System.Data.CommandType]::Text
-    $command.CommandTimeout = $Config.database.queryTimeoutSec
-    $command.CommandText = $spec.sql
-    foreach ($parameter in @($spec.parameters)) {
-      [void]$command.Parameters.AddWithValue($parameter.name, $parameter.value)
+    try {
+      $connection = & $script:SourceConnectionProvider $Config $username $password
+      if ($null -eq $connection) { throw 'CONNECTION_INVALID' }
+      $observation.sourceConnection = 'PASS'
+    } catch {
+      $observation.failureReason = 'SOURCE_CONNECTION_FAILED'
+      $observation.sourceConnection = 'FAIL'
+      return $observation
     }
-    $value = $command.ExecuteScalar()
-    if ($null -eq $value -or $value -is [System.DBNull]) { throw 'COUNT_INVALID' }
-    $count = [long]$value
-    if ($count -lt 0) { throw 'COUNT_INVALID' }
-    return $count
+
+    $observation.sourceCountStatementAttempted = 'YES'
+    try {
+      $value = & $script:SourceCountCommandProvider $connection $Config $FilterValue
+      $observation.sourceCountStatement = 'PASS'
+    } catch {
+      $observation.failureReason = 'SOURCE_COUNT_STATEMENT_FAILED'
+      $observation.sourceCountStatement = 'FAIL'
+      return $observation
+    }
+
+    try {
+      if ($null -eq $value -or $value -is [System.DBNull]) { throw 'COUNT_INVALID' }
+      if (-not ($value -is [long])) { throw 'COUNT_INVALID' }
+      $count = [long]$value
+      if ($count -lt 0) { throw 'COUNT_INVALID' }
+      $observation.state = 'COMPLETE'
+      $observation.failureReason = 'NONE'
+      $observation['count'] = $count
+      $observation.sourceCountResult = 'PASS'
+      return $observation
+    } catch {
+      $observation.failureReason = 'SOURCE_COUNT_RESULT_INVALID'
+      $observation.sourceCountResult = 'FAIL'
+      return $observation
+    }
   } finally {
-    $connection.Close()
-    $connection.Dispose()
+    if ($null -ne $connection) {
+      & $script:SourceConnectionCleanupProvider $connection
+    }
   }
 }
 
@@ -530,6 +703,18 @@ function Get-Pm2FlagOffSample {
   }
 }
 
+$script:SourceConnectionProvider = {
+  param($Config, $Username, $Password)
+  Open-ProbeSqlConnection -Config $Config -Username $Username -Password $Password
+}
+$script:SourceCountCommandProvider = {
+  param($Connection, $Config, $Value)
+  Invoke-ProbeCountCommand -Connection $Connection -Config $Config -FilterValue $Value
+}
+$script:SourceConnectionCleanupProvider = {
+  param($Connection)
+  Close-ProbeSqlConnection -Connection $Connection
+}
 $script:Pm2SampleProvider = { param($HelperPath) Get-Pm2FlagOffSample -HelperPath $HelperPath }
 $script:CountProvider = { param($Config, $Value) Invoke-SamePredicateCount -Config $Config -FilterValue $Value }
 $script:BridgePageProvider = { param($Config, $Value) Invoke-BridgeFilteredPage -Config $Config -FilterValue $Value }
@@ -621,14 +806,30 @@ function Invoke-BoundedCandidateDiscovery {
     $script:ProbeRunCount += 1
     $result.probeRunCount = 'ONE'
     try {
-      $count = [long](& $script:CountProvider $config $filterValue)
-      if ($count -lt 0) { throw 'COUNT_INVALID' }
-      $result.samePredicateCount = 'PASS'
+      $countObservation = & $script:CountProvider $config $filterValue
+      if (-not (Test-SourceCountObservation -Observation $countObservation)) {
+        throw 'SOURCE_COUNT_OBSERVATION_INVALID'
+      }
     } catch {
-      $result.samePredicateCount = 'FAIL'
-      Set-DiscoveryFailure -Result $result -Stage 'SOURCE_COUNT' -Reason 'SOURCE_COUNT_FAILED'
+      Set-DiscoveryFailure -Result $result -Stage 'INTERNAL' -Reason 'UNEXPECTED'
       return $result
     }
+    foreach ($name in @(
+      'sourceCredentialEnv', 'sourceConnectionAttempted', 'sourceConnection',
+      'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountResult'
+    )) {
+      $result[$name] = $countObservation[$name]
+    }
+    if ($countObservation.state -eq 'BLOCKED') {
+      $result.samePredicateCount = 'FAIL'
+      Set-DiscoveryFailure `
+        -Result $result `
+        -Stage 'SOURCE_COUNT' `
+        -Reason $countObservation.failureReason
+      return $result
+    }
+    $count = [long]$countObservation['count']
+    $result.samePredicateCount = 'PASS'
 
     try {
       $page = & $script:BridgePageProvider $config $filterValue
