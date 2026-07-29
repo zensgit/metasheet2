@@ -6,9 +6,11 @@ Purpose
 Run one discovery-only probe on the Windows entity machine while the stock-preparation flag is OFF.
 The probe compares:
 
-1. one allowlisted equality-filter query through the running readonly bridge; and
+1. one source-free bound-limit parameter control on the source connection;
 2. one parameterized COUNT_BIG query over at most `limit + 1` matches from the same configured
-   source and predicate.
+   source and predicate; and
+3. one allowlisted equality-filter query through the running readonly bridge, only after both SQL
+   statements pass.
 
 It does not deploy or restart anything, mutate the bridge config, enable a feature flag, write to
 the source, or produce acceptance evidence. A POSSIBLE result only permits preparation of a new
@@ -17,10 +19,15 @@ approved config followed by the normal flag-OFF preflight.
 The count is deliberately capped at `limit + 1`. That is sufficient to distinguish a short scope
 from a full/over-limit scope without counting an arbitrarily large matching set.
 
-The v3 diagnostic contract separates the source-count path into credential, connection, statement,
-and result stages. A failed statement is additionally mapped from SQL error numbers into a closed
-sourceCountFailureClass. Raw error numbers, driver messages, SQL text, endpoints, object/field
-names, and credentials are discarded.
+The v4 diagnostic contract separates the source-count path into credential, connection, a
+source-free bound-limit control, the real same-predicate count statement, and result stages. The
+control runs on the same opened connection before the real count and binds only Config.limit+1
+through the same scalar AddWithValue binder. A failed statement (control or actual) is mapped from
+SQL error numbers into a closed failure class. When isolation is possible, sourceParameterFailureRole
+reports BOUND_LIMIT or PREDICATE_OR_SOURCE; otherwise NONE, NOT_RUN, or UNDETERMINED. Raw error
+numbers, driver messages, SQL text, endpoints, object/field names, and credentials are discarded.
+A control PASS does not exonerate the filter value or its type; it only isolates the bound-limit
+binding path from the predicate/source path for PARAMETER_OR_TYPE failures.
 
 Required private inputs
 -----------------------
@@ -96,17 +103,27 @@ Interpretation:
   the private count was equal to or greater than the verified bridge limit. Do not use this scope.
 - failureReason=SOURCE_CREDENTIAL_UNAVAILABLE:
   the configured SQL-auth username or password environment value was absent in this parent process;
-  no source connection or count statement was attempted.
+  no source connection, bound-limit control, or count statement was attempted.
 - failureReason=SOURCE_CONNECTION_FAILED:
   credential environment values were present, but the source connection could not be opened; no
-  count statement was attempted.
+  bound-limit control or count statement was attempted.
+- failureReason=SOURCE_BOUND_LIMIT_CONTROL_FAILED:
+  the source connection opened, but the source-free bound-limit control statement did not complete.
+  sourceBoundLimitControlFailureClass reports exactly one values-free class (same closed set as
+  sourceCountFailureClass). PARAMETER_OR_TYPE and SYNTAX_OR_DIALECT map
+  sourceParameterFailureRole=BOUND_LIMIT; other control classes map UNDETERMINED. The real count and
+  bridge query are not attempted; the connection is still closed.
+- failureReason=SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID:
+  the bound-limit control completed but did not return exactly INT64 1. Role is UNDETERMINED; the
+  real count and bridge query are not attempted.
 - failureReason=SOURCE_COUNT_STATEMENT_FAILED:
-  the source connection opened, but the bounded count statement did not complete.
+  the bound-limit control passed, but the real bounded count statement did not complete.
   sourceCountFailureClass reports exactly one values-free class:
   SELECT_PERMISSION, OBJECT_OR_COLUMN_RESOLUTION, PARAMETER_OR_TYPE, SYNTAX_OR_DIALECT,
   TIMEOUT_OR_RESOURCE, or OTHER. NONE and NOT_RUN are reserved for non-failing tuples.
   If one SQL exception carries multiple classified errors, that displayed order is the frozen
-  precedence.
+  precedence. When sourceCountFailureClass=PARAMETER_OR_TYPE after a control PASS,
+  sourceParameterFailureRole=PREDICATE_OR_SOURCE; other actual classes keep role NONE.
 - failureReason=SOURCE_COUNT_RESULT_INVALID:
   the bounded count statement completed but did not return the required non-negative INT64 shape.
 - executionState=BLOCKED or boundedCandidateSignal=INCONCLUSIVE:

@@ -108,7 +108,9 @@ function Write-FixtureConfig {
 function New-FixtureCountObservation {
   param(
     [string]$FailureReason = 'NONE',
-    [long]$Count = 0L
+    [long]$Count = 0L,
+    [string]$SourceCountFailureClass = 'OTHER',
+    [string]$SourceBoundLimitControlFailureClass = 'OTHER'
   )
   $observation = [ordered]@{
     state = 'BLOCKED'
@@ -117,6 +119,10 @@ function New-FixtureCountObservation {
     sourceCredentialEnv = 'NOT_RUN'
     sourceConnectionAttempted = 'NO'
     sourceConnection = 'NOT_RUN'
+    sourceBoundLimitControlAttempted = 'NO'
+    sourceBoundLimitControl = 'NOT_RUN'
+    sourceBoundLimitControlFailureClass = 'NOT_RUN'
+    sourceParameterFailureRole = 'NOT_RUN'
     sourceCountStatementAttempted = 'NO'
     sourceCountStatement = 'NOT_RUN'
     sourceCountFailureClass = 'NOT_RUN'
@@ -129,6 +135,10 @@ function New-FixtureCountObservation {
       $observation.sourceCredentialEnv = 'PASS'
       $observation.sourceConnectionAttempted = 'YES'
       $observation.sourceConnection = 'PASS'
+      $observation.sourceBoundLimitControlAttempted = 'YES'
+      $observation.sourceBoundLimitControl = 'PASS'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceParameterFailureRole = 'NONE'
       $observation.sourceCountStatementAttempted = 'YES'
       $observation.sourceCountStatement = 'PASS'
       $observation.sourceCountFailureClass = 'NONE'
@@ -142,18 +152,54 @@ function New-FixtureCountObservation {
       $observation.sourceConnectionAttempted = 'YES'
       $observation.sourceConnection = 'FAIL'
     }
+    'SOURCE_BOUND_LIMIT_CONTROL_FAILED' {
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'PASS'
+      $observation.sourceBoundLimitControlAttempted = 'YES'
+      $observation.sourceBoundLimitControl = 'FAIL'
+      $observation.sourceBoundLimitControlFailureClass = $SourceBoundLimitControlFailureClass
+      $observation.sourceParameterFailureRole = if (
+        $SourceBoundLimitControlFailureClass -in @('PARAMETER_OR_TYPE', 'SYNTAX_OR_DIALECT')
+      ) {
+        'BOUND_LIMIT'
+      } else {
+        'UNDETERMINED'
+      }
+    }
+    'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID' {
+      $observation.sourceCredentialEnv = 'PASS'
+      $observation.sourceConnectionAttempted = 'YES'
+      $observation.sourceConnection = 'PASS'
+      $observation.sourceBoundLimitControlAttempted = 'YES'
+      $observation.sourceBoundLimitControl = 'FAIL'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceParameterFailureRole = 'UNDETERMINED'
+    }
     'SOURCE_COUNT_STATEMENT_FAILED' {
       $observation.sourceCredentialEnv = 'PASS'
       $observation.sourceConnectionAttempted = 'YES'
       $observation.sourceConnection = 'PASS'
+      $observation.sourceBoundLimitControlAttempted = 'YES'
+      $observation.sourceBoundLimitControl = 'PASS'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
       $observation.sourceCountStatementAttempted = 'YES'
       $observation.sourceCountStatement = 'FAIL'
-      $observation.sourceCountFailureClass = 'OTHER'
+      $observation.sourceCountFailureClass = $SourceCountFailureClass
+      $observation.sourceParameterFailureRole = if ($SourceCountFailureClass -eq 'PARAMETER_OR_TYPE') {
+        'PREDICATE_OR_SOURCE'
+      } else {
+        'NONE'
+      }
     }
     'SOURCE_COUNT_RESULT_INVALID' {
       $observation.sourceCredentialEnv = 'PASS'
       $observation.sourceConnectionAttempted = 'YES'
       $observation.sourceConnection = 'PASS'
+      $observation.sourceBoundLimitControlAttempted = 'YES'
+      $observation.sourceBoundLimitControl = 'PASS'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceParameterFailureRole = 'NONE'
       $observation.sourceCountStatementAttempted = 'YES'
       $observation.sourceCountStatement = 'PASS'
       $observation.sourceCountFailureClass = 'NONE'
@@ -169,9 +215,13 @@ function Reset-Fixture {
   $script:CountCalls = 0
   $script:BridgeCalls = 0
   $script:SourceConnectionCalls = 0
+  $script:SourceControlCalls = 0
   $script:SourceStatementCalls = 0
   $script:SourceCleanupCalls = 0
+  $script:SourceCallOrder = @()
+  $script:OpenConnection = $null
   $script:MockCount = 3L
+  $script:MockControlValue = 1L
   $script:MockPageCount = 3
   $script:MockPageLimit = 7
   $script:MockFiltersApplied = $true
@@ -193,20 +243,47 @@ function Reset-Fixture {
   $script:SourceConnectionProvider = {
     param($Config, $Username, $Password)
     $script:SourceConnectionCalls += 1
+    $script:SourceCallOrder += 'connect'
     if ($Username -ne 'fixture-user' -or $Password -ne 'fixture-password') {
       throw $privateError
     }
-    return [pscustomobject]@{ state = 'open' }
+    $script:OpenConnection = [pscustomobject]@{ state = 'open'; id = [guid]::NewGuid().ToString('N') }
+    return $script:OpenConnection
+  }
+  $script:SourceBoundLimitControlCommandProvider = {
+    param($Connection, $Config)
+    $script:SourceControlCalls += 1
+    $script:SourceCallOrder += 'control'
+    if ($null -eq $Connection -or
+      $null -eq $script:OpenConnection -or
+      $Connection.id -cne $script:OpenConnection.id -or
+      $Connection.state -ne 'open') {
+      throw $privateError
+    }
+    return [long]$script:MockControlValue
   }
   $script:SourceCountCommandProvider = {
     param($Connection, $Config, $Value)
     $script:SourceStatementCalls += 1
-    if ($Connection.state -ne 'open' -or $Value -ne $privateValue) { throw $privateError }
+    $script:SourceCallOrder += 'count'
+    if ($null -eq $Connection -or
+      $null -eq $script:OpenConnection -or
+      $Connection.id -cne $script:OpenConnection.id -or
+      $Connection.state -ne 'open' -or
+      $Value -ne $privateValue) {
+      throw $privateError
+    }
     return [long]$script:MockCount
   }
   $script:SourceConnectionCleanupProvider = {
     param($Connection)
     $script:SourceCleanupCalls += 1
+    $script:SourceCallOrder += 'cleanup'
+    if ($null -eq $Connection -or
+      $null -eq $script:OpenConnection -or
+      $Connection.id -cne $script:OpenConnection.id) {
+      throw $privateError
+    }
   }
   $script:BridgePageProvider = {
     param($Config, $Value)
@@ -239,6 +316,32 @@ function Invoke-FixtureProbe {
     -RequestedFilterValueType 'STRING' `
     -RequestedFilterValueEnvVar $filterEnv `
     -Root $opsDir
+}
+
+function New-FixtureScalarConnection {
+  param([long]$ScalarValue)
+  Add-Type -AssemblyName System.Data
+  $parameters = [pscustomobject]@{ added = @() }
+  $parameters | Add-Member -MemberType ScriptMethod -Name AddWithValue -Value {
+    param($Name, $Value)
+    $this.added += ,([pscustomobject]@{ name = $Name; value = $Value })
+    return $null
+  }
+  $command = [pscustomobject]@{
+    CommandType = $null
+    CommandTimeout = 0
+    CommandText = ''
+    Parameters = $parameters
+    ScalarValue = $ScalarValue
+  }
+  $command | Add-Member -MemberType ScriptMethod -Name ExecuteScalar -Value {
+    return $this.ScalarValue
+  }
+  $connection = [pscustomobject]@{ Command = $command }
+  $connection | Add-Member -MemberType ScriptMethod -Name CreateCommand -Value {
+    return $this.Command
+  }
+  return $connection
 }
 
 try {
@@ -314,6 +417,10 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $possible.sourceCredentialEnv -eq 'PASS' -and
     $possible.sourceConnectionAttempted -eq 'YES' -and
     $possible.sourceConnection -eq 'PASS' -and
+    $possible.sourceBoundLimitControlAttempted -eq 'YES' -and
+    $possible.sourceBoundLimitControl -eq 'PASS' -and
+    $possible.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+    $possible.sourceParameterFailureRole -eq 'NONE' -and
     $possible.sourceCountStatementAttempted -eq 'YES' -and
     $possible.sourceCountStatement -eq 'PASS' -and
     $possible.sourceCountFailureClass -eq 'NONE' -and
@@ -322,9 +429,11 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $possible.countRelationToLimit -eq 'LT' -and
     $script:CountCalls -eq 1 -and
     $script:SourceConnectionCalls -eq 1 -and
+    $script:SourceControlCalls -eq 1 -and
     $script:SourceStatementCalls -eq 1 -and
     $script:SourceCleanupCalls -eq 1 -and
-    $script:BridgeCalls -eq 1
+    $script:BridgeCalls -eq 1 -and
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,count,cleanup'
   )
   Check 'successful output is closed and omits private value, source, field, host, path, and counts' (
     $possibleText -notmatch [regex]::Escape($privateValue) -and
@@ -332,6 +441,12 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $possibleText -notmatch [regex]::Escape($configPath) -and
     @($possibleText -split '\r?\n' | Where-Object {
       $_ -eq 'sourceCountFailureClass=NONE'
+    }).Count -eq 1 -and
+    @($possibleText -split '\r?\n' | Where-Object {
+      $_ -eq 'sourceBoundLimitControl=PASS'
+    }).Count -eq 1 -and
+    @($possibleText -split '\r?\n' | Where-Object {
+      $_ -eq 'sourceParameterFailureRole=NONE'
     }).Count -eq 1 -and
     -not (@($possibleText -split '\r?\n') | Where-Object { $_ -match '^[^=]+=(3|7)$' })
   )
@@ -440,10 +555,15 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $credentialFailure.sourceCredentialEnv -eq 'FAIL' -and
     $credentialFailure.sourceConnectionAttempted -eq 'NO' -and
     $credentialFailure.sourceConnection -eq 'NOT_RUN' -and
+    $credentialFailure.sourceBoundLimitControlAttempted -eq 'NO' -and
+    $credentialFailure.sourceBoundLimitControl -eq 'NOT_RUN' -and
+    $credentialFailure.sourceBoundLimitControlFailureClass -eq 'NOT_RUN' -and
+    $credentialFailure.sourceParameterFailureRole -eq 'NOT_RUN' -and
     $credentialFailure.sourceCountStatementAttempted -eq 'NO' -and
     $credentialFailure.sourceCountStatement -eq 'NOT_RUN' -and
     $credentialFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 0 -and
+    $script:SourceControlCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:BridgeCalls -eq 0 -and
     $credentialFailureText -notmatch 'fixture-user|fixture-password'
@@ -457,8 +577,11 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $passwordFailure.failureReason -eq 'SOURCE_CREDENTIAL_UNAVAILABLE' -and
     $passwordFailure.sourceCredentialEnv -eq 'FAIL' -and
     $passwordFailure.sourceConnectionAttempted -eq 'NO' -and
+    $passwordFailure.sourceBoundLimitControlAttempted -eq 'NO' -and
+    $passwordFailure.sourceParameterFailureRole -eq 'NOT_RUN' -and
     $passwordFailure.sourceCountStatementAttempted -eq 'NO' -and
     $script:SourceConnectionCalls -eq 0 -and
+    $script:SourceControlCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:SourceCleanupCalls -eq 0 -and
     $script:BridgeCalls -eq 0
@@ -468,6 +591,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
   $script:SourceConnectionProvider = {
     param($Config, $Username, $Password)
     $script:SourceConnectionCalls += 1
+    $script:SourceCallOrder += 'connect'
     throw $privateError
   }
   $connectionFailure = Invoke-FixtureProbe
@@ -477,11 +601,16 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $connectionFailure.sourceCredentialEnv -eq 'PASS' -and
     $connectionFailure.sourceConnectionAttempted -eq 'YES' -and
     $connectionFailure.sourceConnection -eq 'FAIL' -and
+    $connectionFailure.sourceBoundLimitControlAttempted -eq 'NO' -and
+    $connectionFailure.sourceBoundLimitControl -eq 'NOT_RUN' -and
+    $connectionFailure.sourceBoundLimitControlFailureClass -eq 'NOT_RUN' -and
+    $connectionFailure.sourceParameterFailureRole -eq 'NOT_RUN' -and
     $connectionFailure.sourceCountStatementAttempted -eq 'NO' -and
     $connectionFailure.sourceCountStatement -eq 'NOT_RUN' -and
     $connectionFailure.sourceCountFailureClass -eq 'NOT_RUN' -and
     $connectionFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 1 -and
+    $script:SourceControlCalls -eq 0 -and
     $script:SourceStatementCalls -eq 0 -and
     $script:SourceCleanupCalls -eq 0 -and
     $script:BridgeCalls -eq 0 -and
@@ -567,6 +696,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
   $script:SourceCountCommandProvider = {
     param($Connection, $Config, $Value)
     $script:SourceStatementCalls += 1
+    $script:SourceCallOrder += 'count'
     throw (New-FixtureSqlException -Numbers ([int[]]@(208)) -Message $privateError)
   }
   $statementFailure = Invoke-FixtureProbe
@@ -575,14 +705,20 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $statementFailure.failureReason -eq 'SOURCE_COUNT_STATEMENT_FAILED' -and
     $statementFailure.sourceCredentialEnv -eq 'PASS' -and
     $statementFailure.sourceConnection -eq 'PASS' -and
+    $statementFailure.sourceBoundLimitControlAttempted -eq 'YES' -and
+    $statementFailure.sourceBoundLimitControl -eq 'PASS' -and
+    $statementFailure.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+    $statementFailure.sourceParameterFailureRole -eq 'NONE' -and
     $statementFailure.sourceCountStatementAttempted -eq 'YES' -and
     $statementFailure.sourceCountStatement -eq 'FAIL' -and
     $statementFailure.sourceCountFailureClass -eq 'OBJECT_OR_COLUMN_RESOLUTION' -and
     $statementFailure.sourceCountResult -eq 'NOT_RUN' -and
     $script:SourceConnectionCalls -eq 1 -and
+    $script:SourceControlCalls -eq 1 -and
     $script:SourceStatementCalls -eq 1 -and
     $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 0 -and
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,count,cleanup' -and
     $statementFailureText -notmatch [regex]::Escape($privateError)
   )
 
@@ -590,6 +726,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
   $script:SourceCountCommandProvider = {
     param($Connection, $Config, $Value)
     $script:SourceStatementCalls += 1
+    $script:SourceCallOrder += 'count'
     return '3'
   }
   $resultFailure = Invoke-FixtureProbe
@@ -597,9 +734,12 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $resultFailure.failureReason -eq 'SOURCE_COUNT_RESULT_INVALID' -and
     $resultFailure.sourceCredentialEnv -eq 'PASS' -and
     $resultFailure.sourceConnection -eq 'PASS' -and
+    $resultFailure.sourceBoundLimitControl -eq 'PASS' -and
+    $resultFailure.sourceParameterFailureRole -eq 'NONE' -and
     $resultFailure.sourceCountStatement -eq 'PASS' -and
     $resultFailure.sourceCountFailureClass -eq 'NONE' -and
     $resultFailure.sourceCountResult -eq 'FAIL' -and
+    $script:SourceControlCalls -eq 1 -and
     $script:SourceCleanupCalls -eq 1 -and
     $script:BridgeCalls -eq 0
   )
@@ -621,6 +761,7 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $malformedObservation.failureReason -eq 'UNEXPECTED' -and
     $malformedObservation.sourceCredentialEnv -eq 'NOT_RUN' -and
     $malformedObservation.sourceConnectionAttempted -eq 'NO' -and
+    $malformedObservation.sourceBoundLimitControlAttempted -eq 'NO' -and
     $malformedObservation.sourceCountStatementAttempted -eq 'NO' -and
     $script:BridgeCalls -eq 0
   )
@@ -636,11 +777,178 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
   $illegalNotRunObservation = New-FixtureCountObservation `
     -FailureReason 'SOURCE_COUNT_STATEMENT_FAILED'
   $illegalNotRunObservation.sourceCountFailureClass = 'NOT_RUN'
+  $illegalControlRoleObservation = New-FixtureCountObservation `
+    -FailureReason 'SOURCE_BOUND_LIMIT_CONTROL_FAILED' `
+    -SourceBoundLimitControlFailureClass 'PARAMETER_OR_TYPE'
+  $illegalControlRoleObservation.sourceParameterFailureRole = 'PREDICATE_OR_SOURCE'
+  $illegalActualRoleObservation = New-FixtureCountObservation `
+    -FailureReason 'SOURCE_COUNT_STATEMENT_FAILED' `
+    -SourceCountFailureClass 'PARAMETER_OR_TYPE'
+  $illegalActualRoleObservation.sourceParameterFailureRole = 'BOUND_LIMIT'
+  $illegalControlResultObservation = New-FixtureCountObservation `
+    -FailureReason 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID'
+  $illegalControlResultObservation.sourceBoundLimitControlFailureClass = 'OTHER'
   Check 'source-count observation validator rejects cross-stage contradictory tuples' (
     -not (Test-SourceCountObservation -Observation $illegalSuccessObservation) -and
     -not (Test-SourceCountObservation -Observation $illegalCredentialObservation) -and
     -not (Test-SourceCountObservation -Observation $illegalStatementObservation) -and
-    -not (Test-SourceCountObservation -Observation $illegalNotRunObservation)
+    -not (Test-SourceCountObservation -Observation $illegalNotRunObservation) -and
+    -not (Test-SourceCountObservation -Observation $illegalControlRoleObservation) -and
+    -not (Test-SourceCountObservation -Observation $illegalActualRoleObservation) -and
+    -not (Test-SourceCountObservation -Observation $illegalControlResultObservation)
+  )
+
+  Reset-Fixture
+  $script:SourceBoundLimitControlCommandProvider = {
+    param($Connection, $Config)
+    $script:SourceControlCalls += 1
+    $script:SourceCallOrder += 'control'
+    throw (New-FixtureSqlException -Numbers ([int[]]@(245)) -Message $privateError)
+  }
+  $controlParameterFailure = Invoke-FixtureProbe
+  $controlParameterFailureText = Format-DiscoveryResultBlock -Result $controlParameterFailure
+  Check 'bound-limit control PARAMETER_OR_TYPE maps BOUND_LIMIT and skips actual count' (
+    $controlParameterFailure.failedStage -eq 'SOURCE_BOUND_LIMIT_CONTROL' -and
+    $controlParameterFailure.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_FAILED' -and
+    $controlParameterFailure.sourceBoundLimitControlAttempted -eq 'YES' -and
+    $controlParameterFailure.sourceBoundLimitControl -eq 'FAIL' -and
+    $controlParameterFailure.sourceBoundLimitControlFailureClass -eq 'PARAMETER_OR_TYPE' -and
+    $controlParameterFailure.sourceParameterFailureRole -eq 'BOUND_LIMIT' -and
+    $controlParameterFailure.sourceCountStatementAttempted -eq 'NO' -and
+    $controlParameterFailure.sourceCountStatement -eq 'NOT_RUN' -and
+    $controlParameterFailure.sourceCountFailureClass -eq 'NOT_RUN' -and
+    $controlParameterFailure.sourceCountResult -eq 'NOT_RUN' -and
+    $script:SourceConnectionCalls -eq 1 -and
+    $script:SourceControlCalls -eq 1 -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 1 -and
+    $script:BridgeCalls -eq 0 -and
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,cleanup' -and
+    $controlParameterFailureText -notmatch [regex]::Escape($privateError) -and
+    $controlParameterFailureText -notmatch '245|SqlException|probe_marker'
+  )
+
+  Reset-Fixture
+  $script:SourceBoundLimitControlCommandProvider = {
+    param($Connection, $Config)
+    $script:SourceControlCalls += 1
+    $script:SourceCallOrder += 'control'
+    throw (New-FixtureSqlException -Numbers ([int[]]@(102)) -Message $privateError)
+  }
+  $controlSyntaxFailure = Invoke-FixtureProbe
+  Check 'bound-limit control SYNTAX_OR_DIALECT maps BOUND_LIMIT while preserving raw class' (
+    $controlSyntaxFailure.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_FAILED' -and
+    $controlSyntaxFailure.sourceBoundLimitControlFailureClass -eq 'SYNTAX_OR_DIALECT' -and
+    $controlSyntaxFailure.sourceParameterFailureRole -eq 'BOUND_LIMIT' -and
+    $controlSyntaxFailure.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 1 -and
+    $script:BridgeCalls -eq 0
+  )
+
+  Reset-Fixture
+  $script:SourceBoundLimitControlCommandProvider = {
+    param($Connection, $Config)
+    $script:SourceControlCalls += 1
+    $script:SourceCallOrder += 'control'
+    throw (New-FixtureSqlException -Numbers ([int[]]@(229)) -Message $privateError)
+  }
+  $controlOtherFailure = Invoke-FixtureProbe
+  Check 'other control failures map UNDETERMINED while preserving raw class' (
+    $controlOtherFailure.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_FAILED' -and
+    $controlOtherFailure.sourceBoundLimitControlFailureClass -eq 'SELECT_PERMISSION' -and
+    $controlOtherFailure.sourceParameterFailureRole -eq 'UNDETERMINED' -and
+    $controlOtherFailure.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 1
+  )
+
+  Reset-Fixture
+  $script:MockControlValue = 2L
+  $controlResultInvalid = Invoke-FixtureProbe
+  Check 'control scalar must be exactly long 1 or result is invalid and undetermined' (
+    $controlResultInvalid.failedStage -eq 'SOURCE_BOUND_LIMIT_CONTROL' -and
+    $controlResultInvalid.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID' -and
+    $controlResultInvalid.sourceBoundLimitControlAttempted -eq 'YES' -and
+    $controlResultInvalid.sourceBoundLimitControl -eq 'FAIL' -and
+    $controlResultInvalid.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+    $controlResultInvalid.sourceParameterFailureRole -eq 'UNDETERMINED' -and
+    $controlResultInvalid.sourceCountStatementAttempted -eq 'NO' -and
+    $script:SourceControlCalls -eq 1 -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:SourceCleanupCalls -eq 1 -and
+    $script:BridgeCalls -eq 0
+  )
+
+  Reset-Fixture
+  $script:SourceBoundLimitControlCommandProvider = {
+    param($Connection, $Config)
+    $script:SourceControlCalls += 1
+    $script:SourceCallOrder += 'control'
+    return '1'
+  }
+  $controlTypeInvalid = Invoke-FixtureProbe
+  Check 'non-long control scalar is closed as RESULT_INVALID without running actual count' (
+    $controlTypeInvalid.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID' -and
+    $controlTypeInvalid.sourceParameterFailureRole -eq 'UNDETERMINED' -and
+    $script:SourceStatementCalls -eq 0 -and
+    $script:BridgeCalls -eq 0
+  )
+
+  Reset-Fixture
+  $script:SourceCountCommandProvider = {
+    param($Connection, $Config, $Value)
+    $script:SourceStatementCalls += 1
+    $script:SourceCallOrder += 'count'
+    throw (New-FixtureSqlException -Numbers ([int[]]@(245)) -Message $privateError)
+  }
+  $actualParameterAfterControl = Invoke-FixtureProbe
+  $actualParameterAfterControlText = Format-DiscoveryResultBlock -Result $actualParameterAfterControl
+  Check 'control PASS plus actual PARAMETER_OR_TYPE maps PREDICATE_OR_SOURCE' (
+    $actualParameterAfterControl.failedStage -eq 'SOURCE_COUNT' -and
+    $actualParameterAfterControl.failureReason -eq 'SOURCE_COUNT_STATEMENT_FAILED' -and
+    $actualParameterAfterControl.sourceBoundLimitControl -eq 'PASS' -and
+    $actualParameterAfterControl.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+    $actualParameterAfterControl.sourceCountFailureClass -eq 'PARAMETER_OR_TYPE' -and
+    $actualParameterAfterControl.sourceParameterFailureRole -eq 'PREDICATE_OR_SOURCE' -and
+    $script:SourceControlCalls -eq 1 -and
+    $script:SourceStatementCalls -eq 1 -and
+    $script:SourceCleanupCalls -eq 1 -and
+    $script:BridgeCalls -eq 0 -and
+    (@($script:SourceCallOrder) -join ',') -eq 'connect,control,count,cleanup' -and
+    $actualParameterAfterControlText -notmatch [regex]::Escape($privateError)
+  )
+
+  Reset-Fixture
+  $script:SourceCountCommandProvider = {
+    param($Connection, $Config, $Value)
+    $script:SourceStatementCalls += 1
+    $script:SourceCallOrder += 'count'
+    throw (New-FixtureSqlException -Numbers ([int[]]@(102)) -Message $privateError)
+  }
+  $actualSyntaxAfterControl = Invoke-FixtureProbe
+  Check 'control PASS plus non-PARAMETER actual class keeps raw class and role NONE' (
+    $actualSyntaxAfterControl.failureReason -eq 'SOURCE_COUNT_STATEMENT_FAILED' -and
+    $actualSyntaxAfterControl.sourceBoundLimitControl -eq 'PASS' -and
+    $actualSyntaxAfterControl.sourceCountFailureClass -eq 'SYNTAX_OR_DIALECT' -and
+    $actualSyntaxAfterControl.sourceParameterFailureRole -eq 'NONE'
+  )
+
+  Check 'valid control and count observation tuples remain accepted' (
+    (Test-SourceCountObservation -Observation (
+      New-FixtureCountObservation -Count 3L
+    )) -and
+    (Test-SourceCountObservation -Observation (
+      New-FixtureCountObservation -FailureReason 'SOURCE_BOUND_LIMIT_CONTROL_FAILED' `
+        -SourceBoundLimitControlFailureClass 'PARAMETER_OR_TYPE'
+    )) -and
+    (Test-SourceCountObservation -Observation (
+      New-FixtureCountObservation -FailureReason 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID'
+    )) -and
+    (Test-SourceCountObservation -Observation (
+      New-FixtureCountObservation -FailureReason 'SOURCE_COUNT_STATEMENT_FAILED' `
+        -SourceCountFailureClass 'PARAMETER_OR_TYPE'
+    ))
   )
 
   Reset-Fixture
@@ -700,6 +1008,14 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     -Path $configPath `
     -RequestedObjectId 'bom' `
     -RequestedFilterField 'ProjectId'
+  $controlSpec = New-BoundLimitControlSpec -Config $config
+  Check 'bound-limit control is source-free and reuses limit-plus-one on @p1 only' (
+    $controlSpec.sql -eq 'SELECT TOP (@p1) CAST(1 AS BIGINT) AS [probe_marker]' -and
+    $controlSpec.sql -notmatch 'FROM \[|WHERE |@p0|BomView|ProjectId' -and
+    @($controlSpec.parameters).Count -eq 1 -and
+    $controlSpec.parameters[0].name -eq '@p1' -and
+    $controlSpec.parameters[0].value -eq 8L
+  )
   $spec = New-SamePredicateCountSpec -Config $config -FilterValue $privateValue
   Check 'same-predicate count is capped at limit plus one and parameterizes private inputs' (
     $spec.sql -eq (
@@ -711,7 +1027,35 @@ Write-Output '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart
     $spec.parameters[0].name -eq '@p0' -and
     $spec.parameters[0].value -eq $privateValue -and
     $spec.parameters[1].name -eq '@p1' -and
-    $spec.parameters[1].value -eq 8L
+    $spec.parameters[1].value -eq 8L -and
+    $spec.parameters[1].value -eq $controlSpec.parameters[0].value
+  )
+  $controlConnection = New-FixtureScalarConnection -ScalarValue 1L
+  $controlScalar = Invoke-ProbeBoundLimitControlCommand `
+    -Connection $controlConnection `
+    -Config $config
+  $countConnection = New-FixtureScalarConnection -ScalarValue 3L
+  $countScalar = Invoke-ProbeCountCommand `
+    -Connection $countConnection `
+    -Config $config `
+    -FilterValue $privateValue
+  Check 'production scalar binder executes control and count with their exact parameter sets' (
+    $controlScalar -eq 1L -and
+    $controlConnection.Command.CommandType -eq [System.Data.CommandType]::Text -and
+    $controlConnection.Command.CommandTimeout -eq 15 -and
+    $controlConnection.Command.CommandText -eq $controlSpec.sql -and
+    @($controlConnection.Command.Parameters.added).Count -eq 1 -and
+    $controlConnection.Command.Parameters.added[0].name -eq '@p1' -and
+    $controlConnection.Command.Parameters.added[0].value -eq 8L -and
+    $countScalar -eq 3L -and
+    $countConnection.Command.CommandType -eq [System.Data.CommandType]::Text -and
+    $countConnection.Command.CommandTimeout -eq 15 -and
+    $countConnection.Command.CommandText -eq $spec.sql -and
+    @($countConnection.Command.Parameters.added).Count -eq 2 -and
+    $countConnection.Command.Parameters.added[0].name -eq '@p0' -and
+    $countConnection.Command.Parameters.added[0].value -eq $privateValue -and
+    $countConnection.Command.Parameters.added[1].name -eq '@p1' -and
+    $countConnection.Command.Parameters.added[1].value -eq 8L
   )
 
   $validPayload = '{"object":"bom","records":[{"id":1}],"limit":7,"filtersApplied":true}' |

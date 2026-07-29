@@ -4,8 +4,9 @@
   One-shot, flag-OFF bounded-candidate discovery for the readonly SQL Server bridge.
 .DESCRIPTION
   Reads the existing bridge allowlist/config without modifying it, verifies the stock-preparation
-  feature flag is OFF, executes one allowlisted bridge equality-filter query, and executes one
-  parameterized COUNT_BIG query capped at limit + 1 over the same source predicate.
+  feature flag is OFF, executes one source-free bound-limit control, one parameterized COUNT_BIG
+  query capped at limit + 1 over the same source predicate, and one allowlisted bridge
+  equality-filter query only after both SQL statements pass.
 
   The fixed stdout block is values-free. This probe can identify a possible bounded candidate; it
   is not a completeness proof and does not replace approved-config preflight.
@@ -57,7 +58,8 @@ $script:ResultVocabulary = [ordered]@{
   executionState = @('COMPLETE', 'BLOCKED')
   failedStage = @(
     'NONE', 'PRECONDITION', 'PM2_CHECK', 'CONFIG_READ', 'INPUT_VALIDATE',
-    'SOURCE_COUNT', 'BRIDGE_QUERY', 'CONSISTENCY_CHECK', 'CLEANUP', 'INTERNAL'
+    'SOURCE_BOUND_LIMIT_CONTROL', 'SOURCE_COUNT', 'BRIDGE_QUERY',
+    'CONSISTENCY_CHECK', 'CLEANUP', 'INTERNAL'
   )
   failureReason = @(
     'NONE', 'INPUT_INVALID', 'PM2_HELPER_INVALID', 'PM2_SAMPLE_INVALID',
@@ -65,6 +67,7 @@ $script:ResultVocabulary = [ordered]@{
     'SOURCE_PRINCIPAL_PARITY_UNPROVEN',
     'OBJECT_NOT_ALLOWLISTED', 'FILTER_NOT_ALLOWLISTED', 'FILTER_VALUE_UNAVAILABLE',
     'SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_CONNECTION_FAILED',
+    'SOURCE_BOUND_LIMIT_CONTROL_FAILED', 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID',
     'SOURCE_COUNT_STATEMENT_FAILED', 'SOURCE_COUNT_RESULT_INVALID',
     'BRIDGE_QUERY_FAILED', 'BRIDGE_FILTER_UNCONFIRMED',
     'BRIDGE_LIMIT_UNCONFIRMED', 'BRIDGE_RESULT_INVALID', 'OBSERVATION_MISMATCH',
@@ -77,6 +80,12 @@ $script:ResultVocabulary = [ordered]@{
   sourceCredentialEnv = @('PASS', 'FAIL', 'NOT_RUN')
   sourceConnectionAttempted = @('YES', 'NO')
   sourceConnection = @('PASS', 'FAIL', 'NOT_RUN')
+  sourceBoundLimitControlAttempted = @('YES', 'NO')
+  sourceBoundLimitControl = @('PASS', 'FAIL', 'NOT_RUN')
+  sourceBoundLimitControlFailureClass = @('NONE', 'NOT_RUN') + $script:SourceCountFailureClasses
+  sourceParameterFailureRole = @(
+    'NONE', 'NOT_RUN', 'BOUND_LIMIT', 'PREDICATE_OR_SOURCE', 'UNDETERMINED'
+  )
   sourceCountStatementAttempted = @('YES', 'NO')
   sourceCountStatement = @('PASS', 'FAIL', 'NOT_RUN')
   sourceCountFailureClass = @('NONE', 'NOT_RUN') + $script:SourceCountFailureClasses
@@ -104,6 +113,10 @@ function New-DiscoveryResult {
     sourceCredentialEnv = 'NOT_RUN'
     sourceConnectionAttempted = 'NO'
     sourceConnection = 'NOT_RUN'
+    sourceBoundLimitControlAttempted = 'NO'
+    sourceBoundLimitControl = 'NOT_RUN'
+    sourceBoundLimitControlFailureClass = 'NOT_RUN'
+    sourceParameterFailureRole = 'NOT_RUN'
     sourceCountStatementAttempted = 'NO'
     sourceCountStatement = 'NOT_RUN'
     sourceCountFailureClass = 'NOT_RUN'
@@ -368,6 +381,16 @@ function New-ProbeConnectionString {
   return $builder.ConnectionString
 }
 
+function New-BoundLimitControlSpec {
+  param($Config)
+  return [ordered]@{
+    sql = 'SELECT TOP (@p1) CAST(1 AS BIGINT) AS [probe_marker]'
+    parameters = @(
+      [ordered]@{ name = '@p1'; value = ([long]$Config.limit + 1L) }
+    )
+  }
+}
+
 function New-SamePredicateCountSpec {
   param(
     $Config,
@@ -408,6 +431,36 @@ function Open-ProbeSqlConnection {
   }
 }
 
+function Invoke-ProbeScalarCommand {
+  param(
+    $Connection,
+    $Config,
+    [string]$Sql,
+    $Parameters
+  )
+  $command = $Connection.CreateCommand()
+  $command.CommandType = [System.Data.CommandType]::Text
+  $command.CommandTimeout = $Config.database.queryTimeoutSec
+  $command.CommandText = $Sql
+  foreach ($parameter in @($Parameters)) {
+    [void]$command.Parameters.AddWithValue($parameter.name, $parameter.value)
+  }
+  return $command.ExecuteScalar()
+}
+
+function Invoke-ProbeBoundLimitControlCommand {
+  param(
+    $Connection,
+    $Config
+  )
+  $spec = New-BoundLimitControlSpec -Config $Config
+  return Invoke-ProbeScalarCommand `
+    -Connection $Connection `
+    -Config $Config `
+    -Sql $spec.sql `
+    -Parameters $spec.parameters
+}
+
 function Invoke-ProbeCountCommand {
   param(
     $Connection,
@@ -415,14 +468,27 @@ function Invoke-ProbeCountCommand {
     $FilterValue
   )
   $spec = New-SamePredicateCountSpec -Config $Config -FilterValue $FilterValue
-  $command = $Connection.CreateCommand()
-  $command.CommandType = [System.Data.CommandType]::Text
-  $command.CommandTimeout = $Config.database.queryTimeoutSec
-  $command.CommandText = $spec.sql
-  foreach ($parameter in @($spec.parameters)) {
-    [void]$command.Parameters.AddWithValue($parameter.name, $parameter.value)
+  return Invoke-ProbeScalarCommand `
+    -Connection $Connection `
+    -Config $Config `
+    -Sql $spec.sql `
+    -Parameters $spec.parameters
+}
+
+function Resolve-BoundLimitControlFailureRole {
+  param([string]$FailureClass)
+  if ($FailureClass -eq 'PARAMETER_OR_TYPE' -or $FailureClass -eq 'SYNTAX_OR_DIALECT') {
+    return 'BOUND_LIMIT'
   }
-  return $command.ExecuteScalar()
+  return 'UNDETERMINED'
+}
+
+function Resolve-ActualCountParameterFailureRole {
+  param([string]$FailureClass)
+  if ($FailureClass -eq 'PARAMETER_OR_TYPE') {
+    return 'PREDICATE_OR_SOURCE'
+  }
+  return 'NONE'
 }
 
 function Resolve-SourceCountFailureClass {
@@ -479,6 +545,10 @@ function New-SourceCountObservation {
     sourceCredentialEnv = 'NOT_RUN'
     sourceConnectionAttempted = 'NO'
     sourceConnection = 'NOT_RUN'
+    sourceBoundLimitControlAttempted = 'NO'
+    sourceBoundLimitControl = 'NOT_RUN'
+    sourceBoundLimitControlFailureClass = 'NOT_RUN'
+    sourceParameterFailureRole = 'NOT_RUN'
     sourceCountStatementAttempted = 'NO'
     sourceCountStatement = 'NOT_RUN'
     sourceCountFailureClass = 'NOT_RUN'
@@ -494,6 +564,8 @@ function Test-SourceCountObservation {
   $keys = @(
     'state', 'failureReason', 'count', 'sourceCredentialEnv',
     'sourceConnectionAttempted', 'sourceConnection',
+    'sourceBoundLimitControlAttempted', 'sourceBoundLimitControl',
+    'sourceBoundLimitControlFailureClass', 'sourceParameterFailureRole',
     'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountFailureClass',
     'sourceCountResult'
   )
@@ -510,6 +582,10 @@ function Test-SourceCountObservation {
     $Observation.sourceCredentialEnv -eq 'PASS' -and
     $Observation.sourceConnectionAttempted -eq 'YES' -and
     $Observation.sourceConnection -eq 'PASS' -and
+    $Observation.sourceBoundLimitControlAttempted -eq 'YES' -and
+    $Observation.sourceBoundLimitControl -eq 'PASS' -and
+    $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+    $Observation.sourceParameterFailureRole -eq 'NONE' -and
     $Observation.sourceCountStatementAttempted -eq 'YES' -and
     $Observation.sourceCountStatement -eq 'PASS' -and
     $Observation.sourceCountFailureClass -eq 'NONE' -and
@@ -524,6 +600,10 @@ function Test-SourceCountObservation {
         $Observation.sourceCredentialEnv -eq 'FAIL' -and
         $Observation.sourceConnectionAttempted -eq 'NO' -and
         $Observation.sourceConnection -eq 'NOT_RUN' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'NO' -and
+        $Observation.sourceBoundLimitControl -eq 'NOT_RUN' -and
+        $Observation.sourceBoundLimitControlFailureClass -eq 'NOT_RUN' -and
+        $Observation.sourceParameterFailureRole -eq 'NOT_RUN' -and
         $Observation.sourceCountStatementAttempted -eq 'NO' -and
         $Observation.sourceCountStatement -eq 'NOT_RUN' -and
         $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
@@ -535,6 +615,42 @@ function Test-SourceCountObservation {
         $Observation.sourceCredentialEnv -eq 'PASS' -and
         $Observation.sourceConnectionAttempted -eq 'YES' -and
         $Observation.sourceConnection -eq 'FAIL' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'NO' -and
+        $Observation.sourceBoundLimitControl -eq 'NOT_RUN' -and
+        $Observation.sourceBoundLimitControlFailureClass -eq 'NOT_RUN' -and
+        $Observation.sourceParameterFailureRole -eq 'NOT_RUN' -and
+        $Observation.sourceCountStatementAttempted -eq 'NO' -and
+        $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
+        $Observation.sourceCountResult -eq 'NOT_RUN'
+      )
+    }
+    'SOURCE_BOUND_LIMIT_CONTROL_FAILED' {
+      $role = Resolve-BoundLimitControlFailureRole `
+        -FailureClass $Observation.sourceBoundLimitControlFailureClass
+      return (
+        $Observation.sourceCredentialEnv -eq 'PASS' -and
+        $Observation.sourceConnectionAttempted -eq 'YES' -and
+        $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'YES' -and
+        $Observation.sourceBoundLimitControl -eq 'FAIL' -and
+        $script:SourceCountFailureClasses -contains $Observation.sourceBoundLimitControlFailureClass -and
+        $Observation.sourceParameterFailureRole -eq $role -and
+        $Observation.sourceCountStatementAttempted -eq 'NO' -and
+        $Observation.sourceCountStatement -eq 'NOT_RUN' -and
+        $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
+        $Observation.sourceCountResult -eq 'NOT_RUN'
+      )
+    }
+    'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID' {
+      return (
+        $Observation.sourceCredentialEnv -eq 'PASS' -and
+        $Observation.sourceConnectionAttempted -eq 'YES' -and
+        $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'YES' -and
+        $Observation.sourceBoundLimitControl -eq 'FAIL' -and
+        $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+        $Observation.sourceParameterFailureRole -eq 'UNDETERMINED' -and
         $Observation.sourceCountStatementAttempted -eq 'NO' -and
         $Observation.sourceCountStatement -eq 'NOT_RUN' -and
         $Observation.sourceCountFailureClass -eq 'NOT_RUN' -and
@@ -542,10 +658,16 @@ function Test-SourceCountObservation {
       )
     }
     'SOURCE_COUNT_STATEMENT_FAILED' {
+      $role = Resolve-ActualCountParameterFailureRole `
+        -FailureClass $Observation.sourceCountFailureClass
       return (
         $Observation.sourceCredentialEnv -eq 'PASS' -and
         $Observation.sourceConnectionAttempted -eq 'YES' -and
         $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'YES' -and
+        $Observation.sourceBoundLimitControl -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+        $Observation.sourceParameterFailureRole -eq $role -and
         $Observation.sourceCountStatementAttempted -eq 'YES' -and
         $Observation.sourceCountStatement -eq 'FAIL' -and
         $script:SourceCountFailureClasses -contains $Observation.sourceCountFailureClass -and
@@ -557,6 +679,10 @@ function Test-SourceCountObservation {
         $Observation.sourceCredentialEnv -eq 'PASS' -and
         $Observation.sourceConnectionAttempted -eq 'YES' -and
         $Observation.sourceConnection -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlAttempted -eq 'YES' -and
+        $Observation.sourceBoundLimitControl -eq 'PASS' -and
+        $Observation.sourceBoundLimitControlFailureClass -eq 'NONE' -and
+        $Observation.sourceParameterFailureRole -eq 'NONE' -and
         $Observation.sourceCountStatementAttempted -eq 'YES' -and
         $Observation.sourceCountStatement -eq 'PASS' -and
         $Observation.sourceCountFailureClass -eq 'NONE' -and
@@ -595,6 +721,35 @@ function Invoke-SamePredicateCount {
       return $observation
     }
 
+    $observation.sourceBoundLimitControlAttempted = 'YES'
+    $controlValue = $null
+    try {
+      $controlValue = & $script:SourceBoundLimitControlCommandProvider $connection $Config
+    } catch {
+      $observation.failureReason = 'SOURCE_BOUND_LIMIT_CONTROL_FAILED'
+      $observation.sourceBoundLimitControl = 'FAIL'
+      $observation.sourceBoundLimitControlFailureClass = Get-SourceCountFailureClass -ErrorRecord $_
+      $observation.sourceParameterFailureRole = Resolve-BoundLimitControlFailureRole `
+        -FailureClass $observation.sourceBoundLimitControlFailureClass
+      return $observation
+    }
+
+    try {
+      if ($null -eq $controlValue -or $controlValue -is [System.DBNull]) {
+        throw 'CONTROL_INVALID'
+      }
+      if (-not ($controlValue -is [long])) { throw 'CONTROL_INVALID' }
+      if ([long]$controlValue -ne 1L) { throw 'CONTROL_INVALID' }
+      $observation.sourceBoundLimitControl = 'PASS'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
+    } catch {
+      $observation.failureReason = 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID'
+      $observation.sourceBoundLimitControl = 'FAIL'
+      $observation.sourceBoundLimitControlFailureClass = 'NONE'
+      $observation.sourceParameterFailureRole = 'UNDETERMINED'
+      return $observation
+    }
+
     $observation.sourceCountStatementAttempted = 'YES'
     try {
       $value = & $script:SourceCountCommandProvider $connection $Config $FilterValue
@@ -604,6 +759,8 @@ function Invoke-SamePredicateCount {
       $observation.failureReason = 'SOURCE_COUNT_STATEMENT_FAILED'
       $observation.sourceCountStatement = 'FAIL'
       $observation.sourceCountFailureClass = Get-SourceCountFailureClass -ErrorRecord $_
+      $observation.sourceParameterFailureRole = Resolve-ActualCountParameterFailureRole `
+        -FailureClass $observation.sourceCountFailureClass
       return $observation
     }
 
@@ -616,10 +773,12 @@ function Invoke-SamePredicateCount {
       $observation.failureReason = 'NONE'
       $observation['count'] = $count
       $observation.sourceCountResult = 'PASS'
+      $observation.sourceParameterFailureRole = 'NONE'
       return $observation
     } catch {
       $observation.failureReason = 'SOURCE_COUNT_RESULT_INVALID'
       $observation.sourceCountResult = 'FAIL'
+      $observation.sourceParameterFailureRole = 'NONE'
       return $observation
     }
   } finally {
@@ -771,6 +930,10 @@ $script:SourceConnectionProvider = {
   param($Config, $Username, $Password)
   Open-ProbeSqlConnection -Config $Config -Username $Username -Password $Password
 }
+$script:SourceBoundLimitControlCommandProvider = {
+  param($Connection, $Config)
+  Invoke-ProbeBoundLimitControlCommand -Connection $Connection -Config $Config
+}
 $script:SourceCountCommandProvider = {
   param($Connection, $Config, $Value)
   Invoke-ProbeCountCommand -Connection $Connection -Config $Config -FilterValue $Value
@@ -880,6 +1043,8 @@ function Invoke-BoundedCandidateDiscovery {
     }
     foreach ($name in @(
       'sourceCredentialEnv', 'sourceConnectionAttempted', 'sourceConnection',
+      'sourceBoundLimitControlAttempted', 'sourceBoundLimitControl',
+      'sourceBoundLimitControlFailureClass', 'sourceParameterFailureRole',
       'sourceCountStatementAttempted', 'sourceCountStatement', 'sourceCountFailureClass',
       'sourceCountResult'
     )) {
@@ -887,9 +1052,17 @@ function Invoke-BoundedCandidateDiscovery {
     }
     if ($countObservation.state -eq 'BLOCKED') {
       $result.samePredicateCount = 'FAIL'
+      $blockedStage = if (
+        $countObservation.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_FAILED' -or
+        $countObservation.failureReason -eq 'SOURCE_BOUND_LIMIT_CONTROL_RESULT_INVALID'
+      ) {
+        'SOURCE_BOUND_LIMIT_CONTROL'
+      } else {
+        'SOURCE_COUNT'
+      }
       Set-DiscoveryFailure `
         -Result $result `
-        -Stage 'SOURCE_COUNT' `
+        -Stage $blockedStage `
         -Reason $countObservation.failureReason
       return $result
     }
