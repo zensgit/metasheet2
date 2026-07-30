@@ -89,6 +89,10 @@ function errorCode(error: unknown): string {
   return String((error as Error).message)
 }
 
+function ignoreForcedScratchDrop(error: Error): void {
+  if (errorCode(error) !== '57P01') throw error
+}
+
 async function createBase(pool: Pool): Promise<void> {
   await pool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
   await pool.query(`
@@ -421,7 +425,9 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
   afterAll(async () => {
     if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
-    for (const current of [pool, migrationPool, adminPool]) current?.on('error', () => undefined)
+    for (const current of [pool, migrationPool, adminPool]) {
+      current?.on('error', ignoreForcedScratchDrop)
+    }
     await db?.destroy()
     await pool?.end()
     await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
