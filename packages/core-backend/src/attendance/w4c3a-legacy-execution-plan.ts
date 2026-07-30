@@ -1688,6 +1688,21 @@ export function computeLegacyImportRecordPreconditionFingerprintV1(
   )
 }
 
+export const LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1 =
+  'd267dd9db10593fdb9c0ce413d5ea1d4180ed7f7a62e9ff22946e2d3a398fea3'
+
+/**
+ * Recovers the frozen record-existence branch from the section 4.4
+ * precondition digest. The only valid missing-row preimage is the canonical
+ * all-null shape above; every existing-row preimage includes exists:true.
+ */
+export function legacyImportRecordWriteExpectsExistingRecordV1(
+  recordWrite: LegacyImportRecordWritePlanV1,
+): boolean {
+  return recordWrite.existingRecordPreconditionFingerprint
+    !== LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1
+}
+
 export type LegacyImportGroupStateV1 = Readonly<{
   readonly groups: readonly Readonly<{
     readonly id: string

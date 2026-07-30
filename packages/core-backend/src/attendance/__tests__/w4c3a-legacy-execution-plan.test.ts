@@ -4,11 +4,13 @@ import {
   ATTENDANCE_LEGACY_IMPORT_BATCH_SOURCES_V1,
   ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1,
   ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1,
+  LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1,
   buildLegacyImportExecutionPlanPackageV1,
   computeLegacyImportChunkDigestV1,
   computeLegacyImportGroupStateFingerprintV1,
   computeLegacyImportPlanDigestV1,
   computeLegacyImportRecordPreconditionFingerprintV1,
+  legacyImportRecordWriteExpectsExistingRecordV1,
   parseLegacyImportAsyncJobSummaryV1,
   parseLegacyImportBatchPlanV1,
   parseLegacyImportExecutionPlanChunkBodyV1,
@@ -321,6 +323,40 @@ describe('LegacyImportExecutionPlanV1', () => {
     expect(computeLegacyImportRecordPreconditionFingerprintV1(missing)).toMatch(
       /^[0-9a-f]{64}$/,
     )
+    expect(computeLegacyImportRecordPreconditionFingerprintV1(missing)).toBe(
+      LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1,
+    )
+    expect(
+      legacyImportRecordWriteExpectsExistingRecordV1(
+        recordWrite({
+          existingRecordPreconditionFingerprint:
+            LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1,
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      legacyImportRecordWriteExpectsExistingRecordV1(
+        recordWrite({
+          existingRecordPreconditionFingerprint:
+            computeLegacyImportRecordPreconditionFingerprintV1({
+              exists: true,
+              id: RECORD_1,
+              orgId: 'org-a',
+              userId: 'user-a',
+              workDate: '2026-07-30',
+              firstInAt: '2026-07-30T01:00:00.000Z',
+              lastOutAt: '2026-07-30T09:00:00.000Z',
+              workMinutes: 480,
+              lateMinutes: 0,
+              earlyLeaveMinutes: 0,
+              status: 'normal',
+              isWorkday: true,
+              meta: {},
+              sourceBatchId: BATCH_ID,
+            }),
+        }),
+      ),
+    ).toBe(true)
     expect(() =>
       computeLegacyImportRecordPreconditionFingerprintV1({
         ...missing,
