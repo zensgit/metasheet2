@@ -51,6 +51,11 @@ export type AttendanceLegacyPlanWorkerJobV1 = Readonly<{
   planDigest: string
 }>
 
+export type AttendanceLegacyPlanWorkerCandidateV1 = Readonly<{
+  jobId: string
+  orgId: string
+}>
+
 export type AttendanceLegacyPlanWorkerStoredPlanV1 = Readonly<{
   planDigest: string
   chunkVectorDigest: string
@@ -74,13 +79,17 @@ export type AttendanceLegacyPlanWorkerResultV1 =
   | Readonly<{ kind: 'completed'; response: LegacyImportAsyncJobSummaryV1 }>
 
 export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
-  readCandidateJob(jobId: string): Promise<AttendanceLegacyPlanWorkerJobV1 | null>
+  readCandidateJob(jobId: string): Promise<AttendanceLegacyPlanWorkerCandidateV1 | null>
   runSerializable<T>(work: (trx: TTransaction) => Promise<T>): Promise<T>
   acquireClass00(trx: TTransaction, orgId: string): Promise<void>
   resolveWritePosture(
     trx: TTransaction,
     orgId: string,
   ): Promise<'suspended' | AttendanceLegacyPlanWorkerJobV1['acceptedWritePosture']>
+  readAuthorizationJob(
+    trx: TTransaction,
+    jobId: string,
+  ): Promise<AttendanceLegacyPlanWorkerJobV1 | null>
   lockJob(
     trx: TTransaction,
     jobId: string,
@@ -281,22 +290,37 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           const locked = await callbacks.lockJob(trx, candidate.jobId)
           if (locked === null || locked.w4ContractVersion !== 1) return { kind: 'not_found' }
           if (locked.jobId !== candidate.jobId || locked.orgId !== candidate.orgId) {
-            throw new Error('W4C3A_WORKER_CANDIDATE_IDENTITY_MISMATCH')
+            return { kind: 'not_found' }
           }
           if (locked.status === 'queued') await callbacks.markSuspendedQueued(trx, locked.jobId)
           return { kind: 'suspended' }
         }
 
-        const candidateAuthorized = await callbacks.authorizeFullImport(trx, candidate)
+        const authorizationJob = await callbacks.readAuthorizationJob(
+          trx,
+          candidate.jobId,
+        )
+        if (
+          authorizationJob === null ||
+          authorizationJob.w4ContractVersion !== 1 ||
+          authorizationJob.jobId !== candidate.jobId ||
+          authorizationJob.orgId !== candidate.orgId
+        ) {
+          return { kind: 'not_found' }
+        }
+        const candidateAuthorized = await callbacks.authorizeFullImport(
+          trx,
+          authorizationJob,
+        )
         const reservation = verifiedReservationIdentities(
           callbacks as AttendanceLegacyPlanWorkerCallbacksV1<unknown>,
-          candidate,
+          authorizationJob,
         )
         await callbacks.acquireClass10(trx, reservation)
         const rechecked = await callbacks.lockJob(trx, candidate.jobId)
         if (rechecked === null || rechecked.w4ContractVersion !== 1) return { kind: 'not_found' }
         if (rechecked.jobId !== candidate.jobId || rechecked.orgId !== candidate.orgId) {
-          throw new Error('W4C3A_WORKER_CANDIDATE_IDENTITY_MISMATCH')
+          return { kind: 'not_found' }
         }
         const recheckedAuthorized = await callbacks.authorizeFullImport(trx, rechecked)
         if (!candidateAuthorized || !recheckedAuthorized) {

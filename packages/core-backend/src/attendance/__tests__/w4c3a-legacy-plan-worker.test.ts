@@ -154,10 +154,11 @@ async function callbacks(
   const ids = await identities()
   const calls: string[] = []
   const hooks: AttendanceLegacyPlanWorkerCallbacksV1<object> = {
-    readCandidateJob: vi.fn(async () => job),
+    readCandidateJob: vi.fn(async () => ({ jobId: job.jobId, orgId: job.orgId })),
     runSerializable: vi.fn(async (work) => work({})),
     acquireClass00: vi.fn(async () => { calls.push('00') }),
     resolveWritePosture: vi.fn(async () => { calls.push('posture'); return 'legacy_projection_only' }),
+    readAuthorizationJob: vi.fn(async () => { calls.push('job-read'); return job }),
     lockJob: vi.fn(async () => { calls.push('job'); return job }),
     authorizeFullImport: vi.fn(async () => { calls.push('auth'); return true }),
     reservationIdentities: vi.fn(() => [ids.batch]),
@@ -325,10 +326,11 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     const ids = await identities()
     const calls: string[] = []
     const hooks: AttendanceLegacyPlanWorkerCallbacksV1<object> = {
-      readCandidateJob: vi.fn(async () => job),
+      readCandidateJob: vi.fn(async () => ({ jobId: job.jobId, orgId: job.orgId })),
       runSerializable: vi.fn(async (work) => work({})),
       acquireClass00: vi.fn(async () => { calls.push('00') }),
       resolveWritePosture: vi.fn(async () => { calls.push('posture'); return 'legacy_projection_only' }),
+      readAuthorizationJob: vi.fn(async () => { calls.push('job-read'); return job }),
       lockJob: vi.fn(async () => { calls.push('job'); return job }),
       authorizeFullImport: vi.fn(async () => { calls.push('auth'); return true }),
       reservationIdentities: vi.fn(() => [ids.batch]),
@@ -376,6 +378,87 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     expect(base.calls).not.toContain('11')
   })
 
+  it('reads only candidate identity before the serializable transaction', async () => {
+    let transactionStarted = false
+    const base = await callbacks({
+      runSerializable: vi.fn(async (work) => {
+        transactionStarted = true
+        return work({})
+      }),
+      readCandidateJob: vi.fn(async () => {
+        expect(transactionStarted).toBe(false)
+        return { jobId: JOB_ID, orgId: ORG_ID }
+      }),
+      readAuthorizationJob: vi.fn(async () => {
+        expect(transactionStarted).toBe(true)
+        return packagePlan().job
+      }),
+    })
+
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toMatchObject({ kind: 'completed' })
+    expect(base.hooks.readCandidateJob).toHaveBeenCalledWith(JOB_ID)
+    expect(base.hooks.readAuthorizationJob).toHaveBeenCalledWith(
+      expect.anything(),
+      JOB_ID,
+    )
+  })
+
+  it('rejects an ambiguous authorization candidate identity without DML', async () => {
+    const base = await callbacks({
+      readAuthorizationJob: vi.fn(async () => ({
+        ...packagePlan().job,
+        orgId: '20000000-0000-4000-8000-000000000002',
+      })),
+    })
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toEqual({ kind: 'not_found' })
+    expect(base.calls).toEqual(['00', 'posture'])
+    expect(base.hooks.readAuthorizationJob).toHaveBeenCalledWith(
+      expect.anything(),
+      JOB_ID,
+    )
+    expect(base.hooks.acquireClass10).not.toHaveBeenCalled()
+    expect(base.hooks.lockJob).not.toHaveBeenCalled()
+    expect(base.hooks.loadPlan).not.toHaveBeenCalled()
+    expect(base.hooks.acquireClass11).not.toHaveBeenCalled()
+    expect(base.hooks.recheckPreconditions).not.toHaveBeenCalled()
+    expect(base.hooks.executeVerifiedPlan).not.toHaveBeenCalled()
+    expect(base.hooks.storeCompletedResponseAndTerminalize).not.toHaveBeenCalled()
+    expect(base.hooks.loadCompletedResponse).not.toHaveBeenCalled()
+    expect(base.hooks.markSuspendedQueued).not.toHaveBeenCalled()
+    expect(base.hooks.markPlanFailed).not.toHaveBeenCalled()
+  })
+
+  it('rejects an ambiguous post-class-10 candidate identity without DML', async () => {
+    const base = await callbacks({
+      lockJob: vi.fn(async () => ({
+        ...packagePlan().job,
+        orgId: '20000000-0000-4000-8000-000000000002',
+      })),
+    })
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toEqual({ kind: 'not_found' })
+    expect(base.calls).toEqual(['00', 'posture', 'job-read', 'auth', '10'])
+    expect(base.hooks.lockJob).toHaveBeenCalledWith(expect.anything(), JOB_ID)
+    expect(
+      vi.mocked(base.hooks.lockJob).mock.invocationCallOrder[0],
+    ).toBeGreaterThan(
+      vi.mocked(base.hooks.acquireClass10).mock.invocationCallOrder[0] ?? 0,
+    )
+    expect(base.hooks.loadPlan).not.toHaveBeenCalled()
+    expect(base.hooks.acquireClass11).not.toHaveBeenCalled()
+    expect(base.hooks.recheckPreconditions).not.toHaveBeenCalled()
+    expect(base.hooks.executeVerifiedPlan).not.toHaveBeenCalled()
+    expect(base.hooks.storeCompletedResponseAndTerminalize).not.toHaveBeenCalled()
+    expect(base.hooks.loadCompletedResponse).not.toHaveBeenCalled()
+    expect(base.hooks.markSuspendedQueued).not.toHaveBeenCalled()
+    expect(base.hooks.markPlanFailed).not.toHaveBeenCalled()
+  })
+
   it('keeps a suspended queued job ahead of authorization and plan access', async () => {
     const base = await callbacks({
       resolveWritePosture: vi.fn(async () => { base.calls.push('posture'); return 'suspended' }),
@@ -383,6 +466,28 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     })
     await expect(createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID)).resolves.toEqual({ kind: 'suspended' })
     expect(base.calls).toEqual(['00', 'posture', 'job', 'suspend'])
+  })
+
+  it('rejects an ambiguous suspended candidate identity without DML', async () => {
+    const base = await callbacks({
+      resolveWritePosture: vi.fn(async () => {
+        base.calls.push('posture')
+        return 'suspended'
+      }),
+      lockJob: vi.fn(async () => {
+        base.calls.push('job')
+        return {
+          ...packagePlan().job,
+          orgId: '20000000-0000-4000-8000-000000000002',
+        }
+      }),
+    })
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toEqual({ kind: 'not_found' })
+    expect(base.calls).toEqual(['00', 'posture', 'job'])
+    expect(base.hooks.markSuspendedQueued).not.toHaveBeenCalled()
+    expect(base.hooks.markPlanFailed).not.toHaveBeenCalled()
   })
 
   it('replays a completed immutable response with zero effects', async () => {
@@ -442,7 +547,20 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
   it('orders verified work through class-00, class-10, class-11, effect, terminal', async () => {
     const base = await callbacks()
     await expect(createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID)).resolves.toMatchObject({ kind: 'completed' })
-    expect(base.calls).toEqual(['00', 'posture', 'auth', '10', 'job', 'auth', 'plan', '11', 'preconditions', 'effect', 'terminal'])
+    expect(base.calls).toEqual([
+      '00',
+      'posture',
+      'job-read',
+      'auth',
+      '10',
+      'job',
+      'auth',
+      'plan',
+      '11',
+      'preconditions',
+      'effect',
+      'terminal',
+    ])
     expect(base.hooks.storeCompletedResponseAndTerminalize).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ jobId: JOB_ID }),
