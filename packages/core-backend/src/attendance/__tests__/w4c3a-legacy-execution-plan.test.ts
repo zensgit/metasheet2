@@ -1,16 +1,22 @@
 import crypto from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  ATTENDANCE_LEGACY_IMPORT_BATCH_SOURCES_V1,
   ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1,
   ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1,
   buildLegacyImportExecutionPlanPackageV1,
+  computeLegacyImportChunkDigestV1,
   computeLegacyImportGroupStateFingerprintV1,
+  computeLegacyImportPlanDigestV1,
   computeLegacyImportRecordPreconditionFingerprintV1,
   parseLegacyImportAsyncJobSummaryV1,
+  parseLegacyImportBatchPlanV1,
+  parseLegacyImportExecutionPlanChunkBodyV1,
   parseLegacyImportExecutionPlanManifestV1,
   parseLegacyImportGroupEffectPlanV1,
   parseLegacyImportItemPlanV1,
   parseLegacyImportRecordWritePlanV1,
+  reassembleLegacyImportPlanChunksV1,
   type LegacyImportExecutionPlanManifestV1,
   type LegacyImportGroupEffectPlanV1,
   type LegacyImportItemPlanV1,
@@ -174,6 +180,7 @@ function recordWrite(
     earlyLeaveMinutes: 0,
     status: 'normal',
     isWorkday: true,
+    timezone: 'Asia/Shanghai',
     targetRevision: 0,
     existingRecordPreconditionFingerprint: HEX_A,
     expectedSourceOwnership: null,
@@ -185,6 +192,21 @@ function recordWrite(
     attributionSnapshot: {},
     sourceBatchId: BATCH_ID,
     resultSlots: {},
+    ...overrides,
+  }
+}
+
+function ensureGroup(
+  overrides: Partial<Extract<LegacyImportGroupEffectPlanV1, { kind: 'ensure_group' }>> = {},
+): Extract<LegacyImportGroupEffectPlanV1, { kind: 'ensure_group' }> {
+  return {
+    kind: 'ensure_group',
+    groupId: GROUP_ID,
+    normalizedName: 'engineering',
+    displayName: 'Engineering',
+    code: null,
+    timezone: 'Asia/Taipei',
+    ruleSetId: null,
     ...overrides,
   }
 }
@@ -319,6 +341,7 @@ describe('LegacyImportExecutionPlanV1', () => {
         kind: 'ensure_group',
         groupId: GROUP_ID,
         normalizedName: ' Group A ',
+        displayName: 'Group A',
         code: null,
         timezone: 'UTC',
         ruleSetId: null,
@@ -363,14 +386,7 @@ describe('LegacyImportExecutionPlanV1', () => {
       groupRevision: 1,
       groupStateFingerprint: HEX_A,
     })
-    const first: LegacyImportGroupEffectPlanV1 = {
-      kind: 'ensure_group',
-      groupId: GROUP_ID,
-      normalizedName: 'engineering',
-      code: null,
-      timezone: 'Asia/Taipei',
-      ruleSetId: null,
-    }
+    const first: LegacyImportGroupEffectPlanV1 = ensureGroup()
     const second: LegacyImportGroupEffectPlanV1 = {
       ...first,
       groupId: '10000000-0000-4000-8000-000000000099',
@@ -451,14 +467,7 @@ describe('LegacyImportExecutionPlanV1', () => {
       groupRevision: 1,
       groupStateFingerprint: HEX_A,
     })
-    const groupEffect: LegacyImportGroupEffectPlanV1 = {
-      kind: 'ensure_group',
-      groupId: GROUP_ID,
-      normalizedName: 'engineering',
-      code: null,
-      timezone: 'Asia/Taipei',
-      ruleSetId: null,
-    }
+    const groupEffect: LegacyImportGroupEffectPlanV1 = ensureGroup()
     const forward = buildLegacyImportExecutionPlanPackageV1({
       manifestSeed: seed,
       items: twoApplyItems,
@@ -894,5 +903,373 @@ describe('LegacyImportExecutionPlanV1', () => {
     expect(deniedCalls.some((sqlText) => sqlText.includes('INSERT INTO'))).toBe(
       false,
     )
+  })
+
+  describe('OD-W4C-57=(a) byte-parity field correction', () => {
+    const normalBatchBase = {
+      kind: 'normal' as const,
+      ruleSetId: null,
+      mappingSnapshot: {},
+      sourceRowCount: 2,
+      status: 'committed',
+      idempotencyKey: 'idem-a',
+      visibilityRule: 'org',
+      engine: 'standard' as const,
+      chunkConfig: { itemsChunkSize: 100, recordsChunkSize: 100 },
+      recordUpsertStrategy: 'unnest' as const,
+      itemsInsertStrategy: 'unnest' as const,
+      mappingProfileId: null,
+      compatibilityMetadata: {},
+      groupSync: null,
+      itemReturnPolicy: { returnItems: false },
+      skippedSamplePolicy: { limit: 50 },
+      resultSlots: {},
+    }
+
+    it('accepts null and every closed non-null batch source as distinct digest inputs', () => {
+      const sources = [null, ...ATTENDANCE_LEGACY_IMPORT_BATCH_SOURCES_V1] as const
+      const digests = new Set<string>()
+      for (const source of sources) {
+        const batch = parseLegacyImportBatchPlanV1({ ...normalBatchBase, source })
+        expect(batch).toMatchObject({ kind: 'normal', source })
+        digests.add(sha256HexOfCanonicalJsonV1(batch))
+      }
+      expect(digests.size).toBe(sources.length)
+    })
+
+    it('rejects empty-string null surrogates and out-of-union batch sources', () => {
+      expect(() =>
+        parseLegacyImportBatchPlanV1({ ...normalBatchBase, source: '' }),
+      ).toThrowError('W4C3A_BATCH_PLAN_INVALID')
+      expect(() =>
+        parseLegacyImportBatchPlanV1({ ...normalBatchBase, source: 'other' }),
+      ).toThrowError('W4C3A_BATCH_PLAN_INVALID')
+      expect(() =>
+        parseLegacyImportBatchPlanV1({ ...normalBatchBase, source: 'Dingtalk' }),
+      ).toThrowError('W4C3A_BATCH_PLAN_INVALID')
+    })
+
+    it('binds batch source substitution into the logical plan digest', () => {
+      const nullSource = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: manifestSeed({
+          batch: { ...manifestSeed().batch, kind: 'normal', source: null },
+        }),
+        items: items(),
+        recordWrites: [recordWrite()],
+        groupEffects: [],
+        groupEffectPlacements: [],
+      })
+      const manualSource = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: manifestSeed({
+          batch: { ...manifestSeed().batch, kind: 'normal', source: 'manual' },
+        }),
+        items: items(),
+        recordWrites: [recordWrite()],
+        groupEffects: [],
+        groupEffectPlacements: [],
+      })
+      const csvSource = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: manifestSeed({
+          batch: { ...manifestSeed().batch, kind: 'normal', source: 'csv' },
+        }),
+        items: items(),
+        recordWrites: [recordWrite()],
+        groupEffects: [],
+        groupEffectPlacements: [],
+      })
+      expect(nullSource.planDigest).not.toBe(manualSource.planDigest)
+      expect(manualSource.planDigest).not.toBe(csvSource.planDigest)
+      expect(nullSource.manifest.batch).toMatchObject({ kind: 'normal', source: null })
+    })
+
+    it('requires non-empty record timezone for both values and unnest strategies', () => {
+      for (const strategy of ['values', 'unnest'] as const) {
+        const built = buildLegacyImportExecutionPlanPackageV1({
+          manifestSeed: manifestSeed({
+            batch: {
+              ...manifestSeed().batch,
+              kind: 'normal',
+              recordUpsertStrategy: strategy,
+            },
+          }),
+          items: items(),
+          recordWrites: [recordWrite({ timezone: 'Asia/Shanghai' })],
+          groupEffects: [],
+          groupEffectPlacements: [],
+        })
+        expect(built.chunks[0].body.recordWrites[0].timezone).toBe('Asia/Shanghai')
+        expect(built.planDigest).toMatch(/^[0-9a-f]{64}$/)
+      }
+    })
+
+    it('rejects timezone omission, empty, null, extra keys, and opaque-leaf substitution', () => {
+      const base = recordWrite()
+      const { timezone: _timezone, ...withoutTimezone } = base
+      expect(() => parseLegacyImportRecordWritePlanV1(withoutTimezone)).toThrowError(
+        'W4C3A_RECORD_WRITE_PLAN_INVALID',
+      )
+      expect(() =>
+        parseLegacyImportRecordWritePlanV1({ ...base, timezone: '' }),
+      ).toThrowError('W4C3A_RECORD_WRITE_PLAN_INVALID')
+      expect(() =>
+        parseLegacyImportRecordWritePlanV1({ ...base, timezone: null }),
+      ).toThrowError('W4C3A_RECORD_WRITE_PLAN_INVALID')
+      expect(() =>
+        parseLegacyImportRecordWritePlanV1({ ...base, extra: true }),
+      ).toThrowError('W4C3A_RECORD_WRITE_PLAN_INVALID')
+      // Neighboring opaque leaf cannot host timezone as a control input.
+      expect(() =>
+        parseLegacyImportRecordWritePlanV1({
+          ...withoutTimezone,
+          compatibilityMetadata: { timezone: 'Asia/Shanghai' },
+        }),
+      ).toThrowError('W4C3A_RECORD_WRITE_PLAN_INVALID')
+    })
+
+    it('changes chunk and plan digests when the frozen record timezone is substituted', () => {
+      const shanghai = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: manifestSeed(),
+        items: items(),
+        recordWrites: [recordWrite({ timezone: 'Asia/Shanghai' })],
+        groupEffects: [],
+        groupEffectPlacements: [],
+      })
+      const tokyo = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: manifestSeed(),
+        items: items(),
+        recordWrites: [recordWrite({ timezone: 'Asia/Tokyo' })],
+        groupEffects: [],
+        groupEffectPlacements: [],
+      })
+      expect(shanghai.planDigest).not.toBe(tokyo.planDigest)
+      expect(shanghai.chunks[0].chunkDigest).not.toBe(tokyo.chunks[0].chunkDigest)
+      expect(
+        computeLegacyImportChunkDigestV1(shanghai.chunks[0].body),
+      ).not.toBe(computeLegacyImportChunkDigestV1(tokyo.chunks[0].body))
+    })
+
+    it('freezes mixed-case displayName separately from normalizedName', () => {
+      const group = parseLegacyImportGroupEffectPlanV1(
+        ensureGroup({
+          normalizedName: 'engineering',
+          displayName: 'Engineering',
+        }),
+      )
+      expect(group).toMatchObject({
+        kind: 'ensure_group',
+        normalizedName: 'engineering',
+        displayName: 'Engineering',
+      })
+      expect(group.kind === 'ensure_group' && group.displayName).not.toBe(
+        group.kind === 'ensure_group' && group.normalizedName,
+      )
+    })
+
+    it('rejects displayName faults, numeric-only names, and normalizedName substitution digests', () => {
+      // Case mismatch: displayName.toLowerCase() must equal normalizedName.
+      expect(() =>
+        parseLegacyImportGroupEffectPlanV1(
+          ensureGroup({
+            normalizedName: 'engineering',
+            displayName: 'Sales',
+          }),
+        ),
+      ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+
+      // Leading/trailing whitespace is rejected (trim equality).
+      expect(() =>
+        parseLegacyImportGroupEffectPlanV1(
+          ensureGroup({
+            normalizedName: 'engineering',
+            displayName: ' Engineering',
+          }),
+        ),
+      ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+
+      // Numeric-only display names are rejected exactly as the retained collector.
+      expect(() =>
+        parseLegacyImportGroupEffectPlanV1(
+          ensureGroup({
+            normalizedName: '1',
+            displayName: '1',
+          }),
+        ),
+      ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+      expect(() =>
+        parseLegacyImportGroupEffectPlanV1(
+          ensureGroup({
+            normalizedName: '42',
+            displayName: '42',
+          }),
+        ),
+      ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+
+      // Lowercase displayName is legal when it already equals normalizedName,
+      // but substituting a mixed-case frozen displayName with normalizedName
+      // changes the plan digest (distinct digest inputs; not a silent rewrite).
+      const mixed = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: manifestSeed({
+          groupRevision: 1,
+          groupStateFingerprint: HEX_A,
+        }),
+        items: items(),
+        recordWrites: [recordWrite()],
+        groupEffects: [
+          ensureGroup({
+            normalizedName: 'engineering',
+            displayName: 'Engineering',
+          }),
+        ],
+        groupEffectPlacements: [{ effectId: GROUP_ID, firstSourceOrdinal: 0 }],
+      })
+      const replacedWithNormalized = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: manifestSeed({
+          groupRevision: 1,
+          groupStateFingerprint: HEX_A,
+        }),
+        items: items(),
+        recordWrites: [recordWrite()],
+        groupEffects: [
+          ensureGroup({
+            normalizedName: 'engineering',
+            displayName: 'engineering',
+          }),
+        ],
+        groupEffectPlacements: [{ effectId: GROUP_ID, firstSourceOrdinal: 0 }],
+      })
+      expect(replacedWithNormalized.planDigest).not.toBe(mixed.planDigest)
+      expect(replacedWithNormalized.chunks[0].chunkDigest).not.toBe(
+        mixed.chunks[0].chunkDigest,
+      )
+
+      const base = ensureGroup()
+      const { displayName: _displayName, ...withoutDisplayName } = base
+      expect(() =>
+        parseLegacyImportGroupEffectPlanV1(withoutDisplayName),
+      ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+      expect(() =>
+        parseLegacyImportGroupEffectPlanV1({ ...base, displayName: null }),
+      ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+      expect(() =>
+        parseLegacyImportGroupEffectPlanV1({ ...base, displayName: '' }),
+      ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+      expect(() =>
+        parseLegacyImportGroupEffectPlanV1({ ...base, extra: true }),
+      ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+      // Opaque-leaf substitution cannot stand in for the required field.
+      expect(() =>
+        parseLegacyImportGroupEffectPlanV1({
+          ...withoutDisplayName,
+          compatibilityMetadata: { displayName: 'Engineering' },
+        }),
+      ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+    })
+
+    it('keeps the three fields as digest inputs across serialize/parse/replay', () => {
+      const seed = manifestSeed({
+        batch: { ...manifestSeed().batch, kind: 'normal', source: null },
+        groupRevision: 1,
+        groupStateFingerprint: HEX_A,
+      })
+      const built = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: seed,
+        items: items(),
+        recordWrites: [recordWrite({ timezone: 'Asia/Shanghai' })],
+        groupEffects: [
+          ensureGroup({
+            normalizedName: 'engineering',
+            displayName: 'Engineering',
+          }),
+        ],
+        groupEffectPlacements: [{ effectId: GROUP_ID, firstSourceOrdinal: 0 }],
+      })
+
+      const serializedManifest = JSON.parse(JSON.stringify(built.manifest))
+      const serializedChunk = JSON.parse(
+        JSON.stringify({
+          items: built.chunks[0].body.items,
+          recordWrites: built.chunks[0].body.recordWrites,
+          groupEffects: built.chunks[0].body.groupEffects,
+        }),
+      )
+      const replayedManifest = parseLegacyImportExecutionPlanManifestV1(serializedManifest)
+      const replayedBody = parseLegacyImportExecutionPlanChunkBodyV1(serializedChunk)
+      const reassembled = reassembleLegacyImportPlanChunksV1(
+        [
+          {
+            chunkIndex: 0,
+            firstSourceOrdinal: 0,
+            sourceRowCount: built.chunks[0].sourceRowCount,
+            chunkDigest: built.chunks[0].chunkDigest,
+            body: replayedBody,
+          },
+        ],
+        replayedManifest.sourceRowCount,
+      )
+      const replayDigest = computeLegacyImportPlanDigestV1({
+        manifest: replayedManifest,
+        items: reassembled.items,
+        recordWrites: reassembled.recordWrites,
+        groupEffects: reassembled.groupEffects,
+      })
+
+      expect(replayedManifest.batch).toMatchObject({ kind: 'normal', source: null })
+      expect(reassembled.recordWrites[0].timezone).toBe('Asia/Shanghai')
+      expect(reassembled.groupEffects[0]).toMatchObject({
+        kind: 'ensure_group',
+        normalizedName: 'engineering',
+        displayName: 'Engineering',
+      })
+      expect(replayDigest).toBe(built.planDigest)
+      expect(computeLegacyImportChunkDigestV1(replayedBody)).toBe(
+        built.chunks[0].chunkDigest,
+      )
+
+      // Independent substitutions of each field diverge the digest (neighboring
+      // guards neutralized: full valid plan shape is held constant).
+      const sourceMutated = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: manifestSeed({
+          batch: { ...seed.batch, kind: 'normal', source: 'manual' },
+          groupRevision: 1,
+          groupStateFingerprint: HEX_A,
+        }),
+        items: items(),
+        recordWrites: [recordWrite({ timezone: 'Asia/Shanghai' })],
+        groupEffects: [
+          ensureGroup({
+            normalizedName: 'engineering',
+            displayName: 'Engineering',
+          }),
+        ],
+        groupEffectPlacements: [{ effectId: GROUP_ID, firstSourceOrdinal: 0 }],
+      })
+      const timezoneMutated = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: seed,
+        items: items(),
+        recordWrites: [recordWrite({ timezone: 'UTC' })],
+        groupEffects: [
+          ensureGroup({
+            normalizedName: 'engineering',
+            displayName: 'Engineering',
+          }),
+        ],
+        groupEffectPlacements: [{ effectId: GROUP_ID, firstSourceOrdinal: 0 }],
+      })
+      const displayMutated = buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: seed,
+        items: items(),
+        recordWrites: [recordWrite({ timezone: 'Asia/Shanghai' })],
+        groupEffects: [
+          ensureGroup({
+            normalizedName: 'engineering',
+            displayName: 'ENGINEERING',
+          }),
+        ],
+        groupEffectPlacements: [{ effectId: GROUP_ID, firstSourceOrdinal: 0 }],
+      })
+      expect(sourceMutated.planDigest).not.toBe(built.planDigest)
+      expect(timezoneMutated.planDigest).not.toBe(built.planDigest)
+      expect(displayMutated.planDigest).not.toBe(built.planDigest)
+    })
   })
 })

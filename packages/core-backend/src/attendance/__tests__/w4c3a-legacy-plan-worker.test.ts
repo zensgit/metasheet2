@@ -10,6 +10,7 @@ import {
   type AttendanceLegacyPlanWorkerCallbacksV1,
   type AttendanceLegacyPlanWorkerJobV1,
   type AttendanceLegacyPlanWorkerStoredPlanV1,
+  type VerifiedAttendanceLegacyPlanV1,
 } from '../w4c3a-legacy-plan-worker'
 import {
   createVerifiedAttendanceCalculationTargetIdentityV1,
@@ -114,7 +115,8 @@ function packagePlan(): { job: AttendanceLegacyPlanWorkerJobV1; stored: Attendan
       recordWriteId: RECORD_ID, recordId: RECORD_ID, orgId: ORG_ID, userId: USER_ID, workDate: '2026-07-30',
       sourceBatchId: BATCH_ID, sourceOrdinals: [0], targetRevision: 0, existingRecordPreconditionFingerprint: HEX_A,
       expectedSourceOwnership: null, mergeMode: 'merge', firstInAt: null, lastOutAt: null, workMinutes: null,
-      lateMinutes: null, earlyLeaveMinutes: null, status: null, isWorkday: null, compatibilityMetadata: {},
+      lateMinutes: null, earlyLeaveMinutes: null, status: null, isWorkday: null, timezone: 'Asia/Shanghai',
+      compatibilityMetadata: {},
       policySnapshot: {}, profileSnapshot: {}, multiPunchSnapshot: {}, attributionSnapshot: {}, resultSlots: {},
     }],
     groupEffects: [],
@@ -196,6 +198,173 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     await createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID)
     expect(base.calls).toContain('failed:ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH')
     expect(base.calls).not.toContain('effect')
+  })
+
+  it('fails closed when a frozen record timezone is substituted in the persisted chunk', async () => {
+    const { stored } = packagePlan()
+    const mutated = {
+      ...stored,
+      chunks: stored.chunks.map((chunk) => ({
+        ...chunk,
+        chunk: {
+          ...chunk.chunk,
+          recordWrites: chunk.chunk.recordWrites.map((write) => ({
+            ...write,
+            timezone: write.timezone === 'UTC' ? 'Asia/Tokyo' : 'UTC',
+          })),
+        },
+      })),
+    }
+    const base = await callbacks({ loadPlan: vi.fn(async () => mutated) })
+    await createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID)
+    expect(base.calls).toContain('failed:ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH')
+    expect(base.calls).not.toContain('effect')
+  })
+
+  it('replays source=null and frozen timezone from persisted manifest/chunk only', async () => {
+    const identityProofVector: unknown[] = []
+    const GROUP_ID = '10000000-0000-4000-8000-000000000008'
+    const manifestSeed: Omit<
+      LegacyImportExecutionPlanManifestV1,
+      'sourceOrdinalDigest' | 'chunkVectorDigest'
+    > = {
+      schemaVersion: 1,
+      orgId: ORG_ID,
+      jobId: JOB_ID,
+      batchId: BATCH_ID,
+      sourceKind: 'import_batch',
+      sourceRef: 'attendance-import',
+      createdBy: 'admin-a',
+      actorId: 'admin-a',
+      actorPosture: 'platform_admin',
+      tokenSubjectUserId: 'admin-a',
+      acceptedWritePosture: 'legacy_projection_only',
+      identityProofVectorDigest: sha256HexOfCanonicalJsonV1(identityProofVector),
+      commandFingerprint: HEX_A,
+      legacyInputFingerprint: HEX_B,
+      operationalBranch: 'strict_targeted',
+      legacyRowSourceKind: 'direct_rows',
+      sourceRowCount: 1,
+      w4ItemCount: 1,
+      w4DistinctTargetCount: 1,
+      w4ItemSequenceFingerprint: HEX_C,
+      w4ItemSetFingerprint: HEX_D,
+      legacySourceRowLimit: null,
+      groupRevision: 1,
+      groupStateFingerprint: HEX_A,
+      batch: {
+        kind: 'normal',
+        source: null,
+        ruleSetId: null,
+        mappingSnapshot: {},
+        sourceRowCount: 1,
+        status: 'committed',
+        idempotencyKey: null,
+        visibilityRule: 'org',
+        engine: 'standard',
+        chunkConfig: { itemsChunkSize: 100, recordsChunkSize: 100 },
+        recordUpsertStrategy: 'values',
+        itemsInsertStrategy: 'unnest',
+        mappingProfileId: null,
+        compatibilityMetadata: {},
+        groupSync: null,
+        itemReturnPolicy: { returnItems: false },
+        skippedSamplePolicy: { limit: 50 },
+        resultSlots: {},
+      },
+      artifactCleanup: { kind: 'none' },
+    }
+    const plan = buildLegacyImportExecutionPlanPackageV1({
+      manifestSeed,
+      items: [{
+        kind: 'apply', ordinal: 0, semanticOrdinal: 0, itemId: ITEM_ID,
+        targetRef: JSON.stringify([ORG_ID, USER_ID, '2026-07-30']),
+        previewSnapshot: {},
+        recordWriteRef: RECORD_ID,
+      }],
+      recordWrites: [{
+        recordWriteId: RECORD_ID, recordId: RECORD_ID, orgId: ORG_ID, userId: USER_ID,
+        workDate: '2026-07-30', sourceBatchId: BATCH_ID, sourceOrdinals: [0],
+        targetRevision: 0, existingRecordPreconditionFingerprint: HEX_A,
+        expectedSourceOwnership: null, mergeMode: 'merge', firstInAt: null, lastOutAt: null,
+        workMinutes: null, lateMinutes: null, earlyLeaveMinutes: null, status: null,
+        isWorkday: null, timezone: 'Asia/Shanghai', compatibilityMetadata: {},
+        policySnapshot: {}, profileSnapshot: {}, multiPunchSnapshot: {},
+        attributionSnapshot: {}, resultSlots: {},
+      }],
+      groupEffects: [{
+        kind: 'ensure_group', groupId: GROUP_ID, normalizedName: 'engineering',
+        displayName: 'Engineering', code: null, timezone: 'Asia/Taipei', ruleSetId: null,
+      }],
+      groupEffectPlacements: [{ effectId: GROUP_ID, firstSourceOrdinal: 0 }],
+    })
+    const job: AttendanceLegacyPlanWorkerJobV1 = {
+      jobId: JOB_ID, orgId: ORG_ID, status: 'queued', w4ContractVersion: 1, batchId: BATCH_ID,
+      sourceKind: 'import_batch', sourceRef: 'attendance-import', createdBy: 'admin-a',
+      actorId: 'admin-a', actorPosture: 'platform_admin', tokenSubjectUserId: 'admin-a',
+      acceptedWritePosture: 'legacy_projection_only', commandFingerprint: HEX_A,
+      legacyInputFingerprint: HEX_B, operationalBranch: 'strict_targeted',
+      identityProofVector, identityProofVectorDigest: plan.manifest.identityProofVectorDigest,
+      itemCount: 1, distinctTargetCount: 1, itemSequenceFingerprint: HEX_C,
+      itemSetFingerprint: HEX_D, planDigest: plan.planDigest,
+    }
+    const stored: AttendanceLegacyPlanWorkerStoredPlanV1 = {
+      planDigest: plan.planDigest,
+      chunkVectorDigest: plan.manifest.chunkVectorDigest,
+      chunkCount: plan.chunks.length,
+      manifest: JSON.parse(JSON.stringify(plan.manifest)),
+      chunks: plan.chunks.map((chunk) => ({
+        chunkIndex: chunk.chunkIndex,
+        firstSourceOrdinal: chunk.firstSourceOrdinal,
+        sourceRowCount: chunk.sourceRowCount,
+        chunkDigest: chunk.chunkDigest,
+        chunk: JSON.parse(JSON.stringify(chunk.body)),
+      })),
+    }
+    let seenPlan: VerifiedAttendanceLegacyPlanV1 | null = null
+    const ids = await identities()
+    const calls: string[] = []
+    const hooks: AttendanceLegacyPlanWorkerCallbacksV1<object> = {
+      readCandidateJob: vi.fn(async () => job),
+      runSerializable: vi.fn(async (work) => work({})),
+      acquireClass00: vi.fn(async () => { calls.push('00') }),
+      resolveWritePosture: vi.fn(async () => { calls.push('posture'); return 'legacy_projection_only' }),
+      lockJob: vi.fn(async () => { calls.push('job'); return job }),
+      authorizeFullImport: vi.fn(async () => { calls.push('auth'); return true }),
+      reservationIdentities: vi.fn(() => [ids.batch]),
+      acquireClass10: vi.fn(async () => { calls.push('10') }),
+      loadPlan: vi.fn(async () => { calls.push('plan'); return stored }),
+      targetIdentities: vi.fn(() => [ids.target]),
+      acquireClass11: vi.fn(async () => { calls.push('11') }),
+      recheckPreconditions: vi.fn(async () => { calls.push('preconditions'); return true }),
+      executeVerifiedPlan: vi.fn(async (_trx, _job, verified) => {
+        calls.push('effect')
+        seenPlan = verified
+        return COMPLETED_RESPONSE
+      }),
+      storeCompletedResponseAndTerminalize: vi.fn(async () => { calls.push('terminal') }),
+      loadCompletedResponse: vi.fn(async () => {
+        return {
+          response: COMPLETED_RESPONSE,
+          responseDigest: computeLegacyImportAsyncJobSummaryDigestV1(COMPLETED_RESPONSE),
+        }
+      }),
+      markSuspendedQueued: vi.fn(async () => { calls.push('suspend') }),
+      markPlanFailed: vi.fn(async (_trx, _jobId, reason) => { calls.push(`failed:${reason}`) }),
+    }
+    await expect(createAttendanceLegacyPlanWorkerV1(hooks).process(JOB_ID)).resolves.toMatchObject({
+      kind: 'completed',
+    })
+    expect(calls).toContain('effect')
+    expect(seenPlan).toMatchObject({
+      manifest: { batch: { kind: 'normal', source: null } },
+      recordWrites: [{ timezone: 'Asia/Shanghai' }],
+      groupEffects: [{
+        kind: 'ensure_group',
+        normalizedName: 'engineering',
+        displayName: 'Engineering',
+      }],
+    })
   })
 
   it('rejects authorization before loading the manifest', async () => {

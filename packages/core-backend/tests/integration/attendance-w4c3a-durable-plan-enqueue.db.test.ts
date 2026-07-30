@@ -241,6 +241,7 @@ function strictInput(org: VerifiedAttendanceOrgIdentityV1, batchId: string, acto
     orgId: org.orgId, userId: TARGET_USER, workDate: '2026-07-30', sourceOrdinals: [0],
     mergeMode: 'merge', firstInAt: '2026-07-30T01:00:00.000Z', lastOutAt: '2026-07-30T09:00:00.000Z',
     workMinutes: 480, lateMinutes: 0, earlyLeaveMinutes: 0, status: 'normal', isWorkday: true,
+    timezone: 'Asia/Shanghai',
     compatibilityMetadata: {}, policySnapshot: {}, profileSnapshot: {}, multiPunchSnapshot: {},
     attributionSnapshot: {}, sourceBatchId: batchId, resultSlots: {},
   }
@@ -428,6 +429,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
           earlyLeaveMinutes: 0,
           status: 'normal',
           isWorkday: true,
+          timezone: 'Asia/Shanghai',
           compatibilityMetadata: {},
           policySnapshot: {},
           profileSnapshot: {},

@@ -1,10 +1,14 @@
 /**
- * W4C-3a phase 1 (#4556 / OD-W4C-56=(a)) — durable LegacyImportExecutionPlanV1
- * schema types, exact-key parsers, canonical digests, and fixed 500-row chunker.
+ * W4C-3a phase 1 (#4556 / OD-W4C-56=(a), OD-W4C-57=(a)) — durable
+ * LegacyImportExecutionPlanV1 schema types, exact-key parsers, canonical digests,
+ * and fixed 500-row chunker.
  *
  * Authority:
  *  docs/development/attendance-issue-4556-w4c3a-durable-legacy-plan-amendment-20260729.md
- *  (sections 3, 4, 5.1, 6, 7, 8, 9).
+ *  (sections 3, 4, 5.1, 6, 7, 8, 9);
+ *  docs/development/attendance-issue-4556-w4c3a-byte-parity-field-amendment-20260730.md
+ *  (OD-W4C-57=(a) exact union correction for batch source, record timezone,
+ *  ensure_group displayName).
  *
  * Scope of this module:
  *  - closed unions and exact-key parsers for the V1 plan root, batch, items,
@@ -101,6 +105,21 @@ export const ATTENDANCE_LEGACY_IMPORT_MERGE_MODES_V1 = Object.freeze([
 ] as const)
 export type AttendanceLegacyImportMergeModeV1 =
   (typeof ATTENDANCE_LEGACY_IMPORT_MERGE_MODES_V1)[number]
+
+/**
+ * Closed normal-batch source domain (OD-W4C-57=(a)). Null is a distinct digest
+ * input; empty string is not a null surrogate.
+ */
+export const ATTENDANCE_LEGACY_IMPORT_BATCH_SOURCES_V1 = Object.freeze([
+  'dingtalk',
+  'manual',
+  'dingtalk_csv',
+  'dingtalk_api',
+  'csv',
+] as const)
+export type AttendanceLegacyImportBatchSourceV1 =
+  | (typeof ATTENDANCE_LEGACY_IMPORT_BATCH_SOURCES_V1)[number]
+  | null
 
 export const ATTENDANCE_LEGACY_PLAN_FAILURE_REASON_CODES_V1 = Object.freeze([
   'ATTENDANCE_IMPORT_LEGACY_PLAN_MISSING',
@@ -372,7 +391,7 @@ export function parseLegacyImportArtifactCleanupV1(
 export type LegacyImportBatchPlanV1 =
   | {
       readonly kind: 'normal'
-      readonly source: string
+      readonly source: AttendanceLegacyImportBatchSourceV1
       readonly ruleSetId: string | null
       readonly mappingSnapshot: unknown
       readonly sourceRowCount: number
@@ -441,6 +460,14 @@ const BATCH_REPLAY_KEYS = [
   'requesterVisibility',
 ] as const
 
+function requireNullableBatchSource(
+  value: unknown,
+  code: string,
+): AttendanceLegacyImportBatchSourceV1 {
+  if (value === null) return null
+  return requireOneOf(value, ATTENDANCE_LEGACY_IMPORT_BATCH_SOURCES_V1, code)
+}
+
 export function parseLegacyImportBatchPlanV1(value: unknown): LegacyImportBatchPlanV1 {
   const code = 'W4C3A_BATCH_PLAN_INVALID'
   if (!isPlainObject(value)) fail(code)
@@ -448,7 +475,7 @@ export function parseLegacyImportBatchPlanV1(value: unknown): LegacyImportBatchP
     const obj = requireExactKeys(value, BATCH_NORMAL_KEYS, code)
     return freezeDeep({
       kind: 'normal' as const,
-      source: requireString(obj.source, code),
+      source: requireNullableBatchSource(obj.source, code),
       ruleSetId: requireNullableString(obj.ruleSetId, code),
       mappingSnapshot: parseOpaqueLeaf(obj.mappingSnapshot, code),
       sourceRowCount: requireNonNegInt(obj.sourceRowCount, code),
@@ -610,6 +637,8 @@ export type LegacyImportRecordWritePlanV1 = {
   readonly earlyLeaveMinutes: number | null
   readonly status: string | null
   readonly isWorkday: boolean | null
+  /** Exact resolved timezone frozen at prepare time (OD-W4C-57=(a)). */
+  readonly timezone: string
   readonly targetRevision: number
   readonly existingRecordPreconditionFingerprint: string
   readonly expectedSourceOwnership: string | null
@@ -722,6 +751,7 @@ const RECORD_WRITE_KEYS = [
   'earlyLeaveMinutes',
   'status',
   'isWorkday',
+  'timezone',
   'targetRevision',
   'existingRecordPreconditionFingerprint',
   'expectedSourceOwnership',
@@ -765,6 +795,7 @@ export function parseLegacyImportRecordWritePlanV1(
         : requireNonNegInt(obj.earlyLeaveMinutes, code),
     status: requireNullableString(obj.status, code),
     isWorkday: obj.isWorkday === null ? null : requireBool(obj.isWorkday, code),
+    timezone: requireString(obj.timezone, code),
     targetRevision: requireNonNegSafeInt(obj.targetRevision, code),
     existingRecordPreconditionFingerprint: requireHex64(
       obj.existingRecordPreconditionFingerprint,
@@ -787,6 +818,13 @@ export type LegacyImportGroupEffectPlanV1 =
       readonly kind: 'ensure_group'
       readonly groupId: string
       readonly normalizedName: string
+      /**
+       * Exact non-empty trimmed display name written to attendance_groups.name.
+       * Must satisfy displayName.trim() === displayName,
+       * displayName.toLowerCase() === normalizedName, and not match /^\d+$/
+       * (OD-W4C-57=(a)). Never replaced by normalizedName at parse time.
+       */
+      readonly displayName: string
       readonly code: string | null
       readonly timezone: string
       readonly ruleSetId: string | null
@@ -802,11 +840,13 @@ const GROUP_ENSURE_KEYS = [
   'kind',
   'groupId',
   'normalizedName',
+  'displayName',
   'code',
   'timezone',
   'ruleSetId',
 ] as const
 const MEMBER_ENSURE_KEYS = ['kind', 'memberId', 'groupRef', 'userId'] as const
+const NUMERIC_ONLY_GROUP_NAME_RE = /^\d+$/
 
 export function parseLegacyImportGroupEffectPlanV1(
   value: unknown,
@@ -822,10 +862,19 @@ export function parseLegacyImportGroupEffectPlanV1(
     ) {
       fail(code)
     }
+    const displayName = requireString(obj.displayName, code)
+    if (
+      displayName.trim() !== displayName ||
+      displayName.toLowerCase() !== normalizedName ||
+      NUMERIC_ONLY_GROUP_NAME_RE.test(displayName)
+    ) {
+      fail(code)
+    }
     return freezeDeep({
       kind: 'ensure_group' as const,
       groupId: requireUuid(obj.groupId, code),
       normalizedName,
+      displayName,
       code: requireNullableString(obj.code, code),
       timezone: requireString(obj.timezone, code),
       ruleSetId:
