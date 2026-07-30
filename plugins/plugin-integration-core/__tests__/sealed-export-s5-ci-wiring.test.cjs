@@ -78,6 +78,20 @@ const gate = workflow.jobs['gate-check']
 assert.ok(gate && typeof gate === 'object')
 assert.deepEqual(gate.needs, ['sqlserver-product-action'])
 assert.equal(gate.if, 'always()')
+assert.deepEqual(gate.services?.postgres, {
+  image: 'postgres:16',
+  env: {
+    POSTGRES_USER: 'postgres',
+    POSTGRES_PASSWORD: 'postgres',
+    POSTGRES_DB: 'metasheet_s5',
+  },
+  ports: ['5432:5432'],
+  options:
+    '--health-cmd "pg_isready -U postgres -d metasheet_s5" --health-interval 5s --health-timeout 5s --health-retries 20',
+})
+assert.deepEqual(gate.env, {
+  DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s5',
+})
 assert.ok(Array.isArray(gate.steps))
 
 const resultStep = gate.steps.find(
@@ -98,10 +112,9 @@ const realPostgresStep = gate.steps.find(
   (step) => step.name === 'Run real-Postgres signer lifecycle migration gate',
 )
 assert.ok(realPostgresStep, 'the gate must execute the real Postgres lifecycle test')
-assert.match(realPostgresStep.run, /vitest\.integration\.config\.ts/)
-assert.match(
+assert.equal(
   realPostgresStep.run,
-  /sealed-export-signer-authority-lifecycle-migration\.db\.test\.ts/,
+  'pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/sealed-export-signer-authority-lifecycle-migration.db.test.ts --reporter=dot',
 )
 
 const downloadStep = gate.steps.find(

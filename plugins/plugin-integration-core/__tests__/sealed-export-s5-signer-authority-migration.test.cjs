@@ -186,6 +186,11 @@ assert.match(
   /BEFORE UPDATE OR DELETE ON integration_sealed_export_terminal_signer_keys/,
   'terminal signer history is append-only for first-party DML',
 )
+assert.match(
+  terminalHistorySql,
+  /BEFORE TRUNCATE ON integration_sealed_export_terminal_signer_keys[\s\S]*?FOR EACH STATEMENT/,
+  'terminal signer history refuses whole-table removal under ordinary DML',
+)
 
 for (const forbidden of [
   'private_key',
