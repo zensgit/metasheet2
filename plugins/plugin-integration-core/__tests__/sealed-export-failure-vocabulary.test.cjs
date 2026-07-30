@@ -1,6 +1,7 @@
 'use strict'
 
-// Sealed-export S1 — closed failure vocabulary battery. Plain node test, hermetic.
+// Sealed-export latent surface — closed failure vocabulary battery. Plain node
+// test, hermetic.
 //
 // §10 of the ratified S0 baseline requires three pins, and this file carries all
 // three:
@@ -115,8 +116,8 @@ function vocabularyExactPin() {
 // PIN 2 — latent-surface partition, and it must be DERIVED, not hand-matched.
 // ---------------------------------------------------------------------------
 function latentSurfacePin() {
-  const reached = new Set(vocabulary.SEALED_EXPORT_S1_REACHED_REASONS)
-  const unreached = new Set(vocabulary.SEALED_EXPORT_S1_UNREACHED_REASONS)
+  const reached = new Set(vocabulary.SEALED_EXPORT_LATENT_REACHED_REASONS)
+  const unreached = new Set(vocabulary.SEALED_EXPORT_LATENT_UNREACHED_REASONS)
 
   // Disjoint, and together exactly the vocabulary.
   for (const reason of reached) assert.equal(unreached.has(reason), false, 'partition overlap: ' + reason)
@@ -154,7 +155,7 @@ function latentSurfacePin() {
   assert.deepEqual(
     Array.from(observed).sort(),
     Array.from(reached).sort(),
-    'declared S1-reached set must equal the set the surface actually raises',
+    'declared latent-reached set must equal the set the surface actually raises',
   )
 }
 
