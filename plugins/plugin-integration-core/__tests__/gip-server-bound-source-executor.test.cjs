@@ -17,6 +17,7 @@
 // Hermetic. No database, no network, no route, no flag.
 
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -1644,7 +1645,7 @@ const DECLARED_WEAKSET_EXEMPTIONS = Object.freeze({
 // value, because "it threw" is not "no" (round 6, P2-C); one that is not exported at all
 // cannot be asked from outside the module.
 //
-// THIRTEEN declarations, NINE of them sweepable. The seventh pre-existing
+// FOURTEEN declarations, TEN of them sweepable. The seventh pre-existing
 // sweepable brand —
 // `firstPartyReadSourceConfigStores` — is the one round 6's hand-authored checker table
 // omitted, and it is minted by a factory this PR changed. The eighth is the
@@ -1673,6 +1674,7 @@ const DECLARED_TRUST_DECLARATIONS = Object.freeze([
   'gip-sqlserver-snapshot-page-sequence-strategy.cjs.trustedStrategies -> isCertifiedSqlServerSnapshotPageSequenceStrategy [sweepable]',
   'gip-system-identity-read.cjs.trustedSystemIdentityServices -> assertTrustedSystemIdentityService [checker-not-exported]',
   'read-source-config-store.cjs.firstPartyReadSourceConfigStores -> isFirstPartyReadSourceConfigStore [sweepable]',
+  'sealed-export/private-ingestion-manifest-verifier.cjs.trustedManifestVerifiers -> isTrustedPrivateIngestionManifestVerifier [sweepable]',
 ])
 
 // A PURE function of injectable inputs, so both positive controls can run the IDENTICAL
@@ -1805,6 +1807,8 @@ const DECLARED_TRUST_MINTING_PATHS = Object.freeze({
   'sqlserverRcsi.resolveCertifiedSqlServerRcsiStrategy': 'certifiedSqlServerRcsiStrategy',
   'sqlserverSnapshot.resolveCertifiedSqlServerSnapshotPageSequenceStrategy':
     'certifiedSqlServerSnapshotPageSequenceStrategy',
+  'sealedExportManifest.createHarnessPrivateIngestionManifestVerifierForTests':
+    'privateIngestionManifestVerifier',
 })
 
 // The brand's short name is derived from its checker, so a brand cannot be renamed in
@@ -2145,9 +2149,9 @@ function trustBrandInventoryIsDerivedNotAuthored() {
     exemptOccurrences: reach.exemptions.length,
   }
   assert.deepEqual(counts, {
-    declarations: 13,
-    declaringModules: 8,
-    sweepable: 9,
+    declarations: 14,
+    declaringModules: 9,
+    sweepable: 10,
     unjudgeable: 4,
     exemptOccurrences: 4,
   }, 'the derived counts disagree with the tree — the banner below may not print a number no assertion pinned')
@@ -2185,6 +2189,8 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
       'sqlserverSnapshot',
     'gip-sqlserver-snapshot-page-sequence-executor.cjs':
       'sqlserverSnapshotExecutor',
+    'sealed-export/private-ingestion-manifest-verifier.cjs':
+      'sealedExportManifest',
   })
   // THE WALK IS PINNED IN BOTH DIRECTIONS. Round 7 asserted only that every DERIVED
   // module has an alias, which is one-directional: a module DROPPING OUT of the
@@ -2209,8 +2215,8 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
   for (const declaration of reach.sweepable) {
     checkers[brandKeyFor(declaration.checker)] = byName.get(declaration.module)[declaration.checker]
   }
-  assert.equal(Object.keys(checkers).length, 9,
-    `the derived checker set must be the nine sweepable brands, got ${Object.keys(checkers).sort().join(', ')}`)
+  assert.equal(Object.keys(checkers).length, 10,
+    `the derived checker set must be the ten sweepable brands, got ${Object.keys(checkers).sort().join(', ')}`)
 
   const result = await saturateAndFindMintingPaths(tables, 3, checkers)
 
@@ -2230,7 +2236,8 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     'serverBoundSourceExecutor', 'sourceBinder', 'systemIdentityAuthority',
   ], 'the closure must reach every sweepable brand except bindingResolution, which needs an APPROVED '
     + 'config row, plus the two certified SQL Server strategies, which each need an exact first-party '
-    + 'profile coordinate; all three are executed directly below instead')
+    + 'profile coordinate, and the latent manifest-verifier harness, which needs an Ed25519 KeyObject; '
+    + 'all four are executed directly below instead')
   assert.equal(result.capHits, 0,
     `the saturation pool hit its cap (${result.capHits} values dropped) — the sweep is TRUNCATED, so the `
     + 'statement below would be about a subset of even this derived reach')
@@ -2284,12 +2291,30 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     'the exact-coordinate SQL Server snapshot resolver is declared as a direct minting path; it must actually '
       + 'resolve the one module-owned certified strategy',
   )
-  assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 3,
-    'the declared ledger must be exactly the swept set plus the three directly-executed paths')
+  const manifestVerifierModule = byName.get(
+    'sealed-export/private-ingestion-manifest-verifier.cjs',
+  )
+  const signer = crypto.generateKeyPairSync('ed25519')
+  const manifestVerifier =
+    manifestVerifierModule.createHarnessPrivateIngestionManifestVerifierForTests({
+      signerKeys: [{
+        signerKeyId: 'trust-surface-signer',
+        publicKey: signer.publicKey,
+      }],
+    })
+  assert.equal(
+    manifestVerifierModule.isTrustedPrivateIngestionManifestVerifier(
+      manifestVerifier,
+    ),
+    true,
+    'the latent S3 harness factory is a declared trust-minting residual and must actually mint the brand',
+  )
+  assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 4,
+    'the declared ledger must be exactly the swept set plus the four directly-executed paths')
 
   console.log(`  TRUST-SURFACE ${result.calls} calls over ${result.exportCount} exports in `
     + `${reach.modules.length} DERIVED modules, pool=${result.poolSize}: ${Object.keys(swept).length} minting paths `
-    + `swept + 3 executed directly = ${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
+    + `swept + 4 executed directly = ${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
 }
 
 // ---------------------------------------------------------------------------

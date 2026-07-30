@@ -676,8 +676,8 @@ function verifyRowsetAgainstManifest(manifest, rows) {
 // §6.4 chunk ordering, duplication and replay classification.
 //
 // PURE. No upload session is created, nothing is persisted, no nonce is consumed and
-// no tombstone is consulted — those are S3/S4 and are out of scope, which is why
-// SEALED_EXPORT_MANIFEST_REPLAYED stays in the S1-unreached partition.
+// no tombstone is consulted. S3 consumes these pure decisions and owns replay state;
+// this S1 helper still does not raise SEALED_EXPORT_MANIFEST_REPLAYED itself.
 // ---------------------------------------------------------------------------
 // §6.2 binds "ordered chunk identities and digests", so a receipt is checked against the
 // manifest descriptor AT ITS INDEX — never against another receipt, another submission or

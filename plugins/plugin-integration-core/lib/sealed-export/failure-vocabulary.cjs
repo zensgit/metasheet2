@@ -86,8 +86,8 @@ const SEALED_EXPORT_FIXED_INTERNAL_REASON = 'SEALED_EXPORT_INTERNAL_ERROR'
 // ---------------------------------------------------------------------------
 // Latent-surface partition (§10 "runtime consumer pin", named honestly).
 //
-// S1 and the owner-authorized S2 producer feasibility slice ship NO runtime
-// consumer. What CAN be pinned exactly is which reasons this whole latent
+// S1 plus the owner-authorized S2 producer and S3 private-ingestion slices ship
+// NO runtime consumer. What CAN be pinned exactly is which reasons this whole latent
 // surface can actually raise and which it cannot. The two lists are asserted
 // disjoint and to union to the full vocabulary; a new throw site that lights up
 // an UNREACHED reason, or one that stops reaching a REACHED reason, REDs the pin.
@@ -105,6 +105,7 @@ const SEALED_EXPORT_LATENT_REACHED_REASONS = Object.freeze([
   'SEALED_EXPORT_MANIFEST_BINDING_MISMATCH',
   'SEALED_EXPORT_MANIFEST_SCHEMA_MISMATCH',
   'SEALED_EXPORT_MANIFEST_SNAPSHOT_MISMATCH',
+  'SEALED_EXPORT_MANIFEST_REPLAYED',
   'SEALED_EXPORT_UPLOAD_SESSION_INVALID',
   'SEALED_EXPORT_CHUNK_UNDECLARED',
   'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH',
@@ -114,16 +115,15 @@ const SEALED_EXPORT_LATENT_REACHED_REASONS = Object.freeze([
   'SEALED_EXPORT_ARTIFACT_DIGEST_MISMATCH',
   'SEALED_EXPORT_ROW_COUNT_MISMATCH',
   'SEALED_EXPORT_BUDGET_EXCEEDED',
+  'SEALED_EXPORT_ARTIFACT_EXPIRED',
+  'SEALED_EXPORT_STAGING_WRITE_FAILED',
   'SEALED_EXPORT_INTERNAL_ERROR',
 ])
 
 // Reasons whose preconditions still belong to later slices: binding
-// qualification, upload replay/tombstones, staging, apply, and CAS.
+// qualification, seal/apply verification, and CAS.
 const SEALED_EXPORT_LATENT_UNREACHED_REASONS = Object.freeze([
   'SEALED_EXPORT_BINDING_UNQUALIFIED',
-  'SEALED_EXPORT_MANIFEST_REPLAYED',
-  'SEALED_EXPORT_ARTIFACT_EXPIRED',
-  'SEALED_EXPORT_STAGING_WRITE_FAILED',
   'SEALED_EXPORT_SEAL_INCOMPLETE',
   'SEALED_EXPORT_APPLY_INCOMPLETE',
   'SEALED_EXPORT_GENERATION_VERIFY_FAILED',
