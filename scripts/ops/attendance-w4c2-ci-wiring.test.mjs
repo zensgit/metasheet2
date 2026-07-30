@@ -82,9 +82,10 @@ const FILES = Object.freeze([
   // durable delivery / lock-order / atomicity gates (section 2 gates 2-8, 15, 17, 19,
   // 22-23 controls) — same two-point discipline as the nine above.
   'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
-  // W4C-3a record-target preconditions: present/missing commit-order races and
-  // transaction-held lock proofs. Keep the same no-DB-exclude + real-DB-run-list
-  // + file-exists contract as the W4C-2 evidence suites above.
+  // W4C-3a durable enqueue and record-target preconditions: SERIALIZABLE
+  // reservation/freeze plus present/missing commit-order and lock-hold proofs.
+  // Keep the same two-point wiring and file-exists contract as the suites above.
+  'tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts',
   'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
 ])
 
