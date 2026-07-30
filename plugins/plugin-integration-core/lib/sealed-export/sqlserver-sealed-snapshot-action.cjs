@@ -132,7 +132,11 @@ SELECT
       GROUP BY source.row_id
       HAVING COUNT_BIG(*) > 1
     ) AS duplicate_groups
-  ) AS bigint) AS duplicateKeyGroups
+  ) AS bigint) AS duplicateKeyGroups,
+  CAST((
+    SELECT COUNT_BIG(*)
+    FROM ${safe} AS source
+  ) AS bigint) AS sourceRowCount
 `
 }
 
@@ -166,8 +170,10 @@ function computeQueryBindingDigest({ objectKey, relationId, tableRef }) {
 }
 
 function resolveCertifiedRelation(relationId) {
+  if (!Object.prototype.hasOwnProperty.call(CERTIFIED_RELATIONS, relationId)) {
+    failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
+  }
   const relation = CERTIFIED_RELATIONS[relationId]
-  if (!relation) failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
   return relation
 }
 

@@ -18,6 +18,7 @@ const {
   CAPTURE_METADATA_SQL,
   CERTIFIED_RELATIONS,
   computeQueryBindingDigest,
+  resolveCertifiedRelation,
   SEALED_EXPORT_S5_CHUNK_BYTES,
   SEALED_EXPORT_S5_SORT_RUN_BYTES,
   SEALED_EXPORT_S5_SOURCE_SCHEMA_DIGEST,
@@ -53,6 +54,16 @@ const APPROVED_CONFIG_VERSION_ID = 's5-config-v1'
 const BINDING_VERSION = 's5-binding-v1'
 const ROLE_BINDING_FINGERPRINT = 's5-role-binding'
 const TENANT_DOMAIN_BINDING = 's5-tenant-domain'
+
+function certifiedRelationLookupRejectsPrototypeProperties() {
+  assert.equal(resolveCertifiedRelation(RELATION_ID), CERTIFIED_RELATIONS[RELATION_ID])
+  for (const relationId of ['constructor', 'toString', '__proto__']) {
+    expectReason(
+      () => resolveCertifiedRelation(relationId),
+      'SEALED_EXPORT_BINDING_UNQUALIFIED',
+    )
+  }
+}
 
 function sourceRows(count = 12, overrides = {}) {
   return Array.from({ length: count }, (_, index) => ({
@@ -108,6 +119,7 @@ async function buildService(options = {}) {
     stageObserver: options.stageObserver || null,
     hermeticCapture: {
       rows: options.rows || sourceRows(),
+      streamRows: options.streamRows || options.rows || sourceRows(),
       snapshotCapable:
         options.snapshotCapable === undefined ? true : options.snapshotCapable,
     },
@@ -596,7 +608,21 @@ async function lifecycleAwareVerifyRefusesExpiredAndRevoked() {
     )
 
     await setAuthorityForQualification(qualification, {
+      signer_status: 'ACTIVE',
+      signer_expires_at: '2000-01-01T00:00:00.000Z',
+    })
+    await expectReason(
+      () =>
+        service.verifyManifestWithLifecycle({
+          envelope,
+          manifest: result.manifest,
+        }),
+      'SEALED_EXPORT_SIGNER_EXPIRED',
+    )
+
+    await setAuthorityForQualification(qualification, {
       signer_status: 'REVOKED',
+      signer_expires_at: '2099-01-01T00:00:00.000Z',
     })
     await expectReason(
       () =>
@@ -703,6 +729,34 @@ async function uniqueButOutOfOrderSourceReadRefuses() {
           ),
         }),
       'SEALED_EXPORT_BINDING_UNQUALIFIED',
+    )
+    assert.deepEqual(fs.readdirSync(root), [])
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
+async function truncatedSuccessfulSourceStreamRefusesBeforeCommitAndSigning() {
+  const root = await fsPromises.mkdtemp(
+    path.join(os.tmpdir(), 'sealed-export-s5-truncated-'),
+  )
+  try {
+    const rows = sourceRows(3)
+    const { service, queryDigest, qualify } = await buildService({
+      artifactRoot: root,
+      rows,
+      streamRows: rows.slice(0, 2),
+    })
+    const qualification = await qualify()
+    await expectReason(
+      () =>
+        service.execute({
+          envelope: envelopeFor(
+            queryDigest,
+            qualification.qualificationDigest,
+          ),
+        }),
+      'SEALED_EXPORT_CAPTURE_INCOMPLETE',
     )
     assert.deepEqual(fs.readdirSync(root), [])
   } finally {
@@ -895,6 +949,7 @@ async function signerRevocationAfterArtifactFinalizeRefusesSigning() {
 }
 
 async function main() {
+  certifiedRelationLookupRejectsPrototypeProperties()
   await positiveHermeticCoreEngine()
   await hermeticCoreIsNotHardcodedCertFixtureOnly()
   await callerInjectionStructurallyUnavailable()
@@ -909,6 +964,7 @@ async function main() {
   await callerSuppliedKeyringCannotReplaceClosureKeyring()
   await duplicateRowIdFailsOrderingQualification()
   await uniqueButOutOfOrderSourceReadRefuses()
+  await truncatedSuccessfulSourceStreamRefusesBeforeCommitAndSigning()
   await longPayloadIsLossless()
   await emptyApprovedObjectRefusesBeforeSigning()
   await callerNowMsRefused()

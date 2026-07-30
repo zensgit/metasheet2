@@ -43,6 +43,16 @@ const PINNED_PROFILE_IDENTITY = Object.freeze({
   continuationLifetime: 'DURABLE_TOKEN',
   supportedCompletenessProofs: Object.freeze(['SIGNED_MANIFEST']),
   recoveryStrategy: 'CHUNK_RESUME',
+  customerScope: 'SINGLE_CUSTOMER',
+  sourceMode: 'READ_ONLY',
+  externalWrite: false,
+  runtimeScaleCertified: false,
+  adjudicationBoundedToEvidenceEnvelope: true,
+  orderingKeyKind: 'STABLE_UNIQUE_NON_NULL_TOTAL_ORDER',
+  signatureAlgorithm: 'ED25519',
+  durableArtifactToken: 'IMMUTABLE_SNAPSHOT_TOKEN',
+  manifestProofClass: 'SOURCE_SNAPSHOT_TXN',
+  immutableSnapshotTokenBindsManifestDigest: true,
 })
 
 const PINNED_MIGRATIONS = Object.freeze([
@@ -80,6 +90,15 @@ const PINNED_MIGRATIONS = Object.freeze([
     requiredMarkers: Object.freeze([
       'integration_sealed_export_authority_state_guard',
       'trg_integration_sealed_export_authority_state_guard',
+    ]),
+  }),
+  Object.freeze({
+    id: '072',
+    relativePath:
+      'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql',
+    requiredMarkers: Object.freeze([
+      'integration_sealed_export_terminal_signer_keys',
+      'trg_integration_sealed_export_terminal_signer_keys_immutable',
     ]),
   }),
 ])
@@ -122,6 +141,13 @@ const PINNED_S5_MODULES = Object.freeze([
 const PINNED_RUNTIME_DEPENDENCIES = Object.freeze({
   mssql: '^10.0.4',
 })
+const PINNED_EXTERNAL_MODULES = Object.freeze([
+  Object.freeze({
+    id: 'gipProfileCertificationContracts',
+    relativePath:
+      'plugins/plugin-integration-core/lib/gip-profile-certification-contracts.cjs',
+  }),
+])
 const PINNED_RUNTIME_FILES = Object.freeze([
   Object.freeze({
     id: 'pluginPackageJson',
@@ -169,6 +195,7 @@ function loadFrozenManifest(repoRoot) {
     parsed.packageProvenanceVersion !== PACKAGE_PROVENANCE_VERSION ||
     !parsed.modules ||
     !parsed.migrations ||
+    !parsed.externalModules ||
     !parsed.dependencies ||
     !parsed.runtimeFiles
   ) {
@@ -233,6 +260,28 @@ function assertProfileIdentityPinned() {
   if (
     completeness.length !== expectedCompleteness.length ||
     completeness.some((value, index) => value !== expectedCompleteness[index])
+  ) {
+    failSealedExport('SEALED_EXPORT_PROFILE_UNCERTIFIED')
+  }
+  const envelope = profile.certificate.maxScale?.evidenceEnvelope
+  if (
+    profile.certificate.maxScale?.runtimeScaleCertified !==
+      PINNED_PROFILE_IDENTITY.runtimeScaleCertified ||
+    profile.certificate.maxScale?.adjudicationBoundedToEvidenceEnvelope !==
+      PINNED_PROFILE_IDENTITY.adjudicationBoundedToEvidenceEnvelope ||
+    envelope?.customerScope !== PINNED_PROFILE_IDENTITY.customerScope ||
+    envelope?.sourceMode !== PINNED_PROFILE_IDENTITY.sourceMode ||
+    envelope?.externalWrite !== PINNED_PROFILE_IDENTITY.externalWrite ||
+    profile.certificate.orderingKeyRequirement?.kind !==
+      PINNED_PROFILE_IDENTITY.orderingKeyKind ||
+    profile.certificate.manifestShape?.signatureAlgorithm !==
+      PINNED_PROFILE_IDENTITY.signatureAlgorithm ||
+    profile.certificate.manifestShape?.durableArtifactToken !==
+      PINNED_PROFILE_IDENTITY.durableArtifactToken ||
+    profile.certificate.manifestShape?.sourceCaptureProofClassRequired !==
+      PINNED_PROFILE_IDENTITY.manifestProofClass ||
+    profile.certificate.tokenShape?.bindsManifestDigest !==
+      PINNED_PROFILE_IDENTITY.immutableSnapshotTokenBindsManifestDigest
   ) {
     failSealedExport('SEALED_EXPORT_PROFILE_UNCERTIFIED')
   }
@@ -334,11 +383,11 @@ function verifyPinnedDependencies(repoRoot, expectedDependencies) {
   return Object.freeze({ ...PINNED_RUNTIME_DEPENDENCIES })
 }
 
-function verifyPinnedRuntimeFiles(repoRoot, expectedDigests) {
+function verifyPinnedFileEntries(repoRoot, entries, expectedDigests) {
   if (!expectedDigests || typeof expectedDigests !== 'object') {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
   }
-  const expectedIds = PINNED_RUNTIME_FILES.map((entry) => entry.id).sort()
+  const expectedIds = entries.map((entry) => entry.id).sort()
   const actualIds = Object.keys(expectedDigests).sort()
   if (
     actualIds.length !== expectedIds.length ||
@@ -347,7 +396,7 @@ function verifyPinnedRuntimeFiles(repoRoot, expectedDigests) {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
   }
   const out = {}
-  for (const entry of PINNED_RUNTIME_FILES) {
+  for (const entry of entries) {
     const filePath = path.join(repoRoot, entry.relativePath)
     if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
       failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
@@ -369,8 +418,17 @@ function verifySealedExportPackageProvenance({ repoRoot } = {}) {
   const s3 = verifyPinnedModules(root, PINNED_S3_MODULES, frozen.modules.s3)
   const s4 = verifyPinnedModules(root, PINNED_S4_MODULES, frozen.modules.s4)
   const s5 = verifyPinnedModules(root, PINNED_S5_MODULES, frozen.modules.s5)
+  const externalModules = verifyPinnedFileEntries(
+    root,
+    PINNED_EXTERNAL_MODULES,
+    frozen.externalModules,
+  )
   const dependencies = verifyPinnedDependencies(root, frozen.dependencies)
-  const runtimeFiles = verifyPinnedRuntimeFiles(root, frozen.runtimeFiles)
+  const runtimeFiles = verifyPinnedFileEntries(
+    root,
+    PINNED_RUNTIME_FILES,
+    frozen.runtimeFiles,
+  )
 
   return Object.freeze({
     candidateTreeVerified: true,
@@ -379,6 +437,7 @@ function verifySealedExportPackageProvenance({ repoRoot } = {}) {
     packageProvenanceVersion: PACKAGE_PROVENANCE_VERSION,
     profileIdentity: PINNED_PROFILE_IDENTITY,
     migrations: Object.freeze(migrations),
+    externalModules: Object.freeze(externalModules),
     modules: Object.freeze({
       s1: Object.freeze(s1),
       s2: Object.freeze(s2),
@@ -414,6 +473,10 @@ function computePackageProvenancePinSet(repoRoot) {
   for (const entry of PINNED_RUNTIME_FILES) {
     runtimeFiles[entry.id] = sha256File(path.join(root, entry.relativePath))
   }
+  const externalModules = {}
+  for (const entry of PINNED_EXTERNAL_MODULES) {
+    externalModules[entry.id] = sha256File(path.join(root, entry.relativePath))
+  }
   return Object.freeze({
     packageProvenanceVersion: PACKAGE_PROVENANCE_VERSION,
     migrations: Object.freeze(migrations),
@@ -424,6 +487,7 @@ function computePackageProvenancePinSet(repoRoot) {
       s4: Object.freeze(moduleDigests(PINNED_S4_MODULES)),
       s5: Object.freeze(moduleDigests(PINNED_S5_MODULES)),
     }),
+    externalModules: Object.freeze(externalModules),
     dependencies: Object.freeze({ ...PINNED_RUNTIME_DEPENDENCIES }),
     runtimeFiles: Object.freeze(runtimeFiles),
   })
@@ -439,6 +503,7 @@ module.exports = Object.freeze({
   PINNED_S3_MODULES,
   PINNED_S4_MODULES,
   PINNED_S5_MODULES,
+  PINNED_EXTERNAL_MODULES,
   PINNED_RUNTIME_DEPENDENCIES,
   PINNED_RUNTIME_FILES,
   verifySealedExportPackageProvenance,

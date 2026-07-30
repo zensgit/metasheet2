@@ -26,11 +26,107 @@ const S5_MODULES = [
   'sealed-export-signer-authority-store.cjs',
   'sealed-export-package-provenance.cjs',
 ]
+const EXACT_PUBLIC_EXPORTS = Object.freeze({
+  'sqlserver-sealed-snapshot-profile.cjs': Object.freeze([
+    'SQLSERVER_SEALED_SNAPSHOT_ACTION_ID',
+    'SQLSERVER_SEALED_SNAPSHOT_CONNECTOR_KIND',
+    'SQLSERVER_SEALED_SNAPSHOT_IMPLEMENTATION_VERSION',
+    'SQLSERVER_SEALED_SNAPSHOT_PROFILE',
+    'SQLSERVER_SEALED_SNAPSHOT_PROFILE_ID',
+    'SQLSERVER_SEALED_SNAPSHOT_RECOVERY_STRATEGY',
+    'assertSealedSnapshotCompletenessEvidence',
+    'successfulSealedSnapshotCompletenessEvidence',
+  ]),
+  'sqlserver-sealed-snapshot-source-session.cjs': Object.freeze([
+    'SNAPSHOT_CAPABILITY_SQL',
+    'isMssqlSnapshotCaptureContext',
+    'openMssqlSnapshotCaptureContext',
+  ]),
+  'sqlserver-sealed-snapshot-action.cjs': Object.freeze([
+    'CAPTURE_METADATA_SQL',
+    'CERTIFIED_RELATIONS',
+    'SEALED_EXPORT_S5_AGENT_PROTOCOL_VERSION',
+    'SEALED_EXPORT_S5_CHUNK_BYTES',
+    'SEALED_EXPORT_S5_ENCODING_VERSION',
+    'SEALED_EXPORT_S5_SORT_MERGE_FAN_IN',
+    'SEALED_EXPORT_S5_SORT_RUN_BYTES',
+    'SEALED_EXPORT_S5_SOURCE_SCHEMA_DIGEST',
+    'SOURCE_FIELDS',
+    'SQLSERVER_SEALED_SNAPSHOT_ACTION_ID',
+    'SQLSERVER_SEALED_SNAPSHOT_IMPLEMENTATION_VERSION',
+    'SQLSERVER_SEALED_SNAPSHOT_PROFILE_ID',
+    'assertSafeSqlServerRelation',
+    'buildOrderingKeyUniquenessProbeSql',
+    'computeQueryBindingDigest',
+    'resolveCertifiedRelation',
+  ]),
+  'sqlserver-sealed-snapshot-service.cjs': Object.freeze([
+    'EXECUTE_INPUT_FIELDS',
+    'FORBIDDEN_EXECUTE_KEYS',
+    'FORBIDDEN_PUBLIC_EXPORT_NAMES',
+    'PRODUCT_CONFIG_FIELDS',
+    'createSqlServerSealedSnapshotService',
+    'isSqlServerSealedSnapshotService',
+  ]),
+  'sqlserver-sealed-snapshot-service-core.cjs': Object.freeze([
+    'EXECUTE_INPUT_FIELDS',
+    'FORBIDDEN_EXECUTE_KEYS',
+    'FORBIDDEN_PUBLIC_EXPORT_NAMES',
+    'createSqlServerSealedSnapshotServiceCore',
+  ]),
+  'sealed-export-binding-qualification.cjs': Object.freeze([
+    'ENVELOPE_SECRET_MIN_BYTES',
+    'computeEnvelopeMac',
+    'computeQualificationDigest',
+    'probeQualificationWithKey',
+    'sealedExportQualificationEvidence',
+    'verifyQualificationWithKey',
+  ]),
+  'sealed-export-signer-authority.cjs': Object.freeze([
+    'SIGNATURE_ALGORITHM',
+    'createCallerBuiltPublicVerifier',
+    'createEd25519SignerMaterial',
+    'decodeCanonicalSignature',
+    'deriveSignerKeyId',
+    'normalizePrivateKey',
+    'normalizePublicKey',
+  ]),
+  'sealed-export-signer-authority-store.cjs': Object.freeze([
+    'AUTHORITY_STATE_TABLE',
+    'PUBLIC_KEY_TABLE',
+    'SIGNATURE_ALGORITHM',
+    'TABLE',
+    'createSignerAuthorityStore',
+    'deriveSignerKeyIdFromDer',
+    'workspaceScopeKey',
+  ]),
+  'sealed-export-package-provenance.cjs': Object.freeze([
+    'FROZEN_MANIFEST_RELATIVE',
+    'PACKAGE_PROVENANCE_VERSION',
+    'PINNED_EXTERNAL_MODULES',
+    'PINNED_MIGRATIONS',
+    'PINNED_PROFILE_IDENTITY',
+    'PINNED_RUNTIME_DEPENDENCIES',
+    'PINNED_RUNTIME_FILES',
+    'PINNED_S1_MODULES',
+    'PINNED_S2_MODULES',
+    'PINNED_S3_MODULES',
+    'PINNED_S4_MODULES',
+    'PINNED_S5_MODULES',
+    'computePackageProvenancePinSet',
+    'verifySealedExportPackageProvenance',
+  ]),
+})
 
 function noForbiddenExportNamesOnProductionSurface() {
   for (const name of S5_MODULES) {
     const mod = require(path.join(SEALED_DIR, name))
-    const keys = Object.keys(mod)
+    const keys = Object.keys(mod).sort()
+    assert.deepEqual(
+      keys,
+      [...EXACT_PUBLIC_EXPORTS[name]].sort(),
+      `${name} public exports must match the certified roster exactly`,
+    )
     for (const forbidden of FORBIDDEN_PUBLIC_EXPORT_NAMES) {
       assert.equal(
         keys.includes(forbidden),

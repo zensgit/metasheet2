@@ -245,6 +245,7 @@ async function assertRealDbProofWiring() {
     'node __tests__/sealed-export-sqlserver-sealed-snapshot-action.test.cjs',
     'node __tests__/sealed-export-package-provenance.test.cjs',
     'node __tests__/sealed-export-s5-evidence.test.cjs',
+    'node __tests__/sealed-export-s5-ci-wiring.test.cjs',
     'node __tests__/sealed-export-s5-product-to-s3-s4-integration.test.cjs',
   ]
   const chain = packageJson.scripts.test.split(' && ')

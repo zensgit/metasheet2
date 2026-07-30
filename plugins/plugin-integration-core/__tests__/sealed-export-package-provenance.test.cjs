@@ -18,6 +18,7 @@ const {
   PINNED_S3_MODULES,
   PINNED_S4_MODULES,
   PINNED_S5_MODULES,
+  PINNED_EXTERNAL_MODULES,
   PINNED_RUNTIME_DEPENDENCIES,
   PINNED_RUNTIME_FILES,
   FROZEN_MANIFEST_RELATIVE,
@@ -49,7 +50,8 @@ function positivePackagePin() {
   assert.equal(result.profileIdentity.profileId, 'sqlserver.sealed_snapshot.v1')
   assert.ok(result.migrations['070'])
   assert.ok(result.migrations['071'])
-  assert.equal(PINNED_MIGRATIONS.length, 4)
+  assert.ok(result.migrations['072'])
+  assert.equal(PINNED_MIGRATIONS.length, 5)
   assert.equal(
     Object.keys(result.modules.s5).length,
     PINNED_S5_MODULES.length,
@@ -60,6 +62,9 @@ function positivePackagePin() {
     PINNED_RUNTIME_FILES.length,
   )
   assert.equal(PINNED_PROFILE_IDENTITY.connectorKind, 'data-source:sql-readonly')
+  assert.deepEqual(Object.keys(result.externalModules), [
+    'gipProfileCertificationContracts',
+  ])
   assert.ok(PINNED_S2_MODULES.includes('sqlserver-s2-producer.cjs'))
   assert.ok(PINNED_S3_MODULES.includes('private-ingestion-service.cjs'))
   assert.ok(PINNED_S4_MODULES.includes('generation-kernel.cjs'))
@@ -91,6 +96,11 @@ async function clonePinnedTree() {
     fs.copyFileSync(path.join(REPO_ROOT, migration.relativePath), dest)
   }
   for (const entry of PINNED_RUNTIME_FILES) {
+    const dest = path.join(root, entry.relativePath)
+    fs.mkdirSync(path.dirname(dest), { recursive: true })
+    fs.copyFileSync(path.join(REPO_ROOT, entry.relativePath), dest)
+  }
+  for (const entry of PINNED_EXTERNAL_MODULES) {
     const dest = path.join(root, entry.relativePath)
     fs.mkdirSync(path.dirname(dest), { recursive: true })
     fs.copyFileSync(path.join(REPO_ROOT, entry.relativePath), dest)
@@ -160,6 +170,26 @@ async function sameSizeLogicMutationOfPinnedMigrationFails() {
   }
 }
 
+async function terminalHistoryMigrationMutationFails() {
+  const root = await clonePinnedTree()
+  try {
+    const target = path.join(
+      root,
+      'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql',
+    )
+    const original = fs.readFileSync(target, 'utf8')
+    const mutated = original.replace("'55000'", "'55001'")
+    assert.notEqual(mutated, original)
+    fs.writeFileSync(target, mutated)
+    expectReason(
+      () => verifySealedExportPackageProvenance({ repoRoot: root }),
+      'SEALED_EXPORT_INTERNAL_ERROR',
+    )
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
 async function isolatedDependencyMutationFails() {
   const root = await clonePinnedTree()
   try {
@@ -174,6 +204,30 @@ async function isolatedDependencyMutationFails() {
         2,
       ),
     )
+    expectReason(
+      () => verifySealedExportPackageProvenance({ repoRoot: root }),
+      'SEALED_EXPORT_INTERNAL_ERROR',
+    )
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
+async function profileCertificationDependencyMutationFails() {
+  const root = await clonePinnedTree()
+  try {
+    const target = path.join(
+      root,
+      'plugins/plugin-integration-core/lib/gip-profile-certification-contracts.cjs',
+    )
+    const original = fs.readFileSync(target, 'utf8')
+    const mutated = original.replace(
+      'SOURCE_SNAPSHOT_TXN',
+      'SOURCE_SNAPSHOT_TXX',
+    )
+    assert.equal(mutated.length, original.length)
+    assert.notEqual(mutated, original)
+    fs.writeFileSync(target, mutated)
     expectReason(
       () => verifySealedExportPackageProvenance({ repoRoot: root }),
       'SEALED_EXPORT_INTERNAL_ERROR',
@@ -221,6 +275,8 @@ async function main() {
   await isolatedModuleMissingFails()
   await sameSizeLogicMutationOfPinnedModuleFails()
   await sameSizeLogicMutationOfPinnedMigrationFails()
+  await terminalHistoryMigrationMutationFails()
+  await profileCertificationDependencyMutationFails()
   await isolatedDependencyMutationFails()
   await isolatedLockfileMutationFails()
   console.log('sealed-export-package-provenance.test.cjs OK')

@@ -1080,20 +1080,25 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
     const probeRow = await captureContext.queryProbe(binding.orderingKeyProbeSql)
     const nullKeyRows = normalizeProbeCount(probeRow.nullKeyRows)
     const duplicateKeyGroups = normalizeProbeCount(probeRow.duplicateKeyGroups)
+    const sourceRowCount = normalizeProbeCount(probeRow.sourceRowCount)
     if (
       nullKeyRows === null ||
       duplicateKeyGroups === null ||
+      sourceRowCount === null ||
       nullKeyRows !== 0 ||
       duplicateKeyGroups !== 0
     ) {
       failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
     }
     return Object.freeze({
-      duplicateKeyGroups: 0,
-      fieldId: binding.orderingKeyField,
-      kind: 'STABLE_UNIQUE_NON_NULL_TOTAL_ORDER',
-      nullKeyRows: 0,
-      proven: true,
+      orderingKeyProof: Object.freeze({
+        duplicateKeyGroups: 0,
+        fieldId: binding.orderingKeyField,
+        kind: 'STABLE_UNIQUE_NON_NULL_TOTAL_ORDER',
+        nullKeyRows: 0,
+        proven: true,
+      }),
+      sourceRowCount,
     })
   }
 
@@ -1153,7 +1158,10 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
         isMssqlSnapshotCaptureContext(captureContext)
 
       // Ordering-key qualification against the actual enrolled relation mapping.
-      const orderingKeyProof = await proveOrderingKey(captureContext, binding)
+      const { orderingKeyProof, sourceRowCount } = await proveOrderingKey(
+        captureContext,
+        binding,
+      )
       // Re-prove total order, then consult the complete live 069 authority row
       // and bind its qualification digest back to this exact approved binding
       // before any source data is read.
@@ -1179,6 +1187,7 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
         binding.sourceReadSql,
       )
       let readerActiveNotified = false
+      let capturedRowCount = 0
       let previousRowId = 0
 
       for await (const rawRow of guardedSourceRows(sourceRead.stream)) {
@@ -1191,6 +1200,7 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
         }
         previousRowId = normalized.row.rowId
         await writer.writeRow(normalized.row)
+        capturedRowCount += 1
         if (!readerActiveNotified) {
           readerActiveNotified = true
           await notify(onReaderActive, 'READER_ACTIVE')
@@ -1199,6 +1209,9 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
       await awaitSourceCompletion(sourceRead.completion)
       if (captureContext.getSourceReadCount() !== 1) {
         failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
+      }
+      if (capturedRowCount !== sourceRowCount) {
+        failSealedExport('SEALED_EXPORT_CAPTURE_INCOMPLETE')
       }
       readerExhausted = true
       await notify(stageObserver, 'READER_EXHAUSTED')
@@ -1394,7 +1407,10 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
     let captureContext = null
     try {
       captureContext = await openCaptureContext()
-      const orderingKeyProof = await proveOrderingKey(captureContext, binding)
+      const { orderingKeyProof } = await proveOrderingKey(
+        captureContext,
+        binding,
+      )
       const bindingWithProof = Object.freeze({
         ...binding,
         orderingKeyProof,

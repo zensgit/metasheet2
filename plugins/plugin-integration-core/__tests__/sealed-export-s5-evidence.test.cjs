@@ -14,6 +14,14 @@ const {
 const {
   SEALED_EXPORT_S2_ACTION_ID,
 } = require('../lib/sealed-export/sqlserver-s2-producer.cjs')
+const {
+  verifySealedExportPackageProvenance,
+} = require('../lib/sealed-export/sealed-export-package-provenance.cjs')
+
+const repoRoot = path.resolve(__dirname, '..', '..', '..')
+const provenanceManifestDigest = verifySealedExportPackageProvenance({
+  repoRoot,
+}).frozenManifestDigest
 
 function record(engineMajorVersion) {
   return {
@@ -48,7 +56,7 @@ function record(engineMajorVersion) {
     privateArtifactCleaned: true,
     candidatePackageProvenanceVerified: true,
     externalPackagePinRequired: true,
-    provenanceManifestDigest: 'a'.repeat(64),
+    provenanceManifestDigest,
     runtimeReachable: false,
     customerSourceUsed: false,
     externalWrite: false,
@@ -111,6 +119,12 @@ async function main() {
     const unprovenMutation = record('2022')
     unprovenMutation.concurrentMutationAffectedAllRows = false
     fs.writeFileSync(file, `${JSON.stringify(unprovenMutation)}\n`)
+    refuses(root)
+    fs.writeFileSync(file, original)
+
+    const wrongProvenance = record('2022')
+    wrongProvenance.provenanceManifestDigest = 'b'.repeat(64)
+    fs.writeFileSync(file, `${JSON.stringify(wrongProvenance)}\n`)
     refuses(root)
     fs.writeFileSync(file, original)
 

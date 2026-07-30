@@ -175,6 +175,16 @@ function crossBindingAndStaleFailClosed() {
       }),
     'SEALED_EXPORT_BINDING_UNQUALIFIED',
   )
+  expectReason(
+    () =>
+      verifyQualificationWithKey({
+        qualification,
+        expected: expectedBinding(b),
+        envelopeKey: key,
+        now: '2026-07-30T01:00:00Z',
+      }),
+    'SEALED_EXPORT_BINDING_UNQUALIFIED',
+  )
 }
 
 function hostileInputsAndProbeTimeFailClosed() {

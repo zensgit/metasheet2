@@ -11,13 +11,17 @@ on:
     branches: [main, develop]
     paths:
       - 'plugins/plugin-integration-core/lib/sealed-export/**'
+      - 'plugins/plugin-integration-core/lib/gip-profile-certification-contracts.cjs'
       - 'plugins/plugin-integration-core/lib/sealed-export/vectors/s5-package-provenance-pins.json'
       - 'plugins/plugin-integration-core/__tests__/sealed-export-*.test.cjs'
       - 'plugins/plugin-integration-core/__tests__/support/sealed-export-s5-*.cjs'
+      - 'plugins/plugin-integration-core/__tests__/support/sealed-export-signer-authority-memory-db.cjs'
+      - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
       - 'packages/core-backend/migrations/068_create_integration_sealed_export_ingestion.sql'
       - 'packages/core-backend/migrations/069_create_integration_sealed_export_generation_kernel.sql'
       - 'packages/core-backend/migrations/070_create_integration_sealed_export_signer_authority.sql'
       - 'packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql'
+      - 'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql'
       - 'packages/core-backend/tests/integration/sealed-export-signer-authority-lifecycle-migration.db.test.ts'
       - 'scripts/ops/run-sealed-export-s5-sqlserver-evidence.cjs'
       - 'scripts/ops/verify-sealed-export-s5-sqlserver-evidence.cjs'
@@ -134,6 +138,15 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s5
     steps:
+      - name: Require all SQL Server product-action matrix legs
+        env:
+          PRODUCT_ACTION_RESULT: ${{ needs.sqlserver-product-action.result }}
+        run: |
+          if [ "$PRODUCT_ACTION_RESULT" != "success" ]; then
+            echo "SQL Server product-action matrix did not complete successfully"
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -164,7 +177,6 @@ jobs:
           --reporter=dot
 
       - name: Download sealed-export S5 evidence
-        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: sealed-export-s5-product-evidence-*

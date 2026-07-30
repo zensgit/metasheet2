@@ -4,7 +4,8 @@
     "068": "88176e7e79f5f5a9017ff93675e05cbadf9589f9d1d3693f00503c05e0ea8fcf",
     "069": "61caa7784f5839954f8996fc775dcc82bf35ea7f320b734be8bcf39d14c7d6bb",
     "070": "01ff2a28d798ea2f2515e181a13701d39b35800bfd152993cc6f14fb30e93404",
-    "071": "650d5815c41769626e1d7afad4ef94aa01ff0d1a5fa6511da12d51e0fc5a89ab"
+    "071": "650d5815c41769626e1d7afad4ef94aa01ff0d1a5fa6511da12d51e0fc5a89ab",
+    "072": "fe349afc5367bcc99e38a23354f3d1ee9e4f58777c3b8472716b51f576fad957"
   },
   "modules": {
     "s1": {
@@ -31,20 +32,23 @@
     "s5": {
       "sqlserver-sealed-snapshot-profile.cjs": "e92c7e03ed4a77a6905ae7bfbee2dc626a0ef87fad8be6b370e8e509a75241e7",
       "sqlserver-sealed-snapshot-source-session.cjs": "3545f7f950e7c8671ad26b68f1e35c218a700413730a6b68428a0cb82eee8c9d",
-      "sqlserver-sealed-snapshot-action.cjs": "8ddaa73ac18b7890eb1ee50bbef9481f5a9f28b1cd59b5e9701a9a5537ab07fe",
+      "sqlserver-sealed-snapshot-action.cjs": "031c03ca3e6260786ba0cbfaa0c5c26c00f76089550393e151b021bdd3bec979",
       "sqlserver-sealed-snapshot-service.cjs": "3a6f4f1b8eb2ff16aae4216842274f95564fe7e0806cd126fefcd013167e94d2",
-      "sqlserver-sealed-snapshot-service-core.cjs": "966462a205a11af74ccad5fbc732600b12839407932740c80687baeac6f8c913",
+      "sqlserver-sealed-snapshot-service-core.cjs": "408ef2227842275ee075e41ec6f848551fc781852be1a59509c161c091e6c69f",
       "sealed-export-binding-qualification.cjs": "6b2995cb996ecfa07f348f8d09a12e4a4faa1045c3f4b941f815794bdb603a65",
       "sealed-export-signer-authority.cjs": "164babbb0ca576babacb15d3d83058e526fef7181e0a5c5ff4e729e476f7ebe1",
       "sealed-export-signer-authority-store.cjs": "043e79eca72ffc79a07c06b133acc1aca2bc5bb4828d164b86038fb10f2e7c72",
-      "sealed-export-package-provenance.cjs": "665278ef6129aaf024dd3cc9338c2302d07a412c793b6ed96a0831a03b0db29e"
+      "sealed-export-package-provenance.cjs": "21d46025978652fc0bfa0bfaffb276242f3dd289d16f9e1adea049035fef2b90"
     }
+  },
+  "externalModules": {
+    "gipProfileCertificationContracts": "253000b5f5676340f2d1876cf2810e5ba90561207840ba3ba12a89717771293d"
   },
   "dependencies": {
     "mssql": "^10.0.4"
   },
   "runtimeFiles": {
-    "pluginPackageJson": "0d181bd6f12472fa841f08cd6f94f6673d770c61a80abe9f458acba641a26dea",
+    "pluginPackageJson": "e343adafb718684e6fc8b9a1d662060b211600340e9c0cd22f7b0c8daf8205da",
     "pnpmLock": "c692cea54d8471a5a131ab94937b4565bb94743cc7ecdf2711cb4114e169d1f7"
   }
 }

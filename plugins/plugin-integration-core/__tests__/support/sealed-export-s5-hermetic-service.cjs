@@ -9,10 +9,15 @@ const {
 
 function openHermeticSnapshotCaptureContext({
   rows,
+  streamRows,
   snapshotCapable,
   capture,
 }) {
-  if (typeof snapshotCapable !== 'boolean' || !Array.isArray(rows)) {
+  if (
+    typeof snapshotCapable !== 'boolean' ||
+    !Array.isArray(rows) ||
+    !Array.isArray(streamRows)
+  ) {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
   }
   if (!snapshotCapable) {
@@ -56,6 +61,7 @@ function openHermeticSnapshotCaptureContext({
       return Object.freeze({
         nullKeyRows: String(nullKeyRows),
         duplicateKeyGroups: String(duplicateKeyGroups),
+        sourceRowCount: String(rows.length),
       })
     },
     async startSourceRead(_sourceReadSql) {
@@ -63,7 +69,7 @@ function openHermeticSnapshotCaptureContext({
       sourceReadCount += 1
       const stream = {
         async *[Symbol.asyncIterator]() {
-          for (const row of rows) yield row
+          for (const row of streamRows) yield row
         },
       }
       return Object.freeze({
@@ -89,6 +95,8 @@ function createHermeticSqlServerSealedSnapshotServiceForTests(rawConfig) {
   const capture = Object.freeze({
     capture: rawConfig.hermeticCapture.capture || null,
     rows: rawConfig.hermeticCapture.rows,
+    streamRows:
+      rawConfig.hermeticCapture.streamRows || rawConfig.hermeticCapture.rows,
     snapshotCapable:
       rawConfig.hermeticCapture.snapshotCapable === undefined
         ? true

@@ -26,6 +26,13 @@ const lifecycleGuardMigrationPath = path.join(
   'migrations',
   '071_harden_integration_sealed_export_authority_lifecycle.sql',
 )
+const terminalHistoryMigrationPath = path.join(
+  repoRoot,
+  'packages',
+  'core-backend',
+  'migrations',
+  '072_harden_integration_sealed_export_terminal_signer_history.sql',
+)
 const rawSql = fs.readFileSync(migrationPath, 'utf8')
 const sql = rawSql
   .split('\n')
@@ -38,6 +45,11 @@ const authoritySql = fs
   .join('\n')
 const lifecycleGuardSql = fs
   .readFileSync(lifecycleGuardMigrationPath, 'utf8')
+  .split('\n')
+  .filter((line) => !line.trim().startsWith('--'))
+  .join('\n')
+const terminalHistorySql = fs
+  .readFileSync(terminalHistoryMigrationPath, 'utf8')
   .split('\n')
   .filter((line) => !line.trim().startsWith('--'))
   .join('\n')
@@ -147,6 +159,32 @@ assert.match(
   lifecycleGuardSql,
   /CREATE TRIGGER trg_integration_sealed_export_authority_state_guard[\s\S]*?BEFORE UPDATE ON integration_sealed_export_authority_state[\s\S]*?EXECUTE FUNCTION integration_sealed_export_authority_state_guard\(\)/,
   'the guard is wired to the live 069 authority table',
+)
+
+assert.match(
+  terminalHistorySql,
+  /CREATE TABLE IF NOT EXISTS integration_sealed_export_terminal_signer_keys/,
+  '072 persists terminal signer history independently of the current authority row',
+)
+assert.match(
+  terminalHistorySql,
+  /PRIMARY KEY \(\s*tenant_id,\s*workspace_scope_key,\s*tenant_domain_binding,\s*system_content_key,\s*role_binding_fingerprint,\s*signer_key_id\s*\)/,
+  'terminal signer history is exact-scope and key bound',
+)
+assert.match(
+  terminalHistorySql,
+  /NEW\.signer_status = 'ACTIVE'[\s\S]*?integration_sealed_export_terminal_signer_keys[\s\S]*?terminal\.signer_key_id = NEW\.signer_key_id/,
+  'an ACTIVE key is checked against durable terminal history',
+)
+assert.match(
+  terminalHistorySql,
+  /BEFORE INSERT OR UPDATE OR DELETE ON integration_sealed_export_authority_state/,
+  'rotate-back, delete-reinsert, and direct insert all cross the lifecycle guard',
+)
+assert.match(
+  terminalHistorySql,
+  /BEFORE UPDATE OR DELETE ON integration_sealed_export_terminal_signer_keys/,
+  'terminal signer history is append-only for first-party DML',
 )
 
 for (const forbidden of [

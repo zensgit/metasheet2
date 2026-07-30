@@ -19,6 +19,11 @@ const {
 } = require(
   '../../plugins/plugin-integration-core/lib/sealed-export/sqlserver-sealed-snapshot-action.cjs',
 )
+const {
+  verifySealedExportPackageProvenance,
+} = require(
+  '../../plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs',
+)
 
 const REQUIRED_ENGINE_VERSIONS = Object.freeze(['2019', '2022'])
 const REQUIRED_FIELDS = Object.freeze([
@@ -75,7 +80,7 @@ function fail() {
   throw new Error('SEALED_EXPORT_S5_EVIDENCE_ARTIFACT_INVALID')
 }
 
-function assertExactRecord(value, engineMajorVersion) {
+function assertExactRecord(value, engineMajorVersion, provenanceManifestDigest) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail()
   const keys = Object.keys(value).sort()
   const expected = [...REQUIRED_FIELDS].sort()
@@ -132,7 +137,7 @@ function assertExactRecord(value, engineMajorVersion) {
   if (value.externalPackagePinRequired !== true) fail()
   if (
     typeof value.provenanceManifestDigest !== 'string' ||
-    !/^[0-9a-f]{64}$/.test(value.provenanceManifestDigest)
+    value.provenanceManifestDigest !== provenanceManifestDigest
   ) {
     fail()
   }
@@ -143,6 +148,21 @@ function assertExactRecord(value, engineMajorVersion) {
 
 function verifySealedExportS5EvidenceArtifacts(root) {
   if (typeof root !== 'string' || root.length === 0) fail()
+  let packageResult
+  try {
+    packageResult = verifySealedExportPackageProvenance({
+      repoRoot: path.resolve(__dirname, '../..'),
+    })
+  } catch {
+    fail()
+  }
+  if (
+    packageResult.verified !== true ||
+    packageResult.candidateTreeVerified !== true ||
+    packageResult.externalPackagePinRequired !== true
+  ) {
+    fail()
+  }
   const directory = path.join(root, 'product-action')
   if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
     fail()
@@ -168,7 +188,11 @@ function verifySealedExportS5EvidenceArtifacts(root) {
     } catch {
       fail()
     }
-    assertExactRecord(parsed, version)
+    assertExactRecord(
+      parsed,
+      version,
+      packageResult.frozenManifestDigest,
+    )
   }
   return [...REQUIRED_ENGINE_VERSIONS]
 }

@@ -53,6 +53,38 @@ function profileCoordinatesExact() {
     [...profile.certificate.supportedCompletenessProofs],
     ['SIGNED_MANIFEST'],
   )
+  assert.deepEqual(profile.certificate.completenessCombinationRules, [
+    ['SIGNED_MANIFEST'],
+  ])
+  assert.deepEqual(profile.certificate.maxScale, {
+    adjudicationBoundedToEvidenceEnvelope: true,
+    evidenceEnvelope: {
+      customerScope: 'SINGLE_CUSTOMER',
+      engineMajors: ['2019', '2022'],
+      externalWrite: false,
+      sourceMode: 'READ_ONLY',
+    },
+    runtimeScaleCertified: false,
+  })
+  assert.deepEqual(profile.certificate.orderingKeyRequirement, {
+    kind: 'STABLE_UNIQUE_NON_NULL_TOTAL_ORDER',
+    qualification: 'SEALED_EXPORT_BINDING_QUALIFICATION_REQUIRED',
+    required: true,
+  })
+  assert.deepEqual(profile.certificate.manifestShape, {
+    callerSuppliedSignerMaterialForbidden: true,
+    callerSuppliedSqlForbidden: true,
+    durableArtifactToken: 'IMMUTABLE_SNAPSHOT_TOKEN',
+    kind: 'SIGNED_MANIFEST',
+    signatureAlgorithm: 'ED25519',
+    sourceCaptureProofClassRequired: 'SOURCE_SNAPSHOT_TXN',
+  })
+  assert.deepEqual(profile.certificate.tokenShape, {
+    bindsManifestDigest: true,
+    durable: true,
+    kind: 'IMMUTABLE_SNAPSHOT_TOKEN',
+    notSourceTimeProof: true,
+  })
   assert.equal(SQLSERVER_SEALED_SNAPSHOT_RECOVERY_STRATEGY, 'CHUNK_RESUME')
   assert.equal(
     deriveRecoveryStrategy(profile.certificate),
