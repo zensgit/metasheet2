@@ -1,20 +1,23 @@
 # Attendance Issue #4556 W4C-3a Durable Legacy Execution Plan Amendment
 
-> Status: **PROPOSED**
+> Status: **RATIFIED**
 >
 > Date: 2026-07-29
 >
-> Decision required: `OD-W4C-56`
+> Ratified: 2026-07-30, merged SHA
+> `e6c536fe7a201ca0466b2dc776b15fbdb23aa890`, `OD-W4C-56=(a)`;
+> owner-decision transcription: PR #4677 comment `#5125676385`.
 >
 > Governing base: W4 design lock and the RATIFIED W4C-3a legacy-preimage
 > amendment at exact merged SHA
 > `1055e543a3680be9f37462de23483bf61ad4610c`. The owner decision is durably
 > transcribed in PR #4672 comment `#5113759839`.
 >
-> This document does not authorize W4C-3a implementation, merge, W4C-3b or
-> later slices, flag changes, deployment, staging soak, production use, or
-> closure of issue #4556. A future implementation remains separately gated and
-> requires an exact-head independent review with zero P1/P2 findings.
+> The owner decision authorizes W4C-3a implementation under this document. It
+> does not authorize W4C-3a merge, W4C-3b or later slices, flag changes,
+> deployment, staging soak, production use, or closure of issue #4556. The
+> implementation remains separately gated and requires an exact-head
+> independent review with zero P1/P2 findings.
 
 ## 0. Why another amendment is required
 
@@ -46,8 +49,10 @@ This is a contract-shape conflict, not an unimplemented helper:
   the existing import execution;
 - keeping a process-local closure would fail P08 restart recovery.
 
-W4C-3a runtime therefore remains paused. The implementation worktree is frozen
-inventory and is not evidence that this amendment has been accepted.
+At drafting time W4C-3a runtime therefore remained paused, and the frozen
+implementation worktree was not evidence that this amendment had been
+accepted. The 2026-07-30 owner RATIFY lifts that implementation pause only; it
+does not lift the merge or later-slice gates in the header.
 
 Terminology in this amendment keeps the governing slice ownership: `P07 worker`
 means `processAsyncImportCommitJob`, and `P08` means startup recovery that
@@ -1868,8 +1873,7 @@ satisfy this amendment.
 
 ## 8. Relationship to the frozen implementation inventory
 
-The unmerged W4C-3a worktree may be reused only after this amendment is
-RATIFIED. Reuse is selective:
+Following RATIFY, the unmerged W4C-3a worktree may be reused only selectively:
 
 - core authorization, identity, lock-order, rollback, and 5000-boundary work
   must be re-reviewed against the new exact head;
@@ -1881,16 +1885,19 @@ RATIFIED. Reuse is selective:
 
 ## 9. Ratification and implementation sequence
 
-1. merge this document as `PROPOSED`;
-2. independently verify the merged document against the exact main tree;
-3. owner RATIFY the exact merged SHA and choose `OD-W4C-56=(a|b)`;
-4. only if `(a)` is RATIFIED, restore a fresh W4C-3a implementation branch from
-   then-current main and selectively port valid frozen inventory;
-5. implement schema/parser/enqueue first, then worker replay, then caller
-   cutover and parity tests;
-6. open a Draft implementation PR;
-7. run exact-head independent review and repair until zero P1/P2;
-8. stop at the owner merge decision.
+1. **Completed:** merge this document as `PROPOSED` at
+   `e6c536fe7a201ca0466b2dc776b15fbdb23aa890`;
+2. **Completed:** independently verify the merged document against that exact
+   main tree;
+3. **Completed:** owner RATIFY that merged SHA with `OD-W4C-56=(a)` on
+   2026-07-30;
+4. **In progress:** use a fresh implementation branch from that main tree and
+   selectively port valid frozen inventory;
+5. **In progress:** implement schema/parser/enqueue first, then worker replay,
+   then caller cutover and parity tests;
+6. **Pending:** open a Draft implementation PR;
+7. **Pending:** run exact-head independent review and repair until zero P1/P2;
+8. **Pending:** stop at the owner merge decision.
 
 None of these steps authorizes W4C-3b, W4C-5 soak, flag changes, deployment,
 production/customer data, or issue closure.
