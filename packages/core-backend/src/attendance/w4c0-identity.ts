@@ -890,7 +890,11 @@ export function createVerifiedAttendanceCalculationTargetIdentityV1(input: unkno
 
 const ROLLOUT_KEY_PREFIX = 'metasheet2:attendance:segment-rollout:v1'
 const OPERATION_KEY_PREFIX = 'metasheet2:attendance:result-operation:v1'
+const LEGACY_IDEMPOTENCY_KEY_PREFIX =
+  'metasheet2:attendance:legacy-import-idempotency:v1'
 const TARGET_KEY_PREFIX = 'metasheet2:attendance:calculation-target:v1'
+const OPERATIONAL_BULK_TARGET_KEY_PREFIX =
+  'metasheet2:attendance:operational-bulk-target:v1'
 // W4C-2 amendment section 1.6 (PR #4617, RATIFIED, OD-W4C-49=(a)): the reserved class `01`
 // scheduled-run key.
 const SCHEDULED_RUN_KEY_PREFIX = 'metasheet2:attendance:scheduled-run:v1'
@@ -966,6 +970,50 @@ export function buildAttendanceResultOperationAdvisoryKey(identity: VerifiedAtte
   return BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_10_PREFIX)
 }
 
+export type CanonicalAttendanceLegacyIdempotencyKeyV1 = Brand<
+  Readonly<{
+    orgId: CanonicalAttendanceRolloutOrgKeyV1
+    idempotencyKey: string
+  }>,
+  'CanonicalAttendanceLegacyIdempotencyKeyV1'
+>
+
+export function parseCanonicalAttendanceLegacyIdempotencyKeyV1(
+  input: unknown,
+): CanonicalAttendanceLegacyIdempotencyKeyV1 {
+  const fields = requireExactKeys(
+    input,
+    ['orgId', 'idempotencyKey'],
+    'W4C3A_LEGACY_IDEMPOTENCY_KEY_INVALID',
+  )
+  const orgId = parseOrgKeyLexical(
+    fields.orgId,
+    'W4C0_ROLLOUT_ORG_KEY_INVALID',
+  ) as CanonicalAttendanceRolloutOrgKeyV1
+  if (typeof fields.idempotencyKey !== 'string') {
+    fail('W4C3A_LEGACY_IDEMPOTENCY_KEY_INVALID')
+  }
+  const idempotencyKey = fields.idempotencyKey.trim()
+  if (idempotencyKey.length < 1 || idempotencyKey.length > 128) {
+    fail('W4C3A_LEGACY_IDEMPOTENCY_KEY_INVALID')
+  }
+  return frozenNullProto({
+    orgId,
+    idempotencyKey,
+  }) as CanonicalAttendanceLegacyIdempotencyKeyV1
+}
+
+/** W4C-3a class-`10` key shared by every sync/async writer of one legacy batch key. */
+export function buildAttendanceLegacyIdempotencyAdvisoryKey(
+  input: CanonicalAttendanceLegacyIdempotencyKeyV1,
+): bigint {
+  const key = parseCanonicalAttendanceLegacyIdempotencyKeyV1(input)
+  const u64 = rawDigestU64(
+    nulJoin([LEGACY_IDEMPOTENCY_KEY_PREFIX, key.orgId, key.idempotencyKey]),
+  )
+  return BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_10_PREFIX)
+}
+
 function requireTargetWitness(identity: unknown): VerifiedAttendanceCalculationTargetIdentityV1 {
   if (typeof identity !== 'object' || identity === null || !targetWitnesses.has(identity)) {
     fail('W4C0_TARGET_WITNESS_REQUIRED')
@@ -980,6 +1028,18 @@ function requireTargetWitness(identity: unknown): VerifiedAttendanceCalculationT
 export function buildAttendanceCalculationTargetAdvisoryKey(identity: VerifiedAttendanceCalculationTargetIdentityV1): bigint {
   const verified = requireTargetWitness(identity)
   const u64 = rawDigestU64(nulJoin([TARGET_KEY_PREFIX, verified.org.orgId, verified.userId, verified.workDate]))
+  return BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_11_PREFIX)
+}
+
+/** W4C-3a class-`11` sentinel for an above-limit operational import. */
+export function buildAttendanceOperationalBulkTargetAdvisoryKey(
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+): bigint {
+  const orgKey = parseOrgKeyLexical(
+    org,
+    'W4C0_ROLLOUT_ORG_KEY_INVALID',
+  ) as CanonicalAttendanceRolloutOrgKeyV1
+  const u64 = rawDigestU64(nulJoin([OPERATIONAL_BULK_TARGET_KEY_PREFIX, orgKey]))
   return BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_11_PREFIX)
 }
 
@@ -1182,6 +1242,31 @@ export async function acquireAttendanceResultOperationLocks(
 }
 
 /**
+ * W4C-3a complete class-`10` reservation set. Operation and normalized legacy
+ * idempotency keys are derived first, then de-duplicated and numerically sorted
+ * together so callers cannot create a cross-domain lock-order inversion.
+ */
+export async function acquireAttendanceImportReservationLocksV1(
+  trx: AttendanceW4TransactionClientV1,
+  identities: readonly VerifiedAttendanceOperationIdentityV1[],
+  legacyIdempotency: CanonicalAttendanceLegacyIdempotencyKeyV1 | null,
+): Promise<void> {
+  if (!Array.isArray(identities)) fail('W4C0_IDENTITY_LIST_INVALID')
+  const keys = identities.map((identity) =>
+    buildAttendanceResultOperationAdvisoryKey(identity),
+  )
+  if (legacyIdempotency !== null) {
+    keys.push(buildAttendanceLegacyIdempotencyAdvisoryKey(legacyIdempotency))
+  }
+  await acquireKeysWithDeadline(
+    trx,
+    'operation',
+    'SELECT pg_advisory_xact_lock($1::bigint)',
+    toSortedUniqueSignedKeys(keys),
+  )
+}
+
+/**
  * Same protocol for class-`11` calculation-target keys. Its own budget/acquisition
  * timeout maps to values-free `503 ATTENDANCE_CALCULATION_TARGET_BUSY` after the
  * caller rolls back.
@@ -1197,6 +1282,18 @@ export async function acquireAttendanceCalculationTargetLocks(
     'target',
     'SELECT pg_advisory_xact_lock($1::bigint)',
     toSortedUniqueSignedKeys(keys),
+  )
+}
+
+export async function acquireAttendanceOperationalBulkTargetLockV1(
+  trx: AttendanceW4TransactionClientV1,
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+): Promise<void> {
+  await acquireKeysWithDeadline(
+    trx,
+    'target',
+    'SELECT pg_advisory_xact_lock($1::bigint)',
+    [buildAttendanceOperationalBulkTargetAdvisoryKey(org)],
   )
 }
 
