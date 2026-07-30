@@ -106,7 +106,7 @@ Smoke 测试：`packages/core-backend/tests/integration/attendance-w4c0-durable-
 6. `w4c0-operation-registry.ts` — 核心生命周期：`attendanceResultOperationPreflightV1`（§8.2 步 1-2：verify witness+capability+org 绑定 → SQL recheck → **non-locking stable-order read**（all-completed-congruent 即零 DML replay，含 suspended 下）→ class-00 shared → resolver → suspended 零 DML 返回 → post-lock org/identity factories → class-10 exclusive → 锁下重读严格分类：replay / all-new claim（batch 先、items 按 operation_id 序、state='claimed'）/ mixed·incomplete·non-congruent=closed 409）；congruence= actor_id/actor_posture/token_subject/capability/subject_scope(canonical json)/source_ref/command_fingerprint 字节等值，accepted posture **不**比较（rollout 转移后重试返回存量）；`seal`（item/batch，batch response=order vector+byItem，键集与 attach 项严格对账）/`cancel`（source-free）/`enqueueAttendanceResultEventOutboxV1`（legacy posture 拒）/`reserveAttendanceImportJobW4V1`（P07 前置接口已退役为 fail-closed compatibility seam，固定返回 `W4C3A_DURABLE_PLAN_REQUIRED`；完整计划仅由 `reserveAttendanceLegacyImportPlanJobV1` 持久化）/`runAttendanceResultOperationTransactionV1`（SERIALIZABLE + 合同超时 + 只 40001/40P01 有界重试）。
 7. `w4c0-write-boundary-types.ts` — §8.1 四签名 + §4.1/4.2 prepared-plan/intent/evidence/fact/projection-directive 全形状**纯类型**逐字转写（execute/prepare/apply/writeBatch 的实现属 W4C-1/2——W4C-0 只交付 interface，见未竟 21）。
 
-测试：unit `src/attendance/__tests__/w4c0-operation-layer.test.ts`（23 用例）；db `tests/integration/attendance-w4c0-operation-registry.db.test.ts`（8 用例：单命令 claim→seal→replay→payload/actor 漂移 409、batch 全生命周期+重排/缺项冲突、legacy null-ID 零行/stable-ID 兼容 op replay+outbox 禁、cancel、claimed 不可提交（deferred 经 service 行触发）、P07 reservation 三态、deadline busy 映射+lock_timeout 恢复、inactive actor SQL recheck 拒）。两点接线：plugin-tests.yml attendance 步（紧跟 Stage B 行）+ vitest.config.ts exclude。
+测试：unit `src/attendance/__tests__/w4c0-operation-layer.test.ts`（23 用例）；db `tests/integration/attendance-w4c0-operation-registry.db.test.ts`（8 用例：单命令 claim→seal→replay→payload/actor 漂移 409、batch 全生命周期+重排/缺项冲突、legacy null-ID 零行/stable-ID 兼容 op replay+outbox 禁、cancel、claimed 不可提交（deferred 经 service 行触发）、predecessor P07 reservation 在 SQL 前 fail-closed、deadline busy 映射+lock_timeout 恢复、inactive actor SQL recheck 拒）。两点接线：plugin-tests.yml attendance 步（紧跟 Stage B 行）+ vitest.config.ts exclude。
 
 Stage B 同片测试的 3 条 helper 调用形状断言按 deadline 协议更新（set_config 交错 + 恢复值 5000 断言；**main 上既有测试零改写**——这 3 条属于本分支 Stage B 自己的新测试，handoff 第 16 条本就指派 Stage C 改 helper）。
 
@@ -293,13 +293,12 @@ vitest.config.ts exclude 注释块）：
   strictly-older/missing/cross-record 拒 + `uq_arc_operation` retry 幂等 backstop；snapshot
   A→B→A 三版本 + 重复 version + 篡改拒；outbox 状态机全腿（非法 kind/重复键/非法转移/
   attempts 单调/delivered 终态）；closure 唯一性；
-- P07 全条：冻结字段矩阵（**含 legacy null→1 promotion 拒**）、execution_reason_code 闭集配对
-  五腿、legacy 行不可带 reason、partial shape 两腿补充、proof-vector CHECK 矩阵（乱序/重复/
-  缺/多/篡改 root/错 namespace/多 key/缺 key 八腿 + 零行落库断言）、**两真连接 reservation
-  backstop 双 commit 序**（holder 回滚 → waiter 锁下重读后 created；holder 提交 → 同 job
-  existing；全程 23505 不外泄 + 裸 SQL bypass 正控证 unique index 真实存在并以 23505 命名
-  `uq_attendance_import_jobs_w4_reservation`）、changed-actor 409、**legacy-only batch root 的
-  reservation 必须 created**（null-version job 不满足 W4 replay）；
+- P07 predecessor 退役边界：冻结字段矩阵保留 **legacy null→1 promotion 拒**、
+  execution_reason_code 闭集配对五腿、legacy 行不可带 reason、partial shape 两腿；
+  successor enqueue seam 拒绝无 manifest/chunks 的 planless V1，旧 reservation export 在
+  SQL 前固定返回 `W4C3A_DURABLE_PLAN_REQUIRED`。完整计划的 proof-vector CHECK 矩阵、
+  reservation 真并发和 changed-actor replay 改由 #4688 承担；在该 Draft/HOLD 通过前不计为
+  当前已覆盖；
 - 触发器姿态扫（全部 trg_a% ON attendance_% 的 tgenabled='O'，声明为弱判别，见未竟 46）+
   两点接线自证腿。
 
@@ -321,7 +320,8 @@ vitest.config.ts exclude 注释块）：
 - 门5：三 source family（import_item/scheduled/verified_delivery）真落库→worker 形状 reload
   （`proof_work_date::text`）→ rehydrate → 真锁验证 builder-grade；漂移矩阵十腿（opId/ordinal/
   fp/root/date/user/ledger-root/多 proof 字段/缺 proof 字段/JS Date）各自精确错误码；缺 key/多 key
-  → DURABLE_ROW_INVALID；P07 vector reload 逐条经 factory 复推 + 换 fp 篡改 → PROOF_DRIFT；
+  → DURABLE_ROW_INVALID；planless P07 vector reload 已退役，完整计划 job-vector reload 转由
+  #4688 Draft/HOLD；
 - 门6：三 namespace SQL 金标字面（与 Stage B parity/unit 同字面）；
 - 门7：unknown kind（接受 chk_aro_source_kind|chk_aro_entrypoint_source_pair 二名——未知 kind
   构造性同时违反两 CHECK，PG 报哪个先到；测试注释已说明）、非法 scalar 组合六腿（direct 多
@@ -388,10 +388,12 @@ vitest.config.ts exclude 注释块）：
     default rollout 行残留或建独立库）。
 48. E1 门「upgrade fixtures preserve every byte」的 jsonb 键序比较依赖 jsonb 规范化序（两侧
     同为 jsonb 产物，删键不改剩余键相对序）——非文本级 diff；字段值全等已覆盖。
-49. E3（真并发 first-claim 矩阵/null-version worker terminal-without-effect/enqueue vs 同步
-    双 commit 序/rollout lock 序/multi-key deadline 双腿）与 Stage F mutation 轮不在本阶段；
-    Stage C 未竟 30/31 仍开放。E1 的 P07 backstop 双连接腿已给 E3 可直接复用的双 client 驱动
-    形状（见 E1 文件 P07 reservation 用例）。
+49. E3（真并发 first-claim 矩阵/null-version worker terminal-without-effect/rollout lock 序/
+    multi-key deadline 双腿）与 Stage F mutation 轮不在本阶段；Stage C 未竟 30/31 仍开放。
+    predecessor P07 backstop 双连接腿已退役；#4688 Draft/HOLD 已补完整计划 enqueue 对同步
+    调用的双 commit 序，并以合同级 transition harness 证明 enqueue 侧 rollout 锁兼容性；
+    production transition writer 尚未交付，故 rollout 双序的完整 cutover 门仍开放，不能沿用
+    旧 planless 证据或把 harness/显式 fresh-transaction retry 当成生产接线。
 50. 本地库现状：`ms2_w4c0`（主验证库，已带加固后 schema + 各阶段残留 fixture）、
     `ms2_w4c0_cycle`（Stage A down/up 循环）、`ms2_w4c0_e1fresh`（本阶段全新 CI 形库，
     742/742 证据现场，保留给门审）；E1 scratch 库 `ms2_w4c0_e1_<run>` 每次运行自建自删。
@@ -432,17 +434,12 @@ waiter 先经 pg_locks `granted=false` 证明真阻塞、双 commit 序都跑；
    提交后在 exclusive 下 re-evaluate（resolver 读 legacy）再落 transition；反向
    transition 持 exclusive 落 shadow → source 的 preflight 在 shared 处真阻塞，释放后
    claim 冻结**新** posture（行内 accepted_write_posture='shadow'，非 pre-lock 的 legacy）；
-8. P07 enqueue vs rollout transition 双序：enqueue-first（shared 从 resolve 持到 job
-   insert 提交；transition 真等待，mid-flight 零 job 可见，exclusive 下 scan 看到
-   queued+frozen 'shadow'）；transition-first（eligible→authoritative 在 exclusive 下
-   提交；enqueue 在 shared 处真阻塞，释放后 job 冻结 'authoritative' —— 若 posture
-   在锁前读会冻 'shadow'，判别成立）；suspension 子腿（authoritative→suspended 提交后
-   waiter resolver→blocked、org factory 拒 mint `W4C0_ORG_POSTURE_BLOCKED`、零 job 行）；
-9. P07 enqueue vs 同步调用双 commit 序：sync-first（enqueue 在 class-10 真阻塞，sync
-   seal+commit 后 enqueue 锁下重读 → 409 batch conflict、零 job 行、恰 2 个 sync
-   operation 行）；enqueue-first（sync preflight 在 class-10 真阻塞，enqueue 提交后
-   sync 锁下重读 → 409、零 operation/batch 行、恰 1 个 job）——「exactly one side
-   reserves the tuple」两个方向都成立；
+8. predecessor P07 enqueue 已退役：当前腿证明旧 reserve 在 SQL 前 fail-closed，且
+   suspension 只产生 blocked posture、零 job 行。完整计划 enqueue vs rollout transition
+   双序未由本阶段证明，转交 #4688 Draft/HOLD；
+9. predecessor P07 enqueue vs 同步调用旧双序腿已退役；当前腿仅证明旧 reserve 即使邻接
+   concurrent synchronous claim 也保持零 job DML。完整计划的双 commit 序和“exactly one
+   side reserves the tuple”由 #4688 Draft/HOLD 重新证明；
 10. incomplete stable-ID operation vs rollout transition：claimed 未提交时 transition
     在 class-00 exclusive 排队，claim seal+commit 后 transition 完成 shadow→eligible ——
     全程无 40P01/重试耗尽；

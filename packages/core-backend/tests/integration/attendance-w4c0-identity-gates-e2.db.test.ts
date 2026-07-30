@@ -509,7 +509,7 @@ describeIfDatabase('W4C-0 Stage E2 — amendment section 2 identity gates (real 
   // Gate 5 — queue/DB reload re-runs the factory; drift fails.
   // =========================================================================
 
-  it('gate 5: durable rows reload through the factory; operation-ID/proof drift, shape violations, and non-canonical dates are rejected; the P07 vector re-derives entry by entry', async () => {
+  it('gate 5: durable operation rows reload through the factory; operation-ID/proof drift, shape violations, and non-canonical dates are rejected', async () => {
     const org = uuid()
     const root = uuid()
     const user = uuid()

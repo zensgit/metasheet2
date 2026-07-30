@@ -21,6 +21,12 @@ import {
   computeAttendanceItemSetFingerprintV1,
 } from '../../src/attendance/w4c0-fingerprints'
 import {
+  attendanceResultOperationPreflightV1,
+  sealAttendanceResultOperationBatchV1,
+  sealAttendanceResultOperationV1,
+} from '../../src/attendance/w4c0-operation-registry'
+import { normalizeAttendanceSourceOperationEnvelopeV1 } from '../../src/attendance/w4c0-source-commands'
+import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceImportReservationLocksV1,
@@ -28,6 +34,7 @@ import {
   createVerifiedAttendanceOrgIdentityV1,
   buildAttendanceOperationalBulkTargetAdvisoryKey,
   parseCanonicalAttendanceRolloutOrgKeyV1,
+  rehydrateVerifiedAttendanceOperationIdentityV1,
   resolveSegmentCalculationPosture,
   type AttendanceW4TransactionClientV1,
   type VerifiedAttendanceOrgIdentityV1,
@@ -44,11 +51,15 @@ const describeIfDatabase = dbUrl ? describe : describe.skip
 const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 const ORG = crypto.randomUUID()
 const POSTURE_ORG = crypto.randomUUID()
+const ROLLOUT_ENQUEUE_FIRST_ORG = crypto.randomUUID()
+const ROLLOUT_TRANSITION_FIRST_ORG = crypto.randomUUID()
+const SYNC_RACE_ORG = crypto.randomUUID()
 const ADMIN_A = `w4c3a-admin-a-${run}`
 const ADMIN_B = `w4c3a-admin-b-${run}`
 const LEGACY_WILDCARD_ADMIN = `w4c3a-legacy-wildcard-${run}`
 const ROLE_WILDCARD_ADMIN = `w4c3a-role-wildcard-${run}`
 const TARGET_USER = crypto.randomUUID()
+const SECOND_TARGET_USER = crypto.randomUUID()
 const SOURCE_REF = `w4c3a-source-${run}`
 const HEX_A = 'a'.repeat(64)
 const HEX_B = 'b'.repeat(64)
@@ -209,6 +220,35 @@ function auth(actorId: string, orgId: string) {
   })
 }
 
+function importBatchEnvelope(orgId: string, batchId: string) {
+  return normalizeAttendanceSourceOperationEnvelopeV1({
+    schemaVersion: 1,
+    orgId,
+    correlationId: `w4c3a-race-${run}`,
+    command: null,
+    batch: {
+      schemaVersion: 1,
+      kind: 'import_batch',
+      payload: {
+        batchCommandId: batchId,
+        transportKind: 'csv_upload',
+        batchFingerprint: HEX_A,
+      },
+      items: [
+        {
+          ordinal: 0,
+          subjectUserId: TARGET_USER,
+          semanticFingerprint: HEX_C,
+          normalizedBusinessInput: {
+            workDate: '2026-07-30',
+            workMinutes: 480,
+          },
+        },
+      ],
+    },
+  })
+}
+
 function noTargetInput(
   org: VerifiedAttendanceOrgIdentityV1,
   batchId: string,
@@ -321,6 +361,161 @@ function strictInput(org: VerifiedAttendanceOrgIdentityV1, batchId: string, acto
   return { input, batchIdentity }
 }
 
+function strictTwoItemInput(
+  org: VerifiedAttendanceOrgIdentityV1,
+  batchId: string,
+  actorId: string,
+) {
+  const itemDrafts = [
+    {
+      userId: TARGET_USER,
+      workDate: '2026-07-30',
+      semanticFingerprint: HEX_B,
+      commandFingerprint: HEX_C,
+    },
+    {
+      userId: SECOND_TARGET_USER,
+      workDate: '2026-07-31',
+      semanticFingerprint: HEX_C,
+      commandFingerprint: HEX_D,
+    },
+  ] as const
+  const batchIdentity = createVerifiedAttendanceOperationIdentityV1({
+    org,
+    kind: 'batch',
+    entrypoint: 'import_batch',
+    source: { sourceKind: 'import_batch', batchCommandId: batchId },
+  })
+  const itemIdentities = itemDrafts.map((draft, ordinal) => ({
+    identity: createVerifiedAttendanceOperationIdentityV1({
+      org,
+      kind: 'item',
+      entrypoint: 'import_batch',
+      source: {
+        sourceKind: 'import_item',
+        batchCommandId: batchId,
+        ordinal,
+        semanticFingerprint: draft.semanticFingerprint,
+      },
+    }),
+    commandFingerprint: draft.commandFingerprint,
+  }))
+  const fingerprintEntries = itemIdentities.map((item, ordinal) => ({
+    ordinal: String(ordinal),
+    operationId: item.identity.id,
+    commandFingerprint: item.commandFingerprint,
+  }))
+  const proofVector = itemIdentities.map((item, ordinal) => ({
+    ordinal,
+    semanticFingerprint: itemDrafts[ordinal].semanticFingerprint,
+    derivedOperationId: item.identity.id,
+    commandFingerprint: item.commandFingerprint,
+  }))
+  const items: readonly LegacyImportItemDraftV1[] = itemDrafts.map(
+    (draft, ordinal) => ({
+      kind: 'apply',
+      ordinal,
+      semanticOrdinal: ordinal,
+      targetRef: JSON.stringify([org.orgId, draft.userId, draft.workDate]),
+      previewSnapshot: { status: 'normal' },
+    }),
+  )
+  const recordWrites: readonly LegacyImportRecordWriteDraftV1[] =
+    itemDrafts.map((draft, ordinal) => ({
+      orgId: org.orgId,
+      userId: draft.userId,
+      workDate: draft.workDate,
+      sourceOrdinals: [ordinal],
+      mergeMode: 'merge',
+      firstInAt: `${draft.workDate}T01:00:00.000Z`,
+      lastOutAt: `${draft.workDate}T09:00:00.000Z`,
+      workMinutes: 480,
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      status: 'normal',
+      isWorkday: true,
+      timezone: 'Asia/Shanghai',
+      compatibilityMetadata: {},
+      policySnapshot: {},
+      profileSnapshot: {},
+      multiPunchSnapshot: {},
+      attributionSnapshot: {},
+      sourceBatchId: batchId,
+      resultSlots: {},
+    }))
+  const sequenceFingerprint =
+    computeAttendanceItemSequenceFingerprintV1(fingerprintEntries)
+  const setFingerprint =
+    computeAttendanceItemSetFingerprintV1(fingerprintEntries)
+  const batch = normalBatch(null, itemDrafts.length)
+
+  return {
+    input: {
+      batchIdentity,
+      itemIdentities,
+      job: {
+        orgId: org.orgId,
+        batchId,
+        createdBy: actorId,
+        idempotencyKey: null,
+        total: itemDrafts.length,
+        payload: {
+          __jobType: 'commit',
+          idempotencyKey: null,
+          __importEngine: 'standard',
+          recordUpsertStrategy: 'unnest',
+          itemsInsertStrategy: 'unnest',
+          __w4ContractVersion: 1,
+        },
+        w4Entrypoint: 'import_batch' as const,
+        w4BatchCommandId: batchId,
+        w4SourceKind: 'import_batch' as const,
+        w4SourceRef: SOURCE_REF,
+        w4ActorId: actorId,
+        w4ActorPosture: 'platform_admin',
+        w4TokenSubjectUserId: actorId,
+        w4CommandFingerprint: HEX_A,
+        w4AcceptedWritePosture: org.acceptedWritePosture,
+        w4ItemCount: itemDrafts.length,
+        w4ItemSequenceFingerprint: sequenceFingerprint,
+        w4ItemSetFingerprint: setFingerprint,
+        w4IdentityProofVector: proofVector,
+        w4DistinctTargetCount: itemDrafts.length,
+        w4OperationalBranch: 'strict_targeted' as const,
+        w4LegacyInputFingerprint: HEX_B,
+      },
+      manifestSeed: {
+        schemaVersion: 1 as const,
+        orgId: org.orgId,
+        batchId,
+        sourceKind: 'import_batch' as const,
+        sourceRef: SOURCE_REF,
+        createdBy: actorId,
+        actorId,
+        actorPosture: 'platform_admin',
+        tokenSubjectUserId: actorId,
+        acceptedWritePosture: org.acceptedWritePosture,
+        commandFingerprint: HEX_A,
+        legacyInputFingerprint: HEX_B,
+        operationalBranch: 'strict_targeted' as const,
+        legacyRowSourceKind: 'direct_rows' as const,
+        sourceRowCount: itemDrafts.length,
+        w4ItemCount: itemDrafts.length,
+        w4DistinctTargetCount: itemDrafts.length,
+        w4ItemSequenceFingerprint: sequenceFingerprint,
+        w4ItemSetFingerprint: setFingerprint,
+        legacySourceRowLimit: null,
+        batch,
+        artifactCleanup: { kind: 'none' as const },
+      },
+      items,
+      recordWrites,
+      groupEffects: [],
+    },
+    proofVector,
+  }
+}
+
 async function runSerializable<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect()
   try {
@@ -333,6 +528,32 @@ async function runSerializable<T>(pool: Pool, work: (client: PoolClient) => Prom
     throw error
   } finally {
     client.release()
+  }
+}
+
+async function backendPid(client: PoolClient): Promise<number> {
+  const result = await client.query('SELECT pg_backend_pid() AS pid')
+  return Number(result.rows[0].pid)
+}
+
+async function waitUntilAdvisoryBlocked(
+  pool: Pool,
+  pid: number,
+  timeoutMs = 8000,
+): Promise<void> {
+  const startedAt = Date.now()
+  for (;;) {
+    const result = await pool.query(
+      `SELECT count(*)::int AS n
+         FROM pg_locks
+        WHERE pid = $1 AND locktype = 'advisory' AND granted = false`,
+      [pid],
+    )
+    if (Number(result.rows[0].n) > 0) return
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error('waiter never blocked on an advisory lock')
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25))
   }
 }
 
@@ -372,13 +593,26 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     await w4c0Up(db)
     await w4c3aUp(db)
     await pool.query(
-      `INSERT INTO users (id) VALUES ($1), ($2), ($3), ($4), ($5)`,
-      [ADMIN_A, ADMIN_B, LEGACY_WILDCARD_ADMIN, ROLE_WILDCARD_ADMIN, TARGET_USER],
+      `INSERT INTO users (id) VALUES ($1), ($2), ($3), ($4), ($5), ($6)`,
+      [
+        ADMIN_A,
+        ADMIN_B,
+        LEGACY_WILDCARD_ADMIN,
+        ROLE_WILDCARD_ADMIN,
+        TARGET_USER,
+        SECOND_TARGET_USER,
+      ],
     )
-    for (const orgId of [ORG, POSTURE_ORG]) {
+    for (const orgId of [
+      ORG,
+      POSTURE_ORG,
+      ROLLOUT_ENQUEUE_FIRST_ORG,
+      ROLLOUT_TRANSITION_FIRST_ORG,
+      SYNC_RACE_ORG,
+    ]) {
       await pool.query(
         `INSERT INTO user_orgs (user_id, org_id) VALUES
-         ($1, $2), ($3, $2), ($4, $2), ($5, $2), ($6, $2)`,
+         ($1, $2), ($3, $2), ($4, $2), ($5, $2), ($6, $2), ($7, $2)`,
         [
           ADMIN_A,
           orgId,
@@ -386,6 +620,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
           LEGACY_WILDCARD_ADMIN,
           ROLE_WILDCARD_ADMIN,
           TARGET_USER,
+          SECOND_TARGET_USER,
         ],
       )
     }
@@ -418,7 +653,22 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       `UPDATE users SET permissions = '["attendance:*"]'::jsonb WHERE id = $1`,
       [LEGACY_WILDCARD_ADMIN],
     )
-    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = POSTURE_ORG
+    for (const orgId of [
+      ROLLOUT_ENQUEUE_FIRST_ORG,
+      ROLLOUT_TRANSITION_FIRST_ORG,
+    ]) {
+      await pool.query(
+        `INSERT INTO attendance_calculation_rollout_state
+         (org_id, state, engine_version, reason_code, actor_id, version, prior_state, scope)
+         VALUES ($1, 'legacy', 'w4c3a-race', 'TEST_FIXTURE', $2, 1, NULL, 'synthetic_staging')`,
+        [orgId, ADMIN_A],
+      )
+    }
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = [
+      POSTURE_ORG,
+      ROLLOUT_ENQUEUE_FIRST_ORG,
+      ROLLOUT_TRANSITION_FIRST_ORG,
+    ].join(',')
     legacyOrgWitness = await loadOrgWitness(pool, ORG)
   }, 90000)
 
@@ -453,6 +703,357 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       [batchId],
     )
     expect(rows.rows).toEqual([{ status: 'queued', total: 2, w4_operational_branch: 'operational_only_no_target', w4_item_count: 0, chunk_count: 1, chunks: 1, source_items: 2 }])
+  })
+
+  it('validates every strict proof-vector predicate and rehydrates every persisted item identity', async () => {
+    const batchId = crypto.randomUUID()
+    const planned = strictTwoItemInput(
+      legacyOrgWitness,
+      batchId,
+      ADMIN_A,
+    )
+    await expect(
+      runSerializable(pool, (client) =>
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(client),
+          auth(ADMIN_A, ORG),
+          planned.input,
+        ),
+      ),
+    ).resolves.toMatchObject({ kind: 'created' })
+
+    const persisted = await pool.query(
+      `SELECT org_id, w4_batch_command_id::text AS root,
+              w4_accepted_write_posture AS posture,
+              w4_item_count AS item_count,
+              w4_distinct_target_count AS distinct_target_count,
+              w4_identity_proof_vector AS vector
+         FROM attendance_import_jobs
+        WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
+      [ORG, batchId],
+    )
+    expect(persisted.rows).toHaveLength(1)
+    const row = persisted.rows[0] as {
+      org_id: string
+      root: string
+      posture: string
+      item_count: number
+      distinct_target_count: number
+      vector: Array<{
+        ordinal: number
+        semanticFingerprint: string
+        derivedOperationId: string
+        commandFingerprint: string
+      }>
+    }
+    expect(row.vector).toEqual(planned.proofVector)
+
+    const validate = async (input: {
+      sourceKind?: string | null
+      root?: string | null
+      vector?: unknown
+      itemCount?: number | null
+      branch?: string | null
+      distinctTargetCount?: number | null
+    }): Promise<boolean> => {
+      const result = await pool.query(
+        `SELECT attendance_w4_job_proof_vector_valid(
+           $1, $2::uuid, $3::jsonb, $4, $5, $6
+         ) AS valid`,
+        [
+          'sourceKind' in input ? input.sourceKind : 'import_batch',
+          'root' in input ? input.root : row.root,
+          JSON.stringify('vector' in input ? input.vector : row.vector),
+          'itemCount' in input ? input.itemCount : row.item_count,
+          'branch' in input ? input.branch : 'strict_targeted',
+          'distinctTargetCount' in input
+            ? input.distinctTargetCount
+            : row.distinct_target_count,
+        ],
+      )
+      return result.rows[0].valid as boolean
+    }
+    const first = row.vector[0]
+    const second = row.vector[1]
+    const withoutOrdinal = { ...first } as Record<string, unknown>
+    delete withoutOrdinal.ordinal
+    const withExtraKey = { ...first, extra: true }
+    const matrix: Array<{
+      label: string
+      input: Parameters<typeof validate>[0]
+      expected: boolean
+    }> = [
+      { label: 'valid strict vector', input: {}, expected: true },
+      {
+        label: 'reordered entries',
+        input: { vector: [second, first] },
+        expected: false,
+      },
+      {
+        label: 'duplicated ordinal',
+        input: { vector: [first, { ...second, ordinal: 0 }] },
+        expected: false,
+      },
+      {
+        label: 'missing entry',
+        input: { vector: [first] },
+        expected: false,
+      },
+      {
+        label: 'extra entry',
+        input: { vector: [first, second, { ...second, ordinal: 2 }] },
+        expected: false,
+      },
+      {
+        label: 'missing exact key',
+        input: { vector: [withoutOrdinal, second] },
+        expected: false,
+      },
+      {
+        label: 'extra exact key',
+        input: { vector: [withExtraKey, second] },
+        expected: false,
+      },
+      {
+        label: 'string ordinal',
+        input: { vector: [{ ...first, ordinal: '0' }, second] },
+        expected: false,
+      },
+      {
+        label: 'non-string semantic fingerprint',
+        input: { vector: [{ ...first, semanticFingerprint: 1 }, second] },
+        expected: false,
+      },
+      {
+        label: 'non-string derived operation id',
+        input: { vector: [{ ...first, derivedOperationId: 1 }, second] },
+        expected: false,
+      },
+      {
+        label: 'non-string command fingerprint',
+        input: { vector: [{ ...first, commandFingerprint: 1 }, second] },
+        expected: false,
+      },
+      {
+        label: 'malformed semantic fingerprint',
+        input: {
+          vector: [{ ...first, semanticFingerprint: 'g'.repeat(64) }, second],
+        },
+        expected: false,
+      },
+      {
+        label: 'malformed command fingerprint',
+        input: {
+          vector: [{ ...first, commandFingerprint: 'g'.repeat(64) }, second],
+        },
+        expected: false,
+      },
+      {
+        label: 'derived operation drift',
+        input: {
+          vector: [{ ...first, derivedOperationId: crypto.randomUUID() }, second],
+        },
+        expected: false,
+      },
+      {
+        label: 'root drift',
+        input: { root: crypto.randomUUID() },
+        expected: false,
+      },
+      {
+        label: 'namespace drift',
+        input: { sourceKind: 'integration_batch' },
+        expected: false,
+      },
+      {
+        label: 'unknown source kind',
+        input: { sourceKind: 'unknown' },
+        expected: false,
+      },
+      {
+        label: 'branch drift',
+        input: { branch: 'operational_only_no_target' },
+        expected: false,
+      },
+      {
+        label: 'unknown branch',
+        input: { branch: 'unknown' },
+        expected: false,
+      },
+      {
+        label: 'null source kind',
+        input: { sourceKind: null },
+        expected: false,
+      },
+      {
+        label: 'null root',
+        input: { root: null },
+        expected: false,
+      },
+      {
+        label: 'null vector',
+        input: { vector: null },
+        expected: false,
+      },
+      {
+        label: 'non-array vector',
+        input: { vector: {} },
+        expected: false,
+      },
+      {
+        label: 'null item count',
+        input: { itemCount: null },
+        expected: false,
+      },
+      {
+        label: 'zero item count',
+        input: { itemCount: 0 },
+        expected: false,
+      },
+      {
+        label: 'item count above strict limit',
+        input: { itemCount: 5001 },
+        expected: false,
+      },
+      {
+        label: 'item-count drift',
+        input: { itemCount: 1 },
+        expected: false,
+      },
+      {
+        label: 'null distinct-target count',
+        input: { distinctTargetCount: null },
+        expected: false,
+      },
+      {
+        label: 'zero distinct-target count',
+        input: { distinctTargetCount: 0 },
+        expected: false,
+      },
+      {
+        label: 'valid folded distinct-target count',
+        input: { distinctTargetCount: 1 },
+        expected: true,
+      },
+      {
+        label: 'distinct-target count above strict limit',
+        input: { distinctTargetCount: 5001 },
+        expected: false,
+      },
+      {
+        label: 'distinct-target count above item count',
+        input: { distinctTargetCount: 3 },
+        expected: false,
+      },
+    ]
+    for (const leg of matrix) {
+      await expect(validate(leg.input), leg.label).resolves.toBe(leg.expected)
+    }
+
+    const checkBinding = await pool.query(
+      `SELECT c.convalidated,
+              pg_get_constraintdef(c.oid, true) AS definition
+         FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+        WHERE t.relname = 'attendance_import_jobs'
+          AND c.conname = 'chk_aij_w4_proof_vector'
+          AND c.contype = 'c'`,
+    )
+    expect(checkBinding.rows).toHaveLength(1)
+    expect(checkBinding.rows[0].convalidated).toBe(true)
+    expect(checkBinding.rows[0].definition).toContain(
+      'attendance_w4_job_proof_vector_valid(w4_source_kind, w4_batch_command_id, w4_identity_proof_vector, w4_item_count, w4_operational_branch, w4_distinct_target_count)',
+    )
+
+    const rejectedJobId = crypto.randomUUID()
+    const rejectedBatchId = crypto.randomUUID()
+    const checkClient = await pool.connect()
+    try {
+      await checkClient.query('BEGIN')
+      await checkClient.query(
+        `SELECT set_config(
+           'attendance.w4c3a_enqueue_job_id',
+           $1::uuid::text,
+           true
+         )`,
+        [rejectedJobId],
+      )
+      await expect(
+        checkClient.query(
+          `INSERT INTO attendance_import_jobs (
+             id, org_id, batch_id, created_by, idempotency_key, status, progress, total, payload,
+             w4_contract_version, w4_entrypoint, w4_batch_command_id, w4_source_kind,
+             w4_source_ref, w4_actor_id, w4_actor_posture, w4_token_subject_user_id,
+             w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
+             w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector,
+             w4_legacy_plan_digest, w4_distinct_target_count, w4_operational_branch,
+             w4_legacy_input_fingerprint
+           )
+           SELECT $3::uuid, org_id, $4::uuid, created_by, $5, status, progress, total, payload,
+                  w4_contract_version, w4_entrypoint, $4::uuid, w4_source_kind,
+                  w4_source_ref, w4_actor_id, w4_actor_posture, w4_token_subject_user_id,
+                  w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
+                  w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector,
+                  w4_legacy_plan_digest, w4_distinct_target_count, w4_operational_branch,
+                  w4_legacy_input_fingerprint
+             FROM attendance_import_jobs
+            WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
+          [
+            ORG,
+            batchId,
+            rejectedJobId,
+            rejectedBatchId,
+            `w4c3a-invalid-check-${run}`,
+          ],
+        ),
+      ).rejects.toMatchObject({
+        code: '23514',
+        constraint: 'chk_aij_w4_proof_vector',
+      })
+    } finally {
+      await checkClient.query('ROLLBACK').catch(() => undefined)
+      checkClient.release()
+    }
+
+    row.vector.forEach((entry, index) => {
+      const durableRow = {
+        orgId: row.org_id,
+        entrypoint: 'import_batch',
+        kind: 'item' as const,
+        operationId: entry.derivedOperationId,
+        acceptedWritePosture: row.posture,
+        identitySourceKind: 'import_item',
+        sourceRootId: row.root,
+        inputOrdinal: entry.ordinal,
+        proofSemanticFingerprint: entry.semanticFingerprint,
+        proofUserId: null,
+        proofWorkDate: null,
+      }
+      const identity =
+        rehydrateVerifiedAttendanceOperationIdentityV1(durableRow)
+      expect(identity.id).toBe(entry.derivedOperationId)
+      expect(identity.sourceProof).toMatchObject({
+        sourceKind: 'import_item',
+        sourceRootId: row.root,
+        ordinal: String(index),
+        semanticFingerprint: entry.semanticFingerprint,
+      })
+
+      const drifted = [
+        { ...durableRow, operationId: crypto.randomUUID() },
+        { ...durableRow, inputOrdinal: (entry.ordinal + 1) % row.vector.length },
+        {
+          ...durableRow,
+          proofSemanticFingerprint:
+            entry.semanticFingerprint === HEX_A ? HEX_B : HEX_A,
+        },
+      ]
+      for (const candidate of drifted) {
+        expect(() =>
+          rehydrateVerifiedAttendanceOperationIdentityV1(candidate),
+        ).toThrow('W4C0_IDENTITY_PROOF_DRIFT')
+      }
+    })
   })
 
   it('freezes legacy name-first and code-fallback group references as durable UUIDs', async () => {
@@ -1069,4 +1670,341 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       [POSTURE_ORG],
     )
   })
+
+  it('serializes complete-plan enqueue against the locked transition contract harness in both commit orders', async () => {
+    // No production rollout-transition writer ships yet. This harness exercises
+    // the locked scan/update sequence required of that future writer, so it proves
+    // enqueue-side lock compatibility without claiming transition cutover.
+    const enqueueFirstBatch = crypto.randomUUID()
+    const enqueueFirstOrg = await loadOrgWitness(
+      pool,
+      ROLLOUT_ENQUEUE_FIRST_ORG,
+    )
+    const enqueueFirstInput = strictInput(
+      enqueueFirstOrg,
+      enqueueFirstBatch,
+      ADMIN_A,
+    )
+    const enqueue = await pool.connect()
+    const transition = await pool.connect()
+    try {
+      await enqueue.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      await expect(
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(enqueue),
+          auth(ADMIN_A, ROLLOUT_ENQUEUE_FIRST_ORG),
+          enqueueFirstInput.input,
+        ),
+      ).resolves.toMatchObject({ kind: 'created' })
+
+      await transition.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const transitionPid = await backendPid(transition)
+      const transitionAcquire = acquireAttendanceCalculationRolloutLock(
+        trx(transition),
+        parseCanonicalAttendanceRolloutOrgKeyV1(
+          ROLLOUT_ENQUEUE_FIRST_ORG,
+        ),
+        'exclusive',
+      )
+      void transitionAcquire.catch(() => undefined)
+      await waitUntilAdvisoryBlocked(pool, transitionPid)
+      expect(await residue(pool, enqueueFirstBatch)).toEqual({
+        jobs: 0,
+        manifests: 0,
+        chunks: 0,
+      })
+
+      await enqueue.query('COMMIT')
+      await transitionAcquire
+      await transition.query(
+        `SELECT status, w4_accepted_write_posture
+           FROM attendance_import_jobs
+          WHERE org_id = $1 AND w4_contract_version = 1
+            AND status IN ('queued', 'running')
+          ORDER BY id
+          FOR UPDATE`,
+        [ROLLOUT_ENQUEUE_FIRST_ORG],
+      )
+      let transitionFailure: unknown
+      try {
+        await transition.query(
+          `UPDATE attendance_calculation_rollout_state
+              SET state = 'shadow', prior_state = 'legacy', version = 2
+            WHERE org_id = $1`,
+          [ROLLOUT_ENQUEUE_FIRST_ORG],
+        )
+        await transition.query('COMMIT')
+      } catch (error) {
+        transitionFailure = error
+      }
+      expect(errorCode(transitionFailure)).toBe('40001')
+      await transition.query('ROLLBACK').catch(() => undefined)
+
+      await transition.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      await acquireAttendanceCalculationRolloutLock(
+        trx(transition),
+        parseCanonicalAttendanceRolloutOrgKeyV1(
+          ROLLOUT_ENQUEUE_FIRST_ORG,
+        ),
+        'exclusive',
+      )
+      const frozen = await transition.query(
+        `SELECT status, w4_accepted_write_posture
+           FROM attendance_import_jobs
+          WHERE org_id = $1 AND w4_contract_version = 1
+            AND status IN ('queued', 'running')
+          ORDER BY id
+          FOR UPDATE`,
+        [ROLLOUT_ENQUEUE_FIRST_ORG],
+      )
+      expect(frozen.rows).toEqual([
+        {
+          status: 'queued',
+          w4_accepted_write_posture: 'legacy_projection_only',
+        },
+      ])
+      await transition.query('ROLLBACK')
+    } finally {
+      await enqueue.query('ROLLBACK').catch(() => undefined)
+      await transition.query('ROLLBACK').catch(() => undefined)
+      enqueue.release()
+      transition.release()
+    }
+
+    const transitionFirstBatch = crypto.randomUUID()
+    const transitionFirstOrg = await loadOrgWitness(
+      pool,
+      ROLLOUT_TRANSITION_FIRST_ORG,
+    )
+    const transitionFirstInput = strictInput(
+      transitionFirstOrg,
+      transitionFirstBatch,
+      ADMIN_A,
+    )
+    const transitionFirst = await pool.connect()
+    const waitingEnqueue = await pool.connect()
+    try {
+      await transitionFirst.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      await acquireAttendanceCalculationRolloutLock(
+        trx(transitionFirst),
+        parseCanonicalAttendanceRolloutOrgKeyV1(
+          ROLLOUT_TRANSITION_FIRST_ORG,
+        ),
+        'exclusive',
+      )
+      await transitionFirst.query(
+        `SELECT id
+           FROM attendance_import_jobs
+          WHERE org_id = $1 AND w4_contract_version = 1
+            AND status IN ('queued', 'running')
+          ORDER BY id
+          FOR UPDATE`,
+        [ROLLOUT_TRANSITION_FIRST_ORG],
+      )
+      await transitionFirst.query(
+        `UPDATE attendance_calculation_rollout_state
+            SET state = 'shadow', prior_state = 'legacy', version = 2
+          WHERE org_id = $1`,
+        [ROLLOUT_TRANSITION_FIRST_ORG],
+      )
+
+      await waitingEnqueue.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const enqueuePid = await backendPid(waitingEnqueue)
+      const enqueuePromise = reserveAttendanceLegacyImportPlanJobV1(
+        trx(waitingEnqueue),
+        auth(ADMIN_A, ROLLOUT_TRANSITION_FIRST_ORG),
+        transitionFirstInput.input,
+      )
+      void enqueuePromise.catch(() => undefined)
+      await waitUntilAdvisoryBlocked(pool, enqueuePid)
+      await transitionFirst.query('COMMIT')
+
+      await expect(enqueuePromise).rejects.toMatchObject({
+        code: '40001',
+      })
+      await waitingEnqueue.query('ROLLBACK').catch(() => undefined)
+      // Caller cutover and its bounded retry are not shipped. Rebuild the witness
+      // explicitly to prove only the state a future whole-transaction retry sees.
+      const refreshedOrg = await loadOrgWitness(
+        pool,
+        ROLLOUT_TRANSITION_FIRST_ORG,
+      )
+      const refreshedInput = strictInput(
+        refreshedOrg,
+        transitionFirstBatch,
+        ADMIN_A,
+      )
+      await expect(
+        runSerializable(pool, (client) =>
+          reserveAttendanceLegacyImportPlanJobV1(
+            trx(client),
+            auth(ADMIN_A, ROLLOUT_TRANSITION_FIRST_ORG),
+            refreshedInput.input,
+          ),
+        ),
+      ).resolves.toMatchObject({ kind: 'created' })
+    } finally {
+      await transitionFirst.query('ROLLBACK').catch(() => undefined)
+      await waitingEnqueue.query('ROLLBACK').catch(() => undefined)
+      transitionFirst.release()
+      waitingEnqueue.release()
+    }
+    expect(await residue(pool, transitionFirstBatch)).toEqual({
+      jobs: 1,
+      manifests: 1,
+      chunks: 1,
+    })
+    const refreshedJob = await pool.query(
+      `SELECT w4_accepted_write_posture
+         FROM attendance_import_jobs
+        WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
+      [ROLLOUT_TRANSITION_FIRST_ORG, transitionFirstBatch],
+    )
+    expect(refreshedJob.rows).toEqual([
+      { w4_accepted_write_posture: 'shadow' },
+    ])
+  }, 30000)
+
+  it('serializes complete-plan enqueue with synchronous operation claims in both commit orders', async () => {
+    const sealClaim = async (
+      client: PoolClient,
+      claim: Awaited<ReturnType<typeof attendanceResultOperationPreflightV1>>,
+    ): Promise<void> => {
+      if (claim.kind !== 'claimed') throw new Error('expected a fresh claim')
+      const itemIds = claim.itemIdentities.map((identity) => identity.id)
+      for (const identity of claim.itemIdentities) {
+        await sealAttendanceResultOperationV1(trx(client), identity, {
+          responseSnapshot: { sync: true },
+        })
+      }
+      await sealAttendanceResultOperationBatchV1(
+        trx(client),
+        claim.batchIdentity,
+        {
+          order: itemIds,
+          byItem: Object.fromEntries(
+            itemIds.map((itemId) => [itemId, { sync: true }]),
+          ),
+        },
+      )
+    }
+
+    const org = await loadOrgWitness(pool, SYNC_RACE_ORG)
+    const syncFirstBatch = crypto.randomUUID()
+    const syncFirstInput = strictInput(org, syncFirstBatch, ADMIN_A)
+    const syncFirst = await pool.connect()
+    const waitingEnqueue = await pool.connect()
+    try {
+      await syncFirst.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const claim = await attendanceResultOperationPreflightV1(
+        trx(syncFirst),
+        auth(ADMIN_A, SYNC_RACE_ORG),
+        importBatchEnvelope(SYNC_RACE_ORG, syncFirstBatch).registryInput,
+      )
+
+      await waitingEnqueue.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const enqueuePid = await backendPid(waitingEnqueue)
+      const enqueuePromise = reserveAttendanceLegacyImportPlanJobV1(
+        trx(waitingEnqueue),
+        auth(ADMIN_A, SYNC_RACE_ORG),
+        syncFirstInput.input,
+      )
+      void enqueuePromise.catch(() => undefined)
+      await waitUntilAdvisoryBlocked(pool, enqueuePid)
+      await sealClaim(syncFirst, claim)
+      await syncFirst.query('COMMIT')
+
+      await expect(enqueuePromise).rejects.toMatchObject({
+        code: '40001',
+      })
+      await waitingEnqueue.query('ROLLBACK')
+      // This explicit fresh transaction proves the committed conflict result; it
+      // does not claim that an enqueue caller/retry wrapper has shipped.
+      await expect(
+        runSerializable(pool, (client) =>
+          reserveAttendanceLegacyImportPlanJobV1(
+            trx(client),
+            auth(ADMIN_A, SYNC_RACE_ORG),
+            syncFirstInput.input,
+          ),
+        ),
+      ).rejects.toMatchObject({
+        code: 'ATTENDANCE_OPERATION_BATCH_CONFLICT',
+      })
+    } finally {
+      await syncFirst.query('ROLLBACK').catch(() => undefined)
+      await waitingEnqueue.query('ROLLBACK').catch(() => undefined)
+      syncFirst.release()
+      waitingEnqueue.release()
+    }
+    expect(await residue(pool, syncFirstBatch)).toEqual({
+      jobs: 0,
+      manifests: 0,
+      chunks: 0,
+    })
+
+    const enqueueFirstBatch = crypto.randomUUID()
+    const enqueueFirstInput = strictInput(org, enqueueFirstBatch, ADMIN_A)
+    const enqueueFirst = await pool.connect()
+    const waitingSync = await pool.connect()
+    try {
+      await enqueueFirst.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      await expect(
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(enqueueFirst),
+          auth(ADMIN_A, SYNC_RACE_ORG),
+          enqueueFirstInput.input,
+        ),
+      ).resolves.toMatchObject({ kind: 'created' })
+
+      await waitingSync.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const syncPid = await backendPid(waitingSync)
+      const syncPromise = attendanceResultOperationPreflightV1(
+        trx(waitingSync),
+        auth(ADMIN_A, SYNC_RACE_ORG),
+        importBatchEnvelope(SYNC_RACE_ORG, enqueueFirstBatch).registryInput,
+      )
+      void syncPromise.catch(() => undefined)
+      await waitUntilAdvisoryBlocked(pool, syncPid)
+      await enqueueFirst.query('COMMIT')
+
+      await expect(syncPromise).rejects.toMatchObject({
+        code: '40001',
+      })
+      await waitingSync.query('ROLLBACK')
+      // As above, retry is modeled explicitly because enqueue caller cutover is
+      // still outside this Draft/HOLD evidence slice.
+      await expect(
+        runSerializable(pool, (client) =>
+          attendanceResultOperationPreflightV1(
+            trx(client),
+            auth(ADMIN_A, SYNC_RACE_ORG),
+            importBatchEnvelope(
+              SYNC_RACE_ORG,
+              enqueueFirstBatch,
+            ).registryInput,
+          ),
+        ),
+      ).rejects.toMatchObject({
+        code: 'ATTENDANCE_OPERATION_BATCH_CONFLICT',
+      })
+    } finally {
+      await enqueueFirst.query('ROLLBACK').catch(() => undefined)
+      await waitingSync.query('ROLLBACK').catch(() => undefined)
+      enqueueFirst.release()
+      waitingSync.release()
+    }
+    expect(await residue(pool, enqueueFirstBatch)).toEqual({
+      jobs: 1,
+      manifests: 1,
+      chunks: 1,
+    })
+    const syncRows = await pool.query(
+      `SELECT count(*)::int AS operations
+         FROM attendance_result_operations
+        WHERE org_id = $1 AND batch_command_id = $2::uuid`,
+      [SYNC_RACE_ORG, enqueueFirstBatch],
+    )
+    expect(syncRows.rows).toEqual([{ operations: 0 }])
+  }, 30000)
 })
