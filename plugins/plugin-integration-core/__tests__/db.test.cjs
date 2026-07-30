@@ -84,7 +84,7 @@ async function main() {
   const publicKeys = Object.keys(db).sort()
   const expected = [
     'ALLOWED_PREFIX', 'countRows', 'deleteRows', 'insertMany', 'insertOne',
-    'select', 'selectOne', 'transaction', 'updateRow',
+    'select', 'selectOne', 'selectOneForUpdate', 'transaction', 'updateRow',
   ]
   assert.deepEqual(publicKeys, expected, 'no rawQuery / execute / any raw SQL hook')
 
@@ -226,6 +226,21 @@ async function main() {
   const row = await db6b_one.selectOne('integration_pipelines', { id: 'p1' })
   assert.ok(row && row.id === 'p1', 'selectOne unwraps array-return shape')
 
+  const mockDb6b_lock = mockDatabase({ nextRows: [
+    [{ id: 'p1', status: 'approved' }],
+  ] })
+  const db6b_lock = createDb({ database: mockDb6b_lock })
+  const locked = await db6b_lock.selectOneForUpdate(
+    'integration_pipelines',
+    { id: 'p1', status: 'approved' },
+  )
+  assert.equal(locked.id, 'p1')
+  assert.match(
+    mockDb6b_lock.calls[0].sql,
+    /^SELECT \* FROM "integration_pipelines" WHERE "id" = \$1 AND "status" = \$2 LIMIT 1 FOR UPDATE$/,
+  )
+  assert.deepEqual(mockDb6b_lock.calls[0].params, ['p1', 'approved'])
+
   const mockDb6b_count = mockDatabase({ nextRows: [
     [{ count: 42 }],
   ] })
@@ -255,7 +270,7 @@ async function main() {
     const trxKeys = Object.keys(trx).sort()
     assert.deepEqual(
       trxKeys,
-      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'updateRow'],
+      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForUpdate', 'updateRow'],
       'transaction exposes scoped surface only, no rawQuery',
     )
     await trx.insertOne('integration_runs', { id: 'rtx', status: 'running' })

@@ -45,6 +45,10 @@ export default defineConfig({
       // applies migration 068 in an isolated schema and requires real PostgreSQL behavior;
       // excluded from the no-DB job and wired as a whole file in plugin-tests.yml.
       'tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts',
+      // Sealed-export S4 generation lease/CAS, inactive apply and visibility golden. It
+      // applies migrations 068+069 in an isolated schema and requires real PostgreSQL;
+      // excluded from the no-DB job and wired as a whole file in plugin-tests.yml.
+      'tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.

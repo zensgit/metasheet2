@@ -257,9 +257,77 @@ function createPrivateIngestionMetadataStore({ db } = {}) {
     return updated
   }
 
-  async function beginCleanup(binding, expectedStatus) {
+  async function claimCompletedSession(binding, generationId, claimedAt) {
     let updated
     try {
+      updated = firstRow(await db.updateRow(
+        SESSION_TABLE,
+        {
+          generation_claim_id: generationId,
+          generation_claimed_at: claimedAt,
+        },
+        Object.assign({}, scopedWhere(binding), {
+          status: 'UPLOAD_COMPLETE',
+          generation_claim_id: null,
+          generation_claimed_at: null,
+        }),
+      ))
+    } catch {
+      failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+    }
+    if (updated !== null) return updated
+
+    const state = await readState(binding)
+    if (
+      state.kind === 'SESSION'
+      && state.session.status === 'UPLOAD_COMPLETE'
+      && state.session.generation_claim_id === generationId
+      && state.session.generation_claimed_at !== null
+    ) {
+      return state.session
+    }
+    failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
+  }
+
+  async function releaseGenerationClaim(binding, generationId) {
+    let updated
+    try {
+      updated = firstRow(await db.updateRow(
+        SESSION_TABLE,
+        {
+          generation_claim_id: null,
+          generation_claimed_at: null,
+        },
+        Object.assign({}, scopedWhere(binding), {
+          status: 'UPLOAD_COMPLETE',
+          generation_claim_id: generationId,
+        }),
+      ))
+    } catch {
+      failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+    }
+    if (updated !== null) return updated
+    const state = await readState(binding)
+    if (
+      state.kind === 'SESSION'
+      && state.session.status === 'UPLOAD_COMPLETE'
+      && state.session.generation_claim_id === null
+      && state.session.generation_claimed_at === null
+    ) {
+      return state.session
+    }
+    failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+  }
+
+  async function beginCleanup(binding, expectedStatus, supportsGenerationClaims) {
+    let updated
+    try {
+      const where = Object.assign({}, scopedWhere(binding), {
+        status: expectedStatus,
+      })
+      if (supportsGenerationClaims) {
+        where.generation_claim_id = null
+      }
       updated = firstRow(await db.updateRow(
         SESSION_TABLE,
         {
@@ -269,7 +337,7 @@ function createPrivateIngestionMetadataStore({ db } = {}) {
           pending_byte_count: null,
           pending_write_token: null,
         },
-        Object.assign({}, scopedWhere(binding), { status: expectedStatus }),
+        where,
       ))
     } catch {
       failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
@@ -340,6 +408,8 @@ function createPrivateIngestionMetadataStore({ db } = {}) {
     releaseChunkWrite,
     finishChunkWrite,
     markComplete,
+    claimCompletedSession,
+    releaseGenerationClaim,
     beginCleanup,
     listExpiredSessions,
     tombstoneAndDelete,

@@ -567,11 +567,20 @@ function packageTestChainIncludesBothSuites() {
     'node __tests__/gip-sqlserver-snapshot-page-sequence-executor.test.cjs'
   const mainChain = packageJson.scripts.test.split(' && ')
 
-  assert.deepEqual(mainChain.slice(-3), [
+  const strategyIndex = mainChain.indexOf(strategyCommand)
+  assert.notEqual(strategyIndex, -1)
+  assert.deepEqual(mainChain.slice(strategyIndex, strategyIndex + 3), [
     strategyCommand,
     profileCommand,
     executorCommand,
   ])
+  for (const command of [strategyCommand, profileCommand, executorCommand]) {
+    assert.equal(
+      mainChain.filter((entry) => entry === command).length,
+      1,
+      `${command} must occur exactly once in the explicit test chain`,
+    )
+  }
   assert.equal(
     packageJson.scripts[
       'test:gip-sqlserver-snapshot-page-sequence-strategy'

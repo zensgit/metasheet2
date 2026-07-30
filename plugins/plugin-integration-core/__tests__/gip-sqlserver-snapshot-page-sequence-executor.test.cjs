@@ -626,7 +626,11 @@ function constantsAndTestChainArePinned() {
     packageJson.scripts['test:gip-sqlserver-snapshot-page-sequence-executor'],
     command,
   )
-  assert.equal(packageJson.scripts.test.endsWith(` && ${command}`), true)
+  assert.equal(
+    packageJson.scripts.test.split(' && ').filter((entry) => entry === command).length,
+    1,
+    'the executor suite must occur exactly once in the explicit test chain',
+  )
   assert.equal(
     packageJson.scripts[
       'evidence:gip-sqlserver-snapshot-page-sequence-executor'

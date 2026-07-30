@@ -1645,7 +1645,7 @@ const DECLARED_WEAKSET_EXEMPTIONS = Object.freeze({
 // value, because "it threw" is not "no" (round 6, P2-C); one that is not exported at all
 // cannot be asked from outside the module.
 //
-// FOURTEEN declarations, TEN of them sweepable. The seventh pre-existing
+// SEVENTEEN declarations, THIRTEEN of them sweepable. The seventh pre-existing
 // sweepable brand —
 // `firstPartyReadSourceConfigStores` — is the one round 6's hand-authored checker table
 // omitted, and it is minted by a factory this PR changed. The eighth is the
@@ -1674,7 +1674,10 @@ const DECLARED_TRUST_DECLARATIONS = Object.freeze([
   'gip-sqlserver-snapshot-page-sequence-strategy.cjs.trustedStrategies -> isCertifiedSqlServerSnapshotPageSequenceStrategy [sweepable]',
   'gip-system-identity-read.cjs.trustedSystemIdentityServices -> assertTrustedSystemIdentityService [checker-not-exported]',
   'read-source-config-store.cjs.firstPartyReadSourceConfigStores -> isFirstPartyReadSourceConfigStore [sweepable]',
+  'sealed-export/failure-vocabulary.cjs.TRUSTED_SEALED_EXPORT_ERRORS -> isTrustedSealedExportError [sweepable]',
+  'sealed-export/generation-store.cjs.TRUSTED_STORES -> isTrustedGenerationStore [sweepable]',
   'sealed-export/private-ingestion-manifest-verifier.cjs.trustedManifestVerifiers -> isTrustedPrivateIngestionManifestVerifier [sweepable]',
+  'sealed-export/private-ingestion-service.cjs.TRUSTED_GENERATION_SOURCES -> isTrustedPrivateIngestionGenerationSource [sweepable]',
 ])
 
 // A PURE function of injectable inputs, so both positive controls can run the IDENTICAL
@@ -2149,9 +2152,9 @@ function trustBrandInventoryIsDerivedNotAuthored() {
     exemptOccurrences: reach.exemptions.length,
   }
   assert.deepEqual(counts, {
-    declarations: 14,
-    declaringModules: 9,
-    sweepable: 10,
+    declarations: 17,
+    declaringModules: 12,
+    sweepable: 13,
     unjudgeable: 4,
     exemptOccurrences: 4,
   }, 'the derived counts disagree with the tree — the banner below may not print a number no assertion pinned')
@@ -2191,6 +2194,9 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
       'sqlserverSnapshotExecutor',
     'sealed-export/private-ingestion-manifest-verifier.cjs':
       'sealedExportManifest',
+    'sealed-export/failure-vocabulary.cjs': 'sealedExportFailureVocabulary',
+    'sealed-export/generation-store.cjs': 'sealedExportGenerationStore',
+    'sealed-export/private-ingestion-service.cjs': 'sealedExportIngestion',
   })
   // THE WALK IS PINNED IN BOTH DIRECTIONS. Round 7 asserted only that every DERIVED
   // module has an alias, which is one-directional: a module DROPPING OUT of the
@@ -2215,8 +2221,8 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
   for (const declaration of reach.sweepable) {
     checkers[brandKeyFor(declaration.checker)] = byName.get(declaration.module)[declaration.checker]
   }
-  assert.equal(Object.keys(checkers).length, 10,
-    `the derived checker set must be the ten sweepable brands, got ${Object.keys(checkers).sort().join(', ')}`)
+  assert.equal(Object.keys(checkers).length, 13,
+    `the derived checker set must be the thirteen sweepable brands, got ${Object.keys(checkers).sort().join(', ')}`)
 
   const result = await saturateAndFindMintingPaths(tables, 3, checkers)
 

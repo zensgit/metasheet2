@@ -5,7 +5,10 @@ const crypto = require('node:crypto')
 const canonicalCodec = require('./canonical-json.cjs')
 const contracts = require('./contracts.cjs')
 const digests = require('./digests.cjs')
-const { failSealedExport } = require('./failure-vocabulary.cjs')
+const {
+  failSealedExport,
+  isTrustedSealedExportError,
+} = require('./failure-vocabulary.cjs')
 const {
   isTrustedPrivateIngestionManifestVerifier,
 } = require('./private-ingestion-manifest-verifier.cjs')
@@ -18,6 +21,7 @@ const AUTHORITY_FIELDS = Object.freeze([
   'roleBindingFingerprint',
 ])
 const SESSION_ID_PATTERN = /^[0-9a-f]{64}$/
+const GENERATION_ID_PATTERN = /^[0-9a-f]{64}$/
 const WRITE_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const ACTIVE_STATUSES = new Set(['UPLOADING', 'CHUNK_WRITING'])
 const SESSION_STATUSES = new Set([
@@ -26,6 +30,7 @@ const SESSION_STATUSES = new Set([
   'UPLOAD_COMPLETE',
   'CLEANING',
 ])
+const TRUSTED_GENERATION_SOURCES = new WeakSet()
 
 function readDataField(input, field) {
   const descriptor = Object.getOwnPropertyDescriptor(input, field)
@@ -128,6 +133,15 @@ function sessionIdFor(authority, manifestDigest) {
   return crypto.createHash('sha256').update(canonical.bytes).digest('hex')
 }
 
+function generationIdFor(sessionId) {
+  const canonical = canonicalCodec.tryCanonicalJson({
+    generationContract: 'sealed-export/generation/v1',
+    sessionId,
+  })
+  if (!canonical.ok) failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+  return crypto.createHash('sha256').update(canonical.bytes).digest('hex')
+}
+
 function bindingFor(authority, sessionId) {
   return Object.freeze({
     sessionId,
@@ -166,6 +180,8 @@ function createPrivateIngestionService({
     || typeof metadataStore.releaseChunkWrite !== 'function'
     || typeof metadataStore.finishChunkWrite !== 'function'
     || typeof metadataStore.markComplete !== 'function'
+    || typeof metadataStore.claimCompletedSession !== 'function'
+    || typeof metadataStore.releaseGenerationClaim !== 'function'
     || typeof metadataStore.beginCleanup !== 'function'
     || typeof metadataStore.listExpiredSessions !== 'function'
     || typeof metadataStore.tombstoneAndDelete !== 'function'
@@ -249,6 +265,21 @@ function createPrivateIngestionService({
 
   function validatePersistedSession(row) {
     if (!row || typeof row !== 'object') failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+    const hasGenerationClaimId = Object.prototype.hasOwnProperty.call(
+      row,
+      'generation_claim_id',
+    )
+    const hasGenerationClaimedAt = Object.prototype.hasOwnProperty.call(
+      row,
+      'generation_claimed_at',
+    )
+    if (hasGenerationClaimId !== hasGenerationClaimedAt) {
+      failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
+    }
+    const generationClaimId = hasGenerationClaimId ? row.generation_claim_id : null
+    const rawGenerationClaimedAt = hasGenerationClaimedAt
+      ? row.generation_claimed_at
+      : null
     const envelope = contracts.validateExportRequestEnvelope(row.export_request_envelope)
     const manifest = contracts.validateSignedManifest(row.manifest)
     assertAuthorityMatchesEnvelope(authority, envelope)
@@ -257,10 +288,14 @@ function createPrivateIngestionService({
     const manifestDigest = contracts.computeManifestDigest(manifest)
     let storedExpiry
     let completedAt = null
+    let generationClaimedAt = null
     try {
       storedExpiry = new Date(row.expires_at).toISOString()
       if (row.completed_at !== null) {
         completedAt = new Date(row.completed_at).toISOString()
+      }
+      if (rawGenerationClaimedAt !== null) {
+        generationClaimedAt = new Date(rawGenerationClaimedAt).toISOString()
       }
     } catch {
       failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
@@ -300,11 +335,33 @@ function createPrivateIngestionService({
         && completedAt !== null
         && row.accepted_chunk_count !== manifest.chunks.length
       )
+      || (
+        generationClaimId === null
+        && generationClaimedAt !== null
+      )
+      || (
+        generationClaimId !== null
+        && (
+          typeof generationClaimId !== 'string'
+          || !GENERATION_ID_PATTERN.test(generationClaimId)
+          || generationClaimedAt === null
+          || row.status !== 'UPLOAD_COMPLETE'
+        )
+      )
     ) {
       failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
     }
     validatePendingState(row, manifest)
-    return Object.freeze({ row, envelope, manifest, manifestDigest })
+    return Object.freeze({
+      row: Object.freeze(Object.assign({}, row, {
+        generation_claim_id: generationClaimId,
+        generation_claimed_at: rawGenerationClaimedAt,
+      })),
+      supportsGenerationClaims: hasGenerationClaimId,
+      envelope,
+      manifest,
+      manifestDigest,
+    })
   }
 
   function validatePersistedReceipts(loaded, rows, mode) {
@@ -564,7 +621,10 @@ function createPrivateIngestionService({
       await blobStore.writeChunk(sessionId, chunkIndex, owned)
     } catch (error) {
       await metadataStore.releaseChunkWrite(loaded.binding, writeToken)
-      if (error && error.reason === 'SEALED_EXPORT_CHUNK_DUPLICATE_CONFLICT') {
+      if (
+        isTrustedSealedExportError(error)
+        && error.reason === 'SEALED_EXPORT_CHUNK_DUPLICATE_CONFLICT'
+      ) {
         failSealedExport('SEALED_EXPORT_CHUNK_DUPLICATE_CONFLICT', { chunkIndex })
       }
       failSealedExport('SEALED_EXPORT_STAGING_WRITE_FAILED', { chunkIndex })
@@ -613,6 +673,89 @@ function createPrivateIngestionService({
     })
   }
 
+  async function claimCompletedSessionForGeneration(input) {
+    const call = validateCall(input, ['sessionId'])
+    const loaded = await readBoundState(call.sessionId)
+    if (
+      loaded.kind !== 'SESSION'
+      || loaded.persisted.row.status !== 'UPLOAD_COMPLETE'
+    ) {
+      failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
+    }
+    if (nowInstant().getTime() >= parseExpiry(loaded.persisted.manifest)) {
+      failSealedExport('SEALED_EXPORT_ARTIFACT_EXPIRED')
+    }
+    const generationId = generationIdFor(call.sessionId)
+    const claimed = validatePersistedSession(
+      await metadataStore.claimCompletedSession(
+        loaded.binding,
+        generationId,
+        nowInstant().toISOString(),
+      ),
+    )
+    if (claimed.row.generation_claim_id !== generationId) {
+      failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+    }
+    const receiptRows = await metadataStore.listReceipts(loaded.binding)
+    const receipts = Object.freeze(receiptRows.map(normalizeReceipt))
+    return Object.freeze({
+      generationId,
+      sessionId: call.sessionId,
+      authority: Object.freeze({
+        tenantId: authority.tenantId,
+        workspaceId: authority.workspaceId,
+        tenantDomainBinding: authority.tenantDomainBinding,
+        systemContentKey: authority.systemContentKey,
+        roleBindingFingerprint: authority.roleBindingFingerprint,
+      }),
+      envelope: claimed.envelope,
+      manifest: claimed.manifest,
+      manifestDigest: claimed.manifestDigest,
+      receipts,
+    })
+  }
+
+  async function readClaimedGenerationChunk(input) {
+    const call = validateCall(input, ['sessionId', 'generationId', 'chunkIndex'])
+    if (
+      typeof call.sessionId !== 'string'
+      || !SESSION_ID_PATTERN.test(call.sessionId)
+      || typeof call.generationId !== 'string'
+      || !GENERATION_ID_PATTERN.test(call.generationId)
+      || generationIdFor(call.sessionId) !== call.generationId
+      || !Number.isSafeInteger(call.chunkIndex)
+      || call.chunkIndex < 0
+    ) {
+      failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
+    }
+    const loaded = await readBoundState(call.sessionId)
+    if (
+      loaded.kind !== 'SESSION'
+      || loaded.persisted.row.status !== 'UPLOAD_COMPLETE'
+      || loaded.persisted.row.generation_claim_id !== call.generationId
+      || call.chunkIndex >= loaded.persisted.manifest.chunks.length
+    ) {
+      failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
+    }
+    return Buffer.from(await blobStore.readChunk(call.sessionId, call.chunkIndex))
+  }
+
+  async function releaseCompletedSessionGenerationClaim(input) {
+    const call = validateCall(input, ['sessionId', 'generationId'])
+    if (
+      typeof call.sessionId !== 'string'
+      || !SESSION_ID_PATTERN.test(call.sessionId)
+      || typeof call.generationId !== 'string'
+      || !GENERATION_ID_PATTERN.test(call.generationId)
+      || generationIdFor(call.sessionId) !== call.generationId
+    ) {
+      failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
+    }
+    const binding = bindingFor(authority, call.sessionId)
+    await metadataStore.releaseGenerationClaim(binding, call.generationId)
+    return Object.freeze({ released: true })
+  }
+
   async function cleanupBySessionId(sessionId) {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const loaded = await readBoundState(sessionId)
@@ -623,6 +766,9 @@ function createPrivateIngestionService({
         await blobStore.removeSession(sessionId)
         return Object.freeze({ sessionId, outcome: 'CLEANED' })
       }
+      if (loaded.persisted.row.generation_claim_id !== null) {
+        return Object.freeze({ sessionId, outcome: 'RETAINED_ACTIVE' })
+      }
       const expired = nowInstant().getTime() >= parseExpiry(loaded.persisted.manifest)
       if (ACTIVE_STATUSES.has(loaded.persisted.row.status) && !expired) {
         return Object.freeze({ sessionId, outcome: 'RETAINED_ACTIVE' })
@@ -631,6 +777,7 @@ function createPrivateIngestionService({
         await metadataStore.beginCleanup(
           loaded.binding,
           loaded.persisted.row.status,
+          loaded.persisted.supportsGenerationClaims,
         )
         continue
       }
@@ -649,9 +796,18 @@ function createPrivateIngestionService({
   }
 
   function validateExpiredCleanupCandidate(row, cutoffMs) {
+    const hasGenerationClaimId = row && Object.prototype.hasOwnProperty.call(
+      row,
+      'generation_claim_id',
+    )
+    const hasGenerationClaimedAt = row && Object.prototype.hasOwnProperty.call(
+      row,
+      'generation_claimed_at',
+    )
     if (
       !row
       || typeof row !== 'object'
+      || hasGenerationClaimId !== hasGenerationClaimedAt
       || typeof row.session_id !== 'string'
       || !SESSION_ID_PATTERN.test(row.session_id)
       || row.tenant_id !== authority.tenantId
@@ -665,9 +821,27 @@ function createPrivateIngestionService({
     ) {
       failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
     }
+    const generationClaimId = hasGenerationClaimId ? row.generation_claim_id : null
+    const generationClaimedAt = hasGenerationClaimedAt ? row.generation_claimed_at : null
+    if (
+      (generationClaimId === null) !== (generationClaimedAt === null)
+      || (
+        generationClaimId !== null
+        && (
+          typeof generationClaimId !== 'string'
+          || !GENERATION_ID_PATTERN.test(generationClaimId)
+          || row.status !== 'UPLOAD_COMPLETE'
+        )
+      )
+    ) {
+      failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+    }
     let expiresAt
     try {
       expiresAt = new Date(row.expires_at).getTime()
+      if (generationClaimedAt !== null) {
+        new Date(generationClaimedAt).toISOString()
+      }
     } catch {
       failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
     }
@@ -675,7 +849,11 @@ function createPrivateIngestionService({
     return Object.freeze({
       binding: bindingFor(authority, row.session_id),
       eligible: expiresAt <= cutoffMs,
-      row,
+      row: Object.freeze(Object.assign({}, row, {
+        generation_claim_id: generationClaimId,
+        generation_claimed_at: generationClaimedAt,
+      })),
+      supportsGenerationClaims: Boolean(hasGenerationClaimId),
     })
   }
 
@@ -697,10 +875,17 @@ function createPrivateIngestionService({
         })
       }
       candidate = validateExpiredCleanupCandidate(state.session, cutoffMs)
+      if (candidate.row.generation_claim_id !== null) {
+        return Object.freeze({
+          sessionId: candidate.binding.sessionId,
+          outcome: 'RETAINED_ACTIVE',
+        })
+      }
       if (candidate.row.status !== 'CLEANING') {
         const transitioned = await metadataStore.beginCleanup(
           candidate.binding,
           candidate.row.status,
+          candidate.supportsGenerationClaims,
         )
         if (transitioned === null) continue
         candidate = validateExpiredCleanupCandidate(transitioned, cutoffMs)
@@ -762,16 +947,26 @@ function createPrivateIngestionService({
     })
   }
 
-  return Object.freeze({
+  const service = Object.freeze({
     createSession,
     resumeSession,
     submitChunk,
     completeSession,
+    claimCompletedSessionForGeneration,
+    readClaimedGenerationChunk,
+    releaseCompletedSessionGenerationClaim,
     cleanupSession,
     cleanupExpiredSessions,
   })
+  TRUSTED_GENERATION_SOURCES.add(service)
+  return service
+}
+
+function isTrustedPrivateIngestionGenerationSource(value) {
+  return value !== null && typeof value === 'object' && TRUSTED_GENERATION_SOURCES.has(value)
 }
 
 module.exports = Object.freeze({
   createPrivateIngestionService,
+  isTrustedPrivateIngestionGenerationSource,
 })
