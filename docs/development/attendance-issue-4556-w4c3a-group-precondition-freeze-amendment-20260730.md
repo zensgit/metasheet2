@@ -11,9 +11,12 @@ Authority proposed against:
 - RATIFIED byte-parity amendment merge SHA
   `ab752d722327f11887e3884a23ed4f6304faa3c5`,
   with owner decision `OD-W4C-57=(a)`;
-- unmerged implementation inventory
-  `f7769a707` on
-  `codex/attendance-4556-w4c3a-durable-plan-20260730`.
+- historical unmerged implementation inventory snapshot
+  `f7769a707`, originally authored on
+  `codex/attendance-4556-w4c3a-durable-plan-20260730` before later rebases;
+- the same contradiction independently reverified at Draft PR #4688 exact head
+  `7a0d49eb155610078e5a27fab21e5acfa03f905c`. That head is evidence only and
+  must be reverified again at the final code gate.
 
 This document is a narrow correction to the W4C-3a group-precondition
 contract. It does not authorize W4C-3a merge or caller cutover, W4C-3b or
