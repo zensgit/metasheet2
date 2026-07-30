@@ -41,6 +41,10 @@ export default defineConfig({
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
+      // Sealed-export S3 private ingestion concurrency + transactional recovery golden. It
+      // applies migration 068 in an isolated schema and requires real PostgreSQL behavior;
+      // excluded from the no-DB job and wired as a whole file in plugin-tests.yml.
+      'tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
