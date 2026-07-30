@@ -202,6 +202,22 @@ function createDb({ database, logger } = {}) {
     return rows[0] || null
   }
 
+  async function selectOneForUpdate(table, where) {
+    const tableIdent = quoteIdent(assertTable(table))
+    if (!where || typeof where !== 'object' || Array.isArray(where)) {
+      throw new Error('selectOneForUpdate: where clause is required')
+    }
+    const whereClause = buildWhereClause(where, 1)
+    const result = await database.query(
+      `SELECT * FROM ${tableIdent}${whereClause.sql} LIMIT 1 FOR UPDATE`,
+      whereClause.params,
+    )
+    const rows = Array.isArray(result)
+      ? result
+      : (result && Array.isArray(result.rows) ? result.rows : [])
+    return rows[0] || null
+  }
+
   async function insertOne(table, row) {
     const tableIdent = quoteIdent(assertTable(table))
     if (!row || typeof row !== 'object' || Array.isArray(row)) {
@@ -304,6 +320,7 @@ function createDb({ database, logger } = {}) {
       return callback({
         select: scoped.select,
         selectOne: scoped.selectOne,
+        selectOneForUpdate: scoped.selectOneForUpdate,
         insertOne: scoped.insertOne,
         insertMany: scoped.insertMany,
         updateRow: scoped.updateRow,
@@ -319,6 +336,7 @@ function createDb({ database, logger } = {}) {
     ALLOWED_PREFIX,
     select,
     selectOne,
+    selectOneForUpdate,
     insertOne,
     insertMany,
     updateRow,

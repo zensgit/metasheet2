@@ -112,6 +112,31 @@ function vocabularyExactPin() {
   assert.equal(vocabulary.isDeclaredFailureReason(null), false)
 }
 
+function trustedErrorIdentityPin() {
+  const genuine = throws(
+    () => vocabulary.failSealedExport('SEALED_EXPORT_INTERNAL_ERROR'),
+    'genuine branded error',
+  )
+  assert.equal(vocabulary.isTrustedSealedExportError(genuine), true)
+  assert.equal(
+    vocabulary.isTrustedSealedExportError(
+      new vocabulary.SealedExportError(
+        'SEALED_EXPORT_INTERNAL_ERROR',
+        Object.freeze({}),
+      ),
+    ),
+    false,
+    'the public error constructor cannot mint transaction-pass-through authority',
+  )
+  assert.equal(
+    vocabulary.isTrustedSealedExportError(
+      Object.create(vocabulary.SealedExportError.prototype),
+    ),
+    false,
+    'prototype spoofing cannot mint transaction-pass-through authority',
+  )
+}
+
 // ---------------------------------------------------------------------------
 // PIN 2 — latent-surface partition, and it must be DERIVED, not hand-matched.
 // ---------------------------------------------------------------------------
@@ -819,6 +844,7 @@ function safeTokenMirrorIsComplete() {
 
 function main() {
   vocabularyExactPin()
+  trustedErrorIdentityPin()
   latentSurfacePin()
   throwSiteInvariant()
   astThrowSiteScanHasNoBlindWindow()
