@@ -499,6 +499,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          plan.w4_distinct_target_count IS DISTINCT FROM job.w4_distinct_target_count OR
          plan.w4_item_sequence_fingerprint IS DISTINCT FROM job.w4_item_sequence_fingerprint OR
          plan.w4_item_set_fingerprint IS DISTINCT FROM job.w4_item_set_fingerprint OR
+         plan.manifest -> 'batch' ->> 'idempotencyKey' IS DISTINCT FROM job.idempotency_key OR
          plan.identity_proof_vector_digest IS DISTINCT FROM encode(digest(convert_to(job.w4_identity_proof_vector::jsonb::text, 'UTF8'), 'sha256'), 'hex') THEN
         RAISE EXCEPTION 'W4C3A_PLAN_JOB_CONGRUENCE_DENIED';
       END IF;
@@ -700,6 +701,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          NEW.w4_item_set_fingerprint IS DISTINCT FROM OLD.w4_item_set_fingerprint OR NEW.w4_identity_proof_vector IS DISTINCT FROM OLD.w4_identity_proof_vector OR
          NEW.w4_legacy_plan_digest IS DISTINCT FROM OLD.w4_legacy_plan_digest OR NEW.w4_distinct_target_count IS DISTINCT FROM OLD.w4_distinct_target_count OR
          NEW.w4_operational_branch IS DISTINCT FROM OLD.w4_operational_branch OR NEW.w4_legacy_input_fingerprint IS DISTINCT FROM OLD.w4_legacy_input_fingerprint OR
+         (OLD.w4_contract_version = 1 AND NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key) OR
          (OLD.w4_contract_version = 1 AND NEW.payload IS DISTINCT FROM OLD.payload) THEN
         RAISE EXCEPTION 'W4C3A_V1_JOB_FROZEN';
       END IF;

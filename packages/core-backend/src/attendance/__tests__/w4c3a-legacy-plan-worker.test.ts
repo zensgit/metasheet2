@@ -67,7 +67,9 @@ async function identities(): Promise<{
   }
 }
 
-function packagePlan(): { job: AttendanceLegacyPlanWorkerJobV1; stored: AttendanceLegacyPlanWorkerStoredPlanV1 } {
+function packagePlan(
+  idempotencyKey: string | null = null,
+): { job: AttendanceLegacyPlanWorkerJobV1; stored: AttendanceLegacyPlanWorkerStoredPlanV1 } {
   const identityProofVector = []
   const manifestSeed: Omit<LegacyImportExecutionPlanManifestV1, 'sourceOrdinalDigest' | 'chunkVectorDigest'> = {
     schemaVersion: 1,
@@ -96,7 +98,7 @@ function packagePlan(): { job: AttendanceLegacyPlanWorkerJobV1; stored: Attendan
     groupStateFingerprint: null,
     batch: {
       kind: 'normal', source: 'manual', ruleSetId: null, mappingSnapshot: {}, sourceRowCount: 1,
-      status: 'committed', idempotencyKey: null, visibilityRule: 'org', engine: 'standard',
+      status: 'committed', idempotencyKey, visibilityRule: 'org', engine: 'standard',
       chunkConfig: { itemsChunkSize: 100, recordsChunkSize: 100 }, recordUpsertStrategy: 'unnest',
       itemsInsertStrategy: 'unnest', mappingProfileId: null, compatibilityMetadata: {}, groupSync: null,
       itemReturnPolicy: { returnItems: false }, skippedSamplePolicy: { limit: 50 }, resultSlots: {},
@@ -124,6 +126,7 @@ function packagePlan(): { job: AttendanceLegacyPlanWorkerJobV1; stored: Attendan
   })
   const job: AttendanceLegacyPlanWorkerJobV1 = {
     jobId: JOB_ID, orgId: ORG_ID, status: 'queued', w4ContractVersion: 1, batchId: BATCH_ID,
+    idempotencyKey,
     sourceKind: 'import_batch', sourceRef: 'attendance-import', createdBy: 'admin-a', actorId: 'admin-a',
     actorPosture: 'platform_admin', tokenSubjectUserId: 'admin-a', acceptedWritePosture: 'legacy_projection_only',
     commandFingerprint: HEX_A, legacyInputFingerprint: HEX_B, operationalBranch: 'strict_targeted',
@@ -149,8 +152,9 @@ function packagePlan(): { job: AttendanceLegacyPlanWorkerJobV1; stored: Attendan
 
 async function callbacks(
   overrides: Partial<AttendanceLegacyPlanWorkerCallbacksV1<object>> = {},
+  planPackage = packagePlan(),
 ): Promise<{ hooks: AttendanceLegacyPlanWorkerCallbacksV1<object>; calls: string[]; job: AttendanceLegacyPlanWorkerJobV1 }> {
-  const { job, stored } = packagePlan()
+  const { job, stored } = planPackage
   const ids = await identities()
   const calls: string[] = []
   const hooks: AttendanceLegacyPlanWorkerCallbacksV1<object> = {
@@ -301,6 +305,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     })
     const job: AttendanceLegacyPlanWorkerJobV1 = {
       jobId: JOB_ID, orgId: ORG_ID, status: 'queued', w4ContractVersion: 1, batchId: BATCH_ID,
+      idempotencyKey: null,
       sourceKind: 'import_batch', sourceRef: 'attendance-import', createdBy: 'admin-a',
       actorId: 'admin-a', actorPosture: 'platform_admin', tokenSubjectUserId: 'admin-a',
       acceptedWritePosture: 'legacy_projection_only', commandFingerprint: HEX_A,
@@ -456,6 +461,58 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     expect(base.hooks.storeCompletedResponseAndTerminalize).not.toHaveBeenCalled()
     expect(base.hooks.loadCompletedResponse).not.toHaveBeenCalled()
     expect(base.hooks.markSuspendedQueued).not.toHaveBeenCalled()
+    expect(base.hooks.markPlanFailed).not.toHaveBeenCalled()
+  })
+
+  it('passes the frozen legacy idempotency key into the class-10 acquisition', async () => {
+    const base = await callbacks({}, packagePlan('legacy-idempotency-a'))
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toMatchObject({ kind: 'completed' })
+    expect(base.hooks.acquireClass10).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ idempotencyKey: 'legacy-idempotency-a' }),
+      expect.any(Array),
+    )
+  })
+
+  it('terminal-fails when the locked plan idempotency key differs from the job', async () => {
+    const accepted = packagePlan('legacy-idempotency-a')
+    const changed = packagePlan('legacy-idempotency-b')
+    const base = await callbacks({}, {
+      job: { ...accepted.job, planDigest: changed.stored.planDigest },
+      stored: changed.stored,
+    })
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toEqual({
+      kind: 'failed',
+      reason: 'ATTENDANCE_IMPORT_LEGACY_PLAN_IDENTITY_MISMATCH',
+    })
+    expect(base.hooks.acquireClass11).not.toHaveBeenCalled()
+    expect(base.hooks.executeVerifiedPlan).not.toHaveBeenCalled()
+    expect(base.hooks.storeCompletedResponseAndTerminalize).not.toHaveBeenCalled()
+  })
+
+  it('returns not-found with zero DML when the class-10 idempotency lock domain drifts before the job lock', async () => {
+    const beforeLock = packagePlan('legacy-idempotency-a')
+    const afterLock = packagePlan('legacy-idempotency-b')
+    const base = await callbacks({
+      readAuthorizationJob: vi.fn(async () => beforeLock.job),
+      lockJob: vi.fn(async () => afterLock.job),
+    }, beforeLock)
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toEqual({ kind: 'not_found' })
+    expect(base.hooks.acquireClass10).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ idempotencyKey: 'legacy-idempotency-a' }),
+      expect.any(Array),
+    )
+    expect(base.hooks.loadPlan).not.toHaveBeenCalled()
+    expect(base.hooks.acquireClass11).not.toHaveBeenCalled()
+    expect(base.hooks.executeVerifiedPlan).not.toHaveBeenCalled()
+    expect(base.hooks.storeCompletedResponseAndTerminalize).not.toHaveBeenCalled()
     expect(base.hooks.markPlanFailed).not.toHaveBeenCalled()
   })
 

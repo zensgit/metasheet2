@@ -32,6 +32,7 @@ export type AttendanceLegacyPlanWorkerJobV1 = Readonly<{
   status: 'queued' | 'running' | 'completed' | 'failed'
   w4ContractVersion: 1
   batchId: string
+  idempotencyKey: string | null
   sourceKind: 'import_batch'
   sourceRef: string
   createdBy: string
@@ -103,6 +104,7 @@ export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
   ): readonly VerifiedAttendanceOperationIdentityV1[]
   acquireClass10(
     trx: TTransaction,
+    job: AttendanceLegacyPlanWorkerJobV1,
     identities: readonly VerifiedAttendanceOperationIdentityV1[],
   ): Promise<void>
   loadPlan(
@@ -232,6 +234,7 @@ function verifyPlan(
     manifest.orgId !== job.orgId ||
     manifest.jobId !== job.jobId ||
     manifest.batchId !== job.batchId ||
+    manifest.batch.idempotencyKey !== job.idempotencyKey ||
     manifest.sourceKind !== job.sourceKind ||
     manifest.sourceRef !== job.sourceRef ||
     manifest.createdBy !== job.createdBy ||
@@ -316,10 +319,14 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           callbacks as AttendanceLegacyPlanWorkerCallbacksV1<unknown>,
           authorizationJob,
         )
-        await callbacks.acquireClass10(trx, reservation)
+        await callbacks.acquireClass10(trx, authorizationJob, reservation)
         const rechecked = await callbacks.lockJob(trx, candidate.jobId)
         if (rechecked === null || rechecked.w4ContractVersion !== 1) return { kind: 'not_found' }
-        if (rechecked.jobId !== candidate.jobId || rechecked.orgId !== candidate.orgId) {
+        if (
+          rechecked.jobId !== candidate.jobId ||
+          rechecked.orgId !== candidate.orgId ||
+          rechecked.idempotencyKey !== authorizationJob.idempotencyKey
+        ) {
           return { kind: 'not_found' }
         }
         const recheckedAuthorized = await callbacks.authorizeFullImport(trx, rechecked)

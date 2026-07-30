@@ -218,10 +218,48 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
         $1,'legacy_projection_only',0,$1,$1,'[]'::jsonb,$1,0,'operational_only_no_target',$1)`, [hex('a')])).rejects.toThrow(/W4C3A_PLAN_MISSING/)
   })
 
+  it('preserves predecessor idempotency updates for null-version jobs', async () => {
+    const inserted = await pool.query(
+      `INSERT INTO attendance_import_jobs (
+         org_id, batch_id, created_by, status, payload
+       ) VALUES ($1, gen_random_uuid(), $2, 'queued', '{}'::jsonb)
+       RETURNING id`,
+      [`legacy-${run}`, `creator:${run}`],
+    )
+    const jobId = String(inserted.rows[0].id)
+    await expect(
+      pool.query(
+        `UPDATE attendance_import_jobs
+            SET idempotency_key = $2
+          WHERE id = $1
+          RETURNING idempotency_key`,
+        [jobId, `legacy-key-${run}`],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ idempotency_key: `legacy-key-${run}` }],
+    })
+  })
+
   it('makes plan/chunk/terminal immutable, cleanup identity immutable with a closed CAS, and V1 delete/reopen impossible', async () => {
     const { jobId } = await seedNoTargetPlan(pool, `org-${run}`)
     await expect(pool.query(`UPDATE attendance_import_legacy_execution_plans SET plan_digest=$2 WHERE job_id=$1`, [jobId, hex('b')])).rejects.toThrow(/IMMUTABLE/)
     await expect(pool.query(`UPDATE attendance_import_legacy_execution_plan_chunks SET chunk_digest=$2 WHERE job_id=$1`, [jobId, hex('b')])).rejects.toThrow(/IMMUTABLE/)
+    await expect(pool.query(`UPDATE attendance_import_jobs SET idempotency_key='changed' WHERE id=$1`, [jobId])).rejects.toThrow(/W4C3A_V1_JOB_FROZEN/)
+    const corruptJob = await pool.connect()
+    try {
+      await corruptJob.query(`SET session_replication_role = replica`)
+      await corruptJob.query(`UPDATE attendance_import_jobs SET idempotency_key='changed' WHERE id=$1`, [jobId])
+      await corruptJob.query(`SET session_replication_role = origin`)
+      await expect(
+        corruptJob.query(`SELECT attendance_validate_import_legacy_plan_v1($1::uuid)`, [jobId]),
+      ).rejects.toThrow(/W4C3A_PLAN_JOB_CONGRUENCE_DENIED/)
+      await corruptJob.query(`SET session_replication_role = replica`)
+      await corruptJob.query(`UPDATE attendance_import_jobs SET idempotency_key=NULL WHERE id=$1`, [jobId])
+      await corruptJob.query(`SET session_replication_role = origin`)
+    } finally {
+      await corruptJob.query(`SET session_replication_role = origin`).catch(() => undefined)
+      corruptJob.release()
+    }
     await expect(pool.query(`INSERT INTO attendance_import_legacy_terminal_responses (job_id,org_id,response_variant,response_digest,response) VALUES ($1,$2,'completed',$3,'{}'::jsonb)`, [jobId, `org-${run}`, hex('a')])).rejects.toThrow()
     await pool.query(`INSERT INTO attendance_import_legacy_terminal_responses (job_id,org_id,response_variant,response_digest,response) VALUES ($1,$2,'first_execution',$3,'{}'::jsonb)`, [jobId, `org-${run}`, hex('a')]).catch(() => undefined)
     await expect(pool.query(`DELETE FROM attendance_import_jobs WHERE id=$1`, [jobId])).rejects.toThrow(/DELETE_DENIED/)
