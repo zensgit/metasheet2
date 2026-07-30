@@ -185,6 +185,12 @@ function normalizePositiveDecimal(value) {
   return null
 }
 
+function engineMajorVersionFromProductMajor(productMajor) {
+  if (productMajor === 15) return '2019'
+  if (productMajor === 16) return '2022'
+  return null
+}
+
 function normalizeApprovedBinding(raw, systemContentKey) {
   if (!hasExactKeys(raw, APPROVED_BINDING_FIELDS)) {
     failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
@@ -391,12 +397,13 @@ function normalizeRawRow(rawRow) {
   const isolationLevel = normalizePositiveInteger(
     ownDataValue(rawRow, '__isolationLevel'),
   )
+  const engineMajorVersion = engineMajorVersionFromProductMajor(productMajor)
   if (
     rowId === null ||
     payloadVersion === null ||
     typeof payload !== 'string' ||
     sessionId === null ||
-    (productMajor !== 15 && productMajor !== 16) ||
+    engineMajorVersion === null ||
     databaseId === null ||
     transactionId === null ||
     snapshotEnabledState === null ||
@@ -414,7 +421,7 @@ function normalizeRawRow(rawRow) {
     row: Object.freeze({ rowId, payloadVersion, payload }),
     capture: Object.freeze({
       databaseId,
-      engineMajorVersion: productMajor === 15 ? '2019' : '2022',
+      engineMajorVersion,
       sessionId,
       transactionId,
     }),
@@ -909,9 +916,10 @@ function normalizeCaptureMetadataRow(row) {
     row.__snapshotEnabledState,
   )
   const isolationLevel = normalizePositiveInteger(row.__isolationLevel)
+  const engineMajorVersion = engineMajorVersionFromProductMajor(productMajor)
   if (
     sessionId === null ||
-    (productMajor !== 15 && productMajor !== 16) ||
+    engineMajorVersion === null ||
     databaseId === null ||
     transactionId === null ||
     snapshotEnabledState !== 1 ||
@@ -921,7 +929,7 @@ function normalizeCaptureMetadataRow(row) {
   }
   return Object.freeze({
     databaseId,
-    engineMajorVersion: productMajor === 15 ? '2019' : '2022',
+    engineMajorVersion,
     sessionId,
     transactionId,
   })

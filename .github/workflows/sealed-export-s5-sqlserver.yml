@@ -12,6 +12,7 @@ on:
     paths:
       - 'plugins/plugin-integration-core/lib/sealed-export/**'
       - 'plugins/plugin-integration-core/lib/gip-profile-certification-contracts.cjs'
+      - 'plugins/plugin-integration-core/lib/gip-canonical-json.cjs'
       - 'plugins/plugin-integration-core/lib/sealed-export/vectors/s5-package-provenance-pins.json'
       - 'plugins/plugin-integration-core/__tests__/sealed-export-*.test.cjs'
       - 'plugins/plugin-integration-core/__tests__/support/sealed-export-s5-*.cjs'
@@ -112,7 +113,7 @@ jobs:
         with:
           name: sealed-export-s5-product-evidence-${{ matrix.mssql }}
           path: sealed-export-s5-evidence-${{ matrix.mssql }}/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
   gate-check:

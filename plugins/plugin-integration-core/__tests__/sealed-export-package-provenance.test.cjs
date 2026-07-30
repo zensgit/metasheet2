@@ -21,6 +21,7 @@ const {
   PINNED_EXTERNAL_MODULES,
   PINNED_RUNTIME_DEPENDENCIES,
   PINNED_RUNTIME_FILES,
+  PINNED_EVIDENCE_FILES,
   FROZEN_MANIFEST_RELATIVE,
   verifySealedExportPackageProvenance,
   computePackageProvenancePinSet,
@@ -61,9 +62,14 @@ function positivePackagePin() {
     Object.keys(result.runtimeFiles).length,
     PINNED_RUNTIME_FILES.length,
   )
+  assert.equal(
+    Object.keys(result.evidenceFiles).length,
+    PINNED_EVIDENCE_FILES.length,
+  )
   assert.equal(PINNED_PROFILE_IDENTITY.connectorKind, 'data-source:sql-readonly')
   assert.deepEqual(Object.keys(result.externalModules), [
     'gipProfileCertificationContracts',
+    'gipCanonicalJson',
   ])
   assert.ok(PINNED_S2_MODULES.includes('sqlserver-s2-producer.cjs'))
   assert.ok(PINNED_S3_MODULES.includes('private-ingestion-service.cjs'))
@@ -105,14 +111,23 @@ async function clonePinnedTree() {
     fs.mkdirSync(path.dirname(dest), { recursive: true })
     fs.copyFileSync(path.join(REPO_ROOT, entry.relativePath), dest)
   }
+  for (const entry of PINNED_EVIDENCE_FILES) {
+    const dest = path.join(root, entry.relativePath)
+    fs.mkdirSync(path.dirname(dest), { recursive: true })
+    fs.copyFileSync(path.join(REPO_ROOT, entry.relativePath), dest)
+  }
   return root
 }
 
 async function isolatedModuleMissingFails() {
-  const root = await fsPromises.mkdtemp(
-    path.join(os.tmpdir(), 'sealed-export-s5-pkg-'),
-  )
+  const root = await clonePinnedTree()
   try {
+    fs.rmSync(
+      path.join(
+        root,
+        'plugins/plugin-integration-core/lib/sealed-export/sqlserver-sealed-snapshot-action.cjs',
+      ),
+    )
     expectReason(
       () => verifySealedExportPackageProvenance({ repoRoot: root }),
       'SEALED_EXPORT_INTERNAL_ERROR',
@@ -179,6 +194,47 @@ async function terminalHistoryMigrationMutationFails() {
     )
     const original = fs.readFileSync(target, 'utf8')
     const mutated = original.replace("'55000'", "'55001'")
+    assert.notEqual(mutated, original)
+    fs.writeFileSync(target, mutated)
+    expectReason(
+      () => verifySealedExportPackageProvenance({ repoRoot: root }),
+      'SEALED_EXPORT_INTERNAL_ERROR',
+    )
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
+async function canonicalJsonDependencyMutationFails() {
+  const root = await clonePinnedTree()
+  try {
+    const target = path.join(
+      root,
+      'plugins/plugin-integration-core/lib/gip-canonical-json.cjs',
+    )
+    fs.appendFileSync(target, '\n// provenance mutation\n')
+    expectReason(
+      () => verifySealedExportPackageProvenance({ repoRoot: root }),
+      'SEALED_EXPORT_INTERNAL_ERROR',
+    )
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
+async function evidenceRunnerMutationFails() {
+  const root = await clonePinnedTree()
+  try {
+    const target = path.join(
+      root,
+      'scripts/ops/run-sealed-export-s5-sqlserver-evidence.cjs',
+    )
+    const original = fs.readFileSync(target, 'utf8')
+    const mutated = original.replace(
+      'runtimeReachable: false,',
+      'runtimeReachable: true ,',
+    )
+    assert.equal(mutated.length, original.length)
     assert.notEqual(mutated, original)
     fs.writeFileSync(target, mutated)
     expectReason(
@@ -266,7 +322,10 @@ function frozenManifestIsIndependentOfWorkingTreeMutation() {
   )
   assert.deepEqual(live.migrations, frozen.migrations)
   assert.deepEqual(live.modules, frozen.modules)
+  assert.deepEqual(live.externalModules, frozen.externalModules)
+  assert.deepEqual(live.dependencies, frozen.dependencies)
   assert.deepEqual(live.runtimeFiles, frozen.runtimeFiles)
+  assert.deepEqual(live.evidenceFiles, frozen.evidenceFiles)
 }
 
 async function main() {
@@ -277,6 +336,8 @@ async function main() {
   await sameSizeLogicMutationOfPinnedMigrationFails()
   await terminalHistoryMigrationMutationFails()
   await profileCertificationDependencyMutationFails()
+  await canonicalJsonDependencyMutationFails()
+  await evidenceRunnerMutationFails()
   await isolatedDependencyMutationFails()
   await isolatedLockfileMutationFails()
   console.log('sealed-export-package-provenance.test.cjs OK')

@@ -72,6 +72,21 @@ BEGIN
   END IF;
 END $$;
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger
+    WHERE tgname = 'trg_integration_sealed_export_terminal_signer_keys_no_truncate'
+      AND tgrelid = 'integration_sealed_export_terminal_signer_keys'::regclass
+  ) THEN
+    CREATE TRIGGER trg_integration_sealed_export_terminal_signer_keys_no_truncate
+      BEFORE TRUNCATE ON integration_sealed_export_terminal_signer_keys
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION integration_sealed_export_terminal_signer_keys_immutable();
+  END IF;
+END $$;
+
 CREATE OR REPLACE FUNCTION integration_sealed_export_authority_state_guard()
 RETURNS TRIGGER AS $$
 BEGIN

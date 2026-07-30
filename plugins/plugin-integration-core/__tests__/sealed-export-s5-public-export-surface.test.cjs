@@ -103,6 +103,7 @@ const EXACT_PUBLIC_EXPORTS = Object.freeze({
   'sealed-export-package-provenance.cjs': Object.freeze([
     'FROZEN_MANIFEST_RELATIVE',
     'PACKAGE_PROVENANCE_VERSION',
+    'PINNED_EVIDENCE_FILES',
     'PINNED_EXTERNAL_MODULES',
     'PINNED_MIGRATIONS',
     'PINNED_PROFILE_IDENTITY',

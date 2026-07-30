@@ -5,7 +5,7 @@
     "069": "61caa7784f5839954f8996fc775dcc82bf35ea7f320b734be8bcf39d14c7d6bb",
     "070": "01ff2a28d798ea2f2515e181a13701d39b35800bfd152993cc6f14fb30e93404",
     "071": "650d5815c41769626e1d7afad4ef94aa01ff0d1a5fa6511da12d51e0fc5a89ab",
-    "072": "fe349afc5367bcc99e38a23354f3d1ee9e4f58777c3b8472716b51f576fad957"
+    "072": "1c7c2d9be123213f9c6bb938c700325414bbd4e89667f23455635ca382848c8d"
   },
   "modules": {
     "s1": {
@@ -34,15 +34,16 @@
       "sqlserver-sealed-snapshot-source-session.cjs": "3545f7f950e7c8671ad26b68f1e35c218a700413730a6b68428a0cb82eee8c9d",
       "sqlserver-sealed-snapshot-action.cjs": "031c03ca3e6260786ba0cbfaa0c5c26c00f76089550393e151b021bdd3bec979",
       "sqlserver-sealed-snapshot-service.cjs": "3a6f4f1b8eb2ff16aae4216842274f95564fe7e0806cd126fefcd013167e94d2",
-      "sqlserver-sealed-snapshot-service-core.cjs": "408ef2227842275ee075e41ec6f848551fc781852be1a59509c161c091e6c69f",
+      "sqlserver-sealed-snapshot-service-core.cjs": "15bb4741672e76197d11384e2462104c3e4e18490ba63bb535cfe53176844097",
       "sealed-export-binding-qualification.cjs": "6b2995cb996ecfa07f348f8d09a12e4a4faa1045c3f4b941f815794bdb603a65",
       "sealed-export-signer-authority.cjs": "164babbb0ca576babacb15d3d83058e526fef7181e0a5c5ff4e729e476f7ebe1",
       "sealed-export-signer-authority-store.cjs": "043e79eca72ffc79a07c06b133acc1aca2bc5bb4828d164b86038fb10f2e7c72",
-      "sealed-export-package-provenance.cjs": "21d46025978652fc0bfa0bfaffb276242f3dd289d16f9e1adea049035fef2b90"
+      "sealed-export-package-provenance.cjs": "a69b638c25ba31af3f5135cb69b5466fc41752fb491a5c38be4891616ef47b78"
     }
   },
   "externalModules": {
-    "gipProfileCertificationContracts": "253000b5f5676340f2d1876cf2810e5ba90561207840ba3ba12a89717771293d"
+    "gipProfileCertificationContracts": "253000b5f5676340f2d1876cf2810e5ba90561207840ba3ba12a89717771293d",
+    "gipCanonicalJson": "99c2f954e35ab1c943c59872def8722b00dccb11401783d77839ae0ed98298b1"
   },
   "dependencies": {
     "mssql": "^10.0.4"
@@ -50,5 +51,12 @@
   "runtimeFiles": {
     "pluginPackageJson": "e343adafb718684e6fc8b9a1d662060b211600340e9c0cd22f7b0c8daf8205da",
     "pnpmLock": "c692cea54d8471a5a131ab94937b4565bb94743cc7ecdf2711cb4114e169d1f7"
+  },
+  "evidenceFiles": {
+    "s5EvidenceWorkflow": "9217a34fbf96c4d747a8414e531d00dc7f4213e8770402aee908061e036d729e",
+    "s5ProductEvidenceRunner": "c571595f5d8e880fabba2296b5475fd27263f926c93566ab0cf95a4933f38fb9",
+    "s5ExactEvidenceVerifier": "cf16c8b02ce817f5ef66053ed93c28b06cb10c04827810b467968bc4503e7fe4",
+    "s5SignerAuthorityMemoryDb": "7dd984783e6783c521022c0025edccb215a386980c264ec5cbd497b1eae46084",
+    "s5SignerLifecycleRealDbTest": "fee8295234946f8ad93f9b6d0168e272e9c4cfabae964d9dd219d635b7bdbf36"
   }
 }

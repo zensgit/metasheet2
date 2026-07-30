@@ -118,6 +118,7 @@ async function buildService(options = {}) {
     onReaderActive: options.onReaderActive || null,
     stageObserver: options.stageObserver || null,
     hermeticCapture: {
+      capture: options.capture,
       rows: options.rows || sourceRows(),
       streamRows: options.streamRows || options.rows || sourceRows(),
       snapshotCapable:
@@ -488,6 +489,54 @@ async function snapshotIdentityAndIsolationMismatchRefuse() {
   }
 }
 
+async function unsupportedEngineMajorVersionRefuses() {
+  const root = await fsPromises.mkdtemp(
+    path.join(os.tmpdir(), 'sealed-export-s5-engine-version-'),
+  )
+  try {
+    const unsupportedMetadata = await buildService({
+      artifactRoot: root,
+      capture: {
+        __databaseId: 7,
+        __isolationLevel: 5,
+        __productMajor: 17,
+        __sessionId: 41,
+        __snapshotEnabledState: 1,
+        __transactionId: '9001',
+      },
+    })
+    const metadataQualification = await unsupportedMetadata.qualify()
+    await expectReason(
+      () =>
+        unsupportedMetadata.service.execute({
+          envelope: envelopeFor(
+            unsupportedMetadata.queryDigest,
+            metadataQualification.qualificationDigest,
+          ),
+        }),
+      'SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE',
+    )
+
+    const unsupportedRows = await buildService({
+      artifactRoot: root,
+      rows: sourceRows(3, { __productMajor: 14 }),
+    })
+    const qualification = await unsupportedRows.qualify()
+    await expectReason(
+      () =>
+        unsupportedRows.service.execute({
+          envelope: envelopeFor(
+            unsupportedRows.queryDigest,
+            qualification.qualificationDigest,
+          ),
+        }),
+      'SEALED_EXPORT_CAPTURE_FAILED',
+    )
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
 async function sourceSessionClosesPoolOnConnectionAndCapabilityFailure() {
   const mssqlPath = require.resolve('mssql')
   const cachedMssql = require.cache[mssqlPath]
@@ -594,6 +643,20 @@ async function lifecycleAwareVerifyRefusesExpiredAndRevoked() {
     })
     assert.equal(ok.lifecycleChecked, true)
     assert.equal(ok.scopeBound, true)
+
+    const tamperedSignature = Buffer.from(result.manifest.signature, 'base64')
+    tamperedSignature[0] ^= 1
+    await expectReason(
+      () =>
+        service.verifyManifestWithLifecycle({
+          envelope,
+          manifest: {
+            ...result.manifest,
+            signature: tamperedSignature.toString('base64'),
+          },
+        }),
+      'SEALED_EXPORT_MANIFEST_SIGNATURE_INVALID',
+    )
 
     await setAuthorityForQualification(qualification, {
       signer_status: 'EXPIRED',
@@ -958,6 +1021,7 @@ async function main() {
   await missingSnapshotCapabilityRefuses()
   snapshotProofSqlAvoidsServerWideDmvPermission()
   await snapshotIdentityAndIsolationMismatchRefuse()
+  await unsupportedEngineMajorVersionRefuses()
   await sourceSessionClosesPoolOnConnectionAndCapabilityFailure()
   await revokedSignerRefuses()
   await lifecycleAwareVerifyRefusesExpiredAndRevoked()

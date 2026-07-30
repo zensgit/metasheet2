@@ -234,5 +234,19 @@ describeIfDatabase('sealed-export signer authority lifecycle migration (real Pos
          WHERE tenant_id = 'tenant-s5'`,
       ),
     ).rejects.toMatchObject({ code: '55000' })
+
+    await expect(
+      client.query(
+        'TRUNCATE TABLE integration_sealed_export_terminal_signer_keys',
+      ),
+    ).rejects.toMatchObject({ code: '55000' })
+
+    const terminalAfterRejectedMutations = await client.query(
+      `SELECT signer_key_id, terminal_status
+       FROM integration_sealed_export_terminal_signer_keys
+       WHERE tenant_id = 'tenant-s5'
+       ORDER BY signer_key_id`,
+    )
+    expect(terminalAfterRejectedMutations.rows).toEqual(terminal.rows)
   })
 })

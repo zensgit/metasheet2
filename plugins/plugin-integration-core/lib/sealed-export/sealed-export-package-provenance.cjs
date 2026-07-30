@@ -99,6 +99,7 @@ const PINNED_MIGRATIONS = Object.freeze([
     requiredMarkers: Object.freeze([
       'integration_sealed_export_terminal_signer_keys',
       'trg_integration_sealed_export_terminal_signer_keys_immutable',
+      'trg_integration_sealed_export_terminal_signer_keys_no_truncate',
     ]),
   }),
 ])
@@ -147,6 +148,11 @@ const PINNED_EXTERNAL_MODULES = Object.freeze([
     relativePath:
       'plugins/plugin-integration-core/lib/gip-profile-certification-contracts.cjs',
   }),
+  Object.freeze({
+    id: 'gipCanonicalJson',
+    relativePath:
+      'plugins/plugin-integration-core/lib/gip-canonical-json.cjs',
+  }),
 ])
 const PINNED_RUNTIME_FILES = Object.freeze([
   Object.freeze({
@@ -156,6 +162,30 @@ const PINNED_RUNTIME_FILES = Object.freeze([
   Object.freeze({
     id: 'pnpmLock',
     relativePath: 'pnpm-lock.yaml',
+  }),
+])
+const PINNED_EVIDENCE_FILES = Object.freeze([
+  Object.freeze({
+    id: 's5EvidenceWorkflow',
+    relativePath: '.github/workflows/sealed-export-s5-sqlserver.yml',
+  }),
+  Object.freeze({
+    id: 's5ProductEvidenceRunner',
+    relativePath: 'scripts/ops/run-sealed-export-s5-sqlserver-evidence.cjs',
+  }),
+  Object.freeze({
+    id: 's5ExactEvidenceVerifier',
+    relativePath: 'scripts/ops/verify-sealed-export-s5-sqlserver-evidence.cjs',
+  }),
+  Object.freeze({
+    id: 's5SignerAuthorityMemoryDb',
+    relativePath:
+      'plugins/plugin-integration-core/__tests__/support/sealed-export-signer-authority-memory-db.cjs',
+  }),
+  Object.freeze({
+    id: 's5SignerLifecycleRealDbTest',
+    relativePath:
+      'packages/core-backend/tests/integration/sealed-export-signer-authority-lifecycle-migration.db.test.ts',
   }),
 ])
 
@@ -197,7 +227,8 @@ function loadFrozenManifest(repoRoot) {
     !parsed.migrations ||
     !parsed.externalModules ||
     !parsed.dependencies ||
-    !parsed.runtimeFiles
+    !parsed.runtimeFiles ||
+    !parsed.evidenceFiles
   ) {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
   }
@@ -429,6 +460,11 @@ function verifySealedExportPackageProvenance({ repoRoot } = {}) {
     PINNED_RUNTIME_FILES,
     frozen.runtimeFiles,
   )
+  const evidenceFiles = verifyPinnedFileEntries(
+    root,
+    PINNED_EVIDENCE_FILES,
+    frozen.evidenceFiles,
+  )
 
   return Object.freeze({
     candidateTreeVerified: true,
@@ -447,6 +483,7 @@ function verifySealedExportPackageProvenance({ repoRoot } = {}) {
     }),
     runtimeDependencies: dependencies,
     runtimeFiles: Object.freeze(runtimeFiles),
+    evidenceFiles: Object.freeze(evidenceFiles),
     verified: true,
   })
 }
@@ -477,6 +514,10 @@ function computePackageProvenancePinSet(repoRoot) {
   for (const entry of PINNED_EXTERNAL_MODULES) {
     externalModules[entry.id] = sha256File(path.join(root, entry.relativePath))
   }
+  const evidenceFiles = {}
+  for (const entry of PINNED_EVIDENCE_FILES) {
+    evidenceFiles[entry.id] = sha256File(path.join(root, entry.relativePath))
+  }
   return Object.freeze({
     packageProvenanceVersion: PACKAGE_PROVENANCE_VERSION,
     migrations: Object.freeze(migrations),
@@ -490,6 +531,7 @@ function computePackageProvenancePinSet(repoRoot) {
     externalModules: Object.freeze(externalModules),
     dependencies: Object.freeze({ ...PINNED_RUNTIME_DEPENDENCIES }),
     runtimeFiles: Object.freeze(runtimeFiles),
+    evidenceFiles: Object.freeze(evidenceFiles),
   })
 }
 
@@ -506,6 +548,7 @@ module.exports = Object.freeze({
   PINNED_EXTERNAL_MODULES,
   PINNED_RUNTIME_DEPENDENCIES,
   PINNED_RUNTIME_FILES,
+  PINNED_EVIDENCE_FILES,
   verifySealedExportPackageProvenance,
   computePackageProvenancePinSet,
 })
