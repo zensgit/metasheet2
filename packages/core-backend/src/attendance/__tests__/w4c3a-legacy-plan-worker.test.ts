@@ -134,6 +134,7 @@ function packagePlan(
     identityProofVectorDigest: plan.manifest.identityProofVectorDigest,
     itemCount: 1, distinctTargetCount: 1,
     itemSequenceFingerprint: HEX_C, itemSetFingerprint: HEX_D, planDigest: plan.planDigest,
+    executionReasonCode: null,
   }
   return {
     job,
@@ -181,6 +182,7 @@ async function callbacks(
       }
     }),
     markSuspendedQueued: vi.fn(async () => { calls.push('suspend') }),
+    clearResumedSuspendedReason: vi.fn(async () => { calls.push('resume') }),
     markPlanFailed: vi.fn(async (_trx, _jobId, reason) => { calls.push(`failed:${reason}`) }),
     ...overrides,
   }
@@ -313,6 +315,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
       identityProofVector, identityProofVectorDigest: plan.manifest.identityProofVectorDigest,
       itemCount: 1, distinctTargetCount: 1, itemSequenceFingerprint: HEX_C,
       itemSetFingerprint: HEX_D, planDigest: plan.planDigest,
+      executionReasonCode: null,
     }
     const stored: AttendanceLegacyPlanWorkerStoredPlanV1 = {
       planDigest: plan.planDigest,
@@ -357,6 +360,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
         }
       }),
       markSuspendedQueued: vi.fn(async () => { calls.push('suspend') }),
+      clearResumedSuspendedReason: vi.fn(async () => { calls.push('resume') }),
       markPlanFailed: vi.fn(async (_trx, _jobId, reason) => { calls.push(`failed:${reason}`) }),
     }
     await expect(createAttendanceLegacyPlanWorkerV1(hooks).process(JOB_ID)).resolves.toMatchObject({
@@ -525,6 +529,48 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     expect(base.calls).toEqual(['00', 'posture', 'job', 'suspend'])
   })
 
+  it('clears a prior suspended reason only after the job lock when posture resumes', async () => {
+    const resumed = {
+      ...packagePlan().job,
+      executionReasonCode: 'SEGMENT_CALCULATION_SUSPENDED',
+    }
+    const base = await callbacks({
+      readAuthorizationJob: vi.fn(async () => resumed),
+      lockJob: vi.fn(async () => {
+        base.calls.push('job')
+        return resumed
+      }),
+    })
+
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toMatchObject({ kind: 'completed' })
+    expect(base.calls).toEqual([
+      '00',
+      'posture',
+      'auth',
+      '10',
+      'job',
+      'resume',
+      'auth',
+      'plan',
+      '11',
+      'preconditions',
+      'effect',
+      'terminal',
+    ])
+    expect(
+      vi.mocked(base.hooks.clearResumedSuspendedReason).mock.invocationCallOrder[0],
+    ).toBeGreaterThan(
+      vi.mocked(base.hooks.lockJob).mock.invocationCallOrder[0] ?? 0,
+    )
+    expect(
+      vi.mocked(base.hooks.authorizeFullImport).mock.invocationCallOrder[1],
+    ).toBeGreaterThan(
+      vi.mocked(base.hooks.clearResumedSuspendedReason).mock.invocationCallOrder[0] ?? 0,
+    )
+  })
+
   it('rejects an ambiguous suspended candidate identity without DML', async () => {
     const base = await callbacks({
       resolveWritePosture: vi.fn(async () => {
@@ -621,6 +667,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     expect(base.hooks.storeCompletedResponseAndTerminalize).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ jobId: JOB_ID }),
+      expect.objectContaining({ manifest: expect.any(Object) }),
       COMPLETED_RESPONSE,
       computeLegacyImportAsyncJobSummaryDigestV1(COMPLETED_RESPONSE),
     )

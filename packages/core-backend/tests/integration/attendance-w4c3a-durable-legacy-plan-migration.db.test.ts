@@ -263,6 +263,12 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     await expect(pool.query(`INSERT INTO attendance_import_legacy_terminal_responses (job_id,org_id,response_variant,response_digest,response) VALUES ($1,$2,'completed',$3,'{}'::jsonb)`, [jobId, `org-${run}`, hex('a')])).rejects.toThrow()
     await pool.query(`INSERT INTO attendance_import_legacy_terminal_responses (job_id,org_id,response_variant,response_digest,response) VALUES ($1,$2,'first_execution',$3,'{}'::jsonb)`, [jobId, `org-${run}`, hex('a')]).catch(() => undefined)
     await expect(pool.query(`DELETE FROM attendance_import_jobs WHERE id=$1`, [jobId])).rejects.toThrow(/DELETE_DENIED/)
+    await expect(pool.query(
+      `UPDATE attendance_import_jobs
+       SET status='failed', error='must-not-leak', w4_execution_reason_code='ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH'
+       WHERE id=$1`,
+      [jobId],
+    )).rejects.toThrow()
     await pool.query(`UPDATE attendance_import_jobs SET status='failed', w4_execution_reason_code='ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH' WHERE id=$1`, [jobId])
     await expect(pool.query(`UPDATE attendance_import_jobs SET status='queued', w4_execution_reason_code=NULL WHERE id=$1`, [jobId])).rejects.toThrow(/TERMINAL_IMMUTABLE|REASON_TRANSITION_DENIED/)
 

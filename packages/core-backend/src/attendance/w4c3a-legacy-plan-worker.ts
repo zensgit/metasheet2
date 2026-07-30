@@ -50,6 +50,7 @@ export type AttendanceLegacyPlanWorkerJobV1 = Readonly<{
   itemSequenceFingerprint: string
   itemSetFingerprint: string
   planDigest: string
+  executionReasonCode: string | null
 }>
 
 export type AttendanceLegacyPlanWorkerCandidateV1 = Readonly<{
@@ -131,6 +132,7 @@ export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
   storeCompletedResponseAndTerminalize(
     trx: TTransaction,
     job: AttendanceLegacyPlanWorkerJobV1,
+    plan: VerifiedAttendanceLegacyPlanV1,
     response: LegacyImportAsyncJobSummaryV1,
     responseDigest: string,
   ): Promise<void>
@@ -139,6 +141,7 @@ export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
     jobId: string,
   ): Promise<Readonly<{ response: unknown; responseDigest: string }>>
   markSuspendedQueued(trx: TTransaction, jobId: string): Promise<void>
+  clearResumedSuspendedReason(trx: TTransaction, jobId: string): Promise<void>
   markPlanFailed(
     trx: TTransaction,
     jobId: string,
@@ -329,6 +332,12 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
         ) {
           return { kind: 'not_found' }
         }
+        if (
+          rechecked.status === 'queued' &&
+          rechecked.executionReasonCode === 'SEGMENT_CALCULATION_SUSPENDED'
+        ) {
+          await callbacks.clearResumedSuspendedReason(trx, rechecked.jobId)
+        }
         const recheckedAuthorized = await callbacks.authorizeFullImport(trx, rechecked)
         if (!candidateAuthorized || !recheckedAuthorized) {
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_AUTHORIZATION_REJECTED')
@@ -376,6 +385,7 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
         await callbacks.storeCompletedResponseAndTerminalize(
           trx,
           rechecked,
+          plan,
           response,
           computeLegacyImportAsyncJobSummaryDigestV1(response),
         )

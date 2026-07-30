@@ -666,7 +666,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       w4_execution_reason_code IS NULL OR
       (w4_execution_reason_code = 'SEGMENT_CALCULATION_SUSPENDED' AND status = 'queued') OR
       (w4_execution_reason_code = 'ATTENDANCE_ASYNC_JOB_POSTURE_CONFLICT' AND status = 'failed') OR
-      (w4_execution_reason_code IN (${sql.raw(quoted(PLAN_FAILURE_REASONS))}) AND status = 'failed')
+      (
+        w4_execution_reason_code IN (${sql.raw(quoted(PLAN_FAILURE_REASONS))}) AND
+        status = 'failed' AND
+        error IS NULL
+      )
     )
   `.execute(db)
   await sql`
