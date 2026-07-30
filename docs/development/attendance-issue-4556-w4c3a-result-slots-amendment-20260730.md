@@ -12,6 +12,9 @@ Authority proposed against:
 - byte-parity amendment merge SHA
   `ab752d722327f11887e3884a23ed4f6304faa3c5`, RATIFIED by
   `OD-W4C-57=(a)` in PR #4679 comment `5125993049`.
+- Draft implementation evidence at exact PR #4688 head
+  `7a0d49eb155610078e5a27fab21e5acfa03f905c`; this head is evidence only and
+  must be reverified again at the final code gate.
 
 This is a narrow correction to the exact W4C-3a plan/result contract. It does
 not authorize W4C-3a merge, W4C-3b or later slices, a flag change, deployment,
@@ -27,8 +30,8 @@ section 4.2). It also forbids an opaque JSON leaf from selecting SQL structure
 or silently dropping a verified legacy leaf (section 7.2, items 57 and 58).
 
 The RATIFIED contract does not yet give exact schemas for those policies or
-name those slots. The unmerged implementation foundation currently represents
-that under-specification with placeholders:
+name those slots. At the exact Draft implementation head named above, that
+under-specification is represented with placeholders:
 
 - its normal batch plan has placeholder keys `itemReturnPolicy`,
   `skippedSamplePolicy`, and `resultSlots`, each parsed only as an opaque leaf;
