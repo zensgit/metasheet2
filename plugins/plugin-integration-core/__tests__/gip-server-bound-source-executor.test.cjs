@@ -1645,7 +1645,7 @@ const DECLARED_WEAKSET_EXEMPTIONS = Object.freeze({
 // value, because "it threw" is not "no" (round 6, P2-C); one that is not exported at all
 // cannot be asked from outside the module.
 //
-// SEVENTEEN declarations, THIRTEEN of them sweepable. The seventh pre-existing
+// NINETEEN declarations, FIFTEEN of them sweepable. The seventh pre-existing
 // sweepable brand —
 // `firstPartyReadSourceConfigStores` — is the one round 6's hand-authored checker table
 // omitted, and it is minted by a factory this PR changed. The eighth is the
@@ -1678,6 +1678,8 @@ const DECLARED_TRUST_DECLARATIONS = Object.freeze([
   'sealed-export/generation-store.cjs.TRUSTED_STORES -> isTrustedGenerationStore [sweepable]',
   'sealed-export/private-ingestion-manifest-verifier.cjs.trustedManifestVerifiers -> isTrustedPrivateIngestionManifestVerifier [sweepable]',
   'sealed-export/private-ingestion-service.cjs.TRUSTED_GENERATION_SOURCES -> isTrustedPrivateIngestionGenerationSource [sweepable]',
+  'sealed-export/sqlserver-sealed-snapshot-service.cjs.productServices -> isSqlServerSealedSnapshotService [sweepable]',
+  'sealed-export/sqlserver-sealed-snapshot-source-session.cjs.mssqlSnapshotCaptureContexts -> isMssqlSnapshotCaptureContext [sweepable]',
 ])
 
 // A PURE function of injectable inputs, so both positive controls can run the IDENTICAL
@@ -1812,6 +1814,10 @@ const DECLARED_TRUST_MINTING_PATHS = Object.freeze({
     'certifiedSqlServerSnapshotPageSequenceStrategy',
   'sealedExportManifest.createHarnessPrivateIngestionManifestVerifierForTests':
     'privateIngestionManifestVerifier',
+  'sealedExportSqlServerService.createSqlServerSealedSnapshotService':
+    'sqlServerSealedSnapshotService',
+  'sealedExportSqlServerSession.openMssqlSnapshotCaptureContext':
+    'mssqlSnapshotCaptureContext',
 })
 
 // The brand's short name is derived from its checker, so a brand cannot be renamed in
@@ -1896,7 +1902,7 @@ function functionExportsOf(label, table) {
   return out
 }
 
-const MAX_POOL = 64
+const MAX_POOL = 96
 
 // A value's admission-relevant shape: what a downstream factory's checks can see.
 function shapeOf(value) {
@@ -2152,9 +2158,9 @@ function trustBrandInventoryIsDerivedNotAuthored() {
     exemptOccurrences: reach.exemptions.length,
   }
   assert.deepEqual(counts, {
-    declarations: 17,
-    declaringModules: 12,
-    sweepable: 13,
+    declarations: 19,
+    declaringModules: 14,
+    sweepable: 15,
     unjudgeable: 4,
     exemptOccurrences: 4,
   }, 'the derived counts disagree with the tree — the banner below may not print a number no assertion pinned')
@@ -2197,6 +2203,10 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     'sealed-export/failure-vocabulary.cjs': 'sealedExportFailureVocabulary',
     'sealed-export/generation-store.cjs': 'sealedExportGenerationStore',
     'sealed-export/private-ingestion-service.cjs': 'sealedExportIngestion',
+    'sealed-export/sqlserver-sealed-snapshot-service.cjs':
+      'sealedExportSqlServerService',
+    'sealed-export/sqlserver-sealed-snapshot-source-session.cjs':
+      'sealedExportSqlServerSession',
   })
   // THE WALK IS PINNED IN BOTH DIRECTIONS. Round 7 asserted only that every DERIVED
   // module has an alias, which is one-directional: a module DROPPING OUT of the
@@ -2221,8 +2231,8 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
   for (const declaration of reach.sweepable) {
     checkers[brandKeyFor(declaration.checker)] = byName.get(declaration.module)[declaration.checker]
   }
-  assert.equal(Object.keys(checkers).length, 13,
-    `the derived checker set must be the thirteen sweepable brands, got ${Object.keys(checkers).sort().join(', ')}`)
+  assert.equal(Object.keys(checkers).length, 15,
+    `the derived checker set must be the fifteen sweepable brands, got ${Object.keys(checkers).sort().join(', ')}`)
 
   const result = await saturateAndFindMintingPaths(tables, 3, checkers)
 
@@ -2315,12 +2325,14 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     true,
     'the latent S3 harness factory is a declared trust-minting residual and must actually mint the brand',
   )
-  assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 4,
-    'the declared ledger must be exactly the swept set plus the four directly-executed paths')
+  assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 6,
+    'the declared ledger must be exactly the swept set plus four paths executed directly here and '
+    + 'the two S5 product paths exercised by the dedicated real-engine certification')
 
   console.log(`  TRUST-SURFACE ${result.calls} calls over ${result.exportCount} exports in `
     + `${reach.modules.length} DERIVED modules, pool=${result.poolSize}: ${Object.keys(swept).length} minting paths `
-    + `swept + 4 executed directly = ${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
+    + `swept + 4 executed directly + 2 S5 real-engine paths = `
+    + `${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
 }
 
 // ---------------------------------------------------------------------------

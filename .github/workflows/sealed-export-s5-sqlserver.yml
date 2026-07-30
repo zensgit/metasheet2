@@ -1,0 +1,180 @@
+name: Sealed-export S5 SQL Server product certification (evidence only)
+
+# EVIDENCE ONLY. This workflow uses ephemeral first-party SQL Server containers
+# for the named product action sqlserver.sealed_snapshot.v1 / sealed_snapshot.
+# It does not register a runtime consumer, connect a customer source, deploy a
+# package, enable a flag, or authorize S6.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'plugins/plugin-integration-core/lib/sealed-export/**'
+      - 'plugins/plugin-integration-core/lib/sealed-export/vectors/s5-package-provenance-pins.json'
+      - 'plugins/plugin-integration-core/__tests__/sealed-export-*.test.cjs'
+      - 'plugins/plugin-integration-core/__tests__/support/sealed-export-s5-*.cjs'
+      - 'packages/core-backend/migrations/068_create_integration_sealed_export_ingestion.sql'
+      - 'packages/core-backend/migrations/069_create_integration_sealed_export_generation_kernel.sql'
+      - 'packages/core-backend/migrations/070_create_integration_sealed_export_signer_authority.sql'
+      - 'packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql'
+      - 'packages/core-backend/tests/integration/sealed-export-signer-authority-lifecycle-migration.db.test.ts'
+      - 'scripts/ops/run-sealed-export-s5-sqlserver-evidence.cjs'
+      - 'scripts/ops/verify-sealed-export-s5-sqlserver-evidence.cjs'
+      - 'plugins/plugin-integration-core/package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/sealed-export-s5-sqlserver.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  sqlserver-product-action:
+    name: Sealed-export S5 SQL Server ${{ matrix.mssql }} product action
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mssql: ['2019', '2022']
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.mssql }}-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'Spike!Probe2026'
+          SA_PASSWORD: 'Spike!Probe2026'
+        ports:
+          - 1433:1433
+    env:
+      MSSQL_HOST: 127.0.0.1
+      MSSQL_PORT: '1433'
+      MSSQL_USERNAME: sa
+      MSSQL_PASSWORD: 'Spike!Probe2026'
+      MSSQL_ENCRYPT: 'true'
+      MSSQL_TRUST_SERVER_CERTIFICATE: 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run hermetic S5 certification tests
+        run: pnpm --filter plugin-integration-core test:sealed-export-s5
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 40); do
+            if pnpm --filter plugin-integration-core exec node -e "
+              const sql = require('mssql');
+              new sql.ConnectionPool({server:'127.0.0.1',port:1433,user:'sa',password:'Spike!Probe2026',database:'master',options:{encrypt:true,trustServerCertificate:true},connectionTimeout:3000})
+                .connect().then(p => p.close()).then(() => process.exit(0)).catch(() => process.exit(1));
+            "; then
+              echo "SQL Server ready on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: SQL Server not ready yet; sleeping 5s"
+            sleep 5
+          done
+          echo "SQL Server never became ready within timeout"
+          exit 1
+
+      - name: Run sealed-export S5 real-engine product evidence
+        env:
+          S5_MSSQL_DECLARED_MAJOR_VERSION: ${{ matrix.mssql }}
+          S5_EVIDENCE_DIR: ${{ github.workspace }}/sealed-export-s5-evidence-${{ matrix.mssql }}
+        run: pnpm --filter plugin-integration-core evidence:sealed-export-s5-sqlserver
+
+      - name: Upload values-free sealed-export S5 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-export-s5-product-evidence-${{ matrix.mssql }}
+          path: sealed-export-s5-evidence-${{ matrix.mssql }}/
+          if-no-files-found: warn
+          retention-days: 14
+
+  gate-check:
+    name: Sealed-export S5 gate-check (evidence only, no S6 wiring)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [sqlserver-product-action]
+    if: always()
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_s5
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_s5"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run real-Postgres signer lifecycle migration gate
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/sealed-export-signer-authority-lifecycle-migration.db.test.ts
+          --reporter=dot
+
+      - name: Download sealed-export S5 evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sealed-export-s5-product-evidence-*
+          path: sealed-export-s5-evidence-combined
+          merge-multiple: true
+
+      - name: Ensure evidence directory exists
+        run: mkdir -p sealed-export-s5-evidence-combined
+
+      - name: Verify exact values-free S5 evidence set
+        env:
+          S5_EVIDENCE_DIR: ${{ github.workspace }}/sealed-export-s5-evidence-combined
+        run: pnpm --filter plugin-integration-core verify:sealed-export-s5-sqlserver-evidence
