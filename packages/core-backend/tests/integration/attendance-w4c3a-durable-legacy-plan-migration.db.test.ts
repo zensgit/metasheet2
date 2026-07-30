@@ -248,6 +248,73 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     expect(LEGACY_IMPORT_PLAN_MAX_SOURCE_ROWS_PER_CHUNK).toBe(500)
   })
 
+  it('keeps the successor proof function and insert/update/delete guard intact when the predecessor migration is replayed', async () => {
+    const replayName = `${scratchName}_replay`
+    const replay = await createScratch(adminPool, replayName)
+    try {
+      await w4c0Up(replay.db)
+      await up(replay.db)
+
+      const captureSuccessor = async (): Promise<{
+        proofArguments: string[]
+        guardFunction: string
+        guardTrigger: string
+      }> => {
+        const proofFunctions = await replay.pool.query(`
+          SELECT pg_get_function_identity_arguments(p.oid) AS args
+          FROM pg_proc p
+          WHERE p.proname = 'attendance_w4_job_proof_vector_valid'
+          ORDER BY args
+        `)
+        const guardFunction = await replay.pool.query(`
+          SELECT pg_get_functiondef(p.oid) AS definition
+          FROM pg_proc p
+          WHERE p.proname = 'attendance_w4_import_jobs_w4_guard'
+            AND pg_get_function_identity_arguments(p.oid) = ''
+        `)
+        const guardTrigger = await replay.pool.query(`
+          SELECT pg_get_triggerdef(t.oid, true) AS definition
+          FROM pg_trigger t
+          WHERE t.tgrelid = 'attendance_import_jobs'::regclass
+            AND t.tgname = 'trg_aij_w4_guard'
+            AND NOT t.tgisinternal
+        `)
+        return {
+          proofArguments: proofFunctions.rows.map((row) => String(row.args)),
+          guardFunction: String(guardFunction.rows[0]?.definition),
+          guardTrigger: String(guardTrigger.rows[0]?.definition),
+        }
+      }
+
+      const beforeReplay = await captureSuccessor()
+      expect(beforeReplay.proofArguments).toEqual([
+        'source_kind text, root uuid, vector jsonb, item_count integer, operational_branch text, distinct_target_count integer',
+      ])
+      expect(beforeReplay.guardTrigger).toMatch(/BEFORE INSERT OR DELETE OR UPDATE/)
+      expect(beforeReplay.guardFunction).toContain('W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED')
+      expect(beforeReplay.guardFunction).toContain('W4C3A_V1_JOB_DELETE_DENIED')
+
+      await w4c0Up(replay.db)
+
+      expect(await captureSuccessor()).toEqual(beforeReplay)
+      await expect(replay.pool.query(
+        `INSERT INTO attendance_import_jobs (
+          id, org_id, batch_id, created_by, w4_contract_version
+        ) VALUES ($1, $2, $3, $4, 1)`,
+        [newId(), `replay-${run}`, newId(), `creator:${run}`],
+      )).rejects.toThrow(/W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED/)
+
+      const seeded = await seedNoTargetJob(replay.pool, `replay-delete-${run}`)
+      await expect(
+        replay.pool.query('DELETE FROM attendance_import_jobs WHERE id = $1', [seeded.jobId]),
+      ).rejects.toThrow(/W4C3A_V1_JOB_DELETE_DENIED/)
+    } finally {
+      await replay.db.destroy()
+      await replay.pool.end()
+      await adminPool.query(`DROP DATABASE IF EXISTS ${replayName} WITH (FORCE)`).catch(() => undefined)
+    }
+  })
+
   it('rejects W4C-3a history attached to a classic null-version job', async () => {
     const jobId = newId()
     await pool.query(

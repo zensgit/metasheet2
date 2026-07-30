@@ -1,8 +1,9 @@
 /**
  * W4C-0 (#4556) Stage C — canonical operation-registry service layer:
  * claim / seal / cancel / replay / congruence over the durable batch/item
- * registries, the transaction-bound outbox enqueue, and the P07 V1 job
- * reservation enqueue (lock sections 4.1, 7.1, 7.1a, 8.1, 8.2; amendment 1.3).
+ * registries and the transaction-bound outbox enqueue (lock sections 4.1,
+ * 7.1, 7.1a, 8.1, 8.2; amendment 1.3). The predecessor P07 reservation
+ * export remains only as a fail-closed compatibility seam after W4C-3a.
  *
  * ZERO caller cutover: no production route/worker imports this module in W4C-0.
  * Every function is transaction-bound — it accepts the canonical `trx` and never
@@ -43,7 +44,6 @@ import {
   deriveAttendanceOperationCandidateIdentityV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   requireVerifiedAttendanceOperationIdentityV1,
-  requireVerifiedAttendanceOrgIdentityV1,
   resolveSegmentCalculationPosture,
 } from './w4c0-identity'
 import {
@@ -864,9 +864,10 @@ export async function enqueueAttendanceResultEventOutboxV1(
 }
 
 // ---------------------------------------------------------------------------
-// P07 V1 job reservation enqueue (lock 7.1; amendment 1.3). Creates NO
-// operation row; the caller must already hold the org rollout SHARED lock and
-// have resolved posture (the verified org witness is the proof of that order).
+// The predecessor P07 reservation cannot construct the complete durable plan
+// required by W4C-3a. Keep the exported seam fail-closed for source
+// compatibility; the canonical replacement is
+// `reserveAttendanceLegacyImportPlanJobV1`.
 // ---------------------------------------------------------------------------
 
 export interface AttendanceImportJobReservationInputV1 {
@@ -888,133 +889,11 @@ export type AttendanceImportJobReservationResultV1 =
   | { readonly kind: 'existing'; readonly jobId: string; readonly status: string }
 
 export async function reserveAttendanceImportJobW4V1(
-  trx: AttendanceW4TransactionClientV1,
-  authorization: unknown,
-  input: AttendanceImportJobReservationInputV1,
+  _trx: AttendanceW4TransactionClientV1,
+  _authorization: unknown,
+  _input: AttendanceImportJobReservationInputV1,
 ): Promise<AttendanceImportJobReservationResultV1> {
-  const batchIdentity = requireVerifiedAttendanceOperationIdentityV1(input.batchIdentity)
-  if (batchIdentity.kind !== 'batch') fail('W4C0_RESERVATION_IDENTITY_INVALID')
-  const org = requireVerifiedAttendanceOrgIdentityV1(batchIdentity.org)
-  const auth = requireAuthorizedCapabilityForEntrypointV1(authorization, batchIdentity.entrypoint)
-  if (auth.orgId !== org.orgId) throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
-  if (!Array.isArray(input.items) || input.items.length === 0) fail('W4C0_RESERVATION_ITEMS_INVALID')
-  if (input.items.length > W4_MAX_BATCH_ITEMS) {
-    throw new AttendanceW4OperationError('W4_BATCH_LIMIT_EXCEEDED')
-  }
-  const batchFingerprint = requireHex64(input.batchCommandFingerprint, 'W4C0_RESERVATION_ITEMS_INVALID')
-
-  const itemIdentities = input.items.map((item) => requireVerifiedAttendanceOperationIdentityV1(item.identity))
-  const entries: AttendanceOperationItemFingerprintEntryV1[] = []
-  const proofVector: Array<Record<string, unknown>> = []
-  itemIdentities.forEach((identity, index) => {
-    if (identity.kind !== 'item' || identity.entrypoint !== batchIdentity.entrypoint) {
-      fail('W4C0_RESERVATION_IDENTITY_INVALID')
-    }
-    if (identity.org !== batchIdentity.org) fail('W4C0_RESERVATION_IDENTITY_INVALID')
-    const proof = identity.sourceProof
-    if (proof.sourceRootId !== batchIdentity.id || proof.ordinal !== String(index) || proof.semanticFingerprint === null) {
-      fail('W4C0_RESERVATION_IDENTITY_INVALID')
-    }
-    const commandFingerprint = requireHex64(input.items[index].commandFingerprint, 'W4C0_RESERVATION_ITEMS_INVALID')
-    entries.push({ ordinal: proof.ordinal, operationId: identity.id, commandFingerprint })
-    proofVector.push({
-      ordinal: index,
-      semanticFingerprint: proof.semanticFingerprint,
-      derivedOperationId: identity.id,
-      commandFingerprint,
-    })
-  })
-  const itemSequenceFingerprint = computeAttendanceItemSequenceFingerprintV1(entries)
-  const itemSetFingerprint = computeAttendanceItemSetFingerprintV1(entries)
-
-  // Class-`10` locks for the batch command and every item identity, held
-  // through the insert commit (transaction advisory locks).
-  await acquireAttendanceResultOperationLocks(trx, [batchIdentity, ...itemIdentities])
-
-  // Recheck OPERATION reservations under the locks: any existing operation row
-  // for this tuple means it was (or is being) executed outside this job.
-  const existingOps = await trx.query(
-    `SELECT 1 FROM attendance_result_operations
-      WHERE org_id = $1 AND entrypoint = $2
-        AND (batch_command_id = $3::uuid OR operation_id = ANY($4::uuid[]))
-      LIMIT 1`,
-    [org.orgId, batchIdentity.entrypoint, batchIdentity.id, itemIdentities.map((identity) => identity.id)],
-  )
-  const existingBatch = await trx.query(
-    'SELECT 1 FROM attendance_result_operation_batches WHERE org_id = $1 AND entrypoint = $2 AND batch_command_id = $3::uuid LIMIT 1',
-    [org.orgId, batchIdentity.entrypoint, batchIdentity.id],
-  )
-  if (existingOps.rows.length > 0 || existingBatch.rows.length > 0) {
-    conflict('ATTENDANCE_OPERATION_BATCH_CONFLICT')
-  }
-
-  // Recheck the retryable-job reservation under the locks.
-  const existingJob = await trx.query(
-    `SELECT id::text AS id, status,
-            w4_actor_id, w4_actor_posture, w4_token_subject_user_id, w4_source_ref,
-            w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
-            w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector
-       FROM attendance_import_jobs
-      WHERE org_id = $1 AND w4_entrypoint = $2 AND w4_batch_command_id = $3::uuid
-        AND w4_contract_version IS NOT NULL
-      FOR UPDATE`,
-    [org.orgId, batchIdentity.entrypoint, batchIdentity.id],
-  )
-  if (existingJob.rows.length > 0) {
-    const row = existingJob.rows[0] as Record<string, unknown>
-    const congruent =
-      row.w4_actor_id === auth.actorId &&
-      row.w4_actor_posture === auth.actorPosture &&
-      ((row.w4_token_subject_user_id as string | null) ?? null) === auth.tokenSubjectUserId &&
-      row.w4_source_ref === auth.sourceRef &&
-      row.w4_command_fingerprint === batchFingerprint &&
-      row.w4_item_count === input.items.length &&
-      row.w4_item_sequence_fingerprint === itemSequenceFingerprint &&
-      row.w4_item_set_fingerprint === itemSetFingerprint &&
-      canonicalAttendanceJsonV1(row.w4_identity_proof_vector) === canonicalAttendanceJsonV1(proofVector)
-    if (!congruent) conflict('ATTENDANCE_OPERATION_CONFLICT')
-    // Congruent retry returns the one existing durable job (no raw 23505 path).
-    return { kind: 'existing', jobId: String(row.id), status: String(row.status) }
-  }
-
-  if (!Number.isInteger(input.legacyJob.total) || input.legacyJob.total < 0) {
-    fail('W4C0_RESERVATION_ITEMS_INVALID')
-  }
-  const inserted = await trx.query(
-    `INSERT INTO attendance_import_jobs (
-        org_id, batch_id, created_by, idempotency_key, status, progress, total, payload,
-        w4_contract_version, w4_entrypoint, w4_batch_command_id, w4_source_kind,
-        w4_source_ref, w4_actor_id, w4_actor_posture, w4_token_subject_user_id,
-        w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
-        w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector
-      ) VALUES (
-        $1, $2::uuid, $3, $4, 'queued', 0, $5, $6::jsonb,
-        1, $7, $8::uuid, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb
-      )
-      RETURNING id::text AS id`,
-    [
-      org.orgId,
-      input.legacyJob.batchId,
-      input.legacyJob.createdBy,
-      input.legacyJob.idempotencyKey ?? null,
-      input.legacyJob.total,
-      canonicalAttendanceJsonV1(input.legacyJob.payload),
-      batchIdentity.entrypoint,
-      batchIdentity.id,
-      batchIdentity.sourceProof.sourceKind,
-      auth.sourceRef,
-      auth.actorId,
-      auth.actorPosture,
-      auth.tokenSubjectUserId,
-      batchFingerprint,
-      org.acceptedWritePosture,
-      input.items.length,
-      itemSequenceFingerprint,
-      itemSetFingerprint,
-      JSON.stringify(proofVector),
-    ],
-  )
-  return { kind: 'created', jobId: String((inserted.rows[0] as Record<string, unknown>).id) }
+  fail('W4C3A_DURABLE_PLAN_REQUIRED')
 }
 
 // ---------------------------------------------------------------------------

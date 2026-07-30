@@ -253,23 +253,36 @@ describeIfDatabase('W4C-0 Stage E2 — amendment section 2 identity gates (real 
         [HEX64_A, uuid()],
       ),
     ).rejects.toThrow(/chk_arob_default_org_posture/)
-    // jobs
-    await expect(
-      pool.query(
+    // jobs: pass the successor enqueue seam deliberately so this leg reaches
+    // the default-org posture constraint instead of being masked by another guard.
+    const jobClient = await pool.connect()
+    try {
+      const jobId = uuid()
+      await jobClient.query('BEGIN')
+      await jobClient.query(
+        `SELECT set_config('attendance.w4c3a_enqueue_job_id', $1, true)`,
+        [jobId],
+      )
+      await expect(
+        jobClient.query(
         `INSERT INTO attendance_import_jobs
-           (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
+           (id, org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
             w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
             w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
             w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector)
-         SELECT 'default', $1::uuid, 'actor-e2', 'queued', '{}'::jsonb, 1, 'import_batch', $1::uuid, 'import_batch',
-                'b:e2', 'actor-e2', 'delegated_import', $2, 'shadow', 1, $2, $2,
+         SELECT $1::uuid, 'default', $2::uuid, 'actor-e2', 'queued', '{}'::jsonb, 1, 'import_batch', $2::uuid, 'import_batch',
+                'b:e2', 'actor-e2', 'delegated_import', $3, 'shadow', 1, $3, $3,
                 jsonb_build_array(jsonb_build_object(
-                  'ordinal', 0, 'semanticFingerprint', $3::text,
-                  'derivedOperationId', attendance_w4_uuidv5($4::uuid, attendance_w4_item_name_bytes($1::uuid, 0, $3))::text,
-                  'commandFingerprint', $2::text))`,
-        [uuid(), HEX64_B, HEX64_A, IMPORT_NS],
-      ),
-    ).rejects.toThrow(/chk_aij_w4_default_org_posture/)
+                  'ordinal', 0, 'semanticFingerprint', $4::text,
+                  'derivedOperationId', attendance_w4_uuidv5($5::uuid, attendance_w4_item_name_bytes($2::uuid, 0, $4))::text,
+                  'commandFingerprint', $3::text))`,
+          [jobId, uuid(), HEX64_B, HEX64_A, IMPORT_NS],
+        ),
+      ).rejects.toThrow(/chk_aij_w4_default_org_posture/)
+    } finally {
+      await jobClient.query('ROLLBACK').catch(() => undefined)
+      jobClient.release()
+    }
 
     // Positive: default + legacy_projection_only persists (the compatibility path).
     const okId = uuid()
@@ -611,75 +624,10 @@ describeIfDatabase('W4C-0 Stage E2 — amendment section 2 identity gates (real 
       codeOf(() => rehydrateVerifiedAttendanceOperationIdentityV1({ ...importRow, verified: true })),
     ).toBe('W4C0_DURABLE_ROW_INVALID')
 
-    // P07 vector reload: every entry re-derives through the factory from the job's
-    // canonical root (amendment 1.3 worker-reload obligation).
-    const jobBatch = uuid()
-    await pool.query(
-      `INSERT INTO attendance_import_jobs
-         (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
-          w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
-          w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
-          w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector)
-       SELECT $1, $2::uuid, 'actor-e2', 'queued', '{}'::jsonb, 1, 'import_batch', $2::uuid, 'import_batch',
-              'b:e2', 'actor-e2', 'delegated_import', $3, 'shadow', 2, $3, $3,
-              jsonb_build_array(
-                jsonb_build_object('ordinal', 0, 'semanticFingerprint', $4::text,
-                  'derivedOperationId', attendance_w4_uuidv5($6::uuid, attendance_w4_item_name_bytes($2::uuid, 0, $4))::text,
-                  'commandFingerprint', $3::text),
-                jsonb_build_object('ordinal', 1, 'semanticFingerprint', $5::text,
-                  'derivedOperationId', attendance_w4_uuidv5($6::uuid, attendance_w4_item_name_bytes($2::uuid, 1, $5))::text,
-                  'commandFingerprint', $3::text))`,
-      [org, jobBatch, HEX64_B, HEX64_A, HEX64_B, IMPORT_NS],
-    )
-    const jobReload = await pool.query(
-      `SELECT w4_batch_command_id::text AS root, w4_accepted_write_posture AS posture,
-              w4_identity_proof_vector AS vector
-         FROM attendance_import_jobs WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
-      [org, jobBatch],
-    )
-    const vector = jobReload.rows[0].vector as Array<{
-      ordinal: number
-      semanticFingerprint: string
-      derivedOperationId: string
-      commandFingerprint: string
-    }>
-    expect(vector).toHaveLength(2)
-    vector.forEach((entry, index) => {
-      expect(entry.ordinal).toBe(index)
-      const identity = rehydrateVerifiedAttendanceOperationIdentityV1({
-        orgId: org,
-        entrypoint: 'import_batch',
-        kind: 'item',
-        operationId: entry.derivedOperationId,
-        acceptedWritePosture: jobReload.rows[0].posture as string,
-        identitySourceKind: 'import_item',
-        sourceRootId: jobReload.rows[0].root as string,
-        inputOrdinal: entry.ordinal,
-        proofSemanticFingerprint: entry.semanticFingerprint,
-        proofUserId: null,
-        proofWorkDate: null,
-      })
-      expect(identity.id).toBe(entry.derivedOperationId)
-    })
-    // A tampered vector entry cannot re-derive: swapping the two fingerprints flips
-    // the factory result away from the stored derivedOperationId.
-    expect(
-      codeOf(() =>
-        rehydrateVerifiedAttendanceOperationIdentityV1({
-          orgId: org,
-          entrypoint: 'import_batch',
-          kind: 'item',
-          operationId: vector[0].derivedOperationId,
-          acceptedWritePosture: 'shadow',
-          identitySourceKind: 'import_item',
-          sourceRootId: jobReload.rows[0].root as string,
-          inputOrdinal: 0,
-          proofSemanticFingerprint: vector[1].semanticFingerprint,
-          proofUserId: null,
-          proofWorkDate: null,
-        }),
-      ),
-    ).toBe('W4C0_IDENTITY_PROOF_DRIFT')
+    // The successor schema forbids a proof-vector-only V1 row without its
+    // durable manifest and chunks. Complete-plan job-vector reload is not
+    // covered here and keeps #4688 Draft/HOLD; the operation-row rehydration
+    // contract above remains owned by W4C-0.
   })
 
   // =========================================================================

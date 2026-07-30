@@ -26,21 +26,21 @@
  *     makes the transition wait and re-evaluate after its commit; a transition
  *     holding exclusive makes the source resolve/freeze the NEW posture only
  *     after release;
- *  8. P07 enqueue versus rollout transition in both race orders — enqueue-first
- *     makes the transition wait then see the committed retryable job;
- *     transition-first makes the enqueue freeze only the new posture, and a
- *     suspension yields blocked posture with zero job row;
- *  9. P07 enqueue versus a synchronous caller on the same batch identity in
- *     both commit orders — exactly one side reserves the tuple; the waiter
- *     re-reads under the class-`10` locks and fails closed with zero
- *     conflicting DML;
+ *  8. predecessor P07 reserve is retired fail-closed before SQL (zero job DML);
+ *     suspension still yields blocked posture and zero job row. Complete-plan
+ *     enqueue versus rollout transition races remain #4688 Draft/HOLD work;
+ *  9. predecessor P07 reserve fails closed with zero job DML even when a
+ *     concurrent synchronous claim holds the same batch identity; complete-plan
+ *     enqueue-versus-sync races remain #4688 Draft/HOLD work;
  * 10. incomplete stable-ID operation versus rollout transition — the common
  *     rollout -> operation-identity-advisory -> operation-row order completes
  *     without deadlock or bounded-retry exhaustion.
  *
- * The worker/enqueue driving code in legs 6-8 is a PROTOCOL HARNESS (W4C-0 has
- * zero caller cutover; the production worker/transition writers are later
- * slices) — the two-connection lock/atomicity/visibility assertions are real.
+ * The worker driving code in legs 6-7 is a PROTOCOL HARNESS (W4C-0 has zero
+ * caller cutover; the production worker/transition writers are later slices) —
+ * the two-connection lock/atomicity/visibility assertions are real. Legs 8-9
+ * no longer drive planless P07 enqueue; they prove the retirement seam and the
+ * suspension zero-job path only.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
@@ -820,133 +820,75 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
   }, 30000)
 
   // -------------------------------------------------------------------------
-  // Leg 8 — P07 enqueue versus rollout transition, both race orders.
+  // Leg 8 — predecessor P07 reserve retired fail-closed; suspension still zero-job.
+  // Complete-plan enqueue vs rollout transition races remain #4688 Draft/HOLD work.
   // -------------------------------------------------------------------------
-  it('P07 enqueue vs rollout transition in both orders: enqueue-first makes the transition wait then see the committed retryable job; transition-first makes the enqueue freeze only the NEW posture; suspension yields blocked posture and zero job row', async () => {
-    const buildReservation = async (client: PoolClient, org: string, batchRoot: string) => {
+  it('predecessor P07 reserve fails closed before SQL (zero job DML); suspension yields blocked posture and zero job row', async () => {
+    // --- Retirement: even after minting verified identities under the shared
+    //     rollout lock, reserveAttendanceImportJobW4V1 cannot construct a
+    //     complete W4C-3a plan and throws before any further SQL/job DML. ---
+    const batchRoot1 = crypto.randomUUID()
+    await withClient(async (client) => {
+      await client.query('BEGIN')
       const t = trx(client)
-      const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(org)
+      const counting = countingTrx(client)
+      const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(ORG_ENQ_TRANS)
       await acquireAttendanceCalculationRolloutLock(t, orgKey, 'shared')
-      const posture = await resolveSegmentCalculationPosture(t, org)
-      const orgIdentity = createVerifiedAttendanceOrgIdentityV1({ orgKey: org, posture })
+      const posture = await resolveSegmentCalculationPosture(t, ORG_ENQ_TRANS)
+      const orgIdentity = createVerifiedAttendanceOrgIdentityV1({ orgKey: ORG_ENQ_TRANS, posture })
       const batchIdentity = createVerifiedAttendanceOperationIdentityV1({
         org: orgIdentity,
         kind: 'batch',
         entrypoint: 'import_batch',
-        source: { sourceKind: 'import_batch', batchCommandId: batchRoot },
+        source: { sourceKind: 'import_batch', batchCommandId: batchRoot1 },
       })
       const items = [HEX64_A, HEX64_B].map((semanticFingerprint, index) => ({
         identity: createVerifiedAttendanceOperationIdentityV1({
           org: orgIdentity,
           kind: 'item',
           entrypoint: 'import_batch',
-          source: { sourceKind: 'import_item', batchCommandId: batchRoot, ordinal: String(index), semanticFingerprint },
+          source: {
+            sourceKind: 'import_item',
+            batchCommandId: batchRoot1,
+            ordinal: String(index),
+            semanticFingerprint,
+          },
         }),
         commandFingerprint: semanticFingerprint,
       }))
-      return { batchIdentity, items }
-    }
-
-    // --- Order 1: enqueue first. It holds shared from posture resolution
-    //     through the job insert; the transition waits, then sees the committed
-    //     retryable (queued) job with its frozen posture. ---
-    const batchRoot1 = crypto.randomUUID()
-    const enqueue = await pool.connect()
-    const transition = await pool.connect()
-    try {
-      await enqueue.query('BEGIN')
-      const built = await buildReservation(enqueue, ORG_ENQ_TRANS, batchRoot1)
-      const created = await reserveAttendanceImportJobW4V1(trx(enqueue), mintImportAuth(ORG_ENQ_TRANS), {
-        batchIdentity: built.batchIdentity,
-        items: built.items,
-        batchCommandFingerprint: HEX64_C,
-        legacyJob: { batchId: crypto.randomUUID(), createdBy: ACTOR, payload: { rows: 2 }, total: 2 },
-      })
-      expect(created.kind).toBe('created')
-
-      await transition.query('BEGIN')
-      const transitionPid = await backendPid(transition)
-      const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(ORG_ENQ_TRANS)
-      const acquire = acquireAttendanceCalculationRolloutLock(trx(transition), orgKey, 'exclusive')
-      await waitUntilAdvisoryBlocked(transitionPid)
-      // While the enqueue holds shared through its commit, the transition's
-      // retryable-job scan CANNOT run yet — and no committed snapshot shows the job.
-      const midFlight = await pool.query(
-        `SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
-        [ORG_ENQ_TRANS, batchRoot1],
-      )
-      expect(midFlight.rows[0].n).toBe(0)
-
-      await enqueue.query('COMMIT')
-      await acquire
-      // Under the exclusive lock the transition's scan sees the committed
-      // retryable job and its frozen accepted_write_posture. (The section 10
-      // posture-comparison DECISION belongs to the transition-writer slice; the
-      // scan visibility/ordering is what W4C-0 proves.)
-      const scan = await transition.query(
-        `SELECT status, w4_accepted_write_posture FROM attendance_import_jobs
-          WHERE org_id = $1 AND w4_batch_command_id = $2::uuid AND w4_contract_version IS NOT NULL
-            AND status NOT IN ('completed', 'failed')`,
-        [ORG_ENQ_TRANS, batchRoot1],
-      )
-      expect(scan.rows).toEqual([{ status: 'queued', w4_accepted_write_posture: 'shadow' }])
-      await transition.query('COMMIT')
-    } finally {
-      enqueue.release()
-      transition.release()
-    }
-
-    // --- Order 2: transition first (eligible -> authoritative under exclusive).
-    //     The enqueue waits at SHARED and then freezes ONLY the new posture:
-    //     'authoritative', not the pre-transition normalized 'shadow'. ---
-    const batchRoot2 = crypto.randomUUID()
-    const transition2 = await pool.connect()
-    const enqueue2 = await pool.connect()
-    const surfaced: unknown[] = []
-    try {
-      await transition2.query('BEGIN')
-      const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(ORG_ENQ_FREEZE)
-      await acquireAttendanceCalculationRolloutLock(trx(transition2), orgKey, 'exclusive')
-      await transition2.query(
-        `UPDATE attendance_calculation_rollout_state
-            SET state = 'authoritative', prior_state = 'eligible', version = 3          WHERE org_id = $1`,
-        [ORG_ENQ_FREEZE],
-      )
-
-      await enqueue2.query('BEGIN')
-      const enqueuePid = await backendPid(enqueue2)
-      const enqueuePromise = (async () => {
-        const built = await buildReservation(enqueue2, ORG_ENQ_FREEZE, batchRoot2)
-        return reserveAttendanceImportJobW4V1(trx(enqueue2), mintImportAuth(ORG_ENQ_FREEZE), {
-          batchIdentity: built.batchIdentity,
-          items: built.items,
+      let caught: unknown
+      try {
+        // counting.t is reserved for the shim only — identity mint used `t` above.
+        await reserveAttendanceImportJobW4V1(counting.t, mintImportAuth(ORG_ENQ_TRANS), {
+          batchIdentity,
+          items,
           batchCommandFingerprint: HEX64_C,
           legacyJob: { batchId: crypto.randomUUID(), createdBy: ACTOR, payload: { rows: 2 }, total: 2 },
         })
-      })().catch((error) => {
-        surfaced.push(error)
-        throw error
-      })
-      await waitUntilAdvisoryBlocked(enqueuePid)
-
-      await transition2.query('COMMIT')
-      const created = await enqueuePromise
-      expect(created.kind).toBe('created')
-      await enqueue2.query('COMMIT')
-      const frozen = await pool.query(
-        `SELECT w4_accepted_write_posture FROM attendance_import_jobs WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
-        [ORG_ENQ_FREEZE, batchRoot2],
-      )
-      expect(frozen.rows).toEqual([{ w4_accepted_write_posture: 'authoritative' }])
-    } finally {
-      enqueue2.release()
-      transition2.release()
-    }
-    expect(surfaced).toEqual([])
+      } catch (error) {
+        caught = error
+      }
+      expect((caught as { code?: string; name?: string }).name).toBe('AttendanceW4RegistryError')
+      expect((caught as { code?: string }).code).toBe('W4C3A_DURABLE_PLAN_REQUIRED')
+      // Shim issues zero SQL of its own.
+      expect(counting.issued()).toBe(0)
+      await client.query('ROLLBACK')
+    })
+    const retiredJobs = await pool.query(
+      `SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
+      [ORG_ENQ_TRANS, batchRoot1],
+    )
+    expect(retiredJobs.rows[0].n).toBe(0)
 
     // --- Suspension: transition authoritative -> suspended under exclusive while
-    //     a fresh enqueue waits at SHARED; after release the posture resolves
+    //     a fresh caller waits at SHARED; after release the posture resolves
     //     blocked, the org factory refuses to mint, and ZERO job row exists. ---
+    // Walk eligible -> authoritative first so the suspended transition has a legal edge.
+    await pool.query(
+      `UPDATE attendance_calculation_rollout_state
+          SET state = 'authoritative', prior_state = 'eligible', version = 3 WHERE org_id = $1`,
+      [ORG_ENQ_FREEZE],
+    )
     const batchRoot3 = crypto.randomUUID()
     const transition3 = await pool.connect()
     const enqueue3 = await pool.connect()
@@ -994,40 +936,15 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
   }, 30000)
 
   // -------------------------------------------------------------------------
-  // Leg 9 — P07 enqueue versus a synchronous caller on the same batch identity,
-  // both commit orders.
+  // Leg 9 — predecessor P07 reserve fails closed with zero job DML; complete-plan
+  // enqueue vs synchronous caller races remain #4688 Draft/HOLD work.
   // -------------------------------------------------------------------------
-  it('P07 enqueue vs synchronous caller on the same batch identity in both commit orders: exactly one side reserves the tuple; the waiter re-reads under the class-10 locks and fails closed with zero conflicting DML', async () => {
-    const buildReservation = async (client: PoolClient, batchRoot: string) => {
-      const t = trx(client)
-      const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(ORG_RACE)
-      await acquireAttendanceCalculationRolloutLock(t, orgKey, 'shared')
-      const posture = await resolveSegmentCalculationPosture(t, ORG_RACE)
-      const orgIdentity = createVerifiedAttendanceOrgIdentityV1({ orgKey: ORG_RACE, posture })
-      const batchIdentity = createVerifiedAttendanceOperationIdentityV1({
-        org: orgIdentity,
-        kind: 'batch',
-        entrypoint: 'import_batch',
-        source: { sourceKind: 'import_batch', batchCommandId: batchRoot },
-      })
-      const items = [HEX64_A, HEX64_B].map((semanticFingerprint, index) => ({
-        identity: createVerifiedAttendanceOperationIdentityV1({
-          org: orgIdentity,
-          kind: 'item',
-          entrypoint: 'import_batch',
-          source: { sourceKind: 'import_item', batchCommandId: batchRoot, ordinal: String(index), semanticFingerprint },
-        }),
-        commandFingerprint: semanticFingerprint,
-      }))
-      return { batchIdentity, items }
-    }
-
-    // --- Order 1: synchronous caller commits first; the concurrently waiting
-    //     enqueue re-reads under the class-10 locks and 409s with zero job DML. ---
+  it('predecessor P07 reserve fails closed with zero job DML even beside a concurrent synchronous claim', async () => {
+    // Sync claim still works (unrelated registry concurrency). The predecessor
+    // P07 reserve cannot create a planless V1 job next to it — it retires before
+    // SQL with zero job DML. Positive complete-plan races are not covered here.
     const batchRoot1 = crypto.randomUUID()
     const syncCaller = await pool.connect()
-    const enqueue = await pool.connect()
-    const surfaced1: unknown[] = []
     try {
       await syncCaller.query('BEGIN')
       const claimed = await attendanceResultOperationPreflightV1(
@@ -1037,21 +954,30 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
       )
       expect(claimed.kind).toBe('claimed')
 
-      await enqueue.query('BEGIN')
-      const enqueuePid = await backendPid(enqueue)
-      const enqueuePromise = (async () => {
-        const built = await buildReservation(enqueue, batchRoot1)
-        return reserveAttendanceImportJobW4V1(trx(enqueue), mintImportAuth(ORG_RACE), {
-          batchIdentity: built.batchIdentity,
-          items: built.items,
+      // While the sync claim holds class-00/10 locks, the retired reserve still
+      // fails closed before SQL — it never waits on the identity locks and never
+      // inserts a job. Positive complete-plan races are not asserted by this leg.
+      let sqlCalls = 0
+      const noSql = {
+        query: async () => {
+          sqlCalls += 1
+          return { rows: [] }
+        },
+      } as AttendanceW4TransactionClientV1
+      let reserveCaught: unknown
+      try {
+        await reserveAttendanceImportJobW4V1(noSql, mintImportAuth(ORG_RACE), {
+          batchIdentity: {},
+          items: [],
           batchCommandFingerprint: HEX64_C,
           legacyJob: { batchId: crypto.randomUUID(), createdBy: ACTOR, payload: { rows: 2 }, total: 2 },
         })
-      })().catch((error) => {
-        surfaced1.push(error)
-        throw error
-      })
-      await waitUntilAdvisoryBlocked(enqueuePid)
+      } catch (error) {
+        reserveCaught = error
+      }
+      expect((reserveCaught as { name?: string; code?: string }).name).toBe('AttendanceW4RegistryError')
+      expect((reserveCaught as { code?: string }).code).toBe('W4C3A_DURABLE_PLAN_REQUIRED')
+      expect(sqlCalls).toBe(0)
 
       if (claimed.kind === 'claimed') {
         const itemIds = claimed.itemIdentities.map((identity) => identity.id as string)
@@ -1064,85 +990,15 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
         })
       }
       await syncCaller.query('COMMIT')
-
-      let enqueueCaught: unknown
-      try {
-        await enqueuePromise
-      } catch (error) {
-        enqueueCaught = error
-      }
-      expect(enqueueCaught).toBeInstanceOf(AttendanceW4OperationError)
-      expect((enqueueCaught as AttendanceW4OperationError).code).toBe('ATTENDANCE_OPERATION_BATCH_CONFLICT')
-      await enqueue.query('ROLLBACK')
     } finally {
       syncCaller.release()
-      enqueue.release()
     }
-    expect(surfaced1).toHaveLength(1) // the one 409, nothing else
     const jobs1 = await pool.query(
       `SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
       [ORG_RACE, batchRoot1],
     )
-    expect(jobs1.rows[0].n).toBe(0) // exactly one side reserved: the sync operations
+    expect(jobs1.rows[0].n).toBe(0)
     expect(await opCount(ORG_RACE, 'batch_command_id = $2::uuid', [batchRoot1])).toBe(2)
-
-    // --- Order 2: enqueue commits first (holds class-00 then every class-10
-    //     identity through the job commit); the concurrently waiting synchronous
-    //     caller re-reads under the locks, finds the V1 reservation, and 409s
-    //     with zero conflicting operation DML. ---
-    const batchRoot2 = crypto.randomUUID()
-    const enqueue2 = await pool.connect()
-    const syncCaller2 = await pool.connect()
-    const surfaced2: unknown[] = []
-    try {
-      await enqueue2.query('BEGIN')
-      const built = await buildReservation(enqueue2, batchRoot2)
-      const created = await reserveAttendanceImportJobW4V1(trx(enqueue2), mintImportAuth(ORG_RACE), {
-        batchIdentity: built.batchIdentity,
-        items: built.items,
-        batchCommandFingerprint: HEX64_C,
-        legacyJob: { batchId: crypto.randomUUID(), createdBy: ACTOR, payload: { rows: 2 }, total: 2 },
-      })
-      expect(created.kind).toBe('created')
-
-      await syncCaller2.query('BEGIN')
-      const syncPid = await backendPid(syncCaller2)
-      const syncPromise = attendanceResultOperationPreflightV1(
-        trx(syncCaller2),
-        mintImportAuth(ORG_RACE),
-        importBatchEnvelope(ORG_RACE, batchRoot2, [HEX64_A, HEX64_B]).registryInput,
-      ).catch((error) => {
-        surfaced2.push(error)
-        throw error
-      })
-      await waitUntilAdvisoryBlocked(syncPid)
-
-      await enqueue2.query('COMMIT')
-      let syncCaught: unknown
-      try {
-        await syncPromise
-      } catch (error) {
-        syncCaught = error
-      }
-      expect(syncCaught).toBeInstanceOf(AttendanceW4OperationError)
-      expect((syncCaught as AttendanceW4OperationError).code).toBe('ATTENDANCE_OPERATION_BATCH_CONFLICT')
-      await syncCaller2.query('ROLLBACK')
-    } finally {
-      enqueue2.release()
-      syncCaller2.release()
-    }
-    expect(surfaced2).toHaveLength(1)
-    const jobs2 = await pool.query(
-      `SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
-      [ORG_RACE, batchRoot2],
-    )
-    expect(jobs2.rows[0].n).toBe(1) // exactly one side reserved: the job
-    expect(await opCount(ORG_RACE, 'batch_command_id = $2::uuid', [batchRoot2])).toBe(0)
-    const batches2 = await pool.query(
-      `SELECT count(*)::int AS n FROM attendance_result_operation_batches WHERE org_id = $1 AND batch_command_id = $2::uuid`,
-      [ORG_RACE, batchRoot2],
-    )
-    expect(batches2.rows[0].n).toBe(0)
   }, 30000)
 
   // -------------------------------------------------------------------------
