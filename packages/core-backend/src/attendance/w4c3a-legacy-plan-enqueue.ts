@@ -703,7 +703,7 @@ async function lockAndFreezeAttendanceGroupReadSetV1(
         value,
       ),
     )
-  const candidateNames = [
+  const candidateAliases = [
     ...ensureGroups.map((effect) => effect.normalizedName),
     ...ensureMembers.map((effect) => effect.groupRef.trim().toLowerCase()),
   ]
@@ -714,10 +714,11 @@ async function lockAndFreezeAttendanceGroupReadSetV1(
       WHERE org_id = $1
         AND (
           id::text = ANY($2::text[]) OR
-          lower(btrim(name)) = ANY($3::text[])
+          lower(btrim(name)) = ANY($3::text[]) OR
+          lower(btrim(code)) = ANY($3::text[])
         )
       ORDER BY id`,
-    [orgId, candidateIds, candidateNames],
+    [orgId, candidateIds, candidateAliases],
   )
   const groupRows = groupsResult.rows as Array<Record<string, unknown>>
   const groupById = new Map<string, Record<string, unknown>>()
@@ -737,6 +738,13 @@ async function lockAndFreezeAttendanceGroupReadSetV1(
   for (const [id] of groupById) resolvedGroupRef.set(id, id)
   for (const [name, row] of groupByName) {
     resolvedGroupRef.set(name, String(row.id))
+  }
+  for (const row of groupRows) {
+    const code =
+      typeof row.code === 'string' ? row.code.trim().toLowerCase() : ''
+    if (code.length > 0 && !resolvedGroupRef.has(code)) {
+      resolvedGroupRef.set(code, String(row.id))
+    }
   }
 
   const memberGroups: string[] = []
@@ -949,6 +957,10 @@ function materializeAttendanceLegacyGroupEffectsV1(
     if (draft.kind !== 'ensure_group') continue
     const groupId = groupIdByRef.get(draft.normalizedName) ?? crypto.randomUUID()
     groupIdByRef.set(draft.normalizedName, groupId)
+    const normalizedCode = draft.code?.trim().toLowerCase() ?? ''
+    if (normalizedCode.length > 0 && !groupIdByRef.has(normalizedCode)) {
+      groupIdByRef.set(normalizedCode, groupId)
+    }
     effects.push({
       kind: 'ensure_group',
       groupId,
@@ -979,7 +991,7 @@ function materializeAttendanceLegacyGroupEffectsV1(
     effects.push({
       kind: 'ensure_member',
       memberId,
-      groupRef: draft.groupRef,
+      groupRef: groupId,
       userId: draft.userId,
     })
     placements.push({

@@ -5,6 +5,7 @@ import { Pool, type PoolClient } from 'pg'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c3aUp } from '../../src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan'
 import {
+  type LegacyImportGroupEffectDraftV1,
   type LegacyImportItemDraftV1,
   type LegacyImportRecordWriteDraftV1,
 } from '../../src/attendance/w4c3a-legacy-plan-enqueue'
@@ -376,6 +377,117 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       [batchId],
     )
     expect(rows.rows).toEqual([{ status: 'queued', total: 2, w4_operational_branch: 'operational_only_no_target', w4_item_count: 0, chunk_count: 1, chunks: 1, source_items: 2 }])
+  })
+
+  it('freezes legacy name-first and code-fallback group references as durable UUIDs', async () => {
+    const nameWinnerId = crypto.randomUUID()
+    const shadowedCodeId = crypto.randomUUID()
+    const codeOnlyId = crypto.randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_groups (id, org_id, name, code, timezone)
+       VALUES
+         ($1, $4, 'Ops', NULL, 'Asia/Taipei'),
+         ($2, $4, 'Secondary', 'OPS', 'Asia/Taipei'),
+         ($3, $4, 'Engineering', 'ENG', 'Asia/Taipei')`,
+      [nameWinnerId, shadowedCodeId, codeOnlyId, ORG],
+    )
+    const batchId = crypto.randomUUID()
+    const { input } = strictInput(legacyOrgWitness, batchId, ADMIN_A)
+    const groupEffects: readonly LegacyImportGroupEffectDraftV1[] = [
+      {
+        kind: 'ensure_member',
+        groupRef: ' ops ',
+        userId: TARGET_USER,
+        firstSourceOrdinal: 0,
+      },
+      {
+        kind: 'ensure_member',
+        groupRef: 'eng',
+        userId: ADMIN_B,
+        firstSourceOrdinal: 0,
+      },
+    ]
+
+    await runSerializable(pool, (client) =>
+      reserveAttendanceLegacyImportPlanJobV1(
+        trx(client),
+        auth(ADMIN_A, ORG),
+        { ...input, groupEffects },
+      ),
+    )
+    const stored = await pool.query(
+      `SELECT chunk
+         FROM attendance_import_legacy_execution_plan_chunks c
+         JOIN attendance_import_jobs j ON j.id = c.job_id
+        WHERE j.batch_id = $1`,
+      [batchId],
+    )
+    const effects = (stored.rows[0].chunk as {
+      groupEffects: Array<Record<string, unknown>>
+    }).groupEffects
+
+    expect(effects).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'ensure_member',
+        groupRef: nameWinnerId,
+        userId: TARGET_USER,
+      }),
+      expect.objectContaining({
+        kind: 'ensure_member',
+        groupRef: codeOnlyId,
+        userId: ADMIN_B,
+      }),
+    ]))
+    expect(effects).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ groupRef: shadowedCodeId }),
+    ]))
+  })
+
+  it('freezes a same-plan ensure-group code reference to the minted group UUID', async () => {
+    const batchId = crypto.randomUUID()
+    const { input } = strictInput(legacyOrgWitness, batchId, ADMIN_A)
+    const groupEffects: readonly LegacyImportGroupEffectDraftV1[] = [
+      {
+        kind: 'ensure_group',
+        normalizedName: 'night shift',
+        displayName: 'Night Shift',
+        code: 'NIGHT',
+        timezone: 'Asia/Taipei',
+        ruleSetId: null,
+        firstSourceOrdinal: 0,
+      },
+      {
+        kind: 'ensure_member',
+        groupRef: 'night',
+        userId: TARGET_USER,
+        firstSourceOrdinal: 0,
+      },
+    ]
+
+    await runSerializable(pool, (client) =>
+      reserveAttendanceLegacyImportPlanJobV1(
+        trx(client),
+        auth(ADMIN_A, ORG),
+        { ...input, groupEffects },
+      ),
+    )
+    const stored = await pool.query(
+      `SELECT chunk
+         FROM attendance_import_legacy_execution_plan_chunks c
+         JOIN attendance_import_jobs j ON j.id = c.job_id
+        WHERE j.batch_id = $1`,
+      [batchId],
+    )
+    const effects = (stored.rows[0].chunk as {
+      groupEffects: Array<Record<string, unknown>>
+    }).groupEffects
+    const group = effects.find((effect) => effect.kind === 'ensure_group')
+    const member = effects.find((effect) => effect.kind === 'ensure_member')
+
+    expect(group?.groupId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
+    expect(member?.groupRef).toBe(group?.groupId)
   })
 
   it('persists exact transient fingerprints for a 5001-item operational batch and rejects one-hex mutations before persistence', async () => {
