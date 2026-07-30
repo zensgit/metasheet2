@@ -520,6 +520,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     await sql.raw(`CREATE TRIGGER trg_${table}_w4c3a_revision BEFORE INSERT OR UPDATE OR DELETE ON ${table} FOR EACH ROW EXECUTE FUNCTION ${functionName}()`).execute(db)
   }
   for (const table of [
+    'attendance_import_jobs',
+    'attendance_import_legacy_execution_plans',
+    'attendance_import_legacy_execution_plan_chunks',
+    'attendance_import_legacy_terminal_responses',
+    'attendance_import_upload_cleanup_commands',
     'attendance_records', 'attendance_groups', 'attendance_group_members',
     'attendance_record_target_revisions', 'attendance_group_effect_revisions',
   ]) {
@@ -537,7 +542,16 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       replay_selector text; cleanup_kind text; expected_variant text; cleanup_required boolean;
     BEGIN
       SELECT * INTO job FROM attendance_import_jobs WHERE id = $1;
-      IF NOT FOUND OR job.w4_contract_version IS NULL THEN RETURN; END IF;
+      IF NOT FOUND THEN RETURN; END IF;
+      IF job.w4_contract_version IS NULL THEN
+        IF EXISTS (SELECT 1 FROM attendance_import_legacy_execution_plans p WHERE p.job_id = $1) OR
+           EXISTS (SELECT 1 FROM attendance_import_legacy_execution_plan_chunks c WHERE c.job_id = $1) OR
+           EXISTS (SELECT 1 FROM attendance_import_legacy_terminal_responses t WHERE t.job_id = $1) OR
+           EXISTS (SELECT 1 FROM attendance_import_upload_cleanup_commands u WHERE u.job_id = $1) THEN
+          RAISE EXCEPTION 'W4C3A_NON_V1_HISTORY_DENIED';
+        END IF;
+        RETURN;
+      END IF;
       IF job.w4_contract_version <> 1 THEN RAISE EXCEPTION 'W4C3A_V1_VERSION_UNSUPPORTED'; END IF;
       IF job.w4_legacy_plan_digest IS NULL THEN
         IF EXISTS (SELECT 1 FROM attendance_import_legacy_execution_plans p WHERE p.job_id = $1) OR

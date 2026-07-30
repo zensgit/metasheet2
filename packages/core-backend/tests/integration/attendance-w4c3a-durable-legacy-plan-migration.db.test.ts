@@ -179,7 +179,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     await adminPool?.end()
   })
 
-  it('creates the four job columns, six history/revision tables, named deferred validator, and five truncate guards', async () => {
+  it('creates the four job columns, six history/revision tables, named deferred validator, and ten truncate guards', async () => {
     const columns = await pool.query(`SELECT count(*)::int AS count FROM information_schema.columns WHERE table_name='attendance_import_jobs' AND column_name = ANY($1::text[])`, [
       ['w4_legacy_plan_digest', 'w4_distinct_target_count', 'w4_operational_branch', 'w4_legacy_input_fingerprint'],
     ])
@@ -214,9 +214,32 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     const terminalCheck = await pool.query(`SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname LIKE '%response_variant%'`)
     expect(terminalCheck.rows.map((row) => row.definition).join('\n')).toContain('first_execution')
     expect(terminalCheck.rows.map((row) => row.definition).join('\n')).not.toContain("'completed'")
-    const truncates = await pool.query(`SELECT count(*)::int AS count FROM pg_trigger WHERE tgname LIKE 'trg_%_w4c3a_truncate'`)
-    expect(truncates.rows[0].count).toBe(5)
+    const truncates = await pool.query(`
+      SELECT count(*)::int AS count
+      FROM pg_trigger
+      WHERE tgfoid = 'attendance_w4c3a_deny_truncate()'::regprocedure
+        AND NOT tgisinternal
+    `)
+    expect(truncates.rows[0].count).toBe(10)
     expect(LEGACY_IMPORT_PLAN_MAX_SOURCE_ROWS_PER_CHUNK).toBe(500)
+  })
+
+  it('rejects W4C-3a history attached to a classic null-version job', async () => {
+    const jobId = newId()
+    await pool.query(
+      `INSERT INTO attendance_import_jobs (id, org_id, batch_id, created_by, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [jobId, `classic-${run}`, newId(), `classic-user-${run}`, `classic-key-${run}`],
+    )
+
+    await expect(
+      pool.query(
+        `INSERT INTO attendance_import_legacy_terminal_responses (
+           job_id, org_id, response_variant, response_digest, response
+         ) VALUES ($1, $2, 'first_execution', $3, $4::jsonb)`,
+        [jobId, `classic-${run}`, TERMINAL_RESPONSE_DIGEST, JSON.stringify(TERMINAL_RESPONSE)],
+      ),
+    ).rejects.toThrow(/W4C3A_NON_V1_HISTORY_DENIED/)
   })
 
   it('rejects invalid exact root keys and a direct incomplete V1 job at commit', async () => {
@@ -446,7 +469,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     await expect(pool.query(`UPDATE attendance_import_jobs SET progress=1 WHERE id=$1`, [invalidNoTarget.jobId])).rejects.toThrow(/NO_TARGET_BRANCH_DENIED/)
   })
 
-  it('backfills and bumps record/group revisions, rejects moves, and rejects all five truncates', async () => {
+  it('backfills and bumps record/group revisions, rejects moves, and rejects all ten truncates', async () => {
     const upgradeName = `${scratchName}_upgrade`
     const upgrade = await createScratch(adminPool, upgradeName)
     try {
@@ -489,7 +512,18 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     expect(Number(groupRevision.rows[0].revision)).toBeGreaterThanOrEqual(2)
     await pool.query(`INSERT INTO attendance_group_effect_revisions (org_id,revision) VALUES ($1,0)`, [`zero-group-${run}`])
     await expect(pool.query(`INSERT INTO attendance_group_effect_revisions (org_id,revision) VALUES ($1,1)`, [`one-group-${run}`])).rejects.toThrow(/DIRECT_MUTATION_DENIED/)
-    for (const table of ['attendance_records', 'attendance_groups', 'attendance_group_members', 'attendance_record_target_revisions', 'attendance_group_effect_revisions']) {
+    for (const table of [
+      'attendance_import_jobs',
+      'attendance_import_legacy_execution_plans',
+      'attendance_import_legacy_execution_plan_chunks',
+      'attendance_import_legacy_terminal_responses',
+      'attendance_import_upload_cleanup_commands',
+      'attendance_records',
+      'attendance_groups',
+      'attendance_group_members',
+      'attendance_record_target_revisions',
+      'attendance_group_effect_revisions',
+    ]) {
       await expect(pool.query(`TRUNCATE ${table} CASCADE`)).rejects.toThrow(/TRUNCATE_DENIED/)
     }
   })
