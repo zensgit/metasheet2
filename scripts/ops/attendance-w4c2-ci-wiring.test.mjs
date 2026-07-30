@@ -87,6 +87,7 @@ const FILES = Object.freeze([
   // Keep the same two-point wiring and file-exists contract as the suites above.
   'tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts',
   'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
+  'tests/integration/attendance-w4c3a-record-effects.db.test.ts',
 ])
 
 /**

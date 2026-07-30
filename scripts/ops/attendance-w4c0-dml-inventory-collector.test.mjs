@@ -234,6 +234,34 @@ test('W4C-3a canonical tables accept a W4C-3a boundary writer', () => {
   assert.equal(classified.canonicalSites[0].table, 'attendance_import_legacy_execution_plans')
 })
 
+test('W4C-3a fixed record-effect DML is classified under P06-P09 without claiming caller cutover', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  const { claimsByEntryId } = classifyTrackedSites(classified.trackedSites)
+  const adapterPath =
+    'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts'
+  const expectedKeys = classified.trackedSites
+    .filter((site) => site.relPath === adapterPath)
+    .map((site) => site.key)
+    .sort()
+
+  assert.equal(expectedKeys.length, 2, 'the fixed adapter must expose exactly UPDATE + INSERT')
+  for (const id of ['P06', 'P07', 'P08', 'P09']) {
+    const claimedKeys = (claimsByEntryId.get(id) || [])
+      .filter((site) => site.relPath === adapterPath)
+      .map((site) => site.key)
+      .sort()
+    assert.deepEqual(claimedKeys, expectedKeys, `${id} must classify both shared adapter sites`)
+    const entry = CURATED_DEBT_ENTRIES.find((candidate) => candidate.id === id)
+    assert.equal(
+      Object.hasOwn(entry || {}, 'canonicalizedBy'),
+      false,
+      `${id} must remain pending until its real caller is cut over`,
+    )
+  }
+})
+
 // -------------------------------------------------------------------------------------------
 // 5. CI wiring: this file must be named explicitly in the workflow (node:test files are neither
 //    vitest-discovered nor covered by vitest.config.ts's exclude list — see module header).

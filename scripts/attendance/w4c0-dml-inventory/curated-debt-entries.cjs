@@ -34,6 +34,8 @@ function byPathPrefix(prefix) {
 }
 
 const PLUGIN = 'plugins/plugin-attendance/index.cjs'
+const W4C3A_RECORD_EFFECT_ADAPTER =
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts'
 
 const CURATED_DEBT_ENTRIES = [
   // ---------------------------------------------------------------------------------------
@@ -109,7 +111,8 @@ const CURATED_DEBT_ENTRIES = [
     claims: (site) =>
       bySymbol(PLUGIN, /^batchUpsertAttendanceRecords(Staging|Unnest|Values)$/)(site) ||
       bySymbol(PLUGIN, /^batchInsertAttendanceImportItems(Staging|Unnest|Values)$/)(site) ||
-      bySymbol(PLUGIN, /^appendSkipped$/)(site),
+      bySymbol(PLUGIN, /^appendSkipped$/)(site) ||
+      byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER)(site),
   },
   {
     id: 'P07',
@@ -119,14 +122,14 @@ const CURATED_DEBT_ENTRIES = [
     confidence: 'heuristic',
     // The worker calls the same commit kernel as P06/P09 (dataTypeFor cluster below); no distinct
     // worker-only DML site was independently resolved by this scan.
-    claims: () => false,
+    claims: byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER),
   },
   {
     id: 'P08',
     title: 'Async import startup recovery that re-enqueues P07 after restart.',
     owningSlice: 'W4C-3a',
     sharedHook: false,
-    claims: () => false,
+    claims: byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER),
   },
   {
     id: 'P09',
@@ -138,7 +141,9 @@ const CURATED_DEBT_ENTRIES = [
     // unrelated locations in the plugin file; the nearest-preceding-symbol heuristic attributes
     // the surrounding legacy import mapping loop's DML to it at each location. Genuine call-graph
     // attribution is left to a future AST-based collector — see the module header note.
-    claims: bySymbol(PLUGIN, /^dataTypeFor$/),
+    claims: (site) =>
+      bySymbol(PLUGIN, /^dataTypeFor$/)(site) ||
+      byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER)(site),
   },
   {
     id: 'P10',

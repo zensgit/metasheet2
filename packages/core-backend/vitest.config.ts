@@ -601,6 +601,10 @@ export default defineConfig({
       // the no-DB lane cannot skip-green it. The whole file is wired into the
       // attendance real-DB step in plugin-tests.yml.
       'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
+      // W4C-3a fixed record-effect adapter: exact UPDATE/INSERT branches and
+      // revision-trigger observation on migrated PostgreSQL. DATABASE_URL-gated;
+      // excluded here and run whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-record-effects.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
