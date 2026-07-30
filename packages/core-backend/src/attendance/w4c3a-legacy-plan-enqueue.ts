@@ -304,18 +304,61 @@ async function recheckAttendanceFullImportAuthorizationInTransactionV1(
            FROM user_roles
           WHERE user_id = $1 AND role_id = 'admin'
        )
-       OR EXISTS (
-         SELECT 1
-           FROM user_permissions
-          WHERE user_id = $1
-            AND permission_code IN ('attendance:import', 'attendance:admin')
-       )
-       OR EXISTS (
-         SELECT 1
-           FROM user_roles ur
-           JOIN role_permissions rp ON rp.role_id = ur.role_id
-          WHERE ur.user_id = $1
-            AND rp.permission_code IN ('attendance:import', 'attendance:admin')
+       OR (
+         EXISTS (
+           SELECT 1
+             FROM user_namespace_admissions
+            WHERE user_id = $1
+              AND namespace = 'attendance'
+              AND enabled = true
+         )
+         AND EXISTS (
+           SELECT 1
+             FROM user_roles ur
+             LEFT JOIN role_permissions rp ON rp.role_id = ur.role_id
+            WHERE ur.user_id = $1
+              AND (
+                ur.role_id = 'attendance'
+                OR ur.role_id LIKE 'attendance\\_%' ESCAPE '\\'
+                OR split_part(COALESCE(rp.permission_code, ''), ':', 1) = 'attendance'
+              )
+         )
+         AND (
+           EXISTS (
+             SELECT 1
+              FROM user_permissions
+              WHERE user_id = $1
+                AND permission_code IN (
+                  'attendance:import',
+                  'attendance:admin',
+                  'attendance:*',
+                  '*:*'
+                )
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM user_roles ur
+               JOIN role_permissions rp ON rp.role_id = ur.role_id
+              WHERE ur.user_id = $1
+                AND rp.permission_code IN (
+                  'attendance:import',
+                  'attendance:admin',
+                  'attendance:*',
+                  '*:*'
+                )
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM users
+              WHERE id = $1
+                AND COALESCE(permissions, '[]'::jsonb) ?| ARRAY[
+                  'attendance:import',
+                  'attendance:admin',
+                  'attendance:*',
+                  '*:*'
+                ]
+           )
+         )
        )
        LIMIT 1`,
     [auth.actorId],
@@ -1445,6 +1488,15 @@ async function persistAttendanceLegacyImportPlanEnqueueV1(
   if (identityProofVectorDigest !== manifest.identityProofVectorDigest) {
     fail('W4C3A_ENQUEUE_PROOF_DIGEST_MISMATCH')
   }
+
+  await trx.query(
+    `SELECT set_config(
+       'attendance.w4c3a_enqueue_job_id',
+       $1::uuid::text,
+       true
+     )`,
+    [job.jobId],
+  )
 
   // Insert job with explicit server-minted id.
   await trx.query(

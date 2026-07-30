@@ -903,14 +903,25 @@ describe('LegacyImportExecutionPlanV1', () => {
     )
     const firstInsert = calls.findIndex((sqlText) => sqlText.includes('INSERT INTO'))
     expect(firstInsert).toBeGreaterThan(-1)
+    const authorizationSql = calls.find((sqlText) =>
+      sqlText.includes('FROM user_namespace_admissions'),
+    )
+    expect(authorizationSql).toContain("namespace = 'attendance'")
+    expect(authorizationSql).toContain("ur.role_id LIKE 'attendance\\_%' ESCAPE '\\'")
+    expect(authorizationSql).toContain("'attendance:import'")
+    expect(authorizationSql).toContain("'attendance:admin'")
+    expect(authorizationSql).toContain("'attendance:*'")
+    expect(authorizationSql).toContain("'*:*'")
+    expect(authorizationSql).toContain("COALESCE(permissions, '[]'::jsonb)")
+    expect(calls.indexOf(authorizationSql as string)).toBeLessThan(firstInsert)
     expect(
       calls.findIndex((sqlText) =>
-        sqlText.includes("permission_code IN ('attendance:import', 'attendance:admin')"),
+        sqlText.includes('FROM attendance_calculation_rollout_state'),
       ),
     ).toBeLessThan(firstInsert)
     expect(
       calls.findIndex((sqlText) =>
-        sqlText.includes('FROM attendance_calculation_rollout_state'),
+        sqlText.includes("'attendance.w4c3a_enqueue_job_id'"),
       ),
     ).toBeLessThan(firstInsert)
     expect(

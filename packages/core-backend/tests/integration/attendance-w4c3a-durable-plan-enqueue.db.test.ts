@@ -21,6 +21,9 @@ import {
   computeAttendanceItemSetFingerprintV1,
 } from '../../src/attendance/w4c0-fingerprints'
 import {
+  acquireAttendanceCalculationRolloutLock,
+  acquireAttendanceCalculationTargetLocks,
+  acquireAttendanceImportReservationLocksV1,
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
   buildAttendanceOperationalBulkTargetAdvisoryKey,
@@ -30,6 +33,11 @@ import {
   type VerifiedAttendanceOrgIdentityV1,
 } from '../../src/attendance/w4c0-identity'
 import { createAuthorizedAttendanceWriteContextV1 } from '../../src/attendance/w4c0-authorization'
+import { createAttendanceLegacyPlanWorkerV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
+import {
+  createAttendanceLegacyPlanWorkerRepositoryV1,
+  type AttendanceLegacyPlanWorkerRepositoryJobV1,
+} from '../../src/attendance/w4c3a-legacy-plan-worker-repository'
 
 const dbUrl = process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -38,6 +46,8 @@ const ORG = crypto.randomUUID()
 const POSTURE_ORG = crypto.randomUUID()
 const ADMIN_A = `w4c3a-admin-a-${run}`
 const ADMIN_B = `w4c3a-admin-b-${run}`
+const LEGACY_WILDCARD_ADMIN = `w4c3a-legacy-wildcard-${run}`
+const ROLE_WILDCARD_ADMIN = `w4c3a-role-wildcard-${run}`
 const TARGET_USER = crypto.randomUUID()
 const SOURCE_REF = `w4c3a-source-${run}`
 const HEX_A = 'a'.repeat(64)
@@ -84,7 +94,8 @@ async function createBase(pool: Pool): Promise<void> {
   await pool.query(`
     CREATE TABLE users (
       id text PRIMARY KEY, is_active boolean NOT NULL DEFAULT true,
-      activation_status text NOT NULL DEFAULT 'activated'
+      activation_status text NOT NULL DEFAULT 'activated',
+      permissions jsonb NOT NULL DEFAULT '[]'::jsonb
     )`)
   await pool.query(`
     CREATE TABLE user_orgs (
@@ -106,6 +117,11 @@ async function createBase(pool: Pool): Promise<void> {
       PRIMARY KEY (role_id, permission_code)
     )`)
   await pool.query(`
+    CREATE TABLE user_namespace_admissions (
+      user_id text NOT NULL, namespace text NOT NULL, enabled boolean NOT NULL DEFAULT false,
+      PRIMARY KEY (user_id, namespace)
+    )`)
+  await pool.query(`
     CREATE TABLE attendance_records (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id text NOT NULL, work_date date NOT NULL,
       first_in_at timestamptz, last_out_at timestamptz, work_minutes integer NOT NULL DEFAULT 0,
@@ -123,7 +139,8 @@ async function createBase(pool: Pool): Promise<void> {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id text NOT NULL, batch_id uuid NOT NULL,
       created_by text NOT NULL, idempotency_key text, status varchar(20) NOT NULL DEFAULT 'queued',
       progress integer NOT NULL DEFAULT 0, total integer NOT NULL DEFAULT 0, error text,
-      payload jsonb NOT NULL DEFAULT '{}'::jsonb, started_at timestamptz, finished_at timestamptz
+      payload jsonb NOT NULL DEFAULT '{}'::jsonb, started_at timestamptz, finished_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
     )`)
   await pool.query(`
     CREATE TABLE attendance_import_batches (
@@ -351,19 +368,51 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     await w4c0Up(db)
     await w4c3aUp(db)
     await pool.query(
-      `INSERT INTO users (id) VALUES ($1), ($2), ($3)`,
-      [ADMIN_A, ADMIN_B, TARGET_USER],
+      `INSERT INTO users (id) VALUES ($1), ($2), ($3), ($4), ($5)`,
+      [ADMIN_A, ADMIN_B, LEGACY_WILDCARD_ADMIN, ROLE_WILDCARD_ADMIN, TARGET_USER],
     )
     for (const orgId of [ORG, POSTURE_ORG]) {
       await pool.query(
-        `INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2), ($3, $2), ($4, $2)`,
-        [ADMIN_A, orgId, ADMIN_B, TARGET_USER],
+        `INSERT INTO user_orgs (user_id, org_id) VALUES
+         ($1, $2), ($3, $2), ($4, $2), ($5, $2), ($6, $2)`,
+        [
+          ADMIN_A,
+          orgId,
+          ADMIN_B,
+          LEGACY_WILDCARD_ADMIN,
+          ROLE_WILDCARD_ADMIN,
+          TARGET_USER,
+        ],
       )
     }
     await pool.query(
       `INSERT INTO user_permissions (user_id, permission_code) VALUES
        ($1, 'attendance:import'), ($2, 'attendance:import')`,
       [ADMIN_A, ADMIN_B],
+    )
+    await pool.query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES
+       ($1, 'attendance_admin'), ($2, 'attendance_admin'),
+       ($3, 'attendance_legacy'), ($4, 'attendance_operator')`,
+      [ADMIN_A, ADMIN_B, LEGACY_WILDCARD_ADMIN, ROLE_WILDCARD_ADMIN],
+    )
+    await pool.query(
+      `INSERT INTO role_permissions (role_id, permission_code) VALUES
+       ('attendance_admin', 'attendance:import'),
+       ('attendance_legacy', 'attendance:read'),
+       ('attendance_operator', 'attendance:*')`,
+    )
+    await pool.query(
+      `INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES
+       ($1, 'attendance', true),
+       ($2, 'attendance', true),
+       ($3, 'attendance', true),
+       ($4, 'attendance', true)`,
+      [ADMIN_A, ADMIN_B, LEGACY_WILDCARD_ADMIN, ROLE_WILDCARD_ADMIN],
+    )
+    await pool.query(
+      `UPDATE users SET permissions = '["attendance:*"]'::jsonb WHERE id = $1`,
+      [LEGACY_WILDCARD_ADMIN],
     )
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = POSTURE_ORG
     legacyOrgWitness = await loadOrgWitness(pool, ORG)
@@ -709,6 +758,83 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     await pool.query(`UPDATE users SET is_active = true WHERE id = $1`, [ADMIN_A])
   })
 
+  it('rechecks namespace admission and legacy wildcard permissions inside the enqueue transaction', async () => {
+    const deniedBatchId = crypto.randomUUID()
+    const denied = noTargetInput(legacyOrgWitness, deniedBatchId, ADMIN_A, ADMIN_A)
+    await pool.query(
+      `UPDATE user_namespace_admissions
+          SET enabled = false
+        WHERE user_id = $1 AND namespace = 'attendance'`,
+      [ADMIN_A],
+    )
+    await expect(
+      runSerializable(pool, (client) =>
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(client),
+          auth(ADMIN_A, ORG),
+          denied.input,
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'W4C3A_ENQUEUE_FULL_IMPORT_AUTHORIZATION_REJECTED',
+    })
+    expect(await residue(pool, deniedBatchId)).toEqual({
+      jobs: 0,
+      manifests: 0,
+      chunks: 0,
+    })
+    await pool.query(
+      `UPDATE user_namespace_admissions
+          SET enabled = true
+        WHERE user_id = $1 AND namespace = 'attendance'`,
+      [ADMIN_A],
+    )
+
+    const wildcardBatchId = crypto.randomUUID()
+    const wildcard = noTargetInput(
+      legacyOrgWitness,
+      wildcardBatchId,
+      LEGACY_WILDCARD_ADMIN,
+      LEGACY_WILDCARD_ADMIN,
+    )
+    await expect(
+      runSerializable(pool, (client) =>
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(client),
+          auth(LEGACY_WILDCARD_ADMIN, ORG),
+          wildcard.input,
+        ),
+      ),
+    ).resolves.toMatchObject({ kind: 'created' })
+    expect(await residue(pool, wildcardBatchId)).toEqual({
+      jobs: 1,
+      manifests: 1,
+      chunks: 1,
+    })
+
+    const roleWildcardBatchId = crypto.randomUUID()
+    const roleWildcard = noTargetInput(
+      legacyOrgWitness,
+      roleWildcardBatchId,
+      ROLE_WILDCARD_ADMIN,
+      ROLE_WILDCARD_ADMIN,
+    )
+    await expect(
+      runSerializable(pool, (client) =>
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(client),
+          auth(ROLE_WILDCARD_ADMIN, ORG),
+          roleWildcard.input,
+        ),
+      ),
+    ).resolves.toMatchObject({ kind: 'created' })
+    expect(await residue(pool, roleWildcardBatchId)).toEqual({
+      jobs: 1,
+      manifests: 1,
+      chunks: 1,
+    })
+  })
+
   it('replays a completed route-idempotency job for a second authorized admin without createdBy equality', async () => {
     const batchId = crypto.randomUUID()
     const idempotencyKey = `idem-${run}`
@@ -736,6 +862,125 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       reserveAttendanceLegacyImportPlanJobV1(trx(client), auth(ADMIN_B, ORG), second.input),
     )).resolves.toMatchObject({ kind: 'existing', jobId: created.jobId, status: 'completed' })
     expect(await residue(pool, batchId)).toEqual({ jobs: 1, manifests: 1, chunks: 1 })
+  })
+
+  it('persists one worker execution and replays the terminal response after a worker restart', async () => {
+    const batchId = crypto.randomUUID()
+    const planned = noTargetInput(legacyOrgWitness, batchId, ADMIN_A, ADMIN_A)
+    const created = await runSerializable(pool, (client) =>
+      reserveAttendanceLegacyImportPlanJobV1(
+        trx(client),
+        auth(ADMIN_A, ORG),
+        planned.input,
+      ),
+    )
+    if (created.kind !== 'created') throw new Error('expected enqueue to create a job')
+
+    let effectCount = 0
+    const makeWorker = () => createAttendanceLegacyPlanWorkerV1<PoolClient>({
+      readCandidateJob: (jobId) =>
+        createAttendanceLegacyPlanWorkerRepositoryV1(
+          trx(pool as unknown as PoolClient),
+        ).readCandidateJob(jobId),
+      runSerializable: (work) => runSerializable(pool, work),
+      acquireClass00: (client, orgId) =>
+        acquireAttendanceCalculationRolloutLock(
+          trx(client),
+          parseCanonicalAttendanceRolloutOrgKeyV1(orgId),
+          'shared',
+        ),
+      resolveWritePosture: async (client, orgId) => {
+        const posture = await resolveSegmentCalculationPosture(trx(client), orgId)
+        return posture.effectiveState === 'suspended'
+          ? 'suspended'
+          : posture.writePosture
+      },
+      readAuthorizationJob: (client, jobId) =>
+        createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+          .readAuthorizationJob(jobId, ORG),
+      lockJob: (client, jobId) =>
+        createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+          .lockJob(jobId, ORG),
+      authorizeFullImport: async () => true,
+      reservationIdentities: (job) => [
+        createVerifiedAttendanceOperationIdentityV1({
+          org: legacyOrgWitness,
+          kind: 'batch',
+          entrypoint: 'import_batch',
+          source: {
+            sourceKind: 'import_batch',
+            batchCommandId: job.batchId,
+          },
+        }),
+      ],
+      acquireClass10: (client, _job, identities) =>
+        acquireAttendanceImportReservationLocksV1(trx(client), identities, null),
+      loadPlan: (client, jobId) =>
+        createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+          .loadPlan(jobId, ORG),
+      targetIdentities: () => [],
+      acquireClass11: (client, _plan, identities) =>
+        acquireAttendanceCalculationTargetLocks(trx(client), identities),
+      recheckPreconditions: async () => true,
+      executeVerifiedPlan: async () => {
+        effectCount += 1
+        return terminalResponse(null)
+      },
+      storeCompletedResponseAndTerminalize: (
+        client,
+        job,
+        plan,
+        response,
+        responseDigest,
+      ) =>
+        createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+          .storeCompletedResponseAndTerminalize(
+            job as AttendanceLegacyPlanWorkerRepositoryJobV1,
+            plan,
+            response,
+            responseDigest,
+          ),
+      loadCompletedResponse: (client, jobId) =>
+        createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+          .loadCompletedResponse(jobId, ORG),
+      markSuspendedQueued: (client, jobId) =>
+        createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+          .markSuspendedQueued(jobId, ORG),
+      clearResumedSuspendedReason: (client, jobId) =>
+        createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+          .clearResumedSuspendedReason(jobId, ORG),
+      markPlanFailed: (client, jobId, reason) =>
+        createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+          .markPlanFailed(jobId, ORG, reason),
+    })
+
+    const first = await makeWorker().process(created.jobId)
+    expect(first).toEqual({ kind: 'completed', response: terminalResponse(null) })
+    expect(effectCount).toBe(1)
+
+    const replay = await makeWorker().process(created.jobId)
+    expect(replay).toEqual(first)
+    expect(JSON.stringify(replay)).toBe(JSON.stringify(first))
+    expect(effectCount).toBe(1)
+
+    const persisted = await pool.query(
+      `SELECT j.status,
+              count(r.job_id)::int AS terminal_responses,
+              count(c.job_id)::int AS cleanup_commands
+         FROM attendance_import_jobs j
+         LEFT JOIN attendance_import_legacy_terminal_responses r
+           ON r.job_id = j.id AND r.org_id = j.org_id
+         LEFT JOIN attendance_import_upload_cleanup_commands c
+           ON c.job_id = j.id AND c.org_id = j.org_id
+        WHERE j.id = $1 AND j.org_id = $2
+        GROUP BY j.status`,
+      [created.jobId, ORG],
+    )
+    expect(persisted.rows).toEqual([{
+      status: 'completed',
+      terminal_responses: 1,
+      cleanup_commands: 0,
+    }])
   })
 
   it('rejects conflicting private executor fields without adding a second job', async () => {

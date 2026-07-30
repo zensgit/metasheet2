@@ -85,6 +85,7 @@ const FILES = Object.freeze([
   // W4C-3a durable enqueue and record-target preconditions: SERIALIZABLE
   // reservation/freeze plus present/missing commit-order and lock-hold proofs.
   // Keep the same two-point wiring and file-exists contract as the suites above.
+  'tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts',
   'tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts',
   'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
   'tests/integration/attendance-w4c3a-record-effects.db.test.ts',

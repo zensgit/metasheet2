@@ -5,8 +5,8 @@
  * at RATIFIED SHA e6c536fe7a201ca0466b2dc776b15fbdb23aa890.
  *
  * This is deliberately a database boundary.  It creates no caller, worker, parser, or plugin
- * wiring: direct SQL must still be unable to manufacture, rewrite, reopen, or truncate V1
- * legacy-plan history.
+ * wiring: predecessor V1 jobs remain valid, while durable-plan V1 history is admitted only
+ * through the transaction-marked enqueue seam and cannot be rewritten, reopened, or truncated.
  */
 import type { Kysely } from 'kysely'
 import { sql } from 'kysely'
@@ -83,8 +83,6 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`ALTER TABLE attendance_import_jobs DROP CONSTRAINT IF EXISTS chk_aij_w4_item_count`.execute(db)
   await sql`ALTER TABLE attendance_import_jobs DROP CONSTRAINT IF EXISTS chk_aij_w4_proof_vector`.execute(db)
   await sql`ALTER TABLE attendance_import_jobs DROP CONSTRAINT IF EXISTS chk_aij_w4_exec_reason`.execute(db)
-  await sql`DROP FUNCTION IF EXISTS attendance_w4_job_proof_vector_valid(text, uuid, jsonb, integer)`.execute(db)
-
   await sql`
     CREATE OR REPLACE FUNCTION attendance_w4c3a_exact_object_keys(value jsonb, expected text[])
     RETURNS boolean
@@ -541,6 +539,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       SELECT * INTO job FROM attendance_import_jobs WHERE id = $1;
       IF NOT FOUND OR job.w4_contract_version IS NULL THEN RETURN; END IF;
       IF job.w4_contract_version <> 1 THEN RAISE EXCEPTION 'W4C3A_V1_VERSION_UNSUPPORTED'; END IF;
+      IF job.w4_legacy_plan_digest IS NULL THEN
+        IF EXISTS (SELECT 1 FROM attendance_import_legacy_execution_plans p WHERE p.job_id = $1) OR
+           EXISTS (SELECT 1 FROM attendance_import_legacy_execution_plan_chunks c WHERE c.job_id = $1) OR
+           EXISTS (SELECT 1 FROM attendance_import_legacy_terminal_responses t WHERE t.job_id = $1) OR
+           EXISTS (SELECT 1 FROM attendance_import_upload_cleanup_commands u WHERE u.job_id = $1) THEN
+          RAISE EXCEPTION 'W4C3A_PREDECESSOR_V1_HISTORY_DENIED';
+        END IF;
+        RETURN;
+      END IF;
       SELECT * INTO plan FROM attendance_import_legacy_execution_plans WHERE attendance_import_legacy_execution_plans.job_id = $1;
       IF NOT FOUND THEN
         IF job.status = 'failed' AND job.w4_execution_reason_code IN ('ATTENDANCE_IMPORT_LEGACY_PLAN_MISSING', 'ATTENDANCE_IMPORT_LEGACY_PLAN_CHUNK_MISSING') THEN RETURN; END IF;
@@ -716,16 +723,33 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       (w4_contract_version = 1 AND w4_entrypoint IS NOT NULL AND w4_batch_command_id IS NOT NULL AND w4_source_kind IS NOT NULL AND
        w4_source_ref IS NOT NULL AND w4_actor_id IS NOT NULL AND w4_actor_posture IS NOT NULL AND w4_command_fingerprint IS NOT NULL AND
        w4_accepted_write_posture IS NOT NULL AND w4_item_count IS NOT NULL AND w4_item_sequence_fingerprint IS NOT NULL AND
-       w4_item_set_fingerprint IS NOT NULL AND w4_identity_proof_vector IS NOT NULL AND w4_legacy_plan_digest IS NOT NULL AND
-       w4_distinct_target_count IS NOT NULL AND w4_operational_branch IS NOT NULL AND w4_legacy_input_fingerprint IS NOT NULL)
+       w4_item_set_fingerprint IS NOT NULL AND w4_identity_proof_vector IS NOT NULL AND (
+         (w4_legacy_plan_digest IS NULL AND w4_distinct_target_count IS NULL AND
+          w4_operational_branch IS NULL AND w4_legacy_input_fingerprint IS NULL)
+         OR
+         (w4_legacy_plan_digest IS NOT NULL AND w4_distinct_target_count IS NOT NULL AND
+          w4_operational_branch IS NOT NULL AND w4_legacy_input_fingerprint IS NOT NULL)
+       ))
     )
   `.execute(db)
-  await sql`ALTER TABLE attendance_import_jobs ADD CONSTRAINT chk_aij_w4_item_count CHECK (w4_item_count IS NULL OR w4_item_count >= 0)`.execute(db)
+  await sql`
+    ALTER TABLE attendance_import_jobs ADD CONSTRAINT chk_aij_w4_item_count CHECK (
+      w4_item_count IS NULL OR
+      (w4_legacy_plan_digest IS NULL AND w4_item_count >= 1) OR
+      (w4_legacy_plan_digest IS NOT NULL AND w4_item_count >= 0)
+    )
+  `.execute(db)
   await sql`
     ALTER TABLE attendance_import_jobs ADD CONSTRAINT chk_aij_w4_proof_vector CHECK (
-      w4_identity_proof_vector IS NULL OR attendance_w4_job_proof_vector_valid(
-        w4_source_kind, w4_batch_command_id, w4_identity_proof_vector, w4_item_count,
-        w4_operational_branch, w4_distinct_target_count
+      w4_identity_proof_vector IS NULL OR (
+        w4_legacy_plan_digest IS NULL AND attendance_w4_job_proof_vector_valid(
+          w4_source_kind, w4_batch_command_id, w4_identity_proof_vector, w4_item_count
+        )
+      ) OR (
+        w4_legacy_plan_digest IS NOT NULL AND attendance_w4_job_proof_vector_valid(
+          w4_source_kind, w4_batch_command_id, w4_identity_proof_vector, w4_item_count,
+          w4_operational_branch, w4_distinct_target_count
+        )
       )
     )
   `.execute(db)
@@ -762,6 +786,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       END IF;
       IF TG_OP = 'INSERT' THEN
         IF NEW.w4_contract_version = 1 AND NEW.status = 'failed' THEN RAISE EXCEPTION 'W4C3A_V1_FAILED_INSERT_DENIED'; END IF;
+        IF NEW.w4_legacy_plan_digest IS NOT NULL AND
+           current_setting('attendance.w4c3a_enqueue_job_id', true) IS DISTINCT FROM NEW.id::text THEN
+          RAISE EXCEPTION 'W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED';
+        END IF;
         RETURN NEW;
       END IF;
       IF NEW.w4_contract_version IS DISTINCT FROM OLD.w4_contract_version OR NEW.w4_entrypoint IS DISTINCT FROM OLD.w4_entrypoint OR

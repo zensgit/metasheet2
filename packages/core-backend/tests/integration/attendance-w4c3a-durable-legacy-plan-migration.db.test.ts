@@ -238,7 +238,80 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
         w4_actor_id,w4_actor_posture,w4_command_fingerprint,w4_accepted_write_posture,w4_item_count,w4_item_sequence_fingerprint,
         w4_item_set_fingerprint,w4_identity_proof_vector,w4_legacy_plan_digest,w4_distinct_target_count,w4_operational_branch,w4_legacy_input_fingerprint
       ) VALUES ('${run}',gen_random_uuid(),'x','queued',0,1,'import_batch',gen_random_uuid(),'import_batch','x','x','attendance_admin',
-        $1,'legacy_projection_only',0,$1,$1,'[]'::jsonb,$1,0,'operational_only_no_target',$1)`, [hex('a')])).rejects.toThrow(/W4C3A_PLAN_MISSING/)
+        $1,'legacy_projection_only',0,$1,$1,'[]'::jsonb,$1,0,'operational_only_no_target',$1)`, [hex('a')])).rejects.toThrow(/W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED/)
+  })
+
+  it('preserves the predecessor four-field proof contract while requiring the marked seam for durable-plan jobs', async () => {
+    const jobId = newId()
+    const batchId = newId()
+    const semanticFingerprint = hex('a')
+    const commandFingerprint = hex('b')
+    const derived = await pool.query(
+      `SELECT attendance_w4_uuidv5(
+         '6f67fdaa-e2aa-48b3-b76c-c4aab9723173'::uuid,
+         attendance_w4_item_name_bytes($1::uuid, 0, $2)
+       )::text AS id`,
+      [batchId, semanticFingerprint],
+    )
+    const proof = [{
+      ordinal: 0,
+      semanticFingerprint,
+      derivedOperationId: String(derived.rows[0].id),
+      commandFingerprint,
+    }]
+
+    await expect(
+      pool.query(
+        `INSERT INTO attendance_import_jobs (
+           id, org_id, batch_id, created_by, status, total, payload,
+           w4_contract_version, w4_entrypoint, w4_batch_command_id,
+           w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
+           w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
+           w4_item_sequence_fingerprint, w4_item_set_fingerprint,
+           w4_identity_proof_vector
+         ) VALUES (
+           $1, $2, $3, $4, 'queued', 1, '{}'::jsonb,
+           1, 'import_batch', $3, 'import_batch', $5, $4, 'attendance_admin',
+           $6, 'legacy_projection_only', 1, $7, $8, $9::jsonb
+         )`,
+        [
+          jobId,
+          `predecessor-${run}`,
+          batchId,
+          `actor:${run}`,
+          `source:${run}`,
+          hex('c'),
+          hex('d'),
+          hex('e'),
+          JSON.stringify(proof),
+        ],
+      ),
+    ).resolves.toMatchObject({ rowCount: 1 })
+
+    await expect(
+      pool.query(
+        `INSERT INTO attendance_import_jobs (
+           org_id,batch_id,created_by,status,total,w4_contract_version,w4_entrypoint,
+           w4_batch_command_id,w4_source_kind,w4_source_ref,w4_actor_id,w4_actor_posture,
+           w4_command_fingerprint,w4_accepted_write_posture,w4_item_count,
+           w4_item_sequence_fingerprint,w4_item_set_fingerprint,w4_identity_proof_vector,
+           w4_legacy_plan_digest,w4_distinct_target_count,w4_operational_branch,
+           w4_legacy_input_fingerprint
+         ) VALUES (
+           $1,gen_random_uuid(),'x','queued',0,1,'import_batch',gen_random_uuid(),
+           'import_batch','x','x','attendance_admin',$2,'legacy_projection_only',0,
+           $3,$4,'[]'::jsonb,$5,0,'operational_only_no_target',$6
+         )`,
+        [
+          `unmarked-${run}`,
+          hex('a'),
+          EMPTY_SEQUENCE,
+          EMPTY_SET,
+          hex('b'),
+          hex('c'),
+        ],
+      ),
+    ).rejects.toThrow(/W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED/)
   })
 
   it('preserves predecessor idempotency updates for null-version jobs', async () => {
