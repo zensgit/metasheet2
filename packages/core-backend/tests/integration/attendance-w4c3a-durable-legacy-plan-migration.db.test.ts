@@ -207,6 +207,30 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     )
     const validator = await pool.query(`SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS args FROM pg_proc p WHERE p.proname='attendance_validate_import_legacy_plan_v1'`)
     expect(validator.rows).toContainEqual(expect.objectContaining({ proname: 'attendance_validate_import_legacy_plan_v1', args: 'job_id uuid' }))
+    const proofFunctions = await pool.query(`
+      SELECT pg_get_function_identity_arguments(p.oid) AS args
+      FROM pg_proc p
+      WHERE p.proname = 'attendance_w4_job_proof_vector_valid'
+      ORDER BY args
+    `)
+    expect(proofFunctions.rows.map((row) => row.args)).toEqual([
+      'source_kind text, root uuid, vector jsonb, item_count integer, operational_branch text, distinct_target_count integer',
+    ])
+    const jobShape = await pool.query(`
+      SELECT pg_get_constraintdef(oid) AS definition
+      FROM pg_constraint
+      WHERE conrelid = 'attendance_import_jobs'::regclass
+        AND conname = 'chk_aij_w4_shape'
+    `)
+    const jobShapeDefinition = String(jobShape.rows[0]?.definition)
+    for (const column of [
+      'w4_legacy_plan_digest',
+      'w4_distinct_target_count',
+      'w4_operational_branch',
+      'w4_legacy_input_fingerprint',
+    ]) {
+      expect(jobShapeDefinition).toContain(`${column} IS NOT NULL`)
+    }
     const cleanupColumns = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name='attendance_import_upload_cleanup_commands' ORDER BY ordinal_position`)
     expect(cleanupColumns.rows.map((row) => row.column_name)).toEqual([
       'job_id', 'org_id', 'file_id', 'status', 'attempt_count', 'claim_token', 'lease_expires_at', 'last_error_code', 'created_at', 'updated_at',
@@ -264,7 +288,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
         $1,'legacy_projection_only',0,$1,$1,'[]'::jsonb,$1,0,'operational_only_no_target',$1)`, [hex('a')])).rejects.toThrow(/W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED/)
   })
 
-  it('preserves the predecessor four-field proof contract while requiring the marked seam for durable-plan jobs', async () => {
+  it('rejects predecessor four-field V1 inserts even through the marked seam', async () => {
     const jobId = newId()
     const batchId = newId()
     const semanticFingerprint = hex('a')
@@ -283,33 +307,45 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
       commandFingerprint,
     }]
 
-    await expect(
-      pool.query(
-        `INSERT INTO attendance_import_jobs (
-           id, org_id, batch_id, created_by, status, total, payload,
-           w4_contract_version, w4_entrypoint, w4_batch_command_id,
-           w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
-           w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
-           w4_item_sequence_fingerprint, w4_item_set_fingerprint,
-           w4_identity_proof_vector
-         ) VALUES (
-           $1, $2, $3, $4, 'queued', 1, '{}'::jsonb,
-           1, 'import_batch', $3, 'import_batch', $5, $4, 'attendance_admin',
-           $6, 'legacy_projection_only', 1, $7, $8, $9::jsonb
-         )`,
-        [
-          jobId,
-          `predecessor-${run}`,
-          batchId,
-          `actor:${run}`,
-          `source:${run}`,
-          hex('c'),
-          hex('d'),
-          hex('e'),
-          JSON.stringify(proof),
-        ],
-      ),
-    ).resolves.toMatchObject({ rowCount: 1 })
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `SELECT set_config('attendance.w4c3a_enqueue_job_id', $1, true)`,
+        [jobId],
+      )
+      await expect(
+        client.query(
+          `INSERT INTO attendance_import_jobs (
+             id, org_id, batch_id, created_by, status, total, payload,
+             w4_contract_version, w4_entrypoint, w4_batch_command_id,
+             w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
+             w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
+             w4_item_sequence_fingerprint, w4_item_set_fingerprint,
+             w4_identity_proof_vector
+           ) VALUES (
+             $1, $2, $3, $4, 'queued', 1, '{}'::jsonb,
+             1, 'import_batch', $3, 'import_batch', $5, $4, 'attendance_admin',
+             $6, 'legacy_projection_only', 1, $7, $8, $9::jsonb
+           )`,
+          [
+            jobId,
+            `predecessor-${run}`,
+            batchId,
+            `actor:${run}`,
+            `source:${run}`,
+            hex('c'),
+            hex('d'),
+            hex('e'),
+            JSON.stringify(proof),
+          ],
+        ),
+      ).rejects.toMatchObject({ code: '23514' })
+      await client.query('ROLLBACK')
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
 
     await expect(
       pool.query(

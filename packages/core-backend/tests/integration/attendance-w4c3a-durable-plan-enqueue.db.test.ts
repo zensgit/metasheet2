@@ -421,6 +421,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
   afterAll(async () => {
     if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+    for (const current of [pool, migrationPool, adminPool]) current?.on('error', () => undefined)
     await db?.destroy()
     await pool?.end()
     await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
@@ -864,7 +865,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     expect(await residue(pool, batchId)).toEqual({ jobs: 1, manifests: 1, chunks: 1 })
   })
 
-  it('persists one worker execution and replays the terminal response after a worker restart', async () => {
+  it('replays one completed response from a new worker instance without duplicate callback execution', async () => {
     const batchId = crypto.randomUUID()
     const planned = noTargetInput(legacyOrgWitness, batchId, ADMIN_A, ADMIN_A)
     const created = await runSerializable(pool, (client) =>
