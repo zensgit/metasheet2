@@ -9,8 +9,9 @@ import type {
 import type {
   VerifiedAttendanceLegacyPlanV1,
 } from '../w4c3a-legacy-plan-worker'
-import type {
-  LegacyImportAsyncJobSummaryV1,
+import {
+  computeLegacyImportAsyncJobSummaryDigestV1,
+  type LegacyImportAsyncJobSummaryV1,
 } from '../w4c3a-legacy-execution-plan'
 
 const JOB_ID = '10000000-0000-4000-8000-000000000001'
@@ -20,10 +21,18 @@ const HEX = 'a'.repeat(64)
 const FILE_ID = '10000000-0000-4000-8000-000000000003'
 const RESPONSE: LegacyImportAsyncJobSummaryV1 = {
   __jobType: 'commit',
-  batchId: BATCH_ID,
-  imported: 1,
-  skipped: 0,
+  idempotencyKey: 'idem-a',
+  __importEngine: 'standard',
+  recordUpsertStrategy: 'unnest',
+  itemsInsertStrategy: 'unnest',
+  summary: {
+    processedRows: 1,
+    failedRows: 0,
+    elapsedMs: 10,
+    chunkConfig: { size: 500 },
+  },
 }
+const RESPONSE_DIGEST = computeLegacyImportAsyncJobSummaryDigestV1(RESPONSE)
 
 function jobRow(): Record<string, unknown> {
   return {
@@ -228,7 +237,7 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
           { kind: 'none' },
         ),
         RESPONSE,
-        HEX,
+        RESPONSE_DIGEST,
       )
 
     expect(query).toHaveBeenCalledTimes(2)
@@ -239,7 +248,7 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
       JOB_ID,
       ORG_ID,
       'first_execution',
-      HEX,
+      RESPONSE_DIGEST,
       JSON.stringify(RESPONSE),
     ])
     expect(String(query.mock.calls[1]?.[0])).toMatch(
@@ -257,7 +266,7 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
           { kind: 'uploaded_import_file', fileId: FILE_ID },
         ),
         RESPONSE,
-        HEX,
+        RESPONSE_DIGEST,
       )
 
     expect(query).toHaveBeenCalledTimes(3)
@@ -280,8 +289,27 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
             { kind: 'none' },
           ),
           RESPONSE,
-          HEX,
+          RESPONSE_DIGEST,
         ),
     ).rejects.toMatchObject({ code: 'W4C3A_REPOSITORY_STATUS_UPDATE_REJECTED' })
+  })
+
+  it('rejects a caller-supplied response digest before terminal DML', async () => {
+    const { db, query } = queryStub([])
+    await expect(
+      createAttendanceLegacyPlanWorkerRepositoryV1(db)
+        .storeCompletedResponseAndTerminalize(
+          mappedJob(),
+          terminalPlan(
+            { kind: 'normal' },
+            { kind: 'none' },
+          ),
+          RESPONSE,
+          HEX,
+        ),
+    ).rejects.toMatchObject({
+      code: 'W4C3A_REPOSITORY_RESPONSE_DIGEST_MISMATCH',
+    })
+    expect(query).not.toHaveBeenCalled()
   })
 })

@@ -17,6 +17,8 @@ import type {
 } from './w4c3a-legacy-plan-worker'
 import {
   ATTENDANCE_LEGACY_PLAN_FAILURE_REASON_CODES_V1,
+  computeLegacyImportAsyncJobSummaryDigestV1,
+  parseLegacyImportAsyncJobSummaryV1,
   type AttendanceLegacyPlanFailureReasonCodeV1,
   type LegacyImportAsyncJobSummaryV1,
 } from './w4c3a-legacy-execution-plan'
@@ -359,12 +361,18 @@ export function createAttendanceLegacyPlanWorkerRepositoryV1(
     },
 
     async storeCompletedResponseAndTerminalize(job, plan, response, responseDigest) {
+      const parsedResponse = parseLegacyImportAsyncJobSummaryV1(response)
+      const computedResponseDigest =
+        computeLegacyImportAsyncJobSummaryDigestV1(parsedResponse)
+      if (responseDigest !== computedResponseDigest) {
+        fail('W4C3A_REPOSITORY_RESPONSE_DIGEST_MISMATCH')
+      }
       await db.query(INSERT_TERMINAL_RESPONSE_SQL, [
         job.jobId,
         job.orgId,
         terminalResponseVariant(plan),
-        responseDigest,
-        JSON.stringify(response),
+        computedResponseDigest,
+        JSON.stringify(parsedResponse),
       ])
       const cleanup = plan.manifest.artifactCleanup
       if (cleanup.kind === 'uploaded_import_file') {

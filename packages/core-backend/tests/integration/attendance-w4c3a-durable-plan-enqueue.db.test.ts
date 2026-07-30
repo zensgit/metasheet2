@@ -13,6 +13,8 @@ import { reserveAttendanceLegacyImportPlanJobV1 } from '../../src/attendance/w4c
 import {
   ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1,
   ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1,
+  computeLegacyImportAsyncJobSummaryDigestV1,
+  type LegacyImportAsyncJobSummaryV1,
 } from '../../src/attendance/w4c3a-legacy-execution-plan'
 import {
   computeAttendanceItemSequenceFingerprintV1,
@@ -42,6 +44,24 @@ const HEX_A = 'a'.repeat(64)
 const HEX_B = 'b'.repeat(64)
 const HEX_C = 'c'.repeat(64)
 const HEX_D = 'd'.repeat(64)
+
+function terminalResponse(
+  idempotencyKey: string | null,
+): LegacyImportAsyncJobSummaryV1 {
+  return {
+    __jobType: 'commit',
+    idempotencyKey,
+    __importEngine: 'standard',
+    recordUpsertStrategy: 'unnest',
+    itemsInsertStrategy: 'unnest',
+    summary: {
+      processedRows: 2,
+      failedRows: 0,
+      elapsedMs: 10,
+      chunkConfig: { size: 500 },
+    },
+  }
+}
 
 function trx(client: PoolClient): AttendanceW4TransactionClientV1 {
   return {
@@ -697,12 +717,18 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       reserveAttendanceLegacyImportPlanJobV1(trx(client), auth(ADMIN_A, ORG), first.input),
     )
     if (created.kind !== 'created') throw new Error('expected first enqueue to create a job')
+    const response = terminalResponse(idempotencyKey)
     await runSerializable(pool, async (client) => {
       await client.query(`UPDATE attendance_import_jobs SET status = 'completed', progress = total, finished_at = now() WHERE id = $1`, [created.jobId])
       await client.query(
         `INSERT INTO attendance_import_legacy_terminal_responses (job_id, org_id, response_variant, response_digest, response)
-         VALUES ($1, $2, 'first_execution', $3, '{}'::jsonb)`,
-        [created.jobId, ORG, HEX_C],
+         VALUES ($1, $2, 'first_execution', $3, $4::jsonb)`,
+        [
+          created.jobId,
+          ORG,
+          computeLegacyImportAsyncJobSummaryDigestV1(response),
+          JSON.stringify(response),
+        ],
       )
     })
     const second = noTargetInput(legacyOrgWitness, batchId, ADMIN_B, ADMIN_B, idempotencyKey)

@@ -97,6 +97,64 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
 
   await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4c3a_async_job_summary_valid(value jsonb)
+    RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE STRICT
+    AS $fn$
+    DECLARE
+      summary jsonb;
+    BEGIN
+      IF NOT attendance_w4c3a_exact_object_keys(
+        value,
+        ARRAY['__jobType', 'idempotencyKey', '__importEngine',
+          'recordUpsertStrategy', 'itemsInsertStrategy', 'summary']
+      ) OR value ->> '__jobType' IS DISTINCT FROM 'commit' OR
+        jsonb_typeof(value -> 'idempotencyKey') NOT IN ('null', 'string') OR
+        value ->> '__importEngine' NOT IN ('standard', 'bulk') OR
+        value ->> 'recordUpsertStrategy' NOT IN ('values', 'unnest', 'staging') OR
+        value ->> 'itemsInsertStrategy' NOT IN ('values', 'unnest', 'staging') THEN
+        RETURN false;
+      END IF;
+      summary := value -> 'summary';
+      IF jsonb_typeof(summary) IS DISTINCT FROM 'object' OR
+        NOT (summary ?& ARRAY['chunkConfig', 'elapsedMs', 'failedRows', 'processedRows']) OR
+        EXISTS (
+          SELECT 1 FROM jsonb_object_keys(summary) AS key
+          WHERE key NOT IN ('chunkConfig', 'elapsedMs', 'failedRows',
+            'processedRows', 'skippedCount', 'skippedRows')
+        ) THEN
+        RETURN false;
+      END IF;
+      IF jsonb_typeof(summary -> 'processedRows') IS DISTINCT FROM 'number' OR
+        (summary ->> 'processedRows') !~ '^(0|[1-9][0-9]*)$' OR
+        (summary ->> 'processedRows')::numeric > 2147483647 OR
+        jsonb_typeof(summary -> 'failedRows') IS DISTINCT FROM 'number' OR
+        (summary ->> 'failedRows') !~ '^(0|[1-9][0-9]*)$' OR
+        (summary ->> 'failedRows')::numeric > 2147483647 OR
+        jsonb_typeof(summary -> 'elapsedMs') IS DISTINCT FROM 'number' OR
+        (summary ->> 'elapsedMs') !~ '^(0|[1-9][0-9]*)$' OR
+        (summary ->> 'elapsedMs')::numeric > 2147483647 THEN
+        RETURN false;
+      END IF;
+      IF summary ? 'skippedCount' AND (
+        jsonb_typeof(summary -> 'skippedCount') IS DISTINCT FROM 'number' OR
+        (summary ->> 'skippedCount') !~ '^[1-9][0-9]*$' OR
+        (summary ->> 'skippedCount')::numeric > 2147483647
+      ) THEN
+        RETURN false;
+      END IF;
+      IF summary ? 'skippedRows' AND (
+        jsonb_typeof(summary -> 'skippedRows') IS DISTINCT FROM 'array' OR
+        jsonb_array_length(summary -> 'skippedRows') < 1
+      ) THEN
+        RETURN false;
+      END IF;
+      RETURN true;
+    END
+    $fn$
+  `.execute(db)
+
+  await sql`
     CREATE OR REPLACE FUNCTION attendance_w4_job_proof_vector_valid(
       source_kind text,
       root uuid,
@@ -222,7 +280,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       response_variant text NOT NULL CHECK (response_variant IN ('first_execution', 'idempotent_early', 'idempotent_in_transaction')),
       response_digest text NOT NULL CHECK (response_digest ~ '${sql.raw(SHA256)}'),
       response jsonb NOT NULL,
-      created_at timestamptz NOT NULL DEFAULT now()
+      created_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT chk_ailtr_response_shape CHECK (
+        attendance_w4c3a_async_job_summary_valid(response)
+      )
     )
   `.execute(db)
 
@@ -597,7 +658,14 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       IF job.status = 'completed' THEN
         expected_variant := CASE WHEN plan.operational_branch = 'operational_only_idempotent_replay' AND replay_selector = 'precheck_hit' THEN 'idempotent_early'
           WHEN plan.operational_branch = 'operational_only_idempotent_replay' THEN 'idempotent_in_transaction' ELSE 'first_execution' END;
-        IF terminal.org_id IS DISTINCT FROM plan.org_id OR terminal.response_variant IS DISTINCT FROM expected_variant THEN
+        IF terminal.org_id IS DISTINCT FROM plan.org_id OR
+           terminal.response_variant IS DISTINCT FROM expected_variant OR
+           terminal.response -> 'idempotencyKey' IS DISTINCT FROM
+             coalesce(to_jsonb(job.idempotency_key), 'null'::jsonb) OR
+           terminal.response ->> '__importEngine' IS DISTINCT FROM
+             plan.manifest -> 'batch' ->> 'engine' OR
+           terminal.response ->> 'recordUpsertStrategy' IS DISTINCT FROM
+             plan.manifest -> 'batch' ->> 'recordUpsertStrategy' THEN
           RAISE EXCEPTION 'W4C3A_PLAN_TERMINAL_SHAPE_DENIED';
         END IF;
       END IF;
@@ -787,6 +855,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_revision_row_guard()`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_deny_truncate()`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4_job_proof_vector_valid(text, uuid, jsonb, integer, text, integer)`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_async_job_summary_valid(jsonb)`.execute(db)
 
   // Restore precisely the predecessor's four-argument V1 proof shape and its immutable guard.
   await sql`

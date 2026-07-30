@@ -7,6 +7,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
+import {
+  computeLegacyImportAsyncJobSummaryDigestV1,
+  type LegacyImportAsyncJobSummaryV1,
+} from '../../src/attendance/w4c3a-legacy-execution-plan'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import {
   down,
@@ -20,6 +24,25 @@ const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 const hex = (letter: string) => letter.repeat(64)
 const EMPTY_SEQUENCE = '94809bfff965ac75c18c3f0fb4f01081090a535d5de8dca93d7126e1267b6993'
 const EMPTY_SET = 'b1fd18b44303a9d854528cd0acf09a6c9947d6893fff761b0713617a06faad69'
+const TERMINAL_RESPONSE: LegacyImportAsyncJobSummaryV1 = {
+  __jobType: 'commit',
+  idempotencyKey: null,
+  __importEngine: 'standard',
+  recordUpsertStrategy: 'unnest',
+  itemsInsertStrategy: 'unnest',
+  summary: {
+    processedRows: 1,
+    failedRows: 0,
+    elapsedMs: 10,
+    chunkConfig: { size: 500 },
+  },
+}
+const TERMINAL_RESPONSE_DIGEST =
+  computeLegacyImportAsyncJobSummaryDigestV1(TERMINAL_RESPONSE)
+const EMPTY_OBJECT_DIGEST = crypto
+  .createHash('sha256')
+  .update('{}', 'utf8')
+  .digest('hex')
 
 function newId(): string {
   return crypto.randomUUID()
@@ -260,8 +283,40 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
       await corruptJob.query(`SET session_replication_role = origin`).catch(() => undefined)
       corruptJob.release()
     }
-    await expect(pool.query(`INSERT INTO attendance_import_legacy_terminal_responses (job_id,org_id,response_variant,response_digest,response) VALUES ($1,$2,'completed',$3,'{}'::jsonb)`, [jobId, `org-${run}`, hex('a')])).rejects.toThrow()
-    await pool.query(`INSERT INTO attendance_import_legacy_terminal_responses (job_id,org_id,response_variant,response_digest,response) VALUES ($1,$2,'first_execution',$3,'{}'::jsonb)`, [jobId, `org-${run}`, hex('a')]).catch(() => undefined)
+    await expect(pool.query(
+      `INSERT INTO attendance_import_legacy_terminal_responses
+        (job_id,org_id,response_variant,response_digest,response)
+       VALUES ($1,$2,'completed',$3,$4::jsonb)`,
+      [jobId, `org-${run}`, TERMINAL_RESPONSE_DIGEST, JSON.stringify(TERMINAL_RESPONSE)],
+    )).rejects.toThrow()
+    await expect(pool.query(
+      `INSERT INTO attendance_import_legacy_terminal_responses
+        (job_id,org_id,response_variant,response_digest,response)
+       VALUES ($1,$2,'first_execution',$3,'{}'::jsonb)`,
+      [jobId, `org-${run}`, EMPTY_OBJECT_DIGEST],
+    )).rejects.toThrow(/chk_ailtr_response_shape/)
+    const terminalClient = await pool.connect()
+    try {
+      await terminalClient.query('SET session_replication_role = replica')
+      await terminalClient.query(
+        `INSERT INTO attendance_import_legacy_terminal_responses
+          (job_id,org_id,response_variant,response_digest,response)
+         VALUES ($1,$2,'first_execution',$3,$4::jsonb)`,
+        [jobId, `org-${run}`, TERMINAL_RESPONSE_DIGEST, JSON.stringify(TERMINAL_RESPONSE)],
+      )
+    } finally {
+      await terminalClient.query('SET session_replication_role = origin').catch(() => undefined)
+      terminalClient.release()
+    }
+    await expect(pool.query(
+      `UPDATE attendance_import_legacy_terminal_responses
+       SET response_digest=$2 WHERE job_id=$1`,
+      [jobId, hex('b')],
+    )).rejects.toThrow(/IMMUTABLE/)
+    await expect(pool.query(
+      `DELETE FROM attendance_import_legacy_terminal_responses WHERE job_id=$1`,
+      [jobId],
+    )).rejects.toThrow(/IMMUTABLE/)
     await expect(pool.query(`DELETE FROM attendance_import_jobs WHERE id=$1`, [jobId])).rejects.toThrow(/DELETE_DENIED/)
     await expect(pool.query(
       `UPDATE attendance_import_jobs
@@ -269,8 +324,14 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
        WHERE id=$1`,
       [jobId],
     )).rejects.toThrow()
-    await pool.query(`UPDATE attendance_import_jobs SET status='failed', w4_execution_reason_code='ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH' WHERE id=$1`, [jobId])
-    await expect(pool.query(`UPDATE attendance_import_jobs SET status='queued', w4_execution_reason_code=NULL WHERE id=$1`, [jobId])).rejects.toThrow(/TERMINAL_IMMUTABLE|REASON_TRANSITION_DENIED/)
+    await expect(pool.query(
+      `UPDATE attendance_import_jobs
+       SET status='failed', w4_execution_reason_code='ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH'
+      WHERE id=$1`,
+      [jobId],
+    )).rejects.toThrow(
+      /TERMINAL_IMMUTABLE|REASON_TRANSITION_DENIED|TERMINAL_CONGRUENCE_DENIED/,
+    )
 
     const cleanupJob = newId()
     const fileId = newId()
