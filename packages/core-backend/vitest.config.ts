@@ -592,6 +592,11 @@ export default defineConfig({
       // cannot skip-green it. The whole file is wired into the attendance
       // real-DB step in plugin-tests.yml.
       'tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts',
+      // W4C-3a record-target precondition locks: two-connection present/missing
+      // commit-order and lock-hold proofs. DATABASE_URL-gated; excluded here so
+      // the no-DB lane cannot skip-green it. The whole file is wired into the
+      // attendance real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.

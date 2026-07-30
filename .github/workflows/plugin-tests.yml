@@ -1096,6 +1096,7 @@ jobs:
             tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts \
             tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts \
             tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts \
+            tests/integration/attendance-w4c3a-record-preconditions.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
