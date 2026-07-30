@@ -88,6 +88,7 @@ const FILES = Object.freeze([
   'tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts',
   'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
   'tests/integration/attendance-w4c3a-record-effects.db.test.ts',
+  'tests/integration/attendance-w4c3a-item-effects.db.test.ts',
 ])
 
 /**

@@ -36,6 +36,15 @@ function byPathPrefix(prefix) {
 const PLUGIN = 'plugins/plugin-attendance/index.cjs'
 const W4C3A_RECORD_EFFECT_ADAPTER =
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts'
+const W4C3A_ITEM_EFFECT_ADAPTER =
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-item-effects.ts'
+
+function byW4C3aFixedEffectAdapter(site) {
+  return (
+    byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER)(site) ||
+    byPathPrefix(W4C3A_ITEM_EFFECT_ADAPTER)(site)
+  )
+}
 
 const CURATED_DEBT_ENTRIES = [
   // ---------------------------------------------------------------------------------------
@@ -112,7 +121,7 @@ const CURATED_DEBT_ENTRIES = [
       bySymbol(PLUGIN, /^batchUpsertAttendanceRecords(Staging|Unnest|Values)$/)(site) ||
       bySymbol(PLUGIN, /^batchInsertAttendanceImportItems(Staging|Unnest|Values)$/)(site) ||
       bySymbol(PLUGIN, /^appendSkipped$/)(site) ||
-      byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER)(site),
+      byW4C3aFixedEffectAdapter(site),
   },
   {
     id: 'P07',
@@ -122,14 +131,14 @@ const CURATED_DEBT_ENTRIES = [
     confidence: 'heuristic',
     // The worker calls the same commit kernel as P06/P09 (dataTypeFor cluster below); no distinct
     // worker-only DML site was independently resolved by this scan.
-    claims: byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER),
+    claims: byW4C3aFixedEffectAdapter,
   },
   {
     id: 'P08',
     title: 'Async import startup recovery that re-enqueues P07 after restart.',
     owningSlice: 'W4C-3a',
     sharedHook: false,
-    claims: byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER),
+    claims: byW4C3aFixedEffectAdapter,
   },
   {
     id: 'P09',
@@ -143,7 +152,7 @@ const CURATED_DEBT_ENTRIES = [
     // attribution is left to a future AST-based collector — see the module header note.
     claims: (site) =>
       bySymbol(PLUGIN, /^dataTypeFor$/)(site) ||
-      byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER)(site),
+      byW4C3aFixedEffectAdapter(site),
   },
   {
     id: 'P10',

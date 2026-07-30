@@ -262,6 +262,34 @@ test('W4C-3a fixed record-effect DML is classified under P06-P09 without claimin
   }
 })
 
+test('W4C-3a fixed item-effect DML is classified under P06-P09 without claiming caller cutover', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  const { claimsByEntryId } = classifyTrackedSites(classified.trackedSites)
+  const adapterPath =
+    'packages/core-backend/src/attendance/w4c3a-legacy-plan-item-effects.ts'
+  const expectedKeys = classified.trackedSites
+    .filter((site) => site.relPath === adapterPath)
+    .map((site) => site.key)
+    .sort()
+
+  assert.equal(expectedKeys.length, 1, 'the fixed item adapter must expose exactly one INSERT')
+  for (const id of ['P06', 'P07', 'P08', 'P09']) {
+    const claimedKeys = (claimsByEntryId.get(id) || [])
+      .filter((site) => site.relPath === adapterPath)
+      .map((site) => site.key)
+      .sort()
+    assert.deepEqual(claimedKeys, expectedKeys, `${id} must classify the shared item adapter site`)
+    const entry = CURATED_DEBT_ENTRIES.find((candidate) => candidate.id === id)
+    assert.equal(
+      Object.hasOwn(entry || {}, 'canonicalizedBy'),
+      false,
+      `${id} must remain pending until its real caller is cut over`,
+    )
+  }
+})
+
 // -------------------------------------------------------------------------------------------
 // 5. CI wiring: this file must be named explicitly in the workflow (node:test files are neither
 //    vitest-discovered nor covered by vitest.config.ts's exclude list — see module header).
