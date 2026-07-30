@@ -31,10 +31,9 @@
 //   - "reference":      org configuration/reference data (shift/rule/holiday/payroll definitions,
 //                       group membership *definitions* as opposed to calculation truth). Not part
 //                       of the source/effect/result chain at all; allowlisted at the bucket level.
-//   - "w4_canonical":   the nine new W4C-0 durable-storage tables (Stage A). DML against these is
-//                       allowed ONLY from inside the canonical adapter path prefix
-//                       (packages/core-backend/src/attendance/w4c0-*.ts or the W4C-0 migration
-//                       file itself); a hit from any other path is a hard failure
+//   - "w4_canonical":   W4 durable source/effect/result and concurrency-authority tables. DML
+//                       against these is allowed ONLY from inside the canonical adapter path
+//                       prefixes named below; a hit from any other path is a hard failure
 //                       (ATTENDANCE_W4C0_DML_OUTSIDE_CANONICAL_BOUNDARY), never silently allowed
 //                       by table membership alone.
 //
@@ -78,6 +77,7 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_integrations: 'operational',
   attendance_integration_runs: 'operational',
   attendance_unscheduled_reminder_dispatch: 'operational',
+  attendance_import_upload_cleanup_commands: 'operational',
 
   // --- reference: org configuration/reference data, not calculation truth ------------------
   attendance_groups: 'reference',
@@ -122,6 +122,13 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_scheduled_runs: 'w4_canonical',
   attendance_scheduled_run_targets: 'w4_canonical',
   attendance_scheduled_run_target_outcomes: 'w4_canonical',
+
+  // --- w4_canonical: W4C-3a durable frozen plan, result, and revision authorities ---------
+  attendance_import_legacy_execution_plans: 'w4_canonical',
+  attendance_import_legacy_execution_plan_chunks: 'w4_canonical',
+  attendance_import_legacy_terminal_responses: 'w4_canonical',
+  attendance_record_target_revisions: 'w4_canonical',
+  attendance_group_effect_revisions: 'w4_canonical',
 })
 
 // Buckets whose DML sites require an individual curated P0x (or later-slice) debt-ID match.
@@ -138,11 +145,13 @@ const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   // outbox dispatcher are canonical-boundary modules — they are the ONLY non-w4c0 writers of
   // the w4_canonical tables (shadow calculations/segments, outbox claim/deliver flips).
   'packages/core-backend/src/attendance/w4c2-',
+  'packages/core-backend/src/attendance/w4c3a-',
   'packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_',
   // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED): the scheduled-run identity + outbox
   // discriminated-union migration's own backfill DML (UPDATE attendance_result_event_outbox
   // SET identity_kind = 'operation' ...), same precedent as the W4C-0 migration file above.
   'packages/core-backend/src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union',
+  'packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts',
 ])
 
 function classifyTable(tableName) {
