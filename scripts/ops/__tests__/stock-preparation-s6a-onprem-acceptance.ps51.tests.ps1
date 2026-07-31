@@ -139,7 +139,7 @@ try {
     @($script:requests | Where-Object { -not $_.HasToken }).Count -eq 0 -and
     -not (Test-Path Env:METASHEET_ADMIN_TOKEN)
   )
-  $summary = Get-Content -LiteralPath $summaryPath -Raw
+  $summary = (Get-Content -LiteralPath $summaryPath -Raw) -replace "`r`n", "`n"
   Check 'summary is values-free and proves bounded replay' (
     $summary -match '(?m)^status=PASS$' -and
     $summary -match "(?m)^serviceRuntimeSha=$serviceSha$" -and
