@@ -129,6 +129,7 @@ import {
 } from './attendance/w4c2-scheduled-run-ops-worker'
 import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
 import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
+import { createAttendanceSyncImportHostV1 } from './attendance/w4c3a-sync-import-host'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import {
   correlationContextEnrichmentMiddleware,
@@ -2179,6 +2180,21 @@ export class MetaSheetServer {
                     },
                   })
                   return host.reserveLegacyImportPlanV1(input)
+                },
+                // W4C-3a P06: least-privilege sync commit. Plugin supplies the
+                // prepareOnly plan; core owns the independent SERIALIZABLE
+                // source/effect transaction (no V1 job/plan/terminal DML).
+                commitSyncImportPlan: async (input) => {
+                  const host = createAttendanceSyncImportHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return host.commitSyncImportPlanV1(input)
                 },
                 buildLegacyImportReservationLockWitness: (input: {
                   orgId: string

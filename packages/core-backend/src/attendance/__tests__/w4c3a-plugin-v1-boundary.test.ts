@@ -528,29 +528,44 @@ describe('plugin V1 jobId-only boundary (static)', () => {
   })
 
   it('wires the sync route recheck before effect DML', () => {
-    const syncRouteStart = source.indexOf(
-      "'/api/attendance/import/commit'",
-    )
+    // W4C-3a P06: route keeps early auth/idempotency/token ordering, then
+    // prepareOnly + core commitSyncImportPlan. Class-10 recheck and effect DML
+    // live in the least-privilege host (not inline plugin SQL).
+    const routeMarker = [
+      'context.api.http.addRoute(',
+      "      'POST',",
+      "      '/api/attendance/import/commit',",
+    ].join('\n')
+    const nextMarker = [
+      'context.api.http.addRoute(',
+      "      'POST',",
+      "      '/api/attendance/import/preview-async',",
+    ].join('\n')
+    const syncRouteStart = source.indexOf(routeMarker)
     const syncRoute = source.slice(
       syncRouteStart,
-      source.indexOf("'/api/attendance/import/preview-async'", syncRouteStart),
+      source.indexOf(nextMarker, syncRouteStart),
     )
-    const lock = syncRoute.indexOf(
-      'acquireAttendanceSyncImportReservationLocks',
+    const earlyReplay = syncRoute.indexOf('loadIdempotentImportBatch')
+    const tokenConsume = syncRoute.indexOf('consumeImportCommitToken')
+    const prepare = syncRoute.indexOf('prepareOnly: true')
+    const portCall = syncRoute.indexOf('commitSyncImportPlan', prepare)
+    expect(earlyReplay).toBeGreaterThan(-1)
+    expect(tokenConsume).toBeGreaterThan(earlyReplay)
+    expect(prepare).toBeGreaterThan(tokenConsume)
+    expect(portCall).toBeGreaterThan(prepare)
+    expect(syncRoute).not.toMatch(/INSERT INTO attendance_import_batches/)
+    expect(syncRoute).not.toMatch(/processLegacyImportPlan\s*\(/)
+
+    const host = fs.readFileSync(
+      path.join(ROOT, 'packages/core-backend/src/attendance/w4c3a-sync-import-host.ts'),
+      'utf8',
     )
-    const batchRecheck = syncRoute.indexOf('loadIdempotentImportBatch', lock)
-    const reservationRecheck = syncRoute.indexOf(
-      'loadAttendanceV1ImportReservationForSync',
-      batchRecheck,
-    )
-    const firstEffect = syncRoute.indexOf(
-      'INSERT INTO attendance_import_batches',
-      reservationRecheck,
-    )
-    expect(lock).toBeGreaterThan(-1)
-    expect(batchRecheck).toBeGreaterThan(lock)
-    expect(reservationRecheck).toBeGreaterThan(batchRecheck)
-    expect(firstEffect).toBeGreaterThan(reservationRecheck)
+    expect(host).toContain('acquireAttendanceImportReservationLocksV1')
+    expect(host).toContain('INSERT INTO attendance_import_batches')
+    const lock = host.indexOf('acquireAttendanceImportReservationLocksV1')
+    const batchEffect = host.indexOf('INSERT INTO attendance_import_batches', lock)
+    expect(batchEffect).toBeGreaterThan(lock)
   })
 
   it('dispatches values, unnest, and staging from one immutable prepared-row boundary', () => {
@@ -696,56 +711,42 @@ describe('plugin V1 jobId-only boundary (static)', () => {
   })
 
   it('keeps sync retry state attempt-local and releases source rows only after commit', () => {
-    const syncRouteStart = source.indexOf(
-      "'/api/attendance/import/commit'",
-    )
+    // W4C-3a P06: SERIALIZABLE retries are owned by
+    // runAttendanceResultOperationTransactionV1 inside the core host. The
+    // plugin route only prepares then calls the least-privilege port.
+    const routeMarker = [
+      'context.api.http.addRoute(',
+      "      'POST',",
+      "      '/api/attendance/import/commit',",
+    ].join('\n')
+    const nextMarker = [
+      'context.api.http.addRoute(',
+      "      'POST',",
+      "      '/api/attendance/import/preview-async',",
+    ].join('\n')
+    const syncRouteStart = source.indexOf(routeMarker)
     const syncRoute = source.slice(
       syncRouteStart,
-      source.indexOf("'/api/attendance/import/preview-async'", syncRouteStart),
+      source.indexOf(nextMarker, syncRouteStart),
     )
-    const transactionStart = syncRoute.indexOf(
+    expect(syncRoute).toContain('prepareOnly: true')
+    expect(syncRoute).toContain('commitSyncImportPlan')
+    expect(syncRoute).not.toContain(
       'runAttendanceSyncImportSerializableTransaction',
     )
-    const firstEffect = syncRoute.indexOf(
+
+    const host = fs.readFileSync(
+      path.join(ROOT, 'packages/core-backend/src/attendance/w4c3a-sync-import-host.ts'),
+      'utf8',
+    )
+    expect(host).toContain('runAttendanceResultOperationTransactionV1')
+    const trx = host.indexOf('runAttendanceResultOperationTransactionV1')
+    const batchInsert = host.indexOf(
       'INSERT INTO attendance_import_batches',
-      transactionStart,
+      trx,
     )
-    const transactionResult = syncRoute.indexOf(
-      '} = transactionResult',
-      firstEffect,
-    )
-    expect(transactionStart).toBeGreaterThan(-1)
-    expect(firstEffect).toBeGreaterThan(transactionStart)
-    expect(transactionResult).toBeGreaterThan(firstEffect)
-
-    const attemptSetup = syncRoute.slice(transactionStart, firstEffect)
-    for (const declaration of [
-      'const results = []',
-      'let importedCount = 0',
-      'const skipped = []',
-      'const batchId = randomUUID()',
-      'const groupWarnings = []',
-      'const ruleSetConfigCache = new Map()',
-      'const engineCache = new Map()',
-    ]) {
-      expect(attemptSetup).toContain(declaration)
-    }
-    expect(attemptSetup).toMatch(
-      /loadAttendanceV1ImportReservationForSync[\s\S]*loadDefaultRule\(trx, orgId\)/,
-    )
-    expect(attemptSetup).toContain(
-      'loadSettings(trx, { failClosed: true })',
-    )
-    expect(syncRoute).toContain(
-      'loadRuleSetConfigById(trx, orgId, activeRuleSetId)',
-    )
-
-    const releaseCalls = Array.from(
-      syncRoute.matchAll(/releaseImportRowMemory\(row\)/g),
-      (match) => match.index,
-    )
-    expect(releaseCalls).toHaveLength(1)
-    expect(releaseCalls[0]).toBeGreaterThan(transactionResult)
+    expect(trx).toBeGreaterThan(-1)
+    expect(batchInsert).toBeGreaterThan(trx)
   })
 
   it('drains durable upload cleanup immediately and during startup recovery', () => {

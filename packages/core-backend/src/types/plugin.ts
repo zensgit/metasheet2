@@ -18,6 +18,12 @@ import type {
 import type {
   ReserveAttendanceLegacyImportPlanJobResultV1,
 } from '../attendance/w4c3a-legacy-plan-enqueue'
+import type {
+  CommitAttendanceSyncImportPlanFromHostInputV1,
+} from '../attendance/w4c3a-sync-import-host'
+import type {
+  AttendanceSyncImportResponseV1,
+} from '../attendance/w4c3a-sync-import-kernel'
 
 export type {
   MultitableProvisioningFieldDescriptor,
@@ -1231,6 +1237,16 @@ export interface PluginServices {
     reserveLegacyImportPlan(
       input: ReserveAttendanceLegacyImportPlanFromHostInputV1,
     ): Promise<ReserveAttendanceLegacyImportPlanJobResultV1>
+    /**
+     * W4C-3a P06 — core-owned modern synchronous import commit. The plugin
+     * supplies one closed prepareOnly plan; core opens one independent
+     * SERIALIZABLE source/effect transaction and owns class-00/10/11, claim,
+     * calculation, compatibility effects, and seals. Never creates V1
+     * job/plan/chunk/terminal rows and never calls processLegacyImportPlan.
+     */
+    commitSyncImportPlan(
+      input: CommitAttendanceSyncImportPlanFromHostInputV1,
+    ): Promise<AttendanceSyncImportResponseV1>
     /**
      * W4C-3a — canonical lock witnesses for the synchronous import compatibility
      * bridge. Core owns key derivation; plugin-attendance only acquires these

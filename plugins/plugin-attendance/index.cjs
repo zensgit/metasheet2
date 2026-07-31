@@ -28357,6 +28357,9 @@ module.exports = {
 		          items: preparedPlanItems.sort((left, right) => left.ordinal - right.ordinal),
 		          recordWrites: preparedPlanRecordWrites,
 		          groupEffects,
+		          // P06 sync response surface: preparation-time group warnings.
+		          groupWarnings,
+		          csvWarnings,
 		        }
 		      }
 
@@ -37558,890 +37561,131 @@ module.exports = {
 	            logger.warn('Attendance import commit token invalid; continuing without enforcement.')
 	          }
 	        }
-	          const importEngine = resolveImportEngineByRowCount(rows.length)
-	          const importChunkConfig = resolveImportChunkConfig(importEngine)
-	          const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
-	            rowCount: rows.length,
-	            engine: importEngine,
-	          })
-	          const importItemsInsertStrategy = resolveImportItemsInsertStrategy({
-	            rowCount: rows.length,
-	            engine: importEngine,
-	          })
+	          // W4C-3a P06: preparation-only plan, then least-privilege core
+	          // commitSyncImportPlan for the independent SERIALIZABLE effect trx.
+	          // Route keeps HTTP serializer / idempotency / token / auth order.
+	          const syncImportPort = attendanceW4SegmentCalculationPort
+	          if (!syncImportPort || typeof syncImportPort.commitSyncImportPlan !== 'function') {
+	            res.status(503).json({
+	              ok: false,
+	              error: {
+	                code: 'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING',
+	                message: 'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING',
+	              },
+	            })
+	            return
+	          }
 
-          const groupSync = normalizeGroupSyncOptions(
-            parsed.data.groupSync,
-            parsed.data.ruleSetId,
-            parsed.data.timezone
-          )
-          const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
-
-	          const statusMap = parsed.data.statusMap ?? {}
 	          const returnItems = parsed.data.returnItems !== false
 	          const itemsLimit = returnItems && typeof parsed.data.itemsLimit === 'number'
 	            ? parsed.data.itemsLimit
 	            : null
-	          const idempotencyEnabled = Boolean(idempotencyKey) && await hasImportBatchIdempotencyColumn(db)
-		          const syncReservationWitness = idempotencyKey
-		            ? buildAttendanceSyncImportReservationLockWitness({ orgId, idempotencyKey })
-		            : null
-
-          const transactionResult = await runAttendanceSyncImportSerializableTransaction(db, async (trx) => {
-            const results = []
-            let importedCount = 0
-            const skipped = []
-            const batchId = randomUUID()
-            let batchMeta = null
-            const groupWarnings = []
-
-		            if (idempotencyKey) {
-		              await acquireAttendanceSyncImportReservationLocks(trx, {
-		                orgId,
-		                idempotencyKey,
-		                witness: syncReservationWitness,
-		              })
-		              const existing = await loadIdempotentImportBatch(
-		                trx,
-		                orgId,
-	                idempotencyKey,
-	                importAccess.fullImport ? undefined : { createdBy: requesterId }
-	              )
-              if (existing) {
-	                return {
-                    batchId,
-                    batchMeta,
-                    groupWarnings,
-                    idempotentInTransaction: existing,
-                    importedCount,
-                    results,
-                    skipped,
-                  }
-	              }
-	              const reservation = await loadAttendanceV1ImportReservationForSync(
-	                trx,
-	                orgId,
-	                idempotencyKey
-	              )
-	              if (!syncReservationWitness && reservation) {
-	                throw new HttpError(
-	                  503,
-	                  'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING',
-	                  'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING'
-	                )
-	              }
-	              assertAttendanceV1ImportReservationAllowsSync(reservation)
-	            }
-
-            const baseRule = await loadDefaultRule(trx, orgId)
-            const settings = await loadSettings(trx, { failClosed: true })
-            const groupRuleSetMap = parsed.data.ruleSetId
-              ? new Map()
-              : await loadAttendanceGroupRuleSetMap(trx, orgId)
-            if (groupNames.size && !groupSync?.autoCreate) {
-              const groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
-              for (const [key, name] of groupNames.entries()) {
-                if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
-              }
-            }
-            if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
-              for (const key of groupNames.keys()) {
-                if (!groupRuleSetMap.has(key)) groupRuleSetMap.set(key, groupSync.ruleSetId)
-              }
-            }
-            const ruleSetConfigCache = new Map()
-            if (parsed.data.ruleSetId && ruleSetConfig) {
-              ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
-            }
-            const engineCache = new Map()
-            let payloadEngine = null
-            if (parsed.data.engine) {
-              try {
-                payloadEngine = createRuleEngine({ config: parsed.data.engine, logger })
-              } catch (error) {
-                logger.warn('Attendance rule engine config invalid (commit payload)', error)
-              }
-            }
-
-            let groupIdMap = null
-            let groupCreated = 0
-            if (groupSync) {
-              groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
-              if (groupSync.autoCreate && groupNames.size) {
-                const ensured = await ensureAttendanceGroups(trx, orgId, groupNames, {
-                  ruleSetId: groupSync.ruleSetId,
-                  timezone: groupSync.timezone,
-                })
-                groupIdMap = ensured.map
-                groupCreated = ensured.created
-              }
-            }
-            const groupMembersToInsert = new Map()
-	            batchMeta = {
-	              ...(parsed.data.batchMeta ?? {}),
-	              idempotencyKey: idempotencyKey || undefined,
-	              engine: importEngine,
-	              chunkConfig: importChunkConfig,
-	              recordUpsertStrategy: importRecordUpsertStrategy,
-	              itemsInsertStrategy: importItemsInsertStrategy,
-	              mappingProfileId: parsed.data.mappingProfileId ?? null,
-	              groupSync: groupSync
-	                ? {
-                    autoCreate: groupSync.autoCreate,
-                    autoAssignMembers: groupSync.autoAssignMembers,
-                    ruleSetId: groupSync.ruleSetId,
-                    timezone: groupSync.timezone,
-                  }
-	                : undefined,
-	              groupCreated,
-	            }
-	            const batchInsert = idempotencyEnabled
-	              ? {
-	                  sql: `INSERT INTO attendance_import_batches
-	                   (id, org_id, idempotency_key, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
-	                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb, now(), now())`,
-	                  params: [
-	                    batchId,
-	                    orgId,
-	                    idempotencyKey,
-	                    requesterId,
-	                    parsed.data.source ?? null,
-	                    parsed.data.ruleSetId ?? null,
-	                    JSON.stringify(mapping),
-	                    rows.length,
-	                    'committed',
-	                    JSON.stringify(batchMeta),
-	                  ],
-	                }
-	              : {
-	                  sql: `INSERT INTO attendance_import_batches
-	                   (id, org_id, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
-	                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb, now(), now())`,
-	                  params: [
-	                    batchId,
-	                    orgId,
-	                    requesterId,
-	                    parsed.data.source ?? null,
-	                    parsed.data.ruleSetId ?? null,
-	                    JSON.stringify(mapping),
-	                    rows.length,
-	                    'committed',
-	                    JSON.stringify(batchMeta),
-	                  ],
-	                }
-		            await trx.query(batchInsert.sql, batchInsert.params)
-
-			            const importItemsBuffer = []
-			            const flushImportItems = async () => {
-			              if (!importItemsBuffer.length) return
-			              const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
-			              await batchInsertAttendanceImportItems(trx, {
-			                batchId,
-			                orgId,
-			                items: chunk,
-			                totalRows: rows.length,
-			                strategy: importItemsInsertStrategy,
-			              })
-			            }
-				            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
-				              importItemsBuffer.push({
-				                id: randomUUID(),
-			                userId: userId ?? null,
-			                workDate: workDate ?? null,
-			                recordId: recordId ?? null,
-			                previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
-			              })
-			              if (importItemsBuffer.length >= importChunkConfig.itemsChunkSize) {
-			                await flushImportItems()
-			              }
-			            }
-
-			            // Prefetch holidays + scheduling assignments for the import scope to reduce per-row DB roundtrips.
-			            const scopeWorkDates = new Set()
-			            const scopeUserIds = new Set()
-			            for (const row of rows) {
-			              const workDate = row?.workDate
-			              if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
-			              const rowUserId = resolveRowUserId({
-			                row,
-			                fallbackUserId: requesterId,
-			                userMap: parsed.data.userMap,
-			                userMapKeyField: parsed.data.userMapKeyField,
-			                userMapSourceFields: parsed.data.userMapSourceFields,
-			              })
-			              if (rowUserId) scopeUserIds.add(rowUserId)
-			            }
-			            const scopeWorkDateList = Array.from(scopeWorkDates)
-			            const scopeUserIdList = Array.from(scopeUserIds)
-			            let scopeFromDate = null
-			            let scopeToDate = null
-			            for (const dateKey of scopeWorkDateList) {
-			              if (!scopeFromDate || dateKey < scopeFromDate) scopeFromDate = dateKey
-			              if (!scopeToDate || dateKey > scopeToDate) scopeToDate = dateKey
-			            }
-			            const scopeSpanDays = scopeFromDate && scopeToDate ? Math.max(0, diffDays(scopeFromDate, scopeToDate)) + 1 : 0
-			            const shouldPrefetchWorkContext = Boolean(
-			              scopeFromDate
-			              && scopeToDate
-			              && scopeUserIdList.length <= ATTENDANCE_IMPORT_PREFETCH_MAX_USERS
-			              && scopeWorkDateList.length <= ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES
-			              && scopeSpanDays <= ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS
-			            )
-			            const prefetchedWorkContext = {
-			              holidaysByDate: new Map(),
-			              shiftAssignmentsByUser: new Map(),
-			              rotationAssignmentsByUser: new Map(),
-			              rotationShiftsById: new Map(),
-			            }
-			            if (shouldPrefetchWorkContext) {
-			              prefetchedWorkContext.holidaysByDate = await loadHolidayMapByDates(trx, orgId, scopeWorkDateList)
-			              prefetchedWorkContext.shiftAssignmentsByUser = await loadShiftAssignmentMapForUsersRange(
-			                trx,
-			                orgId,
-			                scopeUserIdList,
-			                scopeFromDate,
-			                scopeToDate
-			              )
-			              const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(
-			                trx,
-			                orgId,
-			                scopeUserIdList,
-			                scopeFromDate,
-			                scopeToDate
-			              )
-			              prefetchedWorkContext.rotationAssignmentsByUser = rotationPrefetch.assignmentsByUser
-			              prefetchedWorkContext.rotationShiftsById = rotationPrefetch.shiftsById
-			            } else if (scopeUserIdList.length || scopeWorkDateList.length) {
-			              logger.info('Attendance import scope prefetch skipped due to limits', {
-			                orgId,
-			                users: scopeUserIdList.length,
-			                workDates: scopeWorkDateList.length,
-			                spanDays: scopeSpanDays,
-			                maxUsers: ATTENDANCE_IMPORT_PREFETCH_MAX_USERS,
-			                maxWorkDates: ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES,
-			                maxSpanDays: ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS,
-			              })
-			            }
-
-			            // Bulk-prefetch existing attendance_records to avoid per-row SELECT ... FOR UPDATE.
-			            const recordUpsertsBuffer = []
-			            const flushRecordUpserts = async () => {
-			              if (!recordUpsertsBuffer.length) return
-			              const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
-			              const chunkUserIds = chunk.map((item) => item.userId)
-			              const chunkWorkDates = chunk.map((item) => item.workDate)
-
-				              const existingRows = await queryImportHeavy(
-				                trx,
-				                `SELECT ar.*
-				                 FROM attendance_records ar
-				                 JOIN unnest($2::text[], $3::date[]) AS t(user_id, work_date)
-				                   ON ar.user_id = t.user_id AND ar.work_date = t.work_date
-				                 WHERE ar.org_id = $1
-				                 FOR UPDATE`,
-					                [orgId, chunkUserIds, chunkWorkDates]
-					              )
-				              const existingMap = new Map()
-				              for (const row of existingRows) {
-				                const workDateKey = normalizeDateOnly(row.work_date) ?? row.work_date
-				                existingMap.set(`${row.user_id}:${workDateKey}`, row)
-				              }
-
-				              const upsertRows = []
-				              for (const item of chunk) {
-				                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
-				                const existingRow = existingMap.get(`${item.userId}:${workDateKey}`) ?? undefined
-				                const values = computeAttendanceRecordUpsertValues({
-				                  existingRow,
-				                  updateFirstInAt: item.updateFirstInAt,
-				                  updateLastOutAt: item.updateLastOutAt,
-				                  workDate: workDateKey,
-				                  mode: item.mode,
-				                  statusOverride: item.statusOverride,
-				                  overrideMetrics: item.overrideMetrics,
-				                  isWorkday: item.isWorkday,
-				                  meta: item.meta,
-				                  sourceBatchId: item.sourceBatchId,
-				                  rule: item.rule,
-				                  leaveMinutes: item.leaveMinutes,
-				                  overtimeMinutes: item.overtimeMinutes,
-				                })
-				                upsertRows.push({
-				                  userId: item.userId,
-				                  orgId,
-				                  workDate: workDateKey,
-				                  timezone: item.timezone,
-				                  firstInAt: values.firstInAt,
-				                  lastOutAt: values.lastOutAt,
-				                  workMinutes: values.workMinutes,
-				                  lateMinutes: values.lateMinutes,
-				                  earlyLeaveMinutes: values.earlyLeaveMinutes,
-				                  status: values.status,
-				                  isWorkday: values.isWorkday,
-				                  metaJson: values.metaJson,
-				                  sourceBatchId: values.sourceBatchId,
-				                })
-				              }
-
-				              const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
-				                strategy: importRecordUpsertStrategy,
-                    totalRows: rows.length,
-				              })
-
-					              for (const item of chunk) {
-					                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
-					                let record = upserted.get(`${item.userId}:${workDateKey}`)
-					                if (!record?.id) {
-					                  const fallbackRows = await queryImportHeavy(
-					                    trx,
-					                    `SELECT id, user_id, work_date
-					                       FROM attendance_records
-					                      WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
-					                      LIMIT 1`,
-					                    [orgId, item.userId, workDateKey]
-					                  )
-					                  if (Array.isArray(fallbackRows) && fallbackRows.length > 0) {
-					                    record = fallbackRows[0]
-					                  }
-					                }
-					                if (!record?.id) {
-					                  throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
-					                }
-
-				                await enqueueImportItem({
-				                  userId: item.userId,
-				                  workDate: workDateKey,
-				                  recordId: record.id,
-				                  previewSnapshot: item.previewSnapshot,
-				                })
-
-				                importedCount += 1
-				                if (returnItems && (!itemsLimit || results.length < itemsLimit)) {
-				                  results.push({
-				                    id: record.id,
-				                    userId: item.userId,
-				                    workDate: workDateKey,
-				                    engine: item.engine,
-				                  })
-				                }
-				              }
-				            }
-				            const enqueueRecordUpsert = async (item) => {
-				              recordUpsertsBuffer.push(item)
-				              if (recordUpsertsBuffer.length >= importChunkConfig.recordsChunkSize) {
-			                await flushRecordUpserts()
-			              }
-			            }
-
-			            const seenRowKeys = new Set()
-			            for (const row of rows) {
-			              const workDate = row.workDate
-			              const groupKey = resolveAttendanceGroupKey(row)
-			              const rowUserId = resolveRowUserId({
-                row,
-                fallbackUserId: requesterId,
-                userMap: parsed.data.userMap,
-                userMapKeyField: parsed.data.userMapKeyField,
-                userMapSourceFields: parsed.data.userMapSourceFields,
-              })
-              const userProfile = resolveRowUserProfile({
-                row,
-                fallbackUserId: requesterId,
-                userMap: parsed.data.userMap,
-                userMapKeyField: parsed.data.userMapKeyField,
-                userMapSourceFields: parsed.data.userMapSourceFields,
-              })
-              const importWarnings = []
-              if (!rowUserId) {
-                importWarnings.push(buildUnresolvedRowUserWarning({
-                  row,
-                  userMapKeyField: parsed.data.userMapKeyField,
-                  userMapSourceFields: parsed.data.userMapSourceFields,
-                }))
-              }
-              if (!workDate) importWarnings.push('Missing workDate')
-              if (requiredFields.length) {
-                const missingRequired = requiredFields.filter((field) => {
-                  const value = resolveRequiredFieldValue(row, field)
-                  return value === undefined || value === null || value === ''
-                })
-                if (missingRequired.length) {
-                  importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
-                }
-              }
-	              if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
-	                const missingPunch = punchRequiredFields.filter((field) => {
-	                  const value = resolveRequiredFieldValue(row, field)
-	                  return value === undefined || value === null || value === ''
-	                })
-	                if (missingPunch.length) {
-	                  importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
-	                }
-	              }
-		              if (importWarnings.length) {
-		                const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
-		                await enqueueImportItem({
-		                  userId: rowUserId ?? null,
-		                  workDate: workDate ?? null,
-		                  recordId: null,
-		                  previewSnapshot: snapshot,
-		                })
-		                skipped.push({
-		                  userId: rowUserId ?? null,
-		                  workDate: workDate ?? null,
-		                  warnings: importWarnings,
-		                })
-	                continue
-	              }
-
-		              const dedupKey = `${rowUserId}:${workDate}`
-		              if (seenRowKeys.has(dedupKey)) {
-		                const warnings = ['Duplicate row in payload (same userId + workDate)']
-		                const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
-		                await enqueueImportItem({
-		                  userId: rowUserId,
-		                  workDate,
-		                  recordId: null,
-		                  previewSnapshot: snapshot,
-		                })
-		                skipped.push({ userId: rowUserId, workDate, warnings })
-		                continue
-		              }
-	              seenRowKeys.add(dedupKey)
-	              if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
-	                const groupEntry = groupIdMap.get(groupKey)
-	                if (groupEntry?.id) {
-	                  groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
-	                }
-	              }
-              let activeRuleSetId = parsed.data.ruleSetId ?? null
-              let activeRuleSetConfig = ruleSetConfig
-              if (!activeRuleSetId && groupRuleSetMap.size) {
-                if (groupKey && groupRuleSetMap.has(groupKey)) {
-                  activeRuleSetId = groupRuleSetMap.get(groupKey)
-                }
-              }
-              if (!activeRuleSetConfig && activeRuleSetId) {
-                if (ruleSetConfigCache.has(activeRuleSetId)) {
-                  activeRuleSetConfig = ruleSetConfigCache.get(activeRuleSetId)
-                } else {
-                  activeRuleSetConfig = await loadRuleSetConfigById(trx, orgId, activeRuleSetId)
-                  ruleSetConfigCache.set(activeRuleSetId, activeRuleSetConfig)
-                }
-              }
-
-              const override = normalizeRuleOverride(activeRuleSetConfig?.rule)
-              const ruleOverride = override
-                ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
-                : baseRule
-
-              let engine = payloadEngine
-              if (!engine && activeRuleSetConfig?.engine) {
-                if (activeRuleSetId && engineCache.has(activeRuleSetId)) {
-                  engine = engineCache.get(activeRuleSetId)
-                } else {
-                  try {
-                    engine = createRuleEngine({ config: activeRuleSetConfig.engine, logger })
-                    if (activeRuleSetId) engineCache.set(activeRuleSetId, engine)
-	                  } catch (error) {
-	                    logger.warn('Attendance rule engine config invalid (rule set)', error)
-	                  }
-	                }
-	              }
-	              const context = resolveWorkContextFromPrefetch({
-	                orgId,
-	                userId: rowUserId,
-	                workDate,
-	                defaultRule: ruleOverride,
-	                prefetched: prefetchedWorkContext,
-	              }) ?? await resolveWorkContext({
-	                db: trx,
-	                orgId,
-	                userId: rowUserId,
-	                workDate,
-	                defaultRule: ruleOverride,
-	              })
-              const mapped = applyFieldMappings(row.fields ?? {}, mapping)
-              const valueFor = (key) => {
-                if (mapped[key]?.value !== undefined) return mapped[key].value
-                if (row.fields?.[key] !== undefined) return row.fields[key]
-                const profileValue = resolveProfileValue(userProfile, key)
-                if (profileValue !== undefined) return profileValue
-                return undefined
-              }
-              const dataTypeFor = (key) => mapped[key]?.dataType
-              const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
-
-              const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
-              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
-              augmentFieldValuesWithDates(fieldValues, workDate)
-              const holidayMeta = resolveHolidayMeta(context.holiday)
-              if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
-              if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
-              fieldValues.holiday_first_day = holidayMeta.isFirstDay
-
-              const baseFacts = {
-                userId: rowUserId,
-                orgId,
-                workDate,
-                shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                isHoliday: Boolean(context.holiday),
-                isWorkingDay: context.isWorkingDay,
-              }
-              const baseUserGroups = resolveUserGroups(activeRuleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
-              const shiftOverride = resolveShiftOverrideFromMappings(
-                activeRuleSetConfig?.policies?.shiftMappings,
-                baseFacts,
-                fieldValues,
-                baseUserGroups
-              )
-
-              const shiftRange = resolveShiftTimeRange(shiftNameRaw)
-              const baseRuleForMetrics = shiftRange ? { ...context.rule, ...shiftRange } : context.rule
-              const ruleForMetrics = shiftRange
-                ? baseRuleForMetrics
-                : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
-
-              const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
-                firstInValue: valueFor('firstInAt'),
-                lastOutValue: valueFor('lastOutAt'),
-                workDate,
-                rule: ruleForMetrics,
-              })
-              const importAttribution = await resolveImportRowWorkDateAttribution({
-                db: trx,
-                orgId,
-                userId: rowUserId,
-                workDate,
-                firstInAt,
-                lastOutAt,
-	              timezone: ruleForMetrics.timezone,
-                explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
-              })
-              const statusRaw = valueFor('status')
-              const statusOverride = statusRaw != null
-                ? resolveStatusOverride(statusRaw, statusMap)
-                : null
-
-              const workMinutes = parseMinutesValue(
-                valueFor('workMinutes') ?? valueFor('workHours'),
-                dataTypeFor('workMinutes') ?? dataTypeFor('workHours')
-              )
-              const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
-              const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
-              const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
-              const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
-
-              const computed = computeMetrics({
-                rule: ruleForMetrics,
-                firstInAt,
-                lastOutAt,
-                workDate,
-                isWorkingDay: context.isWorkingDay,
-                leaveMinutes,
-                overtimeMinutes,
-              })
-              const initialMetrics = {
-                workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
-                lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
-                earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
-                status: statusOverride ?? computed.status,
-              }
-
-              const approvalSummary = valueFor('approvalSummary')
-                ?? valueFor('attendance_approve')
-                ?? valueFor('attendanceApprove')
-
-              const policyBaseMetrics = {
-                ...initialMetrics,
-                leaveMinutes: leaveMinutes ?? 0,
-                overtimeMinutes: overtimeMinutes ?? 0,
-              }
-              const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
-              const holidayPolicyResult = applyHolidayPolicy({
-                settings,
-                holiday: context.holiday,
-                holidayMeta,
-                metrics: policyBaseMetrics,
-                approvalSummary,
-                policyContext: holidayPolicyContext,
-              })
-              const policyResult = applyAttendancePolicies({
-                policies: activeRuleSetConfig?.policies,
-                facts: {
-                  userId: rowUserId,
-                  orgId,
-                  workDate,
-                  shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                  isHoliday: Boolean(context.holiday),
-                  isWorkingDay: context.isWorkingDay,
-                  holidayName: holidayMeta.name,
-                  holidayDayIndex: holidayMeta.dayIndex,
-                  holidayFirstDay: holidayMeta.isFirstDay,
-                },
-                fieldValues,
-                metrics: holidayPolicyResult.metrics,
-                options: { skipRules: resolvePolicySkipRules(settings) },
-              })
-              const effective = policyResult.metrics
-              let engineResult = null
-              if (engine) {
-                const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
-                const roleTags = Array.isArray(rawRoleTags)
-                  ? rawRoleTags
-                  : typeof rawRoleTags === 'string' && rawRoleTags.trim()
-                    ? rawRoleTags.split(',').map((tag) => tag.trim()).filter(Boolean)
-                    : []
-
-                engineResult = engine.evaluate({
-                  record: {
-                    userId: rowUserId,
-                    shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
-                    attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
-                    clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
-                    clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
-                    clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
-                    clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
-                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
-                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
-                    is_holiday: Boolean(context.holiday),
-                    is_workday: context.isWorkingDay,
-                    holiday_name: holidayMeta.name ?? undefined,
-                    holiday_day_index: holidayMeta.dayIndex ?? undefined,
-                    holiday_first_day: holidayMeta.isFirstDay,
-                    holiday_policy_enabled: Boolean(settings?.holidayPolicy?.firstDayEnabled),
-                    overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
-                    actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
-                  },
-                  profile: {
-                    roleTags,
-                    role: valueFor('role') ?? valueFor('职位'),
-                    department: valueFor('department'),
-                    attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
-                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
-                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
-                  },
-                  approvals: approvalSummary ?? [],
-                  calc: {
-                    leaveHours: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes / 60 : undefined,
-                    exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
-                  },
-                })
-              }
-              const baseMetrics = {
-                ...effective,
-                leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : leaveMinutes,
-                overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : overtimeMinutes,
-              }
-              const engineAdjustment = engineResult ? applyEngineOverrides(baseMetrics, engineResult) : { metrics: baseMetrics, meta: null }
-              const finalMetrics = engineAdjustment.metrics
-              const effectiveLeaveMinutes = Number.isFinite(finalMetrics.leaveMinutes)
-                ? finalMetrics.leaveMinutes
-                : leaveMinutes
-              const effectiveOvertimeMinutes = Number.isFinite(finalMetrics.overtimeMinutes)
-                ? finalMetrics.overtimeMinutes
-                : overtimeMinutes
-
-              const policyWarnings = [...holidayPolicyResult.warnings, ...policyResult.warnings]
-              let meta = null
-              if (policyWarnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
-                meta = {
-                  policy: {
-                    warnings: policyWarnings,
-                    appliedRules: policyResult.appliedRules,
-                    userGroups: policyResult.userGroups,
-                  },
-                }
-              }
-              if (profileSnapshot) {
-                meta = meta ?? {}
-                meta.profile = profileSnapshot
-              }
-              meta = meta ?? {}
-              meta.metrics = {
-                leaveMinutes: effectiveLeaveMinutes,
-                overtimeMinutes: effectiveOvertimeMinutes,
-              }
-              meta.source = {
-                source: parsed.data.source ?? null,
-                mappingProfileId: parsed.data.mappingProfileId ?? null,
-              }
-              meta = attachAttendanceImportMultiPunchMeta(meta, {
-                valueFor,
-                workDate,
-                rule: ruleForMetrics,
-                clearMissing: (parsed.data.mode ?? 'override') === 'override',
-              })
-              if (importAttribution.frozenAttribution) {
-                meta = meta ?? {}
-                meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
-              }
-		              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
-	                meta = meta ?? {}
-	                meta.engine = {
-	                  appliedRules: engineResult.appliedRules,
-	                  warnings: engineResult.warnings,
-	                  reasons: engineResult.reasons,
-	                  overrides: engineAdjustment.meta?.overrides ?? null,
-	                  base: engineAdjustment.meta?.base ?? null,
-	                }
-	              }
-
-	              const snapshot = {
-	                metrics: {
-	                  workMinutes: finalMetrics.workMinutes,
-	                  lateMinutes: finalMetrics.lateMinutes,
-                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-                  leaveMinutes: effectiveLeaveMinutes,
-                  overtimeMinutes: effectiveOvertimeMinutes,
-                  status: finalMetrics.status,
-                },
-	                policy: meta?.policy ?? null,
-	                engine: meta?.engine ?? null,
-	              }
-	              await enqueueRecordUpsert({
-	                userId: rowUserId,
-	                workDate,
-	                timezone: context.rule.timezone,
-	                rule: context.rule,
-	                updateFirstInAt: firstInAt,
-	                updateLastOutAt: lastOutAt,
-	                mode: parsed.data.mode ?? 'override',
-	                statusOverride,
-	                overrideMetrics: {
-	                  workMinutes: finalMetrics.workMinutes,
-	                  lateMinutes: finalMetrics.lateMinutes,
-	                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-	                  status: finalMetrics.status,
-	                },
-	                isWorkday: context.isWorkingDay,
-	                leaveMinutes: effectiveLeaveMinutes,
-	                overtimeMinutes: effectiveOvertimeMinutes,
-	                meta: meta ?? undefined,
-	                sourceBatchId: batchId,
-	                previewSnapshot: snapshot,
-	                engine: engineResult
-	                  ? {
-	                      appliedRules: engineResult.appliedRules,
-	                      warnings: engineResult.warnings,
-	                      reasons: engineResult.reasons,
-	                      overrides: engineAdjustment.meta?.overrides ?? null,
-	                      base: engineAdjustment.meta?.base ?? null,
-	                    }
-	                  : null,
-	              })
-			            }
-
-			            await flushRecordUpserts()
-			            await flushImportItems()
-
-		            if (groupSync?.autoAssignMembers && groupMembersToInsert.size) {
-		              const groupMembersAdded = await insertAttendanceGroupMembers(
-		                trx,
-		                orgId,
-                Array.from(groupMembersToInsert.values())
-              )
-              if (batchMeta) {
-                batchMeta.groupMembersAdded = groupMembersAdded
-                await trx.query(
-                  'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-                  [batchId, orgId, JSON.stringify(batchMeta)]
-                )
-              }
-            }
-            if (skipped.length) {
-              const updatedMeta = {
-                ...(batchMeta ?? {}),
-                skippedCount: skipped.length,
-                skippedRows: skipped.slice(0, 50),
-              }
-              await trx.query(
-                'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-                [batchId, orgId, JSON.stringify(updatedMeta)]
-              )
-              batchMeta = updatedMeta
-	            }
-            return {
-              batchId,
-              batchMeta,
-              groupWarnings,
-              idempotentInTransaction: null,
-              importedCount,
-              results,
-              skipped,
-            }
+	          const batchId = randomUUID()
+	          const preparedPlan = await commitAttendanceImportPayload({
+	            payload: parsed.data,
+	            orgId,
+	            requesterId,
+	            batchId,
+	            idempotencyKey,
+	            prepareOnly: true,
+	          })
+	          // Pass the prepared plan through unchanged. Do not re-fingerprint
+	          // attribution/policy leaves here — core freeze authority is separate.
+	          const commitResult = await syncImportPort.commitSyncImportPlan({
+	            ...preparedPlan,
+	            actorPosture: importAccess.fullAdmin ? 'platform_admin' : 'attendance_admin',
+	            tokenSubjectUserId: requesterId,
+	            itemReturnPolicy: {
+	              returnItems,
+	              itemsLimit,
+	            },
+	            csvWarnings: Array.isArray(preparedPlan.csvWarnings)
+	              ? preparedPlan.csvWarnings
+	              : csvWarnings,
+	            groupWarnings: Array.isArray(preparedPlan.groupWarnings)
+	              ? preparedPlan.groupWarnings
+	              : [],
 	          })
 
-            const {
-              batchId,
-              batchMeta,
-              groupWarnings,
-              idempotentInTransaction,
-              importedCount,
-              results,
-              skipped,
-            } = transactionResult
-            if (!idempotentInTransaction) {
-              for (const row of rows) releaseImportRowMemory(row)
-            }
-
-	          // Best-effort cleanup: once commit succeeds, the uploaded CSV is no longer needed.
-	          if (csvFileId) {
-	            await deleteImportUpload({ orgId, fileId: csvFileId })
+	          // Best-effort post-commit upload cleanup (governing P06 order).
+	          if (
+	            preparedPlan.artifactCleanup
+	            && preparedPlan.artifactCleanup.kind === 'uploaded_import_file'
+	            && preparedPlan.artifactCleanup.fileId
+	          ) {
+	            await deleteImportUpload({
+	              orgId,
+	              fileId: preparedPlan.artifactCleanup.fileId,
+	            })
 	          }
 
-	          if (idempotentInTransaction) {
-	            const idempotentRowCount = idempotentInTransaction.imported + idempotentInTransaction.skipped
-	            const idempotentEngine = resolveImportEngineFromMeta(
-	              idempotentInTransaction.meta,
-	              idempotentRowCount
-	            )
+	          if (commitResult.idempotent) {
 	            res.json({
 	              ok: true,
 	              data: {
-	                batchId: idempotentInTransaction.batchId,
-	                imported: idempotentInTransaction.imported,
-	                processedRows: idempotentInTransaction.imported,
-	                failedRows: idempotentInTransaction.skipped,
-	                elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
-	                engine: idempotentEngine,
-	                recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
-	                  idempotentInTransaction.meta,
-	                  idempotentRowCount,
-	                  idempotentEngine
-	                ),
+	                batchId: commitResult.batchId,
+	                imported: commitResult.imported,
+	                processedRows: commitResult.processedRows,
+	                failedRows: commitResult.failedRows,
+	                elapsedMs: commitResult.elapsedMs,
+	                engine: commitResult.engine,
+	                recordUpsertStrategy: commitResult.recordUpsertStrategy,
 	                items: [],
 	                skipped: [],
-                csvWarnings: [],
-                groupWarnings: [],
-                meta: idempotentInTransaction.meta,
-                idempotent: true,
-              },
-            })
-            return
-          }
+	                csvWarnings: [],
+	                groupWarnings: [],
+	                meta: commitResult.meta,
+	                idempotent: true,
+	              },
+	            })
+	            return
+	          }
 
 	          res.json({
 	            ok: true,
 	            success: true,
 	            data: {
-	              batchId,
-	              imported: importedCount,
-	              processedRows: importedCount,
-	              failedRows: skipped.length,
-	              elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
-	              engine: importEngine,
-	              recordUpsertStrategy: importRecordUpsertStrategy,
-	              items: returnItems ? results : [],
-	              itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
-              skipped,
-              csvWarnings: [...csvWarnings, ...groupWarnings],
-              groupWarnings,
-              meta: batchMeta,
-            },
-          })
+	              batchId: commitResult.batchId,
+	              imported: commitResult.imported,
+	              processedRows: commitResult.processedRows,
+	              failedRows: commitResult.failedRows,
+	              elapsedMs: commitResult.elapsedMs,
+	              engine: commitResult.engine,
+	              recordUpsertStrategy: commitResult.recordUpsertStrategy,
+	              items: commitResult.items,
+	              itemsTruncated: commitResult.itemsTruncated,
+	              skipped: commitResult.skipped,
+	              csvWarnings: [...(commitResult.csvWarnings ?? []), ...(commitResult.groupWarnings ?? [])],
+	              groupWarnings: commitResult.groupWarnings ?? [],
+	              meta: commitResult.meta,
+	            },
+	          })
 	        } catch (error) {
 	          if (error instanceof HttpError) {
 	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          const errorCode = typeof error?.code === 'string' && error.code
+	            ? error.code
+	            : (typeof error?.message === 'string' ? error.message : '')
+	          if (errorCode === 'ATTENDANCE_IMPORT_BATCH_LIMIT_EXCEEDED' || errorCode === 'W4_BATCH_LIMIT_EXCEEDED') {
+	            res.status(422).json({ ok: false, error: { code: 'W4_BATCH_LIMIT_EXCEEDED', message: 'W4_BATCH_LIMIT_EXCEEDED' } })
+	            return
+	          }
+	          if (errorCode === 'ATTENDANCE_OPERATION_IN_PROGRESS') {
+	            res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'ATTENDANCE_OPERATION_CONFLICT' || errorCode === 'ATTENDANCE_OPERATION_BATCH_CONFLICT') {
+	            res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'SEGMENT_CALCULATION_SUSPENDED') {
+	            res.status(503).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'W4C3A_IMPORT_FREEZE_INVALID') {
+	            res.status(422).json({ ok: false, error: { code: errorCode, message: errorCode } })
 	            return
 	          }
 	          if (isDatabaseSchemaError(error)) {

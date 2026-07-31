@@ -594,7 +594,7 @@ type FrozenAttendanceRecordWriteDraftV1 = Readonly<{
   readonly existingRecordId: string | null
 }>
 
-async function lockAndFreezeAttendanceRecordPreconditionsV1(
+export async function lockAndFreezeAttendanceRecordPreconditionsV1(
   trx: AttendanceW4TransactionClientV1,
   org: ReturnType<typeof requireVerifiedAttendanceOrgIdentityV1>,
   branch: AttendanceLegacyOperationalBranchV1,
@@ -753,7 +753,7 @@ type FrozenAttendanceGroupReadSetV1 = Readonly<{
   readonly existingMemberships: ReadonlySet<string>
 }>
 
-async function lockAndFreezeAttendanceGroupReadSetV1(
+export async function lockAndFreezeAttendanceGroupReadSetV1(
   trx: AttendanceW4TransactionClientV1,
   orgId: string,
   groupEffects: readonly LegacyImportGroupEffectDraftV1[],
@@ -1053,7 +1053,7 @@ function validateAttendanceLegacyImportPlanDraftBeforeSqlV1(
   validateAttendanceLegacyImportPlanEnqueuePackageV1(packageInput)
 }
 
-function materializeAttendanceLegacyGroupEffectsV1(
+export function materializeAttendanceLegacyGroupEffectsV1(
   orgId: string,
   drafts: readonly LegacyImportGroupEffectDraftV1[],
   readSet: FrozenAttendanceGroupReadSetV1,
