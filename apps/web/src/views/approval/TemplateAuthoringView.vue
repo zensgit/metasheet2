@@ -584,6 +584,9 @@
           :canvas-edge-lines="canvasEdgeLines"
           :canvas-insertion-targets="canvasInsertionTargets"
           :canvas-move-target-lines="canvasMoveTargetLines"
+          :selected-canvas-branch-group="selectedCanvasBranchGroup"
+          :dragging-canvas-branch-edge-key="canvasBranchDragSession?.edgeKey ?? null"
+          :canvas-live-message="canvasLiveMessage"
           :canvas-minimap="canvasMinimap"
           :selected-canvas-node="selectedCanvasNode"
           :moving-canvas-node="movingCanvasNode"
@@ -608,10 +611,15 @@
           @close-inspector="clearCanvasSelection"
           @node-keydown="onCanvasNodeKeydown"
           @node-drag-start="onCanvasNodeDragStart"
-          @node-drag-end="cancelCanvasNodeMove"
+          @node-drag-end="finishCanvasNodeDrag"
           @move-target-click="applyCanvasNodeMove"
+          @move-target-drop="onCanvasNodeDrop"
           @move-step="moveCanvasNodeStep"
           @begin-move="beginCanvasNodeMove"
+          @branch-drag-start="onCanvasBranchDragStart"
+          @branch-drag-end="finishCanvasBranchDrag"
+          @branch-target-drop="onCanvasBranchDrop"
+          @move-branch-step="moveCanvasBranchStep"
           @add-condition-branch="onAddConditionBranch"
           @add-parallel-branch="onAddParallelBranch"
           @insert-node-into-edge="onInsertNodeIntoEdge"
@@ -1281,10 +1289,14 @@ import {
   insertNodeIntoEdge,
   insertParallelGateway,
   linearNodeMoveTargets,
-  moveLinearNode,
   removeLinearNode,
   type EdgeInsertableNodeType,
 } from '../../approvals/graphTopologyEdit'
+import {
+  executeApprovalCanvasCommand,
+  type ApprovalCanvasCommand,
+  type ApprovalCanvasSelection,
+} from '../../approvals/approvalCanvasCommands'
 import {
   computeLayout,
   graphValidityIssues,
@@ -1974,6 +1986,39 @@ function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): boolean {
     return false
   }
 }
+
+const CANVAS_COMMAND_REJECTED = Symbol('canvas-command-rejected')
+
+/**
+ * C4 page seam for every semantic node move and branch reorder. C5 can replace the body with the
+ * shared history apply without changing renderer intents or leaving a second graph-write path.
+ */
+function applyCanvasCommand(
+  command: ApprovalCanvasCommand,
+  selectionBefore: ApprovalCanvasSelection,
+  guard: (graph: ApprovalGraph) => boolean = () => true,
+): boolean {
+  if (readOnly.value) return false
+  try {
+    let applied = false
+    const nextDraft = applyTopologyToDraft(draft.value, (graph) => {
+      if (!guard(graph)) throw CANVAS_COMMAND_REJECTED
+      const result = executeApprovalCanvasCommand(graph, command, selectionBefore)
+      if (!result.ok) throw CANVAS_COMMAND_REJECTED
+      applied = true
+      return result.graph
+    })
+    if (!applied) return false
+    draft.value = nextDraft
+    return true
+  } catch (error) {
+    if (error !== CANVAS_COMMAND_REJECTED) {
+      loadError.value = '该拓扑操作不适用于当前流程结构'
+    }
+    return false
+  }
+}
+
 function onAddConditionBranch(nodeKey: string): void {
   runTopologyOp((graph) => addConditionBranch(graph, nodeKey))
 }
@@ -2077,9 +2122,35 @@ const canvasAvailable = computed(() => (
 const linearCanvasActive = computed(() => (
   canvasAvailable.value && !graphReadOnly.value && canvasViewMode.value === 'canvas'
 ))
+type CanvasBranchKind = 'condition' | 'parallel'
+interface CanvasBranchReorderGroup {
+  kind: CanvasBranchKind
+  nodeKey: string
+  title: string
+  branches: Array<{ edgeKey: string; label: string }>
+}
+interface CanvasNodeDragSession {
+  token: number
+  nodeKey: string
+}
+interface CanvasBranchDragSession {
+  token: number
+  kind: CanvasBranchKind
+  nodeKey: string
+  edgeKey: string
+}
+
+const CANVAS_NODE_DRAG_TYPE = 'application/x-metasheet-approval-canvas-node'
+const CANVAS_BRANCH_DRAG_TYPE = 'application/x-metasheet-approval-canvas-branch'
+const INVALID_NODE_DROP_MESSAGE = '该位置不能放置此节点'
+const INVALID_BRANCH_DROP_MESSAGE = '该分支位置已失效，请重试'
 const selectedCanvasNode = ref<string | null>(null)
 const flowCanvasRef = ref<InstanceType<typeof ApprovalFlowCanvas> | null>(null)
 const movingCanvasNode = ref<string | null>(null)
+const canvasNodeDragSession = ref<CanvasNodeDragSession | null>(null)
+const canvasBranchDragSession = ref<CanvasBranchDragSession | null>(null)
+const canvasDragSequence = ref(0)
+const canvasLiveMessage = ref('')
 const canvasZoom = ref(1)
 const canvasViewportState = ref({ width: 0, height: 0, scrollLeft: 0, scrollTop: 0 })
 const CANVAS_NODE_W = GRAPH_LAYOUT_NODE_WIDTH
@@ -2164,11 +2235,54 @@ const selectedCanvasInspectorNode = computed<ApprovalNode | null>(() => {
   if (!key) return null
   return canvasNodeByKey(key) ?? null
 })
+
+function canvasBranchOrder(
+  graph: ApprovalGraph,
+  kind: CanvasBranchKind,
+  nodeKey: string,
+): string[] | undefined {
+  const node = graph.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node || node.type !== kind) return undefined
+  if (kind === 'condition') {
+    const branches = (node.config as ConditionNodeConfig).branches
+    return Array.isArray(branches) && branches.every((branch) => typeof branch.edgeKey === 'string')
+      ? branches.map((branch) => branch.edgeKey)
+      : undefined
+  }
+  const branches = (node.config as ParallelNodeConfig).branches
+  return Array.isArray(branches) && branches.every((edgeKey) => typeof edgeKey === 'string')
+    ? [...branches]
+    : undefined
+}
+
+const selectedCanvasBranchGroup = computed<CanvasBranchReorderGroup | null>(() => {
+  if (readOnly.value) return null
+  const node = selectedCanvasInspectorNode.value
+  if (!node || (node.type !== 'condition' && node.type !== 'parallel')) return null
+  const order = canvasBranchOrder(canvasEffectiveGraph.value, node.type, node.key)
+  if (!order?.length) return null
+  return {
+    kind: node.type,
+    nodeKey: node.key,
+    title: node.type === 'condition' ? '条件分支优先级' : '并行分支顺序',
+    branches: order.map((edgeKey, index) => ({
+      edgeKey,
+      label: node.type === 'condition'
+        ? `优先级 ${index + 1} · ${conditionEdgeLabel(node.key, edgeKey)}`
+        : `分支 ${index + 1} · ${graphEdgeTargetLabel(node.key, edgeKey)}`,
+    })),
+  }
+})
+
 watch(canvasEffectiveGraph, (graph) => {
   const key = selectedCanvasNode.value
   if (key && !graph.nodes.some((node) => node.key === key)) clearCanvasSelection()
   const movingKey = movingCanvasNode.value
-  if (movingKey && linearNodeMoveTargets(graph, movingKey).length === 0) cancelCanvasNodeMove()
+  if (
+    movingKey
+    && !canvasNodeDragSession.value
+    && linearNodeMoveTargets(graph, movingKey).length === 0
+  ) cancelCanvasNodeMove()
 })
 watch([canvasViewMode, canvasLayout, activeAuthoringSection], async ([mode, _layout, section]) => {
   if (mode !== 'canvas' || section !== 'flow') return
@@ -2252,7 +2366,7 @@ const canvasInsertionTargets = computed(() => {
       : []
   })
 })
-const canvasMoveTargets = computed(() => movingCanvasNode.value
+const canvasMoveTargets = computed(() => !readOnly.value && movingCanvasNode.value
   ? new Set(linearNodeMoveTargets(canvasEffectiveGraph.value, movingCanvasNode.value).map((target) => target.edgeKey))
   : new Set<string>())
 const canvasMoveTargetLines = computed(() => canvasEdgeLines.value.filter((line) => canvasMoveTargets.value.has(line.key)))
@@ -2267,19 +2381,69 @@ function canvasMoveTargetLabel(edgeKey: string): string {
   const movingLabel = movingCanvasNode.value ? graphNodeLabel(movingCanvasNode.value) : '节点'
   return edge ? `将${movingLabel}移动到${graphNodeLabel(edge.source)}之后` : `移动${movingLabel}`
 }
+function currentCanvasSelection(): ApprovalCanvasSelection {
+  return selectedCanvasNode.value
+    ? { kind: 'node', nodeKey: selectedCanvasNode.value }
+    : { kind: 'none' }
+}
+function announceCanvas(message: string): void {
+  canvasLiveMessage.value = ''
+  void nextTick(() => {
+    canvasLiveMessage.value = message
+  })
+}
+function serializeCanvasDragSession(session: CanvasNodeDragSession | CanvasBranchDragSession): string {
+  return JSON.stringify(session)
+}
 function beginCanvasNodeMove(nodeKey: string): void {
   if (readOnly.value || !canMoveCanvasNode(nodeKey)) return
-  movingCanvasNode.value = movingCanvasNode.value === nodeKey ? null : nodeKey
+  if (movingCanvasNode.value === nodeKey) {
+    cancelCanvasNodeMove()
+    return
+  }
+  canvasNodeDragSession.value = null
+  movingCanvasNode.value = nodeKey
 }
 function cancelCanvasNodeMove(): void {
+  canvasNodeDragSession.value = null
   movingCanvasNode.value = null
+}
+function rejectCanvasNodeDrop(): void {
+  cancelCanvasNodeMove()
+  announceCanvas(INVALID_NODE_DROP_MESSAGE)
+}
+function finishCanvasNodeDrag(): void {
+  if (!canvasNodeDragSession.value) return
+  rejectCanvasNodeDrop()
 }
 function applyCanvasNodeMove(targetEdgeKey: string): void {
   const nodeKey = movingCanvasNode.value
-  if (!nodeKey || !canvasMoveTargets.value.has(targetEdgeKey)) return
-  runTopologyOp((graph) => moveLinearNode(graph, nodeKey, targetEdgeKey))
+  if (!nodeKey) return
+  if (!canvasMoveTargets.value.has(targetEdgeKey)) {
+    rejectCanvasNodeDrop()
+    return
+  }
+  const applied = applyCanvasCommand(
+    { type: 'move-node-into-edge', nodeKey, intoEdgeKey: targetEdgeKey },
+    currentCanvasSelection(),
+    (graph) => linearNodeMoveTargets(graph, nodeKey)
+      .some((target) => target.edgeKey === targetEdgeKey),
+  )
+  if (!applied) {
+    rejectCanvasNodeDrop()
+    return
+  }
   selectedCanvasNode.value = nodeKey
   cancelCanvasNodeMove()
+}
+function onCanvasNodeDrop(event: DragEvent, targetEdgeKey: string): void {
+  const session = canvasNodeDragSession.value
+  const payload = event.dataTransfer?.getData(CANVAS_NODE_DRAG_TYPE) ?? ''
+  if (!session || payload !== serializeCanvasDragSession(session)) {
+    rejectCanvasNodeDrop()
+    return
+  }
+  applyCanvasNodeMove(targetEdgeKey)
 }
 function moveCanvasNodeStep(nodeKey: string, direction: 'up' | 'down'): void {
   const target = canvasStepMoveTarget(nodeKey, direction)
@@ -2294,13 +2458,123 @@ function onCanvasNodeKeydown(event: KeyboardEvent, nodeKey: string): void {
   moveCanvasNodeStep(nodeKey, event.key === 'ArrowUp' ? 'up' : 'down')
 }
 function onCanvasNodeDragStart(event: DragEvent, nodeKey: string): void {
-  if (readOnly.value || !canMoveCanvasNode(nodeKey)) {
+  if (readOnly.value || !canMoveCanvasNode(nodeKey) || !event.dataTransfer) {
     event.preventDefault()
     return
   }
+  const session: CanvasNodeDragSession = {
+    token: ++canvasDragSequence.value,
+    nodeKey,
+  }
+  canvasNodeDragSession.value = session
   movingCanvasNode.value = nodeKey
-  event.dataTransfer?.setData('text/plain', nodeKey)
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData(CANVAS_NODE_DRAG_TYPE, serializeCanvasDragSession(session))
+  event.dataTransfer.setData('text/plain', 'approval-canvas-node')
+  event.dataTransfer.effectAllowed = 'move'
+}
+
+function cancelCanvasBranchDrag(): void {
+  canvasBranchDragSession.value = null
+}
+function rejectCanvasBranchDrop(): void {
+  cancelCanvasBranchDrag()
+  announceCanvas(INVALID_BRANCH_DROP_MESSAGE)
+}
+function onCanvasBranchDragStart(
+  event: DragEvent,
+  kind: CanvasBranchKind,
+  nodeKey: string,
+  edgeKey: string,
+): void {
+  const group = selectedCanvasBranchGroup.value
+  if (
+    readOnly.value
+    || !event.dataTransfer
+    || group?.kind !== kind
+    || group.nodeKey !== nodeKey
+    || !group.branches.some((branch) => branch.edgeKey === edgeKey)
+  ) {
+    event.preventDefault()
+    return
+  }
+  const session: CanvasBranchDragSession = {
+    token: ++canvasDragSequence.value,
+    kind,
+    nodeKey,
+    edgeKey,
+  }
+  canvasBranchDragSession.value = session
+  event.dataTransfer.setData(CANVAS_BRANCH_DRAG_TYPE, serializeCanvasDragSession(session))
+  event.dataTransfer.setData('text/plain', 'approval-canvas-branch')
+  event.dataTransfer.effectAllowed = 'move'
+}
+function applyCanvasBranchReorder(
+  kind: CanvasBranchKind,
+  nodeKey: string,
+  edgeKey: string,
+  targetEdgeKey: string,
+): boolean {
+  const order = canvasBranchOrder(canvasEffectiveGraph.value, kind, nodeKey)
+  if (!order) return false
+  const fromIndex = order.indexOf(edgeKey)
+  const targetIndex = order.indexOf(targetEdgeKey)
+  if (fromIndex < 0 || targetIndex < 0) return false
+  if (fromIndex === targetIndex) return true
+  const orderedEdgeKeys = [...order]
+  const [movedEdgeKey] = orderedEdgeKeys.splice(fromIndex, 1)
+  orderedEdgeKeys.splice(targetIndex, 0, movedEdgeKey)
+  const command: ApprovalCanvasCommand = kind === 'condition'
+    ? { type: 'reorder-condition-branches', conditionNodeKey: nodeKey, orderedEdgeKeys }
+    : { type: 'reorder-parallel-branches', parallelNodeKey: nodeKey, orderedEdgeKeys }
+  const selectionBefore: ApprovalCanvasSelection = kind === 'condition'
+    ? { kind: 'condition-branch', conditionNodeKey: nodeKey, edgeKey }
+    : { kind: 'parallel-branch', parallelNodeKey: nodeKey, edgeKey }
+  return applyCanvasCommand(command, selectionBefore, (graph) => {
+    const latestOrder = canvasBranchOrder(graph, kind, nodeKey)
+    return Boolean(
+      latestOrder
+      && latestOrder.length === order.length
+      && latestOrder.every((candidate, index) => candidate === order[index]),
+    )
+  })
+}
+function onCanvasBranchDrop(
+  event: DragEvent,
+  kind: CanvasBranchKind,
+  nodeKey: string,
+  targetEdgeKey: string,
+): void {
+  const session = canvasBranchDragSession.value
+  const payload = event.dataTransfer?.getData(CANVAS_BRANCH_DRAG_TYPE) ?? ''
+  if (
+    !session
+    || session.kind !== kind
+    || session.nodeKey !== nodeKey
+    || payload !== serializeCanvasDragSession(session)
+    || !applyCanvasBranchReorder(kind, nodeKey, session.edgeKey, targetEdgeKey)
+  ) {
+    rejectCanvasBranchDrop()
+    return
+  }
+  cancelCanvasBranchDrag()
+}
+function finishCanvasBranchDrag(): void {
+  if (!canvasBranchDragSession.value) return
+  rejectCanvasBranchDrop()
+}
+function moveCanvasBranchStep(
+  kind: CanvasBranchKind,
+  nodeKey: string,
+  edgeKey: string,
+  direction: 'up' | 'down',
+): void {
+  const order = canvasBranchOrder(canvasEffectiveGraph.value, kind, nodeKey)
+  const index = order?.indexOf(edgeKey) ?? -1
+  const targetIndex = direction === 'up' ? index - 1 : index + 1
+  if (!order || index < 0 || targetIndex < 0 || targetIndex >= order.length) return
+  if (!applyCanvasBranchReorder(kind, nodeKey, edgeKey, order[targetIndex])) {
+    announceCanvas(INVALID_BRANCH_DROP_MESSAGE)
+  }
 }
 function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
   const step = linearStepForNode(nodeKey)
