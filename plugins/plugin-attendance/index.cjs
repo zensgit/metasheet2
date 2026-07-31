@@ -26884,8 +26884,9 @@ module.exports = {
 	    // Shared background commit implementation. Intentionally mirrors the sync commit logic but:
 	    // - uses a stable batchId (job.batch_id)
 	    // - does NOT consume commit tokens (token is consumed when the job is enqueued)
-		    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress, prepareOnly = false }) => {
+		    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress, prepareOnly = false, integrationId = null }) => {
 	      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+	      const trustedIntegrationId = normalizeUuidString(integrationId)
 	      const commitStartedAtMs = Date.now()
 		      if (cleanIdempotency && !prepareOnly) {
 	        const existing = await loadIdempotentImportBatch(db, orgId, cleanIdempotency)
@@ -27116,6 +27117,10 @@ module.exports = {
 		          async: true,
 		        }
 		        if (cleanIdempotency) batchMeta.idempotencyKey = cleanIdempotency
+		        if (trustedIntegrationId) {
+		          batchMeta.source = 'integration'
+		          batchMeta.integrationId = trustedIntegrationId
+		        }
 		        if (groupSync) {
 		          batchMeta.groupSync = {
 		            autoCreate: groupSync.autoCreate,
@@ -27840,6 +27845,7 @@ module.exports = {
 	          meta.source = {
 	            source: payload.source ?? null,
 	            mappingProfileId: payload.mappingProfileId ?? null,
+	            ...(trustedIntegrationId ? { integrationId: trustedIntegrationId } : {}),
 	          }
 	          meta = attachAttendanceImportMultiPunchMeta(meta, {
 	            valueFor,
@@ -38477,6 +38483,8 @@ module.exports = {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
+	    const importAccess = await resolveAttendanceImportActor(req, res)
+	    if (!importAccess) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -38557,6 +38565,22 @@ module.exports = {
               userMapSourceFields: config.userMapSourceFields,
               mappingProfileId: config.mappingProfileId ?? 'dingtalk_api_columns',
             }
+	        const scopedAccess = await assertAttendanceImportCommitAllowed(req, res, {
+	          orgId,
+	          rows: allRows,
+	          payload,
+	          fallbackUserId: requesterId,
+	          actorAccess: importAccess,
+	        })
+	        if (!scopedAccess) {
+	          await updateIntegrationRun(db, run.id, {
+	            status: 'failed',
+	            message: 'Integration import scope denied',
+	            meta: { imported: 0, skipped: 0, batchId: null, partialErrors },
+	            finishedAt: new Date().toISOString(),
+	          })
+	          return
+	        }
             if (parsed.data.dryRun) {
               const runResult = await updateIntegrationRun(db, run.id, {
                 status: partialErrors.length ? 'partial' : 'success',
@@ -38588,389 +38612,41 @@ module.exports = {
               })
               return
             } else {
-              const importResponse = await (async () => {
+              if (allRows.length > 0) {
                 const parsedImport = importPayloadSchema.safeParse(normalizeImportPayload(payload))
-                if (!parsedImport.success) throw new Error(parsedImport.error.message)
-                const importUserId = payload.userId ?? requesterId
-                const importOrgId = orgId
-                const importRows = Array.isArray(parsedImport.data.rows) ? parsedImport.data.rows : []
-                let ruleSetConfig = null
-                const profile = resolveImportProfileForPayload(parsedImport.data)
-                const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
-                const mapping = parsedImport.data.mapping?.columns
-                  ?? parsedImport.data.mapping?.fields
-                  ?? (profileMapping.length ? profileMapping : undefined)
-                  ?? ruleSetConfig?.mappings?.columns
-                  ?? ruleSetConfig?.mappings?.fields
-                  ?? []
-                const requiredFields = profile?.requiredFields ?? []
-                const punchRequiredFields = profile?.punchRequiredFields ?? []
-                const baseRule = await loadDefaultRule(db, orgId)
-                const override = normalizeRuleOverride(ruleSetConfig?.rule)
-                const ruleOverride = override
-                  ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
-                  : baseRule
-                const settings = await getSettings(db)
-                const statusMap = parsedImport.data.statusMap ?? {}
-                const results = []
-                const skippedRows = []
-                const newBatchId = randomUUID()
-                const batchMeta = {
-                  source: 'integration',
-                  integrationId,
-                  mappingProfileId: parsedImport.data.mappingProfileId ?? null,
+                if (!parsedImport.success) {
+                  throw new HttpError(400, 'VALIDATION_ERROR', parsedImport.error.message)
                 }
-
-                await db.transaction(async (trx) => {
-                  await trx.query(
-                    `INSERT INTO attendance_import_batches
-                     (id, org_id, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb, now(), now())`,
-                    [
-                      newBatchId,
-                      orgId,
-                      requesterId,
-                      payload.source ?? null,
-                      null,
-                      JSON.stringify(mapping),
-                      importRows.length,
-                      'committed',
-                      JSON.stringify(batchMeta),
-                    ]
+                const syncImportPort = attendanceW4SegmentCalculationPort
+                if (!syncImportPort || typeof syncImportPort.commitSyncImportPlan !== 'function') {
+                  throw new HttpError(
+                    503,
+                    'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING',
+                    'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING'
                   )
-
-                  const seenRowKeys = new Set()
-                  for (const row of importRows) {
-                    const workDate = row.workDate
-                    const rowUserId = resolveRowUserId({
-                      row,
-                      fallbackUserId: importUserId,
-                      userMap: parsedImport.data.userMap,
-                      userMapKeyField: parsedImport.data.userMapKeyField,
-                      userMapSourceFields: parsedImport.data.userMapSourceFields,
-                    })
-                    const userProfile = resolveRowUserProfile({
-                      row,
-                      fallbackUserId: importUserId,
-                      userMap: parsedImport.data.userMap,
-                      userMapKeyField: parsedImport.data.userMapKeyField,
-                      userMapSourceFields: parsedImport.data.userMapSourceFields,
-                    })
-                    const importWarnings = []
-                    if (!rowUserId) {
-                      importWarnings.push(buildUnresolvedRowUserWarning({
-                        row,
-                        userMapKeyField: parsedImport.data.userMapKeyField,
-                        userMapSourceFields: parsedImport.data.userMapSourceFields,
-                      }))
-                    }
-                    if (!workDate) importWarnings.push('Missing workDate')
-                    if (requiredFields.length) {
-                      const missingRequired = requiredFields.filter((field) => {
-                        const value = resolveRequiredFieldValue(row, field)
-                        return value === undefined || value === null || value === ''
-                      })
-                      if (missingRequired.length) {
-                        importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
-                      }
-                    }
-                    if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
-                      const missingPunch = punchRequiredFields.filter((field) => {
-                        const value = resolveRequiredFieldValue(row, field)
-                        return value === undefined || value === null || value === ''
-                      })
-                      if (missingPunch.length) {
-                        importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
-                      }
-                    }
-                    if (importWarnings.length) {
-                      const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
-                      await trx.query(
-                        `INSERT INTO attendance_import_items
-                         (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
-                        [
-                          randomUUID(),
-                          newBatchId,
-                          orgId,
-                          rowUserId ?? null,
-                          workDate ?? null,
-                          null,
-                          JSON.stringify(snapshot),
-                        ]
-                      )
-                      skippedRows.push({ userId: rowUserId ?? null, workDate: workDate ?? null, warnings: importWarnings })
-                      continue
-                    }
-
-                    const dedupKey = `${rowUserId}:${workDate}`
-                    if (seenRowKeys.has(dedupKey)) {
-                      const warnings = ['Duplicate row in payload (same userId + workDate)']
-                      const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
-                      await trx.query(
-                        `INSERT INTO attendance_import_items
-                         (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
-                        [
-                          randomUUID(),
-                          newBatchId,
-                          orgId,
-                          rowUserId,
-                          workDate,
-                          null,
-                          JSON.stringify(snapshot),
-                        ]
-                      )
-                      skippedRows.push({ userId: rowUserId, workDate, warnings })
-                      continue
-                    }
-                    seenRowKeys.add(dedupKey)
-                    const context = await resolveWorkContext({
-                      db: trx,
-                      orgId,
-                      userId: rowUserId,
-                      workDate,
-                      defaultRule: ruleOverride,
-                    })
-                    const mapped = applyFieldMappings(row.fields ?? {}, mapping)
-                    const valueFor = (key) => {
-                      if (mapped[key]?.value !== undefined) return mapped[key].value
-                      if (row.fields?.[key] !== undefined) return row.fields[key]
-                      const profileValue = resolveProfileValue(userProfile, key)
-                      if (profileValue !== undefined) return profileValue
-                      return undefined
-                    }
-                    const dataTypeFor = (key) => mapped[key]?.dataType
-                    const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
-
-                    const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
-                    const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
-                    augmentFieldValuesWithDates(fieldValues, workDate)
-                    const holidayMeta = resolveHolidayMeta(context.holiday)
-                    if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
-                    if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
-                    fieldValues.holiday_first_day = holidayMeta.isFirstDay
-
-                    const baseFacts = {
-                      userId: rowUserId,
-                      orgId,
-                      workDate,
-                      shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                      isHoliday: Boolean(context.holiday),
-                      isWorkingDay: context.isWorkingDay,
-                    }
-                    const baseUserGroups = resolveUserGroups(ruleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
-                    const shiftOverride = resolveShiftOverrideFromMappings(
-                      ruleSetConfig?.policies?.shiftMappings,
-                      baseFacts,
-                      fieldValues,
-                      baseUserGroups
-                    )
-
-                    const shiftRange = resolveShiftTimeRange(shiftNameRaw)
-                    const baseRuleForMetrics = shiftRange ? { ...context.rule, ...shiftRange } : context.rule
-                    const ruleForMetrics = shiftRange
-                      ? baseRuleForMetrics
-                      : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
-
-                    const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
-                      firstInValue: valueFor('firstInAt'),
-                      lastOutValue: valueFor('lastOutAt'),
-                      workDate,
-                      rule: ruleForMetrics,
-                    })
-                    const importAttribution = await resolveImportRowWorkDateAttribution({
-                      db: trx,
-                      orgId,
-                      userId: rowUserId,
-                      workDate,
-                      firstInAt,
-                      lastOutAt,
-                      timezone: ruleForMetrics.timezone,
-                      explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
-                    })
-                    const statusRaw = valueFor('status')
-                    const statusOverride = statusRaw != null
-                      ? resolveStatusOverride(statusRaw, statusMap)
-                      : null
-
-                    const workMinutes = parseMinutesValue(
-                      valueFor('workMinutes') ?? valueFor('workHours'),
-                      dataTypeFor('workMinutes') ?? dataTypeFor('workHours')
-                    )
-                    const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
-                    const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
-                    const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
-                    const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
-
-                    const computed = computeMetrics({
-                      rule: ruleForMetrics,
-                      firstInAt,
-                      lastOutAt,
-                      workDate,
-                      isWorkingDay: context.isWorkingDay,
-                      leaveMinutes,
-                      overtimeMinutes,
-                    })
-                    const initialMetrics = {
-                      workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
-                      lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
-                      earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
-                      status: statusOverride ?? computed.status,
-                    }
-
-                    const approvalSummary = valueFor('approvalSummary')
-                      ?? valueFor('attendance_approve')
-                      ?? valueFor('attendanceApprove')
-
-                    const policyBaseMetrics = {
-                      ...initialMetrics,
-                      leaveMinutes: leaveMinutes ?? 0,
-                      overtimeMinutes: overtimeMinutes ?? 0,
-                    }
-                    const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
-                    const holidayPolicyResult = applyHolidayPolicy({
-                      settings,
-                      holiday: context.holiday,
-                      holidayMeta,
-                      metrics: policyBaseMetrics,
-                      approvalSummary,
-                      policyContext: holidayPolicyContext,
-                    })
-                    const policyResult = applyAttendancePolicies({
-                      policies: ruleSetConfig?.policies,
-                      facts: {
-                        userId: rowUserId,
-                        orgId,
-                        workDate,
-                      shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                        isHoliday: Boolean(context.holiday),
-                        isWorkingDay: context.isWorkingDay,
-                        holidayName: holidayMeta.name,
-                        holidayDayIndex: holidayMeta.dayIndex,
-                        holidayFirstDay: holidayMeta.isFirstDay,
-                      },
-                      fieldValues,
-                      metrics: holidayPolicyResult.metrics,
-                      options: { skipRules: resolvePolicySkipRules(settings) },
-                    })
-                    const effective = policyResult.metrics
-                    const baseMetrics = {
-                      ...effective,
-                      leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : leaveMinutes,
-                      overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : overtimeMinutes,
-                    }
-                    const finalMetrics = baseMetrics
-                    const effectiveLeaveMinutes = Number.isFinite(finalMetrics.leaveMinutes)
-                      ? finalMetrics.leaveMinutes
-                      : leaveMinutes
-                    const effectiveOvertimeMinutes = Number.isFinite(finalMetrics.overtimeMinutes)
-                      ? finalMetrics.overtimeMinutes
-                      : overtimeMinutes
-
-                    const policyWarnings = [...holidayPolicyResult.warnings, ...policyResult.warnings]
-                    let meta = null
-                    if (policyWarnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
-                      meta = {
-                        policy: {
-                          warnings: policyWarnings,
-                          appliedRules: policyResult.appliedRules,
-                          userGroups: policyResult.userGroups,
-                        },
-                      }
-                    }
-                    if (profileSnapshot) {
-                      meta = meta ?? {}
-                      meta.profile = profileSnapshot
-                    }
-                    meta = meta ?? {}
-                    meta.metrics = {
-                      leaveMinutes: effectiveLeaveMinutes,
-                      overtimeMinutes: effectiveOvertimeMinutes,
-                    }
-                    meta.source = {
-                      source: payload.source ?? null,
-                      mappingProfileId: payload.mappingProfileId ?? null,
-                      integrationId,
-                    }
-                    meta = attachAttendanceImportMultiPunchMeta(meta, {
-                      valueFor,
-                      workDate,
-                      rule: ruleForMetrics,
-                      clearMissing: (parsedImport.data.mode ?? 'override') === 'override',
-                    })
-                    if (importAttribution.frozenAttribution) {
-                      meta = meta ?? {}
-                      meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
-                    }
-
-                    const record = await upsertAttendanceRecord({
-                      userId: rowUserId,
-                      orgId,
-                      workDate,
-                      timezone: context.rule.timezone,
-                      rule: context.rule,
-                      updateFirstInAt: firstInAt,
-                      updateLastOutAt: lastOutAt,
-                      mode: parsedImport.data.mode ?? 'override',
-                      statusOverride,
-                      overrideMetrics: {
-                        workMinutes: finalMetrics.workMinutes,
-                        lateMinutes: finalMetrics.lateMinutes,
-                        earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-                        status: finalMetrics.status,
-                      },
-                      isWorkday: context.isWorkingDay,
-                      leaveMinutes: effectiveLeaveMinutes,
-                      overtimeMinutes: effectiveOvertimeMinutes,
-                      meta: meta ?? undefined,
-                      sourceBatchId: newBatchId,
-                      client: trx,
-                    })
-
-                    const snapshot = {
-                      metrics: {
-                        workMinutes: finalMetrics.workMinutes,
-                        lateMinutes: finalMetrics.lateMinutes,
-                        earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-                        leaveMinutes: effectiveLeaveMinutes,
-                        overtimeMinutes: effectiveOvertimeMinutes,
-                        status: finalMetrics.status,
-                      },
-                      policy: meta?.policy ?? null,
-                    }
-
-                    await trx.query(
-                      `INSERT INTO attendance_import_items
-                       (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
-                      [
-                        randomUUID(),
-                        newBatchId,
-                        orgId,
-                        rowUserId,
-                        workDate,
-                        record.id,
-                        JSON.stringify(snapshot),
-                      ]
-                    )
-
-                    results.push({ id: record.id, userId: rowUserId, workDate })
-                  }
-
-                  if (skippedRows.length) {
-                    await trx.query(
-                      'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-                      [newBatchId, orgId, JSON.stringify({ ...batchMeta, skippedCount: skippedRows.length, skippedRows: skippedRows.slice(0, 50) })]
-                    )
-                  }
+                }
+                const newBatchId = randomUUID()
+                const preparedPlan = await commitAttendanceImportPayload({
+                  payload: parsedImport.data,
+                  orgId,
+                  requesterId,
+                  batchId: newBatchId,
+                  idempotencyKey: null,
+                  prepareOnly: true,
+                  integrationId,
                 })
-
-                return { results, skipped: skippedRows, batchId: newBatchId }
-              })()
-              imported = importResponse.results.length
-              skipped = importResponse.skipped
-              batchId = importResponse.batchId
+                const commitResult = await syncImportPort.commitSyncImportPlan({
+                  ...preparedPlan,
+                  actorPosture: importAccess.fullAdmin ? 'platform_admin' : 'attendance_admin',
+                  tokenSubjectUserId: requesterId,
+                  itemReturnPolicy: { returnItems: true, itemsLimit: null },
+                  csvWarnings: preparedPlan.csvWarnings ?? [],
+                  groupWarnings: preparedPlan.groupWarnings ?? [],
+                })
+                imported = commitResult.imported
+                skipped = commitResult.skipped
+                batchId = commitResult.batchId
+              }
             }
           }
 
@@ -39010,12 +38686,6 @@ module.exports = {
           }
 	          if (run?.id) {
             try {
-              if (!parsed.data.dryRun) {
-                await db.query(
-                  'UPDATE attendance_integrations SET last_sync_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2',
-                  [integrationId, orgId]
-                )
-              }
               await updateIntegrationRun(db, run.id, {
                 status: 'failed',
                 message: error?.message || 'Integration sync failed',
@@ -39036,6 +38706,25 @@ module.exports = {
 	          }
 	          if (error instanceof HttpError) {
 	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          const errorCode = typeof error?.code === 'string' && error.code
+	            ? error.code
+	            : (typeof error?.message === 'string' ? error.message : '')
+	          if (errorCode === 'ATTENDANCE_OPERATION_IN_PROGRESS') {
+	            res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'ATTENDANCE_OPERATION_CONFLICT' || errorCode === 'ATTENDANCE_OPERATION_BATCH_CONFLICT') {
+	            res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'SEGMENT_CALCULATION_SUSPENDED') {
+	            res.status(503).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'W4C3A_IMPORT_FREEZE_INVALID') {
+	            res.status(422).json({ ok: false, error: { code: errorCode, message: errorCode } })
 	            return
 	          }
 	          logger.error('Attendance integration sync failed', error)

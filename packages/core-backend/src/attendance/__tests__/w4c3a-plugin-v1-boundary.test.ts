@@ -206,6 +206,25 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(route).not.toContain('resolveWorkContext({')
   })
 
+  it('cuts P10 integration sync over after dry-run and scoped authorization', () => {
+    const routeStart = source.indexOf("'/api/attendance/integrations/:id/sync',")
+    const routeEnd = source.indexOf("'/api/attendance/import/batches',", routeStart)
+    const route = source.slice(routeStart, routeEnd)
+    const scopedAccess = route.indexOf('assertAttendanceImportCommitAllowed')
+    const dryRun = route.indexOf('if (parsed.data.dryRun)')
+    const prepare = route.indexOf('prepareOnly: true')
+    const apply = route.indexOf('await syncImportPort.commitSyncImportPlan')
+    expect(routeStart).toBeGreaterThan(-1)
+    expect(routeEnd).toBeGreaterThan(routeStart)
+    expect(scopedAccess).toBeGreaterThan(-1)
+    expect(dryRun).toBeGreaterThan(scopedAccess)
+    expect(prepare).toBeGreaterThan(dryRun)
+    expect(apply).toBeGreaterThan(prepare)
+    expect(route).not.toContain('await db.transaction')
+    expect(route).not.toContain('upsertAttendanceRecord')
+    expect(route).not.toContain('resolveWorkContext({')
+  })
+
   it('keeps preparation-only calculation free of compatibility DML', () => {
     const calculator = source.slice(
       source.indexOf('const commitAttendanceImportPayload = async'),

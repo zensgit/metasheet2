@@ -500,6 +500,35 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     expect(await businessCounts(fixture.orgId)).toEqual(before)
   })
 
+  it('P10: legacy integration sync preserves its public response and compatibility effects', async () => {
+    const fixture = await seedActorAndRollout('legacy')
+    const integrationId = await createIntegration(fixture.orgId, fixture.actorId, 'legacy')
+    const response = await requestJson(
+      `/api/attendance/integrations/${integrationId}/sync`,
+      fixture.token,
+      { orgId: fixture.orgId, from: workDate, to: workDate },
+    )
+    expect(response.status, response.raw).toBe(200)
+    expect(response.body?.ok).toBe(true)
+    expect(response.body?.data).toMatchObject({
+      integrationId,
+      imported: 1,
+      skipped: [],
+      batchId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      partialErrors: [],
+      run: { status: 'success', message: 'Sync completed' },
+    })
+    expect(await canonicalOperationCounts(fixture.orgId)).toEqual({ batches: 0, operations: 0 })
+    const persisted = await businessCounts(fixture.orgId)
+    expect(persisted.importBatches).toBe(1)
+    expect(persisted.importItems).toBe(1)
+    const record = await pool.query<{ work_minutes: number }>(
+      'SELECT work_minutes FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date',
+      [fixture.orgId, fixture.actorId, workDate],
+    )
+    expect(record.rows).toEqual([{ work_minutes: 17 }])
+  })
+
   it('P10: shadow integration sync apply seals the same canonical prepared-operation boundary', async () => {
     const sync = await seedActorAndRollout('shadow')
     const integrationId = await createIntegration(sync.orgId, sync.actorId, 'canonical')
@@ -512,7 +541,7 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     expect(await canonicalOperationCounts(sync.orgId)).toEqual({ batches: 1, operations: 1 })
   })
 
-  it('P10: exact imported metric presence that disagrees with the frozen canonical result returns import_metric_conflict before import/result DML', async () => {
+  it('P10: an exact imported metric conflict preserves compatibility data but cannot project a canonical result', async () => {
     const fixture = await seedActorAndRollout('shadow')
     const integrationId = await createIntegration(fixture.orgId, fixture.actorId, 'metric-conflict')
     const before = await businessCounts(fixture.orgId)
@@ -523,9 +552,52 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       { orgId: fixture.orgId, from: workDate, to: workDate },
     )
 
-    expect(response.status, response.raw).toBe(409)
-    expect((response.body?.error as { code?: string } | undefined)?.code).toBe('import_metric_conflict')
-    expect(await businessCounts(fixture.orgId)).toEqual(before)
+    expect(response.status, response.raw).toBe(200)
+    const after = await businessCounts(fixture.orgId)
+    expect(after).toEqual({
+      records: before.records + 1,
+      importBatches: before.importBatches + 1,
+      importItems: before.importItems + 1,
+      operationBatches: before.operationBatches + 1,
+      operations: before.operations + 1,
+      calculations: before.calculations + 1,
+      outbox: before.outbox,
+    })
+    const review = await pool.query<{
+      work_minutes: number
+      imported_work: { present: boolean; value: number }
+      projection_owner: string
+      current_calculation_id: string | null
+      outcome: string
+      outcome_reason_code: string
+      projection_effect: string
+      segments: number
+    }>(
+      `SELECT r.work_minutes,
+              o.normalized_business_input_snapshot -> 'metrics' -> 'workMinutes' AS imported_work,
+              r.projection_owner,
+              r.current_calculation_id,
+              c.outcome,
+              c.outcome_reason_code,
+              c.projection_effect,
+              (SELECT count(*)::int FROM attendance_record_segments s
+                WHERE s.calculation_id = c.id) AS segments
+         FROM attendance_records r
+         JOIN attendance_result_operations o ON o.org_id = r.org_id
+         JOIN attendance_record_calculations c ON c.attendance_record_id = r.id
+        WHERE r.org_id = $1`,
+      [fixture.orgId],
+    )
+    expect(review.rows).toEqual([{
+      work_minutes: 17,
+      imported_work: { present: true, value: 17 },
+      projection_owner: 'legacy_untracked',
+      current_calculation_id: null,
+      outcome: 'review_required',
+      outcome_reason_code: 'import_metric_conflict',
+      projection_effect: 'none',
+      segments: 0,
+    }])
   })
 
   it('P24: dryRun appends one integration audit attempt only, preserving every attendance business table and last_sync_at', async () => {
