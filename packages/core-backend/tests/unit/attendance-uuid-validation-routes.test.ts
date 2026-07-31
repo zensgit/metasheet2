@@ -1,10 +1,38 @@
 import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  buildAttendanceImportAttributionFreezeV1,
+  buildAttendanceImportPolicySourceProofV1,
+} from '../../src/attendance/w4c3a-import-proof'
 
 const require = createRequire(import.meta.url)
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
 
 type RouteHandler = (req: any, res: any, next: any) => Promise<void>
+type CommitSyncImportPlan = (input: unknown) => Promise<unknown>
+
+function syncImportResult(batchId: string, itemId: string) {
+  return {
+    batchId,
+    imported: 1,
+    processedRows: 1,
+    failedRows: 0,
+    elapsedMs: 1,
+    engine: 'row',
+    recordUpsertStrategy: 'row',
+    items: [{
+      id: itemId,
+      userId: 'worker-1',
+      workDate: '2026-06-10',
+      engine: null,
+    }],
+    itemsTruncated: false,
+    skipped: [],
+    csvWarnings: [],
+    groupWarnings: [],
+    meta: {},
+  }
+}
 
 const originalRbacBypass = process.env.RBAC_BYPASS
 const originalAsyncEnabled = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED
@@ -45,7 +73,10 @@ function createResponse() {
   }
 }
 
-async function createHarness(rbacBypass = 'true') {
+async function createHarness(
+  rbacBypass = 'true',
+  commitSyncImportPlan?: CommitSyncImportPlan,
+) {
   process.env.RBAC_BYPASS = rbacBypass
   process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED = 'false'
 
@@ -73,6 +104,15 @@ async function createHarness(rbacBypass = 'true') {
         },
       },
     },
+    services: commitSyncImportPlan
+      ? {
+          attendanceW4SegmentCalculation: {
+            commitSyncImportPlan,
+            buildImportAttributionFreeze: buildAttendanceImportAttributionFreezeV1,
+            buildImportPolicySourceProof: buildAttendanceImportPolicySourceProofV1,
+          },
+        }
+      : undefined,
     logger,
   })
 
@@ -1460,7 +1500,11 @@ describe('attendance UUID route validation', () => {
   })
 
   it('lets scoped non-admin schedulers commit import rows inside their import scope', async () => {
-    const { db, routes } = await createHarness('false')
+    const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+      '00000000-0000-4000-8000-000000000411',
+      '00000000-0000-4000-8000-000000000401',
+    ))
+    const { db, routes } = await createHarness('false', commitSyncImportPlan)
 
     db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
       const sql = typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
@@ -1533,11 +1577,17 @@ describe('attendance UUID route validation', () => {
       },
     })
     expect(db.transaction).toHaveBeenCalledTimes(1)
-    expect(db.query).toHaveBeenCalledWith(
+    expect(db.query).not.toHaveBeenCalledWith(
       'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE',
     )
+    expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: 'default',
+      actorId: 'scheduler-1',
+      actorPosture: 'attendance_admin',
+      tokenSubjectUserId: 'scheduler-1',
+    }))
     expect(db.query.mock.calls.map(([query]) => typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query))
-      .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(true)
+      .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(false)
   })
 
   it('rejects scoped import commit outside scheduler scope before token consumption or writes', async () => {
@@ -1717,7 +1767,11 @@ describe('attendance UUID route validation', () => {
   })
 
   it('lets scoped non-admin schedulers run legacy import rows inside their import scope', async () => {
-    const { db, routes } = await createHarness('false')
+    const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+      '00000000-0000-4000-8000-000000000412',
+      '00000000-0000-4000-8000-000000000402',
+    ))
+    const { db, routes } = await createHarness('false', commitSyncImportPlan)
 
     db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
       const sql = typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
@@ -1788,8 +1842,14 @@ describe('attendance UUID route validation', () => {
       },
     })
     expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: 'default',
+      actorId: 'scheduler-1',
+      actorPosture: 'attendance_admin',
+      tokenSubjectUserId: 'scheduler-1',
+    }))
     expect(db.query.mock.calls.map(([query]) => typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query))
-      .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(true)
+      .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(false)
   })
 
   it('rejects scoped legacy import outside scheduler scope before rule evaluation or writes', async () => {
