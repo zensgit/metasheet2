@@ -19345,6 +19345,14 @@ attendanceIntegrationDescribe(
         const copy = structuredClone(value)
         const compareText = (left: unknown, right: unknown) =>
           String(left ?? '').localeCompare(String(right ?? ''))
+        const normalizeDatabaseInstant = (value: unknown, key: string) => {
+          if (value == null) return value
+          const timestamp = new Date(String(value).replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'))
+          if (Number.isNaN(timestamp.getTime())) {
+            throw new Error(`Invalid ${key} timestamp in legacy-import-v1 golden: ${String(value)}`)
+          }
+          return timestamp.toISOString()
+        }
         const sortRace = (entries: any[]) => entries.sort((left, right) => {
           const leftReplay = left?.body?.data?.idempotent === true ? 1 : 0
           const rightReplay = right?.body?.data?.idempotent === true ? 1 : 0
@@ -19372,6 +19380,10 @@ attendanceIntegrationDescribe(
           || compareText(left.work_date, right.work_date)
           || compareText(left.user_id, right.user_id)
           || compareText(left.id, right.id))
+        for (const record of copy.database.records) {
+          record.first_in_at = normalizeDatabaseInstant(record.first_in_at, 'first_in_at')
+          record.last_out_at = normalizeDatabaseInstant(record.last_out_at, 'last_out_at')
+        }
         copy.database.records.sort((left: any, right: any) =>
           compareText(left.user_id, right.user_id)
           || compareText(left.work_date, right.work_date)
