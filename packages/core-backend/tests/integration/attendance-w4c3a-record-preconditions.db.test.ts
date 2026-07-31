@@ -10,8 +10,15 @@ import {
   type LegacyImportRecordWritePlanV1,
 } from '../../src/attendance/w4c3a-legacy-execution-plan'
 import { lockAndRecheckAttendanceLegacyRecordPreconditionsV1 } from '../../src/attendance/w4c3a-legacy-plan-preconditions'
+import { applyAttendanceLegacyRecordEffectsV1 } from '../../src/attendance/w4c3a-legacy-plan-record-effects'
+import { acquireAttendanceLegacyPlanClass11V1 } from '../../src/attendance/w4c3a-legacy-plan-processor'
 import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
-import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
+import {
+  createVerifiedAttendanceCalculationTargetIdentityV1,
+  createVerifiedAttendanceOrgIdentityV1,
+  resolveSegmentCalculationPosture,
+  type AttendanceW4TransactionClientV1,
+} from '../../src/attendance/w4c0-identity'
 
 const dbUrl =
   process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -32,6 +39,22 @@ function plan(
 ): VerifiedAttendanceLegacyPlanV1 {
   return {
     manifest: {},
+    chunks: [],
+    items: [],
+    recordWrites,
+    groupEffects: [],
+  } as unknown as VerifiedAttendanceLegacyPlanV1
+}
+
+function branchPlan(
+  recordWrites: readonly LegacyImportRecordWritePlanV1[],
+  operationalBranch: 'strict_targeted' | 'operational_only_batch_limit',
+): VerifiedAttendanceLegacyPlanV1 {
+  return {
+    manifest: {
+      orgId: recordWrites[0]?.orgId,
+      operationalBranch,
+    },
     chunks: [],
     items: [],
     recordWrites,
@@ -92,9 +115,11 @@ async function createBase(pool: Pool): Promise<void> {
       early_leave_minutes integer NOT NULL DEFAULT 0,
       status varchar(64) NOT NULL DEFAULT 'normal',
       is_workday boolean,
+      timezone text,
       meta jsonb,
       source_batch_id uuid,
       org_id text NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT now(),
       UNIQUE (org_id, user_id, work_date)
     )`)
   await pool.query(`
@@ -155,9 +180,9 @@ async function waitUntilLockBlocked(pool: Pool, pid: number): Promise<void> {
 
 describeIfDatabase('W4C-3a record precondition locks (real PostgreSQL)', () => {
   const scratchName = `ms2_w4c3a_pre_${run}`
-  const orgId = `w4c3a-pre-org-${run}`
-  const existingUserId = `w4c3a-pre-existing-${run}`
-  const missingUserId = `w4c3a-pre-missing-${run}`
+  const orgId = crypto.randomUUID()
+  const existingUserId = crypto.randomUUID()
+  const missingUserId = crypto.randomUUID()
   const existingWorkDate = '2026-07-30'
   const missingWorkDate = '2026-07-31'
   const existingRecordId = crypto.randomUUID()
@@ -429,4 +454,177 @@ describeIfDatabase('W4C-3a record precondition locks (real PostgreSQL)', () => {
       writer.release()
     }
   })
+
+  it('serializes two operational-bulk workers on one org sentinel', async () => {
+    const first = await pool.connect()
+    const second = await pool.connect()
+    const bulkPlan = branchPlan(
+      [existingWrite],
+      'operational_only_batch_limit',
+    )
+    try {
+      await first.query('BEGIN')
+      await acquireAttendanceLegacyPlanClass11V1(trx(first), bulkPlan, [])
+
+      await second.query('BEGIN')
+      const secondPid = Number(
+        (await second.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+      )
+      const secondAcquire = acquireAttendanceLegacyPlanClass11V1(
+        trx(second),
+        bulkPlan,
+        [],
+      )
+      void secondAcquire.catch(() => undefined)
+      await waitUntilLockBlocked(pool, secondPid)
+
+      const held = await pool.query(
+        `SELECT granted, count(*)::int AS n
+           FROM pg_locks
+          WHERE locktype = 'advisory'
+            AND pid IN ($1, $2)
+          GROUP BY granted
+          ORDER BY granted`,
+        [
+          Number((await first.query('SELECT pg_backend_pid() AS pid')).rows[0].pid),
+          secondPid,
+        ],
+      )
+      expect(held.rows).toEqual([
+        { granted: false, n: 1 },
+        { granted: true, n: 1 },
+      ])
+
+      await first.query('COMMIT')
+      await expect(secondAcquire).resolves.toBeUndefined()
+      await second.query('COMMIT')
+    } finally {
+      await first.query('ROLLBACK').catch(() => undefined)
+      await second.query('ROLLBACK').catch(() => undefined)
+      first.release()
+      second.release()
+    }
+  })
+
+  it.each([
+    ['operational-bulk first', 'operational_only_batch_limit', 'strict_targeted'],
+    ['strict-targeted first', 'strict_targeted', 'operational_only_batch_limit'],
+  ] as const)(
+    'serializes one shared preimage across branches: %s',
+    async (_label, firstBranch, secondBranch) => {
+      await pool.query(
+        `UPDATE attendance_records
+            SET work_minutes = 480,
+                first_in_at = '2026-07-30T01:00:00.000Z',
+                last_out_at = '2026-07-30T09:00:00.000Z',
+                late_minutes = 0,
+                early_leave_minutes = 0,
+                status = 'normal',
+                is_workday = true,
+                meta = '{"source":"import"}'::jsonb,
+                source_batch_id = $4::uuid
+          WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date`,
+        [orgId, existingUserId, existingWorkDate, sourceBatchId],
+      )
+      const current = await pool.query(
+        `SELECT revision::int AS revision
+           FROM attendance_record_target_revisions
+          WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date`,
+        [orgId, existingUserId, existingWorkDate],
+      )
+      const currentWrite: LegacyImportRecordWritePlanV1 = {
+        ...existingWrite,
+        targetRevision: Number(current.rows[0].revision),
+        workMinutes: 481,
+        lateMinutes: 0,
+        earlyLeaveMinutes: 0,
+        status: 'normal',
+        isWorkday: true,
+      }
+      const firstPlan = branchPlan([currentWrite], firstBranch)
+      const secondPlan = branchPlan([currentWrite], secondBranch)
+      const posture = await resolveSegmentCalculationPosture(
+        trx(pool as unknown as PoolClient),
+        orgId,
+      )
+      const verifiedOrg = createVerifiedAttendanceOrgIdentityV1({
+        orgKey: orgId,
+        posture,
+      })
+      const target = createVerifiedAttendanceCalculationTargetIdentityV1({
+        org: verifiedOrg,
+        userId: existingUserId,
+        workDate: existingWorkDate,
+      })
+      const identities = [target]
+      const class11Identities = (
+        branch: typeof firstBranch,
+      ) => (branch === 'strict_targeted' ? identities : [])
+
+      const first = await pool.connect()
+      const second = await pool.connect()
+      try {
+        await first.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        await acquireAttendanceLegacyPlanClass11V1(
+          trx(first),
+          firstPlan,
+          class11Identities(firstBranch),
+        )
+        await expect(
+          lockAndRecheckAttendanceLegacyRecordPreconditionsV1(
+            trx(first),
+            firstPlan,
+          ),
+        ).resolves.toBe(true)
+
+        await second.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        await acquireAttendanceLegacyPlanClass11V1(
+          trx(second),
+          secondPlan,
+          class11Identities(secondBranch),
+        )
+        const secondPid = Number(
+          (await second.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+        )
+        const secondRecheck =
+          lockAndRecheckAttendanceLegacyRecordPreconditionsV1(
+            trx(second),
+            secondPlan,
+          )
+        void secondRecheck.catch(() => undefined)
+        await waitUntilLockBlocked(pool, secondPid)
+
+        await applyAttendanceLegacyRecordEffectsV1(trx(first), firstPlan)
+        await first.query('COMMIT')
+        await expect(secondRecheck).rejects.toMatchObject({ code: '40001' })
+        await second.query('ROLLBACK')
+
+        const fresh = await pool.connect()
+        try {
+          await fresh.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+          await acquireAttendanceLegacyPlanClass11V1(
+            trx(fresh),
+            secondPlan,
+            class11Identities(secondBranch),
+          )
+          await expect(
+            lockAndRecheckAttendanceLegacyRecordPreconditionsV1(
+              trx(fresh),
+              secondPlan,
+            ),
+          ).resolves.toBe(false)
+          await fresh.query('ROLLBACK')
+        } finally {
+          await fresh.query('ROLLBACK').catch(() => undefined)
+          fresh.release()
+        }
+      } finally {
+        await first.query('ROLLBACK').catch(() => undefined)
+        await second.query('ROLLBACK').catch(() => undefined)
+        first.release()
+        second.release()
+      }
+    },
+    30000,
+  )
 })

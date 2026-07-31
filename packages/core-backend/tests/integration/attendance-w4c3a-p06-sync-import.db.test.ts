@@ -564,6 +564,83 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
     expect(ops.rows).toHaveLength(0)
   })
 
+  it('keeps values, unnest, and staging business effects congruent while preserving the frozen strategy', async () => {
+    const projections: Array<Record<string, unknown>> = []
+    for (const strategy of ['values', 'unnest', 'staging'] as const) {
+      const orgId = crypto.randomUUID()
+      const actorId = `admin-p06-${strategy}-${run}`
+      const userId = crypto.randomUUID()
+      const batchId = crypto.randomUUID()
+      const workDate = '2026-07-31'
+      await pool.query(
+        `INSERT INTO users (id, is_active, activation_status, permissions)
+         VALUES ($1, true, 'activated', '["attendance:admin"]'::jsonb),
+                ($2, true, 'activated', '[]'::jsonb)`,
+        [actorId, userId],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         VALUES ($1, $3, true), ($2, $3, true)`,
+        [actorId, userId, orgId],
+      )
+
+      const response = await syncHost().commitSyncImportPlanV1(
+        hostInput({
+          orgId,
+          actorId,
+          batchId,
+          userId,
+          workDate,
+          strategy,
+        }),
+      )
+      expect(response.recordUpsertStrategy).toBe(strategy)
+
+      const persisted = await pool.query(
+        `SELECT b.status AS batch_status,
+                b.row_count,
+                b.meta->>'recordUpsertStrategy' AS record_strategy,
+                b.meta->>'itemsInsertStrategy' AS item_strategy,
+                i.work_date::text AS item_work_date,
+                (i.record_id IS NOT NULL) AS item_has_record,
+                r.work_date::text AS record_work_date,
+                r.timezone,
+                r.first_in_at,
+                r.last_out_at,
+                r.work_minutes,
+                r.late_minutes,
+                r.early_leave_minutes,
+                r.status AS record_status,
+                r.is_workday,
+                r.meta AS record_meta,
+                (r.source_batch_id = b.id) AS source_batch_matches
+           FROM attendance_import_batches b
+           JOIN attendance_import_items i
+             ON i.org_id = b.org_id AND i.batch_id = b.id
+           JOIN attendance_records r
+             ON r.org_id = b.org_id
+            AND r.user_id = i.user_id
+            AND r.work_date = i.work_date
+          WHERE b.org_id = $1 AND b.id = $2::uuid`,
+        [orgId, batchId],
+      )
+      expect(persisted.rows).toHaveLength(1)
+      expect(persisted.rows[0]).toMatchObject({
+        record_strategy: strategy,
+        item_strategy: strategy,
+      })
+      const {
+        record_strategy: _recordStrategy,
+        item_strategy: _itemStrategy,
+        ...businessProjection
+      } = persisted.rows[0] as Record<string, unknown>
+      projections.push(businessProjection)
+    }
+
+    expect(projections[1]).toEqual(projections[0])
+    expect(projections[2]).toEqual(projections[0])
+  })
+
   it('rejects an inactive actor membership before sync import business DML', async () => {
     const orgId = crypto.randomUUID()
     const actorId = `inactive-admin-p06-${run}`

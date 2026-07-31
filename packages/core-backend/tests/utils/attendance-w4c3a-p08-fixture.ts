@@ -455,6 +455,168 @@ export async function enqueueP08FullPlanV1(
   return result.jobId
 }
 
+function quoteIdentifier(value: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/.test(value)) {
+    throw new Error(`unsafe SQL identifier in P08 fixture: ${value}`)
+  }
+  return `"${value}"`
+}
+
+async function insertExactRow(
+  client: PoolClient,
+  table: string,
+  row: Record<string, unknown>,
+): Promise<void> {
+  const jsonColumns: Record<string, ReadonlySet<string>> = {
+    attendance_import_jobs: new Set(['payload', 'w4_identity_proof_vector']),
+    attendance_import_legacy_execution_plans: new Set(['manifest']),
+    attendance_import_legacy_execution_plan_chunks: new Set(['chunk']),
+  }
+  const columns = Object.keys(row)
+  const columnSql = columns.map(quoteIdentifier).join(', ')
+  const placeholders = columns.map((_, index) => `$${index + 1}`).join(', ')
+  await client.query(
+    `INSERT INTO ${quoteIdentifier(table)} (${columnSql}) VALUES (${placeholders})`,
+    columns.map((column) =>
+      jsonColumns[table]?.has(column) ? JSON.stringify(row[column]) : row[column],
+    ),
+  )
+}
+
+/**
+ * Replicate one already accepted immutable plan into another isolated
+ * candidate database. This is test setup, not a second plan builder: every
+ * server-minted identity and every persisted plan byte is copied literally.
+ */
+export async function cloneP08PersistedPlanV1(
+  source: Pool,
+  target: Pool,
+  jobId: string,
+): Promise<void> {
+  const job = await source.query<Record<string, unknown>>(
+    'SELECT * FROM attendance_import_jobs WHERE id = $1::uuid',
+    [jobId],
+  )
+  const manifest = await source.query<Record<string, unknown>>(
+    'SELECT * FROM attendance_import_legacy_execution_plans WHERE job_id = $1::uuid',
+    [jobId],
+  )
+  const chunks = await source.query<Record<string, unknown>>(
+    `SELECT * FROM attendance_import_legacy_execution_plan_chunks
+      WHERE job_id = $1::uuid ORDER BY chunk_index`,
+    [jobId],
+  )
+  const recordRevisions = await source.query<Record<string, unknown>>(
+    `SELECT revision.*
+       FROM attendance_record_target_revisions revision
+       JOIN attendance_import_jobs job ON job.org_id = revision.org_id
+      WHERE job.id = $1::uuid
+      ORDER BY revision.user_id, revision.work_date`,
+    [jobId],
+  )
+  const groupRevisions = await source.query<Record<string, unknown>>(
+    `SELECT revision.*
+       FROM attendance_group_effect_revisions revision
+       JOIN attendance_import_jobs job ON job.org_id = revision.org_id
+      WHERE job.id = $1::uuid`,
+    [jobId],
+  )
+  if (job.rows.length !== 1 || manifest.rows.length !== 1 || chunks.rows.length < 1) {
+    throw new Error(`P08 persisted plan incomplete for clone: ${jobId}`)
+  }
+
+  const client = await target.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SET CONSTRAINTS ALL DEFERRED')
+    await client.query(
+      `SELECT set_config('attendance.w4c3a_enqueue_job_id', $1::uuid::text, true)`,
+      [jobId],
+    )
+    for (const revision of recordRevisions.rows) {
+      await insertExactRow(
+        client,
+        'attendance_record_target_revisions',
+        revision,
+      )
+    }
+    for (const revision of groupRevisions.rows) {
+      await insertExactRow(
+        client,
+        'attendance_group_effect_revisions',
+        revision,
+      )
+    }
+    await insertExactRow(client, 'attendance_import_jobs', job.rows[0])
+    await insertExactRow(
+      client,
+      'attendance_import_legacy_execution_plans',
+      manifest.rows[0],
+    )
+    for (const chunk of chunks.rows) {
+      await insertExactRow(
+        client,
+        'attendance_import_legacy_execution_plan_chunks',
+        chunk,
+      )
+    }
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined)
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+export type P08PersistedPlanProjection = Readonly<{
+  jobId: string
+  batchId: string
+  planDigest: string
+  manifest: unknown
+  chunks: readonly unknown[]
+}>
+
+export async function readP08PersistedPlanProjection(
+  pool: Pool,
+  jobId: string,
+): Promise<P08PersistedPlanProjection> {
+  const result = await pool.query<{
+    job_id: string
+    batch_id: string
+    plan_digest: string
+    manifest: unknown
+    chunks: unknown[]
+  }>(
+    `SELECT j.id::text AS job_id,
+            j.batch_id::text AS batch_id,
+            p.plan_digest,
+            p.manifest,
+            COALESCE(
+              jsonb_agg(c.chunk ORDER BY c.chunk_index)
+                FILTER (WHERE c.job_id IS NOT NULL),
+              '[]'::jsonb
+            ) AS chunks
+       FROM attendance_import_jobs j
+       JOIN attendance_import_legacy_execution_plans p ON p.job_id = j.id
+       LEFT JOIN attendance_import_legacy_execution_plan_chunks c ON c.job_id = j.id
+      WHERE j.id = $1::uuid
+      GROUP BY j.id, j.batch_id, p.plan_digest, p.manifest`,
+    [jobId],
+  )
+  if (result.rows.length !== 1) {
+    throw new Error(`P08 persisted plan missing: ${jobId}`)
+  }
+  const row = result.rows[0]
+  return Object.freeze({
+    jobId: row.job_id,
+    batchId: row.batch_id,
+    planDigest: row.plan_digest,
+    manifest: row.manifest,
+    chunks: Object.freeze(row.chunks),
+  })
+}
+
 export async function processP08JobId(
   connectionString: string,
   jobId: string,

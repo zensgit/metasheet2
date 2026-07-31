@@ -379,6 +379,25 @@ export async function recheckAttendanceFullImportAuthorizationInTransactionV1(
   }
 }
 
+async function assertPreCutoverImportWorkersDrainedV1(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<void> {
+  const legacyJobs = await trx.query(
+    `SELECT id::text AS id
+       FROM attendance_import_jobs
+      WHERE org_id = $1
+        AND w4_contract_version IS NULL
+        AND status IN ('queued', 'running')
+      ORDER BY id
+      FOR UPDATE`,
+    [orgId],
+  )
+  if (legacyJobs.rows.length > 0) {
+    fail('W4C3A_ENQUEUE_PRE_CUTOVER_WORKER_DRAIN_REQUIRED')
+  }
+}
+
 /**
  * Known authorization-domain denials/input faults that map to permanent
  * ATTENDANCE_IMPORT_LEGACY_PLAN_AUTHORIZATION_REJECTED. SQLSTATE 40001/40P01
@@ -1259,6 +1278,11 @@ export async function reserveAttendanceLegacyImportPlanJobV1(
   if (currentOrg.acceptedWritePosture !== org.acceptedWritePosture) {
     fail('W4C3A_ENQUEUE_POSTURE_CHANGED')
   }
+  // A pre-cutover worker does not participate in the V1 class-10/11 lock
+  // protocol. Locking every nonterminal null-version job here makes an active
+  // old worker finish first, then keeps V1 enqueue closed if legacy work is
+  // still queued/running. This gate precedes all plan/effect identities.
+  await assertPreCutoverImportWorkersDrainedV1(trx, org.orgId)
 
   requireLowerHex64(
     job.w4CommandFingerprint,

@@ -114,6 +114,7 @@ const POSTURE_ORG = crypto.randomUUID()
 const ROLLOUT_ENQUEUE_FIRST_ORG = crypto.randomUUID()
 const ROLLOUT_TRANSITION_FIRST_ORG = crypto.randomUUID()
 const SYNC_RACE_ORG = crypto.randomUUID()
+const LEGACY_DRAIN_ORG = crypto.randomUUID()
 const ADMIN_A = `w4c3a-admin-a-${run}`
 const ADMIN_B = `w4c3a-admin-b-${run}`
 const LEGACY_WILDCARD_ADMIN = `w4c3a-legacy-wildcard-${run}`
@@ -646,6 +647,29 @@ async function waitUntilAdvisoryBlocked(
   }
 }
 
+async function waitUntilLockBlocked(
+  pool: Pool,
+  pid: number,
+  timeoutMs = 8000,
+): Promise<void> {
+  const startedAt = Date.now()
+  for (;;) {
+    const result = await pool.query(
+      `SELECT wait_event_type, wait_event
+         FROM pg_stat_activity
+        WHERE pid = $1`,
+      [pid],
+    )
+    if (result.rows[0]?.wait_event_type === 'Lock') return
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(
+        `waiter never blocked on a row lock: ${JSON.stringify(result.rows[0] ?? null)}`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
 async function residue(pool: Pool, batchId: string): Promise<{ jobs: number; manifests: number; chunks: number }> {
   const jobs = await pool.query('SELECT count(*)::int AS n FROM attendance_import_jobs WHERE batch_id = $1', [batchId])
   const manifests = await pool.query(`
@@ -698,6 +722,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       ROLLOUT_ENQUEUE_FIRST_ORG,
       ROLLOUT_TRANSITION_FIRST_ORG,
       SYNC_RACE_ORG,
+      LEGACY_DRAIN_ORG,
     ]) {
       await pool.query(
         `INSERT INTO user_orgs (user_id, org_id) VALUES
@@ -1870,6 +1895,111 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       [POSTURE_ORG],
     )
   })
+
+  it('blocks V1 enqueue until pre-cutover workers drain, then requires a fresh transaction', async () => {
+    const org = await loadOrgWitness(pool, LEGACY_DRAIN_ORG)
+    const queuedLegacyId = crypto.randomUUID()
+    const queuedLegacyBatch = crypto.randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_import_jobs (
+         id, org_id, batch_id, created_by, status, total, payload
+       ) VALUES ($1::uuid, $2, $3::uuid, $4, 'queued', 1, '{}'::jsonb)`,
+      [queuedLegacyId, LEGACY_DRAIN_ORG, queuedLegacyBatch, ADMIN_A],
+    )
+
+    const rejectedBatchId = crypto.randomUUID()
+    const rejected = noTargetInput(
+      org,
+      rejectedBatchId,
+      ADMIN_A,
+      ADMIN_A,
+    )
+    await expect(
+      runSerializable(pool, (client) =>
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(client),
+          auth(ADMIN_A, LEGACY_DRAIN_ORG),
+          rejected.input,
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'W4C3A_ENQUEUE_PRE_CUTOVER_WORKER_DRAIN_REQUIRED',
+    })
+    expect(await residue(pool, rejectedBatchId)).toEqual({
+      jobs: 0,
+      manifests: 0,
+      chunks: 0,
+    })
+    await pool.query('DELETE FROM attendance_import_jobs WHERE id = $1::uuid', [
+      queuedLegacyId,
+    ])
+
+    const runningLegacyId = crypto.randomUUID()
+    const runningLegacyBatch = crypto.randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_import_jobs (
+         id, org_id, batch_id, created_by, status, total, payload, started_at
+       ) VALUES ($1::uuid, $2, $3::uuid, $4, 'running', 1, '{}'::jsonb, now())`,
+      [runningLegacyId, LEGACY_DRAIN_ORG, runningLegacyBatch, ADMIN_A],
+    )
+    const legacyWorker = await pool.connect()
+    const waitingEnqueue = await pool.connect()
+    const acceptedBatchId = crypto.randomUUID()
+    const accepted = noTargetInput(
+      org,
+      acceptedBatchId,
+      ADMIN_A,
+      ADMIN_A,
+    )
+    try {
+      await legacyWorker.query('BEGIN')
+      await legacyWorker.query(
+        `UPDATE attendance_import_jobs
+            SET status = 'completed', finished_at = now()
+          WHERE id = $1::uuid`,
+        [runningLegacyId],
+      )
+
+      await waitingEnqueue.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const waitingPid = await backendPid(waitingEnqueue)
+      const enqueuePromise = reserveAttendanceLegacyImportPlanJobV1(
+        trx(waitingEnqueue),
+        auth(ADMIN_A, LEGACY_DRAIN_ORG),
+        accepted.input,
+      )
+      void enqueuePromise.catch(() => undefined)
+      await waitUntilLockBlocked(pool, waitingPid)
+      expect(await residue(pool, acceptedBatchId)).toEqual({
+        jobs: 0,
+        manifests: 0,
+        chunks: 0,
+      })
+
+      await legacyWorker.query('COMMIT')
+      await expect(enqueuePromise).rejects.toMatchObject({ code: '40001' })
+      await waitingEnqueue.query('ROLLBACK')
+
+      await expect(
+        runSerializable(pool, (client) =>
+          reserveAttendanceLegacyImportPlanJobV1(
+            trx(client),
+            auth(ADMIN_A, LEGACY_DRAIN_ORG),
+            accepted.input,
+          ),
+        ),
+      ).resolves.toMatchObject({ kind: 'created' })
+      expect(await residue(pool, acceptedBatchId)).toEqual({
+        jobs: 1,
+        manifests: 1,
+        chunks: 1,
+      })
+    } finally {
+      await legacyWorker.query('ROLLBACK').catch(() => undefined)
+      await waitingEnqueue.query('ROLLBACK').catch(() => undefined)
+      legacyWorker.release()
+      waitingEnqueue.release()
+    }
+  }, 30000)
 
   it('serializes complete-plan enqueue against the locked transition contract harness in both commit orders', async () => {
     // No production rollout-transition writer ships yet. This harness exercises

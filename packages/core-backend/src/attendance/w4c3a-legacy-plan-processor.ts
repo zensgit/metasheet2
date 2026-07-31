@@ -350,7 +350,7 @@ export function createAttendanceLegacyPlanProcessorV1(
       try {
         const callbacks = assembleCallbacks(acquired.client)
         const worker = createAttendanceLegacyPlanWorkerV1(callbacks)
-        return worker.process(jobId)
+        return await worker.process(jobId)
       } finally {
         acquired.release()
       }

@@ -624,6 +624,10 @@ export default defineConfig({
       // real PostgreSQL and are whole-file wired into the attendance real-DB step.
       'tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts',
       'tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts',
+      // W4C-3a M60 commit-token ordering uses real plugin HTTP routes and
+      // PostgreSQL. Keep it out of the no-DB lane and run the whole file in
+      // the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts',
       'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
       'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
       'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',

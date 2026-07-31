@@ -1106,6 +1106,7 @@ jobs:
             tests/integration/attendance-w4c3a-group-effects.db.test.ts \
             tests/integration/attendance-w4c3a-auth-recovery.db.test.ts \
             tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts \
+            tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts \
             tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts \
             tests/integration/attendance-w4c3a-import-rollback.db.test.ts \
             tests/integration/attendance-w4c3a-rollout-control.db.test.ts \

@@ -98,6 +98,7 @@ const FILES = Object.freeze([
   // P06, P09/P10/P24, P11/P23/P25, and rollout races all require real PostgreSQL.
   'tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts',
   'tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts',
+  'tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts',
   'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
   'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
   'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',

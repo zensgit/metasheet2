@@ -4,19 +4,20 @@
  * Two isolated DBs, identical schemas + deterministic plan fixture helper.
  *
  * Candidate A (DB A, parent process):
- *   enqueue via production surface + execute via canonical processor
+ *   enqueue once via production surface + execute via canonical processor
  *   → golden = readP08DeterministicProjection (not a handwritten object)
  *
  * Candidate B (DB B):
- *   Child A (fresh module graph): enqueueP08FullPlanV1 itself, print jobId only
+ *   clone the exact committed A job/manifest/chunks, preserving every ID/byte
  *   Parent: poison current rule/settings/profile/group mapping
- *   Child B (fresh module graph): processLegacyImportPlanV1(jobId only)
+ *   Child (fresh module graph): processLegacyImportPlanV1(jobId only)
  *   → projection must equal golden A
- *   Second child B: terminal replay, no double DML
+ *   Second child: terminal replay, no double DML
  *   Org B: zero influencing writes
  *
- * Discriminators: child A fails if parent already enqueued on B; golden is
- * DB-read after process on A; source forbids handwritten golden literals for B.
+ * Discriminators: the pre-execution persisted-plan projections are exactly
+ * equal across A/B; golden is DB-read after process on A; source forbids
+ * handwritten golden literals for B.
  */
 import crypto from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -27,14 +28,17 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 import {
   createP08BaseSchema,
+  cloneP08PersistedPlanV1,
   enqueueP08FullPlanV1,
   migrateP08Schema,
   poisonP08CurrentConfig,
   processP08JobId,
   readP08DeterministicProjection,
+  readP08PersistedPlanProjection,
   seedP08ActorsAndConfig,
   type P08DeterministicProjection,
   type P08FixtureIds,
+  type P08PersistedPlanProjection,
 } from '../utils/attendance-w4c3a-p08-fixture'
 
 const dbUrl = process.env.DATABASE_URL
@@ -43,7 +47,6 @@ const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PKG_ROOT = path.resolve(HERE, '../..')
 const TSX = path.join(PKG_ROOT, 'node_modules/.bin/tsx')
-const CHILD_ENQUEUE = path.join(HERE, '../utils/attendance-w4c3a-p08-child-enqueue.ts')
 const CHILD_EXECUTE = path.join(HERE, '../utils/attendance-w4c3a-p08-child-execute.ts')
 
 function requireTsx(): string {
@@ -88,7 +91,13 @@ async function createIsolatedDb(
   await adminPool.query(`CREATE DATABASE ${name}`)
   const u = new URL(dbUrl as string)
   u.pathname = `/${name}`
-  const url = u.toString()
+  // WHATWG URL stringification collapses `postgresql:///db` to
+  // `postgresql:/db`, which node-postgres then parses as a host URL without a
+  // user. Preserve the libpq local-socket form used by developer test DBs.
+  const localUser = process.env.PGUSER || process.env.USER
+  const url = u.hostname || u.username
+    ? u.toString()
+    : `postgresql://${encodeURIComponent(localUser || 'postgres')}@localhost/${name}`
   const pool = new Pool({ connectionString: url })
   await createP08BaseSchema(pool)
   await migrateP08Schema(url)
@@ -117,11 +126,12 @@ describeIfDatabase('W4C-3a P08 candidate A/B (blueprint-structural)', () => {
   let urlB: string
   let urlC: string
   let goldenA: P08DeterministicProjection
+  let persistedPlanA: P08PersistedPlanProjection
   let jobIdA: string
   let jobIdB: string
 
   beforeAll(async () => {
-    if (!fs.existsSync(CHILD_ENQUEUE) || !fs.existsSync(CHILD_EXECUTE)) {
+    if (!fs.existsSync(CHILD_EXECUTE)) {
       throw new Error('P08 child scripts missing under tests/utils')
     }
     requireTsx()
@@ -144,8 +154,16 @@ describeIfDatabase('W4C-3a P08 candidate A/B (blueprint-structural)', () => {
     await seedP08ActorsAndConfig(poolB, ids)
     await seedP08ActorsAndConfig(poolC, ids)
 
-    // --- Candidate A: parent enqueue + execute → golden from actual projection ---
+    // --- One accepted plan, copied literally to both candidate databases. ---
     jobIdA = await enqueueP08FullPlanV1(poolA, ids)
+    persistedPlanA = await readP08PersistedPlanProjection(poolA, jobIdA)
+    await cloneP08PersistedPlanV1(poolA, poolB, jobIdA)
+    jobIdB = jobIdA
+    expect(await readP08PersistedPlanProjection(poolB, jobIdB)).toEqual(
+      persistedPlanA,
+    )
+
+    // --- Candidate A execution → golden from actual projection. ---
     const processedA = await processP08JobId(urlA, jobIdA)
     if (processedA.kind !== 'completed') {
       throw new Error(`candidate A process failed: ${JSON.stringify(processedA)}`)
@@ -174,49 +192,17 @@ describeIfDatabase('W4C-3a P08 candidate A/B (blueprint-structural)', () => {
     }
   })
 
-  it('child A enqueues on B; child B first-exec equals A golden after poison; replay once', async () => {
-    // Precondition: DB B has zero V1 jobs before child A.
+  it('the exact A plan restarts in child B after poison and replays once', async () => {
+    // Precondition: B contains exactly the cloned queued plan and no effects.
     const before = await poolB.query(
-      `SELECT count(*)::int AS n FROM attendance_import_jobs WHERE w4_contract_version = 1`,
+      `SELECT count(*)::int AS n,
+              count(*) FILTER (WHERE status = 'queued')::int AS queued
+         FROM attendance_import_jobs WHERE w4_contract_version = 1`,
     )
-    expect(Number(before.rows[0].n)).toBe(0)
-
-    // --- Child A: genuine enqueue on DB B ---
-    // Use a distinct batchId for B so the fixture's batch identity is DB-local.
-    const idsB: P08FixtureIds = { ...ids, batchId: crypto.randomUUID() }
-    const childA = spawnChild(CHILD_ENQUEUE, [], {
-      DATABASE_URL: urlB,
-      P08_FIXTURE_JSON: JSON.stringify(idsB),
-    })
-    if (childA.status !== 0) {
-      throw new Error(
-        `Child A enqueue failed status=${childA.status} stderr=${childA.stderr.slice(0, 1200)} stdout=${childA.stdout.slice(0, 400)}`,
-      )
-    }
-    const printed = childA.stdout.trim().split('\n').filter(Boolean).pop()
-    if (!printed || !/^[0-9a-f-]{36}$/i.test(printed)) {
-      throw new Error(`Child A did not print a jobId: ${childA.stdout}`)
-    }
-    jobIdB = printed
-
-    // Prove child A actually inserted (not a parent enqueue on B).
-    const afterEnqueue = await poolB.query(
-      `SELECT id::text AS id, status, w4_contract_version
-         FROM attendance_import_jobs WHERE id = $1::uuid`,
-      [jobIdB],
+    expect(before.rows[0]).toEqual({ n: 1, queued: 1 })
+    expect(await readP08PersistedPlanProjection(poolB, jobIdB)).toEqual(
+      persistedPlanA,
     )
-    expect(afterEnqueue.rows.length).toBe(1)
-    expect(Number(afterEnqueue.rows[0].w4_contract_version)).toBe(1)
-    expect(afterEnqueue.rows[0].status).toBe('queued')
-
-    // Discriminator: a second child-A enqueue must refuse when a V1 job already exists
-    // (would catch a parent that enqueued before spawning child A).
-    const childAReject = spawnChild(CHILD_ENQUEUE, [], {
-      DATABASE_URL: urlB,
-      P08_FIXTURE_JSON: JSON.stringify({ ...idsB, batchId: crypto.randomUUID() }),
-    })
-    expect(childAReject.status).toBe(4)
-    expect(childAReject.stderr).toMatch(/parent_already_enqueued/)
 
     // Parent mutates current config on B only (not A golden DB).
     await poisonP08CurrentConfig(poolB, ids.orgId)
@@ -232,7 +218,7 @@ describeIfDatabase('W4C-3a P08 candidate A/B (blueprint-structural)', () => {
         ids.targetUserId,
         '2026-07-30',
         JSON.stringify({ crossOrgDecoy: true }),
-        idsB.batchId,
+        ids.batchId,
         ids.orgBId,
       ],
     )
@@ -273,6 +259,9 @@ describeIfDatabase('W4C-3a P08 candidate A/B (blueprint-structural)', () => {
     if (projectionB.ok === false) {
       throw new Error(`Child B not ok: ${line1}`)
     }
+    expect(await readP08PersistedPlanProjection(poolB, jobIdB)).toEqual(
+      persistedPlanA,
+    )
 
     // Exact equality of all governed deterministic fields (no handwritten golden).
     expect({
@@ -354,15 +343,12 @@ describeIfDatabase('W4C-3a P08 candidate A/B (blueprint-structural)', () => {
     const suiteSource = fs
       .readFileSync(path.join(HERE, 'attendance-w4c3a-p08-child-process.db.test.ts'), 'utf8')
       .replace(/\/\/.*$/gm, '')
-    // Parent must enqueue only on DB A (golden). Forbidden: enqueue helper on poolB.
+    // Parent enqueues only on DB A; B receives the literal persisted plan.
     expect(suiteSource).not.toMatch(/enqueueP08FullPlanV1\(\s*poolB\b/)
+    expect(suiteSource).toMatch(/cloneP08PersistedPlanV1\(poolA,\s*poolB/)
     // Golden must come from DB-read projection, not a handwritten object for B.
     expect(suiteSource).toMatch(/goldenA\s*=\s*await\s+readP08DeterministicProjection/)
     expect(suiteSource).toMatch(/\.toEqual\(\s*goldenA\s*\)/)
-    // Child A must use the production enqueue helper and refuse parent pre-enqueue.
-    const childASource = fs.readFileSync(CHILD_ENQUEUE, 'utf8')
-    expect(childASource).toMatch(/enqueueP08FullPlanV1/)
-    expect(childASource).toMatch(/parent_already_enqueued/)
     // Child B is jobId + DATABASE_URL only (no enqueue / no fixture env consumption).
     const childBSource = fs.readFileSync(CHILD_EXECUTE, 'utf8')
     expect(childBSource).toMatch(/processP08JobId/)
