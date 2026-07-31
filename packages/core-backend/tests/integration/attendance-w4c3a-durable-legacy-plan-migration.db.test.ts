@@ -68,6 +68,8 @@ function rawEvidence(sourceOrdinal = 0): RawImportEvidenceV1 {
       workMinutes: { present: false, value: null },
       lateMinutes: { present: false, value: null },
       earlyLeaveMinutes: { present: false, value: null },
+      leaveMinutes: { present: false, value: null },
+      overtimeMinutes: { present: false, value: null },
     },
     provenance: {
       transport: 'rows',

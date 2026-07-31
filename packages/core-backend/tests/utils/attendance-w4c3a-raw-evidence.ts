@@ -15,6 +15,8 @@ export type RawImportEvidenceOptionsV1 = Readonly<{
   workMinutes?: PresenceValue<number>
   lateMinutes?: PresenceValue<number>
   earlyLeaveMinutes?: PresenceValue<number>
+  leaveMinutes?: PresenceValue<number>
+  overtimeMinutes?: PresenceValue<number>
   transport?: RawImportEvidenceV1['provenance']['transport']
   sourceRef?: string
 }>
@@ -56,6 +58,8 @@ export function rawImportEvidenceV1(
       workMinutes: presence(options.workMinutes),
       lateMinutes: presence(options.lateMinutes),
       earlyLeaveMinutes: presence(options.earlyLeaveMinutes),
+      leaveMinutes: presence(options.leaveMinutes),
+      overtimeMinutes: presence(options.overtimeMinutes),
     },
     provenance: {
       transport: options.transport ?? 'rows',

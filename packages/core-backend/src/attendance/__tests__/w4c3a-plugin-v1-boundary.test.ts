@@ -661,11 +661,36 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       status: 'normal',
       firstInAt: '2026-07-31T01:00:00.000Z',
       sourceBatchId: common.sourceBatchId,
-      policySnapshot: {
-        sourceOrdinals: [3, 4],
-        sources: [{ source: 'first' }, { source: 'second' }],
-      },
+      attributionSnapshot: { schemaVersion: 1 },
+      policySnapshot: { schemaVersion: 1 },
     })
+    const write = folded.recordWrites[0] as {
+      attributionSnapshot: { sources: Array<{ sourceOrdinal: number; attribution: unknown; context: unknown }> }
+      policySnapshot: {
+        sources: Array<{
+          sourceOrdinal: number
+          sourceFingerprint: string
+          ruleVersion: string
+          engineVersion: string | null
+          output: Record<string, unknown>
+        }>
+      }
+    }
+    expect(write.attributionSnapshot.sources.map((row) => row.sourceOrdinal)).toEqual([3, 4])
+    expect(write.policySnapshot.sources.map((row) => row.sourceOrdinal)).toEqual([3, 4])
+    expect(Object.keys(write.attributionSnapshot.sources[0]).sort()).toEqual([
+      'attribution',
+      'context',
+      'sourceOrdinal',
+    ])
+    expect(Object.keys(write.policySnapshot.sources[0]).sort()).toEqual([
+      'engineVersion',
+      'output',
+      'ruleVersion',
+      'sourceFingerprint',
+      'sourceOrdinal',
+    ])
+    expect(write.policySnapshot.sources[0].sourceFingerprint).toMatch(/^[0-9a-f]{64}$/)
     expect(folded.targetRefBySourceOrdinal.get(3)).toBe(JSON.stringify(target))
     expect(folded.targetRefBySourceOrdinal.get(4)).toBe(JSON.stringify(target))
   })

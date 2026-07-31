@@ -143,6 +143,8 @@ function rawEvidence(
       workMinutes: { present: false, value: null },
       lateMinutes: { present: false, value: null },
       earlyLeaveMinutes: { present: false, value: null },
+      leaveMinutes: { present: false, value: null },
+      overtimeMinutes: { present: false, value: null },
     },
     provenance: {
       transport: 'rows',
@@ -327,6 +329,8 @@ describe('LegacyImportExecutionPlanV1', () => {
           workMinutes: { present: true, value: 0 },
           lateMinutes: { present: false, value: null },
           earlyLeaveMinutes: { present: false, value: null },
+          leaveMinutes: { present: false, value: null },
+          overtimeMinutes: { present: false, value: null },
         },
       }),
     })

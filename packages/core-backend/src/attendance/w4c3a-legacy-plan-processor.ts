@@ -31,13 +31,12 @@ import {
   requireReplayBatchCongruence,
 } from './w4c3a-legacy-plan-enqueue'
 import {
-  applyAttendanceLegacyBatchEffectsV1,
-  buildAttendanceLegacyAsyncJobSummaryV1,
-} from './w4c3a-legacy-plan-batch-effects'
-import { applyAttendanceLegacyGroupEffectsV1 } from './w4c3a-legacy-plan-group-effects'
-import { applyAttendanceLegacyItemEffectsV1 } from './w4c3a-legacy-plan-item-effects'
+  claimAttendanceCanonicalImportRegistryV1,
+  executeAttendanceCanonicalImportPlanV1,
+  inspectAttendanceCanonicalImportRegistryV1,
+  type AttendanceCanonicalImportRegistryClaimV1,
+} from './w4c3a-canonical-import-kernel'
 import { lockAndRecheckAttendanceLegacyPlanPreconditionsV1 } from './w4c3a-legacy-plan-preconditions'
-import { applyAttendanceLegacyRecordEffectsV1 } from './w4c3a-legacy-plan-record-effects'
 import {
   createAttendanceLegacyPlanWorkerRepositoryV1,
 } from './w4c3a-legacy-plan-worker-repository'
@@ -70,7 +69,7 @@ export type AttendanceLegacyPlanProcessorV1 = Readonly<{
   ): Promise<AttendanceLegacyPlanWorkerResultV1>
 }>
 
-function reservationIdentitiesFromJob(
+export function reservationIdentitiesFromJob(
   job: AttendanceLegacyPlanWorkerJobV1,
 ): readonly VerifiedAttendanceOperationIdentityV1[] {
   const org = rehydrateVerifiedAttendanceOrgIdentityV1({
@@ -171,38 +170,6 @@ export async function acquireAttendanceLegacyPlanClass11V1(
   await acquireAttendanceCalculationTargetLocks(trx, identities)
 }
 
-async function executeFixedVerifiedPlan(
-  trx: AttendanceW4TransactionClientV1,
-  job: AttendanceLegacyPlanWorkerJobV1,
-  plan: VerifiedAttendanceLegacyPlanV1,
-): Promise<unknown> {
-  const startedAt = Date.now()
-  // Replay: zero item/record/group/batch DML; summary from locked batch fields.
-  if (plan.manifest.batch.kind === 'idempotent_replay') {
-    const elapsedMs =
-      plan.manifest.batch.replaySelector === 'precheck_hit' ? 0 : Math.max(0, Date.now() - startedAt)
-    return buildAttendanceLegacyAsyncJobSummaryV1({
-      plan,
-      effectResult: { groupCreated: 0, groupMembersAdded: 0 },
-      elapsedMs,
-    })
-  }
-
-  // First execution: mirror the retained legacy FK/effect order. Groups are
-  // resolved before batch metadata is frozen; the batch parent precedes items.
-  // For legacy_projection_only: zero W4 operation/source/result DML.
-  const groupResult = await applyAttendanceLegacyGroupEffectsV1(trx, plan)
-  await applyAttendanceLegacyBatchEffectsV1(trx, plan, groupResult)
-  await applyAttendanceLegacyRecordEffectsV1(trx, plan)
-  await applyAttendanceLegacyItemEffectsV1(trx, plan)
-  const elapsedMs = Math.max(0, Date.now() - startedAt)
-  return buildAttendanceLegacyAsyncJobSummaryV1({
-    plan,
-    effectResult: groupResult,
-    elapsedMs,
-  })
-}
-
 function assembleCallbacks(
   connection: AttendanceW4TransactionClientV1,
 ): AttendanceLegacyPlanWorkerCallbacksV1<AttendanceW4TransactionClientV1> {
@@ -262,8 +229,21 @@ function assembleCallbacks(
         legacyIdempotency,
       )
     },
+    async inspectOperationRows(trx, job, identities) {
+      return inspectAttendanceCanonicalImportRegistryV1(trx, {
+        job,
+        identities,
+      })
+    },
     async loadPlan(trx, jobId, orgId) {
       return createAttendanceLegacyPlanWorkerRepositoryV1(trx).loadPlan(jobId, orgId)
+    },
+    async claimOperationRows(trx, job, plan, identities) {
+      return claimAttendanceCanonicalImportRegistryV1(trx, {
+        job,
+        plan,
+        identities,
+      })
     },
     async recheckReplayPrecondition(trx, job, plan) {
       try {
@@ -283,8 +263,12 @@ function assembleCallbacks(
     async recheckPreconditions(trx, plan) {
       return lockAndRecheckAttendanceLegacyPlanPreconditionsV1(trx, plan)
     },
-    async executeVerifiedPlan(trx, job, plan) {
-      return executeFixedVerifiedPlan(trx, job, plan)
+    async executeVerifiedPlan(trx, job, plan, registryClaim) {
+      return executeAttendanceCanonicalImportPlanV1(trx, {
+        job,
+        plan,
+        registryClaim: registryClaim as AttendanceCanonicalImportRegistryClaimV1 | null,
+      })
     },
     async storeCompletedResponseAndTerminalize(
       trx,

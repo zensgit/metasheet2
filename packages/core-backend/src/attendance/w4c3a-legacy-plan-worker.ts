@@ -118,11 +118,22 @@ export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
     job: AttendanceLegacyPlanWorkerJobV1,
     identities: readonly VerifiedAttendanceOperationIdentityV1[],
   ): Promise<void>
+  inspectOperationRows(
+    trx: TTransaction,
+    job: AttendanceLegacyPlanWorkerJobV1,
+    identities: readonly VerifiedAttendanceOperationIdentityV1[],
+  ): Promise<'all_new' | 'all_completed_congruent' | 'conflict'>
   loadPlan(
     trx: TTransaction,
     jobId: string,
     orgId: string,
   ): Promise<AttendanceLegacyPlanWorkerStoredPlanV1 | null>
+  claimOperationRows(
+    trx: TTransaction,
+    job: AttendanceLegacyPlanWorkerJobV1,
+    plan: VerifiedAttendanceLegacyPlanV1,
+    identities: readonly VerifiedAttendanceOperationIdentityV1[],
+  ): Promise<unknown>
   recheckReplayPrecondition(
     trx: TTransaction,
     job: AttendanceLegacyPlanWorkerJobV1,
@@ -144,6 +155,7 @@ export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
     trx: TTransaction,
     job: AttendanceLegacyPlanWorkerJobV1,
     plan: VerifiedAttendanceLegacyPlanV1,
+    registryClaim: unknown,
   ): Promise<unknown>
   storeCompletedResponseAndTerminalize(
     trx: TTransaction,
@@ -351,6 +363,35 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           authorizationJob,
         )
         await callbacks.acquireClass10(trx, authorizationJob, reservation)
+
+        if (!candidateAuthorized) {
+          const rejectedJob = await callbacks.lockJob(
+            trx,
+            candidate.jobId,
+            candidate.orgId,
+          )
+          if (
+            rejectedJob === null ||
+            rejectedJob.w4ContractVersion !== 1 ||
+            rejectedJob.jobId !== candidate.jobId ||
+            rejectedJob.orgId !== candidate.orgId ||
+            rejectedJob.idempotencyKey !== authorizationJob.idempotencyKey
+          ) {
+            return { kind: 'not_found' }
+          }
+          return failClosed(
+            trx,
+            rejectedJob,
+            'ATTENDANCE_IMPORT_LEGACY_PLAN_AUTHORIZATION_REJECTED',
+          )
+        }
+
+        const operationState = await callbacks.inspectOperationRows(
+          trx,
+          authorizationJob,
+          reservation,
+        )
+
         const rechecked = await callbacks.lockJob(
           trx,
           candidate.jobId,
@@ -379,6 +420,11 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_AUTHORIZATION_REJECTED')
         }
         if (rechecked.status === 'completed') {
+          const completedOperationStateAllowed =
+            rechecked.acceptedWritePosture === 'legacy_projection_only'
+              ? operationState === 'all_new'
+              : operationState === 'all_completed_congruent'
+          if (!completedOperationStateAllowed) return { kind: 'not_found' }
           const storedResponse = await callbacks.loadCompletedResponse(
             trx,
             rechecked.jobId,
@@ -399,14 +445,23 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
         if (rechecked.status !== 'queued' || posture !== rechecked.acceptedWritePosture) {
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED')
         }
+        if (operationState !== 'all_new') {
+          return failClosed(
+            trx,
+            rechecked,
+            'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED',
+          )
+        }
 
-        // OD-W4C-59=(a): locked_race / precheck_hit replay plans have zero item
-        // identities and must not enter class-11 / revision / effect adapters.
         let plan: VerifiedAttendanceLegacyPlanV1
         try {
           plan = verifyPlan(
             rechecked,
-            await callbacks.loadPlan(trx, rechecked.jobId, rechecked.orgId),
+            await callbacks.loadPlan(
+              trx,
+              rechecked.jobId,
+              rechecked.orgId,
+            ),
           )
         } catch (error) {
           if (error instanceof AttendanceLegacyPlanWorkerFailure) {
@@ -424,7 +479,7 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
             )
           }
           const response = parseLegacyImportAsyncJobSummaryV1(
-            await callbacks.executeVerifiedPlan(trx, rechecked, plan),
+            await callbacks.executeVerifiedPlan(trx, rechecked, plan, null),
           )
           await callbacks.storeCompletedResponseAndTerminalize(
             trx,
@@ -446,8 +501,14 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
         if (!(await callbacks.recheckPreconditions(trx, plan))) {
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED')
         }
+        const registryClaim = await callbacks.claimOperationRows(
+          trx,
+          rechecked,
+          plan,
+          reservation,
+        )
         const response = parseLegacyImportAsyncJobSummaryV1(
-          await callbacks.executeVerifiedPlan(trx, rechecked, plan),
+          await callbacks.executeVerifiedPlan(trx, rechecked, plan, registryClaim),
         )
         await callbacks.storeCompletedResponseAndTerminalize(
           trx,

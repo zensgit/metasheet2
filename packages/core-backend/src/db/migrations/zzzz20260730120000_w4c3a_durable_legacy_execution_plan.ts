@@ -276,7 +276,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         ARRAY['userId', 'workDate', 'timezone', 'firstInAt', 'lastOutAt', 'status', 'isWorkday']
       ) OR NOT attendance_w4c3a_exact_object_keys(
         metrics,
-        ARRAY['workMinutes', 'lateMinutes', 'earlyLeaveMinutes']
+        ARRAY['workMinutes', 'lateMinutes', 'earlyLeaveMinutes', 'leaveMinutes', 'overtimeMinutes']
       ) THEN
         RETURN false;
       END IF;
@@ -289,7 +289,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          NOT attendance_w4c3a_presence_valid(fields -> 'isWorkday', ARRAY['boolean', 'null']) OR
          NOT attendance_w4c3a_presence_valid(metrics -> 'workMinutes', ARRAY['number', 'null'], true) OR
          NOT attendance_w4c3a_presence_valid(metrics -> 'lateMinutes', ARRAY['number', 'null'], true) OR
-         NOT attendance_w4c3a_presence_valid(metrics -> 'earlyLeaveMinutes', ARRAY['number', 'null'], true) THEN
+         NOT attendance_w4c3a_presence_valid(metrics -> 'earlyLeaveMinutes', ARRAY['number', 'null'], true) OR
+         NOT attendance_w4c3a_presence_valid(metrics -> 'leaveMinutes', ARRAY['number', 'null'], true) OR
+         NOT attendance_w4c3a_presence_valid(metrics -> 'overtimeMinutes', ARRAY['number', 'null'], true) THEN
         RETURN false;
       END IF;
       IF (jsonb_typeof(fields -> 'firstInAt' -> 'value') = 'string' AND

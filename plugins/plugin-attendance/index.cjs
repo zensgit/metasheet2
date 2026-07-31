@@ -15126,6 +15126,8 @@ async function resolveImportRowWorkDateAttribution(options) {
     return { resolution: null, frozenAttribution: null }
   }
   const { adapters } = createPluginAttendanceWorkDateResolver(db)
+  // W4C-3a: request the full winner so prepareOnly can freeze closed attribution/context.
+  // Opt-in flag is byte-identical for callers that ignore the additive out-params.
   const resolution = await adapters.import.resolveImportWorkDate({
     orgId,
     userId,
@@ -15134,6 +15136,7 @@ async function resolveImportRowWorkDateAttribution(options) {
     calendarWorkDate: workDate,
     explicitWorkDate: workDate,
     explicitShiftId: explicitShiftId || null,
+    includeFullWinner: true,
   })
   if (resolution.kind === 'ambiguous') {
     throw new HttpError(
@@ -19799,6 +19802,666 @@ function computeAttendanceRecordUpsertValues(options) {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// W4C-3a — raw import evidence + frozen import snapshot producers (prepareOnly).
+// Presence is exact: `undefined` ⇒ absent; any other value (incl. null / 0) ⇒ present.
+// Evidence is captured from the source row BEFORE computed/policy/engine overrides.
+// ──────────────────────────────────────────────────────────────────────────────
+
+function rawImportFieldPresence(value) {
+  if (value === undefined) return { present: false, value: null }
+  return { present: true, value: value === undefined ? null : value }
+}
+
+function firstDefinedPresence(...candidates) {
+  for (const candidate of candidates) {
+    if (candidate !== undefined) return candidate
+  }
+  return undefined
+}
+
+function toRawImportInstantIso(value) {
+  if (value == null) return null
+  if (value instanceof Date) {
+    const ms = value.getTime()
+    return Number.isFinite(ms) ? value.toISOString() : null
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return null
+    const ms = Date.parse(trimmed)
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : null
+  }
+  return null
+}
+
+function toRawImportNonNegInt(value) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return null
+  const floored = Math.floor(numeric)
+  if (floored < 0) return null
+  return floored
+}
+
+function toRawImportBoolean(value) {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return value !== 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (!normalized) return null
+    if (['true', '1', 'yes', 'y', '是'].includes(normalized)) return true
+    if (['false', '0', 'no', 'n', '否'].includes(normalized)) return false
+  }
+  return null
+}
+
+function toRawImportString(value) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed ? trimmed : null
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return null
+}
+
+function sha256HexOfUtf8(text) {
+  return crypto.createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex')
+}
+
+async function sha256HexOfFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256')
+    const stream = fs.createReadStream(filePath)
+    stream.on('error', reject)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('end', () => resolve(hash.digest('hex')))
+  })
+}
+
+function resolveLegacyImportRowSourceKind({ payload, csvFileId }) {
+  if (csvFileId) return 'uploaded_csv'
+  if (typeof payload?.csvText === 'string' && payload.csvText.length > 0) return 'inline_csv'
+  if (Array.isArray(payload?.rows)) return 'direct_rows'
+  if (Array.isArray(payload?.entries)) return 'entries'
+  return 'dingtalk_tabular'
+}
+
+/**
+ * Closed provenance for RawImportEvidenceV1. Differentiates direct rows / entries /
+ * inline CSV / uploaded CSV / DingTalk tabular via transport + sourceRef, without
+ * embedding filesystem paths or secrets.
+ */
+function buildImportRowProvenanceV1(options = {}) {
+  const kind = options.legacyRowSourceKind || 'direct_rows'
+  const batchId = typeof options.batchId === 'string' && options.batchId.trim()
+    ? options.batchId.trim()
+    : 'unknown-batch'
+  const fileId = typeof options.csvFileId === 'string' && options.csvFileId.trim()
+    ? options.csvFileId.trim()
+    : null
+  const convertedSheetName = typeof options.convertedSheetName === 'string' && options.convertedSheetName.trim()
+    ? options.convertedSheetName.trim()
+    : null
+  const artifactSha256 = typeof options.artifactSha256 === 'string' && /^[0-9a-f]{64}$/.test(options.artifactSha256)
+    ? options.artifactSha256
+    : null
+  const normalizedCsvSha256 = typeof options.normalizedCsvSha256 === 'string'
+    && /^[0-9a-f]{64}$/.test(options.normalizedCsvSha256)
+    ? options.normalizedCsvSha256
+    : null
+
+  if (convertedSheetName) {
+    return {
+      transport: 'xlsx_client_converted_csv',
+      sourceRef: `attendance-import:${batchId}:xlsx_client_converted_csv`,
+      artifactSha256,
+      normalizedCsvSha256,
+      convertedSheetName,
+    }
+  }
+  if (kind === 'uploaded_csv') {
+    return {
+      transport: 'csv_upload',
+      sourceRef: fileId
+        ? `attendance-import:${batchId}:uploaded_csv:${fileId}`
+        : `attendance-import:${batchId}:uploaded_csv`,
+      artifactSha256,
+      normalizedCsvSha256,
+      convertedSheetName: null,
+    }
+  }
+  if (kind === 'inline_csv') {
+    return {
+      transport: 'csv_text',
+      sourceRef: `attendance-import:${batchId}:inline_csv`,
+      artifactSha256: null,
+      normalizedCsvSha256,
+      convertedSheetName: null,
+    }
+  }
+  // direct_rows | entries | dingtalk_tabular share transport `rows` but keep distinct sourceRef.
+  return {
+    transport: 'rows',
+    sourceRef: `attendance-import:${batchId}:${kind}`,
+    artifactSha256: null,
+    normalizedCsvSha256: null,
+    convertedSheetName: null,
+  }
+}
+
+/**
+ * Build parser-valid RawImportEvidenceV1 from pre-override source values.
+ * `fields` / `metrics` entries use undefined = absent; null / 0 / '' stay present.
+ */
+function buildRawImportEvidenceV1(options = {}) {
+  const sourceOrdinal = Number(options.sourceOrdinal)
+  if (!Number.isInteger(sourceOrdinal) || sourceOrdinal < 0) {
+    throw new Error('W4C3A_RAW_IMPORT_EVIDENCE_ORDINAL_INVALID')
+  }
+  const raw = options.fields && typeof options.fields === 'object' ? options.fields : {}
+  const rawMetrics = options.metrics && typeof options.metrics === 'object' ? options.metrics : {}
+
+  const firstInIso = raw.firstInAt === undefined
+    ? undefined
+    : toRawImportInstantIso(raw.firstInAt)
+  const lastOutIso = raw.lastOutAt === undefined
+    ? undefined
+    : toRawImportInstantIso(raw.lastOutAt)
+
+  const fields = {
+    userId: rawImportFieldPresence(
+      raw.userId === undefined ? undefined : toRawImportString(raw.userId),
+    ),
+    workDate: rawImportFieldPresence(
+      raw.workDate === undefined ? undefined : toRawImportString(raw.workDate),
+    ),
+    timezone: rawImportFieldPresence(
+      raw.timezone === undefined ? undefined : toRawImportString(raw.timezone),
+    ),
+    firstInAt: rawImportFieldPresence(firstInIso),
+    lastOutAt: rawImportFieldPresence(lastOutIso),
+    status: rawImportFieldPresence(
+      raw.status === undefined ? undefined : toRawImportString(raw.status),
+    ),
+    isWorkday: rawImportFieldPresence(
+      raw.isWorkday === undefined ? undefined : toRawImportBoolean(raw.isWorkday),
+    ),
+  }
+
+  const metrics = {
+    workMinutes: rawImportFieldPresence(
+      rawMetrics.workMinutes === undefined ? undefined : toRawImportNonNegInt(rawMetrics.workMinutes),
+    ),
+    lateMinutes: rawImportFieldPresence(
+      rawMetrics.lateMinutes === undefined ? undefined : toRawImportNonNegInt(rawMetrics.lateMinutes),
+    ),
+    earlyLeaveMinutes: rawImportFieldPresence(
+      rawMetrics.earlyLeaveMinutes === undefined
+        ? undefined
+        : toRawImportNonNegInt(rawMetrics.earlyLeaveMinutes),
+    ),
+    leaveMinutes: rawImportFieldPresence(
+      rawMetrics.leaveMinutes === undefined ? undefined : toRawImportNonNegInt(rawMetrics.leaveMinutes),
+    ),
+    overtimeMinutes: rawImportFieldPresence(
+      rawMetrics.overtimeMinutes === undefined
+        ? undefined
+        : toRawImportNonNegInt(rawMetrics.overtimeMinutes),
+    ),
+  }
+
+  const punches = []
+  if (fields.firstInAt.present && fields.firstInAt.value !== null) {
+    punches.push({ direction: 'check_in', occurredAt: fields.firstInAt.value })
+  }
+  if (fields.lastOutAt.present && fields.lastOutAt.value !== null) {
+    punches.push({ direction: 'check_out', occurredAt: fields.lastOutAt.value })
+  }
+
+  const provenance = options.provenance && typeof options.provenance === 'object'
+    ? {
+        transport: options.provenance.transport,
+        sourceRef: options.provenance.sourceRef,
+        artifactSha256: options.provenance.artifactSha256 ?? null,
+        normalizedCsvSha256: options.provenance.normalizedCsvSha256 ?? null,
+        convertedSheetName: options.provenance.convertedSheetName ?? null,
+      }
+    : {
+        transport: 'rows',
+        sourceRef: `attendance-import:unknown:${sourceOrdinal}`,
+        artifactSha256: null,
+        normalizedCsvSha256: null,
+        convertedSheetName: null,
+      }
+
+  return {
+    schemaVersion: 1,
+    sourceOrdinal,
+    punches,
+    fields,
+    metrics,
+    provenance,
+  }
+}
+
+// Must match packages/core-backend/src/attendance/w4c2-frozen-attribution.ts.
+const ATTENDANCE_W4C2_ATTRIBUTION_RESOLVER_VERSION_V1 =
+  'attendance-work-date-resolver-w2+w4c2-strict-rebuild@1'
+const ATTENDANCE_W4_WINDOW_EVIDENCE_DOMAIN_V1 =
+  'metasheet2:attendance:w4:window-evidence-fingerprint:v1'
+const ATTENDANCE_IMPORT_POLICY_SOURCE_FINGERPRINT_DOMAIN_V1 =
+  'metasheet2:attendance:w4c3a:import-policy-source-fingerprint:v1'
+
+function canonicalAttendanceJsonCjsV1(value) {
+  const seen = new WeakSet()
+  const normalize = (input) => {
+    if (input === null || typeof input === 'number' || typeof input === 'boolean' || typeof input === 'string') {
+      if (typeof input === 'number' && !Number.isFinite(input)) {
+        throw new Error('W4C3A_CANONICAL_JSON_INVALID')
+      }
+      return input
+    }
+    if (typeof input !== 'object') throw new Error('W4C3A_CANONICAL_JSON_INVALID')
+    if (seen.has(input)) throw new Error('W4C3A_CANONICAL_JSON_INVALID')
+    seen.add(input)
+    if (Array.isArray(input)) return input.map(normalize)
+    const keys = Object.keys(input).sort()
+    const out = {}
+    for (const key of keys) {
+      if (typeof key === 'symbol') continue
+      const next = input[key]
+      if (next === undefined) continue
+      out[key] = normalize(next)
+    }
+    return out
+  }
+  return JSON.stringify(normalize(value))
+}
+
+function sha256HexOfCanonicalJsonCjsV1(value) {
+  return crypto.createHash('sha256').update(canonicalAttendanceJsonCjsV1(value), 'utf8').digest('hex')
+}
+
+function freezeNonNegIntOrNull(value) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return null
+  const floored = Math.floor(numeric)
+  if (!Number.isSafeInteger(floored) || floored < 0) return null
+  return floored
+}
+
+function freezeStatusOrNull(value) {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  return text || null
+}
+
+function toIsoInstantStrict(value) {
+  if (value instanceof Date) {
+    const ms = value.getTime()
+    if (!Number.isFinite(ms)) return null
+    return value.toISOString()
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const ms = Date.parse(value)
+    if (!Number.isFinite(ms)) return null
+    return new Date(ms).toISOString()
+  }
+  return null
+}
+
+function computeImportWindowEvidenceFingerprintV1({ attributionTailMinutes, approvedOvertimeWindows }) {
+  const tail = Number(attributionTailMinutes)
+  if (!Number.isInteger(tail) || tail < 0) {
+    throw new Error('W4C2_WINDOW_EVIDENCE_INVALID')
+  }
+  const entries = (Array.isArray(approvedOvertimeWindows) ? approvedOvertimeWindows : []).map((entry) => {
+    const requestId = entry && entry.requestId != null ? String(entry.requestId) : ''
+    if (!requestId) throw new Error('W4C2_WINDOW_EVIDENCE_INVALID')
+    const approvedEndAt = toIsoInstantStrict(entry.approvedEndAt)
+    if (!approvedEndAt) throw new Error('W4C2_WINDOW_EVIDENCE_INVALID')
+    return {
+      requestId,
+      approvedEndAt,
+      anchor: entry.anchor === undefined ? null : entry.anchor,
+    }
+  })
+  entries.sort((a, b) => (a.requestId < b.requestId ? -1 : a.requestId > b.requestId ? 1 : 0))
+  const projection = { attributionTailMinutes: tail, approvedOvertimeWindows: entries }
+  return crypto
+    .createHash('sha256')
+    .update(
+      Buffer.concat([
+        Buffer.from(ATTENDANCE_W4_WINDOW_EVIDENCE_DOMAIN_V1, 'utf8'),
+        Buffer.from([0]),
+        Buffer.from(canonicalAttendanceJsonCjsV1(projection), 'utf8'),
+      ]),
+    )
+    .digest('hex')
+}
+
+/**
+ * Build exact AttendanceAttributionSnapshotV1 from an import work-date resolution
+ * that requested includeFullWinner. Falls closed to unsupported — never fabricates V2.
+ */
+function buildImportAttendanceAttributionSnapshotV1(options = {}) {
+  const orgId = options.orgId == null ? null : String(options.orgId)
+  const userId = options.userId == null ? null : String(options.userId)
+  const resolution = options.resolution
+  const nowIso = toIsoInstantStrict(options.nowIso ?? new Date()) || new Date().toISOString()
+  if (!orgId || !userId) {
+    return {
+      posture: 'unsupported',
+      sourceSchemaVersion: null,
+      reason: 'missing',
+      sourceFingerprint: null,
+    }
+  }
+  if (!resolution) {
+    return {
+      posture: 'unsupported',
+      sourceSchemaVersion: null,
+      reason: 'missing',
+      sourceFingerprint: null,
+    }
+  }
+  if (resolution.kind === 'ambiguous') {
+    return {
+      posture: 'unsupported',
+      sourceSchemaVersion: null,
+      reason: 'ambiguous',
+      sourceFingerprint: null,
+    }
+  }
+  if (resolution.kind !== 'resolved') {
+    return {
+      posture: 'unsupported',
+      sourceSchemaVersion: null,
+      reason: 'unresolved',
+      sourceFingerprint: null,
+    }
+  }
+  const winner = resolution.fullWinner
+  if (
+    !winner
+    || typeof winner.workStartTime !== 'string'
+    || typeof winner.workEndTime !== 'string'
+    || typeof winner.timezone !== 'string'
+    || !winner.absoluteWindow
+    || !winner.attributionWindow
+    || !Number.isInteger(resolution.attributionTailMinutes)
+  ) {
+    return {
+      posture: 'unsupported',
+      sourceSchemaVersion: null,
+      reason: 'unresolved',
+      sourceFingerprint: null,
+    }
+  }
+  const absoluteStartAt = toIsoInstantStrict(winner.absoluteWindow.startAt)
+  const absoluteEndAt = toIsoInstantStrict(winner.absoluteWindow.endAt)
+  const attributionStartAt = toIsoInstantStrict(winner.attributionWindow.startAt)
+  const attributionEndAt = toIsoInstantStrict(winner.attributionWindow.endAt)
+  if (!absoluteStartAt || !absoluteEndAt || !attributionStartAt || !attributionEndAt) {
+    return {
+      posture: 'unsupported',
+      sourceSchemaVersion: null,
+      reason: 'unresolved',
+      sourceFingerprint: null,
+    }
+  }
+  const absoluteStartMs = Date.parse(absoluteStartAt)
+  const absoluteEndMs = Date.parse(absoluteEndAt)
+  const attributionStartMs = Date.parse(attributionStartAt)
+  const attributionEndMs = Date.parse(attributionEndAt)
+  if (!(absoluteEndMs > absoluteStartMs) || attributionStartMs !== absoluteStartMs) {
+    return {
+      posture: 'unsupported',
+      sourceSchemaVersion: null,
+      reason: 'unresolved',
+      sourceFingerprint: sha256HexOfUtf8('W4C2_ATTRIBUTION_WINDOW_INVALID'),
+    }
+  }
+  const tailMs = resolution.attributionTailMinutes * 60_000
+  const baseEndMs = absoluteEndMs + tailMs
+  let extendedByApprovedOvertime = false
+  if (attributionEndMs === baseEndMs) {
+    extendedByApprovedOvertime = false
+  } else if (attributionEndMs > baseEndMs) {
+    const overtime = Array.isArray(resolution.approvedOvertimeWindows)
+      ? resolution.approvedOvertimeWindows
+      : []
+    const explained = overtime.some((entry) => {
+      const endAt = toIsoInstantStrict(entry?.approvedEndAt)
+      if (!endAt) return false
+      return Date.parse(endAt) + tailMs === attributionEndMs
+    })
+    if (!explained) {
+      return {
+        posture: 'unsupported',
+        sourceSchemaVersion: null,
+        reason: 'unresolved',
+        sourceFingerprint: sha256HexOfUtf8('W4C2_ATTRIBUTION_WINDOW_END_UNEXPLAINED'),
+      }
+    }
+    extendedByApprovedOvertime = true
+  } else {
+    return {
+      posture: 'unsupported',
+      sourceSchemaVersion: null,
+      reason: 'unresolved',
+      sourceFingerprint: sha256HexOfUtf8('W4C2_ATTRIBUTION_WINDOW_END_UNEXPLAINED'),
+    }
+  }
+
+  let windowEvidenceFingerprint
+  try {
+    windowEvidenceFingerprint = computeImportWindowEvidenceFingerprintV1({
+      attributionTailMinutes: resolution.attributionTailMinutes,
+      approvedOvertimeWindows: (Array.isArray(resolution.approvedOvertimeWindows)
+        ? resolution.approvedOvertimeWindows
+        : []
+      ).map((entry) => ({
+        requestId: String(entry.requestId),
+        approvedEndAt: toIsoInstantStrict(entry.approvedEndAt),
+        anchor: entry.anchor === undefined ? null : entry.anchor,
+      })),
+    })
+  } catch {
+    return {
+      posture: 'unsupported',
+      sourceSchemaVersion: null,
+      reason: 'unresolved',
+      sourceFingerprint: null,
+    }
+  }
+
+  return {
+    posture: 'resolved_v2',
+    value: {
+      schemaVersion: 2,
+      resolverVersion: ATTENDANCE_W4C2_ATTRIBUTION_RESOLVER_VERSION_V1,
+      orgId,
+      userId,
+      workDate: String(resolution.workDate),
+      shiftId: String(resolution.shiftId),
+      reasonCode: String(resolution.reasonCode ?? 'SINGLE_MATCHING_CANDIDATE'),
+      resolvedAt: nowIso,
+      absoluteWindow: { startAt: absoluteStartAt, endAt: absoluteEndAt },
+      attributionWindow: { startAt: attributionStartAt, endAt: attributionEndAt },
+      attributionTailMinutes: resolution.attributionTailMinutes,
+      extendedByApprovedOvertime,
+      windowEvidenceFingerprint,
+      source: 'import_resolution',
+    },
+  }
+}
+
+/**
+ * Closed policy source fingerprint over frozen rule/policy/engine inputs only
+ * (never mutable row punches/metrics bytes).
+ */
+function computeImportPolicySourceFingerprintV1(options = {}) {
+  const rule = options.rule && typeof options.rule === 'object' ? options.rule : {}
+  const workingDays = Array.isArray(rule.workingDays)
+    ? [...rule.workingDays].map((day) => Number(day)).filter((day) => Number.isFinite(day)).sort((a, b) => a - b)
+    : []
+  const appliedPolicyRules = Array.isArray(options.appliedPolicyRules)
+    ? [...options.appliedPolicyRules].map(String).sort()
+    : []
+  const appliedEngineRules = Array.isArray(options.appliedEngineRules)
+    ? [...options.appliedEngineRules].map(String).sort()
+    : []
+  const projection = {
+    schemaVersion: 1,
+    ruleVersion: options.ruleVersion == null ? null : String(options.ruleVersion),
+    engineVersion: options.engineVersion == null ? null : String(options.engineVersion),
+    rule: {
+      timezone: rule.timezone == null ? null : String(rule.timezone),
+      workStartTime: rule.workStartTime == null ? null : String(rule.workStartTime),
+      workEndTime: rule.workEndTime == null ? null : String(rule.workEndTime),
+      lateGraceMinutes: freezeNonNegIntOrNull(rule.lateGraceMinutes),
+      earlyGraceMinutes: freezeNonNegIntOrNull(rule.earlyGraceMinutes ?? rule.earlyLeaveGraceMinutes),
+      roundingMinutes: freezeNonNegIntOrNull(rule.roundingMinutes),
+      severeLateThresholdMinutes: freezeNonNegIntOrNull(rule.severeLateThresholdMinutes),
+      absenceLateThresholdMinutes: freezeNonNegIntOrNull(rule.absenceLateThresholdMinutes),
+      workingDays,
+    },
+    policy: {
+      appliedRules: appliedPolicyRules,
+      userGroups: Array.isArray(options.userGroups)
+        ? [...options.userGroups].map(String).sort()
+        : [],
+    },
+    engine: options.engineVersion == null
+      ? null
+      : {
+          appliedRules: appliedEngineRules,
+        },
+  }
+  return crypto
+    .createHash('sha256')
+    .update(
+      Buffer.concat([
+        Buffer.from(ATTENDANCE_IMPORT_POLICY_SOURCE_FINGERPRINT_DOMAIN_V1, 'utf8'),
+        Buffer.from([0]),
+        Buffer.from(canonicalAttendanceJsonCjsV1(projection), 'utf8'),
+      ]),
+    )
+    .digest('hex')
+}
+
+function buildImportPolicyOutputV1(options = {}) {
+  return {
+    status: freezeStatusOrNull(options.status),
+    workMinutes: freezeNonNegIntOrNull(options.workMinutes),
+    lateMinutes: freezeNonNegIntOrNull(options.lateMinutes),
+    earlyLeaveMinutes: freezeNonNegIntOrNull(options.earlyLeaveMinutes),
+    leaveMinutes: freezeNonNegIntOrNull(options.leaveMinutes),
+    overtimeMinutes: freezeNonNegIntOrNull(options.overtimeMinutes),
+  }
+}
+
+/**
+ * Per-source freeze leaf carried on prepareOnly upsert items, then folded into
+ * closed recordWrite attributionSnapshot / policySnapshot wrappers.
+ */
+function buildImportCanonicalFreezeSourceV1(options = {}) {
+  const sourceOrdinal = Number(options.sourceOrdinal)
+  if (!Number.isInteger(sourceOrdinal) || sourceOrdinal < 0) {
+    throw new Error('W4C3A_IMPORT_FREEZE_SOURCE_ORDINAL_INVALID')
+  }
+  const ruleVersion = options.ruleVersion == null || options.ruleVersion === ''
+    ? 'org-default-rule'
+    : String(options.ruleVersion)
+  const engineVersion = options.engineVersion == null || options.engineVersion === ''
+    ? null
+    : String(options.engineVersion)
+  const attribution = options.attribution
+    && typeof options.attribution === 'object'
+    ? options.attribution
+    : {
+        posture: 'unsupported',
+        sourceSchemaVersion: null,
+        reason: 'missing',
+        sourceFingerprint: null,
+      }
+  const context = options.context === undefined ? null : options.context
+  const sourceFingerprint = typeof options.sourceFingerprint === 'string'
+    && /^[0-9a-f]{64}$/.test(options.sourceFingerprint)
+    ? options.sourceFingerprint
+    : computeImportPolicySourceFingerprintV1({
+        ruleVersion,
+        engineVersion,
+        rule: options.rule,
+        appliedPolicyRules: options.appliedPolicyRules,
+        appliedEngineRules: options.appliedEngineRules,
+        userGroups: options.userGroups,
+      })
+  return {
+    sourceOrdinal,
+    attribution,
+    context,
+    sourceFingerprint,
+    ruleVersion,
+    engineVersion,
+    output: buildImportPolicyOutputV1(options.output || {}),
+  }
+}
+
+/** Closed attributionSnapshot wrapper — same shape for single and folded targets. */
+function buildClosedImportAttributionSnapshotV1(sources) {
+  const ordered = (Array.isArray(sources) ? [...sources] : [])
+    .map((source) => ({
+      sourceOrdinal: Number(source.sourceOrdinal),
+      attribution: source.attribution,
+      context: source.context === undefined ? null : source.context,
+    }))
+    .sort((left, right) => left.sourceOrdinal - right.sourceOrdinal)
+  return {
+    schemaVersion: 1,
+    sources: ordered,
+  }
+}
+
+/** Closed policySnapshot wrapper — same shape for single and folded targets. */
+function buildClosedImportPolicySnapshotV1(sources) {
+  const ordered = (Array.isArray(sources) ? [...sources] : [])
+    .map((source) => ({
+      sourceOrdinal: Number(source.sourceOrdinal),
+      sourceFingerprint: String(source.sourceFingerprint),
+      ruleVersion: String(source.ruleVersion),
+      engineVersion: source.engineVersion == null ? null : String(source.engineVersion),
+      output: buildImportPolicyOutputV1(source.output || {}),
+    }))
+    .sort((left, right) => left.sourceOrdinal - right.sourceOrdinal)
+  return {
+    schemaVersion: 1,
+    sources: ordered,
+  }
+}
+
+/** @deprecated leaf name retained for tests; prefer per-source freeze builders. */
+function buildFrozenImportSnapshotV1(options = {}) {
+  return buildImportCanonicalFreezeSourceV1({
+    sourceOrdinal: options.sourceOrdinal,
+    attribution: options.resolvedAttribution ?? options.attribution,
+    context: options.frozenContext ?? options.context ?? null,
+    sourceFingerprint: options.sourceFingerprint,
+    ruleVersion: options.ruleVersion,
+    engineVersion: options.engineVersion,
+    rule: options.rule,
+    appliedPolicyRules: options.appliedPolicyRules,
+    appliedEngineRules: options.appliedEngineRules,
+    userGroups: options.userGroups,
+    output: options.output ?? options.policySnapshot ?? {},
+  })
+}
+
 function foldAttendanceImportPreparedTargets({ items, existingMap, orgId, sourceBatchId }) {
   const groups = new Map()
   for (const item of items) {
@@ -19815,6 +20478,8 @@ function foldAttendanceImportPreparedTargets({ items, existingMap, orgId, source
   const recordWrites = []
   const targetRefBySourceOrdinal = new Map()
   for (const group of groups.values()) {
+    // Source-row order: sort by sourceOrdinal so wrappers exactly match sourceOrdinals.
+    group.items.sort((left, right) => Number(left.sourceOrdinal) - Number(right.sourceOrdinal))
     const firstItem = group.items[0]
     const existingRow = existingMap.get(`${firstItem.userId}:${group.workDate}`) ?? undefined
     let calculationBase = existingRow
@@ -19867,6 +20532,31 @@ function foldAttendanceImportPreparedTargets({ items, existingMap, orgId, source
     const lastItem = group.items[group.items.length - 1]
     const compatibilityMetadata = normalizeMetadata(prepared.metaJson)
     const sourceOrdinals = group.items.map((item) => item.sourceOrdinal)
+    const freezeSources = group.items.map((item) => {
+      if (item.canonicalFreezeSource) return item.canonicalFreezeSource
+      // Fail closed to unsupported rather than inventing a resolved_v2 leaf.
+      return buildImportCanonicalFreezeSourceV1({
+        sourceOrdinal: item.sourceOrdinal,
+        attribution: {
+          posture: 'unsupported',
+          sourceSchemaVersion: null,
+          reason: 'missing',
+          sourceFingerprint: null,
+        },
+        context: null,
+        ruleVersion: 'org-default-rule',
+        engineVersion: null,
+        rule: item.rule,
+        output: {
+          status: item.overrideMetrics?.status ?? null,
+          workMinutes: item.overrideMetrics?.workMinutes ?? null,
+          lateMinutes: item.overrideMetrics?.lateMinutes ?? null,
+          earlyLeaveMinutes: item.overrideMetrics?.earlyLeaveMinutes ?? null,
+          leaveMinutes: item.leaveMinutes ?? null,
+          overtimeMinutes: item.overtimeMinutes ?? null,
+        },
+      })
+    })
     const folded = group.items.length > 1
     recordWrites.push({
       orgId,
@@ -19887,12 +20577,10 @@ function foldAttendanceImportPreparedTargets({ items, existingMap, orgId, source
       isWorkday: prepared.isWorkday ?? null,
       timezone: prepared.timezone,
       compatibilityMetadata,
-      policySnapshot: folded
-        ? {
-            sourceOrdinals,
-            sources: group.items.map((item) => item.previewSnapshot?.policy ?? null),
-          }
-        : (lastItem.previewSnapshot?.policy ?? {}),
+      // Closed freeze wrappers — identical shape for single and folded targets.
+      attributionSnapshot: buildClosedImportAttributionSnapshotV1(freezeSources),
+      policySnapshot: buildClosedImportPolicySnapshotV1(freezeSources),
+      // Compatibility-only leaves (not closed freeze contracts).
       profileSnapshot: folded
         ? {
             sourceOrdinals,
@@ -19905,12 +20593,6 @@ function foldAttendanceImportPreparedTargets({ items, existingMap, orgId, source
             sources: group.items.map((item) => normalizeMetadata(item.meta)?.multiPunch ?? null),
           }
         : (compatibilityMetadata?.multiPunch ?? {}),
-      attributionSnapshot: folded
-        ? {
-            sourceOrdinals,
-            sources: group.items.map((item) => normalizeMetadata(item.meta)?.[FROZEN_ATTRIBUTION_KEY] ?? null),
-          }
-        : (compatibilityMetadata?.[FROZEN_ATTRIBUTION_KEY] ?? {}),
       sourceBatchId,
       resultSlots: {},
     })
@@ -23117,6 +23799,18 @@ module.exports = {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
     resolveRowUserId,
+    rawImportFieldPresence,
+    firstDefinedPresence,
+    buildRawImportEvidenceV1,
+    buildImportRowProvenanceV1,
+    buildFrozenImportSnapshotV1,
+    buildImportAttendanceAttributionSnapshotV1,
+    buildImportCanonicalFreezeSourceV1,
+    buildClosedImportAttributionSnapshotV1,
+    buildClosedImportPolicySnapshotV1,
+    computeImportPolicySourceFingerprintV1,
+    resolveLegacyImportRowSourceKind,
+    sha256HexOfUtf8,
   },
   __attendanceW4C3aSyncCompatibilityForTests: {
     foldAttendanceImportPreparedTargets,
@@ -26591,6 +27285,39 @@ module.exports = {
 		      const preparedPlanItems = []
 		      const preparedPlanRecordWrites = []
 		      const preparedPlanGroupEffects = []
+	      // W4C-3a prepareOnly: freeze closed provenance once per plan (no path/secret leakage).
+	      let prepareOnlyProvenance = null
+	      if (prepareOnly) {
+	        const legacyRowSourceKindForEvidence = resolveLegacyImportRowSourceKind({ payload, csvFileId })
+	        let artifactSha256 = null
+	        let normalizedCsvSha256 = null
+	        const convertedSheetName = typeof payload?.convertedSheetName === 'string'
+	          && payload.convertedSheetName.trim()
+	          ? payload.convertedSheetName.trim()
+	          : (typeof payload?.sheetName === 'string' && payload.sheetName.trim()
+	            ? payload.sheetName.trim()
+	            : null)
+	        if (legacyRowSourceKindForEvidence === 'inline_csv' && typeof payload.csvText === 'string') {
+	          normalizedCsvSha256 = sha256HexOfUtf8(payload.csvText)
+	        } else if (legacyRowSourceKindForEvidence === 'uploaded_csv' && csvFileId) {
+	          const { csvPath } = getImportUploadPaths({ orgId, fileId: csvFileId })
+	          artifactSha256 = await sha256HexOfFile(csvPath)
+	          // Uploaded body is already the CSV artifact the parser hashes.
+	          normalizedCsvSha256 = artifactSha256
+	        }
+	        if (convertedSheetName && typeof payload.csvText === 'string' && !normalizedCsvSha256) {
+	          normalizedCsvSha256 = sha256HexOfUtf8(payload.csvText)
+	          if (!artifactSha256) artifactSha256 = normalizedCsvSha256
+	        }
+	        prepareOnlyProvenance = buildImportRowProvenanceV1({
+	          legacyRowSourceKind: legacyRowSourceKindForEvidence,
+	          batchId: resolvedBatchId,
+	          csvFileId,
+	          artifactSha256,
+	          normalizedCsvSha256,
+	          convertedSheetName,
+	        })
+	      }
 
 	      await db.transaction(async (trx) => {
 	        await applyImportHeavyTransactionTimeout(trx)
@@ -26700,7 +27427,7 @@ module.exports = {
 		            strategy: importItemsInsertStrategy,
 		          })
 		        }
-		        const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot, sourceOrdinal, reasonCode }) => {
+		        const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot, sourceOrdinal, reasonCode, rawEvidence }) => {
 		          if (prepareOnly) {
 		            preparedPlanItems.push({
 		              kind: 'skip',
@@ -26711,6 +27438,15 @@ module.exports = {
 		              reasonCode,
 		              warnings: Array.isArray(previewSnapshot?.warnings) ? previewSnapshot.warnings : [],
 		              previewSnapshot: previewSnapshot ?? {},
+		              rawEvidence: rawEvidence ?? buildRawImportEvidenceV1({
+		                sourceOrdinal,
+		                fields: {
+		                  userId: userId ?? undefined,
+		                  workDate: workDate ?? undefined,
+		                },
+		                metrics: {},
+		                provenance: prepareOnlyProvenance,
+		              }),
 		            })
 		            return
 		          }
@@ -26822,12 +27558,16 @@ module.exports = {
 	            let semanticOrdinal = preparedPlanItems.filter((item) => item.kind === 'apply').length
 	            for (const { item, targetRef } of applyItems) {
 	              if (!targetRef) throw new Error('Attendance prepared target fold failed')
+	              if (!item.rawEvidence) {
+	                throw new Error('Attendance prepareOnly apply item missing rawEvidence')
+	              }
 	              preparedPlanItems.push({
 	                kind: 'apply',
 	                ordinal: item.sourceOrdinal,
 	                semanticOrdinal,
 	                targetRef,
 	                previewSnapshot: item.previewSnapshot ?? {},
+	                rawEvidence: item.rawEvidence,
 	              })
 	              semanticOrdinal += 1
 	            }
@@ -26970,6 +27710,30 @@ module.exports = {
 	          }
 		          if (importWarnings.length) {
 		            const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
+		            const skipRawEvidence = prepareOnly
+		              ? buildRawImportEvidenceV1({
+		                sourceOrdinal,
+		                fields: {
+		                  userId: rowUserId ?? (row?.fields?.userId !== undefined ? row.fields.userId : undefined),
+		                  workDate: workDate === undefined || workDate === null || workDate === ''
+		                    ? (workDate === undefined ? undefined : null)
+		                    : workDate,
+		                  timezone: row?.fields?.timezone !== undefined ? row.fields.timezone : undefined,
+		                  firstInAt: row?.fields?.firstInAt !== undefined ? row.fields.firstInAt : undefined,
+		                  lastOutAt: row?.fields?.lastOutAt !== undefined ? row.fields.lastOutAt : undefined,
+		                  status: row?.fields?.status !== undefined ? row.fields.status : undefined,
+		                  isWorkday: row?.fields?.isWorkday !== undefined ? row.fields.isWorkday : undefined,
+		                },
+		                metrics: {
+		                  workMinutes: firstDefinedPresence(row?.fields?.workMinutes, row?.fields?.workHours),
+		                  lateMinutes: row?.fields?.lateMinutes,
+		                  earlyLeaveMinutes: row?.fields?.earlyLeaveMinutes,
+		                  leaveMinutes: firstDefinedPresence(row?.fields?.leaveMinutes, row?.fields?.leaveHours),
+		                  overtimeMinutes: firstDefinedPresence(row?.fields?.overtimeMinutes, row?.fields?.overtimeHours),
+		                },
+		                provenance: prepareOnlyProvenance,
+		              })
+		              : undefined
 		            await enqueueImportItem({
 	              userId: rowUserId ?? null,
 	              workDate: workDate ?? null,
@@ -26977,6 +27741,7 @@ module.exports = {
 		              previewSnapshot: snapshot,
 		              sourceOrdinal,
 		              reasonCode: 'validation',
+		              rawEvidence: skipRawEvidence,
 		            })
 		            appendSkipped({
 		              userId: rowUserId ?? null,
@@ -27123,9 +27888,25 @@ module.exports = {
 	            ? baseRuleForMetrics
 	            : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
+	          // Capture raw source presence BEFORE parse/fallback so prepareOnly evidence
+	          // can distinguish absent keys from present-null / present-zero values.
+	          // Presence probes use firstDefinedPresence (undefined-only). Legacy parse paths
+	          // keep `??` so null still falls through to hour aliases — prepareOnly=false
+	          // metrics behavior is unchanged.
+	          const rawFirstInValue = valueFor('firstInAt')
+	          const rawLastOutValue = valueFor('lastOutAt')
+	          const rawStatusValue = valueFor('status')
+	          const rawTimezoneValue = valueFor('timezone')
+	          const rawIsWorkdayValue = valueFor('isWorkday')
+	          const rawWorkMinutesPresence = firstDefinedPresence(valueFor('workMinutes'), valueFor('workHours'))
+	          const rawLateMinutesValue = valueFor('lateMinutes')
+	          const rawEarlyLeaveMinutesValue = valueFor('earlyLeaveMinutes')
+	          const rawLeaveMinutesPresence = firstDefinedPresence(valueFor('leaveMinutes'), valueFor('leaveHours'))
+	          const rawOvertimeMinutesPresence = firstDefinedPresence(valueFor('overtimeMinutes'), valueFor('overtimeHours'))
+
 	          const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
-	            firstInValue: valueFor('firstInAt'),
-	            lastOutValue: valueFor('lastOutAt'),
+	            firstInValue: rawFirstInValue,
+	            lastOutValue: rawLastOutValue,
 	            workDate,
 	            rule: ruleForMetrics,
 	          })
@@ -27139,14 +27920,52 @@ module.exports = {
 		            timezone: ruleForMetrics.timezone,
 	            explicitShiftId: valueFor('shiftId') || valueFor('shift_id') || null,
 	          })
-	          const statusRaw = valueFor('status')
+	          const statusRaw = rawStatusValue
 	          const statusOverride = statusRaw != null ? resolveStatusOverride(statusRaw, statusMap) : null
 
 	          const workMinutes = parseMinutesValue(valueFor('workMinutes') ?? valueFor('workHours'), dataTypeFor('workMinutes') ?? dataTypeFor('workHours'))
-	          const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
-	          const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
+	          const lateMinutes = parseMinutesValue(rawLateMinutesValue, dataTypeFor('lateMinutes'))
+	          const earlyLeaveMinutes = parseMinutesValue(rawEarlyLeaveMinutesValue, dataTypeFor('earlyLeaveMinutes'))
 	          const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
 	          const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
+
+	          // Raw evidence must bind imported values before computed/policy/engine overrides.
+	          const rowRawEvidence = prepareOnly
+	            ? buildRawImportEvidenceV1({
+	              sourceOrdinal,
+	              fields: {
+	                userId: rowUserId ?? undefined,
+	                workDate: workDate ?? undefined,
+	                timezone: rawTimezoneValue,
+	                firstInAt: rawFirstInValue === undefined
+	                  ? undefined
+	                  : (firstInAt ?? null),
+	                lastOutAt: rawLastOutValue === undefined
+	                  ? undefined
+	                  : (lastOutAt ?? null),
+	                status: rawStatusValue,
+	                isWorkday: rawIsWorkdayValue,
+	              },
+	              metrics: {
+	                workMinutes: rawWorkMinutesPresence === undefined
+	                  ? undefined
+	                  : (Number.isFinite(workMinutes) ? workMinutes : null),
+	                lateMinutes: rawLateMinutesValue === undefined
+	                  ? undefined
+	                  : (Number.isFinite(lateMinutes) ? lateMinutes : null),
+	                earlyLeaveMinutes: rawEarlyLeaveMinutesValue === undefined
+	                  ? undefined
+	                  : (Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : null),
+	                leaveMinutes: rawLeaveMinutesPresence === undefined
+	                  ? undefined
+	                  : (Number.isFinite(leaveMinutes) ? leaveMinutes : null),
+	                overtimeMinutes: rawOvertimeMinutesPresence === undefined
+	                  ? undefined
+	                  : (Number.isFinite(overtimeMinutes) ? overtimeMinutes : null),
+	              },
+	              provenance: prepareOnlyProvenance,
+	            })
+	            : null
 
 	          const computed = computeMetrics({
 	            rule: ruleForMetrics,
@@ -27296,6 +28115,74 @@ module.exports = {
 	            meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
 	          }
 
+	          // prepareOnly: freeze closed AttendanceAttributionSnapshotV1 + FrozenAttendanceContextV1
+	          // and closed policy source leaf for recordWrite wrappers.
+	          let canonicalFreezeSource = null
+	          if (prepareOnly) {
+	            const attributionSnapshot = buildImportAttendanceAttributionSnapshotV1({
+	              orgId,
+	              userId: rowUserId,
+	              resolution: importAttribution.resolution,
+	              nowIso: new Date().toISOString(),
+	            })
+	            let frozenImportContext = null
+	            if (
+	              attributionSnapshot.posture === 'resolved_v2'
+	              && importAttribution.resolution?.kind === 'resolved'
+	              && importAttribution.resolution.shiftId
+	            ) {
+	              const winnerTimezone = importAttribution.resolution.fullWinner
+	                && typeof importAttribution.resolution.fullWinner.timezone === 'string'
+	                && importAttribution.resolution.fullWinner.timezone
+	                ? importAttribution.resolution.fullWinner.timezone
+	                : (ruleForMetrics.timezone ?? context.rule?.timezone)
+	              frozenImportContext = await buildW4ShadowFrozenContextV1(trx, {
+	                orgId,
+	                userId: rowUserId,
+	                workDate: importAttribution.resolution.workDate,
+	                shiftId: importAttribution.resolution.shiftId,
+	                timezone: winnerTimezone,
+	                isWorkday: context.isWorkingDay,
+	                holidayKind: context.holiday
+	                  ? (context.holiday.type
+	                    ?? (context.holiday.isWorkingDay === false ? 'holiday' : 'working_day_override'))
+	                  : null,
+	              })
+	            }
+	            const ruleVersion = activeRuleSetId
+	              ? `rule-set:${activeRuleSetId}`
+	              : 'org-default-rule'
+	            const engineVersion = engineResult ? 'attendance-rule-engine@1' : null
+	            const appliedPolicyRules = Array.isArray(policyResult?.appliedRules)
+	              ? policyResult.appliedRules
+	              : []
+	            const appliedEngineRules = Array.isArray(engineResult?.appliedRules)
+	              ? engineResult.appliedRules
+	              : []
+	            const userGroups = Array.isArray(policyResult?.userGroups)
+	              ? policyResult.userGroups
+	              : []
+	            canonicalFreezeSource = buildImportCanonicalFreezeSourceV1({
+	              sourceOrdinal,
+	              attribution: attributionSnapshot,
+	              context: frozenImportContext,
+	              ruleVersion,
+	              engineVersion,
+	              rule: ruleForMetrics,
+	              appliedPolicyRules,
+	              appliedEngineRules,
+	              userGroups,
+	              output: {
+	                status: finalMetrics.status,
+	                workMinutes: finalMetrics.workMinutes,
+	                lateMinutes: finalMetrics.lateMinutes,
+	                earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+	                leaveMinutes: effectiveLeaveMinutes,
+	                overtimeMinutes: effectiveOvertimeMinutes,
+	              },
+	            })
+	          }
+
 	          const snapshot = {
 	            metrics: {
 	              workMinutes: finalMetrics.workMinutes,
@@ -27330,6 +28217,8 @@ module.exports = {
 	            meta: meta ?? undefined,
 	            sourceBatchId: resolvedBatchId,
 	            previewSnapshot: snapshot,
+	            rawEvidence: rowRawEvidence ?? undefined,
+	            canonicalFreezeSource: canonicalFreezeSource ?? undefined,
 	            engine: engineResult
 	              ? {
 	                  appliedRules: engineResult.appliedRules,
@@ -27391,15 +28280,7 @@ module.exports = {
 		          if (!memberEffects.has(key)) memberEffects.set(key, effect)
 		        }
 		        groupEffects.push(...memberEffects.values())
-		        const legacyRowSourceKind = csvFileId
-		          ? 'uploaded_csv'
-		          : typeof payload.csvText === 'string'
-		            ? 'inline_csv'
-		            : Array.isArray(payload.rows)
-		              ? 'direct_rows'
-		              : Array.isArray(payload.entries)
-		                ? 'entries'
-		                : 'dingtalk_tabular'
+		        const legacyRowSourceKind = resolveLegacyImportRowSourceKind({ payload, csvFileId })
 		        return {
 		          orgId,
 		          actorId: requesterId,

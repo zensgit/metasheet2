@@ -65,6 +65,8 @@ function rawEvidence(sourceOrdinal: number) {
       workMinutes: { present: false as const, value: null },
       lateMinutes: { present: false as const, value: null },
       earlyLeaveMinutes: { present: false as const, value: null },
+      leaveMinutes: { present: false as const, value: null },
+      overtimeMinutes: { present: false as const, value: null },
     },
     provenance: {
       transport: 'rows' as const,
@@ -100,6 +102,7 @@ async function identities(): Promise<{
 
 function packagePlan(
   idempotencyKey: string | null = null,
+  acceptedWritePosture: AttendanceLegacyPlanWorkerJobV1['acceptedWritePosture'] = 'legacy_projection_only',
 ): { job: AttendanceLegacyPlanWorkerJobV1; stored: AttendanceLegacyPlanWorkerStoredPlanV1 } {
   const identityProofVector = []
   const manifestSeed: Omit<
@@ -116,7 +119,7 @@ function packagePlan(
     actorId: 'admin-a',
     actorPosture: 'platform_admin',
     tokenSubjectUserId: 'admin-a',
-    acceptedWritePosture: 'legacy_projection_only',
+    acceptedWritePosture,
     identityProofVectorDigest: sha256HexOfCanonicalJsonV1(identityProofVector),
     commandFingerprint: HEX_A,
     legacyInputFingerprint: HEX_B,
@@ -169,7 +172,7 @@ function packagePlan(
     jobId: JOB_ID, orgId: ORG_ID, status: 'queued', w4ContractVersion: 1, batchId: BATCH_ID,
     idempotencyKey,
     sourceKind: 'import_batch', sourceRef: 'attendance-import', createdBy: 'admin-a', actorId: 'admin-a',
-    actorPosture: 'platform_admin', tokenSubjectUserId: 'admin-a', acceptedWritePosture: 'legacy_projection_only',
+    actorPosture: 'platform_admin', tokenSubjectUserId: 'admin-a', acceptedWritePosture,
     commandFingerprint: HEX_A, legacyInputFingerprint: HEX_B, operationalBranch: 'strict_targeted',
     identityProofVector,
     identityProofVectorDigest: plan.manifest.identityProofVectorDigest,
@@ -307,7 +310,9 @@ async function callbacks(
     authorizeFullImport: vi.fn(async () => { calls.push('auth'); return true }),
     reservationIdentities: vi.fn(() => [ids.batch]),
     acquireClass10: vi.fn(async () => { calls.push('10') }),
+    inspectOperationRows: vi.fn(async () => { calls.push('registry-read'); return 'all_new' }),
     loadPlan: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('plan'); return stored }),
+    claimOperationRows: vi.fn(async () => { calls.push('registry'); return null }),
     recheckReplayPrecondition: vi.fn(async () => {
       calls.push('replay-precondition')
       return true
@@ -527,7 +532,9 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
       authorizeFullImport: vi.fn(async () => { calls.push('auth'); return true }),
       reservationIdentities: vi.fn(() => [ids.batch]),
       acquireClass10: vi.fn(async () => { calls.push('10') }),
+      inspectOperationRows: vi.fn(async () => { calls.push('registry-read'); return 'all_new' }),
       loadPlan: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('plan'); return stored }),
+      claimOperationRows: vi.fn(async () => { calls.push('registry'); return null }),
       recheckReplayPrecondition: vi.fn(async () => {
         calls.push('replay-precondition')
         return true
@@ -641,7 +648,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     await expect(
       createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
     ).resolves.toEqual({ kind: 'not_found' })
-    expect(base.calls).toEqual(['00', 'posture', 'job-read', 'auth', '10'])
+    expect(base.calls).toEqual(['00', 'posture', 'job-read', 'auth', '10', 'registry-read'])
     expect(base.hooks.lockJob).toHaveBeenCalledWith(expect.anything(), JOB_ID, ORG_ID)
     expect(
       vi.mocked(base.hooks.lockJob).mock.invocationCallOrder[0],
@@ -740,12 +747,14 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
       'posture',
       'auth',
       '10',
+      'registry-read',
       'job',
       'resume',
       'auth',
       'plan',
       '11',
       'preconditions',
+      'registry',
       'effect',
       'terminal',
     ])
@@ -793,6 +802,67 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     expect(base.calls).not.toContain('plan')
     expect(base.calls).not.toContain('effect')
     expect(base.calls).not.toContain('terminal')
+  })
+
+  it('replays a strict completed job only with an all-completed-congruent registry', async () => {
+    const strict = packagePlan(null, 'shadow')
+    const completed = { ...strict.job, status: 'completed' as const }
+    const base = await callbacks(
+      {
+        resolveWritePosture: vi.fn(async () => 'shadow'),
+        inspectOperationRows: vi.fn(async () => 'all_completed_congruent'),
+        lockJob: vi.fn(async () => completed),
+      },
+      strict,
+    )
+
+    await expect(createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID)).resolves.toEqual({
+      kind: 'completed', response: COMPLETED_RESPONSE,
+    })
+    expect(base.hooks.loadCompletedResponse).toHaveBeenCalledOnce()
+    expect(base.hooks.loadPlan).not.toHaveBeenCalled()
+    expect(base.hooks.claimOperationRows).not.toHaveBeenCalled()
+    expect(base.hooks.executeVerifiedPlan).not.toHaveBeenCalled()
+  })
+
+  it('rejects a strict completed job paired with all-new rows before replay or plan access', async () => {
+    const strict = packagePlan(null, 'shadow')
+    const completed = { ...strict.job, status: 'completed' as const }
+    const base = await callbacks(
+      {
+        resolveWritePosture: vi.fn(async () => 'shadow'),
+        inspectOperationRows: vi.fn(async () => 'all_new'),
+        lockJob: vi.fn(async () => completed),
+      },
+      strict,
+    )
+
+    await expect(createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID)).resolves.toEqual({
+      kind: 'not_found',
+    })
+    expect(base.hooks.loadCompletedResponse).not.toHaveBeenCalled()
+    expect(base.hooks.loadPlan).not.toHaveBeenCalled()
+    expect(base.hooks.claimOperationRows).not.toHaveBeenCalled()
+    expect(base.hooks.executeVerifiedPlan).not.toHaveBeenCalled()
+  })
+
+  it('terminal-fails a queued strict registry conflict before plan access or claim', async () => {
+    const strict = packagePlan(null, 'shadow')
+    const base = await callbacks(
+      {
+        resolveWritePosture: vi.fn(async () => 'shadow'),
+        inspectOperationRows: vi.fn(async () => 'conflict'),
+      },
+      strict,
+    )
+
+    await expect(createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID)).resolves.toEqual({
+      kind: 'failed', reason: 'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED',
+    })
+    expect(base.hooks.markPlanFailed).toHaveBeenCalledOnce()
+    expect(base.hooks.loadPlan).not.toHaveBeenCalled()
+    expect(base.hooks.claimOperationRows).not.toHaveBeenCalled()
+    expect(base.hooks.executeVerifiedPlan).not.toHaveBeenCalled()
   })
 
   it('does not expose or rewrite a completed response after authorization loss', async () => {
@@ -846,11 +916,13 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
       'job-read',
       'auth',
       '10',
+      'registry-read',
       'job',
       'auth',
       'plan',
       '11',
       'preconditions',
+      'registry',
       'effect',
       'terminal',
     ])

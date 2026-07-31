@@ -659,6 +659,8 @@ export type RawImportEvidenceV1 = Readonly<{
     readonly workMinutes: RawImportFieldPresenceV1<number>
     readonly lateMinutes: RawImportFieldPresenceV1<number>
     readonly earlyLeaveMinutes: RawImportFieldPresenceV1<number>
+    readonly leaveMinutes: RawImportFieldPresenceV1<number>
+    readonly overtimeMinutes: RawImportFieldPresenceV1<number>
   }>
   readonly provenance: AttendanceInputProvenanceRefV1
 }>
@@ -686,6 +688,8 @@ const RAW_IMPORT_METRIC_KEYS = [
   'workMinutes',
   'lateMinutes',
   'earlyLeaveMinutes',
+  'leaveMinutes',
+  'overtimeMinutes',
 ] as const
 
 function parsePresence<T>(
@@ -816,6 +820,8 @@ export function parseRawImportEvidenceV1(value: unknown): RawImportEvidenceV1 {
     workMinutes: parseRawNullableMetricPresence(rawMetrics.workMinutes, code),
     lateMinutes: parseRawNullableMetricPresence(rawMetrics.lateMinutes, code),
     earlyLeaveMinutes: parseRawNullableMetricPresence(rawMetrics.earlyLeaveMinutes, code),
+    leaveMinutes: parseRawNullableMetricPresence(rawMetrics.leaveMinutes, code),
+    overtimeMinutes: parseRawNullableMetricPresence(rawMetrics.overtimeMinutes, code),
   })
   const expectedPunches = [
     ...(fields.firstInAt.present && fields.firstInAt.value !== null
