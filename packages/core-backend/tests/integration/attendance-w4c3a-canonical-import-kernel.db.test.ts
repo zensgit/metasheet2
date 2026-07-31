@@ -16,6 +16,10 @@ import {
 } from '../../src/attendance/w4c0-identity'
 import type { AttendanceLegacyPlanWorkerJobV1, VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
 import { LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1 } from '../../src/attendance/w4c3a-legacy-execution-plan'
+import {
+  buildAttendanceImportAttributionFreezeV1,
+  buildAttendanceImportPolicySourceProofV1,
+} from '../../src/attendance/w4c3a-import-proof'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as addOffStatusUp } from '../../src/db/migrations/zzzz20260731120000_w4c3a_add_off_daily_status'
 
@@ -111,29 +115,63 @@ function frozenContext(orgId: string, userId: string, workDate: string) {
 }
 
 function frozenAttribution(orgId: string, userId: string, workDate: string) {
+  const result = buildAttendanceImportAttributionFreezeV1({
+    orgId,
+    userId,
+    workDate,
+    shiftId: `shift-${run}`,
+    reasonCode: 'SINGLE_MATCHING_CANDIDATE',
+    resolvedAt: `${workDate}T00:00:00.000Z`,
+    timezone: 'Asia/Shanghai',
+    workStartTime: '09:00',
+    workEndTime: '17:00',
+    isOvernight: false,
+    candidateAbsoluteWindow: {
+      startAt: `${workDate}T01:00:00.000Z`,
+      endAt: `${workDate}T09:00:00.000Z`,
+    },
+    candidateAttributionWindow: {
+      startAt: `${workDate}T01:00:00.000Z`,
+      endAt: `${workDate}T09:00:00.000Z`,
+    },
+    attributionTailMinutes: 0,
+    approvedOvertimeWindows: [],
+  })
+  if (result.kind !== 'resolved_v2') {
+    throw new Error('expected a resolved canonical import attribution fixture')
+  }
+  return result
+}
+
+function policySourceProof(conflict: boolean) {
+  const proof = buildAttendanceImportPolicySourceProofV1({
+    ruleVersion: 'w4c3a-test',
+    engineVersion: null,
+    rule: {
+      timezone: 'Asia/Shanghai',
+      workStartTime: '09:00',
+      workEndTime: '17:00',
+      lateGraceMinutes: 0,
+      earlyGraceMinutes: 0,
+      roundingMinutes: 1,
+      severeLateThresholdMinutes: 60,
+      absenceLateThresholdMinutes: 240,
+      workingDays: [1, 2, 3, 4, 5],
+    },
+    policy: { appliedRules: [], userGroups: [] },
+    engine: null,
+  })
   return {
-    posture: 'resolved_v2',
-    value: {
-      schemaVersion: 2,
-      resolverVersion: 'w4c3a-test',
-      orgId,
-      userId,
-      workDate,
-      shiftId: `shift-${run}`,
-      reasonCode: 'scheduled_shift',
-      resolvedAt: `${workDate}T00:00:00.000Z`,
-      absoluteWindow: {
-        startAt: `${workDate}T01:00:00.000Z`,
-        endAt: `${workDate}T09:00:00.000Z`,
-      },
-      attributionWindow: {
-        startAt: `${workDate}T01:00:00.000Z`,
-        endAt: `${workDate}T09:00:00.000Z`,
-      },
-      attributionTailMinutes: 0,
-      extendedByApprovedOvertime: false,
-      windowEvidenceFingerprint: hex('a'),
-      source: 'import_resolution',
+    sourceOrdinal: 0,
+    sourceFingerprint: proof.sourceFingerprint,
+    sourceDefinition: proof.sourceDefinition,
+    output: {
+      status: 'normal',
+      workMinutes: conflict ? 479 : 480,
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      leaveMinutes: 0,
+      overtimeMinutes: 0,
     },
   }
 }
@@ -169,6 +207,7 @@ function fixture(posture: 'shadow' | 'authoritative', input?: Readonly<{ conflic
   })
   const attribution = frozenAttribution(orgId, userId, workDate)
   const context = frozenContext(orgId, userId, workDate)
+  const policySource = policySourceProof(input?.conflict === true)
   const rawEvidence = {
     schemaVersion: 1,
     sourceOrdinal: 0,
@@ -217,27 +256,19 @@ function fixture(posture: 'shadow' | 'authoritative', input?: Readonly<{ conflic
     timezone: 'Asia/Shanghai',
     compatibilityMetadata: {},
     policySnapshot: {
-      schemaVersion: 1,
-      sources: [{
-        sourceOrdinal: 0,
-        sourceFingerprint: hex('c'),
-        ruleVersion: 'w4c3a-test',
-        engineVersion: 'w4c3a-test',
-        output: {
-          status: 'normal',
-          workMinutes: input?.conflict ? 479 : 480,
-          lateMinutes: 0,
-          earlyLeaveMinutes: 0,
-          leaveMinutes: 0,
-          overtimeMinutes: 0,
-        },
-      }],
+      schemaVersion: 2,
+      sources: [policySource],
     },
     profileSnapshot: {},
     multiPunchSnapshot: {},
     attributionSnapshot: {
-      schemaVersion: 1,
-      sources: [{ sourceOrdinal: 0, attribution, context }],
+      schemaVersion: 2,
+      sources: [{
+        sourceOrdinal: 0,
+        attribution: attribution.attribution,
+        context,
+        importAttributionReconstruction: attribution.reconstruction,
+      }],
     },
     sourceBatchId: batchId,
     resultSlots: {},
@@ -342,11 +373,11 @@ function withSecondFoldedSource(input: ReturnType<typeof fixture>): ReturnType<t
   >
   const firstWrite = input.plan.recordWrites[0]
   const attributionRoot = firstWrite.attributionSnapshot as {
-    schemaVersion: 1
+    schemaVersion: 2
     sources: Array<Record<string, unknown>>
   }
   const policyRoot = firstWrite.policySnapshot as {
-    schemaVersion: 1
+    schemaVersion: 2
     sources: Array<Record<string, unknown>>
   }
   const secondRawEvidence = {
@@ -383,11 +414,11 @@ function withSecondFoldedSource(input: ReturnType<typeof fixture>): ReturnType<t
       ...firstWrite,
       sourceOrdinals: [0, 1],
       attributionSnapshot: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         sources: [attributionRoot.sources[0], secondAttribution],
       },
       policySnapshot: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         sources: [policyRoot.sources[0], secondPolicy],
       },
     }],
