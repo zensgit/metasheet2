@@ -102,6 +102,8 @@ on:
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
       - 'apps/web/tests/approval-canvas-commands.test.ts'
       - 'apps/web/tests/approval-canvas-c4-command-wiring.test.ts'
+      - 'apps/web/src/approvals/approvalAuthoringHistory.ts'
+      - 'apps/web/tests/approval-authoring-history.test.ts'
       - 'apps/web/tests/approval-form-commands.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
       - 'apps/web/src/approvals/canvasViewport.ts'
@@ -283,6 +285,8 @@ on:
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
       - 'apps/web/tests/approval-canvas-commands.test.ts'
       - 'apps/web/tests/approval-canvas-c4-command-wiring.test.ts'
+      - 'apps/web/src/approvals/approvalAuthoringHistory.ts'
+      - 'apps/web/tests/approval-authoring-history.test.ts'
       - 'apps/web/tests/approval-form-commands.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
       - 'apps/web/src/approvals/canvasViewport.ts'
@@ -433,7 +437,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run Canvas V2 command canaries
-        run: pnpm --filter @metasheet/web exec vitest run approval-canvas-commands approval-canvas-c4-command-wiring approval-form-commands --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-canvas-commands approval-canvas-c4-command-wiring approval-authoring-history approval-form-commands --reporter=dot
 
       - name: Run FWB mapping authoring contract
         run: pnpm --filter @metasheet/web exec vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
