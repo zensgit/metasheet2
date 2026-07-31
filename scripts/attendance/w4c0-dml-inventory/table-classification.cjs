@@ -131,6 +131,144 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_group_effect_revisions: 'w4_canonical',
 })
 
+// P25 is a classification contract in addition to a table bucket.  In particular, the
+// durable legacy plan tables remain inside the canonical path boundary for storage integrity,
+// but their values are still transport/compatibility state.  They cannot become calculation,
+// source, result, promotion, rollback, authorization, or operation-claim evidence.
+const P25_FORBIDDEN_AUTHORITY_ROLES = Object.freeze([
+  'calculation_source',
+  'calculation_result',
+  'business_evidence',
+  'business_state',
+  'promotion_evidence',
+  'rollback_authority',
+  'authorization_evidence',
+  'operation_claim',
+])
+
+const P25_ALLOWED_NON_AUTHORITY_ROLES = Object.freeze([
+  'transport',
+  'compatibility_transport',
+  'audit_attempt',
+  'concurrency_control',
+  'retryable_job_identity_claim',
+  'identity_transport',
+])
+
+function p25Spec(family, authorityClass, options = {}) {
+  return Object.freeze({
+    family,
+    authorityClass,
+    forbiddenAuthorityRoles: P25_FORBIDDEN_AUTHORITY_ROLES,
+    reservedIdentityTransport: options.reservedIdentityTransport === true,
+    allowedIdentityAdapters: Object.freeze(options.allowedIdentityAdapters || []),
+  })
+}
+
+// This is the closed P25 import/integration inventory.  A newly in-scope table must be added here
+// with a family and authority posture; adding it only to TABLE_BUCKETS would make the generated
+// census green while leaving the correctness contract implicit. Notification delivery and W4
+// concurrency-revision tables are intentionally outside this set.
+const P25_OPERATIONAL_TABLE_SPECS = Object.freeze({
+  attendance_import_tokens: p25Spec('import_token', 'operational_transport'),
+  attendance_import_jobs: p25Spec('import_job', 'operational_transport', {
+    reservedIdentityTransport: true,
+    allowedIdentityAdapters: ['enqueue', 'private_worker'],
+  }),
+  attendance_import_template_prefs: p25Spec('template_preference', 'operational_configuration'),
+  attendance_import_items_stage: p25Spec('temporary_staging', 'operational_transport'),
+  attendance_import_records_stage: p25Spec('temporary_staging', 'operational_transport'),
+  attendance_import_upload_cleanup_commands: p25Spec('upload_lifecycle', 'operational_transport'),
+  attendance_integrations: p25Spec('integration_configuration_watermark', 'operational_transport'),
+  attendance_integration_runs: p25Spec('integration_audit_attempt', 'audit_only'),
+
+  // These tables are stored inside the canonical boundary, but OD-W4C-56 explicitly keeps the
+  // plan/manifest/chunk/terminal values out of W4 authority.  The classification therefore
+  // distinguishes storage boundary from semantic authority.
+  attendance_import_legacy_execution_plans: p25Spec('durable_legacy_plan', 'compatibility_transport', {
+    reservedIdentityTransport: true,
+    allowedIdentityAdapters: ['enqueue', 'private_worker'],
+  }),
+  attendance_import_legacy_execution_plan_chunks: p25Spec('durable_legacy_plan', 'compatibility_transport', {
+    reservedIdentityTransport: true,
+    allowedIdentityAdapters: ['private_worker'],
+  }),
+  attendance_import_legacy_terminal_responses: p25Spec('durable_legacy_terminal', 'compatibility_transport', {
+    reservedIdentityTransport: true,
+    allowedIdentityAdapters: ['private_worker'],
+  }),
+})
+
+const P25_IMPORT_INTEGRATION_TABLES = Object.freeze(Object.keys(P25_OPERATIONAL_TABLE_SPECS).sort())
+
+function classifyP25Use({ table, role, adapter = null, dryRun = false }) {
+  const spec = P25_OPERATIONAL_TABLE_SPECS[table]
+  if (!spec) return { allowed: true, table, role, classification: 'not_p25_operational' }
+
+  if (table === 'attendance_integration_runs' && role === 'business_state') {
+    return {
+      allowed: false,
+      code: dryRun ? 'ATTENDANCE_P25_DRY_RUN_AUDIT_NOT_BUSINESS_STATE' : 'ATTENDANCE_P25_AUDIT_NOT_BUSINESS_STATE',
+      table,
+      role,
+      family: spec.family,
+    }
+  }
+
+  if (spec.forbiddenAuthorityRoles.includes(role)) {
+    return {
+      allowed: false,
+      code: 'ATTENDANCE_P25_OPERATIONAL_AUTHORITY_FORBIDDEN',
+      table,
+      role,
+      family: spec.family,
+    }
+  }
+
+  if (
+    spec.reservedIdentityTransport &&
+    ['transport', 'compatibility_transport', 'retryable_job_identity_claim', 'identity_transport'].includes(role) &&
+    (typeof adapter !== 'string' || !spec.allowedIdentityAdapters.includes(adapter))
+  ) {
+    return {
+      allowed: false,
+      code: 'ATTENDANCE_P25_NON_WORKER_JOB_IDENTITY_FORBIDDEN',
+      table,
+      role,
+      adapter,
+      family: spec.family,
+    }
+  }
+
+  if (!P25_ALLOWED_NON_AUTHORITY_ROLES.includes(role)) {
+    return {
+      allowed: false,
+      code: 'ATTENDANCE_P25_UNKNOWN_USAGE_ROLE',
+      table,
+      role,
+      family: spec.family,
+    }
+  }
+
+  return {
+    allowed: true,
+    table,
+    role,
+    family: spec.family,
+    authorityClass: spec.authorityClass,
+  }
+}
+
+function assertP25Use(input) {
+  const result = classifyP25Use(input)
+  if (!result.allowed) {
+    const error = new Error(`${result.code}: ${result.table} cannot be used as ${result.role}`)
+    error.code = result.code
+    throw error
+  }
+  return result
+}
+
 // Buckets whose DML sites require an individual curated P0x (or later-slice) debt-ID match.
 const TRACKED_BUCKETS = Object.freeze(['business', 'schedule_fact', 'shared_hook'])
 
@@ -160,8 +298,13 @@ function classifyTable(tableName) {
 
 module.exports = {
   TABLE_BUCKETS,
+  P25_FORBIDDEN_AUTHORITY_ROLES,
+  P25_IMPORT_INTEGRATION_TABLES,
+  P25_OPERATIONAL_TABLE_SPECS,
   TRACKED_BUCKETS,
   BUCKET_ALLOWLISTED_BUCKETS,
   W4_CANONICAL_PATH_PREFIXES,
   classifyTable,
+  classifyP25Use,
+  assertP25Use,
 }

@@ -23,7 +23,14 @@ const { buildRawCensus, classifyCensus, scanFileForDmlSites, isCanonicalBoundary
 )
 const { classifyTrackedSites } = require(path.join(toolDir, 'classify-tracked-sites.cjs'))
 const { CURATED_DEBT_ENTRIES } = require(path.join(toolDir, 'curated-debt-entries.cjs'))
-const { TABLE_BUCKETS } = require(path.join(toolDir, 'table-classification.cjs'))
+const {
+  TABLE_BUCKETS,
+  P25_FORBIDDEN_AUTHORITY_ROLES,
+  P25_IMPORT_INTEGRATION_TABLES,
+  P25_OPERATIONAL_TABLE_SPECS,
+  classifyP25Use,
+  assertP25Use,
+} = require(path.join(toolDir, 'table-classification.cjs'))
 
 const PINNED_REF = 'e0defbe26d7f2e1747e74aa908ca710422812bf7'
 const BASELINE_ARTIFACT_RELPATH = 'docs/development/attendance-w4c0-dml-debt-baseline-e0defbe26.json'
@@ -407,4 +414,172 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
     ],
     'the w4_canonical bucket is an exact closed set — a demotion OR a smuggled addition both redden here',
   )
+})
+
+// -------------------------------------------------------------------------------------------
+// 8. P25 import/integration inventory contract (OD-W4C-36 and OD-W4C-56).  A bucket allowlist alone
+// is too weak: it would let a V1 job/plan value be reported as authority while the DML census
+// remains green.  The P25 table spec is the closed family/authority inventory; the synthetic
+// use checks below are deliberately independent from route behavior and do not claim that the
+// remaining P06-P11/P23-P24 callers are implemented.
+// -------------------------------------------------------------------------------------------
+test('P25: the closed import/integration set has explicit family and non-authority specs', () => {
+  const expectedP25Tables = [
+    'attendance_import_items_stage',
+    'attendance_import_jobs',
+    'attendance_import_legacy_execution_plan_chunks',
+    'attendance_import_legacy_execution_plans',
+    'attendance_import_legacy_terminal_responses',
+    'attendance_import_records_stage',
+    'attendance_import_template_prefs',
+    'attendance_import_tokens',
+    'attendance_import_upload_cleanup_commands',
+    'attendance_integration_runs',
+    'attendance_integrations',
+  ]
+  assert.deepEqual(
+    P25_IMPORT_INTEGRATION_TABLES,
+    expectedP25Tables,
+    'P25 must remain a closed import/integration set, not every operational attendance feature',
+  )
+
+  for (const [table, spec] of Object.entries(P25_OPERATIONAL_TABLE_SPECS)) {
+    assert.ok(TABLE_BUCKETS[table], `${table} must also exist in the closed table bucket map`)
+    assert.match(spec.family, /^[a-z0-9_]+$/)
+    assert.match(spec.authorityClass, /^[a-z0-9_]+$/)
+    assert.deepEqual(spec.forbiddenAuthorityRoles, P25_FORBIDDEN_AUTHORITY_ROLES)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('calculation_source'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('calculation_result'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('promotion_evidence'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('rollback_authority'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('authorization_evidence'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('operation_claim'), true)
+  }
+
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  const p25Sites = [...classified.bucketAllowlistedSites, ...classified.canonicalSites].filter(
+    (site) => P25_OPERATIONAL_TABLE_SPECS[site.table],
+  )
+  assert.ok(p25Sites.length > 0, 'the generated census must contain P25 operational/canonical sites')
+  for (const site of p25Sites) {
+    assert.deepEqual(site.p25, P25_OPERATIONAL_TABLE_SPECS[site.table], `${site.table} must carry its P25 posture in generated inventory`)
+  }
+
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_jobs.family, 'import_job')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_items_stage.family, 'temporary_staging')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_upload_cleanup_commands.family, 'upload_lifecycle')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_integration_runs.family, 'integration_audit_attempt')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_legacy_execution_plans.family, 'durable_legacy_plan')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_legacy_execution_plan_chunks.family, 'durable_legacy_plan')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_legacy_terminal_responses.family, 'durable_legacy_terminal')
+  for (const table of [
+    'attendance_notification_deliveries',
+    'attendance_unscheduled_reminder_dispatch',
+    'attendance_record_target_revisions',
+    'attendance_group_effect_revisions',
+  ]) {
+    assert.equal(P25_OPERATIONAL_TABLE_SPECS[table], undefined, `${table} must remain outside P25 scope`)
+    assert.equal(classifyP25Use({ table, role: 'business_state' }).classification, 'not_p25_operational')
+  }
+})
+
+test('P25: durable legacy V1 job and plan values cannot become authority evidence', () => {
+  for (const table of [
+    'attendance_import_jobs',
+    'attendance_import_legacy_execution_plans',
+    'attendance_import_legacy_execution_plan_chunks',
+    'attendance_import_legacy_terminal_responses',
+  ]) {
+    assert.throws(
+      () => assertP25Use({ table, role: 'authorization_evidence' }),
+      (error) => error.code === 'ATTENDANCE_P25_OPERATIONAL_AUTHORITY_FORBIDDEN',
+      `${table} must not be promoted into authorization evidence`,
+    )
+    assert.equal(
+      classifyP25Use({ table, role: 'compatibility_transport', adapter: 'private_worker' }).allowed,
+      true,
+      `${table} may remain transport state for the private worker`,
+    )
+  }
+})
+
+test('P25: non-worker adapters cannot claim a retryable V1 job identity', () => {
+  for (const adapter of ['sync', 'legacy_import', 'integration_sync', 'rollback']) {
+    assert.throws(
+      () => assertP25Use({ table: 'attendance_import_jobs', role: 'retryable_job_identity_claim', adapter }),
+      (error) => error.code === 'ATTENDANCE_P25_NON_WORKER_JOB_IDENTITY_FORBIDDEN',
+      `${adapter} must reject a retryable job identity before source/operation DML`,
+    )
+  }
+  assert.equal(
+    classifyP25Use({
+      table: 'attendance_import_jobs',
+      role: 'retryable_job_identity_claim',
+      adapter: 'private_worker',
+    }).allowed,
+    true,
+    'the private worker is the only adapter allowed to claim a retryable job identity',
+  )
+  assert.equal(
+    classifyP25Use({
+      table: 'attendance_import_jobs',
+      role: 'identity_transport',
+      adapter: 'legacy_import',
+    }).allowed,
+    false,
+    'a non-worker adapter cannot transport a reserved V1 identity tuple',
+  )
+  assert.equal(
+    classifyP25Use({
+      table: 'attendance_import_legacy_execution_plans',
+      role: 'compatibility_transport',
+      adapter: 'legacy_import',
+    }).allowed,
+    false,
+    'renaming a reserved identity use as compatibility transport must not bypass the adapter boundary',
+  )
+  assert.equal(
+    classifyP25Use({
+      table: 'attendance_import_legacy_execution_plans',
+      role: 'compatibility_transport',
+      adapter: 'private_worker',
+    }).allowed,
+    true,
+    'the private worker may consume the durable compatibility plan',
+  )
+})
+
+test('P25: integration dryRun audit state cannot be categorized as business state', () => {
+  assert.throws(
+    () => assertP25Use({ table: 'attendance_integration_runs', role: 'business_state', dryRun: true }),
+    (error) => error.code === 'ATTENDANCE_P25_DRY_RUN_AUDIT_NOT_BUSINESS_STATE',
+  )
+  assert.equal(
+    classifyP25Use({ table: 'attendance_integration_runs', role: 'audit_attempt', dryRun: true }).allowed,
+    true,
+    'dryRun may append an audit attempt only',
+  )
+})
+
+test('P06-P11/P23-P24 remain visible debt and are not prematurely canonicalized', () => {
+  const requiredDebtIds = ['P06', 'P07', 'P08', 'P09', 'P10', 'P11', 'P23', 'P24']
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  const { claimsByEntryId } = classifyTrackedSites(classified.trackedSites)
+
+  for (const id of requiredDebtIds) {
+    const entry = byId.get(id)
+    assert.ok(entry, `${id} must remain in the generated debt inventory`)
+    assert.equal(entry.owningSlice, 'W4C-3a', `${id} must remain owned by W4C-3a until its caller gate is complete`)
+    assert.equal(Object.hasOwn(entry, 'canonicalizedBy'), false, `${id} must not claim completion early`)
+    // P23/P24 are authorization/operational classification debt and intentionally have no
+    // tracked business DML claim; P06-P11 must retain the concrete current census claims.
+    if (!['P23', 'P24'].includes(id)) {
+      assert.ok((claimsByEntryId.get(id) || []).length > 0, `${id} must expose current business writers as debt`)
+    }
+  }
 })

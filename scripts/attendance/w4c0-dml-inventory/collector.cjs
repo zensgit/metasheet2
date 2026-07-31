@@ -17,7 +17,12 @@
 const crypto = require('crypto')
 const path = require('path')
 
-const { classifyTable, TRACKED_BUCKETS, W4_CANONICAL_PATH_PREFIXES } = require('./table-classification.cjs')
+const {
+  classifyTable,
+  P25_OPERATIONAL_TABLE_SPECS,
+  TRACKED_BUCKETS,
+  W4_CANONICAL_PATH_PREFIXES,
+} = require('./table-classification.cjs')
 
 const SCANNABLE_EXTENSIONS = new Set(['.ts', '.js', '.cjs', '.mjs', '.sql', '.sh'])
 
@@ -333,7 +338,8 @@ function classifyCensus(rawSites) {
       unclassifiedTableSites.push(site)
       continue
     }
-    const classified = { ...site, bucket }
+    const p25 = P25_OPERATIONAL_TABLE_SPECS[site.table]
+    const classified = p25 ? { ...site, bucket, p25 } : { ...site, bucket }
     if (bucket === 'w4_canonical') {
       if (isCanonicalBoundaryPath(site.relPath)) {
         canonicalSites.push(classified)
