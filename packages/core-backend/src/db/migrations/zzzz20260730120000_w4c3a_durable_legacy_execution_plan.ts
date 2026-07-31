@@ -36,6 +36,7 @@ const MANIFEST_ROOT_KEYS = [
   'actorId', 'actorPosture', 'tokenSubjectUserId', 'acceptedWritePosture',
   'identityProofVectorDigest', 'commandFingerprint', 'legacyInputFingerprint',
   'operationalBranch', 'legacyRowSourceKind', 'sourceRowCount', 'sourceOrdinalDigest',
+  'rawEvidenceDigest',
   'w4ItemCount', 'w4DistinctTargetCount', 'w4ItemSequenceFingerprint',
   'w4ItemSetFingerprint', 'legacySourceRowLimit', 'groupRevision', 'groupStateFingerprint',
   'chunkVectorDigest', 'batch', 'artifactCleanup',
@@ -204,6 +205,163 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
 
   await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4c3a_presence_valid(
+      value jsonb,
+      allowed_value_types text[],
+      non_negative_integer boolean DEFAULT false
+    )
+    RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $fn$
+    DECLARE
+      value_type text;
+      numeric_value numeric;
+    BEGIN
+      IF NOT attendance_w4c3a_exact_object_keys(value, ARRAY['present', 'value']) OR
+         jsonb_typeof(value -> 'present') IS DISTINCT FROM 'boolean' THEN
+        RETURN false;
+      END IF;
+      IF (value ->> 'present') = 'false' THEN
+        RETURN jsonb_typeof(value -> 'value') = 'null';
+      END IF;
+      value_type := jsonb_typeof(value -> 'value');
+      IF value_type IS NULL OR NOT (value_type = ANY(allowed_value_types)) THEN
+        RETURN false;
+      END IF;
+      IF non_negative_integer AND value_type = 'number' THEN
+        numeric_value := (value ->> 'value')::numeric;
+        IF numeric_value < 0 OR numeric_value <> trunc(numeric_value) OR numeric_value > 2147483647 THEN
+          RETURN false;
+        END IF;
+      END IF;
+      RETURN true;
+    END
+    $fn$
+  `.execute(db)
+
+  await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4c3a_raw_import_evidence_valid(value jsonb)
+    RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $fn$
+    DECLARE
+      fields jsonb;
+      metrics jsonb;
+      provenance jsonb;
+      punch jsonb;
+      transport text;
+      check_in_count integer := 0;
+      check_out_count integer := 0;
+      check_in_ordinal integer := 0;
+      check_out_ordinal integer := 0;
+      punch_ordinal integer := 0;
+    BEGIN
+      IF NOT attendance_w4c3a_exact_object_keys(
+        value,
+        ARRAY['schemaVersion', 'sourceOrdinal', 'punches', 'fields', 'metrics', 'provenance']
+      ) OR value ->> 'schemaVersion' IS DISTINCT FROM '1' OR
+         jsonb_typeof(value -> 'sourceOrdinal') IS DISTINCT FROM 'number' OR
+         (value ->> 'sourceOrdinal') !~ '^(0|[1-9][0-9]*)$' OR
+         (value ->> 'sourceOrdinal')::numeric > 2147483647 OR
+         jsonb_typeof(value -> 'punches') IS DISTINCT FROM 'array' OR
+         jsonb_array_length(value -> 'punches') > 2 THEN
+        RETURN false;
+      END IF;
+
+      fields := value -> 'fields';
+      metrics := value -> 'metrics';
+      provenance := value -> 'provenance';
+      IF NOT attendance_w4c3a_exact_object_keys(
+        fields,
+        ARRAY['userId', 'workDate', 'timezone', 'firstInAt', 'lastOutAt', 'status', 'isWorkday']
+      ) OR NOT attendance_w4c3a_exact_object_keys(
+        metrics,
+        ARRAY['workMinutes', 'lateMinutes', 'earlyLeaveMinutes']
+      ) THEN
+        RETURN false;
+      END IF;
+      IF NOT attendance_w4c3a_presence_valid(fields -> 'userId', ARRAY['string', 'null']) OR
+         NOT attendance_w4c3a_presence_valid(fields -> 'workDate', ARRAY['string', 'null']) OR
+         NOT attendance_w4c3a_presence_valid(fields -> 'timezone', ARRAY['string', 'null']) OR
+         NOT attendance_w4c3a_presence_valid(fields -> 'firstInAt', ARRAY['string', 'null']) OR
+         NOT attendance_w4c3a_presence_valid(fields -> 'lastOutAt', ARRAY['string', 'null']) OR
+         NOT attendance_w4c3a_presence_valid(fields -> 'status', ARRAY['string', 'null']) OR
+         NOT attendance_w4c3a_presence_valid(fields -> 'isWorkday', ARRAY['boolean', 'null']) OR
+         NOT attendance_w4c3a_presence_valid(metrics -> 'workMinutes', ARRAY['number', 'null'], true) OR
+         NOT attendance_w4c3a_presence_valid(metrics -> 'lateMinutes', ARRAY['number', 'null'], true) OR
+         NOT attendance_w4c3a_presence_valid(metrics -> 'earlyLeaveMinutes', ARRAY['number', 'null'], true) THEN
+        RETURN false;
+      END IF;
+      IF (jsonb_typeof(fields -> 'firstInAt' -> 'value') = 'string' AND
+          (fields -> 'firstInAt' ->> 'value') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$') OR
+         (jsonb_typeof(fields -> 'lastOutAt' -> 'value') = 'string' AND
+          (fields -> 'lastOutAt' ->> 'value') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$') THEN
+        RETURN false;
+      END IF;
+
+      IF NOT attendance_w4c3a_exact_object_keys(
+        provenance,
+        ARRAY['transport', 'sourceRef', 'artifactSha256', 'normalizedCsvSha256', 'convertedSheetName']
+      ) OR jsonb_typeof(provenance -> 'transport') IS DISTINCT FROM 'string' OR
+         jsonb_typeof(provenance -> 'sourceRef') IS DISTINCT FROM 'string' OR
+         length(provenance ->> 'sourceRef') = 0 THEN
+        RETURN false;
+      END IF;
+      transport := provenance ->> 'transport';
+      IF transport NOT IN ('live_event', 'rows', 'csv_text', 'csv_upload', 'xlsx_client_converted_csv',
+        'integration_sync', 'approved_request', 'scheduled_job', 'recompute', 'approval_reversal',
+        'import_rollback', 'operator_retirement', 'legacy_baseline_capture') THEN
+        RETURN false;
+      END IF;
+      IF transport IN ('csv_upload', 'xlsx_client_converted_csv') THEN
+        IF (provenance ->> 'artifactSha256') !~ '${sql.raw(SHA256)}' THEN RETURN false; END IF;
+      ELSIF jsonb_typeof(provenance -> 'artifactSha256') IS DISTINCT FROM 'null' THEN
+        RETURN false;
+      END IF;
+      IF transport IN ('csv_text', 'csv_upload', 'xlsx_client_converted_csv') THEN
+        IF (provenance ->> 'normalizedCsvSha256') !~ '${sql.raw(SHA256)}' THEN RETURN false; END IF;
+      ELSIF jsonb_typeof(provenance -> 'normalizedCsvSha256') IS DISTINCT FROM 'null' THEN
+        RETURN false;
+      END IF;
+      IF transport = 'xlsx_client_converted_csv' THEN
+        IF jsonb_typeof(provenance -> 'convertedSheetName') IS DISTINCT FROM 'string' OR
+           length(provenance ->> 'convertedSheetName') = 0 THEN RETURN false; END IF;
+      ELSIF jsonb_typeof(provenance -> 'convertedSheetName') IS DISTINCT FROM 'null' THEN
+        RETURN false;
+      END IF;
+
+      FOR punch, punch_ordinal IN
+        SELECT entry.value, entry.ordinality::integer
+          FROM jsonb_array_elements(value -> 'punches') WITH ORDINALITY AS entry(value, ordinality)
+      LOOP
+        IF NOT attendance_w4c3a_exact_object_keys(punch, ARRAY['direction', 'occurredAt']) OR
+           punch ->> 'direction' NOT IN ('check_in', 'check_out') OR
+           (punch ->> 'occurredAt') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$' THEN
+          RETURN false;
+        END IF;
+        IF punch ->> 'direction' = 'check_in' THEN
+          check_in_count := check_in_count + 1;
+          IF check_in_count > 1 THEN RETURN false; END IF;
+          IF punch ->> 'occurredAt' IS DISTINCT FROM fields -> 'firstInAt' ->> 'value' THEN RETURN false; END IF;
+          check_in_ordinal := punch_ordinal;
+        ELSE
+          check_out_count := check_out_count + 1;
+          IF check_out_count > 1 THEN RETURN false; END IF;
+          IF punch ->> 'occurredAt' IS DISTINCT FROM fields -> 'lastOutAt' ->> 'value' THEN RETURN false; END IF;
+          check_out_ordinal := punch_ordinal;
+        END IF;
+      END LOOP;
+      IF check_in_count IS DISTINCT FROM (CASE WHEN fields -> 'firstInAt' ->> 'present' = 'true' AND jsonb_typeof(fields -> 'firstInAt' -> 'value') = 'string' THEN 1 ELSE 0 END) OR
+         check_out_count IS DISTINCT FROM (CASE WHEN fields -> 'lastOutAt' ->> 'present' = 'true' AND jsonb_typeof(fields -> 'lastOutAt' -> 'value') = 'string' THEN 1 ELSE 0 END) OR
+         (check_in_count = 1 AND check_out_count = 1 AND check_in_ordinal >= check_out_ordinal) THEN
+        RETURN false;
+      END IF;
+      RETURN true;
+    END
+    $fn$
+  `.execute(db)
+
+  await sql`
     CREATE OR REPLACE FUNCTION attendance_w4c3a_chunk_body_valid(chunk jsonb)
     RETURNS boolean
     LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
@@ -211,6 +369,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     DECLARE
       effect jsonb;
       record_write jsonb;
+      item jsonb;
     BEGIN
       IF NOT attendance_w4c3a_exact_object_keys(chunk, ARRAY['items', 'recordWrites', 'groupEffects']) THEN
         RETURN false;
@@ -227,6 +386,28 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       FOR record_write IN SELECT value FROM jsonb_array_elements(chunk -> 'recordWrites') AS t(value)
       LOOP
         IF NOT attendance_w4c3a_record_write_slots_valid(record_write) THEN RETURN false; END IF;
+      END LOOP;
+      FOR item IN SELECT value FROM jsonb_array_elements(chunk -> 'items') AS t(value)
+      LOOP
+        IF item ->> 'kind' = 'apply' THEN
+          IF NOT attendance_w4c3a_exact_object_keys(
+            item,
+            ARRAY['kind', 'ordinal', 'semanticOrdinal', 'itemId', 'targetRef',
+              'previewSnapshot', 'recordWriteRef', 'rawEvidence']
+          ) THEN RETURN false; END IF;
+        ELSIF item ->> 'kind' = 'skip' THEN
+          IF NOT attendance_w4c3a_exact_object_keys(
+            item,
+            ARRAY['kind', 'ordinal', 'semanticOrdinal', 'itemId', 'resolvedUserId',
+              'resolvedWorkDate', 'reasonCode', 'warnings', 'previewSnapshot', 'rawEvidence']
+          ) THEN RETURN false; END IF;
+        ELSE
+          RETURN false;
+        END IF;
+        IF NOT attendance_w4c3a_raw_import_evidence_valid(item -> 'rawEvidence') OR
+           item ->> 'ordinal' IS DISTINCT FROM item -> 'rawEvidence' ->> 'sourceOrdinal' THEN
+          RETURN false;
+        END IF;
       END LOOP;
       RETURN true;
     END
@@ -816,6 +997,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          plan.manifest ->> 'legacyRowSourceKind' IS DISTINCT FROM plan.legacy_row_source_kind OR
          plan.manifest ->> 'sourceRowCount' IS DISTINCT FROM plan.source_row_count::text OR
          plan.manifest ->> 'sourceOrdinalDigest' IS DISTINCT FROM plan.source_ordinal_digest OR
+         (plan.manifest ->> 'rawEvidenceDigest') !~ '${sql.raw(SHA256)}' OR
          plan.manifest ->> 'w4ItemCount' IS DISTINCT FROM plan.w4_item_count::text OR
          plan.manifest ->> 'w4DistinctTargetCount' IS DISTINCT FROM plan.w4_distinct_target_count::text OR
          plan.manifest ->> 'w4ItemSequenceFingerprint' IS DISTINCT FROM plan.w4_item_sequence_fingerprint OR
@@ -864,7 +1046,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            job.total <= 0 OR job.w4_identity_proof_vector <> '[]'::jsonb OR
            plan.w4_item_sequence_fingerprint <> '${sql.raw(EMPTY_ITEM_SEQUENCE_FINGERPRINT)}' OR
            plan.w4_item_set_fingerprint <> '${sql.raw(EMPTY_ITEM_SET_FINGERPRINT)}' OR
-           plan.source_ordinal_digest <> '${sql.raw(EMPTY_CANONICAL_ARRAY_DIGEST)}' OR plan.chunk_vector_digest <> '${sql.raw(EMPTY_CANONICAL_ARRAY_DIGEST)}' OR
+           plan.source_ordinal_digest <> '${sql.raw(EMPTY_CANONICAL_ARRAY_DIGEST)}' OR
+           plan.manifest ->> 'rawEvidenceDigest' <> '${sql.raw(EMPTY_CANONICAL_ARRAY_DIGEST)}' OR
+           plan.chunk_vector_digest <> '${sql.raw(EMPTY_CANONICAL_ARRAY_DIGEST)}' OR
            plan.manifest -> 'batch' ->> 'kind' IS DISTINCT FROM 'idempotent_replay' OR
            replay_selector NOT IN ('precheck_hit', 'locked_race') OR
            plan.manifest -> 'batch' ->> 'totalRowCount' IS DISTINCT FROM job.total::text THEN
@@ -1115,6 +1299,8 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP FUNCTION IF EXISTS attendance_w4_job_proof_vector_valid(text, uuid, jsonb, integer, text, integer)`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_async_job_summary_valid(jsonb)`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_chunk_body_valid(jsonb)`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_raw_import_evidence_valid(jsonb)`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_presence_valid(jsonb, text[], boolean)`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_record_write_slots_valid(jsonb)`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_batch_plan_valid(jsonb)`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_group_effect_valid(jsonb)`.execute(db)

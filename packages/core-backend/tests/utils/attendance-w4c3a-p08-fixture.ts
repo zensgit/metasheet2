@@ -27,6 +27,7 @@ import {
 } from '../../src/attendance/w4c0-identity'
 import { createAuthorizedAttendanceWriteContextV1 } from '../../src/attendance/w4c0-authorization'
 import { createAttendanceLegacyPlanProcessorV1 } from '../../src/attendance/w4c3a-legacy-plan-processor'
+import { rawImportEvidenceV1 } from './attendance-w4c3a-raw-evidence'
 
 export const P08_HEX_A = 'a'.repeat(64)
 export const P08_HEX_C = 'c'.repeat(64)
@@ -302,6 +303,19 @@ export function buildP08FullPlanInput(
     semanticOrdinal: 0,
     targetRef: JSON.stringify([org.orgId, ids.targetUserId, P08_WORK_DATE]),
     previewSnapshot: { status: 'normal' },
+    rawEvidence: rawImportEvidenceV1(0, {
+      userId: ids.targetUserId,
+      workDate: P08_WORK_DATE,
+      timezone: P08_RECORD_TIMEZONE,
+      firstInAt: '2026-07-30T01:00:00.000Z',
+      lastOutAt: '2026-07-30T09:00:00.000Z',
+      status: 'normal',
+      isWorkday: true,
+      workMinutes: P08_WORK_MINUTES,
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      sourceRef: ids.sourceRef,
+    }),
   }
   const groupEffects: readonly LegacyImportGroupEffectDraftV1[] = [
     {

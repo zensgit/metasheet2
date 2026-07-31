@@ -12,6 +12,12 @@ import type {
   MultitableProvisioningViewDescriptor,
 } from '../multitable/contracts'
 import type { CollectionDefinition } from './collection'
+import type {
+  ReserveAttendanceLegacyImportPlanFromHostInputV1,
+} from '../attendance/w4c3a-legacy-plan-reservation-host'
+import type {
+  ReserveAttendanceLegacyImportPlanJobResultV1,
+} from '../attendance/w4c3a-legacy-plan-enqueue'
 
 export type {
   MultitableProvisioningFieldDescriptor,
@@ -1217,6 +1223,14 @@ export interface PluginServices {
       | { kind: 'failed'; reason: string }
       | { kind: 'completed'; response: unknown }
     >
+    /**
+     * W4C-3a P07 — core-owned V1 reservation. The plugin supplies one closed
+     * prepared plan; core owns posture, verified identities, authorization,
+     * SERIALIZABLE transaction, and class-00/10/11 locking.
+     */
+    reserveLegacyImportPlan(
+      input: ReserveAttendanceLegacyImportPlanFromHostInputV1,
+    ): Promise<ReserveAttendanceLegacyImportPlanJobResultV1>
     /**
      * W4C-3a — canonical lock witnesses for the synchronous import compatibility
      * bridge. Core owns key derivation; plugin-attendance only acquires these

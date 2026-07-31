@@ -9,6 +9,7 @@ import type {
 } from '../../src/attendance/w4c3a-legacy-execution-plan'
 import { applyAttendanceLegacyItemEffectsV1 } from '../../src/attendance/w4c3a-legacy-plan-item-effects'
 import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
+import { rawImportEvidenceV1 } from '../utils/attendance-w4c3a-raw-evidence'
 
 const dbUrl =
   process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -171,6 +172,7 @@ describeIfDatabase('W4C-3a fixed item effects (real PostgreSQL)', () => {
               ]),
               previewSnapshot: { kind: 'apply', nested: { value: 1 } },
               recordWriteRef: write.recordWriteId,
+              rawEvidence: rawImportEvidenceV1(0),
             },
             {
               kind: 'skip',
@@ -182,6 +184,7 @@ describeIfDatabase('W4C-3a fixed item effects (real PostgreSQL)', () => {
               reasonCode: 'invalid_row',
               warnings: [],
               previewSnapshot: { kind: 'skip', nested: { value: 2 } },
+              rawEvidence: rawImportEvidenceV1(1),
             },
           ],
         }),

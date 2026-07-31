@@ -9,6 +9,7 @@ import {
   computeLegacyImportChunkVectorDigestV1,
   computeLegacyImportAsyncJobSummaryDigestV1,
   computeLegacyImportPlanDigestV1,
+  computeRawImportEvidenceDigestV1,
   computeLegacyImportSourceOrdinalDigestV1,
   parseLegacyImportExecutionPlanChunkBodyV1,
   parseLegacyImportExecutionPlanManifestV1,
@@ -248,6 +249,9 @@ function verifyPlan(
     fail('ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH')
   }
   if (computeLegacyImportSourceOrdinalDigestV1(assembled.items) !== manifest.sourceOrdinalDigest) {
+    fail('ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH')
+  }
+  if (computeRawImportEvidenceDigestV1(assembled.items) !== manifest.rawEvidenceDigest) {
     fail('ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH')
   }
   if (

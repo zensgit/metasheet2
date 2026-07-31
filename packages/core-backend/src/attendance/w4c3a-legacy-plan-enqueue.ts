@@ -24,6 +24,7 @@ import {
   computeLegacyImportRecordPreconditionFingerprintV1,
   computeLegacyImportChunkVectorDigestV1,
   computeLegacyImportPlanDigestV1,
+  computeRawImportEvidenceDigestV1,
   computeLegacyImportSourceOrdinalDigestV1,
   parseLegacyImportExecutionPlanManifestV1,
   parseLegacyImportPublicJobEnvelopeV1,
@@ -168,6 +169,7 @@ export type LegacyImportExecutionPlanManifestSeedV1 = Omit<
   | 'groupRevision'
   | 'groupStateFingerprint'
   | 'sourceOrdinalDigest'
+  | 'rawEvidenceDigest'
   | 'chunkVectorDigest'
 >
 
@@ -539,6 +541,12 @@ function validateAttendanceLegacyImportPlanEnqueuePackageV1(
     manifest.sourceOrdinalDigest
   ) {
     fail('W4C3A_ENQUEUE_SOURCE_ORDINAL_DIGEST_MISMATCH')
+  }
+  if (
+    computeRawImportEvidenceDigestV1(reassembled.items) !==
+    manifest.rawEvidenceDigest
+  ) {
+    fail('W4C3A_ENQUEUE_PLAN_DIGEST_MISMATCH')
   }
   if (
     computeLegacyImportPlanDigestV1({
@@ -1667,6 +1675,7 @@ async function persistAttendanceLegacyImportPlanEnqueueV1(
     legacyRowSourceKind: manifest.legacyRowSourceKind,
     sourceRowCount: manifest.sourceRowCount,
     sourceOrdinalDigest: manifest.sourceOrdinalDigest,
+    rawEvidenceDigest: manifest.rawEvidenceDigest,
     w4ItemCount: manifest.w4ItemCount,
     w4DistinctTargetCount: manifest.w4DistinctTargetCount,
     w4ItemSequenceFingerprint: manifest.w4ItemSequenceFingerprint,
@@ -1766,7 +1775,7 @@ function buildAttendanceLegacyImportPlanEnqueuePackageV1(input: {
   readonly job: Omit<AttendanceLegacyImportJobInsertV1, 'w4LegacyPlanDigest'>
   readonly manifestSeed: Omit<
     LegacyImportExecutionPlanManifestV1,
-    'sourceOrdinalDigest' | 'chunkVectorDigest'
+    'sourceOrdinalDigest' | 'rawEvidenceDigest' | 'chunkVectorDigest'
   >
   readonly items: readonly LegacyImportItemPlanV1[]
   readonly recordWrites: readonly LegacyImportRecordWritePlanV1[]

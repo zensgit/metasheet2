@@ -27,7 +27,12 @@
  * Not in this module: worker replay, plugin caller cutover, or lock acquisition.
  */
 import crypto from 'node:crypto'
-import { canonicalAttendanceJsonV1 } from './w4c0-fingerprints'
+import {
+  ATTENDANCE_INPUT_PROVENANCE_TRANSPORTS_V1,
+  canonicalAttendanceJsonV1,
+  computeAttendanceProvenanceFingerprintV1,
+  type AttendanceInputProvenanceRefV1,
+} from './w4c0-fingerprints'
 import {
   ATTENDANCE_ACCEPTED_WRITE_POSTURES_V1,
   ATTENDANCE_SOURCE_ENTRYPOINTS_V1,
@@ -630,6 +635,212 @@ export function parseLegacyImportBatchPlanV1(value: unknown): LegacyImportBatchP
   fail(code)
 }
 
+export type RawImportFieldPresenceV1<T> =
+  | Readonly<{ readonly present: false; readonly value: null }>
+  | Readonly<{ readonly present: true; readonly value: T | null }>
+
+export type RawImportEvidenceV1 = Readonly<{
+  readonly schemaVersion: 1
+  readonly sourceOrdinal: number
+  readonly punches: readonly Readonly<{
+    readonly direction: 'check_in' | 'check_out'
+    readonly occurredAt: string
+  }>[]
+  readonly fields: Readonly<{
+    readonly userId: RawImportFieldPresenceV1<string>
+    readonly workDate: RawImportFieldPresenceV1<string>
+    readonly timezone: RawImportFieldPresenceV1<string>
+    readonly firstInAt: RawImportFieldPresenceV1<string>
+    readonly lastOutAt: RawImportFieldPresenceV1<string>
+    readonly status: RawImportFieldPresenceV1<string>
+    readonly isWorkday: RawImportFieldPresenceV1<boolean>
+  }>
+  readonly metrics: Readonly<{
+    readonly workMinutes: RawImportFieldPresenceV1<number>
+    readonly lateMinutes: RawImportFieldPresenceV1<number>
+    readonly earlyLeaveMinutes: RawImportFieldPresenceV1<number>
+  }>
+  readonly provenance: AttendanceInputProvenanceRefV1
+}>
+
+const RAW_IMPORT_EVIDENCE_KEYS = [
+  'schemaVersion',
+  'sourceOrdinal',
+  'punches',
+  'fields',
+  'metrics',
+  'provenance',
+] as const
+
+const RAW_IMPORT_FIELD_KEYS = [
+  'userId',
+  'workDate',
+  'timezone',
+  'firstInAt',
+  'lastOutAt',
+  'status',
+  'isWorkday',
+] as const
+
+const RAW_IMPORT_METRIC_KEYS = [
+  'workMinutes',
+  'lateMinutes',
+  'earlyLeaveMinutes',
+] as const
+
+function parsePresence<T>(
+  value: unknown,
+  code: string,
+  parseValue: (value: unknown, code: string) => T,
+): RawImportFieldPresenceV1<T> {
+  const obj = requireExactKeys(value, ['present', 'value'] as const, code)
+  const present = requireBool(obj.present, code)
+  if (!present) {
+    if (obj.value !== null) fail(code)
+    return freezeDeep({ present: false as const, value: null })
+  }
+  return freezeDeep({
+    present: true as const,
+    value: obj.value === null ? null : parseValue(obj.value, code),
+  })
+}
+
+function parseRawNullableStringPresence(
+  value: unknown,
+  code: string,
+): RawImportFieldPresenceV1<string> {
+  return parsePresence(value, code, requireString)
+}
+
+function parseRawNullableInstantPresence(
+  value: unknown,
+  code: string,
+): RawImportFieldPresenceV1<string> {
+  return parsePresence(value, code, (candidate, candidateCode) => {
+    const parsed = requireNullableUtcInstant(candidate, candidateCode)
+    if (parsed === null) fail(candidateCode)
+    return parsed
+  })
+}
+
+function parseRawNullableBooleanPresence(
+  value: unknown,
+  code: string,
+): RawImportFieldPresenceV1<boolean> {
+  return parsePresence(value, code, requireBool)
+}
+
+function parseRawNullableMetricPresence(
+  value: unknown,
+  code: string,
+): RawImportFieldPresenceV1<number> {
+  return parsePresence(value, code, requireNonNegInt)
+}
+
+function parseRawImportProvenanceV1(
+  value: unknown,
+  code: string,
+): AttendanceInputProvenanceRefV1 {
+  const obj = requireExactKeys(
+    value,
+    ['transport', 'sourceRef', 'artifactSha256', 'normalizedCsvSha256', 'convertedSheetName'],
+    code,
+  )
+  const provenance = {
+    transport: requireOneOf(
+      obj.transport,
+      ATTENDANCE_INPUT_PROVENANCE_TRANSPORTS_V1,
+      code,
+    ),
+    sourceRef: requireString(obj.sourceRef, code),
+    artifactSha256: obj.artifactSha256 === null ? null : requireHex64(obj.artifactSha256, code),
+    normalizedCsvSha256:
+      obj.normalizedCsvSha256 === null
+        ? null
+        : requireHex64(obj.normalizedCsvSha256, code),
+    convertedSheetName: requireNullableString(obj.convertedSheetName, code),
+  }
+  try {
+    computeAttendanceProvenanceFingerprintV1(provenance)
+  } catch {
+    fail(code)
+  }
+  return freezeDeep(provenance)
+}
+
+export function parseRawImportEvidenceV1(value: unknown): RawImportEvidenceV1 {
+  const code = 'W4C3A_RAW_IMPORT_EVIDENCE_INVALID'
+  const obj = requireExactKeys(value, RAW_IMPORT_EVIDENCE_KEYS, code)
+  if (obj.schemaVersion !== 1 || !Array.isArray(obj.punches)) fail(code)
+  const punches = obj.punches.map((rawPunch) => {
+    const punch = requireExactKeys(rawPunch, ['direction', 'occurredAt'] as const, code)
+    return freezeDeep({
+      direction: requireOneOf(
+        punch.direction,
+        ['check_in', 'check_out'] as const,
+        code,
+      ),
+      occurredAt: (() => {
+        const parsed = requireNullableUtcInstant(punch.occurredAt, code)
+        if (parsed === null) fail(code)
+        return parsed
+      })(),
+    })
+  })
+  if (punches.length > 2) fail(code)
+  const seenDirections = new Set<string>()
+  for (const punch of punches) {
+    if (seenDirections.has(punch.direction)) fail(code)
+    seenDirections.add(punch.direction)
+  }
+  if (
+    punches.some((punch, index) =>
+      index > 0 && punch.direction === 'check_in',
+    )
+  ) {
+    fail(code)
+  }
+
+  const rawFields = requireExactKeys(obj.fields, RAW_IMPORT_FIELD_KEYS, code)
+  const fields = freezeDeep({
+    userId: parseRawNullableStringPresence(rawFields.userId, code),
+    workDate: parseRawNullableStringPresence(rawFields.workDate, code),
+    timezone: parseRawNullableStringPresence(rawFields.timezone, code),
+    firstInAt: parseRawNullableInstantPresence(rawFields.firstInAt, code),
+    lastOutAt: parseRawNullableInstantPresence(rawFields.lastOutAt, code),
+    status: parseRawNullableStringPresence(rawFields.status, code),
+    isWorkday: parseRawNullableBooleanPresence(rawFields.isWorkday, code),
+  })
+  const rawMetrics = requireExactKeys(obj.metrics, RAW_IMPORT_METRIC_KEYS, code)
+  const metrics = freezeDeep({
+    workMinutes: parseRawNullableMetricPresence(rawMetrics.workMinutes, code),
+    lateMinutes: parseRawNullableMetricPresence(rawMetrics.lateMinutes, code),
+    earlyLeaveMinutes: parseRawNullableMetricPresence(rawMetrics.earlyLeaveMinutes, code),
+  })
+  const expectedPunches = [
+    ...(fields.firstInAt.present && fields.firstInAt.value !== null
+      ? [{ direction: 'check_in' as const, occurredAt: fields.firstInAt.value }]
+      : []),
+    ...(fields.lastOutAt.present && fields.lastOutAt.value !== null
+      ? [{ direction: 'check_out' as const, occurredAt: fields.lastOutAt.value }]
+      : []),
+  ]
+  if (
+    canonicalAttendanceJsonV1(punches) !==
+    canonicalAttendanceJsonV1(expectedPunches)
+  ) {
+    fail(code)
+  }
+  return freezeDeep({
+    schemaVersion: 1 as const,
+    sourceOrdinal: requireNonNegInt(obj.sourceOrdinal, code),
+    punches: Object.freeze(punches),
+    fields,
+    metrics,
+    provenance: parseRawImportProvenanceV1(obj.provenance, code),
+  })
+}
+
 export type LegacyImportItemPlanV1 =
   | {
       readonly kind: 'apply'
@@ -639,6 +850,7 @@ export type LegacyImportItemPlanV1 =
       readonly targetRef: string
       readonly previewSnapshot: unknown
       readonly recordWriteRef: string
+      readonly rawEvidence: RawImportEvidenceV1
     }
   | {
       readonly kind: 'skip'
@@ -650,6 +862,7 @@ export type LegacyImportItemPlanV1 =
       readonly reasonCode: AttendanceLegacyImportSkipReasonCodeV1
       readonly warnings: readonly unknown[]
       readonly previewSnapshot: unknown
+      readonly rawEvidence: RawImportEvidenceV1
     }
 
 const ITEM_APPLY_KEYS = [
@@ -660,6 +873,7 @@ const ITEM_APPLY_KEYS = [
   'targetRef',
   'previewSnapshot',
   'recordWriteRef',
+  'rawEvidence',
 ] as const
 
 const ITEM_SKIP_KEYS = [
@@ -672,6 +886,7 @@ const ITEM_SKIP_KEYS = [
   'reasonCode',
   'warnings',
   'previewSnapshot',
+  'rawEvidence',
 ] as const
 
 export function parseLegacyImportItemPlanV1(value: unknown): LegacyImportItemPlanV1 {
@@ -687,6 +902,7 @@ export function parseLegacyImportItemPlanV1(value: unknown): LegacyImportItemPla
       targetRef: requireString(obj.targetRef, code),
       previewSnapshot: parseOpaqueLeaf(obj.previewSnapshot, code),
       recordWriteRef: requireString(obj.recordWriteRef, code),
+      rawEvidence: parseRawImportEvidenceV1(obj.rawEvidence),
     })
   }
   if (value.kind === 'skip') {
@@ -709,6 +925,7 @@ export function parseLegacyImportItemPlanV1(value: unknown): LegacyImportItemPla
       ),
       warnings,
       previewSnapshot: parseOpaqueLeaf(obj.previewSnapshot, code),
+      rawEvidence: parseRawImportEvidenceV1(obj.rawEvidence),
     })
   }
   fail(code)
@@ -1024,6 +1241,7 @@ export type LegacyImportExecutionPlanManifestV1 = {
   readonly legacyRowSourceKind: AttendanceLegacyRowSourceKindV1 | null
   readonly sourceRowCount: number
   readonly sourceOrdinalDigest: string
+  readonly rawEvidenceDigest: string
   readonly w4ItemCount: number
   readonly w4DistinctTargetCount: number
   readonly w4ItemSequenceFingerprint: string
@@ -1056,6 +1274,7 @@ export const LEGACY_IMPORT_PLAN_MANIFEST_KEYS_V1 = [
   'legacyRowSourceKind',
   'sourceRowCount',
   'sourceOrdinalDigest',
+  'rawEvidenceDigest',
   'w4ItemCount',
   'w4DistinctTargetCount',
   'w4ItemSequenceFingerprint',
@@ -1268,6 +1487,7 @@ export function parseLegacyImportExecutionPlanManifestV1(
     legacyRowSourceKind,
     sourceRowCount,
     sourceOrdinalDigest: requireHex64(obj.sourceOrdinalDigest, code),
+    rawEvidenceDigest: requireHex64(obj.rawEvidenceDigest, code),
     w4ItemCount,
     w4DistinctTargetCount,
     w4ItemSequenceFingerprint: requireHex64(obj.w4ItemSequenceFingerprint, code),
@@ -1359,6 +1579,14 @@ export function computeLegacyImportSourceOrdinalDigestV1(
   )
 }
 
+export function computeRawImportEvidenceDigestV1(
+  items: readonly LegacyImportItemPlanV1[],
+): string {
+  return sha256HexOfCanonicalJsonV1(
+    items.map((item) => parseRawImportEvidenceV1(item.rawEvidence)),
+  )
+}
+
 /**
  * Logical plan stream is independent of physical chunk boundaries (section 4.1).
  * Includes all items/recordWrites/groupEffects in their canonical orders.
@@ -1389,6 +1617,7 @@ export function computeLegacyImportPlanDigestV1(input: {
     legacyRowSourceKind: m.legacyRowSourceKind,
     sourceRowCount: m.sourceRowCount,
     sourceOrdinalDigest: m.sourceOrdinalDigest,
+    rawEvidenceDigest: m.rawEvidenceDigest,
     w4ItemCount: m.w4ItemCount,
     w4DistinctTargetCount: m.w4DistinctTargetCount,
     w4ItemSequenceFingerprint: m.w4ItemSequenceFingerprint,
@@ -1623,7 +1852,12 @@ export function reassembleLegacyImportPlanChunksV1(
     const recomputed = computeLegacyImportChunkDigestV1(chunk.body)
     if (recomputed !== chunk.chunkDigest) fail('W4C3A_CHUNK_DIGEST_MISMATCH')
     for (const item of chunk.body.items) {
-      if (item.ordinal !== items.length) fail(code)
+      if (
+        item.ordinal !== items.length ||
+        item.rawEvidence.sourceOrdinal !== item.ordinal
+      ) {
+        fail(code)
+      }
       items.push(item)
     }
     for (const recordWrite of chunk.body.recordWrites) {
@@ -1906,7 +2140,7 @@ export function computeLegacyImportGroupStateFingerprintV1(
 export function buildLegacyImportExecutionPlanPackageV1(input: {
   readonly manifestSeed: Omit<
     LegacyImportExecutionPlanManifestV1,
-    'sourceOrdinalDigest' | 'chunkVectorDigest'
+    'sourceOrdinalDigest' | 'rawEvidenceDigest' | 'chunkVectorDigest'
   >
   readonly items: readonly LegacyImportItemPlanV1[]
   readonly recordWrites: readonly LegacyImportRecordWritePlanV1[]
@@ -2000,10 +2234,12 @@ export function buildLegacyImportExecutionPlanPackageV1(input: {
       fail(code)
     }
     const sourceOrdinalDigest = computeLegacyImportSourceOrdinalDigestV1([])
+    const rawEvidenceDigest = computeRawImportEvidenceDigestV1([])
     const chunkVectorDigest = computeLegacyImportChunkVectorDigestV1([])
     const manifest = parseLegacyImportExecutionPlanManifestV1({
       ...seed,
       sourceOrdinalDigest,
+      rawEvidenceDigest,
       chunkVectorDigest,
     })
     const planDigest = computeLegacyImportPlanDigestV1({
@@ -2025,6 +2261,7 @@ export function buildLegacyImportExecutionPlanPackageV1(input: {
   for (let i = 0; i < items.length; i += 1) {
     const item = items[i]
     if (item.ordinal !== i) fail(code)
+    if (item.rawEvidence.sourceOrdinal !== item.ordinal) fail(code)
     if (item.kind === 'apply') {
       if (item.semanticOrdinal !== nextSemanticOrdinal) fail(code)
       nextSemanticOrdinal += 1
@@ -2106,6 +2343,7 @@ export function buildLegacyImportExecutionPlanPackageV1(input: {
   if ((groupEffects.length > 0) !== (seed.groupStateFingerprint !== null)) fail(code)
 
   const sourceOrdinalDigest = computeLegacyImportSourceOrdinalDigestV1(items)
+  const rawEvidenceDigest = computeRawImportEvidenceDigestV1(items)
   const { chunks, chunkVectorDigest } = chunkLegacyImportPlanSourceRowsV1({
     items,
     recordWrites,
@@ -2115,6 +2353,7 @@ export function buildLegacyImportExecutionPlanPackageV1(input: {
   const manifest = parseLegacyImportExecutionPlanManifestV1({
     ...seed,
     sourceOrdinalDigest,
+    rawEvidenceDigest,
     chunkVectorDigest,
   })
   if (chunks.length === 0) fail(code)

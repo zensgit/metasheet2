@@ -47,6 +47,35 @@ const COMPLETED_RESPONSE = Object.freeze({
   }),
 })
 
+function rawEvidence(sourceOrdinal: number) {
+  return {
+    schemaVersion: 1 as const,
+    sourceOrdinal,
+    punches: [],
+    fields: {
+      userId: { present: true as const, value: USER_ID },
+      workDate: { present: true as const, value: '2026-07-30' },
+      timezone: { present: true as const, value: 'Asia/Shanghai' },
+      firstInAt: { present: false as const, value: null },
+      lastOutAt: { present: false as const, value: null },
+      status: { present: false as const, value: null },
+      isWorkday: { present: false as const, value: null },
+    },
+    metrics: {
+      workMinutes: { present: false as const, value: null },
+      lateMinutes: { present: false as const, value: null },
+      earlyLeaveMinutes: { present: false as const, value: null },
+    },
+    provenance: {
+      transport: 'rows' as const,
+      sourceRef: `attendance-import:${BATCH_ID}:${sourceOrdinal}`,
+      artifactSha256: null,
+      normalizedCsvSha256: null,
+      convertedSheetName: null,
+    },
+  }
+}
+
 async function identities(): Promise<{
   batch: VerifiedAttendanceOperationIdentityV1
   target: VerifiedAttendanceCalculationTargetIdentityV1
@@ -73,7 +102,10 @@ function packagePlan(
   idempotencyKey: string | null = null,
 ): { job: AttendanceLegacyPlanWorkerJobV1; stored: AttendanceLegacyPlanWorkerStoredPlanV1 } {
   const identityProofVector = []
-  const manifestSeed: Omit<LegacyImportExecutionPlanManifestV1, 'sourceOrdinalDigest' | 'chunkVectorDigest'> = {
+  const manifestSeed: Omit<
+    LegacyImportExecutionPlanManifestV1,
+    'sourceOrdinalDigest' | 'rawEvidenceDigest' | 'chunkVectorDigest'
+  > = {
     schemaVersion: 1,
     orgId: ORG_ID,
     jobId: JOB_ID,
@@ -119,6 +151,7 @@ function packagePlan(
       targetRef: JSON.stringify([ORG_ID, USER_ID, '2026-07-30']),
       previewSnapshot: {},
       recordWriteRef: RECORD_ID,
+      rawEvidence: rawEvidence(0),
     }],
     recordWrites: [{
       recordWriteId: RECORD_ID, recordId: RECORD_ID, orgId: ORG_ID, userId: USER_ID, workDate: '2026-07-30',
@@ -166,7 +199,7 @@ function packageReplayPlan(): {
   const identityProofVector: unknown[] = []
   const manifestSeed: Omit<
     LegacyImportExecutionPlanManifestV1,
-    'sourceOrdinalDigest' | 'chunkVectorDigest'
+    'sourceOrdinalDigest' | 'rawEvidenceDigest' | 'chunkVectorDigest'
   > = {
     schemaVersion: 1,
     orgId: ORG_ID,
@@ -380,7 +413,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     const GROUP_ID = '10000000-0000-4000-8000-000000000008'
     const manifestSeed: Omit<
       LegacyImportExecutionPlanManifestV1,
-      'sourceOrdinalDigest' | 'chunkVectorDigest'
+      'sourceOrdinalDigest' | 'rawEvidenceDigest' | 'chunkVectorDigest'
     > = {
       schemaVersion: 1,
       orgId: ORG_ID,
@@ -438,6 +471,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
         targetRef: JSON.stringify([ORG_ID, USER_ID, '2026-07-30']),
         previewSnapshot: {},
         recordWriteRef: RECORD_ID,
+        rawEvidence: rawEvidence(0),
       }],
       recordWrites: [{
         recordWriteId: RECORD_ID, recordId: RECORD_ID, orgId: ORG_ID, userId: USER_ID,

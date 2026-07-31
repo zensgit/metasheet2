@@ -10,6 +10,7 @@ import {
   computeLegacyImportGroupStateFingerprintV1,
   computeLegacyImportPlanDigestV1,
   computeLegacyImportRecordPreconditionFingerprintV1,
+  computeRawImportEvidenceDigestV1,
   legacyImportRecordWriteExpectsExistingRecordV1,
   parseLegacyImportAsyncJobSummaryV1,
   parseLegacyImportBatchPlanV1,
@@ -18,11 +19,13 @@ import {
   parseLegacyImportGroupEffectPlanV1,
   parseLegacyImportItemPlanV1,
   parseLegacyImportRecordWritePlanV1,
+  parseRawImportEvidenceV1,
   reassembleLegacyImportPlanChunksV1,
   type LegacyImportExecutionPlanManifestV1,
   type LegacyImportGroupEffectPlanV1,
   type LegacyImportItemPlanV1,
   type LegacyImportRecordWritePlanV1,
+  type RawImportEvidenceV1,
   sha256HexOfCanonicalJsonV1,
 } from '../w4c3a-legacy-execution-plan'
 import {
@@ -54,12 +57,12 @@ function manifestSeed(
   overrides: Partial<
     Omit<
       LegacyImportExecutionPlanManifestV1,
-      'sourceOrdinalDigest' | 'chunkVectorDigest'
+      'sourceOrdinalDigest' | 'rawEvidenceDigest' | 'chunkVectorDigest'
     >
   > = {},
 ): Omit<
   LegacyImportExecutionPlanManifestV1,
-  'sourceOrdinalDigest' | 'chunkVectorDigest'
+  'sourceOrdinalDigest' | 'rawEvidenceDigest' | 'chunkVectorDigest'
 > {
   return {
     schemaVersion: 1,
@@ -114,6 +117,44 @@ function manifestSeed(
   }
 }
 
+function rawEvidence(
+  sourceOrdinal: number,
+  overrides: Partial<RawImportEvidenceV1> = {},
+): RawImportEvidenceV1 {
+  const firstInAt = sourceOrdinal === 0 ? '2026-07-30T01:00:00.000Z' : null
+  return {
+    schemaVersion: 1,
+    sourceOrdinal,
+    punches: firstInAt === null
+      ? []
+      : [{ direction: 'check_in', occurredAt: firstInAt }],
+    fields: {
+      userId: { present: true, value: 'user-a' },
+      workDate: { present: true, value: '2026-07-30' },
+      timezone: { present: true, value: 'Asia/Shanghai' },
+      firstInAt: firstInAt === null
+        ? { present: false, value: null }
+        : { present: true, value: firstInAt },
+      lastOutAt: { present: false, value: null },
+      status: { present: false, value: null },
+      isWorkday: { present: false, value: null },
+    },
+    metrics: {
+      workMinutes: { present: false, value: null },
+      lateMinutes: { present: false, value: null },
+      earlyLeaveMinutes: { present: false, value: null },
+    },
+    provenance: {
+      transport: 'rows',
+      sourceRef: `attendance-import:${BATCH_ID}:${sourceOrdinal}`,
+      artifactSha256: null,
+      normalizedCsvSha256: null,
+      convertedSheetName: null,
+    },
+    ...overrides,
+  }
+}
+
 function replayManifestSeed(): ReturnType<typeof manifestSeed> {
   return {
     ...manifestSeed(),
@@ -152,6 +193,7 @@ function items(
       targetRef: '["org-a","user-a","2026-07-30"]',
       previewSnapshot: { status: 'normal' },
       recordWriteRef: RECORD_1,
+      rawEvidence: rawEvidence(0),
       ...applyOverrides,
     },
     {
@@ -164,6 +206,7 @@ function items(
       reasonCode: 'validation',
       warnings: ['Missing workDate'],
       previewSnapshot: { reason: 'validation' },
+      rawEvidence: rawEvidence(1),
     },
   ]
 }
@@ -234,6 +277,128 @@ describe('LegacyImportExecutionPlanV1', () => {
     expect(Object.isFrozen(built.manifest)).toBe(true)
     expect(built.chunks).toHaveLength(1)
     expect(built.chunks[0].body.items.map((item) => item.ordinal)).toEqual([0, 1])
+    expect(built.manifest.rawEvidenceDigest).toBe(
+      computeRawImportEvidenceDigestV1(built.chunks[0].body.items),
+    )
+    const parsedBody = parseLegacyImportExecutionPlanChunkBodyV1(
+      JSON.parse(JSON.stringify(built.chunks[0].body)),
+    )
+    expect(parsedBody.items[0]?.rawEvidence).toEqual(rawEvidence(0))
+  })
+
+  it('enforces exact raw-evidence keys, presence values, punch correspondence, and provenance', () => {
+    const baseline = rawEvidence(0)
+    expect(parseRawImportEvidenceV1(baseline)).toEqual(baseline)
+
+    expect(() => parseRawImportEvidenceV1({ ...baseline, extra: true })).toThrowError(
+      'W4C3A_RAW_IMPORT_EVIDENCE_INVALID',
+    )
+    expect(() =>
+      parseRawImportEvidenceV1({
+        ...baseline,
+        fields: {
+          ...baseline.fields,
+          status: { present: false, value: 'normal' },
+        },
+      }),
+    ).toThrowError('W4C3A_RAW_IMPORT_EVIDENCE_INVALID')
+    expect(() =>
+      parseRawImportEvidenceV1({
+        ...baseline,
+        punches: [{ direction: 'check_out', occurredAt: '2026-07-30T01:00:00.000Z' }],
+      }),
+    ).toThrowError('W4C3A_RAW_IMPORT_EVIDENCE_INVALID')
+    expect(() =>
+      parseRawImportEvidenceV1({
+        ...baseline,
+        provenance: {
+          ...baseline.provenance,
+          transport: 'csv_text',
+        },
+      }),
+    ).toThrowError('W4C3A_RAW_IMPORT_EVIDENCE_INVALID')
+  })
+
+  it('binds raw evidence ordinal, exact-presence metrics, and transport into digests', () => {
+    const baseline = buildValid()
+    const changedMetricItems = items({
+      rawEvidence: rawEvidence(0, {
+        metrics: {
+          workMinutes: { present: true, value: 0 },
+          lateMinutes: { present: false, value: null },
+          earlyLeaveMinutes: { present: false, value: null },
+        },
+      }),
+    })
+    const changedMetric = buildLegacyImportExecutionPlanPackageV1({
+      manifestSeed: manifestSeed(),
+      items: changedMetricItems,
+      recordWrites: [recordWrite()],
+      groupEffects: [],
+      groupEffectPlacements: [],
+    })
+    const changedTransportItems = items({
+      rawEvidence: rawEvidence(0, {
+        provenance: {
+          transport: 'integration_sync',
+          sourceRef: 'integration:batch-a:item-0',
+          artifactSha256: null,
+          normalizedCsvSha256: null,
+          convertedSheetName: null,
+        },
+      }),
+    })
+    const changedTransport = buildLegacyImportExecutionPlanPackageV1({
+      manifestSeed: manifestSeed(),
+      items: changedTransportItems,
+      recordWrites: [recordWrite()],
+      groupEffects: [],
+      groupEffectPlacements: [],
+    })
+
+    expect(changedMetric.manifest.rawEvidenceDigest).not.toBe(
+      baseline.manifest.rawEvidenceDigest,
+    )
+    expect(changedMetric.chunks[0].chunkDigest).not.toBe(
+      baseline.chunks[0].chunkDigest,
+    )
+    expect(changedMetric.planDigest).not.toBe(baseline.planDigest)
+    expect(changedTransport.manifest.rawEvidenceDigest).not.toBe(
+      baseline.manifest.rawEvidenceDigest,
+    )
+    expect(changedTransport.planDigest).not.toBe(baseline.planDigest)
+
+    expect(() =>
+      buildLegacyImportExecutionPlanPackageV1({
+        manifestSeed: manifestSeed(),
+        items: items({ rawEvidence: rawEvidence(1) }),
+        recordWrites: [recordWrite()],
+        groupEffects: [],
+        groupEffectPlacements: [],
+      }),
+    ).toThrowError('W4C3A_PLAN_PACKAGE_INVALID')
+
+    const mutatedBody = parseLegacyImportExecutionPlanChunkBodyV1({
+      ...baseline.chunks[0].body,
+      items: baseline.chunks[0].body.items.map((item, index) =>
+        index === 0
+          ? {
+              ...item,
+              rawEvidence: { ...item.rawEvidence, sourceOrdinal: 1 },
+            }
+          : item,
+      ),
+    })
+    expect(() =>
+      reassembleLegacyImportPlanChunksV1(
+        [{
+          ...baseline.chunks[0],
+          body: mutatedBody,
+          chunkDigest: computeLegacyImportChunkDigestV1(mutatedBody),
+        }],
+        baseline.manifest.sourceRowCount,
+      ),
+    ).toThrowError('W4C3A_CHUNK_REASSEMBLY_INVALID')
   })
 
   it('rejects extra manifest keys and an opaque array above the encoded-byte limit', () => {
@@ -458,6 +623,61 @@ describe('LegacyImportExecutionPlanV1', () => {
     ).toThrowError('W4C3A_PLAN_PACKAGE_INVALID')
   })
 
+  it('builds and validates two ordered apply items folded into one record write', () => {
+    const targetRef = '["org-a","user-a","2026-07-30"]'
+    const foldedItems: readonly LegacyImportItemPlanV1[] = [
+      {
+        kind: 'apply',
+        ordinal: 0,
+        semanticOrdinal: 0,
+        itemId: ITEM_1,
+        targetRef,
+        previewSnapshot: { source: 'first' },
+        recordWriteRef: RECORD_1,
+        rawEvidence: rawEvidence(0),
+      },
+      {
+        kind: 'apply',
+        ordinal: 1,
+        semanticOrdinal: 1,
+        itemId: ITEM_2,
+        targetRef,
+        previewSnapshot: { source: 'second' },
+        recordWriteRef: RECORD_1,
+        rawEvidence: rawEvidence(1, {
+          punches: [{ direction: 'check_out', occurredAt: '2026-07-30T09:00:00.000Z' }],
+          fields: {
+            ...rawEvidence(1).fields,
+            lastOutAt: { present: true, value: '2026-07-30T09:00:00.000Z' },
+          },
+        }),
+      },
+    ]
+    const built = buildLegacyImportExecutionPlanPackageV1({
+      manifestSeed: manifestSeed({
+        w4ItemCount: 2,
+        w4DistinctTargetCount: 1,
+      }),
+      items: foldedItems,
+      recordWrites: [recordWrite({ sourceOrdinals: [0, 1] })],
+      groupEffects: [],
+      groupEffectPlacements: [],
+    })
+    const reassembled = reassembleLegacyImportPlanChunksV1(
+      built.chunks,
+      built.manifest.sourceRowCount,
+    )
+
+    expect(reassembled.items.map((item) => item.semanticOrdinal)).toEqual([0, 1])
+    expect(reassembled.recordWrites).toHaveLength(1)
+    expect(reassembled.recordWrites[0]?.sourceOrdinals).toEqual([0, 1])
+    expect(
+      reassembled.items.every(
+        (item) => item.kind === 'apply' && item.recordWriteRef === RECORD_1,
+      ),
+    ).toBe(true)
+  })
+
   it('permits a frozen source-row limit only for a selected CSV source', () => {
     expect(() =>
       buildLegacyImportExecutionPlanPackageV1({
@@ -500,6 +720,7 @@ describe('LegacyImportExecutionPlanV1', () => {
         targetRef: '["org-a","user-b","2026-07-30"]',
         previewSnapshot: {},
         recordWriteRef: RECORD_2,
+        rawEvidence: rawEvidence(1),
       },
     ]
     const seed = manifestSeed({
@@ -662,6 +883,7 @@ describe('LegacyImportExecutionPlanV1', () => {
             reasonCode: 'validation',
             warnings: [],
             previewSnapshot: {},
+            rawEvidence: rawEvidence(1),
           },
         ],
         recordWrites: [],
@@ -703,11 +925,13 @@ describe('LegacyImportExecutionPlanV1', () => {
       groupRevision: _groupRevision,
       groupStateFingerprint: _groupFingerprint,
       sourceOrdinalDigest: _sourceDigest,
+      rawEvidenceDigest: _rawEvidenceDigest,
       chunkVectorDigest: _chunkDigest,
       ...enqueueManifestSeed
     } = {
       ...manifestWithoutJob,
       sourceOrdinalDigest: HEX_A,
+      rawEvidenceDigest: HEX_C,
       chunkVectorDigest: HEX_B,
     }
     await expect(
@@ -758,6 +982,7 @@ describe('LegacyImportExecutionPlanV1', () => {
             reasonCode: 'validation',
             warnings: [],
             previewSnapshot: {},
+            rawEvidence: rawEvidence(0),
           },
         ],
         recordWrites: [],
@@ -825,6 +1050,7 @@ describe('LegacyImportExecutionPlanV1', () => {
         reasonCode: 'validation',
         warnings: [],
         previewSnapshot: {},
+        rawEvidence: rawEvidence(0),
       },
       {
         kind: 'skip',
@@ -836,6 +1062,7 @@ describe('LegacyImportExecutionPlanV1', () => {
         reasonCode: 'duplicate',
         warnings: [],
         previewSnapshot: {},
+        rawEvidence: rawEvidence(1),
       },
     ]
     const seed = manifestSeed({
@@ -860,10 +1087,16 @@ describe('LegacyImportExecutionPlanV1', () => {
       groupStateFingerprint: _groupStateFingerprint,
       ...seedWithoutRuntimeFields
     } = seed
-    const { sourceOrdinalDigest: _source, chunkVectorDigest: _chunk, ...enqueueSeed } =
+    const {
+      sourceOrdinalDigest: _source,
+      rawEvidenceDigest: _rawEvidence,
+      chunkVectorDigest: _chunk,
+      ...enqueueSeed
+    } =
       {
         ...seedWithoutRuntimeFields,
         sourceOrdinalDigest: HEX_A,
+        rawEvidenceDigest: HEX_C,
         chunkVectorDigest: HEX_B,
       }
 

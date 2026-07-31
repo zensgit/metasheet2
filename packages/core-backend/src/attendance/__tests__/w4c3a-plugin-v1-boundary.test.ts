@@ -16,6 +16,18 @@ const PLUGIN = path.join(ROOT, 'plugins/plugin-attendance/index.cjs')
 const require = createRequire(import.meta.url)
 const attendancePlugin = require(PLUGIN) as {
   __attendanceW4C3aSyncCompatibilityForTests: {
+    foldAttendanceImportPreparedTargets(input: {
+      items: readonly Record<string, unknown>[]
+      existingMap: Map<string, Record<string, unknown>>
+      orgId: string
+      sourceBatchId: string
+    }): {
+      recordWrites: readonly Record<string, unknown>[]
+      targetRefBySourceOrdinal: Map<number, string>
+    }
+    prepareAttendanceImportRecordRows(
+      rows: readonly Record<string, unknown>[],
+    ): readonly Readonly<Record<string, unknown>>[]
     normalizeAttendanceSyncImportLockWitness(value: unknown): {
       rolloutKey: string
       legacyIdempotencyKey: string
@@ -121,6 +133,66 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       /const enqueueImportJob = async \(jobId\)[\s\S]{0,800}processAsyncImportCommitJob\(\{\s*jobId\s*\}\)/,
     )
     expect(source).toMatch(/Re-enqueue queued\/running jobs on startup[\s\S]{0,600}enqueueImportJob\(row\.id\)/)
+  })
+
+  it('cuts only commit-async over to the V1 reservation host', () => {
+    const previewStart = source.indexOf("'/api/attendance/import/preview'")
+    const preview = source.slice(
+      previewStart,
+      source.indexOf("'/api/attendance/import/commit'", previewStart),
+    )
+    expect(preview).not.toContain('reserveLegacyImportPlan')
+    expect(preview).not.toContain('Full attendance import permission required')
+    expect(preview.match(/const importAccess =/g)).toHaveLength(1)
+
+    const asyncRouteMarker = [
+      'context.api.http.addRoute(',
+      "      'POST',",
+      "      '/api/attendance/import/commit-async',",
+    ].join('\n')
+    const jobsRouteMarker = [
+      'context.api.http.addRoute(',
+      "      'GET',",
+      "      '/api/attendance/import/jobs/:id',",
+    ].join('\n')
+    const asyncStart = source.indexOf(asyncRouteMarker)
+    const asyncRoute = source.slice(
+      asyncStart,
+      source.indexOf(jobsRouteMarker, asyncStart),
+    )
+    const fullImport = asyncRoute.indexOf('if (!importAccess.fullImport)')
+    const portCheck = asyncRoute.indexOf(
+      "typeof legacyPlanPort.reserveLegacyImportPlan !== 'function'",
+    )
+    const prepare = asyncRoute.indexOf('prepareOnly: true')
+    const reserve = asyncRoute.indexOf(
+      'legacyPlanPort.reserveLegacyImportPlan',
+      prepare,
+    )
+    const enqueue = asyncRoute.indexOf('enqueueImportJob(jobId)', reserve)
+    expect(fullImport).toBeGreaterThan(-1)
+    expect(portCheck).toBeGreaterThan(fullImport)
+    expect(prepare).toBeGreaterThan(portCheck)
+    expect(reserve).toBeGreaterThan(prepare)
+    expect(enqueue).toBeGreaterThan(reserve)
+    expect(asyncRoute).not.toMatch(/INSERT INTO attendance_import_jobs/)
+    expect(asyncRoute).not.toContain('sanitizeImportJobPayload')
+  })
+
+  it('keeps preparation-only calculation free of compatibility DML', () => {
+    const calculator = source.slice(
+      source.indexOf('const commitAttendanceImportPayload = async'),
+      source.indexOf('// Register queue processor'),
+    )
+    expect(calculator).toContain('prepareOnly = false')
+    expect(calculator).toContain('if (!prepareOnly) await trx.query(batchInsert.sql')
+    expect(calculator).toContain('if (prepareOnly) return')
+    expect(calculator).toMatch(
+      /if \(prepareOnly\) \{[\s\S]*preparedPlanRecordWrites\.push[\s\S]*preparedPlanItems\.push/,
+    )
+    expect(calculator).toMatch(
+      /if \(!prepareOnly && groupSync\?\.autoAssignMembers[\s\S]*insertAttendanceGroupMembers/,
+    )
   })
 
   it('projects completed V1 jobs only from the immutable terminal response', () => {
@@ -479,6 +551,123 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(batchRecheck).toBeGreaterThan(lock)
     expect(reservationRecheck).toBeGreaterThan(batchRecheck)
     expect(firstEffect).toBeGreaterThan(reservationRecheck)
+  })
+
+  it('dispatches values, unnest, and staging from one immutable prepared-row boundary', () => {
+    const input = {
+      userId: 'user-1',
+      orgId: 'org-1',
+      workDate: '2026-07-31',
+      timezone: 'Asia/Taipei',
+      firstInAt: '2026-07-31T01:00:00.000Z',
+      lastOutAt: '2026-07-31T09:00:00.000Z',
+      workMinutes: 480,
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      status: 'normal',
+      isWorkday: true,
+      metaJson: '{}',
+      sourceBatchId: '10000000-0000-4000-8000-000000000001',
+      ignoredTransportHint: 'must-not-cross',
+    }
+    const prepared = syncCompatibility.prepareAttendanceImportRecordRows([
+      input,
+    ])
+    expect(Object.isFrozen(prepared)).toBe(true)
+    expect(Object.isFrozen(prepared[0])).toBe(true)
+    expect(prepared[0]).toEqual({
+      userId: input.userId,
+      orgId: input.orgId,
+      workDate: input.workDate,
+      timezone: input.timezone,
+      firstInAt: input.firstInAt,
+      lastOutAt: input.lastOutAt,
+      workMinutes: input.workMinutes,
+      lateMinutes: input.lateMinutes,
+      earlyLeaveMinutes: input.earlyLeaveMinutes,
+      status: input.status,
+      isWorkday: input.isWorkday,
+      metaJson: input.metaJson,
+      sourceBatchId: input.sourceBatchId,
+    })
+
+    const dispatcher = source.slice(
+      source.indexOf('async function batchUpsertAttendanceRecords(client'),
+      source.indexOf('async function batchInsertAttendanceImportItemsValues'),
+    )
+    expect(dispatcher.match(/prepareAttendanceImportRecordRows\(rows\)/g)).toHaveLength(1)
+    for (const adapter of [
+      'batchUpsertAttendanceRecordsValues(client, preparedRows)',
+      'batchUpsertAttendanceRecordsUnnest(client, preparedRows)',
+      'batchUpsertAttendanceRecordsStaging(client, preparedRows, { totalRows })',
+    ]) {
+      expect(dispatcher).toContain(adapter)
+    }
+    expect(dispatcher).not.toMatch(/batchUpsertAttendanceRecords(?:Values|Unnest|Staging)\(client, rows/)
+  })
+
+  it('folds duplicate targets in source order and binds both source ordinals', () => {
+    const target = ['org-1', 'user-1', '2026-07-31']
+    const common = {
+      userId: 'user-1',
+      workDate: '2026-07-31',
+      timezone: 'Asia/Taipei',
+      mode: 'override',
+      updateLastOutAt: new Date('2026-07-31T09:00:00.000Z'),
+      overrideMetrics: {
+        workMinutes: 480,
+        lateMinutes: 0,
+        earlyLeaveMinutes: 0,
+      },
+      isWorkday: true,
+      meta: {},
+      sourceBatchId: '10000000-0000-4000-8000-000000000001',
+      rule: {
+        timezone: 'Asia/Taipei',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        lateGraceMinutes: 0,
+        earlyGraceMinutes: 0,
+        roundingMinutes: 1,
+      },
+      leaveMinutes: 0,
+      overtimeMinutes: 0,
+    }
+    const folded = syncCompatibility.foldAttendanceImportPreparedTargets({
+      items: [
+        {
+          ...common,
+          sourceOrdinal: 3,
+          updateFirstInAt: new Date('2026-07-31T01:30:00.000Z'),
+          statusOverride: 'late',
+          previewSnapshot: { policy: { source: 'first' } },
+        },
+        {
+          ...common,
+          sourceOrdinal: 4,
+          updateFirstInAt: new Date('2026-07-31T01:00:00.000Z'),
+          statusOverride: 'normal',
+          previewSnapshot: { policy: { source: 'second' } },
+        },
+      ],
+      existingMap: new Map(),
+      orgId: 'org-1',
+      sourceBatchId: common.sourceBatchId,
+    })
+
+    expect(folded.recordWrites).toHaveLength(1)
+    expect(folded.recordWrites[0]).toMatchObject({
+      sourceOrdinals: [3, 4],
+      status: 'normal',
+      firstInAt: '2026-07-31T01:00:00.000Z',
+      sourceBatchId: common.sourceBatchId,
+      policySnapshot: {
+        sourceOrdinals: [3, 4],
+        sources: [{ source: 'first' }, { source: 'second' }],
+      },
+    })
+    expect(folded.targetRefBySourceOrdinal.get(3)).toBe(JSON.stringify(target))
+    expect(folded.targetRefBySourceOrdinal.get(4)).toBe(JSON.stringify(target))
   })
 
   it('keeps sync retry state attempt-local and releases source rows only after commit', () => {

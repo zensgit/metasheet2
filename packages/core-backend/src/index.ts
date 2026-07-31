@@ -128,6 +128,7 @@ import {
   type AttendanceScheduledRunAdminAbandonInputV1,
 } from './attendance/w4c2-scheduled-run-ops-worker'
 import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
+import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2165,6 +2166,18 @@ export class MetaSheetServer {
                     },
                   })
                   return processor.processLegacyImportPlanV1(jobId)
+                },
+                reserveLegacyImportPlan: async (input) => {
+                  const host = createAttendanceLegacyPlanReservationHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return host.reserveLegacyImportPlanV1(input)
                 },
                 buildLegacyImportReservationLockWitness: (input: {
                   orgId: string

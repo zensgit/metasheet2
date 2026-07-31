@@ -10,6 +10,7 @@ import { Pool } from 'pg'
 import {
   computeLegacyImportAsyncJobSummaryDigestV1,
   type LegacyImportAsyncJobSummaryV1,
+  type RawImportEvidenceV1,
 } from '../../src/attendance/w4c3a-legacy-execution-plan'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import {
@@ -46,6 +47,63 @@ const EMPTY_OBJECT_DIGEST = crypto
 
 function newId(): string {
   return crypto.randomUUID()
+}
+
+function rawEvidence(sourceOrdinal = 0): RawImportEvidenceV1 {
+  const firstInAt = '2026-07-30T01:00:00.000Z'
+  return {
+    schemaVersion: 1,
+    sourceOrdinal,
+    punches: [{ direction: 'check_in', occurredAt: firstInAt }],
+    fields: {
+      userId: { present: true, value: 'user-a' },
+      workDate: { present: true, value: '2026-07-30' },
+      timezone: { present: true, value: 'Asia/Shanghai' },
+      firstInAt: { present: true, value: firstInAt },
+      lastOutAt: { present: false, value: null },
+      status: { present: false, value: null },
+      isWorkday: { present: false, value: null },
+    },
+    metrics: {
+      workMinutes: { present: false, value: null },
+      lateMinutes: { present: false, value: null },
+      earlyLeaveMinutes: { present: false, value: null },
+    },
+    provenance: {
+      transport: 'rows',
+      sourceRef: `migration-fixture:${run}:${sourceOrdinal}`,
+      artifactSha256: null,
+      normalizedCsvSha256: null,
+      convertedSheetName: null,
+    },
+  }
+}
+
+function rawPlanItem(kind: 'skip' | 'apply') {
+  const evidence = rawEvidence()
+  return kind === 'apply'
+    ? {
+        kind,
+        ordinal: 0,
+        semanticOrdinal: 0,
+        itemId: newId(),
+        targetRef: 'fixture-target',
+        previewSnapshot: {},
+        recordWriteRef: 'fixture-record-write',
+        rawEvidence: evidence,
+      }
+    : {
+        kind,
+        ordinal: 0,
+        semanticOrdinal: null,
+        itemId: newId(),
+        resolvedUserId: null,
+        resolvedWorkDate: null,
+        reasonCode: 'validation',
+        warnings: [],
+        previewSnapshot: {},
+        rawEvidence: evidence,
+      }
 }
 
 async function createBase(pool: Pool): Promise<void> {
@@ -117,7 +175,7 @@ async function seedNoTargetPlan(pool: Pool, orgId: string, itemKind: 'skip' | 'a
     createdBy: `creator:${run}`, actorId: `actor:${run}`, actorPosture: 'attendance_admin', tokenSubjectUserId: null,
     acceptedWritePosture: 'legacy_projection_only', identityProofVectorDigest: '', commandFingerprint: hex('a'),
     legacyInputFingerprint: hex('b'), operationalBranch: 'operational_only_no_target', legacyRowSourceKind: 'direct_rows',
-    sourceRowCount: 1, sourceOrdinalDigest: hex('c'), w4ItemCount: 0, w4DistinctTargetCount: 0,
+    sourceRowCount: 1, sourceOrdinalDigest: hex('c'), rawEvidenceDigest: hex('d'), w4ItemCount: 0, w4DistinctTargetCount: 0,
     w4ItemSequenceFingerprint: EMPTY_SEQUENCE, w4ItemSetFingerprint: EMPTY_SET, legacySourceRowLimit: null,
     groupRevision: null, groupStateFingerprint: null, chunkVectorDigest: hex('f'),
     batch: {
@@ -167,7 +225,7 @@ async function seedNoTargetPlan(pool: Pool, orgId: string, itemKind: 'skip' | 'a
     await client.query(
       `INSERT INTO attendance_import_legacy_execution_plan_chunks (job_id, chunk_index, first_source_ordinal, source_row_count, chunk_digest, chunk)
        VALUES ($1,0,0,1,$2,$3::jsonb)`,
-      [jobId, hex('f'), JSON.stringify({ items: [{ kind: itemKind }], recordWrites: [], groupEffects: [] })],
+      [jobId, hex('f'), JSON.stringify({ items: [rawPlanItem(itemKind)], recordWrites: [], groupEffects: [] })],
     )
   } finally {
     await client.query('SET session_replication_role = origin').catch(() => undefined)
@@ -815,7 +873,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
         tokenSubjectUserId: null, acceptedWritePosture: 'legacy_projection_only',
         identityProofVectorDigest, commandFingerprint: hex('a'), legacyInputFingerprint: hex('b'),
         operationalBranch: 'operational_only_no_target', legacyRowSourceKind: 'direct_rows',
-        sourceRowCount: 1, sourceOrdinalDigest: hex('c'), w4ItemCount: 0, w4DistinctTargetCount: 0,
+        sourceRowCount: 1, sourceOrdinalDigest: hex('c'), rawEvidenceDigest: hex('d'), w4ItemCount: 0, w4DistinctTargetCount: 0,
         w4ItemSequenceFingerprint: EMPTY_SEQUENCE, w4ItemSetFingerprint: EMPTY_SET,
         legacySourceRowLimit: null, groupRevision: null, groupStateFingerprint: null,
         chunkVectorDigest: hex('f'), batch, artifactCleanup: { kind: 'none' },
@@ -925,7 +983,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
           [
             jobId, hex('f'),
             JSON.stringify({
-              items: [{ kind: 'skip' }],
+              items: [rawPlanItem('skip')],
               recordWrites: [{ resultSlots: {} }],
               groupEffects: [],
             }),

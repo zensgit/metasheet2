@@ -13096,7 +13096,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify(commitPayload),
     })
-    expect(commitRes.status).toBe(200)
+    expect(commitRes.status, commitRes.raw).toBe(200)
     const job = (commitRes.body as { data?: { job?: any } } | undefined)?.data?.job
     const jobId = job?.id
     expect(typeof jobId).toBe('string')

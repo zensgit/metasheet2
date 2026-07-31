@@ -49,6 +49,7 @@ import {
   createAttendanceLegacyPlanWorkerRepositoryV1,
   type AttendanceLegacyPlanWorkerRepositoryJobV1,
 } from '../../src/attendance/w4c3a-legacy-plan-worker-repository'
+import { rawImportEvidenceV1 } from '../utils/attendance-w4c3a-raw-evidence'
 
 const dbUrl = process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -320,10 +321,12 @@ function noTargetInput(
     {
       kind: 'skip', ordinal: 0, semanticOrdinal: null, resolvedUserId: null,
       resolvedWorkDate: null, reasonCode: 'validation', warnings: [], previewSnapshot: {},
+      rawEvidence: rawImportEvidenceV1(0),
     },
     {
       kind: 'skip', ordinal: 1, semanticOrdinal: null, resolvedUserId: null,
       resolvedWorkDate: null, reasonCode: 'duplicate', warnings: [], previewSnapshot: {},
+      rawEvidence: rawImportEvidenceV1(1),
     },
   ]
   const batch = normalBatch(idempotencyKey, items.length)
@@ -389,6 +392,18 @@ function strictInput(org: VerifiedAttendanceOrgIdentityV1, batchId: string, acto
     kind: 'apply', ordinal: 0, semanticOrdinal: 0,
     targetRef: JSON.stringify([org.orgId, TARGET_USER, '2026-07-30']),
     previewSnapshot: { status: 'normal' },
+    rawEvidence: rawImportEvidenceV1(0, {
+      userId: TARGET_USER,
+      workDate: '2026-07-30',
+      timezone: 'Asia/Shanghai',
+      firstInAt: '2026-07-30T01:00:00.000Z',
+      lastOutAt: '2026-07-30T09:00:00.000Z',
+      status: 'normal',
+      isWorkday: true,
+      workMinutes: 480,
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+    }),
   }
   const batch = normalBatch(null, 1)
   const proofVector = [{ ordinal: 0, semanticFingerprint, derivedOperationId: itemIdentity.id, commandFingerprint }]
@@ -476,6 +491,18 @@ function strictTwoItemInput(
       semanticOrdinal: ordinal,
       targetRef: JSON.stringify([org.orgId, draft.userId, draft.workDate]),
       previewSnapshot: { status: 'normal' },
+      rawEvidence: rawImportEvidenceV1(ordinal, {
+        userId: draft.userId,
+        workDate: draft.workDate,
+        timezone: 'Asia/Shanghai',
+        firstInAt: `${draft.workDate}T01:00:00.000Z`,
+        lastOutAt: `${draft.workDate}T09:00:00.000Z`,
+        status: 'normal',
+        isWorkday: true,
+        workMinutes: 480,
+        lateMinutes: 0,
+        earlyLeaveMinutes: 0,
+      }),
     }),
   )
   const recordWrites: readonly LegacyImportRecordWriteDraftV1[] =
@@ -1349,7 +1376,19 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
           commandFingerprint: HEX_C,
         })
         const targetRef = JSON.stringify([legacyOrgWitness.orgId, userId, workDate])
-        items.push({ kind: 'apply', ordinal, semanticOrdinal: ordinal, targetRef, previewSnapshot: {} })
+        items.push({
+          kind: 'apply', ordinal, semanticOrdinal: ordinal, targetRef, previewSnapshot: {},
+          rawEvidence: rawImportEvidenceV1(ordinal, {
+            userId,
+            workDate,
+            timezone: 'Asia/Shanghai',
+            status: 'normal',
+            isWorkday: true,
+            workMinutes: 0,
+            lateMinutes: 0,
+            earlyLeaveMinutes: 0,
+          }),
+        })
         recordWrites.push({
           orgId: legacyOrgWitness.orgId,
           userId,
