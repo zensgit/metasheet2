@@ -801,4 +801,21 @@ const { node } = toRefs(props)
     grid-template-columns: 1fr;
   }
 }
+
+@media (max-width: 560px) {
+  .approval-node-config-editor :deep(.el-button),
+  .approval-node-config-editor :deep(.el-checkbox),
+  .approval-node-config-editor :deep(.el-input__wrapper),
+  .approval-node-config-editor :deep(.el-select__wrapper),
+  .approval-node-config-editor :deep(.el-input-number),
+  .approval-node-config-editor :deep(.el-textarea__inner) {
+    min-height: 44px;
+  }
+
+  .approval-node-config-editor :deep(.el-input-number__decrease),
+  .approval-node-config-editor :deep(.el-input-number__increase) {
+    width: 44px;
+    height: 44px;
+  }
+}
 </style>

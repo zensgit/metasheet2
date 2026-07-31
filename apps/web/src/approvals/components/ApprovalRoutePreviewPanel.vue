@@ -261,4 +261,21 @@ function setField(fieldId: string, value: unknown): void {
   border-left: 2px solid var(--el-color-primary-light-5);
   font-size: 12px;
 }
+
+@media (max-width: 560px) {
+  .approval-route-preview-panel :deep(.el-button),
+  .approval-route-preview-panel :deep(.el-input__wrapper),
+  .approval-route-preview-panel :deep(.el-select__wrapper),
+  .approval-route-preview-panel :deep(.el-input-number),
+  .approval-route-preview-panel :deep(.el-textarea__inner),
+  .approval-route-preview-panel :deep(.el-collapse-item__header) {
+    min-height: 44px;
+  }
+
+  .approval-route-preview-panel :deep(.el-input-number__decrease),
+  .approval-route-preview-panel :deep(.el-input-number__increase) {
+    width: 44px;
+    height: 44px;
+  }
+}
 </style>

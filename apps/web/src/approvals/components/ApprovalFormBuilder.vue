@@ -453,7 +453,7 @@ function onFieldKeyboardReorder(event: KeyboardEvent, index: number): void {
 
 .approval-form-builder__workspace {
   display: grid;
-  grid-template-columns: minmax(190px, 220px) minmax(300px, 1fr) minmax(300px, 380px);
+  grid-template-columns: minmax(220px, 240px) minmax(300px, 1fr) minmax(300px, 380px);
   align-items: start;
   gap: 16px;
 }
@@ -659,7 +659,7 @@ function onFieldKeyboardReorder(event: KeyboardEvent, index: number): void {
 
 @media (max-width: 1280px) {
   .approval-form-builder__workspace {
-    grid-template-columns: minmax(180px, 210px) minmax(300px, 1fr);
+    grid-template-columns: minmax(220px, 240px) minmax(300px, 1fr);
   }
 
   .approval-form-builder__inspector-shell {

@@ -146,8 +146,8 @@ function onDragStart(event: DragEvent, type: FormAuthoringFieldType) {
 
 .approval-form-palette__item span {
   min-width: 0;
-  overflow-wrap: anywhere;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 @media (max-width: 1024px) {
@@ -155,7 +155,9 @@ function onDragStart(event: DragEvent, type: FormAuthoringFieldType) {
     position: static;
     grid-row: auto;
   }
+}
 
+@media (max-width: 860px) {
   .approval-form-palette__items {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }

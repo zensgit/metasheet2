@@ -270,6 +270,7 @@
             :model-value="field.visibility.dependsOnFieldId"
             :disabled="readOnly"
             class="ms-w-200"
+            placeholder="无（始终显示）"
             data-testid="approval-field-visibility-depends"
             @update:model-value="updateVisibilityString('dependsOnFieldId', $event)"
           >
