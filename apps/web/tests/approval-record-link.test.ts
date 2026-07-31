@@ -20,7 +20,6 @@ import {
   recordLinkSheetId,
   resolvePinnedTargetLabel,
   validateRecordLinkPinAgainstLoadedCatalog,
-  RECORD_LINK_TARGET_UNAVAILABLE,
 } from '../src/approvals/recordLinkField'
 import {
   AUTHORABLE_FIELD_TYPES,
@@ -66,20 +65,28 @@ describe('record-link — FormFieldType / authoring parity', () => {
     expect(isRecordLinkField({ type: 'detail' })).toBe(false)
   })
 
-  it('TemplateAuthoringView: catalog failure is retriable (not sticky loaded=true)', async () => {
+  it('form builder: catalog failure is retriable (not sticky loaded=true)', async () => {
     const { readFileSync } = await import('node:fs')
     const { join } = await import('node:path')
-    const src = readFileSync(
+    const viewSrc = readFileSync(
       join(__dirname, '../src/views/approval/TemplateAuthoringView.vue'),
       'utf8',
     )
-    // Catch path must leave loaded=false and surface values-free error + retry.
-    expect(src).toMatch(/recordLinkCatalogLoaded\.value\s*=\s*false/)
-    expect(src).toContain('关联表目录加载失败，请重试')
-    expect(src).toContain('approval-record-link-catalog-retry')
-    expect(src).toContain('retryRecordLinkCatalog')
+    const inspectorSrc = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalFieldInspector.vue'),
+      'utf8',
+    )
+    // The parent owns catalog state/loading; the extracted inspector owns the retry control.
+    expect(viewSrc).toMatch(/recordLinkCatalogLoaded\.value\s*=\s*false/)
+    expect(viewSrc).toContain('关联表目录加载失败，请重试')
+    expect(viewSrc).toContain('@retry-record-link-catalog="retryRecordLinkCatalog"')
+    expect(inspectorSrc).toContain('approval-record-link-catalog-retry')
+    expect(inspectorSrc).toContain("emit('retry-record-link-catalog')")
     // Must not permanently mark loaded on catch (the sticky-failure bug).
-    const catchBlock = src.slice(src.indexOf('} catch {'), src.indexOf('} finally {', src.indexOf('} catch {')))
+    const catchBlock = viewSrc.slice(
+      viewSrc.indexOf('} catch {'),
+      viewSrc.indexOf('} finally {', viewSrc.indexOf('} catch {')),
+    )
     expect(catchBlock).not.toMatch(/recordLinkCatalogLoaded\.value\s*=\s*true/)
   })
 
