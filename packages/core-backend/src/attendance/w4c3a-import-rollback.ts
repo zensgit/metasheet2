@@ -731,6 +731,7 @@ export async function readAttendanceImportRollbackSourceJobsV1(
         fail('IMPORT_ROLLBACK_BATCH_CHANGED')
       }
     } else if (
+      row.status !== 'completed' ||
       row.w4_entrypoint !== 'import_batch' ||
       row.w4_batch_command_id !== batchId ||
       !['legacy_projection_only', 'shadow', 'authoritative'].includes(

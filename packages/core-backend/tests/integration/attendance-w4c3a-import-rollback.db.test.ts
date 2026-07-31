@@ -670,12 +670,15 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
   }
 
-  async function legacyRaceFixture(workDate: string) {
-    const raceOrgId = id()
+  async function legacyRaceFixture(workDate: string, requestedOrgId?: string) {
+    const raceOrgId = requestedOrgId ?? id()
     const batchId = id()
     const recordId = id()
     const targetUserId = id()
-    await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [actorId, raceOrgId])
+    await pool.query(
+      'INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [actorId, raceOrgId],
+    )
     await pool.query('INSERT INTO users (id) VALUES ($1)', [targetUserId])
     await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [
       targetUserId,
@@ -700,6 +703,48 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       [id(), batchId, raceOrgId, targetUserId, workDate, recordId],
     )
     return { raceOrgId, batchId, recordId }
+  }
+
+  async function insertV1SourceJob(input: {
+    orgId: string
+    batchId: string
+    status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled'
+  }): Promise<string> {
+    const jobId = id()
+    const fingerprint = crypto.createHash('sha256').update(input.batchId).digest('hex')
+    const semanticFingerprint = hex('d')
+    await pool.query(
+      `INSERT INTO attendance_import_jobs (
+         id, org_id, batch_id, created_by, status, total, payload,
+         w4_contract_version, w4_entrypoint, w4_batch_command_id,
+         w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
+         w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
+         w4_item_sequence_fingerprint, w4_item_set_fingerprint,
+         w4_identity_proof_vector)
+       VALUES ($1, $2, $3, $4, $5, 1, '{}'::jsonb,
+         1, 'import_batch', $3, 'import_batch', $6, $4, 'attendance_admin', $7,
+         'legacy_projection_only', 1, $8, $9,
+         jsonb_build_array(jsonb_build_object(
+           'ordinal', 0,
+           'semanticFingerprint', $10::text,
+           'derivedOperationId', attendance_w4_uuidv5(
+             '6f67fdaa-e2aa-48b3-b76c-c4aab9723173'::uuid,
+             attendance_w4_item_name_bytes($3::uuid, 0, $10::text)),
+           'commandFingerprint', $7::text)))`,
+      [
+        jobId,
+        input.orgId,
+        input.batchId,
+        actorId,
+        input.status,
+        'test:w4c3a-p25-source-job',
+        fingerprint,
+        hex('b'),
+        hex('c'),
+        semanticFingerprint,
+      ],
+    )
+    return jobId
   }
 
   async function controlResidue(org: string, batchId: string) {
@@ -1166,7 +1211,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
          w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
          w4_item_sequence_fingerprint, w4_item_set_fingerprint,
          w4_identity_proof_vector)
-       VALUES (gen_random_uuid(), $1, $2, $3, 'failed', 1, '{}'::jsonb,
+       VALUES (gen_random_uuid(), $1, $2, $3, 'completed', 1, '{}'::jsonb,
          1, 'import_batch', $2, 'import_batch', $4, $3, 'delegated_import', $5,
          'legacy_projection_only', 1, $6, $7,
          jsonb_build_array(jsonb_build_object(
@@ -1287,6 +1332,92 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     expect(parentLock).toBeGreaterThan(targetAdvisory)
     expect(statements[parentLock].sql).toContain('ORDER BY user_id, work_date, id')
   })
+
+  it.each([
+    ['queued', '2026-08-31'],
+    ['running', '2026-09-01'],
+    ['failed', '2026-09-02'],
+    ['canceled', '2026-09-03'],
+  ] as const)(
+    'P25 rejects a %s V1 source-job reservation before legacy rollback DML',
+    async (status, workDate) => {
+      const fixture = await legacyRaceFixture(workDate)
+      await insertV1SourceJob({
+        orgId: fixture.raceOrgId,
+        batchId: fixture.batchId,
+        status,
+      })
+      const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      try {
+        await expect(rollbackBoundary().rollbackImportBatchV1({
+          orgId: fixture.raceOrgId,
+          batchId: fixture.batchId,
+          actorId,
+          tokenSubjectUserId: actorId,
+        })).rejects.toMatchObject({ code: 'IMPORT_ROLLBACK_BATCH_CHANGED' })
+      } finally {
+        if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+        else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+      }
+      expect(await rollbackResidue(fixture.batchId)).toEqual({
+        commands: 0,
+        reversals: 0,
+        witnesses: 0,
+      })
+      await expect(pool.query(
+        `SELECT b.status, count(r.id)::int AS records
+           FROM attendance_import_batches b
+           LEFT JOIN attendance_records r
+             ON r.org_id = b.org_id AND r.source_batch_id = b.id
+          WHERE b.org_id = $1 AND b.id = $2::uuid
+          GROUP BY b.status`,
+        [fixture.raceOrgId, fixture.batchId],
+      )).resolves.toMatchObject({ rows: [{ status: 'committed', records: 1 }] })
+    },
+    60000,
+  )
+
+  it('P25 rejects an operational batch-id reassignment as rollback authority', async () => {
+    const original = await legacyRaceFixture('2026-09-04')
+    const target = await legacyRaceFixture('2026-09-05', original.raceOrgId)
+    const jobId = await insertV1SourceJob({
+      orgId: original.raceOrgId,
+      batchId: original.batchId,
+      status: 'completed',
+    })
+    await pool.query('UPDATE attendance_import_jobs SET batch_id = $2::uuid WHERE id = $1::uuid', [
+      jobId,
+      target.batchId,
+    ])
+
+    const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    try {
+      await expect(rollbackBoundary().rollbackImportBatchV1({
+        orgId: target.raceOrgId,
+        batchId: target.batchId,
+        actorId,
+        tokenSubjectUserId: actorId,
+      })).rejects.toMatchObject({ code: 'IMPORT_ROLLBACK_BATCH_CHANGED' })
+    } finally {
+      if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+    }
+    expect(await rollbackResidue(target.batchId)).toEqual({
+      commands: 0,
+      reversals: 0,
+      witnesses: 0,
+    })
+    await expect(pool.query(
+      'SELECT status FROM attendance_import_batches WHERE org_id = $1 AND id = $2::uuid',
+      [target.raceOrgId, target.batchId],
+    )).resolves.toMatchObject({ rows: [{ status: 'committed' }] })
+    await expect(pool.query(
+      'SELECT count(*)::int AS n FROM attendance_records WHERE org_id = $1 AND id = $2::uuid',
+      [target.raceOrgId, target.recordId],
+    )).resolves.toMatchObject({ rows: [{ n: 1 }] })
+  }, 60000)
 
   it('serializes closure-first against legacy rollback and returns 409 with zero rollback DML', async () => {
     const fixture = await legacyRaceFixture('2026-09-01')
