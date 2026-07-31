@@ -166,6 +166,111 @@ test('approval canvas exposes edge insertion and branch reordering in the real b
   expect(after).toEqual([...before].reverse())
 })
 
+test('approval route preview runs through the production wrapper and highlights the saved canvas path', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await mockVersionWorkspaceApi(page)
+  let previewRequest: unknown = null
+  await page.route('**/api/approval-templates/tpl-browser/route-preview', async (route) => {
+    previewRequest = route.request().postDataJSON()
+    await route.fulfill({
+      json: {
+        route: [
+          { nodeKey: 'secret_approval_one', nodeLabel: 'secret_approval_one', assignees: [{ id: 'secret_user_id', name: '张三', assignmentType: 'user' }] },
+          { nodeKey: 'secret_approval_two', nodeLabel: 'secret_approval_two', assignees: [{ id: 'secret_missing_user', name: 'secret_missing_user', assignmentType: 'user' }] },
+          { nodeKey: 'secret_approval_three', nodeLabel: 'secret_approval_three', assignees: [], resolveError: 'EMPTY_ASSIGNEES' },
+        ],
+        truncated: false,
+      },
+    })
+  })
+
+  await page.goto(`${HARNESS}?mode=route-preview`)
+  const previewToggle = page.getByTestId('approval-template-route-preview-toggle')
+  await previewToggle.focus()
+  await previewToggle.press('Enter')
+  await expect(page.getByTestId('approval-canvas-route-preview-panel')).toBeVisible()
+  await expect(page.getByTestId('approval-canvas-route-preview-heading')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('approval-canvas-route-preview-panel')).toHaveCount(0)
+  await expect(previewToggle).toBeFocused()
+
+  await previewToggle.click()
+  await page.getByTestId('approval-canvas-route-preview-panel').getByRole('spinbutton').fill('1200')
+  await page.getByTestId('approval-template-tryrun-button').click()
+
+  await expect.poll(() => previewRequest).toEqual({
+    sampleFormData: { secret_amount_id: 1200 },
+    expectedLatestVersionId: 'ver-current',
+  })
+  await expect(page.locator('[data-route-preview="matched"][data-canvas-node]')).toHaveCount(6)
+  await expect(page.locator('[data-route-preview="matched"][data-testid="approval-canvas-edge"]')).toHaveCount(5)
+  await expect(page.getByTestId('approval-canvas-route-preview-tag')).toHaveCount(6)
+  await expect(page.getByTestId('approval-template-tryrun-result')).toContainText('张三')
+  await expect(page.getByTestId('approval-template-tryrun-result')).toContainText('成员信息待确认')
+  await expect(page.getByTestId('approval-template-tryrun-result')).toContainText('审批人待定')
+  const visibleText = await page.getByTestId('approval-canvas-route-preview-panel').textContent()
+  expect(visibleText).not.toContain('secret_')
+
+  await page.screenshot({
+    path: 'verification-output/approval-route-preview-canvas.png',
+    fullPage: true,
+  })
+
+  await page.getByTestId('approval-canvas-route-preview-close').click()
+  await expect(page.getByTestId('approval-canvas-route-preview-panel')).toHaveCount(0)
+  await expect(page.locator('[data-route-preview="matched"]')).toHaveCount(0)
+})
+
+test('approval route preview remains operable without horizontal overflow at a phone viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await mockVersionWorkspaceApi(page)
+  await page.route('**/api/approval-templates/tpl-browser/route-preview', async (route) => {
+    await route.fulfill({
+      json: {
+        route: [
+          { nodeKey: 'secret_approval_one', nodeLabel: 'secret_approval_one', assignees: [{ id: 'user-1', name: '张三', assignmentType: 'user' }] },
+          { nodeKey: 'secret_approval_two', nodeLabel: 'secret_approval_two', assignees: [{ id: 'user-2', name: '李四', assignmentType: 'user' }] },
+          { nodeKey: 'secret_approval_three', nodeLabel: 'secret_approval_three', assignees: [{ id: 'user-3', name: '王五', assignmentType: 'user' }] },
+        ],
+        truncated: false,
+      },
+    })
+  })
+
+  await page.goto(`${HARNESS}?mode=route-preview`)
+  const toggle = page.getByTestId('approval-template-route-preview-toggle')
+  await toggle.click()
+  const panel = page.getByTestId('approval-canvas-route-preview-panel')
+  await expect(panel).toBeVisible()
+  await panel.getByRole('spinbutton').fill('1200')
+  await page.getByTestId('approval-template-tryrun-button').click()
+  await expect(page.getByTestId('approval-template-tryrun-result')).toContainText('张三')
+
+  const layout = await page.evaluate(() => {
+    const panel = document.querySelector<HTMLElement>('[data-testid="approval-canvas-route-preview-panel"]')
+    const canvas = document.querySelector<HTMLElement>('[data-testid="approval-canvas-viewport"]')
+    if (!panel || !canvas) throw new Error('missing route-preview mobile surface')
+    return {
+      bodyWidth: document.body.scrollWidth,
+      viewportWidth: document.documentElement.clientWidth,
+      panel: panel.getBoundingClientRect().toJSON(),
+      canvas: canvas.getBoundingClientRect().toJSON(),
+    }
+  })
+  expect(layout.bodyWidth).toBeLessThanOrEqual(layout.viewportWidth)
+  expect(layout.panel.right).toBeLessThanOrEqual(layout.viewportWidth)
+  expect(layout.panel.top).toBeGreaterThanOrEqual(layout.canvas.bottom)
+
+  await page.screenshot({
+    path: 'verification-output/approval-route-preview-mobile.png',
+    fullPage: true,
+  })
+
+  await page.getByTestId('approval-canvas-route-preview-close').click()
+  await expect(panel).toHaveCount(0)
+  await expect(toggle).toBeFocused()
+})
+
 test('approval form designer stacks without horizontal overflow at a phone viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await openFormDesigner(page)

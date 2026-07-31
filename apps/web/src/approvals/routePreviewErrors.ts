@@ -20,6 +20,8 @@ import { ApprovalApiError } from './api'
  * TemplateAuthoringView.
  */
 const ROUTE_PREVIEW_WEDGE_MESSAGES: Record<string, string> = {
+  APPROVAL_TEMPLATE_VERSION_STALE:
+    '模板草稿已更新，请重新加载后再运行预演。',
   APPROVAL_REQUESTER_DEPARTMENT_REQUIRED:
     '此样例发起人缺少部门，真实提交会被拒绝。换一个样例发起人，或先补全其目录信息。',
   APPROVAL_REQUESTER_TITLE_REQUIRED:

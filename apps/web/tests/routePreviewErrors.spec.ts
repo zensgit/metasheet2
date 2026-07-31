@@ -10,6 +10,11 @@ import { describeRoutePreviewError } from '../src/approvals/routePreviewErrors'
 // see ApprovalProductService.ts:3447-3492), plus the honest fallbacks for anything else.
 
 describe('describeRoutePreviewError', () => {
+  it('APPROVAL_TEMPLATE_VERSION_STALE (409) asks the author to reload without echoing backend text', () => {
+    const error = new ApprovalApiError('internal draft changed detail', 409, 'APPROVAL_TEMPLATE_VERSION_STALE')
+    expect(describeRoutePreviewError(error)).toBe('模板草稿已更新，请重新加载后再运行预演。')
+  })
+
   it('APPROVAL_REQUESTER_DEPARTMENT_REQUIRED (422) → actionable 会被拒 message', () => {
     const error = new ApprovalApiError('missing dept', 422, 'APPROVAL_REQUESTER_DEPARTMENT_REQUIRED')
     expect(describeRoutePreviewError(error)).toBe(

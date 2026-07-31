@@ -42,7 +42,11 @@ const router = createRouter({
 
 await useFeatureFlags().loadProductFeatures(true, { skipSessionProbe: true })
 const harnessMode = new URL(window.location.href).searchParams.get('mode')
-await router.push(harnessMode === 'version' ? '/approval-templates/tpl-browser/edit' : '/approval-templates/new')
+await router.push(
+  harnessMode === 'version' || harnessMode === 'route-preview'
+    ? '/approval-templates/tpl-browser/edit'
+    : '/approval-templates/new',
+)
 await router.isReady()
 
 createApp(TemplateAuthoringView)

@@ -33,6 +33,7 @@
           role="region"
           aria-label="审批流程画布"
           tabindex="0"
+          data-testid="approval-canvas-viewport"
           @scroll="emit('viewport-scroll')"
         >
           <div class="template-authoring__canvas-stage" :style="canvasStageCss">
@@ -46,15 +47,20 @@
                   <marker id="approval-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
                     <path d="M0,0 L7,3 L0,6 Z" fill="#bbb" />
                   </marker>
+                  <marker id="approval-canvas-arrow-preview" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+                    <path d="M0,0 L7,3 L0,6 Z" class="template-authoring__canvas-preview-arrow" />
+                  </marker>
                 </defs>
                 <path
                   v-for="line in canvasEdgeLines"
                   :key="line.key"
                   :d="line.path"
+                  :class="{ 'is-route-preview': routePreviewEdgeKeys.has(line.key) }"
                   stroke="#bbb"
                   stroke-width="1.5"
                   fill="none"
-                  marker-end="url(#approval-canvas-arrow)"
+                  :marker-end="routePreviewEdgeKeys.has(line.key) ? 'url(#approval-canvas-arrow-preview)' : 'url(#approval-canvas-arrow)'"
+                  :data-route-preview="routePreviewEdgeKeys.has(line.key) ? 'matched' : undefined"
                   data-testid="approval-canvas-edge"
                 />
               </svg>
@@ -120,9 +126,15 @@
                 v-for="pos in canvasLayout.nodes"
                 :key="pos.key"
                 class="template-authoring__canvas-node"
-                :class="{ 'is-selected': selectedCanvasNode === pos.key, 'is-moving': movingCanvasNode === pos.key }"
+                :class="{
+                  'is-selected': selectedCanvasNode === pos.key,
+                  'is-moving': movingCanvasNode === pos.key,
+                  'is-route-preview': routePreviewNodeKeys.has(pos.key),
+                  'is-route-unresolved': routePreviewUnresolvedNodeKeys.has(pos.key),
+                }"
                 :style="{ position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: nodeWidth + 'px' }"
                 :data-canvas-node="pos.key"
+                :data-route-preview="routePreviewNodeKeys.has(pos.key) ? 'matched' : undefined"
                 data-testid="approval-canvas-node"
                 :draggable="!readOnly && canMoveCanvasNode(pos.key)"
                 @click="emit('select-node', pos.key)"
@@ -133,7 +145,7 @@
                   class="template-authoring__canvas-node-selector"
                   role="button"
                   tabindex="0"
-                  :aria-label="`编辑${graphNodeLabel(pos.key)}节点`"
+                  :aria-label="canvasNodeAriaLabel(pos.key)"
                   :aria-pressed="selectedCanvasNode === pos.key"
                   data-testid="approval-canvas-node-select"
                   @click.stop="emit('select-node', pos.key)"
@@ -144,6 +156,13 @@
                   <strong>{{ graphNodeLabel(pos.key) }}</strong>
                   <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
                     {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
+                  </span>
+                  <span
+                    v-if="routePreviewNodeKeys.has(pos.key)"
+                    class="template-authoring__canvas-preview-tag"
+                    data-testid="approval-canvas-route-preview-tag"
+                  >
+                    {{ routePreviewUnresolvedNodeKeys.has(pos.key) ? '预演待定' : '预演命中' }}
                   </span>
                 </div>
                 <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
@@ -224,7 +243,18 @@
       <p class="template-authoring__hint">画布用于编排结构（增删节点 / 分支、拖动布局）。点击节点在右侧检查器编辑配置；也可切换「辅助编辑模式」。</p>
     </div>
     <aside
-      v-if="selectedCanvasInspectorNode"
+      v-if="routePreviewVisible"
+      ref="canvasInspectorRef"
+      class="template-authoring__canvas-inspector template-authoring__canvas-inspector--preview"
+      tabindex="-1"
+      aria-label="路由预演"
+      data-testid="approval-canvas-route-preview-panel"
+      @keydown.esc.stop.prevent="emit('close-route-preview')"
+    >
+      <slot name="route-preview" />
+    </aside>
+    <aside
+      v-else-if="selectedCanvasInspectorNode"
       ref="canvasInspectorRef"
       class="template-authoring__canvas-inspector"
       data-testid="approval-canvas-inspector"
@@ -371,6 +401,11 @@ const props = defineProps<{
   selectedCanvasNode: string | null
   movingCanvasNode: string | null
   selectedCanvasInspectorNode: ApprovalNode | null
+  routePreviewVisible: boolean
+  routePreviewNodeKeys: ReadonlySet<string>
+  routePreviewEdgeKeys: ReadonlySet<string>
+  routePreviewUnresolvedNodeKeys: ReadonlySet<string>
+  routePreviewNodeSummaries: ReadonlyMap<string, string>
   nodeWidth: number
   nodeHeight: number
   minimapWidth: number
@@ -392,6 +427,7 @@ const emit = defineEmits<{
   (e: 'viewport-scroll'): void
   (e: 'select-node', nodeKey: string): void
   (e: 'close-inspector'): void
+  (e: 'close-route-preview'): void
   (e: 'node-keydown', event: KeyboardEvent, nodeKey: string): void
   (e: 'node-drag-start', event: DragEvent, nodeKey: string): void
   (e: 'node-drag-end'): void
@@ -414,6 +450,14 @@ const activeInsertionTarget = computed(() =>
   props.canvasInsertionTargets.find((target) => target.edgeKey === activeInsertionEdgeKey.value) ?? null)
 const workspaceRef = ref<HTMLElement | null>(null)
 const activeInsertionTrigger = ref<HTMLButtonElement | null>(null)
+
+function canvasNodeAriaLabel(nodeKey: string): string {
+  const action = `编辑${props.graphNodeLabel(nodeKey)}节点`
+  if (!props.routePreviewNodeKeys.has(nodeKey)) return action
+  const state = props.routePreviewUnresolvedNodeKeys.has(nodeKey) ? '预演审批人待定' : '预演路径命中'
+  const summary = props.routePreviewNodeSummaries.get(nodeKey)
+  return summary ? `${action}，${state}，${summary}` : `${action}，${state}`
+}
 
 function toggleInsertionMenu(edgeKey: string, event: MouseEvent): void {
   if (props.readOnly || !props.canvasInsertionTargets.some((target) => target.edgeKey === edgeKey)) return
@@ -544,6 +588,35 @@ defineExpose({ canvasViewportRef, canvasInspectorRef })
 .template-authoring__canvas-node.is-moving {
   border-style: dashed;
   border-color: var(--el-color-primary);
+}
+.template-authoring__canvas-node.is-route-preview {
+  border: 2px solid var(--el-color-success);
+  box-shadow: 0 0 0 2px var(--el-color-success-light-8);
+}
+.template-authoring__canvas-node.is-route-preview.is-route-unresolved {
+  border-style: dashed;
+  border-color: var(--el-color-warning);
+  box-shadow: 0 0 0 2px var(--el-color-warning-light-8);
+}
+.template-authoring__canvas-preview-tag {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  color: var(--el-color-success-dark-2);
+  font-size: 11px;
+  line-height: 16px;
+}
+.template-authoring__canvas-node.is-route-unresolved .template-authoring__canvas-preview-tag {
+  color: var(--el-color-warning-dark-2);
+}
+.template-authoring__canvas-edges path.is-route-preview {
+  stroke: var(--el-color-success);
+  stroke-width: 3;
+}
+.template-authoring__canvas-preview-arrow {
+  fill: var(--el-color-success);
 }
 .template-authoring__canvas-insert-target {
   position: absolute;
@@ -689,6 +762,9 @@ defineExpose({ canvasViewportRef, canvasInspectorRef })
   max-height: min(70vh, 720px);
   overflow: hidden;
   scroll-margin-top: 164px;
+}
+.template-authoring__canvas-inspector--preview {
+  overflow: auto;
 }
 .template-authoring__canvas-inspector-header {
   display: flex;
