@@ -41,10 +41,11 @@ describe('routePreviewAssigneeSummary', () => {
           ],
         }),
       ),
-    ).toBe('张三、角色:财务主管、u2')
+    ).toBe('张三、角色:财务主管、成员信息待确认')
   })
 
-  it('renders the honest id fallback verbatim (server enriches; FE never re-guesses)', () => {
-    expect(routePreviewAssigneeSummary(node({ assignees: [{ id: 'u_gone', name: 'u_gone', assignmentType: 'user' }] }))).toBe('u_gone')
+  it('does not expose a raw identity when the server could only return its id fallback', () => {
+    expect(routePreviewAssigneeSummary(node({ assignees: [{ id: 'u_gone', name: 'u_gone', assignmentType: 'user' }] }))).toBe('成员信息待确认')
+    expect(routePreviewAssigneeSummary(node({ assignees: [{ id: 'r_gone', name: 'r_gone', assignmentType: 'role' }] }))).toBe('角色信息待确认')
   })
 })

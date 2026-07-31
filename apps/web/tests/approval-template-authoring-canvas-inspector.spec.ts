@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
+import { ApprovalApiError } from '../src/approvals/api'
 import { AUTHORABLE_FIELD_TYPES } from '../src/approvals/templateAuthoring'
 import type { ApprovalTemplateDetailDTO } from '../src/types/approval'
 
@@ -83,6 +84,7 @@ const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
 const getTemplateFormAuthoringContextSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
+const previewTemplateRouteSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   ApprovalApiError: class ApprovalApiError extends Error {
@@ -101,6 +103,7 @@ vi.mock('../src/approvals/api', () => ({
   getTemplate: (id: string) => getTemplateSpy(id),
   getTemplateFormAuthoringContext: (id: string) => getTemplateFormAuthoringContextSpy(id),
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
+  previewTemplateRoute: (id: string, payload: unknown) => previewTemplateRouteSpy(id, payload),
 }))
 
 vi.mock('element-plus', () => ({
@@ -532,6 +535,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       referenceInventory: { complete: true, references: [] },
     }))
     dryRunApprovalConditionFormulaSpy.mockReset()
+    previewTemplateRouteSpy.mockReset()
     pushSpy.mockClear()
     replaceSpy.mockClear()
     updateTemplateSpy.mockImplementation(async (id, payload) => ({
@@ -1439,6 +1443,215 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(inspector.getAttribute('data-inspector-type')).toBe('parallel')
     expect(inspector.querySelector('[data-testid="approval-parallel-editor"]')).not.toBeNull()
     expect(inspector.querySelector('[data-testid="approval-parallel-join-mode"]')).not.toBeNull()
+  })
+
+  it('runs the saved route in the canvas inspector and highlights only the returned path without mutating the draft', async () => {
+    routeParams = { id: 'tpl_route_preview' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: routeParams.id }))
+    previewTemplateRouteSpy.mockResolvedValue({
+      route: [{
+        nodeKey: 'approval_1',
+        nodeLabel: 'internal-node-fallback',
+        assignees: [{ id: 'user-internal-id', name: '张三', assignmentType: 'user' }],
+      }],
+      truncated: false,
+    })
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-route-preview-toggle"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-route-preview-panel"]')).not.toBeNull()
+
+    const amount = container!.querySelector(
+      '[data-testid="approval-canvas-route-preview-panel"] input[type="number"]',
+    ) as HTMLInputElement
+    amount.value = '1200'
+    amount.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-tryrun-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(previewTemplateRouteSpy).toHaveBeenCalledWith('tpl_route_preview', {
+      sampleFormData: { amount: 1200 },
+      expectedLatestVersionId: 'ver_1',
+    })
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+    expect((container!.querySelector('[data-canvas-node="approval_1"]') as HTMLElement).outerHTML)
+      .toContain('data-route-preview="matched"')
+    expect(container!.querySelectorAll('[data-route-preview="matched"][data-canvas-node]')).toHaveLength(3)
+    expect(container!.querySelectorAll('[data-route-preview="matched"][data-testid="approval-canvas-edge"]')).toHaveLength(2)
+    expect(container!.querySelector('[data-canvas-node="approval_1"]')?.textContent).toContain('预演命中')
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-result"]')?.textContent).toContain('张三')
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-partial-highlight"]')).toBeNull()
+    expect(container!.textContent).not.toContain('internal-node-fallback')
+    expect(container!.textContent).not.toContain('user-internal-id')
+  })
+
+  it('keeps an ambiguous preview visible but labels the canvas highlight as partial', async () => {
+    routeParams = { id: 'tpl_route_preview_ambiguous' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      id: routeParams.id,
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'condition',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'yes', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] }],
+              defaultEdgeKey: 'no',
+            },
+          },
+          { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['u1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'start-condition', source: 'start', target: 'condition' },
+          { key: 'yes', source: 'condition', target: 'approval_1' },
+          { key: 'no', source: 'condition', target: 'approval_1' },
+          { key: 'approval-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+    previewTemplateRouteSpy.mockResolvedValue({
+      route: [{ nodeKey: 'approval_1', nodeLabel: 'approval_1', assignees: [] }],
+      truncated: false,
+    })
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-route-preview-toggle"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-tryrun-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-result"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-partial-highlight"]')?.textContent)
+      .toContain('仅标出可确认的节点和连线')
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-decisions"]')).toBeNull()
+  })
+
+  it('clears route-preview state before a mounted editor loads another template', async () => {
+    routeParams = { id: 'tpl_route_preview_first' }
+    getTemplateSpy.mockImplementation(async (id: string) => buildTemplate({ id }))
+    previewTemplateRouteSpy.mockResolvedValue({
+      route: [{
+        nodeKey: 'approval_1',
+        nodeLabel: 'approval_1',
+        assignees: [{ id: 'u1', name: '张三', assignmentType: 'user' }],
+      }],
+      truncated: false,
+    })
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-route-preview-toggle"]') as HTMLButtonElement).click()
+    await flushUi()
+    const amount = container!.querySelector(
+      '[data-testid="approval-canvas-route-preview-panel"] input[type="number"]',
+    ) as HTMLInputElement
+    amount.value = '1200'
+    amount.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-tryrun-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-route-preview="matched"][data-canvas-node]')).toHaveLength(3)
+
+    routeParams = { id: 'tpl_route_preview_second' }
+    routeVersion.value += 1
+    await flushUi()
+
+    expect(getTemplateSpy).toHaveBeenLastCalledWith('tpl_route_preview_second')
+    expect(container!.querySelector('[data-testid="approval-canvas-route-preview-panel"]')).toBeNull()
+    expect(container!.querySelectorAll('[data-route-preview="matched"]')).toHaveLength(0)
+
+    ;(container!.querySelector('[data-testid="approval-template-route-preview-toggle"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect((container!.querySelector(
+      '[data-testid="approval-canvas-route-preview-panel"] input[type="number"]',
+    ) as HTMLInputElement).value).toBe('')
+  })
+
+  it('keeps the flag-off review panel on the same preview request, invalidation, and safe error path', async () => {
+    featureFlags.value = { approvalCanvasV2: false, approvalAttachments: false }
+    routeParams = { id: 'tpl_route_preview_legacy' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: routeParams.id }))
+    previewTemplateRouteSpy.mockResolvedValue({
+      route: [{
+        nodeKey: 'approval_1',
+        nodeLabel: 'approval_1',
+        assignees: [{ id: 'u1', name: '张三', assignmentType: 'user' }],
+      }],
+      truncated: false,
+    })
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-panel"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-tryrun-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(previewTemplateRouteSpy).toHaveBeenLastCalledWith(routeParams.id, {
+      sampleFormData: {},
+      expectedLatestVersionId: 'ver_1',
+    })
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-result"]')?.textContent).toContain('张三')
+
+    const amount = container!.querySelector(
+      '[data-testid="approval-template-tryrun-panel"] input[type="number"]',
+    ) as HTMLInputElement
+    amount.value = '300'
+    amount.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-result"]')).toBeNull()
+
+    previewTemplateRouteSpy.mockRejectedValueOnce(new ApprovalApiError(
+      'internal template version detail',
+      409,
+      'APPROVAL_TEMPLATE_VERSION_STALE',
+    ))
+    ;(container!.querySelector('[data-testid="approval-template-tryrun-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-error"]')?.textContent)
+      .toContain('模板草稿已更新，请重新加载后再运行预演。')
+    expect(container!.textContent).not.toContain('internal template version detail')
+  })
+
+  it('keeps route preview reachable when Canvas V2 cannot author the saved template', async () => {
+    featureFlags.value = { approvalCanvasV2: true, approvalAttachments: false }
+    routeParams = { id: 'tpl_route_preview_canvas_unavailable' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      id: routeParams.id,
+      formSchema: { fields: [{ id: 'file', type: 'attachment', label: '附件' }] },
+    }))
+    previewTemplateRouteSpy.mockResolvedValue({
+      route: [{
+        nodeKey: 'approval_1',
+        nodeLabel: 'approval_1',
+        assignees: [{ id: 'u1', name: '张三', assignmentType: 'user' }],
+      }],
+      truncated: false,
+    })
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-graph-view-toggle"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-route-preview-toggle"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-canvas-route-preview-panel"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-panel"]')).not.toBeNull()
+    expect(document.activeElement).toBe(container!.querySelector('[data-testid="approval-canvas-route-preview-heading"]'))
+    ;(container!.querySelector('[data-testid="approval-template-tryrun-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(previewTemplateRouteSpy).toHaveBeenLastCalledWith(routeParams.id, {
+      sampleFormData: {},
+      expectedLatestVersionId: 'ver_1',
+    })
+    expect(container!.querySelector('[data-testid="approval-template-tryrun-result"]')?.textContent).toContain('张三')
   })
 
   it('opens the inspector from the keyboard-accessible node selector', async () => {

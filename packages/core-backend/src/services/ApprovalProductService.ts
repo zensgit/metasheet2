@@ -4655,6 +4655,10 @@ export class ApprovalProductService {
         userId: string
         userName?: string
       }
+      // Authoring dry-run only. The comparison runs immediately after the same bundle load used
+      // below, before newer-schema validation or org/authz reads can leak a misleading error to a
+      // stale editor.
+      expectedLatestVersionId?: string
     } = {},
   ): Promise<{
     bundle: NonNullable<Awaited<ReturnType<ApprovalProductService['loadTemplateBundle']>>>
@@ -4681,6 +4685,13 @@ export class ApprovalProductService {
     })
     if (!bundle) {
       throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+    }
+    if (options.expectedLatestVersionId && bundle.version.id !== options.expectedLatestVersionId) {
+      throw new ServiceError(
+        'Approval template changed since the authoring draft was loaded',
+        409,
+        'APPROVAL_TEMPLATE_VERSION_STALE',
+      )
     }
     // The published gate applies to the real create + B3-05 (which route on the frozen published
     // runtime graph). A draft dry-run (B3-06) legitimately previews an un-published version, so it
@@ -5033,12 +5044,17 @@ export class ApprovalProductService {
       // Identity only — see assembleCreationContext.requesterOverride: the sample requester's org
       // attributes are always re-resolved from the DB, never accepted from the caller.
       sampleRequester?: { userId: string; userName?: string }
+      // Optional for wire compatibility with the ratified B3-06 endpoint. The authoring UI always
+      // sends the version it rendered; comparing it with the SAME bundle used below prevents a
+      // concurrent save from painting an older/newer route onto the current canvas.
+      expectedLatestVersionId?: string
     } = {},
   ): Promise<ApprovalRoutePreviewResult> {
     const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
       whitelistFormDataToSchema: true,
       previewSource: 'draft',
       ...(options.sampleRequester ? { requesterOverride: options.sampleRequester } : {}),
+      ...(options.expectedLatestVersionId ? { expectedLatestVersionId: options.expectedLatestVersionId } : {}),
     })
     return this.walkPreviewRoute(runtimeGraph, executor)
   }

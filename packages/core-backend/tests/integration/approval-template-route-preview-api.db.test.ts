@@ -62,6 +62,7 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
   let base = ''
   let adminTok = ''
   let draftTemplateId = ''
+  let draftLatestVersionId = ''
   let deptRoutingDraftId = ''
   let titleRoutingDraftId = ''
 
@@ -98,6 +99,7 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
       },
     } as never, { userId: ADMIN, userName: ADMIN } as never)
     draftTemplateId = (template as { id: string }).id
+    draftLatestVersionId = (template as { latestVersionId: string }).latestVersionId
     // NOTE: deliberately NOT published — the whole point of B3-06 is previewing un-published edits.
 
     // A draft that ROUTES on requester.department — for pinning the wedge-guard contract when a
@@ -206,7 +208,11 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
   })
 
   it('previews a DRAFT (never-published) template and resolves the route as the SAMPLE requester', async () => {
-    const resA = await post(base, PATH(), adminTok, { sampleFormData: { summary: 'draft run' }, sampleRequesterId: SAMPLE_A })
+    const resA = await post(base, PATH(), adminTok, {
+      sampleFormData: { summary: 'draft run' },
+      sampleRequesterId: SAMPLE_A,
+      expectedLatestVersionId: draftLatestVersionId,
+    })
     expect(resA.status, await resA.clone().text()).toBe(200)
     const bodyA = (await resA.json()) as PreviewBody
     // Draft compiled + walked; the requester-kind node resolved to sample A (with name enrichment).
@@ -215,9 +221,25 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
 
     // A DIFFERENT sample requester ⇒ a different resolved assignee — proves sampleRequesterId drives
     // the routing identity (the org-probe capability), not the admin caller.
-    const resB = await post(base, PATH(), adminTok, { sampleFormData: { summary: 'draft run' }, sampleRequesterId: SAMPLE_B })
+    const resB = await post(base, PATH(), adminTok, {
+      sampleFormData: { summary: 'draft run' },
+      sampleRequesterId: SAMPLE_B,
+      expectedLatestVersionId: draftLatestVersionId,
+    })
     const bodyB = (await resB.json()) as PreviewBody
     expect(bodyB.route[0]!.assignees).toEqual([{ id: SAMPLE_B, name: SAMPLE_B_NAME, assignmentType: 'user' }])
+  })
+
+  it('409 when the rendered draft version no longer matches the bundle used for preview', async () => {
+    const res = await post(base, PATH(), adminTok, {
+      // Missing the current required field on purpose. The version fence must win before the newer
+      // schema is validated, otherwise a stale editor receives a misleading 400 instead of 409.
+      sampleFormData: {},
+      expectedLatestVersionId: '00000000-0000-4000-8000-000000000001',
+    })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error?: { code?: string } }).error?.code)
+      .toBe('APPROVAL_TEMPLATE_VERSION_STALE')
   })
 
   it('falls back to the admin actor as requester when sampleRequesterId is omitted', async () => {

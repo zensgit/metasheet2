@@ -48,6 +48,17 @@
           </template>
           <el-button
             v-if="isEditMode && canvasV2Enabled && canManageTemplates"
+            ref="routePreviewTriggerRef"
+            :icon="VideoPlay"
+            :type="routePreviewPanelVisible ? 'primary' : 'default'"
+            :aria-pressed="routePreviewPanelVisible"
+            data-testid="approval-template-route-preview-toggle"
+            @click="toggleRoutePreviewPanel"
+          >
+            路由预演
+          </el-button>
+          <el-button
+            v-if="isEditMode && canvasV2Enabled && canManageTemplates"
             :icon="Clock"
             data-testid="approval-template-version-workspace-button"
             @click="versionWorkspaceVisible = true"
@@ -359,6 +370,11 @@
           :selected-canvas-node="selectedCanvasNode"
           :moving-canvas-node="movingCanvasNode"
           :selected-canvas-inspector-node="selectedCanvasInspectorNode"
+          :route-preview-visible="routePreviewPanelVisible"
+          :route-preview-node-keys="routePreviewHighlight.nodeKeys"
+          :route-preview-edge-keys="routePreviewHighlight.edgeKeys"
+          :route-preview-unresolved-node-keys="routePreviewUnresolvedNodeKeys"
+          :route-preview-node-summaries="routePreviewNodeSummaries"
           :node-width="CANVAS_NODE_W"
           :node-height="CANVAS_NODE_H"
           :minimap-width="CANVAS_MINIMAP_W"
@@ -377,6 +393,7 @@
           @viewport-scroll="syncCanvasViewportState"
           @select-node="selectCanvasNode"
           @close-inspector="clearCanvasSelection"
+          @close-route-preview="closeRoutePreviewPanel({ restoreFocus: true })"
           @node-keydown="onCanvasNodeKeydown"
           @node-drag-start="onCanvasNodeDragStart"
           @node-drag-end="finishCanvasNodeDrag"
@@ -392,7 +409,43 @@
           @add-parallel-branch="onAddParallelBranch"
           @insert-node-into-edge="onInsertNodeIntoEdge"
           @remove-node="onRemoveNode"
-        />
+        >
+          <template #route-preview>
+            <div class="template-authoring__canvas-inspector-header">
+              <div class="template-authoring__canvas-inspector-title">
+                <strong
+                  ref="routePreviewHeadingRef"
+                  tabindex="-1"
+                  data-testid="approval-canvas-route-preview-heading"
+                >路由预演</strong>
+                <span class="template-authoring__node-type">只读</span>
+              </div>
+              <el-button
+                text
+                size="small"
+                data-testid="approval-canvas-route-preview-close"
+                @click="closeRoutePreviewPanel({ restoreFocus: true })"
+              >关闭</el-button>
+            </div>
+            <div class="template-authoring__canvas-inspector-body">
+              <ApprovalRoutePreviewPanel
+                v-model:requester-id="sampleRequesterId"
+                :form-data="sampleFormData"
+                :visible-fields="requesterVisibleFields"
+                :hidden-fields="requesterHiddenFields"
+                :loading="routePreviewLoading"
+                :error="routePreviewError"
+                :preview="routePreview"
+                :disabled-reason="tryRunDisabledReason"
+                :decisions="routePreviewHighlight.decisions"
+                :highlight-complete="routePreviewHighlight.complete"
+                :node-label="routePreviewNodeLabel"
+                @update:field="setRoutePreviewSampleField"
+                @run="runTemplateRoutePreview"
+              />
+            </div>
+          </template>
+        </ApprovalFlowCanvas>
 
         <div v-if="graphReadOnly && (!canvasAvailable || canvasViewMode === 'list')" data-testid="approval-graph-readonly-list">
           <div
@@ -695,196 +748,38 @@
            draft graph — never writes an instance/assignment/notification. Compute-at-click via
            the shared race-guard controller (RP-2's createRoutePreviewController, made generic). -->
       <el-card
-        v-if="canManageTemplates"
-        v-show="activeAuthoringSection === 'review'"
+        v-if="canManageTemplates && (!canvasV2Enabled || !canvasAvailable)"
+        v-show="activeAuthoringSection === 'review' && (!canvasV2Enabled || routePreviewPanelVisible)"
         class="template-authoring__panel"
         shadow="never"
         data-testid="approval-template-tryrun-panel"
       >
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>试运行</strong>
+            <strong
+              ref="routePreviewHeadingRef"
+              tabindex="-1"
+              data-testid="approval-canvas-route-preview-heading"
+            >试运行</strong>
             <span class="template-authoring__hint">按样例表单值只读走一遍审批路径，不创建任何审批实例。</span>
           </div>
         </template>
 
-        <p class="template-authoring__hint" data-testid="approval-template-tryrun-draft-note">
-          试运行按最后保存的草稿图解析；未策展角色的路由以发布校验为准。
-        </p>
-
-        <el-form label-position="top" class="template-authoring__grid">
-          <el-form-item label="样例发起人（留空 = 以当前管理员身份预览）">
-            <ApprovalUserPicker
-              v-model="sampleRequesterId"
-              placeholder="搜索用户名 / 邮箱（可留空）"
-              data-testid="approval-template-tryrun-requester-picker"
-            />
-          </el-form-item>
-        </el-form>
-
-        <div v-if="templateFormFields.length === 0" class="template-authoring__hint">
-          请先在上方添加表单字段，再试运行。
-        </div>
-        <!-- G-B2-21 发起人视角: only fields a requester would SEE for the current sample values are
-             rendered here (visibility resolved by the same getVisibleFormFields the submit page and
-             the backend prune use). Editing a sample value flips visibility live. -->
-        <el-form v-else label-position="top" class="template-authoring__grid">
-          <template v-for="field in requesterVisibleFields" :key="field.id">
-            <el-form-item
-              v-if="!sampleFieldUnsupportedReason(field)"
-              :label="fieldDisplayLabel(field)"
-              data-testid="approval-template-tryrun-field"
-            >
-              <!-- text -->
-              <el-input
-                v-if="field.type === 'text'"
-                v-model="sampleFormData[field.id]"
-                :placeholder="field.placeholder || `请输入${fieldDisplayLabel(field)}`"
-              />
-              <!-- textarea -->
-              <el-input
-                v-else-if="field.type === 'textarea'"
-                v-model="sampleFormData[field.id]"
-                type="textarea"
-                :rows="2"
-                :placeholder="field.placeholder || `请输入${fieldDisplayLabel(field)}`"
-              />
-              <!-- number -->
-              <el-input-number
-                v-else-if="field.type === 'number'"
-                v-model="sampleFormData[field.id]"
-                class="ms-w-100pct"
-              />
-              <!-- date -->
-              <el-date-picker
-                v-else-if="field.type === 'date'"
-                v-model="sampleFormData[field.id]"
-                type="date"
-                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
-                class="ms-w-100pct"
-              />
-              <!-- datetime -->
-              <el-date-picker
-                v-else-if="field.type === 'datetime'"
-                v-model="sampleFormData[field.id]"
-                type="datetime"
-                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
-                class="ms-w-100pct"
-              />
-              <!-- select -->
-              <el-select
-                v-else-if="field.type === 'select'"
-                v-model="sampleFormData[field.id]"
-                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
-                class="ms-w-100pct"
-              >
-                <el-option
-                  v-for="opt in (field.options || [])"
-                  :key="opt.value"
-                  :label="opt.label"
-                  :value="opt.value"
-                />
-              </el-select>
-              <!-- multi-select -->
-              <el-select
-                v-else-if="field.type === 'multi-select'"
-                v-model="sampleFormData[field.id]"
-                multiple
-                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
-                class="ms-w-100pct"
-              >
-                <el-option
-                  v-for="opt in (field.options || [])"
-                  :key="opt.value"
-                  :label="opt.label"
-                  :value="opt.value"
-                />
-              </el-select>
-              <!-- user -->
-              <ApprovalUserPicker
-                v-else-if="field.type === 'user'"
-                :model-value="(sampleFormData[field.id] as string | null | undefined) ?? null"
-                @update:model-value="sampleFormData[field.id] = $event"
-              />
-            </el-form-item>
-            <div
-              v-else
-              class="template-authoring__hint template-authoring__wide"
-              data-testid="approval-template-tryrun-field-unsupported"
-            >
-              {{ fieldDisplayLabel(field) }}：{{ sampleFieldUnsupportedReason(field) }}
-            </div>
-          </template>
-        </el-form>
-
-        <!-- G-B2-21: fields the current sample values HIDE from a requester — shown (not silently
-             dropped) with WHY, so the author can verify their visibilityRule. Their sample values
-             stay in sampleFormData but the backend prunes hidden fields before routing, so they do
-             not participate in condition evaluation. -->
-        <el-collapse v-if="requesterHiddenFields.length > 0" class="template-authoring__tryrun-hidden">
-          <el-collapse-item
-            :title="`发起人视角下当前隐藏 ${requesterHiddenFields.length} 个字段（不参与走图）`"
-            name="hidden"
-            data-testid="approval-template-tryrun-hidden"
-          >
-            <ul class="template-authoring__tryrun-hidden-list">
-              <li
-                v-for="entry in requesterHiddenFields"
-                :key="entry.field.id"
-                data-testid="approval-template-tryrun-hidden-field"
-              >
-                <span class="template-authoring__tryrun-hidden-label">{{ fieldDisplayLabel(entry.field) }}</span>
-                <span class="template-authoring__tryrun-hidden-reason">{{ entry.reason }}</span>
-              </li>
-            </ul>
-          </el-collapse-item>
-        </el-collapse>
-
-        <div class="template-authoring__tryrun-actions">
-          <el-tooltip v-if="tryRunDisabledReason" :content="tryRunDisabledReason" placement="top">
-            <span>
-              <el-button :loading="routePreviewLoading" disabled data-testid="approval-template-tryrun-button">
-                试运行
-              </el-button>
-            </span>
-          </el-tooltip>
-          <el-button
-            v-else
-            :loading="routePreviewLoading"
-            data-testid="approval-template-tryrun-button"
-            @click="runTemplateRoutePreview"
-          >
-            试运行
-          </el-button>
-        </div>
-
-        <div v-if="routePreviewError" class="template-authoring__tryrun-error" data-testid="approval-template-tryrun-error">
-          {{ routePreviewError }}
-        </div>
-        <div v-else-if="routePreview" class="template-authoring__tryrun-row" data-testid="approval-template-tryrun-result">
-          <span class="template-authoring__tryrun-chip template-authoring__tryrun-chip--requester">发起人</span>
-          <template v-for="node in routePreview.route" :key="node.nodeKey">
-            <span class="template-authoring__tryrun-arrow">→</span>
-            <span
-              class="template-authoring__tryrun-chip"
-              :class="{ 'template-authoring__tryrun-chip--unresolved': !!node.resolveError }"
-              data-testid="approval-template-tryrun-node"
-            >
-              {{ node.nodeLabel }}
-              <span class="template-authoring__tryrun-chip-summary">{{ routePreviewAssigneeSummary(node) }}</span>
-            </span>
-          </template>
-          <span
-            v-if="routePreview.truncated"
-            class="template-authoring__tryrun-truncated"
-            data-testid="approval-template-tryrun-truncated"
-          >
-            （路径未能完整解析，以实际流转为准）
-          </span>
-          <span v-else-if="routePreview.route.length === 0" class="template-authoring__tryrun-truncated">
-            （按当前样例将直接通过，无审批节点）
-          </span>
-        </div>
+        <ApprovalRoutePreviewPanel
+          v-model:requester-id="sampleRequesterId"
+          :form-data="sampleFormData"
+          :visible-fields="requesterVisibleFields"
+          :hidden-fields="requesterHiddenFields"
+          :loading="routePreviewLoading"
+          :error="routePreviewError"
+          :preview="routePreview"
+          :disabled-reason="tryRunDisabledReason"
+          :decisions="routePreviewHighlight.decisions"
+          :highlight-complete="true"
+          :node-label="routePreviewNodeLabel"
+          @update:field="setRoutePreviewSampleField"
+          @run="runTemplateRoutePreview"
+        />
 
         <div v-if="conditionNodeSummaries.length" class="template-authoring__tryrun-conditions" data-testid="approval-template-tryrun-conditions">
           <strong>条件分支规则</strong>
@@ -981,7 +876,7 @@ import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
-import { Clock, Plus, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
+import { Clock, Plus, RefreshLeft, RefreshRight, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useFeatureFlags } from '../../stores/featureFlags'
@@ -1003,14 +898,15 @@ import type {
 import { describeTemplateAuthoringError } from '../../approvals/templateAuthoringErrors'
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
+import { deriveRoutePreviewHighlight } from '../../approvals/routePreviewHighlight'
 import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import { linearStepForNodeKey } from '../../approvals/linearCanvasCarrier'
-import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
 import ApprovalFormBuilder from '../../approvals/components/ApprovalFormBuilder.vue'
+import ApprovalRoutePreviewPanel from '../../approvals/components/ApprovalRoutePreviewPanel.vue'
 import ApprovalVersionWorkspace from '../../approvals/components/ApprovalVersionWorkspace.vue'
 import {
   addFormField,
@@ -1144,6 +1040,8 @@ const loadError = ref<string | null>(null)
 const validationErrors = ref<string[]>([])
 const unsupportedReason = ref<string | null>(null)
 const loadedTemplateForAuthoring = ref<ApprovalTemplateDetailDTO | null>(null)
+const routePreviewTriggerRef = ref<{ $el?: HTMLElement } | null>(null)
+const routePreviewHeadingRef = ref<HTMLElement | null>(null)
 const versionWorkspaceVisible = ref(false)
 // G-1: a COMPLEX (condition/parallel/cc/non-linear) graph renders read-only but is NOT
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
@@ -2394,6 +2292,7 @@ function canvasNodeByKey(key: string): ApprovalNode | undefined {
   return canvasEffectiveGraph.value.nodes.find((n) => n.key === key)
 }
 async function selectCanvasNode(nodeKey: string): Promise<void> {
+  routePreviewPanelVisible.value = false
   selectedCanvasNode.value = nodeKey
   await nextTick()
   if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 960px)').matches) {
@@ -3323,6 +3222,10 @@ function moveStep(index: number, delta: -1 | 1) {
 }
 
 async function loadTemplateForEdit() {
+  routePreviewController.invalidate()
+  routePreviewPanelVisible.value = false
+  sampleRequesterId.value = null
+  sampleFormData.value = {}
   resetAuthoringHistory()
   selectedCanvasNode.value = null
   movingCanvasNode.value = null
@@ -3532,6 +3435,58 @@ const sampleFormData = ref<Record<string, unknown>>({})
 const routePreview = ref<ApprovalRoutePreview | null>(null)
 const routePreviewLoading = ref(false)
 const routePreviewError = ref('')
+const routePreviewPanelVisible = ref(false)
+
+const routePreviewHighlight = computed(() => {
+  if (!routePreviewPanelVisible.value || !routePreview.value) {
+    return {
+      nodeKeys: new Set<string>(),
+      edgeKeys: new Set<string>(),
+      decisions: [],
+      complete: false,
+    }
+  }
+  return deriveRoutePreviewHighlight(
+    canvasEffectiveGraph.value,
+    routePreview.value.route,
+    routePreview.value.truncated,
+    buildFormSchema(draft.value),
+  )
+})
+const routePreviewUnresolvedNodeKeys = computed(() => new Set(
+  routePreview.value?.route.filter((node) => node.resolveError).map((node) => node.nodeKey) ?? [],
+))
+const routePreviewNodeSummaries = computed(() => new Map(
+  routePreview.value?.route.map((node) => [node.nodeKey, routePreviewAssigneeSummary(node)]) ?? [],
+))
+
+function routePreviewNodeLabel(nodeKey: string): string {
+  return canvasNodeByKey(nodeKey) ? graphNodeLabel(nodeKey) : '流程节点'
+}
+
+async function toggleRoutePreviewPanel(): Promise<void> {
+  if (routePreviewPanelVisible.value) {
+    closeRoutePreviewPanel({ restoreFocus: true })
+    return
+  }
+  routePreviewPanelVisible.value = true
+  selectedCanvasNode.value = null
+  if (canvasAvailable.value) canvasViewMode.value = 'canvas'
+  await selectAuthoringSection(canvasAvailable.value ? 'flow' : 'review')
+  await nextTick()
+  routePreviewHeadingRef.value?.focus({ preventScroll: true })
+  if (canvasAvailable.value) {
+    flowCanvasRef.value?.canvasInspectorRef?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+  }
+}
+
+function closeRoutePreviewPanel(options: { restoreFocus?: boolean } = {}): void {
+  routePreviewPanelVisible.value = false
+  announceCanvas('已关闭路由预演')
+  if (options.restoreFocus) {
+    void nextTick(() => routePreviewTriggerRef.value?.$el?.focus({ preventScroll: true }))
+  }
+}
 
 // The template must exist server-side before it has an id to preview against.
 // `draft.value.templateId` is set by persistDraft() immediately on create/update (before the
@@ -3541,12 +3496,17 @@ const templateIdForPreview = computed(() => draft.value.templateId ?? '')
 
 const tryRunDisabledReason = computed<string>(() => {
   if (!templateIdForPreview.value) return '请先保存草稿，才能试运行'
+  if (!loadedTemplateForAuthoring.value?.latestVersionId) return '请重新加载草稿版本后再试运行'
   if (isDraftDirty.value) return '有未保存的更改，请先保存再试运行'
   return ''
 })
 
 const routePreviewController = createRoutePreviewController(
-  async (req: { sampleFormData: Record<string, unknown>; sampleRequesterId?: string }) => {
+  async (req: {
+    sampleFormData: Record<string, unknown>
+    sampleRequesterId?: string
+    expectedLatestVersionId: string
+  }) => {
     try {
       return await previewTemplateRoute(templateIdForPreview.value, req)
     } catch (error) {
@@ -3566,14 +3526,26 @@ const routePreviewController = createRoutePreviewController(
 
 async function runTemplateRoutePreview() {
   if (tryRunDisabledReason.value) return
+  const expectedLatestVersionId = loadedTemplateForAuthoring.value?.latestVersionId
+  if (!expectedLatestVersionId) return
   await routePreviewController.run({
     sampleFormData: { ...sampleFormData.value },
     ...(sampleRequesterId.value ? { sampleRequesterId: sampleRequesterId.value } : {}),
+    expectedLatestVersionId,
   })
 }
 
+watch(routePreview, (preview) => {
+  if (!routePreviewPanelVisible.value || !preview) return
+  announceCanvas(`路由预演完成，命中 ${preview.route.length} 个审批节点`)
+})
+
 watch(sampleFormData, () => routePreviewController.invalidate(), { deep: true })
 watch(sampleRequesterId, () => routePreviewController.invalidate())
+watch(activeAuthoringSection, (section) => {
+  const previewSection = canvasAvailable.value ? 'flow' : 'review'
+  if (section !== previewSection) routePreviewPanelVisible.value = false
+})
 // A draft-graph edit invalidates a prior result too — the ratified "stale path never misleads"
 // contract otherwise breaks the moment isDraftDirty flips true: the button greys out (see
 // tryRunDisabledReason), but the OLD chip row would keep rendering as if it still matched the
@@ -3587,19 +3559,15 @@ watch(isDraftDirty, (dirty) => {
 // `detail` (repeating sub-form rows) and `attachment` (no working upload pipeline yet — see
 // ApprovalNewView's own honest stopgap) are skipped with an inline note rather than faked; every
 // other field type gets a plain input.
-const templateFormFields = computed<FormField[]>(() => buildFormSchema(draft.value).fields)
-
 // G-B2-21: the requester-view split for the 试运行 sample values. Delegates visibility to the
 // shared getVisibleFormFields (see requesterPreviewFields) so the panel, the submit page, and the
-// backend prune never disagree. templateFormFields stays the FULL field list for the other callers.
+// backend prune never disagree.
 const requesterPreview = computed(() => computeRequesterPreviewFields(buildFormSchema(draft.value), sampleFormData.value))
 const requesterVisibleFields = computed<FormField[]>(() => requesterPreview.value.visible)
 const requesterHiddenFields = computed(() => requesterPreview.value.hidden)
 
-function sampleFieldUnsupportedReason(field: FormField): string | null {
-  if (field.type === 'detail') return '试运行暂不支持明细子表单的样例值，已跳过（不影响其余字段的走图）'
-  if (field.type === 'attachment') return '试运行暂不支持附件类型的样例值，已跳过'
-  return null
+function setRoutePreviewSampleField(fieldId: string, value: unknown): void {
+  sampleFormData.value = { ...sampleFormData.value, [fieldId]: value }
 }
 
 // G-B2-19 condition summaries for the panel's static "条件分支规则" note — read straight off the
@@ -4132,87 +4100,6 @@ pre {
   border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
   background: var(--el-fill-color-light);
-}
-
-/* RP-3 (route-preview lock, B3-06) 试运行面板 — chip styling mirrors ApprovalNewView's RP-2 live
-   route preview (same visual language for "resolved path", different scoped class prefix since
-   Vue's `<style scoped>` is per-SFC). */
-.template-authoring__tryrun-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-
-.template-authoring__tryrun-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.template-authoring__tryrun-chip {
-  display: inline-flex;
-  flex-direction: column;
-  padding: 4px 10px;
-  border-radius: 6px;
-  background: var(--el-fill-color-light);
-  color: var(--el-text-color-regular);
-  font-size: 13px;
-}
-
-.template-authoring__tryrun-chip--requester {
-  background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
-  font-weight: 500;
-}
-
-.template-authoring__tryrun-chip--unresolved {
-  border: 1px dashed var(--el-color-danger);
-}
-
-.template-authoring__tryrun-chip-summary {
-  font-size: 11px;
-  color: var(--el-text-color-placeholder);
-}
-
-.template-authoring__tryrun-arrow {
-  color: var(--el-text-color-placeholder);
-  font-size: 12px;
-}
-
-.template-authoring__tryrun-error {
-  margin-top: 10px;
-  font-size: 12px;
-  color: var(--el-color-danger);
-}
-
-.template-authoring__tryrun-hidden {
-  margin-top: 10px;
-}
-
-.template-authoring__tryrun-hidden-list {
-  margin: 0;
-  padding-left: 18px;
-}
-
-.template-authoring__tryrun-hidden-list li {
-  margin-bottom: 4px;
-  font-size: 12px;
-}
-
-.template-authoring__tryrun-hidden-label {
-  color: var(--el-text-color-primary);
-  margin-right: 8px;
-}
-
-.template-authoring__tryrun-hidden-reason {
-  color: var(--el-text-color-secondary);
-}
-
-.template-authoring__tryrun-truncated {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__tryrun-conditions {

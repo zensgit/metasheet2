@@ -1085,7 +1085,11 @@ export function templateRoutePreviewPath(templateId: string): string {
 
 export async function previewTemplateRoute(
   templateId: string,
-  body: { sampleFormData: Record<string, unknown>; sampleRequesterId?: string },
+  body: {
+    sampleFormData: Record<string, unknown>
+    sampleRequesterId?: string
+    expectedLatestVersionId: string
+  },
 ): Promise<ApprovalRoutePreview> {
   if (USE_MOCK) return { route: [], truncated: false }
   return postApprovalJson(templateRoutePreviewPath(templateId), body)

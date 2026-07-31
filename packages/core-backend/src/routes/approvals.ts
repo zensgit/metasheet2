@@ -514,6 +514,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           ? req.body.sampleFormData as Record<string, unknown>
           : null
       const sampleRequesterId = typeof req.body?.sampleRequesterId === 'string' ? req.body.sampleRequesterId.trim() : ''
+      const expectedLatestVersionId = typeof req.body?.expectedLatestVersionId === 'string'
+        ? req.body.expectedLatestVersionId.trim()
+        : ''
 
       if (!templateId || !sampleFormData) {
         return res.status(400).json({
@@ -538,7 +541,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         },
         // The sample requester is identified by id only; org relations / directory roles / dept /
         // title are resolved fresh from the DB by that id inside the substrate (never client-supplied).
-        sampleRequesterId ? { sampleRequester: { userId: sampleRequesterId } } : {},
+        {
+          ...(sampleRequesterId ? { sampleRequester: { userId: sampleRequesterId } } : {}),
+          ...(expectedLatestVersionId ? { expectedLatestVersionId } : {}),
+        },
       )
 
       // Conform to the ratified §3 output contract ({ route, truncated? }); the substrate's

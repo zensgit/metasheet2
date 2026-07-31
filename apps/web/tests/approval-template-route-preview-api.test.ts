@@ -13,18 +13,25 @@ import { previewTemplateRoute, templateRoutePreviewPath } from '../src/approvals
 describe('previewTemplateRoute (mock branch — USE_MOCK is always on under Vitest)', () => {
   it('resolves the honest empty-route shape regardless of the sample payload', async () => {
     await expect(
-      previewTemplateRoute('tpl_1', { sampleFormData: { amount: 8000 } }),
+      previewTemplateRoute('tpl_1', { sampleFormData: { amount: 8000 }, expectedLatestVersionId: 'ver_1' }),
     ).resolves.toEqual({ route: [], truncated: false })
   })
 
   it('resolves the same shape when a sampleRequesterId is supplied', async () => {
     await expect(
-      previewTemplateRoute('tpl_1', { sampleFormData: {}, sampleRequesterId: 'user_42' }),
+      previewTemplateRoute('tpl_1', {
+        sampleFormData: {},
+        sampleRequesterId: 'user_42',
+        expectedLatestVersionId: 'ver_1',
+      }),
     ).resolves.toEqual({ route: [], truncated: false })
   })
 
   it('resolves the same shape for an empty sampleFormData', async () => {
-    await expect(previewTemplateRoute('tpl_1', { sampleFormData: {} })).resolves.toEqual({
+    await expect(previewTemplateRoute('tpl_1', {
+      sampleFormData: {},
+      expectedLatestVersionId: 'ver_1',
+    })).resolves.toEqual({
       route: [],
       truncated: false,
     })
