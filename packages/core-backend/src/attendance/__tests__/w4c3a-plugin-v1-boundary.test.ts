@@ -139,7 +139,7 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(mapper).toContain('error: row.error ?? null')
   })
 
-  it('projects a reason only for failed V1 rows with an exact conditional key shape', () => {
+  it('projects new failed reasons while preserving the existing suspended V1 pair', () => {
     expect(
       syncCompatibility.projectAttendanceImportExecutionReasonCode({
         w4_contract_version: 1,
@@ -148,6 +148,15 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       }),
     ).toEqual({
       executionReasonCode: 'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH',
+    })
+    expect(
+      syncCompatibility.projectAttendanceImportExecutionReasonCode({
+        w4_contract_version: 1,
+        status: 'queued',
+        w4_execution_reason_code: 'SEGMENT_CALCULATION_SUSPENDED',
+      }),
+    ).toEqual({
+      executionReasonCode: 'SEGMENT_CALCULATION_SUSPENDED',
     })
     for (const row of [
       {
@@ -158,6 +167,11 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       {
         w4_contract_version: 1,
         status: 'completed',
+        w4_execution_reason_code: 'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH',
+      },
+      {
+        w4_contract_version: 1,
+        status: 'queued',
         w4_execution_reason_code: 'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH',
       },
       {

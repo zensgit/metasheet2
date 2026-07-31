@@ -9583,7 +9583,9 @@ function mapImportBatchRow(row) {
 		  const reason = typeof row?.w4_execution_reason_code === 'string'
 		    ? row.w4_execution_reason_code.trim()
 		    : ''
-		  return isV1 && status === 'failed' && reason
+		  const isExistingSuspendedPair =
+		    status === 'queued' && reason === 'SEGMENT_CALCULATION_SUSPENDED'
+		  return isV1 && reason && (status === 'failed' || isExistingSuspendedPair)
 		    ? { executionReasonCode: reason }
 		    : {}
 		}
