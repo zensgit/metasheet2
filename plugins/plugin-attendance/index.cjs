@@ -14131,7 +14131,7 @@ function mergeSettings(base, update) {
   })
 }
 
-async function loadSettings(db) {
+async function loadSettings(db, { failClosed = false } = {}) {
   try {
     const rows = await db.query('SELECT value FROM system_configs WHERE key = $1', [SETTINGS_KEY])
     if (!rows.length) return { ...DEFAULT_SETTINGS }
@@ -14139,6 +14139,7 @@ async function loadSettings(db) {
     return normalizeSettings(raw)
   } catch (error) {
     if (isDatabaseSchemaError(error)) return { ...DEFAULT_SETTINGS }
+    if (failClosed) throw error
     return { ...DEFAULT_SETTINGS }
   }
 }
@@ -19431,6 +19432,35 @@ async function applyImportHeavyTransactionTimeout(client) {
   if (client) client.__attendanceImportStatementTimeoutMs = normalized
 }
 
+const ATTENDANCE_SYNC_IMPORT_TRANSACTION_MAX_RETRIES = 2
+
+function isAttendanceSyncImportRetryableTransactionError(error) {
+  const code = String(error?.code ?? '')
+  return code === '40001' || code === '40P01'
+}
+
+async function runAttendanceSyncImportSerializableTransaction(db, runAttempt) {
+  let attempt = 0
+  for (;;) {
+    try {
+      return await db.transaction(async (trx) => {
+        await trx.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+        if (trx) delete trx.__attendanceImportStatementTimeoutMs
+        await applyImportHeavyTransactionTimeout(trx)
+        return runAttempt(trx, attempt)
+      })
+    } catch (error) {
+      if (
+        !isAttendanceSyncImportRetryableTransactionError(error)
+        || attempt >= ATTENDANCE_SYNC_IMPORT_TRANSACTION_MAX_RETRIES
+      ) {
+        throw error
+      }
+      attempt += 1
+    }
+  }
+}
+
 async function loadAttendanceRecordForUpdate(client, { userId, workDate, orgId }) {
   const rows = await client.query(
     'SELECT * FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3 FOR UPDATE',
@@ -22949,6 +22979,8 @@ module.exports = {
     acquireAttendanceSyncImportReservationLocks,
     loadAttendanceV1ImportReservationForSync,
     assertAttendanceV1ImportReservationAllowsSync,
+    isAttendanceSyncImportRetryableTransactionError,
+    runAttendanceSyncImportSerializableTransaction,
   },
   __attendanceImportPathForTests: {
     getImportUploadPaths,
@@ -36312,59 +36344,31 @@ module.exports = {
 	            engine: importEngine,
 	          })
 
-          const baseRule = await loadDefaultRule(db, orgId)
-          const settings = await getSettings(db)
-          const groupRuleSetMap = parsed.data.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
           const groupSync = normalizeGroupSyncOptions(
             parsed.data.groupSync,
             parsed.data.ruleSetId,
             parsed.data.timezone
           )
           const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
-          const groupWarnings = []
-          if (groupNames.size && !groupSync?.autoCreate) {
-            const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
-            for (const [key, name] of groupNames.entries()) {
-              if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
-            }
-          }
-          if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
-            for (const key of groupNames.keys()) {
-              if (!groupRuleSetMap.has(key)) groupRuleSetMap.set(key, groupSync.ruleSetId)
-            }
-          }
-          const ruleSetConfigCache = new Map()
-          if (parsed.data.ruleSetId && ruleSetConfig) {
-            ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
-          }
-          const engineCache = new Map()
-          let payloadEngine = null
-          if (parsed.data.engine) {
-            try {
-              payloadEngine = createRuleEngine({ config: parsed.data.engine, logger })
-            } catch (error) {
-              logger.warn('Attendance rule engine config invalid (commit payload)', error)
-            }
-          }
 
 	          const statusMap = parsed.data.statusMap ?? {}
 	          const returnItems = parsed.data.returnItems !== false
 	          const itemsLimit = returnItems && typeof parsed.data.itemsLimit === 'number'
 	            ? parsed.data.itemsLimit
 	            : null
-	          const results = []
-	          let importedCount = 0
-	          const skipped = []
 	          const idempotencyEnabled = Boolean(idempotencyKey) && await hasImportBatchIdempotencyColumn(db)
-		          const batchId = randomUUID()
-		          let batchMeta = null
-		          let idempotentInTransaction = null
 		          const syncReservationWitness = idempotencyKey
 		            ? buildAttendanceSyncImportReservationLockWitness({ orgId, idempotencyKey })
 		            : null
 
-          await db.transaction(async (trx) => {
-		            await applyImportHeavyTransactionTimeout(trx)
+          const transactionResult = await runAttendanceSyncImportSerializableTransaction(db, async (trx) => {
+            const results = []
+            let importedCount = 0
+            const skipped = []
+            const batchId = randomUUID()
+            let batchMeta = null
+            const groupWarnings = []
+
 		            if (idempotencyKey) {
 		              await acquireAttendanceSyncImportReservationLocks(trx, {
 		                orgId,
@@ -36378,8 +36382,15 @@ module.exports = {
 	                importAccess.fullImport ? undefined : { createdBy: requesterId }
 	              )
               if (existing) {
-	                idempotentInTransaction = existing
-	                return
+	                return {
+                    batchId,
+                    batchMeta,
+                    groupWarnings,
+                    idempotentInTransaction: existing,
+                    importedCount,
+                    results,
+                    skipped,
+                  }
 	              }
 	              const reservation = await loadAttendanceV1ImportReservationForSync(
 	                trx,
@@ -36395,6 +36406,36 @@ module.exports = {
 	              }
 	              assertAttendanceV1ImportReservationAllowsSync(reservation)
 	            }
+
+            const baseRule = await loadDefaultRule(trx, orgId)
+            const settings = await loadSettings(trx, { failClosed: true })
+            const groupRuleSetMap = parsed.data.ruleSetId
+              ? new Map()
+              : await loadAttendanceGroupRuleSetMap(trx, orgId)
+            if (groupNames.size && !groupSync?.autoCreate) {
+              const groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
+              for (const [key, name] of groupNames.entries()) {
+                if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
+              }
+            }
+            if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
+              for (const key of groupNames.keys()) {
+                if (!groupRuleSetMap.has(key)) groupRuleSetMap.set(key, groupSync.ruleSetId)
+              }
+            }
+            const ruleSetConfigCache = new Map()
+            if (parsed.data.ruleSetId && ruleSetConfig) {
+              ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
+            }
+            const engineCache = new Map()
+            let payloadEngine = null
+            if (parsed.data.engine) {
+              try {
+                payloadEngine = createRuleEngine({ config: parsed.data.engine, logger })
+              } catch (error) {
+                logger.warn('Attendance rule engine config invalid (commit payload)', error)
+              }
+            }
 
             let groupIdMap = null
             let groupCreated = 0
@@ -36724,7 +36765,6 @@ module.exports = {
 		                  workDate: workDate ?? null,
 		                  warnings: importWarnings,
 		                })
-		                releaseImportRowMemory(row)
 	                continue
 	              }
 
@@ -36739,7 +36779,6 @@ module.exports = {
 		                  previewSnapshot: snapshot,
 		                })
 		                skipped.push({ userId: rowUserId, workDate, warnings })
-		                releaseImportRowMemory(row)
 		                continue
 		              }
 	              seenRowKeys.add(dedupKey)
@@ -36760,7 +36799,7 @@ module.exports = {
                 if (ruleSetConfigCache.has(activeRuleSetId)) {
                   activeRuleSetConfig = ruleSetConfigCache.get(activeRuleSetId)
                 } else {
-                  activeRuleSetConfig = await loadRuleSetConfigById(db, orgId, activeRuleSetId)
+                  activeRuleSetConfig = await loadRuleSetConfigById(trx, orgId, activeRuleSetId)
                   ruleSetConfigCache.set(activeRuleSetId, activeRuleSetConfig)
                 }
               }
@@ -37065,7 +37104,6 @@ module.exports = {
 	                    }
 	                  : null,
 	              })
-	              releaseImportRowMemory(row)
 			            }
 
 			            await flushRecordUpserts()
@@ -37097,7 +37135,29 @@ module.exports = {
               )
               batchMeta = updatedMeta
 	            }
+            return {
+              batchId,
+              batchMeta,
+              groupWarnings,
+              idempotentInTransaction: null,
+              importedCount,
+              results,
+              skipped,
+            }
 	          })
+
+            const {
+              batchId,
+              batchMeta,
+              groupWarnings,
+              idempotentInTransaction,
+              importedCount,
+              results,
+              skipped,
+            } = transactionResult
+            if (!idempotentInTransaction) {
+              for (const row of rows) releaseImportRowMemory(row)
+            }
 
 	          // Best-effort cleanup: once commit succeeds, the uploaded CSV is no longer needed.
 	          if (csvFileId) {

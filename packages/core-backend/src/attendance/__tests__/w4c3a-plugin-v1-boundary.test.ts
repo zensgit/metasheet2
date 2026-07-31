@@ -41,6 +41,20 @@ const attendancePlugin = require(PLUGIN) as {
     assertAttendanceV1ImportReservationAllowsSync(
       reservation: { kind: 'in_progress' | 'conflict' } | null,
     ): void
+    isAttendanceSyncImportRetryableTransactionError(error: unknown): boolean
+    runAttendanceSyncImportSerializableTransaction<T>(
+      db: {
+        transaction(
+          run: (trx: {
+            query(text: string, values?: unknown[]): Promise<unknown>
+          }) => Promise<T>,
+        ): Promise<T>
+      },
+      runAttempt: (
+        trx: { query(text: string, values?: unknown[]): Promise<unknown> },
+        attempt: number,
+      ) => Promise<T>,
+    ): Promise<T>
   }
 }
 const syncCompatibility =
@@ -277,6 +291,128 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     ).rejects.toBe(databaseError)
   })
 
+  it('runs the sync source/effect body under SERIALIZABLE and retries only whole transactions', async () => {
+    const transactionQueries: string[][] = []
+    const seenAttempts: number[] = []
+    let currentQueries: string[] = []
+    const sharedTransactionClient = {
+      query: async (text: string) => {
+        currentQueries.push(text)
+        return []
+      },
+    }
+    const transientErrors = [
+      Object.assign(new Error('serialization detail'), { code: '40001' }),
+      Object.assign(new Error('deadlock detail'), { code: '40P01' }),
+    ]
+    const result =
+      await syncCompatibility.runAttendanceSyncImportSerializableTransaction(
+        {
+          transaction: async (run) => {
+            const queries: string[] = []
+            currentQueries = queries
+            transactionQueries.push(queries)
+            return run(sharedTransactionClient)
+          },
+        },
+        async (_trx, attempt) => {
+          seenAttempts.push(attempt)
+          if (attempt < transientErrors.length) throw transientErrors[attempt]
+          return 'committed'
+        },
+      )
+
+    expect(result).toBe('committed')
+    expect(seenAttempts).toEqual([0, 1, 2])
+    expect(transactionQueries).toHaveLength(3)
+    for (const queries of transactionQueries) {
+      expect(queries[0]).toBe('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+      expect(queries[1]).toMatch(/^SET LOCAL statement_timeout = /)
+    }
+  })
+
+  it('propagates non-retryable SQL errors without replaying the transaction body', async () => {
+    const constraintError = Object.assign(new Error('unique detail'), {
+      code: '23505',
+    })
+    let transactionCalls = 0
+    let bodyCalls = 0
+    await expect(
+      syncCompatibility.runAttendanceSyncImportSerializableTransaction(
+        {
+          transaction: async (run) => {
+            transactionCalls += 1
+            return run({ query: async () => [] })
+          },
+        },
+        async () => {
+          bodyCalls += 1
+          throw constraintError
+        },
+      ),
+    ).rejects.toBe(constraintError)
+    expect(transactionCalls).toBe(1)
+    expect(bodyCalls).toBe(1)
+    expect(
+      syncCompatibility.isAttendanceSyncImportRetryableTransactionError(
+        constraintError,
+      ),
+    ).toBe(false)
+  })
+
+  it('bounds retryable SQL failures at three attempts and preserves the final error', async () => {
+    const errors = Array.from({ length: 3 }, (_, index) =>
+      Object.assign(new Error(`serialization-${index}`), { code: '40001' }),
+    )
+    let bodyCalls = 0
+    await expect(
+      syncCompatibility.runAttendanceSyncImportSerializableTransaction(
+        {
+          transaction: async (run) =>
+            run({ query: async () => [] }),
+        },
+        async () => {
+          const error = errors[bodyCalls]
+          bodyCalls += 1
+          throw error
+        },
+      ),
+    ).rejects.toBe(errors[2])
+    expect(bodyCalls).toBe(3)
+  })
+
+  it('discards a failed attempt effect and returns only fresh successful-attempt state', async () => {
+    const persistedEffects: string[] = []
+    let stagedEffects: string[] = []
+    const result =
+      await syncCompatibility.runAttendanceSyncImportSerializableTransaction(
+        {
+          transaction: async (run) => {
+            stagedEffects = []
+            try {
+              const value = await run({ query: async () => [] })
+              persistedEffects.push(...stagedEffects)
+              return value
+            } catch (error) {
+              stagedEffects = []
+              throw error
+            }
+          },
+        },
+        async (_trx, attempt) => {
+          const results = [`result-${attempt}`]
+          stagedEffects.push(`effect-${attempt}`)
+          if (attempt === 0) {
+            throw Object.assign(new Error('retry'), { code: '40001' })
+          }
+          return results
+        },
+      )
+
+    expect(result).toEqual(['result-1'])
+    expect(persistedEffects).toEqual(['effect-1'])
+  })
+
   it('rechecks V1 reservations under row lock and returns closed sync postures', async () => {
     const calls: Array<{ text: string; values: unknown[] }> = []
     const queued = await syncCompatibility.loadAttendanceV1ImportReservationForSync(
@@ -343,6 +479,59 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(batchRecheck).toBeGreaterThan(lock)
     expect(reservationRecheck).toBeGreaterThan(batchRecheck)
     expect(firstEffect).toBeGreaterThan(reservationRecheck)
+  })
+
+  it('keeps sync retry state attempt-local and releases source rows only after commit', () => {
+    const syncRouteStart = source.indexOf(
+      "'/api/attendance/import/commit'",
+    )
+    const syncRoute = source.slice(
+      syncRouteStart,
+      source.indexOf("'/api/attendance/import/preview-async'", syncRouteStart),
+    )
+    const transactionStart = syncRoute.indexOf(
+      'runAttendanceSyncImportSerializableTransaction',
+    )
+    const firstEffect = syncRoute.indexOf(
+      'INSERT INTO attendance_import_batches',
+      transactionStart,
+    )
+    const transactionResult = syncRoute.indexOf(
+      '} = transactionResult',
+      firstEffect,
+    )
+    expect(transactionStart).toBeGreaterThan(-1)
+    expect(firstEffect).toBeGreaterThan(transactionStart)
+    expect(transactionResult).toBeGreaterThan(firstEffect)
+
+    const attemptSetup = syncRoute.slice(transactionStart, firstEffect)
+    for (const declaration of [
+      'const results = []',
+      'let importedCount = 0',
+      'const skipped = []',
+      'const batchId = randomUUID()',
+      'const groupWarnings = []',
+      'const ruleSetConfigCache = new Map()',
+      'const engineCache = new Map()',
+    ]) {
+      expect(attemptSetup).toContain(declaration)
+    }
+    expect(attemptSetup).toMatch(
+      /loadAttendanceV1ImportReservationForSync[\s\S]*loadDefaultRule\(trx, orgId\)/,
+    )
+    expect(attemptSetup).toContain(
+      'loadSettings(trx, { failClosed: true })',
+    )
+    expect(syncRoute).toContain(
+      'loadRuleSetConfigById(trx, orgId, activeRuleSetId)',
+    )
+
+    const releaseCalls = Array.from(
+      syncRoute.matchAll(/releaseImportRowMemory\(row\)/g),
+      (match) => match.index,
+    )
+    expect(releaseCalls).toHaveLength(1)
+    expect(releaseCalls[0]).toBeGreaterThan(transactionResult)
   })
 
   it('drains durable upload cleanup immediately and during startup recovery', () => {

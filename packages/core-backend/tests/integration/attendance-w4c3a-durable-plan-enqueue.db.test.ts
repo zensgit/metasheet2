@@ -87,6 +87,19 @@ const syncCompatibility = (
       assertAttendanceV1ImportReservationAllowsSync(
         reservation: { kind: 'in_progress' | 'conflict' } | null,
       ): void
+      runAttendanceSyncImportSerializableTransaction<T>(
+        db: {
+          transaction(
+            run: (trx: {
+              query(text: string, values?: unknown[]): Promise<unknown>
+            }) => Promise<T>,
+          ): Promise<T>
+        },
+        runAttempt: (
+          trx: { query(text: string, values?: unknown[]): Promise<unknown> },
+          attempt: number,
+        ) => Promise<T>,
+      ): Promise<T>
     }
   }
 ).__attendanceW4C3aSyncCompatibilityForTests
@@ -2216,6 +2229,64 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     expect(unchanged.rows[0].w4_identity_proof_vector).toEqual(
       input.job.w4IdentityProofVector,
     )
+  })
+
+  it('retries the complete sync transaction under SERIALIZABLE with zero failed-attempt residue', async () => {
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS w4c3a_sync_retry_probe (
+         marker text PRIMARY KEY
+       )`,
+    )
+    await pool.query('TRUNCATE w4c3a_sync_retry_probe')
+    let bodyCalls = 0
+    const result =
+      await syncCompatibility.runAttendanceSyncImportSerializableTransaction(
+        {
+          transaction: async (runAttempt) => {
+            const client = await pool.connect()
+            try {
+              await client.query('BEGIN')
+              const value = await runAttempt({
+                query: (text, values = []) => client.query(text, values),
+              })
+              await client.query('COMMIT')
+              return value
+            } catch (error) {
+              await client.query('ROLLBACK')
+              throw error
+            } finally {
+              client.release()
+            }
+          },
+        },
+        async (client, attempt) => {
+          bodyCalls += 1
+          const isolation = (await client.query(
+            `SELECT current_setting('transaction_isolation') AS isolation`,
+          )) as { rows: Array<{ isolation: string }> }
+          expect(isolation.rows[0]?.isolation).toBe('serializable')
+          await client.query(
+            'INSERT INTO w4c3a_sync_retry_probe (marker) VALUES ($1)',
+            [`attempt-${attempt}`],
+          )
+          if (attempt === 0) {
+            throw Object.assign(new Error('synthetic serialization failure'), {
+              code: '40001',
+            })
+          }
+          return `attempt-${attempt}`
+        },
+      )
+
+    expect(result).toBe('attempt-1')
+    expect(bodyCalls).toBe(2)
+    expect(
+      (
+        await pool.query(
+          'SELECT marker FROM w4c3a_sync_retry_probe ORDER BY marker',
+        )
+      ).rows,
+    ).toEqual([{ marker: 'attempt-1' }])
   })
 
   it('rechecks queued, running, and failed V1 reservations through the sync compatibility bridge with zero effects', async () => {
