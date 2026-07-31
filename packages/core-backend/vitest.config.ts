@@ -619,6 +619,14 @@ export default defineConfig({
       'tests/integration/attendance-w4c3a-group-effects.db.test.ts',
       // W4C-3a full-import authorization recovery matrix.
       'tests/integration/attendance-w4c3a-auth-recovery.db.test.ts',
+      // W4C-3a canonical import execution, sync/legacy/integration route cutover,
+      // append-only rollback, and rollout-control race gates. These suites require
+      // real PostgreSQL and are whole-file wired into the attendance real-DB step.
+      'tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts',
+      'tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts',
+      'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
+      'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
+      'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.

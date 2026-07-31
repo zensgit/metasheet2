@@ -94,6 +94,13 @@ const FILES = Object.freeze([
   'tests/integration/attendance-w4c3a-group-preconditions.db.test.ts',
   'tests/integration/attendance-w4c3a-group-effects.db.test.ts',
   'tests/integration/attendance-w4c3a-auth-recovery.db.test.ts',
+  // W4C-3a caller cutover and rollback/control completion: the canonical kernel,
+  // P06, P09/P10/P24, P11/P23/P25, and rollout races all require real PostgreSQL.
+  'tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts',
+  'tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts',
+  'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
+  'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
+  'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
 ])
 
 /**
