@@ -322,6 +322,15 @@ export type AttendanceImportRollbackSourceJobCandidateV1 = Readonly<{
   identityProofVector: unknown
 }>
 
+let beforeRollbackDmlForTests: (() => Promise<void>) | null = null
+
+/** Test-only barrier after final target/source rechecks and before reversal DML. */
+export function __setW4C3aImportRollbackBeforeDmlForTests(
+  hook: (() => Promise<void>) | null,
+): void {
+  beforeRollbackDmlForTests = hook
+}
+
 interface CalculationRow {
   id: string
   attendance_record_id: string
@@ -1206,6 +1215,7 @@ async function executeRollback(
   const authorizationInput = buildAuthorizationInput(records)
   const authorizationWitness = await authorizationPort.recheckInTransaction(trx, authorizationInput)
   requireRollbackAuthorizationWitness(authorizationWitness, authorizationInput)
+  await beforeRollbackDmlForTests?.()
 
   await insertOperation(trx, {
     command,

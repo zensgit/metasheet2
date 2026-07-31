@@ -8,13 +8,29 @@ import { Pool } from 'pg'
 
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c3aUp } from '../../src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan'
-import { createAttendanceSyncImportHostV1 } from '../../src/attendance/w4c3a-sync-import-host'
+import { up as rollbackUp } from '../../src/db/migrations/zzzz20260731120000_w4c3a_import_rollback_foundation'
+import {
+  __setW4C3aSyncImportAfterPreconditionsForTests,
+  createAttendanceSyncImportHostV1,
+} from '../../src/attendance/w4c3a-sync-import-host'
+import { __setW4C3aImportRollbackBeforeDmlForTests } from '../../src/attendance/w4c3a-import-rollback'
+import { createAttendanceImportRollbackBoundaryV1 } from '../../src/attendance/w4c3a-import-rollback-boundary'
+import {
+  buildAttendanceImportAttributionFreezeV1,
+  buildAttendanceImportPolicySourceProofV1,
+} from '../../src/attendance/w4c3a-import-proof'
 import { rawImportEvidenceV1 } from '../utils/attendance-w4c3a-raw-evidence'
 import type { CommitAttendanceSyncImportPlanFromHostInputV1 } from '../../src/attendance/w4c3a-sync-import-host'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
 const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: (() => void) | undefined
+  const promise = new Promise<void>((done) => { resolve = done })
+  return { promise, resolve: () => resolve?.() }
+}
 
 function errorCode(error: unknown): string {
   if (typeof error === 'object' && error !== null && 'code' in error) {
@@ -114,6 +130,72 @@ function hostInput(input: {
   strategy: 'values' | 'unnest' | 'staging'
 }): CommitAttendanceSyncImportPlanFromHostInputV1 {
   const targetRef = JSON.stringify([input.orgId, input.userId, input.workDate])
+  const attribution = buildAttendanceImportAttributionFreezeV1({
+    orgId: input.orgId,
+    userId: input.userId,
+    workDate: input.workDate,
+    shiftId: `shift-p06-${run}`,
+    reasonCode: 'SINGLE_MATCHING_CANDIDATE',
+    resolvedAt: `${input.workDate}T00:00:00.000Z`,
+    timezone: 'Asia/Shanghai',
+    workStartTime: '09:00',
+    workEndTime: '17:00',
+    isOvernight: false,
+    candidateAbsoluteWindow: {
+      startAt: `${input.workDate}T01:00:00.000Z`,
+      endAt: `${input.workDate}T09:00:00.000Z`,
+    },
+    candidateAttributionWindow: {
+      startAt: `${input.workDate}T01:00:00.000Z`,
+      endAt: `${input.workDate}T09:00:00.000Z`,
+    },
+    attributionTailMinutes: 0,
+    approvedOvertimeWindows: [],
+  })
+  if (attribution.kind !== 'resolved_v2') {
+    throw new Error('expected a resolved P06 attribution fixture')
+  }
+  const context = {
+    schemaVersion: 1 as const,
+    selector: 'legacy' as const,
+    orgId: input.orgId,
+    userId: input.userId,
+    workDate: input.workDate,
+    timezone: 'Asia/Shanghai',
+    shiftId: `shift-p06-${run}`,
+    isWorkday: true,
+    holidayKind: null,
+    calculationGroupId: null,
+    roundingMinutes: 1,
+    severeLateThresholdMinutes: 60,
+    absenceLateThresholdMinutes: 240,
+    segments: [{
+      index: 0,
+      startTime: '09:00',
+      endTime: '17:00',
+      startDayOffset: 0,
+      endDayOffset: 0,
+      lateGraceMinutes: 0,
+      earlyLeaveGraceMinutes: 0,
+    }],
+  }
+  const policyProof = buildAttendanceImportPolicySourceProofV1({
+    ruleVersion: 'w4c3a-p06',
+    engineVersion: null,
+    rule: {
+      timezone: 'Asia/Shanghai',
+      workStartTime: '09:00',
+      workEndTime: '17:00',
+      lateGraceMinutes: 0,
+      earlyGraceMinutes: 0,
+      roundingMinutes: 1,
+      severeLateThresholdMinutes: 60,
+      absenceLateThresholdMinutes: 240,
+      workingDays: [1, 2, 3, 4, 5],
+    },
+    policy: { appliedRules: [], userGroups: [] },
+    engine: null,
+  })
   return {
     orgId: input.orgId,
     actorId: input.actorId,
@@ -187,16 +269,15 @@ function hostInput(input: {
         earlyLeaveMinutes: 0,
         status: 'normal',
         isWorkday: true,
-        timezone: 'UTC',
+        timezone: 'Asia/Shanghai',
         compatibilityMetadata: {},
         policySnapshot: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           sources: [
             {
               sourceOrdinal: 0,
-              sourceFingerprint: 'c'.repeat(64),
-              ruleVersion: 'w4c3a-p06',
-              engineVersion: null,
+              sourceFingerprint: policyProof.sourceFingerprint,
+              sourceDefinition: policyProof.sourceDefinition,
               output: {
                 status: 'normal',
                 workMinutes: 480,
@@ -211,17 +292,13 @@ function hostInput(input: {
         profileSnapshot: {},
         multiPunchSnapshot: {},
         attributionSnapshot: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           sources: [
             {
               sourceOrdinal: 0,
-              attribution: {
-                posture: 'unsupported',
-                sourceSchemaVersion: 1,
-                reason: 'legacy_v1',
-                sourceFingerprint: null,
-              },
-              context: null,
+              attribution: attribution.attribution,
+              context,
+              importAttributionReconstruction: attribution.reconstruction,
             },
           ],
         },
@@ -264,9 +341,12 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
     await createBase(pool)
     await w4c0Up(db)
     await w4c3aUp(db)
+    await rollbackUp(db)
   }, 120000)
 
   afterAll(async () => {
+    __setW4C3aSyncImportAfterPreconditionsForTests(null)
+    __setW4C3aImportRollbackBeforeDmlForTests(null)
     for (const current of [pool, kyselyPool]) {
       try {
         await current?.end()
@@ -281,6 +361,99 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
     }
     await adminPool?.end()
   }, 120000)
+
+  function syncHost() {
+    return createAttendanceSyncImportHostV1({
+      acquireConnection: async () => {
+        const client = await pool.connect()
+        return { client, release: () => client.release() }
+      },
+    })
+  }
+
+  function rollbackBoundary() {
+    return createAttendanceImportRollbackBoundaryV1({
+      acquireConnection: async () => {
+        const client = await pool.connect()
+        return { client, release: () => client.release() }
+      },
+    })
+  }
+
+  async function authoritativeRaceFixture(label: string) {
+    const orgId = crypto.randomUUID()
+    const actorId = `admin-p06-race-${label}-${run}`
+    const userId = crypto.randomUUID()
+    const oldBatchId = crypto.randomUUID()
+    const workDate = '2026-07-30'
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
+    await pool.query(
+      `INSERT INTO users (id, is_active, activation_status, permissions)
+       VALUES ($1, true, 'activated', '["attendance:admin"]'::jsonb),
+              ($2, true, 'activated', '[]'::jsonb)`,
+      [actorId, userId],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $3, true), ($2, $3, true)`,
+      [actorId, userId, orgId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_calculation_rollout_state
+         (org_id, state, engine_version, reason_code, actor_id, version, prior_state, scope)
+       VALUES ($1, 'legacy', 'w4c3a-p06-race', 'TEST_FIXTURE', $2, 1, NULL,
+               'synthetic_staging')`,
+      [orgId, actorId],
+    )
+    await pool.query(
+      `UPDATE attendance_calculation_rollout_state
+          SET state = 'shadow', prior_state = 'legacy', version = 2
+        WHERE org_id = $1`,
+      [orgId],
+    )
+    await pool.query(
+      `UPDATE attendance_calculation_rollout_state
+          SET state = 'eligible', prior_state = 'shadow', version = 3
+        WHERE org_id = $1`,
+      [orgId],
+    )
+    await pool.query(
+      `UPDATE attendance_calculation_rollout_state
+          SET state = 'authoritative', prior_state = 'eligible', version = 4
+        WHERE org_id = $1`,
+      [orgId],
+    )
+
+    await syncHost().commitSyncImportPlanV1(
+      hostInput({
+        orgId,
+        actorId,
+        batchId: oldBatchId,
+        userId,
+        workDate,
+        strategy: 'values',
+      }),
+    )
+    const initial = await pool.query(
+      `SELECT r.id::text AS record_id, r.current_calculation_id::text,
+              r.projection_owner, r.visibility_state,
+              c.source_batch_id::text AS calculation_source_batch_id,
+              c.parent_preimage_snapshot
+         FROM attendance_records r
+         JOIN attendance_record_calculations c
+           ON c.org_id = r.org_id AND c.id = r.current_calculation_id
+        WHERE r.org_id = $1 AND r.user_id = $2 AND r.work_date = $3::date`,
+      [orgId, userId, workDate],
+    )
+    expect(initial.rows).toHaveLength(1)
+    expect(initial.rows[0]).toMatchObject({
+      projection_owner: 'w4',
+      visibility_state: 'active',
+      calculation_source_batch_id: oldBatchId,
+    })
+    expect(initial.rows[0].parent_preimage_snapshot).not.toBeNull()
+    return { orgId, actorId, userId, oldBatchId, workDate, recordId: initial.rows[0].record_id as string }
+  }
 
   it('legacy_projection_only writes batch/item/record with zero job/plan/terminal DML', async () => {
     const orgId = crypto.randomUUID()
@@ -445,6 +618,195 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
       operations: 0,
     })
   })
+
+  it('source-first serializes a later source before old-batch rollback and rejects stale reversal', async () => {
+    const previousAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    const fixture = await authoritativeRaceFixture('source-first')
+    const newBatchId = crypto.randomUUID()
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId
+    const sourceEntered = deferred()
+    const releaseSource = deferred()
+    let rollbackSettled = false
+    __setW4C3aSyncImportAfterPreconditionsForTests(async () => {
+      sourceEntered.resolve()
+      await releaseSource.promise
+    })
+    try {
+      const sourceOutcome = syncHost()
+        .commitSyncImportPlanV1(
+          hostInput({
+            orgId: fixture.orgId,
+            actorId: fixture.actorId,
+            batchId: newBatchId,
+            userId: fixture.userId,
+            workDate: fixture.workDate,
+            strategy: 'values',
+          }),
+        )
+        .then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+      await sourceEntered.promise
+      const rollbackOutcome = rollbackBoundary()
+        .rollbackImportBatchV1({
+          orgId: fixture.orgId,
+          batchId: fixture.oldBatchId,
+          actorId: fixture.actorId,
+          tokenSubjectUserId: fixture.actorId,
+        })
+        .then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+        .finally(() => { rollbackSettled = true })
+      await new Promise((resolve) => setTimeout(resolve, 75))
+      expect(rollbackSettled).toBe(false)
+      releaseSource.resolve()
+
+      const [source, rollback] = await Promise.all([sourceOutcome, rollbackOutcome])
+      expect(source.ok).toBe(true)
+      expect(rollback.ok).toBe(false)
+      if (rollback.ok) throw new Error('expected stale rollback rejection')
+      expect(errorCode(rollback.error)).toBe('IMPORT_ROLLBACK_SUPERSEDED')
+
+      const state = await pool.query(
+        `SELECT r.current_calculation_id::text, r.projection_owner, r.visibility_state,
+                c.source_batch_id::text AS source_batch_id,
+                (SELECT count(*)::int FROM attendance_import_rollback_commands
+                  WHERE org_id = $1 AND source_batch_id = $2::uuid) AS rollback_commands,
+                (SELECT status FROM attendance_import_batches
+                  WHERE org_id = $1 AND id = $2::uuid) AS old_batch_status
+           FROM attendance_records r
+           JOIN attendance_record_calculations c
+             ON c.org_id = r.org_id AND c.id = r.current_calculation_id
+          WHERE r.org_id = $1 AND r.id = $3::uuid`,
+        [fixture.orgId, fixture.oldBatchId, fixture.recordId],
+      )
+      expect(state.rows).toHaveLength(1)
+      expect(state.rows[0]).toMatchObject({
+        projection_owner: 'w4',
+        visibility_state: 'active',
+        source_batch_id: newBatchId,
+        rollback_commands: 0,
+        old_batch_status: 'committed',
+      })
+    } finally {
+      releaseSource.resolve()
+      __setW4C3aSyncImportAfterPreconditionsForTests(null)
+      if (previousAllowlist === undefined) {
+        delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      } else {
+        process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = previousAllowlist
+      }
+    }
+  }, 30000)
+
+  it('rollback-first commits one reversal before a later source reactivates the target', async () => {
+    const previousAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    const fixture = await authoritativeRaceFixture('rollback-first')
+    const newBatchId = crypto.randomUUID()
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId
+    const rollbackEntered = deferred()
+    const releaseRollback = deferred()
+    let sourceSettled = false
+    __setW4C3aImportRollbackBeforeDmlForTests(async () => {
+      rollbackEntered.resolve()
+      await releaseRollback.promise
+    })
+    try {
+      const rollbackOutcome = rollbackBoundary()
+        .rollbackImportBatchV1({
+          orgId: fixture.orgId,
+          batchId: fixture.oldBatchId,
+          actorId: fixture.actorId,
+          tokenSubjectUserId: fixture.actorId,
+        })
+        .then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+      await rollbackEntered.promise
+      const sourceOutcome = syncHost()
+        .commitSyncImportPlanV1(
+          hostInput({
+            orgId: fixture.orgId,
+            actorId: fixture.actorId,
+            batchId: newBatchId,
+            userId: fixture.userId,
+            workDate: fixture.workDate,
+            strategy: 'values',
+          }),
+        )
+        .then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+        .finally(() => { sourceSettled = true })
+      await new Promise((resolve) => setTimeout(resolve, 75))
+      expect(sourceSettled).toBe(false)
+      releaseRollback.resolve()
+
+      const [rollback, source] = await Promise.all([rollbackOutcome, sourceOutcome])
+      expect(rollback.ok).toBe(true)
+      if (!rollback.ok) throw rollback.error
+      expect(rollback.value).toMatchObject({
+        kind: 'w4',
+        affected: 1,
+        restored: 0,
+        retired: 1,
+        status: 'rolled_back',
+      })
+      expect(source.ok).toBe(true)
+      if (!source.ok) throw source.error
+
+      const state = await pool.query(
+        `SELECT r.current_calculation_id::text, r.projection_owner, r.visibility_state,
+                c.source_batch_id::text AS source_batch_id,
+                c.parent_preimage_snapshot,
+                (SELECT count(*)::int FROM attendance_import_rollback_commands
+                  WHERE org_id = $1 AND source_batch_id = $2::uuid) AS rollback_commands,
+                (SELECT count(*)::int FROM attendance_import_rollback_restore_witnesses
+                  WHERE org_id = $1 AND source_batch_id = $2::uuid) AS restore_witnesses,
+                (SELECT count(*)::int FROM attendance_record_calculations
+                  WHERE org_id = $1 AND attendance_record_id = $3::uuid
+                    AND entrypoint = 'import_rollback') AS reversal_calculations,
+                (SELECT id::text FROM attendance_record_calculations
+                  WHERE org_id = $1 AND attendance_record_id = $3::uuid
+                    AND entrypoint = 'import_rollback') AS reversal_calculation_id,
+                (SELECT status FROM attendance_import_batches
+                  WHERE org_id = $1 AND id = $2::uuid) AS old_batch_status
+           FROM attendance_records r
+           JOIN attendance_record_calculations c
+             ON c.org_id = r.org_id AND c.id = r.current_calculation_id
+          WHERE r.org_id = $1 AND r.id = $3::uuid`,
+        [fixture.orgId, fixture.oldBatchId, fixture.recordId],
+      )
+      expect(state.rows).toHaveLength(1)
+      expect(state.rows[0]).toMatchObject({
+        projection_owner: 'w4',
+        visibility_state: 'active',
+        source_batch_id: newBatchId,
+        rollback_commands: 1,
+        restore_witnesses: 0,
+        reversal_calculations: 1,
+        old_batch_status: 'rolled_back',
+      })
+      expect(state.rows[0].parent_preimage_snapshot).toMatchObject({
+        posture: 'present',
+        currentCalculationId: state.rows[0].reversal_calculation_id,
+        visibilityState: 'retired',
+      })
+    } finally {
+      releaseRollback.resolve()
+      __setW4C3aImportRollbackBeforeDmlForTests(null)
+      if (previousAllowlist === undefined) {
+        delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      } else {
+        process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = previousAllowlist
+      }
+    }
+  }, 30000)
 
   it('rejects authoritative 5001 before batch/item DML on a real connection', async () => {
     const orgId = crypto.randomUUID()

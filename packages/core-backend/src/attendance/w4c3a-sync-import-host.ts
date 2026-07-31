@@ -118,6 +118,15 @@ export type AttendanceSyncImportHostV1 = Readonly<{
   ): Promise<AttendanceSyncImportResponseV1>
 }>
 
+let afterPreconditionsForTests: (() => Promise<void>) | null = null
+
+/** Test-only barrier after class-11/precondition locks and before source DML. */
+export function __setW4C3aSyncImportAfterPreconditionsForTests(
+  hook: (() => Promise<void>) | null,
+): void {
+  afterPreconditionsForTests = hook
+}
+
 function fail(code: string): never {
   throw new AttendanceSyncImportError(code)
 }
@@ -370,6 +379,8 @@ export function createAttendanceSyncImportHostV1(
         return await runAttendanceResultOperationTransactionV1(
           acquired.client,
           async (trx) => {
+            const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
+            await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
             const posture = await resolveSegmentCalculationPosture(
               trx,
               input.orgId,
@@ -495,9 +506,6 @@ export function createAttendanceSyncImportHostV1(
                 : []
 
             // class-00 shared, then class-10.
-            const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
-            await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
-
             const reservationIdentities =
               deriveAttendanceLegacyPlanReservationIdentitiesV1({
                 orgId: input.orgId,
@@ -723,6 +731,7 @@ export function createAttendanceSyncImportHostV1(
             if (!preconditionsOk) {
               fail('ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED')
             }
+            await afterPreconditionsForTests?.()
 
             let effectResult: Awaited<
               ReturnType<typeof applyAttendanceLegacyGroupEffectsV1>
