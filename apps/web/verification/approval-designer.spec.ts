@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
 const HARNESS = '/verification/approval-designer-harness.html'
 const browserErrors = new WeakMap<Page, string[]>()
@@ -24,6 +24,16 @@ async function openFormDesigner(page: Page) {
   await page.goto(HARNESS)
   await page.getByTestId('approval-template-section-fields').click()
   await expect(page.getByTestId('approval-form-palette')).toBeVisible()
+}
+
+async function expectTouchTargetsAtLeast(locator: Locator, size: number): Promise<void> {
+  expect(await locator.count()).toBeGreaterThan(0)
+  for (const target of await locator.all()) {
+    const box = await target.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.width).toBeGreaterThanOrEqual(size - 0.001)
+    expect(box!.height).toBeGreaterThanOrEqual(size - 0.001)
+  }
 }
 
 async function contrastRatio(page: Page, selector: string): Promise<number> {
@@ -342,6 +352,16 @@ test('approval route preview remains operable without horizontal overflow at a p
   }
   const panel = page.getByTestId('approval-canvas-route-preview-panel')
   await expect(panel).toBeVisible()
+  await expectTouchTargetsAtLeast(page.locator([
+    '[data-testid="approval-canvas-route-preview-close"]:visible',
+    '.approval-route-preview-panel .el-button:visible',
+    '.approval-route-preview-panel .el-input__wrapper:visible',
+    '.approval-route-preview-panel .el-select__wrapper:visible',
+    '.approval-route-preview-panel .el-input-number:visible',
+    '.approval-route-preview-panel .el-input-number__decrease:visible',
+    '.approval-route-preview-panel .el-input-number__increase:visible',
+    '.approval-route-preview-panel .el-textarea__inner:visible',
+  ].join(', ')), 44)
   await panel.getByRole('spinbutton').fill('1200')
   await page.getByTestId('approval-template-tryrun-button').click()
   await expect(page.getByTestId('approval-template-tryrun-result')).toContainText('张三')
@@ -435,6 +455,7 @@ test('approval designer remains contained at tablet and compact desktop viewport
 test('authoring navigation never scrolls content beneath a dynamic header', async ({ page }) => {
   for (const viewport of [
     { width: 1280, height: 800 },
+    { width: 1024, height: 800 },
     { width: 900, height: 800 },
     { width: 800, height: 800 },
     { width: 761, height: 800 },
@@ -447,6 +468,21 @@ test('authoring navigation never scrolls content beneath a dynamic header', asyn
       if (!header || !hint) throw new Error('missing header or form-builder hint')
       return hint.getBoundingClientRect().top >= header.getBoundingClientRect().bottom
     })).toBe(true)
+    if (viewport.width <= 1024) {
+      const navigation = await page.evaluate(() => {
+        const steps = document.querySelector<HTMLElement>('.template-authoring__steps')
+        const modeSwitch = document.querySelector<HTMLElement>('.template-authoring__mode-switch')
+        if (!steps || !modeSwitch) throw new Error('missing steps or authoring mode switch')
+        const a = steps.getBoundingClientRect()
+        const b = modeSwitch.getBoundingClientRect()
+        return {
+          position: getComputedStyle(steps).position,
+          intersects: a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top,
+        }
+      })
+      expect(navigation.position).toBe('static')
+      expect(navigation.intersects).toBe(false)
+    }
   }
 })
 
@@ -478,12 +514,16 @@ test('mobile canvas move and branch inspector controls meet the touch contract',
   const bottomSheetControls = page.locator(
     '.template-authoring__canvas-branch-handle, .template-authoring__canvas-branch-actions .el-button, .template-authoring__canvas-inspector-body .el-button',
   )
-  expect(await bottomSheetControls.count()).toBeGreaterThan(0)
-  for (const control of await bottomSheetControls.all()) {
-    const box = await control.boundingBox()
-    expect(box?.width).toBeGreaterThanOrEqual(44)
-    expect(box?.height).toBeGreaterThanOrEqual(44)
-  }
+  await expectTouchTargetsAtLeast(bottomSheetControls, 44)
+  await expectTouchTargetsAtLeast(page.locator([
+    '[data-testid="approval-canvas-inspector"] .el-checkbox:visible',
+    '[data-testid="approval-canvas-inspector"] .el-input__wrapper:visible',
+    '[data-testid="approval-canvas-inspector"] .el-select__wrapper:visible',
+    '[data-testid="approval-canvas-inspector"] .el-input-number:visible',
+    '[data-testid="approval-canvas-inspector"] .el-input-number__decrease:visible',
+    '[data-testid="approval-canvas-inspector"] .el-input-number__increase:visible',
+    '[data-testid="approval-canvas-inspector"] .el-textarea__inner:visible',
+  ].join(', ')), 44)
 })
 
 test('approval form designer stacks without horizontal overflow at a phone viewport', async ({ page }) => {

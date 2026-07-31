@@ -4016,9 +4016,9 @@ pre {
   }
 
   .template-authoring__steps {
-    position: sticky;
-    top: 108px;
-    z-index: 2;
+    position: static;
+    top: auto;
+    z-index: auto;
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
@@ -4103,6 +4103,11 @@ pre {
 
   .template-authoring__section-actions :deep(.el-button) {
     flex: 1;
+    min-height: 44px;
+  }
+
+  .template-authoring__canvas-inspector-header :deep(.el-button) {
+    min-width: 44px;
     min-height: 44px;
   }
 
