@@ -24,8 +24,11 @@ merge、部署、UAT 和 flag 是不同状态，不互相替代。
 | F1-a | 表单 palette、插入槽和字段移动 | C2 head / `codex/approval-editor-f1-form-palette-20260728` | `6b926dce5` | Codex 实现；三轮独立子代理对抗复审 | 点击/typed drag 插入、handle-only 拖排、键盘/触屏等价、唯一字段 ID、三 viewport 真浏览器 | Draft PR #4657；required CI 绿 |
 | C3 | 合法边 `+` 与 typed 插入菜单 | C2 head / `codex/approval-editor-c3-edge-insert-agent-20260728` | `525915d3d` | 子代理实现；Codex exact-source 复核和修复 | 40x40 边控件、四类节点、renderer intent、无 default 条件图、parallel join 收敛、真浏览器 | Draft PR #4697；本地 required Web Tests / build PASS；exact-head required CI PASS，merge state CLEAN |
 | F1-b | 三栏表单 builder 与聚焦 inspector | F1-a head / `codex/approval-editor-f1b-form-builder-20260728` | `93a9527f2` | Codex 实现与复核 | 左 palette / 中画布 / 右 inspector、typed drag、键盘/触屏等价、flag OFF 回退、三 viewport 真浏览器 | Draft PR #4696；本地 required Web Tests / build PASS；exact-head required CI PASS，merge state CLEAN |
-| C4 | 语义节点拖拽与条件/并行分支排序 | C3 head / `codex/approval-editor-c4-semantic-drag-20260731` | `c6f0b7bbc` | 子代理实现；Codex exact-source 复核 | renderer intent-only、统一 command seam、合法槽、stale/cross-region no-op、values-free live message、键盘等价 | Draft PR #4698；本地 required Web 360/4338 + build PASS；PR checks 运行中；真浏览器证据待补 |
-| F2 | 表单结构命令、历史身份与 FWB 引用保护 | F1-b head / `codex/approval-editor-f2-form-command-protection-20260731` | `5fff366e8` + `4ccc20f71` | Codex 前端；子代理后端；Codex 组合复核 | UUID identity、全版本字段/明细列历史、values-free 引用、发布同事务 gate、错配/畸形上下文 fail-closed | Draft PR #4699；required Web 359/4330、unit 147、fresh PG15 API 8/8、两刀 mutation RED；PR checks 运行中 |
+| C4 | 语义节点拖拽与条件/并行分支排序 | C3 head / `codex/approval-editor-c4-semantic-drag-20260731` | `c6f0b7bbc` | 子代理实现；Codex exact-source 复核 | renderer intent-only、统一 command seam、合法槽、stale/cross-region no-op、values-free live message、键盘等价 | Draft PR #4698；本地 required Web 360/4338 + build PASS；required checks 3/3 PASS、CLEAN；真浏览器证据待补 |
+| F2 | 表单结构命令、历史身份与 FWB 引用保护 | F1-b head / `codex/approval-editor-f2-form-command-protection-20260731` | `5fff366e8` + `4ccc20f71` | Codex 前端；子代理后端；Codex 组合复核 | UUID identity、全版本字段/明细列历史、values-free 引用、发布同事务 gate、错配/畸形上下文 fail-closed | Draft PR #4699；required Web 359/4330、unit 147、fresh PG15 API 8/8、两刀 mutation RED；required checks 3/3 PASS、CLEAN |
+| F3 | 附件字段 authoring 双 flag 兼容 | F2 head / `codex/approval-editor-f3-attachment-authoring-20260731` | `2cbbd539a` | Codex 实现与复核 | palette allowlist、已有附件模板 fail-closed、flag OFF 不丢字段 | Draft PR #4700；required checks 3/3 PASS；CLEAN；真浏览器整链待 T1 |
+| C5 | Canvas/节点检查器统一 undo/redo | C4 head / `codex/approval-editor-c5-unified-history-20260731` | `a2dacd562` | Codex 实现；Kimi 只读复核 | 顶栏/快捷键、稳定 key 选择、焦点恢复、redo 分叉清理 | Draft PR #4701；required checks 3/3 PASS；CLEAN；真浏览器整链待 T1 |
+| I1 | 表单与 Canvas 单一 per-draft history 最终组合 | F3 head + C3/C4/C5 / `codex/approval-editor-2-final-integration-20260731` | `7192a56fd` | Codex 实现/组合复核；Kimi 对抗复核；Grok 上游不可用 | 受控字段组件、唯一父层写入口、表单四类命令、changed-key restore、保存边界、身份不可复用 | Draft PR #4702；本地 focused 46/46、required Web 360/4366、lint/type/build PASS、五刀 mutation RED；required checks 3/3 PASS |
 
 ## 2. E1-b 执行事实
 
@@ -73,16 +76,30 @@ E2 只修改：
 | 判别变异 | PASS | PASS | 3 刀 | 4 刀 | 3 刀 | focused + browser | focused + browser | command/mounted 判别 | 2 刀 + real DB |
 | 独立复审 | Codex | Codex | Kimi + Codex | Kimi + Codex | 子代理 + Codex | Codex | Codex | Codex，无 P1/P2 | Codex 组合复核，修 DTO/mock/运行时校验 |
 | push / PR | #4643 | #4642 | #4649 | #4652 | #4657 | #4697 | #4696 | #4698 | #4699 |
-| required CI | PASS | PASS | PASS | PASS | PASS | PASS | PASS | 运行中 | 运行中 |
+| required CI | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
 | 真浏览器 | PASS | N/A | PASS | PASS | PASS | PASS | PASS | 待补 | 待补 |
 | merge / UAT / flag | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 |
+
+新增切片状态：
+
+| 面 | F3 | C5 | I1 (#4702) |
+|---|---|---|---|
+| 设计方向 | 已约束 | 已约束 | 锁 §7.1 组合闭环 |
+| 实现 | 完成 | 完成 | 完成 |
+| 本地测试 | PASS | PASS | PASS |
+| 判别变异 | focused 判别 | history 判别 | 5 刀 RED-before |
+| 独立复审 | Codex | Codex | Kimi + Codex；无未闭合 P1/P2 |
+| push / PR | #4700 | #4701 | #4702 |
+| required CI | PASS | PASS | PASS |
+| 真浏览器 | 整链待 T1 | 整链待 T1 | 待 T1 |
+| merge / UAT / flag | 全部否 | 全部否 | 全部否 |
 
 ## 5. 后续顺序
 
 1. 审阅并按依赖落 #4642 -> #4649 -> #4652；其后 #4697 走 C3，#4657 -> #4696 走 F1；#4643 是 verification-only 独立支线；
-2. C3/C4 已交付边 `+`、语义拖拽与分支排序；C5 继续收统一 undo/redo；
-3. F1-a/F1-b/F2 已交付 palette、三栏 builder、命令层与外部引用保护；
-4. F3 补附件 authoring；
+2. C3/C4/C5 已交付边 `+`、语义拖拽、分支排序及 Canvas/节点检查器统一历史；
+3. F1-a/F1-b/F2/F3 已交付 palette、三栏 builder、命令层、外部引用保护及附件双 flag authoring；
+4. #4702 已完成表单与 Canvas 单一 history 的组合收口，required checks 3/3 PASS，待 owner 审阅；
 5. V1/V2、P1、X1 收版本、试运行、移动端/无障碍；
 6. T1 真浏览器 required CI 全闭合后才进入 staging UAT；
 7. production flag 和结构化辅助入口退役始终由 owner 单独决定。
@@ -173,3 +190,26 @@ E2 只修改：
   build 和 diff check 均通过；
 - 真 Chromium 1440 / 1024 / 390 builder overflow 0、console error 0；桌面
   拖入日期后字段数 3 -> 4，选中字段在右 inspector 改名成功。
+
+## 11. C4 / C5 / F2 / F3 / I1 执行事实
+
+- C4 的 node/branch drag intent 只在页面进入既有 command algebra；合法槽、
+  session token、stale/cross-region no-op 和 values-free live message 已由
+  focused tests 与 required CI 覆盖，真浏览器仍待 T1；
+- C5 把 Canvas 和节点检查器的 topology/configure/delete 统一进顶栏历史，
+  selection/focus 用稳定业务 key 恢复；#4701 required checks 3/3 PASS；
+- F2 的后端 identity/reference authority 与发布同事务 gate 保持不变；F3 只在
+  Canvas+附件双 flag 时开放新附件字段，旧模板在能力关闭时 read-only；
+- I1 将 `ApprovalFieldInspector` 改为 props-in/events-out，
+  `ApprovalFormBuilder` 不再通过嵌套 `v-model` 拥有草稿，父 view 成为唯一写
+  入口；add/remove/move/configure-form-field 与 Canvas 共用一个 history；
+- history entry 记录命令实际改变的顶层 draft key，避免撤销字段操作覆盖后来
+  修改的 description 等基本信息；成功保存回读全版本 identity context 后清空
+  本地历史与临时退役集合，失败保存保留 undo；
+- exact head `7192a56fd`：focused 46/46、required Web 360 文件 / 4366 测试、
+  targeted ESLint、`vue-tsc --noEmit`、production build、diff check 全 PASS；
+- 五刀判别变异依次中和 history gate、身份保留、changed-key restore、焦点
+  fallback 和成功保存历史边界，指定测试均 RED，恢复后全绿；
+- Kimi 对抗复核确认受控组件 ownership、nested field mutation 和 flag OFF
+  路径没有 P1；其跨保存旧快照风险已通过成功/失败保存边界回归关闭。Grok
+  session 因上游连接失败未读取代码，不计入复核证据。

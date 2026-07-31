@@ -1,14 +1,16 @@
-# 审批编辑器与流程编排 E1-b / E2 / C1-C4 / F1-a-F2 收尾验证（2026-07-31）
+# 审批编辑器与流程编排 E1-b / E2 / C1-C5 / F1-a-F3 收尾验证（2026-07-31）
 
 **范围状态：PR VERIFIED / REQUIRED CI PASS**
 
 **整线状态：NOT FINAL**
 
 本报告只关闭 E1-b renderer/command feasibility、E2 第一刀无行为抽取、
-C1 线性/复杂流程统一载体、C2 canvas-first 工作区、C3 边 `+` 插入，及
-F1-a/F1-b/F2 表单 palette、三栏 builder/inspector、命令与引用保护，以及
-C4 语义拖拽/分支排序。它不宣称审批编辑器已对标完成，不授权 C5/F3、
-部署、UAT 或 flag 开启；C4 真浏览器证据仍未闭合。
+C1 线性/复杂流程统一载体、C2 canvas-first 工作区、C3 边 `+` 插入、C4
+语义拖拽/分支排序、C5 Canvas 历史，以及 F1-a/F1-b/F2/F3 表单 palette、
+三栏 builder/inspector、命令/引用保护和附件 authoring 代码门。#4702 又完成
+表单与 Canvas 单一 per-draft history 的组合验证。它不宣称审批编辑器已对标
+完成，不授权部署、UAT 或 flag 开启；C4/F1/F3 真浏览器 T1、V1/V2、P1、
+X1 仍未闭合。
 
 ## 1. Exact heads
 
@@ -21,6 +23,11 @@ C4 语义拖拽/分支排序。它不宣称审批编辑器已对标完成，不�
 | F1-a | `codex/approval-editor-f1-form-palette-20260728` | `6b926dce5` |
 | C3 | `codex/approval-editor-c3-edge-insert-agent-20260728` | `525915d3d` |
 | F1-b | `codex/approval-editor-f1b-form-builder-20260728` | `93a9527f2` |
+| C4 | `codex/approval-editor-c4-semantic-drag-20260731` | `c6f0b7bbc` |
+| F2 | `codex/approval-editor-f2-form-command-protection-20260731` | `4ccc20f71`（组合含 `5fff366e8`） |
+| F3 | `codex/approval-editor-f3-attachment-authoring-20260731` | `2cbbd539a` |
+| C5 | `codex/approval-editor-c5-unified-history-20260731` | `a2dacd562` |
+| I1 | `codex/approval-editor-2-final-integration-20260731` | `7192a56fd` |
 | 文档 | `codex/approval-editor-flow-parity-plan-20260727` | 本报告提交后的 head |
 
 E2 起点为 `origin/main@9da0335b4`。canonical checkout 未被修改。
@@ -304,14 +311,57 @@ F1-a 本身没有抽出独立 builder，也没有提供聚焦字段的右侧属�
   required Web 359 文件 / 4330 测试、两刀 mutation RED；Draft PR #4699，
   exact head `4ccc20f71`。
 
+### 8.5 F3 附件 authoring
+
+- 附件字段只在 Canvas V2 与附件 authoring 两个 flag 同时开启时进入 palette；
+- 任一能力关闭时，已有附件模板由 unsupported/read-only gate fail-closed，
+  不能在可写编辑器中静默删除附件字段；
+- Draft PR #4700，exact head `2cbbd539a`，required checks 3/3 PASS、
+  merge state CLEAN；尚未 merge、部署或开启 flag。
+
+### 8.6 C5 与 I1 单一历史
+
+- C5 为 Canvas topology/configure/delete 提供顶栏 undo/redo 和快捷键，恢复
+  graph、selection 与 focus；Draft PR #4701 exact head `a2dacd562`，
+  required checks 3/3 PASS；
+- I1 把表单 add/remove/move/configure 也接入同一 history；字段 inspector
+  完全受控，builder 只发事件，父 view 是唯一草稿写入口；
+- 每条 history entry 记录实际改变的顶层 draft key，撤销字段操作不会覆盖
+  之后发生的 description 等基本信息编辑；
+- 成功保存回读服务端全版本 identity context 后建立新历史边界并清空临时
+  退役集合；失败保存不清空 undo；
+- form selection/focus 随 undo/redo 恢复；无具体 control id 时聚焦 inspector
+  第一个可交互控件，避免焦点落到 body。
+
+### 8.7 I1 exact-head 验证与审阅
+
+```text
+focused history + mounted inspector: 46/46 PASS
+required Web: 360 files / 4366 tests PASS
+targeted ESLint: PASS
+vue-tsc --noEmit: PASS
+production Web build: PASS
+git diff --check: PASS
+```
+
+五刀判别变异分别中和 history gate、撤销后的身份保留、changed-key restore、
+焦点 fallback 和成功保存后的历史边界，指定测试均精确 RED；恢复后全绿。
+
+Kimi exact-tree 对抗复核确认没有 nested `v-model`/direct mutation 绕过，
+flag OFF 继续 mutate-only 且不展示 history 控件。它提出的跨成功保存旧快照
+风险已通过“成功保存清空、失败保存保留”双正反控制关闭。其剩余 P3 为输入
+逐键产生历史项及明细表格焦点粒度，均不构成数据正确性或 flag-ON 阻塞。
+Grok 本轮因上游连接失败未读取代码，未计入复核证据。
+
 ## 9. 残余与 owner 门
 
-1. #4642/#4643/#4649/#4652/#4657 required CI 已绿；#4696/#4697 已开 Draft，
-   本地门与 exact-head required CI 均已绿，merge state 均为 CLEAN；全部未 merge；
+1. #4642/#4643/#4649/#4652/#4657/#4696-#4702 required CI 已绿；#4702 为
+   Draft、required checks 3/3 PASS；全部未 merge；
 2. edge `+` 产品接线和节点按钮群移除已由 C3 完成；
-3. drag feedback 和分支拖排已由 C4 实现，但真浏览器证据待补；undo/redo 属于 C5；
-4. F1-a/F1-b/F2 已有 palette、三栏 builder、字段命令和引用保护；附件
-   authoring 仍属于 F3；
+3. drag feedback 和分支拖排已由 C4 实现，C5/I1 已实现 Canvas、节点检查器、
+   表单结构与字段属性的单一 history；真浏览器证据仍待补；
+4. F1-a-F3 已有 palette、三栏 builder、字段命令、引用保护及附件双 flag
+   authoring；不得在 T1 前宣称交互交付；
 5. 版本时间线/双画布 diff、路由预览整合、真实键盘/a11y 仍未完成；
 6. 390 虽无横向溢出，但 sticky bottom navigation 会遮住内容，属于 X1；
 7. production Canvas 仍默认 OFF；staging UAT 与生产 flag 为 owner 门；
@@ -327,6 +377,9 @@ F1-a 本身没有抽出独立 builder，也没有提供聚焦字段的右侧属�
 - `C3 edge insertion = DRAFT PR / LOCAL REQUIRED PASS / EXACT-HEAD PR CI PASS / CLEAN`；
 - `F1-b form builder and inspector = DRAFT PR / LOCAL REQUIRED PASS / EXACT-HEAD PR CI PASS / CLEAN`；
 - `C4 semantic drag = DRAFT PR / LOCAL REQUIRED PASS / BROWSER EVIDENCE PENDING`；
-- `F2 form command protection = DRAFT PR / LOCAL REQUIRED PASS / REAL DB PASS / PR CI RUNNING`；
+- `C5 unified canvas history = DRAFT PR / EXACT-HEAD PR CI PASS / CLEAN / BROWSER EVIDENCE PENDING`；
+- `F2 form command protection = DRAFT PR / LOCAL REQUIRED PASS / REAL DB PASS / PR CI PASS`；
+- `F3 attachment authoring = DRAFT PR / EXACT-HEAD PR CI PASS / CLEAN / BROWSER EVIDENCE PENDING`；
+- `I1 form + canvas single history = DRAFT PR / LOCAL REQUIRED PASS / EXACT-HEAD PR CI PASS / BROWSER EVIDENCE PENDING`；
 - `approval editor parity line = IN PROGRESS / NOT FINAL`；
-- 下一开发点为 C5 统一 undo/redo 与 F3 附件 authoring，并补 C4 真浏览器门。
+- 下一开发点为 T1 真浏览器、V1/V2、P1 和 X1；T1/U0 前不得标 FINAL。

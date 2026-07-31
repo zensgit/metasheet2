@@ -1,6 +1,6 @@
 # 审批编辑器与流程编排对标开发计划（2026-07-27）
 
-**状态：IN PROGRESS（C4 与 F2 已实现并形成待审 Draft PR；C4 仍缺真浏览器证据，C5 / F3 仍在开发队列）**
+**状态：IN PROGRESS（C3-C5 与 F1-a-F3 已形成待审 Draft 栈；最终整合 PR #4702 本地门与 required CI 通过；T1 真浏览器、V1/V2、P1、X1 仍未闭合）**
 
 **事实审计基线：** `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
 
@@ -64,13 +64,13 @@
 | 用户面 | 当前 `main` | 对标差距 |
 |---|---|---|
 | 信息架构 | C2 在 Canvas flag ON 时提供表单/流程直接模式切换 | shell、字段 builder 和版本工作区仍待继续拆分 |
-| 线性流程 | C1 派生统一 Canvas carrier；C2 默认进入流程画布；C3 提供边 `+` 插入；C4 接入语义拖拽 | 统一历史和上下文操作仍未产品化 |
-| 复杂流程 | flag ON 后默认 Canvas；结构视图保留为“辅助编辑模式”；C3 仅向合法边提供插入菜单；C4 接入条件/并行分支拖排 | undo/redo 尚未收口 |
-| 节点操作 | C3 已移除节点卡内插入按钮群；C4 的节点移动与分支排序共用 typed command seam | 上下文菜单和统一历史仍待 C5 |
+| 线性流程 | C1 派生统一 Canvas carrier；C2 默认进入流程画布；C3 提供边 `+` 插入；C4 接入语义拖拽；C5 接入统一历史 | 上下文菜单与 T1 真浏览器全路径仍未闭合 |
+| 复杂流程 | flag ON 后默认 Canvas；结构视图保留为“辅助编辑模式”；C3 仅向合法边提供插入菜单；C4 接入条件/并行分支拖排；C5 接入 undo/redo | 辅助入口等价证明、版本工作区和大图验收仍未完成 |
+| 节点操作 | C3 已移除节点卡内插入按钮群；C4 的节点移动与分支排序共用 typed command seam；C5 顶栏 undo/redo 恢复选择与焦点 | 上下文菜单与浏览器键盘全路径仍待 T1 |
 | 拖拽 | C4 已实现合法槽高亮、stale/cross-region no-op、values-free live message 和分支把手/键盘等价 | 真浏览器拖拽证据仍待 Browser 会话恢复后补齐 |
-| 撤销/重做 | 命令层有逆操作/历史类型 | 顶栏未挂载统一 undo/redo |
-| 表单设计 | F1-a/F1-b 提供 palette 与三栏工作区；F2 已把增删移动接到命令层，并接后端历史 ID / FWB 引用权威 | 附件 authoring 仍未完成 |
-| 检查器 | 复杂画布已有右侧检查器 | 线性流程、字段、版本差异未统一；窄屏不是正式 bottom sheet |
+| 撤销/重做 | C5 提供顶栏、快捷键、Canvas/节点检查器统一历史；#4702 将表单增删移动与字段属性也纳入同一 per-draft history | 辅助结构列表仍是回退入口；成功保存建立新历史边界，T1 仍需实测焦点 |
+| 表单设计 | F1-a/F1-b 提供 palette 与三栏工作区；F2 接命令层、历史 ID / FWB 引用权威；F3 按 Canvas+附件双 flag 开放附件控件 | 嵌套明细精确焦点、长表单性能和真浏览器全链仍待 T1/X1 |
+| 检查器 | 线性/复杂节点和字段已有受控检查器，所有字段写入由父层单一命令入口拥有 | 版本 before/after 检查器未整合；窄屏不是正式 bottom sheet |
 | 版本比较 | 表格历史 + 变化列表 + 单画布 overlay | 缺编辑器内时间线、双画布并排和 before/after 检查器 |
 | 可访问性 | 部分按钮/键盘事件和结构列表 fallback | 缺完整键盘创作、live region、焦点恢复和真实浏览器证明 |
 | 浏览器验收 | 主要为 Vitest/jsdom 和真库 API | 没有审批编辑器 Playwright 视觉/交互矩阵 |
@@ -239,6 +239,28 @@ FWB 引用并拒绝删除仍在使用的字段。前端 focused 105/105、后端
 147/147、fresh PostgreSQL 15 全迁移真实服务器 8/8、required Web 359 文件 /
 4330 测试、两刀中和精确转红。Draft PR #4699（`4ccc20f71`）依赖 #4696；
 尚未 merge、部署或开启 flag。
+
+F3 已在 F2 head 上完成附件 authoring 兼容。附件控件只有 Canvas V2 与附件
+authoring 两个 flag 同时开启才出现在 palette；任何已有附件字段在任一能力
+关闭时继续以 unsupported/read-only fail-closed，避免保存时静默丢字段。
+Draft PR #4700（`2cbbd539a`）依赖 #4699；required checks 3/3 PASS、merge
+state CLEAN，尚未 merge、部署或开启 flag。
+
+C5 已在 C4 head 上完成 Canvas 和节点检查器统一历史。顶栏 undo/redo、
+Cmd/Ctrl+Z、Cmd/Ctrl+Shift+Z、选择与焦点恢复均基于稳定业务 key；renderer
+仍只发 intent，不拥有历史或业务校验。Draft PR #4701（`a2dacd562`）依赖
+#4698；required checks 3/3 PASS、merge state CLEAN，尚未 merge、部署或
+开启 flag。
+
+最终组合 PR #4702（`7192a56fd`）把 C3/C4/C5 与 F1/F2/F3 组合验证，并关闭
+原锁 §7.1 的遗漏：表单新增、删除、移动和属性配置与 Canvas/节点检查器共用
+一条 per-draft history。字段组件改为受控输入，父 view 是唯一草稿写入口；
+undo/redo 只恢复命令实际改变的顶层 draft 域，不覆盖后来发生的基本信息编辑；
+成功保存以服务端全版本 identity context 建立新历史边界，失败保存保留本地
+undo。exact-head 本地门：focused 46/46、required Web 360 文件 / 4366 测试、
+ESLint、`vue-tsc`、production build PASS；五刀判别变异均 RED-before。该 PR
+仍为 Draft、required checks 3/3 PASS，且 C4/F1/F3 的完整真浏览器 T1
+仍未闭合。
 
 ### 4.1 依赖图
 
@@ -461,10 +483,11 @@ U0 至少包含以下 12 项，全部保存截图、录屏或网络/数据库证
 1. **E0：完成。** Codex exact-head 审阅，Claude Opus 只读对抗复核；
 2. **E1 / E1-b：完成。** Kimi 提供视觉 IA，Grok 构建隔离 renderer 和生产命令适配验证，Codex 复核与变异；
 3. **E2 / C1 / C2：完成待审。** Claude 负责 shell 与统一 carrier，Codex 完成 canvas-first 接线、真浏览器验证和判别变异，Kimi 复审；
-4. **F1-a / F1-b / F2：完成待审。** Codex 完成 palette、三栏 builder/inspector、命令接线、不可复用字段身份与后端历史/FWB 引用权威；
+4. **F1-a / F1-b / F2 / F3：完成待审。** Codex 完成 palette、三栏 builder/inspector、命令接线、不可复用字段身份、后端历史/FWB 引用权威及附件双 flag authoring；
 5. **C3：完成待审。** 子代理实现边 `+`，Codex exact-source 复核后修正 condition default 与 parallel join 两处合法性守卫，并重跑 required Web Tests、生产 build 和真浏览器；
-6. **C4：代码与 CI 门完成，浏览器门未闭合。** 语义拖拽和分支排序已形成 Draft PR，真实 Browser 附着失败被保留为显式阻塞，未伪报视觉验收。
+6. **C4 / C5：代码与 CI 门完成，浏览器门未闭合。** 语义拖拽、分支排序和统一 Canvas 历史已形成 Draft PR；真实 Browser 附着失败被保留为显式阻塞，未伪报视觉验收；
+7. **最终表单+画布历史整合：完成待审。** #4702 把表单结构与属性编辑纳入同一 history，补成功/失败保存边界、焦点恢复和身份不可复用回归；本地门与 required checks 3/3 PASS。
 
-本轮尚未启动 C5/F3 及版本/试运行收口，没有开启任何 flag。下一开发点为
-C5 统一 undo/redo 与 F3 附件 authoring；同时补 C4 真浏览器证据。不得把
-C4/F2 的实现完成解释为整条编辑器已达到飞书/钉钉产品完成度。
+本轮尚未完成版本/试运行/响应式与无障碍收口，也没有开启任何 flag。下一
+开发点为补 C4/F1/F3 真浏览器 T1，并继续 V1/V2、P1、X1。不得把
+C3-C5/F1-F3 的代码完成解释为整条编辑器已达到飞书/钉钉产品完成度。
