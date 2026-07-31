@@ -6053,7 +6053,7 @@ async function readDingTalkJsonSafely(response) {
   }
 }
 
-async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body, timeoutMs = ATTENDANCE_DINGTALK_HTTP_TIMEOUT_MS }) {
+async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body, timeoutMs = ATTENDANCE_DINGTALK_HTTP_TIMEOUT_MS, logger }) {
   let lastError = null
   const maskedUrl = maskDingTalkUrlForLog(url)
   for (let attempt = 1; attempt <= ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS; attempt += 1) {
@@ -6069,7 +6069,7 @@ async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body
         const message = data?.errmsg || `HTTP ${response.status}`
         if (attempt < ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS && shouldRetryDingTalkRequest({ status: response.status, errcode: data?.errcode })) {
           const delay = calculateDingTalkRetryDelay(attempt)
-          logger.warn('Retrying DingTalk request', { url: maskedUrl, attempt, delay, status: response.status, errcode: data?.errcode, message })
+          logger?.warn('Retrying DingTalk request', { url: maskedUrl, attempt, delay, status: response.status, errcode: data?.errcode, message })
           await sleepMs(delay)
           continue
         }
@@ -6080,14 +6080,14 @@ async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body
       lastError = error
       if (attempt >= ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS) break
       const delay = calculateDingTalkRetryDelay(attempt)
-      logger.warn('DingTalk request attempt failed', { url: maskedUrl, attempt, delay, error: error?.message || String(error) })
+      logger?.warn('DingTalk request attempt failed', { url: maskedUrl, attempt, delay, error: error?.message || String(error) })
       await sleepMs(delay)
     }
   }
   throw lastError || new Error('DingTalk request failed')
 }
 
-async function fetchDingTalkAccessToken({ appKey, appSecret, baseUrl }) {
+async function fetchDingTalkAccessToken({ appKey, appSecret, baseUrl, logger }) {
   if (!appKey || !appSecret) {
     throw new Error('DingTalk appKey/appSecret required')
   }
@@ -6097,7 +6097,7 @@ async function fetchDingTalkAccessToken({ appKey, appSecret, baseUrl }) {
     return cached.token
   }
   const tokenUrl = `${baseUrl}/gettoken?appkey=${encodeURIComponent(appKey)}&appsecret=${encodeURIComponent(appSecret)}`
-  const data = await requestDingTalkJsonWithRetry({ url: tokenUrl })
+  const data = await requestDingTalkJsonWithRetry({ url: tokenUrl, logger })
   const accessToken = data?.access_token
   const expiresInSeconds = Number(data?.expires_in ?? 7200)
   const safeTtlMs = Number.isFinite(expiresInSeconds) && expiresInSeconds > 300
@@ -6118,7 +6118,7 @@ function normalizeDingTalkDateRange(value, fallback) {
   return text
 }
 
-async function fetchDingTalkColumnValues({ baseUrl, accessToken, userId, columnIds, fromDate, toDate }) {
+async function fetchDingTalkColumnValues({ baseUrl, accessToken, userId, columnIds, fromDate, toDate, logger }) {
   const url = `${baseUrl}/topapi/attendance/getcolumnval?access_token=${encodeURIComponent(accessToken)}`
   const body = {
     userid: userId,
@@ -6131,6 +6131,7 @@ async function fetchDingTalkColumnValues({ baseUrl, accessToken, userId, columnI
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    logger,
   })
   return data?.result ?? {}
 }
@@ -39694,6 +39695,7 @@ module.exports = {
               appKey: config.appKey,
               appSecret: config.appSecret,
               baseUrl: config.baseUrl,
+              logger,
             })
             const columns = Array.isArray(config.columns) && config.columns.length
               ? config.columns
@@ -39715,6 +39717,7 @@ module.exports = {
                   columnIds: config.columnIds,
                   fromDate,
                   toDate,
+                  logger,
                 })
                 const payload = {
                   column_vals: result.column_vals ?? [],
@@ -39737,8 +39740,35 @@ module.exports = {
               mappingProfileId: config.mappingProfileId ?? 'dingtalk_api_columns',
             }
             if (parsed.data.dryRun) {
-              imported = 0
-              skipped = []
+              const runResult = await updateIntegrationRun(db, run.id, {
+                status: partialErrors.length ? 'partial' : 'success',
+                message: partialErrors.length
+                  ? `Dry run completed with ${partialErrors.length} partial errors`
+                  : 'Dry run completed',
+                meta: {
+                  imported: 0,
+                  skipped: 0,
+                  batchId: null,
+                  partialErrors,
+                  dryRun: true,
+                  from: fromDate,
+                  to: toDate,
+                },
+                finishedAt: new Date().toISOString(),
+              })
+              res.json({
+                ok: true,
+                data: {
+                  integrationId,
+                  imported: 0,
+                  skipped: [],
+                  batchId: null,
+                  partialErrors,
+                  run: runResult,
+                  dryRun: true,
+                },
+              })
+              return
             } else {
               const importResponse = await (async () => {
                 const parsedImport = importPayloadSchema.safeParse(normalizeImportPayload(payload))
@@ -40134,7 +40164,7 @@ module.exports = {
             status: partialErrors.length ? 'partial' : 'success',
             message: partialErrors.length
               ? `Sync completed with ${partialErrors.length} partial errors`
-              : (parsed.data.dryRun ? 'Dry run completed' : 'Sync completed'),
+              : 'Sync completed',
             meta: {
               imported,
               skipped: skipped.length,
@@ -40162,10 +40192,12 @@ module.exports = {
           }
 	          if (run?.id) {
             try {
-              await db.query(
-                'UPDATE attendance_integrations SET last_sync_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2',
-                [integrationId, orgId]
-              )
+              if (!parsed.data.dryRun) {
+                await db.query(
+                  'UPDATE attendance_integrations SET last_sync_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2',
+                  [integrationId, orgId]
+                )
+              }
               await updateIntegrationRun(db, run.id, {
                 status: 'failed',
                 message: error?.message || 'Integration sync failed',
