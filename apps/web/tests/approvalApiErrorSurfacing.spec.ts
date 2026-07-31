@@ -3,15 +3,14 @@ import { ApprovalApiError, approvalRequestError } from '../src/approvals/api'
 
 /**
  * B1-04 (宽恕型错误三件套) — unit coverage for the error-surfacing helper that
- * `createApproval` and `dispatchAction` (apps/web/src/approvals/api.ts) funnel their failed
+ * approval writes (apps/web/src/approvals/api.ts) funnel their failed
  * (non-OK) responses through, generalizing the ad hoc `payload.error.code/message` parsing
  * `remindApproval` already did for its own failure branches.
  *
  * This exercises `approvalRequestError` directly against a fabricated `Response`, rather than
- * via `createApproval`/`dispatchAction` themselves: `approvals/api.ts`'s `USE_MOCK` flag is
- * `import.meta.env.DEV || ...`, and `DEV` is always `true` under Vitest, so those exported
- * functions always take their mock branch here and never reach the real fetch path. The helper
- * itself has no such gate, so it is independently testable.
+ * via the statically imported write wrappers themselves: without an explicit override,
+ * `approvals/api.ts` remains mock-first while `DEV` is true under Vitest. The helper itself has
+ * no such gate, so it is independently testable.
  */
 function fakeResponse(status: number, jsonImpl: () => Promise<unknown>): Response {
   return { status, json: jsonImpl } as unknown as Response

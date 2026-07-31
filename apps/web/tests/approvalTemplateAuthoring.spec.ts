@@ -758,6 +758,29 @@ describe('TemplateAuthoringView', () => {
     expect(scrollIntoViewSpy).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
   })
 
+  it('shows the version workspace only for an existing template while Canvas V2 is enabled', async () => {
+    approvalCanvasV2.value = true
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-template-version-workspace-button"]')).toBeNull()
+
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    routeParams = { id: 'tpl_versioned' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_versioned' }))
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-template-version-workspace-button"]')).not.toBeNull()
+
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    approvalCanvasV2.value = false
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-template-version-workspace-button"]')).toBeNull()
+  })
+
   it('reveals and focuses field validation errors when saving from another section', async () => {
     await mountView()
 

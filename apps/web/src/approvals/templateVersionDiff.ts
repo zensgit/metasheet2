@@ -1,9 +1,15 @@
 import type {
   ApprovalEdge,
+  ApprovalGraph,
   ApprovalNode,
   ApprovalTemplateVersionDetailDTO,
   FormField,
 } from '../types/approval'
+import {
+  approvalEdgeDisplayLabel,
+  approvalFieldDisplayLabel,
+  approvalNodeDisplayLabel,
+} from './approvalVersionPresentation'
 
 export type TemplateVersionChangeKind = 'added' | 'removed' | 'changed' | 'moved'
 export type TemplateVersionChangeEntity = 'field' | 'node' | 'edge'
@@ -40,22 +46,22 @@ function sameValue(left: unknown, right: unknown): boolean {
 }
 
 function fieldLabel(field: FormField): string {
-  return field.label || field.id
+  return approvalFieldDisplayLabel(field)
 }
 
 function nodeLabel(node: ApprovalNode): string {
-  return node.name || node.key
+  return approvalNodeDisplayLabel(node)
 }
 
-function edgeLabel(edge: ApprovalEdge): string {
-  return `${edge.source} -> ${edge.target}`
+function edgeLabel(edge: ApprovalEdge, graph: ApprovalGraph): string {
+  return approvalEdgeDisplayLabel(edge, graph)
 }
 
 function compareEntities<T>(
   before: T[],
   after: T[],
   keyOf: (value: T) => string,
-  labelOf: (value: T) => string,
+  labelOf: (value: T, side: 'before' | 'after') => string,
   entity: TemplateVersionChangeEntity,
   options: { trackMoves?: boolean } = {},
 ): TemplateVersionChange[] {
@@ -79,21 +85,21 @@ function compareEntities<T>(
   for (const [key, value] of beforeByKey) {
     const next = afterByKey.get(key)
     if (!next) {
-      changes.push({ kind: 'removed', entity, key, label: labelOf(value) })
+      changes.push({ kind: 'removed', entity, key, label: labelOf(value, 'before') })
       continue
     }
     if (!sameValue(value, next)) {
       // Content attribution wins: an edited entry reports as "changed" even if it also moved.
-      changes.push({ kind: 'changed', entity, key, label: labelOf(next) })
+      changes.push({ kind: 'changed', entity, key, label: labelOf(next, 'after') })
       continue
     }
     if (beforeRanks && afterRanks && beforeRanks.get(key) !== afterRanks.get(key)) {
-      changes.push({ kind: 'moved', entity, key, label: labelOf(next) })
+      changes.push({ kind: 'moved', entity, key, label: labelOf(next, 'after') })
     }
   }
   for (const [key, value] of afterByKey) {
     if (!beforeByKey.has(key)) {
-      changes.push({ kind: 'added', entity, key, label: labelOf(value) })
+      changes.push({ kind: 'added', entity, key, label: labelOf(value, 'after') })
     }
   }
   return changes
@@ -107,7 +113,7 @@ export function diffApprovalTemplateVersions(
     before.formSchema.fields,
     after.formSchema.fields,
     (field) => field.id,
-    fieldLabel,
+    (field) => fieldLabel(field),
     'field',
     // Field order is form-visible, so a repositioned-but-unchanged field still surfaces — as
     // 'moved', never as a spurious 'changed'. Node/edge order carries no semantics (the graph is
@@ -118,14 +124,14 @@ export function diffApprovalTemplateVersions(
     before.approvalGraph.nodes,
     after.approvalGraph.nodes,
     (node) => node.key,
-    nodeLabel,
+    (node) => nodeLabel(node),
     'node',
   )
   const edgeChanges = compareEntities(
     before.approvalGraph.edges,
     after.approvalGraph.edges,
     (edge) => edge.key,
-    edgeLabel,
+    (edge, side) => edgeLabel(edge, side === 'before' ? before.approvalGraph : after.approvalGraph),
     'edge',
   )
   const changes = [...fieldChanges, ...nodeChanges, ...edgeChanges]

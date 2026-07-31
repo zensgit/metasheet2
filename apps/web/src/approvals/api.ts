@@ -31,7 +31,10 @@ import type {
 // ---------------------------------------------------------------------------
 // Mock-mode flag
 // ---------------------------------------------------------------------------
-const USE_MOCK = import.meta.env.DEV || (globalThis as any).__APPROVAL_MOCK__ === true
+const explicitMockMode = (globalThis as { __APPROVAL_MOCK__?: boolean }).__APPROVAL_MOCK__
+// Browser verification can explicitly exercise the real request wrappers in a Vite dev server.
+// With no override, local development keeps its longstanding mock-first behavior.
+const USE_MOCK = explicitMockMode === true || (explicitMockMode !== false && import.meta.env.DEV)
 
 // ---------------------------------------------------------------------------
 // Mock data factories
@@ -847,7 +850,7 @@ export async function unarchiveTemplate(templateId: string): Promise<ApprovalTem
 
 export async function getTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
   if (USE_MOCK) return mockTemplateDetail(id)
-  return apiGet(`/api/approval-templates/${id}`)
+  return apiGet(`/api/approval-templates/${encodeURIComponent(id)}`)
 }
 
 export async function getTemplateFormAuthoringContext(
@@ -879,7 +882,9 @@ export async function getTemplateVersion(
   versionId: string,
 ): Promise<ApprovalTemplateVersionDetailDTO> {
   if (USE_MOCK) return mockVersionDetail(templateId, versionId)
-  return apiGet(`/api/approval-templates/${templateId}/versions/${versionId}`)
+  return apiGet(
+    `/api/approval-templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(versionId)}`,
+  )
 }
 
 /**
@@ -928,7 +933,7 @@ export async function restoreTemplateVersion(
       restoredFromVersionId: versionId,
     }
   }
-  return apiPost(
+  return postApprovalJson(
     `/api/approval-templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(versionId)}/restore`,
     request,
   )
@@ -986,15 +991,14 @@ export async function getApprovalHistory(id: string): Promise<UnifiedApprovalHis
 }
 
 // ---------------------------------------------------------------------------
-// B1-04 (宽恕型错误三件套) — typed error surfacing for the approval create/action
-// write paths. Generalizes the ad hoc `payload.error.code/message` parsing
+// B1-04 (宽恕型错误三件套) — typed error surfacing for approval write paths that
+// need server machine codes. Generalizes the ad hoc `payload.error.code/message` parsing
 // `remindApproval` already does for its 429/failure branches (further below,
 // unchanged): a failed response is expected to carry `{ error: { code,
 // message } }`; the server's message is threaded through VERBATIM so the UI
 // can render the real reason instead of collapsing every failure into
 // '操作失败，请重试'. `apiPost`/`apiGet` (utils/api.ts) intentionally keep their
-// existing generic-message throw for every OTHER caller — this helper is
-// scoped to the approval create/action endpoints below.
+// existing generic-message throw for every OTHER caller.
 // ---------------------------------------------------------------------------
 export class ApprovalApiError extends Error {
   /** HTTP status of the failed response — lets callers branch on 4xx/5xx without re-parsing `message`. */
@@ -1027,8 +1031,8 @@ export async function approvalRequestError(response: Response): Promise<never> {
 
 /**
  * POST + parse-JSON, surfacing a failed response via `approvalRequestError` instead of the
- * generic `apiPost` throw. Used by `createApproval` and `dispatchAction` — the two write paths
- * B1-04 covers; every other approval-template endpoint below is unchanged.
+ * generic `apiPost` throw. Used by create/action writes and version restore, whose optimistic
+ * concurrency retry needs the server's typed stale-version code.
  */
 async function postApprovalJson<T>(path: string, payload: unknown): Promise<T> {
   const response = await apiFetch(path, {

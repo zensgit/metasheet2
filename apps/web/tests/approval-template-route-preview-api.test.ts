@@ -4,10 +4,9 @@ import { previewTemplateRoute, templateRoutePreviewPath } from '../src/approvals
 
 // RP-3 (route-preview lock, B3-06) — coverage for the authoring-side dry-run API wrapper.
 //
-// `previewTemplateRoute` itself is gated by `USE_MOCK` (`import.meta.env.DEV || ...`), and DEV is
-// always `true` under this project's Vitest run (see `approvalApiErrorSurfacing.spec.ts`'s
-// comment on the sibling `createApproval`/`previewApprovalRoute`) — so calling it in a test can
-// only ever exercise the mock branch, never the real `postApprovalJson(...)` call. The templateId
+// `previewTemplateRoute` itself defaults to mock mode while DEV is true under this project's
+// Vitest run (see `approvalApiErrorSurfacing.spec.ts`). This static import does not set the
+// explicit false override, so calling it here exercises the mock branch. The templateId
 // URL-encoding is therefore split into `templateRoutePreviewPath`, a pure helper independently
 // testable for the path-building / `encodeURIComponent` behavior the real branch depends on.
 
