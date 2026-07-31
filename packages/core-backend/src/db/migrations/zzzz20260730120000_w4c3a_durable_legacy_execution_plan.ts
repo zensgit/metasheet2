@@ -84,6 +84,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`ALTER TABLE attendance_import_jobs DROP CONSTRAINT IF EXISTS chk_aij_w4_item_count`.execute(db)
   await sql`ALTER TABLE attendance_import_jobs DROP CONSTRAINT IF EXISTS chk_aij_w4_proof_vector`.execute(db)
   await sql`ALTER TABLE attendance_import_jobs DROP CONSTRAINT IF EXISTS chk_aij_w4_exec_reason`.execute(db)
+  await sql`ALTER TABLE attendance_import_jobs DROP CONSTRAINT IF EXISTS chk_aij_w4_plan_columns`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4_job_proof_vector_valid(text, uuid, jsonb, integer)`.execute(db)
   await sql`
     CREATE OR REPLACE FUNCTION attendance_w4c3a_exact_object_keys(value jsonb, expected text[])

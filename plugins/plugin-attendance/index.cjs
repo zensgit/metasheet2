@@ -25395,6 +25395,9 @@ module.exports = {
 	        elapsedMs,
 	        throughputRowsPerSec,
 	        error: row.error ?? null,
+	        ...(isV1 && row.w4_execution_reason_code
+	          ? { executionReasonCode: row.w4_execution_reason_code }
+	          : {}),
 	        preview,
 	        startedAt: row.started_at ?? null,
 	        finishedAt: row.finished_at ?? null,
@@ -25445,6 +25448,7 @@ module.exports = {
 		        job.created_at,
 		        job.updated_at,
 		        job.w4_contract_version,
+		        job.w4_execution_reason_code,
 		        CASE
 		          WHEN job.payload IS NULL THEN NULL
 		          ELSE job.payload - 'rows' - 'entries' - 'csvText'

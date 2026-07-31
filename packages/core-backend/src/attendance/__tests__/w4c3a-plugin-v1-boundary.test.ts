@@ -92,6 +92,22 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     )
   })
 
+  it('projects the values-free V1 execution reason while keeping public error separate', () => {
+    const projection = source.slice(
+      source.indexOf('const buildImportJobProjectionSql'),
+      source.indexOf('const loadImportJob ='),
+    )
+    expect(projection).toContain('job.w4_execution_reason_code')
+    const mapper = source.slice(
+      source.indexOf('const mapImportJobRow'),
+      source.indexOf('const estimateCsvRowCount'),
+    )
+    expect(mapper).toMatch(
+      /\.\.\.\(isV1 && row\.w4_execution_reason_code[\s\S]*executionReasonCode: row\.w4_execution_reason_code/,
+    )
+    expect(mapper).toContain('error: row.error ?? null')
+  })
+
   it('drains durable upload cleanup immediately and during startup recovery', () => {
     expect(source).toMatch(/attendance_claim_import_upload_cleanup_command/)
     expect(source).toMatch(/attendance_finish_import_upload_cleanup_command/)

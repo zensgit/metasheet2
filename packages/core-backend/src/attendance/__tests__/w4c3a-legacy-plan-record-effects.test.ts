@@ -125,6 +125,8 @@ describe('applyAttendanceLegacyRecordEffectsV1', () => {
     expect(sql).toMatch(/org_id\s*=\s*\$2/)
     expect(sql).toMatch(/user_id\s*=\s*\$3/)
     expect(sql).toMatch(/work_date\s*=\s*\$4::date/)
+    expect(sql).toMatch(/source_batch_id\s*=\s*NULL/i)
+    expect(sql).not.toContain('$14')
     expect(sql).toMatch(/RETURNING\s+id::text\s+AS\s+id/i)
 
     expect(params).toEqual([
@@ -141,7 +143,6 @@ describe('applyAttendanceLegacyRecordEffectsV1', () => {
       'normal',
       true,
       JSON.stringify(COMPAT_META),
-      BATCH_ID,
     ])
   })
 
@@ -248,7 +249,6 @@ describe('applyAttendanceLegacyRecordEffectsV1', () => {
       'late',
       false,
       JSON.stringify(COMPAT_META),
-      BATCH_ID,
     ])
   })
 

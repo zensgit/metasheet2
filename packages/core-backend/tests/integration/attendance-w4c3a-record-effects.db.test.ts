@@ -280,7 +280,7 @@ describeIfDatabase('W4C-3a fixed record effects (real PostgreSQL)', () => {
           status: 'late',
           is_workday: true,
           meta: { frozen: 'existing' },
-          source_batch_id: appliedSourceBatchId,
+          source_batch_id: null,
         },
         {
           id: missingRecordId,
@@ -310,6 +310,24 @@ describeIfDatabase('W4C-3a fixed record effects (real PostgreSQL)', () => {
       expect(revisions.rows).toEqual([
         { user_id: existingUserId, revision: '2' },
         { user_id: missingUserId, revision: '1' },
+      ])
+
+      const rolledBack = await client.query(
+        `DELETE FROM attendance_records
+          WHERE org_id = $1
+            AND source_batch_id = $2::uuid
+        RETURNING id::text AS id`,
+        [orgId, appliedSourceBatchId],
+      )
+      expect(rolledBack.rows).toEqual([{ id: missingRecordId }])
+      const retainedExisting = await client.query(
+        `SELECT id::text AS id, source_batch_id::text AS source_batch_id
+           FROM attendance_records
+          WHERE id = $1::uuid AND org_id = $2`,
+        [existingRecordId, orgId],
+      )
+      expect(retainedExisting.rows).toEqual([
+        { id: existingRecordId, source_batch_id: null },
       ])
     } finally {
       await client.query('ROLLBACK')

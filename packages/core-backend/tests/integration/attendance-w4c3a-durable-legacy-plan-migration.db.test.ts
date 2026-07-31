@@ -192,6 +192,10 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     kyselyPool = scratch.kyselyPool
     db = scratch.db
     await w4c0Up(db)
+    await pool.query(`
+      ALTER TABLE attendance_import_jobs
+      ADD CONSTRAINT chk_aij_w4_plan_columns CHECK (true)
+    `)
     await up(db)
   }, 90000)
 
@@ -255,6 +259,15 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     ]) {
       expect(jobShapeDefinition).toContain(`${column} IS NOT NULL`)
     }
+    const planColumnsCheck = await pool.query(`
+      SELECT pg_get_constraintdef(oid) AS definition
+      FROM pg_constraint
+      WHERE conrelid = 'attendance_import_jobs'::regclass
+        AND conname = 'chk_aij_w4_plan_columns'
+    `)
+    expect(String(planColumnsCheck.rows[0]?.definition)).toContain(
+      'w4_legacy_plan_digest',
+    )
     const cleanupColumns = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name='attendance_import_upload_cleanup_commands' ORDER BY ordinal_position`)
     expect(cleanupColumns.rows.map((row) => row.column_name)).toEqual([
       'job_id', 'org_id', 'file_id', 'status', 'attempt_count', 'claim_token', 'lease_expires_at', 'last_error_code', 'created_at', 'updated_at',

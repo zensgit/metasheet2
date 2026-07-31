@@ -1173,8 +1173,8 @@ async function acquireKeysWithDeadline(
   lockClass: 'rollout' | 'operation' | 'target' | 'scheduled_run',
   acquisitionSql: string,
   keys: readonly bigint[],
+  deadline = monotonicNow() + W4_ADVISORY_HELPER_WAIT_MS,
 ): Promise<void> {
-  const deadline = monotonicNow() + W4_ADVISORY_HELPER_WAIT_MS
   for (const key of keys) {
     const remaining = Math.ceil(deadline - monotonicNow())
     if (remaining <= 0) throw busyError(lockClass)
@@ -1188,6 +1188,27 @@ async function acquireKeysWithDeadline(
     if (monotonicNow() > deadline) throw busyError(lockClass)
   }
   await trx.query("SELECT set_config('lock_timeout', $1, true)", [String(W4_TRANSACTION_LOCK_TIMEOUT_MS)])
+}
+
+async function acquireLegacyImportCompatibilityLock(
+  trx: AttendanceW4TransactionClientV1,
+  key: CanonicalAttendanceLegacyIdempotencyKeyV1,
+  deadline: number,
+): Promise<void> {
+  const parsed = parseCanonicalAttendanceLegacyIdempotencyKeyV1(key)
+  const remaining = Math.ceil(deadline - monotonicNow())
+  if (remaining <= 0) throw busyError('operation')
+  await trx.query("SELECT set_config('lock_timeout', $1, true)", [String(remaining)])
+  try {
+    await trx.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+      [parsed.orgId, parsed.idempotencyKey],
+    )
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw busyError('operation')
+    throw error
+  }
+  if (monotonicNow() > deadline) throw busyError('operation')
 }
 
 /**
@@ -1242,9 +1263,9 @@ export async function acquireAttendanceResultOperationLocks(
 }
 
 /**
- * W4C-3a complete class-`10` reservation set. Operation and normalized legacy
- * idempotency keys are derived first, then de-duplicated and numerically sorted
- * together so callers cannot create a cross-domain lock-order inversion.
+ * W4C-3a complete reservation set. A normalized legacy key first interlocks
+ * with the shipped two-int synchronous writer; operation and normalized legacy
+ * class-`10` keys are then de-duplicated and numerically sorted together.
  */
 export async function acquireAttendanceImportReservationLocksV1(
   trx: AttendanceW4TransactionClientV1,
@@ -1252,10 +1273,14 @@ export async function acquireAttendanceImportReservationLocksV1(
   legacyIdempotency: CanonicalAttendanceLegacyIdempotencyKeyV1 | null,
 ): Promise<void> {
   if (!Array.isArray(identities)) fail('W4C0_IDENTITY_LIST_INVALID')
+  const deadline = monotonicNow() + W4_ADVISORY_HELPER_WAIT_MS
   const keys = identities.map((identity) =>
     buildAttendanceResultOperationAdvisoryKey(identity),
   )
   if (legacyIdempotency !== null) {
+    // The shipped synchronous importer still owns this two-int lock. Take it
+    // first so old and new writers share exclusion during the cutover.
+    await acquireLegacyImportCompatibilityLock(trx, legacyIdempotency, deadline)
     keys.push(buildAttendanceLegacyIdempotencyAdvisoryKey(legacyIdempotency))
   }
   await acquireKeysWithDeadline(
@@ -1263,6 +1288,7 @@ export async function acquireAttendanceImportReservationLocksV1(
     'operation',
     'SELECT pg_advisory_xact_lock($1::bigint)',
     toSortedUniqueSignedKeys(keys),
+    deadline,
   )
 }
 

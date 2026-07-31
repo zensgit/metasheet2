@@ -1049,7 +1049,7 @@ describe('advisory key builders and acquisition helpers', () => {
     expect(keys[0] < keys[1]).toBe(true)
   })
 
-  it('normalizes the legacy idempotency key and acquires one globally sorted class-10 set', async () => {
+  it('normalizes the legacy key, takes the shipped compatibility lock first, then sorts class-10 keys', async () => {
     const org = await orgIdentity(ORG, null)
     const batch = createVerifiedAttendanceOperationIdentityV1({
       org,
@@ -1067,8 +1067,16 @@ describe('advisory key builders and acquisition helpers', () => {
 
     const trx = stubTrx()
     await acquireAttendanceImportReservationLocksV1(trx, [batch], legacyKey)
-    const acquired = trx.calls
-      .filter((call) => call.sqlText.includes('pg_advisory'))
+    const advisoryCalls = trx.calls.filter((call) =>
+      call.sqlText.includes('pg_advisory'),
+    )
+    expect(advisoryCalls[0]).toEqual({
+      sqlText:
+        'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+      params: [ORG, 'retry-1'],
+    })
+    const acquired = advisoryCalls
+      .slice(1)
       .map((call) => BigInt(call.params[0] as string))
     expect(acquired).toHaveLength(2)
     expect(acquired[0] < acquired[1]).toBe(true)
@@ -1076,7 +1084,9 @@ describe('advisory key builders and acquisition helpers', () => {
     __setAttendanceW4DigestSeamForTests(() => Buffer.alloc(32, 0x11))
     const collided = stubTrx()
     await acquireAttendanceImportReservationLocksV1(collided, [batch], legacyKey)
-    expect(collided.calls.filter((call) => call.sqlText.includes('pg_advisory'))).toHaveLength(1)
+    expect(
+      collided.calls.filter((call) => call.sqlText.includes('pg_advisory')),
+    ).toHaveLength(2)
     expectCode(
       () =>
         parseCanonicalAttendanceLegacyIdempotencyKeyV1({

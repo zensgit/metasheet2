@@ -39,7 +39,7 @@ const UPDATE_EXISTING_RECORD_SQL = `
       status = $11,
       is_workday = $12,
       meta = $13::jsonb,
-      source_batch_id = $14::uuid,
+      source_batch_id = NULL,
       updated_at = now()
   WHERE id = $1::uuid
     AND org_id = $2
@@ -94,7 +94,6 @@ function existingUpdateParams(write: LegacyImportRecordWritePlanV1): unknown[] {
     write.status,
     write.isWorkday,
     JSON.stringify(write.compatibilityMetadata),
-    write.sourceBatchId,
   ]
 }
 

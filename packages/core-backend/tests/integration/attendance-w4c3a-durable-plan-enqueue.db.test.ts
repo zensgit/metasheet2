@@ -33,6 +33,7 @@ import {
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
   buildAttendanceOperationalBulkTargetAdvisoryKey,
+  parseCanonicalAttendanceLegacyIdempotencyKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   rehydrateVerifiedAttendanceOperationIdentityV1,
   resolveSegmentCalculationPosture,
@@ -2097,5 +2098,66 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       [SYNC_RACE_ORG, enqueueFirstBatch],
     )
     expect(syncRows.rows).toEqual([{ operations: 0 }])
+  }, 30000)
+
+  it('interlocks the class-10 reservation with the shipped two-int legacy idempotency lock in both orders', async () => {
+    const idempotencyKey = `compat-${run}`
+    const legacyKey = parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+      orgId: SYNC_RACE_ORG,
+      idempotencyKey,
+    })
+    const legacyFirst = await pool.connect()
+    const currentWaiter = await pool.connect()
+    try {
+      await legacyFirst.query('BEGIN')
+      await legacyFirst.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+        [SYNC_RACE_ORG, idempotencyKey],
+      )
+      await currentWaiter.query('BEGIN')
+      const waiterPid = await backendPid(currentWaiter)
+      const currentPromise = acquireAttendanceImportReservationLocksV1(
+        trx(currentWaiter),
+        [],
+        legacyKey,
+      )
+      void currentPromise.catch(() => undefined)
+      await waitUntilAdvisoryBlocked(pool, waiterPid)
+      await legacyFirst.query('COMMIT')
+      await expect(currentPromise).resolves.toBeUndefined()
+      await currentWaiter.query('COMMIT')
+    } finally {
+      await legacyFirst.query('ROLLBACK').catch(() => undefined)
+      await currentWaiter.query('ROLLBACK').catch(() => undefined)
+      legacyFirst.release()
+      currentWaiter.release()
+    }
+
+    const currentFirst = await pool.connect()
+    const legacyWaiter = await pool.connect()
+    try {
+      await currentFirst.query('BEGIN')
+      await acquireAttendanceImportReservationLocksV1(
+        trx(currentFirst),
+        [],
+        legacyKey,
+      )
+      await legacyWaiter.query('BEGIN')
+      const waiterPid = await backendPid(legacyWaiter)
+      const legacyPromise = legacyWaiter.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+        [SYNC_RACE_ORG, idempotencyKey],
+      )
+      void legacyPromise.catch(() => undefined)
+      await waitUntilAdvisoryBlocked(pool, waiterPid)
+      await currentFirst.query('COMMIT')
+      await expect(legacyPromise).resolves.toBeDefined()
+      await legacyWaiter.query('COMMIT')
+    } finally {
+      await currentFirst.query('ROLLBACK').catch(() => undefined)
+      await legacyWaiter.query('ROLLBACK').catch(() => undefined)
+      currentFirst.release()
+      legacyWaiter.release()
+    }
   }, 30000)
 })
