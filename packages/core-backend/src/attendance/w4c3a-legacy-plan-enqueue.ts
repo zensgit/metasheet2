@@ -389,6 +389,7 @@ async function assertPreCutoverImportWorkersDrainedV1(
       WHERE org_id = $1
         AND w4_contract_version IS NULL
         AND status IN ('queued', 'running')
+        AND (payload ->> '__jobType') IS DISTINCT FROM 'preview'
       ORDER BY id
       FOR UPDATE`,
     [orgId],
@@ -1279,9 +1280,10 @@ export async function reserveAttendanceLegacyImportPlanJobV1(
     fail('W4C3A_ENQUEUE_POSTURE_CHANGED')
   }
   // A pre-cutover worker does not participate in the V1 class-10/11 lock
-  // protocol. Locking every nonterminal null-version job here makes an active
-  // old worker finish first, then keeps V1 enqueue closed if legacy work is
-  // still queued/running. This gate precedes all plan/effect identities.
+  // protocol. Locking every write-capable nonterminal null-version job here
+  // makes an active old worker finish first, then keeps V1 enqueue closed if
+  // legacy write work is still queued/running. Read-only preview jobs remain
+  // outside the drain set. This gate precedes all plan/effect identities.
   await assertPreCutoverImportWorkersDrainedV1(trx, org.orgId)
 
   requireLowerHex64(

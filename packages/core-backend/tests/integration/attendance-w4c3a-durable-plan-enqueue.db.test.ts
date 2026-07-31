@@ -1896,6 +1896,113 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     )
   })
 
+  it('drains only write-capable pre-cutover jobs and preserves preview, org, and V1 boundaries', async () => {
+    const org = await loadOrgWitness(pool, LEGACY_DRAIN_ORG)
+    const previewId = crypto.randomUUID()
+    const previewBatchId = crypto.randomUUID()
+    const foreignLegacyId = crypto.randomUUID()
+    const foreignLegacyBatchId = crypto.randomUUID()
+    const cleanupIds = [previewId, foreignLegacyId]
+    await pool.query(
+      `INSERT INTO attendance_import_jobs (
+         id, org_id, batch_id, created_by, status, total, payload
+       ) VALUES
+         ($1::uuid, $2, $3::uuid, $4, 'queued', 1, '{"__jobType":"preview"}'::jsonb),
+         ($5::uuid, $6, $7::uuid, $4, 'queued', 1, '{}'::jsonb)`,
+      [
+        previewId,
+        LEGACY_DRAIN_ORG,
+        previewBatchId,
+        ADMIN_A,
+        foreignLegacyId,
+        ORG,
+        foreignLegacyBatchId,
+      ],
+    )
+
+    try {
+      const firstBatchId = crypto.randomUUID()
+      const first = noTargetInput(org, firstBatchId, ADMIN_A, ADMIN_A)
+      await expect(
+        runSerializable(pool, (client) =>
+          reserveAttendanceLegacyImportPlanJobV1(
+            trx(client),
+            auth(ADMIN_A, LEGACY_DRAIN_ORG),
+            first.input,
+          ),
+        ),
+      ).resolves.toMatchObject({ kind: 'created' })
+
+      await pool.query(
+        'DELETE FROM attendance_import_jobs WHERE id = ANY($1::uuid[])',
+        [cleanupIds],
+      )
+
+      const secondBatchId = crypto.randomUUID()
+      const second = noTargetInput(org, secondBatchId, ADMIN_A, ADMIN_A)
+      await expect(
+        runSerializable(pool, (client) =>
+          reserveAttendanceLegacyImportPlanJobV1(
+            trx(client),
+            auth(ADMIN_A, LEGACY_DRAIN_ORG),
+            second.input,
+          ),
+        ),
+      ).resolves.toMatchObject({ kind: 'created' })
+
+      for (const payload of [
+        { __jobType: 'future_kind' },
+        {},
+      ]) {
+        const legacyId = crypto.randomUUID()
+        cleanupIds.push(legacyId)
+        await pool.query(
+          `INSERT INTO attendance_import_jobs (
+             id, org_id, batch_id, created_by, status, total, payload
+           ) VALUES ($1::uuid, $2, $3::uuid, $4, 'queued', 1, $5::jsonb)`,
+          [
+            legacyId,
+            LEGACY_DRAIN_ORG,
+            crypto.randomUUID(),
+            ADMIN_A,
+            JSON.stringify(payload),
+          ],
+        )
+        const rejectedBatchId = crypto.randomUUID()
+        const rejected = noTargetInput(
+          org,
+          rejectedBatchId,
+          ADMIN_A,
+          ADMIN_A,
+        )
+        await expect(
+          runSerializable(pool, (client) =>
+            reserveAttendanceLegacyImportPlanJobV1(
+              trx(client),
+              auth(ADMIN_A, LEGACY_DRAIN_ORG),
+              rejected.input,
+            ),
+          ),
+        ).rejects.toMatchObject({
+          code: 'W4C3A_ENQUEUE_PRE_CUTOVER_WORKER_DRAIN_REQUIRED',
+        })
+        expect(await residue(pool, rejectedBatchId)).toEqual({
+          jobs: 0,
+          manifests: 0,
+          chunks: 0,
+        })
+        await pool.query('DELETE FROM attendance_import_jobs WHERE id = $1::uuid', [
+          legacyId,
+        ])
+      }
+    } finally {
+      await pool.query(
+        'DELETE FROM attendance_import_jobs WHERE id = ANY($1::uuid[])',
+        [cleanupIds],
+      )
+    }
+  })
+
   it('blocks V1 enqueue until pre-cutover workers drain, then requires a fresh transaction', async () => {
     const org = await loadOrgWitness(pool, LEGACY_DRAIN_ORG)
     const queuedLegacyId = crypto.randomUUID()
