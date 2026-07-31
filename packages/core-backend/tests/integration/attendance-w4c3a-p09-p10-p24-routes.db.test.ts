@@ -124,7 +124,7 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     return token
   }
 
-  async function seedActorAndRollout(state: 'legacy' | 'shadow'): Promise<{ orgId: string; actorId: string; token: string }> {
+  async function seedActorAndRollout(state: 'legacy' | 'shadow' | 'authoritative'): Promise<{ orgId: string; actorId: string; token: string }> {
     const orgId = randomUUID()
     const actorId = randomUUID()
 	    // The rollout resolver requires the exact org key; a truthy/wildcard
@@ -142,10 +142,50 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     await pool.query(
       `INSERT INTO attendance_calculation_rollout_state
        (org_id, state, engine_version, reason_code, actor_id, version, prior_state, scope)
-       VALUES ($1, $2, 'w4c3a-route-acceptance', 'TEST_FIXTURE', $3, 1, NULL, 'synthetic_staging')`,
-      [orgId, state, actorId],
+       VALUES ($1, 'legacy', 'w4c3a-route-acceptance', 'TEST_FIXTURE', $2, 1, NULL, 'synthetic_staging')`,
+      [orgId, actorId],
     )
+    if (state === 'shadow' || state === 'authoritative') {
+      await pool.query(
+        `UPDATE attendance_calculation_rollout_state
+            SET state = 'shadow', prior_state = 'legacy', version = 2
+          WHERE org_id = $1`,
+        [orgId],
+      )
+    }
+    if (state === 'authoritative') {
+      await pool.query(
+        `UPDATE attendance_calculation_rollout_state
+            SET state = 'eligible', prior_state = 'shadow', version = 3
+          WHERE org_id = $1`,
+        [orgId],
+      )
+      await pool.query(
+        `UPDATE attendance_calculation_rollout_state
+            SET state = 'authoritative', prior_state = 'eligible', version = 4
+          WHERE org_id = $1`,
+        [orgId],
+      )
+    }
     return { orgId, actorId, token: await mintToken(actorId) }
+  }
+
+  async function seedTargetUsers(orgId: string, count: number): Promise<string[]> {
+    const userIds = Array.from({ length: count }, () => randomUUID())
+    const emails = userIds.map((userId) => `${fixturePrefix}-${userId}@example.test`)
+    await pool.query(
+      `INSERT INTO users
+       (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
+       SELECT user_id, email, user_id, 'W4C-3a scale target', 'x', 'user', '[]'::jsonb, true, false, now(), now()
+         FROM unnest($1::text[], $2::text[]) AS target(user_id, email)`,
+      [userIds, emails],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       SELECT user_id, $2, true FROM unnest($1::text[]) AS target(user_id)`,
+      [userIds, orgId],
+    )
+    return userIds
   }
 
   async function seedLegacyRecord(orgId: string, userId: string): Promise<string> {
@@ -317,6 +357,94 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       else process.env[key] = value
     }
   }, 60000)
+
+  it('P06: real POST /api/attendance/import/commit reaches the synchronous canonical host', async () => {
+    const fixture = await seedActorAndRollout('shadow')
+    const response = await requestJson('/api/attendance/import/commit', fixture.token, {
+      orgId: fixture.orgId,
+      userId: fixture.actorId,
+      rows: [{ userId: fixture.actorId, workDate, fields: { workMinutes: 480 } }],
+    })
+    expect(response.status, response.raw).toBe(200)
+    expect(response.body).toMatchObject({
+      ok: true,
+      success: true,
+      data: {
+        imported: 1,
+        processedRows: 1,
+        failedRows: 0,
+        batchId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      },
+    })
+    expect(await canonicalOperationCounts(fixture.orgId)).toEqual({ batches: 1, operations: 1 })
+  })
+
+  it('P06: shadow 5001 uses the operational-only compatibility branch with zero W4 DML', async () => {
+    const fixture = await seedActorAndRollout('shadow')
+    const targetUserIds = await seedTargetUsers(fixture.orgId, 5001)
+    const rows = targetUserIds.map((userId) => ({
+      userId,
+      workDate,
+      fields: { workMinutes: 480 },
+    }))
+    const response = await requestJson('/api/attendance/import/commit', fixture.token, {
+      orgId: fixture.orgId,
+      userId: fixture.actorId,
+      rows,
+      returnItems: false,
+    })
+    expect(response.status, response.raw).toBe(200)
+    expect(response.body).toMatchObject({
+      ok: true,
+      success: true,
+      data: { imported: 5001, processedRows: 5001, failedRows: 0 },
+    })
+    expect(await canonicalOperationCounts(fixture.orgId)).toEqual({ batches: 0, operations: 0 })
+  }, 120000)
+
+  it('P06: authoritative 5001 fails at the real route before import or result DML', async () => {
+    const fixture = await seedActorAndRollout('authoritative')
+    const before = await businessCounts(fixture.orgId)
+    const rows = Array.from({ length: 5001 }, () => ({
+      userId: fixture.actorId,
+      workDate,
+      fields: { workMinutes: 480 },
+    }))
+    const response = await requestJson('/api/attendance/import/commit', fixture.token, {
+      orgId: fixture.orgId,
+      userId: fixture.actorId,
+      rows,
+      returnItems: false,
+    })
+    expect(response.status, response.raw).toBe(422)
+    expect((response.body?.error as { code?: string } | undefined)?.code).toBe('W4_BATCH_LIMIT_EXCEEDED')
+    expect(await businessCounts(fixture.orgId)).toEqual(before)
+  }, 30000)
+
+  it('P06: authoritative exactly 5000 commits atomically through the real route', async () => {
+    const fixture = await seedActorAndRollout('authoritative')
+    const targetUserIds = await seedTargetUsers(fixture.orgId, 5000)
+    const response = await requestJson('/api/attendance/import/commit', fixture.token, {
+      orgId: fixture.orgId,
+      userId: fixture.actorId,
+      rows: targetUserIds.map((userId) => ({
+        userId,
+        workDate,
+        fields: { workMinutes: 480 },
+      })),
+      returnItems: false,
+    })
+    expect(response.status, response.raw).toBe(200)
+    expect(response.body).toMatchObject({
+      ok: true,
+      success: true,
+      data: { imported: 5000, processedRows: 5000, failedRows: 0 },
+    })
+    expect(await canonicalOperationCounts(fixture.orgId)).toEqual({
+      batches: 1,
+      operations: 5000,
+    })
+  }, 180000)
 
   it('P09: legacy_projection_only retains the frozen legacy POST /api/attendance/import response bytes', async () => {
     const { orgId, actorId, token } = await seedActorAndRollout('legacy')
@@ -676,5 +804,4 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     }
   })
 
-  it.skip('P09/P10 scale 5000 accepted and 5001 rejected before DML: pending canonical route wiring; exercising 5001 against the current private per-row routes would itself perform the DML this leg must prove absent')
 })

@@ -560,13 +560,15 @@ export function createAttendanceSyncImportHostV1(
               idempotencyKey: input.idempotencyKey,
               sourceRef,
             })
-            const registryState =
-              await inspectAttendanceCanonicalImportRegistryV1(trx, {
-                job: inspectJob,
-                identities: reservationIdentities,
-              })
-            if (registryState !== 'all_new') {
-              fail('ATTENDANCE_OPERATION_CONFLICT')
+            if (operationalBranch === 'strict_targeted') {
+              const registryState =
+                await inspectAttendanceCanonicalImportRegistryV1(trx, {
+                  job: inspectJob,
+                  identities: reservationIdentities,
+                })
+              if (registryState !== 'all_new') {
+                fail('ATTENDANCE_OPERATION_CONFLICT')
+              }
             }
 
             // Freeze preconditions (class-11 inside strict/bulk freeze helpers).
