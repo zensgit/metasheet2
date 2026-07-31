@@ -609,6 +609,136 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
     await expect(pool.query(`UPDATE attendance_import_jobs SET progress=1 WHERE id=$1`, [invalidNoTarget.jobId])).rejects.toThrow(/NO_TARGET_BRANCH_DENIED/)
   })
 
+  it('replays the complete successor frozen-field UPDATE matrix on a persisted V1 plan', async () => {
+    const mutations = [
+      ['w4_contract_version', 'NULL'],
+      ['w4_entrypoint', "'scheduled_auto_absence'"],
+      ['w4_batch_command_id', 'gen_random_uuid()'],
+      ['w4_source_kind', "'scheduled_auto_absence'"],
+      ['w4_source_ref', "'changed-source'"],
+      ['w4_actor_id', "'changed-actor'"],
+      ['w4_actor_posture', "'platform_admin'"],
+      ['w4_token_subject_user_id', "'changed-subject'"],
+      ['w4_command_fingerprint', `'${hex('b')}'`],
+      ['w4_accepted_write_posture', "'shadow'"],
+      ['w4_item_count', '1'],
+      ['w4_item_sequence_fingerprint', `'${hex('d')}'`],
+      ['w4_item_set_fingerprint', `'${hex('e')}'`],
+      ['w4_identity_proof_vector', `'[{"changed":true}]'::jsonb`],
+      ['w4_legacy_plan_digest', `'${hex('e')}'`],
+      ['w4_distinct_target_count', '1'],
+      ['w4_operational_branch', "'normal'"],
+      ['w4_legacy_input_fingerprint', `'${hex('e')}'`],
+      ['idempotency_key', "'changed-key'"],
+      ['payload', `'{"changed":true}'::jsonb`],
+    ] as const
+
+    for (const [column, value] of mutations) {
+      const { jobId } = await seedNoTargetPlan(
+        pool,
+        `frozen-${column}-${run}`,
+      )
+      await expect(
+        pool.query(
+          `UPDATE attendance_import_jobs SET ${column} = ${value} WHERE id = $1`,
+          [jobId],
+        ),
+      ).rejects.toThrow(/W4C3A_V1_JOB_FROZEN/)
+    }
+  })
+
+  it('replays successor execution-reason/status pairing and immutable terminal transitions', async () => {
+    const suspended = await seedNoTargetPlan(pool, `reason-suspended-${run}`)
+    await expect(
+      pool.query(
+        `UPDATE attendance_import_jobs
+            SET w4_execution_reason_code = 'SEGMENT_CALCULATION_SUSPENDED'
+          WHERE id = $1`,
+        [suspended.jobId],
+      ),
+    ).resolves.toMatchObject({ rowCount: 1 })
+    await expect(
+      pool.query(
+        `UPDATE attendance_import_jobs SET status = 'running' WHERE id = $1`,
+        [suspended.jobId],
+      ),
+    ).rejects.toThrow(/chk_aij_w4_exec_reason/)
+
+    const postureConflict = await seedNoTargetPlan(
+      pool,
+      `reason-posture-${run}`,
+    )
+    await expect(
+      pool.query(
+        `UPDATE attendance_import_jobs
+            SET status = 'failed',
+                w4_execution_reason_code = 'ATTENDANCE_ASYNC_JOB_POSTURE_CONFLICT'
+          WHERE id = $1`,
+        [postureConflict.jobId],
+      ),
+    ).resolves.toMatchObject({ rowCount: 1 })
+
+    const planFailure = await seedNoTargetPlan(
+      pool,
+      `reason-plan-${run}`,
+    )
+    await expect(
+      pool.query(
+        `UPDATE attendance_import_jobs
+            SET status = 'failed',
+                error = NULL,
+                w4_execution_reason_code = 'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH'
+          WHERE id = $1`,
+        [planFailure.jobId],
+      ),
+    ).resolves.toMatchObject({ rowCount: 1 })
+    await expect(
+      pool.query(
+        `UPDATE attendance_import_jobs
+            SET w4_execution_reason_code = 'ATTENDANCE_IMPORT_LEGACY_PLAN_VERSION_MISMATCH'
+          WHERE id = $1`,
+        [planFailure.jobId],
+      ),
+    ).rejects.toThrow(/W4C3A_V1_REASON_TRANSITION_DENIED/)
+    await expect(
+      pool.query(
+        `UPDATE attendance_import_jobs SET status = 'queued' WHERE id = $1`,
+        [planFailure.jobId],
+      ),
+    ).rejects.toThrow(
+      /W4C3A_V1_TERMINAL_IMMUTABLE|W4C3A_V1_REASON_TRANSITION_DENIED/,
+    )
+
+    const leakedError = await seedNoTargetPlan(
+      pool,
+      `reason-error-${run}`,
+    )
+    await expect(
+      pool.query(
+        `UPDATE attendance_import_jobs
+            SET status = 'failed',
+                error = 'must-not-leak',
+                w4_execution_reason_code = 'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH'
+          WHERE id = $1`,
+        [leakedError.jobId],
+      ),
+    ).rejects.toThrow(/chk_aij_w4_exec_reason/)
+
+    const unknownReason = await seedNoTargetPlan(
+      pool,
+      `reason-unknown-${run}`,
+    )
+    await expect(
+      pool.query(
+        `UPDATE attendance_import_jobs
+            SET status = 'failed',
+                w4_execution_reason_code = 'ATTENDANCE_IMPORT_UNKNOWN_REASON'
+          WHERE id = $1`,
+        [unknownReason.jobId],
+      ),
+    ).rejects.toThrow(/chk_aij_w4_exec_reason/)
+  })
+
   it('backfills and bumps record/group revisions, rejects moves, and rejects all ten truncates', async () => {
     const upgradeName = `${scratchName}_upgrade`
     const upgrade = await createScratch(adminPool, upgradeName)

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
@@ -30,6 +31,8 @@ import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceImportReservationLocksV1,
+  buildAttendanceCalculationRolloutAdvisoryKey,
+  buildAttendanceLegacyIdempotencyAdvisoryKey,
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
   buildAttendanceOperationalBulkTargetAdvisoryKey,
@@ -49,6 +52,44 @@ import {
 
 const dbUrl = process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
+const require = createRequire(import.meta.url)
+const syncCompatibility = (
+  require('../../../../plugins/plugin-attendance/index.cjs') as {
+    __attendanceW4C3aSyncCompatibilityForTests: {
+      acquireAttendanceSyncImportReservationLocks(
+        client: {
+          query(
+            text: string,
+            values?: unknown[],
+          ): Promise<unknown>
+        },
+        input: {
+          orgId: string
+          idempotencyKey: string
+          witness: {
+            rolloutKey: string
+            legacyIdempotencyKey: string
+            helperWaitMs: number
+            transactionLockTimeoutMs: number
+          }
+        },
+      ): Promise<void>
+      loadAttendanceV1ImportReservationForSync(
+        client: {
+          query(
+            text: string,
+            values?: unknown[],
+          ): Promise<unknown>
+        },
+        orgId: string,
+        idempotencyKey: string,
+      ): Promise<{ kind: 'in_progress' | 'conflict' } | null>
+      assertAttendanceV1ImportReservationAllowsSync(
+        reservation: { kind: 'in_progress' | 'conflict' } | null,
+      ): void
+    }
+  }
+).__attendanceW4C3aSyncCompatibilityForTests
 const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 const ORG = crypto.randomUUID()
 const POSTURE_ORG = crypto.randomUUID()
@@ -2099,6 +2140,197 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     )
     expect(syncRows.rows).toEqual([{ operations: 0 }])
   }, 30000)
+
+  it('replays the complete-plan P07 proof-vector rejection matrix on the successor schema', async () => {
+    const org = await loadOrgWitness(pool, SYNC_RACE_ORG)
+    const batchId = crypto.randomUUID()
+    const { input } = strictTwoItemInput(org, batchId, ADMIN_A)
+    await expect(
+      runSerializable(pool, (client) =>
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(client),
+          auth(ADMIN_A, SYNC_RACE_ORG),
+          input,
+        ),
+      ),
+    ).resolves.toMatchObject({ kind: 'created' })
+
+    const job = await pool.query(
+      `SELECT id::text AS id,
+              attendance_w4_job_proof_vector_valid(
+                w4_source_kind,
+                w4_batch_command_id,
+                w4_identity_proof_vector,
+                w4_item_count,
+                w4_operational_branch,
+                w4_distinct_target_count
+              ) AS valid
+         FROM attendance_import_jobs
+        WHERE org_id = $1 AND w4_batch_command_id = $2::uuid`,
+      [SYNC_RACE_ORG, batchId],
+    )
+    expect(job.rows).toEqual([
+      expect.objectContaining({ valid: true }),
+    ])
+    const jobId = String(job.rows[0].id)
+    const wrongNamespaceId = crypto.randomUUID()
+    const mutations = [
+      `(
+        SELECT jsonb_agg(value ORDER BY ordinal DESC)
+        FROM jsonb_array_elements(w4_identity_proof_vector)
+          WITH ORDINALITY AS entries(value, ordinal)
+      )`,
+      `w4_identity_proof_vector || jsonb_build_array(w4_identity_proof_vector -> 0)`,
+      `w4_identity_proof_vector - 1`,
+      `w4_identity_proof_vector || jsonb_build_array(w4_identity_proof_vector -> 1)`,
+      `jsonb_set(w4_identity_proof_vector, '{0,semanticFingerprint}', to_jsonb('${HEX_A}'::text))`,
+      `jsonb_set(w4_identity_proof_vector, '{0,derivedOperationId}', to_jsonb('${wrongNamespaceId}'::text))`,
+    ]
+    const client = await pool.connect()
+    try {
+      await client.query('SET session_replication_role = replica')
+      for (const mutation of mutations) {
+        await expect(
+          client.query(
+            `UPDATE attendance_import_jobs
+                SET w4_identity_proof_vector = ${mutation}
+              WHERE id = $1::uuid`,
+            [jobId],
+          ),
+        ).rejects.toMatchObject({
+          code: '23514',
+          constraint: 'chk_aij_w4_proof_vector',
+        })
+      }
+    } finally {
+      await client.query('SET session_replication_role = origin').catch(() => undefined)
+      client.release()
+    }
+
+    const unchanged = await pool.query(
+      `SELECT w4_identity_proof_vector
+         FROM attendance_import_jobs
+        WHERE id = $1::uuid`,
+      [jobId],
+    )
+    expect(unchanged.rows[0].w4_identity_proof_vector).toEqual(
+      input.job.w4IdentityProofVector,
+    )
+  })
+
+  it('rechecks queued, running, and failed V1 reservations through the sync compatibility bridge with zero effects', async () => {
+    const org = await loadOrgWitness(pool, SYNC_RACE_ORG)
+    const idempotencyKey = `sync-reservation-${run}`
+    const batchId = crypto.randomUUID()
+    const { input } = noTargetInput(
+      org,
+      batchId,
+      ADMIN_A,
+      ADMIN_A,
+      idempotencyKey,
+    )
+    await expect(
+      runSerializable(pool, (client) =>
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(client),
+          auth(ADMIN_A, SYNC_RACE_ORG),
+          input,
+        ),
+      ),
+    ).resolves.toMatchObject({ kind: 'created' })
+
+    const legacyKey = parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+      orgId: SYNC_RACE_ORG,
+      idempotencyKey,
+    })
+    const witness = {
+      rolloutKey: buildAttendanceCalculationRolloutAdvisoryKey(
+        parseCanonicalAttendanceRolloutOrgKeyV1(SYNC_RACE_ORG),
+      ).toString(),
+      legacyIdempotencyKey:
+        buildAttendanceLegacyIdempotencyAdvisoryKey(legacyKey).toString(),
+      helperWaitMs: 5000,
+      transactionLockTimeoutMs: 5000,
+    }
+    const probe = async (
+      expectedKind: 'in_progress' | 'conflict',
+      expectedCode: string,
+    ): Promise<void> => {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await syncCompatibility.acquireAttendanceSyncImportReservationLocks(
+          client,
+          {
+            orgId: SYNC_RACE_ORG,
+            idempotencyKey,
+            witness,
+          },
+        )
+        const reservation =
+          await syncCompatibility.loadAttendanceV1ImportReservationForSync(
+            client,
+            SYNC_RACE_ORG,
+            idempotencyKey,
+          )
+        expect(reservation).toEqual({ kind: expectedKind })
+        expect(() =>
+          syncCompatibility.assertAttendanceV1ImportReservationAllowsSync(
+            reservation,
+          ),
+        ).toThrow(expect.objectContaining({ code: expectedCode }))
+        await client.query('ROLLBACK')
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    }
+
+    await probe('in_progress', 'ATTENDANCE_OPERATION_IN_PROGRESS')
+    await pool.query(
+      `UPDATE attendance_import_jobs
+          SET status = 'running', started_at = now()
+        WHERE org_id = $1
+          AND idempotency_key = $2
+          AND w4_contract_version = 1`,
+      [SYNC_RACE_ORG, idempotencyKey],
+    )
+    await probe('in_progress', 'ATTENDANCE_OPERATION_IN_PROGRESS')
+    await pool.query(
+      `UPDATE attendance_import_jobs
+          SET status = 'failed',
+              error = NULL,
+              w4_execution_reason_code =
+                'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH',
+              finished_at = now()
+        WHERE org_id = $1
+          AND idempotency_key = $2
+          AND w4_contract_version = 1`,
+      [SYNC_RACE_ORG, idempotencyKey],
+    )
+    await probe('conflict', 'ATTENDANCE_OPERATION_BATCH_CONFLICT')
+
+    const effects = await pool.query(
+      `SELECT
+         (SELECT count(*)::int
+            FROM attendance_import_batches
+           WHERE id = $1::uuid OR idempotency_key = $2) AS batches,
+         (SELECT count(*)::int
+            FROM attendance_import_items
+           WHERE batch_id = $1::uuid) AS items,
+         (SELECT count(*)::int
+            FROM attendance_records
+           WHERE source_batch_id = $1::uuid) AS records,
+         (SELECT count(*)::int
+            FROM attendance_result_operations
+           WHERE org_id = $3
+             AND batch_command_id = $1::uuid) AS operations`,
+      [batchId, idempotencyKey, SYNC_RACE_ORG],
+    )
+    expect(effects.rows).toEqual([
+      { batches: 0, items: 0, records: 0, operations: 0 },
+    ])
+  })
 
   it('interlocks the class-10 reservation with the shipped two-int legacy idempotency lock in both orders', async () => {
     const idempotencyKey = `compat-${run}`

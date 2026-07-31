@@ -9544,6 +9544,144 @@ function mapImportBatchRow(row) {
 		  }
 		}
 
+		function normalizeAttendanceSyncImportLockWitness(value) {
+		  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+		  const rolloutKey = typeof value.rolloutKey === 'string' ? value.rolloutKey : ''
+		  const legacyIdempotencyKey = typeof value.legacyIdempotencyKey === 'string'
+		    ? value.legacyIdempotencyKey
+		    : ''
+		  const helperWaitMs = Number(value.helperWaitMs)
+		  const transactionLockTimeoutMs = Number(value.transactionLockTimeoutMs)
+		  if (
+		    !/^-?\d+$/.test(rolloutKey)
+		    || !/^-?\d+$/.test(legacyIdempotencyKey)
+		    || !Number.isInteger(helperWaitMs)
+		    || helperWaitMs <= 0
+		    || !Number.isInteger(transactionLockTimeoutMs)
+		    || transactionLockTimeoutMs <= 0
+		  ) {
+		    return null
+		  }
+		  try {
+		    const rollout = BigInt(rolloutKey)
+		    const legacy = BigInt(legacyIdempotencyKey)
+		    if (BigInt.asIntN(64, rollout) !== rollout || BigInt.asIntN(64, legacy) !== legacy) return null
+		  } catch (_error) {
+		    return null
+		  }
+		  return {
+		    rolloutKey,
+		    legacyIdempotencyKey,
+		    helperWaitMs,
+		    transactionLockTimeoutMs,
+		  }
+		}
+
+		function projectAttendanceImportExecutionReasonCode(row) {
+		  const isV1 = Number(row?.w4_contract_version) === 1
+		  const status = typeof row?.status === 'string' ? row.status.trim().toLowerCase() : ''
+		  const reason = typeof row?.w4_execution_reason_code === 'string'
+		    ? row.w4_execution_reason_code.trim()
+		    : ''
+		  return isV1 && status === 'failed' && reason
+		    ? { executionReasonCode: reason }
+		    : {}
+		}
+
+		function classifyAttendanceV1ImportReservationForSync(status) {
+		  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : ''
+		  return normalized === 'queued' || normalized === 'running'
+		    ? 'in_progress'
+		    : 'conflict'
+		}
+
+		function importQueryRows(result) {
+		  if (Array.isArray(result)) return result
+		  return Array.isArray(result?.rows) ? result.rows : []
+		}
+
+		function attendanceSyncImportLockBusyError(code) {
+		  const status = code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY' ? 503 : 409
+		  return new HttpError(status, code, code)
+		}
+
+		async function acquireAttendanceSyncImportReservationLocks(client, {
+		  orgId,
+		  idempotencyKey,
+		  witness,
+		  monotonicNow = () => performance.now(),
+		}) {
+		  const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+		  if (!clean) return
+		  const normalizedWitness = normalizeAttendanceSyncImportLockWitness(witness)
+		  if (!normalizedWitness) {
+		    await acquireImportIdempotencyLock(client, orgId, clean)
+		    return
+		  }
+
+		  const deadline = monotonicNow() + normalizedWitness.helperWaitMs
+		  const takeLock = async (sql, params, code) => {
+		    const remaining = Math.ceil(deadline - monotonicNow())
+		    if (remaining <= 0) throw attendanceSyncImportLockBusyError(code)
+		    await client.query("SELECT set_config('lock_timeout', $1, true)", [String(remaining)])
+		    try {
+		      await client.query(sql, params)
+		    } catch (error) {
+		      if (String(error?.code ?? '') === '55P03') {
+		        throw attendanceSyncImportLockBusyError(code)
+		      }
+		      throw error
+		    }
+		    if (monotonicNow() > deadline) throw attendanceSyncImportLockBusyError(code)
+		  }
+
+		  await takeLock(
+		    'SELECT pg_advisory_xact_lock_shared($1::bigint)',
+		    [normalizedWitness.rolloutKey],
+		    'ATTENDANCE_CALCULATION_ROLLOUT_BUSY'
+		  )
+		  await takeLock(
+		    'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+		    [String(orgId ?? ''), clean],
+		    'ATTENDANCE_OPERATION_IN_PROGRESS'
+		  )
+		  await takeLock(
+		    'SELECT pg_advisory_xact_lock($1::bigint)',
+		    [normalizedWitness.legacyIdempotencyKey],
+		    'ATTENDANCE_OPERATION_IN_PROGRESS'
+		  )
+		  await client.query("SELECT set_config('lock_timeout', $1, true)", [
+		    String(normalizedWitness.transactionLockTimeoutMs),
+		  ])
+		}
+
+		async function loadAttendanceV1ImportReservationForSync(client, orgId, idempotencyKey) {
+		  const result = await client.query(
+		    `SELECT id::text AS id, status
+		       FROM attendance_import_jobs
+		      WHERE org_id = $1
+		        AND idempotency_key = $2
+		        AND w4_contract_version = 1
+		      ORDER BY id
+		      FOR UPDATE`,
+		    [orgId, idempotencyKey]
+		  )
+		  const rows = importQueryRows(result)
+		  if (rows.length === 0) return null
+		  if (rows.length > 1) return { kind: 'conflict' }
+		  return {
+		    kind: classifyAttendanceV1ImportReservationForSync(rows[0].status),
+		  }
+		}
+
+		function assertAttendanceV1ImportReservationAllowsSync(reservation) {
+		  if (!reservation) return
+		  const code = reservation.kind === 'in_progress'
+		    ? 'ATTENDANCE_OPERATION_IN_PROGRESS'
+		    : 'ATTENDANCE_OPERATION_BATCH_CONFLICT'
+		  throw new HttpError(409, code, code)
+		}
+
 		async function acquireAttendanceRequestLock(client, orgId, userId, workDate, requestType) {
 		  try {
 		    await client.query(
@@ -22802,6 +22940,14 @@ module.exports = {
     collectRowUserIdentityValues,
     resolveRowUserId,
   },
+  __attendanceW4C3aSyncCompatibilityForTests: {
+    normalizeAttendanceSyncImportLockWitness,
+    projectAttendanceImportExecutionReasonCode,
+    classifyAttendanceV1ImportReservationForSync,
+    acquireAttendanceSyncImportReservationLocks,
+    loadAttendanceV1ImportReservationForSync,
+    assertAttendanceV1ImportReservationAllowsSync,
+  },
   __attendanceImportPathForTests: {
     getImportUploadPaths,
     resolveImportUploadWithinBase,
@@ -23126,10 +23272,27 @@ module.exports = {
     // zone must never become a future calculation input, so a timezone-carrying write
     // FAILS CLOSED when the port is absent instead of falling back to the looser local
     // Intl probe (which accepts offset forms like "+05:00"). Reads and writes that do
-    // not carry a timezone value are untouched.
-    const attendanceW4SegmentCalculationPort = context?.services?.attendanceW4SegmentCalculation ?? null
-    // Returns true when it has already written the response (invalid zone / port missing); callers must return.
-    const respondUnlessStrictIanaTimezoneWrite = (res, zone, fieldName = 'timezone') => {
+	    // not carry a timezone value are untouched.
+	    const attendanceW4SegmentCalculationPort = context?.services?.attendanceW4SegmentCalculation ?? null
+	    const buildAttendanceSyncImportReservationLockWitness = ({ orgId, idempotencyKey }) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.buildLegacyImportReservationLockWitness !== 'function') return null
+	      try {
+	        const witness = port.buildLegacyImportReservationLockWitness({ orgId, idempotencyKey })
+	        if (!normalizeAttendanceSyncImportLockWitness(witness)) {
+	          throw new Error('ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_INVALID')
+	        }
+	        return witness
+	      } catch (_error) {
+	        throw new HttpError(
+	          503,
+	          'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING',
+	          'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING'
+	        )
+	      }
+	    }
+	    // Returns true when it has already written the response (invalid zone / port missing); callers must return.
+	    const respondUnlessStrictIanaTimezoneWrite = (res, zone, fieldName = 'timezone') => {
       if (zone === undefined || zone === null) return false
       const port = attendanceW4SegmentCalculationPort
       if (!port || typeof port.validateIanaTimezone !== 'function') {
@@ -25392,13 +25555,11 @@ module.exports = {
 	        failedRows,
 	        skippedCount,
 	        skippedRows,
-	        elapsedMs,
-	        throughputRowsPerSec,
-	        error: row.error ?? null,
-	        ...(isV1 && row.w4_execution_reason_code
-	          ? { executionReasonCode: row.w4_execution_reason_code }
-	          : {}),
-	        preview,
+		        elapsedMs,
+		        throughputRowsPerSec,
+		        error: row.error ?? null,
+		        ...projectAttendanceImportExecutionReasonCode(row),
+		        preview,
 	        startedAt: row.started_at ?? null,
 	        finishedAt: row.finished_at ?? null,
 	        createdAt: row.created_at ?? null,
@@ -36183,25 +36344,45 @@ module.exports = {
 	          let importedCount = 0
 	          const skipped = []
 	          const idempotencyEnabled = Boolean(idempotencyKey) && await hasImportBatchIdempotencyColumn(db)
-	          const batchId = randomUUID()
-	          let batchMeta = null
-	          let idempotentInTransaction = null
+		          const batchId = randomUUID()
+		          let batchMeta = null
+		          let idempotentInTransaction = null
+		          const syncReservationWitness = idempotencyKey
+		            ? buildAttendanceSyncImportReservationLockWitness({ orgId, idempotencyKey })
+		            : null
 
           await db.transaction(async (trx) => {
-	            await applyImportHeavyTransactionTimeout(trx)
-	            if (idempotencyKey) {
-	              await acquireImportIdempotencyLock(trx, orgId, idempotencyKey)
-	              const existing = await loadIdempotentImportBatch(
-	                trx,
-	                orgId,
+		            await applyImportHeavyTransactionTimeout(trx)
+		            if (idempotencyKey) {
+		              await acquireAttendanceSyncImportReservationLocks(trx, {
+		                orgId,
+		                idempotencyKey,
+		                witness: syncReservationWitness,
+		              })
+		              const existing = await loadIdempotentImportBatch(
+		                trx,
+		                orgId,
 	                idempotencyKey,
 	                importAccess.fullImport ? undefined : { createdBy: requesterId }
 	              )
               if (existing) {
-                idempotentInTransaction = existing
-                return
-              }
-            }
+	                idempotentInTransaction = existing
+	                return
+	              }
+	              const reservation = await loadAttendanceV1ImportReservationForSync(
+	                trx,
+	                orgId,
+	                idempotencyKey
+	              )
+	              if (!syncReservationWitness && reservation) {
+	                throw new HttpError(
+	                  503,
+	                  'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING',
+	                  'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING'
+	                )
+	              }
+	              assertAttendanceV1ImportReservationAllowsSync(reservation)
+	            }
 
             let groupIdMap = null
             let groupCreated = 0

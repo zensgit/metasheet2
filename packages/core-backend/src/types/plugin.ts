@@ -1217,6 +1217,20 @@ export interface PluginServices {
       | { kind: 'failed'; reason: string }
       | { kind: 'completed'; response: unknown }
     >
+    /**
+     * W4C-3a — canonical lock witnesses for the synchronous import compatibility
+     * bridge. Core owns key derivation; plugin-attendance only acquires these
+     * exact signed keys inside its existing source/effect transaction.
+     */
+    buildLegacyImportReservationLockWitness(input: {
+      orgId: string
+      idempotencyKey: string
+    }): {
+      rolloutKey: string
+      legacyIdempotencyKey: string
+      helperWaitMs: number
+      transactionLockTimeoutMs: number
+    }
   }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService

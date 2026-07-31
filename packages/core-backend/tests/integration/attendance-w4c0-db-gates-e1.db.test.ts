@@ -1403,8 +1403,9 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
       [org],
     )
     expect(v1Rows.rows[0].n).toBe(0)
-    // This suite does not mint complete plans. Frozen-field UPDATE and
-    // execution-reason pairing remain explicit #4688 Draft/HOLD work.
+    // This predecessor suite does not mint complete plans. The successor
+    // W4C-3a migration suite replays every frozen-field UPDATE and the closed
+    // execution-reason/status matrix on persisted complete plans.
   })
 
   it('P07 successor enqueue seam rejects planless V1 rows before proof-vector validation', async () => {
@@ -1426,8 +1427,8 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
     expect(String((caught as Error).message)).toMatch(/W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED/)
     const rows = await pool.query('SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1', [org])
     expect(rows.rows[0].n).toBe(0)
-    // Complete-plan proof-vector discrimination is not covered here and keeps
-    // #4688 Draft/HOLD until the successor matrix is independently proven.
+    // Complete-plan proof-vector discrimination is reloaded by the W4C-3a
+    // enqueue suite against the successor six-argument validator.
   })
 
   it('retires the predecessor P07 reservation before SQL because it cannot persist a complete W4C-3a plan', async () => {

@@ -4,6 +4,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
@@ -12,6 +13,38 @@ const ROOT = path.resolve(
   '../../../../..',
 )
 const PLUGIN = path.join(ROOT, 'plugins/plugin-attendance/index.cjs')
+const require = createRequire(import.meta.url)
+const attendancePlugin = require(PLUGIN) as {
+  __attendanceW4C3aSyncCompatibilityForTests: {
+    normalizeAttendanceSyncImportLockWitness(value: unknown): {
+      rolloutKey: string
+      legacyIdempotencyKey: string
+      helperWaitMs: number
+      transactionLockTimeoutMs: number
+    } | null
+    projectAttendanceImportExecutionReasonCode(row: unknown): Record<string, string>
+    classifyAttendanceV1ImportReservationForSync(status: unknown): 'in_progress' | 'conflict'
+    acquireAttendanceSyncImportReservationLocks(
+      client: { query(text: string, values?: unknown[]): Promise<unknown> },
+      input: {
+        orgId: string
+        idempotencyKey: string
+        witness: unknown
+        monotonicNow?: () => number
+      },
+    ): Promise<void>
+    loadAttendanceV1ImportReservationForSync(
+      client: { query(text: string, values?: unknown[]): Promise<unknown> },
+      orgId: string,
+      idempotencyKey: string,
+    ): Promise<{ kind: 'in_progress' | 'conflict' } | null>
+    assertAttendanceV1ImportReservationAllowsSync(
+      reservation: { kind: 'in_progress' | 'conflict' } | null,
+    ): void
+  }
+}
+const syncCompatibility =
+  attendancePlugin.__attendanceW4C3aSyncCompatibilityForTests
 
 describe('plugin V1 jobId-only boundary (static)', () => {
   const source = fs.readFileSync(PLUGIN, 'utf8')
@@ -102,10 +135,200 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       source.indexOf('const mapImportJobRow'),
       source.indexOf('const estimateCsvRowCount'),
     )
-    expect(mapper).toMatch(
-      /\.\.\.\(isV1 && row\.w4_execution_reason_code[\s\S]*executionReasonCode: row\.w4_execution_reason_code/,
-    )
+    expect(mapper).toContain('...projectAttendanceImportExecutionReasonCode(row)')
     expect(mapper).toContain('error: row.error ?? null')
+  })
+
+  it('projects a reason only for failed V1 rows with an exact conditional key shape', () => {
+    expect(
+      syncCompatibility.projectAttendanceImportExecutionReasonCode({
+        w4_contract_version: 1,
+        status: 'failed',
+        w4_execution_reason_code: 'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH',
+      }),
+    ).toEqual({
+      executionReasonCode: 'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH',
+    })
+    for (const row of [
+      {
+        w4_contract_version: null,
+        status: 'failed',
+        w4_execution_reason_code: 'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH',
+      },
+      {
+        w4_contract_version: 1,
+        status: 'completed',
+        w4_execution_reason_code: 'ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH',
+      },
+      {
+        w4_contract_version: 1,
+        status: 'failed',
+        w4_execution_reason_code: null,
+      },
+    ]) {
+      expect(
+        Object.keys(
+          syncCompatibility.projectAttendanceImportExecutionReasonCode(row),
+        ),
+      ).toEqual([])
+    }
+  })
+
+  it('takes shared rollout, shipped two-int, and canonical class-10 locks under one deadline', async () => {
+    const calls: Array<{ text: string; values: unknown[] }> = []
+    let tick = 0
+    await syncCompatibility.acquireAttendanceSyncImportReservationLocks(
+      {
+        query: async (text, values = []) => {
+          calls.push({ text, values })
+          return []
+        },
+      },
+      {
+        orgId: 'default',
+        idempotencyKey: 'sync-key',
+        witness: {
+          rolloutKey: '1',
+          legacyIdempotencyKey: '-2',
+          helperWaitMs: 5000,
+          transactionLockTimeoutMs: 5000,
+        },
+        monotonicNow: () => tick++,
+      },
+    )
+    expect(calls.map((call) => call.text)).toEqual([
+      "SELECT set_config('lock_timeout', $1, true)",
+      'SELECT pg_advisory_xact_lock_shared($1::bigint)',
+      "SELECT set_config('lock_timeout', $1, true)",
+      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+      "SELECT set_config('lock_timeout', $1, true)",
+      'SELECT pg_advisory_xact_lock($1::bigint)',
+      "SELECT set_config('lock_timeout', $1, true)",
+    ])
+    expect(calls[1]?.values).toEqual(['1'])
+    expect(calls[3]?.values).toEqual(['default', 'sync-key'])
+    expect(calls[5]?.values).toEqual(['-2'])
+    expect(calls[6]?.values).toEqual(['5000'])
+  })
+
+  it('maps only helper lock timeout to values-free busy postures', async () => {
+    const sharedBusy = { code: '55P03', message: 'raw-shared-lock-detail' }
+    await expect(
+      syncCompatibility.acquireAttendanceSyncImportReservationLocks(
+        {
+          query: async (text) => {
+            if (text.includes('pg_advisory_xact_lock_shared')) throw sharedBusy
+            return []
+          },
+        },
+        {
+          orgId: 'default',
+          idempotencyKey: 'sync-key',
+          witness: {
+            rolloutKey: '1',
+            legacyIdempotencyKey: '-2',
+            helperWaitMs: 5000,
+            transactionLockTimeoutMs: 5000,
+          },
+        },
+      ),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY',
+      message: 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY',
+    })
+
+    const databaseError = { code: 'XX000', message: 'database failure' }
+    await expect(
+      syncCompatibility.acquireAttendanceSyncImportReservationLocks(
+        {
+          query: async (text) => {
+            if (text.includes('pg_advisory_xact_lock_shared')) {
+              throw databaseError
+            }
+            return []
+          },
+        },
+        {
+          orgId: 'default',
+          idempotencyKey: 'sync-key',
+          witness: {
+            rolloutKey: '1',
+            legacyIdempotencyKey: '-2',
+            helperWaitMs: 5000,
+            transactionLockTimeoutMs: 5000,
+          },
+        },
+      ),
+    ).rejects.toBe(databaseError)
+  })
+
+  it('rechecks V1 reservations under row lock and returns closed sync postures', async () => {
+    const calls: Array<{ text: string; values: unknown[] }> = []
+    const queued = await syncCompatibility.loadAttendanceV1ImportReservationForSync(
+      {
+        query: async (text, values = []) => {
+          calls.push({ text, values })
+          return [{ id: 'job-1', status: 'queued' }]
+        },
+      },
+      'org-1',
+      'sync-key',
+    )
+    expect(queued).toEqual({ kind: 'in_progress' })
+    expect(calls[0]?.text).toMatch(/w4_contract_version = 1[\s\S]*FOR UPDATE/)
+    expect(calls[0]?.values).toEqual(['org-1', 'sync-key'])
+    expect(() =>
+      syncCompatibility.assertAttendanceV1ImportReservationAllowsSync(queued),
+    ).toThrow(
+      expect.objectContaining({
+        status: 409,
+        code: 'ATTENDANCE_OPERATION_IN_PROGRESS',
+      }),
+    )
+
+    const failed = await syncCompatibility.loadAttendanceV1ImportReservationForSync(
+      {
+        query: async () => [{ id: 'job-2', status: 'failed' }],
+      },
+      'org-1',
+      'sync-key',
+    )
+    expect(failed).toEqual({ kind: 'conflict' })
+    expect(() =>
+      syncCompatibility.assertAttendanceV1ImportReservationAllowsSync(failed),
+    ).toThrow(
+      expect.objectContaining({
+        status: 409,
+        code: 'ATTENDANCE_OPERATION_BATCH_CONFLICT',
+      }),
+    )
+  })
+
+  it('wires the sync route recheck before effect DML', () => {
+    const syncRouteStart = source.indexOf(
+      "'/api/attendance/import/commit'",
+    )
+    const syncRoute = source.slice(
+      syncRouteStart,
+      source.indexOf("'/api/attendance/import/preview-async'", syncRouteStart),
+    )
+    const lock = syncRoute.indexOf(
+      'acquireAttendanceSyncImportReservationLocks',
+    )
+    const batchRecheck = syncRoute.indexOf('loadIdempotentImportBatch', lock)
+    const reservationRecheck = syncRoute.indexOf(
+      'loadAttendanceV1ImportReservationForSync',
+      batchRecheck,
+    )
+    const firstEffect = syncRoute.indexOf(
+      'INSERT INTO attendance_import_batches',
+      reservationRecheck,
+    )
+    expect(lock).toBeGreaterThan(-1)
+    expect(batchRecheck).toBeGreaterThan(lock)
+    expect(reservationRecheck).toBeGreaterThan(batchRecheck)
+    expect(firstEffect).toBeGreaterThan(reservationRecheck)
   })
 
   it('drains durable upload cleanup immediately and during startup recovery', () => {
