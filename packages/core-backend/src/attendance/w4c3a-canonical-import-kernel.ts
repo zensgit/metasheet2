@@ -14,6 +14,11 @@ import {
   computeAttendanceSemanticInputFingerprintV1,
 } from './w4c0-fingerprints'
 import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerprints'
+import {
+  verifyAttendanceImportAttributionSnapshotV1,
+  verifyAttendanceImportPolicySourceFingerprintV1,
+  type AttendanceImportPolicySourceProjectionV1,
+} from './w4c3a-import-proof'
 import type {
   AttendanceAttributionSnapshotV1,
   AttendanceEvidenceV1,
@@ -68,6 +73,7 @@ type CanonicalImportFrozenSourceV1 = Readonly<{
   attribution: AttendanceAttributionSnapshotV1
   context: FrozenAttendanceContextV1 | null
   sourceFingerprint: string
+  sourceDefinition: AttendanceImportPolicySourceProjectionV1
   ruleVersion: string
   engineVersion: string | null
   output: CanonicalImportPolicyOutputV1
@@ -139,75 +145,6 @@ function parseImportPolicyOutput(value: unknown): CanonicalImportPolicyOutputV1 
   })
 }
 
-function parseImportAttribution(value: unknown): AttendanceAttributionSnapshotV1 {
-  const root = exactRecord(value, ['posture', ...(isPlainRecord(value) && value.posture === 'resolved_v2' ? ['value'] : [
-    'sourceSchemaVersion',
-    'reason',
-    'sourceFingerprint',
-  ])])
-  if (root.posture === 'unsupported') {
-    if (
-      root.sourceSchemaVersion !== null &&
-      root.sourceSchemaVersion !== 0 &&
-      root.sourceSchemaVersion !== 1
-    ) {
-      throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
-    }
-    if (!['legacy_v1', 'missing', 'ambiguous', 'unresolved'].includes(String(root.reason))) {
-      throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
-    }
-    if (
-      root.sourceFingerprint !== null &&
-      (typeof root.sourceFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(root.sourceFingerprint))
-    ) {
-      throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
-    }
-    return root as unknown as AttendanceAttributionSnapshotV1
-  }
-  if (root.posture !== 'resolved_v2') throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
-  const v2 = exactRecord(root.value, [
-    'schemaVersion',
-    'resolverVersion',
-    'orgId',
-    'userId',
-    'workDate',
-    'shiftId',
-    'reasonCode',
-    'resolvedAt',
-    'absoluteWindow',
-    'attributionWindow',
-    'attributionTailMinutes',
-    'extendedByApprovedOvertime',
-    'windowEvidenceFingerprint',
-    'source',
-  ])
-  exactRecord(v2.absoluteWindow, ['startAt', 'endAt'])
-  exactRecord(v2.attributionWindow, ['startAt', 'endAt'])
-  if (
-    v2.schemaVersion !== 2 ||
-    !Number.isSafeInteger(v2.attributionTailMinutes) ||
-    Number(v2.attributionTailMinutes) < 0 ||
-    typeof v2.extendedByApprovedOvertime !== 'boolean' ||
-    typeof v2.windowEvidenceFingerprint !== 'string' ||
-    !/^[0-9a-f]{64}$/.test(v2.windowEvidenceFingerprint) ||
-    !['live_resolution', 'request_creation', 'import_resolution', 'scheduled_resolution'].includes(
-      String(v2.source),
-    )
-  ) {
-    throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
-  }
-  for (const key of ['resolverVersion', 'orgId', 'userId', 'workDate', 'shiftId', 'reasonCode', 'resolvedAt']) {
-    nonEmptyString(v2[key])
-  }
-  for (const window of [v2.absoluteWindow, v2.attributionWindow]) {
-    const shape = window as Record<string, unknown>
-    normalizeInstant(shape.startAt)
-    normalizeInstant(shape.endAt)
-  }
-  normalizeInstant(v2.resolvedAt)
-  return root as unknown as AttendanceAttributionSnapshotV1
-}
-
 function parseImportContext(value: unknown): FrozenAttendanceContextV1 | null {
   if (value === null) return null
   const root = exactRecord(value, [
@@ -271,8 +208,8 @@ function parseCanonicalImportFreeze(write: LegacyImportRecordWritePlanV1): Canon
   const attributionRoot = exactRecord(write.attributionSnapshot, ['schemaVersion', 'sources'])
   const policyRoot = exactRecord(write.policySnapshot, ['schemaVersion', 'sources'])
   if (
-    attributionRoot.schemaVersion !== 1 ||
-    policyRoot.schemaVersion !== 1 ||
+    attributionRoot.schemaVersion !== 2 ||
+    policyRoot.schemaVersion !== 2 ||
     !Array.isArray(attributionRoot.sources) ||
     !Array.isArray(policyRoot.sources) ||
     attributionRoot.sources.length !== write.sourceOrdinals.length ||
@@ -285,8 +222,7 @@ function parseCanonicalImportFreeze(write: LegacyImportRecordWritePlanV1): Canon
     const row = exactRecord(raw, [
       'sourceOrdinal',
       'sourceFingerprint',
-      'ruleVersion',
-      'engineVersion',
+      'sourceDefinition',
       'output',
     ])
     const sourceOrdinal = nullableNonNegativeInteger(row.sourceOrdinal)
@@ -294,29 +230,55 @@ function parseCanonicalImportFreeze(write: LegacyImportRecordWritePlanV1): Canon
       throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
     }
     const sourceFingerprint = nonEmptyString(row.sourceFingerprint)
-    if (!/^[0-9a-f]{64}$/.test(sourceFingerprint)) {
-      throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
-    }
+    const sourceDefinition = verifyAttendanceImportPolicySourceFingerprintV1({
+      sourceDefinition: row.sourceDefinition,
+      sourceFingerprint,
+    })
     policyByOrdinal.set(sourceOrdinal, {
       sourceOrdinal,
       sourceFingerprint,
-      ruleVersion: nonEmptyString(row.ruleVersion),
-      engineVersion: row.engineVersion === null ? null : nonEmptyString(row.engineVersion),
+      sourceDefinition,
+      ruleVersion: sourceDefinition.ruleVersion,
+      engineVersion: sourceDefinition.engineVersion,
       output: parseImportPolicyOutput(row.output),
     })
   }
   const sources = attributionRoot.sources.map((raw, index) => {
-    const row = exactRecord(raw, ['sourceOrdinal', 'attribution', 'context'])
+    const row = exactRecord(raw, [
+      'sourceOrdinal',
+      'attribution',
+      'context',
+      'importAttributionReconstruction',
+    ])
     const sourceOrdinal = nullableNonNegativeInteger(row.sourceOrdinal)
     const expectedOrdinal = write.sourceOrdinals[index]
     const policy = sourceOrdinal === null ? null : policyByOrdinal.get(sourceOrdinal)
     if (sourceOrdinal !== expectedOrdinal || !policy) {
       throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
     }
+    const attribution = verifyAttendanceImportAttributionSnapshotV1({
+      attribution: row.attribution,
+      reconstruction: row.importAttributionReconstruction,
+      expectedIdentity: {
+        orgId: write.orgId,
+        userId: write.userId,
+        workDate: write.workDate,
+      },
+    })
+    const context = parseImportContext(row.context)
+    if (
+      context !== null &&
+      (context.orgId !== write.orgId ||
+        context.userId !== write.userId ||
+        context.workDate !== write.workDate ||
+        (attribution.posture === 'resolved_v2' && context.shiftId !== attribution.value.shiftId))
+    ) {
+      throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
+    }
     return Object.freeze({
       ...policy,
-      attribution: parseImportAttribution(row.attribution),
-      context: parseImportContext(row.context),
+      attribution,
+      context,
     })
   })
   if (policyByOrdinal.size !== sources.length) throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
@@ -324,10 +286,15 @@ function parseCanonicalImportFreeze(write: LegacyImportRecordWritePlanV1): Canon
   const firstDefinition = canonicalAttendanceJsonV1({
     attribution: first.attribution,
     context: first.context,
+    sourceDefinition: first.sourceDefinition,
   })
   const freezeConflict = sources.some(
     (source) =>
-      canonicalAttendanceJsonV1({ attribution: source.attribution, context: source.context }) !==
+      canonicalAttendanceJsonV1({
+        attribution: source.attribution,
+        context: source.context,
+        sourceDefinition: source.sourceDefinition,
+      }) !==
       firstDefinition,
   )
   return Object.freeze({
@@ -340,6 +307,13 @@ function parseCanonicalImportFreeze(write: LegacyImportRecordWritePlanV1): Canon
     }),
     freezeConflict,
   })
+}
+
+/** Validates the sealed attribution and policy-source evidence before import execution. */
+export function validateAttendanceCanonicalImportFreezeV1(
+  write: LegacyImportRecordWritePlanV1,
+): void {
+  parseCanonicalImportFreeze(write)
 }
 
 function unsupportedImportAttribution(): AttendanceAttributionSnapshotV1 {
