@@ -27,6 +27,7 @@
     <div v-if="workspaceEnabled" class="approval-form-builder__workspace">
       <ApprovalFormPalette
         :read-only="readOnly || !structuralMutationEnabled"
+        :attachment-authoring-enabled="attachmentAuthoringEnabled"
         @add="appendFieldOfType"
       />
 
@@ -186,6 +187,7 @@
           :record-link-catalog-loading="recordLinkCatalogLoading"
           :record-link-catalog-loaded="recordLinkCatalogLoaded"
           :record-link-catalog-error="recordLinkCatalogError"
+          :attachment-authoring-enabled="attachmentAuthoringEnabled"
           @retry-record-link-catalog="emit('retry-record-link-catalog')"
           @field-type-change="emit('field-type-change', $event)"
         />
@@ -230,6 +232,7 @@
           :record-link-catalog-loading="recordLinkCatalogLoading"
           :record-link-catalog-loaded="recordLinkCatalogLoaded"
           :record-link-catalog-error="recordLinkCatalogError"
+          :attachment-authoring-enabled="attachmentAuthoringEnabled"
           @retry-record-link-catalog="emit('retry-record-link-catalog')"
           @field-type-change="emit('field-type-change', $event)"
         />
@@ -243,7 +246,7 @@ import { computed, ref, watch } from 'vue'
 import { ArrowDown, ArrowUp, Delete, Plus, Rank } from '@element-plus/icons-vue'
 import ApprovalFieldInspector from './ApprovalFieldInspector.vue'
 import ApprovalFormPalette from './ApprovalFormPalette.vue'
-import type { AuthorableFieldType, FieldAuthoringDraft } from '../templateAuthoring'
+import type { FieldAuthoringDraft, FormAuthoringFieldType } from '../templateAuthoring'
 import {
   APPROVAL_FORM_FIELD_MOVE_MIME,
   APPROVAL_FORM_FIELD_TYPE_LABELS,
@@ -262,6 +265,7 @@ const props = defineProps<{
   recordLinkCatalogError: string
   structuralMutationEnabled: boolean
   structuralMutationReason: string
+  attachmentAuthoringEnabled: boolean
 }>()
 
 const fields = defineModel<FieldAuthoringDraft[]>('fields', { required: true })
@@ -269,7 +273,7 @@ const fields = defineModel<FieldAuthoringDraft[]>('fields', { required: true })
 const emit = defineEmits<{
   'retry-record-link-catalog': []
   'field-type-change': [field: FieldAuthoringDraft]
-  'add-field': [request: { type: AuthorableFieldType; insertionIndex: number }]
+  'add-field': [request: { type: FormAuthoringFieldType; insertionIndex: number }]
   'remove-field': [request: { localId: string }]
   'move-field': [request: { localId: string; targetIndex: number }]
 }>()
@@ -305,14 +309,15 @@ function selectField(localId: string): void {
   selectedFieldLocalId.value = localId
 }
 
-function requestAddField(type: AuthorableFieldType, index: number): void {
+function requestAddField(type: FormAuthoringFieldType, index: number): void {
   if (props.readOnly || !props.structuralMutationEnabled) return
+  if (type === 'attachment' && !props.attachmentAuthoringEnabled) return
   const insertionIndex = Math.max(0, Math.min(index, fields.value.length))
   emit('add-field', { type, insertionIndex })
   selectedFieldInsertionIndex.value = null
 }
 
-function appendFieldOfType(type: AuthorableFieldType): void {
+function appendFieldOfType(type: FormAuthoringFieldType): void {
   requestAddField(type, selectedFieldInsertionIndex.value ?? fields.value.length)
 }
 
@@ -373,7 +378,7 @@ function onFieldInsertionDrop(event: DragEvent, insertionIndex: number): void {
     resetFieldDragState()
     return
   }
-  const paletteType = readPaletteFieldType(event.dataTransfer)
+  const paletteType = readPaletteFieldType(event.dataTransfer, props.attachmentAuthoringEnabled)
   if (paletteType) {
     requestAddField(paletteType, insertionIndex)
     resetFieldDragState()

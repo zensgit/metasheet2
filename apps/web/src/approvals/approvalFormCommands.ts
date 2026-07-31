@@ -1,7 +1,7 @@
 import type { DetailColumnDraft } from './detailField'
 import type {
-  AuthorableFieldType,
   FieldAuthoringDraft,
+  FormAuthoringFieldType,
   TemplateAuthoringDraft,
 } from './templateAuthoring'
 
@@ -83,6 +83,14 @@ export interface CompleteFormIdentityHistory {
   readonly localIds: readonly string[]
 }
 
+/**
+ * Capability is a command input rather than an inferred UI condition. This keeps
+ * attachment creation unavailable to every flag-OFF caller, including drag payloads.
+ */
+export interface FormAuthoringCapabilities {
+  readonly attachmentAuthoringEnabled?: boolean
+}
+
 export type FormCommandResult =
   | {
       ok: true
@@ -95,7 +103,7 @@ export type FormCommandResult =
       dependencies: readonly FormFieldDependency[]
     }
 
-const FIELD_LABELS: Record<AuthorableFieldType, string> = {
+const FIELD_LABELS: Record<FormAuthoringFieldType, string> = {
   text: '单行文本',
   textarea: '多行文本',
   number: '数字',
@@ -106,10 +114,11 @@ const FIELD_LABELS: Record<AuthorableFieldType, string> = {
   user: '人员',
   detail: '明细',
   'record-link': '关联记录',
+  attachment: '附件',
 }
 
-const AUTHORABLE_FIELD_TYPES = new Set<AuthorableFieldType>(
-  Object.keys(FIELD_LABELS) as AuthorableFieldType[],
+const FORM_AUTHORING_FIELD_TYPES = new Set<FormAuthoringFieldType>(
+  Object.keys(FIELD_LABELS) as FormAuthoringFieldType[],
 )
 
 function successful(
@@ -144,7 +153,7 @@ function nonBlank(value: unknown): value is string {
 }
 
 function isUsableIdentity(
-  fieldType: AuthorableFieldType,
+  fieldType: FormAuthoringFieldType,
   identity: FormFieldIdentity | undefined,
 ): identity is FormFieldIdentity {
   if (
@@ -213,12 +222,15 @@ function identityConflicts(
  */
 export function addFormField(
   draft: TemplateAuthoringDraft,
-  fieldType: AuthorableFieldType,
+  fieldType: FormAuthoringFieldType,
   identity: FormFieldIdentity,
   history: CompleteFormIdentityHistory,
   afterLocalId?: string,
+  capabilities: FormAuthoringCapabilities = {},
 ): FormCommandResult {
-  if (!AUTHORABLE_FIELD_TYPES.has(fieldType))
+  if (!FORM_AUTHORING_FIELD_TYPES.has(fieldType))
+    return rejected('unsupported_field_type')
+  if (fieldType === 'attachment' && capabilities.attachmentAuthoringEnabled !== true)
     return rejected('unsupported_field_type')
   if (!isUsableIdentity(fieldType, identity))
     return rejected('invalid_field_identity')

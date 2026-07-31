@@ -1,6 +1,7 @@
 import {
   AUTHORABLE_FIELD_TYPES,
   type AuthorableFieldType,
+  type FormAuthoringFieldType,
 } from "./templateAuthoring";
 
 export const APPROVAL_FORM_PALETTE_MIME =
@@ -9,7 +10,7 @@ export const APPROVAL_FORM_FIELD_MOVE_MIME =
   "application/x-metasheet-approval-field-index";
 
 export const APPROVAL_FORM_FIELD_TYPE_LABELS: Record<
-  AuthorableFieldType,
+  FormAuthoringFieldType,
   string
 > = {
   text: "单行文本",
@@ -22,6 +23,7 @@ export const APPROVAL_FORM_FIELD_TYPE_LABELS: Record<
   user: "用户",
   detail: "明细",
   "record-link": "关联记录",
+  attachment: "附件",
 };
 
 export const APPROVAL_FORM_PALETTE_TYPES: readonly AuthorableFieldType[] =
@@ -29,10 +31,23 @@ export const APPROVAL_FORM_PALETTE_TYPES: readonly AuthorableFieldType[] =
 
 const AUTHORABLE_FIELD_TYPE_SET = new Set<string>(AUTHORABLE_FIELD_TYPES);
 
+/** Attachment is opt-in even when the canvas itself is enabled. */
+export function approvalFormPaletteTypes(
+  attachmentAuthoringEnabled: boolean,
+): readonly FormAuthoringFieldType[] {
+  return attachmentAuthoringEnabled
+    ? [...APPROVAL_FORM_PALETTE_TYPES, "attachment"]
+    : APPROVAL_FORM_PALETTE_TYPES;
+}
+
 export function readPaletteFieldType(
   dataTransfer: DataTransfer | null,
-): AuthorableFieldType | null {
+  attachmentAuthoringEnabled = false,
+): FormAuthoringFieldType | null {
   const value = dataTransfer?.getData(APPROVAL_FORM_PALETTE_MIME) ?? "";
+  if (value === "attachment") {
+    return attachmentAuthoringEnabled ? "attachment" : null;
+  }
   return AUTHORABLE_FIELD_TYPE_SET.has(value)
     ? (value as AuthorableFieldType)
     : null;

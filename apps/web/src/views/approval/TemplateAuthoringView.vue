@@ -250,6 +250,7 @@
         v-show="activeAuthoringSection === 'fields'"
         v-model:fields="draft.fields"
         :workspace-enabled="canvasV2Enabled"
+        :attachment-authoring-enabled="attachmentAuthoringEnabled"
         :read-only="readOnly"
         :record-link-bases="recordLinkBases"
         :record-link-sheets="recordLinkSheets"
@@ -944,7 +945,10 @@ import {
   updateTemplate,
   type ApprovalRoutePreview,
 } from '../../approvals/api'
-import type { ApprovalTemplateFormAuthoringContextDTO } from '../../types/approval'
+import type {
+  ApprovalTemplateDetailDTO,
+  ApprovalTemplateFormAuthoringContextDTO,
+} from '../../types/approval'
 import { describeTemplateAuthoringError } from '../../approvals/templateAuthoringErrors'
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
@@ -990,7 +994,7 @@ import {
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
   type ApprovalStepDraft,
-  type AuthorableFieldType,
+  type FormAuthoringFieldType,
   type ConditionBranchEdit,
   type ConditionNodeEdit,
   type ConditionRuleEdit,
@@ -1056,6 +1060,10 @@ const router = useRouter()
 const { canManageTemplates } = useApprovalPermissions()
 const { features: productFeatures } = useFeatureFlags()
 const canvasV2Enabled = computed(() => productFeatures.value.approvalCanvasV2 === true)
+// Attachment authoring is a separate rollout from the canvas. Neither flag implies the other.
+const attachmentAuthoringEnabled = computed(
+  () => canvasV2Enabled.value && productFeatures.value.approvalAttachments === true,
+)
 
 const loading = ref(false)
 const saving = ref(false)
@@ -1064,6 +1072,7 @@ const creatingPresetId = ref<CommonApprovalTemplatePresetId | null>(null)
 const loadError = ref<string | null>(null)
 const validationErrors = ref<string[]>([])
 const unsupportedReason = ref<string | null>(null)
+const loadedTemplateForAuthoring = ref<ApprovalTemplateDetailDTO | null>(null)
 // G-1: a COMPLEX (condition/parallel/cc/non-linear) graph renders read-only but is NOT
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
@@ -1077,6 +1086,14 @@ const formAuthoringContextLoading = ref(false)
 const formAuthoringContextError = ref('')
 const retiredFormPersistentIds = ref<string[]>([])
 const retiredFormLocalIds = ref<string[]>([])
+
+watch(attachmentAuthoringEnabled, (enabled, previous) => {
+  if (enabled === previous || !loadedTemplateForAuthoring.value) return
+  // A live capability flip cannot safely rehydrate an in-memory draft without risking a
+  // structural overwrite. Require a fresh load instead of changing the save surface in place.
+  unsupportedReason.value = '附件编辑能力已变更，请刷新后继续'
+  graphReadOnlyMessage.value = null
+})
 
 // FWB-0 Layer 2: typed base/sheet catalog for record-link authoring (IDs persist on the draft,
 // never shown as ordinary free-text labels). Loaded via MultitableApiClient listBases/listSheets.
@@ -2241,7 +2258,7 @@ function currentFormReferenceInventory(): CompleteFormReferenceInventory | undef
   return formAuthoringContext.value?.referenceInventory
 }
 
-function newFormFieldIdentity(type: AuthorableFieldType): FormFieldIdentity {
+function newFormFieldIdentity(type: FormAuthoringFieldType): FormFieldIdentity {
   const fieldToken = globalThis.crypto.randomUUID().replace(/-/g, '')
   const identity: FormFieldIdentity = {
     persistentId: `field_${fieldToken}`,
@@ -2280,7 +2297,7 @@ function acceptFormCommand(result: FormCommandResult, announcement: string): boo
   return true
 }
 
-function onAddFormField(request: { type: AuthorableFieldType; insertionIndex: number }): void {
+function onAddFormField(request: { type: FormAuthoringFieldType; insertionIndex: number }): void {
   const history = currentFormIdentityHistory()
   if (!history) {
     acceptFormCommand(
@@ -2291,7 +2308,14 @@ function onAddFormField(request: { type: AuthorableFieldType; insertionIndex: nu
   }
   const identity = newFormFieldIdentity(request.type)
   const before = draft.value.fields.slice()
-  let result = addFormField(draft.value, request.type, identity, history)
+  let result = addFormField(
+    draft.value,
+    request.type,
+    identity,
+    history,
+    undefined,
+    { attachmentAuthoringEnabled: attachmentAuthoringEnabled.value },
+  )
   if (result.ok && request.insertionIndex < before.length) {
     result = moveFormField(
       result.draft,
@@ -2446,6 +2470,7 @@ async function loadTemplateForEdit() {
     formAuthoringContext.value = null
     formAuthoringContextError.value = ''
     unsupportedReason.value = null
+    loadedTemplateForAuthoring.value = null
     graphReadOnlyMessage.value = null
     snapshotDraft()
     return
@@ -2454,9 +2479,16 @@ async function loadTemplateForEdit() {
   loadError.value = null
   try {
     const template = await getTemplate(templateId.value)
-    unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
-    graphReadOnlyMessage.value = graphReadOnlyReason(template)
-    draft.value = draftFromTemplate(template)
+    loadedTemplateForAuthoring.value = template
+    unsupportedReason.value = unsupportedTemplateAuthoringReason(template, {
+      attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+    })
+    graphReadOnlyMessage.value = graphReadOnlyReason(template, {
+      attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+    })
+    draft.value = draftFromTemplate(template, {
+      attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+    })
     await loadFormAuthoringContext(template.id)
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
@@ -2508,18 +2540,32 @@ async function persistDraft() {
   try {
     if (draft.value.templateId) {
       const updated = await updateTemplate(draft.value.templateId, buildUpdateTemplatePayload(draft.value))
-      draft.value = draftFromTemplate(updated)
+      draft.value = draftFromTemplate(updated, {
+        attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+      })
       await loadFormAuthoringContext(updated.id)
-      unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
-      graphReadOnlyMessage.value = graphReadOnlyReason(updated)
+      loadedTemplateForAuthoring.value = updated
+      unsupportedReason.value = unsupportedTemplateAuthoringReason(updated, {
+        attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+      })
+      graphReadOnlyMessage.value = graphReadOnlyReason(updated, {
+        attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+      })
       snapshotDraft()
       return updated
     }
     const created = await createTemplate(buildCreateTemplatePayload(draft.value))
-    draft.value = draftFromTemplate(created)
+    draft.value = draftFromTemplate(created, {
+      attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+    })
     await loadFormAuthoringContext(created.id)
-    unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
-    graphReadOnlyMessage.value = graphReadOnlyReason(created)
+    loadedTemplateForAuthoring.value = created
+    unsupportedReason.value = unsupportedTemplateAuthoringReason(created, {
+      attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+    })
+    graphReadOnlyMessage.value = graphReadOnlyReason(created, {
+      attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+    })
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
@@ -2537,10 +2583,17 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
   loadError.value = null
   try {
     const created = await createTemplate(buildCommonApprovalTemplatePresetPayload(presetId))
-    draft.value = draftFromTemplate(created)
+    draft.value = draftFromTemplate(created, {
+      attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+    })
     await loadFormAuthoringContext(created.id)
-    unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
-    graphReadOnlyMessage.value = graphReadOnlyReason(created)
+    loadedTemplateForAuthoring.value = created
+    unsupportedReason.value = unsupportedTemplateAuthoringReason(created, {
+      attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+    })
+    graphReadOnlyMessage.value = graphReadOnlyReason(created, {
+      attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
+    })
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()

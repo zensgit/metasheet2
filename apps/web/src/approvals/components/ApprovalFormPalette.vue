@@ -33,6 +33,7 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import {
   Calendar,
   Checked,
@@ -42,26 +43,28 @@ import {
   EditPen,
   Grid,
   List,
+  Paperclip,
   Tickets,
   User,
 } from "@element-plus/icons-vue";
 import type { Component } from "vue";
-import type { AuthorableFieldType } from "../templateAuthoring";
+import type { FormAuthoringFieldType } from "../templateAuthoring";
 import {
   APPROVAL_FORM_FIELD_TYPE_LABELS,
   APPROVAL_FORM_PALETTE_MIME,
-  APPROVAL_FORM_PALETTE_TYPES,
+  approvalFormPaletteTypes,
 } from "../formPalette";
 
-defineProps<{
+const props = defineProps<{
   readOnly: boolean;
+  attachmentAuthoringEnabled: boolean;
 }>();
 
 const emit = defineEmits<{
-  add: [type: AuthorableFieldType];
+  add: [type: FormAuthoringFieldType];
 }>();
 
-const icons: Record<AuthorableFieldType, Component> = {
+const icons: Record<FormAuthoringFieldType, Component> = {
   text: EditPen,
   textarea: Document,
   number: Tickets,
@@ -72,15 +75,16 @@ const icons: Record<AuthorableFieldType, Component> = {
   user: User,
   detail: Grid,
   "record-link": Connection,
+  attachment: Paperclip,
 };
 
-const paletteItems = APPROVAL_FORM_PALETTE_TYPES.map((type) => ({
+const paletteItems = computed(() => approvalFormPaletteTypes(props.attachmentAuthoringEnabled).map((type) => ({
   type,
   label: APPROVAL_FORM_FIELD_TYPE_LABELS[type],
   icon: icons[type],
-}));
+})));
 
-function onDragStart(event: DragEvent, type: AuthorableFieldType) {
+function onDragStart(event: DragEvent, type: FormAuthoringFieldType) {
   if (!event.dataTransfer) return;
   event.dataTransfer.effectAllowed = "copy";
   event.dataTransfer.setData(APPROVAL_FORM_PALETTE_MIME, type);
