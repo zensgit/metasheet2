@@ -848,11 +848,12 @@ async function readDurableImportRecordIds(
   ).sort()
 }
 
-async function lockLegacyImportBatchRow(
+async function lockCompatibilityImportBatchRow(
   trx: AttendanceW4TransactionClientV1,
   command: FrozenAttendanceImportRollbackCommandV1,
 ): Promise<void> {
-  if (command.sourceBatchEntrypoint !== 'import_batch') return
+  // The production boundary derives P23 ownership for both batch entrypoints
+  // from this compatibility row, so both must retain and lock it.
   const result = await trx.query(
     `SELECT id::text
        FROM attendance_import_batches
@@ -1056,7 +1057,7 @@ async function executeRollback(
   if (canonicalAttendanceJsonV1(batch) !== canonicalAttendanceJsonV1(preflightBatch)) {
     fail('IMPORT_ROLLBACK_BATCH_CHANGED')
   }
-  await lockLegacyImportBatchRow(trx, command)
+  await lockCompatibilityImportBatchRow(trx, command)
   const lockedImportRecordIds = await readDurableImportRecordIds(trx, command, true)
   const lockedRecordIds = resolveDurableRecordIds(
     command,

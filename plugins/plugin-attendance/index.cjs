@@ -6296,6 +6296,17 @@ function getAuthenticatedUserId(req) {
   return null
 }
 
+function getAuthenticatedTokenSubjectUserId(req) {
+  const user = req.user
+  // jwtAuthMiddleware exposes the verified principal as canonical id; another
+  // authenticated provider may retain sub/userId. Keep this derivation
+  // independent from actor selection; core rejects any mismatch.
+  const raw = user?.sub ?? user?.userId ?? user?.id
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  return null
+}
+
 function getUserLabel(req, fallback) {
   const user = req.user
   if (typeof user?.name === 'string' && user.name.trim().length > 0) return user.name
@@ -40447,7 +40458,8 @@ module.exports = {
 	      '/api/attendance/import/rollback/:id',
       async (req, res) => {
         const actorId = getAuthenticatedUserId(req)
-        if (!actorId) {
+        const tokenSubjectUserId = getAuthenticatedTokenSubjectUserId(req)
+        if (!actorId || !tokenSubjectUserId) {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
@@ -40477,7 +40489,7 @@ module.exports = {
             orgId,
             batchId,
             actorId,
-            tokenSubjectUserId: actorId,
+            tokenSubjectUserId,
           })
           if (result.kind === 'legacy') {
             res.json({

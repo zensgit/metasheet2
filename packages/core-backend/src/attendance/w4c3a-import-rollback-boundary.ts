@@ -957,11 +957,19 @@ async function rollbackInTransaction(
   // needed to decide whether the caller may inspect the rollback state.
   const legacySource = await loadLegacySourceAuthorization(trx, request)
   if (!legacySource) fail('IMPORT_ROLLBACK_NOT_FOUND')
-  const authorizationTargets = await loadAuthorizationTargets(trx, request)
-  const legacyAuthorizationSource: SourceAuthorizationV1 = {
+  const legacySourceAuthority: SourceAuthorizationV1 = {
     actorId: legacySource.createdBy,
     actorPosture: 'delegated_import',
     tokenSubjectUserId: legacySource.createdBy,
+    subjectScope: { kind: 'self', userId: legacySource.createdBy },
+  }
+  // Source authority must fail before any target-sensitive import-item or
+  // attendance-record read. Target-range authorization is repeated below from
+  // the minimal target projection before status/preimage/eligibility reads.
+  await resolveRollbackActorPosture(trx, request, legacySourceAuthority, [])
+  const authorizationTargets = await loadAuthorizationTargets(trx, request)
+  const legacyAuthorizationSource: SourceAuthorizationV1 = {
+    ...legacySourceAuthority,
     subjectScope: {
       kind: 'explicit_users',
       userIds: Array.from(new Set(authorizationTargets.map((target) => target.userId))),

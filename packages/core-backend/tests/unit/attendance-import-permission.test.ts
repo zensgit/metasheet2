@@ -81,5 +81,15 @@ describe('attendance import permission wiring', () => {
     expect(userHelper).toContain('user?.id ?? user?.sub ?? user?.userId')
     expect(userHelper).not.toContain("req.headers['x-user-id']")
     expect(userHelper).toContain('return null')
+
+    const subjectStart = pluginSource.indexOf('function getAuthenticatedTokenSubjectUserId(req)')
+    const subjectEnd = pluginSource.indexOf('\n}\n', subjectStart) + 2
+    const subjectHelper = pluginSource.slice(subjectStart, subjectEnd)
+    expect(subjectStart).toBeGreaterThanOrEqual(0)
+    expect(subjectHelper).toContain('user?.sub ?? user?.userId ?? user?.id')
+    expect(subjectHelper).not.toContain('getAuthenticatedUserId(req)')
+    expect(subjectHelper).not.toContain("req.headers['x-user-id']")
+    expect(pluginSource).toContain('tokenSubjectUserId,')
+    expect(pluginSource).not.toContain('tokenSubjectUserId: actorId')
   })
 })

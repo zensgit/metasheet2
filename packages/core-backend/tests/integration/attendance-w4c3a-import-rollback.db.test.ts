@@ -303,16 +303,20 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     }
   }
 
-  async function importedRecord(input: {
-    batchId: string
-    preimage: 'absent' | 'active' | 'retired' | 'w4_active'
-    workDate: string
-    workMinutes: number
-    fabricateFingerprint?: boolean
-    mutateProjectionWithoutFingerprint?: boolean
-    orgId?: string
-    userId?: string
-  }): Promise<{
+  async function importedRecord(
+    input: {
+      batchId: string
+      preimage: 'absent' | 'active' | 'retired' | 'w4_active'
+      workDate: string
+      workMinutes: number
+      fabricateFingerprint?: boolean
+      mutateProjectionWithoutFingerprint?: boolean
+      orgId?: string
+      userId?: string
+      entrypoint?: 'legacy_import' | 'integration_sync'
+    },
+    transactionClient?: PoolClient,
+  ): Promise<{
     recordId: string
     calculationId: string
     priorCalculationId: string | null
@@ -373,9 +377,10 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
                 : compatibilityFingerprint,
             projection: storedProjection,
           }
-    const client = await pool.connect()
+    const client = transactionClient ?? await pool.connect()
+    const ownsTransaction = transactionClient === undefined
     try {
-      await client.query('BEGIN')
+      if (ownsTransaction) await client.query('BEGIN')
       await client.query(
         `INSERT INTO attendance_records (
            id, user_id, work_date, first_in_at, last_out_at, work_minutes,
@@ -415,7 +420,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
            projected_work_minutes, projected_late_minutes,
            projected_early_leave_minutes, projected_daily_fingerprint,
            parent_preimage_snapshot, actor_id, correlation_id
-         ) VALUES ($1, $2, $3, $14, 'calculation', 'authoritative', 'legacy_import',
+         ) VALUES ($1, $2, $3, $14, 'calculation', 'authoritative', $16,
            'fixture-v1', 1, $15, $4, $5, $6, $7, $8,
            '{"posture":"resolved_v2"}'::jsonb, '{}'::jsonb, '[]'::jsonb,
            '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'merge',
@@ -438,6 +443,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
           `fixture-${run}`,
           priorCalculationId === null ? 1 : 2,
           priorCalculationId,
+          input.entrypoint ?? 'legacy_import',
         ],
       )
       await client.query(
@@ -467,13 +473,13 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
          VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb)`,
         [id(), input.batchId, recordOrgId, userId, input.workDate, recordId],
       )
-      await client.query('COMMIT')
+      if (ownsTransaction) await client.query('COMMIT')
       return { recordId, calculationId, priorCalculationId, userId, projection }
     } catch (error) {
-      await client.query('ROLLBACK')
+      if (ownsTransaction) await client.query('ROLLBACK')
       throw error
     } finally {
-      client.release()
+      if (ownsTransaction) client.release()
     }
   }
 
@@ -869,6 +875,184 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     expect(closureRead).toBeGreaterThan(parentLock)
   })
 
+  it('locks and retains the compatibility owner row for integration_batch rollback', async () => {
+    const integrationOrgId = id()
+    const integrationActorId = id()
+    const batchId = id()
+    const fingerprint = crypto.createHash('sha256').update(batchId).digest('hex')
+    const targetUserId = id()
+    const semanticFingerprint = hex('e')
+    await pool.query('INSERT INTO users (id) VALUES ($1)', [integrationActorId])
+    await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [
+      integrationActorId,
+      integrationOrgId,
+    ])
+    await pool.query("INSERT INTO user_roles VALUES ($1, 'attendance_admin')", [integrationActorId])
+    await pool.query('INSERT INTO users (id) VALUES ($1)', [targetUserId])
+    await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [
+      targetUserId,
+      integrationOrgId,
+    ])
+    const target = await (async () => {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await client.query(
+          `INSERT INTO attendance_import_batches (
+             id, org_id, created_by, source, row_count, status, meta)
+           VALUES ($1, $2, $3, 'integration-fixture', 1, 'committed', '{}'::jsonb)`,
+          [batchId, integrationOrgId, integrationActorId],
+        )
+        await client.query(
+          `INSERT INTO attendance_result_operation_batches (
+             org_id, entrypoint, batch_command_id, identity_source_kind, source_root_id,
+             source_ref, actor_id, actor_posture, token_subject_user_id, capability,
+             subject_scope, accepted_write_posture, command_fingerprint, item_count,
+             item_sequence_fingerprint, item_set_fingerprint, state)
+           VALUES ($1, 'integration_batch', $2, 'integration_batch', $2,
+             'test:w4c3a-integration-rollback', $3, 'attendance_admin', $3, 'import',
+             $4::jsonb, 'authoritative', $5, 1, $6, $7, 'claimed')`,
+          [
+            integrationOrgId,
+            batchId,
+            integrationActorId,
+            JSON.stringify({ kind: 'explicit_users', userIds: [targetUserId] }),
+            fingerprint,
+            hex('b'),
+            hex('c'),
+          ],
+        )
+        const created = await importedRecord({
+          batchId,
+          preimage: 'active',
+          workDate: '2026-08-12',
+          workMinutes: 480,
+          orgId: integrationOrgId,
+          userId: targetUserId,
+          entrypoint: 'integration_sync',
+        }, client)
+        await client.query(
+          `INSERT INTO attendance_result_operations (
+             org_id, entrypoint, operation_id, batch_command_id, input_ordinal,
+             identity_source_kind, source_root_id, proof_semantic_fingerprint,
+             source_ref, actor_id, actor_posture, token_subject_user_id, capability,
+             subject_scope, command_fingerprint, accepted_write_posture,
+             normalized_business_input_snapshot, state, resolved_record_id,
+             resolved_calculation_id, response_snapshot)
+           VALUES ($1, 'integration_batch', attendance_w4_uuidv5(
+               '46501375-c273-459f-a5af-f926859f6411'::uuid,
+               attendance_w4_item_name_bytes($2::uuid, 0, $3)),
+             $2, 0, 'integration_item', $2, $3,
+             'test:w4c3a-integration-rollback', $4, 'attendance_admin', $4, 'import',
+             $5::jsonb, $6, 'authoritative', '{}'::jsonb, 'completed', $7, $8,
+             '{}'::jsonb)`,
+          [
+            integrationOrgId,
+            batchId,
+            semanticFingerprint,
+            integrationActorId,
+            JSON.stringify({ kind: 'explicit_users', userIds: [targetUserId] }),
+            fingerprint,
+            created.recordId,
+            created.calculationId,
+          ],
+        )
+        await client.query(
+          `UPDATE attendance_result_operation_batches
+              SET state = 'completed', response_snapshot = '{}'::jsonb,
+                  updated_at = now(), version = version + 1
+            WHERE org_id = $1 AND entrypoint = 'integration_batch'
+              AND batch_command_id = $2`,
+          [integrationOrgId, batchId],
+        )
+        await client.query('COMMIT')
+        return created
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    })()
+    await pool.query(
+      `INSERT INTO attendance_calculation_rollout_state (
+         org_id, state, engine_version, reason_code, actor_id, version, scope)
+       VALUES ($1, 'shadow', 'fixture-v1', 'fixture', $2, 1, 'synthetic_staging')
+       ON CONFLICT (org_id) DO UPDATE SET state = EXCLUDED.state,
+         engine_version = EXCLUDED.engine_version, reason_code = EXCLUDED.reason_code,
+         actor_id = EXCLUDED.actor_id,
+         version = attendance_calculation_rollout_state.version + 1`,
+      [integrationOrgId, integrationActorId],
+    )
+
+    const statements: Array<{ sql: string; values: readonly unknown[] }> = []
+    const boundary = createAttendanceImportRollbackBoundaryV1({
+      async acquireConnection() {
+        const client = await pool.connect()
+        return {
+          client: {
+            query: async (statement, values) => {
+              statements.push({
+                sql: statement.replace(/\s+/g, ' ').trim(),
+                values: [...(values ?? [])],
+              })
+              return client.query(statement, values as unknown[]) as unknown as Promise<{
+                rows: Array<Record<string, unknown>>
+              }>
+            },
+          },
+          release: () => client.release(),
+        }
+      },
+    })
+    const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = integrationOrgId
+    try {
+      await expect(
+        boundary.rollbackImportBatchV1({
+          orgId: integrationOrgId,
+          batchId,
+          actorId: integrationActorId,
+          tokenSubjectUserId: integrationActorId,
+        }),
+      ).resolves.toMatchObject({ kind: 'w4', id: batchId, affected: 1 })
+    } finally {
+      if (priorAllowlist === undefined) {
+        delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      } else {
+        process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+      }
+    }
+
+    const operationRowsLock = statements.findIndex(
+      (entry) =>
+        entry.sql.includes('FROM attendance_result_operations') &&
+        entry.sql.includes("entrypoint = 'import_rollback'") &&
+        entry.sql.includes('FOR UPDATE'),
+    )
+    const operationBatchLock = statements.findIndex(
+      (entry, index) =>
+        index > operationRowsLock &&
+        entry.sql.includes('FROM attendance_result_operation_batches') &&
+        entry.sql.includes('FOR UPDATE'),
+    )
+    const compatibilityOwnerLock = statements.findIndex(
+      (entry, index) =>
+        index > operationBatchLock &&
+        entry.sql.includes('SELECT id::text') &&
+        entry.sql.includes('FROM attendance_import_batches') &&
+        entry.sql.includes('FOR UPDATE'),
+    )
+    expect(operationRowsLock).toBeGreaterThan(0)
+    expect(operationBatchLock).toBeGreaterThan(operationRowsLock)
+    expect(compatibilityOwnerLock).toBeGreaterThan(operationBatchLock)
+    expect(await pool.query(
+      `SELECT created_by, status FROM attendance_import_batches
+        WHERE org_id = $1 AND id = $2`,
+      [integrationOrgId, batchId],
+    )).toMatchObject({ rows: [{ created_by: integrationActorId, status: 'rolled_back' }] })
+  })
+
   it('uses the common source-operation-job order for an eligible legacy P07 batch', async () => {
     const legacyOrgId = id()
     const legacyActorId = id()
@@ -1037,7 +1221,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     expect(statements[parentLock].sql).toContain('ORDER BY user_id, work_date, id')
   })
 
-  it('P23 denies another same-org importer before state/eligibility reads even with RBAC_BYPASS', async () => {
+  it('P23 denies another same-org importer before target/state reads even with RBAC_BYPASS', async () => {
     const batchId = id()
     const fingerprint = crypto.createHash('sha256').update(batchId).digest('hex')
     const targetUserId = id()
@@ -1092,6 +1276,8 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     }
 
     expect(statements.some((sql) => sql.includes('SELECT created_by, status'))).toBe(false)
+    expect(statements.some((sql) => sql.includes('FROM attendance_import_items'))).toBe(false)
+    expect(statements.some((sql) => sql.includes('FROM attendance_records'))).toBe(false)
     expect(statements.some((sql) => sql.includes(' AS eligible'))).toBe(false)
     expect(statements.some((sql) => sql.includes('parent_preimage_snapshot'))).toBe(false)
     expect(
