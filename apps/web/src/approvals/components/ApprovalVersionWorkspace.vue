@@ -40,7 +40,7 @@
               {{ versionStatusLabel(summary.status) }}
             </el-tag>
           </span>
-          <span>{{ formatDate(summary.updatedAt) }}</span>
+          <span data-testid="approval-version-timeline-date">{{ formatDate(summary.updatedAt) }}</span>
           <small>{{ summary.publishNote?.trim() || '未填写发布说明' }}</small>
           <small v-if="summary.restoredFromVersionId">
             由 {{ restoredSourceLabel(summary.restoredFromVersionId) }} 恢复

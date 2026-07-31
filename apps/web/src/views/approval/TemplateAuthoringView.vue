@@ -4007,6 +4007,10 @@ pre {
 }
 
 @media (max-width: 1024px) {
+  .template-authoring__header {
+    position: static;
+  }
+
   .template-authoring__workspace {
     grid-template-columns: 1fr;
   }

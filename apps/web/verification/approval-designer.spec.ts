@@ -28,24 +28,45 @@ async function openFormDesigner(page: Page) {
 
 async function contrastRatio(page: Page, selector: string): Promise<number> {
   return page.locator(selector).evaluate((element) => {
-    const parseRgb = (value: string) => {
-      const channels = value.match(/[\d.]+/g)?.slice(0, 3).map(Number)
-      if (!channels || channels.length !== 3) throw new Error(`unsupported color ${value}`)
-      return channels.map((channel) => {
+    type Rgba = [number, number, number, number]
+    const parseColor = (value: string): Rgba => {
+      if (value === 'transparent') return [0, 0, 0, 0]
+      const channels = value.match(/[\d.]+/g)?.map(Number)
+      if (!channels || channels.length < 3) throw new Error(`unsupported color ${value}`)
+      return [channels[0], channels[1], channels[2], channels[3] ?? 1]
+    }
+    const composite = (front: Rgba, back: Rgba): Rgba => {
+      const alpha = front[3] + back[3] * (1 - front[3])
+      if (alpha === 0) return [0, 0, 0, 0]
+      return [
+        (front[0] * front[3] + back[0] * back[3] * (1 - front[3])) / alpha,
+        (front[1] * front[3] + back[1] * back[3] * (1 - front[3])) / alpha,
+        (front[2] * front[3] + back[2] * back[3] * (1 - front[3])) / alpha,
+        alpha,
+      ]
+    }
+    const luminance = (color: Rgba) => {
+      const channels = color.slice(0, 3).map((channel) => {
         const normalized = channel / 255
         return normalized <= 0.04045
           ? normalized / 12.92
           : ((normalized + 0.055) / 1.055) ** 2.4
       })
+      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
     }
-    const luminance = (value: string) => {
-      const [red, green, blue] = parseRgb(value)
-      return 0.2126 * red + 0.7152 * green + 0.0722 * blue
-    }
+
     const styles = window.getComputedStyle(element)
-    const foreground = luminance(styles.color)
-    const background = luminance(styles.backgroundColor)
-    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05)
+    let background = parseColor(styles.backgroundColor)
+    let ancestor = element.parentElement
+    while (background[3] < 1 && ancestor) {
+      background = composite(background, parseColor(window.getComputedStyle(ancestor).backgroundColor))
+      ancestor = ancestor.parentElement
+    }
+    if (background[3] < 1) background = composite(background, [255, 255, 255, 1])
+    const foreground = luminance(composite(parseColor(styles.color), background))
+    const backgroundLuminance = luminance(background)
+    return (Math.max(foreground, backgroundLuminance) + 0.05)
+      / (Math.min(foreground, backgroundLuminance) + 0.05)
   })
 }
 
@@ -370,6 +391,14 @@ test('approval designer remains contained at tablet and compact desktop viewport
   ]) {
     await page.setViewportSize(viewport)
     await openFormDesigner(page)
+    const paletteGeometry = await page.locator('.approval-form-palette__item').evaluateAll((items) => items.map((item) => {
+      const label = item.querySelector('span')
+      return {
+        itemWidth: item.getBoundingClientRect().width,
+        labelFits: Boolean(label && label.scrollWidth <= label.clientWidth),
+      }
+    }))
+    expect(paletteGeometry.every(({ itemWidth, labelFits }) => itemWidth >= 80 && labelFits)).toBe(true)
     await page.getByRole('button', { name: '流程设计' }).click()
     await expect(page.getByTestId('approval-authoring-mode-flow')).toHaveAttribute('aria-pressed', 'true')
     await expect.poll(() => contrastRatio(page, '[data-testid="approval-authoring-mode-flow"]')).toBeGreaterThanOrEqual(4.5)
@@ -401,6 +430,60 @@ test('approval designer remains contained at tablet and compact desktop viewport
     path: 'verification-output/approval-designer-tablet.png',
     fullPage: true,
   })
+})
+
+test('authoring navigation never scrolls content beneath a dynamic header', async ({ page }) => {
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 900, height: 800 },
+    { width: 800, height: 800 },
+    { width: 761, height: 800 },
+  ]) {
+    await page.setViewportSize(viewport)
+    await openFormDesigner(page)
+    await expect.poll(() => page.evaluate(() => {
+      const header = document.querySelector<HTMLElement>('.template-authoring__header')
+      const hint = document.querySelector<HTMLElement>('.approval-form-builder__header small')
+      if (!header || !hint) throw new Error('missing header or form-builder hint')
+      return hint.getBoundingClientRect().top >= header.getBoundingClientRect().bottom
+    })).toBe(true)
+  }
+})
+
+test('mobile canvas move and branch inspector controls meet the touch contract', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await openFormDesigner(page)
+  await page.getByRole('button', { name: '流程设计' }).click()
+
+  await page.getByRole('button', { name: '在「审批人 1」之后插入节点' }).click()
+  await page.getByRole('menuitem', { name: '审批' }).click()
+  const moveButton = page.locator(
+    '[data-testid^="approval-canvas-move-"]:not([data-testid^="approval-canvas-move-up-"]):not([data-testid^="approval-canvas-move-down-"])',
+  ).first()
+  await moveButton.click()
+  const moveTargets = page.locator('[data-testid^="approval-canvas-move-target-"]')
+  expect(await moveTargets.count()).toBeGreaterThan(0)
+  for (const target of await moveTargets.all()) {
+    const box = await target.boundingBox()
+    expect(box?.width).toBeGreaterThanOrEqual(40)
+    expect(box?.height).toBeGreaterThanOrEqual(40)
+  }
+  await moveButton.click()
+
+  await page.getByRole('button', { name: '在「审批人 1」之后插入节点' }).click()
+  await page.getByRole('menuitem', { name: '条件分支' }).click()
+  await page.getByTestId(/approval-canvas-add-condition-/).click()
+  await expect(page.getByTestId('approval-canvas-branch-reorder')).toBeVisible()
+
+  const bottomSheetControls = page.locator(
+    '.template-authoring__canvas-branch-handle, .template-authoring__canvas-branch-actions .el-button, .template-authoring__canvas-inspector-body .el-button',
+  )
+  expect(await bottomSheetControls.count()).toBeGreaterThan(0)
+  for (const control of await bottomSheetControls.all()) {
+    const box = await control.boundingBox()
+    expect(box?.width).toBeGreaterThanOrEqual(44)
+    expect(box?.height).toBeGreaterThanOrEqual(44)
+  }
 })
 
 test('approval form designer stacks without horizontal overflow at a phone viewport', async ({ page }) => {
@@ -566,7 +649,7 @@ test('approval version workspace stacks without horizontal overflow at a phone v
   const closeBox = await closeButton.boundingBox()
   expect(closeBox?.width).toBeGreaterThanOrEqual(44)
   expect(closeBox?.height).toBeGreaterThanOrEqual(44)
-  const versionDate = page.getByTestId('approval-version-timeline-3').locator('small')
+  const versionDate = page.getByTestId('approval-version-timeline-date')
   await expect(versionDate).toBeVisible()
   expect(await versionDate.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
   const timelineCardsFit = await page.locator(

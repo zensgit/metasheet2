@@ -747,40 +747,6 @@ defineExpose({ canvasViewportRef, canvasInspectorRef })
   stroke: var(--el-color-primary);
   stroke-width: 1.5;
 }
-@media (max-width: 560px) {
-  .template-authoring__canvas-minimap {
-    display: none;
-  }
-  .template-authoring__canvas-toolbar {
-    flex-wrap: wrap;
-    justify-content: flex-start;
-  }
-  .template-authoring__canvas-toolbar :deep(.el-button-group) {
-    display: flex;
-    flex: 1 1 220px;
-  }
-  .template-authoring__canvas-toolbar :deep(.el-button-group .el-button) {
-    flex: 1 1 0;
-  }
-  .template-authoring__canvas-toolbar :deep(.el-button) {
-    min-width: 44px;
-    min-height: 44px;
-    margin-left: 0;
-  }
-  .template-authoring__canvas-inspector-header :deep(.el-button) {
-    min-height: 44px;
-  }
-  .template-authoring__canvas-node-actions :deep(.el-button),
-  .template-authoring__canvas-branch-actions :deep(.el-button) {
-    min-width: 40px;
-    min-height: 40px;
-    margin-left: 0;
-  }
-  .template-authoring__canvas-branch-handle {
-    width: 40px;
-    height: 40px;
-  }
-}
 .template-authoring__canvas-inspector {
   /* ~400px so ms-w-360 controls fit with body padding; stacks to 100% under 960px. */
   flex: 0 0 400px;
@@ -908,5 +874,47 @@ defineExpose({ canvasViewportRef, canvasInspectorRef })
 .template-authoring__error-list {
   margin: 6px 0 0;
   padding-left: 20px;
+}
+
+@media (max-width: 560px) {
+  .template-authoring__canvas-minimap {
+    display: none;
+  }
+  .template-authoring__canvas-toolbar {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .template-authoring__canvas-toolbar :deep(.el-button-group) {
+    display: flex;
+    flex: 1 1 220px;
+  }
+  .template-authoring__canvas-toolbar :deep(.el-button-group .el-button) {
+    flex: 1 1 0;
+  }
+  .template-authoring__canvas-toolbar :deep(.el-button) {
+    min-width: 44px;
+    min-height: 44px;
+    margin-left: 0;
+  }
+  .template-authoring__canvas-inspector-header :deep(.el-button),
+  .template-authoring__canvas-inspector-body :deep(.el-button),
+  .template-authoring__canvas-branch-actions :deep(.el-button) {
+    min-width: 44px;
+    min-height: 44px;
+    margin-left: 0;
+  }
+  .template-authoring__canvas-node-actions :deep(.el-button),
+  .template-authoring__canvas-move-target {
+    min-width: 40px;
+    min-height: 40px;
+    margin-left: 0;
+  }
+  .template-authoring__canvas-branch-row {
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+  }
+  .template-authoring__canvas-branch-handle {
+    width: 44px;
+    height: 44px;
+  }
 }
 </style>
