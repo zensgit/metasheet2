@@ -743,6 +743,10 @@ function fieldTypeLabel(type: FormField['type']): string {
     padding: 10px 12px;
     border-top: 1px solid var(--el-border-color-lighter);
   }
+  :global(.approval-version-workspace-dialog .el-dialog__headerbtn) {
+    width: 44px;
+    height: 44px;
+  }
   .approval-version-workspace {
     grid-template-columns: 1fr;
     min-height: 0;
@@ -757,7 +761,12 @@ function fieldTypeLabel(type: FormField['type']): string {
   }
   .approval-version-workspace__current,
   .approval-version-workspace__version {
-    flex: 0 0 210px;
+    flex: 0 0 min(240px, calc(100vw - 48px));
+  }
+  .approval-version-workspace__version > span,
+  .approval-version-workspace__version > small {
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
   .approval-version-workspace__graphs,
   .approval-version-workspace__details {
@@ -771,6 +780,18 @@ function fieldTypeLabel(type: FormField['type']): string {
     display: block;
     margin: 0 0 8px;
     text-align: left;
+  }
+}
+
+@media (max-width: 560px) {
+  .approval-version-workspace__timeline {
+    flex-direction: column;
+    overflow-x: visible;
+  }
+  .approval-version-workspace__current,
+  .approval-version-workspace__version {
+    flex: 0 0 auto;
+    width: 100%;
   }
 }
 </style>

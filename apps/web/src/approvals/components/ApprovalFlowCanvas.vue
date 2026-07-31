@@ -11,7 +11,12 @@
       >
         <ul class="template-authoring__error-list"><li v-for="issue in canvasValidity" :key="issue">{{ issue }}</li></ul>
       </el-alert>
-      <div class="template-authoring__canvas-toolbar" data-testid="approval-canvas-toolbar">
+      <div
+        class="template-authoring__canvas-toolbar"
+        role="toolbar"
+        aria-label="画布视图"
+        data-testid="approval-canvas-toolbar"
+      >
         <el-button-group>
           <el-button :icon="ZoomOut" title="缩小画布" aria-label="缩小画布" data-testid="approval-canvas-zoom-out" @click="emit('zoom-out')" />
           <el-button
@@ -745,6 +750,35 @@ defineExpose({ canvasViewportRef, canvasInspectorRef })
 @media (max-width: 560px) {
   .template-authoring__canvas-minimap {
     display: none;
+  }
+  .template-authoring__canvas-toolbar {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .template-authoring__canvas-toolbar :deep(.el-button-group) {
+    display: flex;
+    flex: 1 1 220px;
+  }
+  .template-authoring__canvas-toolbar :deep(.el-button-group .el-button) {
+    flex: 1 1 0;
+  }
+  .template-authoring__canvas-toolbar :deep(.el-button) {
+    min-width: 44px;
+    min-height: 44px;
+    margin-left: 0;
+  }
+  .template-authoring__canvas-inspector-header :deep(.el-button) {
+    min-height: 44px;
+  }
+  .template-authoring__canvas-node-actions :deep(.el-button),
+  .template-authoring__canvas-branch-actions :deep(.el-button) {
+    min-width: 40px;
+    min-height: 40px;
+    margin-left: 0;
+  }
+  .template-authoring__canvas-branch-handle {
+    width: 40px;
+    height: 40px;
   }
 }
 .template-authoring__canvas-inspector {

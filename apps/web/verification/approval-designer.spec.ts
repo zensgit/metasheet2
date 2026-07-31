@@ -26,6 +26,29 @@ async function openFormDesigner(page: Page) {
   await expect(page.getByTestId('approval-form-palette')).toBeVisible()
 }
 
+async function contrastRatio(page: Page, selector: string): Promise<number> {
+  return page.locator(selector).evaluate((element) => {
+    const parseRgb = (value: string) => {
+      const channels = value.match(/[\d.]+/g)?.slice(0, 3).map(Number)
+      if (!channels || channels.length !== 3) throw new Error(`unsupported color ${value}`)
+      return channels.map((channel) => {
+        const normalized = channel / 255
+        return normalized <= 0.04045
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4
+      })
+    }
+    const luminance = (value: string) => {
+      const [red, green, blue] = parseRgb(value)
+      return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    }
+    const styles = window.getComputedStyle(element)
+    const foreground = luminance(styles.color)
+    const background = luminance(styles.backgroundColor)
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05)
+  })
+}
+
 const versionGraph = {
   nodes: [
     { key: 'secret_start_key', type: 'start', name: '发起', config: {} },
@@ -114,6 +137,12 @@ test('approval form palette supports real drag, keyboard reorder, inspector edit
   await page.setViewportSize({ width: 1440, height: 900 })
   await openFormDesigner(page)
 
+  await expect(page.getByTestId('approval-field-visibility-depends')).toContainText('无（始终显示）')
+  const paletteLabelsFit = await page.locator('.approval-form-palette__item span').evaluateAll((elements) =>
+    elements.every((element) => element.scrollWidth <= element.clientWidth),
+  )
+  expect(paletteLabelsFit).toBe(true)
+
   await page.getByTestId('approval-form-palette-textarea').dragTo(
     page.getByTestId('approval-form-drop-slot-1'),
   )
@@ -140,6 +169,19 @@ test('approval form palette supports real drag, keyboard reorder, inspector edit
     /报销说明多行文本/,
     /字段 1单行文本/,
   ])
+
+  await page.mouse.move(0, 0)
+  await expect(page.locator('.el-popper[role="tooltip"]:visible')).toHaveCount(0)
+  const headerSeparation = await page.evaluate(() => {
+    const header = document.querySelector<HTMLElement>('.template-authoring__header')
+    const hint = document.querySelector<HTMLElement>('.approval-form-builder__header small')
+    if (!header || !hint) throw new Error('missing sticky header or form-builder hint')
+    return {
+      headerBottom: header.getBoundingClientRect().bottom,
+      hintTop: hint.getBoundingClientRect().top,
+    }
+  })
+  expect(headerSeparation.hintTop).toBeGreaterThanOrEqual(headerSeparation.headerBottom)
 
   await page.screenshot({
     path: 'verification-output/approval-designer-desktop.png',
@@ -238,8 +280,45 @@ test('approval route preview remains operable without horizontal overflow at a p
   })
 
   await page.goto(`${HARNESS}?mode=route-preview`)
+  const headerActionIds = [
+    'approval-template-undo',
+    'approval-template-redo',
+    'approval-template-route-preview-toggle',
+    'approval-template-version-workspace-button',
+    'approval-template-save-button',
+    'approval-template-publish-button',
+  ]
+  for (const testId of headerActionIds) {
+    const box = await page.getByTestId(testId).boundingBox()
+    expect(box, `${testId} must render`).not.toBeNull()
+    expect(box!.x, `${testId} left edge`).toBeGreaterThanOrEqual(0)
+    expect(box!.x + box!.width, `${testId} right edge`).toBeLessThanOrEqual(390)
+  }
   const toggle = page.getByTestId('approval-template-route-preview-toggle')
   await toggle.click()
+  const canvasToolbar = page.getByRole('toolbar', { name: '画布视图' })
+  await expect(canvasToolbar).toBeVisible()
+  for (const button of await canvasToolbar.getByRole('button').all()) {
+    const box = await button.boundingBox()
+    expect(box?.width).toBeGreaterThanOrEqual(44)
+    expect(box?.height).toBeGreaterThanOrEqual(44)
+  }
+  const nodeActionButtons = page.locator('.template-authoring__canvas-node-actions .el-button')
+  expect(await nodeActionButtons.count()).toBeGreaterThan(0)
+  for (const button of await nodeActionButtons.all()) {
+    const box = await button.boundingBox()
+    expect(box?.width).toBeGreaterThanOrEqual(40)
+    expect(box?.height).toBeGreaterThanOrEqual(40)
+  }
+  const canvasNodeBoxes = await page.getByTestId('approval-canvas-node').evaluateAll((nodes) => nodes
+    .map((node) => {
+      const rect = node.getBoundingClientRect()
+      return { top: rect.top, bottom: rect.bottom }
+    })
+    .sort((left, right) => left.top - right.top))
+  for (let index = 1; index < canvasNodeBoxes.length; index += 1) {
+    expect(canvasNodeBoxes[index].top).toBeGreaterThanOrEqual(canvasNodeBoxes[index - 1].bottom)
+  }
   const panel = page.getByTestId('approval-canvas-route-preview-panel')
   await expect(panel).toBeVisible()
   await panel.getByRole('spinbutton').fill('1200')
@@ -261,6 +340,19 @@ test('approval route preview remains operable without horizontal overflow at a p
   expect(layout.panel.right).toBeLessThanOrEqual(layout.viewportWidth)
   expect(layout.panel.top).toBeGreaterThanOrEqual(layout.canvas.bottom)
 
+  await panel.scrollIntoViewIfNeeded()
+  const navigationOverlap = await page.evaluate(() => {
+    const steps = document.querySelector<HTMLElement>('.template-authoring__steps')
+    const canvas = document.querySelector<HTMLElement>('[data-testid="approval-canvas-viewport"]')
+    if (!steps || !canvas) throw new Error('missing authoring navigation or canvas')
+    const a = steps.getBoundingClientRect()
+    const b = canvas.getBoundingClientRect()
+    const intersects = a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+    return { position: getComputedStyle(steps).position, intersects }
+  })
+  expect(navigationOverlap.position).toBe('static')
+  expect(navigationOverlap.intersects).toBe(false)
+
   await page.screenshot({
     path: 'verification-output/approval-route-preview-mobile.png',
     fullPage: true,
@@ -269,6 +361,46 @@ test('approval route preview remains operable without horizontal overflow at a p
   await page.getByTestId('approval-canvas-route-preview-close').click()
   await expect(panel).toHaveCount(0)
   await expect(toggle).toBeFocused()
+})
+
+test('approval designer remains contained at tablet and compact desktop viewports', async ({ page }) => {
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 1024, height: 768 },
+  ]) {
+    await page.setViewportSize(viewport)
+    await openFormDesigner(page)
+    await page.getByRole('button', { name: '流程设计' }).click()
+    await expect(page.getByTestId('approval-authoring-mode-flow')).toHaveAttribute('aria-pressed', 'true')
+    await expect.poll(() => contrastRatio(page, '[data-testid="approval-authoring-mode-flow"]')).toBeGreaterThanOrEqual(4.5)
+
+    const geometry = await page.evaluate(() => {
+      const workspace = document.querySelector<HTMLElement>('[data-testid="approval-template-workspace-content"]')
+      const canvas = document.querySelector<HTMLElement>('[data-testid="approval-canvas-workspace"]')
+      const toolbar = document.querySelector<HTMLElement>('[data-testid="approval-canvas-toolbar"]')
+      const actions = document.querySelector<HTMLElement>('.template-authoring__section-actions')
+      if (!workspace || !canvas || !toolbar || !actions) throw new Error('missing designer surface')
+      return {
+        bodyWidth: document.body.scrollWidth,
+        viewportWidth: document.documentElement.clientWidth,
+        workspaceRight: workspace.getBoundingClientRect().right,
+        canvasRight: canvas.getBoundingClientRect().right,
+        canvasBottom: canvas.getBoundingClientRect().bottom,
+        toolbarRight: toolbar.getBoundingClientRect().right,
+        actionsTop: actions.getBoundingClientRect().top,
+      }
+    })
+    expect(geometry.bodyWidth).toBeLessThanOrEqual(geometry.viewportWidth)
+    expect(geometry.workspaceRight).toBeLessThanOrEqual(geometry.viewportWidth)
+    expect(geometry.canvasRight).toBeLessThanOrEqual(geometry.viewportWidth)
+    expect(geometry.toolbarRight).toBeLessThanOrEqual(geometry.viewportWidth)
+    if (viewport.width === 1024) expect(geometry.actionsTop).toBeGreaterThanOrEqual(geometry.canvasBottom)
+  }
+
+  await page.screenshot({
+    path: 'verification-output/approval-designer-tablet.png',
+    fullPage: true,
+  })
 })
 
 test('approval form designer stacks without horizontal overflow at a phone viewport', async ({ page }) => {
@@ -430,6 +562,20 @@ test('approval version workspace stacks without horizontal overflow at a phone v
   await page.goto(`${HARNESS}?mode=version`)
   await page.getByTestId('approval-template-version-workspace-button').click()
   await expect(page.getByTestId('approval-version-workspace')).toBeVisible()
+  const closeButton = page.locator('.approval-version-workspace-dialog .el-dialog__headerbtn')
+  const closeBox = await closeButton.boundingBox()
+  expect(closeBox?.width).toBeGreaterThanOrEqual(44)
+  expect(closeBox?.height).toBeGreaterThanOrEqual(44)
+  const versionDate = page.getByTestId('approval-version-timeline-3').locator('small')
+  await expect(versionDate).toBeVisible()
+  expect(await versionDate.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  const timelineCardsFit = await page.locator(
+    '[data-testid="approval-version-current-draft"], [data-testid^="approval-version-timeline-"]',
+  ).evaluateAll((elements) => elements.every((element) => {
+    const rect = element.getBoundingClientRect()
+    return rect.left >= 0 && rect.right <= document.documentElement.clientWidth
+  }))
+  expect(timelineCardsFit).toBe(true)
 
   const layout = await page.evaluate(() => {
     const rect = (selector: string) => {

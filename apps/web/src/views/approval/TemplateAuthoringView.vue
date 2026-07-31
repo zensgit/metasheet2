@@ -3682,7 +3682,7 @@ onUnmounted(() => {
 
 .template-authoring__validation-summary,
 .template-authoring__content {
-  scroll-margin-top: 124px;
+  scroll-margin-top: 140px;
 }
 
 .template-authoring__validation-summary:focus {
@@ -4031,6 +4031,9 @@ pre {
     grid-template-columns: 28px minmax(0, 1fr);
   }
 
+  .template-authoring__section-actions {
+    position: static;
+  }
 }
 
 @media (max-width: 760px) {
@@ -4059,12 +4062,30 @@ pre {
     width: 100%;
   }
 
+  .template-authoring__actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: stretch;
+  }
+
+  .template-authoring__actions > * {
+    min-width: 0;
+  }
+
+  .template-authoring__actions > span {
+    display: flex;
+  }
+
   .template-authoring__actions :deep(.el-button) {
-    flex: 1;
+    min-width: 0;
+    min-height: 40px;
+    margin-left: 0;
   }
 
   .template-authoring__steps {
-    top: 0;
+    position: static;
+    top: auto;
+    z-index: auto;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -4081,9 +4102,6 @@ pre {
     min-height: 44px;
   }
 
-  .template-authoring__section-actions {
-    position: static;
-  }
 }
 
 .template-authoring__view-toggle {
@@ -4100,6 +4118,12 @@ pre {
   border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
   background: var(--el-fill-color-light);
+}
+
+.template-authoring__mode-switch :deep(.el-button--primary) {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary);
+  color: var(--el-color-white);
 }
 
 .template-authoring__tryrun-conditions {

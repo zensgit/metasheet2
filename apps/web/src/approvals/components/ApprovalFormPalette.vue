@@ -146,8 +146,8 @@ function onDragStart(event: DragEvent, type: FormAuthoringFieldType) {
 
 .approval-form-palette__item span {
   min-width: 0;
-  overflow-wrap: anywhere;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 @media (max-width: 1024px) {
