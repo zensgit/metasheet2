@@ -1,4 +1,4 @@
-# 审批编辑器与流程编排 E1-b / E2 / C1 / C2 / C3 / F1-a / F1-b 收尾验证（2026-07-31）
+# 审批编辑器与流程编排 E1-b / E2 / C1-C4 / F1-a-F2 收尾验证（2026-07-31）
 
 **范围状态：PR VERIFIED / REQUIRED CI PASS**
 
@@ -6,8 +6,9 @@
 
 本报告只关闭 E1-b renderer/command feasibility、E2 第一刀无行为抽取、
 C1 线性/复杂流程统一载体、C2 canvas-first 工作区、C3 边 `+` 插入，及
-F1-a/F1-b 表单 palette、三栏 builder/inspector 与插入移动交互。它不宣称
-审批编辑器已对标完成，不授权 C4/C5、F2/F3、部署、UAT 或 flag 开启。
+F1-a/F1-b/F2 表单 palette、三栏 builder/inspector、命令与引用保护，以及
+C4 语义拖拽/分支排序。它不宣称审批编辑器已对标完成，不授权 C5/F3、
+部署、UAT 或 flag 开启；C4 真浏览器证据仍未闭合。
 
 ## 1. Exact heads
 
@@ -280,14 +281,37 @@ F1-a 本身没有抽出独立 builder，也没有提供聚焦字段的右侧属�
 - 真 Chromium 1440 / 1024 / 390 builder overflow 0、console error 0；桌面
   拖入日期后字段数 3 -> 4，并在右侧把选中字段改名为“财务复核人”。
 
+### 8.3 C4 语义拖拽与分支排序
+
+- 节点拖入合法 edge slot、条件分支排序和并行分支排序统一经页面
+  `applyCanvasCommand` 接现有命令代数，renderer 无拓扑业务逻辑；
+- 拖拽 payload 与本地 session token 绑定；stale、非法和跨区域输入 no-op，
+  visible/live 文案 values-free；分支把手、`Alt+Arrow` 和按钮共享语义；
+- focused 79/79、required Web 360 文件 / 4338 测试、类型和 production build
+  PASS；Draft PR #4698，exact head `c6f0b7bbc`；
+- 本轮 Codex In-app Browser 无法附着 localhost 新标签页。HTTP 服务本身 200，
+  但缺 drag/screenshot 证据，因此 C4 只记 `IMPLEMENTED / LOCAL REQUIRED PASS`。
+
+### 8.4 F2 表单命令与权威引用
+
+- Builder 仅发 typed add/remove/move intent，页面调用 `approvalFormCommands`；
+- 新字段/明细列使用 UUID identity；后端收集该模板全部历史版本的字段与明细
+  列 ID，删除后不可复用；
+- admin-only authoring context 在 REPEATABLE READ 只读事务返回完整身份与
+  values-free FWB reference inventory；错模板、缺项或畸形成员全部 fail-closed；
+- publish 在同一事务重扫引用，删除仍被 FWB 使用的字段返回 values-free 409；
+- focused FE 105/105、BE unit 147/147、fresh PG15 全迁移真实 API 8/8、
+  required Web 359 文件 / 4330 测试、两刀 mutation RED；Draft PR #4699，
+  exact head `4ccc20f71`。
+
 ## 9. 残余与 owner 门
 
 1. #4642/#4643/#4649/#4652/#4657 required CI 已绿；#4696/#4697 已开 Draft，
    本地门与 exact-head required CI 均已绿，merge state 均为 CLEAN；全部未 merge；
 2. edge `+` 产品接线和节点按钮群移除已由 C3 完成；
-3. 统一 drag feedback、分支拖排和 undo/redo 属于 C4/C5；
-4. F1-a/F1-b 已有 palette、插入槽、字段移动和三栏 builder/inspector；完整
-   引用保护和附件 authoring 仍属于 F2/F3；
+3. drag feedback 和分支拖排已由 C4 实现，但真浏览器证据待补；undo/redo 属于 C5；
+4. F1-a/F1-b/F2 已有 palette、三栏 builder、字段命令和引用保护；附件
+   authoring 仍属于 F3；
 5. 版本时间线/双画布 diff、路由预览整合、真实键盘/a11y 仍未完成；
 6. 390 虽无横向溢出，但 sticky bottom navigation 会遮住内容，属于 X1；
 7. production Canvas 仍默认 OFF；staging UAT 与生产 flag 为 owner 门；
@@ -302,6 +326,7 @@ F1-a 本身没有抽出独立 builder，也没有提供聚焦字段的右侧属�
 - `F1-a form palette and insertion = PR VERIFIED / CI PASS`；
 - `C3 edge insertion = DRAFT PR / LOCAL REQUIRED PASS / EXACT-HEAD PR CI PASS / CLEAN`；
 - `F1-b form builder and inspector = DRAFT PR / LOCAL REQUIRED PASS / EXACT-HEAD PR CI PASS / CLEAN`；
+- `C4 semantic drag = DRAFT PR / LOCAL REQUIRED PASS / BROWSER EVIDENCE PENDING`；
+- `F2 form command protection = DRAFT PR / LOCAL REQUIRED PASS / REAL DB PASS / PR CI RUNNING`；
 - `approval editor parity line = IN PROGRESS / NOT FINAL`；
-- 下一开发点为 C4/C5 语义拖拽、分支排序与 undo/redo，并行推进 F2/F3
-  引用保护和附件 authoring。
+- 下一开发点为 C5 统一 undo/redo 与 F3 附件 authoring，并补 C4 真浏览器门。

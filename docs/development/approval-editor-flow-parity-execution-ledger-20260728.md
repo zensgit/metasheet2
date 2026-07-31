@@ -24,6 +24,8 @@ merge、部署、UAT 和 flag 是不同状态，不互相替代。
 | F1-a | 表单 palette、插入槽和字段移动 | C2 head / `codex/approval-editor-f1-form-palette-20260728` | `6b926dce5` | Codex 实现；三轮独立子代理对抗复审 | 点击/typed drag 插入、handle-only 拖排、键盘/触屏等价、唯一字段 ID、三 viewport 真浏览器 | Draft PR #4657；required CI 绿 |
 | C3 | 合法边 `+` 与 typed 插入菜单 | C2 head / `codex/approval-editor-c3-edge-insert-agent-20260728` | `525915d3d` | 子代理实现；Codex exact-source 复核和修复 | 40x40 边控件、四类节点、renderer intent、无 default 条件图、parallel join 收敛、真浏览器 | Draft PR #4697；本地 required Web Tests / build PASS；exact-head required CI PASS，merge state CLEAN |
 | F1-b | 三栏表单 builder 与聚焦 inspector | F1-a head / `codex/approval-editor-f1b-form-builder-20260728` | `93a9527f2` | Codex 实现与复核 | 左 palette / 中画布 / 右 inspector、typed drag、键盘/触屏等价、flag OFF 回退、三 viewport 真浏览器 | Draft PR #4696；本地 required Web Tests / build PASS；exact-head required CI PASS，merge state CLEAN |
+| C4 | 语义节点拖拽与条件/并行分支排序 | C3 head / `codex/approval-editor-c4-semantic-drag-20260731` | `c6f0b7bbc` | 子代理实现；Codex exact-source 复核 | renderer intent-only、统一 command seam、合法槽、stale/cross-region no-op、values-free live message、键盘等价 | Draft PR #4698；本地 required Web 360/4338 + build PASS；PR checks 运行中；真浏览器证据待补 |
+| F2 | 表单结构命令、历史身份与 FWB 引用保护 | F1-b head / `codex/approval-editor-f2-form-command-protection-20260731` | `5fff366e8` + `4ccc20f71` | Codex 前端；子代理后端；Codex 组合复核 | UUID identity、全版本字段/明细列历史、values-free 引用、发布同事务 gate、错配/畸形上下文 fail-closed | Draft PR #4699；required Web 359/4330、unit 147、fresh PG15 API 8/8、两刀 mutation RED；PR checks 运行中 |
 
 ## 2. E1-b 执行事实
 
@@ -63,26 +65,24 @@ E2 只修改：
 
 ## 4. 状态矩阵
 
-| 面 | E1-b | E2 | C1 | C2 | F1-a | C3 | F1-b |
-|---|---|---|---|---|---|---|---|
-| 设计方向 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 |
-| 实现 | 完成 | 完成 | 完成 | 完成 | 完成 | 完成 | 完成 |
-| 本地测试 | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
-| 判别变异 | PASS | PASS | PASS（3 刀） | PASS（4 刀） | PASS（3 刀） | focused guards + exact browser | focused guards + exact browser |
-| 独立复审 | Codex | Codex | Kimi APPROVE，无 P1/P2；Codex复核修 P3 | Kimi APPROVE，无 P1/P2；Codex复核 | 三轮子代理复审；最终无 P1/P2 | Codex 复核，修 2 个 P2 级合法性漂移 | Codex exact-source 复核 |
-| 提交 | 是 | 是 | 是 | 是 | 是 | 是 | 是 |
-| push / PR | #4643 | #4642 | #4649（stacked on #4642） | #4652（stacked on #4649） | #4657（stacked on #4652） | #4697（stacked on #4652） | #4696（stacked on #4657） |
-| required CI | PASS | PASS | PASS | PASS | PASS | PR 待结算 | PR 待结算 |
-| merge | 否 | 否 | 否 | 否 | 否 | 否 | 否 |
-| staging / UAT | 否 | 否 | 否 | 否 | 否 | 否 | 否 |
-| production flag | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF |
+| 面 | E1-b | E2 | C1 | C2 | F1-a | C3 | F1-b | C4 | F2 |
+|---|---|---|---|---|---|---|---|---|---|
+| 设计方向 | 已约束 | 已约束 | 已约束 | 已约束 | 已约束 | 已约束 | 已约束 | 已约束 | 已约束 |
+| 实现 | 完成 | 完成 | 完成 | 完成 | 完成 | 完成 | 完成 | 完成 | 完成 |
+| 本地测试 | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
+| 判别变异 | PASS | PASS | 3 刀 | 4 刀 | 3 刀 | focused + browser | focused + browser | command/mounted 判别 | 2 刀 + real DB |
+| 独立复审 | Codex | Codex | Kimi + Codex | Kimi + Codex | 子代理 + Codex | Codex | Codex | Codex，无 P1/P2 | Codex 组合复核，修 DTO/mock/运行时校验 |
+| push / PR | #4643 | #4642 | #4649 | #4652 | #4657 | #4697 | #4696 | #4698 | #4699 |
+| required CI | PASS | PASS | PASS | PASS | PASS | PASS | PASS | 运行中 | 运行中 |
+| 真浏览器 | PASS | N/A | PASS | PASS | PASS | PASS | PASS | 待补 | 待补 |
+| merge / UAT / flag | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 | 全部否 |
 
 ## 5. 后续顺序
 
 1. 审阅并按依赖落 #4642 -> #4649 -> #4652；其后 #4697 走 C3，#4657 -> #4696 走 F1；#4643 是 verification-only 独立支线；
-2. C3 已把节点按钮群改为边 `+`，C4/C5 继续收拖拽与 undo/redo；
-3. F1-a/F1-b 已交付 palette/插入槽和三栏 builder/inspector；
-4. F2/F3 补完整字段引用保护与附件 authoring；
+2. C3/C4 已交付边 `+`、语义拖拽与分支排序；C5 继续收统一 undo/redo；
+3. F1-a/F1-b/F2 已交付 palette、三栏 builder、命令层与外部引用保护；
+4. F3 补附件 authoring；
 5. V1/V2、P1、X1 收版本、试运行、移动端/无障碍；
 6. T1 真浏览器 required CI 全闭合后才进入 staging UAT；
 7. production flag 和结构化辅助入口退役始终由 owner 单独决定。

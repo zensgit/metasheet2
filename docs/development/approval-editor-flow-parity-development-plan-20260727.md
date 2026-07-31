@@ -1,6 +1,6 @@
 # 审批编辑器与流程编排对标开发计划（2026-07-27）
 
-**状态：IN PROGRESS（E0 / E1 / E1-b / E2 / C1 / C2 / C3 / F1-a / F1-b 已完成并形成待审 Draft PR；C4 / C5 及 F2 / F3 仍在开发队列）**
+**状态：IN PROGRESS（C4 与 F2 已实现并形成待审 Draft PR；C4 仍缺真浏览器证据，C5 / F3 仍在开发队列）**
 
 **事实审计基线：** `origin/main@d449aa7e6d02f94df2738a77cafffa778b12fde0`
 
@@ -64,12 +64,12 @@
 | 用户面 | 当前 `main` | 对标差距 |
 |---|---|---|
 | 信息架构 | C2 在 Canvas flag ON 时提供表单/流程直接模式切换 | shell、字段 builder 和版本工作区仍待继续拆分 |
-| 线性流程 | C1 派生统一 Canvas carrier；C2 默认进入流程画布；C3 提供边 `+` 插入 | 统一历史、拖拽反馈和上下文操作仍未产品化 |
-| 复杂流程 | flag ON 后默认 Canvas；结构视图保留为“辅助编辑模式”；C3 仅向合法边提供插入菜单 | 分支拖排和 undo/redo 尚未收口 |
-| 节点操作 | C3 已移除节点卡内插入按钮群，审批/抄送/条件/并行改由边 `+` 插入 | 上下文菜单、删除/移动动作和统一历史仍待 C4/C5 |
-| 拖拽 | 审批/抄送节点可移入合法边槽 | 缺合法槽持续高亮、统一拖拽状态机和分支拖排 UI |
+| 线性流程 | C1 派生统一 Canvas carrier；C2 默认进入流程画布；C3 提供边 `+` 插入；C4 接入语义拖拽 | 统一历史和上下文操作仍未产品化 |
+| 复杂流程 | flag ON 后默认 Canvas；结构视图保留为“辅助编辑模式”；C3 仅向合法边提供插入菜单；C4 接入条件/并行分支拖排 | undo/redo 尚未收口 |
+| 节点操作 | C3 已移除节点卡内插入按钮群；C4 的节点移动与分支排序共用 typed command seam | 上下文菜单和统一历史仍待 C5 |
+| 拖拽 | C4 已实现合法槽高亮、stale/cross-region no-op、values-free live message 和分支把手/键盘等价 | 真浏览器拖拽证据仍待 Browser 会话恢复后补齐 |
 | 撤销/重做 | 命令层有逆操作/历史类型 | 顶栏未挂载统一 undo/redo |
-| 表单设计 | F1-a 提供全字段 palette；F1-b 已形成左 palette + 中画布 + 右侧聚焦字段检查器 | 完整命令层引用保护与附件 authoring 仍未完成 |
+| 表单设计 | F1-a/F1-b 提供 palette 与三栏工作区；F2 已把增删移动接到命令层，并接后端历史 ID / FWB 引用权威 | 附件 authoring 仍未完成 |
 | 检查器 | 复杂画布已有右侧检查器 | 线性流程、字段、版本差异未统一；窄屏不是正式 bottom sheet |
 | 版本比较 | 表格历史 + 变化列表 + 单画布 overlay | 缺编辑器内时间线、双画布并排和 before/after 检查器 |
 | 可访问性 | 部分按钮/键盘事件和结构列表 fallback | 缺完整键盘创作、live region、焦点恢复和真实浏览器证明 |
@@ -220,6 +220,25 @@ C3 已在 C2 head 上把节点卡内插入按钮群迁移为每条合法边上�
 Tests 为 360 文件 / 4335 测试，生产 build 和真 Chromium 插入 `4 -> 5`
 节点均通过。Draft PR #4697（`525915d3d`）依赖 #4652；尚未 merge、部署或
 开启 flag。
+
+C4 已在 C3 head 上完成语义拖拽与分支排序。渲染层只发 node/branch drag
+intent，页面统一通过 `applyCanvasCommand` 接既有 command algebra；合法边槽
+在拖拽期间高亮，stale、非法与跨区域 payload 均 no-op，并仅返回 values-free
+live message。条件与并行分支的把手拖排、`Alt+Arrow` 和原按钮重排共用同一
+typed command。required Web 为 360 文件 / 4338 测试，类型与 production
+build 通过；Draft PR #4698（`c6f0b7bbc`）依赖 #4697。Codex In-app Browser
+本轮无法附着本地新标签页，因此真浏览器 drag/screenshot 仍是独立未闭合门，
+不得用 jsdom 或构建绿替代。
+
+F2 已在 F1-b head 上完成表单结构命令与后端权威接线。新增/删除/移动只经
+`approvalFormCommands`；新增字段使用不可复用 UUID identity，后端在
+REPEATABLE READ 只读事务内收集全部模板版本的顶层字段与明细列 ID，并以
+values-free 方式枚举停用/嵌套 FWB 引用。上下文缺失、错模板或成员格式异常时
+新增/删除 fail-closed，但无结构风险的重排保留；发布时在同一事务再次扫描
+FWB 引用并拒绝删除仍在使用的字段。前端 focused 105/105、后端 unit
+147/147、fresh PostgreSQL 15 全迁移真实服务器 8/8、required Web 359 文件 /
+4330 测试、两刀中和精确转红。Draft PR #4699（`4ccc20f71`）依赖 #4696；
+尚未 merge、部署或开启 flag。
 
 ### 4.1 依赖图
 
@@ -442,10 +461,10 @@ U0 至少包含以下 12 项，全部保存截图、录屏或网络/数据库证
 1. **E0：完成。** Codex exact-head 审阅，Claude Opus 只读对抗复核；
 2. **E1 / E1-b：完成。** Kimi 提供视觉 IA，Grok 构建隔离 renderer 和生产命令适配验证，Codex 复核与变异；
 3. **E2 / C1 / C2：完成待审。** Claude 负责 shell 与统一 carrier，Codex 完成 canvas-first 接线、真浏览器验证和判别变异，Kimi 复审；
-4. **F1-a / F1-b：完成待审。** Codex 完成 palette、三栏 builder/inspector、插入槽、handle-only 拖排、键盘/触屏等价和唯一字段 ID 修复；
-5. **C3：完成待审。** 子代理实现边 `+`，Codex exact-source 复核后修正 condition default 与 parallel join 两处合法性守卫，并重跑 required Web Tests、生产 build 和真浏览器。
+4. **F1-a / F1-b / F2：完成待审。** Codex 完成 palette、三栏 builder/inspector、命令接线、不可复用字段身份与后端历史/FWB 引用权威；
+5. **C3：完成待审。** 子代理实现边 `+`，Codex exact-source 复核后修正 condition default 与 parallel join 两处合法性守卫，并重跑 required Web Tests、生产 build 和真浏览器；
+6. **C4：代码与 CI 门完成，浏览器门未闭合。** 语义拖拽和分支排序已形成 Draft PR，真实 Browser 附着失败被保留为显式阻塞，未伪报视觉验收。
 
-本轮尚未启动 C4/C5、F2/F3 及版本/试运行收口，没有开启任何 flag，也没有
-接触审批运行时服务。下一开发点为 C4 语义拖拽/分支排序与 C5 undo/redo，
-并行推进 F2 引用保护、F3 附件 authoring；不得把 C3/F1-b 的交互完成解释为
-整条编辑器已达到飞书/钉钉产品完成度。
+本轮尚未启动 C5/F3 及版本/试运行收口，没有开启任何 flag。下一开发点为
+C5 统一 undo/redo 与 F3 附件 authoring；同时补 C4 真浏览器证据。不得把
+C4/F2 的实现完成解释为整条编辑器已达到飞书/钉钉产品完成度。
