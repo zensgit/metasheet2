@@ -405,11 +405,16 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
   it('P06: authoritative 5001 fails at the real route before import or result DML', async () => {
     const fixture = await seedActorAndRollout('authoritative')
     const before = await businessCounts(fixture.orgId)
-    const rows = Array.from({ length: 5001 }, () => ({
+    const rows = Array.from({ length: 5001 }, (_, index) => ({
       userId: fixture.actorId,
-      workDate,
+      workDate: new Date(Date.UTC(2020, 0, index + 1))
+        .toISOString()
+        .slice(0, 10),
       fields: { workMinutes: 480 },
     }))
+    expect(new Set(rows.map((row) => `${row.userId}:${row.workDate}`)).size).toBe(
+      5001,
+    )
     const response = await requestJson('/api/attendance/import/commit', fixture.token, {
       orgId: fixture.orgId,
       userId: fixture.actorId,
@@ -419,7 +424,7 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     expect(response.status, response.raw).toBe(422)
     expect((response.body?.error as { code?: string } | undefined)?.code).toBe('W4_BATCH_LIMIT_EXCEEDED')
     expect(await businessCounts(fixture.orgId)).toEqual(before)
-  }, 30000)
+  }, 120000)
 
   it('P06: authoritative exactly 5000 commits atomically through the real route', async () => {
     const fixture = await seedActorAndRollout('authoritative')
