@@ -1479,6 +1479,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('FROM attendance_rules')) return []
       if (sql.includes('SELECT value FROM system_configs')) return []
       if (sql.includes('SELECT name, code, rule_set_id FROM attendance_groups')) return []
+      if (sql.includes('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')) return []
       if (sql.includes('SET LOCAL statement_timeout')) return []
       if (sql.includes('INSERT INTO attendance_import_batches')) return []
       if (sql.includes('FROM attendance_holidays')) return []
@@ -1532,6 +1533,9 @@ describe('attendance UUID route validation', () => {
       },
     })
     expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(db.query).toHaveBeenCalledWith(
+      'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE',
+    )
     expect(db.query.mock.calls.map(([query]) => typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query))
       .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(true)
   })
