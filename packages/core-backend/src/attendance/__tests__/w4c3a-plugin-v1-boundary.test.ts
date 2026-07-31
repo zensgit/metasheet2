@@ -185,6 +185,27 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(asyncRoute).not.toContain('sanitizeImportJobPayload')
   })
 
+  it('cuts P09 legacy import over to prepare/apply without retaining its private writer', () => {
+    const routeStart = source.indexOf("'/api/attendance/import',")
+    const routeEnd = source.indexOf("'/api/attendance/integrations',", routeStart)
+    const route = source.slice(routeStart, routeEnd)
+    const prepareAccess = route.indexOf('assertAttendanceImportPrepareAllowed')
+    const scopedAccess = route.indexOf('assertAttendanceImportCommitAllowed')
+    const token = route.indexOf('consumeImportCommitToken')
+    const prepare = route.indexOf('prepareOnly: true')
+    const apply = route.indexOf('await syncImportPort.commitSyncImportPlan')
+    expect(routeStart).toBeGreaterThan(-1)
+    expect(routeEnd).toBeGreaterThan(routeStart)
+    expect(prepareAccess).toBeGreaterThan(-1)
+    expect(scopedAccess).toBeGreaterThan(prepareAccess)
+    expect(token).toBeGreaterThan(scopedAccess)
+    expect(prepare).toBeGreaterThan(token)
+    expect(apply).toBeGreaterThan(prepare)
+    expect(route).not.toContain('await db.transaction')
+    expect(route).not.toContain('upsertAttendanceRecord')
+    expect(route).not.toContain('resolveWorkContext({')
+  })
+
   it('keeps preparation-only calculation free of compatibility DML', () => {
     const calculator = source.slice(
       source.indexOf('const commitAttendanceImportPayload = async'),

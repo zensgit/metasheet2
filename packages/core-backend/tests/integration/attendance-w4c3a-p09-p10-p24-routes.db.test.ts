@@ -110,6 +110,9 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
   async function seedActorAndRollout(state: 'legacy' | 'shadow'): Promise<{ orgId: string; actorId: string; token: string }> {
     const orgId = randomUUID()
     const actorId = randomUUID()
+	    // The rollout resolver requires the exact org key; a truthy/wildcard
+	    // value is deliberately insufficient proof of shadow eligibility.
+	    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
     await pool.query(
       `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
        VALUES ($1, $2, $1, 'W4C-3a route fixture', 'x', 'user', '[]'::jsonb, true, false, now(), now())`,
@@ -121,8 +124,8 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     )
     await pool.query(
       `INSERT INTO attendance_calculation_rollout_state
-       (org_id, state, engine_version, reason_code, actor_id, version, prior_state)
-       VALUES ($1, $2, 'w4c3a-route-acceptance', 'TEST_FIXTURE', $3, 1, NULL)`,
+       (org_id, state, engine_version, reason_code, actor_id, version, prior_state, scope)
+       VALUES ($1, $2, 'w4c3a-route-acceptance', 'TEST_FIXTURE', $3, 1, NULL, 'synthetic_staging')`,
       [orgId, state, actorId],
     )
     return { orgId, actorId, token: await mintToken(actorId) }
@@ -329,6 +332,9 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
         }),
       )
       expect(await canonicalOperationCounts(orgId)).toEqual({ batches: 0, operations: 0 })
+	    const persisted = await businessCounts(orgId)
+	    expect(persisted.importBatches).toBe(1)
+	    expect(persisted.importItems).toBe(1)
     } finally {
       now.mockRestore()
     }
@@ -343,6 +349,9 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     })
     expect(legacyResponse.status, legacyResponse.raw).toBe(200)
     expect(await canonicalOperationCounts(legacy.orgId)).toEqual({ batches: 1, operations: 1 })
+	  const persisted = await businessCounts(legacy.orgId)
+	  expect(persisted.importBatches).toBe(1)
+	  expect(persisted.importItems).toBe(1)
   })
 
   it('P10: shadow integration sync apply seals the same canonical prepared-operation boundary', async () => {
