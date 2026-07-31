@@ -18,11 +18,23 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.
 const toolDir = path.join(rootDir, 'scripts/attendance/w4c0-dml-inventory')
 
 const { createWorktreeSource, createGitRefSource } = require(path.join(toolDir, 'sources.cjs'))
-const { buildRawCensus, classifyCensus, scanFileForDmlSites, isCanonicalBoundaryPath, contentHashOfKeys } = require(
+const {
+  buildRawCensus,
+  buildP25CallPathCensus,
+  classifyCensus,
+  scanFileForDmlSites,
+  scanFileForP25CallPathSites,
+  isCanonicalBoundaryPath,
+  contentHashOfKeys,
+} = require(
   path.join(toolDir, 'collector.cjs'),
 )
 const { classifyTrackedSites } = require(path.join(toolDir, 'classify-tracked-sites.cjs'))
 const { CURATED_DEBT_ENTRIES } = require(path.join(toolDir, 'curated-debt-entries.cjs'))
+const {
+  P25_CALL_PATH_CLASSIFICATIONS,
+  classifyP25CallPathSites,
+} = require(path.join(toolDir, 'p25-call-path-classification.cjs'))
 const {
   TABLE_BUCKETS,
   P25_FORBIDDEN_AUTHORITY_ROLES,
@@ -560,6 +572,95 @@ test('P25: integration dryRun audit state cannot be categorized as business stat
     classifyP25Use({ table: 'attendance_integration_runs', role: 'audit_attempt', dryRun: true }).allowed,
     true,
     'dryRun may append an audit attempt only',
+  )
+})
+
+test('P25: generated runtime call-path census classifies every closed-table read and write', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildP25CallPathCensus(source)
+  const result = classifyP25CallPathSites(sites)
+
+  assert.equal(sites.length, 97, 'the current generated P25 read/write inventory must remain explicit')
+  assert.deepEqual(result.unclassified, [], 'a new P25 table/site or renamed wrapper must not inherit a broad allowlist')
+  assert.deepEqual(result.countDrift, [], 'an extra P25 access in an existing wrapper must require an explicit classification')
+  assert.deepEqual(result.stale, [], 'removing a P25 access must retire its classification deliberately')
+  assert.equal(result.classifiedSites.length, sites.length, 'every generated P25 site must carry an explicit adapter and role')
+  assert.deepEqual(
+    [...new Set(sites.map((site) => site.table))].sort(),
+    P25_IMPORT_INTEGRATION_TABLES,
+    'the generated call-path census must cover every closed P25 table family',
+  )
+})
+
+test('P25 mutation: removing the private-worker boundary or adding a non-worker reserved-tuple read fails', () => {
+  const workerClassification = P25_CALL_PATH_CLASSIFICATIONS.find(
+    (classification) =>
+      classification.relPath === 'packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts' &&
+      classification.table === 'attendance_import_legacy_execution_plans' &&
+      classification.access === 'read',
+  )
+  assert.ok(workerClassification)
+  const withoutPrivateWorker = P25_CALL_PATH_CLASSIFICATIONS.map((classification) =>
+    classification === workerClassification ? { ...classification, adapter: 'sync' } : classification,
+  )
+  assert.throws(
+    () => classifyP25CallPathSites([], withoutPrivateWorker),
+    (error) => error.code === 'ATTENDANCE_P25_IDENTITY_ADAPTER_PATH_FORBIDDEN',
+    'the durable plan read cannot survive after its private-worker boundary is removed',
+  )
+
+  const nonWorkerRead = scanFileForP25CallPathSites(
+    'plugins/plugin-attendance/index.cjs',
+    "async function syncAdoptsReservedTuple() {\n  await db.query('SELECT * FROM attendance_import_jobs WHERE id = $1', [jobId])\n}\n",
+  )
+  assert.equal(nonWorkerRead.length, 1)
+  assert.throws(
+    () =>
+      classifyP25CallPathSites(nonWorkerRead, [
+        {
+          relPath: 'plugins/plugin-attendance/index.cjs',
+          enclosingSymbol: 'syncAdoptsReservedTuple',
+          table: 'attendance_import_jobs',
+          access: 'read',
+          verb: 'select',
+          count: 1,
+          role: 'compatibility_transport',
+          adapter: 'sync',
+        },
+      ]),
+    (error) => error.code === 'ATTENDANCE_P25_IDENTITY_ADAPTER_PATH_FORBIDDEN',
+    'a sync/legacy/integration/rollback wrapper cannot consume a reserved retryable tuple',
+  )
+})
+
+test('P25 mutation: an unclassified wrapper and integration-run authority both fail', () => {
+  const renamedWrapper = scanFileForP25CallPathSites(
+    'packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts',
+    "async function renamedPlanReader() {\n  await db.query('SELECT * FROM attendance_import_legacy_execution_plans WHERE job_id = $1', [jobId])\n}\n",
+  )
+  const unclassified = classifyP25CallPathSites(renamedWrapper)
+  assert.equal(unclassified.unclassified.length, 1, 'renaming a P25 wrapper must require a new explicit classification')
+
+  const addedSite = scanFileForP25CallPathSites(
+    'plugins/plugin-attendance/index.cjs',
+    "function buildImportJobProjectionSql() {\n  return 'SELECT * FROM attendance_import_jobs'\n}\n",
+  )
+  const addedSiteResult = classifyP25CallPathSites(addedSite)
+  assert.equal(addedSiteResult.unclassified.length, 0, 'the single known wrapper site remains classified')
+  const duplicateSiteResult = classifyP25CallPathSites([...addedSite, ...addedSite])
+  assert.equal(duplicateSiteResult.unclassified.length, 1, 'a new P25 site inside an existing wrapper must be unclassified')
+
+  const integrationAudit = P25_CALL_PATH_CLASSIFICATIONS.find(
+    (classification) => classification.table === 'attendance_integration_runs',
+  )
+  assert.ok(integrationAudit)
+  const authorityMutation = P25_CALL_PATH_CLASSIFICATIONS.map((classification) =>
+    classification === integrationAudit ? { ...classification, role: 'business_state' } : classification,
+  )
+  assert.throws(
+    () => classifyP25CallPathSites([], authorityMutation),
+    (error) => error.code === 'ATTENDANCE_P25_AUDIT_NOT_BUSINESS_STATE',
+    'integration_runs, including dry-run audit state, cannot feed calculation or authorization authority',
   )
 })
 

@@ -137,7 +137,12 @@ function discoverRuntimeRoots(source) {
 // collector limitation (see the collector's own CI test and the Stage D handoff note), not a
 // silently-claimed guarantee.
 const DML_LINE_PATTERN =
-  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
+  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
+
+const P25_READ_TABLE_PATTERN = new RegExp(
+  `\\b(?:FROM|JOIN)\\s+"?(${Object.keys(P25_OPERATIONAL_TABLE_SPECS).join('|')})"?`,
+  'gi',
+)
 
 // Reserved words that can legally follow a DML verb without being a table name — most notably
 // `... ON CONFLICT (...) DO UPDATE SET col = ...` (an upsert), where "SET" immediately follows
@@ -180,7 +185,7 @@ function verbFromKeyword(keyword) {
   if (k.startsWith('TRUNCATE')) return 'truncate'
   if (k.startsWith('MERGE')) return 'merge'
   if (k === 'COPY') return 'copy'
-  if (k.startsWith('CREATE TABLE')) return 'staging_create'
+  if (k.startsWith('CREATE') && k.includes('TABLE')) return 'staging_create'
   if (k.startsWith('DROP TABLE')) return 'staging_drop'
   if (k.startsWith('ALTER TABLE')) return 'staging_alter'
   return 'unknown'
@@ -261,6 +266,42 @@ function scanFileForDmlSites(relPath, content) {
   return sites
 }
 
+function isDeleteTarget(line, table) {
+  return new RegExp(`\\bDELETE\\s+FROM\\s+"?${table}"?`, 'i').test(line)
+}
+
+// P25 needs more than the DML census: operational state becomes dangerous when a caller reads
+// it as authority. This deliberately scans only SQL table positions (DML targets plus FROM/JOIN),
+// not every string occurrence, and preserves the same nearest-symbol attribution used by the
+// existing generated inventory.
+function scanFileForP25CallPathSites(relPath, content) {
+  const lines = content.split(/\r?\n/)
+  const sites = scanFileForDmlSites(relPath, content)
+    .filter((site) => P25_OPERATIONAL_TABLE_SPECS[site.table])
+    .map((site) => ({ ...site, access: 'write' }))
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    P25_READ_TABLE_PATTERN.lastIndex = 0
+    let match
+    while ((match = P25_READ_TABLE_PATTERN.exec(line))) {
+      const table = match[1]
+      // DELETE FROM names its write target, not a second read. INSERT ... SELECT and UPDATE ...
+      // FROM still retain their source-table read, which is the evidence this guard needs.
+      if (isDeleteTarget(line, table)) continue
+      sites.push({
+        relPath,
+        line: i + 1,
+        verb: 'select',
+        table,
+        enclosingSymbol: nearestEnclosingSymbol(lines, i),
+        access: 'read',
+      })
+    }
+  }
+  return sites
+}
+
 // Builds the full raw census across every scannable file under the discovered runtime roots.
 // `source` supplies `readFile(relPath) -> string|null` and `listAllFiles(rootDir) -> relPath[]`.
 function buildRawCensus(source) {
@@ -277,6 +318,24 @@ function buildRawCensus(source) {
       for (const site of scanFileForDmlSites(relPath, content)) {
         sites.push(site)
       }
+    }
+  }
+  sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
+  return { roots, sites }
+}
+
+function buildP25CallPathCensus(source) {
+  const roots = discoverRuntimeRoots(source)
+  const seen = new Set()
+  const sites = []
+  for (const root of roots) {
+    for (const relPath of source.listAllFiles(root)) {
+      if (seen.has(relPath)) continue
+      seen.add(relPath)
+      if (!isScannablePath(relPath)) continue
+      const content = source.readFile(relPath)
+      if (content == null) continue
+      sites.push(...scanFileForP25CallPathSites(relPath, content))
     }
   }
   sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
@@ -374,7 +433,9 @@ module.exports = {
   parseWorkspacePatterns,
   isScannablePath,
   scanFileForDmlSites,
+  scanFileForP25CallPathSites,
   buildRawCensus,
+  buildP25CallPathCensus,
   classifyCensus,
   debtKey,
   isCanonicalBoundaryPath,

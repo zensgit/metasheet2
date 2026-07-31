@@ -153,6 +153,10 @@ const P25_ALLOWED_NON_AUTHORITY_ROLES = Object.freeze([
   'concurrency_control',
   'retryable_job_identity_claim',
   'identity_transport',
+  'operational_status',
+  'configuration_maintenance',
+  'schema_migration',
+  'tooling_cleanup',
 ])
 
 function p25Spec(family, authorityClass, options = {}) {
@@ -191,7 +195,7 @@ const P25_OPERATIONAL_TABLE_SPECS = Object.freeze({
   }),
   attendance_import_legacy_execution_plan_chunks: p25Spec('durable_legacy_plan', 'compatibility_transport', {
     reservedIdentityTransport: true,
-    allowedIdentityAdapters: ['private_worker'],
+    allowedIdentityAdapters: ['enqueue', 'private_worker'],
   }),
   attendance_import_legacy_terminal_responses: p25Spec('durable_legacy_terminal', 'compatibility_transport', {
     reservedIdentityTransport: true,
