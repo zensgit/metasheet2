@@ -1,6 +1,7 @@
 'use strict'
 
 const assert = require('node:assert/strict')
+const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const fsPromises = require('node:fs/promises')
 const os = require('node:os')
@@ -18,12 +19,14 @@ const {
   PINNED_S3_MODULES,
   PINNED_S4_MODULES,
   PINNED_S5_MODULES,
+  PINNED_S6_MODULES,
   PINNED_EXTERNAL_MODULES,
   PINNED_RUNTIME_DEPENDENCIES,
   PINNED_RUNTIME_FILES,
   PINNED_EVIDENCE_FILES,
   FROZEN_MANIFEST_RELATIVE,
   verifySealedExportPackageProvenance,
+  verifySealedExportRuntimePackageProvenance,
   computePackageProvenancePinSet,
 } = require('../lib/sealed-export/sealed-export-package-provenance.cjs')
 
@@ -52,10 +55,15 @@ function positivePackagePin() {
   assert.ok(result.migrations['070'])
   assert.ok(result.migrations['071'])
   assert.ok(result.migrations['072'])
-  assert.equal(PINNED_MIGRATIONS.length, 5)
+  assert.ok(result.migrations['073'])
+  assert.equal(PINNED_MIGRATIONS.length, 6)
   assert.equal(
     Object.keys(result.modules.s5).length,
     PINNED_S5_MODULES.length,
+  )
+  assert.equal(
+    Object.keys(result.modules.s6).length,
+    PINNED_S6_MODULES.length,
   )
   assert.deepEqual(result.runtimeDependencies, PINNED_RUNTIME_DEPENDENCIES)
   assert.equal(
@@ -66,20 +74,51 @@ function positivePackagePin() {
     Object.keys(result.evidenceFiles).length,
     PINNED_EVIDENCE_FILES.length,
   )
+  assert.equal(
+    PINNED_RUNTIME_FILES.some(
+      (entry) => entry.id === 'multitableOnpremPackageVerify',
+    ),
+    true,
+  )
+  assert.equal(
+    PINNED_RUNTIME_FILES.some(
+      (entry) => entry.id === 'multitableOnpremPackageBuild',
+    ),
+    false,
+  )
+  assert.equal(
+    PINNED_EVIDENCE_FILES.some(
+      (entry) => entry.id === 'multitableOnpremPackageBuild',
+    ),
+    true,
+  )
   assert.equal(PINNED_PROFILE_IDENTITY.connectorKind, 'data-source:sql-readonly')
   assert.deepEqual(Object.keys(result.externalModules), [
     'gipProfileCertificationContracts',
     'gipCanonicalJson',
+    'pluginDb',
+    'stockPreparationDecoder',
+    'stockPreparationReadonlyIntake',
+    'stockPreparationPlmSourcePersistBridge',
+    'stockPreparationSyncRunPersist',
   ])
   assert.ok(PINNED_S2_MODULES.includes('sqlserver-s2-producer.cjs'))
   assert.ok(PINNED_S3_MODULES.includes('private-ingestion-service.cjs'))
   assert.ok(PINNED_S4_MODULES.includes('generation-kernel.cjs'))
   assert.ok(fs.existsSync(path.join(REPO_ROOT, FROZEN_MANIFEST_RELATIVE)))
+
+  const runtimePackage = verifySealedExportRuntimePackageProvenance({
+    repoRoot: REPO_ROOT,
+  })
+  assert.equal(runtimePackage.verified, true)
+  assert.equal(runtimePackage.runtimePackageVerified, true)
+  assert.equal(runtimePackage.repositoryEvidenceRequired, true)
+  assert.equal(runtimePackage.candidateTreeVerified, undefined)
 }
 
 async function clonePinnedTree() {
   const root = await fsPromises.mkdtemp(
-    path.join(os.tmpdir(), 'sealed-export-s5-prov-'),
+    path.join(os.tmpdir(), 'sealed-export-s6a-prov-'),
   )
   const sealedRel = 'plugins/plugin-integration-core/lib/sealed-export'
   const sealedSrc = path.join(REPO_ROOT, sealedRel)
@@ -205,6 +244,54 @@ async function terminalHistoryMigrationMutationFails() {
   }
 }
 
+async function runtimeAuthorityMigrationMutationFails() {
+  const root = await clonePinnedTree()
+  try {
+    const target = path.join(
+      root,
+      'packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql',
+    )
+    const original = fs.readFileSync(target, 'utf8')
+    const mutated = original.replace(
+      "'CAPTURING'",
+      "'CAPTUREXX'",
+    )
+    assert.equal(mutated.length, original.length)
+    assert.notEqual(mutated, original)
+    fs.writeFileSync(target, mutated)
+    expectReason(
+      () => verifySealedExportPackageProvenance({ repoRoot: root }),
+      'SEALED_EXPORT_INTERNAL_ERROR',
+    )
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
+async function s6RuntimeModuleMutationFails() {
+  const root = await clonePinnedTree()
+  try {
+    const target = path.join(
+      root,
+      'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-core.cjs',
+    )
+    const original = fs.readFileSync(target, 'utf8')
+    const mutated = original.replace(
+      "'COMPLETED'",
+      "'COMPLETEZ'",
+    )
+    assert.equal(mutated.length, original.length)
+    assert.notEqual(mutated, original)
+    fs.writeFileSync(target, mutated)
+    expectReason(
+      () => verifySealedExportPackageProvenance({ repoRoot: root }),
+      'SEALED_EXPORT_INTERNAL_ERROR',
+    )
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
 async function canonicalJsonDependencyMutationFails() {
   const root = await clonePinnedTree()
   try {
@@ -254,7 +341,7 @@ async function isolatedDependencyMutationFails() {
       JSON.stringify(
         {
           name: 'plugin-integration-core',
-          dependencies: { mssql: '^9.0.0' },
+          dependencies: { mssql: '^9.0.0', pg: '^8.11.3' },
         },
         null,
         2,
@@ -313,6 +400,66 @@ async function isolatedLockfileMutationFails() {
   }
 }
 
+function runPackageShellVerifier(root) {
+  return spawnSync(
+    'bash',
+    [
+      '-lc',
+      'source "$VERIFY_SCRIPT"; ' +
+        'verify_sealed_export_package_provenance "$PACKAGE_ROOT"',
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PACKAGE_ROOT: root,
+        VERIFY_SCRIPT: path.join(
+          REPO_ROOT,
+          'scripts/ops/multitable-onprem-package-verify.sh',
+        ),
+      },
+    },
+  )
+}
+
+async function packageShellVerifierRejectsPinnedMutation() {
+  const verifierText = fs.readFileSync(
+    path.join(
+      REPO_ROOT,
+      'scripts/ops/multitable-onprem-package-verify.sh',
+    ),
+    'utf8',
+  )
+  assert.match(
+    verifierText,
+    /verify_sealed_export_package_provenance "\$pkg_root"/,
+  )
+  const root = await clonePinnedTree()
+  try {
+    for (const entry of PINNED_EVIDENCE_FILES) {
+      fs.rmSync(path.join(root, entry.relativePath), { force: true })
+    }
+    const clean = runPackageShellVerifier(root)
+    assert.equal(clean.status, 0, clean.stderr)
+    fs.appendFileSync(
+      path.join(
+        root,
+        'plugins/plugin-integration-core/lib/sealed-export/' +
+          'stock-preparation-runtime-core.cjs',
+      ),
+      '\n',
+    )
+    const mutated = runPackageShellVerifier(root)
+    assert.notEqual(mutated.status, 0)
+    assert.match(
+      mutated.stderr,
+      /S6-A sealed-export package provenance pins did not verify/,
+    )
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
 function frozenManifestIsIndependentOfWorkingTreeMutation() {
   // The candidate tree and repository-frozen manifest agree. The returned
   // frozenManifestDigest is what a later package gate must pin externally.
@@ -335,11 +482,14 @@ async function main() {
   await sameSizeLogicMutationOfPinnedModuleFails()
   await sameSizeLogicMutationOfPinnedMigrationFails()
   await terminalHistoryMigrationMutationFails()
+  await runtimeAuthorityMigrationMutationFails()
+  await s6RuntimeModuleMutationFails()
   await profileCertificationDependencyMutationFails()
   await canonicalJsonDependencyMutationFails()
   await evidenceRunnerMutationFails()
   await isolatedDependencyMutationFails()
   await isolatedLockfileMutationFails()
+  await packageShellVerifierRejectsPinnedMutation()
   console.log('sealed-export-package-provenance.test.cjs OK')
 }
 

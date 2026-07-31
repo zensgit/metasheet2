@@ -56,14 +56,31 @@ function createSqlServerSealedSnapshotService(rawConfig) {
   if (!frozenConnection.ok || !isStrictObject(frozenConnection.value)) {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
   }
-  const connectionConfig = frozenConnection.value
+  const rawConnectionConfig = frozenConnection.value
+  if (!isStrictObject(rawConnectionConfig.options)) {
+    failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+  }
+  const ownedConnection = canonicalCodec.tryFreezeCanonical({
+    ...rawConnectionConfig,
+    options: {
+      ...rawConnectionConfig.options,
+      readOnlyIntent: true,
+    },
+  })
+  if (!ownedConnection.ok) {
+    failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+  }
+  const connectionConfig = ownedConnection.value
   const coreService = core.createSqlServerSealedSnapshotServiceCore({
     approvedBindings: rawConfig.approvedBindings,
     artifactRoot: rawConfig.artifactRoot,
     authorityDb: rawConfig.authorityDb,
     onReaderActive: rawConfig.onReaderActive,
-    openCaptureContext: () =>
-      openMssqlSnapshotCaptureContext(connectionConfig),
+    openCaptureContext: (binding) =>
+      openMssqlSnapshotCaptureContext({
+        connectionConfig,
+        tableRef: binding.tableRef,
+      }),
     privateSignerMaterials: rawConfig.privateSignerMaterials,
     qualificationKeyring: rawConfig.qualificationKeyring,
     stageObserver: rawConfig.stageObserver,

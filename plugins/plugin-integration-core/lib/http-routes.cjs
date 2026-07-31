@@ -139,6 +139,11 @@ const ROUTES = [
   ['GET', '/api/integration/dead-letters', 'deadLettersList'],
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
 ]
+const STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE = Object.freeze([
+  'POST',
+  '/api/integration/internal/stock-preparation/sqlserver-sealed-snapshot/run',
+  'stockPreparationSqlServerSealedSnapshotRun',
+])
 const EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS = 1000
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
 const { createRunLogger } = require('./run-log.cjs')
@@ -2408,6 +2413,8 @@ function createHandlers(services, options = {}) {
   // BA-APPLY-2a: only the methods the 4 routes below actually call are required — save/approve/retire
   // (write-tier) + getForApply (the fail-closed approval gate for the GET route).
   const bridgeAgentChecklists = requireService('bridgeAgentChecklistStore', ['saveVersion', 'approve', 'retire', 'getForApply'])
+  const stockPreparationSqlServerRuntime =
+    services && services.stockPreparationSqlServerRuntime
   const context = options.context || {}
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
@@ -2435,6 +2442,31 @@ function createHandlers(services, options = {}) {
       })
     }
     return provisioning
+  }
+
+  function stockPreparationSqlServerRunInput(req) {
+    const body = requestBody(req)
+    const query = requestQuery(req)
+    const params = requestParams(req)
+    if (
+      !isPlainObject(body)
+      || Object.keys(body).length !== 1
+      || !Object.prototype.hasOwnProperty.call(body, 'operationId')
+      || Object.keys(query).length !== 0
+      || Object.keys(params).length !== 0
+      || typeof body.operationId !== 'string'
+      || body.operationId.length < 1
+      || body.operationId.length > 128
+      || body.operationId.trim() !== body.operationId
+      || /[\u0000-\u001F\u007F]/.test(body.operationId)
+    ) {
+      throw new HttpRouteError(
+        400,
+        'STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_REQUEST_INVALID',
+        'request must contain only a valid operationId',
+      )
+    }
+    return Object.freeze({ operationId: body.operationId })
   }
 
   async function loadStockPreparationReadonlySource(req, input, errorCode) {
@@ -4865,6 +4897,35 @@ function createHandlers(services, options = {}) {
       })), 201)
     },
 
+    async stockPreparationSqlServerSealedSnapshotRun(req, res) {
+      const user = requireAccess(req, 'admin')
+      if (
+        !stockPreparationSqlServerRuntime
+        || typeof stockPreparationSqlServerRuntime.run !== 'function'
+      ) {
+        throw new HttpRouteError(
+          404,
+          'STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_DISABLED',
+          'stock-preparation sealed-snapshot runtime is not enabled',
+        )
+      }
+      const input = stockPreparationSqlServerRunInput(req)
+      const actor = firstString(user.id, user.email)
+      if (!actor) {
+        throw new HttpRouteError(
+          403,
+          'STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_ACTOR_REQUIRED',
+          'an authenticated actor identity is required',
+        )
+      }
+      return sendOk(res, await stockPreparationSqlServerRuntime.run({
+        actor,
+        operationId: input.operationId,
+        tenantId: resolveAuthUserTenantId(req),
+        workspaceId: null,
+      }))
+    },
+
     async runsList(req, res) {
       requireAccess(req, 'read')
       const query = requestQuery(req)
@@ -4939,7 +5000,11 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
   }
   const handlers = createHandlers(services || {}, { context })
   const registered = []
-  for (const [method, path, handlerName] of ROUTES) {
+  const routeDefinitions = services
+    && services.stockPreparationSqlServerRuntime
+    ? [...ROUTES, STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE]
+    : ROUTES
+  for (const [method, path, handlerName] of routeDefinitions) {
     const handler = handlers[handlerName]
     context.api.http.addRoute(method, path, async (req, res) => {
       try {
@@ -4958,6 +5023,7 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
 
 module.exports = {
   ROUTES,
+  STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE,
   HttpRouteError,
   MAX_LIST_LIMIT,
   MAX_LIST_OFFSET,

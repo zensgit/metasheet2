@@ -8,11 +8,24 @@
 
 const canonicalCodec = require('./canonical-json.cjs')
 const { failSealedExport } = require('./failure-vocabulary.cjs')
+const {
+  assertSafeSqlServerRelation,
+} = require('./sqlserver-sealed-snapshot-action.cjs')
 
 const mssqlSnapshotCaptureContexts = new WeakSet()
 
 const SNAPSHOT_CAPABILITY_SQL = `
-SELECT CAST(snapshot_isolation_state AS int) AS snapshotEnabledState
+SELECT
+  CAST(snapshot_isolation_state AS int) AS snapshotEnabledState,
+  CAST(IS_SRVROLEMEMBER('sysadmin') AS int) AS isSysadmin,
+  CAST(IS_MEMBER('db_owner') AS int) AS isDbOwner,
+  CAST(IS_MEMBER('db_datawriter') AS int) AS isDbDataWriter,
+  CAST(HAS_PERMS_BY_NAME(@tableRef, 'OBJECT', 'SELECT') AS int) AS canSelect,
+  CAST(HAS_PERMS_BY_NAME(@tableRef, 'OBJECT', 'INSERT') AS int) AS canInsert,
+  CAST(HAS_PERMS_BY_NAME(@tableRef, 'OBJECT', 'UPDATE') AS int) AS canUpdate,
+  CAST(HAS_PERMS_BY_NAME(@tableRef, 'OBJECT', 'DELETE') AS int) AS canDelete,
+  CAST(HAS_PERMS_BY_NAME(@tableRef, 'OBJECT', 'ALTER') AS int) AS canAlter,
+  CAST(HAS_PERMS_BY_NAME(@tableRef, 'OBJECT', 'CONTROL') AS int) AS canControl
 FROM sys.databases
 WHERE database_id = DB_ID()
 `
@@ -30,17 +43,19 @@ function normalizeNonNegativeInteger(value) {
   return null
 }
 
-async function assertSnapshotCapability(pool) {
+async function assertSnapshotCapability(pool, tableRef) {
   let result
   try {
     const request = pool.request()
     if (
       request === null ||
       typeof request !== 'object' ||
+      typeof request.input !== 'function' ||
       typeof request.query !== 'function'
     ) {
       failSealedExport('SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE')
     }
+    request.input('tableRef', tableRef)
     result = await request.query(SNAPSHOT_CAPABILITY_SQL)
   } catch {
     failSealedExport('SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE')
@@ -53,14 +68,41 @@ async function assertSnapshotCapability(pool) {
   const row = recordset[0]
   if (
     !isStrictObject(row) ||
-    normalizeNonNegativeInteger(row.snapshotEnabledState) !== 1
+    normalizeNonNegativeInteger(row.snapshotEnabledState) !== 1 ||
+    normalizeNonNegativeInteger(row.isSysadmin) !== 0 ||
+    normalizeNonNegativeInteger(row.isDbOwner) !== 0 ||
+    normalizeNonNegativeInteger(row.isDbDataWriter) !== 0 ||
+    normalizeNonNegativeInteger(row.canSelect) !== 1 ||
+    normalizeNonNegativeInteger(row.canInsert) !== 0 ||
+    normalizeNonNegativeInteger(row.canUpdate) !== 0 ||
+    normalizeNonNegativeInteger(row.canDelete) !== 0 ||
+    normalizeNonNegativeInteger(row.canAlter) !== 0 ||
+    normalizeNonNegativeInteger(row.canControl) !== 0
   ) {
     failSealedExport('SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE')
   }
 }
 
 // Open a real mssql snapshot capture context. Used only by the product service.
-async function openMssqlSnapshotCaptureContext(connectionConfig) {
+async function openMssqlSnapshotCaptureContext(rawInput) {
+  const normalized = canonicalCodec.tryFreezeCanonical(rawInput)
+  if (
+    !normalized.ok ||
+    !isStrictObject(normalized.value) ||
+    Object.keys(normalized.value).sort().join('\n') !==
+      ['connectionConfig', 'tableRef'].sort().join('\n') ||
+    !isStrictObject(normalized.value.connectionConfig)
+  ) {
+    failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
+  }
+  const connectionConfig = normalized.value.connectionConfig
+  const tableRef = assertSafeSqlServerRelation(normalized.value.tableRef)
+  if (
+    !isStrictObject(connectionConfig.options) ||
+    connectionConfig.options.readOnlyIntent !== true
+  ) {
+    failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
+  }
   let sql
   try {
     sql = require('mssql')
@@ -92,7 +134,7 @@ async function openMssqlSnapshotCaptureContext(connectionConfig) {
   }
 
   try {
-    await assertSnapshotCapability(pool)
+    await assertSnapshotCapability(pool, tableRef)
   } catch {
     try {
       await pool.close()
@@ -165,6 +207,9 @@ async function openMssqlSnapshotCaptureContext(connectionConfig) {
     },
     async startSourceRead(sourceReadSql) {
       if (closed) failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
+      if (sourceReadCount !== 0) {
+        failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
+      }
       if (typeof sourceReadSql !== 'string' || sourceReadSql.length === 0) {
         failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
       }

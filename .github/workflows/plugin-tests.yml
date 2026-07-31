@@ -130,6 +130,9 @@ jobs:
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
             scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.ps51.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1

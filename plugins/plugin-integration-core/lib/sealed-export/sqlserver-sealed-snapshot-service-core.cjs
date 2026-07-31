@@ -1161,7 +1161,7 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
       writer = createArtifactWriter(directory, input.envelope)
       await writer.open()
 
-      captureContext = await openCaptureContext()
+      captureContext = await openCaptureContext(binding)
       const productCaptureContext =
         isMssqlSnapshotCaptureContext(captureContext)
 
@@ -1215,7 +1215,8 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
         }
       }
       await awaitSourceCompletion(sourceRead.completion)
-      if (captureContext.getSourceReadCount() !== 1) {
+      const dataStreamReadCount = captureContext.getSourceReadCount()
+      if (dataStreamReadCount !== 1) {
         failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
       }
       if (capturedRowCount !== sourceRowCount) {
@@ -1342,7 +1343,7 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
         rowCount: artifact.rowCount,
         runtimeReachable: false,
         signatureVerified: true,
-        dataStreamReadCount: 1,
+        dataStreamReadCount,
         orderingProbeReadCount: 1,
         usedCompletenessProofs: completeness.usedCompletenessProofs,
       })
@@ -1414,7 +1415,7 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
     if (!binding) failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
     let captureContext = null
     try {
-      captureContext = await openCaptureContext()
+      captureContext = await openCaptureContext(binding)
       const { orderingKeyProof } = await proveOrderingKey(
         captureContext,
         binding,

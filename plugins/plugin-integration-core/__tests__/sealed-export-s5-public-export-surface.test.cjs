@@ -114,8 +114,10 @@ const EXACT_PUBLIC_EXPORTS = Object.freeze({
     'PINNED_S3_MODULES',
     'PINNED_S4_MODULES',
     'PINNED_S5_MODULES',
+    'PINNED_S6_MODULES',
     'computePackageProvenancePinSet',
     'verifySealedExportPackageProvenance',
+    'verifySealedExportRuntimePackageProvenance',
   ]),
 })
 
@@ -204,6 +206,7 @@ async function executeRefusesCallerTrustAndSecretKeys() {
   } = require('./support/sealed-export-signer-authority-memory-db.cjs')
 
   const material = createEd25519SignerMaterial()
+  const authorityDb = createMemorySignerAuthorityDb()
   const objectKey = 'orders.lines'
   const relationId = 'sqlserver.relation.rowid_payload.v1'
   const tableRef = 'dbo.orders_lines'
@@ -243,7 +246,7 @@ async function executeRefusesCallerTrustAndSecretKeys() {
         tenantDomainBinding: 'domain-1',
       },
     ],
-    authorityDb: createMemorySignerAuthorityDb(),
+    authorityDb,
     privateSignerMaterials: [
       { privateKey: material.privateKey, signerKeyId: material.signerKeyId },
     ],
@@ -331,6 +334,239 @@ async function executeRefusesCallerTrustAndSecretKeys() {
   }
 }
 
+async function productionIngestionVerifierUsesProductLifecycleAuthority() {
+  const crypto = require('node:crypto')
+  const contracts = require('../lib/sealed-export/contracts.cjs')
+  const canonicalCodec = require('../lib/sealed-export/canonical-json.cjs')
+  const {
+    createEd25519SignerMaterial,
+  } = require('../lib/sealed-export/sealed-export-signer-authority.cjs')
+  const {
+    AUTHORITY_STATE_TABLE,
+    createSignerAuthorityStore,
+  } = require('../lib/sealed-export/sealed-export-signer-authority-store.cjs')
+  const {
+    computeQueryBindingDigest,
+    SEALED_EXPORT_S5_SOURCE_SCHEMA_DIGEST,
+  } = require('../lib/sealed-export/sqlserver-sealed-snapshot-action.cjs')
+  const {
+    createSqlServerPrivateIngestionManifestVerifier,
+    isTrustedPrivateIngestionManifestVerifier,
+  } = require('../lib/sealed-export/private-ingestion-manifest-verifier.cjs')
+  const {
+    createPrivateIngestionService,
+  } = require('../lib/sealed-export/private-ingestion-service.cjs')
+  const {
+    SealedExportError,
+  } = require('../lib/sealed-export/failure-vocabulary.cjs')
+  const {
+    createMemorySignerAuthorityDb,
+  } = require('./support/sealed-export-signer-authority-memory-db.cjs')
+
+  const material = createEd25519SignerMaterial()
+  const authorityDb = createMemorySignerAuthorityDb()
+  const authority = Object.freeze({
+    roleBindingFingerprint: 'rb',
+    systemContentKey: 'sys-1',
+    tenantDomainBinding: 'domain-1',
+    tenantId: 't1',
+    workspaceId: null,
+  })
+  const binding = Object.freeze({
+    approvedConfigVersionId: 'cfgv',
+    bindingVersion: 'b1',
+    canonicalObjectVersion: 'obj-v1',
+    configContentKey: 'cfg-1',
+    objectKey: 'orders.lines',
+    relationId: 'sqlserver.relation.rowid_payload.v1',
+    roleBindingFingerprint: authority.roleBindingFingerprint,
+    tableRef: 'dbo.orders_lines',
+    tenantDomainBinding: authority.tenantDomainBinding,
+  })
+  const service = createSqlServerSealedSnapshotService({
+    approvedBindings: [binding],
+    artifactRoot: '/tmp',
+    authorityDb,
+    connectionConfig: {
+      database: 'db',
+      options: { encrypt: true },
+      password: 'not-used',
+      server: 'localhost',
+      user: 'user',
+    },
+    onReaderActive: null,
+    privateSignerMaterials: [
+      { privateKey: material.privateKey, signerKeyId: material.signerKeyId },
+    ],
+    qualificationKeyring: {
+      keyId: 'k1',
+      secret: crypto.randomBytes(32),
+    },
+    stageObserver: null,
+    systemContentKey: authority.systemContentKey,
+    tenantId: authority.tenantId,
+    workspaceId: authority.workspaceId,
+  })
+  const qualificationDigest = crypto
+    .createHash('sha256')
+    .update('s6a-production-verifier-qualification')
+    .digest('hex')
+  const authorityStore = createSignerAuthorityStore({ db: authorityDb })
+  await authorityStore.enrollPublicKey(authority, {
+    publicKey: material.publicKey,
+    signerKeyId: material.signerKeyId,
+  })
+  await authorityDb.insertOne(AUTHORITY_STATE_TABLE, {
+    binding_current: true,
+    binding_expires_at: '2099-01-01T00:00:00.000Z',
+    qualification_current: true,
+    qualification_digest: qualificationDigest,
+    qualification_expires_at: '2099-01-01T00:00:00.000Z',
+    role_binding_fingerprint: authority.roleBindingFingerprint,
+    signer_expires_at: '2099-01-01T00:00:00.000Z',
+    signer_key_id: material.signerKeyId,
+    signer_status: 'ACTIVE',
+    system_content_key: authority.systemContentKey,
+    tenant_domain_binding: authority.tenantDomainBinding,
+    tenant_id: authority.tenantId,
+    workspace_id: authority.workspaceId,
+  })
+  const envelope = {
+    actionProfileVersion: 'sqlserver.sealed_snapshot.v1',
+    applyProfileVersion: 'NO_APPLY',
+    approvedConfigVersionId: binding.approvedConfigVersionId,
+    bindingVersion: binding.bindingVersion,
+    byteBudget: 1024,
+    canonicalObjectVersion: binding.canonicalObjectVersion,
+    chunkBudget: 1,
+    configContentKey: binding.configContentKey,
+    executionMode: 'S6A',
+    expectedSourceSchemaFieldMapDigest:
+      SEALED_EXPORT_S5_SOURCE_SCHEMA_DIGEST,
+    expiry: '2099-01-01T00:00:00.000Z',
+    exportRequestId: 's6a-export',
+    nonce: 's6a-nonce',
+    qualificationDigest,
+    queryObjectFilterBindingDigest: computeQueryBindingDigest(binding),
+    roleBindingFingerprint: authority.roleBindingFingerprint,
+    roleId: 'stock-preparation-source',
+    rowBudget: 10,
+    scenarioVersion: 'stock-preparation.v1',
+    systemContentKey: authority.systemContentKey,
+    tenantDomainBinding: authority.tenantDomainBinding,
+  }
+  const emptyDigest = crypto.createHash('sha256').update('').digest('hex')
+  const unsignedManifest = {
+    agentImplementationVersion: 's6a-test-agent',
+    agentProtocolVersion: 's6a-test-protocol',
+    canonicalRowsetMultiplicityDigest: emptyDigest,
+    canonicalizationVersion:
+      canonicalCodec.SEALED_EXPORT_CANONICALIZATION_VERSION,
+    captureCompletionTimestamp: '2026-07-31T00:00:00.000Z',
+    chunks: [
+      {
+        byteCount: 0,
+        chunkDigest: emptyDigest,
+        chunkIndex: 0,
+      },
+    ],
+    encodingVersion: 's6a-test-encoding',
+    exportRequestEnvelopeDigest:
+      contracts.computeExportRequestEnvelopeDigest(envelope),
+    manifestExpiry: '2099-01-01T00:00:00.000Z',
+    signature: 'AA==',
+    signatureAlgorithm: 'ED25519',
+    signerKeyId: material.signerKeyId,
+    sourceCaptureIdentity: 's6a-test-capture',
+    sourceCaptureProofClass: 'SOURCE_SNAPSHOT_TXN',
+    sourceSchemaDigest: SEALED_EXPORT_S5_SOURCE_SCHEMA_DIGEST,
+    totalBytes: 0,
+    totalRows: 0,
+    wholeArtifactByteDigest: emptyDigest,
+  }
+  const manifest = {
+    ...unsignedManifest,
+    signature: crypto
+      .sign(
+        null,
+        contracts.computeSignedManifestBytes(unsignedManifest),
+        material.privateKey,
+      )
+      .toString('base64'),
+  }
+  const verifier = createSqlServerPrivateIngestionManifestVerifier({
+    envelope,
+    sealedSnapshotService: service,
+  })
+  assert.equal(isTrustedPrivateIngestionManifestVerifier(verifier), true)
+  envelope.nonce = 'caller-mutated-after-construction'
+  const verified = await verifier.verify(manifest)
+  assert.equal(verified.signatureVerified, true)
+
+  assert.throws(
+    () => createSqlServerPrivateIngestionManifestVerifier({
+      envelope,
+      sealedSnapshotService: {
+        verifyManifestWithLifecycle: service.verifyManifestWithLifecycle,
+      },
+    }),
+    (error) => (
+      error instanceof SealedExportError
+      && error.reason === 'SEALED_EXPORT_INTERNAL_ERROR'
+    ),
+  )
+
+  let metadataWrites = 0
+  const metadataStore = Object.freeze({
+    async beginChunkWrite() {},
+    async beginCleanup() {},
+    async claimCompletedSession() {},
+    async createSession() {
+      metadataWrites += 1
+    },
+    async finishChunkWrite() {},
+    async listExpiredSessions() { return [] },
+    async listReceipts() { return [] },
+    async markComplete() {},
+    async readState() { return { kind: 'MISSING' } },
+    async releaseChunkWrite() {},
+    async releaseGenerationClaim() {},
+    async tombstoneAndDelete() {},
+  })
+  const blobStore = Object.freeze({
+    async createSessionArea() {},
+    async readChunk() {},
+    async readChunkIfPresent() {},
+    async removeSession() {},
+    async writeChunk() {},
+  })
+  const ingestionService = createPrivateIngestionService({
+    authority,
+    blobStore,
+    clock: () => new Date('2026-07-31T00:00:00.000Z'),
+    manifestVerifier: verifier,
+    metadataStore,
+  })
+  const tamperedManifest = {
+    ...manifest,
+    signature: Buffer.alloc(64).toString('base64'),
+  }
+  await assert.rejects(
+    () => ingestionService.createSession({
+      envelope: {
+        ...envelope,
+        nonce: 's6a-nonce',
+      },
+      manifest: tamperedManifest,
+    }),
+    (error) => (
+      error instanceof SealedExportError
+      && error.reason === 'SEALED_EXPORT_MANIFEST_SIGNATURE_INVALID'
+    ),
+  )
+  assert.equal(metadataWrites, 0)
+}
+
 function sourceTextHasNoReexportedHarnesses() {
   for (const name of S5_MODULES) {
     const text = fs.readFileSync(path.join(SEALED_DIR, name), 'utf8')
@@ -358,6 +594,7 @@ async function main() {
   noForbiddenExportNamesOnProductionSurface()
   duckTypedServicesCannotForgeProductBrand()
   await executeRefusesCallerTrustAndSecretKeys()
+  await productionIngestionVerifierUsesProductLifecycleAuthority()
   sourceTextHasNoReexportedHarnesses()
   console.log('sealed-export-s5-public-export-surface.test.cjs OK')
 }

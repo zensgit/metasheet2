@@ -68,6 +68,7 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
+  "scripts/ops/multitable-onprem-package-verify.sh"
   # K3 WISE PoC operator tooling — preflight (C1/C2), live PoC packet builder
   # (C3), evidence compiler (C10), delivery readiness compiler, postdeploy
   # smoke + summary, the #1542 metadata seed helper, mock fixtures, and the
@@ -86,6 +87,7 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   "scripts/ops/stock-preparation-onprem-acceptance.ps1"
+  "scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
   "scripts/ops/stock-preparation-pm2-sample.mjs"
   "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/fixtures/integration-k3wise"
@@ -107,6 +109,7 @@ REQUIRED_PATHS=(
   "docs/operations/data-source-system-integration-c5-k3-mssql-smoke-runbook-20260615.md"
   "docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
   "docs/operations/bridge-agent-readonly-runbook-20260521.md"
+  "docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md"
   "docs/operations/integration-k3wise-webapi-read-list-customer-sample-manifest.md"
   "docs/operations/integration-k3wise-relationship-mapping-customer-sample-manifest.md"
   "docs/development/k3wise-bridge-machine-codex-handoff-20260513.md"

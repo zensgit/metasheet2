@@ -263,7 +263,7 @@ function createPrivateIngestionService({
     }
   }
 
-  function validatePersistedSession(row) {
+  async function validatePersistedSession(row) {
     if (!row || typeof row !== 'object') failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
     const hasGenerationClaimId = Object.prototype.hasOwnProperty.call(
       row,
@@ -284,7 +284,7 @@ function createPrivateIngestionService({
     const manifest = contracts.validateSignedManifest(row.manifest)
     assertAuthorityMatchesEnvelope(authority, envelope)
     const verifiedBinding = contracts.verifyManifestBinding(envelope, manifest)
-    manifestVerifier.verify(manifest)
+    await manifestVerifier.verify(manifest)
     const manifestDigest = contracts.computeManifestDigest(manifest)
     let storedExpiry
     let completedAt = null
@@ -412,12 +412,11 @@ function createPrivateIngestionService({
     return Object.freeze({
       binding,
       kind: 'SESSION',
-      persisted: validatePersistedSession(state.session),
+      persisted: await validatePersistedSession(state.session),
     })
   }
 
-  async function loadActive(sessionId, allowRecovery) {
-    const loaded = await readBoundState(sessionId)
+  function assertActiveSession(loaded, allowRecovery) {
     if (loaded.kind === 'TOMBSTONE') failSealedExport('SEALED_EXPORT_MANIFEST_REPLAYED')
     if (loaded.kind !== 'SESSION') failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
     if (
@@ -436,6 +435,13 @@ function createPrivateIngestionService({
       failSealedExport('SEALED_EXPORT_ARTIFACT_EXPIRED')
     }
     return loaded
+  }
+
+  async function loadActive(sessionId, allowRecovery) {
+    return assertActiveSession(
+      await readBoundState(sessionId),
+      allowRecovery,
+    )
   }
 
   function receiptRow(loaded, chunkIndex, chunkDigest, byteCount, acceptedAt) {
@@ -493,7 +499,7 @@ function createPrivateIngestionService({
     const manifest = contracts.validateSignedManifest(call.manifest)
     assertAuthorityMatchesEnvelope(authority, envelope)
     const verified = contracts.verifyManifestBinding(envelope, manifest)
-    manifestVerifier.verify(manifest)
+    await manifestVerifier.verify(manifest)
     const expiry = parseExpiry(manifest)
     const instant = nowInstant()
     if (instant.getTime() >= expiry) failSealedExport('SEALED_EXPORT_ARTIFACT_EXPIRED')
@@ -520,7 +526,7 @@ function createPrivateIngestionService({
       created_at: instant.toISOString(),
       updated_at: instant.toISOString(),
     })
-    const persisted = validatePersistedSession(row)
+    const persisted = await validatePersistedSession(row)
     if (
       persisted.row.status === 'UPLOAD_COMPLETE'
       || persisted.row.status === 'CLEANING'
@@ -553,7 +559,39 @@ function createPrivateIngestionService({
 
   async function resumeSession(input) {
     const call = validateCall(input, ['sessionId'])
-    let loaded = await loadActive(call.sessionId, true)
+    let loaded = await readBoundState(call.sessionId)
+    if (
+      loaded.kind === 'SESSION'
+      && loaded.persisted.row.status === 'UPLOAD_COMPLETE'
+    ) {
+      if (nowInstant().getTime() >= parseExpiry(loaded.persisted.manifest)) {
+        failSealedExport('SEALED_EXPORT_ARTIFACT_EXPIRED')
+      }
+      const rows = await metadataStore.listReceipts(loaded.binding)
+      const receipts = validatePersistedReceipts(loaded, rows, 'COMPLETE')
+      const orderedBytes = []
+      for (
+        let index = 0;
+        index < loaded.persisted.manifest.chunks.length;
+        index += 1
+      ) {
+        orderedBytes.push(await blobStore.readChunk(call.sessionId, index))
+      }
+      contracts.verifyArtifactAgainstManifest(
+        loaded.persisted.manifest,
+        orderedBytes,
+      )
+      return Object.freeze({
+        sessionId: call.sessionId,
+        status: 'UPLOAD_COMPLETE',
+        acceptedChunkCount: receipts.length,
+        acceptedChunkIndexes: Object.freeze(
+          receipts.map((receipt) => receipt.chunkIndex),
+        ),
+        artifactDigestVerified: true,
+      })
+    }
+    loaded = assertActiveSession(loaded, true)
     if (loaded.persisted.row.status === 'CHUNK_WRITING') {
       await recoverPendingWrite(loaded)
       loaded = await loadActive(call.sessionId, false)
@@ -686,7 +724,7 @@ function createPrivateIngestionService({
       failSealedExport('SEALED_EXPORT_ARTIFACT_EXPIRED')
     }
     const generationId = generationIdFor(call.sessionId)
-    const claimed = validatePersistedSession(
+    const claimed = await validatePersistedSession(
       await metadataStore.claimCompletedSession(
         loaded.binding,
         generationId,

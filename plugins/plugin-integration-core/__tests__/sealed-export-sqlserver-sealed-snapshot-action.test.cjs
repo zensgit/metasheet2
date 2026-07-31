@@ -541,9 +541,18 @@ async function sourceSessionClosesPoolOnConnectionAndCapabilityFailure() {
   const mssqlPath = require.resolve('mssql')
   const cachedMssql = require.cache[mssqlPath]
 
-  async function runCase({ connectFails, snapshotEnabledState }, reason) {
+  async function runCase({
+    connectFails,
+    snapshotEnabledState,
+    canInsert = 0,
+  }, reason) {
     let closeCount = 0
+    let boundTableRef = null
     class FakeConnectionPool {
+      constructor(config) {
+        assert.equal(config.options.readOnlyIntent, true)
+      }
+
       async connect() {
         if (connectFails) throw new Error('synthetic-connect-failure')
         return this
@@ -551,8 +560,26 @@ async function sourceSessionClosesPoolOnConnectionAndCapabilityFailure() {
 
       request() {
         return {
+          input(name, value) {
+            assert.equal(name, 'tableRef')
+            boundTableRef = value
+            return this
+          },
           async query() {
-            return { recordset: [{ snapshotEnabledState }] }
+            return {
+              recordset: [{
+                canAlter: 0,
+                canControl: 0,
+                canDelete: 0,
+                canInsert,
+                canSelect: 1,
+                canUpdate: 0,
+                isDbDataWriter: 0,
+                isDbOwner: 0,
+                isSysadmin: 0,
+                snapshotEnabledState,
+              }],
+            }
           },
         }
       }
@@ -573,10 +600,14 @@ async function sourceSessionClosesPoolOnConnectionAndCapabilityFailure() {
       },
     }
     await expectReason(
-      () => openMssqlSnapshotCaptureContext({}),
+      () => openMssqlSnapshotCaptureContext({
+        connectionConfig: { options: { readOnlyIntent: true } },
+        tableRef: TABLE_REF,
+      }),
       reason,
     )
     assert.equal(closeCount, 1)
+    if (!connectFails) assert.equal(boundTableRef, TABLE_REF)
   }
 
   try {
@@ -588,10 +619,110 @@ async function sourceSessionClosesPoolOnConnectionAndCapabilityFailure() {
       { connectFails: false, snapshotEnabledState: 0 },
       'SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE',
     )
+    await runCase(
+      { connectFails: false, snapshotEnabledState: 1, canInsert: 1 },
+      'SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE',
+    )
   } finally {
     if (cachedMssql) require.cache[mssqlPath] = cachedMssql
     else delete require.cache[mssqlPath]
   }
+}
+
+async function sourceSessionRefusesSecondDataReadBeforeRequest() {
+  const mssqlPath = require.resolve('mssql')
+  const cachedMssql = require.cache[mssqlPath]
+  let poolCloseCount = 0
+  let transactionRequestCount = 0
+
+  class FakeConnectionPool {
+    async connect() {
+      return this
+    }
+
+    request() {
+      return {
+        input() {
+          return this
+        },
+        async query() {
+          return {
+            recordset: [{
+              canAlter: 0,
+              canControl: 0,
+              canDelete: 0,
+              canInsert: 0,
+              canSelect: 1,
+              canUpdate: 0,
+              isDbDataWriter: 0,
+              isDbOwner: 0,
+              isSysadmin: 0,
+              snapshotEnabledState: 1,
+            }],
+          }
+        },
+      }
+    }
+
+    async close() {
+      poolCloseCount += 1
+    }
+  }
+
+  class FakeTransaction {
+    async begin() {}
+
+    request() {
+      transactionRequestCount += 1
+      return {
+        async query() {
+          return {}
+        },
+        toReadableStream() {
+          return {
+            async *[Symbol.asyncIterator]() {},
+          }
+        },
+      }
+    }
+
+    async rollback() {}
+  }
+
+  require.cache[mssqlPath] = {
+    id: mssqlPath,
+    filename: mssqlPath,
+    loaded: true,
+    exports: {
+      ConnectionPool: FakeConnectionPool,
+      Transaction: FakeTransaction,
+      ISOLATION_LEVEL: { SNAPSHOT: 5 },
+    },
+  }
+
+  let context
+  try {
+    context = await openMssqlSnapshotCaptureContext({
+      connectionConfig: { options: { readOnlyIntent: true } },
+      tableRef: TABLE_REF,
+    })
+    const sourceRead = await context.startSourceRead('SELECT 1')
+    await sourceRead.completion
+    await expectReason(
+      () => context.startSourceRead('SELECT 2'),
+      'SEALED_EXPORT_CAPTURE_FAILED',
+    )
+    assert.equal(
+      transactionRequestCount,
+      1,
+      'a second data read is refused before allocating another request',
+    )
+  } finally {
+    if (context) await context.close()
+    if (cachedMssql) require.cache[mssqlPath] = cachedMssql
+    else delete require.cache[mssqlPath]
+  }
+  assert.equal(poolCloseCount, 1)
 }
 
 async function revokedSignerRefuses() {
@@ -1023,6 +1154,7 @@ async function main() {
   await snapshotIdentityAndIsolationMismatchRefuse()
   await unsupportedEngineMajorVersionRefuses()
   await sourceSessionClosesPoolOnConnectionAndCapabilityFailure()
+  await sourceSessionRefusesSecondDataReadBeforeRequest()
   await revokedSignerRefuses()
   await lifecycleAwareVerifyRefusesExpiredAndRevoked()
   await callerSuppliedKeyringCannotReplaceClosureKeyring()

@@ -8301,6 +8301,82 @@ async function testStockPreparationPlmSourceRunAutoPersistFailureIsCoarse() {
   console.log('  testStockPreparationPlmSourceRunAutoPersistFailureIsCoarse OK')
 }
 
+async function testStockPreparationSqlServerSealedSnapshotInternalRoute() {
+  const routePath =
+    '/api/integration/internal/stock-preparation/sqlserver-sealed-snapshot/run'
+  const withoutRuntime = createMockServices()
+  const disabled = mountRoutes(withoutRuntime.services)
+  assert.equal(
+    disabled.routes.has(`POST ${routePath}`),
+    false,
+    'flag-off construction does not register the controlled runtime route',
+  )
+
+  const calls = []
+  const withRuntime = createMockServices({
+    stockPreparationSqlServerRuntime: {
+      async run(input) {
+        calls.push(input)
+        return Object.freeze({
+          externalWrite: false,
+          mode: 'internal_persist',
+          status: 'COMPLETED',
+          valuesFree: true,
+        })
+      },
+    },
+  })
+  const { routes, registered } = mountRoutes(withRuntime.services)
+  assert.ok(registered.includes(`POST ${routePath}`))
+  const admin = {
+    id: 'admin-1',
+    permissions: ['integration:admin'],
+    tenantId: 'tenant-1',
+  }
+  const accepted = await invoke(routes, 'POST', routePath, {
+    body: { operationId: 'operation-1' },
+    user: admin,
+  })
+  assertOkResponse(accepted, 200)
+  assert.deepEqual(calls, [{
+    actor: 'admin-1',
+    operationId: 'operation-1',
+    tenantId: 'tenant-1',
+    workspaceId: null,
+  }])
+  assert.equal(accepted.body.data.externalWrite, false)
+
+  for (const invalid of [
+    { body: { operationId: 'operation-2', table: 'dbo.bom' } },
+    { body: { operationId: 'operation-2', sql: 'SELECT 1' } },
+    { body: { operationId: 'operation-2' }, query: { tenantId: 'other' } },
+    { body: { operationId: ' operation-2' } },
+  ]) {
+    const before = calls.length
+    const refused = await invoke(routes, 'POST', routePath, {
+      user: admin,
+      ...invalid,
+    })
+    assert.equal(refused.statusCode, 400)
+    assert.equal(
+      refused.body.error.code,
+      'STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_REQUEST_INVALID',
+    )
+    assert.equal(calls.length, before, 'invalid input never reaches runtime')
+  }
+
+  const nonAdmin = await invoke(routes, 'POST', routePath, {
+    body: { operationId: 'operation-3' },
+    user: {
+      id: 'reader-1',
+      permissions: ['integration:read'],
+      tenantId: 'tenant-1',
+    },
+  })
+  assert.equal(nonAdmin.statusCode, 403)
+  assert.equal(calls.length, 1)
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -8342,6 +8418,7 @@ async function main() {
   await testStockPreparationPlmSourceRunAutoPersistLineStatus()
   await testStockPreparationPlmSourceRunAutoPersistOffInert()
   await testStockPreparationPlmSourceRunAutoPersistFailureIsCoarse()
+  await testStockPreparationSqlServerSealedSnapshotInternalRoute()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
