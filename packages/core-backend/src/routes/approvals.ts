@@ -628,6 +628,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  r.get('/api/approval-templates/:id/form-authoring-context', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const context = await productService.getTemplateFormAuthoringContext(req.params.id)
+      res.json(context)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_FORM_AUTHORING_CONTEXT_FETCH_FAILED',
+        'Failed to fetch approval form authoring context',
+      )
+    }
+  })
+
   // Wave 2 WP4 slice 1 — clone an existing template as a new draft. Always
   // creates the clone as draft; no `published_definition` is copied over, so
   // the caller must publish the clone separately before it can initiate

@@ -31,9 +31,14 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
   })
 }
 
-async function authToken(baseUrl: string, userId: string): Promise<string> {
+async function authToken(
+  baseUrl: string,
+  userId: string,
+  roles = 'admin',
+  perms = '*:*',
+): Promise<string> {
   const response = await realFetch(
-    `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
+    `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=${encodeURIComponent(roles)}&perms=${encodeURIComponent(perms)}`,
   )
   expect(response.status).toBe(200)
   const payload = await response.json() as { token: string }
@@ -97,6 +102,7 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
   let requesterToken = ''
   const createdTemplateIds = new Set<string>()
   const createdApprovalIds = new Set<string>()
+  const createdAutomationRuleIds = new Set<string>()
 
   beforeAll(async () => {
     const canListen = await canListenOnEphemeralPort()
@@ -135,6 +141,10 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
       )
       const approvalIds = [...createdApprovalIds]
       const templateIds = [...createdTemplateIds]
+      const automationRuleIds = [...createdAutomationRuleIds]
+      if (automationRuleIds.length > 0) {
+        await pool.query('DELETE FROM automation_rules WHERE id = ANY($1::text[])', [automationRuleIds])
+      }
       if (approvalIds.length > 0) {
         await pool.query('DELETE FROM approval_records WHERE instance_id = ANY($1::text[])', [approvalIds])
         await pool.query('DELETE FROM approval_assignments WHERE instance_id = ANY($1::text[])', [approvalIds])
@@ -707,5 +717,177 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
       [created.id],
     )
     expect(versions.rows.map((row) => row.version)).toEqual([1, 2, 3])
+  })
+
+  it('serves complete form identity/reference authority and blocks publishing a deleted FWB field', async () => {
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'requester' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'end' },
+      ],
+    }
+    const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: `uat-authoring-context-${Date.now()}`,
+        name: 'UAT Authoring Context',
+        visibilityScope: { type: 'all', ids: [] },
+        formSchema: {
+          fields: [
+            { id: 'live_text', type: 'text', label: 'Live' },
+            { id: 'retired_top', type: 'text', label: 'Retired' },
+            {
+              id: 'retired_detail',
+              type: 'detail',
+              label: 'Retired detail',
+              columns: [{ id: 'retired_detail_column', type: 'text', label: 'Retired column' }],
+            },
+          ],
+        },
+        approvalGraph: graph,
+      },
+    })
+    expect(createResp.status).toBe(201)
+    const created = await createResp.json() as { id: string; latestVersionId: string }
+    createdTemplateIds.add(created.id)
+
+    const updateResp = await jsonRequest(baseUrl, `/api/approval-templates/${created.id}`, adminToken, {
+      method: 'PATCH',
+      body: {
+        formSchema: { fields: [{ id: 'live_text', type: 'text', label: 'Live' }] },
+      },
+    })
+    expect(updateResp.status).toBe(200)
+
+    const pool = poolManager.get()
+    const disabledRuleId = `uat_ctx_disabled_${Date.now()}`
+    const nestedRuleId = `uat_ctx_nested_${Date.now()}`
+    createdAutomationRuleIds.add(disabledRuleId)
+    createdAutomationRuleIds.add(nestedRuleId)
+    await pool.query(
+      `INSERT INTO automation_rules
+         (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, actions, created_by)
+       VALUES
+         ($1, $2, 'disabled FWB', 'approval.completed', $3::jsonb,
+          'write_approval_form_values', $4::jsonb, FALSE, NULL, 'uat-admin'),
+         ($5, $2, 'nested FWB', 'approval.completed', $3::jsonb,
+          'condition_branch', '{}'::jsonb, TRUE, $6::jsonb, 'uat-admin')`,
+      [
+        disabledRuleId,
+        `uat_ctx_sheet_${Date.now()}`,
+        JSON.stringify({ templateId: created.id }),
+        JSON.stringify({
+          sourceTemplateVersionId: created.latestVersionId,
+          mappings: [{ formFieldId: 'retired_top', targetFieldId: 'private_target_value' }],
+        }),
+        nestedRuleId,
+        JSON.stringify([{
+          type: 'condition_branch',
+          config: {
+            branches: [{
+              key: 'yes',
+              actions: [{
+                type: 'write_approval_form_values',
+                config: {
+                  sourceTemplateVersionId: created.latestVersionId,
+                  mappings: [{ formFieldId: 'live_text', targetFieldId: 'another_private_target' }],
+                  recordLinkFieldId: 'retired_detail_column',
+                },
+              }],
+            }],
+          },
+        }]),
+      ],
+    )
+
+    const readerToken = await authToken(baseUrl, 'uat-authoring-context-reader', 'user', 'approvals:read')
+    const forbidden = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/form-authoring-context`,
+      readerToken,
+    )
+    expect(forbidden.status).toBe(403)
+
+    const contextResp = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/form-authoring-context`,
+      adminToken,
+    )
+    expect(contextResp.status).toBe(200)
+    const context = await contextResp.json() as {
+      templateId: string
+      identityHistory: { complete: boolean; persistentIds: string[] }
+      referenceInventory: {
+        complete: boolean
+        references: Array<{ fieldId: string; kind: string; location: string }>
+      }
+    }
+    expect(context.templateId).toBe(created.id)
+    expect(context.identityHistory).toEqual({
+      complete: true,
+      persistentIds: ['live_text', 'retired_detail', 'retired_detail_column', 'retired_top'],
+    })
+    expect(context.referenceInventory).toEqual({
+      complete: true,
+      references: [
+        {
+          fieldId: 'live_text',
+          kind: 'fwb_mapping',
+          location: 'automation.write_approval_form_values.mappings.formFieldId',
+        },
+        {
+          fieldId: 'retired_detail_column',
+          kind: 'fwb_record_link',
+          location: 'automation.write_approval_form_values.recordLinkFieldId',
+        },
+        {
+          fieldId: 'retired_top',
+          kind: 'fwb_mapping',
+          location: 'automation.write_approval_form_values.mappings.formFieldId',
+        },
+      ],
+    })
+    const serializedContext = JSON.stringify(context)
+    expect(serializedContext).not.toContain(disabledRuleId)
+    expect(serializedContext).not.toContain(nestedRuleId)
+    expect(serializedContext).not.toContain('private_target_value')
+    expect(serializedContext).not.toContain('another_private_target')
+
+    const rejectedPublish = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/publish`,
+      adminToken,
+      { method: 'POST', body: { policy: { allowRevoke: true } } },
+    )
+    expect(rejectedPublish.status).toBe(409)
+    const rejectedPayload = await rejectedPublish.json() as { error: { code: string; message: string } }
+    expect(rejectedPayload.error.code).toBe('APPROVAL_TEMPLATE_FORM_FIELD_REFERENCED')
+    expect(JSON.stringify(rejectedPayload)).not.toContain('retired_top')
+    expect(JSON.stringify(rejectedPayload)).not.toContain('retired_detail_column')
+    expect(JSON.stringify(rejectedPayload)).not.toContain(disabledRuleId)
+
+    await pool.query('DELETE FROM automation_rules WHERE id = ANY($1::text[])', [[disabledRuleId, nestedRuleId]])
+    createdAutomationRuleIds.delete(disabledRuleId)
+    createdAutomationRuleIds.delete(nestedRuleId)
+    const acceptedPublish = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/publish`,
+      adminToken,
+      { method: 'POST', body: { policy: { allowRevoke: true } } },
+    )
+    expect(acceptedPublish.status).toBe(200)
   })
 })

@@ -287,6 +287,11 @@ function commonApprovalClientMockResult(statement: string): { rows: unknown[]; r
   if (statement.startsWith('SELECT id FROM approval_templates WHERE')) {
     return { rows: [{ id: 'tpl-1' }], rowCount: 1 }
   }
+  // F2-a publish-time FWB reference rescan. Dedicated unit and real-DB route goldens own
+  // referenced-field refusal; unrelated publish tests retain the ordinary no-reference baseline.
+  if (statement.startsWith('SELECT action_type, action_config, actions FROM automation_rules')) {
+    return { rows: [], rowCount: 0 }
+  }
   return null
 }
 
@@ -2884,7 +2889,7 @@ describe('ApprovalProductService', () => {
         }
         if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
         if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const commonResult = commonApprovalClientMockResult(statement); if (commonResult) return commonResult } throw new Error(`Unhandled query: ${statement}`)
       })
     }
 
