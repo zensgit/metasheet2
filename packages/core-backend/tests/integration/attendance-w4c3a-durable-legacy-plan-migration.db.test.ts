@@ -119,7 +119,31 @@ async function seedNoTargetPlan(pool: Pool, orgId: string, itemKind: 'skip' | 'a
     legacyInputFingerprint: hex('b'), operationalBranch: 'operational_only_no_target', legacyRowSourceKind: 'direct_rows',
     sourceRowCount: 1, sourceOrdinalDigest: hex('c'), w4ItemCount: 0, w4DistinctTargetCount: 0,
     w4ItemSequenceFingerprint: EMPTY_SEQUENCE, w4ItemSetFingerprint: EMPTY_SET, legacySourceRowLimit: null,
-    groupRevision: null, groupStateFingerprint: null, chunkVectorDigest: hex('f'), batch: { kind: 'normal' }, artifactCleanup: { kind: 'none' },
+    groupRevision: null, groupStateFingerprint: null, chunkVectorDigest: hex('f'),
+    batch: {
+      kind: 'normal',
+      source: 'manual',
+      ruleSetId: null,
+      mappingSnapshot: {},
+      sourceRowCount: 1,
+      status: 'committed',
+      idempotencyKey: null,
+      visibilityRule: 'org',
+      engine: 'standard',
+      chunkConfig: {},
+      recordUpsertStrategy: 'unnest',
+      itemsInsertStrategy: 'unnest',
+      mappingProfileId: null,
+      compatibilityMetadata: {},
+      groupSync: null,
+      itemReturnPolicy: { returnItems: false, itemsLimit: null },
+      skippedSamplePolicy: { limit: 50 },
+      resultSlots: {
+        groupCreated: 'ensure_group_returned_row_count',
+        groupMembersAdded: 'ensure_member_inserted_row_count',
+      },
+    },
+    artifactCleanup: { kind: 'none' },
   }
   const digest = await pool.query(`SELECT encode(digest(convert_to('[]'::jsonb::text, 'UTF8'), 'sha256'), 'hex') AS value`)
   manifest.identityProofVectorDigest = digest.rows[0].value as string
@@ -630,6 +654,180 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
       await expect(pool.query(`TRUNCATE ${table} CASCADE`)).rejects.toThrow(/TRUNCATE_DENIED/)
     }
   })
+
+
+  it('OD-W4C-60 ordinary-role single-transaction commit rejects open batch/result leaves', async () => {
+    const orgId = `org-od60-ord-${run}`
+    // Seed job only (replica), then exercise ordinary-role plan/chunk inserts.
+    const { jobId, batchId } = await seedNoTargetJob(pool, orgId)
+    const digest = await pool.query(
+      `SELECT encode(digest(convert_to('[]'::jsonb::text, 'UTF8'), 'sha256'), 'hex') AS value`,
+    )
+    const identityProofVectorDigest = String(digest.rows[0].value)
+
+    function manifestWithBatch(batch: Record<string, unknown>) {
+      return {
+        schemaVersion: 1, orgId, jobId, batchId, sourceKind: 'import_batch', sourceRef: `ref:${run}`,
+        createdBy: `creator:${run}`, actorId: `actor:${run}`, actorPosture: 'attendance_admin',
+        tokenSubjectUserId: null, acceptedWritePosture: 'legacy_projection_only',
+        identityProofVectorDigest, commandFingerprint: hex('a'), legacyInputFingerprint: hex('b'),
+        operationalBranch: 'operational_only_no_target', legacyRowSourceKind: 'direct_rows',
+        sourceRowCount: 1, sourceOrdinalDigest: hex('c'), w4ItemCount: 0, w4DistinctTargetCount: 0,
+        w4ItemSequenceFingerprint: EMPTY_SEQUENCE, w4ItemSetFingerprint: EMPTY_SET,
+        legacySourceRowLimit: null, groupRevision: null, groupStateFingerprint: null,
+        chunkVectorDigest: hex('f'), batch, artifactCleanup: { kind: 'none' },
+      }
+    }
+    const goodBatch = {
+      kind: 'normal', source: 'manual', ruleSetId: null, mappingSnapshot: {},
+      sourceRowCount: 1, status: 'committed', idempotencyKey: null, visibilityRule: 'org',
+      engine: 'standard', chunkConfig: {}, recordUpsertStrategy: 'unnest',
+      itemsInsertStrategy: 'unnest', mappingProfileId: null, compatibilityMetadata: {},
+      groupSync: null,
+      itemReturnPolicy: { returnItems: false, itemsLimit: null },
+      skippedSamplePolicy: { limit: 50 },
+      resultSlots: {
+        groupCreated: 'ensure_group_returned_row_count',
+        groupMembersAdded: 'ensure_member_inserted_row_count',
+      },
+    }
+    const badBatches: Array<{ label: string; batch: Record<string, unknown> }> = [
+      {
+        label: 'omit itemReturnPolicy',
+        batch: Object.fromEntries(Object.entries(goodBatch).filter(([k]) => k !== 'itemReturnPolicy')),
+      },
+      {
+        label: 'extra key on itemReturnPolicy',
+        batch: { ...goodBatch, itemReturnPolicy: { returnItems: false, itemsLimit: null, extra: true } },
+      },
+      {
+        label: 'wrong returnItems literal',
+        batch: { ...goodBatch, itemReturnPolicy: { returnItems: true, itemsLimit: null } },
+      },
+      { label: 'limit -1', batch: { ...goodBatch, skippedSamplePolicy: { limit: -1 } } },
+      { label: 'limit 501', batch: { ...goodBatch, skippedSamplePolicy: { limit: 501 } } },
+      { label: 'limit fraction', batch: { ...goodBatch, skippedSamplePolicy: { limit: 1.5 } } },
+      {
+        label: 'wrong resultSlots literal',
+        batch: {
+          ...goodBatch,
+          resultSlots: {
+            groupCreated: 'plan_value',
+            groupMembersAdded: 'ensure_member_inserted_row_count',
+          },
+        },
+      },
+      { label: 'empty resultSlots object', batch: { ...goodBatch, resultSlots: {} } },
+    ]
+
+    for (const c of badBatches) {
+      const seeded = await seedNoTargetJob(pool, orgId)
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const role = await client.query(`SELECT current_setting('session_replication_role') AS r`)
+        expect(String(role.rows[0].r)).toBe('origin')
+        const m = manifestWithBatch(c.batch)
+        m.jobId = seeded.jobId
+        m.batchId = seeded.batchId
+        await expect(
+          client.query(
+            `INSERT INTO attendance_import_legacy_execution_plans (
+              job_id, org_id, batch_id, plan_version, plan_digest, chunk_vector_digest, source_kind, source_ref, created_by,
+              actor_id, actor_posture, token_subject_user_id, accepted_write_posture, identity_proof_vector_digest,
+              command_fingerprint, legacy_input_fingerprint, operational_branch, legacy_row_source_kind, legacy_source_row_limit,
+              source_row_count, source_ordinal_digest, w4_item_count, w4_distinct_target_count, w4_item_sequence_fingerprint,
+              w4_item_set_fingerprint, group_revision, group_state_fingerprint, chunk_count, manifest
+            ) VALUES ($1,$2,$3,1,$4,$5,'import_batch',$6,$7,$8,'attendance_admin',NULL,'legacy_projection_only',$9,$10,$11,
+              'operational_only_no_target','direct_rows',NULL,1,$12,0,0,$13,$14,NULL,NULL,1,$15::jsonb)`,
+            [
+              seeded.jobId, orgId, seeded.batchId, hex('f'), hex('f'), `ref:${run}`, `creator:${run}`, `actor:${run}`,
+              identityProofVectorDigest, hex('a'), hex('b'), hex('c'), EMPTY_SEQUENCE, EMPTY_SET,
+              JSON.stringify(m),
+            ],
+          ),
+        ).rejects.toThrow()
+        await client.query('ROLLBACK')
+      } finally {
+        client.release()
+      }
+    }
+
+    // Valid exact shapes commit under ordinary role in one transaction (plan+chunk).
+    {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const role = await client.query(`SELECT current_setting('session_replication_role') AS r`)
+        expect(String(role.rows[0].r)).toBe('origin')
+        await client.query(
+          `INSERT INTO attendance_import_legacy_execution_plans (
+            job_id, org_id, batch_id, plan_version, plan_digest, chunk_vector_digest, source_kind, source_ref, created_by,
+            actor_id, actor_posture, token_subject_user_id, accepted_write_posture, identity_proof_vector_digest,
+            command_fingerprint, legacy_input_fingerprint, operational_branch, legacy_row_source_kind, legacy_source_row_limit,
+            source_row_count, source_ordinal_digest, w4_item_count, w4_distinct_target_count, w4_item_sequence_fingerprint,
+            w4_item_set_fingerprint, group_revision, group_state_fingerprint, chunk_count, manifest
+          ) VALUES ($1,$2,$3,1,$4,$5,'import_batch',$6,$7,$8,'attendance_admin',NULL,'legacy_projection_only',$9,$10,$11,
+            'operational_only_no_target','direct_rows',NULL,1,$12,0,0,$13,$14,NULL,NULL,1,$15::jsonb)`,
+          [
+            jobId, orgId, batchId, hex('f'), hex('f'), `ref:${run}`, `creator:${run}`, `actor:${run}`,
+            identityProofVectorDigest, hex('a'), hex('b'), hex('c'), EMPTY_SEQUENCE, EMPTY_SET,
+            JSON.stringify(manifestWithBatch(goodBatch)),
+          ],
+        )
+        await client.query(
+          `INSERT INTO attendance_import_legacy_execution_plan_chunks
+             (job_id, chunk_index, first_source_ordinal, source_row_count, chunk_digest, chunk)
+           VALUES ($1,0,0,1,$2,$3::jsonb)`,
+          [
+            jobId, hex('f'),
+            JSON.stringify({
+              items: [{ kind: 'skip' }],
+              recordWrites: [{ resultSlots: {} }],
+              groupEffects: [],
+            }),
+          ],
+        )
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    // Nonempty record resultSlots rejected immediately on chunk INSERT (ordinary role).
+    {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const role = await client.query(`SELECT current_setting('session_replication_role') AS r`)
+        expect(String(role.rows[0].r)).toBe('origin')
+        await expect(
+          client.query(
+            `INSERT INTO attendance_import_legacy_execution_plan_chunks
+               (job_id, chunk_index, first_source_ordinal, source_row_count, chunk_digest, chunk)
+             VALUES ($1,1,1,1,$2,$3::jsonb)`,
+            [
+              jobId, hex('e'),
+              JSON.stringify({
+                items: [],
+                recordWrites: [{ resultSlots: { groupCreated: 1 } }],
+                groupEffects: [],
+              }),
+            ],
+          ),
+        ).rejects.toThrow()
+        await client.query('ROLLBACK')
+      } finally {
+        client.release()
+      }
+    }
+  })
+
+
+
 
   it('refuses up before DDL for any pre-amendment V1 job, and guarded down restores predecessor columns only when empty', async () => {
     const blockedName = `${scratchName}_blocked`

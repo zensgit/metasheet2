@@ -90,6 +90,10 @@ const FILES = Object.freeze([
   'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
   'tests/integration/attendance-w4c3a-record-effects.db.test.ts',
   'tests/integration/attendance-w4c3a-item-effects.db.test.ts',
+  'tests/integration/attendance-w4c3a-p08-child-process.db.test.ts',
+  'tests/integration/attendance-w4c3a-group-preconditions.db.test.ts',
+  'tests/integration/attendance-w4c3a-group-effects.db.test.ts',
+  'tests/integration/attendance-w4c3a-auth-recovery.db.test.ts',
 ])
 
 /**

@@ -197,9 +197,12 @@ function normalBatch(idempotencyKey: string | null, sourceRowCount: number) {
     mappingProfileId: null,
     compatibilityMetadata: {},
     groupSync: null,
-    itemReturnPolicy: { returnItems: false },
+    itemReturnPolicy: { returnItems: false, itemsLimit: null },
     skippedSamplePolicy: { limit: 50 },
-    resultSlots: {},
+    resultSlots: {
+      groupCreated: 'ensure_group_returned_row_count',
+      groupMembersAdded: 'ensure_member_inserted_row_count',
+    },
   }
 }
 
@@ -1108,16 +1111,103 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
         kind: 'ensure_member',
         groupRef: nameWinnerId,
         userId: TARGET_USER,
+      membershipExistedAtPrepare: false,
       }),
       expect.objectContaining({
         kind: 'ensure_member',
         groupRef: codeOnlyId,
         userId: ADMIN_B,
+      membershipExistedAtPrepare: false,
       }),
     ]))
     expect(effects).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ groupRef: shadowedCodeId }),
     ]))
+  })
+
+  it('omits ensure_group for a frozen existing group and keeps only a requested member effect', async () => {
+    const existingGroupId = crypto.randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_groups (id, org_id, name, code, timezone)
+       VALUES ($1, $2, 'Existing Team', 'EXISTING', 'Asia/Taipei')`,
+      [existingGroupId, ORG],
+    )
+
+    const reserve = async (
+      batchId: string,
+      groupEffects: readonly LegacyImportGroupEffectDraftV1[],
+    ) => {
+      const { input } = strictInput(legacyOrgWitness, batchId, ADMIN_A)
+      await runSerializable(pool, (client) =>
+        reserveAttendanceLegacyImportPlanJobV1(
+          trx(client),
+          auth(ADMIN_A, ORG),
+          { ...input, groupEffects },
+        ),
+      )
+      return pool.query(
+        `SELECT m.group_revision, m.group_state_fingerprint, c.chunk
+           FROM attendance_import_legacy_execution_plans m
+           JOIN attendance_import_jobs j ON j.id = m.job_id
+           LEFT JOIN attendance_import_legacy_execution_plan_chunks c
+             ON c.job_id = m.job_id AND c.chunk_index = 0
+          WHERE j.batch_id = $1`,
+        [batchId],
+      )
+    }
+
+    const existingOnly = await reserve(crypto.randomUUID(), [
+      {
+        kind: 'ensure_group',
+        normalizedName: 'existing team',
+        displayName: 'Existing Team',
+        code: 'EXISTING',
+        timezone: 'Asia/Taipei',
+        ruleSetId: null,
+        firstSourceOrdinal: 0,
+      },
+    ])
+    const existingOnlyEffects = (
+      existingOnly.rows[0].chunk as {
+        groupEffects: Array<Record<string, unknown>>
+      }
+    ).groupEffects
+    expect(existingOnlyEffects).toEqual([])
+    expect(existingOnly.rows[0].group_revision).toBeNull()
+    expect(existingOnly.rows[0].group_state_fingerprint).toBeNull()
+
+    const withMember = await reserve(crypto.randomUUID(), [
+      {
+        kind: 'ensure_group',
+        normalizedName: 'existing team',
+        displayName: 'Existing Team',
+        code: 'EXISTING',
+        timezone: 'Asia/Taipei',
+        ruleSetId: null,
+        firstSourceOrdinal: 0,
+      },
+      {
+        kind: 'ensure_member',
+        groupRef: 'existing',
+        userId: TARGET_USER,
+        firstSourceOrdinal: 0,
+      },
+    ])
+    const memberEffects = (
+      withMember.rows[0].chunk as {
+        groupEffects: Array<Record<string, unknown>>
+      }
+    ).groupEffects
+    expect(memberEffects).toEqual([
+      expect.objectContaining({
+        kind: 'ensure_member',
+        groupRef: existingGroupId,
+        userId: TARGET_USER,
+        membershipExistedAtPrepare: false,
+      }),
+    ])
+    expect(withMember.rows[0].group_revision).not.toBeNull()
+    expect(withMember.rows[0].group_state_fingerprint).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it('freezes a same-plan ensure-group code reference to the minted group UUID', async () => {
@@ -1526,6 +1616,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       loadPlan: (client, jobId) =>
         createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
           .loadPlan(jobId, ORG),
+      recheckReplayPrecondition: async () => true,
       targetIdentities: () => [],
       acquireClass11: (client, _plan, identities) =>
         acquireAttendanceCalculationTargetLocks(trx(client), identities),

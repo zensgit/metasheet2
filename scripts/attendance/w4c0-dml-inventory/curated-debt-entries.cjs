@@ -38,11 +38,17 @@ const W4C3A_RECORD_EFFECT_ADAPTER =
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts'
 const W4C3A_ITEM_EFFECT_ADAPTER =
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-item-effects.ts'
+const W4C3A_GROUP_EFFECT_ADAPTER =
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-group-effects.ts'
+const W4C3A_BATCH_EFFECT_ADAPTER =
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-batch-effects.ts'
 
 function byW4C3aFixedEffectAdapter(site) {
   return (
     byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER)(site) ||
-    byPathPrefix(W4C3A_ITEM_EFFECT_ADAPTER)(site)
+    byPathPrefix(W4C3A_ITEM_EFFECT_ADAPTER)(site) ||
+    byPathPrefix(W4C3A_GROUP_EFFECT_ADAPTER)(site) ||
+    byPathPrefix(W4C3A_BATCH_EFFECT_ADAPTER)(site)
   )
 }
 

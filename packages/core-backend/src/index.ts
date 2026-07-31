@@ -116,6 +116,7 @@ import {
   abandonScheduledRunOnceV1,
   type AttendanceScheduledRunAdminAbandonInputV1,
 } from './attendance/w4c2-scheduled-run-ops-worker'
+import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2134,6 +2135,26 @@ export class MetaSheetServer {
                     poolManager.get().getInternalPool(),
                     input as unknown as AttendanceScheduledRunAdminAbandonInputV1,
                   ),
+                // W4C-3a: values-free V1 legacy-plan processor. Plugin supplies
+                // only jobId; core owns SERIALIZABLE assembly and fixed effects.
+                processLegacyImportPlan: async (input: { jobId: string }) => {
+                  const jobId =
+                    typeof input === 'object' &&
+                    input !== null &&
+                    typeof input.jobId === 'string'
+                      ? input.jobId
+                      : ''
+                  const processor = createAttendanceLegacyPlanProcessorV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return processor.processLegacyImportPlanV1(jobId)
+                },
               }
             : undefined,
         automationRegistry,

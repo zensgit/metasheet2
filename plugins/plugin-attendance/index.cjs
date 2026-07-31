@@ -25317,10 +25317,26 @@ module.exports = {
 	      }
 	    }
 
-	    const mapImportJobRow = (row) => {
-	      const payload = normalizeMetadata(row.payload)
-	      const kind = payload?.__jobType === 'preview' ? 'preview' : 'commit'
-	      const status = normalizeImportJobStatus(row.status)
+		    const mapImportJobRow = (row) => {
+		      const status = normalizeImportJobStatus(row.status)
+		      const isV1 = Number(row.w4_contract_version) === 1
+		      if (
+		        isV1 &&
+		        status === 'completed' &&
+		        (!row.w4_terminal_response ||
+		          typeof row.w4_terminal_response !== 'object' ||
+		          Array.isArray(row.w4_terminal_response))
+		      ) {
+		        const error = new Error('ATTENDANCE_IMPORT_LEGACY_TERMINAL_RESPONSE_MISSING')
+		        error.code = 'ATTENDANCE_IMPORT_LEGACY_TERMINAL_RESPONSE_MISSING'
+		        throw error
+		      }
+		      const payload = normalizeMetadata(
+		        isV1 && status === 'completed'
+		          ? row.w4_terminal_response
+		          : row.payload
+		      )
+		      const kind = payload?.__jobType === 'preview' ? 'preview' : 'commit'
 	      const progress = Number(row.progress ?? 0)
 	      const total = Number(row.total ?? 0)
 	      const summary = normalizeMetadata(payload?.summary)
@@ -25413,44 +25429,48 @@ module.exports = {
 
 	    const getQueueService = () => context?.services?.queue
 
-	    const buildImportJobProjectionSql = () => `
-	      SELECT
-	        id,
-	        org_id,
-	        batch_id,
-	        created_by,
-	        idempotency_key,
-	        status,
-	        progress,
-	        total,
-	        error,
-	        started_at,
-	        finished_at,
-	        created_at,
-	        updated_at,
-	        CASE
-	          WHEN payload IS NULL THEN NULL
-	          ELSE payload - 'rows' - 'entries' - 'csvText'
-	        END AS payload
-	      FROM attendance_import_jobs`
+		    const buildImportJobProjectionSql = () => `
+		      SELECT
+		        job.id,
+		        job.org_id,
+		        job.batch_id,
+		        job.created_by,
+		        job.idempotency_key,
+		        job.status,
+		        job.progress,
+		        job.total,
+		        job.error,
+		        job.started_at,
+		        job.finished_at,
+		        job.created_at,
+		        job.updated_at,
+		        job.w4_contract_version,
+		        CASE
+		          WHEN job.payload IS NULL THEN NULL
+		          ELSE job.payload - 'rows' - 'entries' - 'csvText'
+		        END AS payload,
+		        terminal.response AS w4_terminal_response
+		      FROM attendance_import_jobs AS job
+		      LEFT JOIN attendance_import_legacy_terminal_responses AS terminal
+		        ON terminal.job_id = job.id AND terminal.org_id = job.org_id`
 
-	    const loadImportJob = async (jobId, orgId) => {
-	      const rows = await db.query(
-	        `${buildImportJobProjectionSql()} WHERE id = $1 AND org_id = $2`,
-	        [jobId, orgId]
-	      )
-	      return rows.length ? rows[0] : null
+		    const loadImportJob = async (jobId, orgId) => {
+		      const rows = await db.query(
+		        `${buildImportJobProjectionSql()} WHERE job.id = $1 AND job.org_id = $2`,
+		        [jobId, orgId]
+		      )
+		      return rows.length ? rows[0] : null
 	    }
 
 	    const loadImportJobByIdempotencyKey = async (orgId, idempotencyKey) => {
-	      if (!idempotencyKey) return null
-	      const rows = await db.query(
-	        `${buildImportJobProjectionSql()}
-	         WHERE org_id = $1 AND idempotency_key = $2
-	         ORDER BY created_at DESC
-	         LIMIT 1`,
-	        [orgId, idempotencyKey]
-	      )
+		      if (!idempotencyKey) return null
+		      const rows = await db.query(
+		        `${buildImportJobProjectionSql()}
+		         WHERE job.org_id = $1 AND job.idempotency_key = $2
+		         ORDER BY job.created_at DESC
+		         LIMIT 1`,
+		        [orgId, idempotencyKey]
+		      )
 	      return rows.length ? rows[0] : null
 	    }
 
@@ -25709,7 +25729,96 @@ module.exports = {
 	      )
 	    }
 
-	    const activeAsyncImportJobIds = new Set()
+		    const activeAsyncImportJobIds = new Set()
+
+		    const deleteImportUploadForDurableCleanup = async ({ orgId, fileId }) => {
+		      if (!isUuidLike(fileId)) {
+		        throw new Error('ATTENDANCE_IMPORT_UPLOAD_CLEANUP_IDENTITY_INVALID')
+		      }
+		      const paths = getImportUploadPaths({ orgId, fileId })
+		      const settled = await Promise.allSettled([
+		        fsp.unlink(paths.csvPath),
+		        fsp.unlink(paths.metaPath),
+		      ])
+		      for (const result of settled) {
+		        if (result.status === 'fulfilled') continue
+		        if (result.reason && result.reason.code === 'ENOENT') continue
+		        throw result.reason
+		      }
+		    }
+
+		    const drainImportUploadCleanupCommand = async (jobId) => {
+		      const rowId = String(jobId || '').trim()
+		      if (!isUuidLike(rowId)) return false
+		      const claimToken = randomUUID()
+		      const leaseExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+		      try {
+		        const claimRows = await db.query(
+		          `SELECT attendance_claim_import_upload_cleanup_command(
+		             $1::uuid, $2::uuid, $3::timestamptz
+		           ) AS claimed`,
+		          [rowId, claimToken, leaseExpiresAt]
+		        )
+		        if (!claimRows.length || claimRows[0].claimed !== true) return false
+
+		        const commandRows = await db.query(
+		          `SELECT org_id, file_id::text AS file_id
+		             FROM attendance_import_upload_cleanup_commands
+		            WHERE job_id = $1::uuid
+		              AND status = 'processing'
+		              AND claim_token = $2::uuid`,
+		          [rowId, claimToken]
+		        )
+		        if (commandRows.length !== 1) {
+		          throw new Error('ATTENDANCE_IMPORT_UPLOAD_CLEANUP_COMMAND_MISSING')
+		        }
+
+		        const command = commandRows[0]
+		        await deleteImportUploadForDurableCleanup({
+		          orgId: String(command.org_id),
+		          fileId: String(command.file_id),
+		        })
+		        const finishRows = await db.query(
+		          `SELECT attendance_finish_import_upload_cleanup_command(
+		             $1::uuid, $2::uuid, 'completed', NULL
+		           ) AS finished`,
+		          [rowId, claimToken]
+		        )
+		        if (!finishRows.length || finishRows[0].finished !== true) {
+		          throw new Error('ATTENDANCE_IMPORT_UPLOAD_CLEANUP_FINISH_REJECTED')
+		        }
+		        return true
+		      } catch (error) {
+		        try {
+		          await db.query(
+		            `SELECT attendance_finish_import_upload_cleanup_command(
+		               $1::uuid, $2::uuid, 'failed_retryable', 'UPLOAD_DELETE_FAILED'
+		             ) AS finished`,
+		            [rowId, claimToken]
+		          )
+		        } catch (finishError) {
+		          logger.warn('Attendance durable import upload cleanup state update failed', finishError)
+		        }
+		        logger.warn('Attendance durable import upload cleanup attempt failed', error)
+		        return false
+		      }
+		    }
+
+		    /**
+	     * W4C-3a values-free host call. Accepts only jobId. Production must not
+	     * pass payload/orgId/rules/settings/profile/effect callbacks.
+	     */
+	    const callAttendanceLegacyPlanHostV1 = async (jobId) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.processLegacyImportPlan !== 'function') {
+	        const err = new Error('ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING')
+	        err.code = 'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING'
+	        err.retryable = false
+	        throw err
+	      }
+	      // Exact single-key envelope — never spread job rows or request state.
+	      return port.processLegacyImportPlan({ jobId })
+	    }
 
 	    const processAsyncImportCommitJob = async ({ jobId }) => {
 	      const rowId = String(jobId || '').trim()
@@ -25717,18 +25826,86 @@ module.exports = {
 
 	      activeAsyncImportJobIds.add(rowId)
 	      try {
-	        const jobRows = await db.query('SELECT * FROM attendance_import_jobs WHERE id = $1', [rowId])
-	        if (!jobRows.length) return
+	        // Classification read only: discriminator + status. Never SELECT payload
+	        // (or SELECT *) before the V1 branch — V1 must not hydrate legacy payload.
+	        const classifyRows = await db.query(
+	          `SELECT id, status, w4_contract_version
+	             FROM attendance_import_jobs
+	            WHERE id = $1`,
+	          [rowId],
+	        )
+	        if (!classifyRows.length) return
 
+	        const classifyRow = classifyRows[0]
+		        const status = normalizeImportJobStatus(classifyRow.status)
+		        const w4ContractVersionRaw = classifyRow.w4_contract_version
+		        const isV1 =
+		          w4ContractVersionRaw === 1 ||
+		          w4ContractVersionRaw === '1' ||
+		          Number(w4ContractVersionRaw) === 1
+		        const isLegacy =
+		          w4ContractVersionRaw === null ||
+		          w4ContractVersionRaw === undefined
+		        if (status === 'completed') {
+		          if (isV1) await drainImportUploadCleanupCommand(rowId)
+		          return
+		        }
+
+		        // W4C-3a: V1 jobs are values-free and must call the host processor
+		        // with only jobId. Governed null-version legacy jobs keep the
+		        // byte-compatible commitAttendanceImportPayload path.
+		        if (isV1) {
+		          try {
+		            const outcome = await callAttendanceLegacyPlanHostV1(rowId)
+		            if (outcome && (outcome.kind === 'completed' || outcome.kind === 'suspended' || outcome.kind === 'failed')) {
+		              // Terminal outcomes are owned by the core processor / durable
+		              // job row. Plugin must not call updateImportJobProgress as a
+		              // second V1 terminal writer.
+		              if (outcome.kind === 'completed') {
+		                await drainImportUploadCleanupCommand(rowId)
+		              }
+		              return
+	            }
+	            // not_found or unexpected: fail closed without legacy hydration.
+	            logger.warn('Attendance V1 legacy-plan processor returned non-terminal', {
+	              jobId: rowId,
+	              kind: outcome?.kind ?? null,
+	            })
+	            return
+	          } catch (error) {
+	            // Missing port is non-retryable fail-closed (no second writer).
+	            // Transient processor throws rethrow so the queue can retry.
+	            if (error?.code === 'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING') {
+	              logger.error('Attendance V1 legacy-plan host port missing', { jobId: rowId })
+	              return
+	            }
+	            logger.error('Attendance V1 legacy-plan processor failed', error)
+	            throw error
+		          }
+		        }
+		        if (!isLegacy) {
+		          logger.error('Attendance async import job has unsupported contract version', {
+		            jobId: rowId,
+		            w4ContractVersion: w4ContractVersionRaw,
+		          })
+		          return
+		        }
+
+		        // Legacy null-version path only: hydrate payload and org-scoped fields.
+	        const jobRows = await db.query(
+	          `SELECT id, org_id, batch_id, created_by, idempotency_key, status, payload, total
+	             FROM attendance_import_jobs
+	            WHERE id = $1`,
+	          [rowId],
+	        )
+	        if (!jobRows.length) return
 	        const jobRow = jobRows[0]
 	        const orgId = jobRow.org_id ?? DEFAULT_ORG_ID
 	        const batchId = jobRow.batch_id
 	        const requesterId = jobRow.created_by
 	        const payload = normalizeMetadata(jobRow.payload)
 	        const isPreviewJob = payload?.__jobType === 'preview'
-	        const status = normalizeImportJobStatus(jobRow.status)
 	        const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
-	        if (status === 'completed') return
 
 	        if (!isPreviewJob) {
 	          // If the batch already exists, treat the job as complete (idempotent re-run).
@@ -26816,10 +26993,30 @@ module.exports = {
 	             LIMIT 50`,
 	            [attendanceImportAsyncStartupCutoff]
 	          )
-	          for (const row of rows) {
-	            await enqueueImportJob(row.id)
-	          }
-	        } catch (error) {
+		          for (const row of rows) {
+		            await enqueueImportJob(row.id)
+		          }
+		          const cleanupRows = await db.query(
+		            `SELECT cleanup.job_id
+		               FROM attendance_import_upload_cleanup_commands AS cleanup
+		               INNER JOIN attendance_import_jobs AS job
+		                 ON job.id = cleanup.job_id
+		                AND job.org_id = cleanup.org_id
+		              WHERE job.w4_contract_version = 1
+		                AND job.status = 'completed'
+		                AND cleanup.created_at < $1::timestamptz
+		                AND (
+		                  cleanup.status IN ('pending', 'failed_retryable') OR
+		                  (cleanup.status = 'processing' AND cleanup.lease_expires_at <= now())
+		                )
+		              ORDER BY cleanup.created_at ASC, cleanup.job_id ASC
+		              LIMIT 50`,
+		            [attendanceImportAsyncStartupCutoff]
+		          )
+		          for (const row of cleanupRows) {
+		            await drainImportUploadCleanupCommand(row.job_id)
+		          }
+		        } catch (error) {
 	          logger.warn('Attendance async import requeue skipped', error)
 	        }
 	      })

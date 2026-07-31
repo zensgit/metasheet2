@@ -1,14 +1,20 @@
 /**
- * W4C-3a phase 1 (#4556 / OD-W4C-56=(a), OD-W4C-57=(a)) — durable
- * LegacyImportExecutionPlanV1 schema types, exact-key parsers, canonical digests,
- * and fixed 500-row chunker.
+ * W4C-3a (#4556 / OD-W4C-56=(a), OD-W4C-57=(a), OD-W4C-58=(a), OD-W4C-59=(a),
+ * OD-W4C-60=(a)) — durable LegacyImportExecutionPlanV1 schema types, exact-key
+ * parsers, canonical digests, and fixed 500-row chunker.
  *
  * Authority:
  *  docs/development/attendance-issue-4556-w4c3a-durable-legacy-plan-amendment-20260729.md
  *  (sections 3, 4, 5.1, 6, 7, 8, 9);
  *  docs/development/attendance-issue-4556-w4c3a-byte-parity-field-amendment-20260730.md
  *  (OD-W4C-57=(a) exact union correction for batch source, record timezone,
- *  ensure_group displayName).
+ *  ensure_group displayName);
+ *  docs/development/attendance-issue-4556-w4c3a-group-precondition-freeze-amendment-20260730.md
+ *  (OD-W4C-58=(a) explicit group/member existence branches);
+ *  docs/development/attendance-issue-4556-w4c3a-locked-race-lockset-amendment-20260730.md
+ *  (OD-W4C-59=(a) retained complete class-10 set on locked_race);
+ *  docs/development/attendance-issue-4556-w4c3a-result-slots-amendment-20260730.md
+ *  (OD-W4C-60=(a) closed item-return / skipped-sample policies and result slots).
  *
  * Scope of this module:
  *  - closed unions and exact-key parsers for the V1 plan root, batch, items,
@@ -388,6 +394,29 @@ export function parseLegacyImportArtifactCleanupV1(
   fail(code)
 }
 
+/** OD-W4C-60=(a) P07 item-return policy: exact closed shape. */
+export type LegacyImportItemReturnPolicyV1 = Readonly<{
+  readonly returnItems: false
+  readonly itemsLimit: null
+}>
+
+/** OD-W4C-60=(a) skipped-sample policy: frozen integer limit in 0..500. */
+export type LegacyImportSkippedSamplePolicyV1 = Readonly<{
+  readonly limit: number
+}>
+
+/**
+ * OD-W4C-60=(a) batch result-slot declaration. Digests bind the slot names to
+ * fixed effect-result counters; values are never plan-provided counts.
+ */
+export type LegacyImportBatchResultSlotsV1 = Readonly<{
+  readonly groupCreated: 'ensure_group_returned_row_count'
+  readonly groupMembersAdded: 'ensure_member_inserted_row_count'
+}>
+
+/** OD-W4C-60=(a) record result slots: empty object only. */
+export type LegacyImportRecordResultSlotsV1 = Readonly<Record<string, never>>
+
 export type LegacyImportBatchPlanV1 =
   | {
       readonly kind: 'normal'
@@ -405,9 +434,9 @@ export type LegacyImportBatchPlanV1 =
       readonly mappingProfileId: string | null
       readonly compatibilityMetadata: unknown
       readonly groupSync: unknown
-      readonly itemReturnPolicy: unknown
-      readonly skippedSamplePolicy: unknown
-      readonly resultSlots: unknown
+      readonly itemReturnPolicy: LegacyImportItemReturnPolicyV1
+      readonly skippedSamplePolicy: LegacyImportSkippedSamplePolicyV1
+      readonly resultSlots: LegacyImportBatchResultSlotsV1
     }
   | {
       readonly kind: 'idempotent_replay'
@@ -468,6 +497,54 @@ function requireNullableBatchSource(
   return requireOneOf(value, ATTENDANCE_LEGACY_IMPORT_BATCH_SOURCES_V1, code)
 }
 
+export function parseLegacyImportItemReturnPolicyV1(
+  value: unknown,
+): LegacyImportItemReturnPolicyV1 {
+  const code = 'W4C3A_BATCH_PLAN_INVALID'
+  const obj = requireExactKeys(value, ['returnItems', 'itemsLimit'] as const, code)
+  if (obj.returnItems !== false || obj.itemsLimit !== null) fail(code)
+  return freezeDeep({ returnItems: false as const, itemsLimit: null })
+}
+
+export function parseLegacyImportSkippedSamplePolicyV1(
+  value: unknown,
+): LegacyImportSkippedSamplePolicyV1 {
+  const code = 'W4C3A_BATCH_PLAN_INVALID'
+  const obj = requireExactKeys(value, ['limit'] as const, code)
+  const limit = requireNonNegInt(obj.limit, code)
+  if (limit > 500) fail(code)
+  return freezeDeep({ limit })
+}
+
+export function parseLegacyImportBatchResultSlotsV1(
+  value: unknown,
+): LegacyImportBatchResultSlotsV1 {
+  const code = 'W4C3A_BATCH_PLAN_INVALID'
+  const obj = requireExactKeys(
+    value,
+    ['groupCreated', 'groupMembersAdded'] as const,
+    code,
+  )
+  if (
+    obj.groupCreated !== 'ensure_group_returned_row_count' ||
+    obj.groupMembersAdded !== 'ensure_member_inserted_row_count'
+  ) {
+    fail(code)
+  }
+  return freezeDeep({
+    groupCreated: 'ensure_group_returned_row_count' as const,
+    groupMembersAdded: 'ensure_member_inserted_row_count' as const,
+  })
+}
+
+export function parseLegacyImportRecordResultSlotsV1(
+  value: unknown,
+): LegacyImportRecordResultSlotsV1 {
+  const code = 'W4C3A_RECORD_WRITE_PLAN_INVALID'
+  requireExactKeys(value, [] as const, code)
+  return freezeDeep({})
+}
+
 export function parseLegacyImportBatchPlanV1(value: unknown): LegacyImportBatchPlanV1 {
   const code = 'W4C3A_BATCH_PLAN_INVALID'
   if (!isPlainObject(value)) fail(code)
@@ -497,13 +574,27 @@ export function parseLegacyImportBatchPlanV1(value: unknown): LegacyImportBatchP
       mappingProfileId: requireNullableString(obj.mappingProfileId, code),
       compatibilityMetadata: parseOpaqueLeaf(obj.compatibilityMetadata, code),
       groupSync: parseOpaqueLeaf(obj.groupSync, code),
-      itemReturnPolicy: parseOpaqueLeaf(obj.itemReturnPolicy, code),
-      skippedSamplePolicy: parseOpaqueLeaf(obj.skippedSamplePolicy, code),
-      resultSlots: parseOpaqueLeaf(obj.resultSlots, code),
+      itemReturnPolicy: parseLegacyImportItemReturnPolicyV1(obj.itemReturnPolicy),
+      skippedSamplePolicy: parseLegacyImportSkippedSamplePolicyV1(
+        obj.skippedSamplePolicy,
+      ),
+      resultSlots: parseLegacyImportBatchResultSlotsV1(obj.resultSlots),
     })
   }
   if (value.kind === 'idempotent_replay') {
     const obj = requireExactKeys(value, BATCH_REPLAY_KEYS, code)
+    if (
+      !isPlainObject(obj.metadata) ||
+      !Object.prototype.hasOwnProperty.call(obj.metadata, 'chunkConfig') ||
+      obj.metadata.chunkConfig === undefined
+    ) {
+      fail(code)
+    }
+    requireOneOf(
+      obj.metadata.itemsInsertStrategy,
+      ATTENDANCE_LEGACY_IMPORT_WRITE_STRATEGIES_V1,
+      code,
+    )
     const totalRowCount = requirePosInt(obj.totalRowCount, code)
     const importedCount = requireNonNegInt(obj.importedCount, code)
     const skippedCount = requireNonNegInt(obj.skippedCount, code)
@@ -649,7 +740,7 @@ export type LegacyImportRecordWritePlanV1 = {
   readonly multiPunchSnapshot: unknown
   readonly attributionSnapshot: unknown
   readonly sourceBatchId: string
-  readonly resultSlots: unknown
+  readonly resultSlots: LegacyImportRecordResultSlotsV1
 }
 
 export type LegacyImportRecordPreconditionV1 = Readonly<{
@@ -809,7 +900,7 @@ export function parseLegacyImportRecordWritePlanV1(
     multiPunchSnapshot: parseOpaqueLeaf(obj.multiPunchSnapshot, code),
     attributionSnapshot: parseOpaqueLeaf(obj.attributionSnapshot, code),
     sourceBatchId: requireUuid(obj.sourceBatchId, code),
-    resultSlots: parseOpaqueLeaf(obj.resultSlots, code),
+    resultSlots: parseLegacyImportRecordResultSlotsV1(obj.resultSlots),
   })
 }
 
@@ -828,12 +919,17 @@ export type LegacyImportGroupEffectPlanV1 =
       readonly code: string | null
       readonly timezone: string
       readonly ruleSetId: string | null
+      /** OD-W4C-58=(a): frozen prepare-time existence of groupId. */
+      readonly groupExistedAtPrepare: boolean
     }
   | {
       readonly kind: 'ensure_member'
       readonly memberId: string
+      /** Resolved group UUID only (OD-W4C-58=(a)). */
       readonly groupRef: string
       readonly userId: string
+      /** OD-W4C-58=(a): frozen prepare-time existence of (groupRef, userId). */
+      readonly membershipExistedAtPrepare: boolean
     }
 
 const GROUP_ENSURE_KEYS = [
@@ -844,8 +940,15 @@ const GROUP_ENSURE_KEYS = [
   'code',
   'timezone',
   'ruleSetId',
+  'groupExistedAtPrepare',
 ] as const
-const MEMBER_ENSURE_KEYS = ['kind', 'memberId', 'groupRef', 'userId'] as const
+const MEMBER_ENSURE_KEYS = [
+  'kind',
+  'memberId',
+  'groupRef',
+  'userId',
+  'membershipExistedAtPrepare',
+] as const
 const NUMERIC_ONLY_GROUP_NAME_RE = /^\d+$/
 
 export function parseLegacyImportGroupEffectPlanV1(
@@ -879,6 +982,7 @@ export function parseLegacyImportGroupEffectPlanV1(
       timezone: requireString(obj.timezone, code),
       ruleSetId:
         obj.ruleSetId === null ? null : requireUuid(obj.ruleSetId, code),
+      groupExistedAtPrepare: requireBool(obj.groupExistedAtPrepare, code),
     })
   }
   if (value.kind === 'ensure_member') {
@@ -886,8 +990,12 @@ export function parseLegacyImportGroupEffectPlanV1(
     return freezeDeep({
       kind: 'ensure_member' as const,
       memberId: requireUuid(obj.memberId, code),
-      groupRef: requireString(obj.groupRef, code),
+      groupRef: requireUuid(obj.groupRef, code),
       userId: requireString(obj.userId, code),
+      membershipExistedAtPrepare: requireBool(
+        obj.membershipExistedAtPrepare,
+        code,
+      ),
     })
   }
   fail(code)
@@ -1819,19 +1927,68 @@ export function buildLegacyImportExecutionPlanPackageV1(input: {
     .map(parseLegacyImportGroupEffectPlanV1)
     .sort(compareGroupEffects)
   const groupNames = new Set<string>()
+  const groupIds = new Set<string>()
+  const missingGroupIds = new Set<string>()
   const membershipIntents = new Set<string>()
   for (const effect of groupEffects) {
     if (effect.kind === 'ensure_group') {
-      if (groupNames.has(effect.normalizedName)) fail(code)
+      if (groupNames.has(effect.normalizedName) || groupIds.has(effect.groupId)) {
+        fail(code)
+      }
       groupNames.add(effect.normalizedName)
+      groupIds.add(effect.groupId)
+      if (!effect.groupExistedAtPrepare) missingGroupIds.add(effect.groupId)
       continue
     }
     const membershipKey = canonicalAttendanceJsonV1([
-      effect.groupRef.trim().toLowerCase(),
+      effect.groupRef,
       effect.userId,
     ])
     if (membershipIntents.has(membershipKey)) fail(code)
     membershipIntents.add(membershipKey)
+    // OD-W4C-58=(a) rules 6-7: a member may reference a prepare-time missing
+    // group only via a same-plan ensure_group with groupExistedAtPrepare=false,
+    // and that membership must itself be frozen missing.
+    if (missingGroupIds.has(effect.groupRef)) {
+      if (effect.membershipExistedAtPrepare) fail(code)
+      continue
+    }
+    if (!groupIds.has(effect.groupRef) && effect.membershipExistedAtPrepare === false) {
+      // member under a group that is not ensure_group and not claimed existing
+      // is allowed only when the referenced group existed at prepare time —
+      // membershipExistedAtPrepare may still be false for a new member of an
+      // existing group. Absence of ensure_group for groupRef means the group
+      // must have existed (rule 7); we cannot prove that here without the
+      // fingerprint, but we do reject references that claim a same-plan missing
+      // group without an ensure_group.
+      continue
+    }
+    if (!groupIds.has(effect.groupRef)) {
+      // Referenced group has no ensure_group effect: rule 7 requires it existed
+      // at prepare. membershipExistedAtPrepare may be true or false.
+      continue
+    }
+  }
+  for (const effect of groupEffects) {
+    if (effect.kind !== 'ensure_member') continue
+    const hasEnsureGroup = groupIds.has(effect.groupRef)
+    if (!hasEnsureGroup) {
+      // No ensure_group for this groupRef ⇒ group must have existed at prepare.
+      // The membership existence bit is independent.
+      continue
+    }
+    const ensureGroup = groupEffects.find(
+      (candidate) =>
+        candidate.kind === 'ensure_group' && candidate.groupId === effect.groupRef,
+    )
+    if (
+      ensureGroup !== undefined &&
+      ensureGroup.kind === 'ensure_group' &&
+      !ensureGroup.groupExistedAtPrepare &&
+      effect.membershipExistedAtPrepare
+    ) {
+      fail(code)
+    }
   }
   if (seed.operationalBranch === 'operational_only_idempotent_replay') {
     if (

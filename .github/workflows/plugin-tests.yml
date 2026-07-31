@@ -1100,6 +1100,10 @@ jobs:
             tests/integration/attendance-w4c3a-record-preconditions.db.test.ts \
             tests/integration/attendance-w4c3a-record-effects.db.test.ts \
             tests/integration/attendance-w4c3a-item-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-p08-child-process.db.test.ts \
+            tests/integration/attendance-w4c3a-group-preconditions.db.test.ts \
+            tests/integration/attendance-w4c3a-group-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-auth-recovery.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

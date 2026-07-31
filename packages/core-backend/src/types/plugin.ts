@@ -1204,6 +1204,19 @@ export interface PluginServices {
       | { kind: 'not_running'; state: 'completed' | 'abandoned' }
       | { kind: 'abandoned'; runId: string; completedUserCount: number }
     >
+    /**
+     * W4C-3a — values-free V1 legacy-plan processor. Accepts only `{ jobId }`.
+     * Core assembles repository, SERIALIZABLE transaction, locks, preconditions,
+     * and fixed effects internally. Plugin must not pass payload/orgId/rules/
+     * settings/profile/source/effect callbacks. Fail closed when absent for a
+     * V1 job.
+     */
+    processLegacyImportPlan(input: { jobId: string }): Promise<
+      | { kind: 'not_found' }
+      | { kind: 'suspended' }
+      | { kind: 'failed'; reason: string }
+      | { kind: 'completed'; response: unknown }
+    >
   }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService

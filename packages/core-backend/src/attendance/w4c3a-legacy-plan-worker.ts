@@ -1,9 +1,9 @@
 /**
  * Private P07/P08 processor for a persisted LegacyImportExecutionPlanV1.
  *
- * This module is intentionally not wired into routes or the plugin. Its callback
- * surface carries only locked durable rows and closed effect adapters: no request,
- * upload, rule, settings, profile, or source-reader input can reach the worker.
+ * Production wiring is owned by the canonical processor. This callback surface
+ * carries only locked durable rows and closed effect adapters: no request, upload,
+ * rule, settings, profile, or source-reader input can reach the worker.
  */
 import {
   computeLegacyImportChunkVectorDigestV1,
@@ -80,6 +80,13 @@ export type AttendanceLegacyPlanWorkerResultV1 =
   | Readonly<{ kind: 'failed'; reason: AttendanceLegacyPlanFailureReasonCodeV1 }>
   | Readonly<{ kind: 'completed'; response: LegacyImportAsyncJobSummaryV1 }>
 
+/**
+ * Internal state-machine seam for focused unit tests. Production must assemble
+ * callbacks only through `createAttendanceLegacyPlanProcessorV1` and must not
+ * inject effect/request/payload/rule/settings/profile/source callbacks.
+ *
+ * Every org-scoped repository bridge receives candidate.orgId explicitly.
+ */
 export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
   readCandidateJob(jobId: string): Promise<AttendanceLegacyPlanWorkerCandidateV1 | null>
   runSerializable<T>(work: (trx: TTransaction) => Promise<T>): Promise<T>
@@ -91,10 +98,12 @@ export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
   readAuthorizationJob(
     trx: TTransaction,
     jobId: string,
+    orgId: string,
   ): Promise<AttendanceLegacyPlanWorkerJobV1 | null>
   lockJob(
     trx: TTransaction,
     jobId: string,
+    orgId: string,
   ): Promise<AttendanceLegacyPlanWorkerJobV1 | null>
   authorizeFullImport(
     trx: TTransaction,
@@ -111,7 +120,13 @@ export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
   loadPlan(
     trx: TTransaction,
     jobId: string,
+    orgId: string,
   ): Promise<AttendanceLegacyPlanWorkerStoredPlanV1 | null>
+  recheckReplayPrecondition(
+    trx: TTransaction,
+    job: AttendanceLegacyPlanWorkerJobV1,
+    plan: VerifiedAttendanceLegacyPlanV1,
+  ): Promise<boolean>
   targetIdentities(
     plan: VerifiedAttendanceLegacyPlanV1,
   ): readonly VerifiedAttendanceCalculationTargetIdentityV1[]
@@ -139,12 +154,14 @@ export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
   loadCompletedResponse(
     trx: TTransaction,
     jobId: string,
+    orgId: string,
   ): Promise<Readonly<{ response: unknown; responseDigest: string }>>
-  markSuspendedQueued(trx: TTransaction, jobId: string): Promise<void>
-  clearResumedSuspendedReason(trx: TTransaction, jobId: string): Promise<void>
+  markSuspendedQueued(trx: TTransaction, jobId: string, orgId: string): Promise<void>
+  clearResumedSuspendedReason(trx: TTransaction, jobId: string, orgId: string): Promise<void>
   markPlanFailed(
     trx: TTransaction,
     jobId: string,
+    orgId: string,
     reason: AttendanceLegacyPlanFailureReasonCodeV1,
   ): Promise<void>
 }>
@@ -279,7 +296,7 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
     reason: AttendanceLegacyPlanFailureReasonCodeV1,
   ): Promise<AttendanceLegacyPlanWorkerResultV1> => {
     if (job.status === 'queued' || job.status === 'running') {
-      await callbacks.markPlanFailed(trx, job.jobId, reason)
+      await callbacks.markPlanFailed(trx, job.jobId, job.orgId, reason)
       return { kind: 'failed', reason }
     }
     return { kind: 'not_found' }
@@ -293,18 +310,25 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
         await callbacks.acquireClass00(trx, candidate.orgId)
         const posture = await callbacks.resolveWritePosture(trx, candidate.orgId)
         if (posture === 'suspended') {
-          const locked = await callbacks.lockJob(trx, candidate.jobId)
+          const locked = await callbacks.lockJob(
+            trx,
+            candidate.jobId,
+            candidate.orgId,
+          )
           if (locked === null || locked.w4ContractVersion !== 1) return { kind: 'not_found' }
           if (locked.jobId !== candidate.jobId || locked.orgId !== candidate.orgId) {
             return { kind: 'not_found' }
           }
-          if (locked.status === 'queued') await callbacks.markSuspendedQueued(trx, locked.jobId)
+          if (locked.status === 'queued') {
+            await callbacks.markSuspendedQueued(trx, locked.jobId, locked.orgId)
+          }
           return { kind: 'suspended' }
         }
 
         const authorizationJob = await callbacks.readAuthorizationJob(
           trx,
           candidate.jobId,
+          candidate.orgId,
         )
         if (
           authorizationJob === null ||
@@ -323,7 +347,11 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           authorizationJob,
         )
         await callbacks.acquireClass10(trx, authorizationJob, reservation)
-        const rechecked = await callbacks.lockJob(trx, candidate.jobId)
+        const rechecked = await callbacks.lockJob(
+          trx,
+          candidate.jobId,
+          candidate.orgId,
+        )
         if (rechecked === null || rechecked.w4ContractVersion !== 1) return { kind: 'not_found' }
         if (
           rechecked.jobId !== candidate.jobId ||
@@ -336,14 +364,22 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           rechecked.status === 'queued' &&
           rechecked.executionReasonCode === 'SEGMENT_CALCULATION_SUSPENDED'
         ) {
-          await callbacks.clearResumedSuspendedReason(trx, rechecked.jobId)
+          await callbacks.clearResumedSuspendedReason(
+            trx,
+            rechecked.jobId,
+            rechecked.orgId,
+          )
         }
         const recheckedAuthorized = await callbacks.authorizeFullImport(trx, rechecked)
         if (!candidateAuthorized || !recheckedAuthorized) {
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_AUTHORIZATION_REJECTED')
         }
         if (rechecked.status === 'completed') {
-          const storedResponse = await callbacks.loadCompletedResponse(trx, rechecked.jobId)
+          const storedResponse = await callbacks.loadCompletedResponse(
+            trx,
+            rechecked.jobId,
+            rechecked.orgId,
+          )
           const response = parseLegacyImportAsyncJobSummaryV1(storedResponse.response)
           if (
             computeLegacyImportAsyncJobSummaryDigestV1(response) !==
@@ -360,15 +396,42 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED')
         }
 
+        // OD-W4C-59=(a): locked_race / precheck_hit replay plans have zero item
+        // identities and must not enter class-11 / revision / effect adapters.
         let plan: VerifiedAttendanceLegacyPlanV1
         try {
-          plan = verifyPlan(rechecked, await callbacks.loadPlan(trx, rechecked.jobId))
+          plan = verifyPlan(
+            rechecked,
+            await callbacks.loadPlan(trx, rechecked.jobId, rechecked.orgId),
+          )
         } catch (error) {
           if (error instanceof AttendanceLegacyPlanWorkerFailure) {
             return failClosed(trx, rechecked, error.reason)
           }
           throw error
         }
+
+        if (plan.manifest.batch.kind === 'idempotent_replay') {
+          if (!(await callbacks.recheckReplayPrecondition(trx, rechecked, plan))) {
+            return failClosed(
+              trx,
+              rechecked,
+              'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED',
+            )
+          }
+          const response = parseLegacyImportAsyncJobSummaryV1(
+            await callbacks.executeVerifiedPlan(trx, rechecked, plan),
+          )
+          await callbacks.storeCompletedResponseAndTerminalize(
+            trx,
+            rechecked,
+            plan,
+            response,
+            computeLegacyImportAsyncJobSummaryDigestV1(response),
+          )
+          return { kind: 'completed', response }
+        }
+
         let targets: readonly VerifiedAttendanceCalculationTargetIdentityV1[]
         try {
           targets = Object.freeze(callbacks.targetIdentities(plan).map(requireVerifiedAttendanceCalculationTargetIdentityV1))

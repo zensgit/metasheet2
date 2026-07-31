@@ -57,10 +57,13 @@ import {
   resolveSegmentCalculationPosture,
 } from './w4c0-identity'
 import {
+  AttendanceW4AuthorizationError,
+  createAuthorizedAttendanceWriteContextV1,
   recheckAttendanceActorLivenessInTransactionV1,
   requireAuthorizedCapabilityForEntrypointV1,
   type AuthorizedAttendanceWriteContextV1,
 } from './w4c0-authorization'
+import { AttendanceW4OperationError } from './w4c0-operation-contract'
 import { canonicalAttendanceJsonV1 } from './w4c0-fingerprints'
 import {
   computeAttendanceItemSequenceFingerprintV1,
@@ -140,14 +143,16 @@ export type LegacyImportRecordWriteDraftV1 = Omit<
 export type LegacyImportGroupEffectDraftV1 =
   | (Omit<
       Extract<LegacyImportGroupEffectPlanV1, { kind: 'ensure_group' }>,
-      'groupId'
+      'groupId' | 'groupExistedAtPrepare'
     > & {
       readonly firstSourceOrdinal: number
     })
   | (Omit<
       Extract<LegacyImportGroupEffectPlanV1, { kind: 'ensure_member' }>,
-      'memberId'
+      'memberId' | 'membershipExistedAtPrepare' | 'groupRef'
     > & {
+      /** Raw name/code/UUID alias resolved at enqueue (OD-W4C-58=(a) §4.1). */
+      readonly groupRef: string
       readonly firstSourceOrdinal: number
     })
 
@@ -222,10 +227,10 @@ function privateExecutorCongruent(
   }
 }
 
-async function requireReplayBatchCongruence(
+export async function requireReplayBatchCongruence(
   trx: AttendanceW4TransactionClientV1,
-  job: AttendanceLegacyImportJobSeedV1,
-  manifest: LegacyImportExecutionPlanManifestSeedV1,
+  job: Pick<AttendanceLegacyImportJobSeedV1, 'orgId'>,
+  manifest: Pick<LegacyImportExecutionPlanManifestV1, 'batch'>,
 ): Promise<void> {
   const batch = manifest.batch
   if (batch.kind !== 'idempotent_replay') {
@@ -292,7 +297,11 @@ async function requireReplayBatchCongruence(
   }
 }
 
-async function recheckAttendanceFullImportAuthorizationInTransactionV1(
+/**
+ * Core-owned full-import authorization recheck shared by enqueue and recovery.
+ * Consumes only durable authorization identity fields — never request payload.
+ */
+export async function recheckAttendanceFullImportAuthorizationInTransactionV1(
   trx: AttendanceW4TransactionClientV1,
   auth: AuthorizedAttendanceWriteContextV1,
 ): Promise<void> {
@@ -365,6 +374,62 @@ async function recheckAttendanceFullImportAuthorizationInTransactionV1(
   )
   if (permission.rows.length !== 1) {
     fail('W4C3A_ENQUEUE_FULL_IMPORT_AUTHORIZATION_REJECTED')
+  }
+}
+
+/**
+ * Known authorization-domain denials/input faults that map to permanent
+ * ATTENDANCE_IMPORT_LEGACY_PLAN_AUTHORIZATION_REJECTED. SQLSTATE 40001/40P01
+ * and other infrastructure errors must not enter this set — they rethrow so
+ * the governing whole-transaction retry can handle them.
+ */
+function isAttendanceLegacyPlanAuthorizationDomainError(error: unknown): boolean {
+  if (error instanceof AttendanceW4AuthorizationError) return true
+  if (error instanceof AttendanceLegacyPlanEnqueueError) {
+    return error.code === 'W4C3A_ENQUEUE_FULL_IMPORT_AUTHORIZATION_REJECTED'
+  }
+  if (error instanceof AttendanceW4OperationError) {
+    return error.code === 'ATTENDANCE_WRITE_NOT_AUTHORIZED'
+  }
+  return false
+}
+
+/**
+ * Worker-facing boolean wrapper over the same full-import SQL recheck.
+ * Reconstructs the authorization context from the locked job row only.
+ *
+ * The SQL predicates bind actorId for liveness and permission. subjectScope is
+ * the closed structural factory input and cannot widen that permission; a self
+ * posture still requires tokenSubjectUserId to equal actorId at mint time.
+ */
+export async function authorizeAttendanceLegacyPlanFullImportFromJobV1(
+  trx: AttendanceW4TransactionClientV1,
+  job: {
+    readonly orgId: string
+    readonly actorId: string
+    readonly actorPosture: string
+    readonly tokenSubjectUserId: string | null
+    readonly sourceRef: string
+  },
+): Promise<boolean> {
+  try {
+    const auth = createAuthorizedAttendanceWriteContextV1({
+      orgId: job.orgId,
+      actorId: job.actorId,
+      actorPosture: job.actorPosture,
+      tokenSubjectUserId: job.tokenSubjectUserId,
+      sourceRef: job.sourceRef,
+      capability: 'import',
+      // Structural only — full-import SQL recheck does not consume subjectScope.
+      subjectScope: { kind: 'self', userId: job.actorId },
+    })
+    await recheckAttendanceFullImportAuthorizationInTransactionV1(trx, auth)
+    return true
+  } catch (error) {
+    if (isAttendanceLegacyPlanAuthorizationDomainError(error)) {
+      return false
+    }
+    throw error
   }
 }
 
@@ -935,16 +1000,22 @@ function validateAttendanceLegacyImportPlanDraftBeforeSqlV1(
         code: draft.code,
         timezone: draft.timezone,
         ruleSetId: draft.ruleSetId,
+        // Draft validation only: real existence bits are frozen during SQL.
+        groupExistedAtPrepare: false,
       })
     } else {
       const key = `${draft.groupRef.trim().toLowerCase()}\u0000${draft.userId}`
       if (seenMembers.has(key)) fail('W4C3A_ENQUEUE_DRAFT_INVALID')
       seenMembers.add(key)
+      // Draft validation mints a UUID-shaped groupRef so the exact parser
+      // accepts the package; the real enqueue materializer overwrites this
+      // with the resolved group UUID.
       groupEffects.push({
         kind: 'ensure_member',
         memberId: effectId,
-        groupRef: draft.groupRef,
+        groupRef: deterministicValidationUuid(`group-ref:${index}`),
         userId: draft.userId,
+        membershipExistedAtPrepare: false,
       })
     }
     groupEffectPlacements.push({
@@ -996,14 +1067,18 @@ function materializeAttendanceLegacyGroupEffectsV1(
   const groupIdByRef = new Map(readSet.groupIdByRef)
   const effects: LegacyImportGroupEffectPlanV1[] = []
   const placements: LegacyImportGroupEffectPlacementV1[] = []
+  const existingGroupIds = new Set(readSet.groups.map((group) => group.id))
   for (const draft of drafts) {
     if (draft.kind !== 'ensure_group') continue
-    const groupId = groupIdByRef.get(draft.normalizedName) ?? crypto.randomUUID()
+    const existingId = groupIdByRef.get(draft.normalizedName)
+    const groupExistedAtPrepare = existingId !== undefined
+    const groupId = existingId ?? crypto.randomUUID()
     groupIdByRef.set(draft.normalizedName, groupId)
     const normalizedCode = draft.code?.trim().toLowerCase() ?? ''
     if (normalizedCode.length > 0 && !groupIdByRef.has(normalizedCode)) {
       groupIdByRef.set(normalizedCode, groupId)
     }
+    if (groupExistedAtPrepare) continue
     effects.push({
       kind: 'ensure_group',
       groupId,
@@ -1012,6 +1087,7 @@ function materializeAttendanceLegacyGroupEffectsV1(
       code: draft.code,
       timezone: draft.timezone,
       ruleSetId: draft.ruleSetId,
+      groupExistedAtPrepare,
     })
     placements.push({
       effectId: groupId,
@@ -1031,11 +1107,19 @@ function materializeAttendanceLegacyGroupEffectsV1(
       groupIdByRef.get(draft.groupRef) ?? groupIdByRef.get(normalizedRef)
     if (groupId === undefined) fail('W4C3A_ENQUEUE_GROUP_REFERENCE_INVALID')
     const memberId = crypto.randomUUID()
+    const membershipExistedAtPrepare = readSet.existingMemberships.has(
+      `${groupId}\u0000${draft.userId}`,
+    )
+    // A membership under a same-plan missing group cannot claim it existed.
+    if (!existingGroupIds.has(groupId) && membershipExistedAtPrepare) {
+      fail('W4C3A_ENQUEUE_GROUP_REFERENCE_INVALID')
+    }
     effects.push({
       kind: 'ensure_member',
       memberId,
       groupRef: groupId,
       userId: draft.userId,
+      membershipExistedAtPrepare,
     })
     placements.push({
       effectId: memberId,
@@ -1045,9 +1129,30 @@ function materializeAttendanceLegacyGroupEffectsV1(
       orgId,
       groupId,
       userId: draft.userId,
-      exists: readSet.existingMemberships.has(
-        `${groupId}\u0000${draft.userId}`,
-      ),
+      exists: membershipExistedAtPrepare,
+    })
+  }
+  // OD-W4C-58=(a) §4.2: fingerprint groups are the existing effective row set
+  // only (ensure_group.groupId and ensure_member.groupRef that existed).
+  const effectiveGroupIds = new Set<string>()
+  for (const effect of effects) {
+    if (effect.kind === 'ensure_group') {
+      if (effect.groupExistedAtPrepare) effectiveGroupIds.add(effect.groupId)
+    } else {
+      if (existingGroupIds.has(effect.groupRef)) {
+        effectiveGroupIds.add(effect.groupRef)
+      }
+    }
+  }
+  const fingerprintGroups = readSet.groups.filter((group) =>
+    effectiveGroupIds.has(group.id),
+  )
+  if (effects.length === 0) {
+    return Object.freeze({
+      effects: Object.freeze([]),
+      placements: Object.freeze([]),
+      revision: null,
+      fingerprint: null,
     })
   }
   return Object.freeze({
@@ -1055,7 +1160,7 @@ function materializeAttendanceLegacyGroupEffectsV1(
     placements: Object.freeze(placements),
     revision: readSet.revision,
     fingerprint: computeLegacyImportGroupStateFingerprintV1({
-      groups: readSet.groups,
+      groups: fingerprintGroups,
       memberships,
     }),
   })

@@ -609,6 +609,16 @@ export default defineConfig({
       // nullable fields and jsonb[] binding. DATABASE_URL-gated; excluded here
       // and run whole-file by the attendance real-DB workflow step.
       'tests/integration/attendance-w4c3a-item-effects.db.test.ts',
+      // W4C-3a P08 child-process restart recovery: process B receives only
+      // DATABASE_URL + jobId. DATABASE_URL-gated; excluded here and run
+      // whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-p08-child-process.db.test.ts',
+      // W4C-3a OD-58 group precondition races and SQL order.
+      'tests/integration/attendance-w4c3a-group-preconditions.db.test.ts',
+      // W4C-3a OD-60 group/batch SQL count legs.
+      'tests/integration/attendance-w4c3a-group-effects.db.test.ts',
+      // W4C-3a full-import authorization recovery matrix.
+      'tests/integration/attendance-w4c3a-auth-recovery.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.

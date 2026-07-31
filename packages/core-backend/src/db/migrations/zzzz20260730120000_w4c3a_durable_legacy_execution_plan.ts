@@ -96,6 +96,142 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     $fn$
   `.execute(db)
 
+  // OD-W4C-58=(a) + OD-W4C-60=(a): nested closed leaves enforced at the DB boundary.
+  await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4c3a_uuid_text(value text)
+    RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $fn$
+      SELECT value ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    $fn$
+  `.execute(db)
+
+  await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4c3a_group_effect_valid(effect jsonb)
+    RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $fn$
+    BEGIN
+      IF jsonb_typeof(effect) IS DISTINCT FROM 'object' THEN RETURN false; END IF;
+      IF effect ->> 'kind' = 'ensure_group' THEN
+        RETURN attendance_w4c3a_exact_object_keys(
+            effect,
+            ARRAY['kind', 'groupId', 'normalizedName', 'displayName', 'code',
+              'timezone', 'ruleSetId', 'groupExistedAtPrepare']
+          )
+          AND attendance_w4c3a_uuid_text(effect ->> 'groupId')
+          AND jsonb_typeof(effect -> 'normalizedName') = 'string'
+          AND length(effect ->> 'normalizedName') > 0
+          AND jsonb_typeof(effect -> 'displayName') = 'string'
+          AND length(effect ->> 'displayName') > 0
+          AND jsonb_typeof(effect -> 'groupExistedAtPrepare') = 'boolean'
+          AND (effect -> 'code' IS NULL OR jsonb_typeof(effect -> 'code') IN ('string', 'null'))
+          AND jsonb_typeof(effect -> 'timezone') = 'string'
+          AND (
+            effect -> 'ruleSetId' IS NULL
+            OR jsonb_typeof(effect -> 'ruleSetId') = 'null'
+            OR attendance_w4c3a_uuid_text(effect ->> 'ruleSetId')
+          );
+      END IF;
+      IF effect ->> 'kind' = 'ensure_member' THEN
+        RETURN attendance_w4c3a_exact_object_keys(
+            effect,
+            ARRAY['kind', 'memberId', 'groupRef', 'userId', 'membershipExistedAtPrepare']
+          )
+          AND attendance_w4c3a_uuid_text(effect ->> 'memberId')
+          AND attendance_w4c3a_uuid_text(effect ->> 'groupRef')
+          AND jsonb_typeof(effect -> 'userId') = 'string'
+          AND length(effect ->> 'userId') > 0
+          AND jsonb_typeof(effect -> 'membershipExistedAtPrepare') = 'boolean';
+      END IF;
+      RETURN false;
+    END
+    $fn$
+  `.execute(db)
+
+  await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4c3a_batch_plan_valid(batch jsonb)
+    RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $fn$
+    DECLARE
+      item_return jsonb;
+      skipped jsonb;
+      slots jsonb;
+      lim numeric;
+    BEGIN
+      IF jsonb_typeof(batch) IS DISTINCT FROM 'object' THEN RETURN false; END IF;
+      IF batch ->> 'kind' = 'idempotent_replay' THEN
+        RETURN true;
+      END IF;
+      IF batch ->> 'kind' IS DISTINCT FROM 'normal' THEN RETURN false; END IF;
+      item_return := batch -> 'itemReturnPolicy';
+      skipped := batch -> 'skippedSamplePolicy';
+      slots := batch -> 'resultSlots';
+      IF NOT attendance_w4c3a_exact_object_keys(item_return, ARRAY['returnItems', 'itemsLimit']) OR
+         jsonb_typeof(item_return -> 'returnItems') IS DISTINCT FROM 'boolean' OR
+         (item_return ->> 'returnItems') IS DISTINCT FROM 'false' OR
+         jsonb_typeof(item_return -> 'itemsLimit') IS DISTINCT FROM 'null' THEN
+        RETURN false;
+      END IF;
+      IF NOT attendance_w4c3a_exact_object_keys(skipped, ARRAY['limit']) OR
+         jsonb_typeof(skipped -> 'limit') IS DISTINCT FROM 'number' OR
+         (skipped ->> 'limit') !~ '^(0|[1-9][0-9]*)$' THEN
+        RETURN false;
+      END IF;
+      lim := (skipped ->> 'limit')::numeric;
+      IF lim < 0 OR lim > 500 OR lim <> trunc(lim) THEN RETURN false; END IF;
+      IF NOT attendance_w4c3a_exact_object_keys(slots, ARRAY['groupCreated', 'groupMembersAdded']) OR
+         slots ->> 'groupCreated' IS DISTINCT FROM 'ensure_group_returned_row_count' OR
+         slots ->> 'groupMembersAdded' IS DISTINCT FROM 'ensure_member_inserted_row_count' THEN
+        RETURN false;
+      END IF;
+      RETURN true;
+    END
+    $fn$
+  `.execute(db)
+
+  await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4c3a_record_write_slots_valid(record_write jsonb)
+    RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $fn$
+      SELECT jsonb_typeof(record_write) = 'object'
+        AND record_write ? 'resultSlots'
+        AND attendance_w4c3a_exact_object_keys(record_write -> 'resultSlots', ARRAY[]::text[])
+    $fn$
+  `.execute(db)
+
+  await sql`
+    CREATE OR REPLACE FUNCTION attendance_w4c3a_chunk_body_valid(chunk jsonb)
+    RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $fn$
+    DECLARE
+      effect jsonb;
+      record_write jsonb;
+    BEGIN
+      IF NOT attendance_w4c3a_exact_object_keys(chunk, ARRAY['items', 'recordWrites', 'groupEffects']) THEN
+        RETURN false;
+      END IF;
+      IF jsonb_typeof(chunk -> 'groupEffects') IS DISTINCT FROM 'array' OR
+         jsonb_typeof(chunk -> 'recordWrites') IS DISTINCT FROM 'array' OR
+         jsonb_typeof(chunk -> 'items') IS DISTINCT FROM 'array' THEN
+        RETURN false;
+      END IF;
+      FOR effect IN SELECT value FROM jsonb_array_elements(chunk -> 'groupEffects') AS t(value)
+      LOOP
+        IF NOT attendance_w4c3a_group_effect_valid(effect) THEN RETURN false; END IF;
+      END LOOP;
+      FOR record_write IN SELECT value FROM jsonb_array_elements(chunk -> 'recordWrites') AS t(value)
+      LOOP
+        IF NOT attendance_w4c3a_record_write_slots_valid(record_write) THEN RETURN false; END IF;
+      END LOOP;
+      RETURN true;
+    END
+    $fn$
+  `.execute(db)
+
   await sql`
     CREATE OR REPLACE FUNCTION attendance_w4c3a_async_job_summary_valid(value jsonb)
     RETURNS boolean
@@ -244,7 +380,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       group_revision bigint,
       group_state_fingerprint text,
       chunk_count integer NOT NULL CHECK (chunk_count >= 0),
-      manifest jsonb NOT NULL CHECK (attendance_w4c3a_exact_object_keys(manifest, ARRAY[${sql.raw(MANIFEST_ROOT_KEYS.map((key) => "'" + key + "'").join(', '))}])),
+      manifest jsonb NOT NULL,
       created_at timestamptz NOT NULL DEFAULT now(),
       CHECK (group_revision IS NULL OR group_revision >= 0),
       CHECK (
@@ -260,6 +396,51 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CHECK (group_state_fingerprint IS NULL OR group_state_fingerprint ~ '${sql.raw(SHA256)}')
     )
   `.execute(db)
+  // OD-W4C-60=(a): batch policy/result-slot leaves are validated IMMEDIATELY on
+  // plan INSERT/UPDATE under ordinary role — not only on deferred commit congruence.
+  await sql`
+    ALTER TABLE attendance_import_legacy_execution_plans
+      DROP CONSTRAINT IF EXISTS chk_ailep_manifest_keys
+  `.execute(db)
+  await sql`
+    ALTER TABLE attendance_import_legacy_execution_plans
+      DROP CONSTRAINT IF EXISTS chk_ailep_manifest_batch_slots
+  `.execute(db)
+  await sql`
+    DO $body$
+    DECLARE r record;
+    BEGIN
+      FOR r IN
+        SELECT c.conname
+          FROM pg_constraint c
+          JOIN pg_class t ON t.oid = c.conrelid
+         WHERE t.relname = 'attendance_import_legacy_execution_plans'
+           AND c.contype = 'c'
+           AND pg_get_constraintdef(c.oid) ILIKE '%exact_object_keys%manifest%'
+      LOOP
+        EXECUTE format(
+          'ALTER TABLE attendance_import_legacy_execution_plans DROP CONSTRAINT %I',
+          r.conname
+        );
+      END LOOP;
+    END
+    $body$
+  `.execute(db)
+  await sql`
+    ALTER TABLE attendance_import_legacy_execution_plans
+      ADD CONSTRAINT chk_ailep_manifest_keys
+      CHECK (
+        attendance_w4c3a_exact_object_keys(
+          manifest,
+          ARRAY[${sql.raw(MANIFEST_ROOT_KEYS.map((key) => "'" + key + "'").join(', '))}]
+        )
+      )
+  `.execute(db)
+  await sql`
+    ALTER TABLE attendance_import_legacy_execution_plans
+      ADD CONSTRAINT chk_ailep_manifest_batch_slots
+      CHECK (attendance_w4c3a_batch_plan_valid(manifest -> 'batch'))
+  `.execute(db)
 
   await sql`
     CREATE TABLE IF NOT EXISTS attendance_import_legacy_execution_plan_chunks (
@@ -268,9 +449,41 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       first_source_ordinal integer NOT NULL CHECK (first_source_ordinal >= 0),
       source_row_count integer NOT NULL CHECK (source_row_count BETWEEN 1 AND ${sql.lit(LEGACY_IMPORT_PLAN_MAX_SOURCE_ROWS_PER_CHUNK)}),
       chunk_digest text NOT NULL CHECK (chunk_digest ~ '${sql.raw(SHA256)}'),
-      chunk jsonb NOT NULL CHECK (attendance_w4c3a_exact_object_keys(chunk, ARRAY['items', 'recordWrites', 'groupEffects'])),
+      chunk jsonb NOT NULL,
       PRIMARY KEY (job_id, chunk_index)
     )
+  `.execute(db)
+  // OD-W4C-58/60: re-bind nested chunk validation even when the table already
+  // existed from an earlier W4C-3a migration revision.
+  await sql`
+    DO $body$
+    DECLARE r record;
+    BEGIN
+      FOR r IN
+        SELECT c.conname
+          FROM pg_constraint c
+          JOIN pg_class t ON t.oid = c.conrelid
+         WHERE t.relname = 'attendance_import_legacy_execution_plan_chunks'
+           AND c.contype = 'c'
+           AND pg_get_constraintdef(c.oid) ILIKE '%chunk%'
+           AND pg_get_constraintdef(c.oid) ILIKE '%exact_object_keys%'
+      LOOP
+        EXECUTE format(
+          'ALTER TABLE attendance_import_legacy_execution_plan_chunks DROP CONSTRAINT %I',
+          r.conname
+        );
+      END LOOP;
+    END
+    $body$
+  `.execute(db)
+  await sql`
+    ALTER TABLE attendance_import_legacy_execution_plan_chunks
+      DROP CONSTRAINT IF EXISTS chk_ailepc_chunk_body
+  `.execute(db)
+  await sql`
+    ALTER TABLE attendance_import_legacy_execution_plan_chunks
+      ADD CONSTRAINT chk_ailepc_chunk_body
+      CHECK (attendance_w4c3a_chunk_body_valid(chunk))
   `.execute(db)
 
   await sql`
@@ -609,8 +822,17 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          plan.manifest ->> 'legacySourceRowLimit' IS DISTINCT FROM plan.legacy_source_row_limit::text OR
          plan.manifest ->> 'groupRevision' IS DISTINCT FROM plan.group_revision::text OR
          plan.manifest ->> 'groupStateFingerprint' IS DISTINCT FROM plan.group_state_fingerprint OR
-         plan.manifest ->> 'chunkVectorDigest' IS DISTINCT FROM plan.chunk_vector_digest THEN
+         plan.manifest ->> 'chunkVectorDigest' IS DISTINCT FROM plan.chunk_vector_digest OR
+         NOT attendance_w4c3a_batch_plan_valid(plan.manifest -> 'batch') THEN
         RAISE EXCEPTION 'W4C3A_PLAN_MANIFEST_CONGRUENCE_DENIED';
+      END IF;
+      IF EXISTS (
+        SELECT 1
+          FROM attendance_import_legacy_execution_plan_chunks c
+         WHERE c.job_id = $1
+           AND NOT attendance_w4c3a_chunk_body_valid(c.chunk)
+      ) THEN
+        RAISE EXCEPTION 'W4C3A_PLAN_CHUNK_BODY_DENIED';
       END IF;
       SELECT count(*)::integer, coalesce(sum(source_row_count), 0)::integer INTO chunk_rows, source_rows
       FROM attendance_import_legacy_execution_plan_chunks WHERE attendance_import_legacy_execution_plan_chunks.job_id = $1;
@@ -891,6 +1113,11 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_deny_truncate()`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4_job_proof_vector_valid(text, uuid, jsonb, integer, text, integer)`.execute(db)
   await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_async_job_summary_valid(jsonb)`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_chunk_body_valid(jsonb)`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_record_write_slots_valid(jsonb)`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_batch_plan_valid(jsonb)`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_group_effect_valid(jsonb)`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS attendance_w4c3a_uuid_text(text)`.execute(db)
 
   // Restore precisely the predecessor's four-argument V1 proof shape and its immutable guard.
   await sql`

@@ -102,9 +102,12 @@ function manifestSeed(
       mappingProfileId: null,
       compatibilityMetadata: {},
       groupSync: null,
-      itemReturnPolicy: { returnItems: false },
+      itemReturnPolicy: { returnItems: false, itemsLimit: null },
       skippedSamplePolicy: { limit: 50 },
-      resultSlots: {},
+      resultSlots: {
+        groupCreated: 'ensure_group_returned_row_count',
+        groupMembersAdded: 'ensure_member_inserted_row_count',
+      },
     },
     artifactCleanup: { kind: 'none' },
     ...overrides,
@@ -130,7 +133,7 @@ function replayManifestSeed(): ReturnType<typeof manifestSeed> {
       totalRowCount: 1,
       engine: 'standard',
       recordUpsertStrategy: 'unnest',
-      metadata: {},
+      metadata: { chunkConfig: {}, itemsInsertStrategy: 'unnest' },
       idempotencyKey: 'idem-a',
       requesterVisibility: { kind: 'org' },
     },
@@ -209,6 +212,7 @@ function ensureGroup(
     code: null,
     timezone: 'Asia/Taipei',
     ruleSetId: null,
+    groupExistedAtPrepare: false,
     ...overrides,
   }
 }
@@ -381,6 +385,7 @@ describe('LegacyImportExecutionPlanV1', () => {
         code: null,
         timezone: 'UTC',
         ruleSetId: null,
+        groupExistedAtPrepare: false,
       }),
     ).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
 
@@ -615,6 +620,22 @@ describe('LegacyImportExecutionPlanV1', () => {
         groupEffectPlacements: [],
       }),
     ).toThrow('W4C3A_BATCH_PLAN_INVALID')
+  })
+
+  it('rejects replay plans without frozen summary strategy inputs', () => {
+    const replay = replayManifestSeed().batch
+    expect(() =>
+      parseLegacyImportBatchPlanV1({
+        ...replay,
+        metadata: { itemsInsertStrategy: 'unnest' },
+      }),
+    ).toThrowError('W4C3A_BATCH_PLAN_INVALID')
+    expect(() =>
+      parseLegacyImportBatchPlanV1({
+        ...replay,
+        metadata: { chunkConfig: {} },
+      }),
+    ).toThrowError('W4C3A_BATCH_PLAN_INVALID')
   })
 
   it('rejects a malformed draft before the first SQL statement', async () => {
@@ -968,9 +989,12 @@ describe('LegacyImportExecutionPlanV1', () => {
       mappingProfileId: null,
       compatibilityMetadata: {},
       groupSync: null,
-      itemReturnPolicy: { returnItems: false },
+      itemReturnPolicy: { returnItems: false, itemsLimit: null },
       skippedSamplePolicy: { limit: 50 },
-      resultSlots: {},
+      resultSlots: {
+        groupCreated: 'ensure_group_returned_row_count',
+        groupMembersAdded: 'ensure_member_inserted_row_count',
+      },
     }
 
     it('accepts null and every closed non-null batch source as distinct digest inputs', () => {

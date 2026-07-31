@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1,
+  ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1,
   buildLegacyImportExecutionPlanPackageV1,
   computeLegacyImportAsyncJobSummaryDigestV1,
   sha256HexOfCanonicalJsonV1,
@@ -101,7 +103,12 @@ function packagePlan(
       status: 'committed', idempotencyKey, visibilityRule: 'org', engine: 'standard',
       chunkConfig: { itemsChunkSize: 100, recordsChunkSize: 100 }, recordUpsertStrategy: 'unnest',
       itemsInsertStrategy: 'unnest', mappingProfileId: null, compatibilityMetadata: {}, groupSync: null,
-      itemReturnPolicy: { returnItems: false }, skippedSamplePolicy: { limit: 50 }, resultSlots: {},
+      itemReturnPolicy: { returnItems: false, itemsLimit: null },
+      skippedSamplePolicy: { limit: 50 },
+      resultSlots: {
+        groupCreated: 'ensure_group_returned_row_count',
+        groupMembersAdded: 'ensure_member_inserted_row_count',
+      },
     },
     artifactCleanup: { kind: 'none' },
   }
@@ -119,7 +126,8 @@ function packagePlan(
       expectedSourceOwnership: null, mergeMode: 'merge', firstInAt: null, lastOutAt: null, workMinutes: null,
       lateMinutes: null, earlyLeaveMinutes: null, status: null, isWorkday: null, timezone: 'Asia/Shanghai',
       compatibilityMetadata: {},
-      policySnapshot: {}, profileSnapshot: {}, multiPunchSnapshot: {}, attributionSnapshot: {}, resultSlots: {},
+      policySnapshot: {}, profileSnapshot: {}, multiPunchSnapshot: {}, attributionSnapshot: {},
+      resultSlots: {},
     }],
     groupEffects: [],
     groupEffectPlacements: [],
@@ -151,6 +159,104 @@ function packagePlan(
   }
 }
 
+function packageReplayPlan(): {
+  job: AttendanceLegacyPlanWorkerJobV1
+  stored: AttendanceLegacyPlanWorkerStoredPlanV1
+} {
+  const identityProofVector: unknown[] = []
+  const manifestSeed: Omit<
+    LegacyImportExecutionPlanManifestV1,
+    'sourceOrdinalDigest' | 'chunkVectorDigest'
+  > = {
+    schemaVersion: 1,
+    orgId: ORG_ID,
+    jobId: JOB_ID,
+    batchId: BATCH_ID,
+    sourceKind: 'import_batch',
+    sourceRef: 'attendance-import',
+    createdBy: 'admin-a',
+    actorId: 'admin-a',
+    actorPosture: 'platform_admin',
+    tokenSubjectUserId: 'admin-a',
+    acceptedWritePosture: 'legacy_projection_only',
+    identityProofVectorDigest: sha256HexOfCanonicalJsonV1(identityProofVector),
+    commandFingerprint: HEX_A,
+    legacyInputFingerprint: HEX_B,
+    operationalBranch: 'operational_only_idempotent_replay',
+    legacyRowSourceKind: null,
+    sourceRowCount: 0,
+    w4ItemCount: 0,
+    w4DistinctTargetCount: 0,
+    w4ItemSequenceFingerprint:
+      ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1,
+    w4ItemSetFingerprint: ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1,
+    legacySourceRowLimit: null,
+    groupRevision: null,
+    groupStateFingerprint: null,
+    batch: {
+      kind: 'idempotent_replay',
+      replayBatchId: RECORD_ID,
+      replaySelector: 'precheck_hit',
+      replayPreconditionDigest: HEX_A,
+      importedCount: 1,
+      skippedCount: 0,
+      totalRowCount: 1,
+      engine: 'standard',
+      recordUpsertStrategy: 'unnest',
+      metadata: {
+        chunkConfig: { itemsChunkSize: 100, recordsChunkSize: 100 },
+        itemsInsertStrategy: 'unnest',
+      },
+      idempotencyKey: 'idem-a',
+      requesterVisibility: { kind: 'org' },
+    },
+    artifactCleanup: { kind: 'none' },
+  }
+  const plan = buildLegacyImportExecutionPlanPackageV1({
+    manifestSeed,
+    items: [],
+    recordWrites: [],
+    groupEffects: [],
+    groupEffectPlacements: [],
+  })
+  return {
+    job: {
+      jobId: JOB_ID,
+      orgId: ORG_ID,
+      status: 'queued',
+      w4ContractVersion: 1,
+      batchId: BATCH_ID,
+      idempotencyKey: 'idem-a',
+      sourceKind: 'import_batch',
+      sourceRef: 'attendance-import',
+      createdBy: 'admin-a',
+      actorId: 'admin-a',
+      actorPosture: 'platform_admin',
+      tokenSubjectUserId: 'admin-a',
+      acceptedWritePosture: 'legacy_projection_only',
+      commandFingerprint: HEX_A,
+      legacyInputFingerprint: HEX_B,
+      operationalBranch: 'operational_only_idempotent_replay',
+      identityProofVector,
+      identityProofVectorDigest: plan.manifest.identityProofVectorDigest,
+      itemCount: 0,
+      distinctTargetCount: 0,
+      itemSequenceFingerprint:
+        ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1,
+      itemSetFingerprint: ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1,
+      planDigest: plan.planDigest,
+      executionReasonCode: null,
+    },
+    stored: {
+      planDigest: plan.planDigest,
+      chunkVectorDigest: plan.manifest.chunkVectorDigest,
+      chunkCount: 0,
+      manifest: plan.manifest,
+      chunks: [],
+    },
+  }
+}
+
 async function callbacks(
   overrides: Partial<AttendanceLegacyPlanWorkerCallbacksV1<object>> = {},
   planPackage = packagePlan(),
@@ -163,27 +269,31 @@ async function callbacks(
     runSerializable: vi.fn(async (work) => work({})),
     acquireClass00: vi.fn(async () => { calls.push('00') }),
     resolveWritePosture: vi.fn(async () => { calls.push('posture'); return 'legacy_projection_only' }),
-    readAuthorizationJob: vi.fn(async () => { calls.push('job-read'); return job }),
-    lockJob: vi.fn(async () => { calls.push('job'); return job }),
+    readAuthorizationJob: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('job-read'); return job }),
+    lockJob: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('job'); return job }),
     authorizeFullImport: vi.fn(async () => { calls.push('auth'); return true }),
     reservationIdentities: vi.fn(() => [ids.batch]),
     acquireClass10: vi.fn(async () => { calls.push('10') }),
-    loadPlan: vi.fn(async () => { calls.push('plan'); return stored }),
+    loadPlan: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('plan'); return stored }),
+    recheckReplayPrecondition: vi.fn(async () => {
+      calls.push('replay-precondition')
+      return true
+    }),
     targetIdentities: vi.fn(() => [ids.target]),
     acquireClass11: vi.fn(async () => { calls.push('11') }),
     recheckPreconditions: vi.fn(async () => { calls.push('preconditions'); return true }),
     executeVerifiedPlan: vi.fn(async () => { calls.push('effect'); return COMPLETED_RESPONSE }),
     storeCompletedResponseAndTerminalize: vi.fn(async () => { calls.push('terminal') }),
-    loadCompletedResponse: vi.fn(async () => {
+    loadCompletedResponse: vi.fn(async (_trx, _jobId, _orgId) => {
       calls.push('replay')
       return {
         response: COMPLETED_RESPONSE,
         responseDigest: computeLegacyImportAsyncJobSummaryDigestV1(COMPLETED_RESPONSE),
       }
     }),
-    markSuspendedQueued: vi.fn(async () => { calls.push('suspend') }),
-    clearResumedSuspendedReason: vi.fn(async () => { calls.push('resume') }),
-    markPlanFailed: vi.fn(async (_trx, _jobId, reason) => { calls.push(`failed:${reason}`) }),
+    markSuspendedQueued: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('suspend') }),
+    clearResumedSuspendedReason: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('resume') }),
+    markPlanFailed: vi.fn(async (_trx, _jobId, _orgId, reason) => { calls.push(`failed:${reason}`) }),
     ...overrides,
   }
   return { hooks, calls, job }
@@ -205,6 +315,43 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     await createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID)
     expect(base.calls).toContain('failed:ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH')
     expect(base.calls).not.toContain('effect')
+  })
+
+  it('rechecks the locked replay batch before response construction', async () => {
+    const replay = packageReplayPlan()
+    const base = await callbacks({}, replay)
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toMatchObject({ kind: 'completed' })
+    expect(base.calls).toContain('replay-precondition')
+    expect(base.calls).not.toContain('11')
+    expect(base.calls).not.toContain('preconditions')
+    expect(
+      vi.mocked(base.hooks.executeVerifiedPlan).mock.invocationCallOrder[0],
+    ).toBeGreaterThan(
+      vi.mocked(base.hooks.recheckReplayPrecondition).mock.invocationCallOrder[0] ??
+        0,
+    )
+  })
+
+  it('terminal-fails a changed replay batch before effects or response storage', async () => {
+    const replay = packageReplayPlan()
+    const base = await callbacks(
+      {
+        recheckReplayPrecondition: vi.fn(async () => false),
+      },
+      replay,
+    )
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toEqual({
+      kind: 'failed',
+      reason: 'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED',
+    })
+    expect(base.hooks.recheckReplayPrecondition).toHaveBeenCalled()
+    expect(base.calls).not.toContain('effect')
+    expect(base.calls).not.toContain('terminal')
+    expect(base.calls).not.toContain('11')
   })
 
   it('fails closed when a frozen record timezone is substituted in the persisted chunk', async () => {
@@ -275,9 +422,12 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
         mappingProfileId: null,
         compatibilityMetadata: {},
         groupSync: null,
-        itemReturnPolicy: { returnItems: false },
+        itemReturnPolicy: { returnItems: false, itemsLimit: null },
         skippedSamplePolicy: { limit: 50 },
-        resultSlots: {},
+        resultSlots: {
+          groupCreated: 'ensure_group_returned_row_count',
+          groupMembersAdded: 'ensure_member_inserted_row_count',
+        },
       },
       artifactCleanup: { kind: 'none' },
     }
@@ -300,7 +450,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
         attributionSnapshot: {}, resultSlots: {},
       }],
       groupEffects: [{
-        kind: 'ensure_group', groupId: GROUP_ID, normalizedName: 'engineering',
+        kind: 'ensure_group', groupId: GROUP_ID, normalizedName: 'engineering', groupExistedAtPrepare: false,
         displayName: 'Engineering', code: null, timezone: 'Asia/Taipei', ruleSetId: null,
       }],
       groupEffectPlacements: [{ effectId: GROUP_ID, firstSourceOrdinal: 0 }],
@@ -338,12 +488,16 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
       runSerializable: vi.fn(async (work) => work({})),
       acquireClass00: vi.fn(async () => { calls.push('00') }),
       resolveWritePosture: vi.fn(async () => { calls.push('posture'); return 'legacy_projection_only' }),
-      readAuthorizationJob: vi.fn(async () => { calls.push('job-read'); return job }),
-      lockJob: vi.fn(async () => { calls.push('job'); return job }),
+      readAuthorizationJob: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('job-read'); return job }),
+      lockJob: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('job'); return job }),
       authorizeFullImport: vi.fn(async () => { calls.push('auth'); return true }),
       reservationIdentities: vi.fn(() => [ids.batch]),
       acquireClass10: vi.fn(async () => { calls.push('10') }),
-      loadPlan: vi.fn(async () => { calls.push('plan'); return stored }),
+      loadPlan: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('plan'); return stored }),
+      recheckReplayPrecondition: vi.fn(async () => {
+        calls.push('replay-precondition')
+        return true
+      }),
       targetIdentities: vi.fn(() => [ids.target]),
       acquireClass11: vi.fn(async () => { calls.push('11') }),
       recheckPreconditions: vi.fn(async () => { calls.push('preconditions'); return true }),
@@ -353,15 +507,15 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
         return COMPLETED_RESPONSE
       }),
       storeCompletedResponseAndTerminalize: vi.fn(async () => { calls.push('terminal') }),
-      loadCompletedResponse: vi.fn(async () => {
+      loadCompletedResponse: vi.fn(async (_trx, _jobId, _orgId) => {
         return {
           response: COMPLETED_RESPONSE,
           responseDigest: computeLegacyImportAsyncJobSummaryDigestV1(COMPLETED_RESPONSE),
         }
       }),
-      markSuspendedQueued: vi.fn(async () => { calls.push('suspend') }),
-      clearResumedSuspendedReason: vi.fn(async () => { calls.push('resume') }),
-      markPlanFailed: vi.fn(async (_trx, _jobId, reason) => { calls.push(`failed:${reason}`) }),
+      markSuspendedQueued: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('suspend') }),
+      clearResumedSuspendedReason: vi.fn(async (_trx, _jobId, _orgId) => { calls.push('resume') }),
+      markPlanFailed: vi.fn(async (_trx, _jobId, _orgId, reason) => { calls.push(`failed:${reason}`) }),
     }
     await expect(createAttendanceLegacyPlanWorkerV1(hooks).process(JOB_ID)).resolves.toMatchObject({
       kind: 'completed',
@@ -411,6 +565,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     expect(base.hooks.readAuthorizationJob).toHaveBeenCalledWith(
       expect.anything(),
       JOB_ID,
+      ORG_ID,
     )
   })
 
@@ -428,6 +583,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     expect(base.hooks.readAuthorizationJob).toHaveBeenCalledWith(
       expect.anything(),
       JOB_ID,
+      ORG_ID,
     )
     expect(base.hooks.acquireClass10).not.toHaveBeenCalled()
     expect(base.hooks.lockJob).not.toHaveBeenCalled()
@@ -452,7 +608,7 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
       createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
     ).resolves.toEqual({ kind: 'not_found' })
     expect(base.calls).toEqual(['00', 'posture', 'job-read', 'auth', '10'])
-    expect(base.hooks.lockJob).toHaveBeenCalledWith(expect.anything(), JOB_ID)
+    expect(base.hooks.lockJob).toHaveBeenCalledWith(expect.anything(), JOB_ID, ORG_ID)
     expect(
       vi.mocked(base.hooks.lockJob).mock.invocationCallOrder[0],
     ).toBeGreaterThan(
