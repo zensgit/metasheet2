@@ -36,6 +36,7 @@ describe('attendance import permission wiring', () => {
       '/api/attendance/import/template',
       '/api/attendance/import/template.csv',
       '/api/attendance/import/upload',
+      '/api/attendance/import/upload-artifact',
       '/api/attendance/import/preview-async',
       '/api/attendance/import/commit-async',
       '/api/attendance/import/jobs/:id',

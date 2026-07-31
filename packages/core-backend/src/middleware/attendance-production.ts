@@ -125,6 +125,7 @@ function resolveAttendanceOperation(req: Request, normalizedRoute: string): stri
   if (method === 'POST' && normalizedRoute === '/api/attendance/import/preview') return 'import_preview'
   if (method === 'POST' && normalizedRoute === '/api/attendance/import/preview-async') return 'import_preview_async'
   if (method === 'POST' && normalizedRoute === '/api/attendance/import/upload') return 'import_upload'
+  if (method === 'POST' && normalizedRoute === '/api/attendance/import/upload-artifact') return 'import_artifact_upload'
   if (method === 'POST' && normalizedRoute === '/api/attendance/import/commit') return 'import_commit'
   if (method === 'POST' && normalizedRoute === '/api/attendance/import/commit-async') return 'import_commit_async'
   if (method === 'GET' && normalizedRoute === '/api/attendance/import/jobs/:id') return 'import_job_poll'
@@ -445,6 +446,9 @@ function pickLimiter(req: Request): { limiter: TokenBucketRateLimiter; keyPrefix
   }
   if (path === '/api/attendance/import/upload' && req.method === 'POST') {
     return { limiter: importPreviewLimiter, keyPrefix: 'attendance_import_upload' }
+  }
+  if (path === '/api/attendance/import/upload-artifact' && req.method === 'POST') {
+    return { limiter: importPreviewLimiter, keyPrefix: 'attendance_import_artifact_upload' }
   }
   if (path === '/api/attendance/import/commit' && req.method === 'POST') {
     return { limiter: importCommitLimiter, keyPrefix: 'attendance_import_commit' }

@@ -5708,6 +5708,10 @@ function normalizeImportPayload(payload) {
   if (next.csvText === undefined) next.csvText = next.csv_text
   if (next.csvOptions === undefined) next.csvOptions = next.csv_options
   if (next.idempotencyKey === undefined) next.idempotencyKey = next.idempotency_key
+  if (next.convertedArtifactFileId === undefined) {
+    next.convertedArtifactFileId = next.converted_artifact_file_id
+  }
+  if (next.convertedSheetName === undefined) next.convertedSheetName = next.converted_sheet_name
   return next
 }
 
@@ -6177,6 +6181,7 @@ function getImportUploadPaths({ orgId, fileId }) {
   return {
     dir,
     csvPath: resolveImportUploadWithinBase(dir, `${fileId}.csv`),
+    artifactPath: resolveImportUploadWithinBase(dir, `${fileId}.artifact`),
     metaPath: resolveImportUploadWithinBase(dir, `${fileId}.json`),
   }
 }
@@ -25532,6 +25537,8 @@ module.exports = {
 	      csvFileId: z.string().uuid().optional(),
 	      fileId: z.string().uuid().optional(),
 	      csvText: z.string().optional(),
+	      convertedArtifactFileId: z.string().uuid().optional(),
+	      convertedSheetName: z.string().trim().min(1).max(200).optional(),
 	      csvOptions: z.object({
 	        delimiter: z.string().optional(),
 	        headerRowIndex: z.number().int().nonnegative().optional(),
@@ -25550,6 +25557,16 @@ module.exports = {
       })).optional(),
 		      statusMap: z.record(z.string()).optional(),
 		      mode: z.enum(['merge', 'override']).optional(),
+		    }).superRefine((payload, ctx) => {
+		      const hasArtifact = Boolean(payload.convertedArtifactFileId)
+		      const hasSheet = Boolean(payload.convertedSheetName)
+		      if (hasArtifact !== hasSheet) {
+		        ctx.addIssue({
+		          code: z.ZodIssueCode.custom,
+		          path: hasArtifact ? ['convertedSheetName'] : ['convertedArtifactFileId'],
+		          message: 'convertedArtifactFileId and convertedSheetName must be provided together',
+		        })
+		      }
 		    })
 
 		    // ============================================================
@@ -25654,15 +25671,55 @@ module.exports = {
 
 		    const readImportUploadCsvText = async ({ orgId, fileId }) => {
 		      const meta = await loadImportUploadMetaOrThrow({ orgId, fileId })
+		      if (meta.kind === 'xlsx_client_source_artifact') {
+		        throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
+		      }
 		      const paths = getImportUploadPaths({ orgId, fileId })
 		      const csvText = await fsp.readFile(paths.csvPath, 'utf8')
 		      return { csvText, meta }
 		    }
 
+		    const loadImportConvertedArtifactProofOrThrow = async ({ orgId, fileId, requesterId }) => {
+		      const meta = await loadImportUploadMetaOrThrow({ orgId, fileId })
+		      if (
+		        meta.kind !== 'xlsx_client_source_artifact'
+		        || meta.orgId !== orgId
+		        || meta.createdBy !== requesterId
+		      ) {
+		        throw new HttpError(404, 'NOT_FOUND', 'Import artifact not found')
+		      }
+		      const paths = getImportUploadPaths({ orgId, fileId })
+		      let stat
+		      let sha256
+		      try {
+		        stat = await fsp.stat(paths.artifactPath)
+		        sha256 = await sha256HexOfFile(paths.artifactPath)
+		      } catch {
+		        throw new HttpError(404, 'NOT_FOUND', 'Import artifact not found')
+		      }
+		      if (
+		        !stat.isFile()
+		        || stat.size !== Number(meta.bytes)
+		        || !/^[0-9a-f]{64}$/.test(String(meta.sha256 ?? ''))
+		        || sha256 !== meta.sha256
+		      ) {
+		        throw new HttpError(
+		          409,
+		          'ATTENDANCE_IMPORT_ARTIFACT_INTEGRITY_MISMATCH',
+		          'ATTENDANCE_IMPORT_ARTIFACT_INTEGRITY_MISMATCH'
+		        )
+		      }
+		      return { sha256, bytes: stat.size }
+		    }
+
 		    const deleteImportUpload = async ({ orgId, fileId }) => {
 		      if (!isUuidLike(fileId)) return
 		      const paths = getImportUploadPaths({ orgId, fileId })
-		      await Promise.allSettled([fsp.unlink(paths.csvPath), fsp.unlink(paths.metaPath)])
+		      await Promise.allSettled([
+		        fsp.unlink(paths.csvPath),
+		        fsp.unlink(paths.artifactPath),
+		        fsp.unlink(paths.metaPath),
+		      ])
 		    }
 
 		    // Best-effort cleanup to avoid upload directory growth if users preview but never commit.
@@ -26979,20 +27036,25 @@ module.exports = {
 	        const convertedSheetName = typeof payload?.convertedSheetName === 'string'
 	          && payload.convertedSheetName.trim()
 	          ? payload.convertedSheetName.trim()
-	          : (typeof payload?.sheetName === 'string' && payload.sheetName.trim()
-	            ? payload.sheetName.trim()
-	            : null)
+	          : null
+	        const convertedArtifactFileId = typeof payload?.convertedArtifactFileId === 'string'
+	          && payload.convertedArtifactFileId.trim()
+	          ? payload.convertedArtifactFileId.trim()
+	          : null
 	        if (legacyRowSourceKindForEvidence === 'inline_csv' && typeof payload.csvText === 'string') {
 	          normalizedCsvSha256 = sha256HexOfUtf8(payload.csvText)
 	        } else if (legacyRowSourceKindForEvidence === 'uploaded_csv' && csvFileId) {
 	          const { csvPath } = getImportUploadPaths({ orgId, fileId: csvFileId })
-	          artifactSha256 = await sha256HexOfFile(csvPath)
-	          // Uploaded body is already the CSV artifact the parser hashes.
-	          normalizedCsvSha256 = artifactSha256
+	          normalizedCsvSha256 = await sha256HexOfFile(csvPath)
+	          if (!convertedSheetName) artifactSha256 = normalizedCsvSha256
 	        }
-	        if (convertedSheetName && typeof payload.csvText === 'string' && !normalizedCsvSha256) {
-	          normalizedCsvSha256 = sha256HexOfUtf8(payload.csvText)
-	          if (!artifactSha256) artifactSha256 = normalizedCsvSha256
+	        if (convertedSheetName && convertedArtifactFileId) {
+	          const artifactProof = await loadImportConvertedArtifactProofOrThrow({
+	            orgId,
+	            fileId: convertedArtifactFileId,
+	            requesterId,
+	          })
+	          artifactSha256 = artifactProof.sha256
 	        }
 	        prepareOnlyProvenance = buildImportRowProvenanceV1({
 	          legacyRowSourceKind: legacyRowSourceKindForEvidence,
@@ -29717,6 +29779,84 @@ module.exports = {
 	          }
 	          logger.error('Attendance anomalies query failed', error)
 	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load anomalies' } })
+	        }
+	      })
+	    )
+
+	    // Preserve the original XLSX bytes separately from the client-converted
+	    // CSV. The artifact is provenance only and is never parsed as business data.
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/import/upload-artifact',
+	      withAttendanceImportPermission(async (req, res) => {
+	        const orgId = getOrgId(req)
+	        const requesterId = getUserId(req)
+	        if (!requesterId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+
+	        const contentType = String(req.headers['content-type'] ?? '').toLowerCase()
+	        const filename = String(req.query?.filename ?? req.query?.name ?? req.headers['x-filename'] ?? '')
+	        const allowedTypes = new Set([
+	          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+	          'application/octet-stream',
+	        ])
+	        if (contentType.startsWith('multipart/')) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Use a raw XLSX body, not multipart/form-data' } })
+	          return
+	        }
+	        if (!filename.toLowerCase().endsWith('.xlsx') || !allowedTypes.has(contentType)) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'A raw .xlsx artifact is required' } })
+	          return
+	        }
+
+	        const fileId = randomUUID()
+	        const paths = getImportUploadPaths({ orgId, fileId })
+	        const createdAt = new Date().toISOString()
+	        const expiresAt = new Date(Date.now() + ATTENDANCE_IMPORT_UPLOAD_TTL_MS).toISOString()
+
+	        try {
+	          await fsp.mkdir(paths.dir, { recursive: true })
+	          const meter = new ImportUploadMeter(ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES)
+	          await pipeline(req, meter, fs.createWriteStream(paths.artifactPath))
+	          if (meter.bytes === 0) {
+	            throw new HttpError(400, 'VALIDATION_ERROR', 'XLSX artifact is empty')
+	          }
+	          const sha256 = await sha256HexOfFile(paths.artifactPath)
+	          const meta = {
+	            kind: 'xlsx_client_source_artifact',
+	            fileId,
+	            orgId,
+	            createdBy: requesterId,
+	            filename: filename.slice(0, 200),
+	            contentType,
+	            bytes: meter.bytes,
+	            sha256,
+	            createdAt,
+	            expiresAt,
+	          }
+	          await fsp.writeFile(paths.metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+
+	          res.status(201).json({
+	            ok: true,
+	            data: {
+	              fileId,
+	              sha256,
+	              bytes: meter.bytes,
+	              createdAt,
+	              expiresAt,
+	              maxBytes: ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES,
+	            },
+	          })
+	        } catch (error) {
+	          await deleteImportUpload({ orgId, fileId })
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance import artifact upload failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to upload XLSX artifact' } })
 	        }
 	      })
 	    )
@@ -36542,6 +36682,7 @@ module.exports = {
 	          const rowCount = validation.rowCount
 
 	          const meta = {
+	            kind: 'csv_upload',
 	            fileId,
 	            orgId,
 	            createdBy: requesterId,
@@ -37393,6 +37534,12 @@ module.exports = {
 	              fileId: preparedPlan.artifactCleanup.fileId,
 	            })
 	          }
+	          if (parsed.data.convertedArtifactFileId) {
+	            await deleteImportUpload({
+	              orgId,
+	              fileId: parsed.data.convertedArtifactFileId,
+	            })
+	          }
 
 	          if (commitResult.idempotent) {
 	            res.json({
@@ -37796,6 +37943,12 @@ module.exports = {
           }
 
 	          if (reservation.kind === 'created') await enqueueImportJob(jobId)
+	          if (parsed.data.convertedArtifactFileId) {
+	            await deleteImportUpload({
+	              orgId,
+	              fileId: parsed.data.convertedArtifactFileId,
+	            })
+	          }
 
 	          res.json({
 	            ok: true,
@@ -38001,6 +38154,12 @@ module.exports = {
 	          await deleteImportUpload({
 	            orgId,
 	            fileId: preparedPlan.artifactCleanup.fileId,
+	          })
+	        }
+	        if (parsed.data.convertedArtifactFileId) {
+	          await deleteImportUpload({
+	            orgId,
+	            fileId: parsed.data.convertedArtifactFileId,
 	          })
 	        }
 

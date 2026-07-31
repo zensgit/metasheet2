@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import http from 'node:http'
 import net from 'node:net'
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
@@ -47,7 +49,7 @@ async function canListen(): Promise<boolean> {
 
 function requestHttp(
   url: string,
-  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+  options: { method?: string; headers?: Record<string, string>; body?: string | Buffer } = {},
 ): Promise<RouteResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
@@ -82,12 +84,14 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
   let dingTalkBaseUrl = ''
   let dingTalkServer: http.Server
   let failDingTalkTokenRequest = false
+	let importUploadDir = ''
   const priorEnv = {
     databaseUrl: process.env.DATABASE_URL,
     rbacBypass: process.env.RBAC_BYPASS,
     skipPlugins: process.env.SKIP_PLUGINS,
     segmentCalculationEnabled: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
     allowedCorpIds: process.env.DINGTALK_ALLOWED_CORP_IDS,
+	  importUploadDir: process.env.ATTENDANCE_IMPORT_UPLOAD_DIR,
   }
 
   async function requestJson(pathname: string, token: string, body: Record<string, unknown>): Promise<RouteResponse> {
@@ -95,6 +99,19 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+    })
+  }
+
+  async function uploadRaw(
+    pathname: string,
+    token: string,
+    contentType: string,
+    body: string | Buffer,
+  ): Promise<RouteResponse> {
+    return requestHttp(`${baseUrl}${pathname}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': contentType },
+      body,
     })
   }
 
@@ -210,6 +227,8 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     process.env.SKIP_PLUGINS = 'false'
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = '1'
     process.env.DINGTALK_ALLOWED_CORP_IDS = dingTalkCorpId
+	  importUploadDir = await mkdtemp(path.join(os.tmpdir(), 'ms2-w4c3a-route-'))
+	  process.env.ATTENDANCE_IMPORT_UPLOAD_DIR = importUploadDir
     vi.stubGlobal('fetch', undiciFetch)
 
     dingTalkServer = http.createServer((req, res) => {
@@ -284,6 +303,7 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     await pool?.end().catch(() => undefined)
     await new Promise<void>((resolve) => dingTalkServer?.close(() => resolve()))
     if (server) await server.stop()
+	  if (importUploadDir) await rm(importUploadDir, { recursive: true, force: true })
     vi.stubGlobal('fetch', setupFetch)
     for (const [key, value] of Object.entries({
       DATABASE_URL: priorEnv.databaseUrl,
@@ -291,6 +311,7 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       SKIP_PLUGINS: priorEnv.skipPlugins,
       ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: priorEnv.segmentCalculationEnabled,
       DINGTALK_ALLOWED_CORP_IDS: priorEnv.allowedCorpIds,
+	    ATTENDANCE_IMPORT_UPLOAD_DIR: priorEnv.importUploadDir,
     })) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
@@ -352,6 +373,131 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
 	  const persisted = await businessCounts(legacy.orgId)
 	  expect(persisted.importBatches).toBe(1)
 	  expect(persisted.importItems).toBe(1)
+  })
+
+  it('P09: client-converted XLSX binds distinct original-artifact and normalized-CSV hashes to canonical provenance', async () => {
+    const fixture = await seedActorAndRollout('shadow')
+    const xlsxBytes = Buffer.from('PK\u0003\u0004synthetic-xlsx-source')
+    const csvText = `日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果\n${workDate},A001,XLSX,09:00,18:00,正常\n`
+    const artifactUpload = await uploadRaw(
+      `/api/attendance/import/upload-artifact?orgId=${fixture.orgId}&filename=fixture.xlsx`,
+      fixture.token,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      xlsxBytes,
+    )
+    expect(artifactUpload.status, artifactUpload.raw).toBe(201)
+    const artifactFileId = (artifactUpload.body?.data as { fileId?: string } | undefined)?.fileId
+    expect(artifactFileId).toMatch(/^[0-9a-f-]{36}$/)
+
+    const csvUpload = await uploadRaw(
+      `/api/attendance/import/upload?orgId=${fixture.orgId}&filename=fixture.csv`,
+      fixture.token,
+      'text/csv',
+      csvText,
+    )
+    expect(csvUpload.status, csvUpload.raw).toBe(201)
+    const csvFileId = (csvUpload.body?.data as { fileId?: string } | undefined)?.fileId
+    expect(csvFileId).toMatch(/^[0-9a-f-]{36}$/)
+
+    const response = await requestJson('/api/attendance/import', fixture.token, {
+      orgId: fixture.orgId,
+      userId: fixture.actorId,
+      csvFileId,
+      convertedArtifactFileId: artifactFileId,
+      convertedSheetName: '打卡日报',
+      mapping: {
+        columns: [
+          { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+        ],
+      },
+      userMap: { A001: fixture.actorId },
+      userMapKeyField: 'empNo',
+      userMapSourceFields: ['empNo'],
+    })
+    expect(response.status, response.raw).toBe(200)
+
+    const evidence = await pool.query<{ provenance: Record<string, unknown> }>(
+      `SELECT normalized_business_input_snapshot -> 'provenance' AS provenance
+         FROM attendance_result_operations
+        WHERE org_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [fixture.orgId],
+    )
+    expect(evidence.rows).toHaveLength(1)
+    expect(evidence.rows[0].provenance).toEqual({
+      transport: 'xlsx_client_converted_csv',
+      sourceRef: expect.stringContaining(':xlsx_client_converted_csv'),
+      artifactSha256: createHash('sha256').update(xlsxBytes).digest('hex'),
+      normalizedCsvSha256: createHash('sha256').update(csvText, 'utf8').digest('hex'),
+      convertedSheetName: '打卡日报',
+    })
+	  await expect(
+	    access(path.join(importUploadDir, fixture.orgId, `${artifactFileId}.artifact`)),
+	  ).rejects.toThrow()
+	  await expect(
+	    access(path.join(importUploadDir, fixture.orgId, `${artifactFileId}.json`)),
+	  ).rejects.toThrow()
+  })
+
+  it('P09: converted artifact fields are an inseparable pair', async () => {
+    const fixture = await seedActorAndRollout('legacy')
+    const response = await requestJson('/api/attendance/import', fixture.token, {
+      orgId: fixture.orgId,
+      userId: fixture.actorId,
+      rows: [{ userId: fixture.actorId, workDate, fields: { workMinutes: 480 } }],
+      convertedSheetName: 'Sheet1',
+    })
+    expect(response.status, response.raw).toBe(400)
+    expect((response.body?.error as { code?: string } | undefined)?.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('P09: converted artifact tampering fails before business or result DML', async () => {
+    const fixture = await seedActorAndRollout('shadow')
+    const artifactUpload = await uploadRaw(
+      `/api/attendance/import/upload-artifact?orgId=${fixture.orgId}&filename=tamper.xlsx`,
+      fixture.token,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      Buffer.from('PK\u0003\u0004original'),
+    )
+    expect(artifactUpload.status, artifactUpload.raw).toBe(201)
+    const artifactFileId = (artifactUpload.body?.data as { fileId?: string } | undefined)?.fileId
+    expect(artifactFileId).toMatch(/^[0-9a-f-]{36}$/)
+    await writeFile(
+      path.join(importUploadDir, fixture.orgId, `${artifactFileId}.artifact`),
+      Buffer.from('PK\u0003\u0004tampered'),
+    )
+    const before = await businessCounts(fixture.orgId)
+    const response = await requestJson('/api/attendance/import', fixture.token, {
+      orgId: fixture.orgId,
+      userId: fixture.actorId,
+      csvText: `日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果\n${workDate},A001,XLSX,09:00,18:00,正常\n`,
+      convertedArtifactFileId: artifactFileId,
+      convertedSheetName: 'Sheet1',
+      mapping: {
+        columns: [
+          { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+        ],
+      },
+      userMap: { A001: fixture.actorId },
+      userMapKeyField: 'empNo',
+      userMapSourceFields: ['empNo'],
+    })
+    expect(response.status, response.raw).toBe(409)
+    expect((response.body?.error as { code?: string } | undefined)?.code).toBe(
+      'ATTENDANCE_IMPORT_ARTIFACT_INTEGRITY_MISMATCH',
+    )
+    expect(await businessCounts(fixture.orgId)).toEqual(before)
   })
 
   it('P10: shadow integration sync apply seals the same canonical prepared-operation boundary', async () => {
