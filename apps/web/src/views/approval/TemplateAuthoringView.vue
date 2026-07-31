@@ -20,7 +20,7 @@
       </template>
       <template #actions>
         <div class="template-authoring__actions">
-          <template v-if="canvasAvailable && !readOnly">
+          <template v-if="canvasV2Enabled && !readOnly">
             <el-tooltip content="撤销（Cmd/Ctrl+Z）" placement="bottom">
               <span>
                 <el-button
@@ -246,6 +246,7 @@
               :disabled="readOnly"
               type="textarea"
               :rows="3"
+              data-testid="approval-template-description"
             />
           </el-form-item>
           <el-form-item label="可见范围">
@@ -274,7 +275,7 @@
       <ApprovalFormBuilder
         ref="formBuilderRef"
         v-show="activeAuthoringSection === 'fields'"
-        v-model:fields="draft.fields"
+        :fields="draft.fields"
         :workspace-enabled="canvasV2Enabled"
         :attachment-authoring-enabled="attachmentAuthoringEnabled"
         :read-only="readOnly"
@@ -286,7 +287,7 @@
         :structural-mutation-enabled="formStructuralMutationEnabled"
         :structural-mutation-reason="formStructuralMutationReason"
         @retry-record-link-catalog="retryRecordLinkCatalog"
-        @field-type-change="invalidateStaleRecordLinkDependencies"
+        @update-field="onUpdateFormField"
         @add-field="onAddFormField"
         @remove-field="onRemoveFormField"
         @move-field="onMoveFormField"
@@ -1129,6 +1130,7 @@ const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
 const formBuilderRef = ref<{
   focusField(localId: string): void
+  currentFieldLocalId(): string | null
   announce(message: string): void
 } | null>(null)
 const formAuthoringContext = ref<ApprovalTemplateFormAuthoringContextDTO | null>(null)
@@ -2137,11 +2139,28 @@ function resetAuthoringHistory(draftKey = templateId.value || '__new__'): void {
   authoringHistory.value = createApprovalAuthoringHistory(draftKey)
 }
 
+function resetAuthoringSessionAfterSave(draftKey: string): void {
+  resetAuthoringHistory(draftKey)
+  retiredFormPersistentIds.value = []
+  retiredFormLocalIds.value = []
+}
+
 function captureAuthoringFocus(): ApprovalAuthoringFocus {
   if (typeof document === 'undefined' || !(document.activeElement instanceof HTMLElement)) {
     return { kind: 'none' }
   }
   const active = document.activeElement
+  const formField = active.closest<HTMLElement>('[data-form-field-local-id]')
+  if (formField?.dataset.formFieldLocalId) {
+    const control = active.closest<HTMLElement>('[data-testid]')
+    return {
+      kind: 'form-field',
+      localId: formField.dataset.formFieldLocalId,
+      ...(control?.getAttribute('data-testid')
+        ? { controlTestId: control.getAttribute('data-testid')! }
+        : {}),
+    }
+  }
   const inspector = active.closest<HTMLElement>('[data-inspector-node]')
   if (inspector?.dataset.inspectorNode) {
     const control = active.closest<HTMLElement>('[data-testid]')
@@ -2165,6 +2184,7 @@ function captureAuthoringSnapshot(): ApprovalAuthoringSnapshot {
   return cloneApprovalAuthoringSnapshot({
     draft: draft.value,
     selection: currentCanvasSelection(),
+    formFieldLocalId: formBuilderRef.value?.currentFieldLocalId() ?? null,
     focus: captureAuthoringFocus(),
   })
 }
@@ -2186,6 +2206,19 @@ function focusFirstInteractive(host: HTMLElement | null): void {
 
 async function restoreAuthoringFocus(focus: ApprovalAuthoringFocus): Promise<void> {
   await nextTick()
+  if (focus.kind === 'form-field') {
+    activeAuthoringSection.value = 'fields'
+    formBuilderRef.value?.focusField(focus.localId)
+    await nextTick()
+    const inspector = Array.from(document.querySelectorAll<HTMLElement>('[data-form-field-local-id]'))
+      .find((candidate) => candidate.dataset.formFieldLocalId === focus.localId) ?? null
+    const control = focus.controlTestId
+      ? Array.from(inspector?.querySelectorAll<HTMLElement>('[data-testid]') ?? [])
+          .find((candidate) => candidate.getAttribute('data-testid') === focus.controlTestId) ?? null
+      : inspector
+    focusFirstInteractive(control)
+    return
+  }
   if (focus.kind === 'inspector') {
     const inspector = (flowCanvasRef.value?.canvasInspectorRef ?? null) as HTMLElement | null
     if (!inspector || inspector.dataset.inspectorNode !== focus.nodeKey) return
@@ -2205,8 +2238,17 @@ async function restoreAuthoringFocus(focus: ApprovalAuthoringFocus): Promise<voi
   if (focus.kind === 'canvas') flowCanvasRef.value?.canvasViewportRef?.focus({ preventScroll: true })
 }
 
-async function restoreAuthoringSnapshot(snapshot: ApprovalAuthoringSnapshot): Promise<void> {
-  draft.value = cloneApprovalAuthoringSnapshot(snapshot).draft
+async function restoreAuthoringSnapshot(
+  snapshot: ApprovalAuthoringSnapshot,
+  changedDraftKeys: Array<keyof TemplateAuthoringDraft>,
+): Promise<void> {
+  const restoredDraft = cloneApprovalAuthoringSnapshot(snapshot).draft
+  const changedDraftValues = Object.fromEntries(
+    changedDraftKeys.map((key) => [key, restoredDraft[key]]),
+  ) as Partial<TemplateAuthoringDraft>
+  // Basic metadata and other draft domains can change outside the command stack. Undo/redo restores
+  // only the top-level domains the recorded command actually changed, so it cannot erase a later edit.
+  draft.value = { ...draft.value, ...changedDraftValues }
   syncAllStepOptions()
   syncAllApprovalNodeOptions()
   syncAllCcOptions()
@@ -2218,21 +2260,30 @@ async function restoreAuthoringSnapshot(snapshot: ApprovalAuthoringSnapshot): Pr
   movingCanvasNode.value = null
   canvasNodeDragSession.value = null
   canvasBranchDragSession.value = null
+  if (
+    snapshot.formFieldLocalId
+    && draft.value.fields.some((field) => field.localId === snapshot.formFieldLocalId)
+  ) {
+    formBuilderRef.value?.focusField(snapshot.formFieldLocalId)
+  }
   await restoreAuthoringFocus(snapshot.focus)
 }
 
 function runAuthoringCommand(
   command: ApprovalAuthoringCommand,
   mutate: () => boolean,
-  afterContext?: () => Partial<Pick<ApprovalAuthoringSnapshot, 'selection' | 'focus'>>,
+  afterContext?: () => Partial<Pick<ApprovalAuthoringSnapshot, 'selection' | 'formFieldLocalId' | 'focus'>>,
 ): boolean {
   if (readOnly.value) return false
-  if (!canvasAvailable.value) return mutate()
+  if (!canvasV2Enabled.value) return mutate()
   const before = captureAuthoringSnapshot()
   if (!mutate()) return false
   const after = captureAuthoringSnapshot()
   const resolvedAfterContext = afterContext?.()
   if (resolvedAfterContext?.selection) after.selection = resolvedAfterContext.selection
+  if (resolvedAfterContext?.formFieldLocalId !== undefined) {
+    after.formFieldLocalId = resolvedAfterContext.formFieldLocalId
+  }
   if (resolvedAfterContext?.focus) after.focus = resolvedAfterContext.focus
   authoringHistory.value = recordApprovalAuthoringCommand(authoringHistory.value, command, before, after)
   return true
@@ -2242,7 +2293,7 @@ async function undoAuthoring(): Promise<void> {
   const result = undoApprovalAuthoringCommand(authoringHistory.value)
   if (!result.snapshot) return
   authoringHistory.value = result.history
-  await restoreAuthoringSnapshot(result.snapshot)
+  await restoreAuthoringSnapshot(result.snapshot, result.changedDraftKeys)
   announceCanvas('已撤销上一步操作')
 }
 
@@ -2250,13 +2301,13 @@ async function redoAuthoring(): Promise<void> {
   const result = redoApprovalAuthoringCommand(authoringHistory.value)
   if (!result.snapshot) return
   authoringHistory.value = result.history
-  await restoreAuthoringSnapshot(result.snapshot)
+  await restoreAuthoringSnapshot(result.snapshot, result.changedDraftKeys)
   announceCanvas('已重做上一步操作')
 }
 
 function onAuthoringHistoryKeydown(event: KeyboardEvent): void {
   if (
-    !canvasAvailable.value
+    !canvasV2Enabled.value
     || readOnly.value
     || event.altKey
     || (!event.metaKey && !event.ctrlKey)
@@ -2989,16 +3040,50 @@ function describeFormCommandFailure(result: Extract<FormCommandResult, { ok: fal
   return '表单结构操作未完成，请刷新后重试'
 }
 
-function acceptFormCommand(result: FormCommandResult, announcement: string): boolean {
+function rejectFormCommand(result: Extract<FormCommandResult, { ok: false }>): false {
+  const message = describeFormCommandFailure(result)
+  formBuilderRef.value?.announce(message)
+  ElMessage.warning(message)
+  return false
+}
+
+function reserveFormIdentity(identity: FormFieldIdentity): void {
+  retiredFormPersistentIds.value = Array.from(new Set([
+    ...retiredFormPersistentIds.value,
+    identity.persistentId,
+    ...(identity.detailColumn ? [identity.detailColumn.persistentId] : []),
+  ]))
+  retiredFormLocalIds.value = Array.from(new Set([
+    ...retiredFormLocalIds.value,
+    identity.localId,
+    ...(identity.detailColumn ? [identity.detailColumn.localId] : []),
+  ]))
+}
+
+function applyFormCommandResult(
+  command: ApprovalAuthoringCommand,
+  result: FormCommandResult,
+  announcement: string,
+  onApplied?: () => void,
+): boolean {
   if (!result.ok) {
-    const message = describeFormCommandFailure(result)
-    formBuilderRef.value?.announce(message)
-    ElMessage.warning(message)
-    return false
+    return rejectFormCommand(result)
   }
-  draft.value = result.draft
-  if (result.focusLocalId) {
-    void nextTick(() => formBuilderRef.value?.focusField(result.focusLocalId!))
+  const focusLocalId = result.focusLocalId
+  const applied = runAuthoringCommand(command, () => {
+    draft.value = result.draft
+    onApplied?.()
+    if (focusLocalId) formBuilderRef.value?.focusField(focusLocalId)
+    return true
+  }, () => ({
+    formFieldLocalId: focusLocalId,
+    focus: focusLocalId
+      ? { kind: 'form-field', localId: focusLocalId }
+      : { kind: 'none' },
+  }))
+  if (!applied) return false
+  if (focusLocalId) {
+    void nextTick(() => formBuilderRef.value?.focusField(focusLocalId))
   }
   formBuilderRef.value?.announce(announcement)
   return true
@@ -3007,10 +3092,7 @@ function acceptFormCommand(result: FormCommandResult, announcement: string): boo
 function onAddFormField(request: { type: FormAuthoringFieldType; insertionIndex: number }): void {
   const history = currentFormIdentityHistory()
   if (!history) {
-    acceptFormCommand(
-      { ok: false, reason: 'identity_history_missing', dependencies: [] },
-      '',
-    )
+    rejectFormCommand({ ok: false, reason: 'identity_history_missing', dependencies: [] })
     return
   }
   const identity = newFormFieldIdentity(request.type)
@@ -3031,9 +3113,11 @@ function onAddFormField(request: { type: FormAuthoringFieldType; insertionIndex:
       'before',
     )
   }
-  acceptFormCommand(
+  applyFormCommandResult(
+    { type: 'add-form-field', localId: identity.localId, insertionIndex: request.insertionIndex },
     result,
     `${request.type === 'detail' ? '明细' : '表单组件'}已插入为字段 ${request.insertionIndex + 1}`,
+    () => reserveFormIdentity(identity),
   )
 }
 
@@ -3045,17 +3129,23 @@ function onRemoveFormField(request: { localId: string }): void {
     request.localId,
     currentFormReferenceInventory(),
   )
-  if (!acceptFormCommand(result, '字段已删除')) return
-  retiredFormPersistentIds.value = [
-    ...retiredFormPersistentIds.value,
-    removing.id,
-    ...removing.detailColumns.map((column) => column.id),
-  ]
-  retiredFormLocalIds.value = [
-    ...retiredFormLocalIds.value,
-    removing.localId,
-    ...removing.detailColumns.map((column) => column.localId),
-  ]
+  applyFormCommandResult(
+    { type: 'remove-form-field', localId: request.localId },
+    result,
+    '字段已删除',
+    () => {
+      retiredFormPersistentIds.value = Array.from(new Set([
+        ...retiredFormPersistentIds.value,
+        removing.id,
+        ...removing.detailColumns.map((column) => column.id),
+      ]))
+      retiredFormLocalIds.value = Array.from(new Set([
+        ...retiredFormLocalIds.value,
+        removing.localId,
+        ...removing.detailColumns.map((column) => column.localId),
+      ]))
+    },
+  )
 }
 
 function onMoveFormField(request: { localId: string; targetIndex: number }): void {
@@ -3071,7 +3161,51 @@ function onMoveFormField(request: { localId: string; targetIndex: number }): voi
     anchor.localId,
     targetIndex === remaining.length ? 'after' : 'before',
   )
-  acceptFormCommand(result, `字段已移动到第 ${targetIndex + 1} 位`)
+  applyFormCommandResult(
+    { type: 'move-form-field', localId: request.localId, targetIndex },
+    result,
+    `字段已移动到第 ${targetIndex + 1} 位`,
+  )
+}
+
+function onUpdateFormField(nextField: FieldAuthoringDraft): void {
+  const current = draft.value.fields.find((field) => field.localId === nextField.localId)
+  if (
+    !current
+    || current.id !== nextField.id
+    || current.localId !== nextField.localId
+    || (nextField.type === 'attachment' && !attachmentAuthoringEnabled.value)
+  ) return
+  const activeFocus = captureAuthoringFocus()
+  const focusControl = activeFocus.kind === 'form-field'
+    && activeFocus.localId === nextField.localId
+    && activeFocus.controlTestId
+    ? activeFocus.controlTestId
+    : undefined
+  const commandControl = focusControl ?? 'approval-form-field-inspector'
+  const nextDraft = JSON.parse(JSON.stringify(draft.value)) as TemplateAuthoringDraft
+  const fieldIndex = nextDraft.fields.findIndex((field) => field.localId === nextField.localId)
+  if (fieldIndex < 0) return
+  nextDraft.fields[fieldIndex] = JSON.parse(JSON.stringify(nextField)) as FieldAuthoringDraft
+  const typeChanged = current.type !== nextField.type
+  const applied = runAuthoringCommand(
+    { type: 'configure-form-field', localId: nextField.localId, control: commandControl },
+    () => {
+      draft.value = nextDraft
+      if (typeChanged) invalidateStaleRecordLinkDependencies(nextField)
+      formBuilderRef.value?.focusField(nextField.localId)
+      return true
+    },
+    () => ({
+      formFieldLocalId: nextField.localId,
+      focus: {
+        kind: 'form-field',
+        localId: nextField.localId,
+        ...(focusControl ? { controlTestId: focusControl } : {}),
+      },
+    }),
+  )
+  if (applied) formBuilderRef.value?.announce('字段属性已更新')
 }
 
 async function loadFormAuthoringContext(id: string): Promise<void> {
@@ -3259,6 +3393,7 @@ async function persistDraft() {
       graphReadOnlyMessage.value = graphReadOnlyReason(updated, {
         attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
       })
+      resetAuthoringSessionAfterSave(updated.id)
       snapshotDraft()
       return updated
     }
@@ -3274,6 +3409,7 @@ async function persistDraft() {
     graphReadOnlyMessage.value = graphReadOnlyReason(created, {
       attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
     })
+    resetAuthoringSessionAfterSave(created.id)
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created

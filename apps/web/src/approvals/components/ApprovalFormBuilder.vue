@@ -179,7 +179,7 @@
       <aside class="approval-form-builder__inspector-shell">
         <ApprovalFieldInspector
           v-if="selectedField"
-          v-model:field="selectedField"
+          :field="selectedField"
           :fields="fields"
           :read-only="readOnly"
           :record-link-bases="recordLinkBases"
@@ -189,7 +189,7 @@
           :record-link-catalog-error="recordLinkCatalogError"
           :attachment-authoring-enabled="attachmentAuthoringEnabled"
           @retry-record-link-catalog="emit('retry-record-link-catalog')"
-          @field-type-change="emit('field-type-change', $event)"
+          @update:field="emit('update-field', $event)"
         />
       </aside>
     </div>
@@ -223,7 +223,7 @@
           </div>
         </div>
         <ApprovalFieldInspector
-          v-model:field="fields[index]"
+          :field="fields[index]!"
           :fields="fields"
           :read-only="readOnly"
           :show-heading="false"
@@ -234,7 +234,7 @@
           :record-link-catalog-error="recordLinkCatalogError"
           :attachment-authoring-enabled="attachmentAuthoringEnabled"
           @retry-record-link-catalog="emit('retry-record-link-catalog')"
-          @field-type-change="emit('field-type-change', $event)"
+          @update:field="emit('update-field', $event)"
         />
       </div>
     </div>
@@ -256,6 +256,7 @@ import {
 import type { RecordLinkNamedOption } from '../recordLinkField'
 
 const props = defineProps<{
+  fields: FieldAuthoringDraft[]
   workspaceEnabled: boolean
   readOnly: boolean
   recordLinkBases: RecordLinkNamedOption[]
@@ -268,11 +269,11 @@ const props = defineProps<{
   attachmentAuthoringEnabled: boolean
 }>()
 
-const fields = defineModel<FieldAuthoringDraft[]>('fields', { required: true })
+const fields = computed(() => props.fields)
 
 const emit = defineEmits<{
   'retry-record-link-catalog': []
-  'field-type-change': [field: FieldAuthoringDraft]
+  'update-field': [field: FieldAuthoringDraft]
   'add-field': [request: { type: FormAuthoringFieldType; insertionIndex: number }]
   'remove-field': [request: { localId: string }]
   'move-field': [request: { localId: string; targetIndex: number }]
@@ -284,17 +285,9 @@ const activeFieldDropIndex = ref<number | null>(null)
 const selectedFieldInsertionIndex = ref<number | null>(null)
 const draggedFieldIndex = ref<number | null>(null)
 
-const selectedField = computed({
-  get: () => fields.value.find((item) => item.localId === selectedFieldLocalId.value) ?? fields.value[0],
-  set: (value: FieldAuthoringDraft | undefined) => {
-    if (!value) return
-    const index = fields.value.findIndex((item) => item.localId === value.localId)
-    if (index < 0) return
-    const next = [...fields.value]
-    next[index] = value
-    fields.value = next
-  },
-})
+const selectedField = computed(
+  () => fields.value.find((item) => item.localId === selectedFieldLocalId.value) ?? fields.value[0],
+)
 
 watch(
   () => fields.value.map((item) => item.localId),
@@ -407,11 +400,15 @@ function focusField(localId: string): void {
   selectedFieldLocalId.value = localId
 }
 
+function currentFieldLocalId(): string | null {
+  return selectedFieldLocalId.value || null
+}
+
 function announce(message: string): void {
   formBuilderAnnouncement.value = message
 }
 
-defineExpose({ focusField, announce })
+defineExpose({ focusField, currentFieldLocalId, announce })
 
 function onFieldKeyboardReorder(event: KeyboardEvent, index: number): void {
   if (props.readOnly || !event.altKey) return

@@ -10,21 +10,28 @@ export type ApprovalAuthoringCommand =
   | { type: 'reorder-parallel-branches'; nodeKey: string }
   | { type: 'delete-node'; nodeKey: string }
   | { type: 'configure-node'; nodeKey: string; control: string }
+  | { type: 'add-form-field'; localId: string; insertionIndex: number }
+  | { type: 'remove-form-field'; localId: string }
+  | { type: 'move-form-field'; localId: string; targetIndex: number }
+  | { type: 'configure-form-field'; localId: string; control: string }
 
 export type ApprovalAuthoringFocus =
   | { kind: 'none' }
   | { kind: 'canvas' }
   | { kind: 'canvas-node'; nodeKey: string }
   | { kind: 'inspector'; nodeKey: string; controlTestId?: string }
+  | { kind: 'form-field'; localId: string; controlTestId?: string }
 
 export interface ApprovalAuthoringSnapshot {
   draft: TemplateAuthoringDraft
   selection: ApprovalCanvasSelection
+  formFieldLocalId: string | null
   focus: ApprovalAuthoringFocus
 }
 
 export interface ApprovalAuthoringHistoryEntry {
   command: ApprovalAuthoringCommand
+  changedDraftKeys: Array<keyof TemplateAuthoringDraft>
   before: ApprovalAuthoringSnapshot
   after: ApprovalAuthoringSnapshot
 }
@@ -47,6 +54,19 @@ export function createApprovalAuthoringHistory(draftKey: string): ApprovalAuthor
   return { draftKey, undoStack: [], redoStack: [] }
 }
 
+function changedDraftKeys(
+  before: TemplateAuthoringDraft,
+  after: TemplateAuthoringDraft,
+): Array<keyof TemplateAuthoringDraft> {
+  const keys = new Set<keyof TemplateAuthoringDraft>([
+    ...Object.keys(before) as Array<keyof TemplateAuthoringDraft>,
+    ...Object.keys(after) as Array<keyof TemplateAuthoringDraft>,
+  ])
+  return Array.from(keys).filter(
+    (key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]),
+  )
+}
+
 export function recordApprovalAuthoringCommand(
   history: ApprovalAuthoringHistory,
   command: ApprovalAuthoringCommand,
@@ -56,7 +76,12 @@ export function recordApprovalAuthoringCommand(
   if (JSON.stringify(before) === JSON.stringify(after)) return history
   return {
     draftKey: history.draftKey,
-    undoStack: [...history.undoStack, { command: clone(command), before: clone(before), after: clone(after) }],
+    undoStack: [...history.undoStack, {
+      command: clone(command),
+      changedDraftKeys: changedDraftKeys(before.draft, after.draft),
+      before: clone(before),
+      after: clone(after),
+    }],
     redoStack: [],
   }
 }
@@ -64,9 +89,10 @@ export function recordApprovalAuthoringCommand(
 export function undoApprovalAuthoringCommand(history: ApprovalAuthoringHistory): {
   history: ApprovalAuthoringHistory
   snapshot: ApprovalAuthoringSnapshot | null
+  changedDraftKeys: Array<keyof TemplateAuthoringDraft>
 } {
   const entry = history.undoStack.at(-1)
-  if (!entry) return { history, snapshot: null }
+  if (!entry) return { history, snapshot: null, changedDraftKeys: [] }
   return {
     history: {
       draftKey: history.draftKey,
@@ -74,15 +100,17 @@ export function undoApprovalAuthoringCommand(history: ApprovalAuthoringHistory):
       redoStack: [entry, ...history.redoStack],
     },
     snapshot: clone(entry.before),
+    changedDraftKeys: entry.changedDraftKeys.slice(),
   }
 }
 
 export function redoApprovalAuthoringCommand(history: ApprovalAuthoringHistory): {
   history: ApprovalAuthoringHistory
   snapshot: ApprovalAuthoringSnapshot | null
+  changedDraftKeys: Array<keyof TemplateAuthoringDraft>
 } {
   const entry = history.redoStack[0]
-  if (!entry) return { history, snapshot: null }
+  if (!entry) return { history, snapshot: null, changedDraftKeys: [] }
   return {
     history: {
       draftKey: history.draftKey,
@@ -90,6 +118,7 @@ export function redoApprovalAuthoringCommand(history: ApprovalAuthoringHistory):
       redoStack: history.redoStack.slice(1),
     },
     snapshot: clone(entry.after),
+    changedDraftKeys: entry.changedDraftKeys.slice(),
   }
 }
 

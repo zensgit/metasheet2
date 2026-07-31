@@ -16,6 +16,7 @@ function snapshot(marker: string): ApprovalAuthoringSnapshot {
   return {
     draft,
     selection: { kind: 'node', nodeKey: 'approval_1' },
+    formFieldLocalId: 'field_local_1',
     focus: { kind: 'inspector', nodeKey: 'approval_1', controlTestId: 'approval-node-mode' },
   }
 }
@@ -31,6 +32,10 @@ describe('approval authoring unified history', () => {
       { type: 'reorder-parallel-branches', nodeKey: 'parallel_1' },
       { type: 'delete-node', nodeKey: 'approval_1' },
       { type: 'configure-node', nodeKey: 'approval_1', control: 'approval-node-mode' },
+      { type: 'add-form-field', localId: 'field_local_2', insertionIndex: 1 },
+      { type: 'move-form-field', localId: 'field_local_2', targetIndex: 0 },
+      { type: 'configure-form-field', localId: 'field_local_2', control: 'approval-field-label-input' },
+      { type: 'remove-form-field', localId: 'field_local_2' },
     ]
     let history = createApprovalAuthoringHistory('template_a')
     commands.forEach((command, index) => {
@@ -40,12 +45,14 @@ describe('approval authoring unified history', () => {
     expect(history.undoStack.map((entry) => entry.command.type)).toEqual(commands.map((command) => command.type))
     expect(history.redoStack).toEqual([])
     expect(JSON.stringify(history)).not.toMatch(/"(?:x|y|position|coordinates)":/)
+    expect(history.undoStack.every((entry) => entry.changedDraftKeys.includes('description'))).toBe(true)
   })
 
   it('restores draft plus selection/focus and clears redo after a divergent edit', () => {
     let history = createApprovalAuthoringHistory('template_a')
     const before = snapshot('before')
-    const after = snapshot('after')
+    const after = structuredClone(before)
+    after.draft.description = 'after'
     history = recordApprovalAuthoringCommand(
       history,
       { type: 'configure-node', nodeKey: 'approval_1', control: 'approval-node-mode' },
@@ -54,6 +61,7 @@ describe('approval authoring unified history', () => {
     )
     const undone = undoApprovalAuthoringCommand(history)
     expect(undone.snapshot).toEqual(before)
+    expect(undone.changedDraftKeys).toEqual(['description'])
     expect(undone.history.redoStack).toHaveLength(1)
 
     const diverged = recordApprovalAuthoringCommand(

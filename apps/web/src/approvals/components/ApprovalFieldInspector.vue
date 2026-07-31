@@ -3,6 +3,7 @@
     class="approval-field-inspector"
     :aria-labelledby="showHeading ? 'approval-field-inspector-heading' : undefined"
     :aria-label="showHeading ? undefined : `字段属性：${field.label.trim() || '未命名字段'}`"
+    :data-form-field-local-id="field.localId"
     data-testid="approval-form-field-inspector"
   >
     <div v-if="showHeading" class="approval-field-inspector__heading">
@@ -19,18 +20,19 @@
       <!-- Field ids remain generated/load-preserved and are not ordinary authoring controls. -->
       <el-form-item label="字段名称">
         <el-input
-          v-model="field.label"
+          :model-value="field.label"
           :disabled="readOnly"
           data-testid="approval-field-label-input"
+          @update:model-value="updateStringField('label', $event)"
         />
       </el-form-item>
       <el-form-item label="类型">
         <el-select
-          v-model="field.type"
+          :model-value="field.type"
           :disabled="readOnly"
           class="ms-w-100pct"
           data-testid="approval-field-type"
-          @change="emit('field-type-change', field)"
+          @update:model-value="onFieldTypeChange"
         >
           <el-option label="文本" value="text" />
           <el-option label="多行文本" value="textarea" />
@@ -50,10 +52,22 @@
         </el-select>
       </el-form-item>
       <el-form-item label="占位文本">
-        <el-input v-model="field.placeholder" :disabled="readOnly" />
+        <el-input
+          :model-value="field.placeholder"
+          :disabled="readOnly"
+          data-testid="approval-field-placeholder-input"
+          @update:model-value="updateStringField('placeholder', $event)"
+        />
       </el-form-item>
       <el-form-item label="是否必填">
-        <el-checkbox v-model="field.required" :disabled="readOnly">必填</el-checkbox>
+        <el-checkbox
+          :model-value="field.required"
+          :disabled="readOnly"
+          data-testid="approval-field-required-input"
+          @update:model-value="updateRequired"
+        >
+          必填
+        </el-checkbox>
       </el-form-item>
 
       <el-form-item
@@ -132,11 +146,13 @@
         class="approval-field-inspector__wide"
       >
         <el-input
-          v-model="field.optionsText"
+          :model-value="field.optionsText"
           :disabled="readOnly"
           type="textarea"
           :rows="3"
           placeholder="每行一个选项，格式：显示名:值"
+          data-testid="approval-field-options-input"
+          @update:model-value="updateStringField('optionsText', $event)"
         />
       </el-form-item>
 
@@ -154,13 +170,23 @@
             class="approval-field-inspector__detail-table"
           >
             <el-table-column label="名称" min-width="120">
-              <template #default="{ row }">
-                <el-input v-model="row.label" :disabled="readOnly" placeholder="如 品名" />
+              <template #default="{ row, $index }">
+                <el-input
+                  :model-value="row.label"
+                  :disabled="readOnly"
+                  placeholder="如 品名"
+                  @update:model-value="updateDetailString($index, 'label', $event)"
+                />
               </template>
             </el-table-column>
             <el-table-column label="类型" min-width="120">
-              <template #default="{ row }">
-                <el-select v-model="row.type" :disabled="readOnly" class="ms-w-100pct">
+              <template #default="{ row, $index }">
+                <el-select
+                  :model-value="row.type"
+                  :disabled="readOnly"
+                  class="ms-w-100pct"
+                  @update:model-value="updateDetailType($index, $event)"
+                >
                   <el-option
                     v-for="leaf in detailLeafTypeOptions"
                     :key="leaf.value"
@@ -171,19 +197,24 @@
               </template>
             </el-table-column>
             <el-table-column label="必填" width="70" align="center">
-              <template #default="{ row }">
-                <el-checkbox v-model="row.required" :disabled="readOnly" />
+              <template #default="{ row, $index }">
+                <el-checkbox
+                  :model-value="row.required"
+                  :disabled="readOnly"
+                  @update:model-value="updateDetailRequired($index, $event)"
+                />
               </template>
             </el-table-column>
             <el-table-column label="选项" min-width="160">
-              <template #default="{ row }">
+              <template #default="{ row, $index }">
                 <el-input
                   v-if="row.type === 'select' || row.type === 'multi-select'"
-                  v-model="row.optionsText"
+                  :model-value="row.optionsText"
                   :disabled="readOnly"
                   type="textarea"
                   :rows="2"
                   placeholder="每行一个：显示名:值"
+                  @update:model-value="updateDetailString($index, 'optionsText', $event)"
                 />
                 <span v-else class="approval-field-inspector__hint">—</span>
               </template>
@@ -214,16 +245,20 @@
               添加子字段
             </el-button>
             <el-input
-              v-model="field.minRowsText"
+              :model-value="field.minRowsText"
               :disabled="readOnly"
               placeholder="最小行数"
               class="ms-w-120"
+              data-testid="approval-detail-min-rows"
+              @update:model-value="updateStringField('minRowsText', $event)"
             />
             <el-input
-              v-model="field.maxRowsText"
+              :model-value="field.maxRowsText"
               :disabled="readOnly"
               placeholder="最大行数"
               class="ms-w-120"
+              data-testid="approval-detail-max-rows"
+              @update:model-value="updateStringField('maxRowsText', $event)"
             />
           </div>
         </div>
@@ -232,10 +267,11 @@
       <el-form-item label="显隐规则" class="approval-field-inspector__wide">
         <div class="approval-field-inspector__visibility">
           <el-select
-            v-model="field.visibility.dependsOnFieldId"
+            :model-value="field.visibility.dependsOnFieldId"
             :disabled="readOnly"
             class="ms-w-200"
             data-testid="approval-field-visibility-depends"
+            @update:model-value="updateVisibilityString('dependsOnFieldId', $event)"
           >
             <el-option label="无（始终显示）" value="" />
             <el-option
@@ -247,10 +283,11 @@
           </el-select>
           <template v-if="field.visibility.dependsOnFieldId">
             <el-select
-              v-model="field.visibility.operator"
+              :model-value="field.visibility.operator"
               :disabled="readOnly"
               class="ms-w-130"
               data-testid="approval-field-visibility-operator"
+              @update:model-value="updateVisibilityOperator"
             >
               <el-option label="等于" value="eq" />
               <el-option label="不等于" value="neq" />
@@ -260,21 +297,23 @@
             </el-select>
             <el-input
               v-if="field.visibility.operator === 'in'"
-              v-model="field.visibility.valueText"
+              :model-value="field.visibility.valueText"
               :disabled="readOnly"
               type="textarea"
               :rows="2"
               placeholder="每行一个值"
               class="ms-w-240"
               data-testid="approval-field-visibility-values"
+              @update:model-value="updateVisibilityString('valueText', $event)"
             />
             <el-input
               v-else-if="field.visibility.operator === 'eq' || field.visibility.operator === 'neq'"
-              v-model="field.visibility.valueText"
+              :model-value="field.visibility.valueText"
               :disabled="readOnly"
               placeholder="比较值"
               class="ms-w-240"
               data-testid="approval-field-visibility-value"
+              @update:model-value="updateVisibilityString('valueText', $event)"
             />
           </template>
         </div>
@@ -294,8 +333,11 @@ import { computed } from 'vue'
 import {
   createEmptyDetailColumnDraft,
   DETAIL_LEAF_FIELD_TYPES,
+  type DetailColumnDraft,
   type FieldAuthoringDraft,
+  type FormAuthoringFieldType,
 } from '../templateAuthoring'
+import type { FormFieldVisibilityOperator } from '../../types/approval'
 import { APPROVAL_FORM_FIELD_TYPE_LABELS } from '../formPalette'
 import {
   buildRecordLinkBaseSelectOptions,
@@ -305,6 +347,7 @@ import {
 
 const props = withDefaults(defineProps<{
   fields: FieldAuthoringDraft[]
+  field: FieldAuthoringDraft
   readOnly: boolean
   showHeading?: boolean
   recordLinkBases: RecordLinkNamedOption[]
@@ -317,11 +360,11 @@ const props = withDefaults(defineProps<{
   showHeading: true,
 })
 
-const field = defineModel<FieldAuthoringDraft>('field', { required: true })
+const field = computed(() => props.field)
 
 const emit = defineEmits<{
   'retry-record-link-catalog': []
-  'field-type-change': [field: FieldAuthoringDraft]
+  'update:field': [field: FieldAuthoringDraft]
 }>()
 
 const DETAIL_LEAF_TYPE_LABELS: Record<string, string> = {
@@ -367,15 +410,89 @@ const visibilityFieldOptions = computed(() =>
     })),
 )
 
+function cloneField(): FieldAuthoringDraft {
+  return JSON.parse(JSON.stringify(field.value)) as FieldAuthoringDraft
+}
+
+function updateField(mutate: (next: FieldAuthoringDraft) => void): void {
+  if (props.readOnly) return
+  const next = cloneField()
+  mutate(next)
+  emit('update:field', next)
+}
+
+function toStringValue(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function updateStringField(
+  key: 'label' | 'placeholder' | 'optionsText' | 'minRowsText' | 'maxRowsText',
+  value: unknown,
+): void {
+  updateField((next) => { next[key] = toStringValue(value) })
+}
+
+function updateRequired(value: unknown): void {
+  updateField((next) => { next.required = value === true })
+}
+
+function onFieldTypeChange(value: unknown): void {
+  if (typeof value !== 'string') return
+  if (value === 'attachment' && !props.attachmentAuthoringEnabled) return
+  updateField((next) => { next.type = value as FormAuthoringFieldType })
+}
+
 function addDetailColumn(): void {
-  field.value.detailColumns = [
-    ...field.value.detailColumns,
-    createEmptyDetailColumnDraft(field.value.detailColumns.length + 1),
-  ]
+  updateField((next) => {
+    next.detailColumns = [
+      ...next.detailColumns,
+      createEmptyDetailColumnDraft(next.detailColumns.length + 1),
+    ]
+  })
 }
 
 function removeDetailColumn(index: number): void {
-  field.value.detailColumns = field.value.detailColumns.filter((_, current) => current !== index)
+  updateField((next) => {
+    next.detailColumns = next.detailColumns.filter((_, current) => current !== index)
+  })
+}
+
+function updateDetailString(
+  index: number,
+  key: 'label' | 'optionsText',
+  value: unknown,
+): void {
+  updateField((next) => {
+    const column = next.detailColumns[index]
+    if (column) column[key] = toStringValue(value)
+  })
+}
+
+function updateDetailType(index: number, value: unknown): void {
+  if (typeof value !== 'string' || !DETAIL_LEAF_FIELD_TYPES.includes(value as DetailColumnDraft['type'])) return
+  updateField((next) => {
+    const column = next.detailColumns[index]
+    if (column) column.type = value as DetailColumnDraft['type']
+  })
+}
+
+function updateDetailRequired(index: number, value: unknown): void {
+  updateField((next) => {
+    const column = next.detailColumns[index]
+    if (column) column.required = value === true
+  })
+}
+
+function updateVisibilityString(
+  key: 'dependsOnFieldId' | 'valueText',
+  value: unknown,
+): void {
+  updateField((next) => { next.visibility[key] = toStringValue(value) })
+}
+
+function updateVisibilityOperator(value: unknown): void {
+  if (typeof value !== 'string') return
+  updateField((next) => { next.visibility.operator = value as FormFieldVisibilityOperator })
 }
 
 function onCatalogSelectVisible(open: boolean): void {
@@ -383,18 +500,22 @@ function onCatalogSelectVisible(open: boolean): void {
 }
 
 function onRecordLinkBaseChange(value: string | null | undefined): void {
-  const next = typeof value === 'string' ? value.trim() : ''
-  field.value.recordLinkBaseId = next
-  if (!field.value.recordLinkSheetId.trim()) return
-  const sheetStillValid = props.recordLinkSheets.some(
-    (sheet) => sheet.id === field.value.recordLinkSheetId.trim()
-      && (typeof sheet.baseId === 'string' ? sheet.baseId.trim() : '') === next,
-  )
-  if (!sheetStillValid) field.value.recordLinkSheetId = ''
+  const baseId = typeof value === 'string' ? value.trim() : ''
+  updateField((next) => {
+    next.recordLinkBaseId = baseId
+    if (!next.recordLinkSheetId.trim()) return
+    const sheetStillValid = props.recordLinkSheets.some(
+      (sheet) => sheet.id === next.recordLinkSheetId.trim()
+        && (typeof sheet.baseId === 'string' ? sheet.baseId.trim() : '') === baseId,
+    )
+    if (!sheetStillValid) next.recordLinkSheetId = ''
+  })
 }
 
 function onRecordLinkSheetChange(value: string | null | undefined): void {
-  field.value.recordLinkSheetId = typeof value === 'string' ? value.trim() : ''
+  updateField((next) => {
+    next.recordLinkSheetId = typeof value === 'string' ? value.trim() : ''
+  })
 }
 </script>
 

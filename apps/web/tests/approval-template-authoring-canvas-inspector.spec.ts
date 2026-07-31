@@ -85,6 +85,16 @@ const getTemplateFormAuthoringContextSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
+  ApprovalApiError: class ApprovalApiError extends Error {
+    readonly status: number
+    readonly code?: string
+
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+  },
   createTemplate: (payload: unknown) => createTemplateSpy(payload),
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
@@ -1076,7 +1086,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       .toBe('审批人')
   })
 
-  it('writes focused inspector edits through the existing save payload', async () => {
+  it('writes focused inspector edits through unified undo/redo and the existing save payload', async () => {
     routeParams = { id: 'tpl_form_builder_inspector_save' }
     getTemplateSpy.mockResolvedValue(buildTemplate())
     await mountView()
@@ -1090,14 +1100,184 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     const labelInput = container!.querySelector(
       '[data-testid="approval-field-label-input"]',
     ) as HTMLInputElement
+    labelInput.focus()
     labelInput.value = '财务复核人'
     labelInput.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
+
+    const undo = container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement
+    const redo = container!.querySelector('[data-testid="approval-template-redo"]') as HTMLButtonElement
+    expect(undo.disabled).toBe(false)
+    undo.click()
+    await flushUi()
+    let restoredLabelInput = container!.querySelector(
+      '[data-testid="approval-field-label-input"]',
+    ) as HTMLInputElement
+    expect(restoredLabelInput.value).toBe('审批人')
+    expect(document.activeElement).toBe(restoredLabelInput)
+    expect(redo.disabled).toBe(false)
+
+    redo.click()
+    await flushUi()
+    restoredLabelInput = container!.querySelector(
+      '[data-testid="approval-field-label-input"]',
+    ) as HTMLInputElement
+    expect(restoredLabelInput.value).toBe('财务复核人')
+    expect(document.activeElement).toBe(restoredLabelInput)
+
+    ;(container!.querySelector('[data-testid="approval-template-section-basic"]') as HTMLButtonElement).click()
+    await flushUi()
+    const descriptionInput = container!.querySelector(
+      '[data-testid="approval-template-description"]',
+    ) as HTMLInputElement
+    descriptionInput.value = '不得被字段撤销覆盖'
+    descriptionInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    undo.click()
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-template-description"]') as HTMLInputElement).value)
+      .toBe('不得被字段撤销覆盖')
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-field-label-input"]') as HTMLInputElement).value)
+      .toBe('审批人')
+    redo.click()
+    await flushUi()
+    restoredLabelInput = container!.querySelector(
+      '[data-testid="approval-field-label-input"]',
+    ) as HTMLInputElement
+    expect(restoredLabelInput.value).toBe('财务复核人')
 
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
     expect(payload.formSchema.fields.map((field: any) => field.label)).toEqual(['金额', '财务复核人'])
+    expect(payload.description).toBe('不得被字段撤销覆盖')
+    expect(undo.disabled).toBe(true)
+    expect(redo.disabled).toBe(true)
+  })
+
+  it('preserves local history when a save fails', async () => {
+    routeParams = { id: 'tpl_form_builder_failed_save_history' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    updateTemplateSpy.mockRejectedValueOnce(new Error('save failed'))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const labelInput = container!.querySelector(
+      '[data-testid="approval-field-label-input"]',
+    ) as HTMLInputElement
+    labelInput.value = '保存失败仍可撤销'
+    labelInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    const undo = container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement
+    expect(undo.disabled).toBe(false)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(undo.disabled).toBe(false)
+    undo.click()
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-field-label-input"]') as HTMLInputElement).value)
+      .toBe('金额')
+  })
+
+  it('restores the first field inspector control when an edit has no focused control id', async () => {
+    routeParams = { id: 'tpl_form_builder_history_focus_fallback' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-section-basic"]') as HTMLButtonElement).focus()
+    const labelInput = container!.querySelector(
+      '[data-testid="approval-field-label-input"]',
+    ) as HTMLInputElement
+    labelInput.value = '无焦点更新'
+    labelInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-redo"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(document.activeElement).toBe(container!.querySelector('[data-testid="approval-field-label-input"]'))
+  })
+
+  it('keeps add, move, and delete in the same form history with selection restoration', async () => {
+    routeParams = { id: 'tpl_form_builder_structure_history' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const undo = container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement
+    const redo = container!.querySelector('[data-testid="approval-template-redo"]') as HTMLButtonElement
+    ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(3)
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')[2]!.getAttribute('aria-current'))
+      .toBe('true')
+
+    undo.click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(2)
+    redo.click()
+    await flushUi()
+    let rows = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+    expect(rows).toHaveLength(3)
+    expect(rows[2]!.getAttribute('aria-current')).toBe('true')
+
+    ;(rows[2]!.querySelector('[aria-label="上移字段"]') as HTMLButtonElement).click()
+    await flushUi()
+    let labels = Array.from(container!.querySelectorAll('[data-testid="approval-form-field-select"] strong'))
+      .map((element) => element.textContent)
+    expect(labels).toEqual(['金额', '日期', '审批人'])
+    undo.click()
+    await flushUi()
+    labels = Array.from(container!.querySelectorAll('[data-testid="approval-form-field-select"] strong'))
+      .map((element) => element.textContent)
+    expect(labels).toEqual(['金额', '审批人', '日期'])
+
+    rows = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+    ;(rows[2]!.querySelector('[data-testid="approval-template-remove-field"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(2)
+    undo.click()
+    await flushUi()
+    rows = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+    expect(rows).toHaveLength(3)
+    expect(rows[2]!.getAttribute('aria-current')).toBe('true')
+  })
+
+  it('never reuses an allocated field identity after undoing its add command', async () => {
+    routeParams = { id: 'tpl_form_builder_undo_identity' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const randomUuidSpy = vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValue('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
+    ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(3)
+    ;(container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(2)
+
+    ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(2)
+    expect(container!.querySelector('[data-testid="approval-form-builder-status"]')?.textContent)
+      .toBe('表单结构操作未完成，请刷新后重试')
+    randomUuidSpy.mockRestore()
   })
 
   it('exposes keyboard-operable field selectors with selection state', async () => {
@@ -1194,6 +1374,19 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(3)
     expect(container!.querySelectorAll('[data-testid="approval-form-field-inspector"]')).toHaveLength(3)
+
+    const labelInput = container!.querySelector(
+      '[data-testid="approval-field-label-input"]',
+    ) as HTMLInputElement
+    labelInput.value = '旧版字段仍可编辑'
+    labelInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-undo"]')).toBeNull()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields[0].label).toBe('旧版字段仍可编辑')
   })
 
   it('keeps field authoring implementation out of the parent hot view', () => {
