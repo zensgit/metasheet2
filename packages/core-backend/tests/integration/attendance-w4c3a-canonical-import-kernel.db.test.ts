@@ -320,6 +320,99 @@ function fixture(posture: 'shadow' | 'authoritative', input?: Readonly<{ conflic
   return { orgId, recordId, batchId, itemId, job, plan, identities: [batchIdentity, itemIdentity] }
 }
 
+function withSecondFoldedSource(input: ReturnType<typeof fixture>): ReturnType<typeof fixture> {
+  const org = rehydrateVerifiedAttendanceOrgIdentityV1({
+    orgId: input.orgId,
+    acceptedWritePosture: input.job.acceptedWritePosture,
+  })
+  const secondIdentity = createVerifiedAttendanceOperationIdentityV1({
+    org,
+    kind: 'item',
+    entrypoint: 'import_batch',
+    source: {
+      sourceKind: 'import_item',
+      batchCommandId: input.batchId,
+      ordinal: 1,
+      semanticFingerprint: hex('6'),
+    },
+  })
+  const firstItem = input.plan.items[0] as Extract<
+    VerifiedAttendanceLegacyPlanV1['items'][number],
+    { kind: 'apply' }
+  >
+  const firstWrite = input.plan.recordWrites[0]
+  const attributionRoot = firstWrite.attributionSnapshot as {
+    schemaVersion: 1
+    sources: Array<Record<string, unknown>>
+  }
+  const policyRoot = firstWrite.policySnapshot as {
+    schemaVersion: 1
+    sources: Array<Record<string, unknown>>
+  }
+  const secondRawEvidence = {
+    ...firstItem.rawEvidence,
+    sourceOrdinal: 1,
+    punches: [],
+  }
+  const secondItem = {
+    ...firstItem,
+    itemId: crypto.randomUUID(),
+    ordinal: 1,
+    semanticOrdinal: 1,
+    rawEvidence: secondRawEvidence,
+  }
+  const secondAttribution = {
+    ...attributionRoot.sources[0],
+    sourceOrdinal: 1,
+  }
+  const secondPolicy = {
+    ...policyRoot.sources[0],
+    sourceOrdinal: 1,
+  }
+  const plan = {
+    ...input.plan,
+    manifest: {
+      ...input.plan.manifest,
+      batch: {
+        ...input.plan.manifest.batch,
+        sourceRowCount: 2,
+      },
+    },
+    items: [firstItem, secondItem],
+    recordWrites: [{
+      ...firstWrite,
+      sourceOrdinals: [0, 1],
+      attributionSnapshot: {
+        schemaVersion: 1,
+        sources: [attributionRoot.sources[0], secondAttribution],
+      },
+      policySnapshot: {
+        schemaVersion: 1,
+        sources: [policyRoot.sources[0], secondPolicy],
+      },
+    }],
+  } as unknown as VerifiedAttendanceLegacyPlanV1
+  const job = {
+    ...input.job,
+    itemCount: 2,
+    identityProofVector: [
+      ...(input.job.identityProofVector as Array<Record<string, unknown>>),
+      {
+        ordinal: 1,
+        semanticFingerprint: hex('6'),
+        derivedOperationId: secondIdentity.id,
+        commandFingerprint: hex('7'),
+      },
+    ],
+  }
+  return {
+    ...input,
+    job,
+    plan,
+    identities: [input.identities[0], input.identities[1], secondIdentity],
+  }
+}
+
 describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
   const scratchName = `ms2_w4c3a_kernel_${run}`
   let adminPool: Pool
@@ -417,6 +510,30 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
       projected_work_minutes: 480,
     })])
     expect(rows.rows[0].current_calculation_id).toBe(rows.rows[0].calculation_id)
+  })
+
+  it('folds two ordered source items into one calculation and seals both operations', async () => {
+    const input = withSecondFoldedSource(fixture('shadow'))
+    await execute(input)
+    const rows = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_record_calculations
+           WHERE attendance_record_id = $1) AS calculations,
+         (SELECT count(*)::int FROM attendance_import_items
+           WHERE batch_id = $2) AS source_items,
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE batch_command_id = $2 AND state = 'completed') AS sealed_operations,
+         (SELECT count(DISTINCT resolved_calculation_id)::int
+            FROM attendance_result_operations
+           WHERE batch_command_id = $2) AS result_calculations`,
+      [input.recordId, input.batchId],
+    )
+    expect(rows.rows).toEqual([{
+      calculations: 1,
+      source_items: 2,
+      sealed_operations: 2,
+      result_calculations: 1,
+    }])
   })
 
   it('freezes an existing legacy projection before selecting the authoritative calculation', async () => {
