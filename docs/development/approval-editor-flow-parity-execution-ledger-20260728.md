@@ -22,8 +22,8 @@ merge、部署、UAT 和 flag 是不同状态，不互相替代。
 | C1 | 线性/复杂流程统一 Canvas 载体 | E2 head / `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` | Claude Opus 5 实现；Kimi exact-head 只读复审 | 真实视图写回、payload/dirty、promote 保真、flag fallback、删除下限及浏览器三 viewport | Draft PR #4649；required CI 绿 |
 | C2 | Canvas-first 工作区与表单/流程切换 | C1 head / `codex/approval-editor-c2-canvas-first-20260728` | `068d6e628` | Codex 实现；Kimi exact-head 对抗复审 | 默认画布、辅助模式、Form/Flow 往返、viewport 重测、ARIA、三 viewport 真浏览器 | Draft PR #4652；required CI 绿 |
 | F1-a | 表单 palette、插入槽和字段移动 | C2 head / `codex/approval-editor-f1-form-palette-20260728` | `6b926dce5` | Codex 实现；三轮独立子代理对抗复审 | 点击/typed drag 插入、handle-only 拖排、键盘/触屏等价、唯一字段 ID、三 viewport 真浏览器 | Draft PR #4657；required CI 绿 |
-| C3 | 合法边 `+` 与 typed 插入菜单 | C2 head / `codex/approval-editor-c3-edge-insert-agent-20260728` | `525915d3d` | 子代理实现；Codex exact-source 复核和修复 | 40x40 边控件、四类节点、renderer intent、无 default 条件图、parallel join 收敛、真浏览器 | Draft PR #4697；本地 required Web Tests / build PASS，PR CI 待结算 |
-| F1-b | 三栏表单 builder 与聚焦 inspector | F1-a head / `codex/approval-editor-f1b-form-builder-20260728` | `93a9527f2` | Codex 实现与复核 | 左 palette / 中画布 / 右 inspector、typed drag、键盘/触屏等价、flag OFF 回退、三 viewport 真浏览器 | Draft PR #4696；本地 required Web Tests / build PASS，PR CI 待结算 |
+| C3 | 合法边 `+` 与 typed 插入菜单 | C2 head / `codex/approval-editor-c3-edge-insert-agent-20260728` | `525915d3d` | 子代理实现；Codex exact-source 复核和修复 | 40x40 边控件、四类节点、renderer intent、无 default 条件图、parallel join 收敛、真浏览器 | Draft PR #4697；本地 required Web Tests / build PASS；exact-head required CI PASS，merge state CLEAN |
+| F1-b | 三栏表单 builder 与聚焦 inspector | F1-a head / `codex/approval-editor-f1b-form-builder-20260728` | `93a9527f2` | Codex 实现与复核 | 左 palette / 中画布 / 右 inspector、typed drag、键盘/触屏等价、flag OFF 回退、三 viewport 真浏览器 | Draft PR #4696；本地 required Web Tests / build PASS；exact-head required CI PASS，merge state CLEAN |
 
 ## 2. E1-b 执行事实
 

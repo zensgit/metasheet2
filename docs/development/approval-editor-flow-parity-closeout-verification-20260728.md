@@ -283,7 +283,7 @@ F1-a 本身没有抽出独立 builder，也没有提供聚焦字段的右侧属�
 ## 9. 残余与 owner 门
 
 1. #4642/#4643/#4649/#4652/#4657 required CI 已绿；#4696/#4697 已开 Draft，
-   本地门已绿、PR CI 单独结算；全部未 merge；
+   本地门与 exact-head required CI 均已绿，merge state 均为 CLEAN；全部未 merge；
 2. edge `+` 产品接线和节点按钮群移除已由 C3 完成；
 3. 统一 drag feedback、分支拖排和 undo/redo 属于 C4/C5；
 4. F1-a/F1-b 已有 palette、插入槽、字段移动和三栏 builder/inspector；完整
@@ -300,8 +300,8 @@ F1-a 本身没有抽出独立 builder，也没有提供聚焦字段的右侧属�
 - `C1 unified carrier = PR VERIFIED / CI PASS`；
 - `C2 canvas-first = PR VERIFIED / CI PASS`；
 - `F1-a form palette and insertion = PR VERIFIED / CI PASS`；
-- `C3 edge insertion = DRAFT PR / LOCAL REQUIRED PASS / PR CI PENDING`；
-- `F1-b form builder and inspector = DRAFT PR / LOCAL REQUIRED PASS / PR CI PENDING`；
+- `C3 edge insertion = DRAFT PR / LOCAL REQUIRED PASS / EXACT-HEAD PR CI PASS / CLEAN`；
+- `F1-b form builder and inspector = DRAFT PR / LOCAL REQUIRED PASS / EXACT-HEAD PR CI PASS / CLEAN`；
 - `approval editor parity line = IN PROGRESS / NOT FINAL`；
 - 下一开发点为 C4/C5 语义拖拽、分支排序与 undo/redo，并行推进 F2/F3
   引用保护和附件 authoring。
