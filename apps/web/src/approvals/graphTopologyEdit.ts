@@ -25,6 +25,16 @@ function edgeKeys(graph: ApprovalGraph): Set<string> {
   return new Set(graph.edges.map((e) => e.key))
 }
 
+export const EDGE_INSERTABLE_NODE_TYPES = ['approval', 'cc', 'condition', 'parallel'] as const
+export type EdgeInsertableNodeType = typeof EDGE_INSERTABLE_NODE_TYPES[number]
+
+export interface ApprovalEdgeInsertionTarget {
+  edgeKey: string
+  source: string
+  target: string
+  nodeTypes: EdgeInsertableNodeType[]
+}
+
 /** A default approval node config — a self-contained, backend-valid starter (requester approves). */
 function defaultApprovalConfig() {
   return { assigneeSources: [{ kind: 'requester' as const }], approvalMode: 'single' as const, emptyAssigneePolicy: 'error' as const }
@@ -204,6 +214,192 @@ export function collectParallelRegionNodeKeys(graph: ApprovalGraph): Set<string>
   return regionNodeKeys
 }
 
+function graphHasUniqueKeysAndBoundEdges(graph: ApprovalGraph): boolean {
+  const nodeKeySet = nodeKeys(graph)
+  const edgeKeySet = edgeKeys(graph)
+  if (nodeKeySet.size !== graph.nodes.length || edgeKeySet.size !== graph.edges.length) return false
+  return graph.edges.every((edge) =>
+    edge.key.trim().length > 0
+    && nodeKeySet.has(edge.source)
+    && nodeKeySet.has(edge.target)
+    && edge.source !== edge.target)
+}
+
+function everyParallelBranchPathReachesJoin(
+  graph: ApprovalGraph,
+  branchStartKey: string,
+  joinNodeKey: string,
+): boolean {
+  const nodeByKey = new Map(graph.nodes.map((node) => [node.key, node]))
+  const successors = new Map<string, string[]>()
+  for (const edge of graph.edges) {
+    const targets = successors.get(edge.source) ?? []
+    targets.push(edge.target)
+    successors.set(edge.source, targets)
+  }
+  const memo = new Map<string, boolean>()
+  const visiting = new Set<string>()
+  const reachesJoin = (nodeKey: string): boolean => {
+    if (nodeKey === joinNodeKey) return true
+    const cached = memo.get(nodeKey)
+    if (cached !== undefined) return cached
+    const node = nodeByKey.get(nodeKey)
+    if (!node || node.type === 'end' || node.type === 'parallel' || visiting.has(nodeKey)) {
+      return false
+    }
+    const targets = successors.get(nodeKey) ?? []
+    if (targets.length === 0) return false
+    visiting.add(nodeKey)
+    const result = targets.every(reachesJoin)
+    visiting.delete(nodeKey)
+    memo.set(nodeKey, result)
+    return result
+  }
+  return reachesJoin(branchStartKey)
+}
+
+/**
+ * Edge insertion is only safe when the existing graph is one closed DAG. This belongs in the pure
+ * topology engine: renderers receive an already-filtered target list and never infer graph legality
+ * themselves.
+ */
+function graphCanAcceptEdgeInsertion(graph: ApprovalGraph): boolean {
+  if (!graphHasUniqueKeysAndBoundEdges(graph) || hasEmptyParallelBranch(graph)) return false
+  const starts = graph.nodes.filter((node) => node.type === 'start')
+  const ends = graph.nodes.filter((node) => node.type === 'end')
+  if (starts.length !== 1 || ends.length !== 1) return false
+
+  const incoming = new Map(graph.nodes.map((node) => [node.key, 0]))
+  const outgoing = new Map(graph.nodes.map((node) => [node.key, 0]))
+  const successors = new Map<string, string[]>()
+  for (const edge of graph.edges) {
+    incoming.set(edge.target, incoming.get(edge.target)! + 1)
+    outgoing.set(edge.source, outgoing.get(edge.source)! + 1)
+    const targets = successors.get(edge.source) ?? []
+    targets.push(edge.target)
+    successors.set(edge.source, targets)
+  }
+  for (const node of graph.nodes) {
+    if ((node.type === 'start') !== (incoming.get(node.key) === 0)) return false
+    if ((node.type === 'end') !== (outgoing.get(node.key) === 0)) return false
+  }
+
+  // With one zero-indegree start, Kahn visiting every node proves both acyclicity and reachability
+  // from that start. The degree rule above makes the sole sink the end node.
+  const remainingIncoming = new Map(incoming)
+  const queue = [starts[0].key]
+  let visited = 0
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    visited += 1
+    for (const target of successors.get(current) ?? []) {
+      const nextCount = remainingIncoming.get(target)! - 1
+      remainingIncoming.set(target, nextCount)
+      if (nextCount === 0) queue.push(target)
+    }
+  }
+  if (visited !== graph.nodes.length) return false
+
+  for (const node of graph.nodes) {
+    if (node.type === 'condition') {
+      const config = node.config && typeof node.config === 'object'
+        ? node.config as ConditionNodeConfig
+        : null
+      const branchKeys = Array.isArray(config?.branches)
+        ? config.branches
+            .filter((branch) => (
+              branch
+              && typeof branch.edgeKey === 'string'
+              && branch.edgeKey.trim().length > 0
+              && Array.isArray(branch.rules)
+            ))
+            .map((branch) => branch.edgeKey)
+        : []
+      const defaultEdgeKey = config?.defaultEdgeKey
+      const hasDefaultEdge = defaultEdgeKey !== undefined
+      if (
+        !config
+        || !Array.isArray(config.branches)
+        || branchKeys.length !== config.branches.length
+        || (hasDefaultEdge && (typeof defaultEdgeKey !== 'string' || defaultEdgeKey.trim().length === 0))
+        || ![...branchKeys, ...(typeof defaultEdgeKey === 'string' ? [defaultEdgeKey] : [])].every((edgeKey) =>
+          graph.edges.some((edge) => edge.key === edgeKey && edge.source === node.key))
+      ) return false
+    }
+    if (node.type === 'parallel') {
+      const config = node.config && typeof node.config === 'object'
+        ? node.config as ParallelNodeConfig
+        : null
+      if (
+        !config
+        || !Array.isArray(config.branches)
+        || config.branches.length < 2
+        || !config.branches.every((edgeKey) => typeof edgeKey === 'string' && edgeKey.trim().length > 0)
+        || new Set(config.branches).size !== config.branches.length
+        || (config.joinMode !== 'all' && config.joinMode !== 'any')
+        || typeof config.joinNodeKey !== 'string'
+        || config.joinNodeKey.trim().length === 0
+        || !graph.nodes.some((candidate) => candidate.key === config.joinNodeKey)
+        || !config.branches.every((edgeKey) =>
+          graph.edges.some((edge) => edge.key === edgeKey && edge.source === node.key))
+        || !config.branches.every((edgeKey) => {
+          const branchEdge = graph.edges.find((edge) => edge.key === edgeKey && edge.source === node.key)
+          return Boolean(branchEdge && everyParallelBranchPathReachesJoin(
+            graph,
+            branchEdge.target,
+            config.joinNodeKey,
+          ))
+        })
+      ) return false
+    }
+  }
+  return true
+}
+
+/**
+ * A branch insertion starts at the configured fork edge and ends at the edge entering the join.
+ * `collectParallelRegionNodeKeys` intentionally excludes the fork itself, so both cases matter.
+ */
+function edgeIsInsideParallelBranch(graph: ApprovalGraph, edge: ApprovalEdge): boolean {
+  if (collectParallelRegionNodeKeys(graph).has(edge.source)) return true
+  return graph.nodes.some((node) =>
+    node.type === 'parallel'
+    && Array.isArray((node.config as ParallelNodeConfig).branches)
+    && (node.config as ParallelNodeConfig).branches.includes(edge.key))
+}
+
+/**
+ * Sole legality predicate for the edge insertion menu and the eventual write.
+ *
+ * Malformed, ambiguous and stale graph state produces no options. Nested parallel is excluded on
+ * both fork and branch-body edges; approval, cc and condition remain legal there.
+ */
+export function edgeInsertionNodeTypes(
+  graph: ApprovalGraph,
+  edgeKey: string,
+): EdgeInsertableNodeType[] {
+  if (!graphCanAcceptEdgeInsertion(graph)) return []
+  const matches = graph.edges.filter((edge) => edge.key === edgeKey)
+  if (matches.length !== 1) return []
+  const edge = matches[0]
+  const source = graph.nodes.find((node) => node.key === edge.source)
+  const target = graph.nodes.find((node) => node.key === edge.target)
+  if (!source || !target || source.type === 'end' || target.type === 'start') return []
+  return edgeIsInsideParallelBranch(graph, edge)
+    ? ['approval', 'cc', 'condition']
+    : [...EDGE_INSERTABLE_NODE_TYPES]
+}
+
+/** Every currently legal insertion slot, in stable graph edge order. */
+export function approvalEdgeInsertionTargets(graph: ApprovalGraph): ApprovalEdgeInsertionTarget[] {
+  return graph.edges.flatMap((edge) => {
+    const nodeTypes = edgeInsertionNodeTypes(graph, edge.key)
+    return nodeTypes.length > 0
+      ? [{ edgeKey: edge.key, source: edge.source, target: edge.target, nodeTypes }]
+      : []
+  })
+}
+
 /**
  * True when a configured parallel fork edge enters its join directly. Such an empty branch has no
  * approval body and, under joinMode=any, can win immediately before sibling assignments exist.
@@ -211,9 +407,13 @@ export function collectParallelRegionNodeKeys(graph: ApprovalGraph): Set<string>
 export function hasEmptyParallelBranch(graph: ApprovalGraph): boolean {
   for (const node of graph.nodes) {
     if (node.type !== 'parallel') continue
-    const config = node.config as ParallelNodeConfig
+    const config = node.config && typeof node.config === 'object'
+      ? node.config as ParallelNodeConfig
+      : null
+    if (!config) return true
     if (typeof config.joinNodeKey !== 'string' || !Array.isArray(config.branches)) return true
     for (const branchEdgeKey of config.branches) {
+      if (typeof branchEdgeKey !== 'string') return true
       const edge = graph.edges.find((candidate) => candidate.key === branchEdgeKey)
       if (!edge || edge.source !== node.key || edge.target === config.joinNodeKey) return true
     }
@@ -314,19 +514,15 @@ export function appendApprovalNode(graph: ApprovalGraph, afterNodeKey: string, n
  * The starter rule is deliberately incomplete. The authoring validator blocks save until the
  * author selects a real form field, avoiding an empty AND branch that evaluates as always true.
  */
-export function insertConditionGateway(
+function insertConditionGatewayOnEdge(
   graph: ApprovalGraph,
-  afterNodeKey: string,
-  name = '条件分支',
+  edgeKey: string,
+  name: string,
 ): ApprovalGraph {
-  const after = graph.nodes.find((node) => node.key === afterNodeKey)
-  if (!after) throw new Error(`insertConditionGateway: node ${afterNodeKey} not found`)
-  const outs = outEdges(graph, afterNodeKey)
-  if (outs.length !== 1) {
-    throw new Error(`insertConditionGateway: ${afterNodeKey} must have exactly one outgoing edge (has ${outs.length})`)
+  if (!edgeInsertionNodeTypes(graph, edgeKey).includes('condition')) {
+    throw new Error(`insertConditionGateway: edge ${edgeKey} is not a legal insertion slot`)
   }
-
-  const originalOut = outs[0]
+  const originalOut = graph.edges.find((edge) => edge.key === edgeKey)!
   const nKeys = nodeKeys(graph)
   const conditionKey = uniqueKey('condition', nKeys)
   nKeys.add(conditionKey)
@@ -383,26 +579,29 @@ export function insertConditionGateway(
   }
 }
 
-/** Insert a two-branch parallel gateway on a linear segment, rejoining at the old target. */
-export function insertParallelGateway(
+export function insertConditionGateway(
   graph: ApprovalGraph,
   afterNodeKey: string,
-  name = '并行分支',
+  name = '条件分支',
 ): ApprovalGraph {
   const after = graph.nodes.find((node) => node.key === afterNodeKey)
-  if (!after) throw new Error(`insertParallelGateway: node ${afterNodeKey} not found`)
+  if (!after) throw new Error(`insertConditionGateway: node ${afterNodeKey} not found`)
   const outs = outEdges(graph, afterNodeKey)
   if (outs.length !== 1) {
-    throw new Error(`insertParallelGateway: ${afterNodeKey} must have exactly one outgoing edge (has ${outs.length})`)
+    throw new Error(`insertConditionGateway: ${afterNodeKey} must have exactly one outgoing edge (has ${outs.length})`)
   }
-  // F4: the backend rejects NESTED parallel at save (`collectBranchAssignees` — "cannot contain
-  // nested parallel node"); refuse to author it (the view also hides the affordance). A CONDITION
-  // gateway inside a parallel branch remains legal — only parallel-in-parallel is blocked.
-  if (collectParallelRegionNodeKeys(graph).has(afterNodeKey)) {
-    throw new Error(`insertParallelGateway: ${afterNodeKey} is inside a parallel branch — nested parallel is not supported`)
-  }
+  return insertConditionGatewayOnEdge(graph, outs[0].key, name)
+}
 
-  const originalOut = outs[0]
+function insertParallelGatewayOnEdge(
+  graph: ApprovalGraph,
+  edgeKey: string,
+  name: string,
+): ApprovalGraph {
+  if (!edgeInsertionNodeTypes(graph, edgeKey).includes('parallel')) {
+    throw new Error(`insertParallelGateway: edge ${edgeKey} is not a legal insertion slot`)
+  }
+  const originalOut = graph.edges.find((edge) => edge.key === edgeKey)!
   const nKeys = nodeKeys(graph)
   const parallelKey = uniqueKey('parallel', nKeys)
   nKeys.add(parallelKey)
@@ -456,6 +655,66 @@ export function insertParallelGateway(
         { key: joinTwoKey, source: branchTwoKey, target: originalOut.target },
       ]),
   }
+}
+
+/** Insert a two-branch parallel gateway on a linear segment, rejoining at the old target. */
+export function insertParallelGateway(
+  graph: ApprovalGraph,
+  afterNodeKey: string,
+  name = '并行分支',
+): ApprovalGraph {
+  const after = graph.nodes.find((node) => node.key === afterNodeKey)
+  if (!after) throw new Error(`insertParallelGateway: node ${afterNodeKey} not found`)
+  const outs = outEdges(graph, afterNodeKey)
+  if (outs.length !== 1) {
+    throw new Error(`insertParallelGateway: ${afterNodeKey} must have exactly one outgoing edge (has ${outs.length})`)
+  }
+  if (edgeIsInsideParallelBranch(graph, outs[0])) {
+    throw new Error(`insertParallelGateway: ${afterNodeKey} is inside a parallel branch — nested parallel is not supported`)
+  }
+  return insertParallelGatewayOnEdge(graph, outs[0].key, name)
+}
+
+function insertLinearNodeOnEdge(
+  graph: ApprovalGraph,
+  edgeKey: string,
+  node: ApprovalNode,
+): ApprovalGraph {
+  const originalEdge = graph.edges.find((edge) => edge.key === edgeKey)!
+  const nextEdgeKey = uniqueKey('edge', edgeKeys(graph))
+  return {
+    nodes: [...graph.nodes.map(clone), node],
+    edges: graph.edges
+      .map((edge) => edge.key === edgeKey
+        ? { ...clone(edge), target: node.key }
+        : clone(edge))
+      .concat([{ key: nextEdgeKey, source: node.key, target: originalEdge.target }]),
+  }
+}
+
+/**
+ * Insert one supported node type into an exact edge slot.
+ *
+ * The existing edge keeps its key/source and now targets the inserted node, preserving condition
+ * and parallel branch references. The legality predicate is re-run here, so a menu intent that
+ * became stale before activation cannot mutate the graph.
+ */
+export function insertNodeIntoEdge(
+  graph: ApprovalGraph,
+  edgeKey: string,
+  nodeType: EdgeInsertableNodeType,
+): ApprovalGraph {
+  if (!edgeInsertionNodeTypes(graph, edgeKey).includes(nodeType)) {
+    throw new Error(`insertNodeIntoEdge: ${nodeType} is not legal on edge ${edgeKey}`)
+  }
+  if (nodeType === 'condition') return insertConditionGatewayOnEdge(graph, edgeKey, '条件分支')
+  if (nodeType === 'parallel') return insertParallelGatewayOnEdge(graph, edgeKey, '并行分支')
+
+  const key = uniqueKey(nodeType, nodeKeys(graph))
+  const node: ApprovalNode = nodeType === 'approval'
+    ? { key, type: 'approval', name: '审批', config: defaultApprovalConfig() }
+    : { key, type: 'cc', name: '抄送', config: { targetType: 'user', targetIds: [] } }
+  return insertLinearNodeOnEdge(graph, edgeKey, node)
 }
 
 /**
