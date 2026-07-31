@@ -1,7 +1,8 @@
 # Approval Canvas V2 Development Plan (2026-07-20)
 
-**Status:** PROPOSED - owner ratification required before D3 canvas foundation work starts
-**Baseline:** `origin/main@a98996ee2e0269b22801a6b87d2b8d5b5f076025`
+**Status:** RATIFIED DESIGN - implementation candidate complete on a Draft PR stack; merge, UAT, and enablement remain owner gates
+**Original baseline:** `origin/main@a98996ee2e0269b22801a6b87d2b8d5b5f076025`
+**Current candidate head:** `1f92c6720` (stacked on #4642 through #4705)
 **Scope:** approval form authoring, approval-flow canvas, template versions, form/decision-value writeback, and attachment integration
 **Flags:** Canvas V2 defaults OFF until G5-C plus owner UAT; FWB and attachments retain separate default-OFF gates
 **Authoritative runtime model:** existing `ApprovalGraph` plus backend `normalizeApprovalGraph`
@@ -589,7 +590,11 @@ Stop the current lane and return to review if any of the following occurs:
 - the Canvas flag is enabled before G5-C plus owner UAT, or any FWB/attachment/optional-runtime flag is enabled
   before G5-R plus its own owner UAT.
 
-## 12. Initial execution ledger
+## 12. Initial execution ledger (historical snapshot)
+
+This table preserves the pre-ratification starting point. It is not the current delivery state and must not be used to
+infer that the candidate is still `NOT_STARTED` or `BLOCKED`; section 16 and the separate execution ledger are the
+current authorities.
 
 | Item        | Initial state | First action                                                                                     |
 | ----------- | ------------- | ------------------------------------------------------------------------------------------------ |
@@ -612,10 +617,14 @@ Stop the current lane and return to review if any of the following occurs:
 | D10-C/D11-C | BLOCKED       | Wait for Canvas/Form/Version gates; do not wait for D9 or optional D7                            |
 | D10-R/D11-R | BLOCKED       | Wait for the independently authorized approval-data runtime gates                                |
 
-## 13. Owner ratification checklist
+## 13. Owner ratification checklist (historical decision form)
 
 Ratifying this plan confirms only the development order and product direction. It does not enable runtime
 flags or production rollout.
+
+The owner subsequently ratified the Canvas direction. The unchecked boxes below preserve the original decision form;
+they are not an open-action list. Section 16 records the bounded as-built amendments, including the deterministic
+renderer choice in place of the original O3 library alternatives.
 
 - [ ] O1 - Canvas is the normal user's primary flow-authoring surface after G6-C.
 - [ ] O2 - The structured editor becomes temporary support-only fallback; ordinary-user entry is removed only
@@ -671,5 +680,47 @@ The initial commit `2338eb928` received two read-only independent reviews before
   regression ownership. Manager/dept/level assignee sources are not attendance-only; they are present in the
   core approval types and product service and now have D7-c1 parity ownership.
 
-Subagent findings are inputs, not proof. This revision was reconciled against the repository by Codex; the plan
-remains PROPOSED until the owner checks section 13.
+Subagent findings are inputs, not proof. This revision was reconciled against the repository by Codex.
+
+## 16. Implementation reconciliation (2026-07-31)
+
+The owner subsequently ratified the Canvas direction and authorized staged implementation. The candidate now
+implements the Canvas-delivery scope through Draft PRs; this section records the resulting delta without changing
+the owner gates in sections 10-14.
+
+### 16.1 As-built choices
+
+- The ordinary authoring path is canvas-first while the structured alternative remains available until accessibility
+  equivalence is proven in owner UAT.
+- Form authoring uses a draggable component palette, typed field inspector, click insertion, keyboard reorder, and
+  shared undo/redo. JSON and internal identifiers remain outside the ordinary-user path.
+- Flow authoring uses the existing deterministic `ApprovalGraph` renderer and typed command algebra. Coordinates are
+  derived and never persisted. Edge `+` insertion, condition/parallel branch reorder, semantic move targets, keyboard
+  alternatives, and invalid-drop rollback all stay above the backend normalization authority.
+- Version history provides a timeline, structural diff, synchronized graph comparison, and restore-to-new-draft with
+  an optimistic latest-version fence. Published history and running instances are not rewritten.
+- Route preview calls the existing saved-draft backend endpoint, then maps returned node anchors onto the current graph.
+  It does not re-evaluate routing rules in the browser and does not create an approval instance.
+- Responsive evidence covers 1280px, 1024px, and 390px. Canvas node/move controls meet the ratified 40px mobile target;
+  toolbar, branch-inspector, route-preview, dialog, input, select, checkbox, and number-stepper targets used in the
+  narrow layout meet 44px. Drag remains optional because click/keyboard commands exist.
+
+The renderer choice is an as-built amendment to O3: this candidate hardens the existing deterministic renderer rather
+than adding Vue Flow/ELK. Accepting the merge accepts that bounded choice; it does not authorize persisted free
+coordinates, arbitrary edge drawing, or renderer-side business logic.
+
+### 16.2 Draft PR topology
+
+Foundation lands first: #4642 -> #4649 -> #4652. After that, the form lane (#4657 -> #4696 -> #4699 -> #4700) and
+flow lane (#4697 -> #4698 -> #4701) may land independently. They converge at #4702, followed by #4703 (versions),
+#4704 (embedded route preview), #4705 (responsive/accessibility), and the documentation closeout PR.
+
+Every PR remains Draft at this reconciliation point. No item above is claimed as merged, deployed, tenant-tested, or
+enabled. `APPROVAL_CANVAS_V2_ENABLED` remains default OFF.
+
+### 16.3 Stable deferrals
+
+The candidate does not add arbitrary free-position nodes/edges, cross-region free drag, native mobile authoring,
+100+ node virtualization, handler nodes, within-node ordered approvers, or new organization-derived assignee sources.
+Those are separate product decisions, not hidden completion work. Approval-to-multitable number mapping also remains
+fail-closed under its independent FWB gate and is not made reachable by Canvas V2.

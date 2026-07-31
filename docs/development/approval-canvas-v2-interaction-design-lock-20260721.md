@@ -1,9 +1,10 @@
 # Approval Canvas V2 Interaction Design Lock (D0, 2026-07-21)
 
-**Status:** PROPOSED — owner ratification required (G0) before D3-D6 (D6-f1 excepted) and D6-f2 start
+**Status:** RATIFIED DESIGN — implemented on a Draft PR stack; merge, UAT, and enablement remain owner gates
 **Plan item:** D0 of `docs/development/approval-canvas-v2-development-plan-20260720.md` ("the plan")
 **Review baseline:** `3ade0d685bbad1605cf71803b228f9aac27d0842`
-**Phase-1 implementation checkpoint:** `eb107032d` (command/preview/backend guards only; no D3+ authorization)
+**Historical phase-1 checkpoint:** `eb107032d` (command/preview/backend guards before G0 ratification)
+**Current implementation candidate:** `1f92c6720` (stacked Draft PRs #4642 through #4705)
 **Authoritative runtime model:** existing `ApprovalGraph` plus backend `normalizeApprovalGraph`
 **Scope of this document:** interaction and visual contract for the ordinary-user, canvas-first approval
 authoring surface — flow canvas, inspector, form builder, version lifecycle, route preview, states,
@@ -531,9 +532,8 @@ exists only after `committed`.
 
 ## 18. Owner gates preserved
 
-- G0 (this lock) → ratification required before D3/D6-f2 (plan §12: D3–D6 and D6-f2 BLOCKED on D0).
-  D3-p is the sole exception and still requires its own owner O3-p authorization; it closes an existing
-  frontend round-trip defect only and confers no renderer or Canvas enablement authority.
+- G0 was satisfied by the owner's later ratification of this interaction direction before D3/D6-f2 implementation.
+  That decision authorized development only; it did not authorize merge, UAT, or Canvas enablement.
 - Merge authority: every implementation PR requires named human owner/reviewer approval on exact-head
   evidence; subagent/Codex verdicts are recommendations only (plan §9).
 - `approvalCanvasV2` stays default-OFF; canary only after G5-C; default ON only after owner UAT (G6-C,
@@ -583,17 +583,33 @@ node configs, `normalizeApprovalGraph` invariants) and plan invariants I1–I9:
 - **Dormant rollout:** flag-off path untouched; this lock enables nothing — §2, §17, §18. Consistent
   with I8.
 
-One acknowledged forward dependency, not a contradiction: D2-b has delivered the move/reorder command
-algebra with inverses on the integration candidate (§21); D3 must still satisfy the §4.2 library gates including deterministic
-layout without persisted positions. If either fails its gate, the affected interaction (semantic move,
-drag) degrades to insertion-menu + context-menu actions — which this lock already requires to exist —
-rather than to free positioning.
+The former D3 renderer dependency is closed on the Draft candidate. The as-built deterministic
+`ApprovalGraph` renderer derives layout without persisted positions, while D2-b supplies the move/reorder
+command algebra and inverses. Semantic drag remains a pointer enhancement over the same command predicates;
+insertion-menu, context-menu, and keyboard actions remain equivalent non-drag paths rather than a fallback for
+an unimplemented renderer.
 
-## 21. Implementation checkpoint (non-ratifying)
+## 21. Historical implementation checkpoint (non-ratifying)
 
-The integration candidate implements only the pre-visual foundation: ordinary-user raw-ID hygiene,
+At historical checkpoint `eb107032d`, the integration candidate implemented only the pre-visual foundation:
+ordinary-user raw-ID hygiene,
 immutable topology commands, stable form-field ID allocation/sequencing, and the frontend/backend
 non-empty-parallel-branch guard. The form command slice does **not** yet provide field update/removal,
 inverse history, or mounted undo/redo. D3 renderer, D4 inspector, D5 semantic drag, D6-f2 mounted form
 builder, version visuals, responsive/a11y proof, and flag enablement remain unimplemented and blocked by
-G0. This checkpoint records evidence; it does not change this document's `PROPOSED` status.
+G0. This paragraph records the pre-ratification state at `eb107032d`; it is superseded as a current-status statement
+by section 22 and does not describe the final Draft candidate.
+
+## 22. Ratification and implementation reconciliation (2026-07-31)
+
+The owner subsequently ratified this interaction direction and authorized the bottom-up implementation plan. This
+reconciliation records that prior authorization; it does not self-ratify the design or widen any runtime gate.
+
+- Draft PRs #4642 through #4705 implement the form builder, Canvas commands and history, versions, embedded route
+  preview, and responsive/accessibility closeout described by this lock.
+- The as-built renderer is the existing deterministic `ApprovalGraph` renderer, not Vue Flow/ELK. Coordinates remain
+  derived and unpersisted; typed commands and backend normalization remain the only business-write path.
+- The structured alternative remains available until owner UAT proves accessible-authoring equivalence.
+- `APPROVAL_CANVAS_V2_ENABLED` and the independent data/runtime flags remain default OFF.
+- No PR is claimed as merged, deployed, tenant-tested, or enabled. Exact-head review, bottom-up landing, merged-main
+  verification, staging UAT, and the owner's canary decision remain open.
