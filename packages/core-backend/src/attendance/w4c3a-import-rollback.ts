@@ -24,6 +24,7 @@ export const ATTENDANCE_IMPORT_ROLLBACK_ERROR_CODES_V1 = Object.freeze([
   'IMPORT_ROLLBACK_NOT_FOUND',
   'IMPORT_ROLLBACK_SUPERSEDED',
   'IMPORT_ROLLBACK_PREIMAGE_INVALID',
+  'IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE',
   'IMPORT_ROLLBACK_CONFLICT',
 ] as const)
 
@@ -268,6 +269,14 @@ interface BatchRow {
   subject_scope: unknown
   accepted_write_posture: AttendanceAcceptedWritePostureV1
   command_fingerprint: string
+  item_count: number
+  state: string
+}
+
+interface SourceItemOperationRow {
+  operation_id: string
+  resolved_record_id: string | null
+  resolved_calculation_id: string | null
   state: string
 }
 
@@ -324,18 +333,18 @@ export type AttendanceImportRollbackProjectionV1 = Readonly<{
 
 export type AttendanceImportRollbackPresentPreimageFingerprintInputV1 = Readonly<{
   projection: AttendanceImportRollbackProjectionV1
-  projectionOwner: 'legacy_untracked'
-  currentCalculationId: null
+  projectionOwner: 'legacy_untracked' | 'w4'
+  currentCalculationId: string | null
   visibilityState: 'active' | 'retired'
-  visibilityReason: 'active' | 'review_placeholder' | 'import_rollback'
+  visibilityReason: 'active' | 'review_placeholder' | 'import_rollback' | 'operator_retirement'
 }>
 
 export type FrozenAttendanceImportRollbackPreimageV1 = Readonly<{
   posture: 'absent' | 'present'
-  projectionOwner?: 'legacy_untracked'
-  currentCalculationId?: null
+  projectionOwner?: 'legacy_untracked' | 'w4'
+  currentCalculationId?: string | null
   visibilityState?: 'active' | 'retired'
-  visibilityReason?: 'active' | 'review_placeholder' | 'import_rollback'
+  visibilityReason?: 'active' | 'review_placeholder' | 'import_rollback' | 'operator_retirement'
   compatibilityFingerprint?: string
   projection?: AttendanceImportRollbackProjectionV1
 }>
@@ -391,12 +400,18 @@ export function parseAttendanceImportRollbackPresentPreimageFingerprintInputV1(
     'earlyLeaveMinutes',
   ])
   if (
-    row.projectionOwner !== 'legacy_untracked' ||
-    row.currentCalculationId !== null ||
+    (row.projectionOwner !== 'legacy_untracked' && row.projectionOwner !== 'w4') ||
+    !(
+      (row.projectionOwner === 'legacy_untracked' && row.currentCalculationId === null) ||
+      (row.projectionOwner === 'w4' &&
+        typeof row.currentCalculationId === 'string' &&
+        UUID.test(row.currentCalculationId))
+    ) ||
     (row.visibilityState !== 'active' && row.visibilityState !== 'retired') ||
     (row.visibilityReason !== 'active' &&
       row.visibilityReason !== 'review_placeholder' &&
-      row.visibilityReason !== 'import_rollback') ||
+      row.visibilityReason !== 'import_rollback' &&
+      row.visibilityReason !== 'operator_retirement') ||
     (row.visibilityState === 'active' && row.visibilityReason !== 'active') ||
     (row.visibilityState === 'retired' && row.visibilityReason === 'active') ||
     typeof projection.status !== 'string' ||
@@ -413,8 +428,9 @@ export function parseAttendanceImportRollbackPresentPreimageFingerprintInputV1(
       lateMinutes: nonNegativeInteger(projection.lateMinutes),
       earlyLeaveMinutes: nonNegativeInteger(projection.earlyLeaveMinutes),
     }),
-    projectionOwner: 'legacy_untracked',
-    currentCalculationId: null,
+    projectionOwner: row.projectionOwner,
+    currentCalculationId:
+      row.projectionOwner === 'w4' ? uuid(row.currentCalculationId) : null,
     visibilityState: row.visibilityState,
     visibilityReason: row.visibilityReason,
   }) as AttendanceImportRollbackPresentPreimageFingerprintInputV1
@@ -461,8 +477,13 @@ export function parseAttendanceImportRollbackPreimageV1(
     rootKeys.length !== expectedRootKeys.length ||
     rootKeys.some((key, index) => key !== expectedRootKeys[index]) ||
     row.posture !== 'present' ||
-    row.projectionOwner !== 'legacy_untracked' ||
-    row.currentCalculationId !== null ||
+    (row.projectionOwner !== 'legacy_untracked' && row.projectionOwner !== 'w4') ||
+    !(
+      (row.projectionOwner === 'legacy_untracked' && row.currentCalculationId === null) ||
+      (row.projectionOwner === 'w4' &&
+        typeof row.currentCalculationId === 'string' &&
+        UUID.test(row.currentCalculationId))
+    ) ||
     (row.visibilityState !== 'active' && row.visibilityState !== 'retired') ||
     typeof row.visibilityReason !== 'string' ||
     typeof row.compatibilityFingerprint !== 'string' ||
@@ -514,6 +535,12 @@ function sameJson(left: unknown, right: unknown): boolean {
   } catch {
     return false
   }
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false
+  const expected = new Set(right)
+  return expected.size === right.length && left.every((value) => expected.has(value))
 }
 
 function assertBatchAuthorization(batch: BatchRow, auth: AuthorizedAttendanceWriteContextV1): void {
@@ -613,9 +640,10 @@ async function executeRollback(
 
   const batchResult = await trx.query(
     `SELECT actor_id, actor_posture, token_subject_user_id, subject_scope,
-            accepted_write_posture, command_fingerprint, state
+            accepted_write_posture, command_fingerprint, item_count, state
        FROM attendance_result_operation_batches
-      WHERE org_id = $1 AND entrypoint = $2 AND batch_command_id = $3::uuid`,
+      WHERE org_id = $1 AND entrypoint = $2 AND batch_command_id = $3::uuid
+      FOR UPDATE`,
     [command.orgId, command.sourceBatchEntrypoint, command.sourceBatchId],
   )
   if (batchResult.rows.length !== 1) fail('IMPORT_ROLLBACK_NOT_FOUND')
@@ -627,6 +655,77 @@ async function executeRollback(
     fail('IMPORT_ROLLBACK_BATCH_CHANGED')
   }
   assertBatchAuthorization(batch, auth)
+
+  const sourceItemsResult = await trx.query(
+    `SELECT operation_id::text, resolved_record_id::text,
+            resolved_calculation_id::text, state
+       FROM attendance_result_operations
+      WHERE org_id = $1
+        AND entrypoint = $2
+        AND batch_command_id = $3::uuid
+      ORDER BY input_ordinal, operation_id
+      FOR UPDATE`,
+    [command.orgId, command.sourceBatchEntrypoint, command.sourceBatchId],
+  )
+  const sourceItems = sourceItemsResult.rows as unknown as SourceItemOperationRow[]
+  if (
+    sourceItems.length !== batch.item_count ||
+    sourceItems.some(
+      (item) =>
+        item.state !== 'completed' ||
+        (item.resolved_record_id === null) !== (item.resolved_calculation_id === null),
+    )
+  ) {
+    fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+  }
+  const operationRecordIds = Array.from(
+    new Set(
+      sourceItems
+        .map((item) => item.resolved_record_id)
+        .filter((value): value is string => value !== null),
+    ),
+  ).sort()
+  for (const recordId of operationRecordIds) {
+    const calculationIds = new Set(
+      sourceItems
+        .filter((item) => item.resolved_record_id === recordId)
+        .map((item) => item.resolved_calculation_id),
+    )
+    if (calculationIds.size !== 1 || calculationIds.has(null)) {
+      fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+    }
+  }
+  let durableRecordIds = operationRecordIds
+  if (command.sourceBatchEntrypoint === 'import_batch') {
+    const durableSourceItems = await trx.query(
+      `SELECT record_id::text
+         FROM attendance_import_items
+        WHERE org_id = $1 AND batch_id = $2::uuid
+        ORDER BY id
+        FOR UPDATE`,
+      [command.orgId, command.sourceBatchId],
+    )
+    const durableSourceRecordIds = Array.from(
+      new Set(
+        durableSourceItems.rows
+          .map((row) => row.record_id)
+          .filter((value): value is string => typeof value === 'string'),
+      ),
+    ).sort()
+    if (
+      operationRecordIds.length > 0 &&
+      !sameStringSet(durableSourceRecordIds, operationRecordIds)
+    ) {
+      fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+    }
+    durableRecordIds = durableSourceRecordIds
+  }
+  const commandRecordIds = command.targets
+    .map((target) => target.attendanceRecordId)
+    .sort()
+  if (durableRecordIds.length === 0 || !sameStringSet(commandRecordIds, durableRecordIds)) {
+    fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+  }
   const closure = await trx.query(
     `SELECT 1
        FROM attendance_import_rollback_closures
@@ -636,7 +735,7 @@ async function executeRollback(
   )
   if (closure.rows.length !== 0) fail('IMPORT_ROLLBACK_CONFLICT')
 
-  const recordIds = command.targets.map((target) => target.attendanceRecordId).sort()
+  const recordIds = durableRecordIds
   const recordsResult = await trx.query(
     `SELECT id::text, user_id::text, work_date::text, current_calculation_id::text,
             projection_owner, visibility_state, visibility_reason, status,
@@ -855,7 +954,7 @@ async function executeRollback(
        ) VALUES (
          $1::uuid, $2, $3::uuid, $4, 'reversal', 'authoritative',
          'import_rollback', 'w4c3a-import-rollback-v1', 1,
-         $5::uuid, NULL, $6::uuid,
+         $5::uuid, $27::uuid, $6::uuid,
          $7::uuid, $8, $9, $10,
          $11::jsonb, $12::jsonb, '[]'::jsonb, $13::jsonb, $14::jsonb,
          $15::jsonb, $16::jsonb, 'reversal',
@@ -891,6 +990,7 @@ async function executeRollback(
         values.dailyFingerprint,
         auth.actorId,
         command.correlationId,
+        present ? preimage.currentCalculationId : null,
       ],
     )
     if (present) {
@@ -935,8 +1035,8 @@ async function executeRollback(
       [
         command.orgId,
         recordId,
-        present ? null : target.reversalCalculationId,
-        present ? 'legacy_untracked' : 'w4',
+        present ? preimage.currentCalculationId : target.reversalCalculationId,
+        present ? preimage.projectionOwner : 'w4',
         visibilityState,
         visibilityReason,
         values.status,

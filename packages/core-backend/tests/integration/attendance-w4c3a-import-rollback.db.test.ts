@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { up as importTablesUp } from '../../src/db/migrations/zzzz20260131160000_create_attendance_import_tables'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import {
   down as rollbackDown,
@@ -106,6 +107,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     await pool.query("INSERT INTO user_roles VALUES ($1, 'attendance_admin')", [actorId])
     await pool.query("INSERT INTO role_permissions VALUES ('attendance_admin', 'attendance:admin')")
 
+    await importTablesUp(db)
     await w4c0Up(db)
     await rollbackUp(db)
     expect(await pool.query("SELECT to_regclass('attendance_import_rollback_commands') AS name")).toMatchObject({
@@ -195,6 +197,12 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     try {
       await client.query('BEGIN')
       await client.query(
+        `INSERT INTO attendance_import_batches (
+           id, org_id, created_by, source, row_count, status, meta)
+         VALUES ($1, $2, $3, 'fixture', 1, 'committed', '{}'::jsonb)`,
+        [batchId, batchOrgId, batchActorId],
+      )
+      await client.query(
         `INSERT INTO attendance_result_operation_batches (
            org_id, entrypoint, batch_command_id, identity_source_kind, source_root_id,
            source_ref, actor_id, actor_posture, token_subject_user_id, capability,
@@ -263,7 +271,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
 
   async function importedRecord(input: {
     batchId: string
-    preimage: 'absent' | 'active' | 'retired'
+    preimage: 'absent' | 'active' | 'retired' | 'w4_active'
     workDate: string
     workMinutes: number
     fabricateFingerprint?: boolean
@@ -272,6 +280,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
   }): Promise<{
     recordId: string
     calculationId: string
+    priorCalculationId: string | null
     userId: string
     projection: {
       firstInAt: null
@@ -285,6 +294,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const recordOrgId = input.orgId ?? orgId
     const recordId = id()
     const calculationId = id()
+    const priorCalculationId = input.preimage === 'w4_active' ? id() : null
     const userId = id()
     const projection = {
       firstInAt: null,
@@ -294,12 +304,16 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       earlyLeaveMinutes: 0,
       status: 'normal',
     }
-    const visibilityState = input.preimage === 'active' ? 'active' as const : 'retired' as const
-    const visibilityReason = input.preimage === 'active' ? 'active' as const : 'review_placeholder' as const
+    const visibilityState = input.preimage === 'active' || input.preimage === 'w4_active'
+      ? 'active' as const
+      : 'retired' as const
+    const visibilityReason = input.preimage === 'active' || input.preimage === 'w4_active'
+      ? 'active' as const
+      : 'review_placeholder' as const
     const fingerprintInput = {
       projection,
-      projectionOwner: 'legacy_untracked' as const,
-      currentCalculationId: null,
+      projectionOwner: priorCalculationId === null ? 'legacy_untracked' as const : 'w4' as const,
+      currentCalculationId: priorCalculationId,
       visibilityState,
       visibilityReason,
     }
@@ -314,8 +328,8 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
         ? { posture: 'absent' as const }
         : {
             posture: 'present' as const,
-            projectionOwner: 'legacy_untracked' as const,
-            currentCalculationId: null,
+            projectionOwner: fingerprintInput.projectionOwner,
+            currentCalculationId: priorCalculationId,
             visibilityState,
             visibilityReason,
             compatibilityFingerprint:
@@ -343,10 +357,20 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
          VALUES ($1, $2, $3, 'group-a', true)`,
         [actorId, recordOrgId, userId],
       )
+      if (priorCalculationId !== null) {
+        await insertCalculation(client, {
+          recordId,
+          version: 1,
+          calculationId: priorCalculationId,
+          updateParent: true,
+          workMinutes: projection.workMinutes,
+        })
+      }
       await client.query(
         `INSERT INTO attendance_record_calculations (
            id, org_id, attendance_record_id, version, calculation_kind, mode,
-           entrypoint, engine_version, snapshot_schema_version, source_batch_id,
+           entrypoint, engine_version, snapshot_schema_version,
+           supersedes_calculation_id, source_batch_id,
            operation_id, semantic_input_fingerprint, provenance_fingerprint,
            source_definition_fingerprint, attribution_snapshot, context_snapshot,
            segment_snapshot, evidence_snapshot, approved_facts_snapshot,
@@ -356,8 +380,8 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
            projected_work_minutes, projected_late_minutes,
            projected_early_leave_minutes, projected_daily_fingerprint,
            parent_preimage_snapshot, actor_id, correlation_id
-         ) VALUES ($1, $2, $3, 1, 'calculation', 'authoritative', 'legacy_import',
-           'fixture-v1', 1, $4, $5, $6, $7, $8,
+         ) VALUES ($1, $2, $3, $14, 'calculation', 'authoritative', 'legacy_import',
+           'fixture-v1', 1, $15, $4, $5, $6, $7, $8,
            '{"posture":"resolved_v2"}'::jsonb, '{}'::jsonb, '[]'::jsonb,
            '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'merge',
            'segment_authoritative', 'completed', 'calculated', 'set_active', 1,
@@ -377,6 +401,8 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
           JSON.stringify(preimage),
           actorId,
           `fixture-${run}`,
+          priorCalculationId === null ? 1 : 2,
+          priorCalculationId,
         ],
       )
       await client.query(
@@ -393,12 +419,21 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       await client.query(
         `UPDATE attendance_records
             SET projection_owner = 'w4', current_calculation_id = $3,
-                visibility_state = 'active', visibility_reason = 'active'
+                visibility_state = 'active', visibility_reason = 'active',
+                status = 'late', first_in_at = '2026-07-31T01:00:00Z',
+                last_out_at = '2026-07-31T09:00:00Z', work_minutes = $4,
+                late_minutes = 1, early_leave_minutes = 2
           WHERE org_id = $1 AND id = $2`,
-        [recordOrgId, recordId, calculationId],
+        [recordOrgId, recordId, calculationId, input.workMinutes],
+      )
+      await client.query(
+        `INSERT INTO attendance_import_items (
+           id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
+         VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb)`,
+        [id(), input.batchId, recordOrgId, userId, input.workDate, recordId],
       )
       await client.query('COMMIT')
-      return { recordId, calculationId, userId, projection }
+      return { recordId, calculationId, priorCalculationId, userId, projection }
     } catch (error) {
       await client.query('ROLLBACK')
       throw error
@@ -548,7 +583,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
   }
 
   async function runSingleRollback(input: {
-    preimage: 'absent' | 'active' | 'retired'
+    preimage: 'absent' | 'active' | 'retired' | 'w4_active'
     workDate: string
     importedWorkMinutes?: number
   }) {
@@ -678,6 +713,33 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       late_minutes: 0,
       early_leave_minutes: 0,
     })
+    expect(await rollbackResidue(batchId)).toEqual({ commands: 1, reversals: 1, witnesses: 1 })
+  }, 60000)
+
+  it('present W4 preimage restores the exact prior calculation pointer', async () => {
+    const { batchId, target, result } = await runSingleRollback({
+      preimage: 'w4_active',
+      workDate: '2026-08-05',
+    })
+    expect(target.priorCalculationId).not.toBeNull()
+    expect((await pool.query(
+      `SELECT projection_owner, current_calculation_id::text,
+              visibility_state, visibility_reason, status, work_minutes
+         FROM attendance_records WHERE id = $1`,
+      [target.recordId],
+    )).rows[0]).toEqual({
+      projection_owner: 'w4',
+      current_calculation_id: target.priorCalculationId,
+      visibility_state: 'active',
+      visibility_reason: 'active',
+      status: 'normal',
+      work_minutes: 120,
+    })
+    expect((await pool.query(
+      `SELECT restores_calculation_id::text
+         FROM attendance_record_calculations WHERE id = $1`,
+      [result.reversalCalculationIds[0]],
+    )).rows[0].restores_calculation_id).toBe(target.priorCalculationId)
     expect(await rollbackResidue(batchId)).toEqual({ commands: 1, reversals: 1, witnesses: 1 })
   }, 60000)
 
@@ -901,6 +963,81 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     )
   }, 60000)
 
+  it('rejects an omitted durable batch target with zero rollback DML', async () => {
+    const batchId = id()
+    const fingerprint = hex('7')
+    await sourceBatch(batchId, fingerprint)
+    const targets = await Promise.all([
+      importedRecord({ batchId, preimage: 'absent', workDate: '2026-08-13', workMinutes: 403 }),
+      importedRecord({ batchId, preimage: 'retired', workDate: '2026-08-14', workMinutes: 404 }),
+    ])
+    const before = await pool.query(
+      `SELECT id::text, current_calculation_id::text, projection_owner,
+              visibility_state, visibility_reason, work_minutes
+         FROM attendance_records
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id`,
+      [targets.map((target) => target.recordId)],
+    )
+    const command = rollbackCommand({
+      batchId,
+      fingerprint,
+      targets: [targets[0]],
+    })
+    const client = await pool.connect()
+    try {
+      await expect(
+        rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort),
+      ).rejects.toMatchObject({
+        code: 'IMPORT_ROLLBACK_BATCH_CHANGED',
+      } satisfies Partial<AttendanceImportRollbackError>)
+    } finally {
+      client.release()
+    }
+    expect(await rollbackResidue(batchId)).toEqual({ commands: 0, reversals: 0, witnesses: 0 })
+    const after = await pool.query(
+      `SELECT id::text, current_calculation_id::text, projection_owner,
+              visibility_state, visibility_reason, work_minutes
+         FROM attendance_records
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id`,
+      [targets.map((target) => target.recordId)],
+    )
+    expect(after.rows).toEqual(before.rows)
+  }, 60000)
+
+  it('rejects an extra command target with zero rollback DML', async () => {
+    const batchId = id()
+    const fingerprint = hex('8')
+    await sourceBatch(batchId, fingerprint)
+    const target = await importedRecord({
+      batchId,
+      preimage: 'active',
+      workDate: '2026-08-15',
+      workMinutes: 405,
+    })
+    const command = rollbackCommand({
+      batchId,
+      fingerprint,
+      targets: [target, { recordId: id() }],
+    })
+    const client = await pool.connect()
+    try {
+      await expect(
+        rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort),
+      ).rejects.toMatchObject({
+        code: 'IMPORT_ROLLBACK_BATCH_CHANGED',
+      } satisfies Partial<AttendanceImportRollbackError>)
+    } finally {
+      client.release()
+    }
+    expect(await rollbackResidue(batchId)).toEqual({ commands: 0, reversals: 0, witnesses: 0 })
+    expect((await pool.query(
+      'SELECT current_calculation_id::text FROM attendance_records WHERE id = $1',
+      [target.recordId],
+    )).rows[0].current_calculation_id).toBe(target.calculationId)
+  }, 60000)
+
   it('serializes two connections for the same command into one execution and one replay', async () => {
     const batchId = id()
     const fingerprint = hex('2')
@@ -928,7 +1065,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     expect(await rollbackResidue(batchId)).toEqual({ commands: 1, reversals: 1, witnesses: 1 })
   }, 60000)
 
-  it('rejects a command whose target calculation belongs to another source batch', async () => {
+  it('rejects a command whose target is absent from the durable source batch set', async () => {
     const actualBatchId = id()
     const requestedBatchId = id()
     const actualFingerprint = hex('1')
@@ -949,7 +1086,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const client = await pool.connect()
     try {
       await expect(rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
-        code: 'IMPORT_ROLLBACK_SUPERSEDED',
+        code: 'IMPORT_ROLLBACK_BATCH_CHANGED',
       } satisfies Partial<AttendanceImportRollbackError>)
     } finally {
       client.release()
@@ -1162,7 +1299,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const client = await pool.connect()
     try {
       await expect(rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
-        code: 'IMPORT_ROLLBACK_NOT_FOUND',
+        code: 'IMPORT_ROLLBACK_BATCH_CHANGED',
       } satisfies Partial<AttendanceImportRollbackError>)
     } finally {
       client.release()

@@ -287,8 +287,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          OR rev.outcome <> 'reversed'
          OR rev.outcome_reason_code <> 'import_rollback_reversal'
          OR rev.mode <> 'authoritative'
-         OR rev.supersedes_calculation_id IS DISTINCT FROM NEW.reversed_calculation_id
-         OR rev.restores_calculation_id IS NOT NULL THEN
+         OR rev.supersedes_calculation_id IS DISTINCT FROM NEW.reversed_calculation_id THEN
         RAISE EXCEPTION 'W4C3A_WITNESS: reversal shape invalid on %', TG_TABLE_NAME;
       END IF;
       IF NOT EXISTS (
@@ -326,9 +325,22 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       IF jsonb_typeof(reversed.parent_preimage_snapshot) IS DISTINCT FROM 'object'
          OR (SELECT count(*) FROM jsonb_object_keys(reversed.parent_preimage_snapshot)) <> 7
          OR reversed.parent_preimage_snapshot ->> 'posture' IS DISTINCT FROM 'present'
-         OR reversed.parent_preimage_snapshot ->> 'projectionOwner' IS DISTINCT FROM 'legacy_untracked'
+         OR reversed.parent_preimage_snapshot ->> 'projectionOwner' NOT IN ('legacy_untracked', 'w4')
          OR reversed.parent_preimage_snapshot ? 'currentCalculationId' = false
-         OR reversed.parent_preimage_snapshot ->> 'currentCalculationId' IS NOT NULL
+         OR NOT (
+              (reversed.parent_preimage_snapshot ->> 'projectionOwner' = 'legacy_untracked'
+                AND reversed.parent_preimage_snapshot ->> 'currentCalculationId' IS NULL)
+              OR
+              (reversed.parent_preimage_snapshot ->> 'projectionOwner' = 'w4'
+                AND reversed.parent_preimage_snapshot ->> 'currentCalculationId' IS NOT NULL
+                AND EXISTS (
+                  SELECT 1
+                  FROM attendance_record_calculations restored
+                  WHERE restored.id = (reversed.parent_preimage_snapshot ->> 'currentCalculationId')::uuid
+                    AND restored.attendance_record_id = NEW.attendance_record_id
+                    AND restored.org_id = NEW.org_id
+                ))
+            )
          OR reversed.parent_preimage_snapshot ->> 'compatibilityFingerprint'
               IS DISTINCT FROM NEW.frozen_preimage_fingerprint
          OR jsonb_typeof(reversed.parent_preimage_snapshot -> 'projection') IS DISTINCT FROM 'object'
@@ -341,6 +353,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
               reversed.parent_preimage_snapshot
             ) IS DISTINCT FROM NEW.frozen_preimage_fingerprint THEN
         RAISE EXCEPTION 'W4C3A_WITNESS: closed present preimage invalid on %', TG_TABLE_NAME;
+      END IF;
+      IF rev.restores_calculation_id IS DISTINCT FROM
+           NULLIF(reversed.parent_preimage_snapshot ->> 'currentCalculationId', '')::uuid THEN
+        RAISE EXCEPTION 'W4C3A_WITNESS: restore pointer drift on %', TG_TABLE_NAME;
       END IF;
       IF rev.projected_status IS DISTINCT FROM (reversed.parent_preimage_snapshot #>> '{projection,status}')
          OR rev.projected_first_in_at IS DISTINCT FROM
@@ -443,8 +459,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       WHERE id = NEW.reversed_calculation_id
         AND attendance_record_id = NEW.attendance_record_id
         AND org_id = NEW.org_id;
-      IF NOT FOUND OR parent.projection_owner IS DISTINCT FROM 'legacy_untracked'
-         OR parent.current_calculation_id IS NOT NULL
+      IF NOT FOUND
+         OR parent.projection_owner IS DISTINCT FROM (reversed.parent_preimage_snapshot ->> 'projectionOwner')
+         OR parent.current_calculation_id IS DISTINCT FROM
+              NULLIF(reversed.parent_preimage_snapshot ->> 'currentCalculationId', '')::uuid
          OR parent.visibility_state IS DISTINCT FROM (reversed.parent_preimage_snapshot ->> 'visibilityState')
          OR parent.visibility_reason IS DISTINCT FROM (reversed.parent_preimage_snapshot ->> 'visibilityReason')
          OR parent.status IS DISTINCT FROM (reversed.parent_preimage_snapshot #>> '{projection,status}')

@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { createAuthorizedAttendanceWriteContextV1 } from '../w4c0-authorization'
 import {
+  ATTENDANCE_IMPORT_ROLLBACK_ERROR_CODES_V1,
   AttendanceImportRollbackError,
   computeAttendanceImportRollbackPreimageFingerprintV1,
   createFrozenAttendanceImportRollbackCommandV1,
@@ -73,6 +74,38 @@ describe('W4C-3a import rollback command', () => {
       ...presentPreimageInput,
       compatibilityFingerprint: fingerprint,
     })
+  })
+
+  it('accepts and fingerprints an exact W4-owned restore pointer', () => {
+    const currentCalculationId = crypto.randomUUID()
+    const w4PreimageInput = {
+      ...presentPreimageInput,
+      projectionOwner: 'w4' as const,
+      currentCalculationId,
+      visibilityState: 'retired' as const,
+      visibilityReason: 'import_rollback' as const,
+    }
+    const fingerprint = computeAttendanceImportRollbackPreimageFingerprintV1(w4PreimageInput)
+    expect(
+      parseAttendanceImportRollbackPreimageV1({
+        posture: 'present',
+        ...w4PreimageInput,
+        compatibilityFingerprint: fingerprint,
+      }),
+    ).toEqual({
+      posture: 'present',
+      ...w4PreimageInput,
+      compatibilityFingerprint: fingerprint,
+    })
+    expect(fingerprint).not.toBe(
+      computeAttendanceImportRollbackPreimageFingerprintV1(presentPreimageInput),
+    )
+  })
+
+  it('publishes the closed preimage-unavailable error code', () => {
+    expect(ATTENDANCE_IMPORT_ROLLBACK_ERROR_CODES_V1).toContain(
+      'IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE',
+    )
   })
 
   it('rejects fabricated fingerprints and one-field mutations', () => {
