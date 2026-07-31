@@ -221,6 +221,8 @@ test('W4C-3a storage buckets preserve frozen source, result, revision, and clean
     'attendance_import_legacy_execution_plans',
     'attendance_import_legacy_execution_plan_chunks',
     'attendance_import_legacy_terminal_responses',
+    'attendance_import_rollback_commands',
+    'attendance_import_rollback_restore_witnesses',
     'attendance_record_target_revisions',
     'attendance_group_effect_revisions',
   ]) {
@@ -253,7 +255,7 @@ test('W4C-3a canonical tables accept a W4C-3a boundary writer', () => {
   assert.equal(classified.canonicalSites[0].table, 'attendance_import_legacy_execution_plans')
 })
 
-test('W4C-3a fixed record-effect DML is classified under P06-P09 without claiming caller cutover', () => {
+test('W4C-3a fixed record-effect DML is classified under the completed P06-P09 cutovers', () => {
   const source = createWorktreeSource(rootDir)
   const { sites } = buildRawCensus(source)
   const classified = classifyCensus(sites)
@@ -274,14 +276,14 @@ test('W4C-3a fixed record-effect DML is classified under P06-P09 without claimin
     assert.deepEqual(claimedKeys, expectedKeys, `${id} must classify both shared adapter sites`)
     const entry = CURATED_DEBT_ENTRIES.find((candidate) => candidate.id === id)
     assert.equal(
-      Object.hasOwn(entry || {}, 'canonicalizedBy'),
-      false,
-      `${id} must remain pending until its real caller is cut over`,
+      entry?.canonicalizedBy,
+      'W4C-3a',
+      `${id} must remain explicitly canonicalized by its owning slice`,
     )
   }
 })
 
-test('W4C-3a fixed item-effect DML is classified under P06-P09 without claiming caller cutover', () => {
+test('W4C-3a fixed item-effect DML is classified under the completed P06-P09 cutovers', () => {
   const source = createWorktreeSource(rootDir)
   const { sites } = buildRawCensus(source)
   const classified = classifyCensus(sites)
@@ -302,9 +304,9 @@ test('W4C-3a fixed item-effect DML is classified under P06-P09 without claiming 
     assert.deepEqual(claimedKeys, expectedKeys, `${id} must classify the shared item adapter site`)
     const entry = CURATED_DEBT_ENTRIES.find((candidate) => candidate.id === id)
     assert.equal(
-      Object.hasOwn(entry || {}, 'canonicalizedBy'),
-      false,
-      `${id} must remain pending until its real caller is cut over`,
+      entry?.canonicalizedBy,
+      'W4C-3a',
+      `${id} must remain explicitly canonicalized by its owning slice`,
     )
   }
 })
@@ -324,20 +326,20 @@ test('this collector test file has an explicit CI execution step', () => {
 //    may be silently marked; and the claim predicates still cover the adapter-owned sites so
 //    unclaimed=0 detection is not bypassed by the removal.
 // -------------------------------------------------------------------------------------------
-test('W4C-2: P01, P02, P03, P04 each independently carry canonicalizedBy=W4C-2 — and only they do', () => {
+test('W4C-2: P01, P02, P03, P04 each independently carry canonicalizedBy=W4C-2 — and only they do for W4C-2', () => {
   const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
   // Four independent assertions — removing any ONE marker fails on its own line.
   assert.equal(byId.get('P01')?.canonicalizedBy, 'W4C-2', 'P01 (live punch) must be removed-by-adapter')
   assert.equal(byId.get('P02')?.canonicalizedBy, 'W4C-2', 'P02 (merge second-pass) must be removed-by-adapter')
   assert.equal(byId.get('P03')?.canonicalizedBy, 'W4C-2', 'P03 (cron absence) must be removed-by-adapter')
   assert.equal(byId.get('P04')?.canonicalizedBy, 'W4C-2', 'P04 (administrator absence run) must be removed-by-adapter')
-  const marked = CURATED_DEBT_ENTRIES.filter((entry) => entry.canonicalizedBy != null)
+  const marked = CURATED_DEBT_ENTRIES.filter((entry) => entry.canonicalizedBy === 'W4C-2')
     .map((entry) => `${entry.id}:${entry.canonicalizedBy}`)
     .sort()
   assert.deepEqual(
     marked,
     ['P01:W4C-2', 'P02:W4C-2', 'P03:W4C-2', 'P04:W4C-2'],
-    'exactly the four W4C-2 entries are canonicalized — no other debt id may borrow the marker',
+    'exactly the four W4C-2 entries carry the W4C-2 marker',
   )
 })
 
@@ -413,6 +415,8 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
       'attendance_import_legacy_execution_plans',
       'attendance_import_legacy_terminal_responses',
       'attendance_import_rollback_closures',
+      'attendance_import_rollback_commands',
+      'attendance_import_rollback_restore_witnesses',
       'attendance_record_calculations',
       'attendance_record_segments',
       'attendance_record_target_revisions',
@@ -433,7 +437,7 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
 // is too weak: it would let a V1 job/plan value be reported as authority while the DML census
 // remains green.  The P25 table spec is the closed family/authority inventory; the synthetic
 // use checks below are deliberately independent from route behavior and do not claim that the
-// remaining P06-P11/P23-P24 callers are implemented.
+// completed P06-P11/P23-P25 callers and classifications remain mechanically visible.
 // -------------------------------------------------------------------------------------------
 test('P25: the closed import/integration set has explicit family and non-authority specs', () => {
   const expectedP25Tables = [
@@ -580,7 +584,7 @@ test('P25: generated runtime call-path census classifies every closed-table read
   const { sites } = buildP25CallPathCensus(source)
   const result = classifyP25CallPathSites(sites)
 
-  assert.equal(sites.length, 97, 'the current generated P25 read/write inventory must remain explicit')
+  assert.equal(sites.length, 100, 'the current generated P25 read/write inventory must remain explicit')
   assert.deepEqual(result.unclassified, [], 'a new P25 table/site or renamed wrapper must not inherit a broad allowlist')
   assert.deepEqual(result.countDrift, [], 'an extra P25 access in an existing wrapper must require an explicit classification')
   assert.deepEqual(result.stale, [], 'removing a P25 access must retire its classification deliberately')
@@ -664,8 +668,8 @@ test('P25 mutation: an unclassified wrapper and integration-run authority both f
   )
 })
 
-test('P06-P11/P23-P24 remain visible debt and are not prematurely canonicalized', () => {
-  const requiredDebtIds = ['P06', 'P07', 'P08', 'P09', 'P10', 'P11', 'P23', 'P24']
+test('P06-P11/P23-P25 remain visible and explicitly canonicalized by W4C-3a', () => {
+  const requiredDebtIds = ['P06', 'P07', 'P08', 'P09', 'P10', 'P11', 'P23', 'P24', 'P25']
   const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
   const source = createWorktreeSource(rootDir)
   const { sites } = buildRawCensus(source)
@@ -675,12 +679,16 @@ test('P06-P11/P23-P24 remain visible debt and are not prematurely canonicalized'
   for (const id of requiredDebtIds) {
     const entry = byId.get(id)
     assert.ok(entry, `${id} must remain in the generated debt inventory`)
-    assert.equal(entry.owningSlice, 'W4C-3a', `${id} must remain owned by W4C-3a until its caller gate is complete`)
-    assert.equal(Object.hasOwn(entry, 'canonicalizedBy'), false, `${id} must not claim completion early`)
-    // P23/P24 are authorization/operational classification debt and intentionally have no
+    assert.equal(
+      entry.owningSlice,
+      id === 'P25' ? 'W4C-0' : 'W4C-3a',
+      `${id} must retain its original owning slice`,
+    )
+    assert.equal(entry.canonicalizedBy, 'W4C-3a', `${id} must retain its completed-slice marker`)
+    // P23/P24/P25 are authorization/operational classification debt and intentionally have no
     // tracked business DML claim; P06-P11 must retain the concrete current census claims.
-    if (!['P23', 'P24'].includes(id)) {
-      assert.ok((claimsByEntryId.get(id) || []).length > 0, `${id} must expose current business writers as debt`)
+    if (!['P23', 'P24', 'P25'].includes(id)) {
+      assert.ok((claimsByEntryId.get(id) || []).length > 0, `${id} must expose its current canonical writers`)
     }
   }
 })

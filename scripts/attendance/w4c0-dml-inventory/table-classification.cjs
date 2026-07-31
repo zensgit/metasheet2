@@ -127,6 +127,8 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_import_legacy_execution_plans: 'w4_canonical',
   attendance_import_legacy_execution_plan_chunks: 'w4_canonical',
   attendance_import_legacy_terminal_responses: 'w4_canonical',
+  attendance_import_rollback_commands: 'w4_canonical',
+  attendance_import_rollback_restore_witnesses: 'w4_canonical',
   attendance_record_target_revisions: 'w4_canonical',
   attendance_group_effect_revisions: 'w4_canonical',
 })
@@ -294,6 +296,7 @@ const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   // SET identity_kind = 'operation' ...), same precedent as the W4C-0 migration file above.
   'packages/core-backend/src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union',
   'packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts',
+  'packages/core-backend/src/db/migrations/zzzz20260731120000_w4c3a_import_rollback_foundation.ts',
 ])
 
 function classifyTable(tableName) {
