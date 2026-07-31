@@ -1,134 +1,150 @@
-# Approval Authoring and Data Closure Closeout Verification (2026-07-21)
+# Approval Authoring and Data Closure Closeout Verification (2026-07-31)
 
-**Status:** PARTIAL ENGINEERING CLOSEOUT - FWB-1 and attachments are review candidates; Canvas V2 and FWB-2/3 remain open
-**Design lock:** `approval-canvas-v2-interaction-design-lock-20260721.md` (`PROPOSED`)
+**Status:** ENGINEERING CANDIDATE COMPLETE - not merged, deployed, tenant-tested, or enabled
+**Design lock:** `approval-canvas-v2-development-plan-20260720.md` (ratified; 2026-07-31 reconciliation in section 16)
 **Execution ledger:** `approval-authoring-data-closure-execution-ledger-20260721.md`
-**Review baseline:** `3ade0d685bbad1605cf71803b228f9aac27d0842`
-**Verified product-code head:** `eb107032d`
-**Runtime posture:** all new product flags remain default OFF
+**Candidate head:** `1f92c6720`
+**Runtime posture:** all related product flags remain default OFF
 
 ## 1. Verdict
 
-Two approval-data slices are implemented on the integration candidate:
+The approval editor candidate now provides the core ordinary-user authoring experience requested for DingTalk/Feishu
+comparison:
 
-- an approved independent approval form can map `text`, `number`, `date`, and `select` values into a
-  new multitable record;
-- the write is net-once and commits its claim, record, revision, and downstream durable event together;
-- approval attachments have a production pipeline with authenticated download, hidden-field redaction,
-  scanner/storage fail-closed behavior, durable purge, and bounded reconciliation;
-- the formal S1-S8 durable/FWB matrix executes the real producer, dispatcher, consumer adapters,
-  production action, and chained record event.
+- a visual form builder with a draggable/clickable component palette, field canvas, typed inspector, reorder, and
+  undo/redo;
+- a vertical flow Canvas for linear, conditional, and parallel approval graphs, with edge insertion, semantic movement,
+  branch priority, contextual configuration, keyboard alternatives, and fail-closed topology validation;
+- version history with readable structural diff, synchronized before/current canvases, and restore-to-new-draft;
+- embedded route preview that calls the existing backend saved-draft evaluator and highlights the matched Canvas path;
+- stable desktop/tablet/mobile layouts with measured contrast, touch sizes, no tested horizontal overflow, and no
+  sticky-header/action overlap.
 
-This is **FWB-1 only**: create a new record from approved form values. FWB-2 existing-record selection/
-update and FWB-3 approver-confirmed decision values are not registered in the production action path.
-The ordinary-user mapping/confirmation UI is also absent. Therefore the broader claim "approval form,
-process, or result data can all be written back" is not yet true.
+This is an **engineering candidate**, not a production close. The entire editor remains on a stacked Draft PR series.
+No merge, deployment, real-tenant UAT, or flag enablement is claimed.
 
-The Canvas V2 objective is only at phase 1. The safe command substrate and backend guards are present,
-but the final tree renderer, inspector, semantic drag, mounted form-builder workflow, responsive visual
-proof, and accessibility closeout are not implemented. D0 is still `PROPOSED`, so calling the complete
-program finished would violate the ratification gate.
+## 2. Product comparison boundary
 
-## 2. Capability boundary
+### Delivered in the candidate
 
-### Available after merge and owner flag/UAT decisions
+| Area | Candidate behavior |
+|---|---|
+| Form design | drag or click components into the form; reorder by drag/keyboard; edit in the inspector |
+| Flow design | tree-style Canvas; edge `+`; approval/cc/condition/parallel nodes; semantic move and branch reorder |
+| Safety | typed commands, rollback on invalid drops, backend normalization authority, no raw JSON/IDs in normal UI |
+| History | draft/version timeline, form/node/edge diff, synchronized graphs, restore as a new draft |
+| Preview | sample-data route preview through the existing backend contract; no approval instance is created |
+| Accessibility | non-drag command path, keyboard reorder/activation, focus return, live status, measured target sizes |
+| Responsive | 1280px/1024px/390px browser evidence; form and Canvas surfaces stack without document overflow |
 
-- Configure, through the API/runtime contract only, an approved-only automation that writes selected
-  approval form values to the rule's sheet. This branch does not ship an ordinary-user authoring UI.
-- Preserve record/revision/outbox atomicity and suppress duplicate instance/action replays.
-- Upload and bind approval attachments, resolve frozen refs, and download bytes through authenticated API
-  routes without exposing storage keys.
-- Continue using the current approval authoring UI with safer immutable graph/form edit commands.
+### Not claimed
 
-### Not yet available
+- A visual clone of DingTalk or Feishu.
+- Arbitrary free-line drawing or persisted node coordinates. The product intentionally uses semantic graph operations.
+- Native-mobile flow construction, 100+ node virtualization, or unrestricted cross-region drag.
+- New runtime node meanings such as handler nodes or within-node ordered approvers.
+- New organization-derived approver sources beyond the already supported contracts.
+- Production numeric FWB mapping. `number` remains fail-closed with `exact_number_mapping_unavailable`.
+- Production readiness before merged-main verification, staging UAT, and the owner flag decision.
 
-- The final Feishu/DingTalk-style tree canvas as the sole ordinary-user authoring surface.
-- Semantic drag/drop, responsive inspector/bottom sheet, full keyboard/touch equivalence, and visual
-  version-diff overlays on that canvas.
-- Ordinary-user FWB mapping/confirmation authoring, FWB-2 existing-record update, and FWB-3
-  approver-confirmed decision values.
-- Mounted form update/remove/reorder undo history; the current D6-f1 foundation only allocates stable
-  IDs, refuses retired IDs, and preserves insertion/reordering sequence.
-- Production enablement. No flag is turned on by this branch.
-
-## 3. Review findings fixed on the composed head
+## 3. Findings closed in the final slices
 
 | Finding | Severity | Resolution | Discriminating evidence |
 |---|---|---|---|
-| Invalid calendar dates could pass FWB ISO parsing | P1 data correctness | strict month/day/leap-year validation | regex-only mutant makes the new unit case RED |
-| Canvas command tests absent from required gates | P2 CI | required script plus Approval Web Guard paths/canary step | exact-head command/form preflight collected 37/37 before the main suite |
-| Attachment detail assumed the new feature ref always existed | P2 compatibility | optional read, missing ref means OFF | original required run failed 13/13 detail cases; fixed scope 95/95 |
-| Eight-scenario fixture used the pre-publish version | P2 test drift | query and bind `active_version_id` in event/config/hash | old fixture failed save; corrected fixture reaches production action |
-| S7 expected raw database error text | P2 security-test drift | assert values-free `fwb_execution_failed` and absence of raw text | S7 proceeds through rollback and clean replay |
-| ApprovalNewView spec-only changes did not trigger the path guard | P3 CI | add the spec to both pull-request and main-push paths | both trigger lists now contain the exact file |
-| Attachment flag parser had no green required canary | P3 CI | export the pure parser and add a focused camel/snake-key matrix | focused canary 4/4; broad quarantined featureFlags specs remain out |
-| Six real-DB files relied on manually maintained two-point wiring | P3 CI | add a source-derived no-DB-exclude plus whole-file-run contract | structural contract 12/12 |
-| Attachment unit-canary comment incorrectly denied default discovery | P3 documentation | describe the explicit canary as stable ownership, not first-ever collection | source comment corrected without changing execution |
-| Booted attachment suite inherited a 15-second setup limit | P3 test stability | give this full-server setup/cleanup an explicit 30-second hook budget | exact-head rerun reaches and passes all product assertions |
-| Deleting/moving a sole parallel-branch body could create fork-to-join and let `joinMode=any` advance without an assignment | P1 approval correctness | frontend commands refuse the mutation; backend normalization rejects the graph | frontend move/delete negatives plus backend mutant each RED |
-| Branch removal heuristics rewrote complex/shared branches | P2 graph integrity | removal is limited to a provably exclusive one-node branch; ambiguous shapes fail closed | complex/shared branch negatives |
-| Canvas error paths surfaced raw graph IDs | P2 information exposure | ordinary-user error/unsupported copy is generic and business-facing | mounted/layout/template hygiene negatives |
-| FWB save/update could reuse creator authority instead of checking the actual modifier/enabler | P1 authorization | bind request actor; separately preserve creator authority checks | real-DB modifier/enabler negative and positive controls |
-| FWB target fields could include per-subject readonly fields | P1 data authorization | canonical field-permission derivation at save and execute | independent gate mutation RED |
-| FWB infrastructure failure could settle durable delivery and lose the write | P1 reliability | retryable FWB failure throws to the durable adapter and remains reclaimable | fault-injection real-DB replay |
-| Two rules could emit the same chained FWB event ID | P2 idempotency | include rule ID plus structural action key | cross-rule golden; identity mutant RED |
-| Confirmation omitted target base and number conversion could lose precision | P2 authority/data correctness | target base included in hash; unsafe/excess-precision numbers fail closed | rehome and precision negatives; number mutant RED |
-| Attachment race proof was helper-level or sequential | P2 evidence | booted HTTP double-submit, blocking GC-wins race, and real blob drain | exact-head 29/29 real-DB suite |
-| Number precision lookup used `property.precision`, while canonical fields persist `property.decimals` | P1 data correctness | bind the execution mapping to canonical `decimals` | real-DB `decimals=2` / `12.345` rejection; spelling mutant RED |
-| FWB update still defaulted a missing actor inside the helper | P2 authorization | creation passes its actor explicitly; update has no actor default or creator fallback | real-DB omitted-actor negative; fallback mutant RED |
-| Canvas validity preview omitted the empty-parallel-branch invariant | P2 authoring safety | reuse `hasEmptyParallelBranch` in preview and emit generic copy | focused preview negative; guard mutant RED |
-| Execute-time field revocation was only covered through an allow-all executor seam | P2 evidence | exercise the production gate after a real `field_permissions.read_only` change | zero claim and record rows in real DB |
-| Deterministic `fwb_rejected:instance_not_found` consumed durable retries | P3 reliability | settle the complete deterministic refusal namespace; retain retry only for infrastructure failure | real production event-fire becomes `done`; classifier mutant RED |
+| Version fence was checked after other bundle-derived reads | P2 | compare `expectedLatestVersionId` immediately after the same creation bundle loads | neutralizing the fence changes stale+invalid input from 409 to 400 |
+| Preview disappeared when Canvas rendering was unavailable | P2 | retain the existing structured preview as a capability-preserving fallback | mounted fallback-condition mutant turns RED |
+| Ambiguous/reconvergent route anchors could imply a false edge path | P2 | highlight nodes only and show a partial warning unless the graph path is unique | ambiguity mutant turns the focused test RED |
+| Returned internal/user IDs could reach ordinary-user copy | P2 | sanitize labels and unresolved directory identities | raw-ID mutant turns the focused test RED |
+| Compact header actions overflowed and sticky bars covered work | P2 UX | stable 3-column actions; static narrow navigation/actions; larger scroll margin | 390/1024 geometry and sticky-separation assertions |
+| Active flow tab appeared low contrast during transition | P2 a11y | explicit primary state plus computed contrast gate | browser poll requires >=4.5:1 before capture |
+| Mobile Canvas and preview controls were below the ratified target | P2 a11y | node/move actions >=40px; toolbar/branch-inspector/route-preview controls, including form controls, >=44px | per-control `getBoundingClientRect` assertions |
+| Tablet steps navigation covered the authoring mode switch | P2 UX | make steps navigation static throughout the <=1024px stacked layout | 761/800/900/1024 geometry assertions prove zero intersection |
+| Larger mobile controls could overlap the next graph node | P2 regression risk | retain semantic layout spacing and assert every linear node box is disjoint | ordered node rectangles have `next.top >= previous.bottom` |
+| Version history card/date was only partly visible on phone | P3 UX | <=560px timeline becomes full-width vertical cards | date/card width assertions and mobile screenshot |
+| Compact-desktop palette labels overlaid adjacent drag sources | P1 UX | keep a usable palette track until the workspace stacks, then use bounded five/two-column layouts | every palette item is >=80px and every label has `scrollWidth <= clientWidth` |
 
-## 4. Verification evidence
+## 4. Exact-head evidence
 
-### Frontend
+### Frontend product path
 
-- Exact-head Canvas focused suite: 4 files, 118/118.
-- The exact product head passed the required local script: Canvas/form command canaries 37/37,
-  attachment flag canary 4/4, then 353/353 files and 4242/4242 tests.
+- CI-equivalent Playwright real-browser workflow at `1f92c6720`: **15/15** (11 approval-designer scenarios plus four
+  neighboring browser verifications).
+- Focused frontend Canvas/form/version/preview suites at the preview head: **77/77**.
+- Required Web Tests on the exact documentation tree over `1f92c6720`: **361 files / 4378 tests**.
 - `vue-tsc --noEmit`: pass.
+- Vite production build: pass. Existing unrelated chunk-size/dynamic-import warnings remain visible and were not
+  misreported as errors.
+- #4705 remote CI at `1f92c6720`: all four emitted checks passed (`approval-web-guard`, `attendance-web-guard`,
+  `Multitable browser verify (chromium)`, and `pr-validate`).
 
-### Backend
+### Backend preview contract
 
-- Backend graph authority: 111/111.
-- FWB focused units: 48/48.
-- Fresh fully migrated PostgreSQL database:
-  - FWB activation/write action: 18/18;
-  - attachment booted pipeline/bind-reconcile/GC: 29/29;
-  - formal durable/FWB S1-S8 matrix: 9/9;
-- `tsc --noEmit`: pass.
-- Nine source mutations each turned its named guard RED, were restored with `apply_patch`, and reran
-  GREEN: field writability, cross-rule event identity, move/backend empty-branch guards, unsafe-number
-  rejection, canonical decimals, update actor, preview empty-branch, and deterministic settlement.
-- Grok's read-only exact-head re-review of `eb107032d`: APPROVE, zero P1/P2; attachment double-waiter,
-  production S3 drain, and already-parsed numeric-lexeme limits remain explicitly P3.
-- Kimi K3's cross-document pass found one stale `36/36` evidence count; it was corrected to the
-  exact-head `37/37`, and all three documents now use the same status, SHA, counts, and owner gates.
+- Fresh real-PostgreSQL route-preview API suite: **11/11**.
+- Stale-version, incomplete Canvas, no-existence-oracle, authorization, and values-free error legs remain covered.
 
-### Required-suite note
+### Browser geometry and visual evidence
 
-The PR's required CI remains an independent merge gate; a local pass is not reported as remote CI
-success.
+The verification harness captures:
 
-## 5. Flag and deployment ledger
+- `apps/web/verification-output/approval-designer-desktop.png`
+- `apps/web/verification-output/approval-designer-tablet.png`
+- `apps/web/verification-output/approval-designer-mobile.png`
+- `apps/web/verification-output/approval-route-preview-canvas.png`
+- `apps/web/verification-output/approval-route-preview-mobile.png`
+- `apps/web/verification-output/approval-version-workspace.png`
+- `apps/web/verification-output/approval-version-workspace-mobile.png`
 
-| Flag/dependency | Candidate default | Enablement requirement |
-|---|---|---|
-| `AUTOMATION_DURABLE_DELIVERY_ENABLED` | OFF unless explicitly set | owner UAT and staged rollout |
-| Class-A/Class-B automation flags | OFF unless explicitly set | durable stable first |
-| `APPROVAL_FWB_WRITEBACK_ENABLED` | OFF unless explicitly set | durable/Class-A prerequisites plus FWB UAT |
-| `APPROVAL_ATTACHMENTS_ENABLED` | OFF unless explicitly set | S3/scanner configuration and attachment UAT |
+Screenshots are visual evidence only. Contrast, overflow, target size, card visibility, sticky separation, and node
+non-overlap are asserted from the browser DOM; downsampled image measurements are not accepted as geometry proof.
 
-## 6. Merge recommendation
+### Independent review
 
-**FWB-1 plus attachments:** code-complete, locally verified review candidates. Exact-head adversarial
-review passed; merge recommendation still waits for remote required CI and owner merge authorization.
+- Route-preview exact-diff re-review: APPROVE, no P1/P2 after the early fence and fallback fixes.
+- Kimi visual critique found the sticky-header and mobile-target issues; both were reproduced or refuted with DOM
+  geometry. The valid issues were fixed. Kimi is not the final correctness authority.
+- The responsive/accessibility re-review at `1f92c6720`: APPROVE, 0 P1/P2/P3. It independently rendered every
+  route-preview and inspector target class, neutralized their size rules, and observed the corresponding browser
+  assertions turn RED.
+- The first exact-tree browser run reused another reviewer-owned Vite process; that process exited after twelve tests,
+  so the run was rejected as evidence. The full workflow was rerun with `CI=1` and an owned server and passed 15/15.
 
-**Canvas V2 phase 1:** review-ready as a non-visual foundation. It does not authorize D3+ implementation.
+## 5. Merge and enablement gates
 
-**Whole program:** not final-closeable until the owner ratifies D0 and either ships D3-D11-C or explicitly
-defers named slices; FWB-2/FWB-3 and the ordinary-user FWB authoring UI are separately shipped or
-explicitly deferred; real UAT passes; and flags are intentionally enabled. After Canvas visual slices
-exist, run Playwright/canvas-pixel/accessibility evidence at the three locked viewports and append a final
-AS-BUILT section rather than rewriting this partial boundary.
+### Bottom-up merge order
+
+1. #4642 -> #4649 -> #4652.
+2. Form lane: #4657 -> #4696 -> #4699 -> #4700.
+3. Flow lane: #4697 -> #4698 -> #4701.
+4. Rebase #4702 onto both landed lanes and verify that only the integration delta remains.
+5. #4703 -> #4704 -> #4705 -> this documentation PR.
+
+Required checks must be recalculated after every rebase. A green stacked head does not transfer automatically to a
+different merged-main tree.
+
+### Merged-main gate
+
+Before staging, rerun on the exact merged-main head:
+
+1. the complete real-browser suite at 1280px, 1024px, and 390px;
+2. required Web Tests and frontend/backend typechecks;
+3. the real-DB route-preview API suite;
+4. flag-OFF compatibility for legacy and Canvas-unavailable paths;
+5. the broader approval/FWB/attachment matrix relevant to the deployed build.
+
+### Owner UAT and flag gate
+
+Staging UAT must cover component drag and click insertion, field reorder, condition/parallel authoring, semantic move,
+undo/redo, version compare/restore, route preview, keyboard-only operation, and narrow layout. Capture baseline and
+post-action screenshots plus the exact deployed SHA.
+
+Only the owner may enable `APPROVAL_CANVAS_V2_ENABLED`, initially as a staged canary. Durable automation, Class A/Class
+B, FWB, and attachment flags remain independent and cannot be enabled by this closeout.
+
+## 6. Closeout disposition
+
+**Engineering development:** complete on the Draft stack for the scope in section 2.
+
+**Delivery:** open. Review, merge, merged-main verification, staging UAT, and flag enablement remain required.
+
+This document may be marked production FINAL only after those owner/operations gates have real evidence. Until then,
+the honest terminal state is **CANDIDATE COMPLETE / DELIVERY PENDING**.
