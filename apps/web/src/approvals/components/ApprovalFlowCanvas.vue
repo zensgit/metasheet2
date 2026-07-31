@@ -101,14 +101,16 @@
               </div>
               <button
                 v-for="line in canvasMoveTargetLines"
+                v-show="!readOnly"
                 :key="`move-target-${line.key}`"
                 type="button"
-                class="template-authoring__canvas-move-target"
+                class="template-authoring__canvas-move-target is-drag-active"
                 :style="{ left: `${line.dropX}px`, top: `${line.dropY}px` }"
                 :aria-label="canvasMoveTargetLabel(line.key)"
+                data-drag-active="true"
                 :data-testid="`approval-canvas-move-target-${line.key}`"
                 @click.stop="emit('move-target-click', line.key)"
-                @dragover.prevent
+                @dragover.stop.prevent
                 @drop="onMoveTargetDrop($event, line.key)"
               >
                 <el-icon><Rank /></el-icon>
@@ -244,9 +246,69 @@
         >关闭</el-button>
       </div>
       <div class="template-authoring__canvas-inspector-body">
+        <section
+          v-if="!readOnly && selectedCanvasBranchGroup"
+          class="template-authoring__canvas-branch-reorder"
+          :aria-label="selectedCanvasBranchGroup.title"
+          data-testid="approval-canvas-branch-reorder"
+        >
+          <strong>{{ selectedCanvasBranchGroup.title }}</strong>
+          <div
+            v-for="(branch, branchIndex) in selectedCanvasBranchGroup.branches"
+            :key="branch.edgeKey"
+            class="template-authoring__canvas-branch-row"
+            :class="{ 'is-dragging': draggingCanvasBranchEdgeKey === branch.edgeKey }"
+            :data-testid="`approval-canvas-branch-row-${branch.edgeKey}`"
+            @dragover.stop.prevent
+            @drop="onBranchTargetDrop($event, branch.edgeKey)"
+          >
+            <button
+              type="button"
+              class="template-authoring__canvas-branch-handle"
+              :draggable="selectedCanvasBranchGroup.branches.length > 1"
+              :title="`拖动${branch.label}`"
+              :aria-label="`拖动${branch.label}`"
+              :data-testid="`approval-canvas-branch-handle-${branch.edgeKey}`"
+              @dragstart.stop="emit('branch-drag-start', $event, selectedCanvasBranchGroup.kind, selectedCanvasBranchGroup.nodeKey, branch.edgeKey)"
+              @dragend.stop="emit('branch-drag-end')"
+              @keydown.alt.up.stop.prevent="emit('move-branch-step', selectedCanvasBranchGroup.kind, selectedCanvasBranchGroup.nodeKey, branch.edgeKey, 'up')"
+              @keydown.alt.down.stop.prevent="emit('move-branch-step', selectedCanvasBranchGroup.kind, selectedCanvasBranchGroup.nodeKey, branch.edgeKey, 'down')"
+            >
+              <el-icon><Rank /></el-icon>
+            </button>
+            <span class="template-authoring__canvas-branch-label">{{ branch.label }}</span>
+            <div class="template-authoring__canvas-branch-actions">
+              <el-button
+                :icon="Top"
+                size="small"
+                title="提高优先级"
+                :aria-label="`提高${branch.label}优先级`"
+                :disabled="branchIndex === 0"
+                :data-testid="`approval-canvas-branch-up-${branch.edgeKey}`"
+                @click="emit('move-branch-step', selectedCanvasBranchGroup.kind, selectedCanvasBranchGroup.nodeKey, branch.edgeKey, 'up')"
+              />
+              <el-button
+                :icon="Bottom"
+                size="small"
+                title="降低优先级"
+                :aria-label="`降低${branch.label}优先级`"
+                :disabled="branchIndex === selectedCanvasBranchGroup.branches.length - 1"
+                :data-testid="`approval-canvas-branch-down-${branch.edgeKey}`"
+                @click="emit('move-branch-step', selectedCanvasBranchGroup.kind, selectedCanvasBranchGroup.nodeKey, branch.edgeKey, 'down')"
+              />
+            </div>
+          </div>
+        </section>
         <ApprovalGraphNodeConfigEditor :node="selectedCanvasInspectorNode" />
       </div>
     </aside>
+    <p
+      class="template-authoring__sr-only"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      data-testid="approval-canvas-live-message"
+    >{{ canvasLiveMessage }}</p>
   </div>
 </template>
 
@@ -283,6 +345,15 @@ interface CanvasInsertionTarget {
   nodeTypes: EdgeInsertableNodeType[]
 }
 
+type CanvasBranchKind = 'condition' | 'parallel'
+
+interface CanvasBranchReorderGroup {
+  kind: CanvasBranchKind
+  nodeKey: string
+  title: string
+  branches: Array<{ edgeKey: string; label: string }>
+}
+
 const props = defineProps<{
   readOnly: boolean
   canvasValidity: string[]
@@ -293,6 +364,9 @@ const props = defineProps<{
   canvasEdgeLines: CanvasEdgeLine[]
   canvasInsertionTargets: CanvasInsertionTarget[]
   canvasMoveTargetLines: CanvasEdgeLine[]
+  selectedCanvasBranchGroup: CanvasBranchReorderGroup | null
+  draggingCanvasBranchEdgeKey: string | null
+  canvasLiveMessage: string
   canvasMinimap: MinimapFrame
   selectedCanvasNode: string | null
   movingCanvasNode: string | null
@@ -322,8 +396,13 @@ const emit = defineEmits<{
   (e: 'node-drag-start', event: DragEvent, nodeKey: string): void
   (e: 'node-drag-end'): void
   (e: 'move-target-click', edgeKey: string): void
+  (e: 'move-target-drop', event: DragEvent, edgeKey: string): void
   (e: 'move-step', nodeKey: string, direction: 'up' | 'down'): void
   (e: 'begin-move', nodeKey: string): void
+  (e: 'branch-drag-start', event: DragEvent, kind: CanvasBranchKind, nodeKey: string, edgeKey: string): void
+  (e: 'branch-drag-end'): void
+  (e: 'branch-target-drop', event: DragEvent, kind: CanvasBranchKind, nodeKey: string, edgeKey: string): void
+  (e: 'move-branch-step', kind: CanvasBranchKind, nodeKey: string, edgeKey: string, direction: 'up' | 'down'): void
   (e: 'add-condition-branch', nodeKey: string): void
   (e: 'add-parallel-branch', nodeKey: string): void
   (e: 'insert-node-into-edge', edgeKey: string, nodeType: EdgeInsertableNodeType): void
@@ -366,7 +445,15 @@ function chooseInsertion(edgeKey: string, nodeType: EdgeInsertableNodeType): voi
 function onMoveTargetDrop(event: DragEvent, edgeKey: string): void {
   event.preventDefault()
   event.stopPropagation()
-  emit('move-target-click', edgeKey)
+  emit('move-target-drop', event, edgeKey)
+}
+
+function onBranchTargetDrop(event: DragEvent, edgeKey: string): void {
+  event.preventDefault()
+  event.stopPropagation()
+  const group = props.selectedCanvasBranchGroup
+  if (!group) return
+  emit('branch-target-drop', event, group.kind, group.nodeKey, edgeKey)
 }
 
 // Exposed for the parent to read/measure (fit-to-viewport, scroll sync, mobile inspector scroll)
@@ -550,7 +637,8 @@ defineExpose({ canvasViewportRef, canvasInspectorRef })
   font-size: 12px;
 }
 .template-authoring__canvas-move-target:hover,
-.template-authoring__canvas-move-target:focus-visible {
+.template-authoring__canvas-move-target:focus-visible,
+.template-authoring__canvas-move-target.is-drag-active {
   border-style: solid;
   background: var(--el-color-primary-light-9);
   outline: none;
@@ -622,6 +710,64 @@ defineExpose({ canvasViewportRef, canvasInspectorRef })
   min-height: 0;
   overflow: auto;
   padding: 10px 12px 14px;
+}
+.template-authoring__canvas-branch-reorder {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--el-border-color-light);
+}
+.template-authoring__canvas-branch-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  background: var(--el-bg-color);
+}
+.template-authoring__canvas-branch-row.is-dragging {
+  border-color: var(--el-color-primary);
+  border-style: dashed;
+}
+.template-authoring__canvas-branch-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--el-text-color-secondary);
+  background: transparent;
+  cursor: grab;
+}
+.template-authoring__canvas-branch-handle:focus-visible {
+  outline: 2px solid var(--el-color-primary-light-5);
+  outline-offset: 1px;
+}
+.template-authoring__canvas-branch-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.template-authoring__canvas-branch-actions {
+  display: flex;
+  gap: 4px;
+}
+.template-authoring__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 @media (max-width: 960px) {
   .template-authoring__canvas-workspace {

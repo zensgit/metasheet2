@@ -378,6 +378,52 @@ function buildLinearReorderGraph() {
   }
 }
 
+function buildBranchReorderGraph() {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'cond_1',
+        type: 'condition',
+        name: '金额判断',
+        config: {
+          branches: [
+            { edgeKey: 'e-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' },
+            { edgeKey: 'e-medium', rules: [{ fieldId: 'amount', operator: 'gte', value: 500 }], conjunction: 'and' },
+          ],
+          defaultEdgeKey: 'e-default',
+        },
+      },
+      { key: 'high_a', type: 'approval', name: '高额初审', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'high_b', type: 'approval', name: '高额复审', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'medium', type: 'approval', name: '中额审批', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'fallback', type: 'cc', name: '默认抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+      { key: 'merge', type: 'cc', name: '条件汇合', config: { targetType: 'role', targetIds: ['audit'] } },
+      { key: 'fork_1', type: 'parallel', name: '并行审批', config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join_1' } },
+      { key: 'app_a', type: 'approval', name: '分支 A', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'app_b', type: 'approval', name: '分支 B', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['legal'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'join_1', type: 'approval', name: '汇聚', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e-start-c', source: 'start', target: 'cond_1' },
+      { key: 'e-high', source: 'cond_1', target: 'high_a' },
+      { key: 'e-high-a-b', source: 'high_a', target: 'high_b' },
+      { key: 'e-high-merge', source: 'high_b', target: 'merge' },
+      { key: 'e-medium', source: 'cond_1', target: 'medium' },
+      { key: 'e-medium-merge', source: 'medium', target: 'merge' },
+      { key: 'e-default', source: 'cond_1', target: 'fallback' },
+      { key: 'e-default-merge', source: 'fallback', target: 'merge' },
+      { key: 'e-merge-fork', source: 'merge', target: 'fork_1' },
+      { key: 'e-fork-a', source: 'fork_1', target: 'app_a' },
+      { key: 'e-fork-b', source: 'fork_1', target: 'app_b' },
+      { key: 'e-a-join', source: 'app_a', target: 'join_1' },
+      { key: 'e-b-join', source: 'app_b', target: 'join_1' },
+      { key: 'e-join-end', source: 'join_1', target: 'end' },
+    ],
+  }
+}
+
 let container: HTMLDivElement | null = null
 let app: VueApp<Element> | null = null
 
@@ -403,6 +449,30 @@ function clickCanvasNode(nodeKey: string) {
   const node = container!.querySelector(`[data-testid="approval-canvas-node"][data-canvas-node="${nodeKey}"]`) as HTMLElement | null
   expect(node, `canvas node ${nodeKey}`).not.toBeNull()
   node!.click()
+}
+
+function createDragDataTransfer(): DataTransfer {
+  const data = new Map<string, string>()
+  return {
+    dropEffect: 'none',
+    effectAllowed: 'uninitialized',
+    files: [] as unknown as FileList,
+    items: [] as unknown as DataTransferItemList,
+    types: [],
+    clearData: (format?: string) => {
+      if (format) data.delete(format)
+      else data.clear()
+    },
+    getData: (format: string) => data.get(format) ?? '',
+    setData: (format: string, value: string) => { data.set(format, value) },
+    setDragImage: vi.fn(),
+  }
+}
+
+function createDragEvent(type: 'dragstart' | 'dragend' | 'drop', dataTransfer: DataTransfer): DragEvent {
+  const event = new Event(type, { bubbles: true, cancelable: true }) as DragEvent
+  Object.defineProperty(event, 'dataTransfer', { value: dataTransfer })
+  return event
 }
 
 describe('Canvas V2 Slice A — canvas inspector', () => {
@@ -520,15 +590,12 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(surface.style.transform).toBe('scale(1.25)')
 
     const node = container!.querySelector('[data-canvas-node="cc_b"]') as HTMLElement
-    const dragStart = new Event('dragstart', { bubbles: true, cancelable: true })
-    Object.defineProperty(dragStart, 'dataTransfer', {
-      value: { setData: vi.fn(), effectAllowed: '' },
-    })
-    node.dispatchEvent(dragStart)
+    const dataTransfer = createDragDataTransfer()
+    node.dispatchEvent(createDragEvent('dragstart', dataTransfer))
     await flushUi()
     const dropTarget = container!.querySelector('[data-testid="approval-canvas-move-target-e-start-a"]') as HTMLButtonElement
     expect(dropTarget).not.toBeNull()
-    dropTarget.dispatchEvent(new Event('drop', { bubbles: true, cancelable: true }))
+    dropTarget.dispatchEvent(createDragEvent('drop', dataTransfer))
     await flushUi()
 
     const movedNode = container!.querySelector('[data-canvas-node="cc_b"]') as HTMLElement
@@ -548,6 +615,145 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await flushUi()
     const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
     expect(payload.approvalGraph.edges).toEqual(buildLinearReorderGraph().edges)
+  })
+
+  it('keeps every legal edge slot highlighted and rejects outside or expired node drops without a write', async () => {
+    routeParams = { id: 'tpl_canvas_drag_reject' }
+    const graph = buildLinearReorderGraph()
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+    await mountView()
+    await flushUi()
+
+    const node = container!.querySelector('[data-canvas-node="cc_b"]') as HTMLElement
+    const outsideTransfer = createDragDataTransfer()
+    node.dispatchEvent(createDragEvent('dragstart', outsideTransfer))
+    await flushUi()
+
+    const targets = Array.from(container!.querySelectorAll('[data-testid^="approval-canvas-move-target-"]'))
+    expect(targets.map((target) => target.getAttribute('data-testid')).sort()).toEqual([
+      'approval-canvas-move-target-e-c-end',
+      'approval-canvas-move-target-e-start-a',
+    ])
+    expect(targets.every((target) => target.getAttribute('data-drag-active') === 'true')).toBe(true)
+    targets[0].dispatchEvent(new Event('dragover', { bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid^="approval-canvas-move-target-"]')).toHaveLength(2)
+
+    node.dispatchEvent(createDragEvent('dragend', outsideTransfer))
+    await flushUi()
+    const liveRegion = container!.querySelector('[data-testid="approval-canvas-live-message"]') as HTMLElement
+    expect(liveRegion.textContent).toBe('该位置不能放置此节点')
+    expect(liveRegion.textContent).not.toMatch(/cc_b|e-start-a/)
+
+    const currentNode = container!.querySelector('[data-canvas-node="cc_b"]') as HTMLElement
+    const activeTransfer = createDragDataTransfer()
+    currentNode.dispatchEvent(createDragEvent('dragstart', activeTransfer))
+    await flushUi()
+    const legalTarget = container!.querySelector(
+      '[data-testid="approval-canvas-move-target-e-start-a"]',
+    ) as HTMLElement
+    expect(legalTarget).not.toBeNull()
+    const expiredTransfer = createDragDataTransfer()
+    expiredTransfer.setData('application/x-metasheet-approval-canvas-node', '{"token":0}')
+    legalTarget.dispatchEvent(createDragEvent('drop', expiredTransfer))
+    await flushUi()
+    expect(liveRegion.textContent).toBe('该位置不能放置此节点')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.approvalGraph.edges).toEqual(graph.edges)
+  })
+
+  it('does not expose a cross-region node drop slot and announces the rejected release', async () => {
+    routeParams = { id: 'tpl_canvas_cross_region' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildBranchReorderGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    const node = container!.querySelector('[data-canvas-node="high_a"]') as HTMLElement
+    const dataTransfer = createDragDataTransfer()
+    node.dispatchEvent(createDragEvent('dragstart', dataTransfer))
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-canvas-move-target-e-high-merge"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-canvas-move-target-e-medium-merge"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-canvas-move-target-e-default-merge"]')).toBeNull()
+
+    node.dispatchEvent(createDragEvent('dragend', dataTransfer))
+    await flushUi()
+    const message = container!.querySelector('[data-testid="approval-canvas-live-message"]')?.textContent ?? ''
+    expect(message).toBe('该位置不能放置此节点')
+    expect(message).not.toMatch(/high_a|e-medium/)
+  })
+
+  it('reorders condition priority and parallel branches by handle drag with keyboard-equivalent commands', async () => {
+    routeParams = { id: 'tpl_canvas_branch_reorder' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildBranchReorderGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    clickCanvasNode('cond_1')
+    await flushUi()
+    let panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    expect(panel.textContent).toContain('条件分支优先级')
+    expect(panel.textContent).toContain('优先级 1')
+    expect(panel.textContent).toContain('优先级 2')
+    expect(panel.textContent).not.toMatch(/e-high|e-medium|e-default/)
+    expect(panel.querySelectorAll('[draggable="true"]')).toHaveLength(2)
+    expect(Array.from(panel.querySelectorAll('[draggable="true"]')).every((element) =>
+      element.matches('[data-testid^="approval-canvas-branch-handle-"]'))).toBe(true)
+
+    let dataTransfer = createDragDataTransfer()
+    ;(panel.querySelector('[data-testid="approval-canvas-branch-handle-e-high"]') as HTMLElement)
+      .dispatchEvent(createDragEvent('dragstart', dataTransfer))
+    ;(panel.querySelector('[data-testid="approval-canvas-branch-row-e-medium"]') as HTMLElement)
+      .dispatchEvent(createDragEvent('drop', dataTransfer))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    let payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    let condition = payload.approvalGraph.nodes.find((candidate: any) => candidate.key === 'cond_1')
+    expect(condition.config.branches.map((branch: any) => branch.edgeKey)).toEqual(['e-medium', 'e-high'])
+    expect(condition.config.defaultEdgeKey).toBe('e-default')
+
+    panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    ;(panel.querySelector('[data-testid="approval-canvas-branch-handle-e-high"]') as HTMLElement)
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    condition = payload.approvalGraph.nodes.find((candidate: any) => candidate.key === 'cond_1')
+    expect(condition.config.branches.map((branch: any) => branch.edgeKey)).toEqual(['e-high', 'e-medium'])
+
+    clickCanvasNode('fork_1')
+    await flushUi()
+    panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    expect(panel.textContent).toContain('并行分支顺序')
+    dataTransfer = createDragDataTransfer()
+    ;(panel.querySelector('[data-testid="approval-canvas-branch-handle-e-fork-b"]') as HTMLElement)
+      .dispatchEvent(createDragEvent('dragstart', dataTransfer))
+    ;(panel.querySelector('[data-testid="approval-canvas-branch-row-e-fork-a"]') as HTMLElement)
+      .dispatchEvent(createDragEvent('drop', dataTransfer))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    let parallel = payload.approvalGraph.nodes.find((candidate: any) => candidate.key === 'fork_1')
+    expect(parallel.config.branches).toEqual(['e-fork-b', 'e-fork-a'])
+    expect(parallel.config.joinMode).toBe('all')
+    expect(parallel.config.joinNodeKey).toBe('join_1')
+
+    panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    ;(panel.querySelector('[data-testid="approval-canvas-branch-handle-e-fork-b"]') as HTMLElement)
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    parallel = payload.approvalGraph.nodes.find((candidate: any) => candidate.key === 'fork_1')
+    expect(parallel.config.branches).toEqual(['e-fork-a', 'e-fork-b'])
   })
 
   it('shows business labels instead of internal topology keys in the inspector', async () => {
@@ -731,6 +937,8 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(inspector.querySelector('[data-testid="approval-parallel-editor"]')).not.toBeNull()
     const joinMode = inspector.querySelector('[data-testid="approval-parallel-join-mode"]') as HTMLSelectElement
     expect(joinMode.disabled).toBe(true)
+    expect(inspector.querySelector('[data-testid="approval-canvas-branch-reorder"]')).toBeNull()
+    expect(container!.querySelector('[data-testid^="approval-canvas-branch-handle-"]')).toBeNull()
 
     clickCanvasNode('approval_high')
     await flushUi()
