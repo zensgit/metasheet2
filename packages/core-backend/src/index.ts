@@ -130,6 +130,10 @@ import {
 import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
 import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
 import { createAttendanceSyncImportHostV1 } from './attendance/w4c3a-sync-import-host'
+import {
+  buildAttendanceImportAttributionFreezeV1,
+  buildAttendanceImportPolicySourceProofV1,
+} from './attendance/w4c3a-import-proof'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import {
   correlationContextEnrichmentMiddleware,
@@ -2196,6 +2200,10 @@ export class MetaSheetServer {
                   })
                   return host.commitSyncImportPlanV1(input)
                 },
+                buildImportAttributionFreeze:
+                  buildAttendanceImportAttributionFreezeV1,
+                buildImportPolicySourceProof:
+                  buildAttendanceImportPolicySourceProofV1,
                 buildLegacyImportReservationLockWitness: (input: {
                   orgId: string
                   idempotencyKey: string

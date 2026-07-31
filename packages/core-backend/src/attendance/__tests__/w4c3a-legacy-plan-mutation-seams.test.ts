@@ -111,7 +111,7 @@ describe('blueprint mutations — real production surfaces', () => {
     const processorSource = fs.readFileSync(PROCESSOR, 'utf8')
     // Positive: processor owns executeVerifiedPlan by fixed internal binding.
     expect(processorSource).toMatch(/executeVerifiedPlan/)
-    expect(processorSource).toMatch(/executeFixedVerifiedPlan/)
+    expect(processorSource).toMatch(/executeAttendanceCanonicalImportPlanV1/)
     // Deps type is only acquireConnection — no effect injection surface.
     const depsMatch = processorSource.match(
       /export type AttendanceLegacyPlanProcessorDepsV1 = Readonly<\{[\s\S]*?\}>/,

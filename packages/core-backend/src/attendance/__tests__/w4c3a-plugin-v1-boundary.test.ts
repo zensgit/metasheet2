@@ -7,6 +7,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { buildAttendanceImportPolicySourceProofV1 } from '../w4c3a-import-proof'
 
 const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -15,6 +16,11 @@ const ROOT = path.resolve(
 const PLUGIN = path.join(ROOT, 'plugins/plugin-attendance/index.cjs')
 const require = createRequire(import.meta.url)
 const attendancePlugin = require(PLUGIN) as {
+  __attendanceImportForTests: {
+    buildImportCanonicalFreezeSourceV1(
+      input: Record<string, unknown>,
+    ): Record<string, unknown>
+  }
   __attendanceW4C3aSyncCompatibilityForTests: {
     foldAttendanceImportPreparedTargets(input: {
       items: readonly Record<string, unknown>[]
@@ -648,6 +654,44 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       leaveMinutes: 0,
       overtimeMinutes: 0,
     }
+    const policySourceProof = buildAttendanceImportPolicySourceProofV1({
+      ruleVersion: 'org-default-rule',
+      engineVersion: null,
+      rule: {
+        timezone: 'Asia/Taipei',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        lateGraceMinutes: 0,
+        earlyGraceMinutes: 0,
+        roundingMinutes: 1,
+        severeLateThresholdMinutes: 30,
+        absenceLateThresholdMinutes: 60,
+        workingDays: [1, 2, 3, 4, 5],
+      },
+      policy: { appliedRules: [], userGroups: [] },
+      engine: null,
+    })
+    const freezeSource = (sourceOrdinal: number, status: string) =>
+      attendancePlugin.__attendanceImportForTests.buildImportCanonicalFreezeSourceV1({
+        sourceOrdinal,
+        attribution: {
+          posture: 'unsupported',
+          sourceSchemaVersion: null,
+          reason: 'unresolved',
+          sourceFingerprint: null,
+        },
+        importAttributionReconstruction: null,
+        context: null,
+        policySourceProof,
+        output: {
+          status,
+          workMinutes: 480,
+          lateMinutes: status === 'late' ? 15 : 0,
+          earlyLeaveMinutes: 0,
+          leaveMinutes: 0,
+          overtimeMinutes: 0,
+        },
+      })
     const folded = syncCompatibility.foldAttendanceImportPreparedTargets({
       items: [
         {
@@ -656,6 +700,7 @@ describe('plugin V1 jobId-only boundary (static)', () => {
           updateFirstInAt: new Date('2026-07-31T01:30:00.000Z'),
           statusOverride: 'late',
           previewSnapshot: { policy: { source: 'first' } },
+          canonicalFreezeSource: freezeSource(3, 'late'),
         },
         {
           ...common,
@@ -663,6 +708,7 @@ describe('plugin V1 jobId-only boundary (static)', () => {
           updateFirstInAt: new Date('2026-07-31T01:00:00.000Z'),
           statusOverride: 'normal',
           previewSnapshot: { policy: { source: 'second' } },
+          canonicalFreezeSource: freezeSource(4, 'normal'),
         },
       ],
       existingMap: new Map(),
@@ -676,8 +722,8 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       status: 'normal',
       firstInAt: '2026-07-31T01:00:00.000Z',
       sourceBatchId: common.sourceBatchId,
-      attributionSnapshot: { schemaVersion: 1 },
-      policySnapshot: { schemaVersion: 1 },
+      attributionSnapshot: { schemaVersion: 2 },
+      policySnapshot: { schemaVersion: 2 },
     })
     const write = folded.recordWrites[0] as {
       attributionSnapshot: { sources: Array<{ sourceOrdinal: number; attribution: unknown; context: unknown }> }
@@ -685,8 +731,7 @@ describe('plugin V1 jobId-only boundary (static)', () => {
         sources: Array<{
           sourceOrdinal: number
           sourceFingerprint: string
-          ruleVersion: string
-          engineVersion: string | null
+          sourceDefinition: Record<string, unknown>
           output: Record<string, unknown>
         }>
       }
@@ -696,12 +741,12 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(Object.keys(write.attributionSnapshot.sources[0]).sort()).toEqual([
       'attribution',
       'context',
+      'importAttributionReconstruction',
       'sourceOrdinal',
     ])
     expect(Object.keys(write.policySnapshot.sources[0]).sort()).toEqual([
-      'engineVersion',
       'output',
-      'ruleVersion',
+      'sourceDefinition',
       'sourceFingerprint',
       'sourceOrdinal',
     ])

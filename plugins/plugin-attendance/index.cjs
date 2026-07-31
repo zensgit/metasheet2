@@ -20075,44 +20075,6 @@ function buildRawImportEvidenceV1(options = {}) {
   }
 }
 
-// Must match packages/core-backend/src/attendance/w4c2-frozen-attribution.ts.
-const ATTENDANCE_W4C2_ATTRIBUTION_RESOLVER_VERSION_V1 =
-  'attendance-work-date-resolver-w2+w4c2-strict-rebuild@1'
-const ATTENDANCE_W4_WINDOW_EVIDENCE_DOMAIN_V1 =
-  'metasheet2:attendance:w4:window-evidence-fingerprint:v1'
-const ATTENDANCE_IMPORT_POLICY_SOURCE_FINGERPRINT_DOMAIN_V1 =
-  'metasheet2:attendance:w4c3a:import-policy-source-fingerprint:v1'
-
-function canonicalAttendanceJsonCjsV1(value) {
-  const seen = new WeakSet()
-  const normalize = (input) => {
-    if (input === null || typeof input === 'number' || typeof input === 'boolean' || typeof input === 'string') {
-      if (typeof input === 'number' && !Number.isFinite(input)) {
-        throw new Error('W4C3A_CANONICAL_JSON_INVALID')
-      }
-      return input
-    }
-    if (typeof input !== 'object') throw new Error('W4C3A_CANONICAL_JSON_INVALID')
-    if (seen.has(input)) throw new Error('W4C3A_CANONICAL_JSON_INVALID')
-    seen.add(input)
-    if (Array.isArray(input)) return input.map(normalize)
-    const keys = Object.keys(input).sort()
-    const out = {}
-    for (const key of keys) {
-      if (typeof key === 'symbol') continue
-      const next = input[key]
-      if (next === undefined) continue
-      out[key] = normalize(next)
-    }
-    return out
-  }
-  return JSON.stringify(normalize(value))
-}
-
-function sha256HexOfCanonicalJsonCjsV1(value) {
-  return crypto.createHash('sha256').update(canonicalAttendanceJsonCjsV1(value), 'utf8').digest('hex')
-}
-
 function freezeNonNegIntOrNull(value) {
   if (value === null || value === undefined || value === '') return null
   const numeric = Number(value)
@@ -20126,261 +20088,6 @@ function freezeStatusOrNull(value) {
   if (value === null || value === undefined) return null
   const text = String(value).trim()
   return text || null
-}
-
-function toIsoInstantStrict(value) {
-  if (value instanceof Date) {
-    const ms = value.getTime()
-    if (!Number.isFinite(ms)) return null
-    return value.toISOString()
-  }
-  if (typeof value === 'string' && value.trim()) {
-    const ms = Date.parse(value)
-    if (!Number.isFinite(ms)) return null
-    return new Date(ms).toISOString()
-  }
-  return null
-}
-
-function computeImportWindowEvidenceFingerprintV1({ attributionTailMinutes, approvedOvertimeWindows }) {
-  const tail = Number(attributionTailMinutes)
-  if (!Number.isInteger(tail) || tail < 0) {
-    throw new Error('W4C2_WINDOW_EVIDENCE_INVALID')
-  }
-  const entries = (Array.isArray(approvedOvertimeWindows) ? approvedOvertimeWindows : []).map((entry) => {
-    const requestId = entry && entry.requestId != null ? String(entry.requestId) : ''
-    if (!requestId) throw new Error('W4C2_WINDOW_EVIDENCE_INVALID')
-    const approvedEndAt = toIsoInstantStrict(entry.approvedEndAt)
-    if (!approvedEndAt) throw new Error('W4C2_WINDOW_EVIDENCE_INVALID')
-    return {
-      requestId,
-      approvedEndAt,
-      anchor: entry.anchor === undefined ? null : entry.anchor,
-    }
-  })
-  entries.sort((a, b) => (a.requestId < b.requestId ? -1 : a.requestId > b.requestId ? 1 : 0))
-  const projection = { attributionTailMinutes: tail, approvedOvertimeWindows: entries }
-  return crypto
-    .createHash('sha256')
-    .update(
-      Buffer.concat([
-        Buffer.from(ATTENDANCE_W4_WINDOW_EVIDENCE_DOMAIN_V1, 'utf8'),
-        Buffer.from([0]),
-        Buffer.from(canonicalAttendanceJsonCjsV1(projection), 'utf8'),
-      ]),
-    )
-    .digest('hex')
-}
-
-/**
- * Build exact AttendanceAttributionSnapshotV1 from an import work-date resolution
- * that requested includeFullWinner. Falls closed to unsupported — never fabricates V2.
- */
-function buildImportAttendanceAttributionSnapshotV1(options = {}) {
-  const orgId = options.orgId == null ? null : String(options.orgId)
-  const userId = options.userId == null ? null : String(options.userId)
-  const resolution = options.resolution
-  const nowIso = toIsoInstantStrict(options.nowIso ?? new Date()) || new Date().toISOString()
-  if (!orgId || !userId) {
-    return {
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'missing',
-      sourceFingerprint: null,
-    }
-  }
-  if (!resolution) {
-    return {
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'missing',
-      sourceFingerprint: null,
-    }
-  }
-  if (resolution.kind === 'ambiguous') {
-    return {
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'ambiguous',
-      sourceFingerprint: null,
-    }
-  }
-  if (resolution.kind !== 'resolved') {
-    return {
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'unresolved',
-      sourceFingerprint: null,
-    }
-  }
-  const winner = resolution.fullWinner
-  if (
-    !winner
-    || typeof winner.workStartTime !== 'string'
-    || typeof winner.workEndTime !== 'string'
-    || typeof winner.timezone !== 'string'
-    || !winner.absoluteWindow
-    || !winner.attributionWindow
-    || !Number.isInteger(resolution.attributionTailMinutes)
-  ) {
-    return {
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'unresolved',
-      sourceFingerprint: null,
-    }
-  }
-  const absoluteStartAt = toIsoInstantStrict(winner.absoluteWindow.startAt)
-  const absoluteEndAt = toIsoInstantStrict(winner.absoluteWindow.endAt)
-  const attributionStartAt = toIsoInstantStrict(winner.attributionWindow.startAt)
-  const attributionEndAt = toIsoInstantStrict(winner.attributionWindow.endAt)
-  if (!absoluteStartAt || !absoluteEndAt || !attributionStartAt || !attributionEndAt) {
-    return {
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'unresolved',
-      sourceFingerprint: null,
-    }
-  }
-  const absoluteStartMs = Date.parse(absoluteStartAt)
-  const absoluteEndMs = Date.parse(absoluteEndAt)
-  const attributionStartMs = Date.parse(attributionStartAt)
-  const attributionEndMs = Date.parse(attributionEndAt)
-  if (!(absoluteEndMs > absoluteStartMs) || attributionStartMs !== absoluteStartMs) {
-    return {
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'unresolved',
-      sourceFingerprint: sha256HexOfUtf8('W4C2_ATTRIBUTION_WINDOW_INVALID'),
-    }
-  }
-  const tailMs = resolution.attributionTailMinutes * 60_000
-  const baseEndMs = absoluteEndMs + tailMs
-  let extendedByApprovedOvertime = false
-  if (attributionEndMs === baseEndMs) {
-    extendedByApprovedOvertime = false
-  } else if (attributionEndMs > baseEndMs) {
-    const overtime = Array.isArray(resolution.approvedOvertimeWindows)
-      ? resolution.approvedOvertimeWindows
-      : []
-    const explained = overtime.some((entry) => {
-      const endAt = toIsoInstantStrict(entry?.approvedEndAt)
-      if (!endAt) return false
-      return Date.parse(endAt) + tailMs === attributionEndMs
-    })
-    if (!explained) {
-      return {
-        posture: 'unsupported',
-        sourceSchemaVersion: null,
-        reason: 'unresolved',
-        sourceFingerprint: sha256HexOfUtf8('W4C2_ATTRIBUTION_WINDOW_END_UNEXPLAINED'),
-      }
-    }
-    extendedByApprovedOvertime = true
-  } else {
-    return {
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'unresolved',
-      sourceFingerprint: sha256HexOfUtf8('W4C2_ATTRIBUTION_WINDOW_END_UNEXPLAINED'),
-    }
-  }
-
-  let windowEvidenceFingerprint
-  try {
-    windowEvidenceFingerprint = computeImportWindowEvidenceFingerprintV1({
-      attributionTailMinutes: resolution.attributionTailMinutes,
-      approvedOvertimeWindows: (Array.isArray(resolution.approvedOvertimeWindows)
-        ? resolution.approvedOvertimeWindows
-        : []
-      ).map((entry) => ({
-        requestId: String(entry.requestId),
-        approvedEndAt: toIsoInstantStrict(entry.approvedEndAt),
-        anchor: entry.anchor === undefined ? null : entry.anchor,
-      })),
-    })
-  } catch {
-    return {
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'unresolved',
-      sourceFingerprint: null,
-    }
-  }
-
-  return {
-    posture: 'resolved_v2',
-    value: {
-      schemaVersion: 2,
-      resolverVersion: ATTENDANCE_W4C2_ATTRIBUTION_RESOLVER_VERSION_V1,
-      orgId,
-      userId,
-      workDate: String(resolution.workDate),
-      shiftId: String(resolution.shiftId),
-      reasonCode: String(resolution.reasonCode ?? 'SINGLE_MATCHING_CANDIDATE'),
-      resolvedAt: nowIso,
-      absoluteWindow: { startAt: absoluteStartAt, endAt: absoluteEndAt },
-      attributionWindow: { startAt: attributionStartAt, endAt: attributionEndAt },
-      attributionTailMinutes: resolution.attributionTailMinutes,
-      extendedByApprovedOvertime,
-      windowEvidenceFingerprint,
-      source: 'import_resolution',
-    },
-  }
-}
-
-/**
- * Closed policy source fingerprint over frozen rule/policy/engine inputs only
- * (never mutable row punches/metrics bytes).
- */
-function computeImportPolicySourceFingerprintV1(options = {}) {
-  const rule = options.rule && typeof options.rule === 'object' ? options.rule : {}
-  const workingDays = Array.isArray(rule.workingDays)
-    ? [...rule.workingDays].map((day) => Number(day)).filter((day) => Number.isFinite(day)).sort((a, b) => a - b)
-    : []
-  const appliedPolicyRules = Array.isArray(options.appliedPolicyRules)
-    ? [...options.appliedPolicyRules].map(String).sort()
-    : []
-  const appliedEngineRules = Array.isArray(options.appliedEngineRules)
-    ? [...options.appliedEngineRules].map(String).sort()
-    : []
-  const projection = {
-    schemaVersion: 1,
-    ruleVersion: options.ruleVersion == null ? null : String(options.ruleVersion),
-    engineVersion: options.engineVersion == null ? null : String(options.engineVersion),
-    rule: {
-      timezone: rule.timezone == null ? null : String(rule.timezone),
-      workStartTime: rule.workStartTime == null ? null : String(rule.workStartTime),
-      workEndTime: rule.workEndTime == null ? null : String(rule.workEndTime),
-      lateGraceMinutes: freezeNonNegIntOrNull(rule.lateGraceMinutes),
-      earlyGraceMinutes: freezeNonNegIntOrNull(rule.earlyGraceMinutes ?? rule.earlyLeaveGraceMinutes),
-      roundingMinutes: freezeNonNegIntOrNull(rule.roundingMinutes),
-      severeLateThresholdMinutes: freezeNonNegIntOrNull(rule.severeLateThresholdMinutes),
-      absenceLateThresholdMinutes: freezeNonNegIntOrNull(rule.absenceLateThresholdMinutes),
-      workingDays,
-    },
-    policy: {
-      appliedRules: appliedPolicyRules,
-      userGroups: Array.isArray(options.userGroups)
-        ? [...options.userGroups].map(String).sort()
-        : [],
-    },
-    engine: options.engineVersion == null
-      ? null
-      : {
-          appliedRules: appliedEngineRules,
-        },
-  }
-  return crypto
-    .createHash('sha256')
-    .update(
-      Buffer.concat([
-        Buffer.from(ATTENDANCE_IMPORT_POLICY_SOURCE_FINGERPRINT_DOMAIN_V1, 'utf8'),
-        Buffer.from([0]),
-        Buffer.from(canonicalAttendanceJsonCjsV1(projection), 'utf8'),
-      ]),
-    )
-    .digest('hex')
 }
 
 function buildImportPolicyOutputV1(options = {}) {
@@ -20403,40 +20110,29 @@ function buildImportCanonicalFreezeSourceV1(options = {}) {
   if (!Number.isInteger(sourceOrdinal) || sourceOrdinal < 0) {
     throw new Error('W4C3A_IMPORT_FREEZE_SOURCE_ORDINAL_INVALID')
   }
-  const ruleVersion = options.ruleVersion == null || options.ruleVersion === ''
-    ? 'org-default-rule'
-    : String(options.ruleVersion)
-  const engineVersion = options.engineVersion == null || options.engineVersion === ''
-    ? null
-    : String(options.engineVersion)
-  const attribution = options.attribution
-    && typeof options.attribution === 'object'
-    ? options.attribution
-    : {
-        posture: 'unsupported',
-        sourceSchemaVersion: null,
-        reason: 'missing',
-        sourceFingerprint: null,
-      }
-  const context = options.context === undefined ? null : options.context
-  const sourceFingerprint = typeof options.sourceFingerprint === 'string'
-    && /^[0-9a-f]{64}$/.test(options.sourceFingerprint)
-    ? options.sourceFingerprint
-    : computeImportPolicySourceFingerprintV1({
-        ruleVersion,
-        engineVersion,
-        rule: options.rule,
-        appliedPolicyRules: options.appliedPolicyRules,
-        appliedEngineRules: options.appliedEngineRules,
-        userGroups: options.userGroups,
-      })
+  if (!options.attribution || typeof options.attribution !== 'object') {
+    throw new Error('W4C3A_IMPORT_ATTRIBUTION_PROOF_MISSING')
+  }
+  if (!options.policySourceProof || typeof options.policySourceProof !== 'object') {
+    throw new Error('W4C3A_IMPORT_POLICY_PROOF_MISSING')
+  }
+  const sourceFingerprint = options.policySourceProof.sourceFingerprint
+  const sourceDefinition = options.policySourceProof.sourceDefinition
+  if (
+    typeof sourceFingerprint !== 'string'
+    || !/^[0-9a-f]{64}$/.test(sourceFingerprint)
+    || !sourceDefinition
+    || typeof sourceDefinition !== 'object'
+  ) {
+    throw new Error('W4C3A_IMPORT_POLICY_PROOF_INVALID')
+  }
   return {
     sourceOrdinal,
-    attribution,
-    context,
+    attribution: options.attribution,
+    importAttributionReconstruction: options.importAttributionReconstruction ?? null,
+    context: options.context ?? null,
     sourceFingerprint,
-    ruleVersion,
-    engineVersion,
+    sourceDefinition,
     output: buildImportPolicyOutputV1(options.output || {}),
   }
 }
@@ -20448,10 +20144,11 @@ function buildClosedImportAttributionSnapshotV1(sources) {
       sourceOrdinal: Number(source.sourceOrdinal),
       attribution: source.attribution,
       context: source.context === undefined ? null : source.context,
+      importAttributionReconstruction: source.importAttributionReconstruction ?? null,
     }))
     .sort((left, right) => left.sourceOrdinal - right.sourceOrdinal)
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sources: ordered,
   }
 }
@@ -20462,32 +20159,14 @@ function buildClosedImportPolicySnapshotV1(sources) {
     .map((source) => ({
       sourceOrdinal: Number(source.sourceOrdinal),
       sourceFingerprint: String(source.sourceFingerprint),
-      ruleVersion: String(source.ruleVersion),
-      engineVersion: source.engineVersion == null ? null : String(source.engineVersion),
+      sourceDefinition: source.sourceDefinition,
       output: buildImportPolicyOutputV1(source.output || {}),
     }))
     .sort((left, right) => left.sourceOrdinal - right.sourceOrdinal)
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sources: ordered,
   }
-}
-
-/** @deprecated leaf name retained for tests; prefer per-source freeze builders. */
-function buildFrozenImportSnapshotV1(options = {}) {
-  return buildImportCanonicalFreezeSourceV1({
-    sourceOrdinal: options.sourceOrdinal,
-    attribution: options.resolvedAttribution ?? options.attribution,
-    context: options.frozenContext ?? options.context ?? null,
-    sourceFingerprint: options.sourceFingerprint,
-    ruleVersion: options.ruleVersion,
-    engineVersion: options.engineVersion,
-    rule: options.rule,
-    appliedPolicyRules: options.appliedPolicyRules,
-    appliedEngineRules: options.appliedEngineRules,
-    userGroups: options.userGroups,
-    output: options.output ?? options.policySnapshot ?? {},
-  })
 }
 
 function foldAttendanceImportPreparedTargets({ items, existingMap, orgId, sourceBatchId }) {
@@ -20561,29 +20240,10 @@ function foldAttendanceImportPreparedTargets({ items, existingMap, orgId, source
     const compatibilityMetadata = normalizeMetadata(prepared.metaJson)
     const sourceOrdinals = group.items.map((item) => item.sourceOrdinal)
     const freezeSources = group.items.map((item) => {
-      if (item.canonicalFreezeSource) return item.canonicalFreezeSource
-      // Fail closed to unsupported rather than inventing a resolved_v2 leaf.
-      return buildImportCanonicalFreezeSourceV1({
-        sourceOrdinal: item.sourceOrdinal,
-        attribution: {
-          posture: 'unsupported',
-          sourceSchemaVersion: null,
-          reason: 'missing',
-          sourceFingerprint: null,
-        },
-        context: null,
-        ruleVersion: 'org-default-rule',
-        engineVersion: null,
-        rule: item.rule,
-        output: {
-          status: item.overrideMetrics?.status ?? null,
-          workMinutes: item.overrideMetrics?.workMinutes ?? null,
-          lateMinutes: item.overrideMetrics?.lateMinutes ?? null,
-          earlyLeaveMinutes: item.overrideMetrics?.earlyLeaveMinutes ?? null,
-          leaveMinutes: item.leaveMinutes ?? null,
-          overtimeMinutes: item.overtimeMinutes ?? null,
-        },
-      })
+      if (!item.canonicalFreezeSource) {
+        throw new Error('W4C3A_IMPORT_FREEZE_SOURCE_MISSING')
+      }
+      return item.canonicalFreezeSource
     })
     const folded = group.items.length > 1
     recordWrites.push({
@@ -23831,12 +23491,9 @@ module.exports = {
     firstDefinedPresence,
     buildRawImportEvidenceV1,
     buildImportRowProvenanceV1,
-    buildFrozenImportSnapshotV1,
-    buildImportAttendanceAttributionSnapshotV1,
     buildImportCanonicalFreezeSourceV1,
     buildClosedImportAttributionSnapshotV1,
     buildClosedImportPolicySnapshotV1,
-    computeImportPolicySourceFingerprintV1,
     resolveLegacyImportRowSourceKind,
     sha256HexOfUtf8,
   },
@@ -28147,12 +27804,95 @@ module.exports = {
 	          // and closed policy source leaf for recordWrite wrappers.
 	          let canonicalFreezeSource = null
 	          if (prepareOnly) {
-	            const attributionSnapshot = buildImportAttendanceAttributionSnapshotV1({
-	              orgId,
-	              userId: rowUserId,
-	              resolution: importAttribution.resolution,
-	              nowIso: new Date().toISOString(),
-	            })
+	            const importProofPort = attendanceW4SegmentCalculationPort
+	            if (
+	              !importProofPort
+	              || typeof importProofPort.buildImportAttributionFreeze !== 'function'
+	              || typeof importProofPort.buildImportPolicySourceProof !== 'function'
+	            ) {
+	              throw new HttpError(
+	                503,
+	                'ATTENDANCE_IMPORT_FREEZE_PROOF_HOST_MISSING',
+	                'ATTENDANCE_IMPORT_FREEZE_PROOF_HOST_MISSING'
+	              )
+	            }
+	            let attributionSnapshot = {
+	              posture: 'unsupported',
+	              sourceSchemaVersion: null,
+	              reason: importAttribution.resolution ? 'unresolved' : 'missing',
+	              sourceFingerprint: null,
+	            }
+	            let importAttributionReconstruction = null
+	            const resolvedImport = importAttribution.resolution
+	            const fullWinner = resolvedImport?.kind === 'resolved'
+	              ? resolvedImport.fullWinner
+	              : null
+	            if (fullWinner) {
+	              const absoluteStartAt = toRawImportInstantIso(fullWinner.absoluteWindow?.startAt)
+	              const absoluteEndAt = toRawImportInstantIso(fullWinner.absoluteWindow?.endAt)
+	              const attributionStartAt = toRawImportInstantIso(fullWinner.attributionWindow?.startAt)
+	              const attributionEndAt = toRawImportInstantIso(fullWinner.attributionWindow?.endAt)
+	              const approvedOvertimeWindows = (Array.isArray(resolvedImport.approvedOvertimeWindows)
+	                ? resolvedImport.approvedOvertimeWindows
+	                : []
+	              ).flatMap((entry) => {
+	                const anchor = parseOvertimeAttributionV1(entry?.anchor)
+	                const approvedEndAt = toRawImportInstantIso(entry?.approvedEndAt)
+	                if (
+	                  !anchor
+	                  || !approvedEndAt
+	                  || String(entry?.orgId) !== String(orgId)
+	                  || String(entry?.userId) !== String(rowUserId)
+	                  || String(entry?.workDate) !== String(resolvedImport.workDate)
+	                  || String(entry?.shiftId) !== String(resolvedImport.shiftId)
+	                  || anchor.orgId !== String(orgId)
+	                  || anchor.userId !== String(rowUserId)
+	                  || anchor.workDate !== String(resolvedImport.workDate)
+	                  || anchor.shiftId !== String(resolvedImport.shiftId)
+	                ) {
+	                  return []
+	                }
+	                return [{
+	                  requestId: String(entry.requestId),
+	                  approvedEndAt,
+	                  anchor,
+	                }]
+	              })
+	              if (absoluteStartAt && absoluteEndAt && attributionStartAt && attributionEndAt) {
+	                let attributionProof
+	                try {
+	                  attributionProof = importProofPort.buildImportAttributionFreeze({
+	                    orgId,
+	                    userId: rowUserId,
+	                    workDate: String(resolvedImport.workDate),
+	                    shiftId: String(resolvedImport.shiftId),
+	                    reasonCode: String(resolvedImport.reasonCode ?? 'SINGLE_MATCHING_CANDIDATE'),
+	                    resolvedAt: new Date().toISOString(),
+	                    timezone: String(fullWinner.timezone),
+	                    workStartTime: String(fullWinner.workStartTime),
+	                    workEndTime: String(fullWinner.workEndTime),
+	                    isOvernight: Boolean(fullWinner.isOvernight),
+	                    candidateAbsoluteWindow: { startAt: absoluteStartAt, endAt: absoluteEndAt },
+	                    candidateAttributionWindow: {
+	                      startAt: attributionStartAt,
+	                      endAt: attributionEndAt,
+	                    },
+	                    attributionTailMinutes: Number(resolvedImport.attributionTailMinutes),
+	                    approvedOvertimeWindows,
+	                  })
+	                } catch (_error) {
+	                  throw new HttpError(
+	                    503,
+	                    'ATTENDANCE_IMPORT_ATTRIBUTION_PROOF_INVALID',
+	                    'ATTENDANCE_IMPORT_ATTRIBUTION_PROOF_INVALID'
+	                  )
+	                }
+	                if (attributionProof?.kind === 'resolved_v2') {
+	                  attributionSnapshot = attributionProof.attribution
+	                  importAttributionReconstruction = attributionProof.reconstruction
+	                }
+	              }
+	            }
 	            let frozenImportContext = null
 	            if (
 	              attributionSnapshot.posture === 'resolved_v2'
@@ -28190,16 +27930,51 @@ module.exports = {
 	            const userGroups = Array.isArray(policyResult?.userGroups)
 	              ? policyResult.userGroups
 	              : []
+	            let policySourceProof
+	            try {
+	              policySourceProof = importProofPort.buildImportPolicySourceProof({
+	                ruleVersion,
+	                engineVersion,
+	                rule: {
+	                  timezone: ruleForMetrics?.timezone ?? null,
+	                  workStartTime: ruleForMetrics?.workStartTime ?? null,
+	                  workEndTime: ruleForMetrics?.workEndTime ?? null,
+	                  lateGraceMinutes: freezeNonNegIntOrNull(ruleForMetrics?.lateGraceMinutes),
+	                  earlyGraceMinutes: freezeNonNegIntOrNull(
+	                    ruleForMetrics?.earlyGraceMinutes ?? ruleForMetrics?.earlyLeaveGraceMinutes
+	                  ),
+	                  roundingMinutes: freezeNonNegIntOrNull(ruleForMetrics?.roundingMinutes),
+	                  severeLateThresholdMinutes: freezeNonNegIntOrNull(
+	                    ruleForMetrics?.severeLateThresholdMinutes
+	                  ),
+	                  absenceLateThresholdMinutes: freezeNonNegIntOrNull(
+	                    ruleForMetrics?.absenceLateThresholdMinutes
+	                  ),
+	                  workingDays: Array.isArray(ruleForMetrics?.workingDays)
+	                    ? ruleForMetrics.workingDays
+	                    : [],
+	                },
+	                policy: {
+	                  appliedRules: appliedPolicyRules,
+	                  userGroups,
+	                },
+	                engine: engineVersion === null
+	                  ? null
+	                  : { appliedRules: appliedEngineRules },
+	              })
+	            } catch (_error) {
+	              throw new HttpError(
+	                503,
+	                'ATTENDANCE_IMPORT_POLICY_PROOF_INVALID',
+	                'ATTENDANCE_IMPORT_POLICY_PROOF_INVALID'
+	              )
+	            }
 	            canonicalFreezeSource = buildImportCanonicalFreezeSourceV1({
 	              sourceOrdinal,
 	              attribution: attributionSnapshot,
+	              importAttributionReconstruction,
 	              context: frozenImportContext,
-	              ruleVersion,
-	              engineVersion,
-	              rule: ruleForMetrics,
-	              appliedPolicyRules,
-	              appliedEngineRules,
-	              userGroups,
+	              policySourceProof,
 	              output: {
 	                status: finalMetrics.status,
 	                workMinutes: finalMetrics.workMinutes,

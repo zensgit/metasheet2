@@ -8,6 +8,10 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { parseRawImportEvidenceV1 } from '../../src/attendance/w4c3a-legacy-execution-plan'
+import {
+  buildAttendanceImportAttributionFreezeV1,
+  buildAttendanceImportPolicySourceProofV1,
+} from '../../src/attendance/w4c3a-import-proof'
 
 const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -21,18 +25,13 @@ const attendancePlugin = require(PLUGIN) as {
     firstDefinedPresence(...candidates: unknown[]): unknown
     buildRawImportEvidenceV1(options: Record<string, unknown>): Record<string, unknown>
     buildImportRowProvenanceV1(options: Record<string, unknown>): Record<string, unknown>
-    buildFrozenImportSnapshotV1(options: Record<string, unknown>): Record<string, unknown>
-    buildImportAttendanceAttributionSnapshotV1(
-      options: Record<string, unknown>,
-    ): Record<string, unknown>
     buildImportCanonicalFreezeSourceV1(options: Record<string, unknown>): Record<string, unknown>
     buildClosedImportAttributionSnapshotV1(
       sources: readonly Record<string, unknown>[],
-    ): { schemaVersion: 1; sources: readonly Record<string, unknown>[] }
+    ): { schemaVersion: 2; sources: readonly Record<string, unknown>[] }
     buildClosedImportPolicySnapshotV1(
       sources: readonly Record<string, unknown>[],
-    ): { schemaVersion: 1; sources: readonly Record<string, unknown>[] }
-    computeImportPolicySourceFingerprintV1(options: Record<string, unknown>): string
+    ): { schemaVersion: 2; sources: readonly Record<string, unknown>[] }
     resolveLegacyImportRowSourceKind(options: {
       payload: Record<string, unknown>
       csvFileId?: string | null
@@ -55,6 +54,26 @@ const attendancePlugin = require(PLUGIN) as {
 const helpers = attendancePlugin.__attendanceImportForTests
 const HEX_A = 'a'.repeat(64)
 const HEX_B = 'b'.repeat(64)
+
+function policySourceProof() {
+  return buildAttendanceImportPolicySourceProofV1({
+    ruleVersion: 'org-default-rule',
+    engineVersion: null,
+    rule: {
+      timezone: 'Asia/Shanghai',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      lateGraceMinutes: 0,
+      earlyGraceMinutes: 0,
+      roundingMinutes: 1,
+      severeLateThresholdMinutes: 30,
+      absenceLateThresholdMinutes: 60,
+      workingDays: [1, 2, 3, 4, 5],
+    },
+    policy: { appliedRules: [], userGroups: [] },
+    engine: null,
+  })
+}
 
 describe('W4C-3a raw import evidence producer', () => {
   it('distinguishes present-null from absent for fields and metrics', () => {
@@ -280,18 +299,9 @@ describe('W4C-3a raw import evidence producer', () => {
       helpers.buildImportCanonicalFreezeSourceV1({
         sourceOrdinal: ordinal,
         attribution: unsupported,
+        importAttributionReconstruction: null,
         context: ordinal === 0 ? context : null,
-        ruleVersion: 'org-default-rule',
-        engineVersion: null,
-        rule: {
-          timezone: 'Asia/Shanghai',
-          workStartTime: '09:00',
-          workEndTime: '18:00',
-          lateGraceMinutes: 0,
-          earlyGraceMinutes: 0,
-          roundingMinutes: 1,
-          workingDays: [1, 2, 3, 4, 5],
-        },
+        policySourceProof: policySourceProof(),
         output: {
           status: 'normal',
           workMinutes: 0,
@@ -306,26 +316,39 @@ describe('W4C-3a raw import evidence producer', () => {
     const attributionSnapshot = helpers.buildClosedImportAttributionSnapshotV1(sources)
     const policySnapshot = helpers.buildClosedImportPolicySnapshotV1(sources)
     expect(attributionSnapshot).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       sources: [
-        { sourceOrdinal: 0, attribution: unsupported, context },
-        { sourceOrdinal: 1, attribution: unsupported, context: null },
-        { sourceOrdinal: 2, attribution: unsupported, context: null },
+        {
+          sourceOrdinal: 0,
+          attribution: unsupported,
+          context,
+          importAttributionReconstruction: null,
+        },
+        {
+          sourceOrdinal: 1,
+          attribution: unsupported,
+          context: null,
+          importAttributionReconstruction: null,
+        },
+        {
+          sourceOrdinal: 2,
+          attribution: unsupported,
+          context: null,
+          importAttributionReconstruction: null,
+        },
       ],
     })
-    expect(policySnapshot.schemaVersion).toBe(1)
+    expect(policySnapshot.schemaVersion).toBe(2)
     expect(policySnapshot.sources.map((row) => row.sourceOrdinal)).toEqual([0, 1, 2])
     for (const row of policySnapshot.sources) {
       expect(Object.keys(row).sort()).toEqual([
-        'engineVersion',
         'output',
-        'ruleVersion',
+        'sourceDefinition',
         'sourceFingerprint',
         'sourceOrdinal',
       ])
       expect(row.sourceFingerprint).toMatch(/^[0-9a-f]{64}$/)
-      expect(row.ruleVersion).toBe('org-default-rule')
-      expect(row.engineVersion).toBeNull()
+      expect(row.sourceDefinition).toEqual(policySourceProof().sourceDefinition)
       expect(Object.keys(row.output as object).sort()).toEqual([
         'earlyLeaveMinutes',
         'lateMinutes',
@@ -340,72 +363,41 @@ describe('W4C-3a raw import evidence producer', () => {
     // Single-target wrapper uses the same shape.
     const single = helpers.buildClosedImportAttributionSnapshotV1([sources[1]])
     expect(single).toEqual({
-      schemaVersion: 1,
-      sources: [{ sourceOrdinal: 0, attribution: unsupported, context }],
+      schemaVersion: 2,
+      sources: [{
+        sourceOrdinal: 0,
+        attribution: unsupported,
+        context,
+        importAttributionReconstruction: null,
+      }],
     })
-
-    // Fingerprint ignores mutable metric bytes — same rule inputs ⇒ same hash.
-    const fpA = helpers.computeImportPolicySourceFingerprintV1({
-      ruleVersion: 'org-default-rule',
-      engineVersion: null,
-      rule: { timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', workingDays: [1, 5, 3] },
-    })
-    const fpB = helpers.computeImportPolicySourceFingerprintV1({
-      ruleVersion: 'org-default-rule',
-      engineVersion: null,
-      rule: { timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', workingDays: [5, 1, 3] },
-    })
-    expect(fpA).toBe(fpB)
-    expect(fpA).toMatch(/^[0-9a-f]{64}$/)
   })
 
-  it('builds unsupported/resolved_v2 attribution snapshots from import resolution', () => {
-    expect(
-      helpers.buildImportAttendanceAttributionSnapshotV1({
-        orgId: 'org-1',
-        userId: 'user-1',
-        resolution: null,
-      }),
-    ).toEqual({
-      posture: 'unsupported',
-      sourceSchemaVersion: null,
-      reason: 'missing',
-      sourceFingerprint: null,
-    })
-
+  it('keeps import attribution and policy proof algorithms core-owned', () => {
     const absoluteStart = '2026-07-30T01:00:00.000Z'
     const absoluteEnd = '2026-07-30T10:00:00.000Z'
-    const resolved = helpers.buildImportAttendanceAttributionSnapshotV1({
+    const resolved = buildAttendanceImportAttributionFreezeV1({
       orgId: 'org-1',
       userId: 'user-1',
-      nowIso: '2026-07-30T12:00:00.000Z',
-      resolution: {
-        kind: 'resolved',
-        workDate: '2026-07-30',
-        shiftId: 'shift-1',
-        reasonCode: 'CURRENT_DAY_CONTAINING_SHIFT',
-        attributionTailMinutes: 0,
-        approvedOvertimeWindows: [],
-        fullWinner: {
-          workStartTime: '09:00',
-          workEndTime: '18:00',
-          timezone: 'Asia/Shanghai',
-          isOvernight: false,
-          absoluteWindow: {
-            startAt: new Date(absoluteStart),
-            endAt: new Date(absoluteEnd),
-          },
-          attributionWindow: {
-            startAt: new Date(absoluteStart),
-            endAt: new Date(absoluteEnd),
-          },
-        },
-      },
+      workDate: '2026-07-30',
+      shiftId: 'shift-1',
+      reasonCode: 'CURRENT_DAY_CONTAINING_SHIFT',
+      resolvedAt: '2026-07-30T12:00:00.000Z',
+      timezone: 'Asia/Shanghai',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      isOvernight: false,
+      candidateAbsoluteWindow: { startAt: absoluteStart, endAt: absoluteEnd },
+      candidateAttributionWindow: { startAt: absoluteStart, endAt: absoluteEnd },
+      attributionTailMinutes: 0,
+      approvedOvertimeWindows: [],
     })
-    expect(resolved.posture).toBe('resolved_v2')
+    expect(resolved.kind).toBe('resolved_v2')
     expect(resolved).toMatchObject({
-      posture: 'resolved_v2',
-      value: {
+      kind: 'resolved_v2',
+      attribution: {
+        posture: 'resolved_v2',
+        value: {
         schemaVersion: 2,
         orgId: 'org-1',
         userId: 'user-1',
@@ -416,11 +408,12 @@ describe('W4C-3a raw import evidence producer', () => {
         attributionWindow: { startAt: absoluteStart, endAt: absoluteEnd },
         attributionTailMinutes: 0,
         extendedByApprovedOvertime: false,
+        },
       },
     })
-    expect((resolved.value as { windowEvidenceFingerprint: string }).windowEvidenceFingerprint).toMatch(
-      /^[0-9a-f]{64}$/,
-    )
+    expect(helpers).not.toHaveProperty('buildImportAttendanceAttributionSnapshotV1')
+    expect(helpers).not.toHaveProperty('computeImportPolicySourceFingerprintV1')
+    expect(helpers).not.toHaveProperty('buildFrozenImportSnapshotV1')
   })
 
   it('fold emits identical closed freeze wrappers for single and multi-source targets', () => {
@@ -434,10 +427,9 @@ describe('W4C-3a raw import evidence producer', () => {
         reason: 'unresolved',
         sourceFingerprint: null,
       },
+      importAttributionReconstruction: null,
       context: null,
-      ruleVersion: 'org-default-rule',
-      engineVersion: null,
-      rule: { timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', workingDays: [1] },
+      policySourceProof: policySourceProof(),
       output: {
         status: 'late',
         workMinutes: 60,
@@ -455,10 +447,9 @@ describe('W4C-3a raw import evidence producer', () => {
         reason: 'unresolved',
         sourceFingerprint: null,
       },
+      importAttributionReconstruction: null,
       context: null,
-      ruleVersion: 'org-default-rule',
-      engineVersion: null,
-      rule: { timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', workingDays: [1] },
+      policySourceProof: policySourceProof(),
       output: {
         status: 'normal',
         workMinutes: 480,
@@ -528,19 +519,19 @@ describe('W4C-3a raw import evidence producer', () => {
       policySnapshot: { schemaVersion: number; sources: { sourceOrdinal: number }[] }
     }
     expect(write.sourceOrdinals).toEqual([3, 4])
-    expect(write.attributionSnapshot.schemaVersion).toBe(1)
-    expect(write.policySnapshot.schemaVersion).toBe(1)
+    expect(write.attributionSnapshot.schemaVersion).toBe(2)
+    expect(write.policySnapshot.schemaVersion).toBe(2)
     expect(write.attributionSnapshot.sources.map((s) => s.sourceOrdinal)).toEqual([3, 4])
     expect(write.policySnapshot.sources.map((s) => s.sourceOrdinal)).toEqual([3, 4])
     expect(Object.keys(write.attributionSnapshot.sources[0] as object).sort()).toEqual([
       'attribution',
       'context',
+      'importAttributionReconstruction',
       'sourceOrdinal',
     ])
     expect(Object.keys(write.policySnapshot.sources[0] as object).sort()).toEqual([
-      'engineVersion',
       'output',
-      'ruleVersion',
+      'sourceDefinition',
       'sourceFingerprint',
       'sourceOrdinal',
     ])
@@ -567,10 +558,17 @@ describe('W4C-3a raw import evidence producer', () => {
       policySnapshot: { schemaVersion: number; sources: unknown[] }
     }
     expect(singleWrite.sourceOrdinals).toEqual([7])
-    expect(singleWrite.attributionSnapshot.schemaVersion).toBe(1)
-    expect(singleWrite.policySnapshot.schemaVersion).toBe(1)
+    expect(singleWrite.attributionSnapshot.schemaVersion).toBe(2)
+    expect(singleWrite.policySnapshot.schemaVersion).toBe(2)
     expect(singleWrite.attributionSnapshot.sources).toHaveLength(1)
     expect(singleWrite.policySnapshot.sources).toHaveLength(1)
+
+    expect(() => fold({
+      items: [{ ...common, sourceOrdinal: 8, updateFirstInAt: null }],
+      existingMap: new Map(),
+      orgId: 'org-1',
+      sourceBatchId: common.sourceBatchId,
+    })).toThrow('W4C3A_IMPORT_FREEZE_SOURCE_MISSING')
   })
 
   it('classifies legacy row source kinds for provenance selection', () => {
@@ -610,7 +608,10 @@ describe('W4C-3a prepareOnly rawEvidence wiring (static + mutation)', () => {
     expect(source).toMatch(/includeFullWinner:\s*true/)
     expect(source).toContain('buildRawImportEvidenceV1')
     expect(source).toContain('buildImportRowProvenanceV1')
-    expect(source).toContain('buildImportAttendanceAttributionSnapshotV1')
+    expect(source).toContain('buildImportAttributionFreeze')
+    expect(source).toContain('buildImportPolicySourceProof')
+    expect(source).not.toMatch(/function buildImportAttendanceAttributionSnapshotV1/)
+    expect(source).not.toMatch(/function computeImportPolicySourceFingerprintV1/)
     expect(source).toContain('buildClosedImportAttributionSnapshotV1')
     expect(source).toContain('buildClosedImportPolicySnapshotV1')
     expect(source).toContain('buildW4ShadowFrozenContextV1')

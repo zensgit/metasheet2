@@ -348,6 +348,11 @@ export type AttendanceImportPolicySourceProjectionInputV1 = Omit<
   'schemaVersion'
 >
 
+export type AttendanceImportPolicySourceProofV1 = Readonly<{
+  sourceDefinition: AttendanceImportPolicySourceProjectionV1
+  sourceFingerprint: string
+}>
+
 function normalizedStringSet(value: unknown): readonly string[] {
   if (!Array.isArray(value)) fail()
   return Object.freeze([...new Set(value.map(nonEmptyString))].sort(compareStrings))
@@ -455,6 +460,17 @@ export function computeAttendanceImportPolicySourceFingerprintV1(
     .update(Buffer.from([0]))
     .update(canonicalAttendanceJsonV1(verified), 'utf8')
     .digest('hex')
+}
+
+export function buildAttendanceImportPolicySourceProofV1(
+  input: AttendanceImportPolicySourceProjectionInputV1,
+): AttendanceImportPolicySourceProofV1 {
+  const sourceDefinition = buildAttendanceImportPolicySourceProjectionV1(input)
+  return Object.freeze({
+    sourceDefinition,
+    sourceFingerprint:
+      computeAttendanceImportPolicySourceFingerprintV1(sourceDefinition),
+  })
 }
 
 export function verifyAttendanceImportPolicySourceFingerprintV1(input: Readonly<{

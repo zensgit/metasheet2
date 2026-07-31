@@ -24,6 +24,14 @@ import type {
 import type {
   AttendanceSyncImportResponseV1,
 } from '../attendance/w4c3a-sync-import-kernel'
+import type {
+  AttendanceImportAttributionFreezeBuildResultV1,
+  AttendanceImportPolicySourceProjectionInputV1,
+  AttendanceImportPolicySourceProofV1,
+} from '../attendance/w4c3a-import-proof'
+import type {
+  AttendanceImportFrozenAttributionBuildInputV1,
+} from '../attendance/w4c2-frozen-attribution'
 
 export type {
   MultitableProvisioningFieldDescriptor,
@@ -1247,6 +1255,12 @@ export interface PluginServices {
     commitSyncImportPlan(
       input: CommitAttendanceSyncImportPlanFromHostInputV1,
     ): Promise<AttendanceSyncImportResponseV1>
+    buildImportAttributionFreeze(
+      input: AttendanceImportFrozenAttributionBuildInputV1,
+    ): AttendanceImportAttributionFreezeBuildResultV1
+    buildImportPolicySourceProof(
+      input: AttendanceImportPolicySourceProjectionInputV1,
+    ): AttendanceImportPolicySourceProofV1
     /**
      * W4C-3a — canonical lock witnesses for the synchronous import compatibility
      * bridge. Core owns key derivation; plugin-attendance only acquires these
