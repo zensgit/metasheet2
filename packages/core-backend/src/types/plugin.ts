@@ -1248,6 +1248,36 @@ export interface PluginServices {
         }
       | null
   }
+  /**
+   * W4C-3a P11/P23 — core-owned import rollback boundary. The plugin may pass
+   * only authenticated request identity plus the durable batch id. Core owns
+   * posture resolution, target enumeration, server ids, authorization
+   * rechecks, transaction/locks, and append-only reversal DML. No target list,
+   * SQL, transaction, resolver, or callback crosses this port.
+   */
+  attendanceImportRollback?: {
+    rollbackImportBatchV1(input: {
+      orgId: string
+      batchId: string
+      actorId: string
+      tokenSubjectUserId: string
+    }): Promise<
+      | {
+          kind: 'legacy'
+          id: string
+          deleted: number
+          status: 'rolled_back'
+        }
+      | {
+          kind: 'w4'
+          id: string
+          affected: number
+          restored: number
+          retired: number
+          status: 'rolled_back'
+        }
+    >
+  }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService
   rbacProvisioning: PluginRbacProvisioningService

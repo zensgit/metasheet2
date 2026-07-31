@@ -70,7 +70,10 @@ export type AttendanceLegacyPlanProcessorV1 = Readonly<{
 }>
 
 export function reservationIdentitiesFromJob(
-  job: AttendanceLegacyPlanWorkerJobV1,
+  job: Pick<
+    AttendanceLegacyPlanWorkerJobV1,
+    'orgId' | 'acceptedWritePosture' | 'batchId' | 'identityProofVector'
+  >,
 ): readonly VerifiedAttendanceOperationIdentityV1[] {
   const org = rehydrateVerifiedAttendanceOrgIdentityV1({
     orgId: job.orgId,
@@ -124,6 +127,9 @@ export function reservationIdentitiesFromJob(
   }
   return Object.freeze(identities)
 }
+
+export const deriveAttendanceLegacyPlanReservationIdentitiesV1 =
+  reservationIdentitiesFromJob
 
 export function deriveAttendanceLegacyPlanTargetIdentitiesV1(
   plan: VerifiedAttendanceLegacyPlanV1,
@@ -213,7 +219,7 @@ function assembleCallbacks(
       return authorizeAttendanceLegacyPlanFullImportFromJobV1(trx, job)
     },
     reservationIdentities(job) {
-      return reservationIdentitiesFromJob(job)
+      return deriveAttendanceLegacyPlanReservationIdentitiesV1(job)
     },
     async acquireClass10(trx, job, identities) {
       const legacyIdempotency =

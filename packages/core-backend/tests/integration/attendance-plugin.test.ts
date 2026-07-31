@@ -1684,8 +1684,29 @@ attendanceIntegrationDescribe(
 
     const runSuffix = Date.now().toString(36)
     const requesterId = `attendance-csv-standard-${runSuffix}`
+    const routePool = new Pool({
+      connectionString: process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL,
+    })
+    await routePool.query(
+      `INSERT INTO users (id, email, password_hash, is_active)
+       VALUES ($1, $2, 'no-login', true)
+       ON CONFLICT (id) DO UPDATE SET is_active = true`,
+      [requesterId, `${requesterId}@example.com`],
+    )
+    await routePool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, 'default', true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [requesterId],
+    )
+    await routePool.query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')
+       ON CONFLICT DO NOTHING`,
+      [requesterId],
+    )
+    await routePool.end()
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()

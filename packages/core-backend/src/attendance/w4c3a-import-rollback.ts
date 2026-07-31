@@ -7,6 +7,7 @@ import {
   createVerifiedAttendanceCalculationTargetIdentityV1,
   createVerifiedAttendanceOperationIdentityV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
+  rehydrateVerifiedAttendanceOperationIdentityV1,
   rehydrateVerifiedAttendanceOrgIdentityV1,
   type AttendanceAcceptedWritePostureV1,
   type AttendanceW4TransactionClientV1,
@@ -16,6 +17,7 @@ import {
   type AuthorizedAttendanceWriteContextV1,
 } from './w4c0-authorization'
 import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
+import { deriveAttendanceLegacyPlanReservationIdentitiesV1 } from './w4c3a-legacy-plan-processor'
 
 export const ATTENDANCE_IMPORT_ROLLBACK_ERROR_CODES_V1 = Object.freeze([
   'IMPORT_ROLLBACK_COMMAND_INVALID',
@@ -63,6 +65,9 @@ export interface AttendanceImportRollbackResultV1 {
   readonly rollbackOperationId: string
   readonly sourceBatchId: string
   readonly reversalCalculationIds: readonly string[]
+  readonly affected: number
+  readonly restored: number
+  readonly retired: number
 }
 
 export interface AttendanceImportRollbackAuthorizationTargetV1 {
@@ -263,6 +268,8 @@ export function createFrozenAttendanceImportRollbackCommandV1(
 }
 
 interface BatchRow {
+  identity_source_kind: string
+  source_root_id: string
   actor_id: string
   actor_posture: string
   token_subject_user_id: string | null
@@ -274,7 +281,16 @@ interface BatchRow {
 }
 
 interface SourceItemOperationRow {
+  entrypoint: string
   operation_id: string
+  batch_command_id: string | null
+  identity_source_kind: string
+  source_root_id: string | null
+  input_ordinal: number | string | null
+  proof_semantic_fingerprint: string | null
+  proof_user_id: string | null
+  proof_work_date: string | null
+  accepted_write_posture: string
   resolved_record_id: string | null
   resolved_calculation_id: string | null
   state: string
@@ -295,6 +311,16 @@ interface RecordRow {
   late_minutes: number
   early_leave_minutes: number
 }
+
+export type AttendanceImportRollbackSourceJobCandidateV1 = Readonly<{
+  id: string
+  status: string
+  w4ContractVersion: 1 | null
+  entrypoint: string | null
+  batchCommandId: string | null
+  acceptedWritePosture: AttendanceAcceptedWritePostureV1 | null
+  identityProofVector: unknown
+}>
 
 interface CalculationRow {
   id: string
@@ -529,29 +555,10 @@ function commandFingerprint(command: FrozenAttendanceImportRollbackCommandV1): s
     .digest('hex')
 }
 
-function sameJson(left: unknown, right: unknown): boolean {
-  try {
-    return canonicalAttendanceJsonV1(left) === canonicalAttendanceJsonV1(right)
-  } catch {
-    return false
-  }
-}
-
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false
   const expected = new Set(right)
   return expected.size === right.length && left.every((value) => expected.has(value))
-}
-
-function assertBatchAuthorization(batch: BatchRow, auth: AuthorizedAttendanceWriteContextV1): void {
-  if (
-    batch.actor_id !== auth.actorId ||
-    batch.actor_posture !== auth.actorPosture ||
-    (batch.token_subject_user_id ?? null) !== auth.tokenSubjectUserId ||
-    !sameJson(batch.subject_scope, auth.subjectScope)
-  ) {
-    fail('IMPORT_ROLLBACK_AUTHORIZATION_STALE')
-  }
 }
 
 async function readReplay(
@@ -586,7 +593,20 @@ async function readReplay(
     fail('IMPORT_ROLLBACK_CONFLICT')
   }
   const ids = (row.response_snapshot as { reversalCalculationIds?: unknown }).reversalCalculationIds
-  if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string')) {
+  const affected = (row.response_snapshot as { affected?: unknown }).affected
+  const restored = (row.response_snapshot as { restored?: unknown }).restored
+  const retired = (row.response_snapshot as { retired?: unknown }).retired
+  if (
+    !Array.isArray(ids) ||
+    ids.some((id) => typeof id !== 'string') ||
+    !Number.isSafeInteger(affected) ||
+    !Number.isSafeInteger(restored) ||
+    !Number.isSafeInteger(retired) ||
+    (affected as number) < 0 ||
+    (restored as number) < 0 ||
+    (retired as number) < 0 ||
+    (restored as number) + (retired as number) !== affected
+  ) {
     fail('IMPORT_ROLLBACK_CONFLICT')
   }
   return Object.freeze({
@@ -594,6 +614,9 @@ async function readReplay(
     rollbackOperationId: command.rollbackOperationId,
     sourceBatchId: command.sourceBatchId,
     reversalCalculationIds: Object.freeze([...ids] as string[]),
+    affected: affected as number,
+    restored: restored as number,
+    retired: retired as number,
   })
 }
 
@@ -628,50 +651,154 @@ async function insertOperation(
   )
 }
 
-async function executeRollback(
+const SOURCE_ITEM_COLUMNS = `entrypoint, operation_id::text, batch_command_id::text,
+  identity_source_kind, source_root_id::text, input_ordinal,
+  proof_semantic_fingerprint, proof_user_id::text, proof_work_date::text,
+  accepted_write_posture, resolved_record_id::text,
+  resolved_calculation_id::text, state`
+
+async function readSourceBatch(
   trx: AttendanceW4TransactionClientV1,
   command: FrozenAttendanceImportRollbackCommandV1,
-  authorizationPort: AttendanceImportRollbackAuthorizationPortV1,
-): Promise<AttendanceImportRollbackResultV1> {
-  const auth = requireAuthorizedCapabilityForEntrypointV1(command.authorization, 'import_rollback')
-
-  const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(command.orgId)
-  await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
-
-  const batchResult = await trx.query(
-    `SELECT actor_id, actor_posture, token_subject_user_id, subject_scope,
-            accepted_write_posture, command_fingerprint, item_count, state
+  lock: boolean,
+): Promise<BatchRow> {
+  const result = await trx.query(
+    `SELECT identity_source_kind, source_root_id::text, actor_id, actor_posture,
+            token_subject_user_id, subject_scope, accepted_write_posture,
+            command_fingerprint, item_count, state
        FROM attendance_result_operation_batches
       WHERE org_id = $1 AND entrypoint = $2 AND batch_command_id = $3::uuid
-      FOR UPDATE`,
+      ${lock ? 'FOR UPDATE' : ''}`,
     [command.orgId, command.sourceBatchEntrypoint, command.sourceBatchId],
   )
-  if (batchResult.rows.length !== 1) fail('IMPORT_ROLLBACK_NOT_FOUND')
-  const batch = batchResult.rows[0] as unknown as BatchRow
+  if (result.rows.length !== 1) fail('IMPORT_ROLLBACK_NOT_FOUND')
+  const batch = result.rows[0] as unknown as BatchRow
   if (
+    batch.identity_source_kind !== command.sourceBatchEntrypoint ||
+    batch.source_root_id !== command.sourceBatchId ||
     batch.state !== 'completed' ||
-    batch.command_fingerprint !== command.expectedSourceBatchFingerprint
+    batch.command_fingerprint !== command.expectedSourceBatchFingerprint ||
+    !Number.isSafeInteger(batch.item_count) ||
+    batch.item_count < 1
   ) {
     fail('IMPORT_ROLLBACK_BATCH_CHANGED')
   }
-  assertBatchAuthorization(batch, auth)
+  return batch
+}
 
-  const sourceItemsResult = await trx.query(
-    `SELECT operation_id::text, resolved_record_id::text,
-            resolved_calculation_id::text, state
+async function readSourceItemOperations(
+  trx: AttendanceW4TransactionClientV1,
+  command: FrozenAttendanceImportRollbackCommandV1,
+): Promise<SourceItemOperationRow[]> {
+  const result = await trx.query(
+    `SELECT ${SOURCE_ITEM_COLUMNS}
        FROM attendance_result_operations
       WHERE org_id = $1
         AND entrypoint = $2
         AND batch_command_id = $3::uuid
-      ORDER BY input_ordinal, operation_id
-      FOR UPDATE`,
+      ORDER BY input_ordinal, operation_id`,
     [command.orgId, command.sourceBatchEntrypoint, command.sourceBatchId],
   )
-  const sourceItems = sourceItemsResult.rows as unknown as SourceItemOperationRow[]
+  return result.rows as unknown as SourceItemOperationRow[]
+}
+
+export async function readAttendanceImportRollbackSourceJobsV1(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+  batchId: string,
+  lock = false,
+): Promise<AttendanceImportRollbackSourceJobCandidateV1[]> {
+  const result = await trx.query(
+    `SELECT id::text, status, w4_contract_version, w4_entrypoint,
+            w4_batch_command_id::text, w4_accepted_write_posture,
+            w4_identity_proof_vector
+       FROM attendance_import_jobs
+      WHERE org_id = $1 AND batch_id = $2::uuid
+      ORDER BY id
+      ${lock ? 'FOR UPDATE' : ''}`,
+    [orgId, batchId],
+  )
+  return result.rows.map((row) => {
+    const version = row.w4_contract_version
+    if (version !== null && version !== 1) fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+    if (version === null) {
+      if (
+        row.w4_entrypoint !== null ||
+        row.w4_batch_command_id !== null ||
+        row.w4_accepted_write_posture !== null ||
+        row.w4_identity_proof_vector !== null
+      ) {
+        fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+      }
+    } else if (
+      row.w4_entrypoint !== 'import_batch' ||
+      row.w4_batch_command_id !== batchId ||
+      !['legacy_projection_only', 'shadow', 'authoritative'].includes(
+        String(row.w4_accepted_write_posture),
+      ) ||
+      !Array.isArray(row.w4_identity_proof_vector)
+    ) {
+      fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+    }
+    return Object.freeze({
+      id: String(row.id),
+      status: String(row.status),
+      w4ContractVersion: version as 1 | null,
+      entrypoint: typeof row.w4_entrypoint === 'string' ? row.w4_entrypoint : null,
+      batchCommandId:
+        typeof row.w4_batch_command_id === 'string' ? row.w4_batch_command_id : null,
+      acceptedWritePosture:
+        version === 1
+          ? (row.w4_accepted_write_posture as AttendanceAcceptedWritePostureV1)
+          : null,
+      identityProofVector: row.w4_identity_proof_vector,
+    })
+  })
+}
+
+export function deriveAttendanceImportRollbackSourceJobIdentitiesV1(
+  orgId: string,
+  batchId: string,
+  jobs: readonly AttendanceImportRollbackSourceJobCandidateV1[],
+) {
+  return jobs.flatMap((job) => {
+    if (job.w4ContractVersion === null) return []
+    if (job.acceptedWritePosture === null || job.batchCommandId !== batchId) {
+      fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+    }
+    return deriveAttendanceLegacyPlanReservationIdentitiesV1({
+      orgId,
+      acceptedWritePosture: job.acceptedWritePosture,
+      batchId,
+      identityProofVector: job.identityProofVector,
+    })
+  })
+}
+
+export async function lockAttendanceImportRollbackSourceJobsV1(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+  batchId: string,
+  candidates: readonly AttendanceImportRollbackSourceJobCandidateV1[],
+): Promise<void> {
+  const locked = await readAttendanceImportRollbackSourceJobsV1(trx, orgId, batchId, true)
+  if (canonicalAttendanceJsonV1(locked) !== canonicalAttendanceJsonV1(candidates)) {
+    fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+  }
+}
+
+function validateSourceItemOperations(
+  batch: BatchRow,
+  sourceItems: readonly SourceItemOperationRow[],
+): string[] {
   if (
     sourceItems.length !== batch.item_count ||
     sourceItems.some(
       (item) =>
+        item.entrypoint !== item.identity_source_kind.replace('_item', '_batch') ||
+        item.batch_command_id !== batch.source_root_id ||
+        item.source_root_id !== batch.source_root_id ||
+        item.accepted_write_posture !== batch.accepted_write_posture ||
         item.state !== 'completed' ||
         (item.resolved_record_id === null) !== (item.resolved_calculation_id === null),
     )
@@ -695,88 +822,196 @@ async function executeRollback(
       fail('IMPORT_ROLLBACK_BATCH_CHANGED')
     }
   }
-  let durableRecordIds = operationRecordIds
-  if (command.sourceBatchEntrypoint === 'import_batch') {
-    const durableSourceItems = await trx.query(
-      `SELECT record_id::text
-         FROM attendance_import_items
-        WHERE org_id = $1 AND batch_id = $2::uuid
-        ORDER BY id
-        FOR UPDATE`,
-      [command.orgId, command.sourceBatchId],
-    )
-    const durableSourceRecordIds = Array.from(
-      new Set(
-        durableSourceItems.rows
-          .map((row) => row.record_id)
-          .filter((value): value is string => typeof value === 'string'),
-      ),
-    ).sort()
-    if (
-      operationRecordIds.length > 0 &&
-      !sameStringSet(durableSourceRecordIds, operationRecordIds)
-    ) {
-      fail('IMPORT_ROLLBACK_BATCH_CHANGED')
-    }
-    durableRecordIds = durableSourceRecordIds
+  return operationRecordIds
+}
+
+async function readDurableImportRecordIds(
+  trx: AttendanceW4TransactionClientV1,
+  command: FrozenAttendanceImportRollbackCommandV1,
+  lock: boolean,
+): Promise<string[]> {
+  if (command.sourceBatchEntrypoint !== 'import_batch') return []
+  const result = await trx.query(
+    `SELECT record_id::text
+       FROM attendance_import_items
+      WHERE org_id = $1 AND batch_id = $2::uuid
+      ORDER BY id
+      ${lock ? 'FOR UPDATE' : ''}`,
+    [command.orgId, command.sourceBatchId],
+  )
+  return Array.from(
+    new Set(
+      result.rows
+        .map((row) => row.record_id)
+        .filter((value): value is string => typeof value === 'string'),
+    ),
+  ).sort()
+}
+
+async function lockLegacyImportBatchRow(
+  trx: AttendanceW4TransactionClientV1,
+  command: FrozenAttendanceImportRollbackCommandV1,
+): Promise<void> {
+  if (command.sourceBatchEntrypoint !== 'import_batch') return
+  const result = await trx.query(
+    `SELECT id::text
+       FROM attendance_import_batches
+      WHERE org_id = $1 AND id = $2::uuid
+      FOR UPDATE`,
+    [command.orgId, command.sourceBatchId],
+  )
+  if (result.rows.length !== 1) fail('IMPORT_ROLLBACK_NOT_FOUND')
+}
+
+function resolveDurableRecordIds(
+  command: FrozenAttendanceImportRollbackCommandV1,
+  operationRecordIds: readonly string[],
+  importRecordIds: readonly string[],
+): string[] {
+  if (
+    command.sourceBatchEntrypoint === 'import_batch' &&
+    operationRecordIds.length > 0 &&
+    !sameStringSet(importRecordIds, operationRecordIds)
+  ) {
+    fail('IMPORT_ROLLBACK_BATCH_CHANGED')
   }
-  const commandRecordIds = command.targets
-    .map((target) => target.attendanceRecordId)
-    .sort()
+  const durableRecordIds =
+    command.sourceBatchEntrypoint === 'import_batch' ? [...importRecordIds] : [...operationRecordIds]
+  const commandRecordIds = command.targets.map((target) => target.attendanceRecordId).sort()
   if (durableRecordIds.length === 0 || !sameStringSet(commandRecordIds, durableRecordIds)) {
     fail('IMPORT_ROLLBACK_BATCH_CHANGED')
   }
-  const closure = await trx.query(
-    `SELECT 1
-       FROM attendance_import_rollback_closures
-      WHERE org_id = $1 AND batch_id = $2::uuid
-      LIMIT 1`,
-    [command.orgId, command.sourceBatchId],
-  )
-  if (closure.rows.length !== 0) fail('IMPORT_ROLLBACK_CONFLICT')
+  return durableRecordIds
+}
 
-  const recordIds = durableRecordIds
-  const recordsResult = await trx.query(
+function sourceBatchIdentity(
+  org: ReturnType<typeof rehydrateVerifiedAttendanceOrgIdentityV1>,
+  command: FrozenAttendanceImportRollbackCommandV1,
+) {
+  const source =
+    command.sourceBatchEntrypoint === 'import_batch'
+      ? { sourceKind: 'import_batch', batchCommandId: command.sourceBatchId }
+      : { sourceKind: 'integration_batch', syncRunId: command.sourceBatchId }
+  return createVerifiedAttendanceOperationIdentityV1({
+    org,
+    kind: 'batch',
+    entrypoint: command.sourceBatchEntrypoint,
+    source,
+  })
+}
+
+function sourceItemIdentity(orgId: string, item: SourceItemOperationRow) {
+  return rehydrateVerifiedAttendanceOperationIdentityV1({
+    orgId,
+    entrypoint: item.entrypoint,
+    kind: 'item',
+    operationId: item.operation_id,
+    acceptedWritePosture: item.accepted_write_posture,
+    identitySourceKind: item.identity_source_kind,
+    sourceRootId: item.source_root_id,
+    inputOrdinal: item.input_ordinal,
+    proofSemanticFingerprint: item.proof_semantic_fingerprint,
+    proofUserId: item.proof_user_id,
+    proofWorkDate: item.proof_work_date,
+  })
+}
+
+async function lockCorrespondingOperationRows(
+  trx: AttendanceW4TransactionClientV1,
+  command: FrozenAttendanceImportRollbackCommandV1,
+  sourceOperationIds: readonly string[],
+): Promise<void> {
+  const rollbackOperationIds = [
+    command.rollbackOperationId,
+    ...command.targets.map((target) => target.reversalOperationId),
+  ]
+  const result = await trx.query(
+    `SELECT entrypoint, operation_id::text
+       FROM attendance_result_operations
+      WHERE org_id = $1
+        AND (
+          (entrypoint = $2 AND operation_id = ANY($3::uuid[]))
+          OR (entrypoint = 'import_rollback' AND operation_id = ANY($4::uuid[]))
+        )
+      ORDER BY entrypoint, operation_id
+      FOR UPDATE`,
+    [command.orgId, command.sourceBatchEntrypoint, sourceOperationIds, rollbackOperationIds],
+  )
+  const lockedSourceIds = result.rows
+    .filter((row) => row.entrypoint === command.sourceBatchEntrypoint)
+    .map((row) => String(row.operation_id))
+  if (!sameStringSet(lockedSourceIds, sourceOperationIds)) {
+    fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+  }
+}
+
+async function readTargetRecords(
+  trx: AttendanceW4TransactionClientV1,
+  command: FrozenAttendanceImportRollbackCommandV1,
+  recordIds: readonly string[],
+  lock: boolean,
+): Promise<Map<string, RecordRow>> {
+  const result = await trx.query(
     `SELECT id::text, user_id::text, work_date::text, current_calculation_id::text,
             projection_owner, visibility_state, visibility_reason, status,
             first_in_at::text, last_out_at::text, work_minutes,
             late_minutes, early_leave_minutes
        FROM attendance_records
       WHERE org_id = $1 AND id = ANY($2::uuid[])
-      ORDER BY id`,
+      ORDER BY user_id, work_date, id
+      ${lock ? 'FOR UPDATE' : ''}`,
     [command.orgId, recordIds],
   )
-  if (recordsResult.rows.length !== command.targets.length) fail('IMPORT_ROLLBACK_NOT_FOUND')
-  let records = new Map(
-    (recordsResult.rows as unknown as RecordRow[]).map((row) => [row.id, row]),
-  )
-  const authorizationInput = Object.freeze({
-    orgId: command.orgId,
-    sourceBatchEntrypoint: command.sourceBatchEntrypoint,
-    sourceBatchId: command.sourceBatchId,
-    sourceBatchActorId: batch.actor_id,
-    sourceBatchActorPosture: batch.actor_posture,
-    sourceBatchTokenSubjectUserId: batch.token_subject_user_id,
-    sourceBatchSubjectScope: batch.subject_scope,
-    authorization: auth,
-    targets: Object.freeze(recordIds.map((recordId) => {
-      const record = records.get(recordId)
-      if (!record) fail('IMPORT_ROLLBACK_NOT_FOUND')
-      return Object.freeze({
-        attendanceRecordId: record.id,
-        userId: record.user_id,
-        workDate: record.work_date,
-      })
-    })),
-  }) satisfies AttendanceImportRollbackAuthorizationRecheckInputV1
-  const authorizationWitness = await authorizationPort.recheckInTransaction(trx, authorizationInput)
-  requireRollbackAuthorizationWitness(authorizationWitness, authorizationInput)
+  if (result.rows.length !== command.targets.length) fail('IMPORT_ROLLBACK_NOT_FOUND')
+  return new Map((result.rows as unknown as RecordRow[]).map((row) => [row.id, row]))
+}
 
+async function executeRollback(
+  trx: AttendanceW4TransactionClientV1,
+  command: FrozenAttendanceImportRollbackCommandV1,
+  authorizationPort: AttendanceImportRollbackAuthorizationPortV1,
+): Promise<AttendanceImportRollbackResultV1> {
+  const auth = requireAuthorizedCapabilityForEntrypointV1(command.authorization, 'import_rollback')
+
+  const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(command.orgId)
+  await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
+
+  // Section 8.2 step 1: these reads derive candidates only. They acquire no
+  // row locks and confer no authority until the complete identity lock set is
+  // held and every durable row is re-read below.
+  const preflightBatch = await readSourceBatch(trx, command, false)
+  const preflightSourceItems = await readSourceItemOperations(trx, command)
+  const preflightSourceJobs = await readAttendanceImportRollbackSourceJobsV1(
+    trx,
+    command.orgId,
+    command.sourceBatchId,
+  )
+  const preflightOperationRecordIds = validateSourceItemOperations(
+    preflightBatch,
+    preflightSourceItems,
+  )
+  const preflightImportRecordIds = await readDurableImportRecordIds(trx, command, false)
+  const candidateRecordIds = resolveDurableRecordIds(
+    command,
+    preflightOperationRecordIds,
+    preflightImportRecordIds,
+  )
+  const preflightRecords = await readTargetRecords(trx, command, candidateRecordIds, false)
+  const recordIds = Array.from(preflightRecords.values())
+    .sort((left, right) =>
+      left.user_id.localeCompare(right.user_id) ||
+      left.work_date.localeCompare(right.work_date) ||
+      left.id.localeCompare(right.id),
+    )
+    .map((record) => record.id)
   const org = rehydrateVerifiedAttendanceOrgIdentityV1({
     orgId: command.orgId,
-    acceptedWritePosture: batch.accepted_write_posture,
+    acceptedWritePosture: preflightBatch.accepted_write_posture,
   })
-  const operationIdentities = [command.rollbackOperationId, ...command.targets.map((target) => target.reversalOperationId)].map(
+  const rollbackOperationIdentities = [
+    command.rollbackOperationId,
+    ...command.targets.map((target) => target.reversalOperationId),
+  ].map(
     (operationId) =>
       createVerifiedAttendanceOperationIdentityV1({
         org,
@@ -785,7 +1020,84 @@ async function executeRollback(
         source: { sourceKind: 'direct_import_rollback', clientOperationId: operationId },
       }),
   )
+  const operationIdentities = [
+    sourceBatchIdentity(org, command),
+    ...preflightSourceItems.map((item) => sourceItemIdentity(command.orgId, item)),
+    ...deriveAttendanceImportRollbackSourceJobIdentitiesV1(
+      command.orgId,
+      command.sourceBatchId,
+      preflightSourceJobs,
+    ),
+    ...rollbackOperationIdentities,
+  ]
   await acquireAttendanceResultOperationLocks(trx, operationIdentities)
+
+  // No source/operation row is locked before the complete canonical advisory
+  // set above. Corresponding operation rows precede batch and source-item rows.
+  await lockCorrespondingOperationRows(
+    trx,
+    command,
+    preflightSourceItems.map((item) => item.operation_id),
+  )
+  await lockAttendanceImportRollbackSourceJobsV1(
+    trx,
+    command.orgId,
+    command.sourceBatchId,
+    preflightSourceJobs,
+  )
+  const sourceItems = await readSourceItemOperations(trx, command)
+  if (
+    canonicalAttendanceJsonV1(sourceItems) !==
+    canonicalAttendanceJsonV1(preflightSourceItems)
+  ) {
+    fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+  }
+  const batch = await readSourceBatch(trx, command, true)
+  if (canonicalAttendanceJsonV1(batch) !== canonicalAttendanceJsonV1(preflightBatch)) {
+    fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+  }
+  await lockLegacyImportBatchRow(trx, command)
+  const lockedImportRecordIds = await readDurableImportRecordIds(trx, command, true)
+  const lockedRecordIds = resolveDurableRecordIds(
+    command,
+    validateSourceItemOperations(batch, sourceItems),
+    lockedImportRecordIds,
+  )
+  if (!sameStringSet(lockedRecordIds, recordIds)) fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+
+  const buildAuthorizationInput = (
+    records: ReadonlyMap<string, RecordRow>,
+  ): AttendanceImportRollbackAuthorizationRecheckInputV1 =>
+    Object.freeze({
+      orgId: command.orgId,
+      sourceBatchEntrypoint: command.sourceBatchEntrypoint,
+      sourceBatchId: command.sourceBatchId,
+      sourceBatchActorId: batch.actor_id,
+      sourceBatchActorPosture: batch.actor_posture,
+      sourceBatchTokenSubjectUserId: batch.token_subject_user_id,
+      sourceBatchSubjectScope: batch.subject_scope,
+      authorization: auth,
+      targets: Object.freeze(
+        recordIds.map((recordId) => {
+          const record = records.get(recordId)
+          if (!record) fail('IMPORT_ROLLBACK_NOT_FOUND')
+          return Object.freeze({
+            attendanceRecordId: record.id,
+            userId: record.user_id,
+            workDate: record.work_date,
+          })
+        }),
+      ),
+    })
+
+  // Completed replay is still authorization-gated, but needs no target locks
+  // or reversal DML. New work repeats this recheck from locked target facts.
+  const replayAuthorizationInput = buildAuthorizationInput(preflightRecords)
+  const replayAuthorizationWitness = await authorizationPort.recheckInTransaction(
+    trx,
+    replayAuthorizationInput,
+  )
+  requireRollbackAuthorizationWitness(replayAuthorizationWitness, replayAuthorizationInput)
 
   const fingerprint = commandFingerprint(command)
   const replay = await readReplay(trx, command, fingerprint)
@@ -804,7 +1116,7 @@ async function executeRollback(
   const targetsByRecord = new Map(command.targets.map((target) => [target.attendanceRecordId, target]))
 
   const targetIdentities = recordIds.map((recordId) => {
-    const record = records.get(recordId)
+    const record = preflightRecords.get(recordId)
     if (!record) fail('IMPORT_ROLLBACK_NOT_FOUND')
     return createVerifiedAttendanceCalculationTargetIdentityV1({
       org,
@@ -814,23 +1126,28 @@ async function executeRollback(
   })
   await acquireAttendanceCalculationTargetLocks(trx, targetIdentities)
 
-  const lockedRecordsResult = await trx.query(
-    `SELECT id::text, user_id::text, work_date::text, current_calculation_id::text,
-            projection_owner, visibility_state, visibility_reason, status,
-            first_in_at::text, last_out_at::text, work_minutes,
-            late_minutes, early_leave_minutes
-       FROM attendance_records
-      WHERE org_id = $1 AND id = ANY($2::uuid[])
-      ORDER BY id
-      FOR UPDATE`,
-    [command.orgId, recordIds],
-  )
-  if (lockedRecordsResult.rows.length !== command.targets.length) {
-    fail('IMPORT_ROLLBACK_NOT_FOUND')
+  const records = await readTargetRecords(trx, command, recordIds, true)
+  for (const recordId of recordIds) {
+    const before = preflightRecords.get(recordId)
+    const locked = records.get(recordId)
+    if (
+      !before ||
+      !locked ||
+      before.user_id !== locked.user_id ||
+      before.work_date !== locked.work_date
+    ) {
+      fail('IMPORT_ROLLBACK_BATCH_CHANGED')
+    }
   }
-  records = new Map(
-    (lockedRecordsResult.rows as unknown as RecordRow[]).map((row) => [row.id, row]),
+
+  const closure = await trx.query(
+    `SELECT 1
+       FROM attendance_import_rollback_closures
+      WHERE org_id = $1 AND batch_id = $2::uuid
+      LIMIT 1`,
+    [command.orgId, command.sourceBatchId],
   )
+  if (closure.rows.length !== 0) fail('IMPORT_ROLLBACK_CONFLICT')
 
   const currentIds = recordIds.map((recordId) => records.get(recordId)?.current_calculation_id)
   if (currentIds.some((id) => id === null || id === undefined)) fail('IMPORT_ROLLBACK_SUPERSEDED')
@@ -855,6 +1172,8 @@ async function executeRollback(
     (calculationsResult.rows as unknown as CalculationRow[]).map((row) => [row.attendance_record_id, row]),
   )
   const preimages = new Map<string, FrozenAttendanceImportRollbackPreimageV1>()
+  let restored = 0
+  let retired = 0
   for (const recordId of recordIds) {
     const record = records.get(recordId)
     const calculation = calculations.get(recordId)
@@ -871,11 +1190,20 @@ async function executeRollback(
     const expectedEntrypoint =
       command.sourceBatchEntrypoint === 'import_batch' ? 'legacy_import' : 'integration_sync'
     if (calculation.entrypoint !== expectedEntrypoint) fail('IMPORT_ROLLBACK_SUPERSEDED')
+    if (calculation.parent_preimage_snapshot === null) {
+      fail('IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE')
+    }
     const preimage = parseAttendanceImportRollbackPreimageV1(
       calculation.parent_preimage_snapshot,
     )
     preimages.set(recordId, preimage)
+    if (preimage.posture === 'present') restored += 1
+    else retired += 1
   }
+
+  const authorizationInput = buildAuthorizationInput(records)
+  const authorizationWitness = await authorizationPort.recheckInTransaction(trx, authorizationInput)
+  requireRollbackAuthorizationWitness(authorizationWitness, authorizationInput)
 
   await insertOperation(trx, {
     command,
@@ -1077,6 +1405,9 @@ async function executeRollback(
     rollbackOperationId: command.rollbackOperationId,
     sourceBatchId: command.sourceBatchId,
     reversalCalculationIds: command.targets.map((target) => target.reversalCalculationId),
+    affected: command.targets.length,
+    restored,
+    retired,
   }
   const sealed = await trx.query(
     `UPDATE attendance_result_operations
@@ -1107,6 +1438,16 @@ export async function rollbackAttendanceImportV1(
   command: FrozenAttendanceImportRollbackCommandV1,
   authorizationPort: AttendanceImportRollbackAuthorizationPortV1,
 ): Promise<AttendanceImportRollbackResultV1> {
+  return runAttendanceResultOperationTransactionV1(connection, (trx) =>
+    rollbackAttendanceImportInExistingTransactionV1(trx, command, authorizationPort),
+  )
+}
+
+export async function rollbackAttendanceImportInExistingTransactionV1(
+  trx: AttendanceW4TransactionClientV1,
+  command: FrozenAttendanceImportRollbackCommandV1,
+  authorizationPort: AttendanceImportRollbackAuthorizationPortV1,
+): Promise<AttendanceImportRollbackResultV1> {
   if (
     typeof command !== 'object' ||
     command === null ||
@@ -1117,7 +1458,5 @@ export async function rollbackAttendanceImportV1(
   }
   requireAuthorizedCapabilityForEntrypointV1(command.authorization, 'import_rollback')
   const verifiedPort = requireRollbackAuthorizationPort(authorizationPort)
-  return runAttendanceResultOperationTransactionV1(connection, (trx) =>
-    executeRollback(trx, command, verifiedPort),
-  )
+  return executeRollback(trx, command, verifiedPort)
 }

@@ -129,6 +129,7 @@ import {
 } from './attendance/w4c2-scheduled-run-ops-worker'
 import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
 import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
+import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2219,6 +2220,18 @@ export class MetaSheetServer {
                   }
                 },
               }
+            : undefined,
+        // W4C-3a P11/P23: separate least-privilege rollback port. The CJS
+        // plugin can submit only authenticated request identity + batch id;
+        // core owns target discovery, authorization, ids, locks and DML.
+        attendanceImportRollback:
+          manifest.name === 'plugin-attendance'
+            ? createAttendanceImportRollbackBoundaryV1({
+                acquireConnection: async () => {
+                  const client = await poolManager.get().getInternalPool().connect()
+                  return { client, release: () => client.release() }
+                },
+              })
             : undefined,
         automationRegistry,
         rbacProvisioning,

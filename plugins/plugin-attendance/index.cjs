@@ -6280,6 +6280,22 @@ function getOrgId(req) {
   return DEFAULT_ORG_ID
 }
 
+function getAuthenticatedOrgId(req) {
+  const user = req.user
+  const raw = user?.orgId ?? user?.workspaceId ?? user?.tenantId
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  return null
+}
+
+function getAuthenticatedUserId(req) {
+  const user = req.user
+  const raw = user?.id ?? user?.sub ?? user?.userId
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  return null
+}
+
 function getUserLabel(req, fallback) {
   const user = req.user
   if (typeof user?.name === 'string' && user.name.trim().length > 0) return user.name
@@ -40429,43 +40445,84 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'POST',
 	      '/api/attendance/import/rollback/:id',
-      withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+      async (req, res) => {
+        const actorId = getAuthenticatedUserId(req)
+        if (!actorId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        const orgId = getAuthenticatedOrgId(req)
+        if (!orgId) {
+          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+          return
+        }
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)
           return
         }
         try {
-          const batchRows = await db.query(
-            'SELECT * FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
-            [batchId, orgId]
-          )
-          if (!batchRows.length) {
+          const rollbackPort = context?.services?.attendanceImportRollback
+          if (!rollbackPort || typeof rollbackPort.rollbackImportBatchV1 !== 'function') {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'ATTENDANCE_IMPORT_ROLLBACK_HOST_PORT_MISSING',
+                message: 'Attendance import rollback is unavailable',
+              },
+            })
+            return
+          }
+          const result = await rollbackPort.rollbackImportBatchV1({
+            orgId,
+            batchId,
+            actorId,
+            tokenSubjectUserId: actorId,
+          })
+          if (result.kind === 'legacy') {
+            res.json({
+              ok: true,
+              data: {
+                id: result.id,
+                deleted: result.deleted,
+                status: result.status,
+              },
+            })
+            return
+          }
+          res.json({
+            ok: true,
+            data: {
+              id: result.id,
+              affected: result.affected,
+              restored: result.restored,
+              retired: result.retired,
+              status: result.status,
+            },
+          })
+        } catch (error) {
+          if (error?.code === 'IMPORT_ROLLBACK_NOT_FOUND') {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Import batch not found' } })
             return
           }
-          const batch = batchRows[0]
-          if (batch.status === 'rolled_back') {
-            res.json({ ok: true, data: { id: batchId, deleted: 0, status: 'rolled_back' } })
+          if (error?.code === 'IMPORT_ROLLBACK_AUTHORIZATION_STALE') {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
             return
           }
-
-          let deletedCount = 0
-          await db.transaction(async (trx) => {
-            const deleted = await trx.query(
-              'DELETE FROM attendance_records WHERE source_batch_id = $1 AND org_id = $2 RETURNING id',
-              [batchId, orgId]
-            )
-            deletedCount = deleted.length
-            await trx.query(
-              'UPDATE attendance_import_batches SET status = $3, updated_at = now() WHERE id = $1 AND org_id = $2',
-              [batchId, orgId, 'rolled_back']
-            )
-          })
-
-          res.json({ ok: true, data: { id: batchId, deleted: deletedCount, status: 'rolled_back' } })
-        } catch (error) {
+          if (error?.code === 'IMPORT_ROLLBACK_COMMAND_INVALID') {
+            res.status(400).json({ ok: false, error: { code: error.code, message: error.code } })
+            return
+          }
+          if (
+            error?.code === 'IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE' ||
+            error?.code === 'IMPORT_ROLLBACK_BATCH_CHANGED' ||
+            error?.code === 'IMPORT_ROLLBACK_SUPERSEDED' ||
+            error?.code === 'IMPORT_ROLLBACK_PREIMAGE_INVALID' ||
+            error?.code === 'IMPORT_ROLLBACK_CONFLICT'
+          ) {
+            res.status(409).json({ ok: false, error: { code: error.code, message: error.code } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -40473,7 +40530,7 @@ module.exports = {
           logger.error('Attendance import rollback failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rollback import batch' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
