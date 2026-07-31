@@ -22,6 +22,8 @@ merge、部署、UAT 和 flag 是不同状态，不互相替代。
 | C1 | 线性/复杂流程统一 Canvas 载体 | E2 head / `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` | Claude Opus 5 实现；Kimi exact-head 只读复审 | 真实视图写回、payload/dirty、promote 保真、flag fallback、删除下限及浏览器三 viewport | Draft PR #4649；required CI 绿 |
 | C2 | Canvas-first 工作区与表单/流程切换 | C1 head / `codex/approval-editor-c2-canvas-first-20260728` | `068d6e628` | Codex 实现；Kimi exact-head 对抗复审 | 默认画布、辅助模式、Form/Flow 往返、viewport 重测、ARIA、三 viewport 真浏览器 | Draft PR #4652；required CI 绿 |
 | F1-a | 表单 palette、插入槽和字段移动 | C2 head / `codex/approval-editor-f1-form-palette-20260728` | `6b926dce5` | Codex 实现；三轮独立子代理对抗复审 | 点击/typed drag 插入、handle-only 拖排、键盘/触屏等价、唯一字段 ID、三 viewport 真浏览器 | Draft PR #4657；required CI 绿 |
+| C3 | 合法边 `+` 与 typed 插入菜单 | C2 head / `codex/approval-editor-c3-edge-insert-agent-20260728` | `525915d3d` | 子代理实现；Codex exact-source 复核和修复 | 40x40 边控件、四类节点、renderer intent、无 default 条件图、parallel join 收敛、真浏览器 | Draft PR #4697；本地 required Web Tests / build PASS，PR CI 待结算 |
+| F1-b | 三栏表单 builder 与聚焦 inspector | F1-a head / `codex/approval-editor-f1b-form-builder-20260728` | `93a9527f2` | Codex 实现与复核 | 左 palette / 中画布 / 右 inspector、typed drag、键盘/触屏等价、flag OFF 回退、三 viewport 真浏览器 | Draft PR #4696；本地 required Web Tests / build PASS，PR CI 待结算 |
 
 ## 2. E1-b 执行事实
 
@@ -61,26 +63,26 @@ E2 只修改：
 
 ## 4. 状态矩阵
 
-| 面 | E1-b | E2 | C1 | C2 | F1-a |
-|---|---|---|---|---|---|
-| 设计方向 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 |
-| 实现 | 完成 | 完成 | 完成 | 完成 | 完成 |
-| 本地测试 | PASS | PASS | PASS | PASS | PASS |
-| 判别变异 | PASS | PASS | PASS（3 刀） | PASS（4 刀） | PASS（3 刀） |
-| 独立复审 | Codex | Codex | Kimi APPROVE，无 P1/P2；Codex复核修 P3 | Kimi APPROVE，无 P1/P2；Codex复核 | 三轮子代理复审；最终无 P1/P2 |
-| 提交 | 是 | 是 | 是 | 是 | 是 |
-| push / PR | #4643 | #4642 | #4649（stacked on #4642） | #4652（stacked on #4649） | #4657（stacked on #4652） |
-| required CI | PASS | PASS | PASS | PASS | PASS |
-| merge | 否 | 否 | 否 | 否 | 否 |
-| staging / UAT | 否 | 否 | 否 | 否 | 否 |
-| production flag | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF |
+| 面 | E1-b | E2 | C1 | C2 | F1-a | C3 | F1-b |
+|---|---|---|---|---|---|---|---|
+| 设计方向 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 | 已由 delta 计划约束 |
+| 实现 | 完成 | 完成 | 完成 | 完成 | 完成 | 完成 | 完成 |
+| 本地测试 | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
+| 判别变异 | PASS | PASS | PASS（3 刀） | PASS（4 刀） | PASS（3 刀） | focused guards + exact browser | focused guards + exact browser |
+| 独立复审 | Codex | Codex | Kimi APPROVE，无 P1/P2；Codex复核修 P3 | Kimi APPROVE，无 P1/P2；Codex复核 | 三轮子代理复审；最终无 P1/P2 | Codex 复核，修 2 个 P2 级合法性漂移 | Codex exact-source 复核 |
+| 提交 | 是 | 是 | 是 | 是 | 是 | 是 | 是 |
+| push / PR | #4643 | #4642 | #4649（stacked on #4642） | #4652（stacked on #4649） | #4657（stacked on #4652） | #4697（stacked on #4652） | #4696（stacked on #4657） |
+| required CI | PASS | PASS | PASS | PASS | PASS | PR 待结算 | PR 待结算 |
+| merge | 否 | 否 | 否 | 否 | 否 | 否 | 否 |
+| staging / UAT | 否 | 否 | 否 | 否 | 否 | 否 | 否 |
+| production flag | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF | 保持 OFF |
 
 ## 5. 后续顺序
 
-1. 审阅并按依赖落 #4642 -> #4649 -> #4652 -> #4657；#4643 是 verification-only 独立支线；
-2. C3 把节点按钮群改为边 `+`，C4/C5 收拖拽与 undo/redo；
-3. F1-a 已交付 palette/插入槽；F1-b 再抽表单 builder 并形成左 palette + 中画布 + 右字段检查器；
-4. F2/F3 补字段引用保护与附件 authoring；
+1. 审阅并按依赖落 #4642 -> #4649 -> #4652；其后 #4697 走 C3，#4657 -> #4696 走 F1；#4643 是 verification-only 独立支线；
+2. C3 已把节点按钮群改为边 `+`，C4/C5 继续收拖拽与 undo/redo；
+3. F1-a/F1-b 已交付 palette/插入槽和三栏 builder/inspector；
+4. F2/F3 补完整字段引用保护与附件 authoring；
 5. V1/V2、P1、X1 收版本、试运行、移动端/无障碍；
 6. T1 真浏览器 required CI 全闭合后才进入 staging UAT；
 7. production flag 和结构化辅助入口退役始终由 owner 单独决定。
@@ -140,3 +142,34 @@ E2 只修改：
   插入槽选择、字段插入、无横向溢出和零 console error；
 - 本刀未抽出 `ApprovalFormBuilder`，也未形成聚焦字段的独立右侧属性
   inspector；这些明确留给 F1-b，不以 #4657 提前关闭。
+
+## 9. C3 执行事实
+
+- 每条通过纯合法性判定的 edge 渲染一个 40x40 可聚焦 `+`；Enter/Space
+  打开菜单，Esc 关闭并返回原按钮；
+- menu 只列当前 edge 合法的 approval / cc / condition / parallel，parallel
+  branch 内不提供 nested parallel；
+- renderer 仅 emit typed insertion intent，父层调用既有 topology command；
+  节点卡内旧插入按钮群被移除，condition/parallel 的分支管理入口保留；
+- Codex 独立复核发现：条件图无显式 default 仍可合法执行，不能误锁；并行
+  分支仅“edge 存在”不足以开放写入，必须证明所有路径收敛到 configured join；
+- 修复后 focused specs 58/58，required Web Tests 360 文件 / 4335 测试，
+  `vue-tsc`、ESLint、production build 和 diff check 均通过；
+- 真 Chromium 验证 4 个节点 / 3 个 edge slot 插入后成为 5 / 4，menu 四项、
+  validity error 0；1440 下观察到 28px 全站顶栏既有横向溢出，画布、菜单、
+  inspector 本身无重叠，该 shell 残余记入 X1，未伪称整页零溢出。
+
+## 10. F1-b 执行事实
+
+- 新增 `ApprovalFormBuilder.vue` 与 `ApprovalFieldInspector.vue`；父 view 继续
+  拥有 draft、catalog 和保存/发布，不在子组件复制持久化合同；
+- flag ON 为左 palette、中字段画布、右聚焦 inspector；1024 降为两栏加
+  下方 inspector，390 为单列；flag OFF 保留旧全字段编辑列表；
+- palette 点击/拖入、字段 handle-only 拖排、插入槽、上下移动和
+  `Alt+ArrowUp/Down` 共用同一 fields 载体；typed payload 不放宽；
+- record-link catalog error/retry、detail、visibility、options 和 required
+  继续由同一 inspector 编辑，required source guard 同步到新 ownership；
+- required Web Tests 359 文件 / 4326 测试、`vue-tsc`、ESLint、production
+  build 和 diff check 均通过；
+- 真 Chromium 1440 / 1024 / 390 builder overflow 0、console error 0；桌面
+  拖入日期后字段数 3 -> 4，选中字段在右 inspector 改名成功。

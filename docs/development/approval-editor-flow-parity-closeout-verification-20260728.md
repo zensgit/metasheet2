@@ -1,13 +1,13 @@
-# 审批编辑器与流程编排 E1-b / E2 / C1 / C2 / F1-a 收尾验证（2026-07-28）
+# 审批编辑器与流程编排 E1-b / E2 / C1 / C2 / C3 / F1-a / F1-b 收尾验证（2026-07-31）
 
 **范围状态：PR VERIFIED / REQUIRED CI PASS**
 
 **整线状态：NOT FINAL**
 
 本报告只关闭 E1-b renderer/command feasibility、E2 第一刀无行为抽取、
-C1 线性/复杂流程统一载体、C2 canvas-first 工作区和 F1-a 表单 palette/
-插入移动交互。它不宣称审批编辑器已对标完成，不授权 C3-C5、
-F1-b/F2/F3、部署、UAT 或 flag 开启。
+C1 线性/复杂流程统一载体、C2 canvas-first 工作区、C3 边 `+` 插入，及
+F1-a/F1-b 表单 palette、三栏 builder/inspector 与插入移动交互。它不宣称
+审批编辑器已对标完成，不授权 C4/C5、F2/F3、部署、UAT 或 flag 开启。
 
 ## 1. Exact heads
 
@@ -18,6 +18,8 @@ F1-b/F2/F3、部署、UAT 或 flag 开启。
 | C1 | `codex/approval-editor-c1-unified-canvas-20260728` | `704276e1a` |
 | C2 | `codex/approval-editor-c2-canvas-first-20260728` | `068d6e628` |
 | F1-a | `codex/approval-editor-f1-form-palette-20260728` | `6b926dce5` |
+| C3 | `codex/approval-editor-c3-edge-insert-agent-20260728` | `525915d3d` |
+| F1-b | `codex/approval-editor-f1b-form-builder-20260728` | `93a9527f2` |
 | 文档 | `codex/approval-editor-flow-parity-plan-20260727` | 本报告提交后的 head |
 
 E2 起点为 `origin/main@9da0335b4`。canonical checkout 未被修改。
@@ -243,28 +245,63 @@ required PR checks: 3/3 PASS
 | 1024 x 900 | 上下堆叠 | 插入槽可选择 | 无 | 0 |
 | 390 x 844 | 上下堆叠 | 触屏选择后插入多行文本为字段 2 | 无 | 0 |
 
-F1-a 没有抽出独立 builder，也没有提供聚焦字段的右侧属性检查器；不能把
-上述证据扩张为 F1/F2/F3 或整条表单设计器完成。
+F1-a 本身没有抽出独立 builder，也没有提供聚焦字段的右侧属性检查器；
+该缺口由 F1-b 关闭，但完整命令层引用保护和附件 authoring 仍属于 F2/F3。
 
-## 8. 残余与 owner 门
+## 8. C3 与 F1-b 证据
 
-1. #4642/#4643/#4649/#4652/#4657 required CI 已绿；五者均未 merge；
-2. edge `+` 产品接线、节点按钮群移除属于 C3；
-3. 统一 drag feedback、undo/redo 属于 C4/C5；
-4. F1-a 已有 palette 点击/拖入、插入槽和字段移动；独立 builder、聚焦字段
-   右侧 inspector、完整引用保护和附件 authoring 仍属于 F1-b/F2/F3；
+### 8.1 C3 边 `+`
+
+- 每条合法 edge 一个 40x40 可聚焦 `+`；menu 提供当前上下文合法的
+  approval / cc / condition / parallel；
+- renderer 只发 typed intent，拓扑仍由纯 command 层修改；节点卡内旧插入
+  按钮群删除，branch management 保留；
+- nested parallel、malformed graph 和 stale edge 均 fail-closed；
+- 独立复核补上两个守卫：无显式 default 的合法 condition 不被误锁；并行
+  每条 branch path 必须收敛到 configured join；
+- focused 58/58、required Web Tests 360 文件 / 4335 测试、类型、lint、
+  production build、diff check 全 PASS；
+- 真 Chromium：4 -> 5 nodes、3 -> 4 edge slots、四项 menu、validity error 0。
+
+1440 viewport 的 `documentElement` 仍有 28px 横向溢出，截图定位为全站顶部
+导航既有宽度，而不是本刀 Canvas/menu/inspector 重叠。该事实保留到 X1，
+不能把 C3 证据写成“整页零溢出”。
+
+### 8.2 F1-b 三栏表单工作区
+
+- 新增 `ApprovalFormBuilder.vue` 和 `ApprovalFieldInspector.vue`；
+- flag ON 为左 palette、中字段画布、右聚焦 inspector；flag OFF 保留旧路径；
+- palette drag/click、插入槽、handle-only 拖排、上下移动和
+  `Alt+ArrowUp/Down` 共用同一 fields 载体；
+- options/detail/visibility/record-link catalog retry 全迁入同一 inspector，
+  未改变持久化 form schema；
+- required Web Tests 359 文件 / 4326 测试、类型、lint、production build、
+  diff check 全 PASS；
+- 真 Chromium 1440 / 1024 / 390 builder overflow 0、console error 0；桌面
+  拖入日期后字段数 3 -> 4，并在右侧把选中字段改名为“财务复核人”。
+
+## 9. 残余与 owner 门
+
+1. #4642/#4643/#4649/#4652/#4657 required CI 已绿；#4696/#4697 已开 Draft，
+   本地门已绿、PR CI 单独结算；全部未 merge；
+2. edge `+` 产品接线和节点按钮群移除已由 C3 完成；
+3. 统一 drag feedback、分支拖排和 undo/redo 属于 C4/C5；
+4. F1-a/F1-b 已有 palette、插入槽、字段移动和三栏 builder/inspector；完整
+   引用保护和附件 authoring 仍属于 F2/F3；
 5. 版本时间线/双画布 diff、路由预览整合、真实键盘/a11y 仍未完成；
 6. 390 虽无横向溢出，但 sticky bottom navigation 会遮住内容，属于 X1；
 7. production Canvas 仍默认 OFF；staging UAT 与生产 flag 为 owner 门；
 8. 结构化辅助编辑入口必须保留，直到键盘/辅助技术等价性有真浏览器证据。
 
-## 9. 结论
+## 10. 结论
 
 - `A1 renderer feasibility = PASS`；
 - `A2 first extraction = PR VERIFIED / CI PASS`；
 - `C1 unified carrier = PR VERIFIED / CI PASS`；
 - `C2 canvas-first = PR VERIFIED / CI PASS`；
 - `F1-a form palette and insertion = PR VERIFIED / CI PASS`；
+- `C3 edge insertion = DRAFT PR / LOCAL REQUIRED PASS / PR CI PENDING`；
+- `F1-b form builder and inspector = DRAFT PR / LOCAL REQUIRED PASS / PR CI PENDING`；
 - `approval editor parity line = IN PROGRESS / NOT FINAL`；
-- 下一开发点为 C3 边 `+` 产品化，并行推进 F1-b 表单 builder 和右侧字段
-  inspector。
+- 下一开发点为 C4/C5 语义拖拽、分支排序与 undo/redo，并行推进 F2/F3
+  引用保护和附件 authoring。
