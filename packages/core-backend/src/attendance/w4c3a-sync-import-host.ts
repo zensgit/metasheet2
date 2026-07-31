@@ -43,6 +43,8 @@ import {
   type AttendanceCanonicalImportRegistryClaimV1,
 } from './w4c3a-canonical-import-kernel'
 import {
+  ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1,
+  ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1,
   buildLegacyImportExecutionPlanPackageV1,
   sha256HexOfCanonicalJsonV1,
   type AttendanceLegacyRowSourceKindV1,
@@ -492,9 +494,13 @@ export function createAttendanceSyncImportHostV1(
               commandFingerprint: item.commandFingerprint,
             }))
             const itemSequenceFingerprint =
-              computeAttendanceItemSequenceFingerprintV1(fingerprintEntries)
+              fingerprintEntries.length === 0
+                ? ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1
+                : computeAttendanceItemSequenceFingerprintV1(fingerprintEntries)
             const itemSetFingerprint =
-              computeAttendanceItemSetFingerprintV1(fingerprintEntries)
+              fingerprintEntries.length === 0
+                ? ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1
+                : computeAttendanceItemSetFingerprintV1(fingerprintEntries)
             const identityProofVector =
               operationalBranch === 'strict_targeted'
                 ? itemIdentityRows.map((item, ordinal) => ({

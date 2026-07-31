@@ -1839,35 +1839,43 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const parent = await pool.query(
       `SELECT projection_owner, current_calculation_id::text, visibility_state,
-              visibility_reason, status, first_in_at::text, last_out_at::text,
+              visibility_reason, status, first_in_at, last_out_at,
               work_minutes, late_minutes, early_leave_minutes
          FROM attendance_records WHERE org_id = $1 AND id = $2`,
       [orgId, target.recordId],
     )
-    expect(parent.rows[0]).toEqual({
+    expect({
+      ...parent.rows[0],
+      first_in_at: new Date(parent.rows[0].first_in_at).toISOString(),
+      last_out_at: new Date(parent.rows[0].last_out_at).toISOString(),
+    }).toEqual({
       projection_owner: 'w4',
       current_calculation_id: result.reversalCalculationIds[0],
       visibility_state: 'retired',
       visibility_reason: 'import_rollback',
       status: 'late',
-      first_in_at: '2026-07-31 09:00:00+08',
-      last_out_at: '2026-07-31 17:00:00+08',
+      first_in_at: '2026-07-31T01:00:00.000Z',
+      last_out_at: '2026-07-31T09:00:00.000Z',
       work_minutes: 455,
       late_minutes: 1,
       early_leave_minutes: 2,
     })
     const reversal = await pool.query(
-      `SELECT projected_status, projected_first_in_at::text,
-              projected_last_out_at::text, projected_work_minutes,
+      `SELECT projected_status, projected_first_in_at,
+              projected_last_out_at, projected_work_minutes,
               projected_late_minutes, projected_early_leave_minutes,
               restores_calculation_id
          FROM attendance_record_calculations WHERE id = $1`,
       [result.reversalCalculationIds[0]],
     )
-    expect(reversal.rows[0]).toEqual({
+    expect({
+      ...reversal.rows[0],
+      projected_first_in_at: new Date(reversal.rows[0].projected_first_in_at).toISOString(),
+      projected_last_out_at: new Date(reversal.rows[0].projected_last_out_at).toISOString(),
+    }).toEqual({
       projected_status: 'late',
-      projected_first_in_at: '2026-07-31 09:00:00+08',
-      projected_last_out_at: '2026-07-31 17:00:00+08',
+      projected_first_in_at: '2026-07-31T01:00:00.000Z',
+      projected_last_out_at: '2026-07-31T09:00:00.000Z',
       projected_work_minutes: 455,
       projected_late_minutes: 1,
       projected_early_leave_minutes: 2,

@@ -362,6 +362,48 @@ attendanceIntegrationDescribe(
   // Snapshot once, restore the EXACT prior row after every test (see tests/utils/attendance-settings-row.ts).
   let settingsRowPool: Pool | undefined
   let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
+  const seededImportIdentityIds = new Set<string>()
+  const sharedImportUserId = randomUUID()
+
+  async function ensureActiveImportIdentitiesForTest(
+    userIds: string | string[],
+    orgId = 'default',
+  ): Promise<void> {
+    if (!settingsRowPool) throw new Error('attendance integration identity fixture pool is unavailable')
+    for (const userId of [...new Set(Array.isArray(userIds) ? userIds : [userIds])]) {
+      await settingsRowPool.query(
+        `INSERT INTO users (
+           id, email, username, name, password_hash, role, permissions,
+           is_active, is_admin, activation_status, created_at, updated_at
+         ) VALUES (
+           $1, $2, $1, 'Attendance Import Test User', 'x', 'admin',
+           '["attendance:read","attendance:write","attendance:admin","attendance:import"]'::jsonb,
+           true, true, 'activated', now(), now()
+         )
+         ON CONFLICT (id) DO UPDATE
+           SET role = 'admin',
+               permissions = '["attendance:read","attendance:write","attendance:admin","attendance:import"]'::jsonb,
+               is_active = true,
+               is_admin = true,
+               activation_status = 'activated',
+               updated_at = now()`,
+        [userId, `${userId}@example.test`],
+      )
+      await settingsRowPool.query(
+        `INSERT INTO user_roles (user_id, role_id)
+         VALUES ($1, 'admin')
+         ON CONFLICT (user_id, role_id) DO NOTHING`,
+        [userId],
+      )
+      await settingsRowPool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [userId, orgId],
+      )
+      seededImportIdentityIds.add(userId)
+    }
+  }
 
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
@@ -442,6 +484,7 @@ attendanceIntegrationDescribe(
 
     settingsRowPool = new Pool({ connectionString: dbUrl, max: 1 })
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(settingsRowPool)
+    await ensureActiveImportIdentitiesForTest(sharedImportUserId)
 
     // Important: load MetaSheetServer only after DATABASE_URL is set,
     // since the DB pool is initialized during module import.
@@ -483,6 +526,18 @@ attendanceIntegrationDescribe(
   afterAll(async () => {
     if (settingsRowPool) {
       await restoreAttendanceSettingsRow(settingsRowPool, settingsRowSnapshot).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM user_roles WHERE user_id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM users WHERE id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
       await settingsRowPool.end().catch(() => undefined)
     }
     if (server && (server as any).stop) {
@@ -496,7 +551,8 @@ attendanceIntegrationDescribe(
   it('registers attendance routes and lists plugin', async () => {
     if (!baseUrl) return
     const runSuffix = Date.now().toString(36)
-    const testUserId = `attendance-test-${runSuffix}`
+    const testUserId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(testUserId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
@@ -1625,10 +1681,10 @@ attendanceIntegrationDescribe(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         mappingProfileId: 'dingtalk_csv_daily_summary',
         userMap: {
-          EMP001: 'attendance-test',
+          EMP001: sharedImportUserId,
         },
         csvText: [
           '日期,工号,未知列',
@@ -1665,7 +1721,7 @@ attendanceIntegrationDescribe(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         mappingProfileId: 'dingtalk_csv_daily_summary',
         csvText: '日期,工号,姓名\n',
         mode: 'override',
@@ -1683,7 +1739,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
-    const requesterId = `attendance-csv-standard-${runSuffix}`
+    const requesterId = randomUUID()
     const routePool = new Pool({
       connectionString: process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL,
     })
@@ -8407,7 +8463,8 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
-    const userId = `attendance-overnight-${runSuffix}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -12236,7 +12293,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12257,7 +12314,7 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -12316,7 +12373,8 @@ attendanceIntegrationDescribe(
   it('supports import commit merge mode (keeps earliest firstInAt and latest lastOutAt)', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-merge-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -12448,7 +12506,8 @@ attendanceIntegrationDescribe(
     const absenceObj = new Date(monday)
     absenceObj.setUTCDate(monday.getUTCDate() + 1)
     const absenceDate = absenceObj.toISOString().slice(0, 10)
-    const userId = `attendance-rt1-${runSuffix}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     try {
@@ -12512,13 +12571,14 @@ attendanceIntegrationDescribe(
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
     const runSuffix = Date.now().toString(36)
-    const orgId = `rt1a-org-${runSuffix}` // isolated org — never pollutes the shared default rule
+    const orgId = randomUUID() // isolated org — never pollutes the shared default rule
     const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
     const firstOfOctober = new Date(Date.UTC(year, 9, 1))
     const monday = new Date(firstOfOctober)
     while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
     const workDate = monday.toISOString().slice(0, 10)
-    const userId = `attendance-rt1a-${runSuffix}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId, orgId)
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     try {
@@ -12578,7 +12638,8 @@ attendanceIntegrationDescribe(
   it('exposes workday context for holiday overrides and shift schedules on attendance records', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-workday-context-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -12743,9 +12804,10 @@ attendanceIntegrationDescribe(
   it('keeps existing records after rolling back a later update batch', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-rollback-safe-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12835,7 +12897,7 @@ attendanceIntegrationDescribe(
       },
       body: '{}',
     })
-    expect(rollbackRes.status).toBe(200)
+    expect(rollbackRes.status, rollbackRes.raw).toBe(200)
 
     const afterRollbackRows = await listRecordRows()
     const rowAfterRollback = afterRollbackRows.find((row) => {
@@ -12850,9 +12912,10 @@ attendanceIntegrationDescribe(
   it('auto-switches to staging upsert strategy for bulk async imports when copy threshold is reached', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-staging-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12871,12 +12934,14 @@ attendanceIntegrationDescribe(
 
     const seedDate = new Date(Date.UTC(2026, 0, 1))
     const distinctWorkDates = 365
+    const targetUserIds = Array.from({ length: 3 }, () => randomUUID())
+    await ensureActiveImportIdentitiesForTest(targetUserIds)
     const rows = Array.from({ length: 1001 }, (_, index) => {
       const date = new Date(seedDate)
       date.setUTCDate(seedDate.getUTCDate() + (index % distinctWorkDates))
       const workDate = date.toISOString().slice(0, 10)
       return {
-        userId: `${userId}-bucket-${Math.floor(index / distinctWorkDates)}`,
+        userId: targetUserIds[Math.floor(index / distinctWorkDates)],
         workDate,
         fields: {
           firstInAt: `${workDate}T09:00:00Z`,
@@ -12961,7 +13026,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12995,7 +13060,7 @@ attendanceIntegrationDescribe(
     expect(commitTokenB).toBeTruthy()
 
     const basePayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -13071,7 +13136,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13092,7 +13157,7 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -13199,13 +13264,13 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
 
     const workDate = new Date().toISOString().slice(0, 10)
-    const duplicateUserId = `attendance-async-duplicate-${Date.now().toString(36)}`
+    const duplicateUserId = randomUUID()
     const idempotencyKey = `integration-async-duplicate-${Date.now().toString(36)}`
 
     const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
@@ -13222,13 +13287,14 @@ attendanceIntegrationDescribe(
 
     const seedDate = new Date(Date.UTC(2026, 0, 1))
     const distinctWorkDates = 250
-    const bulkUserSeed = Date.now().toString(36)
+    const bulkTargetUserIds = Array.from({ length: 4 }, () => randomUUID())
+    await ensureActiveImportIdentitiesForTest([...bulkTargetUserIds, duplicateUserId])
     const bulkRows = Array.from({ length: 1000 }, (_, index) => {
       const date = new Date(seedDate)
       date.setUTCDate(seedDate.getUTCDate() + (index % distinctWorkDates))
       const rowWorkDate = date.toISOString().slice(0, 10)
       return {
-        userId: `attendance-async-bulk-${bulkUserSeed}-${Math.floor(index / distinctWorkDates)}`,
+        userId: bulkTargetUserIds[Math.floor(index / distinctWorkDates)],
         workDate: rowWorkDate,
         fields: {
           firstInAt: `${rowWorkDate}T09:00:00Z`,
@@ -13239,7 +13305,7 @@ attendanceIntegrationDescribe(
     })
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -13381,7 +13447,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13403,7 +13469,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13441,7 +13507,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `integration-async-rows-large-${Date.now().toString(36)}`
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows,
@@ -13502,7 +13568,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13521,8 +13587,10 @@ attendanceIntegrationDescribe(
 
     const workDate = new Date().toISOString().slice(0, 10)
     const totalEntries = 20_001
+    const entryTargetUserId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(entryTargetUserId)
     const entries = Array.from({ length: totalEntries }, (_, index) => ({
-      userId: 'attendance-large-entries',
+      userId: entryTargetUserId,
       workDate,
       field: `raw_field_${index}`,
       value: `${workDate}T09:00:00Z`,
@@ -13534,7 +13602,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `integration-async-entries-large-${Date.now().toString(36)}`
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       entries,
@@ -13596,7 +13664,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13617,7 +13685,7 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const previewPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       previewLimit: 2,
@@ -13720,7 +13788,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13758,7 +13826,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13865,7 +13933,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13913,7 +13981,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13933,7 +14001,7 @@ attendanceIntegrationDescribe(
     expect(commitTokenPreview).toBeTruthy()
 
     const previewPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       previewLimit: 1,
       rows: [
@@ -13987,7 +14055,7 @@ attendanceIntegrationDescribe(
     expect(commitTokenCommit).toBeTruthy()
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       returnItems: false,
       rows: [
@@ -14040,7 +14108,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14053,7 +14121,7 @@ attendanceIntegrationDescribe(
     const csvText = `${csvHeader}\n${csvRows.join('\n')}`
 
     const csvPayloadBase = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       csvText,
       mapping: {
         columns: [
@@ -14066,7 +14134,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14131,7 +14199,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14155,7 +14223,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       fileId: String(fileId || ''),
       mapping: {
@@ -14169,7 +14237,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14256,9 +14324,10 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const runSuffix = Date.now().toString(36)
-    const requesterId = `attendance-fileid-${runSuffix}`
+    const requesterId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(requesterId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14380,7 +14449,8 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const runSuffix = Date.now().toString(36)
-    const requesterId = `attendance-api-csv-${runSuffix}`
+    const requesterId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(requesterId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -14485,7 +14555,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14517,7 +14587,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       mappingProfileId: 'dingtalk_csv_daily_summary',
@@ -14661,7 +14731,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14687,7 +14757,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       idempotencyKey,
@@ -14702,7 +14772,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14809,7 +14879,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14835,7 +14905,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       idempotencyKey,
@@ -14850,7 +14920,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14968,7 +15038,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15016,7 +15086,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId,
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: String(fileId || ''),
         mapping: {
@@ -15029,7 +15099,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken: previewCommitToken,
       }),
@@ -15045,7 +15115,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15053,8 +15123,9 @@ attendanceIntegrationDescribe(
     const orgId = 'default'
     const runSuffix = Date.now().toString(36)
     const workDate = new Date().toISOString().slice(0, 10)
-    const mappedUserIdA = `attendance-async-${runSuffix}-a`
-    const mappedUserIdB = `attendance-async-${runSuffix}-b`
+    const mappedUserIdA = randomUUID()
+    const mappedUserIdB = randomUUID()
+    await ensureActiveImportIdentitiesForTest([mappedUserIdA, mappedUserIdB])
     const asyncGroupName = `CSV Async Group ${runSuffix}`
     const csvHeader = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
     const csvRows = [
@@ -15092,7 +15163,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `upload-async-idempo-${Date.now()}`
     const commitPayload = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       idempotencyKey,
@@ -15235,7 +15306,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15243,10 +15314,13 @@ attendanceIntegrationDescribe(
     const orgId = 'default'
     const runSuffix = Date.now().toString(36)
     const workDate = new Date().toISOString().slice(0, 10)
+    const streamedUserIdA = randomUUID()
+    const streamedUserIdB = randomUUID()
+    await ensureActiveImportIdentitiesForTest([streamedUserIdA, streamedUserIdB])
     const csvText = [
       '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果',
-      `${workDate},attendance-stream-${runSuffix}-a,CSV Stream Group ${runSuffix},09:00,18:00,正常`,
-      `${workDate},attendance-stream-${runSuffix}-b,CSV Stream Group ${runSuffix},09:10,18:10,正常`,
+      `${workDate},${streamedUserIdA},CSV Stream Group ${runSuffix},09:00,18:00,正常`,
+      `${workDate},${streamedUserIdB},CSV Stream Group ${runSuffix},09:10,18:10,正常`,
       '',
     ].join('\n')
 
@@ -15297,7 +15371,7 @@ attendanceIntegrationDescribe(
         },
         body: JSON.stringify({
           orgId,
-          userId: 'attendance-test',
+          userId: sharedImportUserId,
           timezone: 'UTC',
           csvFileId: String(fileId || ''),
           idempotencyKey: `upload-async-stream-${Date.now()}`,
@@ -15358,7 +15432,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15385,7 +15459,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId: 'default',
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: missingFileId,
         mapping: {
@@ -15398,7 +15472,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -15413,7 +15487,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15439,7 +15513,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId: 'default',
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: missingFileId,
         mapping: {
@@ -15452,7 +15526,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -15468,7 +15542,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15516,7 +15590,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId,
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: String(fileId || ''),
         mapping: {
@@ -15529,7 +15603,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -15545,7 +15619,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15593,7 +15667,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId,
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: String(fileId || ''),
         mapping: {
@@ -15606,7 +15680,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),

@@ -27013,7 +27013,7 @@ module.exports = {
 	        if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
 	        const rowUserId = resolveRowUserId({
 	          row,
-	          fallbackUserId: requesterId,
+	          fallbackUserId: payload.userId ?? requesterId,
 	          userMap: payload.userMap,
 	          userMapKeyField: payload.userMapKeyField,
 	          userMapSourceFields: payload.userMapSourceFields,
@@ -27261,7 +27261,7 @@ module.exports = {
 		              ordinal: sourceOrdinal,
 		              semanticOrdinal: null,
 		              resolvedUserId: userId ?? null,
-		              resolvedWorkDate: normalizeDateOnly(workDate) ?? workDate ?? null,
+		              resolvedWorkDate: normalizeDateOnly(workDate) ?? null,
 		              reasonCode,
 		              warnings: Array.isArray(previewSnapshot?.warnings) ? previewSnapshot.warnings : [],
 		              previewSnapshot: previewSnapshot ?? {},
@@ -27496,14 +27496,14 @@ module.exports = {
 	          const groupKey = resolveAttendanceGroupKey(row)
 	          const rowUserId = resolveRowUserId({
 	            row,
-	            fallbackUserId: requesterId,
+	            fallbackUserId: payload.userId ?? requesterId,
 	            userMap: payload.userMap,
 	            userMapKeyField: payload.userMapKeyField,
 	            userMapSourceFields: payload.userMapSourceFields,
 	          })
 	          const userProfile = resolveRowUserProfile({
 	            row,
-	            fallbackUserId: requesterId,
+	            fallbackUserId: payload.userId ?? requesterId,
 	            userMap: payload.userMap,
 	            userMapKeyField: payload.userMapKeyField,
 	            userMapSourceFields: payload.userMapSourceFields,
@@ -27619,7 +27619,9 @@ module.exports = {
 		            return true
 	          }
 	          seenRowKeys.add(dedupKey)
-	          if (prepareOnly && groupSync?.autoAssignMembers && groupKey && rowUserId) {
+	          const prepareOnlyGroupResolvable = groupKey
+	            && (groupIdMap?.has(groupKey) || (groupSync?.autoCreate && groupNames.has(groupKey)))
+	          if (prepareOnly && groupSync?.autoAssignMembers && prepareOnlyGroupResolvable && rowUserId) {
 	            preparedPlanGroupEffects.push({
 	              kind: 'ensure_member',
 	              groupRef: groupKey,

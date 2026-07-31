@@ -19,6 +19,8 @@ import {
 } from './w4c0-operation-contract'
 import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
 import {
+  ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1,
+  ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1,
   sha256HexOfCanonicalJsonV1,
   type AttendanceLegacyRowSourceKindV1,
   type LegacyImportArtifactCleanupV1,
@@ -245,9 +247,13 @@ export function createAttendanceLegacyPlanReservationHostV1(
               w4AcceptedWritePosture: org.acceptedWritePosture,
               w4ItemCount: applyItems.length,
               w4ItemSequenceFingerprint:
-                computeAttendanceItemSequenceFingerprintV1(fingerprintEntries),
+                fingerprintEntries.length === 0
+                  ? ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1
+                  : computeAttendanceItemSequenceFingerprintV1(fingerprintEntries),
               w4ItemSetFingerprint:
-                computeAttendanceItemSetFingerprintV1(fingerprintEntries),
+                fingerprintEntries.length === 0
+                  ? ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1
+                  : computeAttendanceItemSetFingerprintV1(fingerprintEntries),
               w4IdentityProofVector: identityProofVector,
               w4DistinctTargetCount: distinctTargets.size,
               w4OperationalBranch: operationalBranch,
@@ -272,9 +278,13 @@ export function createAttendanceLegacyPlanReservationHostV1(
               w4ItemCount: applyItems.length,
               w4DistinctTargetCount: distinctTargets.size,
               w4ItemSequenceFingerprint:
-                computeAttendanceItemSequenceFingerprintV1(fingerprintEntries),
+                fingerprintEntries.length === 0
+                  ? ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1
+                  : computeAttendanceItemSequenceFingerprintV1(fingerprintEntries),
               w4ItemSetFingerprint:
-                computeAttendanceItemSetFingerprintV1(fingerprintEntries),
+                fingerprintEntries.length === 0
+                  ? ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1
+                  : computeAttendanceItemSetFingerprintV1(fingerprintEntries),
               legacySourceRowLimit: input.legacySourceRowLimit,
               batch: input.batch,
               artifactCleanup: input.artifactCleanup,

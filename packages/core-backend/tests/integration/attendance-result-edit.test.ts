@@ -72,9 +72,9 @@ const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_U
 const describeDb = dbUrl ? describe : describe.skip
 
 const RUN = Date.now().toString(36)
-const ORG = `ae1-${RUN}`          // dedicated org → isolates seeded payroll cycles + records
-const ORG_OTHER = `ae1-other-${RUN}`
-const ADMIN_USER_ID = `ae1-admin-${RUN}`
+const ORG = randomUUID()          // dedicated org → isolates seeded payroll cycles + records
+const ORG_OTHER = randomUUID()
+const ADMIN_USER_ID = randomUUID()
 
 function ymd(daysAgo: number): string {
   return new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10)
@@ -104,6 +104,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   let pool: Pool
   let adminToken = ''
   let previousDefaultNotificationChannel: string | undefined
+  const seededUserIds = new Set<string>()
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
@@ -124,6 +125,26 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     requestJson(`${baseUrl}/api/attendance/settings`, { headers: authHeaders(adminToken) })
   const putSettings = (body: Record<string, unknown>) =>
     requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(adminToken), body: JSON.stringify(body) })
+
+  async function ensureActiveIdentity(userId: string, orgId: string): Promise<void> {
+    await pool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, activation_status, created_at, updated_at
+       ) VALUES ($1, $2, $1, 'AE-1 Test User', 'x', 'user', '[]'::jsonb,
+                 true, false, 'activated', now(), now())
+       ON CONFLICT (id) DO UPDATE
+         SET is_active = true, activation_status = 'activated', updated_at = now()`,
+      [userId, `${userId}@example.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [userId, orgId],
+    )
+    seededUserIds.add(userId)
+  }
 
   type ResultEditPolicySetting = {
     enabled?: boolean
@@ -165,6 +186,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     org?: string
   }): Promise<string> {
     const id = randomUUID()
+    await ensureActiveIdentity(input.userId, input.org ?? ORG)
     await pool.query(
       `INSERT INTO attendance_records
        (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
@@ -287,9 +309,24 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       `INSERT INTO users (
          id, email, username, name, password_hash, role, permissions,
          is_active, is_admin, created_at, updated_at
-       ) VALUES ($1, $2, $1, 'AE-1 Admin', 'x', 'admin', '[]'::jsonb, true, true, now(), now())
-       ON CONFLICT (id) DO NOTHING`,
+       ) VALUES (
+         $1, $2, $1, 'AE-1 Admin', 'x', 'admin',
+         '["attendance:read","attendance:write","attendance:admin","attendance:import"]'::jsonb,
+         true, true, now(), now()
+       )
+       ON CONFLICT (id) DO UPDATE
+         SET role = 'admin',
+             permissions = '["attendance:read","attendance:write","attendance:admin","attendance:import"]'::jsonb,
+             is_active = true,
+             is_admin = true,
+             updated_at = now()`,
       [ADMIN_USER_ID, `${ADMIN_USER_ID}@example.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_roles (user_id, role_id)
+       VALUES ($1, 'admin')
+       ON CONFLICT (user_id, role_id) DO NOTHING`,
+      [ADMIN_USER_ID],
     )
     await pool.query(
       `INSERT INTO user_orgs (user_id, org_id, is_active)
@@ -297,6 +334,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
        ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
       [ADMIN_USER_ID, ORG],
     )
+    seededUserIds.add(ADMIN_USER_ID)
     adminToken = await mintToken(ADMIN_USER_ID, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
 
     // This is a LIVE feature, not a dormant table: when a DB is present the AE-1 migration MUST have run.
@@ -335,6 +373,9 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       await pool.query(`DELETE FROM attendance_record_result_edits WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_records WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_payroll_cycles WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_roles WHERE user_id = ANY($1)`, [[...seededUserIds]]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_orgs WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = ANY($1)`, [[...seededUserIds]]).catch(() => undefined)
     }
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) await (server as unknown as { stop: () => Promise<void> }).stop()
     await pool?.end().catch(() => undefined)
@@ -379,7 +420,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
         lastOutAt: `${workDate}T10:00:00.000Z`,
         isWorkday: true,
       },
-      actorUserId: `ae1-admin-${RUN}`,
+      actorUserId: ADMIN_USER_ID,
       reviewConflict: null,
     })
     expect(rec.meta?.manual_result_edit.auditId).toEqual(expect.any(String))
@@ -394,7 +435,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(Number(audit[0].before_snapshot.lateMinutes)).toBe(35)
     expect(Number(audit[0].after_snapshot.lateMinutes)).toBe(0)
     expect(audit[0].reason).toContain('核验后更正')
-    expect(audit[0].actor_user_id).toBe(`ae1-admin-${RUN}`)
+    expect(audit[0].actor_user_id).toBe(ADMIN_USER_ID)
     expect(audit[0].notification_delivery_id).toEqual(expect.any(String))
     expect(audit[0].notification_skipped_reason).toBeNull()
 
@@ -471,7 +512,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('AE-1b durability: same-facts import recompute preserves the corrected result without a review flag', async () => {
-    const userId = `u-durable-same-${RUN}`
+    const userId = randomUUID()
     const workDate = workdayYmd(3)
     const recordId = await seedRecord({
       userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 35, earlyLeaveMinutes: 0,
@@ -495,6 +536,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       mode: 'override',
     })
     expect(importRes.status).toBe(200)
+    expect(dataOf(importRes)?.items?.[0]?.id).toBe(recordId)
 
     const rec = await recordById(recordId)
     expect(rec.status).toBe('normal')
@@ -537,7 +579,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('AE-1b durability: a no-status import recompute preserves the corrected result and flags changed facts', async () => {
-    const userId = `u-durable-${RUN}`
+    const userId = randomUUID()
     const workDate = workdayYmd(3)
     const recordId = await seedRecord({
       userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 35, earlyLeaveMinutes: 0,
@@ -561,6 +603,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       mode: 'override',
     })
     expect(importRes.status).toBe(200)
+    expect(dataOf(importRes)?.items?.[0]?.id).toBe(recordId)
 
     const rec = await recordById(recordId)
     expect(rec.first_in_at?.toISOString()).toBe(`${workDate}T01:55:00.000Z`)
@@ -586,7 +629,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('AE-1b durability: explicit import statusOverride intentionally supersedes a stale manual marker', async () => {
-    const userId = `u-durable-explicit-${RUN}`
+    const userId = randomUUID()
     const workDate = ymd(3)
     const recordId = await seedRecord({
       userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 35, earlyLeaveMinutes: 0,
@@ -619,7 +662,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('AE-1b durability: approved request explicit override is intentional and clears a stale manual marker', async () => {
-    const userId = `ae1-admin-${RUN}`
+    const userId = ADMIN_USER_ID
     const workDate = ymd(6)
     const recordId = await seedRecord({
       userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 40, earlyLeaveMinutes: 0,
@@ -818,7 +861,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
 
   it('W2 correction and legacy import reject overlapping shift ambiguity with zero record writes', async () => {
     const workDate = workdayYmd(4)
-    const ambiguityUserId = `w2-amb-${RUN}`
+    const ambiguityUserId = randomUUID()
     const shiftA = randomUUID()
     const shiftB = randomUUID()
     const assignmentA = randomUUID()
@@ -1021,46 +1064,13 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
           idempotencyKey: `w2-commit-async-${RUN}`,
         }),
       })
-      expect(asyncResponse.status, asyncResponse.raw).toBe(200)
-      const asyncJob = dataOf(asyncResponse)?.job
-      const asyncJobId = String(asyncJob?.id ?? '')
-      const asyncBatchId = String(asyncJob?.batchId ?? '')
-      expect(asyncJobId).toBeTruthy()
-      expect(asyncBatchId).toBeTruthy()
-      importJobIds.push(asyncJobId)
-      importBatchIds.push(asyncBatchId)
-      let failedAsyncJob: any = null
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        const jobResponse = await requestJson(
-          `${baseUrl}/api/attendance/import/jobs/${encodeURIComponent(asyncJobId)}?orgId=${encodeURIComponent(ORG)}`,
-          { headers: authHeaders(adminToken) },
-        )
-        expect(jobResponse.status, jobResponse.raw).toBe(200)
-        const job = dataOf(jobResponse)
-        if (job?.status === 'failed') {
-          failedAsyncJob = job
-          break
-        }
-        if (job?.status === 'completed') {
-          throw new Error(`W2 ambiguous async import completed unexpectedly: ${jobResponse.raw}`)
-        }
-        await new Promise((resolve) => setTimeout(resolve, 25))
-      }
-      expect(failedAsyncJob).toBeTruthy()
-      expect(String(failedAsyncJob?.error ?? '')).toContain('Multiple shift windows match')
+      expect(asyncResponse.status, asyncResponse.raw).toBe(422)
+      expect(codeOf(asyncResponse)).toBe('WORK_DATE_ATTRIBUTION_AMBIGUOUS')
       expect((await pool.query(
         `SELECT 1 FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3`,
         [ORG, ambiguityUserId, workDate],
       )).rows).toHaveLength(0)
       expect(await importPersistenceSnapshot()).toEqual(beforeAsyncFailure)
-      expect((await pool.query(
-        `SELECT status FROM attendance_import_jobs WHERE id = $1`,
-        [asyncJobId],
-      )).rows).toEqual([{ status: 'failed' }])
-      expect((await pool.query(
-        `SELECT 1 FROM attendance_import_batches WHERE id = $1`,
-        [asyncBatchId],
-      )).rows).toHaveLength(0)
 
       let mockFirstInAt: string = `${workDate}T02:00:00.000Z`
       let mockLastOutAt: string = `${workDate}T10:00:00.000Z`
@@ -1219,7 +1229,10 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       }
       const acceptedImport = await postImport(overnightRowsPayload)
       expect(acceptedImport.status, acceptedImport.raw).toBe(200)
-      expect(await assertOvernightRecord()).toBeNull()
+      expect(dataOf(acceptedImport)?.batchId).toBeNull()
+      const acceptedImportBatchId = await assertOvernightRecord()
+      expect(acceptedImportBatchId).toBeTruthy()
+      importBatchIds.push(String(acceptedImportBatchId))
       await clearOvernightRecord()
 
       const acceptedCommit = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
@@ -1324,7 +1337,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('AE-1b durability: unmarked records keep route-derived behavior and never gain a manual marker', async () => {
-    const userId = `u-durable-unmarked-${RUN}`
+    const userId = randomUUID()
     const workDate = ymd(3)
     const recordId = await seedRecord({
       userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 25, earlyLeaveMinutes: 0,
