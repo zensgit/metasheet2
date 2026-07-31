@@ -109,6 +109,8 @@ const ElButton = defineComponent({
       type: 'button',
       disabled: this.disabled || this.loading,
       'data-testid': (this.$attrs as any)?.['data-testid'],
+      title: (this.$attrs as any)?.title,
+      'aria-label': (this.$attrs as any)?.['aria-label'],
       onClick: (event: Event) => this.$emit('click', event),
     }, this.$slots.default?.())
   },
@@ -232,6 +234,7 @@ function installStubs(app: VueApp<Element>) {
   app.directive('loading', {})
   app.component('ElButton', ElButton)
   app.component('ElButtonGroup', passthrough('ElButtonGroup'))
+  app.component('ElTooltip', passthrough('ElTooltip'))
   app.component('ElInput', ElInput)
   app.component('ElInputNumber', ElInputNumber)
   app.component('ElSelect', ElSelect)
@@ -593,6 +596,8 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     expect(q('[data-testid="approval-graph-view-toggle"]')).toBeNull()
     expect(q('[data-testid="approval-authoring-mode-switch"]')).toBeNull()
     expect(q('[data-testid="approval-canvas-workspace"]')).toBeNull()
+    expect(q('[data-testid="approval-template-undo"]')).toBeNull()
+    expect(q('[data-testid="approval-template-redo"]')).toBeNull()
     expect(q('[data-testid="approval-graph-canvas"]')).toBeNull()
     expect(visibleStepRows()).toHaveLength(2)
     expect(q('[data-testid="approval-template-step-spine"]')).not.toBeNull()
@@ -755,8 +760,19 @@ describe('C1 unified canvas — linear step drafts on the production Canvas V2 s
     // Promoted: the canvas grew by one node and the structured view is now the graph node list.
     expect(all('[data-testid="approval-canvas-node"]')).toHaveLength(5)
     const selectedNode = q('[data-testid="approval-canvas-node"].is-selected')
-    expect(selectedNode?.getAttribute('data-canvas-node')).not.toBeNull()
+    const insertedNodeKey = selectedNode?.getAttribute('data-canvas-node')
+    expect(insertedNodeKey).not.toBeNull()
     expect(q('[data-testid="approval-canvas-inspector"]')?.getAttribute('data-inspector-type')).toBe('approval')
+
+    click('approval-template-undo')
+    await flushUi()
+    expect(all('[data-testid="approval-canvas-node"]')).toHaveLength(4)
+    expect(q(`[data-canvas-node="${insertedNodeKey}"]`)).toBeNull()
+
+    click('approval-template-redo')
+    await flushUi()
+    expect(all('[data-testid="approval-canvas-node"]')).toHaveLength(5)
+    expect(q(`[data-canvas-node="${insertedNodeKey}"]`)?.classList.contains('is-selected')).toBe(true)
     click('approval-view-list')
     await flushUi()
     expect(q('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()

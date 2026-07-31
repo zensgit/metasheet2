@@ -34,6 +34,13 @@ const FORM_BUILDER_SOURCE = readFileSync(
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
 let routeParams: Record<string, string> = {}
+const routeVersion = ref(0)
+const reactiveRouteParams = new Proxy({} as Record<string, string>, {
+  get: (_target, key: string) => {
+    void routeVersion.value
+    return routeParams[key]
+  },
+})
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -45,7 +52,7 @@ vi.mock('vue-router', async () => {
       back: vi.fn(),
     }),
     useRoute: () => ({
-      params: routeParams,
+      params: reactiveRouteParams,
       query: {},
       path: routeParams.id ? `/approval-templates/${routeParams.id}/edit` : '/approval-templates/new',
       meta: {},
@@ -106,6 +113,8 @@ const ElButton = defineComponent({
       type: 'button',
       disabled: this.disabled || this.loading,
       'data-testid': (this.$attrs as any)?.['data-testid'],
+      title: (this.$attrs as any)?.title,
+      'aria-label': (this.$attrs as any)?.['aria-label'],
       onClick: (event: Event) => this.$emit('click', event),
     }, this.$slots.default?.())
   },
@@ -236,6 +245,7 @@ function installStubs(app: VueApp<Element>) {
   app.directive('loading', {})
   app.component('ElButton', ElButton)
   app.component('ElButtonGroup', passthrough('ElButtonGroup'))
+  app.component('ElTooltip', passthrough('ElTooltip'))
   app.component('ElInput', ElInput)
   app.component('ElInputNumber', ElInputNumber)
   app.component('ElSelect', ElSelect)
@@ -498,6 +508,7 @@ function createDragEvent(type: 'dragstart' | 'dragend' | 'drop', dataTransfer: D
 describe('Canvas V2 Slice A — canvas inspector', () => {
   beforeEach(() => {
     routeParams = {}
+    routeVersion.value = 0
     canManageTemplates.value = true
     featureFlags.value = { approvalCanvasV2: true, approvalAttachments: false }
     createTemplateSpy.mockReset()
@@ -1296,7 +1307,19 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     const appA = container!.querySelector('[data-canvas-node="app_a"]') as HTMLElement
     expect(Number.parseFloat(movedNode.style.top)).toBeLessThan(Number.parseFloat(appA.style.top))
 
-    const selector = movedNode.querySelector('[data-testid="approval-canvas-node-select"]') as HTMLElement
+    ;(container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(Number.parseFloat((container!.querySelector('[data-canvas-node="cc_b"]') as HTMLElement).style.top))
+      .toBeGreaterThan(Number.parseFloat((container!.querySelector('[data-canvas-node="app_a"]') as HTMLElement).style.top))
+
+    ;(container!.querySelector('[data-testid="approval-template-redo"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(Number.parseFloat((container!.querySelector('[data-canvas-node="cc_b"]') as HTMLElement).style.top))
+      .toBeLessThan(Number.parseFloat((container!.querySelector('[data-canvas-node="app_a"]') as HTMLElement).style.top))
+
+    const selector = container!.querySelector(
+      '[data-canvas-node="cc_b"] [data-testid="approval-canvas-node-select"]',
+    ) as HTMLElement
     selector.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))
     await flushUi()
     expect(Number.parseFloat(movedNode.style.top)).toBeGreaterThan(Number.parseFloat(appA.style.top))
@@ -1404,6 +1427,21 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     ;(panel.querySelector('[data-testid="approval-canvas-branch-row-e-medium"]') as HTMLElement)
       .dispatchEvent(createDragEvent('drop', dataTransfer))
     await flushUi()
+
+    const branchOrder = (host: HTMLElement) => Array.from(
+      host.querySelectorAll<HTMLElement>('[data-testid^="approval-canvas-branch-row-"]'),
+    ).map((row) => row.dataset.testid!.replace('approval-canvas-branch-row-', ''))
+    panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    expect(branchOrder(panel)).toEqual(['e-medium', 'e-high'])
+    ;(container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement).click()
+    await flushUi()
+    panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    expect(branchOrder(panel)).toEqual(['e-high', 'e-medium'])
+    ;(container!.querySelector('[data-testid="approval-template-redo"]') as HTMLButtonElement).click()
+    await flushUi()
+    panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    expect(branchOrder(panel)).toEqual(['e-medium', 'e-high'])
+
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     let payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
@@ -1431,6 +1469,18 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     ;(panel.querySelector('[data-testid="approval-canvas-branch-row-e-fork-a"]') as HTMLElement)
       .dispatchEvent(createDragEvent('drop', dataTransfer))
     await flushUi()
+
+    panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    expect(branchOrder(panel)).toEqual(['e-fork-b', 'e-fork-a'])
+    ;(container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement).click()
+    await flushUi()
+    panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    expect(branchOrder(panel)).toEqual(['e-fork-a', 'e-fork-b'])
+    ;(container!.querySelector('[data-testid="approval-template-redo"]') as HTMLButtonElement).click()
+    await flushUi()
+    panel = container!.querySelector('[data-testid="approval-canvas-branch-reorder"]') as HTMLElement
+    expect(branchOrder(panel)).toEqual(['e-fork-b', 'e-fork-a'])
+
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
@@ -1505,7 +1555,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(inspector.textContent).not.toContain('cc_1')
   })
 
-  it('a representative inspector edit writes through to the existing draft save payload', async () => {
+  it('records inspector edits with focus-preserving shortcuts and clears redo on a divergent edit', async () => {
     routeParams = { id: 'tpl_inspector_edit' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
@@ -1521,9 +1571,58 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     ) as HTMLSelectElement
     expect(joinMode).not.toBeNull()
     expect(joinMode.disabled).toBe(false)
+    const undo = container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement
+    const redo = container!.querySelector('[data-testid="approval-template-redo"]') as HTMLButtonElement
+    expect(undo.title).toBe('撤销（Cmd/Ctrl+Z）')
+    expect(undo.disabled).toBe(true)
+    expect(redo.disabled).toBe(true)
     joinMode.value = 'any'
     joinMode.dispatchEvent(new Event('change'))
     await flushUi()
+    expect(undo.disabled).toBe(false)
+
+    joinMode.focus()
+    const editableShortcut = new KeyboardEvent('keydown', {
+      key: 'z', ctrlKey: true, bubbles: true, cancelable: true,
+    })
+    joinMode.dispatchEvent(editableShortcut)
+    await flushUi()
+    expect(editableShortcut.defaultPrevented).toBe(false)
+    expect(joinMode.value).toBe('any')
+
+    const undoShortcut = new KeyboardEvent('keydown', {
+      key: 'z', ctrlKey: true, bubbles: true, cancelable: true,
+    })
+    window.dispatchEvent(undoShortcut)
+    await flushUi()
+    expect(undoShortcut.defaultPrevented).toBe(true)
+    let restoredJoinMode = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-parallel-join-mode"]',
+    ) as HTMLSelectElement
+    expect(restoredJoinMode.value).toBe('all')
+    expect(document.activeElement).toBe(restoredJoinMode)
+    expect(redo.disabled).toBe(false)
+
+    const redoShortcut = new KeyboardEvent('keydown', {
+      key: 'z', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+    })
+    window.dispatchEvent(redoShortcut)
+    await flushUi()
+    expect(redoShortcut.defaultPrevented).toBe(true)
+    restoredJoinMode = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-parallel-join-mode"]',
+    ) as HTMLSelectElement
+    expect(restoredJoinMode.value).toBe('any')
+
+    undo.click()
+    await flushUi()
+    restoredJoinMode = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-parallel-join-mode"]',
+    ) as HTMLSelectElement
+    restoredJoinMode.value = 'any'
+    restoredJoinMode.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(redo.disabled).toBe(true)
 
     // Switching to list keeps a still-valid selection; the list surface shows the same draft value.
     ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
@@ -1551,7 +1650,40 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(parallel.config.joinNodeKey).toBe('join_1')
   })
 
-  it('deleting the selected node clears selection and closes the inspector', async () => {
+  it('clears both history stacks when the mounted editor loads a different template', async () => {
+    routeParams = { id: 'tpl_history_first' }
+    getTemplateSpy.mockImplementation(async (id: string) => buildTemplate({
+      id,
+      approvalGraph: buildMixedGraph() as any,
+    }))
+    await mountView()
+    await flushUi()
+
+    clickCanvasNode('fork_1')
+    await flushUi()
+    const joinMode = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-parallel-join-mode"]',
+    ) as HTMLSelectElement
+    joinMode.value = 'any'
+    joinMode.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement).disabled).toBe(false)
+
+    routeParams = { id: 'tpl_history_second' }
+    routeVersion.value += 1
+    await flushUi()
+    expect(getTemplateSpy).toHaveBeenLastCalledWith('tpl_history_second')
+    expect((container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement).disabled).toBe(true)
+    expect((container!.querySelector('[data-testid="approval-template-redo"]') as HTMLButtonElement).disabled).toBe(true)
+
+    const staleUndo = new KeyboardEvent('keydown', {
+      key: 'z', ctrlKey: true, bubbles: true, cancelable: true,
+    })
+    window.dispatchEvent(staleUndo)
+    expect(staleUndo.defaultPrevented).toBe(false)
+  })
+
+  it('records deletion and restores the deleted node selection through undo/redo', async () => {
     routeParams = { id: 'tpl_inspector_delete' }
     // Must be a COMPLEX graph (cc) so the canvas toggle mounts. Keep a second approval so
     // approval_mid is both a linear mid-chain node (1 in / 1 out) and legally removable under
@@ -1607,8 +1739,19 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
     ;(container!.querySelector('[data-testid="approval-canvas-remove-approval_mid"]') as HTMLButtonElement).click()
     await flushUi()
-    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
     expect(container!.querySelector('[data-canvas-node="approval_mid"]')).toBeNull()
+    expect(container!.querySelector('[data-canvas-node="approval_first"]')?.classList.contains('is-selected')).toBe(true)
+
+    ;(container!.querySelector('[data-testid="approval-template-undo"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-canvas-node="approval_mid"]')?.classList.contains('is-selected')).toBe(true)
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')?.getAttribute('data-inspector-node'))
+      .toBe('approval_mid')
+
+    ;(container!.querySelector('[data-testid="approval-template-redo"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-canvas-node="approval_mid"]')).toBeNull()
+    expect(container!.querySelector('[data-canvas-node="approval_first"]')?.classList.contains('is-selected')).toBe(true)
   })
 
   it('read-only mode renders inspector details but disables mutation controls', async () => {
@@ -1631,6 +1774,8 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(inspector.querySelector('[data-testid="approval-parallel-editor"]')).not.toBeNull()
     const joinMode = inspector.querySelector('[data-testid="approval-parallel-join-mode"]') as HTMLSelectElement
     expect(joinMode.disabled).toBe(true)
+    expect(container!.querySelector('[data-testid="approval-template-undo"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-template-redo"]')).toBeNull()
     expect(inspector.querySelector('[data-testid="approval-canvas-branch-reorder"]')).toBeNull()
     expect(container!.querySelector('[data-testid^="approval-canvas-branch-handle-"]')).toBeNull()
 

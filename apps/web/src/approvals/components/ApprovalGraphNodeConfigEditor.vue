@@ -28,18 +28,19 @@
             :disabled="readOnly"
             class="ms-w-130"
             data-testid="approval-condition-predicate-mode"
-            @update:model-value="(mode: string) => setConditionBranchPredicateMode(branch, mode)"
+            @update:model-value="(mode: string) => setConditionBranchPredicateMode(node.key, branch.edgeKey, mode)"
           >
             <el-option label="简单规则" value="rules" />
             <el-option label="公式" value="formula" />
           </el-select>
           <el-select
             v-if="branch.predicateMode === 'rules'"
-            v-model="branch.conjunction"
+            :model-value="branch.conjunction"
             size="small"
             :disabled="readOnly"
             class="ms-w-110"
             data-testid="approval-condition-conjunction"
+            @update:model-value="(value: 'and' | 'or') => setConditionConjunction(node.key, branch.edgeKey, value)"
           >
             <el-option label="全部满足 (AND)" value="and" />
             <el-option label="任一满足 (OR)" value="or" />
@@ -53,13 +54,14 @@
             data-testid="approval-condition-rule"
           >
             <el-select
-              v-model="rule.fieldId"
+              :model-value="rule.fieldId"
               size="small"
               filterable
               placeholder="字段"
               :disabled="readOnly"
               class="ms-w-160"
               data-testid="approval-condition-rule-field"
+              @update:model-value="(fieldId: string) => setConditionRuleField(node.key, branch.edgeKey, ruleIndex, fieldId)"
             >
               <el-option
                 v-for="field in conditionFieldOptions"
@@ -69,11 +71,12 @@
               />
             </el-select>
             <el-select
-              v-model="rule.operator"
+              :model-value="rule.operator"
               size="small"
               :disabled="readOnly"
               class="ms-w-120"
               data-testid="approval-condition-rule-operator"
+              @update:model-value="(operator: ConditionRuleOperator) => setConditionRuleOperator(node.key, branch.edgeKey, ruleIndex, operator)"
             >
               <el-option
                 v-for="operator in CONDITION_RULE_OPERATORS"
@@ -90,14 +93,14 @@
               :disabled="readOnly"
               class="ms-w-160"
               data-testid="approval-condition-rule-value"
-              @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
+              @update:model-value="(text: string) => setConditionRuleValue(node.key, branch.edgeKey, ruleIndex, text)"
             />
             <el-button
               size="small"
               type="danger"
               :disabled="readOnly || branch.rules.length === 1"
               data-testid="approval-condition-rule-remove"
-              @click="removeConditionRule(branch, ruleIndex)"
+              @click="removeConditionRule(node.key, branch.edgeKey, ruleIndex)"
             >删除</el-button>
           </div>
         </template>
@@ -106,7 +109,7 @@
           size="small"
           :disabled="readOnly"
           data-testid="approval-condition-rule-add"
-          @click="addConditionRule(branch)"
+          @click="addConditionRule(node.key, branch.edgeKey)"
         >
           <el-icon><Plus /></el-icon>
           添加规则
@@ -117,12 +120,13 @@
           data-testid="approval-condition-formula"
         >
           <el-input
-            v-model="branch.formulaExpression"
+            :model-value="branch.formulaExpression"
             type="textarea"
             :rows="3"
             :disabled="readOnly"
             placeholder='例如 SUM({purchase_items.amount}) >= 20000'
             data-testid="approval-condition-formula-expression"
+            @update:model-value="(expression: string) => setConditionFormulaExpression(node.key, branch.edgeKey, expression)"
           />
           <div class="template-authoring__condition-formula-tools">
             <el-button
@@ -132,31 +136,31 @@
               :disabled="readOnly"
               :title="option.label"
               :data-testid="`approval-condition-formula-insert-${option.token}`"
-              @click="insertConditionFormulaToken(branch, option.token)"
+              @click="insertConditionFormulaToken(node.key, branch.edgeKey, option.token)"
             >{{ option.token }}</el-button>
             <el-button
               size="small"
               :disabled="readOnly"
               data-testid="approval-condition-formula-insert-sum"
-              @click="insertConditionFormulaFunction(branch, 'SUM')"
+              @click="insertConditionFormulaFunction(node.key, branch.edgeKey, 'SUM')"
             >SUM()</el-button>
             <el-button
               size="small"
               :disabled="readOnly"
               data-testid="approval-condition-formula-insert-count"
-              @click="insertConditionFormulaFunction(branch, 'COUNT')"
+              @click="insertConditionFormulaFunction(node.key, branch.edgeKey, 'COUNT')"
             >COUNT()</el-button>
             <el-button
               size="small"
               :disabled="readOnly"
               data-testid="approval-condition-formula-insert-min"
-              @click="insertConditionFormulaFunction(branch, 'MIN')"
+              @click="insertConditionFormulaFunction(node.key, branch.edgeKey, 'MIN')"
             >MIN()</el-button>
             <el-button
               size="small"
               :disabled="readOnly"
               data-testid="approval-condition-formula-insert-max"
-              @click="insertConditionFormulaFunction(branch, 'MAX')"
+              @click="insertConditionFormulaFunction(node.key, branch.edgeKey, 'MAX')"
             >MAX()</el-button>
             <template v-if="formulaRoles.length > 0">
               <span
@@ -170,7 +174,7 @@
                 :disabled="readOnly"
                 :title="`插入 requester.role in [&quot;${role.id}&quot;]`"
                 :data-testid="`approval-condition-formula-insert-role-${role.id}`"
-                @click="insertConditionFormulaRoleMembership(branch, role.id)"
+                @click="insertConditionFormulaRoleMembership(node.key, branch.edgeKey, role.id)"
               >{{ formatRoleLabel(role) }}</el-button>
             </template>
           </div>
@@ -202,13 +206,14 @@
       </div>
       <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
         <el-select
-          v-model="conditionEditFor(node.key)!.defaultEdgeKey"
+          :model-value="conditionEditFor(node.key)!.defaultEdgeKey"
           size="small"
           clearable
           :disabled="readOnly"
           class="ms-w-220"
           placeholder="（无默认分支）"
           data-testid="approval-condition-default-edge"
+          @update:model-value="(edgeKey: string) => setConditionDefaultEdge(node.key, edgeKey ?? '')"
         >
           <el-option
             v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
@@ -231,11 +236,12 @@
     >
       <el-form-item label="汇聚模式" class="template-authoring__parallel-join-mode">
         <el-select
-          v-model="parallelEditFor(node.key)!.joinMode"
+          :model-value="parallelEditFor(node.key)!.joinMode"
           size="small"
           :disabled="readOnly"
           class="ms-w-240"
           data-testid="approval-parallel-join-mode"
+          @update:model-value="(mode: ParallelJoinMode) => setParallelJoinMode(node.key, mode)"
         >
           <el-option
             v-for="mode in PARALLEL_JOIN_MODES"
@@ -262,12 +268,12 @@
     >
       <el-form-item label="抄送类型">
         <el-select
-          v-model="ccEditFor(node.key)!.targetType"
+          :model-value="ccEditFor(node.key)!.targetType"
           size="small"
           :disabled="readOnly"
           class="ms-w-240"
           data-testid="approval-cc-target-type"
-          @change="syncCcOptions(node.key)"
+          @update:model-value="(targetType: ApprovalAssigneeType) => setCcTargetType(node.key, targetType)"
         >
           <el-option
             v-for="targetType in CC_TARGET_TYPES"
@@ -522,10 +528,12 @@ import { computed, inject, toRefs, unref, type ComputedRef, type Ref } from 'vue
 import { Plus } from '@element-plus/icons-vue'
 import type {
   ApprovalAssigneeSourceKind,
+  ApprovalAssigneeType,
   ApprovalMode,
   ApprovalNode,
   EmptyAssigneePolicy,
   NodeFieldAccess,
+  ParallelJoinMode,
   ParallelNodeConfig,
 } from '../../types/approval'
 import {
@@ -535,6 +543,7 @@ import {
   CONDITION_RULE_OPERATORS,
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
+  type ConditionRuleOperator,
 } from '../templateAuthoring'
 
 const props = defineProps<{
@@ -567,13 +576,18 @@ const hasApprovalNodeEditor = api.hasApprovalNodeEditor
 const conditionOperatorLabel = api.conditionOperatorLabel
 const liveBranchSummary = api.liveBranchSummary
 const conditionRuleValueText = api.conditionRuleValueText
+const setConditionConjunction = api.setConditionConjunction
+const setConditionRuleField = api.setConditionRuleField
+const setConditionRuleOperator = api.setConditionRuleOperator
 const setConditionRuleValue = api.setConditionRuleValue
 const addConditionRule = api.addConditionRule
 const removeConditionRule = api.removeConditionRule
 const setConditionBranchPredicateMode = api.setConditionBranchPredicateMode
+const setConditionFormulaExpression = api.setConditionFormulaExpression
 const insertConditionFormulaToken = api.insertConditionFormulaToken
 const insertConditionFormulaFunction = api.insertConditionFormulaFunction
 const insertConditionFormulaRoleMembership = api.insertConditionFormulaRoleMembership
+const setConditionDefaultEdge = api.setConditionDefaultEdge
 const conditionFormulaDryRunResult = api.conditionFormulaDryRunResult
 const conditionFormulaDryRunLoading = api.conditionFormulaDryRunLoading
 const dryRunConditionFormula = api.dryRunConditionFormula
@@ -582,7 +596,9 @@ const conditionEdgeLabel = api.conditionEdgeLabel
 const graphEdgeTargetLabel = api.graphEdgeTargetLabel
 const graphNodeLabel = api.graphNodeLabel
 const parallelJoinModeLabel = api.parallelJoinModeLabel
+const setParallelJoinMode = api.setParallelJoinMode
 const ccTargetTypeLabel = api.ccTargetTypeLabel
+const setCcTargetType = api.setCcTargetType
 const setCcTargetIds = api.setCcTargetIds
 const syncCcOptions = api.syncCcOptions
 const approvalSourceKind = api.approvalSourceKind
