@@ -5,6 +5,7 @@ const AUTHORING_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   APPROVAL_CONDITION_BRANCH_RULES_EMPTY: '条件分支必须配置条件，默认分支请使用“其他情况”',
   APPROVAL_CONDITION_FORMULA_STATIC: '条件公式必须引用表单或发起人数据',
   APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE: '条件公式会匹配所有有效申请，请改用“其他情况”分支',
+  APPROVAL_TEMPLATE_VERSION_STALE: '模板版本已更新，请刷新版本后重试',
 }
 
 /**

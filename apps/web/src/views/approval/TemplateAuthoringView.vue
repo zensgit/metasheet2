@@ -47,6 +47,14 @@
             </el-tooltip>
           </template>
           <el-button
+            v-if="isEditMode && canvasV2Enabled && canManageTemplates"
+            :icon="Clock"
+            data-testid="approval-template-version-workspace-button"
+            @click="versionWorkspaceVisible = true"
+          >
+            版本
+          </el-button>
+          <el-button
             :loading="saving"
             :disabled="!canSave"
             data-testid="approval-template-save-button"
@@ -66,6 +74,17 @@
         </div>
       </template>
     </PageHeader>
+
+    <ApprovalVersionWorkspace
+      v-if="isEditMode && canvasV2Enabled && canManageTemplates && versionWorkspaceVisible"
+      v-model:visible="versionWorkspaceVisible"
+      :template-id="templateId"
+      :latest-version-id="loadedTemplateForAuthoring?.latestVersionId ?? null"
+      :current-form-schema="versionWorkspaceFormSchema"
+      :current-graph="canvasEffectiveGraph"
+      :current-dirty="isDraftDirty"
+      @restored="handleVersionRestored"
+    />
 
     <el-alert
       v-if="!canManageTemplates"
@@ -962,7 +981,7 @@ import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
-import { Plus, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
+import { Clock, Plus, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useFeatureFlags } from '../../stores/featureFlags'
@@ -992,6 +1011,7 @@ import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vu
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
 import ApprovalFormBuilder from '../../approvals/components/ApprovalFormBuilder.vue'
+import ApprovalVersionWorkspace from '../../approvals/components/ApprovalVersionWorkspace.vue'
 import {
   addFormField,
   moveFormField,
@@ -1124,6 +1144,7 @@ const loadError = ref<string | null>(null)
 const validationErrors = ref<string[]>([])
 const unsupportedReason = ref<string | null>(null)
 const loadedTemplateForAuthoring = ref<ApprovalTemplateDetailDTO | null>(null)
+const versionWorkspaceVisible = ref(false)
 // G-1: a COMPLEX (condition/parallel/cc/non-linear) graph renders read-only but is NOT
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
@@ -2126,6 +2147,7 @@ const CANVAS_NODE_H = GRAPH_LAYOUT_NODE_HEIGHT
 const CANVAS_MINIMAP_W = 220
 const CANVAS_MINIMAP_H = 120
 const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(draft.value))
+const versionWorkspaceFormSchema = computed(() => buildFormSchema(draft.value))
 const canvasLayout = computed<GraphLayout>(() => computeLayout(canvasEffectiveGraph.value))
 // C1: validity now reads the effective graph for BOTH shapes. This does not move publish gating for
 // a linear draft (`publishApprovalFlowIssues` consumes it): every check in `graphValidityIssues`
@@ -3341,6 +3363,11 @@ async function loadTemplateForEdit() {
   } finally {
     loading.value = false
   }
+}
+
+async function handleVersionRestored(): Promise<void> {
+  versionWorkspaceVisible.value = false
+  await loadTemplateForEdit()
 }
 
 function firstInvalidAuthoringSection(formErrors: string[]): AuthoringSectionId {

@@ -69,8 +69,8 @@ describe('approval template version diff', () => {
       { kind: 'added', entity: 'field', key: 'costCenter', label: '成本中心' },
       { kind: 'changed', entity: 'node', key: 'approve', label: '财务审批' },
       { kind: 'added', entity: 'node', key: 'cc', label: '抄送财务' },
-      { kind: 'changed', entity: 'edge', key: 'e2', label: 'approve -> cc' },
-      { kind: 'added', entity: 'edge', key: 'e3', label: 'cc -> end' },
+      { kind: 'changed', entity: 'edge', key: 'e2', label: '财务审批 → 抄送财务' },
+      { kind: 'added', entity: 'edge', key: 'e3', label: '抄送财务 → 结束' },
     ]))
   })
 
@@ -139,5 +139,24 @@ describe('approval template version diff', () => {
       { kind: 'changed', entity: 'field', key: 'reason', label: '申请原因' },
       { kind: 'moved', entity: 'field', key: 'amount', label: '金额' },
     ]))
+  })
+
+  it('never exposes field ids, node keys, or edge keys as user-facing labels', () => {
+    const before = version({
+      formSchema: { fields: [{ id: 'secret_field_id', type: 'text', label: '' }] },
+      approvalGraph: {
+        nodes: [
+          { key: 'secret_start_key', type: 'start', config: {} },
+          { key: 'secret_node_key', type: 'approval', config: { approvalMode: 'single' } },
+        ],
+        edges: [{ key: 'secret_edge_key', source: 'secret_start_key', target: 'secret_node_key' }],
+      },
+    })
+    const after = version({ formSchema: { fields: [] }, approvalGraph: { nodes: [], edges: [] } })
+
+    const labels = diffApprovalTemplateVersions(before, after).changes.map((change) => change.label)
+
+    expect(labels).toEqual(expect.arrayContaining(['未命名字段', '发起', '审批', '发起 → 审批']))
+    expect(labels.join(' ')).not.toMatch(/secret_(field|start|node|edge)_/)
   })
 })

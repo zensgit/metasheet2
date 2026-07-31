@@ -115,10 +115,14 @@ on:
       - 'apps/web/src/approvals/components/ApprovalGraphNodeConfigEditor.vue'
       - 'apps/web/src/approvals/nodeConfigEditorContext.ts'
       - 'apps/web/src/approvals/templateVersionDiff.ts'
+      - 'apps/web/src/approvals/approvalVersionPresentation.ts'
       - 'apps/web/src/approvals/versionGraphOverlay.ts'
+      - 'apps/web/src/approvals/components/ApprovalVersionGraphSnapshot.vue'
+      - 'apps/web/src/approvals/components/ApprovalVersionWorkspace.vue'
       - 'apps/web/tests/approval-canvas-viewport.test.ts'
       - 'apps/web/tests/approval-template-version-diff.test.ts'
       - 'apps/web/tests/approval-version-graph-overlay.test.ts'
+      - 'apps/web/tests/approval-version-workspace.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -303,10 +307,14 @@ on:
       - 'apps/web/src/approvals/components/ApprovalGraphNodeConfigEditor.vue'
       - 'apps/web/src/approvals/nodeConfigEditorContext.ts'
       - 'apps/web/src/approvals/templateVersionDiff.ts'
+      - 'apps/web/src/approvals/approvalVersionPresentation.ts'
       - 'apps/web/src/approvals/versionGraphOverlay.ts'
+      - 'apps/web/src/approvals/components/ApprovalVersionGraphSnapshot.vue'
+      - 'apps/web/src/approvals/components/ApprovalVersionWorkspace.vue'
       - 'apps/web/tests/approval-canvas-viewport.test.ts'
       - 'apps/web/tests/approval-template-version-diff.test.ts'
       - 'apps/web/tests/approval-version-graph-overlay.test.ts'
+      - 'apps/web/tests/approval-version-workspace.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -451,6 +459,9 @@ jobs:
 
       - name: Run FWB mapping authoring contract
         run: pnpm --filter @metasheet/web exec vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
+
+      - name: Run approval version workspace contract
+        run: pnpm --filter @metasheet/web exec vitest run approval-version-workspace --reporter=dot
 
       - name: Run approval web guard specs (targeted)
         # detail/sub-form (明细) FE helpers: frozen-schema row render + fill-row seeding +
