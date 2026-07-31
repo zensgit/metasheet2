@@ -9,6 +9,7 @@ import { apiFetch, apiGet, apiPost } from '../utils/api'
 import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateDetailDTO,
+  ApprovalTemplateFormAuthoringContextDTO,
   ApprovalTemplateVersionDetailDTO,
   ApprovalTemplateVersionSummaryDTO,
   UnifiedApprovalDTO,
@@ -847,6 +848,30 @@ export async function unarchiveTemplate(templateId: string): Promise<ApprovalTem
 export async function getTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
   if (USE_MOCK) return mockTemplateDetail(id)
   return apiGet(`/api/approval-templates/${id}`)
+}
+
+export async function getTemplateFormAuthoringContext(
+  templateId: string,
+): Promise<ApprovalTemplateFormAuthoringContextDTO> {
+  if (USE_MOCK) {
+    const template = mockTemplateDetail(templateId)
+    const persistentIds = template.formSchema.fields.flatMap((field) => {
+      const columns = field.type === 'detail' && Array.isArray(field.columns)
+        ? field.columns
+            .map((column) => column.id)
+            .filter((id): id is string => typeof id === 'string' && id.length > 0)
+        : []
+      return [field.id, ...columns]
+    })
+    return {
+      templateId,
+      identityHistory: { complete: true, persistentIds },
+      referenceInventory: { complete: true, references: [] },
+    }
+  }
+  return apiGet(
+    `/api/approval-templates/${encodeURIComponent(templateId)}/form-authoring-context`,
+  )
 }
 
 export async function getTemplateVersion(

@@ -494,6 +494,35 @@ export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   approvalGraph: ApprovalGraph
 }
 
+export type ApprovalFormExternalReferenceKind =
+  | 'fwb_mapping'
+  | 'fwb_record_link'
+
+export interface ApprovalFormExternalReferenceDTO {
+  fieldId: string
+  kind: ApprovalFormExternalReferenceKind
+  /** Values-free dependency class; never contains a rule id or action payload. */
+  location:
+    | 'automation.write_approval_form_values.mappings.formFieldId'
+    | 'automation.write_approval_form_values.recordLinkFieldId'
+}
+
+/**
+ * Backend authority for the form command layer. Persistent ids come from every stored template
+ * version; browser-local ids remain session-owned and are deliberately not invented here.
+ */
+export interface ApprovalFormAuthoringContextDTO {
+  templateId: string
+  identityHistory: {
+    complete: true
+    persistentIds: string[]
+  }
+  referenceInventory: {
+    complete: true
+    references: ApprovalFormExternalReferenceDTO[]
+  }
+}
+
 export interface ApprovalTemplateVisibilityScope {
   type: ApprovalTemplateVisibilityType
   ids: string[]

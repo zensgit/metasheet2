@@ -323,6 +323,24 @@ export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   approvalGraph: ApprovalGraph
 }
 
+export interface ApprovalTemplateFormAuthoringContextDTO {
+  templateId: string
+  identityHistory: {
+    complete: true
+    persistentIds: string[]
+  }
+  referenceInventory: {
+    complete: true
+    references: Array<{
+      fieldId: string
+      kind: 'fwb_mapping' | 'fwb_record_link'
+      location:
+        | 'automation.write_approval_form_values.mappings.formFieldId'
+        | 'automation.write_approval_form_values.recordLinkFieldId'
+    }>
+  }
+}
+
 export interface ApprovalTemplateVisibilityScope {
   type: ApprovalTemplateVisibilityType
   ids: string[]

@@ -9,6 +9,7 @@ import type {
   AutoApprovalPolicy,
   AutoApprovalPolicySource,
   ApprovalTemplateDetailDTO,
+  ApprovalFormAuthoringContextDTO,
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVisibilityScope,
   ApprovalTemplateVersionDetailDTO,
@@ -116,6 +117,11 @@ import {
 } from './approval-record-link-txn-auth'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
+import {
+  collectApprovalFormPersistentIds,
+  findMissingApprovalFormReferenceIds,
+  loadApprovalFormExternalReferences,
+} from './approval-form-authoring-context'
 
 const metricsLogger = new Logger('ApprovalMetricsHook')
 const nodeTimeoutLogger = new Logger('ApprovalNodeTimeout')
@@ -3534,6 +3540,63 @@ export class ApprovalProductService {
     }))
   }
 
+  async getTemplateFormAuthoringContext(
+    templateId: string,
+  ): Promise<ApprovalFormAuthoringContextDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    let client: ApprovalDbClient | null = null
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+
+      const templateResult = await client.query<{ id: string }>(
+        'SELECT id FROM approval_templates WHERE id = $1',
+        [templateId],
+      )
+      if (!templateResult.rows[0]) {
+        throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+      }
+
+      const versionsResult = await client.query<{ form_schema: unknown }>(
+        `SELECT form_schema
+         FROM approval_template_versions
+         WHERE template_id = $1
+         ORDER BY version ASC`,
+        [templateId],
+      )
+      let persistentIds: string[]
+      try {
+        persistentIds = collectApprovalFormPersistentIds(
+          versionsResult.rows.map((row) => row.form_schema),
+        )
+      } catch {
+        throw new ServiceError(
+          'Approval form authoring context is unavailable',
+          500,
+          'APPROVAL_FORM_AUTHORING_CONTEXT_INCOMPLETE',
+        )
+      }
+
+      const references = await loadApprovalFormExternalReferences(
+        async (sql, params) => client!.query(sql, params),
+        templateId,
+      )
+      await client.query('COMMIT')
+
+      return {
+        templateId,
+        identityHistory: { complete: true, persistentIds },
+        referenceInventory: { complete: true, references },
+      }
+    } catch (error) {
+      await rollbackQuietly(client)
+      throw error
+    } finally {
+      client?.release()
+    }
+  }
+
   async restoreTemplateVersion(
     templateId: string,
     versionId: string,
@@ -3924,6 +3987,20 @@ export class ApprovalProductService {
       )
 
       const formSchema = asFormSchema(version.form_schema)
+      const fwbReferences = await loadApprovalFormExternalReferences(
+        async (sql, params) => client!.query(sql, params),
+        id,
+      )
+      if (findMissingApprovalFormReferenceIds(formSchema, fwbReferences).length > 0) {
+        throw new ServiceError(
+          'Approval form fields required by automation writeback are missing',
+          409,
+          'APPROVAL_TEMPLATE_FORM_FIELD_REFERENCED',
+        )
+      }
+      // This in-transaction rescan is the publish choke point, not a claim that the authoring GET
+      // is TOCTOU-free. A concurrently-created rule after this scan is still fail-closed by FWB's
+      // sourceTemplateVersionId mismatch at execution time.
       const storedApprovalGraph = asApprovalGraph(version.approval_graph)
       // Publishing is a write choke point: historical drafts stay readable, but
       // must satisfy the current all-runtime-path contract before activation.
