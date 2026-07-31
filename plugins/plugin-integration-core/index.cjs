@@ -46,6 +46,18 @@ const { createErpFeedbackWriter } = require('./lib/erp-feedback.cjs')
 const { createPipelineRunner } = require('./lib/pipeline-runner.cjs')
 const { installStaging, listStagingDescriptors } = require('./lib/staging-installer.cjs')
 const { registerIntegrationRoutes } = require('./lib/http-routes.cjs')
+const {
+  loadStockPreparationRuntimeConfig,
+} = require('./lib/sealed-export/stock-preparation-runtime-config.cjs')
+const {
+  createStockPreparationRuntimeDatabase,
+} = require('./lib/sealed-export/stock-preparation-runtime-database.cjs')
+const {
+  createStockPreparationRuntimePersist,
+} = require('./lib/sealed-export/stock-preparation-runtime-persist.cjs')
+const {
+  createStockPreparationSqlServerRuntime,
+} = require('./lib/sealed-export/stock-preparation-sqlserver-runtime.cjs')
 const manifest = require('./plugin.json')
 
 const registeredRoutes = []
@@ -67,6 +79,8 @@ let runLogger = null
 let erpFeedbackWriter = null
 let pipelineRunner = null
 let stagingInstaller = null
+let stockPreparationSqlServerRuntime = null
+let stockPreparationRuntimeDatabase = null
 
 function buildCapabilityStatus() {
   return {
@@ -78,6 +92,8 @@ function buildCapabilityStatus() {
     deadLetters: Boolean(deadLetterStore),
     deadLetterReplay: Boolean(pipelineRunner && typeof pipelineRunner.replayDeadLetter === 'function'),
     staging: Boolean(stagingInstaller),
+    stockPreparationSqlServerSealedSnapshot:
+      Boolean(stockPreparationSqlServerRuntime),
   }
 }
 
@@ -273,6 +289,43 @@ module.exports = {
       erpFeedbackWriter,
     })
 
+    const stockPreparationRuntimeConfig =
+      loadStockPreparationRuntimeConfig()
+    if (stockPreparationRuntimeConfig.enabled) {
+      stockPreparationRuntimeDatabase =
+        createStockPreparationRuntimeDatabase({
+          connectionString:
+            stockPreparationRuntimeConfig.runtimeDatabaseUrl,
+          expectedRole:
+            stockPreparationRuntimeConfig.runtimeDatabaseRole,
+        })
+      try {
+        await stockPreparationRuntimeDatabase.assertReady()
+        stockPreparationSqlServerRuntime =
+          createStockPreparationSqlServerRuntime({
+            artifactRoot: stockPreparationRuntimeConfig.artifactRoot,
+            evidenceKey: stockPreparationRuntimeConfig.evidenceKey,
+            externalSystemRegistry,
+            identityKey: stockPreparationRuntimeConfig.identityKey,
+            persistStockPreparation:
+              createStockPreparationRuntimePersist({ context }),
+            privateSignerMaterials:
+              stockPreparationRuntimeConfig.privateSignerMaterials,
+            qualificationKeyring:
+              stockPreparationRuntimeConfig.qualificationKeyring,
+            runtimeDatabase: stockPreparationRuntimeDatabase,
+          })
+      } catch (error) {
+        try {
+          await stockPreparationRuntimeDatabase.close()
+        } catch {
+          // Preserve the activation refusal; close is best effort here.
+        }
+        stockPreparationRuntimeDatabase = null
+        throw error
+      }
+    }
+
     // --- HTTP routes ------------------------------------------------------
     context.api.http.addRoute('GET', '/api/integration/health', async (_req, res) => {
       res.json(buildHealthPayload())
@@ -293,6 +346,9 @@ module.exports = {
         pipelineRunner,
         deadLetterStore,
         stagingInstaller,
+        ...(stockPreparationSqlServerRuntime
+          ? { stockPreparationSqlServerRuntime }
+          : {}),
       },
     }))
 
@@ -305,6 +361,17 @@ module.exports = {
   async deactivate() {
     if (!activeContext) return
     const logger = activeContext.logger || console
+    if (stockPreparationRuntimeDatabase) {
+      try {
+        await stockPreparationRuntimeDatabase.close()
+      } catch {
+        if (typeof logger.warn === 'function') {
+          logger.warn(
+            `[${PLUGIN_ID}] sealed-snapshot runtime database close failed`,
+          )
+        }
+      }
+    }
     // PluginContext currently exposes no removeRoute hook for the addRoute
     // helper used above; host is expected to drop the router on deactivate.
     // We clear local state here so a re-activation starts clean.
@@ -323,6 +390,8 @@ module.exports = {
     erpFeedbackWriter = null
     pipelineRunner = null
     stagingInstaller = null
+    stockPreparationSqlServerRuntime = null
+    stockPreparationRuntimeDatabase = null
     activeContext = null
     logger.info(`[${PLUGIN_ID}] deactivated`)
   },

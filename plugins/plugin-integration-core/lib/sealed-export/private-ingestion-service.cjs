@@ -263,7 +263,7 @@ function createPrivateIngestionService({
     }
   }
 
-  function validatePersistedSession(row) {
+  async function validatePersistedSession(row) {
     if (!row || typeof row !== 'object') failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
     const hasGenerationClaimId = Object.prototype.hasOwnProperty.call(
       row,
@@ -284,7 +284,7 @@ function createPrivateIngestionService({
     const manifest = contracts.validateSignedManifest(row.manifest)
     assertAuthorityMatchesEnvelope(authority, envelope)
     const verifiedBinding = contracts.verifyManifestBinding(envelope, manifest)
-    manifestVerifier.verify(manifest)
+    await manifestVerifier.verify(manifest)
     const manifestDigest = contracts.computeManifestDigest(manifest)
     let storedExpiry
     let completedAt = null
@@ -412,7 +412,7 @@ function createPrivateIngestionService({
     return Object.freeze({
       binding,
       kind: 'SESSION',
-      persisted: validatePersistedSession(state.session),
+      persisted: await validatePersistedSession(state.session),
     })
   }
 
@@ -493,7 +493,7 @@ function createPrivateIngestionService({
     const manifest = contracts.validateSignedManifest(call.manifest)
     assertAuthorityMatchesEnvelope(authority, envelope)
     const verified = contracts.verifyManifestBinding(envelope, manifest)
-    manifestVerifier.verify(manifest)
+    await manifestVerifier.verify(manifest)
     const expiry = parseExpiry(manifest)
     const instant = nowInstant()
     if (instant.getTime() >= expiry) failSealedExport('SEALED_EXPORT_ARTIFACT_EXPIRED')
@@ -520,7 +520,7 @@ function createPrivateIngestionService({
       created_at: instant.toISOString(),
       updated_at: instant.toISOString(),
     })
-    const persisted = validatePersistedSession(row)
+    const persisted = await validatePersistedSession(row)
     if (
       persisted.row.status === 'UPLOAD_COMPLETE'
       || persisted.row.status === 'CLEANING'
@@ -686,7 +686,7 @@ function createPrivateIngestionService({
       failSealedExport('SEALED_EXPORT_ARTIFACT_EXPIRED')
     }
     const generationId = generationIdFor(call.sessionId)
-    const claimed = validatePersistedSession(
+    const claimed = await validatePersistedSession(
       await metadataStore.claimCompletedSession(
         loaded.binding,
         generationId,

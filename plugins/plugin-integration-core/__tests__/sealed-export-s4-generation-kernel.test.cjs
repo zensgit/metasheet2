@@ -1019,10 +1019,243 @@ async function main() {
       (row) => { row.signer_status = 'ACTIVE' },
     )
 
+    const pinnedRows = memory.rows(GENERATION_ROW_TABLE)
+      .filter((row) => row.generation_id === activeAfterCas)
+      .sort((leftRow, rightRow) => leftRow.row_index - rightRow.row_index)
+      .map((row) => JSON.parse(row.canonical_row_text))
+    assert.equal(pinnedRows.length, 2, 'pinned-read fixture spans two pages')
+    const originalSelectOne = memory.api.selectOne
+    let pointerReads = 0
+    memory.api.selectOne = async (table, where) => {
+      if (table === ACTIVE_POINTER_TABLE) pointerReads += 1
+      return originalSelectOne(table, where)
+    }
+    const readDescriptor = await kernel.createActiveReadDescriptor({
+      canonicalObjectVersion: CANONICAL_OBJECT_VERSION,
+    })
+    assert.equal(pointerReads, 1, 'descriptor resolves the active pointer once')
+    assert.deepEqual(
+      Object.keys(readDescriptor).sort(),
+      [
+        'appliedRowCount',
+        'canonicalObjectVersion',
+        'domainIsolatedArtifactDigest',
+        'domainIsolatedGenerationDigest',
+        'domainIsolatedManifestDigest',
+        'domainIsolatedRowsetDigest',
+        'externalWrite',
+        'manifestRowCount',
+        'sealedRowCount',
+      ],
+      'descriptor exposes only the closed values-free surface',
+    )
+    assert.equal(Object.isFrozen(readDescriptor), true)
+    assert.equal(readDescriptor.appliedRowCount, pinnedRows.length)
+    assert.deepEqual(
+      await kernel.readPinnedRows({
+        descriptor: readDescriptor,
+        offset: 0,
+        limit: 1,
+      }),
+      pinnedRows.slice(0, 1),
+    )
+    const activationExpectation = await kernel.createActivationExpectation({
+      canonicalObjectVersion: CANONICAL_OBJECT_VERSION,
+    })
+    assert.deepEqual(
+      Object.keys(activationExpectation).sort(),
+      [
+        'activeGenerationPresent',
+        'canonicalObjectVersion',
+        'externalWrite',
+        'pointerVersion',
+      ],
+      'activation expectation does not expose the active generation id',
+    )
+    assert.equal(activationExpectation.activeGenerationPresent, true)
+    assert.equal(Object.isFrozen(activationExpectation), true)
+    await refuses(
+      () => kernel.activateWithExpectation({
+        generationId: activeAfterCas,
+        expectation: Object.freeze({ ...activationExpectation }),
+      }),
+      'SEALED_EXPORT_VISIBILITY_CAS_CONFLICT',
+      'copying an activation expectation cannot forge its private binding',
+    )
+
+    const successor = await prepareGeneration(harness, 'pinned-successor', 3)
+    await verifyGeneration(harness, successor.generationId)
+    const successorActivation = await kernel.activateWithExpectation({
+      generationId: successor.generationId,
+      expectation: activationExpectation,
+    })
+    const successorReadDescriptor =
+      await kernel.createReadDescriptorForActivation({
+        activation: successorActivation,
+      })
+    assert.equal(successorReadDescriptor.appliedRowCount, 3)
+    await refuses(
+      () => kernel.createReadDescriptorForActivation({
+        activation: Object.freeze({ ...successorActivation }),
+      }),
+      'SEALED_EXPORT_GENERATION_VERIFY_FAILED',
+      'copying activation evidence cannot mint a read descriptor',
+    )
+    await refuses(
+      () => kernel.activateWithExpectation({
+        generationId: successor.generationId,
+        expectation: activationExpectation,
+      }),
+      'SEALED_EXPORT_VISIBILITY_CAS_CONFLICT',
+      'activation expectations are one-shot',
+    )
+    const replayExpectation = await kernel.createActivationExpectation({
+      canonicalObjectVersion: CANONICAL_OBJECT_VERSION,
+    })
+    const replayOutcome = await kernel.activateWithExpectation({
+      generationId: successor.generationId,
+      expectation: replayExpectation,
+    })
+    assert.equal(replayOutcome.activePointerOutcome, 'UNCHANGED')
+    assert.equal(replayOutcome.externalWrite, false)
+    assert.equal(replayOutcome.pointerVersion, replayExpectation.pointerVersion)
+    assert.equal(replayOutcome.rowCount, 3)
+    assert.equal(replayOutcome.status, 'ACTIVE')
+    assert.match(replayOutcome.domainIsolatedGenerationDigest, /^[0-9a-f]{64}$/)
+    const staleReplayExpectation = await kernel.createActivationExpectation({
+      canonicalObjectVersion: CANONICAL_OBJECT_VERSION,
+    })
+    memory.mutate(
+      ACTIVE_POINTER_TABLE,
+      (row) => row.canonical_object_version === CANONICAL_OBJECT_VERSION,
+      (row) => { row.pointer_version += 1 },
+    )
+    await refuses(
+      () => kernel.activateWithExpectation({
+        generationId: successor.generationId,
+        expectation: staleReplayExpectation,
+      }),
+      'SEALED_EXPORT_VISIBILITY_CAS_CONFLICT',
+      'unchanged activation still rejects a stale pointer version',
+    )
+    const staleExpectation = await kernel.createActivationExpectation({
+      canonicalObjectVersion: CANONICAL_OBJECT_VERSION,
+    })
+    const staleCandidate = await prepareGeneration(
+      harness,
+      'stale-activation-expectation',
+      1,
+    )
+    await verifyGeneration(harness, staleCandidate.generationId)
+    memory.mutate(
+      ACTIVE_POINTER_TABLE,
+      (row) => row.canonical_object_version === CANONICAL_OBJECT_VERSION,
+      (row) => { row.pointer_version += 1 },
+    )
+    await refuses(
+      () => kernel.activateWithExpectation({
+        generationId: staleCandidate.generationId,
+        expectation: staleExpectation,
+      }),
+      'SEALED_EXPORT_VISIBILITY_CAS_CONFLICT',
+      'pointer-version changes invalidate an otherwise matching expectation',
+    )
+    pointerReads = 0
+    assert.deepEqual(
+      await kernel.readPinnedRows({
+        descriptor: readDescriptor,
+        offset: 1,
+        limit: 1,
+      }),
+      pinnedRows.slice(1, 2),
+      'pointer flip cannot mix a successor row into a pinned read',
+    )
+    assert.equal(pointerReads, 0, 'pinned pages never re-read the active pointer')
+
+    const peerKernel = createSealedExportGenerationKernel({
+      generationStore,
+      ingestionSource: ingestionService,
+      authority: AUTHORITY,
+      evidenceKey: EVIDENCE_KEY,
+      clock,
+    })
+    await refuses(
+      () => peerKernel.readPinnedRows({
+        descriptor: readDescriptor,
+        offset: 0,
+        limit: 1,
+      }),
+      'SEALED_EXPORT_GENERATION_VERIFY_FAILED',
+      'a descriptor is bound to the kernel that minted it',
+    )
+    await refuses(
+      () => kernel.readPinnedRows({
+        descriptor: Object.freeze({ ...readDescriptor }),
+        offset: 0,
+        limit: 1,
+      }),
+      'SEALED_EXPORT_GENERATION_VERIFY_FAILED',
+      'copying the public descriptor cannot forge a trusted handle',
+    )
+
+    memory.mutate(
+      GENERATION_TABLE,
+      (row) => row.generation_id === activeAfterCas,
+      (row) => { row.status = 'QUARANTINED' },
+    )
+    await refuses(
+      () => kernel.readPinnedRows({
+        descriptor: readDescriptor,
+        offset: 0,
+        limit: 1,
+      }),
+      'SEALED_EXPORT_GENERATION_VERIFY_FAILED',
+      'a quarantined pinned generation is no longer readable',
+    )
+    memory.mutate(
+      GENERATION_TABLE,
+      (row) => row.generation_id === activeAfterCas,
+      (row) => { row.status = 'ACTIVE' },
+    )
+    const pinnedGeneration = memory.rows(GENERATION_TABLE)
+      .find((row) => row.generation_id === activeAfterCas)
+    memory.mutate(
+      GENERATION_TABLE,
+      (row) => row.generation_id === activeAfterCas,
+      (row) => { row.sealed_rowset_digest = D('pinned-tamper') },
+    )
+    await refuses(
+      () => kernel.readPinnedRows({
+        descriptor: readDescriptor,
+        offset: 0,
+        limit: 1,
+      }),
+      'SEALED_EXPORT_GENERATION_VERIFY_FAILED',
+      'generation digest tampering invalidates the pinned handle',
+    )
+    memory.mutate(
+      GENERATION_TABLE,
+      (row) => row.generation_id === activeAfterCas,
+      (row) => {
+        row.sealed_rowset_digest = pinnedGeneration.sealed_rowset_digest
+      },
+    )
+    assert.deepEqual(
+      await kernel.readPinnedRows({
+        descriptor: readDescriptor,
+        offset: 0,
+        limit: 2,
+      }),
+      pinnedRows,
+      'restoring the exact anchors restores the pinned read',
+    )
+    memory.api.selectOne = originalSelectOne
+
     const publicText = JSON.stringify({
       activeFirst,
       verifiedFirst,
       firstChunk,
+      readDescriptor,
       audits: memory.rows(AUDIT_TABLE).map((row) => ({
         eventType: row.event_type,
         reason: row.reason,

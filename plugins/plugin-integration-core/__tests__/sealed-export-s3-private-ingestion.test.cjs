@@ -283,6 +283,7 @@ async function refuses(action, expectedReason, label) {
       'SIGNATURE_ALGORITHM',
       'createHarnessPrivateIngestionManifestVerifierForTests',
       'createPrivateIngestionManifestVerifier',
+      'createSqlServerPrivateIngestionManifestVerifier',
       'isTrustedPrivateIngestionManifestVerifier',
     ])
 

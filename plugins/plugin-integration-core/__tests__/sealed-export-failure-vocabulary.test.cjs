@@ -1,12 +1,13 @@
 'use strict'
 
-// Sealed-export latent surface — closed failure vocabulary battery. Plain node
-// test, hermetic.
+// Sealed-export controlled surface — closed failure vocabulary battery. Plain
+// node test, hermetic.
 //
 // §10 of the ratified S0 baseline requires three pins, and this file carries all
 // three:
 //   1. an exact vocabulary pin              -> vocabularyExactPin()
-//   2. a runtime consumer pin               -> latentSurfacePin() + zeroConsumerSweep()
+//   2. a runtime consumer pin               -> latentSurfacePin()
+//                                            + controlledConsumerSweep()
 //   3. a source-level throw-site invariant  -> throwSiteInvariant()
 //                                            + astThrowSiteScanHasNoBlindWindow()
 //
@@ -518,8 +519,9 @@ function astScanMatchesBindingsNotNames() {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime-consumer pin, second half: S1 is LATENT, so nothing in the repository's runtime
-// code may import these modules — not just nothing inside this package.
+// Runtime-consumer pin, second half: S6-A authorizes exactly three controlled
+// consumers outside the sealed-export implementation directory. Any additional
+// runtime import remains outside the approved single-customer surface.
 //
 // Both roots and the filesystem are PARAMETERS, so the sweep can be aimed at a synthetic
 // tree whose offender is known. Without that, "zero offenders" is a traversal result, not
@@ -602,7 +604,7 @@ function inMemoryFilesystem(files) {
   }
 }
 
-function zeroConsumerSweep() {
+function controlledConsumerSweep() {
   const repoRoot = path.join(__dirname, '..', '..', '..')
   const roots = [
     { label: 'apps', path: path.join(repoRoot, 'apps') },
@@ -620,8 +622,15 @@ function zeroConsumerSweep() {
     assert.ok((real.scannedByRoot[label] || 0) > 50,
       'sweep must traverse ' + label + ', scanned=' + (real.scannedByRoot[label] || 0))
   }
-  assert.deepEqual(real.offenders.map((f) => path.relative(repoRoot, f)), [],
-    'S1 must have no runtime consumer anywhere in apps/, packages/ or plugins/')
+  assert.deepEqual(
+    real.offenders.map((f) => path.relative(repoRoot, f)),
+    [
+      'plugins/plugin-integration-core/index.cjs',
+      'plugins/plugin-integration-core/lib/stock-preparation-sealed-snapshot-decoder.cjs',
+      'plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs',
+    ],
+    'only the three S6-A controlled consumers may import sealed-export modules',
+  )
 
   // POSITIVE CONTROL — CROSS-PACKAGE DETECTION. A synthetic consumer in a DIFFERENT
   // package must make the sweep RED and must be NAMED. Without this the assertion above
@@ -849,7 +858,7 @@ function main() {
   throwSiteInvariant()
   astThrowSiteScanHasNoBlindWindow()
   astScanMatchesBindingsNotNames()
-  zeroConsumerSweep()
+  controlledConsumerSweep()
   undeclaredReasonIsNeverEchoed()
   detailsCarryNoCallerValues()
   safeTokenMirrorIsComplete()

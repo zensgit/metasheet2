@@ -180,6 +180,11 @@ async function main() {
   assert.ok(statusResult.adapters.includes('metasheet:multitable'), 'status reports MetaSheet multitable target adapter')
   assert.equal(statusResult.deadLetters, true, 'status reports dead-letter store')
   assert.equal(statusResult.deadLetterReplay, true, 'status reports dead-letter replay')
+  assert.equal(
+    statusResult.stockPreparationSqlServerSealedSnapshot,
+    false,
+    'sealed-snapshot runtime remains disabled by default',
+  )
   assert.deepEqual(statusResult.capabilities, {
     externalSystems: statusResult.externalSystems,
     adapters: statusResult.adapters,
@@ -189,6 +194,8 @@ async function main() {
     deadLetters: statusResult.deadLetters,
     deadLetterReplay: statusResult.deadLetterReplay,
     staging: statusResult.staging,
+    stockPreparationSqlServerSealedSnapshot:
+      statusResult.stockPreparationSqlServerSealedSnapshot,
   }, 'status capabilities mirror flat readiness fields')
 
   // --- 5b. Comm API exposes registry methods ----------------------------

@@ -114,6 +114,21 @@ test('on-prem package build prunes copied workspace node_modules before archivin
   )
 })
 
+test('on-prem package ships the verifier but keeps the builder repository-only', () => {
+  assert.match(
+    buildScript,
+    /"scripts\/ops\/multitable-onprem-package-verify\.sh"/,
+  )
+  const requiredPaths = buildScript.match(
+    /REQUIRED_PATHS=\(\n([\s\S]*?)\n\)/,
+  )
+  assert.ok(requiredPaths)
+  assert.doesNotMatch(
+    requiredPaths[1],
+    /"scripts\/ops\/multitable-onprem-package-build\.sh"/,
+  )
+})
+
 test('on-prem verifier rejects native bcrypt build dependencies', () => {
   const clean = runNativeBcryptVerifier(
     {
@@ -373,12 +388,23 @@ test('on-prem release and workflow artifacts publish both first-hop bootstrap si
 test('on-prem verifier rejects packages missing the stock-preparation acceptance runtime contract', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-stock-prep-package-'))
   const migrationPath = path.join(root, 'packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql')
+  const sealedMigrationPath = path.join(root, 'packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql')
   const smokePath = path.join(root, 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs')
   const acceptancePath = path.join(root, 'scripts/ops/stock-preparation-onprem-acceptance.ps1')
+  const sealedAcceptancePath = path.join(root, 'scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1')
+  const sealedRunbookPath = path.join(root, 'docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md')
   const pm2SamplePath = path.join(root, 'scripts/ops/stock-preparation-pm2-sample.mjs')
   fs.mkdirSync(path.dirname(migrationPath), { recursive: true })
   fs.mkdirSync(path.dirname(smokePath), { recursive: true })
+  fs.mkdirSync(path.dirname(sealedRunbookPath), { recursive: true })
   fs.writeFileSync(migrationPath, 'CREATE TABLE integration_stock_prep_audit ();\n')
+  fs.writeFileSync(
+    sealedMigrationPath,
+    [
+      'CREATE TABLE integration_sealed_export_stock_prep_bindings ();',
+      'CREATE TABLE integration_sealed_export_stock_prep_runs ();',
+    ].join('\n'),
+  )
   fs.writeFileSync(smokePath, 'S.auditActionsCovered = "8/8"\nS.selfScanClean = true\nS.pass = true\n')
   fs.writeFileSync(
     acceptancePath,
@@ -389,6 +415,29 @@ test('on-prem verifier rejects packages missing the stock-preparation acceptance
       '$Summary.selfScanClean = "true"',
       '$Summary.externalPlmK3ErpWrite = "false"',
       'stock-preparation-pm2-sample.mjs',
+      ].join('\n'),
+  )
+  fs.writeFileSync(
+    sealedAcceptancePath,
+    [
+      'stock-preparation/sqlserver-sealed-snapshot/acceptance/v2',
+      'internal/stock-preparation/sqlserver-sealed-snapshot/run',
+      'internal_noop',
+      '24999',
+      'machineBindingDigest',
+      'operationBindingDigest',
+      'ExpectedServiceRuntimeSha',
+      'ExpectedPackageSha256',
+      'BUILD_PROVENANCE.json',
+      'Get-S6FileSha256',
+    ].join('\n'),
+  )
+  fs.writeFileSync(
+    sealedRunbookPath,
+    [
+      'Create PostgreSQL Roles Before Migration 073',
+      'Unconditional Flag-Off Restoration',
+      'nextTestMachineAction=STOP_AND_WAIT',
     ].join('\n'),
   )
   fs.writeFileSync(pm2SamplePath, "const APP_NAME = 'metasheet-backend'\n")
@@ -402,6 +451,39 @@ test('on-prem verifier rejects packages missing the stock-preparation acceptance
     assert.notEqual(missingPm2Sample.status, 0)
     assert.match(missingPm2Sample.stderr, /PM2 safe projection helper/)
     fs.writeFileSync(pm2SamplePath, "const APP_NAME = 'metasheet-backend'\n")
+
+    fs.rmSync(sealedAcceptancePath)
+    const missingSealedAcceptance = runStockPreparationVerifier(root)
+    assert.notEqual(missingSealedAcceptance.status, 0)
+    assert.match(missingSealedAcceptance.stderr, /S6-A acceptance/)
+    fs.writeFileSync(
+      sealedAcceptancePath,
+      [
+        'stock-preparation/sqlserver-sealed-snapshot/acceptance/v2',
+        'internal/stock-preparation/sqlserver-sealed-snapshot/run',
+        'internal_noop',
+        '24999',
+        'machineBindingDigest',
+        'operationBindingDigest',
+        'ExpectedServiceRuntimeSha',
+        'ExpectedPackageSha256',
+        'BUILD_PROVENANCE.json',
+        'Get-S6FileSha256',
+      ].join('\n'),
+    )
+
+    fs.rmSync(sealedRunbookPath)
+    const missingSealedRunbook = runStockPreparationVerifier(root)
+    assert.notEqual(missingSealedRunbook.status, 0)
+    assert.match(missingSealedRunbook.stderr, /S6-A runbook/)
+    fs.writeFileSync(
+      sealedRunbookPath,
+      [
+        'Create PostgreSQL Roles Before Migration 073',
+        'Unconditional Flag-Off Restoration',
+        'nextTestMachineAction=STOP_AND_WAIT',
+      ].join('\n'),
+    )
 
     fs.rmSync(acceptancePath)
     const missingAcceptance = runStockPreparationVerifier(root)

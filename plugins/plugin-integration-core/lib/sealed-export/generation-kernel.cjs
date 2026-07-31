@@ -408,6 +408,9 @@ function createSealedExportGenerationKernel({
   const authority = validateAuthority(rawAuthority)
   const ownedEvidenceKey = Buffer.from(evidenceKey)
   const now = clock || (() => new Date())
+  const activationExpectations = new WeakMap()
+  const activationResults = new WeakMap()
+  const readDescriptors = new WeakMap()
 
   function nowInstant() {
     let value
@@ -884,20 +887,26 @@ function createSealedExportGenerationKernel({
     })
   }
 
-  async function activate(input) {
-    const call = readClosedCall(
-      input,
-      ['generationId', 'expectedActiveGenerationId'],
-      'VISIBILITY',
-    )
+  async function activateGeneration(
+    generationId,
+    expectedActiveGenerationId,
+    expectedPointerVersion,
+  ) {
     if (
-      typeof call.generationId !== 'string'
-      || !GENERATION_ID_PATTERN.test(call.generationId)
+      typeof generationId !== 'string'
+      || !GENERATION_ID_PATTERN.test(generationId)
       || (
-        call.expectedActiveGenerationId !== null
+        expectedActiveGenerationId !== null
         && (
-          typeof call.expectedActiveGenerationId !== 'string'
-          || !GENERATION_ID_PATTERN.test(call.expectedActiveGenerationId)
+          typeof expectedActiveGenerationId !== 'string'
+          || !GENERATION_ID_PATTERN.test(expectedActiveGenerationId)
+        )
+      )
+      || (
+        expectedPointerVersion !== null
+        && (
+          !Number.isSafeInteger(expectedPointerVersion)
+          || expectedPointerVersion < 0
         )
       )
     ) {
@@ -905,7 +914,7 @@ function createSealedExportGenerationKernel({
     }
     const candidate = await generationStore.readGeneration(
       authority,
-      call.generationId,
+      generationId,
     )
     if (candidate === null || candidate.status !== 'VERIFIED') {
       failSealedExport('SEALED_EXPORT_VISIBILITY_CAS_CONFLICT')
@@ -918,7 +927,7 @@ function createSealedExportGenerationKernel({
       candidateRowCount,
     )
     const outcome = await generationStore.transaction(async (trx) => {
-      const generation = await trx.readGeneration(authority, call.generationId)
+      const generation = await trx.readGeneration(authority, generationId)
       if (generation === null || generation.status !== 'VERIFIED') {
         failSealedExport('SEALED_EXPORT_VISIBILITY_CAS_CONFLICT')
       }
@@ -993,13 +1002,17 @@ function createSealedExportGenerationKernel({
       const pointer = await trx.readPointer(pointerId)
       if (
         pointer === null
-        || pointer.active_generation_id !== call.expectedActiveGenerationId
+        || pointer.active_generation_id !== expectedActiveGenerationId
+        || (
+          expectedPointerVersion !== null
+          && normalizeCount(pointer.pointer_version) !== expectedPointerVersion
+        )
       ) {
         failSealedExport('SEALED_EXPORT_VISIBILITY_CAS_CONFLICT')
       }
       const updatedPointer = await trx.updatePointer(
         pointerId,
-        call.expectedActiveGenerationId,
+        expectedActiveGenerationId,
         normalizeCount(pointer.pointer_version),
         {
           active_generation_id: generation.generation_id,
@@ -1026,7 +1039,7 @@ function createSealedExportGenerationKernel({
       })
     })
     if (outcome.kind === 'REFUSED') refuseAuthority(outcome.reason)
-    return Object.freeze({
+    const result = Object.freeze({
       status: 'ACTIVE',
       rowCount: outcome.rowCount,
       pointerVersion: outcome.pointerVersion,
@@ -1034,51 +1047,143 @@ function createSealedExportGenerationKernel({
       activePointerOutcome: 'FLIPPED',
       externalWrite: false,
     })
+    activationResults.set(result, Object.freeze({
+      canonicalObjectVersion: candidate.canonical_object_version,
+      generationId: outcome.generationId,
+    }))
+    return result
   }
 
-  async function readActiveRows(input) {
+  async function activate(input) {
     const call = readClosedCall(
       input,
-      ['canonicalObjectVersion', 'offset', 'limit'],
+      ['generationId', 'expectedActiveGenerationId'],
+      'VISIBILITY',
     )
+    return activateGeneration(
+      call.generationId,
+      call.expectedActiveGenerationId,
+      null,
+    )
+  }
+
+  async function createActivationExpectation(input) {
+    const call = readClosedCall(input, ['canonicalObjectVersion'])
+    if (!isBoundedString(call.canonicalObjectVersion)) {
+      failSealedExport('SEALED_EXPORT_VISIBILITY_CAS_CONFLICT')
+    }
+    const pointerId = pointerIdFor(authority, call.canonicalObjectVersion)
+    const pointer = await generationStore.readPointer(pointerId)
     if (
-      !isBoundedString(call.canonicalObjectVersion)
-      || !Number.isSafeInteger(call.offset)
-      || call.offset < 0
-      || !Number.isSafeInteger(call.limit)
-      || call.limit < 1
-      || call.limit > 1000
+      pointer === null
+      || pointer.pointer_id !== pointerId
+      || pointer.tenant_id !== authority.tenantId
+      || pointer.workspace_id !== authority.workspaceId
+      || pointer.tenant_domain_binding !== authority.tenantDomainBinding
+      || pointer.system_content_key !== authority.systemContentKey
+      || pointer.role_binding_fingerprint !== authority.roleBindingFingerprint
+      || pointer.canonical_object_version !== call.canonicalObjectVersion
+      || (
+        pointer.active_generation_id !== null
+        && (
+          typeof pointer.active_generation_id !== 'string'
+          || !GENERATION_ID_PATTERN.test(pointer.active_generation_id)
+        )
+      )
+    ) {
+      failSealedExport('SEALED_EXPORT_VISIBILITY_CAS_CONFLICT')
+    }
+    const pointerVersion = normalizeCount(pointer.pointer_version)
+    const expectation = Object.freeze({
+      activeGenerationPresent: pointer.active_generation_id !== null,
+      canonicalObjectVersion: call.canonicalObjectVersion,
+      externalWrite: false,
+      pointerVersion,
+    })
+    activationExpectations.set(expectation, Object.freeze({
+      canonicalObjectVersion: call.canonicalObjectVersion,
+      expectedActiveGenerationId: pointer.active_generation_id,
+      pointerVersion,
+    }))
+    return expectation
+  }
+
+  async function activateWithExpectation(input) {
+    const call = readClosedCall(
+      input,
+      ['generationId', 'expectation'],
+      'VISIBILITY',
+    )
+    const binding = activationExpectations.get(call.expectation)
+    if (binding === undefined) {
+      failSealedExport('SEALED_EXPORT_VISIBILITY_CAS_CONFLICT')
+    }
+    activationExpectations.delete(call.expectation)
+    if (binding.expectedActiveGenerationId === call.generationId) {
+      const descriptor = await createActiveReadDescriptor({
+        canonicalObjectVersion: binding.canonicalObjectVersion,
+      })
+      const activeBinding = readDescriptors.get(descriptor)
+      if (
+        activeBinding === undefined
+        || activeBinding.generationId !== call.generationId
+        || activeBinding.pointerVersion !== binding.pointerVersion
+      ) {
+        failSealedExport('SEALED_EXPORT_VISIBILITY_CAS_CONFLICT')
+      }
+      const result = Object.freeze({
+        activePointerOutcome: 'UNCHANGED',
+        domainIsolatedGenerationDigest:
+          descriptor.domainIsolatedGenerationDigest,
+        externalWrite: false,
+        pointerVersion: binding.pointerVersion,
+        rowCount: descriptor.appliedRowCount,
+        status: 'ACTIVE',
+      })
+      activationResults.set(result, Object.freeze({
+        canonicalObjectVersion: binding.canonicalObjectVersion,
+        generationId: call.generationId,
+      }))
+      return result
+    }
+    return activateGeneration(
+      call.generationId,
+      binding.expectedActiveGenerationId,
+      binding.pointerVersion,
+    )
+  }
+
+  function projectDigest(rawDigestHex) {
+    const projected = digests.computeDomainIsolatedDigestProjection(
+      ownedEvidenceKey,
+      rawDigestHex,
+    )
+    if (!projected.ok) failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+    return projected.digest
+  }
+
+  function validatePageWindow(offset, limit) {
+    if (
+      !Number.isSafeInteger(offset)
+      || offset < 0
+      || !Number.isSafeInteger(limit)
+      || limit < 1
+      || limit > 1000
     ) {
       failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
     }
-    const pointer = await generationStore.readPointer(
-      pointerIdFor(authority, call.canonicalObjectVersion),
-    )
-    if (pointer === null || pointer.active_generation_id === null) {
-      return Object.freeze([])
-    }
-    const generation = await generationStore.readGeneration(
-      authority,
-      pointer.active_generation_id,
-    )
-    if (
-      generation === null
-      || generation.status !== 'ACTIVE'
-      || generation.manifest_digest !== pointer.active_manifest_digest
-      || generation.canonical_object_version !== call.canonicalObjectVersion
-    ) {
-      failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
-    }
-    const rowCount = normalizeCount(generation.applied_row_count)
+  }
+
+  async function materializeGenerationPage(generationId, rowCount, offset, limit) {
     const expectedPageLength = Math.min(
-      call.limit,
-      Math.max(0, rowCount - call.offset),
+      limit,
+      Math.max(0, rowCount - offset),
     )
     const rows = await generationStore.listGenerationRows(
-      generation.generation_id,
+      generationId,
       ['row_index', 'ASC'],
-      call.limit,
-      call.offset,
+      limit,
+      offset,
     )
     if (rows.length !== expectedPageLength) {
       failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
@@ -1091,7 +1196,7 @@ function createSealedExportGenerationKernel({
         : Object.freeze({ ok: false })
       if (
         !Number.isSafeInteger(row.row_index)
-        || row.row_index !== call.offset + index
+        || row.row_index !== offset + index
         || typeof row.canonical_row_text !== 'string'
         || !canonicalCodec.isCanonicalJsonText(row.canonical_row_text)
         || !(row.row_sort_key instanceof Uint8Array)
@@ -1118,12 +1223,214 @@ function createSealedExportGenerationKernel({
     return Object.freeze(values)
   }
 
+  async function readActiveRows(input) {
+    const call = readClosedCall(
+      input,
+      ['canonicalObjectVersion', 'offset', 'limit'],
+    )
+    if (!isBoundedString(call.canonicalObjectVersion)) {
+      failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+    }
+    validatePageWindow(call.offset, call.limit)
+    const pointer = await generationStore.readPointer(
+      pointerIdFor(authority, call.canonicalObjectVersion),
+    )
+    if (pointer === null || pointer.active_generation_id === null) {
+      return Object.freeze([])
+    }
+    const generation = await generationStore.readGeneration(
+      authority,
+      pointer.active_generation_id,
+    )
+    if (
+      generation === null
+      || generation.status !== 'ACTIVE'
+      || generation.manifest_digest !== pointer.active_manifest_digest
+      || generation.canonical_object_version !== call.canonicalObjectVersion
+    ) {
+      failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
+    }
+    return materializeGenerationPage(
+      generation.generation_id,
+      normalizeCount(generation.applied_row_count),
+      call.offset,
+      call.limit,
+    )
+  }
+
+  async function createActiveReadDescriptor(input) {
+    const call = readClosedCall(input, ['canonicalObjectVersion'])
+    if (!isBoundedString(call.canonicalObjectVersion)) {
+      failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+    }
+    const pointer = await generationStore.readPointer(
+      pointerIdFor(authority, call.canonicalObjectVersion),
+    )
+    if (pointer === null || pointer.active_generation_id === null) {
+      failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
+    }
+    const generation = await generationStore.readGeneration(
+      authority,
+      pointer.active_generation_id,
+    )
+    if (
+      generation === null
+      || generation.status !== 'ACTIVE'
+      || generation.manifest_digest !== pointer.active_manifest_digest
+      || generation.canonical_object_version !== call.canonicalObjectVersion
+      || generation.tenant_id !== authority.tenantId
+      || generation.workspace_id !== authority.workspaceId
+      || generation.tenant_domain_binding !== authority.tenantDomainBinding
+      || generation.system_content_key !== authority.systemContentKey
+      || generation.role_binding_fingerprint !== authority.roleBindingFingerprint
+    ) {
+      failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
+    }
+    const manifestRowCount = normalizeCount(generation.manifest_row_count)
+    const sealedRowCount = normalizeCount(generation.sealed_row_count)
+    const appliedRowCount = normalizeCount(generation.applied_row_count)
+    if (
+      manifestRowCount !== sealedRowCount
+      || sealedRowCount !== appliedRowCount
+      || normalizeCount(generation.manifest_byte_count)
+        !== normalizeCount(generation.sealed_byte_count)
+      || normalizeCount(generation.manifest_chunk_count)
+        !== normalizeCount(generation.sealed_chunk_count)
+      || !digests.constantTimeEqualDigest(
+        generation.manifest_artifact_digest,
+        generation.sealed_artifact_digest,
+      )
+      || !digests.constantTimeEqualDigest(
+        generation.manifest_rowset_digest,
+        generation.sealed_rowset_digest,
+      )
+      || !digests.constantTimeEqualDigest(
+        generation.manifest_chunk_set_digest,
+        generation.sealed_receipt_set_digest,
+      )
+      || !digests.constantTimeEqualDigest(
+        generation.sealed_rowset_digest,
+        generation.applied_rowset_digest,
+      )
+    ) {
+      failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
+    }
+    const binding = Object.freeze({
+      tenantId: authority.tenantId,
+      workspaceId: authority.workspaceId,
+      tenantDomainBinding: authority.tenantDomainBinding,
+      systemContentKey: authority.systemContentKey,
+      roleBindingFingerprint: authority.roleBindingFingerprint,
+      canonicalObjectVersion: call.canonicalObjectVersion,
+      generationId: generation.generation_id,
+      manifestRowCount,
+      sealedRowCount,
+      appliedRowCount,
+      manifestDigest: generation.manifest_digest,
+      manifestArtifactDigest: generation.manifest_artifact_digest,
+      sealedArtifactDigest: generation.sealed_artifact_digest,
+      manifestRowsetDigest: generation.manifest_rowset_digest,
+      sealedRowsetDigest: generation.sealed_rowset_digest,
+      appliedRowsetDigest: generation.applied_rowset_digest,
+      manifestChunkSetDigest: generation.manifest_chunk_set_digest,
+      sealedReceiptSetDigest: generation.sealed_receipt_set_digest,
+      pointerVersion: normalizeCount(pointer.pointer_version),
+    })
+    const descriptor = Object.freeze({
+      canonicalObjectVersion: binding.canonicalObjectVersion,
+      manifestRowCount: binding.manifestRowCount,
+      sealedRowCount: binding.sealedRowCount,
+      appliedRowCount: binding.appliedRowCount,
+      domainIsolatedGenerationDigest: generationProjection(binding.generationId),
+      domainIsolatedManifestDigest: projectDigest(binding.manifestDigest),
+      domainIsolatedArtifactDigest: projectDigest(binding.sealedArtifactDigest),
+      domainIsolatedRowsetDigest: projectDigest(binding.sealedRowsetDigest),
+      externalWrite: false,
+    })
+    readDescriptors.set(descriptor, binding)
+    return descriptor
+  }
+
+  async function readPinnedRows(input) {
+    const call = readClosedCall(input, ['descriptor', 'offset', 'limit'])
+    validatePageWindow(call.offset, call.limit)
+    const binding = readDescriptors.get(call.descriptor)
+    if (
+      binding === undefined
+      || binding.tenantId !== authority.tenantId
+      || binding.workspaceId !== authority.workspaceId
+      || binding.tenantDomainBinding !== authority.tenantDomainBinding
+      || binding.systemContentKey !== authority.systemContentKey
+      || binding.roleBindingFingerprint !== authority.roleBindingFingerprint
+    ) {
+      failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
+    }
+    const generation = await generationStore.readGeneration(
+      authority,
+      binding.generationId,
+    )
+    if (
+      generation === null
+      || generation.status !== 'ACTIVE'
+      || generation.generation_id !== binding.generationId
+      || generation.canonical_object_version !== binding.canonicalObjectVersion
+      || generation.tenant_id !== binding.tenantId
+      || generation.workspace_id !== binding.workspaceId
+      || generation.tenant_domain_binding !== binding.tenantDomainBinding
+      || generation.system_content_key !== binding.systemContentKey
+      || generation.role_binding_fingerprint !== binding.roleBindingFingerprint
+      || generation.manifest_digest !== binding.manifestDigest
+      || normalizeCount(generation.manifest_row_count) !== binding.manifestRowCount
+      || normalizeCount(generation.sealed_row_count) !== binding.sealedRowCount
+      || normalizeCount(generation.applied_row_count) !== binding.appliedRowCount
+      || generation.manifest_artifact_digest !== binding.manifestArtifactDigest
+      || generation.sealed_artifact_digest !== binding.sealedArtifactDigest
+      || generation.manifest_rowset_digest !== binding.manifestRowsetDigest
+      || generation.sealed_rowset_digest !== binding.sealedRowsetDigest
+      || generation.applied_rowset_digest !== binding.appliedRowsetDigest
+      || generation.manifest_chunk_set_digest !== binding.manifestChunkSetDigest
+      || generation.sealed_receipt_set_digest !== binding.sealedReceiptSetDigest
+    ) {
+      failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
+    }
+    return materializeGenerationPage(
+      binding.generationId,
+      binding.appliedRowCount,
+      call.offset,
+      call.limit,
+    )
+  }
+
+  async function createReadDescriptorForActivation(input) {
+    const call = readClosedCall(input, ['activation'])
+    const activation = activationResults.get(call.activation)
+    if (activation === undefined) {
+      failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
+    }
+    const descriptor = await createActiveReadDescriptor({
+      canonicalObjectVersion: activation.canonicalObjectVersion,
+    })
+    const binding = readDescriptors.get(descriptor)
+    if (
+      binding === undefined
+      || binding.generationId !== activation.generationId
+    ) {
+      failSealedExport('SEALED_EXPORT_GENERATION_VERIFY_FAILED')
+    }
+    return descriptor
+  }
+
   return Object.freeze({
     stageAndSeal,
     beginApply,
     applyNextChunk,
     activate,
+    createActivationExpectation,
+    activateWithExpectation,
+    createReadDescriptorForActivation,
     readActiveRows,
+    createActiveReadDescriptor,
+    readPinnedRows,
   })
 }
 

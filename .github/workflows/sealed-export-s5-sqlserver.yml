@@ -1,9 +1,10 @@
-name: Sealed-export S5 SQL Server product certification (evidence only)
+name: Sealed-export S5 SQL Server evidence and S6-A authority gates
 
-# EVIDENCE ONLY. This workflow uses ephemeral first-party SQL Server containers
-# for the named product action sqlserver.sealed_snapshot.v1 / sealed_snapshot.
-# It does not register a runtime consumer, connect a customer source, deploy a
-# package, enable a flag, or authorize S6.
+# EVIDENCE ONLY. This workflow uses ephemeral first-party SQL Server and
+# PostgreSQL containers for the S5 product action and S6-A database authority.
+# S6-A product-runtime tests here are hermetic; real S6-A execution remains an
+# entity-machine S6-B gate. This workflow does not connect a customer source,
+# deploy a package, enable a flag, or authorize rollout.
 
 on:
   workflow_dispatch:
@@ -11,10 +12,18 @@ on:
     branches: [main, develop]
     paths:
       - 'plugins/plugin-integration-core/lib/sealed-export/**'
+      - 'plugins/plugin-integration-core/lib/stock-preparation-sealed-snapshot-decoder.cjs'
+      - 'plugins/plugin-integration-core/lib/stock-preparation-readonly-intake.cjs'
+      - 'plugins/plugin-integration-core/lib/stock-preparation-plm-source-persist-bridge.cjs'
+      - 'plugins/plugin-integration-core/lib/stock-preparation-sync-run-persist.cjs'
+      - 'plugins/plugin-integration-core/lib/http-routes.cjs'
+      - 'plugins/plugin-integration-core/index.cjs'
+      - 'plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs'
       - 'plugins/plugin-integration-core/lib/gip-profile-certification-contracts.cjs'
       - 'plugins/plugin-integration-core/lib/gip-canonical-json.cjs'
-      - 'plugins/plugin-integration-core/lib/sealed-export/vectors/s5-package-provenance-pins.json'
+      - 'plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json'
       - 'plugins/plugin-integration-core/__tests__/sealed-export-*.test.cjs'
+      - 'plugins/plugin-integration-core/__tests__/stock-preparation-sealed-snapshot-decoder.test.cjs'
       - 'plugins/plugin-integration-core/__tests__/support/sealed-export-s5-*.cjs'
       - 'plugins/plugin-integration-core/__tests__/support/sealed-export-signer-authority-memory-db.cjs'
       - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
@@ -23,11 +32,19 @@ on:
       - 'packages/core-backend/migrations/070_create_integration_sealed_export_signer_authority.sql'
       - 'packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql'
       - 'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql'
+      - 'packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql'
       - 'packages/core-backend/tests/integration/sealed-export-signer-authority-lifecycle-migration.db.test.ts'
+      - 'packages/core-backend/tests/integration/sealed-export-s6a-runtime-authority.db.test.ts'
       - 'scripts/ops/run-sealed-export-s5-sqlserver-evidence.cjs'
       - 'scripts/ops/verify-sealed-export-s5-sqlserver-evidence.cjs'
+      - 'scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1'
+      - 'scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1'
+      - 'scripts/ops/multitable-onprem-package-build.sh'
+      - 'scripts/ops/multitable-onprem-package-verify.sh'
+      - 'docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md'
       - 'plugins/plugin-integration-core/package.json'
       - 'pnpm-lock.yaml'
+      - '.github/workflows/plugin-tests.yml'
       - '.github/workflows/sealed-export-s5-sqlserver.yml'
 
 permissions:
@@ -84,6 +101,9 @@ jobs:
       - name: Run hermetic S5 certification tests
         run: pnpm --filter plugin-integration-core test:sealed-export-s5
 
+      - name: Run hermetic S6-A controlled-runtime tests
+        run: pnpm --filter plugin-integration-core test:sealed-export-s6a
+
       - name: Wait for SQL Server
         run: |
           for i in $(seq 1 40); do
@@ -117,7 +137,7 @@ jobs:
           retention-days: 14
 
   gate-check:
-    name: Sealed-export S5 gate-check (evidence only, no S6 wiring)
+    name: Sealed-export S5 evidence and S6-A runtime-authority gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [sqlserver-product-action]
@@ -175,6 +195,13 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest
           --config vitest.integration.config.ts run
           tests/integration/sealed-export-signer-authority-lifecycle-migration.db.test.ts
+          --reporter=dot
+
+      - name: Run real-Postgres S6-A runtime authority and privilege gate
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/sealed-export-s6a-runtime-authority.db.test.ts
           --reporter=dot
 
       - name: Download sealed-export S5 evidence

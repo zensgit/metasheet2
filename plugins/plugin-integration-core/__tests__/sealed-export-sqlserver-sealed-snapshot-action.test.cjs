@@ -541,9 +541,18 @@ async function sourceSessionClosesPoolOnConnectionAndCapabilityFailure() {
   const mssqlPath = require.resolve('mssql')
   const cachedMssql = require.cache[mssqlPath]
 
-  async function runCase({ connectFails, snapshotEnabledState }, reason) {
+  async function runCase({
+    connectFails,
+    snapshotEnabledState,
+    canInsert = 0,
+  }, reason) {
     let closeCount = 0
+    let boundTableRef = null
     class FakeConnectionPool {
+      constructor(config) {
+        assert.equal(config.options.readOnlyIntent, true)
+      }
+
       async connect() {
         if (connectFails) throw new Error('synthetic-connect-failure')
         return this
@@ -551,8 +560,26 @@ async function sourceSessionClosesPoolOnConnectionAndCapabilityFailure() {
 
       request() {
         return {
+          input(name, value) {
+            assert.equal(name, 'tableRef')
+            boundTableRef = value
+            return this
+          },
           async query() {
-            return { recordset: [{ snapshotEnabledState }] }
+            return {
+              recordset: [{
+                canAlter: 0,
+                canControl: 0,
+                canDelete: 0,
+                canInsert,
+                canSelect: 1,
+                canUpdate: 0,
+                isDbDataWriter: 0,
+                isDbOwner: 0,
+                isSysadmin: 0,
+                snapshotEnabledState,
+              }],
+            }
           },
         }
       }
@@ -573,10 +600,14 @@ async function sourceSessionClosesPoolOnConnectionAndCapabilityFailure() {
       },
     }
     await expectReason(
-      () => openMssqlSnapshotCaptureContext({}),
+      () => openMssqlSnapshotCaptureContext({
+        connectionConfig: { options: { readOnlyIntent: true } },
+        tableRef: TABLE_REF,
+      }),
       reason,
     )
     assert.equal(closeCount, 1)
+    if (!connectFails) assert.equal(boundTableRef, TABLE_REF)
   }
 
   try {
@@ -586,6 +617,10 @@ async function sourceSessionClosesPoolOnConnectionAndCapabilityFailure() {
     )
     await runCase(
       { connectFails: false, snapshotEnabledState: 0 },
+      'SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE',
+    )
+    await runCase(
+      { connectFails: false, snapshotEnabledState: 1, canInsert: 1 },
       'SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE',
     )
   } finally {

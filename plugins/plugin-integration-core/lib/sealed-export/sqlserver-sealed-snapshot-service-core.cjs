@@ -1161,7 +1161,7 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
       writer = createArtifactWriter(directory, input.envelope)
       await writer.open()
 
-      captureContext = await openCaptureContext()
+      captureContext = await openCaptureContext(binding)
       const productCaptureContext =
         isMssqlSnapshotCaptureContext(captureContext)
 
@@ -1414,7 +1414,7 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
     if (!binding) failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
     let captureContext = null
     try {
-      captureContext = await openCaptureContext()
+      captureContext = await openCaptureContext(binding)
       const { orderingKeyProof } = await proveOrderingKey(
         captureContext,
         binding,

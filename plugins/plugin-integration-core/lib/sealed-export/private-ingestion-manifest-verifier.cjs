@@ -4,6 +4,9 @@ const crypto = require('node:crypto')
 
 const contracts = require('./contracts.cjs')
 const { failSealedExport } = require('./failure-vocabulary.cjs')
+const {
+  isSqlServerSealedSnapshotService,
+} = require('./sqlserver-sealed-snapshot-service.cjs')
 
 const SIGNATURE_ALGORITHM = 'ED25519'
 const SIGNATURE_BYTES = 64
@@ -114,6 +117,26 @@ function createHarnessPrivateIngestionManifestVerifierForTests(options) {
   return verifier
 }
 
+function createSqlServerPrivateIngestionManifestVerifier({
+  envelope: rawEnvelope,
+  sealedSnapshotService,
+} = {}) {
+  if (!isSqlServerSealedSnapshotService(sealedSnapshotService)) {
+    failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+  }
+  const envelope = contracts.validateExportRequestEnvelope(rawEnvelope)
+  const verifier = Object.freeze({
+    async verify(manifest) {
+      return sealedSnapshotService.verifyManifestWithLifecycle({
+        envelope,
+        manifest,
+      })
+    },
+  })
+  trustedManifestVerifiers.add(verifier)
+  return verifier
+}
+
 function isTrustedPrivateIngestionManifestVerifier(value) {
   return trustedManifestVerifiers.has(value)
 }
@@ -122,5 +145,6 @@ module.exports = Object.freeze({
   SIGNATURE_ALGORITHM,
   createPrivateIngestionManifestVerifier,
   createHarnessPrivateIngestionManifestVerifierForTests,
+  createSqlServerPrivateIngestionManifestVerifier,
   isTrustedPrivateIngestionManifestVerifier,
 })
