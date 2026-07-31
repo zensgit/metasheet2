@@ -26,6 +26,7 @@ const P25_CALL_PATH_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c0-operation-registry.ts', 'attendanceResultOperationPreflightV1', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'sync_rejection_preflight'),
   entry('packages/core-backend/src/attendance/w4c3a-import-rollback-boundary.ts', 'legacyDeleteEligible', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollback_rejection_preflight'),
   entry('packages/core-backend/src/attendance/w4c3a-import-rollback.ts', 'readAttendanceImportRollbackSourceJobsV1', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollback_rejection_preflight'),
+  entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-enqueue.ts', 'assertPreCutoverImportWorkersDrainedV1', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'enqueue'),
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-enqueue.ts', 'reserveAttendanceLegacyImportPlanJobV1', 'attendance_import_jobs', 'read', 'select', 1, 'retryable_job_identity_claim', 'enqueue'),
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-enqueue.ts', 'persistAttendanceLegacyImportPlanEnqueueV1', 'attendance_import_jobs', 'write', 'insert', 1, 'identity_transport', 'enqueue'),
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-enqueue.ts', 'persistAttendanceLegacyImportPlanEnqueueV1', 'attendance_import_legacy_execution_plans', 'write', 'insert', 1, 'identity_transport', 'enqueue'),
