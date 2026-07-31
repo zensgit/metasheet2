@@ -78,6 +78,11 @@ const createTemplateSpy = vi.fn()
 const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
+const getTemplateFormAuthoringContextSpy = vi.fn().mockImplementation(async (id: string) => ({
+  templateId: id,
+  identityHistory: { complete: true, persistentIds: [] },
+  referenceInventory: { complete: true, references: [] },
+}))
 const dryRunApprovalConditionFormulaSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
@@ -85,6 +90,7 @@ vi.mock('../src/approvals/api', () => ({
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
   getTemplate: (id: string) => getTemplateSpy(id),
+  getTemplateFormAuthoringContext: (id: string) => getTemplateFormAuthoringContextSpy(id),
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
 }))
 

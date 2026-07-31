@@ -14,9 +14,9 @@
         <el-button
           v-if="!workspaceEnabled"
           size="small"
-          :disabled="readOnly"
+          :disabled="readOnly || !structuralMutationEnabled"
           data-testid="approval-template-add-field"
-          @click="appendLegacyField"
+          @click="requestAddField('text', fields.length)"
         >
           <el-icon><Plus /></el-icon>
           添加字段
@@ -25,7 +25,10 @@
     </template>
 
     <div v-if="workspaceEnabled" class="approval-form-builder__workspace">
-      <ApprovalFormPalette :read-only="readOnly" @add="appendFieldOfType" />
+      <ApprovalFormPalette
+        :read-only="readOnly || !structuralMutationEnabled"
+        @add="appendFieldOfType"
+      />
 
       <main
         class="approval-form-builder__canvas"
@@ -123,7 +126,7 @@
                 text
                 size="small"
                 type="danger"
-                :disabled="readOnly || fields.length === 1"
+                :disabled="readOnly || !structuralMutationEnabled || fields.length === 1"
                 aria-label="删除字段"
                 data-testid="approval-template-remove-field"
                 @click.stop="removeField(index)"
@@ -161,6 +164,14 @@
           data-testid="approval-form-builder-status"
         >
           {{ formBuilderAnnouncement }}
+        </p>
+        <p
+          v-if="!structuralMutationEnabled && structuralMutationReason"
+          class="approval-form-builder__status"
+          role="status"
+          data-testid="approval-form-structure-disabled"
+        >
+          {{ structuralMutationReason }}
         </p>
       </main>
 
@@ -201,7 +212,7 @@
             <el-button
               size="small"
               type="danger"
-              :disabled="readOnly || fields.length === 1"
+              :disabled="readOnly || !structuralMutationEnabled || fields.length === 1"
               data-testid="approval-template-remove-field"
               @click="removeField(index)"
             >
@@ -232,13 +243,7 @@ import { computed, ref, watch } from 'vue'
 import { ArrowDown, ArrowUp, Delete, Plus, Rank } from '@element-plus/icons-vue'
 import ApprovalFieldInspector from './ApprovalFieldInspector.vue'
 import ApprovalFormPalette from './ApprovalFormPalette.vue'
-import {
-  createEmptyFieldDraft,
-  moveItemToIndex,
-  nextAvailableFieldDraftIndex,
-  type AuthorableFieldType,
-  type FieldAuthoringDraft,
-} from '../templateAuthoring'
+import type { AuthorableFieldType, FieldAuthoringDraft } from '../templateAuthoring'
 import {
   APPROVAL_FORM_FIELD_MOVE_MIME,
   APPROVAL_FORM_FIELD_TYPE_LABELS,
@@ -255,6 +260,8 @@ const props = defineProps<{
   recordLinkCatalogLoading: boolean
   recordLinkCatalogLoaded: boolean
   recordLinkCatalogError: string
+  structuralMutationEnabled: boolean
+  structuralMutationReason: string
 }>()
 
 const fields = defineModel<FieldAuthoringDraft[]>('fields', { required: true })
@@ -262,6 +269,9 @@ const fields = defineModel<FieldAuthoringDraft[]>('fields', { required: true })
 const emit = defineEmits<{
   'retry-record-link-catalog': []
   'field-type-change': [field: FieldAuthoringDraft]
+  'add-field': [request: { type: AuthorableFieldType; insertionIndex: number }]
+  'remove-field': [request: { localId: string }]
+  'move-field': [request: { localId: string; targetIndex: number }]
 }>()
 
 const selectedFieldLocalId = ref(fields.value[0]?.localId ?? '')
@@ -295,55 +305,28 @@ function selectField(localId: string): void {
   selectedFieldLocalId.value = localId
 }
 
-function replaceFields(next: FieldAuthoringDraft[]): void {
-  // Nested prop mutation is intentional here: palette/drop/delete events can occur in the same
-  // tick, before a v-model emit has flowed back from the parent. Updating the shared reactive
-  // array first keeps the next command on the authoritative state; the assignment then preserves
-  // the normal v-model notification contract.
-  fields.value.splice(0, fields.value.length, ...next)
-  fields.value = [...fields.value]
-}
-
-function appendLegacyField(): void {
-  const next = createEmptyFieldDraft(nextAvailableFieldDraftIndex(fields.value))
-  replaceFields([...fields.value, next])
-  selectedFieldLocalId.value = next.localId
-}
-
-function insertFieldOfType(type: AuthorableFieldType, index: number): void {
-  if (props.readOnly) return
-  const nextField = createEmptyFieldDraft(nextAvailableFieldDraftIndex(fields.value))
-  nextField.type = type
+function requestAddField(type: AuthorableFieldType, index: number): void {
+  if (props.readOnly || !props.structuralMutationEnabled) return
   const insertionIndex = Math.max(0, Math.min(index, fields.value.length))
-  replaceFields([
-    ...fields.value.slice(0, insertionIndex),
-    nextField,
-    ...fields.value.slice(insertionIndex),
-  ])
-  selectedFieldLocalId.value = nextField.localId
+  emit('add-field', { type, insertionIndex })
   selectedFieldInsertionIndex.value = null
-  formBuilderAnnouncement.value = `${APPROVAL_FORM_FIELD_TYPE_LABELS[type]}已插入为字段 ${insertionIndex + 1}`
 }
 
 function appendFieldOfType(type: AuthorableFieldType): void {
-  insertFieldOfType(type, selectedFieldInsertionIndex.value ?? fields.value.length)
+  requestAddField(type, selectedFieldInsertionIndex.value ?? fields.value.length)
 }
 
 function removeField(index: number): void {
-  if (props.readOnly || fields.value.length === 1) return
-  const removingSelected = fields.value[index]?.localId === selectedFieldLocalId.value
-  const next = fields.value.filter((_, current) => current !== index)
-  replaceFields(next)
-  if (removingSelected) {
-    selectedFieldLocalId.value = next[Math.min(index, next.length - 1)]?.localId ?? ''
-  }
+  if (props.readOnly || !props.structuralMutationEnabled || fields.value.length === 1) return
+  const localId = fields.value[index]?.localId
+  if (localId) emit('remove-field', { localId })
 }
 
 function moveField(index: number, delta: -1 | 1): void {
   const target = index + delta
   if (props.readOnly || target < 0 || target >= fields.value.length) return
-  replaceFields(moveItemToIndex(fields.value, index, target))
-  formBuilderAnnouncement.value = `字段已移动到第 ${target + 1} 位`
+  const localId = fields.value[index]?.localId
+  if (localId) emit('move-field', { localId, targetIndex: target })
 }
 
 function onFieldDragStart(event: DragEvent, index: number): void {
@@ -356,7 +339,8 @@ function onFieldDragStart(event: DragEvent, index: number): void {
 
 function onLegacyFieldDrop(index: number): void {
   if (props.readOnly || draggedFieldIndex.value === null) return
-  replaceFields(moveItemToIndex(fields.value, draggedFieldIndex.value, index))
+  const localId = fields.value[draggedFieldIndex.value]?.localId
+  if (localId) emit('move-field', { localId, targetIndex: index })
   resetFieldDragState()
 }
 
@@ -365,7 +349,7 @@ function activateFieldDropSlot(index: number): void {
 }
 
 function selectFieldInsertionSlot(index: number): void {
-  if (props.readOnly) return
+  if (props.readOnly || !props.structuralMutationEnabled) return
   if (selectedFieldInsertionIndex.value === index) {
     selectedFieldInsertionIndex.value = null
     formBuilderAnnouncement.value = '已取消插入位置'
@@ -391,7 +375,7 @@ function onFieldInsertionDrop(event: DragEvent, insertionIndex: number): void {
   }
   const paletteType = readPaletteFieldType(event.dataTransfer)
   if (paletteType) {
-    insertFieldOfType(paletteType, insertionIndex)
+    requestAddField(paletteType, insertionIndex)
     resetFieldDragState()
     return
   }
@@ -408,11 +392,21 @@ function onFieldInsertionDrop(event: DragEvent, insertionIndex: number): void {
   }
   const targetIndex = insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex
   if (targetIndex !== sourceIndex) {
-    replaceFields(moveItemToIndex(fields.value, sourceIndex, targetIndex))
-    formBuilderAnnouncement.value = `字段已移动到第 ${targetIndex + 1} 位`
+    const localId = fields.value[sourceIndex]?.localId
+    if (localId) emit('move-field', { localId, targetIndex })
   }
   resetFieldDragState()
 }
+
+function focusField(localId: string): void {
+  selectedFieldLocalId.value = localId
+}
+
+function announce(message: string): void {
+  formBuilderAnnouncement.value = message
+}
+
+defineExpose({ focusField, announce })
 
 function onFieldKeyboardReorder(event: KeyboardEvent, index: number): void {
   if (props.readOnly || !event.altKey) return

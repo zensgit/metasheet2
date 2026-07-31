@@ -246,6 +246,7 @@
       </el-card>
 
       <ApprovalFormBuilder
+        ref="formBuilderRef"
         v-show="activeAuthoringSection === 'fields'"
         v-model:fields="draft.fields"
         :workspace-enabled="canvasV2Enabled"
@@ -255,8 +256,13 @@
         :record-link-catalog-loading="recordLinkCatalogLoading"
         :record-link-catalog-loaded="recordLinkCatalogLoaded"
         :record-link-catalog-error="recordLinkCatalogError"
+        :structural-mutation-enabled="formStructuralMutationEnabled"
+        :structural-mutation-reason="formStructuralMutationReason"
         @retry-record-link-catalog="retryRecordLinkCatalog"
         @field-type-change="invalidateStaleRecordLinkDependencies"
+        @add-field="onAddFormField"
+        @remove-field="onRemoveFormField"
+        @move-field="onMoveFormField"
       />
 
       <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
@@ -932,11 +938,13 @@ import {
   createTemplate,
   dryRunApprovalConditionFormula,
   getTemplate,
+  getTemplateFormAuthoringContext,
   previewTemplateRoute,
   publishTemplate,
   updateTemplate,
   type ApprovalRoutePreview,
 } from '../../approvals/api'
+import type { ApprovalTemplateFormAuthoringContextDTO } from '../../types/approval'
 import { describeTemplateAuthoringError } from '../../approvals/templateAuthoringErrors'
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
@@ -948,6 +956,15 @@ import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vu
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
 import ApprovalFormBuilder from '../../approvals/components/ApprovalFormBuilder.vue'
+import {
+  addFormField,
+  moveFormField,
+  removeFormField,
+  type CompleteFormIdentityHistory,
+  type CompleteFormReferenceInventory,
+  type FormCommandResult,
+  type FormFieldIdentity,
+} from '../../approvals/approvalFormCommands'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
   type ApprovalNodeConfigEditorApi,
@@ -973,6 +990,7 @@ import {
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
   type ApprovalStepDraft,
+  type AuthorableFieldType,
   type ConditionBranchEdit,
   type ConditionNodeEdit,
   type ConditionRuleEdit,
@@ -1050,6 +1068,15 @@ const unsupportedReason = ref<string | null>(null)
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
+const formBuilderRef = ref<{
+  focusField(localId: string): void
+  announce(message: string): void
+} | null>(null)
+const formAuthoringContext = ref<ApprovalTemplateFormAuthoringContextDTO | null>(null)
+const formAuthoringContextLoading = ref(false)
+const formAuthoringContextError = ref('')
+const retiredFormPersistentIds = ref<string[]>([])
+const retiredFormLocalIds = ref<string[]>([])
 
 // FWB-0 Layer 2: typed base/sheet catalog for record-link authoring (IDs persist on the draft,
 // never shown as ordinary free-text labels). Loaded via MultitableApiClient listBases/listSheets.
@@ -1138,6 +1165,15 @@ const conditionFormulaDryRunBusy = ref<Record<string, boolean>>({})
 
 const templateId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
 const isEditMode = computed(() => templateId.value.length > 0)
+const formStructuralMutationEnabled = computed(
+  () => !draft.value.templateId || formAuthoringContext.value !== null,
+)
+const formStructuralMutationReason = computed(() => {
+  if (formStructuralMutationEnabled.value) return ''
+  return formAuthoringContextLoading.value
+    ? '正在核对字段历史与外部引用'
+    : formAuthoringContextError.value || '字段依赖未完成核对，新增和删除已暂停'
+})
 const commonTemplatePresets = COMMON_APPROVAL_TEMPLATE_PRESETS
 const showPresetLibrary = computed(() => !isEditMode.value && canManageTemplates.value)
 // Truly-unsupported (attachment field / unknown node / extra config keys) locks the WHOLE form.
@@ -2182,6 +2218,167 @@ function swap<T>(items: T[], index: number, delta: -1 | 1) {
   return copy
 }
 
+function currentFormIdentityHistory(): CompleteFormIdentityHistory | undefined {
+  if (draft.value.templateId && !formAuthoringContext.value) return undefined
+  return {
+    complete: true,
+    persistentIds: [
+      ...(formAuthoringContext.value?.identityHistory.persistentIds ?? []),
+      ...retiredFormPersistentIds.value,
+    ],
+    localIds: [
+      ...draft.value.fields.flatMap((field) => [
+        field.localId,
+        ...field.detailColumns.map((column) => column.localId),
+      ]),
+      ...retiredFormLocalIds.value,
+    ],
+  }
+}
+
+function currentFormReferenceInventory(): CompleteFormReferenceInventory | undefined {
+  if (!draft.value.templateId) return { complete: true, references: [] }
+  return formAuthoringContext.value?.referenceInventory
+}
+
+function newFormFieldIdentity(type: AuthorableFieldType): FormFieldIdentity {
+  const fieldToken = globalThis.crypto.randomUUID().replace(/-/g, '')
+  const identity: FormFieldIdentity = {
+    persistentId: `field_${fieldToken}`,
+    localId: `field_local_${fieldToken}`,
+  }
+  if (type !== 'detail') return identity
+  const columnToken = globalThis.crypto.randomUUID().replace(/-/g, '')
+  return {
+    ...identity,
+    detailColumn: {
+      persistentId: `column_${columnToken}`,
+      localId: `column_local_${columnToken}`,
+    },
+  }
+}
+
+function describeFormCommandFailure(result: Extract<FormCommandResult, { ok: false }>): string {
+  if (result.reason === 'field_is_referenced') return '该字段仍被流程或自动化引用，不能删除'
+  if (result.reason === 'identity_history_missing') return '字段历史未完成核对，暂不能新增字段'
+  if (result.reason === 'reference_inventory_missing') return '字段引用未完成核对，暂不能删除字段'
+  return '表单结构操作未完成，请刷新后重试'
+}
+
+function acceptFormCommand(result: FormCommandResult, announcement: string): boolean {
+  if (!result.ok) {
+    const message = describeFormCommandFailure(result)
+    formBuilderRef.value?.announce(message)
+    ElMessage.warning(message)
+    return false
+  }
+  draft.value = result.draft
+  if (result.focusLocalId) {
+    void nextTick(() => formBuilderRef.value?.focusField(result.focusLocalId!))
+  }
+  formBuilderRef.value?.announce(announcement)
+  return true
+}
+
+function onAddFormField(request: { type: AuthorableFieldType; insertionIndex: number }): void {
+  const history = currentFormIdentityHistory()
+  if (!history) {
+    acceptFormCommand(
+      { ok: false, reason: 'identity_history_missing', dependencies: [] },
+      '',
+    )
+    return
+  }
+  const identity = newFormFieldIdentity(request.type)
+  const before = draft.value.fields.slice()
+  let result = addFormField(draft.value, request.type, identity, history)
+  if (result.ok && request.insertionIndex < before.length) {
+    result = moveFormField(
+      result.draft,
+      identity.localId,
+      before[Math.max(0, request.insertionIndex)]!.localId,
+      'before',
+    )
+  }
+  acceptFormCommand(
+    result,
+    `${request.type === 'detail' ? '明细' : '表单组件'}已插入为字段 ${request.insertionIndex + 1}`,
+  )
+}
+
+function onRemoveFormField(request: { localId: string }): void {
+  const removing = draft.value.fields.find((field) => field.localId === request.localId)
+  if (!removing) return
+  const result = removeFormField(
+    draft.value,
+    request.localId,
+    currentFormReferenceInventory(),
+  )
+  if (!acceptFormCommand(result, '字段已删除')) return
+  retiredFormPersistentIds.value = [
+    ...retiredFormPersistentIds.value,
+    removing.id,
+    ...removing.detailColumns.map((column) => column.id),
+  ]
+  retiredFormLocalIds.value = [
+    ...retiredFormLocalIds.value,
+    removing.localId,
+    ...removing.detailColumns.map((column) => column.localId),
+  ]
+}
+
+function onMoveFormField(request: { localId: string; targetIndex: number }): void {
+  const currentIndex = draft.value.fields.findIndex((field) => field.localId === request.localId)
+  if (currentIndex < 0 || currentIndex === request.targetIndex) return
+  const remaining = draft.value.fields.filter((field) => field.localId !== request.localId)
+  if (remaining.length === 0) return
+  const targetIndex = Math.max(0, Math.min(request.targetIndex, remaining.length))
+  const anchor = targetIndex === remaining.length ? remaining[remaining.length - 1] : remaining[targetIndex]
+  const result = moveFormField(
+    draft.value,
+    request.localId,
+    anchor.localId,
+    targetIndex === remaining.length ? 'after' : 'before',
+  )
+  acceptFormCommand(result, `字段已移动到第 ${targetIndex + 1} 位`)
+}
+
+async function loadFormAuthoringContext(id: string): Promise<void> {
+  formAuthoringContext.value = null
+  formAuthoringContextError.value = ''
+  if (!id) return
+  formAuthoringContextLoading.value = true
+  try {
+    const context = await getTemplateFormAuthoringContext(id)
+    if (
+      context.templateId !== id
+      || context.identityHistory.complete !== true
+      || !Array.isArray(context.identityHistory.persistentIds)
+      || !context.identityHistory.persistentIds.every(
+        (persistentId) => typeof persistentId === 'string' && persistentId.trim().length > 0,
+      )
+      || context.referenceInventory.complete !== true
+      || !Array.isArray(context.referenceInventory.references)
+      || !context.referenceInventory.references.every((reference) =>
+        typeof reference?.fieldId === 'string'
+        && reference.fieldId.trim().length > 0
+        && (reference.kind === 'fwb_mapping' || reference.kind === 'fwb_record_link')
+        && (
+          reference.location === 'automation.write_approval_form_values.mappings.formFieldId'
+          || reference.location === 'automation.write_approval_form_values.recordLinkFieldId'
+        ),
+      )
+    ) {
+      throw new Error('invalid_form_authoring_context')
+    }
+    formAuthoringContext.value = context
+  } catch {
+    formAuthoringContextError.value = '字段历史与外部引用核对失败，新增和删除已暂停'
+  } finally {
+    formAuthoringContextLoading.value = false
+  }
+}
+
 /**
  * When a field is retyped to/from record-link (or detail), drop stale visibility deps and
  * condition rules that referenced it — otherwise the UI would keep a now-illegal dependency
@@ -2242,8 +2439,12 @@ async function loadTemplateForEdit() {
   selectedCanvasNode.value = null
   movingCanvasNode.value = null
   canvasZoom.value = 1
+  retiredFormPersistentIds.value = []
+  retiredFormLocalIds.value = []
   if (!isEditMode.value) {
     draft.value = createEmptyTemplateDraft()
+    formAuthoringContext.value = null
+    formAuthoringContextError.value = ''
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
     snapshotDraft()
@@ -2256,6 +2457,7 @@ async function loadTemplateForEdit() {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
+    await loadFormAuthoringContext(template.id)
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
@@ -2307,6 +2509,7 @@ async function persistDraft() {
     if (draft.value.templateId) {
       const updated = await updateTemplate(draft.value.templateId, buildUpdateTemplatePayload(draft.value))
       draft.value = draftFromTemplate(updated)
+      await loadFormAuthoringContext(updated.id)
       unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
       graphReadOnlyMessage.value = graphReadOnlyReason(updated)
       snapshotDraft()
@@ -2314,6 +2517,7 @@ async function persistDraft() {
     }
     const created = await createTemplate(buildCreateTemplatePayload(draft.value))
     draft.value = draftFromTemplate(created)
+    await loadFormAuthoringContext(created.id)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     snapshotDraft() // before the route replace so the leave guard stays quiet
@@ -2334,6 +2538,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
   try {
     const created = await createTemplate(buildCommonApprovalTemplatePresetPayload(presetId))
     draft.value = draftFromTemplate(created)
+    await loadFormAuthoringContext(created.id)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     syncAllStepOptions()

@@ -41,11 +41,17 @@ const createTemplateSpy = vi.fn()
 const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
+const getTemplateFormAuthoringContextSpy = vi.fn().mockImplementation(async (id: string) => ({
+  templateId: id,
+  identityHistory: { complete: true, persistentIds: [] },
+  referenceInventory: { complete: true, references: [] },
+}))
 vi.mock('../src/approvals/api', () => ({
   createTemplate: (payload: unknown) => createTemplateSpy(payload),
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
   getTemplate: (id: string) => getTemplateSpy(id),
+  getTemplateFormAuthoringContext: (id: string) => getTemplateFormAuthoringContextSpy(id),
 }))
 
 // Mock the directory composable so the picker renders without any network.

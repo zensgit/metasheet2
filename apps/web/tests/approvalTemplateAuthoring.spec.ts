@@ -58,6 +58,7 @@ const createTemplateSpy = vi.fn()
 const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
+const getTemplateFormAuthoringContextSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
@@ -65,6 +66,7 @@ vi.mock('../src/approvals/api', () => ({
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
   getTemplate: (id: string) => getTemplateSpy(id),
+  getTemplateFormAuthoringContext: (id: string) => getTemplateFormAuthoringContextSpy(id),
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
 }))
 
@@ -681,6 +683,12 @@ describe('TemplateAuthoringView', () => {
     updateTemplateSpy.mockReset()
     publishTemplateSpy.mockReset()
     getTemplateSpy.mockReset()
+    getTemplateFormAuthoringContextSpy.mockReset()
+    getTemplateFormAuthoringContextSpy.mockImplementation(async (id: string) => ({
+      templateId: id,
+      identityHistory: { complete: true, persistentIds: [] },
+      referenceInventory: { complete: true, references: [] },
+    }))
     dryRunApprovalConditionFormulaSpy.mockReset()
     pushSpy.mockClear()
     replaceSpy.mockClear()
@@ -1506,6 +1514,7 @@ describe('TemplateAuthoringView', () => {
     routeParams = { id: 'tpl_1' }
     getTemplateSpy.mockResolvedValue(buildTemplate())
     await mountView()
+    await flushUi()
 
     setInput('approval-template-name', '费用审批 v2')
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
@@ -1593,11 +1602,12 @@ describe('TemplateAuthoringView', () => {
     expect(confirmButton.disabled).toBe(false)
 
     confirmButton.click()
-    await flushUi()
+    await vi.waitFor(() => {
+      expect(pushSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created' })
+    })
 
     expect(createTemplateSpy).toHaveBeenCalledTimes(1)
     expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_created', { policy: { allowRevoke: true } })
-    expect(pushSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created' })
   })
 
   // B3-09 (模板治理 — 发布说明): the checklist dialog carries an OPTIONAL note; typed → trimmed and

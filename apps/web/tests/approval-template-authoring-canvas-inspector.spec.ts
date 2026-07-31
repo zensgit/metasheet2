@@ -74,6 +74,7 @@ const createTemplateSpy = vi.fn()
 const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
+const getTemplateFormAuthoringContextSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
@@ -81,6 +82,7 @@ vi.mock('../src/approvals/api', () => ({
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
   getTemplate: (id: string) => getTemplateSpy(id),
+  getTemplateFormAuthoringContext: (id: string) => getTemplateFormAuthoringContextSpy(id),
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
 }))
 
@@ -432,6 +434,12 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     updateTemplateSpy.mockReset()
     publishTemplateSpy.mockReset()
     getTemplateSpy.mockReset()
+    getTemplateFormAuthoringContextSpy.mockReset()
+    getTemplateFormAuthoringContextSpy.mockImplementation(async (id: string) => ({
+      templateId: id,
+      identityHistory: { complete: true, persistentIds: [] },
+      referenceInventory: { complete: true, references: [] },
+    }))
     dryRunApprovalConditionFormulaSpy.mockReset()
     pushSpy.mockClear()
     replaceSpy.mockClear()
@@ -450,7 +458,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   it('adds palette fields, inserts at an explicit drop slot, and reorders with the keyboard', async () => {
     routeParams = { id: 'tpl_form_palette' }
-    getTemplateSpy.mockResolvedValue(buildTemplate())
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: routeParams.id }))
     await mountView()
     await flushUi()
 
@@ -536,13 +544,14 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   it('keeps forward, backward, and adjacent insertion-slot reorders exact', async () => {
     routeParams = { id: 'tpl_form_palette_crossing' }
-    getTemplateSpy.mockResolvedValue(buildTemplate())
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: routeParams.id }))
     await mountView()
     await flushUi()
 
     ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
     await flushUi()
     ;(container!.querySelector('[data-testid="approval-form-palette-textarea"]') as HTMLButtonElement).click()
+    await flushUi()
     ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
     await flushUi()
 
@@ -638,11 +647,11 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
-    expect(payload.formSchema.fields.map((field: any) => field.id)).toEqual([
-      'field_1',
-      'field_3',
-      'field_2',
-    ])
+    const ids = payload.formSchema.fields.map((field: any) => field.id)
+    expect(ids.slice(0, 2)).toEqual(['field_1', 'field_3'])
+    expect(ids[2]).toMatch(/^field_[a-f0-9]{32}$/)
+    expect(new Set(ids).size).toBe(3)
+    expect(ids[2]).not.toBe('field_2')
   })
 
   it('keeps generated field ids unique after delete-then-insert', async () => {
@@ -670,11 +679,146 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
-    expect(payload.formSchema.fields.map((field: any) => field.id)).toEqual([
-      'field_1',
-      'field_2',
-      'field_3',
-    ])
+    const ids = payload.formSchema.fields.map((field: any) => field.id)
+    expect(ids[0]).toBe('field_1')
+    expect(ids[1]).toMatch(/^field_[a-f0-9]{32}$/)
+    expect(ids[2]).toBe('field_3')
+    expect(new Set(ids).size).toBe(3)
+    expect(ids[1]).not.toBe('field_2')
+  })
+
+  it('fails closed on historical identity collisions before adding a field', async () => {
+    routeParams = { id: 'tpl_form_palette_history_collision' }
+    const reservedToken = 'aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa'
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: routeParams.id }))
+    getTemplateFormAuthoringContextSpy.mockResolvedValue({
+      templateId: routeParams.id,
+      identityHistory: {
+        complete: true,
+        persistentIds: [`field_${reservedToken}`],
+      },
+      referenceInventory: { complete: true, references: [] },
+    })
+    const randomUuidSpy = vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValue('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const before = container!.querySelectorAll('[data-testid="approval-template-field-row"]').length
+    ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(before)
+    expect(container!.querySelector('[data-testid="approval-form-builder-status"]')?.textContent)
+      .toBe('表单结构操作未完成，请刷新后重试')
+    expect(container!.textContent).not.toContain(reservedToken)
+    randomUuidSpy.mockRestore()
+  })
+
+  it('blocks an externally referenced field delete without exposing its storage location', async () => {
+    routeParams = { id: 'tpl_form_palette_external_reference' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: routeParams.id }))
+    getTemplateFormAuthoringContextSpy.mockResolvedValue({
+      templateId: routeParams.id,
+      identityHistory: { complete: true, persistentIds: ['amount', 'reviewer'] },
+      referenceInventory: {
+        complete: true,
+        references: [{
+          fieldId: 'amount',
+          kind: 'fwb_mapping',
+          location: 'automation.write_approval_form_values.mappings.formFieldId',
+        }],
+      },
+    })
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const firstRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[0] as HTMLElement
+    ;(firstRow.querySelector('[data-testid="approval-template-remove-field"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(2)
+    expect(container!.querySelector('[data-testid="approval-form-builder-status"]')?.textContent)
+      .toBe('该字段仍被流程或自动化引用，不能删除')
+    expect(container!.textContent).not.toContain(
+      'automation.write_approval_form_values.mappings.formFieldId',
+    )
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields.map((field: any) => field.id)).toEqual(['amount', 'reviewer'])
+  })
+
+  it('pauses add and delete on a mismatched authoring context but keeps field reordering available', async () => {
+    routeParams = { id: 'tpl_form_palette_context_unavailable' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: routeParams.id }))
+    getTemplateFormAuthoringContextSpy.mockResolvedValue({
+      templateId: 'wrong_template_private_id',
+      identityHistory: { complete: true, persistentIds: [] },
+      referenceInventory: { complete: true, references: [] },
+    })
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const paletteButton = container!.querySelector(
+      '[data-testid="approval-form-palette-date"]',
+    ) as HTMLButtonElement
+    const firstRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[0] as HTMLElement
+    expect(paletteButton.disabled).toBe(true)
+    expect((firstRow.querySelector('[data-testid="approval-template-remove-field"]') as HTMLButtonElement).disabled)
+      .toBe(true)
+    const disabledStatus = container!.querySelector('[data-testid="approval-form-structure-disabled"]')
+    expect(disabledStatus?.textContent).toContain('新增和删除已暂停')
+    expect(disabledStatus?.textContent).not.toContain('wrong_template_private_id')
+
+    const firstHandle = firstRow.querySelector(
+      '[data-testid="approval-form-field-drag-handle"]',
+    ) as HTMLButtonElement
+    expect(firstHandle.disabled).toBe(false)
+    firstHandle.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    }))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields.map((field: any) => field.id)).toEqual(['reviewer', 'amount'])
+  })
+
+  it('fails closed when the authoring context carries an incomplete external reference', async () => {
+    routeParams = { id: 'tpl_form_palette_context_malformed' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: routeParams.id }))
+    getTemplateFormAuthoringContextSpy.mockResolvedValue({
+      templateId: routeParams.id,
+      identityHistory: { complete: true, persistentIds: ['amount', 'reviewer'] },
+      referenceInventory: {
+        complete: true,
+        references: [{
+          fieldId: '',
+          kind: 'fwb_mapping',
+          location: 'automation.write_approval_form_values.mappings.formFieldId',
+        }],
+      },
+    })
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect((container!.querySelector(
+      '[data-testid="approval-form-palette-date"]',
+    ) as HTMLButtonElement).disabled).toBe(true)
+    expect(container!.querySelector('[data-testid="approval-form-structure-disabled"]')?.textContent)
+      .toContain('新增和删除已暂停')
   })
 
   it('rejects a moved-field drop when its typed payload does not match the local drag', async () => {
