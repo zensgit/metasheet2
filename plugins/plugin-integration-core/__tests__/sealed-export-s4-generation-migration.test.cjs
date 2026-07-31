@@ -235,15 +235,29 @@ async function assertRealDbProofWiring() {
     'node __tests__/sealed-export-s4-generation-kernel.test.cjs',
     'node __tests__/sealed-export-s4-generation-migration.test.cjs',
   ]
+  const s5Commands = [
+    'node __tests__/sealed-export-sqlserver-sealed-snapshot-profile.test.cjs',
+    'node __tests__/sealed-export-s5-public-export-surface.test.cjs',
+    'node __tests__/sealed-export-binding-qualification.test.cjs',
+    'node __tests__/sealed-export-signer-authority.test.cjs',
+    'node __tests__/sealed-export-signer-authority-store.test.cjs',
+    'node __tests__/sealed-export-s5-signer-authority-migration.test.cjs',
+    'node __tests__/sealed-export-sqlserver-sealed-snapshot-action.test.cjs',
+    'node __tests__/sealed-export-package-provenance.test.cjs',
+    'node __tests__/sealed-export-s5-evidence.test.cjs',
+    'node __tests__/sealed-export-s5-ci-wiring.test.cjs',
+    'node __tests__/sealed-export-s5-product-to-s3-s4-integration.test.cjs',
+  ]
+  const chain = packageJson.scripts.test.split(' && ')
+  // S4 remains contiguous in the chain; S5 certification suites follow it.
   assert.deepEqual(
-    packageJson.scripts.test.split(' && ').slice(-2),
-    s4Commands,
-    'the explicit plugin test chain must end by executing both S4 suites',
+    chain.slice(-(s4Commands.length + s5Commands.length)),
+    [...s4Commands, ...s5Commands],
+    'the explicit plugin test chain must execute both S4 suites then the S5 suites',
   )
-  for (const command of s4Commands) {
+  for (const command of [...s4Commands, ...s5Commands]) {
     assert.equal(
-      packageJson.scripts.test.split(' && ')
-        .filter((entry) => entry === command).length,
+      chain.filter((entry) => entry === command).length,
       1,
       `${command} must occur exactly once in the explicit test chain`,
     )
