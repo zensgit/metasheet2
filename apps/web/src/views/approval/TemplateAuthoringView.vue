@@ -4085,6 +4085,10 @@ pre {
     flex: 1;
     min-height: 44px;
   }
+
+  .template-authoring__section-actions {
+    position: static;
+  }
 }
 
 .template-authoring__view-toggle {
