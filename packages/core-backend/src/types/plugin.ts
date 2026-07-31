@@ -1225,12 +1225,14 @@ export interface PluginServices {
     buildLegacyImportReservationLockWitness(input: {
       orgId: string
       idempotencyKey: string
-    }): {
-      rolloutKey: string
-      legacyIdempotencyKey: string
-      helperWaitMs: number
-      transactionLockTimeoutMs: number
-    }
+    }):
+      | {
+          rolloutKey: string
+          legacyIdempotencyKey: string
+          helperWaitMs: number
+          transactionLockTimeoutMs: number
+        }
+      | null
   }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService

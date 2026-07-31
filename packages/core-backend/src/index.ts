@@ -109,6 +109,7 @@ import {
 } from './attendance/w4c2-live-scheduled-boundary'
 import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
 import {
+  AttendanceW4IdentityError,
   buildAttendanceCalculationRolloutAdvisoryKey,
   buildAttendanceLegacyIdempotencyAdvisoryKey,
   parseCanonicalAttendanceLegacyIdempotencyKeyV1,
@@ -2169,9 +2170,22 @@ export class MetaSheetServer {
                   orgId: string
                   idempotencyKey: string
                 }) => {
-                  const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(
-                    input?.orgId,
-                  )
+                  let orgKey: ReturnType<
+                    typeof parseCanonicalAttendanceRolloutOrgKeyV1
+                  >
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(
+                      input?.orgId,
+                    )
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return null
+                    }
+                    throw error
+                  }
                   const legacyKey =
                     parseCanonicalAttendanceLegacyIdempotencyKeyV1({
                       orgId: orgKey,

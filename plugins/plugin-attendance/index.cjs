@@ -23278,9 +23278,19 @@ module.exports = {
 	    const attendanceW4SegmentCalculationPort = context?.services?.attendanceW4SegmentCalculation ?? null
 	    const buildAttendanceSyncImportReservationLockWitness = ({ orgId, idempotencyKey }) => {
 	      const port = attendanceW4SegmentCalculationPort
-	      if (!port || typeof port.buildLegacyImportReservationLockWitness !== 'function') return null
+	      if (!port || typeof port.buildLegacyImportReservationLockWitness !== 'function') {
+	        throw new HttpError(
+	          503,
+	          'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING',
+	          'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING'
+	        )
+	      }
 	      try {
 	        const witness = port.buildLegacyImportReservationLockWitness({ orgId, idempotencyKey })
+	        // A legacy org outside the canonical W4 rollout domain cannot own a
+	        // V1 reservation. Preserve its existing sync path; the locked
+	        // reservation recheck below still fails closed if such a row exists.
+	        if (witness === null) return null
 	        if (!normalizeAttendanceSyncImportLockWitness(witness)) {
 	          throw new Error('ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_INVALID')
 	        }
