@@ -97,6 +97,15 @@ const ROLLBACK_ITEM_OPERATION_NAMESPACE = '48400374-f47e-42c2-a647-e8d637592f03'
 const ROLLBACK_CALCULATION_NAMESPACE = 'de4e2568-a6f6-4584-89a3-d85eaa4eff95'
 const LEGACY_TARGET_USER_NAMESPACE = 'e1115f83-9d66-4fd3-8758-852da8ed096a'
 
+let afterSharedRolloutLockForTests: (() => Promise<void>) | null = null
+
+/** Test-only deterministic barrier. Production wiring never sets this hook. */
+export function __setW4C3aImportRollbackAfterSharedLockForTests(
+  hook: (() => Promise<void>) | null,
+): void {
+  afterSharedRolloutLockForTests = hook
+}
+
 function fail(code: ConstructorParameters<typeof AttendanceImportRollbackError>[0]): never {
   throw new AttendanceImportRollbackError(code)
 }
@@ -950,6 +959,7 @@ async function rollbackInTransaction(
 ): Promise<AttendanceImportRollbackBoundaryResultV1> {
   const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(request.orgId)
   await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
+  await afterSharedRolloutLockForTests?.()
   await recheckRequestActorLiveness(trx, request)
 
   // P23 precedes every batch-status, preimage, and legacy-eligibility read.

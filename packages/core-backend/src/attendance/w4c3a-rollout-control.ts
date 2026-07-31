@@ -3,10 +3,6 @@
  *
  * These commands deliberately have no PluginServices, route, flag, or index
  * surface. They are the control-side half of the §7.9/§8.2 protocol only.
- * The current rollback route does not expose a transaction-bound coordinator
- * that can supply its direct-import class-10 identities to this module. Until
- * that interface exists, this module locks the complete durable *source* set
- * and refuses to claim rollback-versus-control race coverage.
  */
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -70,6 +66,7 @@ export type AttendanceW4C3aRolloutControlResultV1 = Readonly<{
 
 type SourceTarget = Readonly<{ userId: string; workDate: string }>
 type BatchReferenceState = Readonly<{
+  batchStatus: string
   closed: boolean
   hasFrozenPreimage: boolean
   hasW4Reference: boolean
@@ -136,7 +133,8 @@ async function loadSourceOperationIdentities(
               NULL::int AS "inputOrdinal", NULL::text AS "proofSemanticFingerprint",
               NULL::text AS "proofUserId", NULL::text AS "proofWorkDate"
          FROM attendance_result_operation_batches
-        WHERE org_id = $1 AND entrypoint = 'import_batch' AND batch_command_id = ANY($2::uuid[])
+        WHERE org_id = $1 AND entrypoint IN ('import_batch', 'integration_batch')
+          AND batch_command_id = ANY($2::uuid[])
         ORDER BY entrypoint, batch_command_id`,
       [orgId, batchIds],
     ),
@@ -147,7 +145,8 @@ async function loadSourceOperationIdentities(
               input_ordinal AS "inputOrdinal", proof_semantic_fingerprint AS "proofSemanticFingerprint",
               proof_user_id::text AS "proofUserId", proof_work_date::text AS "proofWorkDate"
          FROM attendance_result_operations
-        WHERE org_id = $1 AND entrypoint = 'import_batch' AND batch_command_id = ANY($2::uuid[])
+        WHERE org_id = $1 AND entrypoint IN ('import_batch', 'integration_batch')
+          AND batch_command_id = ANY($2::uuid[])
         ORDER BY entrypoint, operation_id`,
       [orgId, batchIds],
     ),
@@ -164,7 +163,8 @@ async function lockSourceOperationRows(
   await trx.query(
     `SELECT batch_command_id
        FROM attendance_result_operation_batches
-      WHERE org_id = $1 AND entrypoint = 'import_batch' AND batch_command_id = ANY($2::uuid[])
+      WHERE org_id = $1 AND entrypoint IN ('import_batch', 'integration_batch')
+        AND batch_command_id = ANY($2::uuid[])
       ORDER BY entrypoint, batch_command_id
       FOR UPDATE`,
     [orgId, batchIds],
@@ -172,7 +172,8 @@ async function lockSourceOperationRows(
   await trx.query(
     `SELECT operation_id
        FROM attendance_result_operations
-      WHERE org_id = $1 AND entrypoint = 'import_batch' AND batch_command_id = ANY($2::uuid[])
+      WHERE org_id = $1 AND entrypoint IN ('import_batch', 'integration_batch')
+        AND batch_command_id = ANY($2::uuid[])
       ORDER BY entrypoint, operation_id
       FOR UPDATE`,
     [orgId, batchIds],
@@ -293,11 +294,13 @@ async function loadBatchReferenceState(
 ): Promise<BatchReferenceState> {
   const result = await trx.query(
     `SELECT
+       (SELECT b.status FROM attendance_import_batches b
+         WHERE b.org_id = $1 AND b.id = $2::uuid) AS "batchStatus",
        EXISTS(SELECT 1 FROM attendance_import_rollback_closures c WHERE c.org_id = $1 AND c.batch_id = $2::uuid) AS closed,
        EXISTS(SELECT 1 FROM attendance_record_calculations c WHERE c.org_id = $1 AND c.source_batch_id = $2::uuid AND c.parent_preimage_snapshot IS NOT NULL) AS "hasFrozenPreimage",
        (
-         EXISTS(SELECT 1 FROM attendance_result_operation_batches b WHERE b.org_id = $1 AND b.entrypoint = 'import_batch' AND b.batch_command_id = $2::uuid)
-         OR EXISTS(SELECT 1 FROM attendance_result_operations o WHERE o.org_id = $1 AND o.entrypoint = 'import_batch' AND o.batch_command_id = $2::uuid)
+         EXISTS(SELECT 1 FROM attendance_result_operation_batches b WHERE b.org_id = $1 AND b.entrypoint IN ('import_batch', 'integration_batch') AND b.batch_command_id = $2::uuid)
+         OR EXISTS(SELECT 1 FROM attendance_result_operations o WHERE o.org_id = $1 AND o.entrypoint IN ('import_batch', 'integration_batch') AND o.batch_command_id = $2::uuid)
          OR EXISTS(SELECT 1 FROM attendance_import_jobs j WHERE j.org_id = $1 AND j.w4_contract_version = 1 AND j.w4_batch_command_id = $2::uuid)
          OR EXISTS(SELECT 1 FROM attendance_record_calculations c WHERE c.org_id = $1 AND c.source_batch_id = $2::uuid)
          OR EXISTS(
@@ -310,10 +313,20 @@ async function loadBatchReferenceState(
   )
   if (result.rows.length !== 1) fail('W4C3A_ROLLOUT_CONTROL_REFERENCE_INVALID')
   const row = result.rows[0]
-  if (typeof row.closed !== 'boolean' || typeof row.hasFrozenPreimage !== 'boolean' || typeof row.hasW4Reference !== 'boolean') {
+  if (
+    typeof row.batchStatus !== 'string' ||
+    typeof row.closed !== 'boolean' ||
+    typeof row.hasFrozenPreimage !== 'boolean' ||
+    typeof row.hasW4Reference !== 'boolean'
+  ) {
     fail('W4C3A_ROLLOUT_CONTROL_REFERENCE_INVALID')
   }
-  return { closed: row.closed, hasFrozenPreimage: row.hasFrozenPreimage, hasW4Reference: row.hasW4Reference }
+  return {
+    batchStatus: row.batchStatus,
+    closed: row.closed,
+    hasFrozenPreimage: row.hasFrozenPreimage,
+    hasW4Reference: row.hasW4Reference,
+  }
 }
 
 async function lockControlDomain(
@@ -364,7 +377,8 @@ async function batchFingerprint(
   const result = await trx.query(
     `SELECT encode(digest(jsonb_build_object(
               'batch', jsonb_build_object(
-                'id', b.id::text, 'orgId', b.org_id, 'idempotencyKey', b.idempotency_key,
+                'id', b.id::text, 'orgId', b.org_id,
+                'idempotencyKey', to_jsonb(b)->'idempotency_key',
                 'rowCount', b.row_count, 'status', b.status, 'meta', b.meta
               ),
               'items', COALESCE((
@@ -431,7 +445,13 @@ export async function closeLegacyRollbackWindowV1(
     await afterExclusiveRolloutLockForTests?.('close')
     const posture = await lockControlDomain(trx, input.orgId, [input.batchId])
     const state = await loadBatchReferenceState(trx, input.orgId, input.batchId)
-    if (state.closed || state.hasFrozenPreimage || state.hasW4Reference || posture !== 'legacy_projection_only') {
+    if (
+      state.batchStatus !== 'committed' ||
+      state.closed ||
+      state.hasFrozenPreimage ||
+      state.hasW4Reference ||
+      posture !== 'legacy_projection_only'
+    ) {
       fail('W4C3A_ROLLOUT_CONTROL_CLOSE_CONFLICT')
     }
     const fingerprint = await batchFingerprint(trx, input.orgId, input.batchId)

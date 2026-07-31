@@ -1,11 +1,4 @@
-/**
- * Core-only W4C-3a rollout-control proof.
- *
- * This test intentionally proves only close/transition serialization. The
- * current rollback implementation does not export a transaction-bound
- * coordinator, so it cannot be used as a real contender without lying with a
- * fixture. That integration remains an explicit interface gap.
- */
+/** Core-only W4C-3a rollout-control proof. */
 import crypto from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
@@ -129,6 +122,108 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_UNCLOSED_BATCH' })
       await expect(pool.query('SELECT count(*)::int AS n FROM attendance_calculation_rollout_state WHERE org_id = $1', [orgId]))
         .resolves.toMatchObject({ rows: [{ n: 0 }] })
+    } finally {
+      client.release()
+    }
+  })
+
+  it('refuses closure when an integration batch owns the compatibility batch identity', async () => {
+    const integrationOrgId = crypto.randomUUID()
+    const integrationBatchId = crypto.randomUUID()
+    const integrationUserId = crypto.randomUUID()
+    const semanticFingerprint = 'd'.repeat(64)
+    await pool.query(
+      `INSERT INTO attendance_import_batches (id, org_id, status, row_count, meta)
+       VALUES ($1::uuid, $2, 'committed', 1, '{"source":"test"}'::jsonb)`,
+      [integrationBatchId, integrationOrgId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_import_items (batch_id, org_id, user_id, work_date, preview_snapshot)
+       VALUES ($1::uuid, $2, $3, '2026-08-02', '{}'::jsonb)`,
+      [integrationBatchId, integrationOrgId, integrationUserId],
+    )
+    const registryClient = await pool.connect()
+    try {
+      await registryClient.query('BEGIN')
+      await registryClient.query(
+        `INSERT INTO attendance_result_operation_batches (
+           org_id, entrypoint, batch_command_id, identity_source_kind, source_root_id,
+           source_ref, actor_id, actor_posture, token_subject_user_id, capability,
+           subject_scope, accepted_write_posture, command_fingerprint, item_count,
+           item_sequence_fingerprint, item_set_fingerprint, state)
+         VALUES ($1, 'integration_batch', $2::uuid, 'integration_batch', $2::uuid,
+           'test:w4c3a-control-integration', $3, 'attendance_admin', $3, 'import',
+           $4::jsonb, 'authoritative', $5, 1, $6, $7, 'claimed')`,
+        [
+          integrationOrgId,
+          integrationBatchId,
+          actorId,
+          JSON.stringify({ kind: 'explicit_users', userIds: [integrationUserId] }),
+          'a'.repeat(64),
+          'b'.repeat(64),
+          'c'.repeat(64),
+        ],
+      )
+      await registryClient.query(
+        `INSERT INTO attendance_result_operations (
+           org_id, entrypoint, operation_id, batch_command_id, input_ordinal,
+           identity_source_kind, source_root_id, proof_semantic_fingerprint,
+           source_ref, actor_id, actor_posture, token_subject_user_id, capability,
+           subject_scope, command_fingerprint, accepted_write_posture,
+           normalized_business_input_snapshot, state)
+         VALUES ($1, 'integration_batch', attendance_w4_uuidv5(
+             '46501375-c273-459f-a5af-f926859f6411'::uuid,
+             attendance_w4_item_name_bytes($2::uuid, 0, $3)),
+           $2::uuid, 0, 'integration_item', $2::uuid, $3,
+           'test:w4c3a-control-integration', $4, 'attendance_admin', $4, 'import',
+           $5::jsonb, $6, 'authoritative', '{}'::jsonb, 'claimed')`,
+        [
+          integrationOrgId,
+          integrationBatchId,
+          semanticFingerprint,
+          actorId,
+          JSON.stringify({ kind: 'explicit_users', userIds: [integrationUserId] }),
+          'a'.repeat(64),
+        ],
+      )
+      await registryClient.query(
+        `UPDATE attendance_result_operations
+            SET state = 'canceled', updated_at = now(), version = version + 1
+          WHERE org_id = $1 AND entrypoint = 'integration_batch'
+            AND batch_command_id = $2::uuid`,
+        [integrationOrgId, integrationBatchId],
+      )
+      await registryClient.query(
+        `UPDATE attendance_result_operation_batches
+            SET state = 'canceled', updated_at = now(), version = version + 1
+          WHERE org_id = $1 AND entrypoint = 'integration_batch'
+            AND batch_command_id = $2::uuid`,
+        [integrationOrgId, integrationBatchId],
+      )
+      await registryClient.query('COMMIT')
+    } catch (error) {
+      await registryClient.query('ROLLBACK')
+      throw error
+    } finally {
+      registryClient.release()
+    }
+
+    const client = await pool.connect()
+    try {
+      await expect(closeLegacyRollbackWindowV1(transactionClient(client), {
+        orgId: integrationOrgId,
+        batchId: integrationBatchId,
+        actorId,
+        correlationId: crypto.randomUUID(),
+        engineVersion: 'w4c3a-control-test',
+        reasonCode: 'legacy_rollback_window_closed',
+      })).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_CLOSE_CONFLICT' })
+      await expect(pool.query(
+        `SELECT count(*)::int AS n
+           FROM attendance_import_rollback_closures
+          WHERE org_id = $1 AND batch_id = $2::uuid`,
+        [integrationOrgId, integrationBatchId],
+      )).resolves.toMatchObject({ rows: [{ n: 0 }] })
     } finally {
       client.release()
     }

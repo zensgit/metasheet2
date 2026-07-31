@@ -22,13 +22,27 @@ import {
   createFrozenAttendanceImportRollbackCommandV1,
   rollbackAttendanceImportV1,
 } from '../../src/attendance/w4c3a-import-rollback'
-import { createAttendanceImportRollbackBoundaryV1 } from '../../src/attendance/w4c3a-import-rollback-boundary'
+import {
+  __setW4C3aImportRollbackAfterSharedLockForTests,
+  createAttendanceImportRollbackBoundaryV1,
+} from '../../src/attendance/w4c3a-import-rollback-boundary'
+import {
+  __setW4C3aRolloutControlAfterExclusiveLockForTests,
+  closeLegacyRollbackWindowV1,
+  transitionAttendanceCalculationRolloutV1,
+} from '../../src/attendance/w4c3a-rollout-control'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
 const run = crypto.randomUUID().replace(/-/g, '').slice(0, 10)
 const hex = (value: string) => value.repeat(64)
 const id = () => crypto.randomUUID()
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: (() => void) | undefined
+  const promise = new Promise<void>((done) => { resolve = done })
+  return { promise, resolve: () => resolve?.() }
+}
 
 function trx(client: PoolClient): AttendanceW4TransactionClientV1 {
   return {
@@ -647,6 +661,59 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     }
   }
 
+  function rollbackBoundary() {
+    return createAttendanceImportRollbackBoundaryV1({
+      async acquireConnection() {
+        const client = await pool.connect()
+        return { client: trx(client), release: () => client.release() }
+      },
+    })
+  }
+
+  async function legacyRaceFixture(workDate: string) {
+    const raceOrgId = id()
+    const batchId = id()
+    const recordId = id()
+    const targetUserId = id()
+    await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [actorId, raceOrgId])
+    await pool.query('INSERT INTO users (id) VALUES ($1)', [targetUserId])
+    await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [
+      targetUserId,
+      raceOrgId,
+    ])
+    await pool.query(
+      `INSERT INTO attendance_import_batches (
+         id, org_id, created_by, source, row_count, status, meta)
+       VALUES ($1, $2, $3, 'fixture', 1, 'committed', '{}'::jsonb)`,
+      [batchId, raceOrgId, actorId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_records (
+         id, user_id, work_date, work_minutes, status, org_id, source_batch_id)
+       VALUES ($1, $2, $3::date, 480, 'normal', $4, $5)`,
+      [recordId, targetUserId, workDate, raceOrgId, batchId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_import_items (
+         id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
+       VALUES ($1, $2, $3, $4, $5::date, $6, '{}'::jsonb)`,
+      [id(), batchId, raceOrgId, targetUserId, workDate, recordId],
+    )
+    return { raceOrgId, batchId, recordId }
+  }
+
+  async function controlResidue(org: string, batchId: string) {
+    const result = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_import_rollback_closures
+           WHERE org_id = $1 AND batch_id = $2::uuid) AS closures,
+         (SELECT count(*)::int FROM attendance_calculation_rollout_events
+           WHERE org_id = $1 AND evidence->>'batchId' = $2::text) AS close_events`,
+      [org, batchId],
+    )
+    return result.rows[0]
+  }
+
   it('locks every operation identity before operation rows, batch/items, targets, and preimages', async () => {
     const batchId = id()
     const fingerprint = crypto.createHash('sha256').update(batchId).digest('hex')
@@ -1220,6 +1287,266 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     expect(parentLock).toBeGreaterThan(targetAdvisory)
     expect(statements[parentLock].sql).toContain('ORDER BY user_id, work_date, id')
   })
+
+  it('serializes closure-first against legacy rollback and returns 409 with zero rollback DML', async () => {
+    const fixture = await legacyRaceFixture('2026-09-01')
+    const entered = deferred()
+    const release = deferred()
+    __setW4C3aRolloutControlAfterExclusiveLockForTests(async (kind) => {
+      if (kind === 'close') {
+        entered.resolve()
+        await release.promise
+      }
+    })
+    const closeClient = await pool.connect()
+    const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    try {
+      const close = closeLegacyRollbackWindowV1(trx(closeClient), {
+        orgId: fixture.raceOrgId,
+        batchId: fixture.batchId,
+        actorId,
+        correlationId: id(),
+        engineVersion: 'w4c3a-race-test',
+        reasonCode: 'legacy_rollback_window_closed',
+      })
+      await entered.promise
+      let rollbackSettled = false
+      const rollback = rollbackBoundary().rollbackImportBatchV1({
+        orgId: fixture.raceOrgId,
+        batchId: fixture.batchId,
+        actorId,
+        tokenSubjectUserId: actorId,
+      }).finally(() => { rollbackSettled = true })
+      await new Promise((resolve) => setTimeout(resolve, 75))
+      expect(rollbackSettled).toBe(false)
+      release.resolve()
+      await expect(close).resolves.toMatchObject({ batchId: fixture.batchId })
+      await expect(rollback).rejects.toMatchObject({
+        code: 'IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE',
+      })
+      expect(await controlResidue(fixture.raceOrgId, fixture.batchId)).toEqual({
+        closures: 1,
+        close_events: 1,
+      })
+      expect(await rollbackResidue(fixture.batchId)).toEqual({
+        commands: 0,
+        reversals: 0,
+        witnesses: 0,
+      })
+      await expect(pool.query('SELECT count(*)::int AS n FROM attendance_records WHERE id = $1', [fixture.recordId]))
+        .resolves.toMatchObject({ rows: [{ n: 1 }] })
+    } finally {
+      __setW4C3aRolloutControlAfterExclusiveLockForTests(null)
+      release.resolve()
+      closeClient.release()
+      if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+    }
+  }, 60000)
+
+  it('serializes rollback-first against closure and rechecks the rolled-back batch state', async () => {
+    const fixture = await legacyRaceFixture('2026-09-02')
+    const entered = deferred()
+    const release = deferred()
+    __setW4C3aImportRollbackAfterSharedLockForTests(async () => {
+      entered.resolve()
+      await release.promise
+    })
+    const closeClient = await pool.connect()
+    const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    try {
+      const rollback = rollbackBoundary().rollbackImportBatchV1({
+        orgId: fixture.raceOrgId,
+        batchId: fixture.batchId,
+        actorId,
+        tokenSubjectUserId: actorId,
+      })
+      await entered.promise
+      let closeSettled = false
+      const close = closeLegacyRollbackWindowV1(trx(closeClient), {
+        orgId: fixture.raceOrgId,
+        batchId: fixture.batchId,
+        actorId,
+        correlationId: id(),
+        engineVersion: 'w4c3a-race-test',
+        reasonCode: 'legacy_rollback_window_closed',
+      }).finally(() => { closeSettled = true })
+      await new Promise((resolve) => setTimeout(resolve, 75))
+      expect(closeSettled).toBe(false)
+      release.resolve()
+      await expect(rollback).resolves.toMatchObject({ kind: 'legacy', deleted: 1 })
+      await expect(close).rejects.toMatchObject({
+        code: 'W4C3A_ROLLOUT_CONTROL_CLOSE_CONFLICT',
+      })
+      expect(await controlResidue(fixture.raceOrgId, fixture.batchId)).toEqual({
+        closures: 0,
+        close_events: 0,
+      })
+      await expect(pool.query(
+        'SELECT status FROM attendance_import_batches WHERE org_id = $1 AND id = $2::uuid',
+        [fixture.raceOrgId, fixture.batchId],
+      )).resolves.toMatchObject({ rows: [{ status: 'rolled_back' }] })
+    } finally {
+      __setW4C3aImportRollbackAfterSharedLockForTests(null)
+      release.resolve()
+      closeClient.release()
+      if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+    }
+  }, 60000)
+
+  it('rejects closure on a frozen preimage, then transition-first preserves W4 rollback', async () => {
+    const raceOrgId = id()
+    const batchId = id()
+    const fingerprint = crypto.createHash('sha256').update(batchId).digest('hex')
+    const targetUserId = id()
+    await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [actorId, raceOrgId])
+    await pool.query('INSERT INTO users (id) VALUES ($1)', [targetUserId])
+    await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [targetUserId, raceOrgId])
+    await sourceBatch(batchId, fingerprint, {
+      orgId: raceOrgId,
+      subjectUserIds: [targetUserId],
+    })
+    const target = await importedRecord({
+      batchId,
+      preimage: 'active',
+      workDate: '2026-09-03',
+      workMinutes: 480,
+      orgId: raceOrgId,
+      userId: targetUserId,
+    })
+    const closeClient = await pool.connect()
+    const transitionClient = await pool.connect()
+    const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = raceOrgId
+    try {
+      await expect(closeLegacyRollbackWindowV1(trx(closeClient), {
+        orgId: raceOrgId,
+        batchId,
+        actorId,
+        correlationId: id(),
+        engineVersion: 'w4c3a-race-test',
+        reasonCode: 'legacy_rollback_window_closed',
+      })).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_CLOSE_CONFLICT' })
+      expect(await controlResidue(raceOrgId, batchId)).toEqual({ closures: 0, close_events: 0 })
+
+      const entered = deferred()
+      const release = deferred()
+      __setW4C3aRolloutControlAfterExclusiveLockForTests(async (kind) => {
+        if (kind === 'transition') {
+          entered.resolve()
+          await release.promise
+        }
+      })
+      const transition = transitionAttendanceCalculationRolloutV1(trx(transitionClient), {
+        orgId: raceOrgId,
+        actorId,
+        correlationId: id(),
+        engineVersion: 'w4c3a-race-test',
+        targetState: 'shadow',
+        reasonCode: 'rollout_transition',
+      })
+      await entered.promise
+      let rollbackSettled = false
+      const rollback = rollbackBoundary().rollbackImportBatchV1({
+        orgId: raceOrgId,
+        batchId,
+        actorId,
+        tokenSubjectUserId: actorId,
+      }).finally(() => { rollbackSettled = true })
+      await new Promise((resolve) => setTimeout(resolve, 75))
+      expect(rollbackSettled).toBe(false)
+      release.resolve()
+      await expect(transition).resolves.toMatchObject({ state: 'shadow' })
+      await expect(rollback).resolves.toMatchObject({
+        kind: 'w4',
+        affected: 1,
+        restored: 1,
+        retired: 0,
+      })
+      await expect(pool.query(
+        'SELECT current_calculation_id::text, work_minutes FROM attendance_records WHERE id = $1',
+        [target.recordId],
+      )).resolves.toMatchObject({
+        rows: [{ current_calculation_id: null, work_minutes: target.projection.workMinutes }],
+      })
+    } finally {
+      __setW4C3aRolloutControlAfterExclusiveLockForTests(null)
+      closeClient.release()
+      transitionClient.release()
+      if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+    }
+  }, 60000)
+
+  it('serializes W4 rollback-first against transition and retains one valid next state', async () => {
+    const raceOrgId = id()
+    const batchId = id()
+    const fingerprint = crypto.createHash('sha256').update(batchId).digest('hex')
+    const targetUserId = id()
+    await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [actorId, raceOrgId])
+    await pool.query('INSERT INTO users (id) VALUES ($1)', [targetUserId])
+    await pool.query('INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2)', [targetUserId, raceOrgId])
+    await sourceBatch(batchId, fingerprint, {
+      orgId: raceOrgId,
+      subjectUserIds: [targetUserId],
+    })
+    await importedRecord({
+      batchId,
+      preimage: 'active',
+      workDate: '2026-09-04',
+      workMinutes: 480,
+      orgId: raceOrgId,
+      userId: targetUserId,
+    })
+    const entered = deferred()
+    const release = deferred()
+    __setW4C3aImportRollbackAfterSharedLockForTests(async () => {
+      entered.resolve()
+      await release.promise
+    })
+    const transitionClient = await pool.connect()
+    const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = raceOrgId
+    try {
+      const rollback = rollbackBoundary().rollbackImportBatchV1({
+        orgId: raceOrgId,
+        batchId,
+        actorId,
+        tokenSubjectUserId: actorId,
+      })
+      await entered.promise
+      let transitionSettled = false
+      const transition = transitionAttendanceCalculationRolloutV1(trx(transitionClient), {
+        orgId: raceOrgId,
+        actorId,
+        correlationId: id(),
+        engineVersion: 'w4c3a-race-test',
+        targetState: 'shadow',
+        reasonCode: 'rollout_transition',
+      }).finally(() => { transitionSettled = true })
+      await new Promise((resolve) => setTimeout(resolve, 75))
+      expect(transitionSettled).toBe(false)
+      release.resolve()
+      await expect(rollback).resolves.toMatchObject({ kind: 'w4', restored: 1 })
+      await expect(transition).resolves.toMatchObject({ state: 'shadow' })
+      await expect(pool.query(
+        `SELECT
+           (SELECT state FROM attendance_calculation_rollout_state WHERE org_id = $1) AS state,
+           (SELECT count(*)::int FROM attendance_record_calculations
+             WHERE org_id = $1 AND source_batch_id = $2::uuid AND entrypoint = 'import_rollback') AS reversals`,
+        [raceOrgId, batchId],
+      )).resolves.toMatchObject({ rows: [{ state: 'shadow', reversals: 1 }] })
+    } finally {
+      __setW4C3aImportRollbackAfterSharedLockForTests(null)
+      release.resolve()
+      transitionClient.release()
+      if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+    }
+  }, 60000)
 
   it('P23 denies another same-org importer before target/state reads even with RBAC_BYPASS', async () => {
     const batchId = id()
