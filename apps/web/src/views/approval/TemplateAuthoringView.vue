@@ -245,395 +245,19 @@
         </el-form>
       </el-card>
 
-      <el-card
+      <ApprovalFormBuilder
         v-show="activeAuthoringSection === 'fields'"
-        class="template-authoring__panel"
-        :class="{ 'template-authoring__panel--form-builder': canvasV2Enabled }"
-        shadow="never"
-      >
-        <template #header>
-          <div class="template-authoring__panel-header">
-            <strong>表单字段</strong>
-            <el-button
-              v-if="!canvasV2Enabled"
-              size="small"
-              :disabled="readOnly"
-              data-testid="approval-template-add-field"
-              @click="addField"
-            >
-              <el-icon><Plus /></el-icon>
-              添加字段
-            </el-button>
-          </div>
-        </template>
-
-        <ApprovalFormPalette
-          v-if="canvasV2Enabled"
-          :read-only="readOnly"
-          @add="appendFieldOfType"
-        />
-
-        <template v-for="(field, index) in draft.fields" :key="field.localId">
-          <button
-            v-if="canvasV2Enabled"
-            type="button"
-            class="template-authoring__field-drop-slot"
-            :class="{
-              'is-active': activeFieldDropIndex === index,
-              'is-selected': selectedFieldInsertionIndex === index,
-            }"
-            :disabled="readOnly"
-            :aria-pressed="selectedFieldInsertionIndex === index"
-            :aria-label="`选择在字段 ${index + 1} 前插入组件`"
-            :data-testid="`approval-form-drop-slot-${index}`"
-            @click="selectFieldInsertionSlot(index)"
-            @dragenter.prevent="activateFieldDropSlot(index)"
-            @dragover.prevent="activateFieldDropSlot(index)"
-            @dragleave="deactivateFieldDropSlot(index)"
-            @drop.prevent="onFieldInsertionDrop($event, index)"
-          >
-            <span aria-hidden="true">+</span>
-          </button>
-
-          <div
-            class="template-authoring__item"
-            data-testid="approval-template-field-row"
-            :draggable="!readOnly && !canvasV2Enabled"
-            @dragstart="onFieldDragStart($event, index)"
-            @dragover="onLegacyFieldDragOver"
-            @drop="onLegacyFieldDrop($event, index)"
-            @dragend="resetFieldDragState"
-          >
-          <div class="template-authoring__item-toolbar">
-            <div class="template-authoring__item-title">
-              <button
-                v-if="canvasV2Enabled"
-                type="button"
-                class="template-authoring__drag-handle"
-                :disabled="readOnly"
-                :aria-label="`移动字段 ${index + 1}`"
-                aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
-                title="拖动排序；也可按 Alt + 方向键"
-                data-testid="approval-form-field-drag-handle"
-                :draggable="!readOnly"
-                @dragstart.stop="onFieldDragStart($event, index)"
-                @dragend.stop="resetFieldDragState"
-                @keydown="onFieldKeyboardReorder($event, index)"
-              >
-                <el-icon><Rank /></el-icon>
-              </button>
-              <strong>字段 {{ index + 1 }}</strong>
-            </div>
-            <div>
-              <el-button size="small" :disabled="readOnly || index === 0" @click="moveField(index, -1)">上移</el-button>
-              <el-button size="small" :disabled="readOnly || index === draft.fields.length - 1" @click="moveField(index, 1)">下移</el-button>
-              <el-button
-                size="small"
-                type="danger"
-                :disabled="readOnly || draft.fields.length === 1"
-                data-testid="approval-template-remove-field"
-                @click="removeField(index)"
-              >
-                删除
-              </el-button>
-            </div>
-          </div>
-          <div class="template-authoring__grid">
-            <!-- D1 hygiene: field.id is auto-generated / load-preserved; not an ordinary control. -->
-            <el-form-item label="字段名称">
-              <el-input v-model="field.label" :disabled="readOnly" />
-            </el-form-item>
-            <el-form-item label="类型">
-              <el-select
-                v-model="field.type"
-                :disabled="readOnly"
-                class="ms-w-100pct"
-                data-testid="approval-field-type"
-                @change="invalidateStaleRecordLinkDependencies(field)"
-              >
-                <el-option label="文本" value="text" />
-                <el-option label="多行文本" value="textarea" />
-                <el-option label="数字" value="number" />
-                <el-option label="日期" value="date" />
-                <el-option label="日期时间" value="datetime" />
-                <el-option label="单选" value="select" />
-                <el-option label="多选" value="multi-select" />
-                <el-option label="用户" value="user" />
-                <el-option label="明细（子表单）" value="detail" />
-                <el-option label="关联记录" value="record-link" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="占位文本">
-              <el-input v-model="field.placeholder" :disabled="readOnly" />
-            </el-form-item>
-            <el-form-item label="是否必填">
-              <el-checkbox v-model="field.required" :disabled="readOnly">必填</el-checkbox>
-            </el-form-item>
-            <el-form-item
-              v-if="field.type === 'record-link'"
-              label="关联目标"
-              class="template-authoring__wide"
-              data-testid="approval-record-link-config"
-            >
-              <div
-                v-if="recordLinkCatalogError"
-                class="template-authoring__hint template-authoring__record-link-catalog-error"
-                data-testid="approval-record-link-catalog-error"
-              >
-                <span>{{ recordLinkCatalogError }}</span>
-                <el-button
-                  type="primary"
-                  link
-                  size="small"
-                  :loading="recordLinkCatalogLoading"
-                  data-testid="approval-record-link-catalog-retry"
-                  @click="retryRecordLinkCatalog"
-                >
-                  重试
-                </el-button>
-              </div>
-              <div class="template-authoring__grid">
-                <el-form-item label="目标空间">
-                  <el-select
-                    :model-value="field.recordLinkBaseId || undefined"
-                    :disabled="readOnly || recordLinkCatalogLoading"
-                    filterable
-                    clearable
-                    class="ms-w-100pct"
-                    placeholder="请选择目标空间"
-                    data-testid="approval-record-link-base-select"
-                    @update:model-value="(value: string | null | undefined) => onRecordLinkBaseChange(field, value)"
-                    @visible-change="(open: boolean) => { if (open && !recordLinkCatalogLoaded) retryRecordLinkCatalog() }"
-                  >
-                    <el-option
-                      v-for="opt in recordLinkBaseOptionsFor(field)"
-                      :key="opt.value"
-                      :label="opt.label"
-                      :value="opt.value"
-                    />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="目标表">
-                  <el-select
-                    :model-value="field.recordLinkSheetId || undefined"
-                    :disabled="readOnly || recordLinkCatalogLoading || !field.recordLinkBaseId.trim()"
-                    filterable
-                    clearable
-                    class="ms-w-100pct"
-                    placeholder="请选择目标表"
-                    data-testid="approval-record-link-sheet-select"
-                    @update:model-value="(value: string | null | undefined) => onRecordLinkSheetChange(field, value)"
-                    @visible-change="(open: boolean) => { if (open && !recordLinkCatalogLoaded) retryRecordLinkCatalog() }"
-                  >
-                    <el-option
-                      v-for="opt in recordLinkSheetOptionsFor(field)"
-                      :key="opt.value"
-                      :label="opt.label"
-                      :value="opt.value"
-                    />
-                  </el-select>
-                </el-form-item>
-              </div>
-              <div class="template-authoring__hint">
-                仅可选择目标表中的一条记录。提交时会验证发起人是否可查看所选记录；不可用的历史目标需重新选择。
-              </div>
-            </el-form-item>
-
-            <el-form-item
-              v-if="field.type === 'select' || field.type === 'multi-select'"
-              label="选项"
-              class="template-authoring__wide"
-            >
-              <el-input
-                v-model="field.optionsText"
-                :disabled="readOnly"
-                type="textarea"
-                :rows="3"
-                placeholder="每行一个选项，格式：显示名:值"
-              />
-            </el-form-item>
-            <!-- detail / sub-form (明细) config: sub-field list editor + minRows/maxRows. Each
-                 sub-field is a LEAF type (no nested detail). Mirrors the backend column schema. -->
-            <el-form-item
-              v-if="field.type === 'detail'"
-              label="明细子字段"
-              class="template-authoring__wide"
-            >
-              <div class="template-authoring__detail" data-testid="approval-detail-config">
-                <el-table
-                  v-if="field.detailColumns.length > 0"
-                  :data="field.detailColumns"
-                  border
-                  size="small"
-                  class="template-authoring__detail-table"
-                >
-                  <!-- D1 hygiene: detail column id is auto-generated / load-preserved; not ordinary UI. -->
-                  <el-table-column label="名称" min-width="120">
-                    <template #default="{ row }">
-                      <el-input v-model="row.label" :disabled="readOnly" placeholder="如 品名" />
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="类型" min-width="120">
-                    <template #default="{ row }">
-                      <el-select v-model="row.type" :disabled="readOnly" class="ms-w-100pct">
-                        <el-option
-                          v-for="leaf in detailLeafTypeOptions"
-                          :key="leaf.value"
-                          :label="leaf.label"
-                          :value="leaf.value"
-                        />
-                      </el-select>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="必填" width="70" align="center">
-                    <template #default="{ row }">
-                      <el-checkbox v-model="row.required" :disabled="readOnly" />
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="选项" min-width="160">
-                    <template #default="{ row }">
-                      <el-input
-                        v-if="row.type === 'select' || row.type === 'multi-select'"
-                        v-model="row.optionsText"
-                        :disabled="readOnly"
-                        type="textarea"
-                        :rows="2"
-                        placeholder="每行一个：显示名:值"
-                      />
-                      <span v-else class="template-authoring__hint">—</span>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="操作" width="70" align="center">
-                    <template #default="{ $index }">
-                      <el-button
-                        type="danger"
-                        link
-                        :disabled="readOnly"
-                        @click="removeDetailColumn(field, $index)"
-                      >
-                        删除
-                      </el-button>
-                    </template>
-                  </el-table-column>
-                </el-table>
-                <div v-else class="template-authoring__hint">尚无子字段，请添加至少一个。</div>
-                <div class="template-authoring__detail-actions">
-                  <el-button
-                    size="small"
-                    type="primary"
-                    plain
-                    :disabled="readOnly"
-                    data-testid="approval-detail-add-column"
-                    @click="addDetailColumn(field)"
-                  >
-                    添加子字段
-                  </el-button>
-                  <el-input
-                    v-model="field.minRowsText"
-                    :disabled="readOnly"
-                    placeholder="最小行数"
-                    class="ms-w-120"
-                  />
-                  <el-input
-                    v-model="field.maxRowsText"
-                    :disabled="readOnly"
-                    placeholder="最大行数"
-                    class="ms-w-120"
-                  />
-                </div>
-              </div>
-            </el-form-item>
-            <el-form-item label="显隐规则" class="template-authoring__wide">
-              <div class="template-authoring__visibility">
-                <el-select
-                  v-model="field.visibility.dependsOnFieldId"
-                  :disabled="readOnly"
-                  class="ms-w-200"
-                  data-testid="approval-field-visibility-depends"
-                >
-                  <el-option label="无（始终显示）" value="" />
-                  <el-option
-                    v-for="dep in visibilityFieldOptions(field)"
-                    :key="dep.localId"
-                    :label="dep.label"
-                    :value="dep.id"
-                  />
-                </el-select>
-                <template v-if="field.visibility.dependsOnFieldId">
-                  <el-select
-                    v-model="field.visibility.operator"
-                    :disabled="readOnly"
-                    class="ms-w-130"
-                    data-testid="approval-field-visibility-operator"
-                  >
-                    <el-option label="等于" value="eq" />
-                    <el-option label="不等于" value="neq" />
-                    <el-option label="包含" value="in" />
-                    <el-option label="为空" value="isEmpty" />
-                    <el-option label="不为空" value="notEmpty" />
-                  </el-select>
-                  <el-input
-                    v-if="field.visibility.operator === 'in'"
-                    v-model="field.visibility.valueText"
-                    :disabled="readOnly"
-                    type="textarea"
-                    :rows="2"
-                    placeholder="每行一个值"
-                    class="ms-w-240"
-                    data-testid="approval-field-visibility-values"
-                  />
-                  <el-input
-                    v-else-if="field.visibility.operator === 'eq' || field.visibility.operator === 'neq'"
-                    v-model="field.visibility.valueText"
-                    :disabled="readOnly"
-                    placeholder="比较值"
-                    class="ms-w-240"
-                    data-testid="approval-field-visibility-value"
-                  />
-                </template>
-              </div>
-              <div v-if="field.visibility.dependsOnFieldId" class="template-authoring__hint">
-                仅当依赖字段满足条件时才显示本字段。
-                <template v-if="field.visibility.operator === 'eq' || field.visibility.operator === 'neq'">
-                  比较值留空表示「{{ field.visibility.operator === 'eq' ? '等于' : '不等于' }}空值」；要取消规则请把依赖字段设为「无」。
-                </template>
-              </div>
-            </el-form-item>
-          </div>
-          </div>
-        </template>
-
-        <button
-          v-if="canvasV2Enabled"
-          type="button"
-          class="template-authoring__field-drop-slot"
-          :class="{
-            'is-active': activeFieldDropIndex === draft.fields.length,
-            'is-selected': selectedFieldInsertionIndex === draft.fields.length,
-          }"
-          :disabled="readOnly"
-          :aria-pressed="selectedFieldInsertionIndex === draft.fields.length"
-          aria-label="选择在表单末尾插入组件"
-          :data-testid="`approval-form-drop-slot-${draft.fields.length}`"
-          @click="selectFieldInsertionSlot(draft.fields.length)"
-          @dragenter.prevent="activateFieldDropSlot(draft.fields.length)"
-          @dragover.prevent="activateFieldDropSlot(draft.fields.length)"
-          @dragleave="deactivateFieldDropSlot(draft.fields.length)"
-          @drop.prevent="onFieldInsertionDrop($event, draft.fields.length)"
-        >
-          <span aria-hidden="true">+</span>
-        </button>
-
-        <p
-          v-if="canvasV2Enabled"
-          class="template-authoring__form-builder-status"
-          role="status"
-          aria-live="polite"
-          data-testid="approval-form-builder-status"
-        >
-          {{ formBuilderAnnouncement }}
-        </p>
-      </el-card>
+        v-model:fields="draft.fields"
+        :workspace-enabled="canvasV2Enabled"
+        :read-only="readOnly"
+        :record-link-bases="recordLinkBases"
+        :record-link-sheets="recordLinkSheets"
+        :record-link-catalog-loading="recordLinkCatalogLoading"
+        :record-link-catalog-loaded="recordLinkCatalogLoaded"
+        :record-link-catalog-error="recordLinkCatalogError"
+        @retry-record-link-catalog="retryRecordLinkCatalog"
+        @field-type-change="invalidateStaleRecordLinkDependencies"
+      />
 
       <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
         <template #header>
@@ -1299,7 +923,7 @@ import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
-import { Plus, Rank } from '@element-plus/icons-vue'
+import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useFeatureFlags } from '../../stores/featureFlags'
@@ -1323,7 +947,7 @@ import { linearStepForNodeKey } from '../../approvals/linearCanvasCarrier'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
-import ApprovalFormPalette from '../../approvals/components/ApprovalFormPalette.vue'
+import ApprovalFormBuilder from '../../approvals/components/ApprovalFormBuilder.vue'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
   type ApprovalNodeConfigEditorApi,
@@ -1334,11 +958,8 @@ import {
   buildFormSchema,
   buildSlaHours,
   buildUpdateTemplatePayload,
-  createEmptyDetailColumnDraft,
-  createEmptyFieldDraft,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
-  DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
   graphReadOnlyReason,
   insertStepAt,
@@ -1362,16 +983,7 @@ import {
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
   applyTopologyToDraft,
-  moveItemToIndex,
-  nextAvailableFieldDraftIndex,
-  type AuthorableFieldType,
 } from '../../approvals/templateAuthoring'
-import {
-  APPROVAL_FORM_FIELD_MOVE_MIME,
-  APPROVAL_FORM_FIELD_TYPE_LABELS,
-  readMovedFieldIndex,
-  readPaletteFieldType,
-} from '../../approvals/formPalette'
 import {
   addConditionBranch,
   addParallelBranch,
@@ -1418,11 +1030,7 @@ import type {
 } from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 import { assigneeSourceSummary } from '../../approvals/assigneeSource'
-import {
-  buildRecordLinkBaseSelectOptions,
-  buildRecordLinkSheetSelectOptions,
-  type RecordLinkNamedOption,
-} from '../../approvals/recordLinkField'
+import type { RecordLinkNamedOption } from '../../approvals/recordLinkField'
 import { multitableClient } from '../../multitable/api/client'
 
 const route = useRoute()
@@ -1493,35 +1101,6 @@ const recordLinkCatalogValidation = computed(() => ({
   loaded: recordLinkCatalogLoaded.value,
   sheets: recordLinkSheets.value,
 }))
-
-function recordLinkBaseOptionsFor(field: FieldAuthoringDraft) {
-  return buildRecordLinkBaseSelectOptions(recordLinkBases.value, field.recordLinkBaseId)
-}
-
-function recordLinkSheetOptionsFor(field: FieldAuthoringDraft) {
-  return buildRecordLinkSheetSelectOptions(
-    recordLinkSheets.value,
-    field.recordLinkBaseId,
-    field.recordLinkSheetId,
-  )
-}
-
-function onRecordLinkBaseChange(field: FieldAuthoringDraft, value: string | null | undefined): void {
-  const next = typeof value === 'string' ? value.trim() : ''
-  field.recordLinkBaseId = next
-  // Changing base invalidates a sheet pin that no longer belongs to the new base.
-  if (field.recordLinkSheetId.trim()) {
-    const sheetStillValid = recordLinkSheets.value.some(
-      (s) => s.id === field.recordLinkSheetId.trim()
-        && (typeof s.baseId === 'string' ? s.baseId.trim() : '') === next,
-    )
-    if (!sheetStillValid) field.recordLinkSheetId = ''
-  }
-}
-
-function onRecordLinkSheetChange(field: FieldAuthoringDraft, value: string | null | undefined): void {
-  field.recordLinkSheetId = typeof value === 'string' ? value.trim() : ''
-}
 
 /** Load the multitable catalog whenever the draft contains a record-link field. */
 watch(
@@ -2603,183 +2182,6 @@ function swap<T>(items: T[], index: number, delta: -1 | 1) {
   return copy
 }
 
-function addField() {
-  draft.value.fields = [
-    ...draft.value.fields,
-    createEmptyFieldDraft(nextAvailableFieldDraftIndex(draft.value.fields)),
-  ]
-}
-
-const formBuilderAnnouncement = ref('')
-const activeFieldDropIndex = ref<number | null>(null)
-const selectedFieldInsertionIndex = ref<number | null>(null)
-
-function insertFieldOfType(type: AuthorableFieldType, index: number) {
-  if (readOnly.value) return
-  const nextField = createEmptyFieldDraft(nextAvailableFieldDraftIndex(draft.value.fields))
-  nextField.type = type
-  const insertionIndex = Math.max(0, Math.min(index, draft.value.fields.length))
-  draft.value.fields = [
-    ...draft.value.fields.slice(0, insertionIndex),
-    nextField,
-    ...draft.value.fields.slice(insertionIndex),
-  ]
-  selectedFieldInsertionIndex.value = null
-  formBuilderAnnouncement.value = `${APPROVAL_FORM_FIELD_TYPE_LABELS[type]}已插入为字段 ${insertionIndex + 1}`
-}
-
-function appendFieldOfType(type: AuthorableFieldType) {
-  insertFieldOfType(type, selectedFieldInsertionIndex.value ?? draft.value.fields.length)
-}
-
-function removeField(index: number) {
-  if (draft.value.fields.length === 1) return
-  draft.value.fields = draft.value.fields.filter((_, i) => i !== index)
-}
-
-function moveField(index: number, delta: -1 | 1) {
-  draft.value.fields = swap(draft.value.fields, index, delta) ?? draft.value.fields
-  const nextIndex = index + delta
-  if (nextIndex >= 0 && nextIndex < draft.value.fields.length) {
-    formBuilderAnnouncement.value = `字段已移动到第 ${nextIndex + 1} 位`
-  }
-}
-
-// D-4/F1-a: native drag carries a typed payload. The parent remains the sole owner of draft
-// creation/reorder so palette, pointer and keyboard paths all share the existing field contracts.
-const draggedFieldIndex = ref<number | null>(null)
-
-function onFieldDragStart(event: DragEvent, index: number) {
-  if (readOnly.value) return
-  draggedFieldIndex.value = index
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData(APPROVAL_FORM_FIELD_MOVE_MIME, String(index))
-  }
-}
-
-function onFieldDrop(index: number) {
-  if (readOnly.value || draggedFieldIndex.value === null) return
-  draft.value.fields = moveItemToIndex(draft.value.fields, draggedFieldIndex.value, index)
-  draggedFieldIndex.value = null
-}
-
-function onLegacyFieldDragOver(event: DragEvent) {
-  if (!canvasV2Enabled.value && !readOnly.value) event.preventDefault()
-}
-
-function onLegacyFieldDrop(event: DragEvent, index: number) {
-  if (canvasV2Enabled.value) return
-  event.preventDefault()
-  onFieldDrop(index)
-}
-
-function activateFieldDropSlot(index: number) {
-  if (!readOnly.value) activeFieldDropIndex.value = index
-}
-
-function selectFieldInsertionSlot(index: number) {
-  if (readOnly.value) return
-  if (selectedFieldInsertionIndex.value === index) {
-    selectedFieldInsertionIndex.value = null
-    formBuilderAnnouncement.value = '已取消插入位置'
-    return
-  }
-  selectedFieldInsertionIndex.value = index
-  formBuilderAnnouncement.value = `已选择第 ${index + 1} 个插入位置，请选择表单组件`
-}
-
-function deactivateFieldDropSlot(index: number) {
-  if (activeFieldDropIndex.value === index) activeFieldDropIndex.value = null
-}
-
-function resetFieldDragState() {
-  draggedFieldIndex.value = null
-  activeFieldDropIndex.value = null
-}
-
-function onFieldInsertionDrop(event: DragEvent, insertionIndex: number) {
-  if (readOnly.value) {
-    resetFieldDragState()
-    return
-  }
-
-  const paletteType = readPaletteFieldType(event.dataTransfer)
-  if (paletteType) {
-    insertFieldOfType(paletteType, insertionIndex)
-    resetFieldDragState()
-    return
-  }
-
-  const sourceIndex = readMovedFieldIndex(event.dataTransfer)
-  if (
-    sourceIndex === null
-    || draggedFieldIndex.value === null
-    || sourceIndex !== draggedFieldIndex.value
-    || sourceIndex < 0
-    || sourceIndex >= draft.value.fields.length
-  ) {
-    resetFieldDragState()
-    return
-  }
-
-  const targetIndex = insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex
-  if (targetIndex !== sourceIndex) {
-    draft.value.fields = moveItemToIndex(draft.value.fields, sourceIndex, targetIndex)
-    formBuilderAnnouncement.value = `字段已移动到第 ${targetIndex + 1} 位`
-  }
-  resetFieldDragState()
-}
-
-function onFieldKeyboardReorder(event: KeyboardEvent, index: number) {
-  if (readOnly.value || !event.altKey) return
-  if (event.key === 'ArrowUp' && index > 0) {
-    event.preventDefault()
-    moveField(index, -1)
-  } else if (event.key === 'ArrowDown' && index < draft.value.fields.length - 1) {
-    event.preventDefault()
-    moveField(index, 1)
-  }
-}
-
-// detail / sub-form (明细) sub-field authoring. Sub-fields are LEAF types only (no nested
-// `detail`), surfaced from the shared `DETAIL_LEAF_FIELD_TYPES` so the picker can never offer
-// `detail` — the one-nesting-level invariant the backend also enforces.
-const DETAIL_LEAF_TYPE_LABELS: Record<string, string> = {
-  text: '文本',
-  textarea: '多行文本',
-  number: '数字',
-  date: '日期',
-  datetime: '日期时间',
-  select: '单选',
-  'multi-select': '多选',
-  user: '用户',
-}
-const detailLeafTypeOptions = computed(() =>
-  DETAIL_LEAF_FIELD_TYPES.map((type) => ({ value: type, label: DETAIL_LEAF_TYPE_LABELS[type] ?? type })),
-)
-
-function addDetailColumn(field: FieldAuthoringDraft) {
-  field.detailColumns = [...field.detailColumns, createEmptyDetailColumnDraft(field.detailColumns.length + 1)]
-}
-
-function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
-  field.detailColumns = field.detailColumns.filter((_, i) => i !== index)
-}
-
-// Visibility-rule depends-on options: other fields that have an id (excludes self).
-// FWB-0 Layer 2 P1-2: record-link / detail cannot be visibility dependencies (server fail-closed).
-function visibilityFieldOptions(current: FieldAuthoringDraft) {
-  return draft.value.fields
-    .filter((field) => (
-      field.localId !== current.localId
-      && field.id.trim().length > 0
-      && field.type !== 'record-link'
-      && field.type !== 'detail'
-    ))
-    .map((field) => ({ localId: field.localId, id: field.id.trim(), label: fieldDisplayLabel(field) }))
-}
-
 /**
  * When a field is retyped to/from record-link (or detail), drop stale visibility deps and
  * condition rules that referenced it — otherwise the UI would keep a now-illegal dependency
@@ -3294,23 +2696,6 @@ onUnmounted(() => {
   box-shadow: var(--ms-shadow-card);
 }
 
-.template-authoring__panel--form-builder :deep(.el-card__body) {
-  display: grid;
-  grid-template-columns: minmax(200px, 228px) minmax(0, 1fr);
-  align-items: start;
-  gap: 0 var(--ms-space-4);
-}
-
-.template-authoring__panel--form-builder :deep(.approval-form-palette) {
-  grid-column: 1;
-}
-
-.template-authoring__panel--form-builder .template-authoring__item,
-.template-authoring__panel--form-builder .template-authoring__field-drop-slot,
-.template-authoring__panel--form-builder .template-authoring__form-builder-status {
-  grid-column: 2;
-}
-
 .template-authoring__section-actions {
   position: sticky;
   bottom: 0;
@@ -3364,13 +2749,6 @@ onUnmounted(() => {
   color: var(--el-text-color-secondary);
 }
 
-.template-authoring__visibility {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: flex-start;
-}
-
 .template-authoring__hint {
   margin-top: 6px;
   font-size: 12px;
@@ -3380,22 +2758,6 @@ onUnmounted(() => {
 
 .template-authoring__inline > .el-input {
   flex: 1;
-}
-
-.template-authoring__detail {
-  width: 100%;
-}
-
-.template-authoring__detail-table {
-  width: 100%;
-}
-
-.template-authoring__detail-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  margin-top: 8px;
 }
 
 .template-authoring__item {
@@ -3471,93 +2833,6 @@ onUnmounted(() => {
 
 .template-authoring__item-toolbar {
   margin-bottom: 12px;
-}
-
-.template-authoring__item-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.template-authoring__drag-handle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--el-text-color-secondary);
-  cursor: grab;
-}
-
-.template-authoring__drag-handle:hover:not(:disabled),
-.template-authoring__drag-handle:focus-visible {
-  border-color: var(--el-border-color);
-  outline: none;
-  background: var(--el-fill-color-light);
-  color: var(--el-color-primary);
-}
-
-.template-authoring__drag-handle:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.template-authoring__field-drop-slot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 28px;
-  width: 100%;
-  padding: 0;
-  margin: 4px 0;
-  border: 1px dashed transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--el-text-color-placeholder);
-  cursor: pointer;
-  font: inherit;
-  font-size: 12px;
-  transition: min-height 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-}
-
-.template-authoring__field-drop-slot::before,
-.template-authoring__field-drop-slot::after {
-  height: 1px;
-  flex: 1;
-  background: var(--el-border-color-lighter);
-  content: '';
-}
-
-.template-authoring__field-drop-slot span {
-  padding: 0 8px;
-}
-
-.template-authoring__field-drop-slot:hover:not(:disabled),
-.template-authoring__field-drop-slot:focus-visible,
-.template-authoring__field-drop-slot.is-active,
-.template-authoring__field-drop-slot.is-selected {
-  min-height: 44px;
-  border-color: var(--el-color-primary);
-  outline: none;
-  background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
-}
-
-.template-authoring__field-drop-slot:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.template-authoring__form-builder-status {
-  min-height: 20px;
-  margin: 4px 0 0;
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
 }
 
 .template-authoring__node-type {
@@ -3652,16 +2927,6 @@ pre {
     grid-template-columns: 28px minmax(0, 1fr);
   }
 
-  .template-authoring__panel--form-builder :deep(.el-card__body) {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .template-authoring__panel--form-builder :deep(.approval-form-palette),
-  .template-authoring__panel--form-builder .template-authoring__item,
-  .template-authoring__panel--form-builder .template-authoring__field-drop-slot,
-  .template-authoring__panel--form-builder .template-authoring__form-builder-status {
-    grid-column: 1;
-  }
 }
 
 @media (max-width: 760px) {

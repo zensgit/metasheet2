@@ -26,6 +26,10 @@ const FLOW_CANVAS_SOURCE = readFileSync(
   join(HERE, '../src/approvals/components/ApprovalFlowCanvas.vue'),
   'utf8',
 )
+const FORM_BUILDER_SOURCE = readFileSync(
+  join(HERE, '../src/approvals/components/ApprovalFormBuilder.vue'),
+  'utf8',
+)
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -732,6 +736,127 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(2)
   })
 
+  it('uses one focused inspector beside the palette and field canvas', async () => {
+    routeParams = { id: 'tpl_form_builder_workspace' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-form-palette"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-form-field-list"]')).not.toBeNull()
+    expect(container!.querySelectorAll('[data-testid="approval-form-field-inspector"]')).toHaveLength(1)
+
+    const rows = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.getAttribute('aria-current')).toBe('true')
+    expect((container!.querySelector('[data-testid="approval-field-label-input"]') as HTMLInputElement).value)
+      .toBe('金额')
+
+    ;(rows[1] as HTMLElement).click()
+    await flushUi()
+    expect(rows[0]!.getAttribute('aria-current')).toBeNull()
+    expect(rows[1]!.getAttribute('aria-current')).toBe('true')
+    expect((container!.querySelector('[data-testid="approval-field-label-input"]') as HTMLInputElement).value)
+      .toBe('审批人')
+  })
+
+  it('writes focused inspector edits through the existing save payload', async () => {
+    routeParams = { id: 'tpl_form_builder_inspector_save' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelectorAll('[data-testid="approval-template-field-row"]')[1] as HTMLElement).click()
+    await flushUi()
+
+    const labelInput = container!.querySelector(
+      '[data-testid="approval-field-label-input"]',
+    ) as HTMLInputElement
+    labelInput.value = '财务复核人'
+    labelInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as any
+    expect(payload.formSchema.fields.map((field: any) => field.label)).toEqual(['金额', '财务复核人'])
+  })
+
+  it('exposes keyboard-operable field selectors with selection state', async () => {
+    routeParams = { id: 'tpl_form_builder_keyboard_selection' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const selectors = container!.querySelectorAll(
+      '[data-testid="approval-form-field-select"]',
+    ) as NodeListOf<HTMLButtonElement>
+    expect(selectors).toHaveLength(2)
+    expect(selectors[0]!.getAttribute('aria-pressed')).toBe('true')
+    expect(selectors[1]!.getAttribute('aria-label')).toContain('审批人')
+
+    selectors[1]!.click()
+    await flushUi()
+    expect(selectors[0]!.getAttribute('aria-pressed')).toBe('false')
+    expect(selectors[1]!.getAttribute('aria-pressed')).toBe('true')
+    expect((container!.querySelector('[data-testid="approval-field-label-input"]') as HTMLInputElement).value)
+      .toBe('审批人')
+  })
+
+  it('selects an inserted field and keeps the nearest field selected after delete', async () => {
+    routeParams = { id: 'tpl_form_builder_selection_lifecycle' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-form-drop-slot-1"]') as HTMLButtonElement).click()
+    ;(container!.querySelector('[data-testid="approval-form-palette-date"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    let rows = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+    expect(rows).toHaveLength(3)
+    expect(rows[1]!.getAttribute('aria-current')).toBe('true')
+    expect((container!.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement).value)
+      .toBe('date')
+
+    ;(rows[1]!.querySelector('[data-testid="approval-template-remove-field"]') as HTMLButtonElement).click()
+    await flushUi()
+    rows = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+    expect(rows).toHaveLength(2)
+    expect(rows[1]!.getAttribute('aria-current')).toBe('true')
+    expect((container!.querySelector('[data-testid="approval-field-label-input"]') as HTMLInputElement).value)
+      .toBe('审批人')
+    expect(container!.querySelectorAll('[data-testid="approval-form-field-inspector"]')).toHaveLength(1)
+  })
+
+  it('keeps selection available but inspector mutation disabled in read-only mode', async () => {
+    routeParams = { id: 'tpl_form_builder_readonly_inspector' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    canManageTemplates.value = false
+    await flushUi()
+
+    ;(container!.querySelectorAll('[data-testid="approval-template-field-row"]')[1] as HTMLElement).click()
+    await flushUi()
+    const labelInput = container!.querySelector(
+      '[data-testid="approval-field-label-input"]',
+    ) as HTMLInputElement
+    expect(labelInput.value).toBe('审批人')
+    expect(labelInput.disabled).toBe(true)
+  })
+
   it('preserves the legacy add and reorder surface while Canvas V2 is off', async () => {
     featureFlags.value.approvalCanvasV2 = false
     routeParams = { id: 'tpl_form_palette_flag_off' }
@@ -743,8 +868,10 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await flushUi()
 
     expect(container!.querySelector('[data-testid="approval-form-palette"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-form-field-list"]')).toBeNull()
     expect(container!.querySelector('[data-testid^="approval-form-drop-slot-"]')).toBeNull()
     expect(container!.querySelector('[data-testid="approval-form-field-drag-handle"]')).toBeNull()
+    expect(container!.querySelectorAll('[data-testid="approval-form-field-inspector"]')).toHaveLength(2)
 
     const addButton = container!.querySelector(
       '[data-testid="approval-template-add-field"]',
@@ -753,6 +880,15 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     addButton.click()
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-template-field-row"]')).toHaveLength(3)
+    expect(container!.querySelectorAll('[data-testid="approval-form-field-inspector"]')).toHaveLength(3)
+  })
+
+  it('keeps field authoring implementation out of the parent hot view', () => {
+    expect(PARENT_AUTHORING_SOURCE).toContain('<ApprovalFormBuilder')
+    expect(PARENT_AUTHORING_SOURCE).not.toContain('<ApprovalFormPalette')
+    expect(PARENT_AUTHORING_SOURCE).not.toContain('approval-form-drop-slot-')
+    expect(FORM_BUILDER_SOURCE).toContain('<ApprovalFieldInspector')
+    expect(FORM_BUILDER_SOURCE).toContain('data-testid="approval-form-field-list"')
   })
 
   it('selecting approval/condition/cc/parallel nodes opens the matching right-side inspector', async () => {
