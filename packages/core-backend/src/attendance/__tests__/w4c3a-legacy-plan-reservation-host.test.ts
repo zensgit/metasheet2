@@ -53,16 +53,23 @@ describe('W4C-3a P07 production reservation host', () => {
     ).toBe('operational_only_batch_limit')
   })
 
-  it('rejects authoritative 5001 before reservation or business DML', async () => {
+  it('retries 40001, then rejects authoritative 5001 before reservation or business DML', async () => {
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ORG_ID
     const sql: string[] = []
     let released = 0
+    let rolloutAttempts = 0
     const host = createAttendanceLegacyPlanReservationHostV1({
       acquireConnection: async () => ({
         client: {
           query: async (text: string) => {
             sql.push(text)
             if (text.includes('attendance_calculation_rollout_state')) {
+              rolloutAttempts += 1
+              if (rolloutAttempts === 1) {
+                throw Object.assign(new Error('serialization failure'), {
+                  code: '40001',
+                })
+              }
               return {
                 rows: [{ state: 'authoritative', scope: 'synthetic_staging' }],
               }
@@ -116,6 +123,7 @@ describe('W4C-3a P07 production reservation host', () => {
       tokenSubjectUserId: 'admin-host-limit',
       batchId: BATCH_ID,
       idempotencyKey: null,
+      legacyInputFingerprint: 'a'.repeat(64),
       payload: {
         __jobType: 'commit',
         idempotencyKey: null,
@@ -159,8 +167,16 @@ describe('W4C-3a P07 production reservation host', () => {
       'ATTENDANCE_IMPORT_BATCH_LIMIT_EXCEEDED',
     )
     expect(released).toBe(1)
+    expect(rolloutAttempts).toBe(2)
     expect(sql).toEqual([
       'BEGIN ISOLATION LEVEL SERIALIZABLE',
+      "SELECT set_config('statement_timeout', $1, true)",
+      "SELECT set_config('lock_timeout', $1, true)",
+      'SELECT state, scope FROM attendance_calculation_rollout_state WHERE org_id = $1',
+      'ROLLBACK',
+      'BEGIN ISOLATION LEVEL SERIALIZABLE',
+      "SELECT set_config('statement_timeout', $1, true)",
+      "SELECT set_config('lock_timeout', $1, true)",
       'SELECT state, scope FROM attendance_calculation_rollout_state WHERE org_id = $1',
       'ROLLBACK',
     ])

@@ -19922,6 +19922,71 @@ function resolveLegacyImportRowSourceKind({ payload, csvFileId }) {
   return 'dingtalk_tabular'
 }
 
+function canonicalLegacyImportFingerprintJson(value) {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalLegacyImportFingerprintJson(entry)).join(',')}]`
+  }
+  if (typeof value === 'object') {
+    const entries = Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalLegacyImportFingerprintJson(value[key])}`)
+    return `{${entries.join(',')}}`
+  }
+  const encoded = JSON.stringify(value)
+  if (encoded === undefined) throw new Error('W4C3A_LEGACY_INPUT_FINGERPRINT_VALUE_INVALID')
+  return encoded
+}
+
+function buildLegacyImportInputFingerprintV1({
+  payload,
+  orgId,
+  requesterId,
+  idempotencyKey,
+  csvFileId,
+}) {
+  const legacyRowSourceKind = resolveLegacyImportRowSourceKind({ payload, csvFileId })
+  const sourceInput = legacyRowSourceKind === 'uploaded_csv'
+    ? { csvFileId }
+    : legacyRowSourceKind === 'inline_csv'
+      ? { csvText: payload.csvText }
+      : legacyRowSourceKind === 'direct_rows'
+        ? { rows: payload.rows }
+        : legacyRowSourceKind === 'entries'
+          ? { entries: payload.entries }
+          : { columns: payload.columns, data: payload.data }
+  const fingerprintInput = {
+    schemaVersion: 1,
+    kind: 'normal',
+    orgId,
+    createdBy: requesterId,
+    legacyRowSourceKind,
+    sourceInput,
+    source: payload.source ?? null,
+    fallbackUserId: payload.userId ?? requesterId,
+    userMap: payload.userMap ?? null,
+    userMapKeyField: payload.userMapKeyField ?? null,
+    userMapSourceFields: payload.userMapSourceFields ?? null,
+    mode: payload.mode ?? null,
+    batchMeta: payload.batchMeta ?? null,
+    idempotencyKey: idempotencyKey || null,
+    ruleSetId: payload.ruleSetId ?? null,
+    mappingProfileId: payload.mappingProfileId ?? null,
+    mapping: payload.mapping ?? null,
+    engine: payload.engine ?? null,
+    statusMap: payload.statusMap ?? null,
+    timezone: payload.timezone ?? null,
+    groupSync: payload.groupSync ?? null,
+    returnItems: payload.returnItems !== false,
+    skippedSampleLimit: payload.skippedSampleLimit ?? null,
+    csvOptions: payload.csvOptions ?? null,
+    convertedArtifactFileId: payload.convertedArtifactFileId ?? null,
+    convertedSheetName: payload.convertedSheetName ?? null,
+  }
+  return sha256HexOfUtf8(canonicalLegacyImportFingerprintJson(fingerprintInput))
+}
+
 /**
  * Closed provenance for RawImportEvidenceV1. Differentiates direct rows / entries /
  * inline CSV / uploaded CSV / DingTalk tabular via transport + sourceRef, without
@@ -26237,6 +26302,7 @@ module.exports = {
 		        job.created_at,
 		        job.updated_at,
 		        job.w4_contract_version,
+		        job.w4_legacy_input_fingerprint,
 		        job.w4_execution_reason_code,
 		        CASE
 		          WHEN job.payload IS NULL THEN NULL
@@ -26965,6 +27031,15 @@ module.exports = {
 	      const rowCount = rowScan.rowCount
 	      const csvWarnings = rowScan.warnings
 	      const csvFileId = rowSource.csvFileId ?? null
+	      const legacyInputFingerprint = prepareOnly
+	        ? buildLegacyImportInputFingerprintV1({
+	            payload,
+	            orgId,
+	            requesterId,
+	            idempotencyKey: cleanIdempotency,
+	            csvFileId,
+	          })
+	        : null
 
 	      if (rowCount === 0) {
 	        throw new Error('No rows to import')
@@ -27505,9 +27580,31 @@ module.exports = {
 		          }
 
 	          const dedupKey = `${rowUserId}:${workDate}`
-	          if (!prepareOnly && seenRowKeys.has(dedupKey)) {
+	          if (seenRowKeys.has(dedupKey)) {
 	            const warnings = ['Duplicate row in payload (same userId + workDate)']
 	            const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
+		            const duplicateRawEvidence = prepareOnly
+		              ? buildRawImportEvidenceV1({
+		                sourceOrdinal,
+		                fields: {
+		                  userId: rowUserId,
+		                  workDate,
+		                  timezone: row?.fields?.timezone !== undefined ? row.fields.timezone : undefined,
+		                  firstInAt: row?.fields?.firstInAt !== undefined ? row.fields.firstInAt : undefined,
+		                  lastOutAt: row?.fields?.lastOutAt !== undefined ? row.fields.lastOutAt : undefined,
+		                  status: row?.fields?.status !== undefined ? row.fields.status : undefined,
+		                  isWorkday: row?.fields?.isWorkday !== undefined ? row.fields.isWorkday : undefined,
+		                },
+		                metrics: {
+		                  workMinutes: firstDefinedPresence(row?.fields?.workMinutes, row?.fields?.workHours),
+		                  lateMinutes: row?.fields?.lateMinutes,
+		                  earlyLeaveMinutes: row?.fields?.earlyLeaveMinutes,
+		                  leaveMinutes: firstDefinedPresence(row?.fields?.leaveMinutes, row?.fields?.leaveHours),
+		                  overtimeMinutes: firstDefinedPresence(row?.fields?.overtimeMinutes, row?.fields?.overtimeHours),
+		                },
+		                provenance: prepareOnlyProvenance,
+		              })
+		              : undefined
 		            await enqueueImportItem({
 		              userId: rowUserId,
 		              workDate,
@@ -27515,25 +27612,11 @@ module.exports = {
 		              previewSnapshot: snapshot,
 		              sourceOrdinal,
 		              reasonCode: 'duplicate',
+		              rawEvidence: duplicateRawEvidence,
 		            })
 		            appendSkipped({ userId: rowUserId, workDate, warnings })
 		            releaseImportRowMemory(row)
 		            return true
-	          }
-	          if (prepareOnly && seenRowKeys.has(dedupKey)) {
-	            const duplicateRows = Array.isArray(batchMeta?.legacyCompatibility?.duplicateSkippedRows)
-	              ? batchMeta.legacyCompatibility.duplicateSkippedRows
-	              : []
-	            batchMeta.legacyCompatibility = {
-	              duplicateSkippedCount: Number(batchMeta?.legacyCompatibility?.duplicateSkippedCount ?? 0) + 1,
-	              duplicateSkippedRows: duplicateRows.length < 50
-	                ? [...duplicateRows, {
-	                    userId: rowUserId,
-	                    workDate,
-	                    warnings: ['Duplicate row in payload (same userId + workDate)'],
-	                  }]
-	                : duplicateRows,
-	            }
 	          }
 	          seenRowKeys.add(dedupKey)
 	          if (prepareOnly && groupSync?.autoAssignMembers && groupKey && rowUserId) {
@@ -28157,6 +28240,7 @@ module.exports = {
 		          actorId: requesterId,
 		          batchId: resolvedBatchId,
 		          idempotencyKey: cleanIdempotency || null,
+		          legacyInputFingerprint,
 		          payload: {
 		            __jobType: 'commit',
 		            idempotencyKey: cleanIdempotency || null,
@@ -37876,12 +37960,37 @@ module.exports = {
         const cleanIdempotencyKey = typeof parsed.data.idempotencyKey === 'string'
           ? parsed.data.idempotencyKey.trim()
           : ''
+		const requestLegacyInputFingerprint = buildLegacyImportInputFingerprintV1({
+		  payload: {
+		    ...parsed.data,
+		    returnItems: false,
+		    skippedSampleLimit: normalizeImportSkippedSampleLimit(parsed.data.skippedSampleLimit)
+		      ?? ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT,
+		  },
+		  orgId,
+		  requesterId,
+		  idempotencyKey: cleanIdempotencyKey,
+		  csvFileId: resolveImportUploadFileId(parsed.data) || null,
+		})
 
         // First: dedupe retries without consuming a new commit token.
         if (cleanIdempotencyKey) {
           try {
             const existingJob = await loadImportJobByIdempotencyKey(orgId, cleanIdempotencyKey)
             if (existingJob) {
+		      if (
+		        Number(existingJob.w4_contract_version) === 1
+		        && existingJob.w4_legacy_input_fingerprint !== requestLegacyInputFingerprint
+		      ) {
+		        res.status(409).json({
+		          ok: false,
+		          error: {
+		            code: 'ATTENDANCE_IMPORT_IDEMPOTENCY_INPUT_CONFLICT',
+		            message: 'Idempotency key is already bound to different import input',
+		          },
+		        })
+		        return
+		      }
               res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
               return
             }
@@ -37936,6 +38045,9 @@ module.exports = {
 	            idempotencyKey: cleanIdempotencyKey,
 	            prepareOnly: true,
 	          })
+	          if (preparedPlan.legacyInputFingerprint !== requestLegacyInputFingerprint) {
+	            throw new Error('W4C3A_LEGACY_INPUT_FINGERPRINT_DERIVATION_DRIFT')
+	          }
 	          const reservation = await legacyPlanPort.reserveLegacyImportPlan({
 	            ...preparedPlan,
 	            actorPosture: importAccess.fullAdmin ? 'platform_admin' : 'attendance_admin',

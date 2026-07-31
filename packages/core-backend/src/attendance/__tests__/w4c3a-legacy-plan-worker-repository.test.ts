@@ -254,6 +254,15 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
     expect(String(query.mock.calls[1]?.[0])).toMatch(
       /status = 'completed'.*error = NULL/s,
     )
+    expect(String(query.mock.calls[1]?.[0])).toMatch(/progress = \$3/)
+    expect(String(query.mock.calls[1]?.[0])).toMatch(
+      /started_at = COALESCE\(started_at, now\(\)\)/,
+    )
+    expect(query.mock.calls[1]?.[1]).toEqual([
+      JOB_ID,
+      ORG_ID,
+      RESPONSE.summary.processedRows,
+    ])
   })
 
   it('stores uploaded replay cleanup before terminalizing a locked-race response', async () => {

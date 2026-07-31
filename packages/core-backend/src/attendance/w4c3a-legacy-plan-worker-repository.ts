@@ -253,8 +253,10 @@ const INSERT_CLEANUP_COMMAND_SQL = `
 
 const MARK_COMPLETED_SQL = `
   UPDATE attendance_import_jobs
-  SET status = 'completed', progress = total, error = NULL,
-      w4_execution_reason_code = NULL, finished_at = now(), updated_at = now()
+  SET status = 'completed', progress = $3, error = NULL,
+      w4_execution_reason_code = NULL,
+      started_at = COALESCE(started_at, now()),
+      finished_at = now(), updated_at = now()
   WHERE id = $1::uuid AND org_id = $2 AND w4_contract_version = 1
     AND status = 'queued' AND w4_execution_reason_code IS NULL
   RETURNING id
@@ -382,7 +384,11 @@ export function createAttendanceLegacyPlanWorkerRepositoryV1(
           cleanup.fileId,
         ])
       }
-      if ((await db.query(MARK_COMPLETED_SQL, [job.jobId, job.orgId])).rows.length !== 1) {
+      if ((await db.query(MARK_COMPLETED_SQL, [
+        job.jobId,
+        job.orgId,
+        parsedResponse.summary.processedRows,
+      ])).rows.length !== 1) {
         fail('W4C3A_REPOSITORY_STATUS_UPDATE_REJECTED')
       }
     },

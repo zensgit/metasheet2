@@ -17,6 +17,7 @@ import {
   W4_MAX_BATCH_ITEMS,
   W4_MAX_DISTINCT_TARGETS,
 } from './w4c0-operation-contract'
+import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
 import {
   sha256HexOfCanonicalJsonV1,
   type AttendanceLegacyRowSourceKindV1,
@@ -49,6 +50,7 @@ export type ReserveAttendanceLegacyImportPlanFromHostInputV1 = Readonly<{
   tokenSubjectUserId: string | null
   batchId: string
   idempotencyKey: string | null
+  legacyInputFingerprint: string
   payload: LegacyImportPublicJobEnvelopeV1
   legacyRowSourceKind: AttendanceLegacyRowSourceKindV1
   legacySourceRowLimit: number | null
@@ -79,6 +81,9 @@ function validateHostInputBeforeConnection(
   }
   if (input.items.length !== input.batch.sourceRowCount) {
     throw new Error('W4C3A_RESERVATION_HOST_SOURCE_COUNT_MISMATCH')
+  }
+  if (!/^[0-9a-f]{64}$/.test(input.legacyInputFingerprint)) {
+    throw new Error('W4C3A_RESERVATION_HOST_LEGACY_INPUT_FP_INVALID')
   }
 }
 
@@ -121,11 +126,8 @@ export function createAttendanceLegacyPlanReservationHostV1(
       validateHostInputBeforeConnection(input)
       const acquired = await deps.acquireConnection()
       const trx = acquired.client
-      let began = false
       try {
-        await trx.query('BEGIN ISOLATION LEVEL SERIALIZABLE', [])
-        began = true
-
+        return await runAttendanceResultOperationTransactionV1(trx, async () => {
         const posture = await resolveSegmentCalculationPosture(trx, input.orgId)
         const org = createVerifiedAttendanceOrgIdentityV1({
           orgKey: input.orgId,
@@ -173,14 +175,7 @@ export function createAttendanceLegacyPlanReservationHostV1(
           recordWrites: input.recordWrites,
           groupEffects: input.groupEffects,
         })
-        const legacyInputFingerprint = sha256HexOfCanonicalJsonV1({
-          legacyRowSourceKind: input.legacyRowSourceKind,
-          legacySourceRowLimit: input.legacySourceRowLimit,
-          batch: input.batch,
-          items: input.items,
-          recordWrites: input.recordWrites,
-          groupEffects: input.groupEffects,
-        })
+        const legacyInputFingerprint = input.legacyInputFingerprint
         const itemIdentities = applyItems.map((item) => {
           const semanticFingerprint = sha256HexOfCanonicalJsonV1({
             semanticOrdinal: item.semanticOrdinal,
@@ -223,7 +218,7 @@ export function createAttendanceLegacyPlanReservationHostV1(
               }))
             : []
 
-        const result = await reserveAttendanceLegacyImportPlanJobV1(
+        return reserveAttendanceLegacyImportPlanJobV1(
           trx,
           authorization,
           {
@@ -289,12 +284,7 @@ export function createAttendanceLegacyPlanReservationHostV1(
             groupEffects: input.groupEffects,
           },
         )
-        await trx.query('COMMIT', [])
-        began = false
-        return result
-      } catch (error) {
-        if (began) await trx.query('ROLLBACK', [])
-        throw error
+        })
       } finally {
         acquired.release()
       }

@@ -3,7 +3,7 @@ import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
 import fs from 'fs/promises'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { createRequire } from 'module'
 import { Pool } from 'pg'
 import http from 'http'
@@ -18795,5 +18795,595 @@ attendanceIntegrationDescribe(
       await pool.end().catch(() => undefined)
     }
   })
+
+  it('W4C-3a reproduces the committed legacy-import-v1 governing-SHA golden', async () => {
+    if (!baseUrl || !importUploadDir) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-30T12:00:00.000Z'))
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      const orgId = 'default'
+      const adminId = 'legacy-golden-admin'
+      const mergeUserId = '22222222-2222-4222-8222-222222222222'
+      const newUserId = '33333333-3333-4333-8333-333333333333'
+      const asyncUserId = '44444444-4444-4444-8444-444444444444'
+      const asyncRaceUserId = '55555555-5555-4555-8555-555555555555'
+      const raceUserId = '66666666-6666-4666-8666-666666666666'
+      const uploadUserId = '77777777-7777-4777-8777-777777777777'
+      const mergeRecordId = '11111111-1111-4111-8111-111111111111'
+      const groupName = 'Legacy Golden Team'
+      const syncKey = 'legacy-import-v1-sync'
+      const syncRaceKey = 'legacy-import-v1-sync-race'
+      const asyncKey = 'legacy-import-v1-async'
+      const asyncRaceKey = 'legacy-import-v1-async-race'
+      const fixedDates = {
+        merge: '2026-07-28',
+        fresh: '2026-07-29',
+        race: '2026-07-30',
+        async: '2026-07-31',
+        upload: '2026-08-01',
+      }
+
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
+      )
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      }
+
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active, activation_status, permissions)
+         VALUES ($1, 'legacy-golden-admin@example.invalid', 'no-login', true, 'activated', $2::jsonb)
+         ON CONFLICT (id) DO UPDATE SET
+           is_active = true,
+           activation_status = 'activated',
+           permissions = EXCLUDED.permissions`,
+        [adminId, JSON.stringify(['attendance:read', 'attendance:write', 'attendance:admin'])],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [adminId, orgId],
+      )
+      await pool.query(
+        `INSERT INTO user_roles (user_id, role_id)
+         VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [adminId],
+      )
+      await pool.query(
+        `INSERT INTO user_namespace_admissions (user_id, namespace, enabled)
+         VALUES ($1, 'attendance', true)
+         ON CONFLICT (user_id, namespace) DO UPDATE SET enabled = true`,
+        [adminId],
+      )
+      const subjectUserIds = [
+        mergeUserId,
+        newUserId,
+        asyncUserId,
+        asyncRaceUserId,
+        raceUserId,
+        uploadUserId,
+      ]
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active, activation_status)
+         SELECT user_id, user_id || '@example.invalid', 'no-login', true, 'activated'
+           FROM unnest($1::text[]) AS user_id
+         ON CONFLICT (id) DO UPDATE SET
+           is_active = true,
+           activation_status = 'activated'`,
+        [subjectUserIds],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         SELECT user_id, $2, true FROM unnest($1::text[]) AS user_id
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [subjectUserIds, orgId],
+      )
+
+      await pool.query(
+        `INSERT INTO attendance_records (
+           id, org_id, user_id, work_date, first_in_at, last_out_at,
+           work_minutes, late_minutes, early_leave_minutes, status,
+           is_workday, timezone, meta, source_batch_id
+         ) VALUES (
+           $1::uuid, $2, $3, $4::date, $5::timestamptz, $6::timestamptz,
+           420, 5, 10, 'normal', true, 'UTC', $7::jsonb, NULL
+         )
+         ON CONFLICT (org_id, user_id, work_date) DO UPDATE SET
+           id = EXCLUDED.id,
+           first_in_at = EXCLUDED.first_in_at,
+           last_out_at = EXCLUDED.last_out_at,
+           work_minutes = EXCLUDED.work_minutes,
+           late_minutes = EXCLUDED.late_minutes,
+           early_leave_minutes = EXCLUDED.early_leave_minutes,
+           status = EXCLUDED.status,
+           timezone = EXCLUDED.timezone,
+           meta = EXCLUDED.meta,
+           source_batch_id = NULL`,
+        [
+          mergeRecordId,
+          orgId,
+          mergeUserId,
+          fixedDates.merge,
+          `${fixedDates.merge}T09:30:00.000Z`,
+          `${fixedDates.merge}T17:30:00.000Z`,
+          JSON.stringify({ seeded: true, keep: 'legacy' }),
+        ],
+      )
+
+      const syncPayload = {
+        orgId,
+        userId: adminId,
+        idempotencyKey: syncKey,
+        timezone: 'UTC',
+        source: 'manual',
+        mode: 'merge',
+        returnItems: true,
+        itemsLimit: 1,
+        batchMeta: { fixture: 'legacy-import-v1', compatibility: 'kept' },
+        userMapKeyField: 'empNo',
+        userMap: {
+          M001: {
+            userId: mergeUserId,
+            profile: { department: 'Legacy', policyTier: 'gold' },
+          },
+          N001: {
+            userId: newUserId,
+            profile: { department: 'New', policyTier: 'silver' },
+          },
+        },
+        groupSync: {
+          autoCreate: true,
+          autoAssignMembers: true,
+          timezone: 'UTC',
+        },
+        rows: [
+          {
+            workDate: fixedDates.merge,
+            fields: {
+              empNo: 'M001',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.merge}T09:00:00.000Z`,
+              lastOutAt: `${fixedDates.merge}T18:00:00.000Z`,
+              status: 'normal',
+              punchSequence: ['09:00', '12:00', '13:00', '18:00'],
+            },
+          },
+          {
+            workDate: fixedDates.fresh,
+            fields: {
+              empNo: 'N001',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.fresh}T08:55:00.000Z`,
+              lastOutAt: `${fixedDates.fresh}T18:05:00.000Z`,
+              status: 'normal',
+              punchSequence: ['08:55', '12:01', '12:58', '18:05'],
+            },
+          },
+          {
+            workDate: fixedDates.fresh,
+            fields: {
+              empNo: 'N001',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.fresh}T09:05:00.000Z`,
+              lastOutAt: `${fixedDates.fresh}T18:10:00.000Z`,
+              status: 'normal',
+            },
+          },
+          {
+            workDate: fixedDates.fresh,
+            fields: {
+              empNo: 'UNMAPPED-RAW',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.fresh}T09:15:00.000Z`,
+            },
+          },
+        ],
+      }
+
+      const syncFirst = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST', headers, body: JSON.stringify(syncPayload),
+      })
+      expect(syncFirst.status, syncFirst.raw).toBe(200)
+      const syncEarly = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST', headers, body: JSON.stringify(syncPayload),
+      })
+      expect(syncEarly.status, syncEarly.raw).toBe(200)
+
+      const syncRacePayload = {
+        orgId,
+        userId: raceUserId,
+        idempotencyKey: syncRaceKey,
+        timezone: 'UTC',
+        mode: 'override',
+        returnItems: false,
+        rows: [{
+          userId: raceUserId,
+          workDate: fixedDates.race,
+          fields: {
+            firstInAt: `${fixedDates.race}T09:00:00.000Z`,
+            lastOutAt: `${fixedDates.race}T18:00:00.000Z`,
+            status: 'normal',
+          },
+        }],
+      }
+      const syncRace = await Promise.all([
+        requestJson(`${baseUrl}/api/attendance/import/commit`, {
+          method: 'POST', headers, body: JSON.stringify(syncRacePayload),
+        }),
+        requestJson(`${baseUrl}/api/attendance/import/commit`, {
+          method: 'POST', headers, body: JSON.stringify(syncRacePayload),
+        }),
+      ])
+      expect(syncRace.map((entry) => entry.status)).toEqual([200, 200])
+
+      const asyncPayload = {
+        orgId,
+        userId: asyncUserId,
+        idempotencyKey: asyncKey,
+        timezone: 'UTC',
+        mode: 'override',
+        returnItems: false,
+        rows: [
+          {
+            userId: asyncUserId,
+            workDate: fixedDates.async,
+            fields: {
+              firstInAt: `${fixedDates.async}T09:00:00.000Z`,
+              lastOutAt: `${fixedDates.async}T18:00:00.000Z`,
+              status: 'normal',
+            },
+          },
+          {
+            userId: asyncUserId,
+            workDate: fixedDates.async,
+            fields: {
+              firstInAt: `${fixedDates.async}T09:05:00.000Z`,
+              lastOutAt: `${fixedDates.async}T18:05:00.000Z`,
+              status: 'normal',
+            },
+          },
+        ],
+      }
+      const asyncFirst = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+        method: 'POST', headers, body: JSON.stringify(asyncPayload),
+      })
+      expect(asyncFirst.status, asyncFirst.raw).toBe(200)
+      const asyncJobId = String((asyncFirst.body as any)?.data?.job?.id || '')
+      expect(asyncJobId).toBeTruthy()
+      const asyncEarly = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+        method: 'POST', headers, body: JSON.stringify(asyncPayload),
+      })
+      expect(asyncEarly.status, asyncEarly.raw).toBe(200)
+      const asyncCompleted = await waitForImportJobCompletion(baseUrl, token, asyncJobId, {
+        attempts: 200,
+        intervalMs: 25,
+        settle: (job) => Array.isArray(job?.skippedRows),
+      })
+
+      const asyncRacePayload = {
+        ...asyncPayload,
+        userId: asyncRaceUserId,
+        idempotencyKey: asyncRaceKey,
+        rows: [{
+          userId: asyncRaceUserId,
+          workDate: fixedDates.race,
+          fields: {
+            firstInAt: `${fixedDates.race}T10:00:00.000Z`,
+            lastOutAt: `${fixedDates.race}T19:00:00.000Z`,
+            status: 'normal',
+          },
+        }],
+      }
+      const asyncRace = await Promise.all([
+        requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+          method: 'POST', headers, body: JSON.stringify(asyncRacePayload),
+        }),
+        requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+          method: 'POST', headers, body: JSON.stringify(asyncRacePayload),
+        }),
+      ])
+      expect(asyncRace.map((entry) => entry.status)).toEqual([200, 200])
+      const asyncRaceJobId = String((asyncRace[0].body as any)?.data?.job?.id || '')
+      if (asyncRaceJobId) {
+        await waitForImportJobCompletion(baseUrl, token, asyncRaceJobId, { attempts: 200, intervalMs: 25 })
+      }
+
+      const csvHeader = '日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+      const csvText = `${csvHeader}\n${fixedDates.upload},U001,Legacy Upload Team,09:00,18:00,正常\n`
+      const uploadRes = await requestJson(
+        `${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=legacy-import-v1.csv`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/csv' },
+          body: csvText,
+        },
+      )
+      expect(uploadRes.status, uploadRes.raw).toBe(201)
+      const fileId = String((uploadRes.body as any)?.data?.fileId || '')
+      expect(fileId).toBeTruthy()
+      const uploadPayload = {
+        orgId,
+        userId: uploadUserId,
+        idempotencyKey: 'legacy-import-v1-upload',
+        timezone: 'UTC',
+        fileId,
+        mapping: { columns: [
+          { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+        ] },
+        userMap: { U001: uploadUserId },
+        groupSync: { autoCreate: true, autoAssignMembers: true, timezone: 'UTC' },
+        mode: 'override',
+        returnItems: false,
+      }
+      const uploadCommit = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST', headers, body: JSON.stringify(uploadPayload),
+      })
+      expect(uploadCommit.status, uploadCommit.raw).toBe(200)
+      const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
+      const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+      const uploadCleanup = {
+        fileId,
+        intent: { kind: 'uploaded_import_file', expectedOwnerOrgId: orgId },
+        csvPresent: await fs.stat(csvPath).then(() => true).catch(() => false),
+        metaPresent: await fs.stat(metaPath).then(() => true).catch(() => false),
+      }
+
+      const syncBatchId = String((syncFirst.body as any)?.data?.batchId || '')
+      const syncRaceBatchId = String((syncRace[0].body as any)?.data?.batchId || '')
+      const asyncBatchId = String(asyncCompleted?.batchId || '')
+      const asyncRaceBatchId = String((asyncRace[0].body as any)?.data?.job?.batchId || '')
+      const uploadBatchId = String((uploadCommit.body as any)?.data?.batchId || '')
+      const batchIds = [syncBatchId, syncRaceBatchId, asyncBatchId, asyncRaceBatchId, uploadBatchId]
+        .filter(Boolean)
+
+      const batches = await pool.query(
+        `SELECT id::text, org_id, idempotency_key, created_by, source,
+                rule_set_id::text, mapping, row_count, status, meta
+           FROM attendance_import_batches
+          WHERE id = ANY($1::uuid[])
+          ORDER BY idempotency_key NULLS LAST, org_id`,
+        [batchIds],
+      )
+      const items = await pool.query(
+        `SELECT i.id::text, i.batch_id::text, i.org_id, i.user_id,
+                i.work_date::text, i.record_id::text, i.preview_snapshot
+           FROM attendance_import_items i
+           JOIN attendance_import_batches b ON b.id = i.batch_id AND b.org_id = i.org_id
+          WHERE i.batch_id = ANY($1::uuid[])
+          ORDER BY b.idempotency_key NULLS LAST, i.work_date, i.user_id`,
+        [batchIds],
+      )
+      const records = await pool.query(
+        `SELECT id::text, org_id, user_id, work_date::text,
+                first_in_at::text, last_out_at::text, work_minutes,
+                late_minutes, early_leave_minutes, status, is_workday,
+                timezone, meta, source_batch_id::text
+           FROM attendance_records
+          WHERE org_id = $1
+            AND (source_batch_id = ANY($2::uuid[]) OR id = $3::uuid)
+          ORDER BY user_id, work_date, id`,
+        [orgId, batchIds, mergeRecordId],
+      )
+      const groups = await pool.query(
+        `SELECT id::text, org_id, name, code, timezone, rule_set_id::text, description
+           FROM attendance_groups
+          WHERE org_id = $1 AND name = ANY($2::text[])
+          ORDER BY lower(name), id`,
+        [orgId, [groupName, 'Legacy Upload Team']],
+      )
+      const members = await pool.query(
+        `SELECT m.id::text, m.org_id, m.group_id::text, g.name AS group_name, m.user_id
+           FROM attendance_group_members m
+           JOIN attendance_groups g ON g.id = m.group_id
+          WHERE m.org_id = $1 AND g.name = ANY($2::text[])
+          ORDER BY lower(g.name), m.user_id, m.id`,
+        [orgId, [groupName, 'Legacy Upload Team']],
+      )
+      const jobs = await pool.query(
+        `SELECT j.id::text, j.org_id, j.batch_id::text, j.created_by, j.idempotency_key,
+                j.status, j.progress, j.total, j.error,
+                COALESCE(t.response, j.payload) AS payload
+           FROM attendance_import_jobs j
+           LEFT JOIN attendance_import_legacy_terminal_responses t
+             ON t.job_id = j.id AND t.org_id = j.org_id
+          WHERE j.id = ANY($1::uuid[])
+          ORDER BY j.idempotency_key NULLS LAST, j.org_id`,
+        [[asyncJobId, asyncRaceJobId].filter(Boolean)],
+      )
+
+      const generatedIdLabels = new Map<string, string>()
+      for (const row of batches.rows) {
+        generatedIdLabels.set(
+          row.id,
+          `batch:${row.org_id}:${row.idempotency_key ?? row.id}`,
+        )
+      }
+      for (const row of jobs.rows) {
+        generatedIdLabels.set(
+          row.id,
+          `job:${row.org_id}:${row.idempotency_key ?? row.id}`,
+        )
+      }
+      const itemOrdinals = new Map<string, number>()
+      for (const row of items.rows) {
+        const ordinal = itemOrdinals.get(row.batch_id) ?? 0
+        generatedIdLabels.set(
+          row.id,
+          `item:${generatedIdLabels.get(row.batch_id) ?? row.batch_id}:${ordinal}`,
+        )
+        itemOrdinals.set(row.batch_id, ordinal + 1)
+      }
+      for (const row of records.rows) {
+        if (row.id !== mergeRecordId) {
+          generatedIdLabels.set(row.id, `record:${row.org_id}:${row.user_id}:${row.work_date}`)
+        }
+      }
+      for (const row of groups.rows) {
+        generatedIdLabels.set(row.id, `group:${row.org_id}:${String(row.name).trim().toLowerCase()}`)
+      }
+      for (const row of members.rows) {
+        generatedIdLabels.set(row.id, `member:${row.org_id}:${String(row.group_name).trim().toLowerCase()}:${row.user_id}`)
+      }
+      generatedIdLabels.set(fileId, `upload-file:${orgId}:legacy-import-v1-upload`)
+      const normalize = (value: unknown, key = ''): unknown => {
+        if (typeof value === 'string') {
+          return generatedIdLabels.get(value) ?? value
+        }
+        if (Array.isArray(value)) return value.map((entry) => normalize(entry))
+        if (value && typeof value === 'object') {
+          const out: Record<string, unknown> = {}
+          for (const currentKey of Object.keys(value as Record<string, unknown>).sort()) {
+            const current = (value as Record<string, unknown>)[currentKey]
+            if (currentKey === 'elapsedMs') {
+              const number = Number(current)
+              out[currentKey] = number === 0 ? 0 : { type: 'number', relation: 'nonnegative' }
+              continue
+            }
+            if (/^(created|updated|started|finished)At$/i.test(currentKey)) {
+              out[currentKey] = current == null ? null : '<db-timestamp>'
+              continue
+            }
+            out[currentKey] = normalize(current, currentKey)
+          }
+          return out
+        }
+        return value
+      }
+      const responseShape = (response: HttpResponse) => ({
+        status: response.status,
+        body: normalize(response.body),
+      })
+      const canonicalizeGolden = (value: any) => {
+        const copy = structuredClone(value)
+        const compareText = (left: unknown, right: unknown) =>
+          String(left ?? '').localeCompare(String(right ?? ''))
+        const sortRace = (entries: any[]) => entries.sort((left, right) => {
+          const leftReplay = left?.body?.data?.idempotent === true ? 1 : 0
+          const rightReplay = right?.body?.data?.idempotent === true ? 1 : 0
+          return leftReplay - rightReplay
+        })
+        sortRace(copy.sync.lockedRace)
+        sortRace(copy.async.lockedRace)
+        copy.database.batches.sort((left: any, right: any) =>
+          compareText(left.idempotency_key, right.idempotency_key))
+        for (const item of copy.database.items) {
+          const warnings = Array.isArray(item.preview_snapshot?.warnings)
+            ? item.preview_snapshot.warnings
+            : []
+          item.id = [
+            'item',
+            item.batch_id,
+            item.record_id === null ? 'skip' : 'apply',
+            item.user_id ?? 'null',
+            item.work_date ?? 'null',
+            JSON.stringify(warnings),
+          ].join(':')
+        }
+        copy.database.items.sort((left: any, right: any) =>
+          compareText(left.batch_id, right.batch_id)
+          || compareText(left.work_date, right.work_date)
+          || compareText(left.user_id, right.user_id)
+          || compareText(left.id, right.id))
+        copy.database.records.sort((left: any, right: any) =>
+          compareText(left.user_id, right.user_id)
+          || compareText(left.work_date, right.work_date)
+          || compareText(left.id, right.id))
+        copy.database.groups.sort((left: any, right: any) =>
+          compareText(String(left.name).toLowerCase(), String(right.name).toLowerCase()))
+        copy.database.members.sort((left: any, right: any) =>
+          compareText(left.group_id, right.group_id)
+          || compareText(left.user_id, right.user_id))
+        copy.database.jobs.sort((left: any, right: any) =>
+          compareText(left.idempotency_key, right.idempotency_key))
+        return copy
+      }
+      const w4Residue = await pool.query(
+        `SELECT
+           (SELECT count(*)::int
+              FROM attendance_result_operation_batches
+             WHERE org_id = $1 AND batch_command_id = ANY($2::uuid[])) AS batches,
+           (SELECT count(*)::int
+              FROM attendance_result_operations
+             WHERE org_id = $1 AND batch_command_id = ANY($2::uuid[])) AS operations,
+           (SELECT count(*)::int
+              FROM attendance_result_event_outbox e
+              JOIN attendance_result_operations o
+                ON o.org_id = e.org_id
+               AND o.entrypoint = e.entrypoint
+               AND o.operation_id = e.operation_id
+             WHERE o.org_id = $1 AND o.batch_command_id = ANY($2::uuid[])) AS outbox,
+           (SELECT count(*)::int
+              FROM attendance_record_calculations
+             WHERE org_id = $1 AND source_batch_id = ANY($2::uuid[])) AS calculations,
+           (SELECT count(*)::int
+              FROM attendance_record_segments s
+              JOIN attendance_record_calculations c
+                ON c.org_id = s.org_id
+               AND c.id = s.calculation_id
+             WHERE c.org_id = $1 AND c.source_batch_id = ANY($2::uuid[])) AS segments`,
+        [orgId, batchIds],
+      )
+      const zeroUnexpectedW4Rows = Object.values(w4Residue.rows[0] ?? {})
+        .every((value) => Number(value) === 0)
+      const fixture = normalize({
+        schemaVersion: 1,
+        fixtureName: 'legacy-import-v1',
+        governingSha: '1055e543a3680be9f37462de23483bf61ad4610c',
+        fixedClock: '2026-07-30T12:00:00.000Z',
+        uuidSource: 'sha256(legacy-import-v1:<ordinal>)',
+        sync: {
+          firstExecution: responseShape(syncFirst),
+          directEarlyReplay: responseShape(syncEarly),
+          lockedRace: syncRace.map(responseShape),
+        },
+        async: {
+          firstExecution: responseShape(asyncFirst),
+          earlyReplay: responseShape(asyncEarly),
+          lockedRace: asyncRace.map(responseShape),
+          completedPublicJob: normalize(asyncCompleted),
+        },
+        uploadCleanup,
+        database: {
+          batches: batches.rows,
+          items: items.rows,
+          records: records.rows,
+          groups: groups.rows,
+          members: members.rows.map(({ group_name: _groupName, ...row }) => row),
+          jobs: jobs.rows,
+        },
+        zeroUnexpectedW4Rows,
+      })
+      const output = `${JSON.stringify(fixture, null, 2)}\n`
+      const fixturePath = path.join(__dirname, '../fixtures/attendance/legacy-import-v1.json')
+      const checksumPath = path.join(__dirname, '../fixtures/attendance/legacy-import-v1.sha256')
+      const expectedBytes = await fs.readFile(fixturePath)
+      const checksum = (await fs.readFile(checksumPath, 'utf8')).trim().split(/\s+/)[0]
+      expect(createHash('sha256').update(expectedBytes).digest('hex')).toBe(checksum)
+      const canonicalActual = canonicalizeGolden(JSON.parse(output))
+      const canonicalExpected = canonicalizeGolden(JSON.parse(expectedBytes.toString('utf8')))
+      expect(canonicalActual).toEqual(canonicalExpected)
+      expect(batches.rows.length).toBe(batchIds.length)
+      expect(generatedIdLabels.size).toBeGreaterThanOrEqual(4)
+      expect(zeroUnexpectedW4Rows).toBe(true)
+      expect(uploadCleanup).toMatchObject({ csvPresent: false, metaPresent: false })
+    } finally {
+      vi.useRealTimers()
+      await pool.end().catch(() => undefined)
+    }
+  }, 300_000)
 
 })
