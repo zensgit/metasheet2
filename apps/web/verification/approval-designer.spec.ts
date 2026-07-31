@@ -647,8 +647,9 @@ test('approval version workspace stacks without horizontal overflow at a phone v
   await expect(page.getByTestId('approval-version-workspace')).toBeVisible()
   const closeButton = page.locator('.approval-version-workspace-dialog .el-dialog__headerbtn')
   const closeBox = await closeButton.boundingBox()
-  expect(closeBox?.width).toBeGreaterThanOrEqual(44)
-  expect(closeBox?.height).toBeGreaterThanOrEqual(44)
+  // Chromium can report a CSS 44px target as 43.999999px after device-scale conversion.
+  expect(closeBox?.width).toBeGreaterThanOrEqual(44 - 0.001)
+  expect(closeBox?.height).toBeGreaterThanOrEqual(44 - 0.001)
   const versionDate = page.getByTestId('approval-version-timeline-date')
   await expect(versionDate).toBeVisible()
   expect(await versionDate.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
