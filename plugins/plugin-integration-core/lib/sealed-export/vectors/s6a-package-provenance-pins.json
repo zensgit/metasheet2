@@ -83,7 +83,7 @@
     "s5SignerAuthorityMemoryDb": "7dd984783e6783c521022c0025edccb215a386980c264ec5cbd497b1eae46084",
     "s5SignerLifecycleRealDbTest": "fee8295234946f8ad93f9b6d0168e272e9c4cfabae964d9dd219d635b7bdbf36",
     "s6aRuntimeAuthorityRealDbTest": "10c9eb64d03dfe8a7c6f04b51cfccbddc8239b4bcce956b0d490c5c40ee5ae5c",
-    "s6aAcceptancePs51Test": "7a77d56e9969591c521a9cabe9e8c0a1969c02465cde3fc37bb0ff340f33b8eb",
+    "s6aAcceptancePs51Test": "835c7c6ce943d82e0378a40a27c7fd1e8b79b526faa8ca4c8066e4231a4bfb0f",
     "s6aProductRuntimeTest": "de978adafa8b89772cefa921c2051f434bf346bf5c2978bef3424ee70f51ba3f",
     "multitableOnpremPackageBuild": "463c7d73c6c7f2d1b6cdf0820d7a06974a9c463dd5e98bbbaf1c996e1dc4ed99",
     "pluginTestsWorkflow": "3ae4a0c8e974d7c7ca6893bdfe5652c4146960f2ffbeb0a50228a36d5a13ac2a"
