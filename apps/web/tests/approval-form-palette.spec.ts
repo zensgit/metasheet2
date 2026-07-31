@@ -4,6 +4,7 @@ import {
   APPROVAL_FORM_FIELD_TYPE_LABELS,
   APPROVAL_FORM_PALETTE_MIME,
   APPROVAL_FORM_PALETTE_TYPES,
+  approvalFormPaletteTypes,
   readMovedFieldIndex,
   readPaletteFieldType,
 } from "../src/approvals/formPalette";
@@ -19,8 +20,13 @@ describe("approval form palette drag payload", () => {
   it("derives the rendered palette from the schema authoring allowlist", () => {
     expect(APPROVAL_FORM_PALETTE_TYPES).toEqual(AUTHORABLE_FIELD_TYPES);
     expect(Object.keys(APPROVAL_FORM_FIELD_TYPE_LABELS).sort()).toEqual(
-      [...AUTHORABLE_FIELD_TYPES].sort(),
+      [...AUTHORABLE_FIELD_TYPES, "attachment"].sort(),
     );
+    expect(approvalFormPaletteTypes(false)).toEqual(AUTHORABLE_FIELD_TYPES);
+    expect(approvalFormPaletteTypes(true)).toEqual([
+      ...AUTHORABLE_FIELD_TYPES,
+      "attachment",
+    ]);
   });
 
   it("accepts only field types supported by the existing authoring schema", () => {
@@ -38,6 +44,14 @@ describe("approval form palette drag payload", () => {
         }),
       ),
     ).toBeNull();
+    expect(
+      readPaletteFieldType(
+        transfer({
+          [APPROVAL_FORM_PALETTE_MIME]: "attachment",
+        }),
+        true,
+      ),
+    ).toBe("attachment");
     expect(
       readPaletteFieldType(
         transfer({

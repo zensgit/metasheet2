@@ -42,6 +42,11 @@
           <el-option label="用户" value="user" />
           <el-option label="明细（子表单）" value="detail" />
           <el-option label="关联记录" value="record-link" />
+          <el-option
+            v-if="attachmentAuthoringEnabled"
+            label="附件"
+            value="attachment"
+          />
         </el-select>
       </el-form-item>
       <el-form-item label="占位文本">
@@ -307,6 +312,7 @@ const props = withDefaults(defineProps<{
   recordLinkCatalogLoading: boolean
   recordLinkCatalogLoaded: boolean
   recordLinkCatalogError: string
+  attachmentAuthoringEnabled: boolean
 }>(), {
   showHeading: true,
 })

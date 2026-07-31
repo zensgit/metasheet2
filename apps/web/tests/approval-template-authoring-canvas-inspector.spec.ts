@@ -63,7 +63,7 @@ vi.mock('../src/approvals/permissions', () => ({
   }),
 }))
 
-const featureFlags = ref({ approvalCanvasV2: true })
+const featureFlags = ref({ approvalCanvasV2: true, approvalAttachments: false })
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
     features: featureFlags,
@@ -429,7 +429,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   beforeEach(() => {
     routeParams = {}
     canManageTemplates.value = true
-    featureFlags.value.approvalCanvasV2 = true
+    featureFlags.value = { approvalCanvasV2: true, approvalAttachments: false }
     createTemplateSpy.mockReset()
     updateTemplateSpy.mockReset()
     publishTemplateSpy.mockReset()
@@ -540,6 +540,94 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     ])
     expect(container!.querySelector('[data-testid="approval-form-builder-status"]')?.textContent)
       .toContain('第 2 位')
+  })
+
+  it('offers and saves an attachment field only when both Canvas V2 and attachments are enabled', async () => {
+    featureFlags.value = { approvalCanvasV2: true, approvalAttachments: true }
+    routeParams = { id: 'tpl_attachment_authoring_enabled' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: routeParams.id }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    const attachmentPaletteItem = container!.querySelector(
+      '[data-testid="approval-form-palette-attachment"]',
+    ) as HTMLButtonElement
+    expect(attachmentPaletteItem).not.toBeNull()
+    attachmentPaletteItem.click()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as {
+      formSchema: { fields: Array<Record<string, unknown>> }
+    }
+    expect(payload.formSchema.fields.at(-1)).toEqual(expect.objectContaining({
+      type: 'attachment',
+      label: '附件',
+    }))
+    expect(payload.formSchema.fields.at(-1)).not.toHaveProperty('required')
+    expect(payload.formSchema.fields.at(-1)).not.toHaveProperty('props')
+    expect(payload.formSchema.fields.at(-1)).not.toHaveProperty('options')
+    expect(payload.formSchema.fields.at(-1)).not.toHaveProperty('columns')
+  })
+
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+  ])('keeps attachment templates fail-closed when Canvas=%s and attachments=%s', async (canvas, attachments) => {
+    featureFlags.value = { approvalCanvasV2: canvas, approvalAttachments: attachments }
+    routeParams = { id: `tpl_attachment_authoring_${canvas}_${attachments}` }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      id: routeParams.id,
+      formSchema: { fields: [{ id: 'file', type: 'attachment', label: '附件' }] },
+    }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull()
+    expect(
+      container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement,
+    ).toHaveProperty('disabled', true)
+    expect(container!.querySelector('[data-testid="approval-form-palette-attachment"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+  })
+
+  it('preserves an existing attachment field when both authoring flags are enabled', async () => {
+    featureFlags.value = { approvalCanvasV2: true, approvalAttachments: true }
+    routeParams = { id: 'tpl_attachment_authoring_preserve' }
+    const template = buildTemplate({
+      id: routeParams.id,
+      formSchema: {
+        fields: [
+          { id: 'file', type: 'attachment', label: '凭证', required: true, placeholder: '选择文件' },
+          { id: 'amount', type: 'number', label: '金额' },
+        ],
+      },
+    })
+    getTemplateSpy.mockResolvedValue(template)
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    expect(
+      container!.querySelector('[data-testid="approval-form-field-list"]')?.textContent,
+    ).toContain('附件')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls.at(-1)?.[1] as {
+      formSchema: { fields: Array<Record<string, unknown>> }
+    }
+    expect(payload.formSchema.fields[0]).toEqual(template.formSchema.fields[0])
   })
 
   it('keeps forward, backward, and adjacent insertion-slot reorders exact', async () => {

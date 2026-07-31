@@ -397,16 +397,21 @@ describe('approval template authoring helpers', () => {
     expect((node.config as ApprovalNodeConfig).fieldPermissions).toEqual([{ fieldId: 'amount', access: 'hidden' }])
   })
 
-  it('blocks existing attachment fields because the MVP has no upload runtime', () => {
-    const reason = unsupportedTemplateAuthoringReason(buildTemplate({
+  it('keeps existing attachment fields fail-closed until attachment authoring is explicitly enabled', () => {
+    const template = buildTemplate({
       formSchema: {
         fields: [
           { id: 'file', type: 'attachment', label: '附件' },
         ],
       },
-    }))
+    })
+    const reason = unsupportedTemplateAuthoringReason(template)
 
     expect(reason).toContain('暂不支持编辑的字段类型')
+    expect(unsupportedTemplateAuthoringReason(template, { attachmentAuthoringEnabled: true })).toBeNull()
+    expect(draftFromTemplate(template).fields).toMatchObject([{ type: 'text' }])
+    expect(buildFormSchema(draftFromTemplate(template, { attachmentAuthoringEnabled: true })).fields)
+      .toEqual(template.formSchema.fields)
   })
 
   it('keeps raw field and node identifiers out of author-facing refusal and validation messages', () => {

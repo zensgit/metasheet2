@@ -180,6 +180,33 @@ describe('approvalFormCommands - add', () => {
     ).toMatchObject({ ok: false, reason: 'target_not_found' })
   })
 
+  it('requires an explicit attachment authoring capability before it creates an attachment field', () => {
+    const source = draftWith([field(1)])
+    expect(
+      addFormField(source, 'attachment', identity(2), EMPTY_IDENTITY_HISTORY),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+
+    const enabled = addFormField(
+      source,
+      'attachment',
+      identity(2),
+      EMPTY_IDENTITY_HISTORY,
+      undefined,
+      { attachmentAuthoringEnabled: true },
+    )
+    assertOk(enabled)
+    expect(enabled.draft.fields.at(-1)).toMatchObject({
+      id: 'new_field_2',
+      type: 'attachment',
+      label: '附件',
+      required: false,
+      placeholder: '',
+      detailColumns: [],
+      recordLinkBaseId: '',
+      recordLinkSheetId: '',
+    })
+  })
+
   it('rejects blank and field/detail-column identity collisions before it changes the draft', () => {
     const source = draftWith([
       field(1, {

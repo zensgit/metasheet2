@@ -70,7 +70,13 @@ export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
 export { placeholderRoleNodeKeys } from './approvalNodeEdit'
 
+/**
+ * The established authoring surface. Attachments deliberately stay out of this
+ * default set: they require an explicit attachment capability at the caller.
+ */
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
+/** A top-level field type that the form-builder command algebra can carry. */
+export type FormAuthoringFieldType = AuthorableFieldType | 'attachment'
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
 
 // Top-level authorable field types: the 8 leaf scalar types plus `detail` (repeatable
@@ -106,7 +112,7 @@ export interface FieldVisibilityDraft {
 export interface FieldAuthoringDraft {
   localId: string
   id: string
-  type: AuthorableFieldType
+  type: FormAuthoringFieldType
   label: string
   required: boolean
   placeholder: string
@@ -382,6 +388,10 @@ function isAuthorableFieldType(value: FormFieldType): value is AuthorableFieldTy
   return AUTHORABLE_FIELD_TYPES.includes(value as AuthorableFieldType)
 }
 
+function isFormAuthoringFieldType(value: FormFieldType): value is FormAuthoringFieldType {
+  return value === 'attachment' || isAuthorableFieldType(value)
+}
+
 function isNodeFieldAccess(value: unknown): value is NodeFieldAccess {
   return value === 'editable' || value === 'readonly' || value === 'hidden'
 }
@@ -415,8 +425,14 @@ export function setStepFieldPermission(
   return [...permissions, { fieldId, access }]
 }
 
-function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
-  if (!isAuthorableFieldType(field.type)) return null
+function fieldDraftFromField(
+  field: FormField,
+  options: { attachmentAuthoringEnabled?: boolean },
+): FieldAuthoringDraft | null {
+  if (
+    !isAuthorableFieldType(field.type)
+    && !(field.type === 'attachment' && options.attachmentAuthoringEnabled === true)
+  ) return null
   const props = field.props && typeof field.props === 'object' ? field.props as Record<string, unknown> : {}
   return {
     localId: nextLocalId('field'),
@@ -725,8 +741,14 @@ function complexNodeConfigHasBackendDrop(node: ApprovalNode): boolean {
   }
 }
 
-export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDetailDTO): string | null {
-  const unsupportedField = template.formSchema.fields.find((field) => !isAuthorableFieldType(field.type))
+export function unsupportedTemplateAuthoringReason(
+  template: ApprovalTemplateDetailDTO,
+  options: { attachmentAuthoringEnabled?: boolean } = {},
+): string | null {
+  const unsupportedField = template.formSchema.fields.find((field) => (
+    !isFormAuthoringFieldType(field.type)
+    || (field.type === 'attachment' && options.attachmentAuthoringEnabled !== true)
+  ))
   if (unsupportedField) {
     return `包含暂不支持编辑的字段类型：${unsupportedField.label || '未命名字段'}`
   }
@@ -809,20 +831,26 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
  * linear steps editor. Complex graphs remain editable and save-preserved; only genuinely unknown
  * node config is blocked by `unsupportedTemplateAuthoringReason`.
  */
-export function graphReadOnlyReason(template: ApprovalTemplateDetailDTO): string | null {
-  if (unsupportedTemplateAuthoringReason(template)) return null
+export function graphReadOnlyReason(
+  template: ApprovalTemplateDetailDTO,
+  options: { attachmentAuthoringEnabled?: boolean } = {},
+): string | null {
+  if (unsupportedTemplateAuthoringReason(template, options)) return null
   if (!isComplexApprovalGraph(template.approvalGraph)) return null
   return '该模板已启用分支流程编辑：可在画布调整流程结构，并在辅助编辑模式编辑各节点配置。'
 }
 
-export function draftFromTemplate(template: ApprovalTemplateDetailDTO): TemplateAuthoringDraft {
+export function draftFromTemplate(
+  template: ApprovalTemplateDetailDTO,
+  options: { attachmentAuthoringEnabled?: boolean } = {},
+): TemplateAuthoringDraft {
   // G-1 anti-flatten keystone: a complex graph is captured VERBATIM and never projected to the
   // linear `steps` model. `buildApprovalGraph` re-emits it byte-identical, so load→save can not
   // drop or reorder its cc/condition/parallel nodes/edges/config.
   const complex = isComplexApprovalGraph(template.approvalGraph)
   const ordered = orderedLinearNodes(template.approvalGraph) ?? template.approvalGraph.nodes
   const fields = template.formSchema.fields
-    .map(fieldDraftFromField)
+    .map((field) => fieldDraftFromField(field, options))
     .filter((field): field is FieldAuthoringDraft => field !== null)
   // Skip the approval-only step projection for complex graphs — they round-trip via
   // `preservedGraph`, and projecting would discard the non-approval nodes (the flatten risk).
@@ -881,6 +909,11 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
       }
       if (!field.placeholder.trim()) {
         delete next.placeholder
+      }
+      // Existing attachment schemas commonly omit `required` when false. Preserve that
+      // byte shape on an untouched attachment instead of manufacturing `required:false`.
+      if (field.type === 'attachment' && field.required === false && field.original?.required === undefined) {
+        delete next.required
       }
       if (field.type === 'select' || field.type === 'multi-select') {
         next.options = parseOptionsText(field.optionsText)
