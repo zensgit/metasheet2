@@ -1105,6 +1105,7 @@ jobs:
             tests/integration/attendance-w4c3a-group-preconditions.db.test.ts \
             tests/integration/attendance-w4c3a-group-effects.db.test.ts \
             tests/integration/attendance-w4c3a-auth-recovery.db.test.ts \
+            tests/integration/attendance-w4c3a-import-rollback.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
