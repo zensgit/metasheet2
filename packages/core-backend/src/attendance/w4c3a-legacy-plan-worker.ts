@@ -379,6 +379,16 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           ) {
             return { kind: 'not_found' }
           }
+          if (
+            rejectedJob.status === 'queued' &&
+            rejectedJob.executionReasonCode === 'SEGMENT_CALCULATION_SUSPENDED'
+          ) {
+            await callbacks.clearResumedSuspendedReason(
+              trx,
+              rejectedJob.jobId,
+              rejectedJob.orgId,
+            )
+          }
           return failClosed(
             trx,
             rejectedJob,

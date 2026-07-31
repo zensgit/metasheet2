@@ -44,6 +44,10 @@ import {
   type VerifiedAttendanceOrgIdentityV1,
 } from '../../src/attendance/w4c0-identity'
 import { createAuthorizedAttendanceWriteContextV1 } from '../../src/attendance/w4c0-authorization'
+import {
+  claimAttendanceCanonicalImportRegistryV1,
+  inspectAttendanceCanonicalImportRegistryV1,
+} from '../../src/attendance/w4c3a-canonical-import-kernel'
 import { createAttendanceLegacyPlanWorkerV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
 import {
   createAttendanceLegacyPlanWorkerRepositoryV1,
@@ -1707,9 +1711,20 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       ],
       acquireClass10: (client, _job, identities) =>
         acquireAttendanceImportReservationLocksV1(trx(client), identities, null),
+      inspectOperationRows: (client, job, identities) =>
+        inspectAttendanceCanonicalImportRegistryV1(trx(client), {
+          job,
+          identities,
+        }),
       loadPlan: (client, jobId) =>
         createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
           .loadPlan(jobId, ORG),
+      claimOperationRows: (client, job, plan, identities) =>
+        claimAttendanceCanonicalImportRegistryV1(trx(client), {
+          job,
+          plan,
+          identities,
+        }),
       recheckReplayPrecondition: async () => true,
       targetIdentities: () => [],
       acquireClass11: (client, _plan, identities) =>

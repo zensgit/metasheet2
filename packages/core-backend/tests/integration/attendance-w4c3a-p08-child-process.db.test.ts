@@ -428,7 +428,10 @@ describeIfDatabase('W4C-3a P08 candidate A/B (blueprint-structural)', () => {
     const suspended = spawnChild(CHILD_EXECUTE, [jobIdC], {
       DATABASE_URL: urlC,
     })
-    expect(suspended.status).toBe(5)
+    expect(
+      suspended.status,
+      `suspended child failed\nstdout:\n${suspended.stdout}\nstderr:\n${suspended.stderr}`,
+    ).toBe(5)
     const suspendedResult = JSON.parse(
       suspended.stdout.trim().split('\n').filter(Boolean).pop() || '{}',
     ) as Record<string, unknown>
@@ -473,7 +476,10 @@ describeIfDatabase('W4C-3a P08 candidate A/B (blueprint-structural)', () => {
     const resumed = spawnChild(CHILD_EXECUTE, [jobIdC], {
       DATABASE_URL: urlC,
     })
-    expect(resumed.status).toBe(5)
+    expect(
+      resumed.status,
+      `resumed child failed\nstdout:\n${resumed.stdout}\nstderr:\n${resumed.stderr}`,
+    ).toBe(5)
     const resumedResult = JSON.parse(
       resumed.stdout.trim().split('\n').filter(Boolean).pop() || '{}',
     ) as Record<string, unknown>

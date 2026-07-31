@@ -770,6 +770,42 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     )
   })
 
+  it('clears a prior suspended reason before failing a resumed job after authorization loss', async () => {
+    const resumed = {
+      ...packagePlan().job,
+      executionReasonCode: 'SEGMENT_CALCULATION_SUSPENDED',
+    }
+    const base = await callbacks({
+      readAuthorizationJob: vi.fn(async () => resumed),
+      lockJob: vi.fn(async () => {
+        base.calls.push('job')
+        return resumed
+      }),
+      authorizeFullImport: vi.fn(async () => false),
+    })
+
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toEqual({
+      kind: 'failed',
+      reason: 'ATTENDANCE_IMPORT_LEGACY_PLAN_AUTHORIZATION_REJECTED',
+    })
+    expect(base.calls).toEqual([
+      '00',
+      'posture',
+      '10',
+      'job',
+      'resume',
+      'failed:ATTENDANCE_IMPORT_LEGACY_PLAN_AUTHORIZATION_REJECTED',
+    ])
+    expect(base.hooks.authorizeFullImport).toHaveBeenCalledOnce()
+    expect(
+      vi.mocked(base.hooks.markPlanFailed).mock.invocationCallOrder[0],
+    ).toBeGreaterThan(
+      vi.mocked(base.hooks.clearResumedSuspendedReason).mock.invocationCallOrder[0] ?? 0,
+    )
+  })
+
   it('rejects an ambiguous suspended candidate identity without DML', async () => {
     const base = await callbacks({
       resolveWritePosture: vi.fn(async () => {
