@@ -624,6 +624,19 @@ async function main() {
       },
     )
     assert.equal(memory.rows(SESSION_TABLE)[0].status, 'UPLOAD_COMPLETE')
+    assert.deepEqual(
+      await resumedHarness.service.resumeSession({ sessionId }),
+      {
+        sessionId,
+        status: 'UPLOAD_COMPLETE',
+        acceptedChunkCount: data.manifest.chunks.length,
+        acceptedChunkIndexes: data.manifest.chunks.map(
+          (chunk) => chunk.chunkIndex,
+        ),
+        artifactDigestVerified: true,
+      },
+      'an exact bound retry can observe durable upload completion',
+    )
     const outputText = JSON.stringify({ creates, replay, resumed, completed })
     for (const forbidden of [
       data.scope.systemContentKey,
@@ -633,6 +646,15 @@ async function main() {
     ]) {
       assert.ok(!outputText.includes(forbidden), 'public result stays values-free')
     }
+    await fs.writeFile(
+      path.join(rootDir, sessionId, 'chunk-1.bin'),
+      Buffer.from('tampered-after-completion', 'utf8'),
+    )
+    await refuses(
+      () => resumedHarness.service.resumeSession({ sessionId }),
+      'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH',
+      'completed resume re-verifies durable chunk bytes',
+    )
 
     await refuses(
       () => resumedHarness.service.createSession({

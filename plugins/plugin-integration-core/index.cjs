@@ -289,17 +289,17 @@ module.exports = {
       erpFeedbackWriter,
     })
 
-    const stockPreparationRuntimeConfig =
-      loadStockPreparationRuntimeConfig()
-    if (stockPreparationRuntimeConfig.enabled) {
-      stockPreparationRuntimeDatabase =
-        createStockPreparationRuntimeDatabase({
-          connectionString:
-            stockPreparationRuntimeConfig.runtimeDatabaseUrl,
-          expectedRole:
-            stockPreparationRuntimeConfig.runtimeDatabaseRole,
-        })
-      try {
+    try {
+      const stockPreparationRuntimeConfig =
+        loadStockPreparationRuntimeConfig()
+      if (stockPreparationRuntimeConfig.enabled) {
+        stockPreparationRuntimeDatabase =
+          createStockPreparationRuntimeDatabase({
+            connectionString:
+              stockPreparationRuntimeConfig.runtimeDatabaseUrl,
+            expectedRole:
+              stockPreparationRuntimeConfig.runtimeDatabaseRole,
+          })
         await stockPreparationRuntimeDatabase.assertReady()
         stockPreparationSqlServerRuntime =
           createStockPreparationSqlServerRuntime({
@@ -315,14 +315,21 @@ module.exports = {
               stockPreparationRuntimeConfig.qualificationKeyring,
             runtimeDatabase: stockPreparationRuntimeDatabase,
           })
-      } catch (error) {
+      }
+    } catch {
+      if (stockPreparationRuntimeDatabase) {
         try {
           await stockPreparationRuntimeDatabase.close()
         } catch {
-          // Preserve the activation refusal; close is best effort here.
+          // S6 remains unavailable; close is best effort here.
         }
-        stockPreparationRuntimeDatabase = null
-        throw error
+      }
+      stockPreparationSqlServerRuntime = null
+      stockPreparationRuntimeDatabase = null
+      if (typeof logger.warn === 'function') {
+        logger.warn(
+          `[${PLUGIN_ID}] sealed-snapshot runtime initialization refused; capability disabled`,
+        )
       }
     }
 

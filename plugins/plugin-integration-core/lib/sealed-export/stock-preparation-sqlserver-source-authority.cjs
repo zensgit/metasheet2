@@ -91,7 +91,8 @@ function nullableText(value, maxLength = 256) {
 }
 
 function normalizeWorkspaceId(value) {
-  return value === null ? null : requiredText(value)
+  if (value !== null) refuse()
+  return null
 }
 
 function ownedCanonical(value) {

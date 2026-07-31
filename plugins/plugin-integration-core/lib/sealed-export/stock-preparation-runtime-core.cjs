@@ -257,7 +257,6 @@ function createStockPreparationRuntimeCore({
       workspaceId: input.workspaceId,
     })
     const binding = await runtimeStore.loadActiveBinding(scope)
-    const authorityState = await runtimeStore.loadCurrentAuthority(binding)
     let handle = await runtimeStore.openRun({
       actor: input.actor,
       binding,
@@ -283,9 +282,11 @@ function createStockPreparationRuntimeCore({
       })
     }
 
+    let authorityState
     let source
     let captureService
     try {
+      authorityState = await runtimeStore.loadCurrentAuthority(binding)
       source = await loadSource(binding, scope)
       captureService = await captureServiceFactory({
         authority: source.authority,
@@ -395,21 +396,31 @@ function createStockPreparationRuntimeCore({
       const resumed = await ingestion.resumeSession({
         sessionId: checkpoint.ingestionSessionId,
       })
-      const accepted = new Set(resumed.acceptedChunkIndexes)
-      for (let index = 0; index < artifact.chunkPaths.length; index += 1) {
-        if (accepted.has(index)) continue
-        await ingestion.submitChunk({
-          bytes: await readArtifactChunk(artifact.chunkPaths[index]),
-          chunkIndex: index,
+      if (resumed.status === 'UPLOADING') {
+        if (!Array.isArray(resumed.acceptedChunkIndexes)) {
+          failSealedExport('SEALED_EXPORT_UPLOAD_SESSION_INVALID')
+        }
+        const accepted = new Set(resumed.acceptedChunkIndexes)
+        for (let index = 0; index < artifact.chunkPaths.length; index += 1) {
+          if (accepted.has(index)) continue
+          await ingestion.submitChunk({
+            bytes: await readArtifactChunk(artifact.chunkPaths[index]),
+            chunkIndex: index,
+            sessionId: checkpoint.ingestionSessionId,
+          })
+        }
+        const completed = await ingestion.completeSession({
           sessionId: checkpoint.ingestionSessionId,
         })
-      }
-      const completed = await ingestion.completeSession({
-        sessionId: checkpoint.ingestionSessionId,
-      })
-      if (
-        completed.status !== 'UPLOAD_COMPLETE'
-        || completed.artifactDigestVerified !== true
+        if (
+          completed.status !== 'UPLOAD_COMPLETE'
+          || completed.artifactDigestVerified !== true
+        ) {
+          failSealedExport('SEALED_EXPORT_ARTIFACT_DIGEST_MISMATCH')
+        }
+      } else if (
+        resumed.status !== 'UPLOAD_COMPLETE'
+        || resumed.artifactDigestVerified !== true
       ) {
         failSealedExport('SEALED_EXPORT_ARTIFACT_DIGEST_MISMATCH')
       }

@@ -15,6 +15,8 @@ const BINDING_TABLE = 'integration_sealed_export_stock_prep_bindings'
 const RUN_TABLE = 'integration_sealed_export_stock_prep_runs'
 const OBJECT_KEY = 'stock-preparation-bom'
 const RELATION_ID = 'sqlserver.relation.rowid_payload.v1'
+const CAPTURE_LEASE_MS = 5 * 60 * 1000
+const STALE_CAPTURE_RECOVERED = Symbol('STALE_CAPTURE_RECOVERED')
 const RESUMABLE_STATUSES = new Set([
   'CAPTURED',
   'INGESTING',
@@ -412,7 +414,7 @@ function createStockPreparationRuntimeStore({
     ) {
       failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
     }
-    return dbBoundary(async () => db.transaction(async (trx) => {
+    const opened = await dbBoundary(async () => db.transaction(async (trx) => {
       const where = {
         tenant_id: scope.tenantId,
         workspace_id: scope.workspaceId,
@@ -423,10 +425,26 @@ function createStockPreparationRuntimeStore({
         const normalized = normalizeRun(existing, scope, operationId)
         if (
           normalized.bindingId !== binding.bindingId
-          || normalized.status === 'CAPTURING'
           || normalized.status === 'CAPTURE_FAILED'
         ) {
           failSealedExport('SEALED_EXPORT_MANIFEST_REPLAYED')
+        }
+        if (normalized.status === 'CAPTURING') {
+          if (
+            Date.parse(normalized.createdAt) + CAPTURE_LEASE_MS
+              > nowMs()
+          ) {
+            failSealedExport('SEALED_EXPORT_MANIFEST_REPLAYED')
+          }
+          rowFromResult(await trx.updateRow(
+            RUN_TABLE,
+            {
+              failure_reason: 'SEALED_EXPORT_CAPTURE_FAILED',
+              status: 'CAPTURE_FAILED',
+            },
+            { run_id: normalized.runId, status: 'CAPTURING' },
+          ))
+          return STALE_CAPTURE_RECOVERED
         }
         return mintHandle(existing, scope, operationId)
       }
@@ -443,6 +461,10 @@ function createStockPreparationRuntimeStore({
       }))
       return mintHandle(created, scope, operationId)
     }), true)
+    if (opened === STALE_CAPTURE_RECOVERED) {
+      failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
+    }
+    return opened
   }
 
   function requireHandle(handle, expectedStatus) {

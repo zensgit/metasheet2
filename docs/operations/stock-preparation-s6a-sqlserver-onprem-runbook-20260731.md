@@ -142,6 +142,9 @@ The provisioning spec contains private connection material. Store it only in
 the controlled secret area and remove the transient copy after successful
 provisioning. Its external-system identity and source configuration must match
 the approved server-side external-system record used by the runtime.
+This single-customer v1 route has no workspace selector: both
+`binding.workspaceId` and `externalSystem.workspaceId` must be JSON `null`.
+Any non-null workspace scope is refused before qualification.
 
 The SQL Server credential in that spec must be a dedicated login for this
 binding. Grant it `SELECT` only on the approved source relation. It must not be
@@ -172,14 +175,21 @@ Run:
 node plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs
 ```
 
-The only accepted success shape is values-free:
+The command probes the approved source and issues a qualification that expires
+five minutes after that probe. Run it immediately before the controlled
+flag-on restart. An exact rerun with the same binding, system identity, signer,
+and public key refreshes only the qualification; any changed anchor is refused.
+
+The only accepted success shape is values-free, with `changed` set to either
+`true` or `false`:
 
 ```json
 {"ok":true,"changed":true,"externalWrite":false,"qualificationCurrent":true,"signerEnrolled":true,"valuesFree":true}
 ```
 
-An idempotent rerun may report `"changed":false`. Any other result is
-`STOP_AND_REPORT`.
+The first provisioning or a qualification refresh reports `"changed":true`;
+an exact replay within the same qualification instant may report
+`"changed":false`. Any other result is `STOP_AND_REPORT`.
 
 ## 6. One Controlled Flag-On Window
 
@@ -229,6 +239,13 @@ Whether the acceptance passes or fails:
 
 Do not retry with a new `operationId` after a failure without a new owner
 instruction.
+
+If the process stops while the source capture is still `CAPTURING`, the
+original `operationId` remains reserved for a five-minute lease. The runtime
+never resumes or repeats that source read. Under a subsequent owner
+instruction, observing the same operation after the lease atomically records
+`CAPTURE_FAILED`; only a separately authorized new operation may read the
+source again.
 
 Flag-off restoration disables execution; it is not a data-erasure claim. The
 artifact root contains private source-derived material and must remain under

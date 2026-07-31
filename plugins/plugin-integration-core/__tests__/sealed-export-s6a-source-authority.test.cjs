@@ -199,6 +199,13 @@ async function main() {
   )
   await refuses(
     () => deriveStockPreparationSqlServerSourceAnchors({
+      binding: bindingDraft({ workspaceId: 'workspace-1' }),
+      externalSystem: externalSystem({ workspaceId: 'workspace-1' }),
+      identityKey: IDENTITY_KEY,
+    }),
+  )
+  await refuses(
+    () => deriveStockPreparationSqlServerSourceAnchors({
       binding: draft,
       externalSystem: externalSystem({
         config: {

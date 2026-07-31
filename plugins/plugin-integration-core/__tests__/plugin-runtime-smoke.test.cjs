@@ -21,6 +21,10 @@ const path = require('node:path')
 const PLUGIN_DIR = path.join(__dirname, '..')
 const MANIFEST_PATH = path.join(PLUGIN_DIR, 'plugin.json')
 const ENTRY_PATH = path.join(PLUGIN_DIR, 'index.cjs')
+const {
+  ENV: STOCK_PREPARATION_ENV,
+  FEATURE_FLAG: STOCK_PREPARATION_FEATURE_FLAG,
+} = require('../lib/sealed-export/stock-preparation-runtime-config.cjs')
 
 function createMockContext() {
   const routes = []
@@ -114,6 +118,12 @@ async function runMockResponse(handler) {
 }
 
 async function main() {
+  const previousFeatureFlag =
+    process.env[STOCK_PREPARATION_FEATURE_FLAG]
+  const previousArtifactRoot =
+    process.env[STOCK_PREPARATION_ENV.artifactRoot]
+  process.env[STOCK_PREPARATION_FEATURE_FLAG] = 'false'
+
   // --- 1. Manifest structural checks -----------------------------------
   const manifest = require(MANIFEST_PATH)
   assert.equal(manifest.manifestVersion, '2.0.0', 'manifest.manifestVersion must be 2.0.0')
@@ -237,11 +247,44 @@ async function main() {
 
   // --- 7. Deactivate clears state --------------------------------------
   await entry.deactivate()
-  // After deactivate, a re-activation must work with clean slate
+  // A malformed enabled S6 configuration disables only that capability.
+  process.env[STOCK_PREPARATION_FEATURE_FLAG] = 'true'
+  delete process.env[STOCK_PREPARATION_ENV.artifactRoot]
   const { context: context2, inspect: inspect2 } = createMockContext()
   await entry.activate(context2)
   assert.ok(inspect2.routes.length >= 1, 'routes cleanly re-registered after deactivate')
+  const healthRoute2 = inspect2.routes.find(
+    (route) =>
+      route.method === 'GET'
+      && route.path === '/api/integration/health',
+  )
+  const healthBody2 = await runMockResponse(healthRoute2.handler)
+  assert.equal(
+    healthBody2.capabilities.stockPreparationSqlServerSealedSnapshot,
+    false,
+    'S6 initialization refusal leaves only the S6 capability disabled',
+  )
+  assert.equal(
+    inspect2.logs.some(
+      ([level, message]) =>
+        level === 'warn'
+        && message.includes('runtime initialization refused'),
+    ),
+    true,
+    'S6 initialization refusal emits a values-free warning',
+  )
   await entry.deactivate()
+  if (previousFeatureFlag === undefined) {
+    delete process.env[STOCK_PREPARATION_FEATURE_FLAG]
+  } else {
+    process.env[STOCK_PREPARATION_FEATURE_FLAG] = previousFeatureFlag
+  }
+  if (previousArtifactRoot === undefined) {
+    delete process.env[STOCK_PREPARATION_ENV.artifactRoot]
+  } else {
+    process.env[STOCK_PREPARATION_ENV.artifactRoot] =
+      previousArtifactRoot
+  }
 
   console.log('✓ plugin-runtime-smoke: all assertions passed')
 }

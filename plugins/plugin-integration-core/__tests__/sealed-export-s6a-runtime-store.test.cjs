@@ -188,8 +188,9 @@ async function refuses(action, reason) {
 async function main() {
   const db = createMemoryDb()
   let nextId = 1
+  let clockMs = NOW_MS
   const store = createStockPreparationRuntimeStore({
-    clock: () => NOW_MS,
+    clock: () => clockMs,
     db,
     idGenerator: () => `run-s6a-${nextId++}`,
   })
@@ -329,6 +330,36 @@ async function main() {
       scope: SCOPE,
     }),
     'SEALED_EXPORT_MANIFEST_REPLAYED',
+  )
+
+  const interruptedCapture = await store.openRun({
+    actor: 'operator-s6a',
+    binding,
+    operationId: 'operation-interrupted',
+    scope: SCOPE,
+  })
+  assert.equal(interruptedCapture.status, 'CAPTURING')
+  clockMs += 5 * 60 * 1000
+  await refuses(
+    () => store.openRun({
+      actor: 'operator-s6a',
+      binding,
+      operationId: 'operation-interrupted',
+      scope: SCOPE,
+    }),
+    'SEALED_EXPORT_CAPTURE_FAILED',
+  )
+  const interruptedRow = db.rows(RUN_TABLE).find(
+    (row) => row.operation_id === 'operation-interrupted',
+  )
+  assert.equal(
+    interruptedRow.status,
+    'CAPTURE_FAILED',
+    'an expired capture lease releases the binding without a second source read',
+  )
+  assert.equal(
+    interruptedRow.failure_reason,
+    'SEALED_EXPORT_CAPTURE_FAILED',
   )
 
   const tamperCapture = await store.openRun({

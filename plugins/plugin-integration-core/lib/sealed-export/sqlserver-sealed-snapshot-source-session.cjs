@@ -207,6 +207,9 @@ async function openMssqlSnapshotCaptureContext(rawInput) {
     },
     async startSourceRead(sourceReadSql) {
       if (closed) failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
+      if (sourceReadCount !== 0) {
+        failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
+      }
       if (typeof sourceReadSql !== 'string' || sourceReadSql.length === 0) {
         failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
       }

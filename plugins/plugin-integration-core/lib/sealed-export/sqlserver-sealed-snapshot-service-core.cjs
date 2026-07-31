@@ -1215,7 +1215,8 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
         }
       }
       await awaitSourceCompletion(sourceRead.completion)
-      if (captureContext.getSourceReadCount() !== 1) {
+      const dataStreamReadCount = captureContext.getSourceReadCount()
+      if (dataStreamReadCount !== 1) {
         failSealedExport('SEALED_EXPORT_CAPTURE_FAILED')
       }
       if (capturedRowCount !== sourceRowCount) {
@@ -1342,7 +1343,7 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
         rowCount: artifact.rowCount,
         runtimeReachable: false,
         signatureVerified: true,
-        dataStreamReadCount: 1,
+        dataStreamReadCount,
         orderingProbeReadCount: 1,
         usedCompletenessProofs: completeness.usedCompletenessProofs,
       })

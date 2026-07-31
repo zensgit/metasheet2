@@ -304,30 +304,47 @@ function bindingRow(binding) {
   }
 }
 
+function rowMatchesExpected(row, expected, ignoredFields = new Set()) {
+  return Boolean(
+    row
+    && Object.entries(expected).every(([field, value]) => {
+      if (ignoredFields.has(field)) return true
+      return (
+        field.endsWith('_at')
+          ? Date.parse(row[field]) === Date.parse(value)
+          : Buffer.isBuffer(value)
+            ? Buffer.isBuffer(row[field]) && row[field].equals(value)
+            : row[field] === value
+      )
+    }),
+  )
+}
+
 function initialProvisioningMatches(binding, authority, rows) {
-  const expectedBinding = bindingRow(binding)
-  const expectedAuthority = authorityRow(authority)
-  const expectedPublicKey = publicKeyRow(authority)
   return (
-    rows.binding
-    && rows.authority
-    && rows.publicKey
-    && Object.entries(expectedBinding).every(([field, value]) =>
-      field.endsWith('_at')
-        ? Date.parse(rows.binding[field]) === Date.parse(value)
-        : rows.binding[field] === value,
+    rowMatchesExpected(rows.binding, bindingRow(binding))
+    && rowMatchesExpected(rows.authority, authorityRow(authority))
+    && rowMatchesExpected(rows.publicKey, publicKeyRow(authority))
+  )
+}
+
+function initialProvisioningCanRefreshQualification(
+  binding,
+  authority,
+  rows,
+) {
+  return (
+    rowMatchesExpected(rows.binding, bindingRow(binding))
+    && rowMatchesExpected(
+      rows.authority,
+      authorityRow(authority),
+      new Set([
+        'qualification_current',
+        'qualification_digest',
+        'qualification_expires_at',
+      ]),
     )
-    && Object.entries(expectedAuthority).every(([field, value]) =>
-      field.endsWith('_at')
-        ? Date.parse(rows.authority[field]) === Date.parse(value)
-        : rows.authority[field] === value,
-    )
-    && Object.entries(expectedPublicKey).every(([field, value]) => {
-      const observed = rows.publicKey[field]
-      return Buffer.isBuffer(value)
-        ? Buffer.isBuffer(observed) && observed.equals(value)
-        : observed === value
-    })
+    && rowMatchesExpected(rows.publicKey, publicKeyRow(authority))
   )
 }
 
@@ -499,6 +516,31 @@ function createSealedExportLifecycleProvisioning({ db, clock = Date.now } = {}) 
           publicKey: existingPublicKey,
         })) {
           return operationEvidence('INITIAL_PROVISIONED', false)
+        }
+        if (initialProvisioningCanRefreshQualification(
+          binding,
+          authority,
+          {
+            authority: existingAuthority,
+            binding: activeBinding,
+            publicKey: existingPublicKey,
+          },
+        )) {
+          changedRow(await trx.updateRow(
+            AUTHORITY_STATE_TABLE,
+            {
+              qualification_current: true,
+              qualification_digest: authority.qualificationDigest,
+              qualification_expires_at:
+                authority.qualificationExpiresAt,
+            },
+            {
+              ...authorityWhere,
+              signer_key_id: authority.signerKeyId,
+              signer_status: 'ACTIVE',
+            },
+          ))
+          return operationEvidence('QUALIFICATION_REFRESHED', true)
         }
         failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
       }

@@ -67,8 +67,13 @@ function createMemoryDb() {
       async selectOneForUpdate(table, where) {
         return target.get(table).find((row) => matches(row, where)) || null
       },
-      async updateRow() {
-        throw new Error('update not expected')
+      async updateRow(table, patch, where) {
+        const row = target.get(table).find(
+          (candidate) => matches(candidate, where),
+        )
+        if (!row) return []
+        Object.assign(row, patch)
+        return [{ ...row }]
       },
     }
   }
@@ -172,6 +177,28 @@ async function main() {
     fixture(material.publicKey),
   )
   assert.equal(replay.changed, false)
+
+  const refreshedInput = fixture(material.publicKey)
+  refreshedInput.authority = {
+    ...refreshedInput.authority,
+    qualificationDigest: '6'.repeat(64),
+    qualificationExpiresAt: '2026-08-01T00:01:00Z',
+  }
+  const refreshed = await service.provisionInitialStockPreparationBinding(
+    refreshedInput,
+  )
+  assert.deepEqual(refreshed, {
+    changed: true,
+    externalWrite: false,
+    operation: 'QUALIFICATION_REFRESHED',
+    valuesFree: true,
+  })
+  assert.equal(
+    db.rows(AUTHORITY_STATE_TABLE)[0].qualification_digest,
+    '6'.repeat(64),
+  )
+  assert.equal(db.rows(BINDING_TABLE).length, 1)
+  assert.equal(db.rows(PUBLIC_KEY_TABLE).length, 1)
 
   const mismatched = fixture(material.publicKey)
   mismatched.binding = {

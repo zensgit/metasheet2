@@ -184,8 +184,13 @@ async function buildCapturePackage(root, envelope, rows = sourceRows()) {
   }
 }
 
-function createRuntimeStore(binding) {
+function createRuntimeStore(
+  binding,
+  { interruptFirstMarkIngested = false } = {},
+) {
   let state = null
+  let markIngestedInterrupted = false
+  let authorityRefused = false
 
   function handle() {
     return Object.freeze({
@@ -204,6 +209,9 @@ function createRuntimeStore(binding) {
       return binding
     },
     async loadCurrentAuthority() {
+      if (authorityRefused) {
+        throw new Error('simulated expired runtime authority')
+      }
       return Object.freeze({
         bindingExpiresAt: '2099-01-01T00:00:00.000Z',
         qualificationDigest: 'b'.repeat(64),
@@ -211,6 +219,9 @@ function createRuntimeStore(binding) {
         signerExpiresAt: '2099-01-01T00:00:00.000Z',
         signerKeyId: 'a'.repeat(64),
       })
+    },
+    refuseAuthority() {
+      authorityRefused = true
     },
     async openRun({ actor, operationId }) {
       if (state === null) {
@@ -238,6 +249,15 @@ function createRuntimeStore(binding) {
       return handle()
     },
     async markIngested() {
+      if (
+        interruptFirstMarkIngested
+        && !markIngestedInterrupted
+      ) {
+        markIngestedInterrupted = true
+        throw new Error(
+          'simulated process interruption after upload completion',
+        )
+      }
       state.status = 'INGESTED'
       return handle()
     },
@@ -284,6 +304,7 @@ function createRuntimeStore(binding) {
 function createPipeline(rows, { interruptFirstUpload = false } = {}) {
   const accepted = new Set()
   let interrupted = false
+  let uploadComplete = false
   const activationResults = new WeakSet()
   const descriptors = new WeakSet()
   return Object.freeze({
@@ -292,8 +313,16 @@ function createPipeline(rows, { interruptFirstUpload = false } = {}) {
         return { sessionId: 'session-s6a' }
       },
       async resumeSession() {
+        if (uploadComplete) {
+          return {
+            acceptedChunkIndexes: [...accepted],
+            artifactDigestVerified: true,
+            status: 'UPLOAD_COMPLETE',
+          }
+        }
         return {
           acceptedChunkIndexes: [...accepted],
+          status: 'UPLOADING',
         }
       },
       async submitChunk({ chunkIndex }) {
@@ -305,6 +334,7 @@ function createPipeline(rows, { interruptFirstUpload = false } = {}) {
         return { decision: 'ACCEPT' }
       },
       async completeSession() {
+        uploadComplete = true
         return {
           artifactDigestVerified: true,
           status: 'UPLOAD_COMPLETE',
@@ -367,7 +397,9 @@ async function main() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 's6a-runtime-core-'))
   try {
     const binding = runtimeBinding()
-    const runtimeStore = createRuntimeStore(binding)
+    const runtimeStore = createRuntimeStore(binding, {
+      interruptFirstMarkIngested: true,
+    })
     const pipeline = createPipeline(sourceRows(), {
       interruptFirstUpload: true,
     })
@@ -415,6 +447,16 @@ async function main() {
     )
     assert.equal(runtimeStore.snapshot().status, 'INGESTING')
     assert.equal(sourceReads, 1)
+    await refuses(
+      () => runtime.run(call),
+      'SEALED_EXPORT_INTERNAL_ERROR',
+    )
+    assert.equal(
+      runtimeStore.snapshot().status,
+      'INGESTING',
+      'upload completion survives interruption before markIngested',
+    )
+    assert.equal(sourceReads, 1)
     const completed = await runtime.run(call)
     assert.deepEqual(completed, {
       businessLineCount: 2,
@@ -427,6 +469,8 @@ async function main() {
     })
     assert.equal(sourceReads, 1, 'retry never re-reads the source')
     assert.equal(persistCalls, 1)
+    runtimeStore.refuseAuthority()
+    const sourceLoadsBeforeReplay = sourceLoads
     const replay = await runtime.run({
       ...call,
       actor: 'different-operator',
@@ -443,7 +487,7 @@ async function main() {
     assert.equal(sourceReads, 1)
     assert.equal(
       sourceLoads,
-      2,
+      sourceLoadsBeforeReplay,
       'completed replay returns before loading source credentials',
     )
 

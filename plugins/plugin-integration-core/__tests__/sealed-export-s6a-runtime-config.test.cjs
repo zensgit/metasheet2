@@ -117,6 +117,21 @@ function main() {
         .sealedSnapshotSqlServer.password,
       'secret',
     )
+    const workspaceScoped = JSON.parse(
+      fs.readFileSync(env[ENV.provisioningSpecFile], 'utf8'),
+    )
+    workspaceScoped.binding.workspaceId = 'workspace-1'
+    workspaceScoped.externalSystem.workspaceId = 'workspace-1'
+    fs.writeFileSync(
+      env[ENV.provisioningSpecFile],
+      JSON.stringify(workspaceScoped),
+    )
+    assert.throws(
+      () => loadStockPreparationProvisioningConfig({ env }),
+      (error) => isTrustedSealedExportError(error)
+        && error.reason === 'SEALED_EXPORT_INTERNAL_ERROR',
+      'the single-customer runtime rejects an unreachable workspace scope',
+    )
 
     assert.throws(
       () => loadStockPreparationRuntimeConfig({

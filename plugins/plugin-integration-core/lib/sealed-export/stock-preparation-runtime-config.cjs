@@ -158,6 +158,12 @@ function readProvisioningSpec(fileName) {
   const spec = exactKeys(owned.value, PROVISIONING_SPEC_FIELDS)
   exactKeys(spec.binding, PROVISIONING_BINDING_FIELDS)
   exactKeys(spec.externalSystem, EXTERNAL_SYSTEM_FIELDS)
+  if (
+    spec.binding.workspaceId !== null
+    || spec.externalSystem.workspaceId !== null
+  ) {
+    failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+  }
   return spec
 }
 
