@@ -20,6 +20,32 @@
       </template>
       <template #actions>
         <div class="template-authoring__actions">
+          <template v-if="canvasV2Enabled && !readOnly">
+            <el-tooltip content="撤销（Cmd/Ctrl+Z）" placement="bottom">
+              <span>
+                <el-button
+                  :icon="RefreshLeft"
+                  :disabled="!canUndoAuthoring"
+                  title="撤销（Cmd/Ctrl+Z）"
+                  aria-label="撤销"
+                  data-testid="approval-template-undo"
+                  @click="undoAuthoring"
+                />
+              </span>
+            </el-tooltip>
+            <el-tooltip content="重做（Cmd/Ctrl+Shift+Z）" placement="bottom">
+              <span>
+                <el-button
+                  :icon="RefreshRight"
+                  :disabled="!canRedoAuthoring"
+                  title="重做（Cmd/Ctrl+Shift+Z）"
+                  aria-label="重做"
+                  data-testid="approval-template-redo"
+                  @click="redoAuthoring"
+                />
+              </span>
+            </el-tooltip>
+          </template>
           <el-button
             :loading="saving"
             :disabled="!canSave"
@@ -220,6 +246,7 @@
               :disabled="readOnly"
               type="textarea"
               :rows="3"
+              data-testid="approval-template-description"
             />
           </el-form-item>
           <el-form-item label="可见范围">
@@ -248,7 +275,7 @@
       <ApprovalFormBuilder
         ref="formBuilderRef"
         v-show="activeAuthoringSection === 'fields'"
-        v-model:fields="draft.fields"
+        :fields="draft.fields"
         :workspace-enabled="canvasV2Enabled"
         :attachment-authoring-enabled="attachmentAuthoringEnabled"
         :read-only="readOnly"
@@ -260,7 +287,7 @@
         :structural-mutation-enabled="formStructuralMutationEnabled"
         :structural-mutation-reason="formStructuralMutationReason"
         @retry-record-link-catalog="retryRecordLinkCatalog"
-        @field-type-change="invalidateStaleRecordLinkDependencies"
+        @update-field="onUpdateFormField"
         @add-field="onAddFormField"
         @remove-field="onRemoveFormField"
         @move-field="onMoveFormField"
@@ -304,7 +331,11 @@
           :canvas-surface-css="canvasSurfaceStyle"
           :canvas-layout="canvasLayout"
           :canvas-edge-lines="canvasEdgeLines"
+          :canvas-insertion-targets="canvasInsertionTargets"
           :canvas-move-target-lines="canvasMoveTargetLines"
+          :selected-canvas-branch-group="selectedCanvasBranchGroup"
+          :dragging-canvas-branch-edge-key="canvasBranchDragSession?.edgeKey ?? null"
+          :canvas-live-message="canvasLiveMessage"
           :canvas-minimap="canvasMinimap"
           :selected-canvas-node="selectedCanvasNode"
           :moving-canvas-node="movingCanvasNode"
@@ -319,8 +350,6 @@
           :can-move-canvas-node="canMoveCanvasNode"
           :canvas-step-move-target="canvasStepMoveTarget"
           :canvas-move-target-label="canvasMoveTargetLabel"
-          :can-insert-after="canInsertAfter"
-          :can-insert-parallel-after="canInsertParallelAfter"
           :can-remove-node="canRemoveNode"
           @zoom-out="changeCanvasZoom('out')"
           @zoom-in="changeCanvasZoom('in')"
@@ -331,15 +360,18 @@
           @close-inspector="clearCanvasSelection"
           @node-keydown="onCanvasNodeKeydown"
           @node-drag-start="onCanvasNodeDragStart"
-          @node-drag-end="cancelCanvasNodeMove"
+          @node-drag-end="finishCanvasNodeDrag"
           @move-target-click="applyCanvasNodeMove"
+          @move-target-drop="onCanvasNodeDrop"
           @move-step="moveCanvasNodeStep"
           @begin-move="beginCanvasNodeMove"
+          @branch-drag-start="onCanvasBranchDragStart"
+          @branch-drag-end="finishCanvasBranchDrag"
+          @branch-target-drop="onCanvasBranchDrop"
+          @move-branch-step="moveCanvasBranchStep"
           @add-condition-branch="onAddConditionBranch"
           @add-parallel-branch="onAddParallelBranch"
-          @insert-approval-after="onInsertApprovalAfter"
-          @insert-condition-after="onInsertConditionAfter"
-          @insert-parallel-after="onInsertParallelAfter"
+          @insert-node-into-edge="onInsertNodeIntoEdge"
           @remove-node="onRemoveNode"
         />
 
@@ -930,7 +962,7 @@ import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useFeatureFlags } from '../../stores/featureFlags'
@@ -1010,14 +1042,33 @@ import {
   addConditionBranch,
   addParallelBranch,
   adjacentLinearNodeMoveTarget,
+  approvalEdgeInsertionTargets,
   appendApprovalNode,
   collectParallelRegionNodeKeys,
+  edgeInsertionNodeTypes,
   insertConditionGateway,
+  insertNodeIntoEdge,
   insertParallelGateway,
   linearNodeMoveTargets,
-  moveLinearNode,
   removeLinearNode,
+  type EdgeInsertableNodeType,
 } from '../../approvals/graphTopologyEdit'
+import {
+  executeApprovalCanvasCommand,
+  type ApprovalCanvasCommand,
+  type ApprovalCanvasSelection,
+} from '../../approvals/approvalCanvasCommands'
+import {
+  cloneApprovalAuthoringSnapshot,
+  createApprovalAuthoringHistory,
+  isApprovalHistoryShortcutBlocked,
+  recordApprovalAuthoringCommand,
+  redoApprovalAuthoringCommand,
+  undoApprovalAuthoringCommand,
+  type ApprovalAuthoringCommand,
+  type ApprovalAuthoringFocus,
+  type ApprovalAuthoringSnapshot,
+} from '../../approvals/approvalAuthoringHistory'
 import {
   computeLayout,
   graphValidityIssues,
@@ -1079,6 +1130,7 @@ const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
 const formBuilderRef = ref<{
   focusField(localId: string): void
+  currentFieldLocalId(): string | null
   announce(message: string): void
 } | null>(null)
 const formAuthoringContext = ref<ApprovalTemplateFormAuthoringContextDTO | null>(null)
@@ -1385,6 +1437,21 @@ function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
   return draft.value.conditionEdits?.[nodeKey]
 }
 
+function conditionBranchFor(nodeKey: string, edgeKey: string): ConditionBranchEdit | undefined {
+  return conditionEditFor(nodeKey)?.branches.find((branch) => branch.edgeKey === edgeKey)
+}
+
+function runNodeConfigCommand(nodeKey: string, control: string, mutate: () => boolean): boolean {
+  return runAuthoringCommand(
+    { type: 'configure-node', nodeKey, control },
+    mutate,
+    () => ({
+      selection: { kind: 'node', nodeKey },
+      focus: { kind: 'inspector', nodeKey, controlTestId: control },
+    }),
+  )
+}
+
 // Field options for a rule's fieldId picker — exclude record-link/detail (server v1 reject).
 const conditionFieldOptions = computed(() =>
   draft.value.fields
@@ -1419,38 +1486,125 @@ function conditionRuleValueText(rule: ConditionRuleEdit): string {
   if (rule.value === undefined || rule.value === null) return ''
   return typeof rule.value === 'string' ? rule.value : String(rule.value)
 }
-function setConditionRuleValue(rule: ConditionRuleEdit, text: string): void {
-  rule.value = text === '' ? undefined : text
+function setConditionConjunction(nodeKey: string, edgeKey: string, conjunction: 'and' | 'or'): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-conjunction', () => {
+    const branch = conditionBranchFor(nodeKey, edgeKey)
+    if (!branch) return false
+    branch.conjunction = conjunction
+    return true
+  })
 }
 
-function addConditionRule(branch: ConditionBranchEdit): void {
-  branch.rules.push({ fieldId: '', operator: 'eq', value: undefined })
+function setConditionRuleField(nodeKey: string, edgeKey: string, ruleIndex: number, fieldId: string): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-rule-field', () => {
+    const rule = conditionBranchFor(nodeKey, edgeKey)?.rules[ruleIndex]
+    if (!rule) return false
+    rule.fieldId = fieldId
+    return true
+  })
 }
-function removeConditionRule(branch: ConditionBranchEdit, ruleIndex: number): void {
-  if (branch.rules.length === 1) return
-  branch.rules.splice(ruleIndex, 1)
+
+function setConditionRuleOperator(
+  nodeKey: string,
+  edgeKey: string,
+  ruleIndex: number,
+  operator: ConditionRuleOperator,
+): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-rule-operator', () => {
+    const rule = conditionBranchFor(nodeKey, edgeKey)?.rules[ruleIndex]
+    if (!rule) return false
+    rule.operator = operator
+    return true
+  })
 }
-function setConditionBranchPredicateMode(branch: ConditionBranchEdit, mode: string): void {
-  branch.predicateMode = mode === 'formula' ? 'formula' : 'rules'
-  if (branch.predicateMode === 'rules' && branch.rules.length === 0) {
+
+function setConditionRuleValue(nodeKey: string, edgeKey: string, ruleIndex: number, text: string): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-rule-value', () => {
+    const rule = conditionBranchFor(nodeKey, edgeKey)?.rules[ruleIndex]
+    if (!rule) return false
+    rule.value = text === '' ? undefined : text
+    return true
+  })
+}
+
+function addConditionRule(nodeKey: string, edgeKey: string): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-rule-add', () => {
+    const branch = conditionBranchFor(nodeKey, edgeKey)
+    if (!branch) return false
     branch.rules.push({ fieldId: '', operator: 'eq', value: undefined })
-  }
+    return true
+  })
+}
+function removeConditionRule(nodeKey: string, edgeKey: string, ruleIndex: number): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-rule-remove', () => {
+    const branch = conditionBranchFor(nodeKey, edgeKey)
+    if (!branch || branch.rules.length === 1 || !branch.rules[ruleIndex]) return false
+    branch.rules.splice(ruleIndex, 1)
+    return true
+  })
+}
+function setConditionBranchPredicateMode(nodeKey: string, edgeKey: string, mode: string): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-predicate-mode', () => {
+    const branch = conditionBranchFor(nodeKey, edgeKey)
+    if (!branch) return false
+    branch.predicateMode = mode === 'formula' ? 'formula' : 'rules'
+    if (branch.predicateMode === 'rules' && branch.rules.length === 0) {
+      branch.rules.push({ fieldId: '', operator: 'eq', value: undefined })
+    }
+    return true
+  })
+}
+function setConditionFormulaExpression(nodeKey: string, edgeKey: string, expression: string): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-formula-expression', () => {
+    const branch = conditionBranchFor(nodeKey, edgeKey)
+    if (!branch) return false
+    branch.formulaExpression = expression
+    return true
+  })
 }
 function appendFormulaText(branch: ConditionBranchEdit, text: string): void {
   const prefix = branch.formulaExpression.trim() ? ' ' : ''
   branch.formulaExpression = `${branch.formulaExpression}${prefix}${text}`
 }
-function insertConditionFormulaToken(branch: ConditionBranchEdit, token: string): void {
-  appendFormulaText(branch, token)
+function insertConditionFormulaToken(nodeKey: string, edgeKey: string, token: string): void {
+  runNodeConfigCommand(nodeKey, `approval-condition-formula-insert-${token}`, () => {
+    const branch = conditionBranchFor(nodeKey, edgeKey)
+    if (!branch) return false
+    appendFormulaText(branch, token)
+    return true
+  })
 }
-function insertConditionFormulaFunction(branch: ConditionBranchEdit, fn: 'SUM' | 'COUNT' | 'MIN' | 'MAX'): void {
-  appendFormulaText(branch, `${fn}()`)
+function insertConditionFormulaFunction(
+  nodeKey: string,
+  edgeKey: string,
+  fn: 'SUM' | 'COUNT' | 'MIN' | 'MAX',
+): void {
+  runNodeConfigCommand(nodeKey, `approval-condition-formula-insert-${fn.toLowerCase()}`, () => {
+    const branch = conditionBranchFor(nodeKey, edgeKey)
+    if (!branch) return false
+    appendFormulaText(branch, `${fn}()`)
+    return true
+  })
 }
 // CURATED-VOCABULARY (RA-1b): insert a ready `requester.role in ["<id>"]` membership for a CURATED role
 // (from the formula-roles picker). JSON.stringify quotes/escapes the id so the inserted snippet always
 // parses. Single-role is the common case; for multiple roles the author edits the array by hand.
-function insertConditionFormulaRoleMembership(branch: ConditionBranchEdit, roleId: string): void {
-  appendFormulaText(branch, `requester.role in [${JSON.stringify(roleId)}]`)
+function insertConditionFormulaRoleMembership(nodeKey: string, edgeKey: string, roleId: string): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-formula-role', () => {
+    const branch = conditionBranchFor(nodeKey, edgeKey)
+    if (!branch) return false
+    appendFormulaText(branch, `requester.role in [${JSON.stringify(roleId)}]`)
+    return true
+  })
+}
+
+function setConditionDefaultEdge(nodeKey: string, edgeKey: string): void {
+  runNodeConfigCommand(nodeKey, 'approval-condition-default-edge', () => {
+    const edit = conditionEditFor(nodeKey)
+    if (!edit) return false
+    edit.defaultEdgeKey = edgeKey
+    return true
+  })
 }
 
 function conditionFormulaDryRunKey(nodeKey: string, edgeKey: string): string {
@@ -1549,6 +1703,14 @@ const PARALLEL_JOIN_MODE_LABELS: Record<ParallelJoinMode, string> = {
 function parallelJoinModeLabel(mode: ParallelJoinMode): string {
   return PARALLEL_JOIN_MODE_LABELS[mode] ?? mode
 }
+function setParallelJoinMode(nodeKey: string, mode: ParallelJoinMode): void {
+  runNodeConfigCommand(nodeKey, 'approval-parallel-join-mode', () => {
+    const edit = parallelEditFor(nodeKey)
+    if (!edit) return false
+    edit.joinMode = mode
+    return true
+  })
+}
 
 // ── G-4 cc editor (targetType + targetIds; the cc node's edges/position are preserved topology) ──
 // Editable model on `draft.ccEdits[nodeKey]`, seeded 1:1 from the preserved cc nodes. The controls
@@ -1559,6 +1721,15 @@ function ccEditFor(nodeKey: string): CcNodeEdit | undefined {
 }
 function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
   return targetType === 'role' ? '角色' : '用户'
+}
+function setCcTargetType(nodeKey: string, targetType: ApprovalAssigneeType): void {
+  runNodeConfigCommand(nodeKey, 'approval-cc-target-type', () => {
+    const edit = ccEditFor(nodeKey)
+    if (!edit) return false
+    edit.targetType = targetType
+    syncCcOptions(nodeKey)
+    return true
+  })
 }
 
 // ── G-5 approval-node editor (approver SOURCE only; the node's mode/policy + edges are preserved) ──
@@ -1593,10 +1764,14 @@ function approvalNodeMode(nodeKey: string): ApprovalMode {
   return approvalNodeEditFor(nodeKey)?.approvalMode ?? 'single'
 }
 function setApprovalNodeMode(nodeKey: string, mode: ApprovalMode): void {
-  const step = linearStepForNode(nodeKey)
-  if (step) { step.approvalMode = mode; return }
-  const edit = approvalNodeEditFor(nodeKey)
-  if (edit) edit.approvalMode = mode
+  runNodeConfigCommand(nodeKey, 'approval-node-mode', () => {
+    const step = linearStepForNode(nodeKey)
+    if (step) { step.approvalMode = mode; return true }
+    const edit = approvalNodeEditFor(nodeKey)
+    if (!edit) return false
+    edit.approvalMode = mode
+    return true
+  })
 }
 function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
   const step = linearStepForNode(nodeKey)
@@ -1604,10 +1779,14 @@ function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
   return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
 }
 function setApprovalNodeEmptyPolicy(nodeKey: string, policy: EmptyAssigneePolicy): void {
-  const step = linearStepForNode(nodeKey)
-  if (step) { step.emptyAssigneePolicy = policy; return }
-  const edit = approvalNodeEditFor(nodeKey)
-  if (edit) edit.emptyAssigneePolicy = policy
+  runNodeConfigCommand(nodeKey, 'approval-node-empty-policy', () => {
+    const step = linearStepForNode(nodeKey)
+    if (step) { step.emptyAssigneePolicy = policy; return true }
+    const edit = approvalNodeEditFor(nodeKey)
+    if (!edit) return false
+    edit.emptyAssigneePolicy = policy
+    return true
+  })
 }
 function approvalNodeMergeWithRequester(nodeKey: string): boolean {
   // Linear carrier: `mergeWithRequester` is its own boolean field; the three non-merge
@@ -1618,16 +1797,19 @@ function approvalNodeMergeWithRequester(nodeKey: string): boolean {
   return Boolean(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy?.mergeWithRequester)
 }
 function setApprovalNodeMergeWithRequester(nodeKey: string, enabled: boolean): void {
-  const step = linearStepForNode(nodeKey)
-  if (step) { step.mergeWithRequester = enabled; return }
-  const edit = approvalNodeEditFor(nodeKey)
-  if (!edit) return
-  const policy = edit.autoApprovalPolicy && edit.autoApprovalPolicy !== null
-    ? { ...edit.autoApprovalPolicy }
-    : {}
-  if (enabled) policy.mergeWithRequester = true
-  else delete policy.mergeWithRequester
-  edit.autoApprovalPolicy = Object.keys(policy).length > 0 ? policy : null
+  runNodeConfigCommand(nodeKey, 'approval-node-merge-with-requester', () => {
+    const step = linearStepForNode(nodeKey)
+    if (step) { step.mergeWithRequester = enabled; return true }
+    const edit = approvalNodeEditFor(nodeKey)
+    if (!edit) return false
+    const policy = edit.autoApprovalPolicy && edit.autoApprovalPolicy !== null
+      ? { ...edit.autoApprovalPolicy }
+      : {}
+    if (enabled) policy.mergeWithRequester = true
+    else delete policy.mergeWithRequester
+    edit.autoApprovalPolicy = Object.keys(policy).length > 0 ? policy : null
+    return true
+  })
 }
 function approvalNodeFieldAccess(nodeKey: string, fieldId: string): NodeFieldAccess {
   const step = linearStepForNode(nodeKey)
@@ -1635,14 +1817,17 @@ function approvalNodeFieldAccess(nodeKey: string, fieldId: string): NodeFieldAcc
   return approvalNodeEditFor(nodeKey)?.fieldPermissions?.find((permission) => permission.fieldId === fieldId)?.access ?? 'editable'
 }
 function setApprovalNodeFieldAccess(nodeKey: string, fieldId: string, access: NodeFieldAccess): void {
-  const step = linearStepForNode(nodeKey)
-  // Same `setStepFieldPermission` write the step card's select performs (absent === editable).
-  if (step) { onStepFieldAccessChange(step, fieldId, access); return }
-  const edit = approvalNodeEditFor(nodeKey)
-  if (!edit) return
-  const next = (edit.fieldPermissions ?? []).filter((permission) => permission.fieldId !== fieldId)
-  if (access !== 'editable') next.push({ fieldId, access })
-  edit.fieldPermissions = next
+  runNodeConfigCommand(nodeKey, `approval-node-field-access-${fieldId}`, () => {
+    const step = linearStepForNode(nodeKey)
+    // Same `setStepFieldPermission` write the step card's select performs (absent === editable).
+    if (step) { onStepFieldAccessChange(step, fieldId, access); return true }
+    const edit = approvalNodeEditFor(nodeKey)
+    if (!edit) return false
+    const next = (edit.fieldPermissions ?? []).filter((permission) => permission.fieldId !== fieldId)
+    if (access !== 'editable') next.push({ fieldId, access })
+    edit.fieldPermissions = next
+    return true
+  })
 }
 // Replace ONLY the primary (first) source; preserve any extra sources verbatim (no flatten).
 function setApprovalNodeSource(nodeKey: string, source: ApprovalAssigneeSource): void {
@@ -1660,16 +1845,20 @@ function setApprovalSourceKind(nodeKey: string, kind: ApprovalAssigneeSourceKind
   // does — the per-kind carriers (`idsText` / `fieldId` / `levels` / `level`) survive a kind switch
   // there, and `sourceFromStep` reads only the one the new kind needs. The complex branch below
   // builds a FRESH source object because its carrier holds no per-kind siblings to preserve.
-  const step = linearStepForNode(nodeKey)
-  if (step) { step.sourceKind = kind; return }
-  const next: ApprovalAssigneeSource =
-    kind === 'static_user' ? { kind, userIds: [] }
-      : kind === 'static_role' ? { kind, roleIds: [] }
-        : kind === 'form_field_user' ? { kind, fieldId: '' }
-          : kind === 'continuous_managers' ? { kind, levels: 1 }
-            : kind === 'manager_at_level' ? { kind, level: 1 }
-              : { kind }
-  setApprovalNodeSource(nodeKey, next)
+  runNodeConfigCommand(nodeKey, 'approval-node-source-kind', () => {
+    const step = linearStepForNode(nodeKey)
+    if (step) { step.sourceKind = kind; return true }
+    const next: ApprovalAssigneeSource =
+      kind === 'static_user' ? { kind, userIds: [] }
+        : kind === 'static_role' ? { kind, roleIds: [] }
+          : kind === 'form_field_user' ? { kind, fieldId: '' }
+            : kind === 'continuous_managers' ? { kind, levels: 1 }
+              : kind === 'manager_at_level' ? { kind, level: 1 }
+                : { kind }
+    if (!approvalNodeEditFor(nodeKey)) return false
+    setApprovalNodeSource(nodeKey, next)
+    return true
+  })
 }
 function approvalSourceIds(nodeKey: string): string[] {
   const step = linearStepForNode(nodeKey)
@@ -1694,36 +1883,147 @@ function approvalSourceIsPlaceholder(nodeKey: string): boolean {
 // Each op runs on the EFFECTIVE graph (configs applied) and re-seeds the draft, so the structured
 // editors stay in sync. Guards mirror the engine preconditions so a shown button never throws; a
 // (defensive) throw surfaces as loadError. The interactive free-drag canvas is the gated next slice.
-function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): void {
+function runTopologyOp(
+  command: ApprovalAuthoringCommand,
+  op: (graph: ApprovalGraph) => ApprovalGraph,
+  afterContext?: () => Partial<Pick<ApprovalAuthoringSnapshot, 'selection' | 'focus'>>,
+): boolean {
   try {
-    draft.value = applyTopologyToDraft(draft.value, op)
+    return runAuthoringCommand(command, () => {
+      draft.value = applyTopologyToDraft(draft.value, op)
+      return true
+    }, afterContext)
   } catch {
     // Topology helpers include internal node/edge keys in diagnostics. Those identifiers are useful
     // to developers but are not an author-facing vocabulary and must not leak into the editor banner.
     loadError.value = '该拓扑操作不适用于当前流程结构'
+    return false
   }
 }
+
+const CANVAS_COMMAND_REJECTED = Symbol('canvas-command-rejected')
+
+/**
+ * C4 page seam for every semantic node move and branch reorder. C5 can replace the body with the
+ * shared history apply without changing renderer intents or leaving a second graph-write path.
+ */
+function applyCanvasCommand(
+  command: ApprovalCanvasCommand,
+  selectionBefore: ApprovalCanvasSelection,
+  guard: (graph: ApprovalGraph) => boolean = () => true,
+): boolean {
+  if (readOnly.value) return false
+  try {
+    let selectionAfter: ApprovalCanvasSelection = selectionBefore
+    const historyCommand: ApprovalAuthoringCommand = command.type === 'move-node-into-edge'
+      ? { type: 'move-node', nodeKey: command.nodeKey, edgeKey: command.intoEdgeKey }
+      : command.type === 'reorder-condition-branches'
+        ? { type: 'reorder-condition-branches', nodeKey: command.conditionNodeKey }
+        : { type: 'reorder-parallel-branches', nodeKey: command.parallelNodeKey }
+    return runAuthoringCommand(historyCommand, () => {
+      let applied = false
+      const nextDraft = applyTopologyToDraft(draft.value, (graph) => {
+        if (!guard(graph)) throw CANVAS_COMMAND_REJECTED
+        const result = executeApprovalCanvasCommand(graph, command, selectionBefore)
+        if (!result.ok) throw CANVAS_COMMAND_REJECTED
+        selectionAfter = result.selectionAfter
+        applied = true
+        return result.graph
+      })
+      if (!applied) return false
+      draft.value = nextDraft
+      selectedCanvasNode.value = historySelectionNodeKey(selectionAfter)
+      return true
+    }, () => ({
+      selection: selectionAfter,
+      focus: historySelectionNodeKey(selectionAfter)
+        ? { kind: 'canvas-node', nodeKey: historySelectionNodeKey(selectionAfter)! }
+        : { kind: 'canvas' },
+    }))
+  } catch (error) {
+    if (error !== CANVAS_COMMAND_REJECTED) {
+      loadError.value = '该拓扑操作不适用于当前流程结构'
+    }
+    return false
+  }
+}
+
 function onAddConditionBranch(nodeKey: string): void {
-  runTopologyOp((graph) => addConditionBranch(graph, nodeKey))
+  runTopologyOp(
+    { type: 'add-branch', nodeKey, branchType: 'condition' },
+    (graph) => addConditionBranch(graph, nodeKey),
+  )
 }
 function onAddParallelBranch(nodeKey: string): void {
-  runTopologyOp((graph) => addParallelBranch(graph, nodeKey))
+  runTopologyOp(
+    { type: 'add-branch', nodeKey, branchType: 'parallel' },
+    (graph) => addParallelBranch(graph, nodeKey),
+  )
 }
 function onInsertApprovalAfter(nodeKey: string): void {
-  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey))
+  runTopologyOp(
+    { type: 'insert-after', nodeKey, nodeType: 'approval' },
+    (graph) => appendApprovalNode(graph, nodeKey),
+  )
 }
 function onInsertConditionAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertConditionGateway(graph, nodeKey))
+  runTopologyOp(
+    { type: 'insert-after', nodeKey, nodeType: 'condition' },
+    (graph) => insertConditionGateway(graph, nodeKey),
+  )
   canvasViewMode.value = 'canvas'
 }
 function onInsertParallelAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertParallelGateway(graph, nodeKey))
+  runTopologyOp(
+    { type: 'insert-after', nodeKey, nodeType: 'parallel' },
+    (graph) => insertParallelGateway(graph, nodeKey),
+  )
   canvasViewMode.value = 'canvas'
 }
+function onInsertNodeIntoEdge(edgeKey: string, nodeType: EdgeInsertableNodeType): void {
+  if (readOnly.value || !edgeInsertionNodeTypes(canvasEffectiveGraph.value, edgeKey).includes(nodeType)) return
+  const existingNodeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  let insertedNodeKey: string | undefined
+  const applied = runTopologyOp({ type: 'insert-node', edgeKey, nodeType }, (graph) => {
+    // Revalidate against the graph `applyTopologyToDraft` actually supplies. A menu opened before
+    // another edit may carry a stale edge/type pair; that intent must be a no-op, never a rewire.
+    if (!edgeInsertionNodeTypes(graph, edgeKey).includes(nodeType)) {
+      throw new Error('stale edge insertion intent')
+    }
+    const next = insertNodeIntoEdge(graph, edgeKey, nodeType)
+    insertedNodeKey = next.nodes.find((node) =>
+      node.type === nodeType && !existingNodeKeys.has(node.key))?.key
+    return next
+  }, () => insertedNodeKey
+    ? ({
+        selection: { kind: 'node', nodeKey: insertedNodeKey },
+        focus: { kind: 'canvas-node', nodeKey: insertedNodeKey },
+      })
+    : ({}))
+  if (!applied || !insertedNodeKey) return
+  canvasViewMode.value = 'canvas'
+  void selectCanvasNode(insertedNodeKey)
+}
 function onRemoveNode(nodeKey: string): void {
-  runTopologyOp((graph) => removeLinearNode(graph, nodeKey))
-  // Canvas V2 Slice A: deleting the selected node clears selection and closes the inspector.
-  if (selectedCanvasNode.value === nodeKey) clearCanvasSelection()
+  const graph = canvasEffectiveGraph.value
+  const neighborKey = graph.edges.find((edge) => edge.target === nodeKey)?.source
+    ?? graph.edges.find((edge) => edge.source === nodeKey)?.target
+    ?? null
+  const wasSelected = selectedCanvasNode.value === nodeKey
+  const afterSelection: ApprovalCanvasSelection = wasSelected && neighborKey
+    ? { kind: 'node', nodeKey: neighborKey }
+    : currentCanvasSelection()
+  const applied = runTopologyOp(
+    { type: 'delete-node', nodeKey },
+    (candidate) => removeLinearNode(candidate, nodeKey),
+    () => ({
+      selection: afterSelection,
+      focus: wasSelected && neighborKey
+        ? { kind: 'canvas-node', nodeKey: neighborKey }
+        : captureAuthoringFocus(),
+    }),
+  )
+  if (applied && wasSelected) selectedCanvasNode.value = neighborKey
 }
 // C1: count edges on the EFFECTIVE graph, not `preservedGraph` alone. A linear draft has no
 // `preservedGraph` yet renders real nodes on the canvas — a preservedGraph-only count would report 0
@@ -1787,11 +2087,40 @@ const canvasAvailable = computed(() => (
 const linearCanvasActive = computed(() => (
   canvasAvailable.value && !graphReadOnly.value && canvasViewMode.value === 'canvas'
 ))
+type CanvasBranchKind = 'condition' | 'parallel'
+interface CanvasBranchReorderGroup {
+  kind: CanvasBranchKind
+  nodeKey: string
+  title: string
+  branches: Array<{ edgeKey: string; label: string }>
+}
+interface CanvasNodeDragSession {
+  token: number
+  nodeKey: string
+}
+interface CanvasBranchDragSession {
+  token: number
+  kind: CanvasBranchKind
+  nodeKey: string
+  edgeKey: string
+}
+
+const CANVAS_NODE_DRAG_TYPE = 'application/x-metasheet-approval-canvas-node'
+const CANVAS_BRANCH_DRAG_TYPE = 'application/x-metasheet-approval-canvas-branch'
+const INVALID_NODE_DROP_MESSAGE = '该位置不能放置此节点'
+const INVALID_BRANCH_DROP_MESSAGE = '该分支位置已失效，请重试'
 const selectedCanvasNode = ref<string | null>(null)
 const flowCanvasRef = ref<InstanceType<typeof ApprovalFlowCanvas> | null>(null)
 const movingCanvasNode = ref<string | null>(null)
+const canvasNodeDragSession = ref<CanvasNodeDragSession | null>(null)
+const canvasBranchDragSession = ref<CanvasBranchDragSession | null>(null)
+const canvasDragSequence = ref(0)
+const canvasLiveMessage = ref('')
 const canvasZoom = ref(1)
 const canvasViewportState = ref({ width: 0, height: 0, scrollLeft: 0, scrollTop: 0 })
+const authoringHistory = ref(createApprovalAuthoringHistory('__new__'))
+const canUndoAuthoring = computed(() => authoringHistory.value.undoStack.length > 0)
+const canRedoAuthoring = computed(() => authoringHistory.value.redoStack.length > 0)
 const CANVAS_NODE_W = GRAPH_LAYOUT_NODE_WIDTH
 const CANVAS_NODE_H = GRAPH_LAYOUT_NODE_HEIGHT
 const CANVAS_MINIMAP_W = 220
@@ -1805,6 +2134,191 @@ const canvasLayout = computed<GraphLayout>(() => computeLayout(canvasEffectiveGr
 // any linear draft. Dropping the branch keeps the alert describing exactly the graph the canvas
 // draws, for whichever shape is on screen.
 const canvasValidity = computed<string[]>(() => graphValidityIssues(canvasEffectiveGraph.value))
+
+function resetAuthoringHistory(draftKey = templateId.value || '__new__'): void {
+  authoringHistory.value = createApprovalAuthoringHistory(draftKey)
+}
+
+function resetAuthoringSessionAfterSave(draftKey: string): void {
+  resetAuthoringHistory(draftKey)
+  retiredFormPersistentIds.value = []
+  retiredFormLocalIds.value = []
+}
+
+function captureAuthoringFocus(): ApprovalAuthoringFocus {
+  if (typeof document === 'undefined' || !(document.activeElement instanceof HTMLElement)) {
+    return { kind: 'none' }
+  }
+  const active = document.activeElement
+  const formField = active.closest<HTMLElement>('[data-form-field-local-id]')
+  if (formField?.dataset.formFieldLocalId) {
+    const control = active.closest<HTMLElement>('[data-testid]')
+    return {
+      kind: 'form-field',
+      localId: formField.dataset.formFieldLocalId,
+      ...(control?.getAttribute('data-testid')
+        ? { controlTestId: control.getAttribute('data-testid')! }
+        : {}),
+    }
+  }
+  const inspector = active.closest<HTMLElement>('[data-inspector-node]')
+  if (inspector?.dataset.inspectorNode) {
+    const control = active.closest<HTMLElement>('[data-testid]')
+    return {
+      kind: 'inspector',
+      nodeKey: inspector.dataset.inspectorNode,
+      ...(control?.getAttribute('data-testid')
+        ? { controlTestId: control.getAttribute('data-testid')! }
+        : {}),
+    }
+  }
+  const canvasNode = active.closest<HTMLElement>('[data-canvas-node]')
+  if (canvasNode?.dataset.canvasNode) {
+    return { kind: 'canvas-node', nodeKey: canvasNode.dataset.canvasNode }
+  }
+  if (active.closest('[data-testid="approval-canvas-workspace"]')) return { kind: 'canvas' }
+  return { kind: 'none' }
+}
+
+function captureAuthoringSnapshot(): ApprovalAuthoringSnapshot {
+  return cloneApprovalAuthoringSnapshot({
+    draft: draft.value,
+    selection: currentCanvasSelection(),
+    formFieldLocalId: formBuilderRef.value?.currentFieldLocalId() ?? null,
+    focus: captureAuthoringFocus(),
+  })
+}
+
+function historySelectionNodeKey(selection: ApprovalCanvasSelection): string | null {
+  if (selection.kind === 'node') return selection.nodeKey
+  if (selection.kind === 'condition-branch') return selection.conditionNodeKey
+  if (selection.kind === 'parallel-branch') return selection.parallelNodeKey
+  return null
+}
+
+function focusFirstInteractive(host: HTMLElement | null): void {
+  if (!host) return
+  const target = host.matches('button,input,textarea,select,[tabindex]')
+    ? host
+    : host.querySelector<HTMLElement>('button,input,textarea,select,[tabindex]')
+  target?.focus({ preventScroll: true })
+}
+
+async function restoreAuthoringFocus(focus: ApprovalAuthoringFocus): Promise<void> {
+  await nextTick()
+  if (focus.kind === 'form-field') {
+    activeAuthoringSection.value = 'fields'
+    formBuilderRef.value?.focusField(focus.localId)
+    await nextTick()
+    const inspector = Array.from(document.querySelectorAll<HTMLElement>('[data-form-field-local-id]'))
+      .find((candidate) => candidate.dataset.formFieldLocalId === focus.localId) ?? null
+    const control = focus.controlTestId
+      ? Array.from(inspector?.querySelectorAll<HTMLElement>('[data-testid]') ?? [])
+          .find((candidate) => candidate.getAttribute('data-testid') === focus.controlTestId) ?? null
+      : inspector
+    focusFirstInteractive(control)
+    return
+  }
+  if (focus.kind === 'inspector') {
+    const inspector = (flowCanvasRef.value?.canvasInspectorRef ?? null) as HTMLElement | null
+    if (!inspector || inspector.dataset.inspectorNode !== focus.nodeKey) return
+    const control = focus.controlTestId
+      ? Array.from(inspector.querySelectorAll<HTMLElement>('[data-testid]'))
+          .find((candidate) => candidate.getAttribute('data-testid') === focus.controlTestId) ?? null
+      : inspector
+    focusFirstInteractive(control)
+    return
+  }
+  if (focus.kind === 'canvas-node') {
+    const node = Array.from(document.querySelectorAll<HTMLElement>('[data-canvas-node]'))
+      .find((candidate) => candidate.dataset.canvasNode === focus.nodeKey) ?? null
+    focusFirstInteractive(node)
+    return
+  }
+  if (focus.kind === 'canvas') flowCanvasRef.value?.canvasViewportRef?.focus({ preventScroll: true })
+}
+
+async function restoreAuthoringSnapshot(
+  snapshot: ApprovalAuthoringSnapshot,
+  changedDraftKeys: Array<keyof TemplateAuthoringDraft>,
+): Promise<void> {
+  const restoredDraft = cloneApprovalAuthoringSnapshot(snapshot).draft
+  const changedDraftValues = Object.fromEntries(
+    changedDraftKeys.map((key) => [key, restoredDraft[key]]),
+  ) as Partial<TemplateAuthoringDraft>
+  // Basic metadata and other draft domains can change outside the command stack. Undo/redo restores
+  // only the top-level domains the recorded command actually changed, so it cannot erase a later edit.
+  draft.value = { ...draft.value, ...changedDraftValues }
+  syncAllStepOptions()
+  syncAllApprovalNodeOptions()
+  syncAllCcOptions()
+  const selectedNodeKey = historySelectionNodeKey(snapshot.selection)
+  selectedCanvasNode.value = selectedNodeKey
+    && canvasEffectiveGraph.value.nodes.some((node) => node.key === selectedNodeKey)
+    ? selectedNodeKey
+    : null
+  movingCanvasNode.value = null
+  canvasNodeDragSession.value = null
+  canvasBranchDragSession.value = null
+  if (
+    snapshot.formFieldLocalId
+    && draft.value.fields.some((field) => field.localId === snapshot.formFieldLocalId)
+  ) {
+    formBuilderRef.value?.focusField(snapshot.formFieldLocalId)
+  }
+  await restoreAuthoringFocus(snapshot.focus)
+}
+
+function runAuthoringCommand(
+  command: ApprovalAuthoringCommand,
+  mutate: () => boolean,
+  afterContext?: () => Partial<Pick<ApprovalAuthoringSnapshot, 'selection' | 'formFieldLocalId' | 'focus'>>,
+): boolean {
+  if (readOnly.value) return false
+  if (!canvasV2Enabled.value) return mutate()
+  const before = captureAuthoringSnapshot()
+  if (!mutate()) return false
+  const after = captureAuthoringSnapshot()
+  const resolvedAfterContext = afterContext?.()
+  if (resolvedAfterContext?.selection) after.selection = resolvedAfterContext.selection
+  if (resolvedAfterContext?.formFieldLocalId !== undefined) {
+    after.formFieldLocalId = resolvedAfterContext.formFieldLocalId
+  }
+  if (resolvedAfterContext?.focus) after.focus = resolvedAfterContext.focus
+  authoringHistory.value = recordApprovalAuthoringCommand(authoringHistory.value, command, before, after)
+  return true
+}
+
+async function undoAuthoring(): Promise<void> {
+  const result = undoApprovalAuthoringCommand(authoringHistory.value)
+  if (!result.snapshot) return
+  authoringHistory.value = result.history
+  await restoreAuthoringSnapshot(result.snapshot, result.changedDraftKeys)
+  announceCanvas('已撤销上一步操作')
+}
+
+async function redoAuthoring(): Promise<void> {
+  const result = redoApprovalAuthoringCommand(authoringHistory.value)
+  if (!result.snapshot) return
+  authoringHistory.value = result.history
+  await restoreAuthoringSnapshot(result.snapshot, result.changedDraftKeys)
+  announceCanvas('已重做上一步操作')
+}
+
+function onAuthoringHistoryKeydown(event: KeyboardEvent): void {
+  if (
+    !canvasV2Enabled.value
+    || readOnly.value
+    || event.altKey
+    || (!event.metaKey && !event.ctrlKey)
+    || event.key.toLowerCase() !== 'z'
+    || isApprovalHistoryShortcutBlocked(event.target)
+  ) return
+  if (event.shiftKey ? !canRedoAuthoring.value : !canUndoAuthoring.value) return
+  event.preventDefault()
+  if (event.shiftKey) void redoAuthoring()
+  else void undoAuthoring()
+}
 const canvasZoomLabel = computed(() => `${Math.round(canvasZoom.value * 100)}%`)
 const canvasStageStyle = computed(() => ({
   width: `${Math.round(canvasLayout.value.width * canvasZoom.value)}px`,
@@ -1874,11 +2388,54 @@ const selectedCanvasInspectorNode = computed<ApprovalNode | null>(() => {
   if (!key) return null
   return canvasNodeByKey(key) ?? null
 })
+
+function canvasBranchOrder(
+  graph: ApprovalGraph,
+  kind: CanvasBranchKind,
+  nodeKey: string,
+): string[] | undefined {
+  const node = graph.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node || node.type !== kind) return undefined
+  if (kind === 'condition') {
+    const branches = (node.config as ConditionNodeConfig).branches
+    return Array.isArray(branches) && branches.every((branch) => typeof branch.edgeKey === 'string')
+      ? branches.map((branch) => branch.edgeKey)
+      : undefined
+  }
+  const branches = (node.config as ParallelNodeConfig).branches
+  return Array.isArray(branches) && branches.every((edgeKey) => typeof edgeKey === 'string')
+    ? [...branches]
+    : undefined
+}
+
+const selectedCanvasBranchGroup = computed<CanvasBranchReorderGroup | null>(() => {
+  if (readOnly.value) return null
+  const node = selectedCanvasInspectorNode.value
+  if (!node || (node.type !== 'condition' && node.type !== 'parallel')) return null
+  const order = canvasBranchOrder(canvasEffectiveGraph.value, node.type, node.key)
+  if (!order?.length) return null
+  return {
+    kind: node.type,
+    nodeKey: node.key,
+    title: node.type === 'condition' ? '条件分支优先级' : '并行分支顺序',
+    branches: order.map((edgeKey, index) => ({
+      edgeKey,
+      label: node.type === 'condition'
+        ? `优先级 ${index + 1} · ${conditionEdgeLabel(node.key, edgeKey)}`
+        : `分支 ${index + 1} · ${graphEdgeTargetLabel(node.key, edgeKey)}`,
+    })),
+  }
+})
+
 watch(canvasEffectiveGraph, (graph) => {
   const key = selectedCanvasNode.value
   if (key && !graph.nodes.some((node) => node.key === key)) clearCanvasSelection()
   const movingKey = movingCanvasNode.value
-  if (movingKey && linearNodeMoveTargets(graph, movingKey).length === 0) cancelCanvasNodeMove()
+  if (
+    movingKey
+    && !canvasNodeDragSession.value
+    && linearNodeMoveTargets(graph, movingKey).length === 0
+  ) cancelCanvasNodeMove()
 })
 watch([canvasViewMode, canvasLayout, activeAuthoringSection], async ([mode, _layout, section]) => {
   if (mode !== 'canvas' || section !== 'flow') return
@@ -1946,7 +2503,23 @@ const canvasEdgeLines = computed(() => {
     }
   })
 })
-const canvasMoveTargets = computed(() => movingCanvasNode.value
+const canvasInsertionTargets = computed(() => {
+  if (readOnly.value) return []
+  const linesByKey = new Map(canvasEdgeLines.value.map((line) => [line.key, line]))
+  return approvalEdgeInsertionTargets(canvasEffectiveGraph.value).flatMap((target) => {
+    const line = linesByKey.get(target.edgeKey)
+    return line
+      ? [{
+          edgeKey: target.edgeKey,
+          insertX: line.dropX,
+          insertY: line.dropY,
+          label: `在「${graphNodeLabel(target.source)}」之后插入节点`,
+          nodeTypes: target.nodeTypes,
+        }]
+      : []
+  })
+})
+const canvasMoveTargets = computed(() => !readOnly.value && movingCanvasNode.value
   ? new Set(linearNodeMoveTargets(canvasEffectiveGraph.value, movingCanvasNode.value).map((target) => target.edgeKey))
   : new Set<string>())
 const canvasMoveTargetLines = computed(() => canvasEdgeLines.value.filter((line) => canvasMoveTargets.value.has(line.key)))
@@ -1961,19 +2534,69 @@ function canvasMoveTargetLabel(edgeKey: string): string {
   const movingLabel = movingCanvasNode.value ? graphNodeLabel(movingCanvasNode.value) : '节点'
   return edge ? `将${movingLabel}移动到${graphNodeLabel(edge.source)}之后` : `移动${movingLabel}`
 }
+function currentCanvasSelection(): ApprovalCanvasSelection {
+  return selectedCanvasNode.value
+    ? { kind: 'node', nodeKey: selectedCanvasNode.value }
+    : { kind: 'none' }
+}
+function announceCanvas(message: string): void {
+  canvasLiveMessage.value = ''
+  void nextTick(() => {
+    canvasLiveMessage.value = message
+  })
+}
+function serializeCanvasDragSession(session: CanvasNodeDragSession | CanvasBranchDragSession): string {
+  return JSON.stringify(session)
+}
 function beginCanvasNodeMove(nodeKey: string): void {
   if (readOnly.value || !canMoveCanvasNode(nodeKey)) return
-  movingCanvasNode.value = movingCanvasNode.value === nodeKey ? null : nodeKey
+  if (movingCanvasNode.value === nodeKey) {
+    cancelCanvasNodeMove()
+    return
+  }
+  canvasNodeDragSession.value = null
+  movingCanvasNode.value = nodeKey
 }
 function cancelCanvasNodeMove(): void {
+  canvasNodeDragSession.value = null
   movingCanvasNode.value = null
+}
+function rejectCanvasNodeDrop(): void {
+  cancelCanvasNodeMove()
+  announceCanvas(INVALID_NODE_DROP_MESSAGE)
+}
+function finishCanvasNodeDrag(): void {
+  if (!canvasNodeDragSession.value) return
+  rejectCanvasNodeDrop()
 }
 function applyCanvasNodeMove(targetEdgeKey: string): void {
   const nodeKey = movingCanvasNode.value
-  if (!nodeKey || !canvasMoveTargets.value.has(targetEdgeKey)) return
-  runTopologyOp((graph) => moveLinearNode(graph, nodeKey, targetEdgeKey))
+  if (!nodeKey) return
+  if (!canvasMoveTargets.value.has(targetEdgeKey)) {
+    rejectCanvasNodeDrop()
+    return
+  }
+  const applied = applyCanvasCommand(
+    { type: 'move-node-into-edge', nodeKey, intoEdgeKey: targetEdgeKey },
+    currentCanvasSelection(),
+    (graph) => linearNodeMoveTargets(graph, nodeKey)
+      .some((target) => target.edgeKey === targetEdgeKey),
+  )
+  if (!applied) {
+    rejectCanvasNodeDrop()
+    return
+  }
   selectedCanvasNode.value = nodeKey
   cancelCanvasNodeMove()
+}
+function onCanvasNodeDrop(event: DragEvent, targetEdgeKey: string): void {
+  const session = canvasNodeDragSession.value
+  const payload = event.dataTransfer?.getData(CANVAS_NODE_DRAG_TYPE) ?? ''
+  if (!session || payload !== serializeCanvasDragSession(session)) {
+    rejectCanvasNodeDrop()
+    return
+  }
+  applyCanvasNodeMove(targetEdgeKey)
 }
 function moveCanvasNodeStep(nodeKey: string, direction: 'up' | 'down'): void {
   const target = canvasStepMoveTarget(nodeKey, direction)
@@ -1988,13 +2611,123 @@ function onCanvasNodeKeydown(event: KeyboardEvent, nodeKey: string): void {
   moveCanvasNodeStep(nodeKey, event.key === 'ArrowUp' ? 'up' : 'down')
 }
 function onCanvasNodeDragStart(event: DragEvent, nodeKey: string): void {
-  if (readOnly.value || !canMoveCanvasNode(nodeKey)) {
+  if (readOnly.value || !canMoveCanvasNode(nodeKey) || !event.dataTransfer) {
     event.preventDefault()
     return
   }
+  const session: CanvasNodeDragSession = {
+    token: ++canvasDragSequence.value,
+    nodeKey,
+  }
+  canvasNodeDragSession.value = session
   movingCanvasNode.value = nodeKey
-  event.dataTransfer?.setData('text/plain', nodeKey)
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData(CANVAS_NODE_DRAG_TYPE, serializeCanvasDragSession(session))
+  event.dataTransfer.setData('text/plain', 'approval-canvas-node')
+  event.dataTransfer.effectAllowed = 'move'
+}
+
+function cancelCanvasBranchDrag(): void {
+  canvasBranchDragSession.value = null
+}
+function rejectCanvasBranchDrop(): void {
+  cancelCanvasBranchDrag()
+  announceCanvas(INVALID_BRANCH_DROP_MESSAGE)
+}
+function onCanvasBranchDragStart(
+  event: DragEvent,
+  kind: CanvasBranchKind,
+  nodeKey: string,
+  edgeKey: string,
+): void {
+  const group = selectedCanvasBranchGroup.value
+  if (
+    readOnly.value
+    || !event.dataTransfer
+    || group?.kind !== kind
+    || group.nodeKey !== nodeKey
+    || !group.branches.some((branch) => branch.edgeKey === edgeKey)
+  ) {
+    event.preventDefault()
+    return
+  }
+  const session: CanvasBranchDragSession = {
+    token: ++canvasDragSequence.value,
+    kind,
+    nodeKey,
+    edgeKey,
+  }
+  canvasBranchDragSession.value = session
+  event.dataTransfer.setData(CANVAS_BRANCH_DRAG_TYPE, serializeCanvasDragSession(session))
+  event.dataTransfer.setData('text/plain', 'approval-canvas-branch')
+  event.dataTransfer.effectAllowed = 'move'
+}
+function applyCanvasBranchReorder(
+  kind: CanvasBranchKind,
+  nodeKey: string,
+  edgeKey: string,
+  targetEdgeKey: string,
+): boolean {
+  const order = canvasBranchOrder(canvasEffectiveGraph.value, kind, nodeKey)
+  if (!order) return false
+  const fromIndex = order.indexOf(edgeKey)
+  const targetIndex = order.indexOf(targetEdgeKey)
+  if (fromIndex < 0 || targetIndex < 0) return false
+  if (fromIndex === targetIndex) return true
+  const orderedEdgeKeys = [...order]
+  const [movedEdgeKey] = orderedEdgeKeys.splice(fromIndex, 1)
+  orderedEdgeKeys.splice(targetIndex, 0, movedEdgeKey)
+  const command: ApprovalCanvasCommand = kind === 'condition'
+    ? { type: 'reorder-condition-branches', conditionNodeKey: nodeKey, orderedEdgeKeys }
+    : { type: 'reorder-parallel-branches', parallelNodeKey: nodeKey, orderedEdgeKeys }
+  const selectionBefore: ApprovalCanvasSelection = kind === 'condition'
+    ? { kind: 'condition-branch', conditionNodeKey: nodeKey, edgeKey }
+    : { kind: 'parallel-branch', parallelNodeKey: nodeKey, edgeKey }
+  return applyCanvasCommand(command, selectionBefore, (graph) => {
+    const latestOrder = canvasBranchOrder(graph, kind, nodeKey)
+    return Boolean(
+      latestOrder
+      && latestOrder.length === order.length
+      && latestOrder.every((candidate, index) => candidate === order[index]),
+    )
+  })
+}
+function onCanvasBranchDrop(
+  event: DragEvent,
+  kind: CanvasBranchKind,
+  nodeKey: string,
+  targetEdgeKey: string,
+): void {
+  const session = canvasBranchDragSession.value
+  const payload = event.dataTransfer?.getData(CANVAS_BRANCH_DRAG_TYPE) ?? ''
+  if (
+    !session
+    || session.kind !== kind
+    || session.nodeKey !== nodeKey
+    || payload !== serializeCanvasDragSession(session)
+    || !applyCanvasBranchReorder(kind, nodeKey, session.edgeKey, targetEdgeKey)
+  ) {
+    rejectCanvasBranchDrop()
+    return
+  }
+  cancelCanvasBranchDrag()
+}
+function finishCanvasBranchDrag(): void {
+  if (!canvasBranchDragSession.value) return
+  rejectCanvasBranchDrop()
+}
+function moveCanvasBranchStep(
+  kind: CanvasBranchKind,
+  nodeKey: string,
+  edgeKey: string,
+  direction: 'up' | 'down',
+): void {
+  const order = canvasBranchOrder(canvasEffectiveGraph.value, kind, nodeKey)
+  const index = order?.indexOf(edgeKey) ?? -1
+  const targetIndex = direction === 'up' ? index - 1 : index + 1
+  if (!order || index < 0 || targetIndex < 0 || targetIndex >= order.length) return
+  if (!applyCanvasBranchReorder(kind, nodeKey, edgeKey, order[targetIndex])) {
+    announceCanvas(INVALID_BRANCH_DROP_MESSAGE)
+  }
 }
 function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
   const step = linearStepForNode(nodeKey)
@@ -2013,7 +2746,13 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
 // verbatim once the author has touched the field, falling back to the derived join before that
 // (hydrate / a node nobody has edited yet).
 function setApprovalSourceIdsFromPicker(nodeKey: string, ids: string[]): void {
-  setApprovalSourceIds(nodeKey, ids)
+  runNodeConfigCommand(nodeKey, 'approval-node-source-ids', () => {
+    const step = linearStepForNode(nodeKey)
+    const source = approvalNodeFirstSource(nodeKey)
+    if (!step && source?.kind !== 'static_user' && source?.kind !== 'static_role') return false
+    setApprovalSourceIds(nodeKey, ids)
+    return true
+  })
 }
 function approvalSourceFieldId(nodeKey: string): string {
   const step = linearStepForNode(nodeKey)
@@ -2022,9 +2761,13 @@ function approvalSourceFieldId(nodeKey: string): string {
   return source?.kind === 'form_field_user' ? source.fieldId : ''
 }
 function setApprovalSourceFieldId(nodeKey: string, fieldId: string): void {
-  const step = linearStepForNode(nodeKey)
-  if (step) { step.fieldId = fieldId; return }
-  setApprovalNodeSource(nodeKey, { kind: 'form_field_user', fieldId })
+  runNodeConfigCommand(nodeKey, 'approval-node-source-field', () => {
+    const step = linearStepForNode(nodeKey)
+    if (step) { step.fieldId = fieldId; return true }
+    if (!approvalNodeEditFor(nodeKey)) return false
+    setApprovalNodeSource(nodeKey, { kind: 'form_field_user', fieldId })
+    return true
+  })
 }
 function approvalSourceLevel(nodeKey: string): number {
   // The step carries BOTH level carriers at all times (`level` for manager_at_level, `levels` for
@@ -2041,15 +2784,20 @@ function approvalSourceLevel(nodeKey: string): number {
   return 1
 }
 function setApprovalSourceLevel(nodeKey: string, value: number): void {
-  const step = linearStepForNode(nodeKey)
-  if (step) {
-    if (step.sourceKind === 'manager_at_level') step.level = value
-    else if (step.sourceKind === 'continuous_managers') step.levels = value
-    return
-  }
-  const kind = approvalSourceKind(nodeKey)
-  if (kind === 'manager_at_level') setApprovalNodeSource(nodeKey, { kind, level: value })
-  else if (kind === 'continuous_managers') setApprovalNodeSource(nodeKey, { kind, levels: value })
+  runNodeConfigCommand(nodeKey, 'approval-node-source-level', () => {
+    const step = linearStepForNode(nodeKey)
+    if (step) {
+      if (step.sourceKind === 'manager_at_level') step.level = value
+      else if (step.sourceKind === 'continuous_managers') step.levels = value
+      else return false
+      return true
+    }
+    const kind = approvalSourceKind(nodeKey)
+    if (kind === 'manager_at_level') setApprovalNodeSource(nodeKey, { kind, level: value })
+    else if (kind === 'continuous_managers') setApprovalNodeSource(nodeKey, { kind, levels: value })
+    else return false
+    return true
+  })
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
@@ -2135,10 +2883,13 @@ function syncAllApprovalNodeOptions(): void {
 }
 
 function setCcTargetIds(nodeKey: string, ids: string[]): void {
-  const edit = ccEditFor(nodeKey)
-  if (!edit) return
-  edit.targetIds = ids
-  syncCcOptions(nodeKey)
+  runNodeConfigCommand(nodeKey, 'approval-cc-target-ids', () => {
+    const edit = ccEditFor(nodeKey)
+    if (!edit) return false
+    edit.targetIds = ids
+    syncCcOptions(nodeKey)
+    return true
+  })
 }
 
 function syncCcOptions(nodeKey: string): void {
@@ -2169,13 +2920,18 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   conditionOperatorLabel,
   liveBranchSummary,
   conditionRuleValueText,
+  setConditionConjunction,
+  setConditionRuleField,
+  setConditionRuleOperator,
   setConditionRuleValue,
   addConditionRule,
   removeConditionRule,
   setConditionBranchPredicateMode,
+  setConditionFormulaExpression,
   insertConditionFormulaToken,
   insertConditionFormulaFunction,
   insertConditionFormulaRoleMembership,
+  setConditionDefaultEdge,
   conditionFormulaDryRunResult,
   conditionFormulaDryRunLoading,
   dryRunConditionFormula,
@@ -2184,7 +2940,9 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   graphEdgeTargetLabel,
   graphNodeLabel,
   parallelJoinModeLabel,
+  setParallelJoinMode,
   ccTargetTypeLabel,
+  setCcTargetType,
   approvalSourceKind,
   setApprovalSourceKind,
   syncApprovalNodeOptions,
@@ -2282,16 +3040,50 @@ function describeFormCommandFailure(result: Extract<FormCommandResult, { ok: fal
   return '表单结构操作未完成，请刷新后重试'
 }
 
-function acceptFormCommand(result: FormCommandResult, announcement: string): boolean {
+function rejectFormCommand(result: Extract<FormCommandResult, { ok: false }>): false {
+  const message = describeFormCommandFailure(result)
+  formBuilderRef.value?.announce(message)
+  ElMessage.warning(message)
+  return false
+}
+
+function reserveFormIdentity(identity: FormFieldIdentity): void {
+  retiredFormPersistentIds.value = Array.from(new Set([
+    ...retiredFormPersistentIds.value,
+    identity.persistentId,
+    ...(identity.detailColumn ? [identity.detailColumn.persistentId] : []),
+  ]))
+  retiredFormLocalIds.value = Array.from(new Set([
+    ...retiredFormLocalIds.value,
+    identity.localId,
+    ...(identity.detailColumn ? [identity.detailColumn.localId] : []),
+  ]))
+}
+
+function applyFormCommandResult(
+  command: ApprovalAuthoringCommand,
+  result: FormCommandResult,
+  announcement: string,
+  onApplied?: () => void,
+): boolean {
   if (!result.ok) {
-    const message = describeFormCommandFailure(result)
-    formBuilderRef.value?.announce(message)
-    ElMessage.warning(message)
-    return false
+    return rejectFormCommand(result)
   }
-  draft.value = result.draft
-  if (result.focusLocalId) {
-    void nextTick(() => formBuilderRef.value?.focusField(result.focusLocalId!))
+  const focusLocalId = result.focusLocalId
+  const applied = runAuthoringCommand(command, () => {
+    draft.value = result.draft
+    onApplied?.()
+    if (focusLocalId) formBuilderRef.value?.focusField(focusLocalId)
+    return true
+  }, () => ({
+    formFieldLocalId: focusLocalId,
+    focus: focusLocalId
+      ? { kind: 'form-field', localId: focusLocalId }
+      : { kind: 'none' },
+  }))
+  if (!applied) return false
+  if (focusLocalId) {
+    void nextTick(() => formBuilderRef.value?.focusField(focusLocalId))
   }
   formBuilderRef.value?.announce(announcement)
   return true
@@ -2300,10 +3092,7 @@ function acceptFormCommand(result: FormCommandResult, announcement: string): boo
 function onAddFormField(request: { type: FormAuthoringFieldType; insertionIndex: number }): void {
   const history = currentFormIdentityHistory()
   if (!history) {
-    acceptFormCommand(
-      { ok: false, reason: 'identity_history_missing', dependencies: [] },
-      '',
-    )
+    rejectFormCommand({ ok: false, reason: 'identity_history_missing', dependencies: [] })
     return
   }
   const identity = newFormFieldIdentity(request.type)
@@ -2324,9 +3113,11 @@ function onAddFormField(request: { type: FormAuthoringFieldType; insertionIndex:
       'before',
     )
   }
-  acceptFormCommand(
+  applyFormCommandResult(
+    { type: 'add-form-field', localId: identity.localId, insertionIndex: request.insertionIndex },
     result,
     `${request.type === 'detail' ? '明细' : '表单组件'}已插入为字段 ${request.insertionIndex + 1}`,
+    () => reserveFormIdentity(identity),
   )
 }
 
@@ -2338,17 +3129,23 @@ function onRemoveFormField(request: { localId: string }): void {
     request.localId,
     currentFormReferenceInventory(),
   )
-  if (!acceptFormCommand(result, '字段已删除')) return
-  retiredFormPersistentIds.value = [
-    ...retiredFormPersistentIds.value,
-    removing.id,
-    ...removing.detailColumns.map((column) => column.id),
-  ]
-  retiredFormLocalIds.value = [
-    ...retiredFormLocalIds.value,
-    removing.localId,
-    ...removing.detailColumns.map((column) => column.localId),
-  ]
+  applyFormCommandResult(
+    { type: 'remove-form-field', localId: request.localId },
+    result,
+    '字段已删除',
+    () => {
+      retiredFormPersistentIds.value = Array.from(new Set([
+        ...retiredFormPersistentIds.value,
+        removing.id,
+        ...removing.detailColumns.map((column) => column.id),
+      ]))
+      retiredFormLocalIds.value = Array.from(new Set([
+        ...retiredFormLocalIds.value,
+        removing.localId,
+        ...removing.detailColumns.map((column) => column.localId),
+      ]))
+    },
+  )
 }
 
 function onMoveFormField(request: { localId: string; targetIndex: number }): void {
@@ -2364,7 +3161,51 @@ function onMoveFormField(request: { localId: string; targetIndex: number }): voi
     anchor.localId,
     targetIndex === remaining.length ? 'after' : 'before',
   )
-  acceptFormCommand(result, `字段已移动到第 ${targetIndex + 1} 位`)
+  applyFormCommandResult(
+    { type: 'move-form-field', localId: request.localId, targetIndex },
+    result,
+    `字段已移动到第 ${targetIndex + 1} 位`,
+  )
+}
+
+function onUpdateFormField(nextField: FieldAuthoringDraft): void {
+  const current = draft.value.fields.find((field) => field.localId === nextField.localId)
+  if (
+    !current
+    || current.id !== nextField.id
+    || current.localId !== nextField.localId
+    || (nextField.type === 'attachment' && !attachmentAuthoringEnabled.value)
+  ) return
+  const activeFocus = captureAuthoringFocus()
+  const focusControl = activeFocus.kind === 'form-field'
+    && activeFocus.localId === nextField.localId
+    && activeFocus.controlTestId
+    ? activeFocus.controlTestId
+    : undefined
+  const commandControl = focusControl ?? 'approval-form-field-inspector'
+  const nextDraft = JSON.parse(JSON.stringify(draft.value)) as TemplateAuthoringDraft
+  const fieldIndex = nextDraft.fields.findIndex((field) => field.localId === nextField.localId)
+  if (fieldIndex < 0) return
+  nextDraft.fields[fieldIndex] = JSON.parse(JSON.stringify(nextField)) as FieldAuthoringDraft
+  const typeChanged = current.type !== nextField.type
+  const applied = runAuthoringCommand(
+    { type: 'configure-form-field', localId: nextField.localId, control: commandControl },
+    () => {
+      draft.value = nextDraft
+      if (typeChanged) invalidateStaleRecordLinkDependencies(nextField)
+      formBuilderRef.value?.focusField(nextField.localId)
+      return true
+    },
+    () => ({
+      formFieldLocalId: nextField.localId,
+      focus: {
+        kind: 'form-field',
+        localId: nextField.localId,
+        ...(focusControl ? { controlTestId: focusControl } : {}),
+      },
+    }),
+  )
+  if (applied) formBuilderRef.value?.announce('字段属性已更新')
 }
 
 async function loadFormAuthoringContext(id: string): Promise<void> {
@@ -2460,6 +3301,7 @@ function moveStep(index: number, delta: -1 | 1) {
 }
 
 async function loadTemplateForEdit() {
+  resetAuthoringHistory()
   selectedCanvasNode.value = null
   movingCanvasNode.value = null
   canvasZoom.value = 1
@@ -2551,6 +3393,7 @@ async function persistDraft() {
       graphReadOnlyMessage.value = graphReadOnlyReason(updated, {
         attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
       })
+      resetAuthoringSessionAfterSave(updated.id)
       snapshotDraft()
       return updated
     }
@@ -2566,6 +3409,7 @@ async function persistDraft() {
     graphReadOnlyMessage.value = graphReadOnlyReason(created, {
       attachmentAuthoringEnabled: attachmentAuthoringEnabled.value,
     })
+    resetAuthoringSessionAfterSave(created.id)
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
@@ -2751,6 +3595,12 @@ onMounted(() => {
   void directory.loadFormulaRoles()
   void loadTemplateForEdit()
   window.addEventListener('resize', syncCanvasViewportState)
+  window.addEventListener('keydown', onAuthoringHistoryKeydown)
+})
+
+watch(templateId, (nextTemplateId, previousTemplateId) => {
+  if (!canManageTemplates.value || nextTemplateId === previousTemplateId) return
+  void loadTemplateForEdit()
 })
 
 // B1-07: discard protection — the editor is the longest-lived form in the approval admin
@@ -2776,6 +3626,7 @@ watch(isDraftDirty, (dirty) => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', syncCanvasViewportState)
+  window.removeEventListener('keydown', onAuthoringHistoryKeydown)
   window.onbeforeunload = null
   if (highlightStepTimer) clearTimeout(highlightStepTimer)
 })
@@ -3233,6 +4084,10 @@ pre {
   .template-authoring__section-actions :deep(.el-button) {
     flex: 1;
     min-height: 44px;
+  }
+
+  .template-authoring__section-actions {
+    position: static;
   }
 }
 

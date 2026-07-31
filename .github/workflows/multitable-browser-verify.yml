@@ -1,10 +1,8 @@
 name: Multitable Browser Verify
 
-# Real-browser verification lane for multitable conditional-formatting + reaction
-# UI (the visual/interaction render jsdom can't prove). Boots Vite, renders the
-# real components via apps/web/verification harness, asserts render + a reaction
-# click→chip mutation, and uploads screenshots. Fail-loud: console/page errors,
-# missing render, or the picked chip not appearing turn this red.
+# Real-browser verification lane for multitable and approval-authoring UI (the
+# visual/interaction render jsdom can't prove). Boots Vite, renders production
+# components via apps/web/verification harnesses, and uploads screenshots.
 #
 # Scope (minimal lane): Path A harness only — no backend, no DB seed. Once this
 # lane is green, browser-gated UI (B1-b/c, A5 config dialog) may proceed.
@@ -21,6 +19,8 @@ on:
       - 'apps/web/src/multitable/views/MultitableWorkbench.vue' # UI-P2-2c drawer CSS lives here (gate NIT-3)
       - 'apps/web/src/multitable/components/MetaRecordInspector.vue' # W2 S7: .meta-record-drawer--overlay CSS lives here
       - 'apps/web/src/multitable/utils/conditional-formatting.ts'
+      - 'apps/web/src/approvals/**'
+      - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
       - 'apps/web/verification/**'
       - 'apps/web/playwright.verification.config.ts'
       - '.github/workflows/multitable-browser-verify.yml'
