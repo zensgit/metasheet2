@@ -98,7 +98,12 @@ const versionGraph = {
   ],
 }
 
-async function mockVersionWorkspaceApi(page: Page) {
+async function mockVersionWorkspaceApi(
+  page: Page,
+  formFields: Array<Record<string, unknown>> = [
+    { id: 'secret_amount_id', type: 'number', label: '报销金额', required: true },
+  ],
+) {
   const currentGraph = {
     ...versionGraph,
     nodes: versionGraph.nodes.map((node) => node.key === 'secret_approval_two'
@@ -118,7 +123,7 @@ async function mockVersionWorkspaceApi(page: Page) {
     latestVersionId: 'ver-current',
     createdAt: '2026-07-20T00:00:00.000Z',
     updatedAt: '2026-07-31T00:00:00.000Z',
-    formSchema: { fields: [{ id: 'secret_amount_id', type: 'number', label: '报销金额', required: true }] },
+    formSchema: { fields: formFields },
     approvalGraph: currentGraph,
   }
   const summary = {
@@ -296,7 +301,22 @@ test('approval route preview runs through the production wrapper and highlights 
 
 test('approval route preview remains operable without horizontal overflow at a phone viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
-  await mockVersionWorkspaceApi(page)
+  await mockVersionWorkspaceApi(page, [
+    { id: 'secret_amount_id', type: 'number', label: '报销金额', required: true },
+    { id: 'secret_reason_id', type: 'textarea', label: '报销说明' },
+    {
+      id: 'secret_kind_id',
+      type: 'select',
+      label: '报销类型',
+      options: [{ label: '普通', value: 'normal' }],
+    },
+    {
+      id: 'secret_hidden_id',
+      type: 'text',
+      label: '条件备注',
+      visibilityRule: { fieldId: 'secret_kind_id', operator: 'eq', value: 'show' },
+    },
+  ])
   await page.route('**/api/approval-templates/tpl-browser/route-preview', async (route) => {
     await route.fulfill({
       json: {
@@ -352,16 +372,15 @@ test('approval route preview remains operable without horizontal overflow at a p
   }
   const panel = page.getByTestId('approval-canvas-route-preview-panel')
   await expect(panel).toBeVisible()
-  await expectTouchTargetsAtLeast(page.locator([
-    '[data-testid="approval-canvas-route-preview-close"]:visible',
-    '.approval-route-preview-panel .el-button:visible',
-    '.approval-route-preview-panel .el-input__wrapper:visible',
-    '.approval-route-preview-panel .el-select__wrapper:visible',
-    '.approval-route-preview-panel .el-input-number:visible',
-    '.approval-route-preview-panel .el-input-number__decrease:visible',
-    '.approval-route-preview-panel .el-input-number__increase:visible',
-    '.approval-route-preview-panel .el-textarea__inner:visible',
-  ].join(', ')), 44)
+  await expectTouchTargetsAtLeast(page.locator('[data-testid="approval-canvas-route-preview-close"]:visible'), 44)
+  await expectTouchTargetsAtLeast(panel.locator('.el-button:visible'), 44)
+  await expectTouchTargetsAtLeast(panel.locator('.el-input__wrapper:visible'), 44)
+  await expectTouchTargetsAtLeast(panel.locator('.el-select__wrapper:visible'), 44)
+  await expectTouchTargetsAtLeast(panel.locator('.el-input-number:visible'), 44)
+  await expectTouchTargetsAtLeast(panel.locator('.el-input-number__decrease:visible'), 44)
+  await expectTouchTargetsAtLeast(panel.locator('.el-input-number__increase:visible'), 44)
+  await expectTouchTargetsAtLeast(panel.locator('.el-textarea__inner:visible'), 44)
+  await expectTouchTargetsAtLeast(panel.locator('.el-collapse-item__header:visible'), 44)
   await panel.getByRole('spinbutton').fill('1200')
   await page.getByTestId('approval-template-tryrun-button').click()
   await expect(page.getByTestId('approval-template-tryrun-result')).toContainText('张三')
@@ -515,15 +534,22 @@ test('mobile canvas move and branch inspector controls meet the touch contract',
     '.template-authoring__canvas-branch-handle, .template-authoring__canvas-branch-actions .el-button, .template-authoring__canvas-inspector-body .el-button',
   )
   await expectTouchTargetsAtLeast(bottomSheetControls, 44)
-  await expectTouchTargetsAtLeast(page.locator([
-    '[data-testid="approval-canvas-inspector"] .el-checkbox:visible',
-    '[data-testid="approval-canvas-inspector"] .el-input__wrapper:visible',
-    '[data-testid="approval-canvas-inspector"] .el-select__wrapper:visible',
-    '[data-testid="approval-canvas-inspector"] .el-input-number:visible',
-    '[data-testid="approval-canvas-inspector"] .el-input-number__decrease:visible',
-    '[data-testid="approval-canvas-inspector"] .el-input-number__increase:visible',
-    '[data-testid="approval-canvas-inspector"] .el-textarea__inner:visible',
-  ].join(', ')), 44)
+  const inspector = page.getByTestId('approval-canvas-inspector')
+  await expectTouchTargetsAtLeast(inspector.locator('.el-input__wrapper:visible'), 44)
+  await expectTouchTargetsAtLeast(inspector.locator('.el-select__wrapper:visible'), 44)
+
+  await page.getByTestId('approval-condition-predicate-mode').first().click()
+  await page.getByRole('option', { name: '公式', exact: true }).click()
+  await expectTouchTargetsAtLeast(inspector.locator('.el-textarea__inner:visible'), 44)
+
+  await page.getByTestId('approval-canvas-node').filter({ hasText: '审批人 1' }).first().click()
+  await expect(page.getByTestId('approval-node-editor')).toBeVisible()
+  await page.getByTestId('approval-node-source-kind').click()
+  await page.getByRole('option', { name: '指定层级上级', exact: true }).click()
+  await expectTouchTargetsAtLeast(inspector.locator('.el-checkbox:visible'), 44)
+  await expectTouchTargetsAtLeast(inspector.locator('.el-input-number:visible'), 44)
+  await expectTouchTargetsAtLeast(inspector.locator('.el-input-number__decrease:visible'), 44)
+  await expectTouchTargetsAtLeast(inspector.locator('.el-input-number__increase:visible'), 44)
 })
 
 test('approval form designer stacks without horizontal overflow at a phone viewport', async ({ page }) => {
