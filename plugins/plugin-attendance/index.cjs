@@ -10471,15 +10471,23 @@ function attendanceShiftWindowsOverlapForSlotConflict(leftShift, rightShift) {
   return left.startMinutes < right.endMinutes && right.startMinutes < left.endMinutes
 }
 
-async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId) {
+async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId, options = {}) {
   try {
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
       [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
     )
-  } catch (_error) {
+  } catch (error) {
+    if (options.required === true) throw error
     // Best-effort: preserve save behavior if advisory locks are unavailable.
   }
+}
+
+async function acquireAttendanceScheduleAssignmentReadLock(client, orgId, userId) {
+  await client.query(
+    'SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))',
+    [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
+  )
 }
 
 function getAttendanceScheduleAssignmentConflictType(draftKind, existingKind) {
@@ -10711,14 +10719,14 @@ function isTemporaryShiftOverlayRowForFixedScheduleDraft(row, draft, overlaps = 
   )
 }
 
-async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds) {
+async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds, options = {}) {
   const lockUserIds = Array.from(new Set(
     (Array.isArray(userIds) ? userIds : [])
       .map((value) => String(value || '').trim())
       .filter(Boolean)
   )).sort()
   for (const userId of lockUserIds) {
-    await acquireAttendanceScheduleAssignmentLock(db, orgId, userId)
+    await acquireAttendanceScheduleAssignmentLock(db, orgId, userId, options)
   }
   return lockUserIds
 }
@@ -15080,6 +15088,10 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
     ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
     : []
   if (!userId || dates.length === 0) return []
+
+  if (lockScheduleFacts) {
+    await acquireAttendanceScheduleAssignmentReadLock(db, targetOrg, userId)
+  }
 
   const candidates = []
 
@@ -44195,7 +44207,12 @@ module.exports = {
 
           const initialSnapshots = new Map(initialRows.map(row => [`${row.kind}:${row.id}`, attendanceSchedulePublishSnapshot(row)]))
           const result = await db.transaction(async (trx) => {
-            await acquireAttendanceScheduleAssignmentLocks(trx, orgId, initialRows.map(row => row.user_id))
+            await acquireAttendanceScheduleAssignmentLocks(
+              trx,
+              orgId,
+              initialRows.map(row => row.user_id),
+              { required: true },
+            )
             const settings = await getSettings(trx)
             const lockedRows = await loadAttendanceSchedulePublicationRows(trx, orgId, assignmentIds, rotationAssignmentIds, { forUpdate: true })
             const lockedKeys = new Set(lockedRows.map(row => `${row.kind}:${row.id}`))

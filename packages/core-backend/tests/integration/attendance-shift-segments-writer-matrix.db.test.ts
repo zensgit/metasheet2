@@ -188,6 +188,38 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     return Number(r.rows[0]?.n ?? 0)
   }
 
+  async function waitForBlockedPid(blockerPid: number): Promise<number> {
+    const deadline = Date.now() + 10000
+    for (;;) {
+      const result = await pool.query(
+        `SELECT pid
+           FROM pg_stat_activity
+          WHERE pid <> $1
+            AND $1 = ANY(pg_blocking_pids(pid))
+          ORDER BY pid`,
+        [blockerPid],
+      )
+      const blockedPid = Number(result.rows[0]?.pid)
+      if (Number.isInteger(blockedPid) && blockedPid > 0) return blockedPid
+      if (Date.now() > deadline) {
+        throw new Error(`no backend became blocked by pid ${blockerPid} (vacuous concurrency proof)`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+
+  async function waitUntilBlockedBy(blockedPid: number, blockerPid: number): Promise<void> {
+    const deadline = Date.now() + 10000
+    for (;;) {
+      const result = await pool.query('SELECT pg_blocking_pids($1)::int[] AS blockers', [blockedPid])
+      if ((result.rows[0]?.blockers ?? []).includes(blockerPid)) return
+      if (Date.now() > deadline) {
+        throw new Error(`pid ${blockedPid} never blocked by ${blockerPid} (vacuous concurrency proof)`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+
   async function segmentCount(shiftId: string): Promise<number> {
     const r = await pool.query('SELECT COUNT(*)::int AS n FROM attendance_shift_segments WHERE shift_id = $1', [shiftId])
     return Number(r.rows[0]?.n ?? 0)
@@ -1014,6 +1046,177 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     expect(publish.status, publish.raw).toBe(200)
     const persisted = await pool.query('SELECT publish_status FROM attendance_rotation_assignments WHERE id = $1', [draftId])
     expect(persisted.rows[0].publish_status).toBe('published')
+  })
+
+  it('P27: calculation-first holds the shared schedule context until publication can commit', async () => {
+    const plugin = require('../../../../plugins/plugin-attendance/index.cjs')
+    const loadCandidates = plugin.__attendanceWorkDateResolverForTests.loadPublishedCandidatesForWorkDateResolver
+    const orgId = randomUUID()
+    const userId = `${orgId}-worker`
+    const workDate = '2049-06-17'
+    const token = await mintToken(`${orgId}-admin`)
+    const shiftId = (await createShiftViaApi(token, orgId, {
+      name: 'P27 calculation first',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+    })).body.data.id as string
+    const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
+      userId,
+      shiftId,
+      startDate: workDate,
+    })
+    expect(draft.status, draft.raw).toBe(201)
+    const draftId = draft.body.data.assignment.id as string
+    await enableShadowPosture(orgId)
+
+    const calculationClient = await pool.connect()
+    try {
+      const calculationPid = Number((await calculationClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await calculationClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const calculationTrx = {
+        query: async (text: string, params?: unknown[]) =>
+          (await calculationClient.query(text, params as never[])).rows,
+      }
+      const frozenCandidates = await loadCandidates(calculationTrx, {
+        orgId,
+        userId,
+        workDates: [workDate],
+        lockScheduleFacts: true,
+      })
+      expect(frozenCandidates).toEqual([])
+
+      const publishPromise = postJson('/api/attendance/schedule-publications', token, orgId, {
+        assignmentIds: [draftId],
+      })
+      await waitForBlockedPid(calculationPid)
+      await calculationClient.query('COMMIT')
+
+      const publish = await publishPromise
+      expect(publish.status, publish.raw).toBe(200)
+      const persisted = await pool.query(
+        'SELECT publish_status FROM attendance_shift_assignments WHERE id = $1',
+        [draftId],
+      )
+      expect(persisted.rows[0].publish_status).toBe('published')
+    } finally {
+      await calculationClient.query('ROLLBACK').catch(() => undefined)
+      calculationClient.release()
+    }
+  })
+
+  it('P27: publication-first holds the exclusive schedule context without mixing the calculation snapshot', async () => {
+    const plugin = require('../../../../plugins/plugin-attendance/index.cjs')
+    const loadCandidates = plugin.__attendanceWorkDateResolverForTests.loadPublishedCandidatesForWorkDateResolver
+    const orgId = randomUUID()
+    const userId = `${orgId}-worker`
+    const workDate = '2049-06-18'
+    const token = await mintToken(`${orgId}-admin`)
+    const shiftId = (await createShiftViaApi(token, orgId, {
+      name: 'P27 publication first',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+    })).body.data.id as string
+    const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
+      userId,
+      shiftId,
+      startDate: workDate,
+    })
+    expect(draft.status, draft.raw).toBe(201)
+    const draftId = draft.body.data.assignment.id as string
+    await enableShadowPosture(orgId)
+
+    const suffix = randomUUID().replaceAll('-', '')
+    const functionName = `w4c3b_p27_pause_${suffix}`
+    const triggerName = `w4c3b_p27_pause_${suffix}`
+    const pauseKey = BigInt(`0x${suffix.slice(0, 15)}`).toString()
+    await pool.query(
+      `CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+       BEGIN
+         IF NEW.id = '${draftId}'::uuid THEN
+           PERFORM pg_advisory_xact_lock(${pauseKey}::bigint);
+         END IF;
+         RETURN NEW;
+       END;
+       $$ LANGUAGE plpgsql`,
+    )
+    await pool.query(
+      `CREATE TRIGGER ${triggerName}
+       BEFORE UPDATE ON attendance_shift_assignments
+       FOR EACH ROW EXECUTE FUNCTION ${functionName}()`,
+    )
+
+    const pauseClient = await pool.connect()
+    const calculationClient = await pool.connect()
+    try {
+      await pauseClient.query('BEGIN')
+      const pausePid = Number((await pauseClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await pauseClient.query('SELECT pg_advisory_xact_lock($1::bigint)', [pauseKey])
+
+      const publishPromise = postJson('/api/attendance/schedule-publications', token, orgId, {
+        assignmentIds: [draftId],
+      })
+      const publicationPid = await waitForBlockedPid(pausePid)
+
+      const calculationPid = Number((await calculationClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await calculationClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const calculationTrx = {
+        query: async (text: string, params?: unknown[]) =>
+          (await calculationClient.query(text, params as never[])).rows,
+      }
+      const candidatesPromise = loadCandidates(calculationTrx, {
+        orgId,
+        userId,
+        workDates: [workDate],
+        lockScheduleFacts: true,
+      })
+      await waitUntilBlockedBy(calculationPid, publicationPid)
+
+      await pauseClient.query('COMMIT')
+      const publish = await publishPromise
+      expect(publish.status, publish.raw).toBe(200)
+      const candidates = await candidatesPromise
+      // SERIALIZABLE fixes its snapshot on the shared-lock statement before it
+      // waits. This overlapping transaction therefore remains wholly before the
+      // publication; it must not splice the newly committed row into that frozen
+      // context. A fresh transaction below observes the complementary state.
+      expect(candidates).toEqual([])
+      await calculationClient.query('COMMIT')
+
+      const freshClient = await pool.connect()
+      let freshCandidates
+      try {
+        await freshClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        freshCandidates = await loadCandidates({
+          query: async (text: string, params?: unknown[]) =>
+            (await freshClient.query(text, params as never[])).rows,
+        }, {
+          orgId,
+          userId,
+          workDates: [workDate],
+          lockScheduleFacts: true,
+        })
+        await freshClient.query('COMMIT')
+      } finally {
+        await freshClient.query('ROLLBACK').catch(() => undefined)
+        freshClient.release()
+      }
+      expect(freshCandidates).toHaveLength(1)
+      expect(freshCandidates[0]).toMatchObject({
+        orgId,
+        userId,
+        workDate,
+        shiftId,
+        assignmentId: draftId,
+        source: 'shift',
+      })
+    } finally {
+      await pauseClient.query('ROLLBACK').catch(() => undefined)
+      await calculationClient.query('ROLLBACK').catch(() => undefined)
+      pauseClient.release()
+      calculationClient.release()
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON attendance_shift_assignments`).catch(() => undefined)
+      await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`).catch(() => undefined)
+    }
   })
 
   it('matrix: shift-swap final approval fails closed after the source shift became multi-segment', async () => {
