@@ -70,8 +70,8 @@ Recommended table: `attendance_group_fixed_schedule_configs`.
 | --- | --- |
 | `id` | UUID primary key. |
 | `org_id` | Required tenant anchor. Every read and write includes it. |
-| `group_id` | Required attendance group; unique with `org_id`. |
-| `shift_id` | Required desired shift; runtime validates the shift belongs to the same org. |
+| `group_id` | Required attendance group; unique with `org_id`. A composite `(group_id, org_id)` foreign key references `attendance_groups(id, org_id)` with `ON DELETE CASCADE`, so deleting a group cannot strand desired config or add a new delete blocker. |
+| `shift_id` | Required desired shift; runtime validates the shift belongs to the same org. A foreign key to `attendance_shifts(id)` uses `ON DELETE RESTRICT`; the existing canonical shift-delete service adds this config table to its blocker set and returns its typed 409 before attempting the delete. |
 | `start_date` / `end_date` | Required finite desired window; start must not exceed end. |
 | `revision` | Monotonic configuration revision, incremented only when one of the three desired values changes. |
 | `updated_by` / timestamps | Audit attribution only; never used to derive effectiveness. |
@@ -197,11 +197,17 @@ expose only the token subject's own applicability and must not reuse the admin
 response wholesale.
 
 FSER-1 introduces one fixed-schedule route actor-context helper and uses it for
-config-save, preview, apply, rebuild, and clear. The helper derives the
-authenticated org, checks every client org selector, and only then performs the
-existing admin/scheduler-scope role check. Apply/rebuild/clear pass that context
-as `actorAccess` to their existing action guards and use `actorAccess.orgId` for
-all transaction arguments and emitted events. This slice does not silently
+config-save, preview, apply, rebuild, and clear. The helper derives both actor
+and organization solely through `getAuthenticatedUserId(req)` and
+`getAuthenticatedOrgId(req)`. It never calls `getUserId(req)` or `getOrgId(req)`
+and never accepts `x-user-id` as an identity source. A missing authenticated
+actor returns 401 and a missing authenticated org returns the repository's
+authenticated-but-unscoped 403 posture, both before scoped SQL. Client org
+selectors and `x-user-id` may be absent or byte-equal to the authenticated
+values; a mismatch fails before the existing admin/scheduler-scope role check.
+Apply/rebuild/clear pass that context as `actorAccess` to their existing action
+guards and use `actorAccess.orgId` and `actorAccess.userId` for all transaction
+arguments, audit attribution, and emitted events. This slice does not silently
 rewrite the generic `resolveAttendanceSchedulerScopeActor(...)` contract used by
 unrelated scheduler routes.
 
@@ -267,7 +273,7 @@ must not duplicate the effectiveness query or cache a second status.
 | Slice | Scope | Completion bar |
 | --- | --- | --- |
 | FSER-0 | This design lock and owner decision | Exact-head review confirms the contradiction and chosen desired-config shape. |
-| FSER-1 | Migration + config service/routes | Fresh and upgrade migration tests; read uses `attendance:admin`; config write uses fixed-schedule `dispatch`; authenticated org is authoritative; org spoofing is blocked before SQL; config upsert is assignment-write-free. |
+| FSER-1 | Migration + config service/routes | Fresh and upgrade migration tests; group delete cascades config; shift delete returns the canonical typed blocker; read uses `attendance:admin`; config write uses fixed-schedule `dispatch`; authenticated actor and org are authoritative; actor/org spoofing is blocked before SQL; config upsert is assignment-write-free. |
 | FSER-2 | Pure derivation + read route | Full four-state real-Postgres matrix, two-org isolation, missing-schema fail-closed, deterministic reason ordering. |
 | FSER-3 | Apply/rebuild config consumption | Absent-config compatibility is atomic; stale candidate 409 and zero writes; matching candidate retains current producer semantics and byte-compatible result shape. |
 | FSER-4 | Group/employee/trace/report UI projections | One shared API client/composable, no duplicate status logic, three viewport browser evidence. |
@@ -305,15 +311,20 @@ effectiveness data.
     error: identical candidates converge idempotently and different candidates
     produce one winner plus one typed 409 with no losing assignment writes.
 17. Read, config-save, preview, apply, rebuild, and clear each reject a forged
-    body/query/header org before scoped SQL; no-principal-org never falls back to
-    `DEFAULT_ORG_ID`. Removing the authenticated-org comparison makes the
-    corresponding negative leg red.
+    body/query/header org and forged `x-user-id` before scoped SQL;
+    no-principal-org never falls back to `DEFAULT_ORG_ID`, and no-principal-user
+    never falls back to a header. Removing either authenticated-principal
+    comparison makes the corresponding negative leg red.
 18. Removing the `attendance:admin` read guard or the scheduler-scope `dispatch`
     config-write guard makes its permission-negative leg red while the existing
     full-admin positive leg stays green.
 19. Replacing the canonical producer-key builder with raw concatenation, or
     acquiring the config lock after a target lock, makes the key-parity or
     lock-order gate red.
+20. Deleting a group removes its desired config in the same database action;
+    deleting a referenced shift returns the canonical typed 409 with both shift
+    and config intact. Removing either referential/delete-service guard makes its
+    lifecycle leg red.
 
 ## 10. Owner Decision
 
