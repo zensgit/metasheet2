@@ -25,7 +25,7 @@ derive them and defines the smallest implementation sequence.
 | Preview/apply/rebuild/clear | The four group routes receive the same three values in each request body. | There is no durable desired configuration to read from another surface. |
 | Applied facts | Apply/rebuild writes per-user `attendance_shift_assignments`; managed rows carry `producer_type`, `producer_ref_id`, `producer_key`, and `producer_run_id`. | Applied results are durable and can prove what was materialized. |
 | Producer identity | `buildAttendanceGroupFixedScheduleProducerKey` includes group, shift, start date, and end date. | Existing managed rows can be compared with one desired configuration without adding another result identity. |
-| Group schema | `attendance_groups` stores group identity, timezone, rule-set link, and description; it has no fixed-schedule selection. | The four-state contract cannot be reconstructed from the group row today. |
+| Group schema | `attendance_groups` stores group identity, timezone, rule-set link, description, and the later `attendance_type` category; it has no fixed-schedule shift/window selection. | The four-state contract cannot be reconstructed from the group row today; `attendance_type` is not desired fixed-schedule configuration. |
 | Earlier FS-A boundary | The 2026-05-28 V1 lock deliberately made assignments the only schedule facts and forbade a persistent group schedule type. | `#4709` is a deliberate vNext amendment, not an implementation detail that can be slipped into a read endpoint. |
 
 Evidence anchors on the baseline:
@@ -39,6 +39,7 @@ Evidence anchors on the baseline:
 - `apps/web/src/views/AttendanceView.vue:27109-27114`
 - `apps/web/src/views/AttendanceView.vue:27422-27574`
 - `packages/core-backend/src/db/migrations/zzzz20260204123000_create_attendance_groups.ts:8-49`
+- `packages/core-backend/src/db/migrations/zzzz20260529213000_add_attendance_group_type.ts:12-29`
 - `docs/development/attendance-group-admin-ux-fixed-schedule-design-20260528.md:40-75`
 
 ## 2. Contradiction That Must Be Resolved
@@ -93,7 +94,7 @@ Hard rules:
 The read model is computed from the desired config, current group membership,
 and eligible managed assignment rows whose producer type is
 `attendance_group_fixed_schedule` and whose producer reference is the group.
-Eligible means `is_active=true` and
+Eligible means `COALESCE(is_active, true)=true` and
 `COALESCE(publish_status, 'published')='published'`, matching the existing
 managed-row loader. Pending or reopened publication rows are reported
 separately and cannot make the desired config effective.
@@ -184,16 +185,36 @@ Response shape:
 not user IDs. The same service is the only source for group, employee, trace,
 and report projections.
 
-Authorization must happen before any scoped SQL. Admin uses the existing
-attendance admin boundary; a future self projection may expose only the token
-subject's own applicability and must not reuse the admin response wholesale.
+Authorization must happen before any scoped SQL. This v1 read route uses
+`withPermission('attendance:admin')`. Organization identity comes from the
+authenticated principal via `getAuthenticatedOrgId(req)`, never from
+`getOrgId(req)` or `DEFAULT_ORG_ID`. A body, query, or `x-org-id` value may be
+absent or equal to the authenticated organization; a mismatch returns 403
+before group, config, membership, shift, or assignment SQL. An authenticated
+principal with no organization also returns the repository's
+authenticated-but-unscoped 403 posture before SQL. A future self projection may
+expose only the token subject's own applicability and must not reuse the admin
+response wholesale.
+
+FSER-1 introduces one fixed-schedule route actor-context helper and uses it for
+config-save, preview, apply, rebuild, and clear. The helper derives the
+authenticated org, checks every client org selector, and only then performs the
+existing admin/scheduler-scope role check. Apply/rebuild/clear pass that context
+as `actorAccess` to their existing action guards and use `actorAccess.orgId` for
+all transaction arguments and emitted events. This slice does not silently
+rewrite the generic `resolveAttendanceSchedulerScopeActor(...)` contract used by
+unrelated scheduler routes.
 
 ## 6. Write Contract Amendment
 
 The first runtime write slice is intentionally narrow:
 
 1. `PUT /api/attendance/groups/:groupId/fixed-schedule/config` validates and
-   upserts the three desired values.
+   upserts the three desired values. It uses the existing fixed-schedule
+   scheduler-scope `dispatch` authorization, including the existing full-admin
+   override, rather than adding a second writer permission. The authorized org
+   returned by that guard is the transaction org. Client org selectors obey the
+   mismatch/no-principal fail-closed contract in section 5.
 2. Existing preview remains write-free and may accept an unsaved candidate.
 3. For backward compatibility, apply/rebuild with no config row atomically
    creates the desired config from the validated request only if materialization
@@ -209,10 +230,18 @@ The first runtime write slice is intentionally narrow:
    `expectedConfigRevision`; a revision mismatch is stale. Legacy clients may
    omit the revision only when all three candidate values equal the locked
    config row; any value mismatch is the same typed 409.
-5. Apply/rebuild materializes assignment rows using the existing producer key.
-6. Clear only clears the exact managed key requested under the existing
+5. Apply/rebuild preserves the existing `lockTargets(...)` per-user lock and
+   overlap-read ordering. The config row is locked before those target locks;
+   target locks are then acquired in their existing deterministic order, and
+   overlap reads and writes stay in that same transaction. No route may hold a
+   target lock and then attempt to acquire the config lock.
+6. Apply/rebuild materializes assignment rows using the existing producer key.
+   Desired-key reconstruction for reads and writes must call
+   `buildAttendanceGroupFixedScheduleProducerKey`; raw date/string
+   concatenation is not an equivalent implementation.
+7. Clear only clears the exact managed key requested under the existing
    permission model; it does not delete desired config.
-7. Desired config removal, if needed, is a separate explicit route and product
+8. Desired config removal, if needed, is a separate explicit route and product
    decision. It is not bundled into the first slice.
 
 This amendment does not authorize weekly matrices, rotations, automatic future
@@ -238,7 +267,7 @@ must not duplicate the effectiveness query or cache a second status.
 | Slice | Scope | Completion bar |
 | --- | --- | --- |
 | FSER-0 | This design lock and owner decision | Exact-head review confirms the contradiction and chosen desired-config shape. |
-| FSER-1 | Migration + config service/routes | Fresh and upgrade migration tests; org spoofing blocked before SQL; config upsert is assignment-write-free. |
+| FSER-1 | Migration + config service/routes | Fresh and upgrade migration tests; read uses `attendance:admin`; config write uses fixed-schedule `dispatch`; authenticated org is authoritative; org spoofing is blocked before SQL; config upsert is assignment-write-free. |
 | FSER-2 | Pure derivation + read route | Full four-state real-Postgres matrix, two-org isolation, missing-schema fail-closed, deterministic reason ordering. |
 | FSER-3 | Apply/rebuild config consumption | Absent-config compatibility is atomic; stale candidate 409 and zero writes; matching candidate retains current producer semantics and byte-compatible result shape. |
 | FSER-4 | Group/employee/trace/report UI projections | One shared API client/composable, no duplicate status logic, three viewport browser evidence. |
@@ -275,6 +304,16 @@ effectiveness data.
 16. Two concurrent first applies for the same group do not leak a uniqueness
     error: identical candidates converge idempotently and different candidates
     produce one winner plus one typed 409 with no losing assignment writes.
+17. Read, config-save, preview, apply, rebuild, and clear each reject a forged
+    body/query/header org before scoped SQL; no-principal-org never falls back to
+    `DEFAULT_ORG_ID`. Removing the authenticated-org comparison makes the
+    corresponding negative leg red.
+18. Removing the `attendance:admin` read guard or the scheduler-scope `dispatch`
+    config-write guard makes its permission-negative leg red while the existing
+    full-admin positive leg stays green.
+19. Replacing the canonical producer-key builder with raw concatenation, or
+    acquiring the config lock after a target lock, makes the key-parity or
+    lock-order gate red.
 
 ## 10. Owner Decision
 
