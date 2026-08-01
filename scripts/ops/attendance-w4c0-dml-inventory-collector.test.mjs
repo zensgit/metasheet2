@@ -279,8 +279,23 @@ test('positive control: MERGE INTO and runtime staging CREATE TABLE syntax class
 test('canonical boundary helper agrees with the classifier on in/out-of-boundary paths', () => {
   assert.equal(isCanonicalBoundaryPath('packages/core-backend/src/attendance/w4c0-operation-registry.ts'), true)
   assert.equal(isCanonicalBoundaryPath('packages/core-backend/src/attendance/w4c3a-legacy-plan-enqueue.ts'), true)
+  assert.equal(isCanonicalBoundaryPath('packages/core-backend/src/attendance/w4c3b-request-snapshots.ts'), true)
   assert.equal(isCanonicalBoundaryPath('plugins/plugin-attendance/index.cjs'), false)
   assert.equal(isCanonicalBoundaryPath('packages/core-backend/src/routes/admin-users.ts'), false)
+})
+
+test('W4C-3b snapshot storage accepts only the canonical module path', () => {
+  const sql = "async function appendSnapshot() {\n  await db.query('INSERT INTO attendance_request_calculation_snapshots (org_id) VALUES ($1)', [orgId])\n}\n"
+  const canonical = classifyOneSyntheticSite(
+    'packages/core-backend/src/attendance/w4c3b-request-snapshots.ts',
+    sql,
+  )
+  const plugin = classifyOneSyntheticSite('plugins/plugin-attendance/index.cjs', sql)
+
+  assert.equal(canonical.canonicalSites.length, 1)
+  assert.equal(canonical.outsideBoundarySites.length, 0)
+  assert.equal(plugin.canonicalSites.length, 0)
+  assert.equal(plugin.outsideBoundarySites.length, 1)
 })
 
 test('W4C-3a storage buckets preserve frozen source, result, revision, and cleanup boundaries', () => {

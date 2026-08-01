@@ -290,6 +290,9 @@ const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   // the w4_canonical tables (shadow calculations/segments, outbox claim/deliver flips).
   'packages/core-backend/src/attendance/w4c2-',
   'packages/core-backend/src/attendance/w4c3a-',
+  // W4C-3b owns the frozen request-snapshot and request mutation boundaries. Its modules are
+  // canonical writers; callers remain outside this prefix and therefore cannot inherit access.
+  'packages/core-backend/src/attendance/w4c3b-',
   'packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_',
   // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED): the scheduled-run identity + outbox
   // discriminated-union migration's own backfill DML (UPDATE attendance_result_event_outbox
