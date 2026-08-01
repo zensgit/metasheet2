@@ -386,6 +386,29 @@ describe('W4C-3a scratch cleanup failure handling', () => {
     expect(second.listenerCount()).toBe(0)
   })
 
+  it('preserves database drop failures alongside shutdown failures and removes listeners', async () => {
+    const shutdownError = new Error('pool shutdown failed')
+    const dropError = new Error('database drop failed')
+    const first = fakeEmitter()
+    const second = fakeEmitter()
+
+    const result = runScratchCleanup({
+      label: 'injected scratch database',
+      errorSources: [first.emitter, second.emitter],
+      shutdown: [
+        async () => { throw shutdownError },
+        async () => undefined,
+      ],
+      countActiveConnections: async () => 0,
+      dropDatabase: async () => { throw dropError },
+      wait: async () => undefined,
+    })
+
+    await expect(result).rejects.toMatchObject({ errors: [shutdownError, dropError] })
+    expect(first.listenerCount()).toBe(0)
+    expect(second.listenerCount()).toBe(0)
+  })
+
   it('closes the admin pool after scratch cleanup fails and preserves every error', async () => {
     const scratchError = new Error('scratch cleanup failed')
     const adminError = new Error('admin close failed')
