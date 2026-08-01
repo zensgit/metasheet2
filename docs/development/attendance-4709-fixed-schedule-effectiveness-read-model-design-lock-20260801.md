@@ -197,7 +197,8 @@ expose only the token subject's own applicability and must not reuse the admin
 response wholesale.
 
 FSER-1 introduces one fixed-schedule route actor-context helper and uses it for
-config-save, preview, apply, rebuild, and clear. The helper derives both actor
+effectiveness-read, config-save, preview, apply, rebuild, and clear. The helper
+derives both actor
 and organization solely through `getAuthenticatedUserId(req)` and
 `getAuthenticatedOrgId(req)`. It never calls `getUserId(req)` or `getOrgId(req)`
 and never accepts `x-user-id` as an identity source. A missing authenticated
