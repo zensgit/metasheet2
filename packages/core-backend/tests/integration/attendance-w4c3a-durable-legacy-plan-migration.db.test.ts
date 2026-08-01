@@ -137,6 +137,111 @@ async function createBase(pool: Pool): Promise<void> {
 
 type ScratchDatabase = { pool: Pool; kyselyPool: Pool; db: Kysely<unknown> }
 
+type ErrorEmitter = {
+  on: (event: 'error', listener: (error: Error) => void) => unknown
+  off: (event: 'error', listener: (error: Error) => void) => unknown
+}
+
+type ScratchCleanupActions = {
+  label: string
+  errorSources: readonly ErrorEmitter[]
+  shutdown: readonly [() => Promise<unknown>, () => Promise<unknown>]
+  countActiveConnections: () => Promise<number>
+  dropDatabase: () => Promise<unknown>
+  wait: () => Promise<unknown>
+  maxAttempts?: number
+}
+
+async function initializeWithCleanup<T>(
+  initialize: () => Promise<T>,
+  cleanup: () => Promise<unknown>,
+  label: string,
+): Promise<T> {
+  try {
+    return await initialize()
+  } catch (error) {
+    try {
+      await cleanup()
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], `Failed to initialize and clean ${label}`)
+    }
+    throw error
+  }
+}
+
+async function runScratchCleanup(actions: ScratchCleanupActions): Promise<void> {
+  const asyncErrors: Error[] = []
+  const captureAsyncError = (error: Error): void => {
+    asyncErrors.push(error)
+  }
+  for (const source of actions.errorSources) {
+    source.on('error', captureAsyncError)
+  }
+
+  try {
+    const failures: unknown[] = []
+    const shutdown = await Promise.allSettled(
+      actions.shutdown.map((close) => Promise.resolve().then(close)),
+    )
+    for (const result of shutdown) {
+      if (result.status === 'rejected') failures.push(result.reason)
+    }
+
+    let dropped = false
+    let activityCheckFailed = false
+    try {
+      for (let attempt = 0; attempt < (actions.maxAttempts ?? 40); attempt += 1) {
+        if ((await actions.countActiveConnections()) === 0) {
+          await actions.dropDatabase()
+          dropped = true
+          break
+        }
+        await actions.wait()
+      }
+    } catch (error) {
+      activityCheckFailed = true
+      failures.push(error)
+    }
+    if (!dropped && !activityCheckFailed) {
+      failures.push(new Error(`${actions.label} still has active connections after pool shutdown`))
+    }
+    failures.push(...asyncErrors)
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `Failed to clean ${actions.label}`)
+    }
+  } finally {
+    for (const source of actions.errorSources) {
+      source.off('error', captureAsyncError)
+    }
+  }
+}
+
+async function finalizeScratchSuite(actions: {
+  label: string
+  cleanupScratch: () => Promise<unknown>
+  closeAdminPool: () => Promise<unknown>
+  adminAsyncErrors: readonly Error[]
+  removeAdminErrorListener: () => void
+}): Promise<void> {
+  const failures: unknown[] = []
+  try {
+    await actions.cleanupScratch()
+  } catch (error) {
+    failures.push(error)
+  }
+  try {
+    await actions.closeAdminPool()
+  } catch (error) {
+    failures.push(error)
+  } finally {
+    actions.removeAdminErrorListener()
+  }
+  failures.push(...actions.adminAsyncErrors)
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `Failed to clean ${actions.label}`)
+  }
+}
+
 async function createScratch(adminPool: Pool, name: string): Promise<ScratchDatabase> {
   await adminPool.query(`DROP DATABASE IF EXISTS ${name}`)
   await adminPool.query(`CREATE DATABASE ${name}`)
@@ -149,17 +254,10 @@ async function createScratch(adminPool: Pool, name: string): Promise<ScratchData
     kyselyPool,
     db: new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kyselyPool }) }),
   }
-  try {
+  return initializeWithCleanup(async () => {
     await createBase(pool)
     return scratch
-  } catch (error) {
-    try {
-      await destroyScratch(adminPool, name, scratch)
-    } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], `Failed to initialize and clean scratch database ${name}`)
-    }
-    throw error
-  }
+  }, () => destroyScratch(adminPool, name, scratch), `scratch database ${name}`)
 }
 
 async function destroyScratch(
@@ -167,56 +265,149 @@ async function destroyScratch(
   name: string,
   scratch: ScratchDatabase,
 ): Promise<void> {
-  const asyncErrors: Error[] = []
-  const captureAsyncError = (error: Error): void => {
-    asyncErrors.push(error)
-  }
-  for (const current of [scratch.pool, scratch.kyselyPool]) {
-    current.on('error', captureAsyncError)
-  }
-
-  try {
-    const failures: unknown[] = []
-    const shutdown = await Promise.allSettled([
-      scratch.db.destroy(),
-      scratch.pool.end(),
-    ])
-    for (const result of shutdown) {
-      if (result.status === 'rejected') failures.push(result.reason)
-    }
-
-    let dropped = false
-    let activityCheckFailed = false
-    try {
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        const active = await adminPool.query(
-          'SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = $1',
-          [name],
-        )
-        if (Number(active.rows[0]?.count) === 0) {
-          await adminPool.query(`DROP DATABASE IF EXISTS ${name}`)
-          dropped = true
-          break
-        }
-        await new Promise((resolve) => setTimeout(resolve, 25))
-      }
-    } catch (error) {
-      activityCheckFailed = true
-      failures.push(error)
-    }
-    if (!dropped && !activityCheckFailed) {
-      failures.push(new Error(`Scratch database ${name} still has active connections after pool shutdown`))
-    }
-    failures.push(...asyncErrors)
-    if (failures.length > 0) {
-      throw new AggregateError(failures, `Failed to clean scratch database ${name}`)
-    }
-  } finally {
-    for (const current of [scratch.pool, scratch.kyselyPool]) {
-      current.off('error', captureAsyncError)
-    }
-  }
+  await runScratchCleanup({
+    label: `scratch database ${name}`,
+    errorSources: [scratch.pool, scratch.kyselyPool],
+    shutdown: [
+      () => scratch.db.destroy(),
+      () => scratch.pool.end(),
+    ],
+    countActiveConnections: async () => {
+      const active = await adminPool.query(
+        'SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = $1',
+        [name],
+      )
+      return Number(active.rows[0]?.count)
+    },
+    dropDatabase: () => adminPool.query(`DROP DATABASE IF EXISTS ${name}`),
+    wait: () => new Promise((resolve) => setTimeout(resolve, 25)),
+  })
 }
+
+describe('W4C-3a scratch cleanup failure handling', () => {
+  function fakeEmitter() {
+    const listeners = new Set<(error: Error) => void>()
+    return {
+      emitter: {
+        on: (_event: 'error', listener: (error: Error) => void) => {
+          listeners.add(listener)
+        },
+        off: (_event: 'error', listener: (error: Error) => void) => {
+          listeners.delete(listener)
+        },
+      },
+      emit(error: Error) {
+        for (const listener of listeners) listener(error)
+      },
+      listenerCount: () => listeners.size,
+    }
+  }
+
+  it('attempts both pool shutdowns and preserves both failures', async () => {
+    const firstError = new Error('first pool close failed')
+    const secondError = new Error('second pool close failed')
+    const calls: string[] = []
+    const first = fakeEmitter()
+    const second = fakeEmitter()
+
+    const result = runScratchCleanup({
+      label: 'injected scratch database',
+      errorSources: [first.emitter, second.emitter],
+      shutdown: [
+        async () => {
+          calls.push('first')
+          throw firstError
+        },
+        async () => {
+          calls.push('second')
+          throw secondError
+        },
+      ],
+      countActiveConnections: async () => 0,
+      dropDatabase: async () => undefined,
+      wait: async () => undefined,
+    })
+
+    await expect(result).rejects.toMatchObject({ errors: [firstError, secondError] })
+    expect(calls).toEqual(['first', 'second'])
+    expect(first.listenerCount()).toBe(0)
+    expect(second.listenerCount()).toBe(0)
+  })
+
+  it('preserves initialization and cleanup failures', async () => {
+    const initializeError = new Error('initialize failed')
+    const cleanupError = new Error('cleanup failed')
+
+    await expect(initializeWithCleanup(
+      async () => { throw initializeError },
+      async () => { throw cleanupError },
+      'injected scratch database',
+    )).rejects.toMatchObject({ errors: [initializeError, cleanupError] })
+  })
+
+  it('captures asynchronous pool errors and always removes listeners', async () => {
+    const asyncError = new Error('asynchronous pool failure')
+    const first = fakeEmitter()
+    const second = fakeEmitter()
+
+    const result = runScratchCleanup({
+      label: 'injected scratch database',
+      errorSources: [first.emitter, second.emitter],
+      shutdown: [
+        async () => { first.emit(asyncError) },
+        async () => undefined,
+      ],
+      countActiveConnections: async () => 0,
+      dropDatabase: async () => undefined,
+      wait: async () => undefined,
+    })
+
+    await expect(result).rejects.toMatchObject({ errors: [asyncError] })
+    expect(first.listenerCount()).toBe(0)
+    expect(second.listenerCount()).toBe(0)
+  })
+
+  it('preserves activity query failures and removes listeners', async () => {
+    const activityError = new Error('activity query failed')
+    const first = fakeEmitter()
+    const second = fakeEmitter()
+
+    const result = runScratchCleanup({
+      label: 'injected scratch database',
+      errorSources: [first.emitter, second.emitter],
+      shutdown: [async () => undefined, async () => undefined],
+      countActiveConnections: async () => { throw activityError },
+      dropDatabase: async () => undefined,
+      wait: async () => undefined,
+    })
+
+    await expect(result).rejects.toMatchObject({ errors: [activityError] })
+    expect(first.listenerCount()).toBe(0)
+    expect(second.listenerCount()).toBe(0)
+  })
+
+  it('closes the admin pool after scratch cleanup fails and preserves every error', async () => {
+    const scratchError = new Error('scratch cleanup failed')
+    const adminError = new Error('admin close failed')
+    const asyncError = new Error('admin asynchronous failure')
+    const calls: string[] = []
+
+    await expect(finalizeScratchSuite({
+      label: 'injected scratch suite',
+      cleanupScratch: async () => {
+        calls.push('scratch')
+        throw scratchError
+      },
+      closeAdminPool: async () => {
+        calls.push('admin')
+        throw adminError
+      },
+      adminAsyncErrors: [asyncError],
+      removeAdminErrorListener: () => { calls.push('remove-listener') },
+    })).rejects.toMatchObject({ errors: [scratchError, adminError, asyncError] })
+    expect(calls).toEqual(['scratch', 'admin', 'remove-listener'])
+  })
+})
 
 async function seedNoTargetJob(pool: Pool, orgId: string): Promise<{ jobId: string; batchId: string }> {
   const jobId = newId()
@@ -337,25 +528,17 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
   }, 90000)
 
   afterAll(async () => {
-    const failures: unknown[] = []
-    try {
-      if (pool && kyselyPool && db) {
-        await destroyScratch(adminPool, scratchName, { pool, kyselyPool, db })
-      }
-    } catch (error) {
-      failures.push(error)
-    }
-    try {
-      await adminPool?.end()
-    } catch (error) {
-      failures.push(error)
-    } finally {
-      adminPool?.off('error', captureAdminAsyncError)
-    }
-    failures.push(...adminAsyncErrors)
-    if (failures.length > 0) {
-      throw new AggregateError(failures, `Failed to clean W4C-3a scratch database ${scratchName}`)
-    }
+    await finalizeScratchSuite({
+      label: `W4C-3a scratch database ${scratchName}`,
+      cleanupScratch: async () => {
+        if (pool && kyselyPool && db) {
+          await destroyScratch(adminPool, scratchName, { pool, kyselyPool, db })
+        }
+      },
+      closeAdminPool: () => adminPool?.end() ?? Promise.resolve(),
+      adminAsyncErrors,
+      removeAdminErrorListener: () => { adminPool?.off('error', captureAdminAsyncError) },
+    })
   })
 
   it('creates the four job columns, six history/revision tables, named deferred validator, and ten truncate guards', async () => {
