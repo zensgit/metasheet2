@@ -99,6 +99,10 @@ const attendancePlugin = require(PLUGIN) as {
       drainCleanup(jobId: string): Promise<void>
       pageSize?: number
     }): Promise<{ jobs: number; cleanups: number }>
+    applyAttendanceReservedImportJobSnapshot(
+      row: Record<string, unknown>,
+      reservation: Record<string, unknown>,
+    ): Record<string, unknown>
   }
 }
 const syncCompatibility =
@@ -223,6 +227,46 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       '00000000-0000-4000-8000-000000000001',
       'default',
     ])
+  })
+
+  it('keeps the lock-time existing-job snapshot when a later read is already terminal', () => {
+    const completedRow = {
+      id: '00000000-0000-4000-8000-000000000001',
+      status: 'completed',
+      progress: 1,
+      total: 1,
+      error: null,
+      started_at: '2026-07-31T00:00:01.000Z',
+      finished_at: '2026-07-31T00:00:02.000Z',
+      created_at: '2026-07-31T00:00:00.000Z',
+      updated_at: '2026-07-31T00:00:02.000Z',
+    }
+    const projected = syncCompatibility.applyAttendanceReservedImportJobSnapshot(
+      completedRow,
+      {
+        kind: 'existing',
+        jobSnapshot: {
+          status: 'queued',
+          progress: 0,
+          total: 1,
+          error: null,
+          startedAt: null,
+          finishedAt: null,
+          createdAt: '2026-07-31T00:00:00.000Z',
+          updatedAt: '2026-07-31T00:00:00.000Z',
+        },
+      },
+    )
+
+    expect(projected).toMatchObject({
+      status: 'queued',
+      progress: 0,
+      total: 1,
+      started_at: null,
+      finished_at: null,
+      updated_at: '2026-07-31T00:00:00.000Z',
+    })
+    expect(completedRow.status).toBe('completed')
   })
 
   it('drains every startup recovery row beyond the 50-row boundary', async () => {

@@ -9635,6 +9635,24 @@ function mapImportBatchRow(row) {
 		  return Array.isArray(result?.rows) ? result.rows : []
 		}
 
+		function applyAttendanceReservedImportJobSnapshot(row, reservation) {
+		  const snapshot = reservation?.kind === 'existing'
+		    ? reservation.jobSnapshot
+		    : null
+		  if (!snapshot || typeof snapshot !== 'object') return row
+		  return {
+		    ...row,
+		    status: snapshot.status,
+		    progress: snapshot.progress,
+		    total: snapshot.total,
+		    error: snapshot.error,
+		    started_at: snapshot.startedAt,
+		    finished_at: snapshot.finishedAt,
+		    created_at: snapshot.createdAt,
+		    updated_at: snapshot.updatedAt,
+		  }
+		}
+
 		function attendanceSyncImportLockBusyError(code) {
 		  const status = code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY' ? 503 : 409
 		  return new HttpError(status, code, code)
@@ -23714,6 +23732,7 @@ module.exports = {
     runAttendanceSyncImportSerializableTransaction,
     runAttendanceLegacyNullVersionCommitAtomically,
     drainAttendanceImportStartupRecoveryPages,
+    applyAttendanceReservedImportJobSnapshot,
   },
   __attendanceImportPathForTests: {
     getImportUploadPaths,
@@ -26470,21 +26489,9 @@ module.exports = {
 	    }
 
 	    const mapReservedImportJobRow = (row, reservation) => {
-	      const snapshot = reservation?.kind === 'existing'
-	        ? reservation.jobSnapshot
-	        : null
-	      if (!snapshot || typeof snapshot !== 'object') return mapImportJobRow(row)
-	      return mapImportJobRow({
-	        ...row,
-	        status: snapshot.status,
-	        progress: snapshot.progress,
-	        total: snapshot.total,
-	        error: snapshot.error,
-	        started_at: snapshot.startedAt,
-	        finished_at: snapshot.finishedAt,
-	        created_at: snapshot.createdAt,
-	        updated_at: snapshot.updatedAt,
-	      })
+	      return mapImportJobRow(
+	        applyAttendanceReservedImportJobSnapshot(row, reservation),
+	      )
 	    }
 
 	    const updateImportJobProgress = async ({ jobId, orgId, status, progress, total, error, startedAt, finishedAt }) => {
