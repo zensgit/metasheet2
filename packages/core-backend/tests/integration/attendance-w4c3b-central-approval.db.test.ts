@@ -32,6 +32,11 @@ import {
   ApprovalProductService,
   __setW4c3bBulkReassignTestBarrierForTests,
 } from '../../src/services/ApprovalProductService'
+import { executeApprovalActionFromCardDelivery } from '../../src/services/ApprovalCardDeliveryAction'
+import {
+  insertDingTalkApprovalCardDelivery,
+  markDingTalkApprovalCardDeliverySent,
+} from '../../src/integrations/dingtalk/approval-card-deliveries'
 
 function createDeferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void
@@ -117,6 +122,7 @@ describeIfDatabase('W4C-3b R0 central approval (real DB)', () => {
       'approval_instances',
       'approval_assignments',
       'approval_records',
+      'dingtalk_approval_card_deliveries',
       'attendance_requests',
       'approval_templates',
       'approval_template_versions',
@@ -188,6 +194,7 @@ describeIfDatabase('W4C-3b R0 central approval (real DB)', () => {
 
   async function cleanupNamespace(): Promise<void> {
     // Child → parent order; all ids / keys are NS-prefixed.
+    await pool.query(`DELETE FROM dingtalk_approval_card_deliveries WHERE instance_id LIKE $1`, [`${NS}%`])
     await pool.query(`DELETE FROM approval_records WHERE instance_id LIKE $1`, [`${NS}%`])
     await pool.query(`DELETE FROM approval_assignments WHERE instance_id LIKE $1`, [`${NS}%`])
     await pool.query(
@@ -548,6 +555,103 @@ describeIfDatabase('W4C-3b R0 central approval (real DB)', () => {
         [instanceId],
       )
       expect(asg.rows.every((r) => r.is_active === true)).toBe(true)
+    }
+  })
+
+  it('keeps an actionable DingTalk attendance card fail-closed before decision DML', async () => {
+    const instanceId = id('card-fail-closed')
+    const seeded = await seedAttendanceInstance({
+      instanceId,
+      withAssignmentFrom: actorOrgAdmin,
+      entryEpoch: 71,
+    })
+    const delivery = await insertDingTalkApprovalCardDelivery(
+      (text, params) => pool.query(text, params),
+      {
+        instanceId,
+        nodeKey: seeded.nodeKey,
+        recipientUserId: actorOrgAdmin,
+        recipientDingTalkUserId: `dd-${actorOrgAdmin}`,
+        deliveryKind: 'work_notice_action_card',
+        entryEpoch: 71,
+      },
+    )
+    await markDingTalkApprovalCardDeliverySent(
+      (text, params) => pool.query(text, params),
+      delivery.id,
+      `${NS}-card-task`,
+    )
+
+    const secret = `${NS}-card-secret`
+    const priorSecret = process.env.APPROVAL_CARD_LINK_SECRET
+    process.env.APPROVAL_CARD_LINK_SECRET = secret
+    const token = crypto.createHmac('sha256', secret).update(delivery.id).digest('hex').slice(0, 32)
+
+    try {
+      const outcome = await executeApprovalActionFromCardDelivery(
+        {
+          query: (text, params) => pool.query(text, params),
+          approvals: product,
+        },
+        {
+          deliveryId: delivery.id,
+          token,
+          decision: 'reject',
+          comment: 'attendance card must use the canonical request decision boundary',
+          actor: { userId: actorOrgAdmin, userName: actorOrgAdmin },
+        },
+      )
+      expect(outcome).toMatchObject({
+        status: 'engine_rejected',
+        code: W4C3B_CENTRAL_APPROVAL_ERROR_CODES.ATTENDANCE_CENTRAL_MUTATION_UNSUPPORTED,
+        httpStatus: 409,
+      })
+
+      const state = await pool.query(
+        `SELECT ai.status AS approval_status,
+                ai.version AS approval_version,
+                ar.status AS request_status,
+                count(DISTINCT aa.id) FILTER (WHERE aa.is_active = TRUE)::int AS active_assignments,
+                count(DISTINCT rec.id)::int AS approval_records,
+                card.card_state,
+                card.send_status,
+                (SELECT count(*)::int
+                   FROM attendance_result_operations op
+                  WHERE op.org_id = ar.org_id
+                    AND op.resolved_request_id = ar.id) AS operations,
+                (SELECT count(*)::int
+                   FROM attendance_result_event_outbox outbox
+                   JOIN attendance_result_operations op
+                     ON op.org_id = outbox.org_id
+                    AND op.entrypoint = outbox.entrypoint
+                    AND op.operation_id = outbox.operation_id
+                  WHERE op.org_id = ar.org_id
+                    AND op.resolved_request_id = ar.id) AS outbox
+           FROM approval_instances ai
+           JOIN attendance_requests ar ON ar.approval_instance_id = ai.id
+           JOIN dingtalk_approval_card_deliveries card ON card.instance_id = ai.id
+           LEFT JOIN approval_assignments aa ON aa.instance_id = ai.id
+           LEFT JOIN approval_records rec ON rec.instance_id = ai.id
+          WHERE ai.id = $1 AND card.id = $2
+          GROUP BY ai.status, ai.version, ar.status, ar.org_id, ar.id,
+                   card.card_state, card.send_status`,
+        [instanceId, delivery.id],
+      )
+      expect(state.rows).toEqual([{
+        approval_status: 'pending',
+        approval_version: 1,
+        request_status: 'pending',
+        active_assignments: 1,
+        approval_records: 0,
+        card_state: 'sent',
+        send_status: 'sent',
+        operations: 0,
+        outbox: 0,
+      }])
+    } finally {
+      if (priorSecret === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
+      else process.env.APPROVAL_CARD_LINK_SECRET = priorSecret
+      await pool.query(`DELETE FROM dingtalk_approval_card_deliveries WHERE id = $1`, [delivery.id])
     }
   })
 

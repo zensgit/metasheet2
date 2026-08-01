@@ -211,6 +211,20 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     return result.rows[0] as { operations: number; outbox: number; approval_records: number }
   }
 
+  async function dispatchCentralDecision(
+    approvalId: string,
+    actorId: string,
+    action: 'approve' | 'reject',
+  ) {
+    const { ApprovalBridgeService } = await import('../../src/services/ApprovalBridgeService')
+    const bridge = new ApprovalBridgeService(null)
+    return bridge.dispatchAction(
+      approvalId,
+      { action, comment: `central ${action}` },
+      { userId: actorId, userName: actorId },
+    )
+  }
+
   async function counts(orgId: string) {
     const result = await pool.query(
       `SELECT
@@ -551,5 +565,77 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       outbox: 0,
       approval_records: 0,
     })
+  })
+
+  it('keeps central and plugin reject paths single-bodied in both sequential orders', async () => {
+    for (const order of ['central-first', 'plugin-first'] as const) {
+      const fixture = await seedOrg('shadow', 'attendance:approve')
+      const requestId = await createRequest(
+        fixture,
+        order === 'central-first' ? '2049-08-10' : '2049-08-11',
+      )
+      const approval = await loadApprovalCursor(requestId)
+      await assignApprovalUser(approval, fixture.userId)
+      const headers = { Authorization: `Bearer ${fixture.token}` }
+      const body = {
+        operationId: randomUUID(),
+        expectedApprovalVersion: approval.version,
+        expectedApprovalNode: approval.node,
+        comment: `${order} plugin reject`,
+      }
+      const pluginDecision = () => requestJson(
+        `${baseUrl}/api/attendance/requests/${requestId}/reject`,
+        { method: 'POST', headers, body },
+      )
+
+      if (order === 'central-first') {
+        await expect(
+          dispatchCentralDecision(approval.approvalId, fixture.userId, 'reject'),
+        ).rejects.toMatchObject({
+          code: 'ATTENDANCE_CENTRAL_MUTATION_UNSUPPORTED',
+          statusCode: 409,
+        })
+        expect(await requestDecisionResidue(fixture.orgId, requestId)).toEqual({
+          operations: 0,
+          outbox: 0,
+          approval_records: 0,
+        })
+        const response = await pluginDecision()
+        expect(response.status, response.raw).toBe(200)
+      } else {
+        const response = await pluginDecision()
+        expect(response.status, response.raw).toBe(200)
+        await expect(
+          dispatchCentralDecision(approval.approvalId, fixture.userId, 'reject'),
+        ).rejects.toMatchObject({
+          code: 'INVALID_STATUS_TRANSITION',
+          statusCode: 409,
+        })
+      }
+
+      expect(await requestDecisionResidue(fixture.orgId, requestId)).toEqual({
+        operations: 1,
+        outbox: 1,
+        approval_records: 1,
+      })
+      const terminal = await pool.query(
+        `SELECT ar.status AS request_status,
+                ai.status AS approval_status,
+                ai.version AS approval_version,
+                count(aa.id) FILTER (WHERE aa.is_active = TRUE)::int AS active_assignments
+           FROM attendance_requests ar
+           JOIN approval_instances ai ON ai.id = ar.approval_instance_id
+           LEFT JOIN approval_assignments aa ON aa.instance_id = ai.id
+          WHERE ar.id = $1::uuid AND ar.org_id = $2
+          GROUP BY ar.status, ai.status, ai.version`,
+        [requestId, fixture.orgId],
+      )
+      expect(terminal.rows).toEqual([{
+        request_status: 'rejected',
+        approval_status: 'rejected',
+        approval_version: approval.version + 1,
+        active_assignments: 0,
+      }])
+    }
   })
 })
