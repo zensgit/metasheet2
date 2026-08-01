@@ -301,7 +301,7 @@ async function readAttendanceRecordRow(
   const result = await runQuery<AttendanceRecordRow>(
     `SELECT id, status, is_workday, work_minutes, late_minutes, early_leave_minutes, meta, source_batch_id,
             created_at, updated_at
-       FROM attendance_records
+       FROM attendance_current_records
       WHERE org_id = $1 AND user_id = $2 AND work_date = $3
       LIMIT 1`,
     [orgId, userId, workDate],
@@ -636,7 +636,7 @@ export async function buildMissingPunchTrace(
   >(
     `SELECT id, status, is_workday, work_minutes, late_minutes, early_leave_minutes, meta, source_batch_id,
             created_at, updated_at, first_in_at, last_out_at
-       FROM attendance_records
+       FROM attendance_current_records
       WHERE org_id = $1 AND user_id = $2 AND work_date = $3
       LIMIT 1`,
     [orgId, userId, workDate],

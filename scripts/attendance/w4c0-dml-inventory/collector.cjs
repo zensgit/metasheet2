@@ -144,6 +144,9 @@ const P25_READ_TABLE_PATTERN = new RegExp(
   'gi',
 )
 
+const ATTENDANCE_RECORD_READ_PATTERN =
+  /\b(?:FROM|JOIN)\s+"?(attendance_records|attendance_current_records)"?/gi
+
 // Reserved words that can legally follow a DML verb without being a table name — most notably
 // `... ON CONFLICT (...) DO UPDATE SET col = ...` (an upsert), where "SET" immediately follows
 // "UPDATE" with no table name at all (the target is implicit from the INSERT INTO on the same
@@ -302,6 +305,25 @@ function scanFileForP25CallPathSites(relPath, content) {
   return sites
 }
 
+function scanFileForAttendanceRecordReadSites(relPath, content) {
+  const lines = content.split(/\r?\n/)
+  const sites = []
+  ATTENDANCE_RECORD_READ_PATTERN.lastIndex = 0
+  let match
+  while ((match = ATTENDANCE_RECORD_READ_PATTERN.exec(content))) {
+    const table = match[1]
+    const lineIndex = content.slice(0, match.index).split(/\r?\n/).length - 1
+    if (isDeleteTarget(lines[lineIndex], table)) continue
+    sites.push({
+      relPath,
+      line: lineIndex + 1,
+      table,
+      enclosingSymbol: nearestEnclosingSymbol(lines, lineIndex),
+    })
+  }
+  return sites
+}
+
 // Builds the full raw census across every scannable file under the discovered runtime roots.
 // `source` supplies `readFile(relPath) -> string|null` and `listAllFiles(rootDir) -> relPath[]`.
 function buildRawCensus(source) {
@@ -336,6 +358,24 @@ function buildP25CallPathCensus(source) {
       const content = source.readFile(relPath)
       if (content == null) continue
       sites.push(...scanFileForP25CallPathSites(relPath, content))
+    }
+  }
+  sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
+  return { roots, sites }
+}
+
+function buildAttendanceRecordReadCensus(source) {
+  const roots = discoverRuntimeRoots(source)
+  const seen = new Set()
+  const sites = []
+  for (const root of roots) {
+    for (const relPath of source.listAllFiles(root)) {
+      if (seen.has(relPath)) continue
+      seen.add(relPath)
+      if (!isScannablePath(relPath)) continue
+      const content = source.readFile(relPath)
+      if (content == null) continue
+      sites.push(...scanFileForAttendanceRecordReadSites(relPath, content))
     }
   }
   sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
@@ -434,8 +474,10 @@ module.exports = {
   isScannablePath,
   scanFileForDmlSites,
   scanFileForP25CallPathSites,
+  scanFileForAttendanceRecordReadSites,
   buildRawCensus,
   buildP25CallPathCensus,
+  buildAttendanceRecordReadCensus,
   classifyCensus,
   debtKey,
   isCanonicalBoundaryPath,

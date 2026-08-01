@@ -27,6 +27,41 @@ type AttendanceReportSyncHelpers = {
     logger: { warn(): void },
     params: { from: string; to: string; userId: string },
   ): Promise<{ synced: number; created: number }>
+  loadAttendanceReportRecordsSyncUserPage(
+    db: { query(sql: string, params?: unknown[]): Promise<unknown[]> },
+    orgId: string,
+    from: string,
+    to: string,
+    options?: { page?: number; pageSize?: number },
+  ): Promise<{ userIds: string[]; totalUsers: number; userSelection: string }>
+  loadAttendancePeriodSummaryEmployeeInfo(
+    db: { query(sql: string, params?: unknown[]): Promise<unknown[]> },
+    orgId: string,
+    userId: string,
+    from: string,
+    to: string,
+  ): Promise<{ employeeName: string; department: string; attendanceGroup: string }>
+}
+
+type AttendanceVisibilityHelpers = {
+  __attendanceMakeupPunchForTests: {
+    deriveMakeupAnomalyFacts(
+      db: { query(sql: string, params?: unknown[]): Promise<unknown[]> },
+      input: { orgId: string; userId: string; workDate: string },
+    ): Promise<string[]>
+  }
+  __attendanceWorkDateResolverForTests: {
+    loadOpenRecordsForWorkDateResolver(
+      db: { query(sql: string, params?: unknown[]): Promise<unknown[]> },
+      input: { orgId: string; userId: string; workDates: string[] },
+    ): Promise<Array<{ userId: string; workDate: string }>>
+  }
+  __attendanceOvertimeBankForTests: {
+    snapshotCycleSettlementOnClose(
+      db: { query(sql: string, params?: unknown[]): Promise<unknown[]> },
+      cycle: { id: string; org_id: string; start_date: string; end_date: string },
+    ): Promise<void>
+  }
 }
 
 function getAttendanceReportSyncHelpers(): AttendanceReportSyncHelpers {
@@ -37,6 +72,10 @@ function getAttendanceReportSyncHelpers(): AttendanceReportSyncHelpers {
     throw new Error('attendance report sync test seam unavailable')
   }
   return plugin.__attendanceReportFieldCatalogForTests
+}
+
+function getAttendanceVisibilityHelpers(): AttendanceVisibilityHelpers {
+  return require('../../../../plugins/plugin-attendance/index.cjs') as AttendanceVisibilityHelpers
 }
 
 type RouteResponse = { status: number; raw: string; body: Record<string, unknown> | null }
@@ -220,6 +259,52 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       [recordId, orgId, userId, workDate],
     )
     return recordId
+  }
+
+  async function seedVisibilityRecord(
+    orgId: string,
+    userId: string,
+    recordWorkDate: string,
+    visibilityState: 'active' | 'retired',
+    fields: {
+      status?: string
+      meta?: Record<string, unknown>
+      firstInAt?: string | null
+      lastOutAt?: string | null
+    } = {},
+  ): Promise<string> {
+    const recordId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_records
+       (id, org_id, user_id, work_date, timezone, first_in_at, last_out_at,
+        work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta,
+        projection_owner, current_calculation_id, visibility_state, visibility_reason,
+        created_at, updated_at)
+       VALUES
+       ($1, $2, $3, $4::date, 'UTC', $5::timestamptz, $6::timestamptz,
+        480, 0, 0, $7, true, $8::jsonb,
+        'legacy_untracked', NULL, $9, $10, now(), now())`,
+      [
+        recordId,
+        orgId,
+        userId,
+        recordWorkDate,
+        fields.firstInAt ?? null,
+        fields.lastOutAt ?? null,
+        fields.status ?? 'normal',
+        JSON.stringify(fields.meta ?? {}),
+        visibilityState,
+        visibilityState === 'active' ? 'active' : 'review_placeholder',
+      ],
+    )
+    return recordId
+  }
+
+  function pluginRowsDb(): { query(sql: string, params?: unknown[]): Promise<unknown[]> } {
+    return {
+      query: async (sql: string, params?: unknown[]) =>
+        (await pool.query(sql, params as unknown[])).rows,
+    }
   }
 
   async function createIntegration(orgId: string, sourceUserId: string, tag: string, lastSyncAt: string | null = null): Promise<string> {
@@ -898,6 +983,144 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       [fixture.orgId],
     )
     expect(deliveryResidue.rows[0].count).toBe(0)
+  })
+
+  it('W4C-3a: report-sync schema fallback enumerates users from current records only', async () => {
+    const fixture = await seedActorAndRollout('legacy')
+    const [activeUserId, retiredUserId] = await seedTargetUsers(fixture.orgId, 2)
+    await seedVisibilityRecord(fixture.orgId, activeUserId, '2026-07-23', 'active')
+    await seedVisibilityRecord(fixture.orgId, retiredUserId, '2026-07-24', 'retired')
+    const fallbackDb = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (/FROM user_orgs/.test(sql)) {
+          throw Object.assign(new Error('synthetic legacy schema'), { code: '42P01' })
+        }
+        return (await pool.query(sql, params as unknown[])).rows
+      },
+    }
+
+    const page = await getAttendanceReportSyncHelpers().loadAttendanceReportRecordsSyncUserPage(
+      fallbackDb,
+      fixture.orgId,
+      '2026-07-23',
+      '2026-07-24',
+      { page: 1, pageSize: 100 },
+    )
+
+    expect(page).toMatchObject({
+      userIds: [activeUserId],
+      totalUsers: 1,
+      userSelection: 'attendanceRecordsFallback',
+    })
+  })
+
+  it('W4C-3a: period report employee metadata ignores the newer retired record', async () => {
+    const fixture = await seedActorAndRollout('legacy')
+    await seedVisibilityRecord(fixture.orgId, fixture.actorId, '2026-07-23', 'active', {
+      meta: { department: 'Visible department', attendanceGroup: 'Visible group' },
+    })
+    await seedVisibilityRecord(fixture.orgId, fixture.actorId, '2026-07-24', 'retired', {
+      meta: { department: 'Retired department', attendanceGroup: 'Retired group' },
+    })
+
+    const employee = await getAttendanceReportSyncHelpers().loadAttendancePeriodSummaryEmployeeInfo(
+      pluginRowsDb(),
+      fixture.orgId,
+      fixture.actorId,
+      '2026-07-23',
+      '2026-07-24',
+    )
+
+    expect(employee).toMatchObject({
+      department: 'Visible department',
+      attendanceGroup: 'Visible group',
+    })
+  })
+
+  it('W4C-3a: makeup anomaly facts do not derive from a retired attendance record', async () => {
+    const fixture = await seedActorAndRollout('legacy')
+    const retiredWorkDate = '2026-07-19'
+    await seedVisibilityRecord(fixture.orgId, fixture.actorId, retiredWorkDate, 'retired', {
+      status: 'normal',
+    })
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (/FROM attendance_current_records/.test(sql)) {
+          return (await pool.query(sql, params as unknown[])).rows
+        }
+        throw Object.assign(new Error('synthetic unavailable context'), { code: '42P01' })
+      },
+    }
+
+    const facts = await getAttendanceVisibilityHelpers()
+      .__attendanceMakeupPunchForTests
+      .deriveMakeupAnomalyFacts(db, {
+        orgId: fixture.orgId,
+        userId: fixture.actorId,
+        workDate: retiredWorkDate,
+      })
+
+    expect(facts).toEqual([])
+  })
+
+  it('W4C-3a: open-record work-date attribution returns active rows only', async () => {
+    const fixture = await seedActorAndRollout('legacy')
+    const activeWorkDate = '2026-07-23'
+    const retiredWorkDate = '2026-07-24'
+    await seedVisibilityRecord(fixture.orgId, fixture.actorId, activeWorkDate, 'active', {
+      status: 'partial',
+      firstInAt: `${activeWorkDate}T09:00:00.000Z`,
+    })
+    await seedVisibilityRecord(fixture.orgId, fixture.actorId, retiredWorkDate, 'retired', {
+      status: 'partial',
+      firstInAt: `${retiredWorkDate}T09:00:00.000Z`,
+    })
+
+    const rows = await getAttendanceVisibilityHelpers()
+      .__attendanceWorkDateResolverForTests
+      .loadOpenRecordsForWorkDateResolver(pluginRowsDb(), {
+        orgId: fixture.orgId,
+        userId: fixture.actorId,
+        workDates: [activeWorkDate, retiredWorkDate],
+      })
+
+    expect(rows.map((row) => row.workDate)).toEqual([activeWorkDate])
+  })
+
+  it('W4C-3a: payroll settlement population does not process a retired-only record user', async () => {
+    const fixture = await seedActorAndRollout('legacy')
+    const periodStart = '2026-07-01'
+    const periodEnd = '2026-07-31'
+    await seedVisibilityRecord(fixture.orgId, fixture.actorId, '2026-07-24', 'retired')
+    const cycle = await pool.query<{
+      id: string
+      org_id: string
+      start_date: string
+      end_date: string
+    }>(
+      `INSERT INTO attendance_payroll_cycles (org_id, start_date, end_date, status)
+       VALUES ($1, $2::date, $3::date, 'closed')
+       RETURNING id, org_id, start_date::text, end_date::text`,
+      [fixture.orgId, periodStart, periodEnd],
+    )
+    const sqlCalls: string[] = []
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        sqlCalls.push(sql)
+        return (await pool.query(sql, params as unknown[])).rows
+      },
+    }
+
+    await getAttendanceVisibilityHelpers()
+      .__attendanceOvertimeBankForTests
+      .snapshotCycleSettlementOnClose(db, cycle.rows[0])
+
+    expect(sqlCalls.filter((sql) => /AS total_days/.test(sql))).toHaveLength(0)
+    const settlements = await pool.query<{ count: number }>(
+      'SELECT count(*)::int AS count FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1',
+      [cycle.rows[0].id],
+    )
+    expect(settlements.rows[0].count).toBe(0)
   })
 
   it('P24: dryRun appends one integration audit attempt only, preserving every attendance business table and last_sync_at', async () => {

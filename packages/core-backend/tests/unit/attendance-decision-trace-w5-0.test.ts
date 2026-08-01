@@ -150,7 +150,7 @@ describe('W5-0 identity resolution (§5.1 auditRef.actor, owner P2-b)', () => {
 
 describe('① today_status', () => {
   it('record absent ⇒ 200-shaped undeterminable trace, reasonCode KEY ABSENT (not null/placeholder)', async () => {
-    const q = makeMockQuery([{ match: /FROM attendance_records/, rows: [] }, ...NO_RULE_HANDLERS])
+    const q = makeMockQuery([{ match: /FROM attendance_current_records/, rows: [] }, ...NO_RULE_HANDLERS])
     const trace = await buildTodayStatusTrace('org1', 'user1', '2026-07-01', q)
     expect(trace.confidence).toBe('undeterminable')
     expect(trace.conclusion.status).toBeNull()
@@ -161,7 +161,7 @@ describe('① today_status', () => {
   it('record present ⇒ EXACT response key set + reasonCode is the status column value (scalar, hard rule 5①)', async () => {
     const q = makeMockQuery([
       {
-        match: /FROM attendance_records/,
+        match: /FROM attendance_current_records/,
         rows: [
           {
             id: 'r1', status: 'late', is_workday: true, work_minutes: 400, late_minutes: 15, early_leave_minutes: 0,
@@ -185,7 +185,7 @@ describe('① today_status', () => {
   it('current-rule environment is ALWAYS current_live_no_history, never snapshot_frozen (R4/§3.1 hard rule 6)', async () => {
     const q = makeMockQuery([
       {
-        match: /FROM attendance_records/,
+        match: /FROM attendance_current_records/,
         rows: [{ id: 'r1', status: 'normal', is_workday: true, work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: '2026-07-01T09:00:00Z' }],
       },
       { match: /attendance_shift_assignments/, rows: [] },
@@ -203,7 +203,7 @@ describe('② late_early — tier legacy fail-closed (not a fabricated zero)', (
   it('legacy record without tier meta keys ⇒ tier environment undeterminable, conclusion tier fields null', async () => {
     const q = makeMockQuery([
       {
-        match: /FROM attendance_records/,
+        match: /FROM attendance_current_records/,
         rows: [{ id: 'r1', status: 'late', is_workday: true, work_minutes: 400, late_minutes: 20, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: '2026-07-01T09:00:00Z' }],
       },
       { match: /attendance_requests/, rows: [] },
@@ -218,7 +218,7 @@ describe('② late_early — tier legacy fail-closed (not a fabricated zero)', (
   it('record with tier meta keys present ⇒ tier fields surfaced from meta, tier env snapshot_frozen', async () => {
     const q = makeMockQuery([
       {
-        match: /FROM attendance_records/,
+        match: /FROM attendance_current_records/,
         rows: [{
           id: 'r1', status: 'late', is_workday: true, work_minutes: 400, late_minutes: 45, early_leave_minutes: 0,
           meta: { severe_late_count: 1, severe_late_minutes: 45, absence_late_count: 0 },
@@ -237,7 +237,7 @@ describe('② late_early — tier legacy fail-closed (not a fabricated zero)', (
 
   it('reasonCode is present at response level (scalar, hard rule 5②) and NEVER an array', async () => {
     const q = makeMockQuery([
-      { match: /FROM attendance_records/, rows: [{ id: 'r1', status: 'normal', is_workday: true, work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y' }] },
+      { match: /FROM attendance_current_records/, rows: [{ id: 'r1', status: 'normal', is_workday: true, work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y' }] },
       { match: /attendance_requests/, rows: [] },
       ...NO_RULE_HANDLERS,
     ])
@@ -248,7 +248,7 @@ describe('② late_early — tier legacy fail-closed (not a fabricated zero)', (
 
   it('EXACT response key set (G4 — a `requester`/extra-key leak would fail this, not just toMatchObject)', async () => {
     const q = makeMockQuery([
-      { match: /FROM attendance_records/, rows: [{ id: 'r1', status: 'normal', is_workday: true, work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y' }] },
+      { match: /FROM attendance_current_records/, rows: [{ id: 'r1', status: 'normal', is_workday: true, work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y' }] },
       { match: /attendance_requests/, rows: [] },
       ...NO_RULE_HANDLERS,
     ])
@@ -288,7 +288,7 @@ describe('③ missing_punch — reuses classifyAttendanceOwedPunch / suggestAtte
   })
 
   it('no record row ⇒ undeterminable, reasonCode key absent', async () => {
-    const q = makeMockQuery([{ match: /FROM attendance_records/, rows: [] }, ...NO_RULE_HANDLERS])
+    const q = makeMockQuery([{ match: /FROM attendance_current_records/, rows: [] }, ...NO_RULE_HANDLERS])
     const trace = await buildMissingPunchTrace('org1', 'user1', '2026-07-01', q)
     expect(trace.confidence).toBe('undeterminable')
     expect(Object.prototype.hasOwnProperty.call(trace, 'reasonCode')).toBe(false)
@@ -296,7 +296,7 @@ describe('③ missing_punch — reuses classifyAttendanceOwedPunch / suggestAtte
 
   it('absent row ⇒ generation-source environment always undeterminable (no run marker exists, §1-3)', async () => {
     const q = makeMockQuery([
-      { match: /FROM attendance_records/, rows: [{ id: 'r1', status: 'absent', is_workday: true, work_minutes: 0, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y', first_in_at: null, last_out_at: null }] },
+      { match: /FROM attendance_current_records/, rows: [{ id: 'r1', status: 'absent', is_workday: true, work_minutes: 0, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y', first_in_at: null, last_out_at: null }] },
       { match: /FROM attendance_requests/, rows: [] },
       ...NO_RULE_HANDLERS,
     ])
@@ -308,7 +308,7 @@ describe('③ missing_punch — reuses classifyAttendanceOwedPunch / suggestAtte
 
   it('EXACT response key set (G4 — a `requester`/extra-key leak would fail this, not just toMatchObject)', async () => {
     const q = makeMockQuery([
-      { match: /FROM attendance_records/, rows: [{ id: 'r1', status: 'partial', is_workday: true, work_minutes: 0, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y', first_in_at: null, last_out_at: '2026-07-01T18:00:00Z' }] },
+      { match: /FROM attendance_current_records/, rows: [{ id: 'r1', status: 'partial', is_workday: true, work_minutes: 0, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y', first_in_at: null, last_out_at: '2026-07-01T18:00:00Z' }] },
       { match: /FROM attendance_requests/, rows: [] },
       ...NO_RULE_HANDLERS,
     ])
@@ -319,7 +319,7 @@ describe('③ missing_punch — reuses classifyAttendanceOwedPunch / suggestAtte
 
   it('③E4 adjustment audit event (index.cjs:30077-30097, event_type=adjustment/source=request) is cited when present', async () => {
     const q = makeMockQuery([
-      { match: /FROM attendance_records/, rows: [{ id: 'r1', status: 'partial', is_workday: true, work_minutes: 0, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y', first_in_at: null, last_out_at: '2026-07-01T18:00:00Z' }] },
+      { match: /FROM attendance_current_records/, rows: [{ id: 'r1', status: 'partial', is_workday: true, work_minutes: 0, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y', first_in_at: null, last_out_at: '2026-07-01T18:00:00Z' }] },
       { match: /FROM attendance_requests/, rows: [] },
       { match: /FROM attendance_events/, rows: [{ occurred_at: '2026-07-02T00:00:00Z' }] },
       ...NO_RULE_HANDLERS,
@@ -331,7 +331,7 @@ describe('③ missing_punch — reuses classifyAttendanceOwedPunch / suggestAtte
 
   it('③E4 adjustment audit event ABSENT ⇒ no attendance_events env pushed (no fabricated env)', async () => {
     const q = makeMockQuery([
-      { match: /FROM attendance_records/, rows: [{ id: 'r1', status: 'partial', is_workday: true, work_minutes: 0, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y', first_in_at: null, last_out_at: '2026-07-01T18:00:00Z' }] },
+      { match: /FROM attendance_current_records/, rows: [{ id: 'r1', status: 'partial', is_workday: true, work_minutes: 0, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y', first_in_at: null, last_out_at: '2026-07-01T18:00:00Z' }] },
       { match: /FROM attendance_requests/, rows: [] },
       { match: /FROM attendance_events/, rows: [] },
       ...NO_RULE_HANDLERS,
@@ -833,7 +833,7 @@ describe('SQL values-free (S7-5 same-type — every builder\'s SQL text is param
     created_at: '2026-07-01T09:00:00Z', updated_at: '2026-07-01T09:20:00Z', first_in_at: '2026-07-01T09:00:00Z', last_out_at: '2026-07-01T18:00:00Z',
   }
   const RECORD_FOUND_HANDLERS: Handler[] = [
-    { match: /FROM attendance_records/, rows: [RECORD_ROW] },
+    { match: /FROM attendance_current_records/, rows: [RECORD_ROW] },
     { match: /attendance_shift_assignments/, rows: [] },
     { match: /FROM attendance_rules WHERE org_id = \$1/, rows: [{ late_grace_minutes: 10, early_grace_minutes: 10, severe_late_threshold_minutes: 30, absence_late_threshold_minutes: 60 }] },
     { match: /attendance_record_result_edits/, rows: [{ created_at: '2026-07-01T09:30:00Z', actor_user_id: 'actor1' }] },

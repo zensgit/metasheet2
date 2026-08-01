@@ -21,9 +21,11 @@ const { createWorktreeSource, createGitRefSource } = require(path.join(toolDir, 
 const {
   buildRawCensus,
   buildP25CallPathCensus,
+  buildAttendanceRecordReadCensus,
   classifyCensus,
   scanFileForDmlSites,
   scanFileForP25CallPathSites,
+  scanFileForAttendanceRecordReadSites,
   isCanonicalBoundaryPath,
   contentHashOfKeys,
 } = require(
@@ -35,6 +37,9 @@ const {
   P25_CALL_PATH_CLASSIFICATIONS,
   classifyP25CallPathSites,
 } = require(path.join(toolDir, 'p25-call-path-classification.cjs'))
+const {
+  classifyAttendanceRecordReadSites,
+} = require(path.join(toolDir, 'current-record-read-classification.cjs'))
 const {
   TABLE_BUCKETS,
   P25_FORBIDDEN_AUTHORITY_ROLES,
@@ -80,6 +85,40 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
     [],
     'w4_canonical-bucket tables may only be written from the canonical adapter path prefix',
   )
+})
+
+test('W4C-3a: generated SELECT inventory classifies every attendance-record read', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildAttendanceRecordReadCensus(source)
+  const result = classifyAttendanceRecordReadSites(sites)
+
+  assert.ok(sites.some((site) => site.table === 'attendance_current_records'))
+  assert.ok(sites.some((site) => site.table === 'attendance_records'))
+  assert.deepEqual(
+    result.unclassified.map((site) => `${site.relPath} :: ${site.enclosingSymbol}`),
+    [],
+    'a direct ordinary attendance_records read must be classified or moved to the current view',
+  )
+  assert.deepEqual(result.countDrift, [], 'an added base-table read in a known wrapper needs explicit review')
+  assert.deepEqual(result.stale, [], 'removed base-table reads must retire their historical classification')
+  assert.equal(result.classifiedSites.length, sites.length)
+})
+
+test('W4C-3a SELECT-inventory mutation: a new direct ordinary base read fails while the current view passes', () => {
+  const relPath = 'plugins/plugin-attendance/index.cjs'
+  const direct = scanFileForAttendanceRecordReadSites(
+    relPath,
+    "async function newOrdinarySummary() { return db.query(`SELECT * FROM\n attendance_records`) }\n",
+  )
+  const current = scanFileForAttendanceRecordReadSites(
+    relPath,
+    "async function newOrdinarySummary() { return db.query(`SELECT * FROM\n attendance_current_records`) }\n",
+  )
+
+  assert.equal(classifyAttendanceRecordReadSites(direct).unclassified.length, 1)
+  const currentResult = classifyAttendanceRecordReadSites(current)
+  assert.deepEqual(currentResult.unclassified, [])
+  assert.equal(currentResult.classifiedSites[0]?.posture, 'current')
 })
 
 // -------------------------------------------------------------------------------------------

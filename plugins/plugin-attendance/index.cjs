@@ -2873,14 +2873,14 @@ async function loadAttendanceReportRecordsSyncUserPage(db, orgId, from, to, opti
       `SELECT COUNT(*)::int AS total
        FROM (
          SELECT DISTINCT user_id
-         FROM attendance_records
+         FROM attendance_current_records
          WHERE org_id = $1 AND work_date BETWEEN $2 AND $3
        ) users_with_records`,
       [orgId, from, to]
     )
     const rows = await db.query(
       `SELECT DISTINCT user_id
-       FROM attendance_records
+       FROM attendance_current_records
        WHERE org_id = $1 AND work_date BETWEEN $2 AND $3
        ORDER BY user_id ASC
        LIMIT $4 OFFSET $5`,
@@ -4099,7 +4099,7 @@ async function loadAttendancePeriodSummaryEmployeeInfo(db, orgId, userId, from, 
      FROM users u
      LEFT JOIN LATERAL (
        SELECT meta
-       FROM attendance_records
+       FROM attendance_current_records
        WHERE user_id = u.id
          AND org_id = $2
          AND work_date BETWEEN $3 AND $4
@@ -12923,7 +12923,7 @@ async function snapshotCycleSettlementOnClose(trx, cycle) {
   })
   const userRows = await trx.query(
     `SELECT DISTINCT user_id FROM (
-       SELECT user_id FROM attendance_records WHERE org_id = $1 AND work_date >= $2 AND work_date <= $3
+       SELECT user_id FROM attendance_current_records WHERE org_id = $1 AND work_date >= $2 AND work_date <= $3
        UNION
        SELECT user_id FROM attendance_requests WHERE org_id = $1 AND status = 'approved' AND work_date >= $2 AND work_date <= $3
        UNION
@@ -13913,7 +13913,7 @@ const MAKEUP_REQUEST_TYPE_ANOMALY_TABLE = Object.freeze({
 })
 
 // 补卡规则 MP-2 §4.4: derive the anomaly facts for a (org,user,workDate) from SERVER-SIDE TRUTH —
-// attendance_records.status / missing-side / late+early minutes / RT-1a tier meta — never from client
+// the current attendance record's status / missing-side / late+early minutes / RT-1a tier meta — never from client
 // anomaly prefill. Returns an ARRAY of fact tokens (a record can match several, e.g. late_early). This
 // is intentionally a plain read (no FOR UPDATE): it observes truth, it does not mutate the record, so it
 // must not contend with the concurrent punch/approval write paths. Shared by the MP-2 type gate and the
@@ -13922,7 +13922,7 @@ async function deriveMakeupAnomalyFacts(trx, { orgId, userId, workDate }) {
   const facts = new Set()
   const rows = await trx.query(
     `SELECT status, first_in_at, last_out_at, late_minutes, early_leave_minutes, is_workday, meta
-     FROM attendance_records
+     FROM attendance_current_records
      WHERE org_id = $1 AND user_id = $2 AND work_date = $3
      LIMIT 1`,
     [orgId, userId, workDate]
@@ -15199,7 +15199,7 @@ async function loadOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates
   try {
     const rows = await db.query(
       `SELECT user_id, org_id, work_date, first_in_at, last_out_at, status
-       FROM attendance_records
+       FROM attendance_current_records
        WHERE org_id = $1
          AND user_id = $2
          AND work_date = ANY($3::date[])
@@ -23731,6 +23731,9 @@ module.exports = {
     lib: attendanceWorkDateResolverLib,
     adaptersLib: attendanceWorkDateAdaptersLib,
   },
+  __attendanceMakeupPunchForTests: {
+    deriveMakeupAnomalyFacts,
+  },
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
   },
@@ -23813,6 +23816,7 @@ module.exports = {
     clampLotValidityDays,
     overtimeBankCapDecision,
     buildCycleSettlementRows,
+    snapshotCycleSettlementOnClose,
   },
   __attendanceLeaveOffsetForTests: {
     LEAVE_DEDUCTION_POOLS,
@@ -23861,6 +23865,7 @@ module.exports = {
     getAttendanceReportPeriodSummariesDescriptor,
     getAttendanceReportPeriodSummariesViewDescriptor,
     ensureAttendanceReportPeriodSummaries,
+    loadAttendancePeriodSummaryEmployeeInfo,
     resolveAttendanceReportPeriodSummaryManagedFormulaFields,
     buildAttendanceReportPeriodSummaryValueFields,
     buildAttendanceReportPeriodSummaryValueColumns,
