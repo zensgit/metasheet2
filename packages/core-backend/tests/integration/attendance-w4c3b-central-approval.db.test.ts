@@ -37,6 +37,7 @@ import {
   insertDingTalkApprovalCardDelivery,
   markDingTalkApprovalCardDeliverySent,
 } from '../../src/integrations/dingtalk/approval-card-deliveries'
+import { APPROVAL_ACTION_TYPES } from '../../src/types/approval-product'
 
 function createDeferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void
@@ -57,6 +58,8 @@ const RUN = crypto.randomUUID().slice(0, 8)
 const NS = `w4c3b-r0-${RUN}`
 const ORG_A = `${NS}-org-a`
 const ORG_B = `${NS}-org-b`
+const P26_ATTENDANCE_FIXTURE_KINDS = ['normal', 'adversary'] as const
+const P26_TIMEOUT_EFFECTS = ['transfer', 'jump'] as const
 
 function id(label: string): string {
   return `${NS}-${label}`
@@ -501,12 +504,10 @@ describeIfDatabase('W4C-3b R0 central approval (real DB)', () => {
     })
   })
 
-  it('fail-closed guards block legacy/bridge/product mutation before DML (normal + adversary)', async () => {
+  it('P26 action union plus bridge/admin jump fail closed before DML (normal + adversary)', async () => {
     const adversaryPub = await seedPublishedDefinition()
-    for (const [label, pub] of [
-      ['normal', null],
-      ['adversary', adversaryPub],
-    ] as const) {
+    for (const label of P26_ATTENDANCE_FIXTURE_KINDS) {
+      const pub = label === 'adversary' ? adversaryPub : null
       const instanceId = id(`fail-${label}`)
       await seedAttendanceInstance({
         instanceId,
@@ -535,11 +536,24 @@ describeIfDatabase('W4C-3b R0 central approval (real DB)', () => {
         ),
       ).rejects.toBeInstanceOf(ServiceError)
 
+      for (const action of APPROVAL_ACTION_TYPES) {
+        await expect(
+          product.dispatchAction(
+            instanceId,
+            { action, comment: `P26 ${action}` },
+            { userId: fromAssignee, userName: 'assignee', roles: [] },
+          ),
+          `${label}:${action}`,
+        ).rejects.toMatchObject({
+          code: W4C3B_CENTRAL_APPROVAL_ERROR_CODES.ATTENDANCE_CENTRAL_MUTATION_UNSUPPORTED,
+        })
+      }
+
       await expect(
-        product.dispatchAction(
+        product.adminJump(
           instanceId,
-          { action: 'approve', comment: 'x' },
-          { userId: fromAssignee, userName: 'assignee', roles: [] },
+          { version: Number(before.rows[0].version), targetNodeKey: 'node-2', reason: 'P26 jump' },
+          { userId: actorOrgAdmin, userName: 'admin', roles: [] },
         ),
       ).rejects.toMatchObject({
         code: W4C3B_CENTRAL_APPROVAL_ERROR_CODES.ATTENDANCE_CENTRAL_MUTATION_UNSUPPORTED,
@@ -1214,27 +1228,52 @@ describeIfDatabase('W4C-3b R0 central approval (real DB)', () => {
       expect(preserved.rows[0]?.current_node_timeout_effect).toBe(scenario.armedEffect)
     }
 
-    const dueInstanceId = id('timeout-due')
-    await seedAttendanceInstance({ instanceId: dueInstanceId })
-    await pool.query(
-      `INSERT INTO approval_metrics
-         (instance_id, started_at, current_node_deadline_at, current_node_timeout_effect)
-       VALUES ($1, NOW(), NOW() - INTERVAL '1 minute', 'transfer')`,
-      [dueInstanceId],
-    )
-    expect(await service.applyNodeTimeoutEffect(dueInstanceId, 'transfer')).toBe('skipped_stale')
-    const consumed = await pool.query<{
-      current_node_deadline_at: Date | string | null
-      current_node_timeout_effect: string | null
-    }>(
-      `SELECT current_node_deadline_at, current_node_timeout_effect
-         FROM approval_metrics WHERE instance_id = $1`,
-      [dueInstanceId],
-    )
-    expect(consumed.rows[0]).toEqual({
-      current_node_deadline_at: null,
-      current_node_timeout_effect: null,
-    })
+    const adversaryPub = await seedPublishedDefinition()
+    for (const label of P26_ATTENDANCE_FIXTURE_KINDS) {
+      const publishedDefinitionId = label === 'adversary' ? adversaryPub : null
+      for (const effect of P26_TIMEOUT_EFFECTS) {
+        const dueInstanceId = id(`timeout-due-${label}-${effect}`)
+        await seedAttendanceInstance({
+          instanceId: dueInstanceId,
+          publishedDefinitionId,
+          withAssignmentFrom: fromAssignee,
+        })
+        await pool.query(
+          `INSERT INTO approval_metrics
+             (instance_id, started_at, current_node_deadline_at, current_node_timeout_effect)
+           VALUES ($1, NOW(), NOW() - INTERVAL '1 minute', $2)`,
+          [dueInstanceId, effect],
+        )
+        const before = await pool.query(
+          `SELECT version, status FROM approval_instances WHERE id = $1`,
+          [dueInstanceId],
+        )
+
+        expect(await service.applyNodeTimeoutEffect(dueInstanceId, effect)).toBe('skipped_stale')
+        const consumed = await pool.query<{
+          current_node_deadline_at: Date | string | null
+          current_node_timeout_effect: string | null
+        }>(
+          `SELECT current_node_deadline_at, current_node_timeout_effect
+             FROM approval_metrics WHERE instance_id = $1`,
+          [dueInstanceId],
+        )
+        expect(consumed.rows[0]).toEqual({
+          current_node_deadline_at: null,
+          current_node_timeout_effect: null,
+        })
+        expect(
+          (await pool.query(`SELECT version, status FROM approval_instances WHERE id = $1`, [dueInstanceId])).rows[0],
+        ).toEqual(before.rows[0])
+        expect(
+          Number((await pool.query(
+            `SELECT count(*)::int AS n FROM approval_assignments
+              WHERE instance_id = $1 AND is_active = TRUE`,
+            [dueInstanceId],
+          )).rows[0].n),
+        ).toBe(1)
+      }
+    }
   })
 
   /**

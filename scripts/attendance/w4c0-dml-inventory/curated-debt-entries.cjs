@@ -223,8 +223,10 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Approval request creation/edit: pending edit overwrites mutable form_snapshot without a version.',
     owningSlice: 'W4C-3b',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3b',
     claims: (site) =>
       bySymbol(PLUGIN, /^resolveAttendanceRequestDraft$/)(site) ||
+      (bySymbol(PLUGIN, /^include$/)(site) && site.table === 'attendance_requests') ||
       (bySymbol(PLUGIN, /^buildWhere$/)(site) && site.table === 'attendance_requests' && site.verb === 'insert') ||
       (bySymbol(PLUGIN, /^approvedOvertimeWindows$/)(site) && site.table === 'attendance_requests' && site.verb === 'insert'),
   },
@@ -234,9 +236,11 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-3b',
     sharedHook: true,
     confidence: 'heuristic',
+    canonicalizedBy: 'W4C-3b',
     claims: (site) =>
       bySymbol(PLUGIN, /^buildWhere$/)(site) ||
       bySymbol(PLUGIN, /^assertDispatchScopeAllowed$/)(site) ||
+      bySymbol(PLUGIN, /^resolveLockedAttendanceApprovalFlowState$/)(site) ||
       bySymbol(PLUGIN, /^upsertAttendanceApprovalInstance$/)(site) ||
       bySymbol(PLUGIN, /^deactivateAttendanceApprovalAssignments$/)(site) ||
       bySymbol(PLUGIN, /^replaceAttendanceApprovalAssignments$/)(site),
@@ -246,7 +250,12 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Approved-request cancellation: balance/leave-ledger reversal only; no result reversal today.',
     owningSlice: 'W4C-3b',
     sharedHook: true,
-    claims: (site) => bySymbol(PLUGIN, /^cancelRequest$/)(site) || bySymbol(PLUGIN, /^reverseLeaveBalanceDeduction$/)(site),
+    canonicalizedBy: 'W4C-3b',
+    claims: (site) =>
+      byPathPrefix('packages/core-backend/src/attendance/w4c3b-approved-leave-cancellation.ts')(site) ||
+      bySymbol(PLUGIN, /^lockLatestRequestSnapshotToken$/)(site) ||
+      bySymbol(PLUGIN, /^cancelRequest$/)(site) ||
+      bySymbol(PLUGIN, /^reverseLeaveBalanceDeduction$/)(site),
   },
   {
     id: 'P15',
@@ -267,6 +276,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Central legacy approve/reject, generic action/bridge, and any card action reaching an attendance instance.',
     owningSlice: 'W4C-3b',
     sharedHook: true,
+    canonicalizedBy: 'W4C-3b',
     claims: (site) =>
       site.relPath === 'packages/core-backend/src/routes/approvals.ts' ||
       bySymbol('packages/core-backend/src/services/ApprovalBridgeService.ts', /^queryFn$/)(site),
@@ -276,6 +286,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Terminal shift_swap and schedule_dispatch write schedule assignments/group membership outside the result transaction.',
     owningSlice: 'W4C-3b',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3b',
     claims: (site) =>
       [
         'archiveScheduleDispatchSourceKey',
@@ -292,6 +303,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Decision/cancellation request lookup plus global permission bypass lacks an explicit org-bound authorization contract.',
     owningSlice: 'W4C-3b',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3b',
     // Not a DML-shaped debt entry (it is an authorization-contract gap, not a write site);
     // recorded for completeness per §8.4's "naming every current command route... and planned
     // canonical adapter", not because this collector's DML scan can independently locate it.
@@ -318,6 +330,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Current request terminalization has three reachable execution bodies and no reconciliation listener.',
     owningSlice: 'W4C-3b',
     sharedHook: true,
+    canonicalizedBy: 'W4C-3b',
     // Structural coverage: the three bodies are the plugin's own terminal routes (P13), the
     // central legacy routes (P17), and ApprovalProductService's generic node advancement (P26).
     // No independent DML site of its own.
@@ -358,6 +371,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Central approval assignment mutation is not one route (admin/reassign, generic approve/return/revoke/jump/...).',
     owningSlice: 'W4C-3b',
     sharedHook: true,
+    canonicalizedBy: 'W4C-3b',
     claims: byPathPrefix('packages/core-backend/src/services/ApprovalProductService.ts'),
   },
   {
@@ -365,6 +379,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Schedule publication (draft->live) writes attendance_shift_assignments/attendance_rotation_assignments to published.',
     owningSlice: 'W4C-3b',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3b',
     claims: bySymbol(PLUGIN, /^enforceAttendanceSchedulePublicationConflicts$/),
   },
   {
@@ -372,6 +387,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Core-backend onboarding default shift: POST /api/admin/users writes a default assignment.',
     owningSlice: 'W4C-3b',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3b',
     claims: bySymbol('packages/core-backend/src/routes/admin-users.ts', /^body$/),
   },
 

@@ -23,6 +23,7 @@ const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-preconditions.ts', 'revisionMatches', 2, 'write_precondition'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'lockTargetsAndParents', 1, 'rollout_precondition'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'loadBatchReferenceState', 1, 'rollout_precondition'),
+  entry('packages/core-backend/src/attendance/w4c3b-approved-leave-cancellation.ts', 'appendApprovedLeaveCancellationCalculationV1', 1, 'approval_reversal_write_lock'),
   entry('plugins/plugin-attendance/index.cjs', 'loadAttendanceRecordForUpdate', 1, 'write_lock'),
   entry('plugins/plugin-attendance/index.cjs', 'applyAttendanceResultEdit', 1, 'correction_write_lock'),
   entry('plugins/plugin-attendance/index.cjs', 'generateAbsenceRecords', 1, 'uniqueness_guard'),

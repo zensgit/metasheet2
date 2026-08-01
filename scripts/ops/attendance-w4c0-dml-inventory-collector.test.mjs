@@ -41,6 +41,10 @@ const {
   classifyAttendanceRecordReadSites,
 } = require(path.join(toolDir, 'current-record-read-classification.cjs'))
 const {
+  assertP26ActionAndFixtureContract,
+  classifyP26ApprovalAssignmentSites,
+} = require(path.join(toolDir, 'p26-approval-assignment-classification.cjs'))
+const {
   TABLE_BUCKETS,
   P25_FORBIDDEN_AUTHORITY_ROLES,
   P25_IMPORT_INTEGRATION_TABLES,
@@ -796,4 +800,100 @@ test('P06-P11/P23-P25 remain visible and explicitly canonicalized by W4C-3a', ()
       assert.ok((claimsByEntryId.get(id) || []).length > 0, `${id} must expose its current canonical writers`)
     }
   }
+})
+
+test('W4C-3b P26 generates the action/fixture matrix and classifies every assignment DML site', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const result = classifyP26ApprovalAssignmentSites(sites)
+
+  assert.deepEqual(
+    result.unclassified.map((site) => `${site.relPath} :: ${site.enclosingSymbol} :: ${site.verb}`),
+    [],
+    'a new approval_assignments DML site must be explicitly classified',
+  )
+  assert.deepEqual(result.countDrift, [], 'a new or removed DML call in a known writer must require review')
+  assert.deepEqual(result.stale, [], 'removed assignment writers must retire their classification')
+  assert.equal(
+    result.classifiedSites.length,
+    sites.filter((site) => site.table === 'approval_assignments').length,
+  )
+
+  const contract = assertP26ActionAndFixtureContract(
+    fs.readFileSync(path.join(rootDir, 'packages/core-backend/src/types/approval-product.ts'), 'utf8'),
+    fs.readFileSync(path.join(rootDir, 'packages/core-backend/tests/integration/attendance-w4c3b-central-approval.db.test.ts'), 'utf8'),
+  )
+  assert.deepEqual(contract.fixtureKinds, ['normal', 'adversary'])
+  assert.deepEqual(contract.timeoutEffects, ['transfer', 'jump'])
+  assert.equal(contract.actions.length, 8)
+})
+
+test('W4C-3b P26 mutations kill action, fixture, and assignment-DML omissions or additions', () => {
+  const typeSource = fs.readFileSync(
+    path.join(rootDir, 'packages/core-backend/src/types/approval-product.ts'),
+    'utf8',
+  )
+  const testSource = fs.readFileSync(
+    path.join(rootDir, 'packages/core-backend/tests/integration/attendance-w4c3b-central-approval.db.test.ts'),
+    'utf8',
+  )
+  assert.throws(
+    () => assertP26ActionAndFixtureContract(typeSource.replace("  'reduce_sign',\n", ''), testSource),
+    /ATTENDANCE_P26_ACTION_UNION_DRIFT/,
+  )
+  assert.throws(
+    () => assertP26ActionAndFixtureContract(typeSource, testSource.replace("'normal', ", '')),
+    /ATTENDANCE_P26_FIXTURE_MATRIX_DRIFT/,
+  )
+  assert.throws(
+    () => assertP26ActionAndFixtureContract(typeSource, testSource.replace("'adversary'", "'mutated'")),
+    /ATTENDANCE_P26_FIXTURE_MATRIX_DRIFT/,
+  )
+
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const target = sites.find((site) =>
+    site.table === 'approval_assignments'
+    && site.relPath === 'packages/core-backend/src/services/ApprovalProductService.ts'
+    && site.enclosingSymbol === 'targetUserIds')
+  assert.ok(target)
+  assert.equal(classifyP26ApprovalAssignmentSites(sites.filter((site) => site !== target)).countDrift.length, 1)
+
+  const added = scanFileForDmlSites(
+    'packages/core-backend/src/services/NewApprovalWriter.ts',
+    "async function mutateAssignments() { await db.query('UPDATE approval_assignments SET is_active = FALSE') }\n",
+  )
+  assert.equal(classifyP26ApprovalAssignmentSites([...sites, ...added]).unclassified.length, 1)
+})
+
+test('P12-P14/P17-P19/P22/P26-P28 remain visible and explicitly canonicalized by W4C-3b', () => {
+  const requiredDebtIds = ['P12', 'P13', 'P14', 'P17', 'P18', 'P19', 'P22', 'P26', 'P27', 'P28']
+  const concreteDebtIds = requiredDebtIds.filter((id) => !['P19', 'P22'].includes(id))
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const { trackedSites } = classifyCensus(sites)
+  const { claimsByEntryId } = classifyTrackedSites(trackedSites)
+
+  for (const id of requiredDebtIds) {
+    const entry = byId.get(id)
+    assert.ok(entry, `${id} must remain in the generated debt inventory`)
+    assert.equal(entry.owningSlice, 'W4C-3b')
+    assert.equal(entry.canonicalizedBy, 'W4C-3b', `${id} must carry its completed-slice marker`)
+  }
+  for (const id of concreteDebtIds) {
+    assert.ok((claimsByEntryId.get(id) || []).length > 0, `${id} must expose its canonical writers`)
+  }
+
+  const pluginSource = fs.readFileSync(path.join(rootDir, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+  assert.match(
+    pluginSource,
+    /acquireAttendanceScheduleAssignmentLocks\(\s*client,\s*orgId,\s*\[requesterSource\.userId, counterpartySource\.userId\],\s*\{ required: true \}\s*\)/,
+    'shift-swap finalization must not silently degrade its schedule-fact lock',
+  )
+  assert.match(
+    pluginSource,
+    /acquireAttendanceScheduleAssignmentLocks\(client, orgId, \[detail\.user_id\], \{ required: true \}\)/,
+    'schedule-dispatch finalization must not silently degrade its schedule-fact lock',
+  )
 })

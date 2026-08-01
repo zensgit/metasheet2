@@ -31090,7 +31090,12 @@ module.exports = {
         'counterpartyAssignmentId'
       )
 
-      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [requesterSource.userId, counterpartySource.userId])
+      await acquireAttendanceScheduleAssignmentLocks(
+        client,
+        orgId,
+        [requesterSource.userId, counterpartySource.userId],
+        { required: true }
+      )
       await enforceShiftSwapEditWindow(client, [
         requesterSource.workDate,
         counterpartySource.workDate,
@@ -31485,7 +31490,7 @@ module.exports = {
       const settings = await getSettings(client)
       const slotResolution = resolveScheduleDispatchSlotIndex(settings, detail.slot_index)
       await acquireScheduleDispatchWindowLock(client, orgId, detail.user_id, targetGroup.id, slotResolution.slotIndex)
-      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [detail.user_id])
+      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [detail.user_id], { required: true })
       await enforceScheduleDispatchEditWindow(client, [detail.start_date, detail.end_date])
       await assertScheduleDispatchProtectedRowsAbsent(client, { orgId, detail })
 
