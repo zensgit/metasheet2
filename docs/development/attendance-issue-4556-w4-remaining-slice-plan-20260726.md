@@ -8,6 +8,11 @@
 > 本文件回应 owner /goal 的第一条要求（「规划并计划开发」），把锁 §12.4-§12.8 的完成门翻译成可执行的
 > 切片任务书与模型分配，使每片开工时无需再做设计。
 
+> **2026-08-01 execution-state correction**: W4C-3a 已由 #4688 合入
+> `9ce340e0f7939f1c1d786acc7eb99bd865a6fac5`。W4C-3b 仍未获开工授权。本计划原 §2
+> 债务摘要漏列 P18；权威锁 §12.5 明确要求 P18、P27、P28 均在 W4C-3b 由具名 adapter
+> 和独立正控消除，故下文补回 P18。此更正不授予 runtime、合并、flag、部署或 soak 授权。
+
 ## 0. 串行合同（锁 §12 逐字，每片一致）
 
 每片：**独立 fresh-main PR** · **前序先合** · **独立对抗审 0 P1/P2** · **exact-head 测试与 mutation** ·
@@ -44,7 +49,7 @@ visibility/reason 元组，永不强制 active。
 ## 2. W4C-3b — approval / correction / outdoor / cancellation
 
 **范围**：canonical correction、leave/overtime、outdoor 首记录路径、冻结 request context、approval reversal。
-**债务**：P12-P14、P17、P19、P22、**P26**（中心审批指派面）、P27/P28（schedule-fact 写者，见下）。
+**债务**：P12-P14、P17、**P18**、P19、P22、**P26**（中心审批指派面）、P27/P28（schedule-fact 写者，见下）。
 
 **门要点（锁 §12.5）**：首记录**不得**在无 request-time V2/context 时成为 authoritative ·
 pre-W4 request 不得由当前配置升级；shadow 可完成其**精确 legacy 终态动作**加一条 unsupported W4 review，
