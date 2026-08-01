@@ -140,6 +140,7 @@ import {
 } from './attendance/w4c3a-import-proof'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
+import { appendApprovedLeaveCancellationCalculationV1 } from './attendance/w4c3b-approved-leave-cancellation'
 // W4C-3b P12: immutable request calculation snapshot plumbing (lock §7.2 / §12.5).
 import {
   appendAttendanceRequestCreateSnapshotV1,
@@ -2116,6 +2117,8 @@ export class MetaSheetServer {
                       return { client, release: () => client.release() }
                     },
                   }),
+                appendApprovedLeaveCancellationCalculation: (input) =>
+                  appendApprovedLeaveCancellationCalculationV1(input),
                 resolveOrgSegmentCalculationPosture: async (
                   trx: import('./types/plugin').DatabaseTransaction,
                   orgId: string,

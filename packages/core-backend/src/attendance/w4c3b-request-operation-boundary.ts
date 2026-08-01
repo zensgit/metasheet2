@@ -142,14 +142,22 @@ export interface AttendanceRequestOperationExecutionV1 {
   }]
 }
 
+export interface AttendanceRequestOperationContextV1 {
+  readonly operationId: string | null
+  readonly correlationId: string
+  readonly acceptedWritePosture: 'legacy_projection_only' | 'shadow' | 'authoritative' | null
+}
+
 export interface AttendanceRequestOperationAdapterV1<TState = unknown> {
   prepare(
     trx: AttendanceRequestPluginTrxV1,
     routeInput: unknown,
+    operation: AttendanceRequestOperationContextV1,
   ): Promise<AttendanceRequestOperationPreparedV1<TState>>
   execute(
     trx: AttendanceRequestPluginTrxV1,
     prepared: AttendanceRequestOperationPreparedV1<TState>,
+    operation: AttendanceRequestOperationContextV1,
   ): Promise<AttendanceRequestOperationExecutionV1>
 }
 
@@ -246,7 +254,12 @@ export function createAttendanceRequestOperationBoundaryV1(
         return await runAttendanceResultOperationTransactionV1(connection.client, async (trx) => {
           const shapedTrx = pluginTrx(trx)
           const adapter = deps.adapters[input.kind]
-          const prepared = await adapter.prepare(shapedTrx, input.routeInput)
+          const operation = Object.freeze({
+            operationId: input.operationId,
+            correlationId: input.correlationId,
+            acceptedWritePosture: null,
+          })
+          const prepared = await adapter.prepare(shapedTrx, input.routeInput, operation)
 
           let canonicalOrg = true
           try {
@@ -256,7 +269,10 @@ export function createAttendanceRequestOperationBoundaryV1(
           }
           if (!canonicalOrg) {
             if (input.operationId !== null) fail('W4C3B_REQUEST_ORG_OUTSIDE_W4_DOMAIN')
-            const result = await adapter.execute(shapedTrx, prepared)
+            const result = await adapter.execute(shapedTrx, prepared, Object.freeze({
+              ...operation,
+              acceptedWritePosture: 'legacy_projection_only' as const,
+            }))
             return { kind: 'legacy' as const, response: result.response }
           }
 
@@ -273,7 +289,10 @@ export function createAttendanceRequestOperationBoundaryV1(
               throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
             }
             if (posture.writePosture === 'legacy_projection_only') {
-              const result = await adapter.execute(shapedTrx, prepared)
+              const result = await adapter.execute(shapedTrx, prepared, Object.freeze({
+                ...operation,
+                acceptedWritePosture: 'legacy_projection_only' as const,
+              }))
               return { kind: 'legacy' as const, response: result.response }
             }
           }
@@ -301,7 +320,10 @@ export function createAttendanceRequestOperationBoundaryV1(
             throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
           }
 
-          const result = await adapter.execute(shapedTrx, prepared)
+          const result = await adapter.execute(shapedTrx, prepared, Object.freeze({
+            ...operation,
+            acceptedWritePosture: preflight.org.acceptedWritePosture,
+          }))
           if (preflight.kind === 'legacy_no_operation') {
             return { kind: 'legacy' as const, response: result.response }
           }

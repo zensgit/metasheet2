@@ -1,8 +1,8 @@
 /**
  * W4C-3b P14 - append-only calculation support for cancelling an approved
- * leave request. This is deliberately transaction-bound but is not wired to a
- * route yet: the later cancellation adapter owns eligibility, request state,
- * ledger reversal, and durable event sequencing.
+ * leave request. This is deliberately transaction-bound: the plugin
+ * cancellation adapter owns eligibility, request state, ledger reversal, and
+ * durable event sequencing around this calculation in the same transaction.
  *
  * This module never resolves a schedule or reads mutable request policy. A
  * completed cancellation calculation is derived solely from the locked prior

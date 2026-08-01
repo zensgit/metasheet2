@@ -52,7 +52,10 @@ function preparedState() {
   }
 }
 
-function adapters(events: string[]): Record<'request_create' | 'request_pending_edit' | 'request_decision' | 'request_cancel', AttendanceRequestOperationAdapterV1> {
+function adapters(
+  events: string[],
+  acceptedWritePostures: Array<'legacy_projection_only' | 'shadow' | 'authoritative' | null> = [],
+): Record<'request_create' | 'request_pending_edit' | 'request_decision' | 'request_cancel', AttendanceRequestOperationAdapterV1> {
   const adapter: AttendanceRequestOperationAdapterV1 = {
     async prepare(trx, routeInput) {
       events.push('prepare')
@@ -60,8 +63,9 @@ function adapters(events: string[]): Record<'request_create' | 'request_pending_
       await trx.query('SELECT 1 AS request_prepare_marker')
       return preparedState()
     },
-    async execute(trx) {
+    async execute(trx, _prepared, operation) {
       events.push('execute')
+      acceptedWritePostures.push(operation.acceptedWritePosture)
       await trx.query('INSERT INTO request_execution_marker(id) VALUES ($1)', [REQUEST_ID])
       return {
         response: { id: REQUEST_ID },
@@ -92,10 +96,11 @@ describe('W4C-3b request operation boundary', () => {
   it('keeps null-ID legacy execution ahead of the new liveness recheck', async () => {
     delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     const events: string[] = []
+    const acceptedWritePostures: Array<'legacy_projection_only' | 'shadow' | 'authoritative' | null> = []
     const client = fakeClient(null)
     const boundary = createAttendanceRequestOperationBoundaryV1({
       acquireConnection: async () => ({ client, release: vi.fn() }),
-      adapters: adapters(events),
+      adapters: adapters(events, acceptedWritePostures),
     })
 
     await expect(boundary.execute({
@@ -106,6 +111,7 @@ describe('W4C-3b request operation boundary', () => {
     })).resolves.toEqual({ kind: 'legacy', response: { id: REQUEST_ID } })
 
     expect(events).toEqual(['prepare', 'execute'])
+    expect(acceptedWritePostures).toEqual(['legacy_projection_only'])
     expect(client.calls.some(({ sqlText }) => sqlText.includes('FROM users WHERE id = $1'))).toBe(false)
     expect(client.calls.some(({ sqlText }) => sqlText.includes('attendance_result_operations'))).toBe(false)
     expect(client.calls.some(({ sqlText }) => sqlText.includes('attendance_result_event_outbox'))).toBe(false)
@@ -161,11 +167,12 @@ describe('W4C-3b request operation boundary', () => {
   it('claims a shadow operation before the fixed adapter performs source DML', async () => {
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ORG_ID
     const events: string[] = []
+    const acceptedWritePostures: Array<'legacy_projection_only' | 'shadow' | 'authoritative' | null> = []
     const client = fakeClient('shadow')
     const release = vi.fn()
     const boundary = createAttendanceRequestOperationBoundaryV1({
       acquireConnection: async () => ({ client, release }),
-      adapters: adapters(events),
+      adapters: adapters(events, acceptedWritePostures),
     })
 
     await expect(
@@ -182,6 +189,7 @@ describe('W4C-3b request operation boundary', () => {
     const outbox = client.calls.findIndex(({ sqlText }) => sqlText.includes('attendance_result_event_outbox'))
     const seal = client.calls.findIndex(({ sqlText }) => sqlText.startsWith('UPDATE attendance_result_operations'))
     expect(events).toEqual(['prepare', 'execute'])
+    expect(acceptedWritePostures).toEqual(['shadow'])
     expect(claim).toBeGreaterThan(-1)
     expect(sourceDml).toBeGreaterThan(claim)
     expect(outbox).toBeGreaterThan(sourceDml)

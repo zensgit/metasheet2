@@ -1161,6 +1161,10 @@ export interface PluginServices {
     createRequestOperationBoundary(config: {
       adapters: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
     }): import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1
+    /** W4C-3b P14: transaction-bound frozen approved-leave cancellation calculation. */
+    appendApprovedLeaveCancellationCalculation(
+      input: import('../attendance/w4c3b-approved-leave-cancellation').AppendApprovedLeaveCancellationCalculationInputV1,
+    ): Promise<import('../attendance/w4c3b-approved-leave-cancellation').AppendApprovedLeaveCancellationCalculationResultV1>
     /**
      * W4C-3b P27: transaction-bound, values-free schedule-reference posture.
      * The host acquires the canonical shared rollout lock and resolves the one

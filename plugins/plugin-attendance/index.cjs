@@ -24447,6 +24447,7 @@ module.exports = {
       'AttendanceW4AuthorizationError',
       'AttendanceW4LiveScheduledBoundaryError',
       'AttendanceW4RequestBoundaryError',
+      'ApprovedLeaveCancellationError',
       'AttendanceW4MergePolicyError',
       // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the
       // durable run-creation/resume/outcome/finalization machine's own
@@ -31904,6 +31905,18 @@ module.exports = {
       }
     }
 
+    const resolveSchema = z.object({
+      comment: z.string().optional(),
+      metadata: z.record(z.unknown()).optional(),
+    })
+    const requestOperationActionSchema = resolveSchema.extend({
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
+      expectedSnapshotVersion: z.coerce.number().int().min(0).optional(),
+      expected_snapshot_version: z.coerce.number().int().min(0).optional(),
+      expectedSnapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+      expected_snapshot_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    })
     const requestBoundaryRouteInputSchema = z.object({
       actorId: z.string().min(1),
       tokenSubjectUserId: z.string().min(1),
@@ -32276,6 +32289,277 @@ module.exports = {
       },
     }
 
+    const requestActionBoundaryRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      actorName: z.string().min(1),
+      requestId: z.string().uuid(),
+      requestBody: requestOperationActionSchema,
+      ipAddress: z.string().nullable(),
+      userAgent: z.string().nullable(),
+    }).strict()
+
+    async function resolveRequestCancellationActorPosture(trx, route, requestRow, allowScopedOperator) {
+      if (route.tokenSubjectUserId !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the cancellation actor')
+      }
+      if (String(requestRow.user_id) === route.actorId) return 'self'
+
+      const actorRows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'
+          FOR KEY SHARE`,
+        [route.actorId],
+      )
+      if (actorRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      if (actorRows[0].platform_admin === true) return 'platform_admin'
+
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE
+          FOR KEY SHARE`,
+        [route.actorId, orgId],
+      )
+      if (membershipRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      if (allowScopedOperator) return 'operator'
+
+      const permissionRows = await trx.query(
+        `SELECT 1
+           WHERE EXISTS (
+             SELECT 1 FROM user_permissions
+              WHERE user_id = $1
+                AND permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM user_roles ur
+             JOIN role_permissions rp ON rp.role_id = ur.role_id
+               WHERE ur.user_id = $1
+                 AND rp.permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM users u
+              WHERE u.id = $1
+                AND COALESCE(to_jsonb(u)->'permissions', '[]'::jsonb) ?| $2::text[]
+           )
+           LIMIT 1`,
+        [route.actorId, ['attendance:admin', 'attendance:*', '*:*']],
+      )
+      if (permissionRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      return 'attendance_admin'
+    }
+
+    async function lockLatestRequestSnapshotToken(trx, route, requestRow) {
+      const snapshotRows = await trx.query(
+        `SELECT version, payload_fingerprint
+           FROM attendance_request_calculation_snapshots
+          WHERE org_id = $1 AND request_id = $2::uuid
+          ORDER BY version DESC
+          LIMIT 1
+          FOR UPDATE`,
+        [requestRow.org_id ?? DEFAULT_ORG_ID, route.requestId],
+      )
+      const snapshot = snapshotRows[0] ?? null
+      const version = snapshot ? Number(snapshot.version) : 0
+      const fingerprint = snapshot ? String(snapshot.payload_fingerprint ?? '') : '0'.repeat(64)
+      if (!Number.isSafeInteger(version) || version < 0 || !/^[0-9a-f]{64}$/.test(fingerprint)) {
+        throw new HttpError(409, 'REQUEST_SNAPSHOT_INVALID', 'Request snapshot is invalid')
+      }
+      const expectedVersion = firstDefinedValue(
+        route.requestBody.expectedSnapshotVersion,
+        route.requestBody.expected_snapshot_version,
+      )
+      const expectedFingerprint = firstDefinedValue(
+        route.requestBody.expectedSnapshotFingerprint,
+        route.requestBody.expected_snapshot_fingerprint,
+      )
+      if (expectedVersion !== undefined && Number(expectedVersion) !== version) {
+        throw new HttpError(409, 'REQUEST_SNAPSHOT_VERSION_CONFLICT', 'Request snapshot version conflict')
+      }
+      if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprint) {
+        throw new HttpError(409, 'REQUEST_SNAPSHOT_FINGERPRINT_CONFLICT', 'Request snapshot fingerprint conflict')
+      }
+      return { version, fingerprint }
+    }
+
+    const requestCancelAdapter = {
+      async prepare(trx, rawInput) {
+        const route = requestActionBoundaryRouteInputSchema.parse(rawInput)
+        const requestRows = await trx.query(
+          'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+          [route.requestId],
+        )
+        if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+        const requestRow = requestRows[0]
+        const approvedLeave = requestRow.status === 'approved' && requestRow.request_type === 'leave'
+
+        const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const scopedDispatch = requestRow.request_type === 'schedule_dispatch'
+        if (scopedDispatch) {
+          await assertScheduleDispatchRequestScopeAllowed(trx, orgId, route.requestId, {
+            userId: route.actorId,
+            orgId,
+            fullAdmin: await hasAttendanceAdminAccess(route.actorId),
+          }, { forUpdate: true })
+        }
+        const actorPosture = await resolveRequestCancellationActorPosture(
+          trx,
+          route,
+          requestRow,
+          scopedDispatch,
+        )
+        const snapshot = await lockLatestRequestSnapshotToken(trx, route, requestRow)
+        const approvalId = requestRow.approval_instance_id ?? null
+        let approval = null
+        if (approvalId) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [approvalId],
+          )
+          approval = approvalRows[0] ?? null
+        }
+        const crossUser = String(requestRow.user_id) !== route.actorId
+        return {
+          orgId,
+          actorId: route.actorId,
+          actorPosture,
+          tokenSubjectUserId: route.tokenSubjectUserId,
+          subjectUserId: requestRow.user_id,
+          subjectScope: crossUser
+            ? { kind: 'explicit_users', userIds: [requestRow.user_id] }
+            : { kind: 'self', userId: requestRow.user_id },
+          commandPayload: {
+            requestId: route.requestId,
+            approvalRef: approvalId,
+            expectedSnapshotVersion: snapshot.version,
+            expectedSnapshotHash: snapshot.fingerprint,
+            reason: normalizeOptionalText(route.requestBody.comment),
+            meta: route.requestBody.metadata ?? null,
+          },
+          state: { route, requestRow, approvalId, approval, approvedLeave, actorPosture },
+        }
+      },
+      async execute(trx, prepared, operation) {
+        const { route, requestRow, approvalId, approval, approvedLeave, actorPosture } = prepared.state
+        if (requestRow.status !== 'pending' && !approvedLeave) {
+          throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
+        }
+        const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        let cancellationCalculation = null
+        if (approvedLeave && operation.acceptedWritePosture !== 'legacy_projection_only') {
+          const requestWorkDate = normalizeDateOnly(requestRow.work_date)
+          if (!requestWorkDate || !/^\d{4}-\d{2}-\d{2}$/.test(requestWorkDate)) {
+            throw new HttpError(409, 'REQUEST_WORK_DATE_INVALID', 'Request work date is invalid')
+          }
+          const port = attendanceW4SegmentCalculationPort
+          if (!port || typeof port.appendApprovedLeaveCancellationCalculation !== 'function' || !operation.operationId) {
+            throw new HttpError(503, 'W4C3B_P14_HOST_PORT_MISSING', 'W4C3B_P14_HOST_PORT_MISSING')
+          }
+          cancellationCalculation = await port.appendApprovedLeaveCancellationCalculation({
+            client: trx,
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            workDate: requestWorkDate,
+            requestId: route.requestId,
+            operationId: operation.operationId,
+            actorId: route.actorId,
+            correlationId: operation.correlationId,
+            mode: operation.acceptedWritePosture === 'authoritative' ? 'authoritative' : 'shadow',
+          })
+          if (cancellationCalculation.kind === 'review_required') {
+            throw new HttpError(
+              409,
+              'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+              'Approved leave cancellation requires attendance review',
+              singleValidationDetail('calculation', cancellationCalculation.reason),
+            )
+          }
+        }
+
+        if (approvalId && approval) {
+          const newVersion = Number(approval.version ?? 0) + 1
+          await trx.query(
+            'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
+            ['cancelled', newVersion, approvalId],
+          )
+          await deactivateAttendanceApprovalAssignments(trx, approvalId)
+          await trx.query(
+            `INSERT INTO approval_records
+             (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
+            [
+              approvalId,
+              'revoke',
+              route.actorId,
+              route.actorName,
+              route.requestBody.comment ?? null,
+              approval.status,
+              'cancelled',
+              approval.version,
+              newVersion,
+              JSON.stringify({ ...(route.requestBody.metadata ?? {}), w4ActorPosture: actorPosture }),
+              route.ipAddress,
+              route.userAgent,
+            ],
+          )
+        }
+
+        const resolvedAt = new Date()
+        const updatedRows = await trx.query(
+          `UPDATE attendance_requests
+              SET status = 'cancelled', resolved_by = $2, resolved_at = $3, updated_at = now()
+            WHERE id = $1::uuid AND org_id = $4 AND status = $5
+            RETURNING *`,
+          [route.requestId, route.actorId, resolvedAt, requestOrgId, requestRow.status],
+        )
+        if (updatedRows.length !== 1) throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request state conflict')
+        if (requestRow.request_type === 'shift_swap') {
+          await archiveShiftSwapSourceKey(trx, requestOrgId, route.requestId)
+        } else if (requestRow.request_type === 'schedule_dispatch') {
+          await closeScheduleDispatchRequest(trx, requestOrgId, route.requestId)
+        }
+
+        let reversal = null
+        if (approvedLeave) {
+          reversal = await reverseLeaveBalanceDeduction(trx, {
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            requestId: route.requestId,
+          })
+        }
+        const response = {
+          ok: true,
+          data: {
+            requestId: route.requestId,
+            status: 'cancelled',
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            reversal,
+            ...(cancellationCalculation ? { cancellationCalculation } : {}),
+          },
+        }
+        return {
+          response,
+          resolvedRequestId: route.requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.request.cancelled',
+            payload: {
+              requestId: route.requestId,
+              status: 'cancelled',
+              orgId: requestOrgId,
+              userId: requestRow.user_id,
+            },
+          }],
+        }
+      },
+    }
+
     const unavailableRequestOperationAdapter = {
       async prepare() {
         throw new HttpError(503, 'W4C3B_REQUEST_ADAPTER_NOT_READY', 'W4C3B_REQUEST_ADAPTER_NOT_READY')
@@ -32292,7 +32576,7 @@ module.exports = {
               request_create: requestCreateAdapter,
               request_pending_edit: requestPendingEditAdapter,
               request_decision: unavailableRequestOperationAdapter,
-              request_cancel: unavailableRequestOperationAdapter,
+              request_cancel: requestCancelAdapter,
             },
           })
         : null
@@ -33633,11 +33917,6 @@ module.exports = {
       })
     )
 
-    const resolveSchema = z.object({
-      comment: z.string().optional(),
-      metadata: z.record(z.unknown()).optional(),
-    })
-
     async function resolveRequest(req, res, action) {
       const parsed = resolveSchema.safeParse(req.body ?? {})
       if (!parsed.success) {
@@ -34470,9 +34749,14 @@ module.exports = {
     }
 
     async function cancelRequest(req, res) {
-      const parsed = resolveSchema.safeParse(req.body ?? {})
+      const parsed = requestOperationActionSchema.safeParse(req.body ?? {})
       if (!parsed.success) {
-        res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+        res.status(400).json(
+          validationErrorBody(
+            'Invalid attendance request cancellation payload',
+            formatZodValidationDetails(parsed.error),
+          ),
+        )
         return
       }
 
@@ -34488,127 +34772,54 @@ module.exports = {
         return
       }
 
+      if (!w4RequestOperationBoundary) {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+        })
+        return
+      }
+
       try {
-        const result = await db.transaction(async (trx) => {
-          const requestRows = await trx.query(
-            'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
-            [requestId]
-          )
-          if (requestRows.length === 0) {
-            throw new HttpError(404, 'NOT_FOUND', 'Request not found')
-          }
-
-          const requestRow = requestRows[0]
-          // #7 (design-lock #3034): a leave may be cancelled AFTER approval (→ reverse its deducted balance
-          // below). The status machine is loosened ONLY for request_type='leave'; every other request type
-          // (shift_swap / schedule_dispatch / …) stays pending-only, unchanged.
-          const isApprovedLeaveCancellation =
-            requestRow.status === 'approved' && requestRow.request_type === 'leave'
-          if (requestRow.status !== 'pending' && !isApprovedLeaveCancellation) {
-            throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
-          }
-          const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
-          if (requestRow.request_type === 'schedule_dispatch') {
-            await assertScheduleDispatchRequestScopeAllowed(trx, requestOrgId, requestId, {
-              userId: requesterId,
-              orgId: requestOrgId,
-              fullAdmin: await hasAttendanceAdminAccess(requesterId),
-            }, { forUpdate: true })
-          }
-
-          if (requestRow.request_type !== 'schedule_dispatch' && requestRow.user_id !== requesterId) {
-            const allowed = await canAccessOtherUsers(requesterId)
-            if (!allowed) {
-              throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
-            }
-          }
-
-          const approvalId = requestRow.approval_instance_id
-          if (approvalId) {
-            const approvalRows = await trx.query(
-              'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-              [approvalId]
-            )
-            if (approvalRows.length > 0) {
-              const approval = approvalRows[0]
-              const newStatus = 'cancelled'
-              const newVersion = Number(approval.version ?? 0) + 1
-
-              await trx.query(
-                'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                [newStatus, newVersion, approvalId]
-              )
-              await deactivateAttendanceApprovalAssignments(trx, approvalId)
-
-              await trx.query(
-                `INSERT INTO approval_records
-                 (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
-                [
-                  approvalId,
-                  'revoke',
-                  requesterId,
-                  getUserLabel(req, requesterId),
-                  parsed.data.comment ?? null,
-                  approval.status,
-                  newStatus,
-                  approval.version,
-                  newVersion,
-                  JSON.stringify(parsed.data.metadata ?? {}),
-                  req.ip ?? null,
-                  req.get('user-agent') ?? null,
-                ]
-              )
-            }
-          }
-
-          const resolvedAt = new Date()
-          await trx.query(
-            `UPDATE attendance_requests
-             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
-             WHERE id = $1`,
-            [requestId, 'cancelled', requesterId, resolvedAt]
-          )
-          if (requestRow.request_type === 'shift_swap') {
-            await archiveShiftSwapSourceKey(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestId)
-          } else if (requestRow.request_type === 'schedule_dispatch') {
-            await closeScheduleDispatchRequest(trx, requestOrgId, requestId)
-          }
-
-          // #7 (design-lock #3034): cancelling an APPROVED leave reverses whatever balance its approval
-          // deducted (annual_leave / comp_time_leave), in the SAME txn. Symmetric + safe for any approved
-          // leave: if nothing was deducted (e.g. annual policy off → no deduct events for this requestId),
-          // the reverse is a no-op. Idempotent inside (a re-cancel finds the existing 'reverse' → no-op).
-          let reversal = null
-          if (isApprovedLeaveCancellation) {
-            reversal = await reverseLeaveBalanceDeduction(trx, {
-              orgId: requestOrgId,
-              userId: requestRow.user_id,
-              requestId,
-            })
-          }
-
-          return {
+        const operationId = resolveRequestOperationId(parsed.data)
+        const outcome = await w4RequestOperationBoundary.execute({
+          kind: 'request_cancel',
+          operationId,
+          correlationId: requestCorrelationId(req, operationId, 'request-cancel'),
+          routeInput: {
+            actorId: requesterId,
+            tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+            actorName: getUserLabel(req, requesterId),
             requestId,
-            status: 'cancelled',
-            orgId: requestOrgId,
-            userId: requestRow.user_id,
-            reversal,
-          }
+            requestBody: parsed.data,
+            ipAddress: req.ip ?? null,
+            userAgent: req.get('user-agent') ?? null,
+          },
         })
 
-        emitEvent('attendance.request.cancelled', {
-          requestId: result.requestId,
-          status: result.status,
-          orgId: result.orgId,
-          userId: result.userId,
-        })
-        res.json({ ok: true, data: result })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+          const result = outcome.response?.data
+          emitEvent('attendance.request.cancelled', {
+            requestId: result?.requestId ?? requestId,
+            status: result?.status ?? 'cancelled',
+            orgId: result?.orgId,
+            userId: result?.userId,
+          })
+        }
+        res.json(outcome.response)
       } catch (error) {
         if (error instanceof HttpError) {
-          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          res.status(error.status).json({
+            ok: false,
+            error: {
+              code: error.code,
+              message: error.message,
+              ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+            },
+          })
           return
         }
+        if (respondIfW4BoundaryError(res, error)) return
         if (isDatabaseSchemaError(error)) {
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
           return

@@ -244,4 +244,78 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       expect(response.body?.error?.code).toBe('SEGMENT_CALCULATION_SUSPENDED')
     expect(await counts(fixture.orgId)).toEqual({ requests: 0, snapshots: 0, operations: 0, outbox: 0 })
   })
+
+  it('replays a shadow cancellation without duplicating source, operation, or outbox rows', async () => {
+    const fixture = await seedOrg('shadow')
+    const headers = { Authorization: `Bearer ${fixture.token}` }
+    const created = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers,
+      body: {
+        operationId: randomUUID(),
+        orgId: fixture.orgId,
+        workDate: '2049-08-04',
+        requestType: 'missed_check_in',
+        requestedInAt: '2049-08-04T09:00:00.000Z',
+        reason: 'P14 cancel replay',
+      },
+    })
+    expect(created.status, created.raw).toBe(201)
+    const requestId = created.body?.data?.request?.id
+    const snapshot = created.body?.data?.requestSnapshot
+    expect(typeof requestId).toBe('string')
+    expect(snapshot).toMatchObject({ version: 1 })
+
+    const cancelBody = {
+      operationId: randomUUID(),
+      expectedSnapshotVersion: snapshot.version,
+      expectedSnapshotFingerprint: snapshot.fingerprint,
+      comment: 'cancel once',
+    }
+    const first = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/cancel`, {
+      method: 'POST', headers, body: cancelBody,
+    })
+    const replay = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/cancel`, {
+      method: 'POST', headers, body: cancelBody,
+    })
+    expect(first.status, first.raw).toBe(200)
+    expect(replay.status, replay.raw).toBe(200)
+    expect(replay.body).toEqual(first.body)
+    expect(first.body?.data).toMatchObject({ requestId, status: 'cancelled', orgId: fixture.orgId })
+    expect(await counts(fixture.orgId)).toEqual({ requests: 1, snapshots: 1, operations: 2, outbox: 2 })
+
+    const persisted = await pool.query(
+      'SELECT status, resolved_by FROM attendance_requests WHERE id = $1::uuid AND org_id = $2',
+      [requestId, fixture.orgId],
+    )
+    expect(persisted.rows).toEqual([{ status: 'cancelled', resolved_by: fixture.userId }])
+  })
+
+  it('rolls back approved-leave cancellation when P14 has no frozen parent calculation', async () => {
+    const fixture = await seedOrg('shadow')
+    const requestId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_requests
+         (id, org_id, user_id, work_date, request_type, status, reason)
+       VALUES ($1::uuid, $2, $3, '2049-08-05', 'leave', 'approved', 'P14 no-parent route')`,
+      [requestId, fixture.orgId, fixture.userId],
+    )
+    const before = await counts(fixture.orgId)
+    const response = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/cancel`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}` },
+      body: { operationId: randomUUID(), comment: 'must fail closed' },
+    })
+    expect(response.status, response.raw).toBe(409)
+    expect(response.body?.error).toMatchObject({
+      code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+      details: [{ field: 'calculation', message: 'record_missing' }],
+    })
+    expect(await counts(fixture.orgId)).toEqual(before)
+    const persisted = await pool.query(
+      'SELECT status, resolved_by, resolved_at FROM attendance_requests WHERE id = $1::uuid AND org_id = $2',
+      [requestId, fixture.orgId],
+    )
+    expect(persisted.rows).toEqual([{ status: 'approved', resolved_by: null, resolved_at: null }])
+  })
 })
