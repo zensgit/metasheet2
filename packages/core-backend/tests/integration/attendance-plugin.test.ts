@@ -19362,8 +19362,97 @@ attendanceIntegrationDescribe(
           const rightReplay = right?.body?.data?.idempotent === true ? 1 : 0
           return leftReplay - rightReplay
         })
+        const normalizeAsyncReplayLifecycle = (entries: any[]) => {
+          const replayEntries = entries.filter((entry) => entry?.body?.data?.idempotent === true)
+          if (replayEntries.length !== 1) {
+            throw new Error(`Expected one async idempotent replay, received ${replayEntries.length}`)
+          }
+          const job = replayEntries[0]?.body?.data?.job
+          if (!job || typeof job !== 'object') {
+            throw new Error('Async idempotent replay is missing its job projection')
+          }
+          const status = String(job.status ?? '')
+          if (!['queued', 'running', 'completed'].includes(status)) {
+            throw new Error(`Unexpected async idempotent replay status: ${status || '<empty>'}`)
+          }
+          const total = job.total
+          const progress = job.progress
+          const processedRows = job.processedRows
+          const failedRows = job.failedRows
+          if (
+            !Number.isInteger(total) || total < 0 ||
+            !Number.isInteger(progress) || progress < 0 || progress > total ||
+            !Number.isInteger(processedRows) || processedRows < 0 || processedRows > total ||
+            !Number.isInteger(failedRows) || failedRows < 0 || failedRows > total ||
+            processedRows + failedRows !== total
+          ) {
+            throw new Error('Async idempotent replay contains an invalid lifecycle counter')
+          }
+          const progressPercent = job.progressPercent
+          // Mirrors mapImportJobRow's public projection formula. The same projection derives
+          // failedRows as total - processedRows until a terminal summary replaces both values.
+          const expectedProgressPercent = total > 0
+            ? Math.round((progress / total) * 100)
+            : 0
+          if (
+            typeof progressPercent !== 'number' ||
+            !Number.isInteger(progressPercent) ||
+            progressPercent !== expectedProgressPercent
+          ) {
+            throw new Error('Async idempotent replay contains an invalid progress percentage')
+          }
+          if (
+            typeof job.throughputRowsPerSec !== 'number' ||
+            !Number.isFinite(job.throughputRowsPerSec) ||
+            job.throughputRowsPerSec < 0
+          ) {
+            throw new Error('Async idempotent replay contains an invalid throughput')
+          }
+          // canonicalizeGolden receives the output of normalize(), which preserves zero and turns
+          // every positive elapsed duration into this relation marker before either side is compared.
+          const elapsedMsIsValid = job.elapsedMs === 0 || (
+            job.elapsedMs &&
+            typeof job.elapsedMs === 'object' &&
+            job.elapsedMs.type === 'number' &&
+            job.elapsedMs.relation === 'nonnegative' &&
+            Object.keys(job.elapsedMs).length === 2
+          )
+          if (!elapsedMsIsValid) {
+            throw new Error('Async idempotent replay contains an invalid elapsed duration')
+          }
+          if (status === 'queued' && (progress !== 0 || job.startedAt !== null || job.finishedAt !== null)) {
+            throw new Error('Queued async idempotent replay contains a started or finished lifecycle')
+          }
+          if (status === 'running' && (job.startedAt === null || job.finishedAt !== null)) {
+            throw new Error('Running async idempotent replay contains an invalid lifecycle timestamp')
+          }
+          if (status === 'completed' && (progress !== total || job.startedAt === null || job.finishedAt === null)) {
+            throw new Error('Completed async idempotent replay contains an incomplete lifecycle')
+          }
+
+          // The replay can legally observe the worker before, during, or after completion. Keep the
+          // created response byte-locked and normalize only these lifecycle values on the replay;
+          // its key set, identity, engine, strategies, error, and every other field remain golden-bound.
+          for (const key of [
+            'elapsedMs',
+            'failedRows',
+            'finishedAt',
+            'processedRows',
+            'progress',
+            'progressPercent',
+            'startedAt',
+            'status',
+            'throughputRowsPerSec',
+          ]) {
+            if (!Object.prototype.hasOwnProperty.call(job, key)) {
+              throw new Error(`Async idempotent replay is missing lifecycle field: ${key}`)
+            }
+            job[key] = `<async-replay-${key}>`
+          }
+        }
         sortRace(copy.sync.lockedRace)
         sortRace(copy.async.lockedRace)
+        normalizeAsyncReplayLifecycle(copy.async.lockedRace)
         copy.database.batches.sort((left: any, right: any) =>
           compareText(left.idempotency_key, right.idempotency_key))
         for (const item of copy.database.items) {

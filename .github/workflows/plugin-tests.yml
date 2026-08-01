@@ -436,13 +436,18 @@ jobs:
         run: |
           node --test scripts/ops/attendance-calculation-group-membership-w1-contract.test.mjs
 
+      - name: Run attendance legacy membership audit contract
+        run: |
+          node --test scripts/ops/attendance-legacy-membership-overlap-audit-contract.test.mjs
+
       # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
       # EXCLUDE constraint on purpose and proves the runtime integrity guard is
       # independently load-bearing. Keep whole-file execution explicit.
-      - name: Run attendance calculation-group W1 timeline-integrity unit
+      - name: Run attendance calculation-group timeline and legacy audit units
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
             tests/unit/attendance-calculation-group-membership-timeline-integrity.test.ts \
+            tests/unit/attendance-legacy-membership-overlap-audit.test.ts \
             --reporter=dot
 
       # #4556 W2: shared work-date resolver unit matrix (overlap precedence, attribution tail,
@@ -1078,6 +1083,7 @@ jobs:
             tests/integration/attendance-setup-readiness-w4-0.db.test.ts \
             tests/integration/attendance-decision-trace-w5-0.db.test.ts \
             tests/integration/attendance-calculation-group-membership-w1.db.test.ts \
+            tests/integration/attendance-legacy-membership-overlap-audit.db.test.ts \
             tests/integration/attendance-work-date-resolver-w2.db.test.ts \
             tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts \
             tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts \

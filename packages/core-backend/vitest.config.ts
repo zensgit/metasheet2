@@ -470,6 +470,9 @@ export default defineConfig({
       // #4561 W1: database exclusion/concurrency and effective-date transition proof.
       // Kept out of the no-DB run and explicitly wired into plugin-tests.yml.
       'tests/integration/attendance-calculation-group-membership-w1.db.test.ts',
+      // #4710: isolated scratch-database proof for the SELECT-only legacy overlap audit.
+      // Explicitly wired into the attendance real-DB step; exclusion prevents skip-green.
+      'tests/integration/attendance-legacy-membership-overlap-audit.db.test.ts',
       // #4556 W2: shared work-date resolver real-DB matrix (overlap precedence, overnight,
       // multi-shift ambiguity, frozen recompute, overtime anchor, adapter parity).
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired
