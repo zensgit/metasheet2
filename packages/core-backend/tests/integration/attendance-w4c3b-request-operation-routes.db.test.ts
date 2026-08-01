@@ -1211,7 +1211,8 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     // Shift swap
     {
       const fixture = await seedOrg('shadow')
-      const pair = await seedShiftSwapPair(fixture.orgId, fixture.userId)
+      const requester = await seedOrgActor(fixture.orgId, 'attendance:write')
+      const pair = await seedShiftSwapPair(fixture.orgId, requester.userId)
       const operationId = randomUUID()
       const requestOptions = {
         method: 'POST',
@@ -1230,6 +1231,10 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       }
       const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, requestOptions)
       await pool.query('UPDATE attendance_approval_flows SET is_active = FALSE WHERE id = $1::uuid', [pair.flowId])
+      await pool.query(
+        'UPDATE attendance_shift_assignments SET user_id = $2 WHERE id = $1::uuid AND org_id = $3',
+        [pair.assignmentA, fixture.userId, fixture.orgId],
+      )
       const replay = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, requestOptions)
       expect(create.status, create.raw).toBe(201)
       expect(replay.status, replay.raw).toBe(201)
@@ -1248,6 +1253,23 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
         outbox: 1,
         source_ref: 'plugin-attendance:POST /api/attendance/shift-swap-requests',
       })
+      const durableIdentity = await pool.query(
+        `SELECT actor_id, actor_posture, subject_scope
+           FROM attendance_result_operations
+          WHERE org_id = $1 AND entrypoint = 'request_create' AND operation_id = $2::uuid`,
+        [fixture.orgId, operationId],
+      )
+      expect(durableIdentity.rows).toEqual([{
+        actor_id: fixture.userId,
+        actor_posture: 'attendance_admin',
+        subject_scope: { kind: 'explicit_users', userIds: [requester.userId] },
+      }])
+      const persistedRequest = await pool.query(
+        `SELECT user_id FROM attendance_requests
+          WHERE org_id = $1 AND request_type = 'shift_swap'`,
+        [fixture.orgId],
+      )
+      expect(persistedRequest.rows).toEqual([{ user_id: requester.userId }])
     }
   })
 

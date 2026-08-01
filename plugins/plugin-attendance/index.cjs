@@ -31948,12 +31948,22 @@ module.exports = {
       reason: z.string().nullable(),
     }).strict()
 
+    const shiftSwapStoredSubjectScopeSchema = z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('self'), userId: z.string().min(1) }).strict(),
+      z.object({
+        kind: z.literal('explicit_users'),
+        userIds: z.array(z.string().min(1)).length(1),
+      }).strict(),
+    ])
+
+    const SHIFT_SWAP_CREATE_SOURCE_REF = 'plugin-attendance:POST /api/attendance/shift-swap-requests'
+
     function withoutOperationIdentity(input) {
       const { operationId: _operationId, operation_id: _operationIdSnake, ...payload } = input
       return payload
     }
 
-    function requestCreateIdentityFromRoute(variant, route) {
+    function requestCreateIdentityFromRoute(variant, route, identityOverride = null) {
       let requestType
       let requestWrite
       if (variant === 'generic') {
@@ -31994,12 +32004,12 @@ module.exports = {
       } else {
         throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
       }
-      const crossUser = variant === 'schedule_dispatch'
-        && String(route.input.userId) !== String(route.actorId)
-      const subjectUserId = variant === 'schedule_dispatch' ? route.input.userId : route.actorId
-      const actorPosture = variant === 'schedule_dispatch'
+      const defaultSubjectUserId = variant === 'schedule_dispatch' ? route.input.userId : route.actorId
+      const subjectUserId = identityOverride?.subjectUserId ?? defaultSubjectUserId
+      const crossUser = String(subjectUserId) !== String(route.actorId)
+      const actorPosture = identityOverride?.actorPosture ?? (variant === 'schedule_dispatch'
         ? (route.actorFullAdmin === true ? 'attendance_admin' : (crossUser ? 'operator' : 'self'))
-        : 'self'
+        : 'self')
       return {
         orgId: route.orgId,
         actorId: route.actorId,
@@ -32014,7 +32024,62 @@ module.exports = {
       }
     }
 
-    async function prepareRequestCreateIdentity(rawInput, operation) {
+    async function resolveShiftSwapRequestCreateIdentity(trx, route, operation) {
+      if (operation.operationId) {
+        const operationRows = await trx.query(
+          `SELECT identity_source_kind, source_ref, actor_id, actor_posture, subject_scope
+             FROM attendance_result_operations
+            WHERE org_id = $1
+              AND entrypoint = 'request_create'
+              AND operation_id = $2::uuid`,
+          [route.orgId, operation.operationId],
+        )
+        if (operationRows.length > 1) {
+          throw new HttpError(409, 'ATTENDANCE_OPERATION_CONFLICT', 'Attendance operation identity is ambiguous')
+        }
+        if (operationRows.length === 1) {
+          const operationRow = operationRows[0]
+          if (
+            operationRow.identity_source_kind !== 'direct_request_create'
+            || operationRow.source_ref !== SHIFT_SWAP_CREATE_SOURCE_REF
+          ) {
+            throw new HttpError(409, 'ATTENDANCE_OPERATION_CONFLICT', 'Attendance operation identity does not match this route')
+          }
+          const subjectScope = shiftSwapStoredSubjectScopeSchema.safeParse(operationRow.subject_scope)
+          if (!subjectScope.success) {
+            throw new HttpError(409, 'ATTENDANCE_OPERATION_CONFLICT', 'Attendance operation subject is invalid')
+          }
+          const subjectUserId = subjectScope.data.kind === 'self'
+            ? subjectScope.data.userId
+            : subjectScope.data.userIds[0]
+          return requestCreateIdentityFromRoute('shift_swap', route, {
+            subjectUserId,
+            actorPosture: operationRow.actor_posture,
+          })
+        }
+      }
+
+      const assignmentRows = await trx.query(
+        `SELECT user_id
+           FROM attendance_shift_assignments
+          WHERE id = $1::uuid AND org_id = $2`,
+        [route.requesterAssignmentId, route.orgId],
+      )
+      if (assignmentRows.length !== 1) {
+        throw new HttpError(404, 'SHIFT_ASSIGNMENT_NOT_FOUND', 'Shift assignment not found')
+      }
+      const subjectUserId = String(assignmentRows[0].user_id)
+      const crossUser = subjectUserId !== route.actorId
+      if (crossUser && !(await canAccessOtherUsers(route.actorId))) {
+        throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
+      }
+      const actorPosture = crossUser
+        ? ((await hasAttendanceAdminAccess(route.actorId)) ? 'attendance_admin' : 'operator')
+        : 'self'
+      return requestCreateIdentityFromRoute('shift_swap', route, { subjectUserId, actorPosture })
+    }
+
+    async function prepareRequestCreateIdentity(trx, rawInput, operation) {
       const variant = operation?.routeVariant
       if (variant === 'generic') {
         const route = requestBoundaryRouteInputSchema.parse(rawInput)
@@ -32030,7 +32095,11 @@ module.exports = {
         return requestCreateIdentityFromRoute(variant, scheduleDispatchCreateRouteInputSchema.parse(rawInput))
       }
       if (variant === 'shift_swap') {
-        return requestCreateIdentityFromRoute(variant, shiftSwapCreateRouteInputSchema.parse(rawInput))
+        return resolveShiftSwapRequestCreateIdentity(
+          trx,
+          shiftSwapCreateRouteInputSchema.parse(rawInput),
+          operation,
+        )
       }
       throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
     }
@@ -32816,7 +32885,10 @@ module.exports = {
         sourceKey,
       }
       return {
-        ...requestCreateIdentityFromRoute('shift_swap', route),
+        ...requestCreateIdentityFromRoute('shift_swap', route, {
+          subjectUserId: requesterSource.userId,
+          actorPosture,
+        }),
         state: {
           routeVariant: 'shift_swap',
           route,
@@ -33015,8 +33087,8 @@ module.exports = {
     }
 
     const requestCreateAdapter = {
-      async prepareIdentity(_trx, rawInput, operation) {
-        return prepareRequestCreateIdentity(rawInput, operation)
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestCreateIdentity(trx, rawInput, operation)
       },
       prepare: async function prepareRequestCreate(trx, rawInput, operation) {
         const variant = operation?.routeVariant
