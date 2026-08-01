@@ -966,6 +966,56 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     expect(persisted.rows[0].publish_status).toBe('draft')
   })
 
+  it('P27: schedule publication consumes the canonical posture seam before publishing a multi-segment reference', async () => {
+    const orgId = randomUUID()
+    const token = await mintToken(`${orgId}-admin`)
+    const single = await createShiftViaApi(token, orgId, { name: 'P27 Day', workStartTime: '09:00', workEndTime: '18:00' })
+    const singleId = single.body.data.id as string
+    const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
+      userId: `${orgId}-worker`,
+      shiftId: singleId,
+      startDate: '2049-06-11',
+    })
+    expect(draft.status, draft.raw).toBe(201)
+    const draftId = draft.body.data.assignment.id as string
+
+    await injectSecondSegment(orgId, singleId)
+    await enableShadowPosture(orgId)
+    const publish = await postJson('/api/attendance/schedule-publications', token, orgId, { assignmentIds: [draftId] })
+    expect(publish.status, publish.raw).toBe(200)
+    const persisted = await pool.query('SELECT publish_status FROM attendance_shift_assignments WHERE id = $1', [draftId])
+    expect(persisted.rows[0].publish_status).toBe('published')
+  })
+
+  it('P27: rotation publication consumes the same posture seam before publishing a multi-segment reference', async () => {
+    const orgId = randomUUID()
+    const token = await mintToken(`${orgId}-admin`)
+    const single = await createShiftViaApi(token, orgId, { name: 'P27 Rotation Day', workStartTime: '09:00', workEndTime: '18:00' })
+    const singleId = single.body.data.id as string
+    const rule = await postJson('/api/attendance/rotation-rules', token, orgId, {
+      name: 'P27 Rotation',
+      shiftSequence: [singleId],
+    })
+    expect(rule.status, rule.raw).toBe(201)
+    const ruleId = rule.body.data.id as string
+    const draft = await postJson('/api/attendance/schedule-drafts/rotation-assignments', token, orgId, {
+      userId: `${orgId}-worker`,
+      rotationRuleId: ruleId,
+      startDate: '2049-06-12',
+    })
+    expect(draft.status, draft.raw).toBe(201)
+    const draftId = draft.body.data.assignment.id as string
+
+    await injectSecondSegment(orgId, singleId)
+    await enableShadowPosture(orgId)
+    const publish = await postJson('/api/attendance/schedule-publications', token, orgId, {
+      rotationAssignmentIds: [draftId],
+    })
+    expect(publish.status, publish.raw).toBe(200)
+    const persisted = await pool.query('SELECT publish_status FROM attendance_rotation_assignments WHERE id = $1', [draftId])
+    expect(persisted.rows[0].publish_status).toBe('published')
+  })
+
   it('matrix: shift-swap final approval fails closed after the source shift became multi-segment', async () => {
     const orgId = org('matrix-swap-final')
     const requesterToken = await mintToken(`${orgId}-a`)

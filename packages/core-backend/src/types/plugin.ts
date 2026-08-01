@@ -1157,6 +1157,22 @@ export interface PluginServices {
     createLiveScheduledBoundary(config: {
       legacyAdapters: import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
     }): import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledBoundaryV1
+    /** W4C-3b P13: fixed request adapters captured once; routes submit closed data only. */
+    createRequestOperationBoundary(config: {
+      adapters: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
+    }): import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1
+    /**
+     * W4C-3b P27: transaction-bound, values-free schedule-reference posture.
+     * The host acquires the canonical shared rollout lock and resolves the one
+     * posture seam on the caller's existing transaction/connection.
+     */
+    resolveOrgSegmentCalculationPosture(
+      trx: DatabaseTransaction,
+      orgId: string,
+    ): Promise<{
+      readonly effectiveState: string
+      readonly referenceSegments: boolean
+    }>
     /**
      * W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round) — lock
      * §8.2 step 7 second clause ("source-definition fingerprint equality").

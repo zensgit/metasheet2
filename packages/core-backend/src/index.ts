@@ -111,10 +111,13 @@ import {
 import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
 import {
   AttendanceW4IdentityError,
+  acquireAttendanceCalculationRolloutLock,
   buildAttendanceCalculationRolloutAdvisoryKey,
   buildAttendanceLegacyIdempotencyAdvisoryKey,
   parseCanonicalAttendanceLegacyIdempotencyKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
+  resolveSegmentCalculationPosture,
+  type AttendanceW4TransactionClientV1,
 } from './attendance/w4c0-identity'
 import {
   W4_ADVISORY_HELPER_WAIT_MS,
@@ -136,6 +139,7 @@ import {
   buildAttendanceImportPolicySourceProofV1,
 } from './attendance/w4c3a-import-proof'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
+import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
 // W4C-3b P12: immutable request calculation snapshot plumbing (lock §7.2 / §12.5).
 import {
   appendAttendanceRequestCreateSnapshotV1,
@@ -2102,6 +2106,43 @@ export class MetaSheetServer {
                       return { client, release: () => client.release() }
                     },
                   }),
+                createRequestOperationBoundary: (config: {
+                  adapters: import('./attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
+                }) =>
+                  createAttendanceRequestOperationBoundaryV1({
+                    adapters: config.adapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                resolveOrgSegmentCalculationPosture: async (
+                  trx: import('./types/plugin').DatabaseTransaction,
+                  orgId: string,
+                ) => {
+                  const rawClient = trx?.__rawClient as AttendanceW4TransactionClientV1 | undefined
+                  if (!rawClient || typeof rawClient.query !== 'function') {
+                    throw new Error('W4C3B_TRANSACTION_CLIENT_REQUIRED')
+                  }
+                  let orgKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return { effectiveState: 'legacy', referenceSegments: false }
+                    }
+                    throw error
+                  }
+                  await acquireAttendanceCalculationRolloutLock(rawClient, orgKey, 'shared')
+                  const posture = await resolveSegmentCalculationPosture(rawClient, orgKey)
+                  return {
+                    effectiveState: posture.effectiveState,
+                    referenceSegments: posture.referenceSegments,
+                  }
+                },
                 // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second
                 // round) — lock §8.2 step 7 second clause. Pure; no DB
                 // access; wraps the module's own private

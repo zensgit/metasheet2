@@ -15074,7 +15074,7 @@ function isPunchWithinShiftWindow(occurredAt, context, workDate, fallbackTimezon
  * Returns ALL published slots for the requested work dates (no LIMIT 1 / row-order winner).
  * Each row is an atomic (workDate, shiftId, segmentIndex=null, absolute window inputs).
  */
-async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId }) {
+async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId, lockScheduleFacts = false }) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   const dates = Array.isArray(workDates)
     ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
@@ -15099,7 +15099,8 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
          AND COALESCE(a.publish_status, 'published') = 'published'
          AND a.start_date <= $3::date
          AND (a.end_date IS NULL OR a.end_date >= $4::date)
-       ORDER BY a.user_id, a.slot_index ASC NULLS FIRST, a.start_date DESC, a.created_at DESC`,
+       ORDER BY a.user_id, a.slot_index ASC NULLS FIRST, a.start_date DESC, a.created_at DESC
+       ${lockScheduleFacts ? 'FOR SHARE OF a' : ''}`,
       [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
     )
     for (const row of assignmentRows || []) {
@@ -15144,7 +15145,8 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
          AND r.is_active = true
          AND a.start_date <= $3::date
          AND (a.end_date IS NULL OR a.end_date >= $4::date)
-       ORDER BY a.start_date DESC, a.created_at DESC`,
+       ORDER BY a.start_date DESC, a.created_at DESC
+       ${lockScheduleFacts ? 'FOR SHARE OF a' : ''}`,
       [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
     )
     for (const row of rotationRows || []) {
@@ -15286,7 +15288,7 @@ async function loadWorkDateAttributionTailMinutes(db) {
   }
 }
 
-function createPluginAttendanceWorkDateResolver(db) {
+function createPluginAttendanceWorkDateResolver(db, options = {}) {
   const resolver = createAttendanceWorkDateResolver({
     toWorkDate,
     buildZonedDate,
@@ -15294,7 +15296,10 @@ function createPluginAttendanceWorkDateResolver(db) {
     normalizeTimeString,
     resolveOvernightFlag,
     async loadPublishedCandidates(args) {
-      return loadPublishedCandidatesForWorkDateResolver(db, args)
+      return loadPublishedCandidatesForWorkDateResolver(db, {
+        ...args,
+        lockScheduleFacts: options.lockScheduleFacts === true,
+      })
     },
     async loadOpenRecords(args) {
       return loadOpenRecordsForWorkDateResolver(db, args)
@@ -22364,7 +22369,11 @@ async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
 // `includeFullWinner` out-params carry the winner's absolute/attribution windows and wall-time
 // provenance for the strict V2 rebuild; without the flag the resolver output is byte-identical.
 async function resolveW4LiveCandidateInTransactionV1(trx, args) {
-  const { adapters } = createPluginAttendanceWorkDateResolver(trx)
+  // P18/P27: the canonical W4 transaction holds a shared lock on every
+  // published assignment candidate it freezes. Schedule publication and
+  // terminal schedule writers take the conflicting row lock, so either commit
+  // order observes one coherent schedule-fact version.
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx, { lockScheduleFacts: true })
   return adapters.live.resolvePunchWorkDate({
     orgId: args.orgId,
     userId: args.userId,
@@ -22377,7 +22386,7 @@ async function resolveW4LiveCandidateInTransactionV1(trx, args) {
 
 // W4C-2: in-transaction W2 re-resolution (freeze step) — scheduled channel.
 async function resolveW4ScheduledCandidateInTransactionV1(trx, args) {
-  const { adapters } = createPluginAttendanceWorkDateResolver(trx)
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx, { lockScheduleFacts: true })
   return adapters.scheduled.resolveScheduledWorkDate({
     orgId: args.orgId,
     userId: args.userId,
@@ -44212,6 +44221,15 @@ module.exports = {
             // A draft created while its shift was single-segment must still fail
             // closed here (typed 422, zero writes) if the shift became multi-segment
             // before publication while segment calculation is OFF for the org.
+            // W4C-3b P27: the publication writer consumes the host's one org-scoped
+            // posture seam on THIS transaction. An absent port is the closed legacy
+            // posture; passing the explicit boolean below prevents this route from
+            // consulting the shift service's private environment predicate.
+            const publicationReferencePosture =
+              attendanceW4SegmentCalculationPort
+              && typeof attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture === 'function'
+                ? await attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture(trx, orgId)
+                : { effectiveState: 'legacy', referenceSegments: false }
             const publicationShiftService = getAttendanceShiftService()
             for (const row of lockedRows) {
               if (row.kind === 'shift') {
@@ -44219,6 +44237,7 @@ module.exports = {
                   orgId,
                   shiftId: row.shift_id,
                   producer: 'schedule_publication',
+                  referenceSegments: publicationReferencePosture.referenceSegments,
                 })
               }
             }
@@ -44238,6 +44257,7 @@ module.exports = {
                   orgId,
                   shiftRefs: ruleRow.shift_sequence ?? [],
                   producer: 'schedule_publication',
+                  referenceSegments: publicationReferencePosture.referenceSegments,
                 })
               }
             }
