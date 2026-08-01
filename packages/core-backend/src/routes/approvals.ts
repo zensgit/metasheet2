@@ -16,6 +16,10 @@ import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import {
+  assertAttendanceCentralMutationFailClosed,
+  attendanceCentralApprovalErrorToServiceFields,
+} from '../attendance/w4c3b-central-approval-hooks'
+import {
   executeApprovalActionFromCardDelivery,
   getApprovalCardDeliverySummary,
 } from '../services/ApprovalCardDeliveryAction'
@@ -2151,6 +2155,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           )
         }
 
+        // P17/P22: attendance instances fail closed before legacy terminal DML.
+        try {
+          await assertAttendanceCentralMutationFailClosed(client, instance)
+        } catch (error) {
+          await client.query('ROLLBACK')
+          const fields = attendanceCentralApprovalErrorToServiceFields(error)
+          if (fields) {
+            return res.status(fields.statusCode).json(
+              approvalErrorResponse(fields.code, fields.message),
+            )
+          }
+          throw error
+        }
+
         const newVersion = instance.version + 1
 
         await client.query(
@@ -2292,6 +2310,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               `Cannot reject: current status is ${instance.status}`,
             ),
           )
+        }
+
+        // P17/P22: attendance instances fail closed before legacy terminal DML.
+        try {
+          await assertAttendanceCentralMutationFailClosed(client, instance)
+        } catch (error) {
+          await client.query('ROLLBACK')
+          const fields = attendanceCentralApprovalErrorToServiceFields(error)
+          if (fields) {
+            return res.status(fields.statusCode).json(
+              approvalErrorResponse(fields.code, fields.message),
+            )
+          }
+          throw error
         }
 
         const newVersion = instance.version + 1
