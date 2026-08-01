@@ -1,10 +1,38 @@
 import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  buildAttendanceImportAttributionFreezeV1,
+  buildAttendanceImportPolicySourceProofV1,
+} from '../../src/attendance/w4c3a-import-proof'
 
 const require = createRequire(import.meta.url)
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
 
 type RouteHandler = (req: any, res: any, next: any) => Promise<void>
+type CommitSyncImportPlan = (input: unknown) => Promise<unknown>
+
+function syncImportResult(batchId: string, itemId: string) {
+  return {
+    batchId,
+    imported: 1,
+    processedRows: 1,
+    failedRows: 0,
+    elapsedMs: 1,
+    engine: 'row',
+    recordUpsertStrategy: 'row',
+    items: [{
+      id: itemId,
+      userId: 'worker-1',
+      workDate: '2026-06-10',
+      engine: null,
+    }],
+    itemsTruncated: false,
+    skipped: [],
+    csvWarnings: [],
+    groupWarnings: [],
+    meta: {},
+  }
+}
 
 const originalRbacBypass = process.env.RBAC_BYPASS
 const originalAsyncEnabled = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED
@@ -45,7 +73,10 @@ function createResponse() {
   }
 }
 
-async function createHarness(rbacBypass = 'true') {
+async function createHarness(
+  rbacBypass = 'true',
+  commitSyncImportPlan?: CommitSyncImportPlan,
+) {
   process.env.RBAC_BYPASS = rbacBypass
   process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED = 'false'
 
@@ -73,6 +104,15 @@ async function createHarness(rbacBypass = 'true') {
         },
       },
     },
+    services: commitSyncImportPlan
+      ? {
+          attendanceW4SegmentCalculation: {
+            commitSyncImportPlan,
+            buildImportAttributionFreeze: buildAttendanceImportAttributionFreezeV1,
+            buildImportPolicySourceProof: buildAttendanceImportPolicySourceProofV1,
+          },
+        }
+      : undefined,
     logger,
   })
 
@@ -1228,7 +1268,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
         return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
       }
-      if (sql.includes('FROM attendance_records ar')) return [attendanceRecordRow()]
+      if (sql.includes('FROM attendance_current_records ar')) return [attendanceRecordRow()]
       if (sql.includes('FROM attendance_requests') && sql.includes('GROUP BY work_date, request_type')) return []
       if (sql.includes('FROM attendance_leave_types')) return []
       if (sql.includes('FROM attendance_overtime_rules')) return []
@@ -1270,7 +1310,7 @@ describe('attendance UUID route validation', () => {
     expect(scheduleScopeSql).toContain("COALESCE(m.effective_from, DATE '0001-01-01') <= $3::date")
     expect(scheduleScopeSql).toContain("COALESCE(m.effective_to, DATE '9999-12-31') >= $4::date")
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('FROM attendance_records ar'),
+      expect.stringContaining('FROM attendance_current_records ar'),
       ['worker-1', 'default', '2026-06-01', '2026-06-30', 1000],
     )
   })
@@ -1314,7 +1354,7 @@ describe('attendance UUID route validation', () => {
 
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
-    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_records ar'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_current_records ar'))).toBe(false)
   })
 
   it('lets scoped non-admin schedulers prepare import tokens when they have import scope', async () => {
@@ -1460,7 +1500,11 @@ describe('attendance UUID route validation', () => {
   })
 
   it('lets scoped non-admin schedulers commit import rows inside their import scope', async () => {
-    const { db, routes } = await createHarness('false')
+    const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+      '00000000-0000-4000-8000-000000000411',
+      '00000000-0000-4000-8000-000000000401',
+    ))
+    const { db, routes } = await createHarness('false', commitSyncImportPlan)
 
     db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
       const sql = typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
@@ -1479,6 +1523,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('FROM attendance_rules')) return []
       if (sql.includes('SELECT value FROM system_configs')) return []
       if (sql.includes('SELECT name, code, rule_set_id FROM attendance_groups')) return []
+      if (sql.includes('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')) return []
       if (sql.includes('SET LOCAL statement_timeout')) return []
       if (sql.includes('INSERT INTO attendance_import_batches')) return []
       if (sql.includes('FROM attendance_holidays')) return []
@@ -1532,8 +1577,17 @@ describe('attendance UUID route validation', () => {
       },
     })
     expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(db.query).not.toHaveBeenCalledWith(
+      'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE',
+    )
+    expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: 'default',
+      actorId: 'scheduler-1',
+      actorPosture: 'attendance_admin',
+      tokenSubjectUserId: 'scheduler-1',
+    }))
     expect(db.query.mock.calls.map(([query]) => typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query))
-      .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(true)
+      .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(false)
   })
 
   it('rejects scoped import commit outside scheduler scope before token consumption or writes', async () => {
@@ -1713,7 +1767,11 @@ describe('attendance UUID route validation', () => {
   })
 
   it('lets scoped non-admin schedulers run legacy import rows inside their import scope', async () => {
-    const { db, routes } = await createHarness('false')
+    const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+      '00000000-0000-4000-8000-000000000412',
+      '00000000-0000-4000-8000-000000000402',
+    ))
+    const { db, routes } = await createHarness('false', commitSyncImportPlan)
 
     db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
       const sql = typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
@@ -1784,8 +1842,14 @@ describe('attendance UUID route validation', () => {
       },
     })
     expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: 'default',
+      actorId: 'scheduler-1',
+      actorPosture: 'attendance_admin',
+      tokenSubjectUserId: 'scheduler-1',
+    }))
     expect(db.query.mock.calls.map(([query]) => typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query))
-      .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(true)
+      .some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(false)
   })
 
   it('rejects scoped legacy import outside scheduler scope before rule evaluation or writes', async () => {
@@ -2011,7 +2075,7 @@ describe('attendance UUID route validation', () => {
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params, true)
       if (rbac !== undefined) return rbac
-      if (sql.includes('FROM attendance_records r')) {
+      if (sql.includes('FROM attendance_current_records r')) {
         return [
           attendanceRecordRow({
             id: 'record-1',
@@ -2061,7 +2125,7 @@ describe('attendance UUID route validation', () => {
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRemindRow()]
-      if (sql.includes('FROM attendance_records r')) {
+      if (sql.includes('FROM attendance_current_records r')) {
         return [
           attendanceRecordRow({
             id: 'record-out-of-scope',
@@ -2131,7 +2195,7 @@ describe('attendance UUID route validation', () => {
 
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
-    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_records r'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_current_records r'))).toBe(false)
   })
 
   it('rejects invalid owed-punch anomaly filters before querying records', async () => {

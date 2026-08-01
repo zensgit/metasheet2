@@ -134,6 +134,25 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     return (res.body as { token?: string })?.token ?? ''
   }
 
+  async function seedActiveIdentity(userId: string, orgId: string): Promise<void> {
+    await pool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, activation_status, created_at, updated_at
+       ) VALUES ($1, $2, $1, 'W3 Writer Matrix User', 'x', 'user', '[]'::jsonb,
+                 true, false, 'activated', now(), now())
+       ON CONFLICT (id) DO UPDATE
+         SET is_active = true, activation_status = 'activated'`,
+      [userId, `${userId}@example.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [userId, orgId],
+    )
+  }
+
   function authHeaders(token: string, orgId: string) {
     return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'x-org-id': orgId }
   }
@@ -393,10 +412,13 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   })
 
   it('fails closed before a historical import can calculate a forced multi-segment shift with the legacy envelope', async () => {
-    const orgId = org('runtime-ended-guard')
-    const userId = `${orgId}-worker`
+    const orgId = randomUUID()
+    const userId = randomUUID()
+    const adminId = randomUUID()
     const workDate = '2020-01-06'
-    const token = await mintToken(`${orgId}-admin`)
+    await seedActiveIdentity(adminId, orgId)
+    await seedActiveIdentity(userId, orgId)
+    const token = await mintToken(adminId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Historic Split',
       timezone: 'UTC',

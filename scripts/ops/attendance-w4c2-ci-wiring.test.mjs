@@ -82,6 +82,26 @@ const FILES = Object.freeze([
   // durable delivery / lock-order / atomicity gates (section 2 gates 2-8, 15, 17, 19,
   // 22-23 controls) — same two-point discipline as the nine above.
   'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
+  // W4C-3a durable enqueue and record-target preconditions: SERIALIZABLE
+  // reservation/freeze plus present/missing commit-order and lock-hold proofs.
+  // Keep the same two-point wiring and file-exists contract as the suites above.
+  'tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts',
+  'tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts',
+  'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
+  'tests/integration/attendance-w4c3a-record-effects.db.test.ts',
+  'tests/integration/attendance-w4c3a-item-effects.db.test.ts',
+  'tests/integration/attendance-w4c3a-p08-child-process.db.test.ts',
+  'tests/integration/attendance-w4c3a-group-preconditions.db.test.ts',
+  'tests/integration/attendance-w4c3a-group-effects.db.test.ts',
+  'tests/integration/attendance-w4c3a-auth-recovery.db.test.ts',
+  // W4C-3a caller cutover and rollback/control completion: the canonical kernel,
+  // P06, P09/P10/P24, P11/P23/P25, and rollout races all require real PostgreSQL.
+  'tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts',
+  'tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts',
+  'tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts',
+  'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
+  'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
+  'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
 ])
 
 /**

@@ -89,6 +89,15 @@ export interface AttendanceFrozenAttributionBuildInputV1 {
   readonly source: 'live_resolution' | 'scheduled_resolution'
 }
 
+/**
+ * Import freezes use the same reconstruction rules, but callers cannot select
+ * the import source through the live/scheduled builder.
+ */
+export type AttendanceImportFrozenAttributionBuildInputV1 = Omit<
+  AttendanceFrozenAttributionBuildInputV1,
+  'source'
+>
+
 export type AttendanceFrozenAttributionBuildResultV1 =
   | {
       readonly kind: 'resolved_v2'
@@ -166,8 +175,9 @@ export function computeAttendanceWindowEvidenceFingerprintV1(input: {
  * programming errors, not business outcomes); business non-reconstructibility
  * returns `not_reconstructible` for the boundary's review mapping.
  */
-export function buildFrozenWorkDateAttributionV2(
-  input: AttendanceFrozenAttributionBuildInputV1,
+function buildFrozenWorkDateAttributionForSourceV1(
+  input: AttendanceImportFrozenAttributionBuildInputV1,
+  source: 'live_resolution' | 'scheduled_resolution' | 'import_resolution',
 ): AttendanceFrozenAttributionBuildResultV1 {
   const orgId = requireNonEmptyString(input.orgId, INVALID)
   const userId = requireNonEmptyString(input.userId, INVALID)
@@ -180,7 +190,6 @@ export function buildFrozenWorkDateAttributionV2(
     fail(INVALID)
   }
   if (typeof input.isOvernight !== 'boolean') fail(INVALID)
-  if (input.source !== 'live_resolution' && input.source !== 'scheduled_resolution') fail(INVALID)
   if (!Number.isInteger(input.attributionTailMinutes) || input.attributionTailMinutes < 0) fail(INVALID)
   if (!Array.isArray(input.approvedOvertimeWindows)) fail(INVALID)
 
@@ -265,7 +274,25 @@ export function buildFrozenWorkDateAttributionV2(
     attributionTailMinutes: input.attributionTailMinutes,
     extendedByApprovedOvertime,
     windowEvidenceFingerprint,
-    source: input.source,
+    source,
   }
   return { kind: 'resolved_v2', attribution: { posture: 'resolved_v2', value } }
+}
+
+export function buildFrozenWorkDateAttributionV2(
+  input: AttendanceFrozenAttributionBuildInputV1,
+): AttendanceFrozenAttributionBuildResultV1 {
+  if (input.source !== 'live_resolution' && input.source !== 'scheduled_resolution') fail(INVALID)
+  const { source, ...reconstruction } = input
+  return buildFrozenWorkDateAttributionForSourceV1(reconstruction, source)
+}
+
+/**
+ * The sole core builder allowed to mint an import-resolution V2 attribution.
+ * Its reconstruction path is intentionally the W4C2 path above.
+ */
+export function buildFrozenImportWorkDateAttributionV2(
+  input: AttendanceImportFrozenAttributionBuildInputV1,
+): AttendanceFrozenAttributionBuildResultV1 {
+  return buildFrozenWorkDateAttributionForSourceV1(input, 'import_resolution')
 }

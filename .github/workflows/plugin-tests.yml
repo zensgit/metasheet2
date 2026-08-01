@@ -1095,6 +1095,21 @@ jobs:
             tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts \
             tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts \
             tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts \
+            tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts \
+            tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts \
+            tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts \
+            tests/integration/attendance-w4c3a-record-preconditions.db.test.ts \
+            tests/integration/attendance-w4c3a-record-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-item-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-p08-child-process.db.test.ts \
+            tests/integration/attendance-w4c3a-group-preconditions.db.test.ts \
+            tests/integration/attendance-w4c3a-group-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-auth-recovery.db.test.ts \
+            tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts \
+            tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts \
+            tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts \
+            tests/integration/attendance-w4c3a-import-rollback.db.test.ts \
+            tests/integration/attendance-w4c3a-rollout-control.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

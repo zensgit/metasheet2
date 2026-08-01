@@ -108,6 +108,17 @@ import {
   computeAttendanceOuterSourceDefinitionFingerprintV1,
 } from './attendance/w4c2-live-scheduled-boundary'
 import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
+import {
+  AttendanceW4IdentityError,
+  buildAttendanceCalculationRolloutAdvisoryKey,
+  buildAttendanceLegacyIdempotencyAdvisoryKey,
+  parseCanonicalAttendanceLegacyIdempotencyKeyV1,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+} from './attendance/w4c0-identity'
+import {
+  W4_ADVISORY_HELPER_WAIT_MS,
+  W4_TRANSACTION_LOCK_TIMEOUT_MS,
+} from './attendance/w4c0-operation-contract'
 // W4C-2 P1-1 fix (#4612 verdict second gate round): the recovery-sweep tick and admin-abandon
 // connection wrappers (amendment sections 1.7 / 1.1.2) — same least-privilege posture as every
 // other `attendanceW4SegmentCalculation` port method below.
@@ -116,6 +127,14 @@ import {
   abandonScheduledRunOnceV1,
   type AttendanceScheduledRunAdminAbandonInputV1,
 } from './attendance/w4c2-scheduled-run-ops-worker'
+import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
+import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
+import { createAttendanceSyncImportHostV1 } from './attendance/w4c3a-sync-import-host'
+import {
+  buildAttendanceImportAttributionFreezeV1,
+  buildAttendanceImportPolicySourceProofV1,
+} from './attendance/w4c3a-import-proof'
+import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2134,7 +2153,109 @@ export class MetaSheetServer {
                     poolManager.get().getInternalPool(),
                     input as unknown as AttendanceScheduledRunAdminAbandonInputV1,
                   ),
+                // W4C-3a: values-free V1 legacy-plan processor. Plugin supplies
+                // only jobId; core owns SERIALIZABLE assembly and fixed effects.
+                processLegacyImportPlan: async (input: { jobId: string }) => {
+                  const jobId =
+                    typeof input === 'object' &&
+                    input !== null &&
+                    typeof input.jobId === 'string'
+                      ? input.jobId
+                      : ''
+                  const processor = createAttendanceLegacyPlanProcessorV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return processor.processLegacyImportPlanV1(jobId)
+                },
+                reserveLegacyImportPlan: async (input) => {
+                  const host = createAttendanceLegacyPlanReservationHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return host.reserveLegacyImportPlanV1(input)
+                },
+                // W4C-3a P06: least-privilege sync commit. Plugin supplies the
+                // prepareOnly plan; core owns the independent SERIALIZABLE
+                // source/effect transaction (no V1 job/plan/terminal DML).
+                commitSyncImportPlan: async (input) => {
+                  const host = createAttendanceSyncImportHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return host.commitSyncImportPlanV1(input)
+                },
+                buildImportAttributionFreeze:
+                  buildAttendanceImportAttributionFreezeV1,
+                buildImportPolicySourceProof:
+                  buildAttendanceImportPolicySourceProofV1,
+                buildLegacyImportReservationLockWitness: (input: {
+                  orgId: string
+                  idempotencyKey: string
+                }) => {
+                  let orgKey: ReturnType<
+                    typeof parseCanonicalAttendanceRolloutOrgKeyV1
+                  >
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(
+                      input?.orgId,
+                    )
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return null
+                    }
+                    throw error
+                  }
+                  const legacyKey =
+                    parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+                      orgId: orgKey,
+                      idempotencyKey: input?.idempotencyKey,
+                    })
+                  return {
+                    rolloutKey:
+                      buildAttendanceCalculationRolloutAdvisoryKey(
+                        orgKey,
+                      ).toString(),
+                    legacyIdempotencyKey:
+                      buildAttendanceLegacyIdempotencyAdvisoryKey(
+                        legacyKey,
+                      ).toString(),
+                    helperWaitMs: W4_ADVISORY_HELPER_WAIT_MS,
+                    transactionLockTimeoutMs:
+                      W4_TRANSACTION_LOCK_TIMEOUT_MS,
+                  }
+                },
               }
+            : undefined,
+        // W4C-3a P11/P23: separate least-privilege rollback port. The CJS
+        // plugin can submit only authenticated request identity + batch id;
+        // core owns target discovery, authorization, ids, locks and DML.
+        attendanceImportRollback:
+          manifest.name === 'plugin-attendance'
+            ? createAttendanceImportRollbackBoundaryV1({
+                acquireConnection: async () => {
+                  const client = await poolManager.get().getInternalPool().connect()
+                  return { client, release: () => client.release() }
+                },
+              })
             : undefined,
         automationRegistry,
         rbacProvisioning,

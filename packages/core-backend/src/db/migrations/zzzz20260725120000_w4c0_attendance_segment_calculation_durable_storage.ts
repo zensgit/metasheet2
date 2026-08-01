@@ -231,6 +231,16 @@ function sqlList(values: readonly string[]): string {
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db)
+  const successorState = await sql<{ installed: boolean }>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_attribute
+      WHERE attrelid = to_regclass('attendance_import_jobs')
+        AND attname = 'w4_legacy_plan_digest'
+        AND NOT attisdropped
+    ) AS installed
+  `.execute(db)
+  const w4c3aInstalled = successorState.rows[0]?.installed === true
 
   // -------------------------------------------------------------------------
   // 1. Canonical SQL functions (amendment 1.3: one immutable PostgreSQL UUIDv5
@@ -322,63 +332,65 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   // { ordinal, semanticFingerprint, derivedOperationId, commandFingerprint }, ordinal equal
   // to position, fingerprints 64 lowercase hex, derived operation ID re-verified through the
   // canonical SQL UUIDv5 function under the source-kind namespace.
-  await sql`
-    CREATE OR REPLACE FUNCTION attendance_w4_job_proof_vector_valid(
-      source_kind text,
-      root uuid,
-      vector jsonb,
-      item_count integer
-    )
-    RETURNS boolean
-    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
-    AS $fn$
-    DECLARE
-      ns uuid;
-      n integer;
-      i integer;
-      entry jsonb;
-      key_count integer;
-      semantic_fp text;
-      command_fp text;
-      derived text;
-    BEGIN
-      IF source_kind IS NULL OR root IS NULL OR vector IS NULL OR item_count IS NULL THEN RETURN false; END IF;
-      IF source_kind = 'import_batch' THEN
-        ns := ${sql.lit(ATTENDANCE_IMPORT_ITEM_NAMESPACE_V1)}::uuid;
-      ELSIF source_kind = 'integration_batch' THEN
-        ns := ${sql.lit(ATTENDANCE_INTEGRATION_ITEM_NAMESPACE_V1)}::uuid;
-      ELSE
-        RETURN false;
-      END IF;
-      IF jsonb_typeof(vector) IS DISTINCT FROM 'array' THEN RETURN false; END IF;
-      n := jsonb_array_length(vector);
-      IF n <> item_count OR n < 1 THEN RETURN false; END IF;
-      FOR i IN 0..(n - 1) LOOP
-        entry := vector -> i;
-        IF jsonb_typeof(entry) IS DISTINCT FROM 'object' THEN RETURN false; END IF;
-        SELECT count(*) INTO key_count FROM jsonb_object_keys(entry) AS t(k);
-        IF key_count <> 4 THEN RETURN false; END IF;
-        IF NOT (entry ?& ARRAY['ordinal', 'semanticFingerprint', 'derivedOperationId', 'commandFingerprint']) THEN
+  if (!w4c3aInstalled) {
+    await sql`
+      CREATE OR REPLACE FUNCTION attendance_w4_job_proof_vector_valid(
+        source_kind text,
+        root uuid,
+        vector jsonb,
+        item_count integer
+      )
+      RETURNS boolean
+      LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+      AS $fn$
+      DECLARE
+        ns uuid;
+        n integer;
+        i integer;
+        entry jsonb;
+        key_count integer;
+        semantic_fp text;
+        command_fp text;
+        derived text;
+      BEGIN
+        IF source_kind IS NULL OR root IS NULL OR vector IS NULL OR item_count IS NULL THEN RETURN false; END IF;
+        IF source_kind = 'import_batch' THEN
+          ns := ${sql.lit(ATTENDANCE_IMPORT_ITEM_NAMESPACE_V1)}::uuid;
+        ELSIF source_kind = 'integration_batch' THEN
+          ns := ${sql.lit(ATTENDANCE_INTEGRATION_ITEM_NAMESPACE_V1)}::uuid;
+        ELSE
           RETURN false;
         END IF;
-        IF jsonb_typeof(entry -> 'ordinal') IS DISTINCT FROM 'number' THEN RETURN false; END IF;
-        IF (entry ->> 'ordinal') IS DISTINCT FROM i::text THEN RETURN false; END IF;
-        IF jsonb_typeof(entry -> 'semanticFingerprint') IS DISTINCT FROM 'string' THEN RETURN false; END IF;
-        IF jsonb_typeof(entry -> 'derivedOperationId') IS DISTINCT FROM 'string' THEN RETURN false; END IF;
-        IF jsonb_typeof(entry -> 'commandFingerprint') IS DISTINCT FROM 'string' THEN RETURN false; END IF;
-        semantic_fp := entry ->> 'semanticFingerprint';
-        command_fp := entry ->> 'commandFingerprint';
-        derived := entry ->> 'derivedOperationId';
-        IF semantic_fp !~ '^[0-9a-f]{64}$' THEN RETURN false; END IF;
-        IF command_fp !~ '^[0-9a-f]{64}$' THEN RETURN false; END IF;
-        IF derived IS DISTINCT FROM attendance_w4_uuidv5(ns, attendance_w4_item_name_bytes(root, i, semantic_fp))::text THEN
-          RETURN false;
-        END IF;
-      END LOOP;
-      RETURN true;
-    END;
-    $fn$
-  `.execute(db)
+        IF jsonb_typeof(vector) IS DISTINCT FROM 'array' THEN RETURN false; END IF;
+        n := jsonb_array_length(vector);
+        IF n <> item_count OR n < 1 THEN RETURN false; END IF;
+        FOR i IN 0..(n - 1) LOOP
+          entry := vector -> i;
+          IF jsonb_typeof(entry) IS DISTINCT FROM 'object' THEN RETURN false; END IF;
+          SELECT count(*) INTO key_count FROM jsonb_object_keys(entry) AS t(k);
+          IF key_count <> 4 THEN RETURN false; END IF;
+          IF NOT (entry ?& ARRAY['ordinal', 'semanticFingerprint', 'derivedOperationId', 'commandFingerprint']) THEN
+            RETURN false;
+          END IF;
+          IF jsonb_typeof(entry -> 'ordinal') IS DISTINCT FROM 'number' THEN RETURN false; END IF;
+          IF (entry ->> 'ordinal') IS DISTINCT FROM i::text THEN RETURN false; END IF;
+          IF jsonb_typeof(entry -> 'semanticFingerprint') IS DISTINCT FROM 'string' THEN RETURN false; END IF;
+          IF jsonb_typeof(entry -> 'derivedOperationId') IS DISTINCT FROM 'string' THEN RETURN false; END IF;
+          IF jsonb_typeof(entry -> 'commandFingerprint') IS DISTINCT FROM 'string' THEN RETURN false; END IF;
+          semantic_fp := entry ->> 'semanticFingerprint';
+          command_fp := entry ->> 'commandFingerprint';
+          derived := entry ->> 'derivedOperationId';
+          IF semantic_fp !~ '^[0-9a-f]{64}$' THEN RETURN false; END IF;
+          IF command_fp !~ '^[0-9a-f]{64}$' THEN RETURN false; END IF;
+          IF derived IS DISTINCT FROM attendance_w4_uuidv5(ns, attendance_w4_item_name_bytes(root, i, semantic_fp))::text THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+        RETURN true;
+      END;
+      $fn$
+    `.execute(db)
+  }
 
   // Shared values-free deny function (append-only / immutable surfaces).
   await sql`
@@ -1678,39 +1690,41 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   // Frozen V1 identity/posture fields are immutable after insert; the W4 contract
   // version can never be rewritten (no history invention, no backfill via UPDATE).
   // Only w4_execution_reason_code may change under its closed pairing CHECK.
-  await sql`
-    CREATE OR REPLACE FUNCTION attendance_w4_import_jobs_w4_guard()
-    RETURNS trigger
-    LANGUAGE plpgsql
-    AS $fn$
-    BEGIN
-      IF NEW.w4_contract_version IS DISTINCT FROM OLD.w4_contract_version OR
-         NEW.w4_entrypoint IS DISTINCT FROM OLD.w4_entrypoint OR
-         NEW.w4_batch_command_id IS DISTINCT FROM OLD.w4_batch_command_id OR
-         NEW.w4_source_kind IS DISTINCT FROM OLD.w4_source_kind OR
-         NEW.w4_source_ref IS DISTINCT FROM OLD.w4_source_ref OR
-         NEW.w4_actor_id IS DISTINCT FROM OLD.w4_actor_id OR
-         NEW.w4_actor_posture IS DISTINCT FROM OLD.w4_actor_posture OR
-         NEW.w4_token_subject_user_id IS DISTINCT FROM OLD.w4_token_subject_user_id OR
-         NEW.w4_command_fingerprint IS DISTINCT FROM OLD.w4_command_fingerprint OR
-         NEW.w4_accepted_write_posture IS DISTINCT FROM OLD.w4_accepted_write_posture OR
-         NEW.w4_item_count IS DISTINCT FROM OLD.w4_item_count OR
-         NEW.w4_item_sequence_fingerprint IS DISTINCT FROM OLD.w4_item_sequence_fingerprint OR
-         NEW.w4_item_set_fingerprint IS DISTINCT FROM OLD.w4_item_set_fingerprint OR
-         NEW.w4_identity_proof_vector IS DISTINCT FROM OLD.w4_identity_proof_vector THEN
-        RAISE EXCEPTION 'W4C0_JOB_FROZEN: W4 job identity/posture fields are immutable on %', TG_TABLE_NAME;
-      END IF;
-      RETURN NEW;
-    END;
-    $fn$
-  `.execute(db)
+  if (!w4c3aInstalled) {
+    await sql`
+      CREATE OR REPLACE FUNCTION attendance_w4_import_jobs_w4_guard()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $fn$
+      BEGIN
+        IF NEW.w4_contract_version IS DISTINCT FROM OLD.w4_contract_version OR
+           NEW.w4_entrypoint IS DISTINCT FROM OLD.w4_entrypoint OR
+           NEW.w4_batch_command_id IS DISTINCT FROM OLD.w4_batch_command_id OR
+           NEW.w4_source_kind IS DISTINCT FROM OLD.w4_source_kind OR
+           NEW.w4_source_ref IS DISTINCT FROM OLD.w4_source_ref OR
+           NEW.w4_actor_id IS DISTINCT FROM OLD.w4_actor_id OR
+           NEW.w4_actor_posture IS DISTINCT FROM OLD.w4_actor_posture OR
+           NEW.w4_token_subject_user_id IS DISTINCT FROM OLD.w4_token_subject_user_id OR
+           NEW.w4_command_fingerprint IS DISTINCT FROM OLD.w4_command_fingerprint OR
+           NEW.w4_accepted_write_posture IS DISTINCT FROM OLD.w4_accepted_write_posture OR
+           NEW.w4_item_count IS DISTINCT FROM OLD.w4_item_count OR
+           NEW.w4_item_sequence_fingerprint IS DISTINCT FROM OLD.w4_item_sequence_fingerprint OR
+           NEW.w4_item_set_fingerprint IS DISTINCT FROM OLD.w4_item_set_fingerprint OR
+           NEW.w4_identity_proof_vector IS DISTINCT FROM OLD.w4_identity_proof_vector THEN
+          RAISE EXCEPTION 'W4C0_JOB_FROZEN: W4 job identity/posture fields are immutable on %', TG_TABLE_NAME;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$
+    `.execute(db)
 
-  await sql`DROP TRIGGER IF EXISTS trg_aij_w4_guard ON attendance_import_jobs`.execute(db)
-  await sql`
-    CREATE TRIGGER trg_aij_w4_guard
-      BEFORE UPDATE ON attendance_import_jobs
-      FOR EACH ROW EXECUTE FUNCTION attendance_w4_import_jobs_w4_guard()
-  `.execute(db)
+    await sql`DROP TRIGGER IF EXISTS trg_aij_w4_guard ON attendance_import_jobs`.execute(db)
+    await sql`
+      CREATE TRIGGER trg_aij_w4_guard
+        BEFORE UPDATE ON attendance_import_jobs
+        FOR EACH ROW EXECUTE FUNCTION attendance_w4_import_jobs_w4_guard()
+    `.execute(db)
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -574,6 +574,57 @@ describeIfDatabase('W5-0 GET decision-trace (admin + self hosts, real DB)', () =
       expect(Object.keys(res.body.data).sort()).toEqual(['basis', 'category', 'conclusion', 'confidence', 'reasonCode'])
     })
 
+    it('today_status treats a retired attendance record as absent', async () => {
+      const retiredWorkDate = '2026-07-23'
+      const recordId = await seedRecord(ORG_G2, USER_G2, retiredWorkDate, {
+        status: 'late',
+        lateMinutes: 15,
+      })
+      await pool.query(
+        `UPDATE attendance_records
+            SET visibility_state = 'retired', visibility_reason = 'review_placeholder'
+          WHERE id = $1`,
+        [recordId],
+      )
+      const app = makeApp({ id: USER_G2 })
+      pinned.setApp(app)
+
+      const res = await request(pinned.url()).get(
+        `/api/attendance/decision-trace?orgId=${ORG_G2}&category=today_status&workDate=${retiredWorkDate}`,
+      )
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.confidence).toBe('undeterminable')
+      expect(res.body.data.conclusion.status).toBeNull()
+      expect(Object.prototype.hasOwnProperty.call(res.body.data, 'reasonCode')).toBe(false)
+    })
+
+    it('missing_punch does not derive an owed-punch reason from a retired attendance record', async () => {
+      const retiredWorkDate = '2026-07-24'
+      const recordId = await seedRecord(ORG_G2, USER_G2, retiredWorkDate, {
+        status: 'partial',
+        firstInAt: null,
+        lastOutAt: `${retiredWorkDate}T18:00:00.000Z`,
+      })
+      await pool.query(
+        `UPDATE attendance_records
+            SET visibility_state = 'retired', visibility_reason = 'review_placeholder'
+          WHERE id = $1`,
+        [recordId],
+      )
+      const app = makeApp({ id: USER_G2 })
+      pinned.setApp(app)
+
+      const res = await request(pinned.url()).get(
+        `/api/attendance/decision-trace?orgId=${ORG_G2}&category=missing_punch&workDate=${retiredWorkDate}`,
+      )
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.confidence).toBe('undeterminable')
+      expect(res.body.data.conclusion.missingSide).toBeNull()
+      expect(Object.prototype.hasOwnProperty.call(res.body.data, 'reasonCode')).toBe(false)
+    })
+
     it('auditRef.actor never leaks a raw user id — the actor who wrote the correction is identity-posture-resolved, not echoed as an id; EXACT key set', async () => {
       const app = makeApp({ id: USER_G2 })
       pinned.setApp(app)

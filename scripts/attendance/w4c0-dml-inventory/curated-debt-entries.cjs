@@ -34,6 +34,42 @@ function byPathPrefix(prefix) {
 }
 
 const PLUGIN = 'plugins/plugin-attendance/index.cjs'
+const W4C3A_RECORD_EFFECT_ADAPTER =
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts'
+const W4C3A_ITEM_EFFECT_ADAPTER =
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-item-effects.ts'
+const W4C3A_GROUP_EFFECT_ADAPTER =
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-group-effects.ts'
+const W4C3A_BATCH_EFFECT_ADAPTER =
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-batch-effects.ts'
+const W4C3A_CANONICAL_IMPORT_KERNEL =
+  'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts'
+const W4C3A_SYNC_IMPORT_HOST =
+  'packages/core-backend/src/attendance/w4c3a-sync-import-host.ts'
+const W4C3A_IMPORT_ROLLBACK =
+  'packages/core-backend/src/attendance/w4c3a-import-rollback.ts'
+const W4C3A_IMPORT_ROLLBACK_BOUNDARY =
+  'packages/core-backend/src/attendance/w4c3a-import-rollback-boundary.ts'
+
+function byW4C3aFixedEffectAdapter(site) {
+  return (
+    byPathPrefix(W4C3A_RECORD_EFFECT_ADAPTER)(site) ||
+    byPathPrefix(W4C3A_ITEM_EFFECT_ADAPTER)(site) ||
+    byPathPrefix(W4C3A_GROUP_EFFECT_ADAPTER)(site) ||
+    byPathPrefix(W4C3A_BATCH_EFFECT_ADAPTER)(site)
+  )
+}
+
+function byW4C3aCanonicalImportKernel(site) {
+  return byPathPrefix(W4C3A_CANONICAL_IMPORT_KERNEL)(site)
+}
+
+function byW4C3aImportRollback(site) {
+  return (
+    byPathPrefix(W4C3A_IMPORT_ROLLBACK)(site) ||
+    byPathPrefix(W4C3A_IMPORT_ROLLBACK_BOUNDARY)(site)
+  )
+}
 
 const CURATED_DEBT_ENTRIES = [
   // ---------------------------------------------------------------------------------------
@@ -106,10 +142,15 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Modern synchronous /import/commit: values, unnest, or staging INSERT...SELECT bulk upsert.',
     owningSlice: 'W4C-3a',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3a',
     claims: (site) =>
       bySymbol(PLUGIN, /^batchUpsertAttendanceRecords(Staging|Unnest|Values)$/)(site) ||
       bySymbol(PLUGIN, /^batchInsertAttendanceImportItems(Staging|Unnest|Values)$/)(site) ||
-      bySymbol(PLUGIN, /^appendSkipped$/)(site),
+      bySymbol(PLUGIN, /^appendSkipped$/)(site) ||
+      (bySymbol(PLUGIN, /^approvedOvertimeWindows$/)(site) && site.table === 'attendance_import_batches') ||
+      byW4C3aFixedEffectAdapter(site) ||
+      byW4C3aCanonicalImportKernel(site) ||
+      byPathPrefix(W4C3A_SYNC_IMPORT_HOST)(site),
   },
   {
     id: 'P07',
@@ -117,16 +158,23 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-3a',
     sharedHook: false,
     confidence: 'heuristic',
+    canonicalizedBy: 'W4C-3a',
     // The worker calls the same commit kernel as P06/P09 (dataTypeFor cluster below); no distinct
     // worker-only DML site was independently resolved by this scan.
-    claims: () => false,
+    claims: (site) =>
+      byW4C3aFixedEffectAdapter(site) ||
+      byW4C3aCanonicalImportKernel(site) ||
+      (bySymbol(PLUGIN, /^approvedOvertimeWindows$/)(site) && site.table === 'attendance_import_batches'),
   },
   {
     id: 'P08',
     title: 'Async import startup recovery that re-enqueues P07 after restart.',
     owningSlice: 'W4C-3a',
     sharedHook: false,
-    claims: () => false,
+    canonicalizedBy: 'W4C-3a',
+    claims: (site) =>
+      byW4C3aFixedEffectAdapter(site) ||
+      byW4C3aCanonicalImportKernel(site),
   },
   {
     id: 'P09',
@@ -134,20 +182,28 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-3a',
     sharedHook: false,
     confidence: 'heuristic',
+    canonicalizedBy: 'W4C-3a',
     // `dataTypeFor` is a small `(key) => mapped[key]?.dataType` closure redeclared at five
     // unrelated locations in the plugin file; the nearest-preceding-symbol heuristic attributes
     // the surrounding legacy import mapping loop's DML to it at each location. Genuine call-graph
     // attribution is left to a future AST-based collector — see the module header note.
-    claims: bySymbol(PLUGIN, /^dataTypeFor$/),
+    claims: (site) =>
+      bySymbol(PLUGIN, /^dataTypeFor$/)(site) ||
+      (bySymbol(PLUGIN, /^approvedOvertimeWindows$/)(site) && site.table === 'attendance_import_batches') ||
+      byW4C3aFixedEffectAdapter(site) ||
+      byW4C3aCanonicalImportKernel(site),
   },
   {
     id: 'P10',
     title: '/api/attendance/integrations/:id/sync: separate per-row calculation/upsert loop.',
     owningSlice: 'W4C-3a',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3a',
     // Integration sync shares the live-punch record upsert kernel (design lock section 1.1
     // line 92: same-function sharing gets separate debt ids).
-    claims: bySymbol(PLUGIN, /^upsertAttendanceRecord$/),
+    claims: (site) =>
+      bySymbol(PLUGIN, /^upsertAttendanceRecord$/)(site) ||
+      byW4C3aCanonicalImportKernel(site),
   },
   {
     id: 'P11',
@@ -155,9 +211,12 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-3a',
     sharedHook: false,
     confidence: 'heuristic',
+    canonicalizedBy: 'W4C-3a',
     // Also claims the same closure's attendance_import_batches anomaly-count bookkeeping UPDATE
     // (same enclosing block as the records DELETE).
-    claims: bySymbol(PLUGIN, /^isAnomaly$/),
+    claims: (site) =>
+      bySymbol(PLUGIN, /^isAnomaly$/)(site) ||
+      byW4C3aImportRollback(site),
   },
   {
     id: 'P12',
@@ -166,7 +225,8 @@ const CURATED_DEBT_ENTRIES = [
     sharedHook: false,
     claims: (site) =>
       bySymbol(PLUGIN, /^resolveAttendanceRequestDraft$/)(site) ||
-      (bySymbol(PLUGIN, /^buildWhere$/)(site) && site.table === 'attendance_requests' && site.verb === 'insert'),
+      (bySymbol(PLUGIN, /^buildWhere$/)(site) && site.table === 'attendance_requests' && site.verb === 'insert') ||
+      (bySymbol(PLUGIN, /^approvedOvertimeWindows$/)(site) && site.table === 'attendance_requests' && site.verb === 'insert'),
   },
   {
     id: 'P13',
@@ -268,6 +328,7 @@ const CURATED_DEBT_ENTRIES = [
     title: '/import/rollback/:id accepts a broader authorization posture than import commit.',
     owningSlice: 'W4C-3a',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3a',
     // Authorization-posture debt over the same DML site P11 already claims — no separate site.
     claims: () => false,
   },
@@ -276,6 +337,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Integration sync has a distinct semantic pipeline; dryRun still writes the run plus last_sync_at.',
     owningSlice: 'W4C-3a',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3a',
     // attendance_integrations/attendance_integration_runs are bucket-allowlisted ("operational");
     // this entry documents the writer without requiring a tracked-bucket claim.
     claims: () => false,
@@ -285,6 +347,7 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Import token, preview/job, template-preference, upload-lifecycle, and temporary-staging writes are operational DML.',
     owningSlice: 'W4C-0',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3a',
     // The tables this entry names (attendance_import_tokens/template_prefs/*_stage/jobs) are all
     // "operational"-bucket in table-classification.cjs, i.e. allowlisted at the bucket level —
     // exactly the classification this entry itself calls for. No tracked-bucket site to claim.

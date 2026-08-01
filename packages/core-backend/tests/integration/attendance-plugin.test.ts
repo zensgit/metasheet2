@@ -3,7 +3,7 @@ import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
 import fs from 'fs/promises'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { createRequire } from 'module'
 import { Pool } from 'pg'
 import http from 'http'
@@ -362,6 +362,48 @@ attendanceIntegrationDescribe(
   // Snapshot once, restore the EXACT prior row after every test (see tests/utils/attendance-settings-row.ts).
   let settingsRowPool: Pool | undefined
   let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
+  const seededImportIdentityIds = new Set<string>()
+  const sharedImportUserId = randomUUID()
+
+  async function ensureActiveImportIdentitiesForTest(
+    userIds: string | string[],
+    orgId = 'default',
+  ): Promise<void> {
+    if (!settingsRowPool) throw new Error('attendance integration identity fixture pool is unavailable')
+    for (const userId of [...new Set(Array.isArray(userIds) ? userIds : [userIds])]) {
+      await settingsRowPool.query(
+        `INSERT INTO users (
+           id, email, username, name, password_hash, role, permissions,
+           is_active, is_admin, activation_status, created_at, updated_at
+         ) VALUES (
+           $1, $2, $1, 'Attendance Import Test User', 'x', 'admin',
+           '["attendance:read","attendance:write","attendance:admin","attendance:import"]'::jsonb,
+           true, true, 'activated', now(), now()
+         )
+         ON CONFLICT (id) DO UPDATE
+           SET role = 'admin',
+               permissions = '["attendance:read","attendance:write","attendance:admin","attendance:import"]'::jsonb,
+               is_active = true,
+               is_admin = true,
+               activation_status = 'activated',
+               updated_at = now()`,
+        [userId, `${userId}@example.test`],
+      )
+      await settingsRowPool.query(
+        `INSERT INTO user_roles (user_id, role_id)
+         VALUES ($1, 'admin')
+         ON CONFLICT (user_id, role_id) DO NOTHING`,
+        [userId],
+      )
+      await settingsRowPool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [userId, orgId],
+      )
+      seededImportIdentityIds.add(userId)
+    }
+  }
 
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
@@ -442,6 +484,7 @@ attendanceIntegrationDescribe(
 
     settingsRowPool = new Pool({ connectionString: dbUrl, max: 1 })
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(settingsRowPool)
+    await ensureActiveImportIdentitiesForTest(sharedImportUserId)
 
     // Important: load MetaSheetServer only after DATABASE_URL is set,
     // since the DB pool is initialized during module import.
@@ -483,6 +526,18 @@ attendanceIntegrationDescribe(
   afterAll(async () => {
     if (settingsRowPool) {
       await restoreAttendanceSettingsRow(settingsRowPool, settingsRowSnapshot).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM user_roles WHERE user_id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM users WHERE id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
       await settingsRowPool.end().catch(() => undefined)
     }
     if (server && (server as any).stop) {
@@ -496,7 +551,8 @@ attendanceIntegrationDescribe(
   it('registers attendance routes and lists plugin', async () => {
     if (!baseUrl) return
     const runSuffix = Date.now().toString(36)
-    const testUserId = `attendance-test-${runSuffix}`
+    const testUserId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(testUserId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
@@ -1625,10 +1681,10 @@ attendanceIntegrationDescribe(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         mappingProfileId: 'dingtalk_csv_daily_summary',
         userMap: {
-          EMP001: 'attendance-test',
+          EMP001: sharedImportUserId,
         },
         csvText: [
           '日期,工号,未知列',
@@ -1665,7 +1721,7 @@ attendanceIntegrationDescribe(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         mappingProfileId: 'dingtalk_csv_daily_summary',
         csvText: '日期,工号,姓名\n',
         mode: 'override',
@@ -1683,9 +1739,30 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
-    const requesterId = `attendance-csv-standard-${runSuffix}`
+    const requesterId = randomUUID()
+    const routePool = new Pool({
+      connectionString: process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL,
+    })
+    await routePool.query(
+      `INSERT INTO users (id, email, password_hash, is_active)
+       VALUES ($1, $2, 'no-login', true)
+       ON CONFLICT (id) DO UPDATE SET is_active = true`,
+      [requesterId, `${requesterId}@example.com`],
+    )
+    await routePool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, 'default', true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [requesterId],
+    )
+    await routePool.query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')
+       ON CONFLICT DO NOTHING`,
+      [requesterId],
+    )
+    await routePool.end()
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8386,7 +8463,8 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
-    const userId = `attendance-overnight-${runSuffix}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -12215,7 +12293,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12236,7 +12314,7 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -12295,7 +12373,8 @@ attendanceIntegrationDescribe(
   it('supports import commit merge mode (keeps earliest firstInAt and latest lastOutAt)', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-merge-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -12427,7 +12506,8 @@ attendanceIntegrationDescribe(
     const absenceObj = new Date(monday)
     absenceObj.setUTCDate(monday.getUTCDate() + 1)
     const absenceDate = absenceObj.toISOString().slice(0, 10)
-    const userId = `attendance-rt1-${runSuffix}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     try {
@@ -12491,13 +12571,14 @@ attendanceIntegrationDescribe(
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
     const runSuffix = Date.now().toString(36)
-    const orgId = `rt1a-org-${runSuffix}` // isolated org — never pollutes the shared default rule
+    const orgId = randomUUID() // isolated org — never pollutes the shared default rule
     const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
     const firstOfOctober = new Date(Date.UTC(year, 9, 1))
     const monday = new Date(firstOfOctober)
     while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
     const workDate = monday.toISOString().slice(0, 10)
-    const userId = `attendance-rt1a-${runSuffix}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId, orgId)
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     try {
@@ -12557,7 +12638,8 @@ attendanceIntegrationDescribe(
   it('exposes workday context for holiday overrides and shift schedules on attendance records', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-workday-context-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -12722,9 +12804,10 @@ attendanceIntegrationDescribe(
   it('keeps existing records after rolling back a later update batch', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-rollback-safe-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12814,7 +12897,7 @@ attendanceIntegrationDescribe(
       },
       body: '{}',
     })
-    expect(rollbackRes.status).toBe(200)
+    expect(rollbackRes.status, rollbackRes.raw).toBe(200)
 
     const afterRollbackRows = await listRecordRows()
     const rowAfterRollback = afterRollbackRows.find((row) => {
@@ -12829,9 +12912,10 @@ attendanceIntegrationDescribe(
   it('auto-switches to staging upsert strategy for bulk async imports when copy threshold is reached', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-staging-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12850,12 +12934,14 @@ attendanceIntegrationDescribe(
 
     const seedDate = new Date(Date.UTC(2026, 0, 1))
     const distinctWorkDates = 365
+    const targetUserIds = Array.from({ length: 3 }, () => randomUUID())
+    await ensureActiveImportIdentitiesForTest(targetUserIds)
     const rows = Array.from({ length: 1001 }, (_, index) => {
       const date = new Date(seedDate)
       date.setUTCDate(seedDate.getUTCDate() + (index % distinctWorkDates))
       const workDate = date.toISOString().slice(0, 10)
       return {
-        userId: `${userId}-bucket-${Math.floor(index / distinctWorkDates)}`,
+        userId: targetUserIds[Math.floor(index / distinctWorkDates)],
         workDate,
         fields: {
           firstInAt: `${workDate}T09:00:00Z`,
@@ -12940,7 +13026,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12974,7 +13060,7 @@ attendanceIntegrationDescribe(
     expect(commitTokenB).toBeTruthy()
 
     const basePayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -13050,7 +13136,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13071,7 +13157,7 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -13096,7 +13182,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify(commitPayload),
     })
-    expect(commitRes.status).toBe(200)
+    expect(commitRes.status, commitRes.raw).toBe(200)
     const job = (commitRes.body as { data?: { job?: any } } | undefined)?.data?.job
     const jobId = job?.id
     expect(typeof jobId).toBe('string')
@@ -13178,13 +13264,13 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
 
     const workDate = new Date().toISOString().slice(0, 10)
-    const duplicateUserId = `attendance-async-duplicate-${Date.now().toString(36)}`
+    const duplicateUserId = randomUUID()
     const idempotencyKey = `integration-async-duplicate-${Date.now().toString(36)}`
 
     const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
@@ -13201,13 +13287,14 @@ attendanceIntegrationDescribe(
 
     const seedDate = new Date(Date.UTC(2026, 0, 1))
     const distinctWorkDates = 250
-    const bulkUserSeed = Date.now().toString(36)
+    const bulkTargetUserIds = Array.from({ length: 4 }, () => randomUUID())
+    await ensureActiveImportIdentitiesForTest([...bulkTargetUserIds, duplicateUserId])
     const bulkRows = Array.from({ length: 1000 }, (_, index) => {
       const date = new Date(seedDate)
       date.setUTCDate(seedDate.getUTCDate() + (index % distinctWorkDates))
       const rowWorkDate = date.toISOString().slice(0, 10)
       return {
-        userId: `attendance-async-bulk-${bulkUserSeed}-${Math.floor(index / distinctWorkDates)}`,
+        userId: bulkTargetUserIds[Math.floor(index / distinctWorkDates)],
         workDate: rowWorkDate,
         fields: {
           firstInAt: `${rowWorkDate}T09:00:00Z`,
@@ -13218,7 +13305,7 @@ attendanceIntegrationDescribe(
     })
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -13360,7 +13447,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13382,7 +13469,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13420,7 +13507,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `integration-async-rows-large-${Date.now().toString(36)}`
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows,
@@ -13481,7 +13568,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13500,8 +13587,10 @@ attendanceIntegrationDescribe(
 
     const workDate = new Date().toISOString().slice(0, 10)
     const totalEntries = 20_001
+    const entryTargetUserId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(entryTargetUserId)
     const entries = Array.from({ length: totalEntries }, (_, index) => ({
-      userId: 'attendance-large-entries',
+      userId: entryTargetUserId,
       workDate,
       field: `raw_field_${index}`,
       value: `${workDate}T09:00:00Z`,
@@ -13513,7 +13602,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `integration-async-entries-large-${Date.now().toString(36)}`
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       entries,
@@ -13575,7 +13664,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13596,7 +13685,7 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const previewPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       previewLimit: 2,
@@ -13699,7 +13788,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13737,7 +13826,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13844,7 +13933,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13892,7 +13981,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13912,7 +14001,7 @@ attendanceIntegrationDescribe(
     expect(commitTokenPreview).toBeTruthy()
 
     const previewPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       previewLimit: 1,
       rows: [
@@ -13966,7 +14055,7 @@ attendanceIntegrationDescribe(
     expect(commitTokenCommit).toBeTruthy()
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       returnItems: false,
       rows: [
@@ -14019,7 +14108,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14032,7 +14121,7 @@ attendanceIntegrationDescribe(
     const csvText = `${csvHeader}\n${csvRows.join('\n')}`
 
     const csvPayloadBase = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       csvText,
       mapping: {
         columns: [
@@ -14045,7 +14134,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14110,7 +14199,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14134,7 +14223,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       fileId: String(fileId || ''),
       mapping: {
@@ -14148,7 +14237,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14235,9 +14324,10 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const runSuffix = Date.now().toString(36)
-    const requesterId = `attendance-fileid-${runSuffix}`
+    const requesterId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(requesterId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14359,7 +14449,8 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const runSuffix = Date.now().toString(36)
-    const requesterId = `attendance-api-csv-${runSuffix}`
+    const requesterId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(requesterId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -14464,7 +14555,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14496,7 +14587,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       mappingProfileId: 'dingtalk_csv_daily_summary',
@@ -14640,7 +14731,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14666,7 +14757,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       idempotencyKey,
@@ -14681,7 +14772,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14788,7 +14879,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14814,7 +14905,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       idempotencyKey,
@@ -14829,7 +14920,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14947,7 +15038,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14995,7 +15086,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId,
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: String(fileId || ''),
         mapping: {
@@ -15008,7 +15099,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken: previewCommitToken,
       }),
@@ -15024,7 +15115,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15032,8 +15123,9 @@ attendanceIntegrationDescribe(
     const orgId = 'default'
     const runSuffix = Date.now().toString(36)
     const workDate = new Date().toISOString().slice(0, 10)
-    const mappedUserIdA = `attendance-async-${runSuffix}-a`
-    const mappedUserIdB = `attendance-async-${runSuffix}-b`
+    const mappedUserIdA = randomUUID()
+    const mappedUserIdB = randomUUID()
+    await ensureActiveImportIdentitiesForTest([mappedUserIdA, mappedUserIdB])
     const asyncGroupName = `CSV Async Group ${runSuffix}`
     const csvHeader = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
     const csvRows = [
@@ -15071,7 +15163,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `upload-async-idempo-${Date.now()}`
     const commitPayload = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       idempotencyKey,
@@ -15214,7 +15306,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15222,10 +15314,13 @@ attendanceIntegrationDescribe(
     const orgId = 'default'
     const runSuffix = Date.now().toString(36)
     const workDate = new Date().toISOString().slice(0, 10)
+    const streamedUserIdA = randomUUID()
+    const streamedUserIdB = randomUUID()
+    await ensureActiveImportIdentitiesForTest([streamedUserIdA, streamedUserIdB])
     const csvText = [
       '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果',
-      `${workDate},attendance-stream-${runSuffix}-a,CSV Stream Group ${runSuffix},09:00,18:00,正常`,
-      `${workDate},attendance-stream-${runSuffix}-b,CSV Stream Group ${runSuffix},09:10,18:10,正常`,
+      `${workDate},${streamedUserIdA},CSV Stream Group ${runSuffix},09:00,18:00,正常`,
+      `${workDate},${streamedUserIdB},CSV Stream Group ${runSuffix},09:10,18:10,正常`,
       '',
     ].join('\n')
 
@@ -15276,7 +15371,7 @@ attendanceIntegrationDescribe(
         },
         body: JSON.stringify({
           orgId,
-          userId: 'attendance-test',
+          userId: sharedImportUserId,
           timezone: 'UTC',
           csvFileId: String(fileId || ''),
           idempotencyKey: `upload-async-stream-${Date.now()}`,
@@ -15337,7 +15432,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15364,7 +15459,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId: 'default',
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: missingFileId,
         mapping: {
@@ -15377,7 +15472,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -15392,7 +15487,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15418,7 +15513,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId: 'default',
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: missingFileId,
         mapping: {
@@ -15431,7 +15526,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -15447,7 +15542,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15495,7 +15590,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId,
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: String(fileId || ''),
         mapping: {
@@ -15508,7 +15603,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -15524,7 +15619,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15572,7 +15667,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId,
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: String(fileId || ''),
         mapping: {
@@ -15585,7 +15680,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -18166,6 +18261,10 @@ attendanceIntegrationDescribe(
         const runsAfterFirst = await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')
         expect(runsAfterFirst).toHaveLength(1)
         expect(runsAfterFirst[0]).toMatchObject({ triggered_by: 'scheduler', dry_run: false })
+        await pool.query(
+          'UPDATE attendance_leave_accrual_runs SET created_at = $1 WHERE id = $2',
+          [now, runsAfterFirst[0].id],
+        )
         expect(await annualSchedItemFor(pool, runsAfterFirst[0].id, uid)).toEqual({ status: 'granted' })
         const lotsAfterFirst = await annualSchedLotsForUser(pool, uid)
         expect(lotsAfterFirst).toHaveLength(1)
@@ -18774,5 +18873,607 @@ attendanceIntegrationDescribe(
       await pool.end().catch(() => undefined)
     }
   })
+
+  it('W4C-3a reproduces the committed legacy-import-v1 governing-SHA golden', async () => {
+    if (!baseUrl || !importUploadDir) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-30T12:00:00.000Z'))
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      const orgId = 'default'
+      const adminId = 'legacy-golden-admin'
+      const mergeUserId = '22222222-2222-4222-8222-222222222222'
+      const newUserId = '33333333-3333-4333-8333-333333333333'
+      const asyncUserId = '44444444-4444-4444-8444-444444444444'
+      const asyncRaceUserId = '55555555-5555-4555-8555-555555555555'
+      const raceUserId = '66666666-6666-4666-8666-666666666666'
+      const uploadUserId = '77777777-7777-4777-8777-777777777777'
+      const mergeRecordId = '11111111-1111-4111-8111-111111111111'
+      const groupName = 'Legacy Golden Team'
+      const syncKey = 'legacy-import-v1-sync'
+      const syncRaceKey = 'legacy-import-v1-sync-race'
+      const asyncKey = 'legacy-import-v1-async'
+      const asyncRaceKey = 'legacy-import-v1-async-race'
+      const fixedDates = {
+        merge: '2026-07-28',
+        fresh: '2026-07-29',
+        race: '2026-07-30',
+        async: '2026-07-31',
+        upload: '2026-08-01',
+      }
+
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
+      )
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      }
+
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active, activation_status, permissions)
+         VALUES ($1, 'legacy-golden-admin@example.invalid', 'no-login', true, 'activated', $2::jsonb)
+         ON CONFLICT (id) DO UPDATE SET
+           is_active = true,
+           activation_status = 'activated',
+           permissions = EXCLUDED.permissions`,
+        [adminId, JSON.stringify(['attendance:read', 'attendance:write', 'attendance:admin'])],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [adminId, orgId],
+      )
+      await pool.query(
+        `INSERT INTO user_roles (user_id, role_id)
+         VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [adminId],
+      )
+      await pool.query(
+        `INSERT INTO user_namespace_admissions (user_id, namespace, enabled)
+         VALUES ($1, 'attendance', true)
+         ON CONFLICT (user_id, namespace) DO UPDATE SET enabled = true`,
+        [adminId],
+      )
+      const subjectUserIds = [
+        mergeUserId,
+        newUserId,
+        asyncUserId,
+        asyncRaceUserId,
+        raceUserId,
+        uploadUserId,
+      ]
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active, activation_status)
+         SELECT user_id, user_id || '@example.invalid', 'no-login', true, 'activated'
+           FROM unnest($1::text[]) AS user_id
+         ON CONFLICT (id) DO UPDATE SET
+           is_active = true,
+           activation_status = 'activated'`,
+        [subjectUserIds],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         SELECT user_id, $2, true FROM unnest($1::text[]) AS user_id
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [subjectUserIds, orgId],
+      )
+
+      await pool.query(
+        `INSERT INTO attendance_records (
+           id, org_id, user_id, work_date, first_in_at, last_out_at,
+           work_minutes, late_minutes, early_leave_minutes, status,
+           is_workday, timezone, meta, source_batch_id
+         ) VALUES (
+           $1::uuid, $2, $3, $4::date, $5::timestamptz, $6::timestamptz,
+           420, 5, 10, 'normal', true, 'UTC', $7::jsonb, NULL
+         )
+         ON CONFLICT (org_id, user_id, work_date) DO UPDATE SET
+           id = EXCLUDED.id,
+           first_in_at = EXCLUDED.first_in_at,
+           last_out_at = EXCLUDED.last_out_at,
+           work_minutes = EXCLUDED.work_minutes,
+           late_minutes = EXCLUDED.late_minutes,
+           early_leave_minutes = EXCLUDED.early_leave_minutes,
+           status = EXCLUDED.status,
+           timezone = EXCLUDED.timezone,
+           meta = EXCLUDED.meta,
+           source_batch_id = NULL`,
+        [
+          mergeRecordId,
+          orgId,
+          mergeUserId,
+          fixedDates.merge,
+          `${fixedDates.merge}T09:30:00.000Z`,
+          `${fixedDates.merge}T17:30:00.000Z`,
+          JSON.stringify({ seeded: true, keep: 'legacy' }),
+        ],
+      )
+
+      const syncPayload = {
+        orgId,
+        userId: adminId,
+        idempotencyKey: syncKey,
+        timezone: 'UTC',
+        source: 'manual',
+        mode: 'merge',
+        returnItems: true,
+        itemsLimit: 1,
+        batchMeta: { fixture: 'legacy-import-v1', compatibility: 'kept' },
+        userMapKeyField: 'empNo',
+        userMap: {
+          M001: {
+            userId: mergeUserId,
+            profile: { department: 'Legacy', policyTier: 'gold' },
+          },
+          N001: {
+            userId: newUserId,
+            profile: { department: 'New', policyTier: 'silver' },
+          },
+        },
+        groupSync: {
+          autoCreate: true,
+          autoAssignMembers: true,
+          timezone: 'UTC',
+        },
+        rows: [
+          {
+            workDate: fixedDates.merge,
+            fields: {
+              empNo: 'M001',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.merge}T09:00:00.000Z`,
+              lastOutAt: `${fixedDates.merge}T18:00:00.000Z`,
+              status: 'normal',
+              punchSequence: ['09:00', '12:00', '13:00', '18:00'],
+            },
+          },
+          {
+            workDate: fixedDates.fresh,
+            fields: {
+              empNo: 'N001',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.fresh}T08:55:00.000Z`,
+              lastOutAt: `${fixedDates.fresh}T18:05:00.000Z`,
+              status: 'normal',
+              punchSequence: ['08:55', '12:01', '12:58', '18:05'],
+            },
+          },
+          {
+            workDate: fixedDates.fresh,
+            fields: {
+              empNo: 'N001',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.fresh}T09:05:00.000Z`,
+              lastOutAt: `${fixedDates.fresh}T18:10:00.000Z`,
+              status: 'normal',
+            },
+          },
+          {
+            workDate: fixedDates.fresh,
+            fields: {
+              empNo: 'UNMAPPED-RAW',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.fresh}T09:15:00.000Z`,
+            },
+          },
+        ],
+      }
+
+      const syncFirst = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST', headers, body: JSON.stringify(syncPayload),
+      })
+      expect(syncFirst.status, syncFirst.raw).toBe(200)
+      const syncEarly = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST', headers, body: JSON.stringify(syncPayload),
+      })
+      expect(syncEarly.status, syncEarly.raw).toBe(200)
+
+      const syncRacePayload = {
+        orgId,
+        userId: raceUserId,
+        idempotencyKey: syncRaceKey,
+        timezone: 'UTC',
+        mode: 'override',
+        returnItems: false,
+        rows: [{
+          userId: raceUserId,
+          workDate: fixedDates.race,
+          fields: {
+            firstInAt: `${fixedDates.race}T09:00:00.000Z`,
+            lastOutAt: `${fixedDates.race}T18:00:00.000Z`,
+            status: 'normal',
+          },
+        }],
+      }
+      const syncRace = await Promise.all([
+        requestJson(`${baseUrl}/api/attendance/import/commit`, {
+          method: 'POST', headers, body: JSON.stringify(syncRacePayload),
+        }),
+        requestJson(`${baseUrl}/api/attendance/import/commit`, {
+          method: 'POST', headers, body: JSON.stringify(syncRacePayload),
+        }),
+      ])
+      expect(syncRace.map((entry) => entry.status)).toEqual([200, 200])
+
+      const asyncPayload = {
+        orgId,
+        userId: asyncUserId,
+        idempotencyKey: asyncKey,
+        timezone: 'UTC',
+        mode: 'override',
+        returnItems: false,
+        rows: [
+          {
+            userId: asyncUserId,
+            workDate: fixedDates.async,
+            fields: {
+              firstInAt: `${fixedDates.async}T09:00:00.000Z`,
+              lastOutAt: `${fixedDates.async}T18:00:00.000Z`,
+              status: 'normal',
+            },
+          },
+          {
+            userId: asyncUserId,
+            workDate: fixedDates.async,
+            fields: {
+              firstInAt: `${fixedDates.async}T09:05:00.000Z`,
+              lastOutAt: `${fixedDates.async}T18:05:00.000Z`,
+              status: 'normal',
+            },
+          },
+        ],
+      }
+      const asyncFirst = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+        method: 'POST', headers, body: JSON.stringify(asyncPayload),
+      })
+      expect(asyncFirst.status, asyncFirst.raw).toBe(200)
+      const asyncJobId = String((asyncFirst.body as any)?.data?.job?.id || '')
+      expect(asyncJobId).toBeTruthy()
+      const asyncEarly = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+        method: 'POST', headers, body: JSON.stringify(asyncPayload),
+      })
+      expect(asyncEarly.status, asyncEarly.raw).toBe(200)
+      const asyncCompleted = await waitForImportJobCompletion(baseUrl, token, asyncJobId, {
+        attempts: 200,
+        intervalMs: 25,
+        settle: (job) => Array.isArray(job?.skippedRows),
+      })
+
+      const asyncRacePayload = {
+        ...asyncPayload,
+        userId: asyncRaceUserId,
+        idempotencyKey: asyncRaceKey,
+        rows: [{
+          userId: asyncRaceUserId,
+          workDate: fixedDates.race,
+          fields: {
+            firstInAt: `${fixedDates.race}T10:00:00.000Z`,
+            lastOutAt: `${fixedDates.race}T19:00:00.000Z`,
+            status: 'normal',
+          },
+        }],
+      }
+      const asyncRace = await Promise.all([
+        requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+          method: 'POST', headers, body: JSON.stringify(asyncRacePayload),
+        }),
+        requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+          method: 'POST', headers, body: JSON.stringify(asyncRacePayload),
+        }),
+      ])
+      expect(asyncRace.map((entry) => entry.status)).toEqual([200, 200])
+      const asyncRaceJobId = String((asyncRace[0].body as any)?.data?.job?.id || '')
+      if (asyncRaceJobId) {
+        await waitForImportJobCompletion(baseUrl, token, asyncRaceJobId, { attempts: 200, intervalMs: 25 })
+      }
+
+      const csvHeader = '日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+      const csvText = `${csvHeader}\n${fixedDates.upload},U001,Legacy Upload Team,09:00,18:00,正常\n`
+      const uploadRes = await requestJson(
+        `${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=legacy-import-v1.csv`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/csv' },
+          body: csvText,
+        },
+      )
+      expect(uploadRes.status, uploadRes.raw).toBe(201)
+      const fileId = String((uploadRes.body as any)?.data?.fileId || '')
+      expect(fileId).toBeTruthy()
+      const uploadPayload = {
+        orgId,
+        userId: uploadUserId,
+        idempotencyKey: 'legacy-import-v1-upload',
+        timezone: 'UTC',
+        fileId,
+        mapping: { columns: [
+          { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+        ] },
+        userMap: { U001: uploadUserId },
+        groupSync: { autoCreate: true, autoAssignMembers: true, timezone: 'UTC' },
+        mode: 'override',
+        returnItems: false,
+      }
+      const uploadCommit = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST', headers, body: JSON.stringify(uploadPayload),
+      })
+      expect(uploadCommit.status, uploadCommit.raw).toBe(200)
+      const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
+      const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+      const uploadCleanup = {
+        fileId,
+        intent: { kind: 'uploaded_import_file', expectedOwnerOrgId: orgId },
+        csvPresent: await fs.stat(csvPath).then(() => true).catch(() => false),
+        metaPresent: await fs.stat(metaPath).then(() => true).catch(() => false),
+      }
+
+      const syncBatchId = String((syncFirst.body as any)?.data?.batchId || '')
+      const syncRaceBatchId = String((syncRace[0].body as any)?.data?.batchId || '')
+      const asyncBatchId = String(asyncCompleted?.batchId || '')
+      const asyncRaceBatchId = String((asyncRace[0].body as any)?.data?.job?.batchId || '')
+      const uploadBatchId = String((uploadCommit.body as any)?.data?.batchId || '')
+      const batchIds = [syncBatchId, syncRaceBatchId, asyncBatchId, asyncRaceBatchId, uploadBatchId]
+        .filter(Boolean)
+
+      const batches = await pool.query(
+        `SELECT id::text, org_id, idempotency_key, created_by, source,
+                rule_set_id::text, mapping, row_count, status, meta
+           FROM attendance_import_batches
+          WHERE id = ANY($1::uuid[])
+          ORDER BY idempotency_key NULLS LAST, org_id`,
+        [batchIds],
+      )
+      const items = await pool.query(
+        `SELECT i.id::text, i.batch_id::text, i.org_id, i.user_id,
+                i.work_date::text, i.record_id::text, i.preview_snapshot
+           FROM attendance_import_items i
+           JOIN attendance_import_batches b ON b.id = i.batch_id AND b.org_id = i.org_id
+          WHERE i.batch_id = ANY($1::uuid[])
+          ORDER BY b.idempotency_key NULLS LAST, i.work_date, i.user_id`,
+        [batchIds],
+      )
+      const records = await pool.query(
+        `SELECT id::text, org_id, user_id, work_date::text,
+                first_in_at::text, last_out_at::text, work_minutes,
+                late_minutes, early_leave_minutes, status, is_workday,
+                timezone, meta, source_batch_id::text
+           FROM attendance_records
+          WHERE org_id = $1
+            AND (source_batch_id = ANY($2::uuid[]) OR id = $3::uuid)
+          ORDER BY user_id, work_date, id`,
+        [orgId, batchIds, mergeRecordId],
+      )
+      const groups = await pool.query(
+        `SELECT id::text, org_id, name, code, timezone, rule_set_id::text, description
+           FROM attendance_groups
+          WHERE org_id = $1 AND name = ANY($2::text[])
+          ORDER BY lower(name), id`,
+        [orgId, [groupName, 'Legacy Upload Team']],
+      )
+      const members = await pool.query(
+        `SELECT m.id::text, m.org_id, m.group_id::text, g.name AS group_name, m.user_id
+           FROM attendance_group_members m
+           JOIN attendance_groups g ON g.id = m.group_id
+          WHERE m.org_id = $1 AND g.name = ANY($2::text[])
+          ORDER BY lower(g.name), m.user_id, m.id`,
+        [orgId, [groupName, 'Legacy Upload Team']],
+      )
+      const jobs = await pool.query(
+        `SELECT j.id::text, j.org_id, j.batch_id::text, j.created_by, j.idempotency_key,
+                j.status, j.progress, j.total, j.error,
+                COALESCE(t.response, j.payload) AS payload
+           FROM attendance_import_jobs j
+           LEFT JOIN attendance_import_legacy_terminal_responses t
+             ON t.job_id = j.id AND t.org_id = j.org_id
+          WHERE j.id = ANY($1::uuid[])
+          ORDER BY j.idempotency_key NULLS LAST, j.org_id`,
+        [[asyncJobId, asyncRaceJobId].filter(Boolean)],
+      )
+
+      const generatedIdLabels = new Map<string, string>()
+      for (const row of batches.rows) {
+        generatedIdLabels.set(
+          row.id,
+          `batch:${row.org_id}:${row.idempotency_key ?? row.id}`,
+        )
+      }
+      for (const row of jobs.rows) {
+        generatedIdLabels.set(
+          row.id,
+          `job:${row.org_id}:${row.idempotency_key ?? row.id}`,
+        )
+      }
+      const itemOrdinals = new Map<string, number>()
+      for (const row of items.rows) {
+        const ordinal = itemOrdinals.get(row.batch_id) ?? 0
+        generatedIdLabels.set(
+          row.id,
+          `item:${generatedIdLabels.get(row.batch_id) ?? row.batch_id}:${ordinal}`,
+        )
+        itemOrdinals.set(row.batch_id, ordinal + 1)
+      }
+      for (const row of records.rows) {
+        if (row.id !== mergeRecordId) {
+          generatedIdLabels.set(row.id, `record:${row.org_id}:${row.user_id}:${row.work_date}`)
+        }
+      }
+      for (const row of groups.rows) {
+        generatedIdLabels.set(row.id, `group:${row.org_id}:${String(row.name).trim().toLowerCase()}`)
+      }
+      for (const row of members.rows) {
+        generatedIdLabels.set(row.id, `member:${row.org_id}:${String(row.group_name).trim().toLowerCase()}:${row.user_id}`)
+      }
+      generatedIdLabels.set(fileId, `upload-file:${orgId}:legacy-import-v1-upload`)
+      const normalize = (value: unknown, key = ''): unknown => {
+        if (typeof value === 'string') {
+          return generatedIdLabels.get(value) ?? value
+        }
+        if (Array.isArray(value)) return value.map((entry) => normalize(entry))
+        if (value && typeof value === 'object') {
+          const out: Record<string, unknown> = {}
+          for (const currentKey of Object.keys(value as Record<string, unknown>).sort()) {
+            const current = (value as Record<string, unknown>)[currentKey]
+            if (currentKey === 'elapsedMs') {
+              const number = Number(current)
+              out[currentKey] = number === 0 ? 0 : { type: 'number', relation: 'nonnegative' }
+              continue
+            }
+            if (/^(created|updated|started|finished)At$/i.test(currentKey)) {
+              out[currentKey] = current == null ? null : '<db-timestamp>'
+              continue
+            }
+            out[currentKey] = normalize(current, currentKey)
+          }
+          return out
+        }
+        return value
+      }
+      const responseShape = (response: HttpResponse) => ({
+        status: response.status,
+        body: normalize(response.body),
+      })
+      const canonicalizeGolden = (value: any) => {
+        const copy = structuredClone(value)
+        const compareText = (left: unknown, right: unknown) =>
+          String(left ?? '').localeCompare(String(right ?? ''))
+        const normalizeDatabaseInstant = (value: unknown, key: string) => {
+          if (value == null) return value
+          const timestamp = new Date(String(value).replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'))
+          if (Number.isNaN(timestamp.getTime())) {
+            throw new Error(`Invalid ${key} timestamp in legacy-import-v1 golden: ${String(value)}`)
+          }
+          return timestamp.toISOString()
+        }
+        const sortRace = (entries: any[]) => entries.sort((left, right) => {
+          const leftReplay = left?.body?.data?.idempotent === true ? 1 : 0
+          const rightReplay = right?.body?.data?.idempotent === true ? 1 : 0
+          return leftReplay - rightReplay
+        })
+        sortRace(copy.sync.lockedRace)
+        sortRace(copy.async.lockedRace)
+        copy.database.batches.sort((left: any, right: any) =>
+          compareText(left.idempotency_key, right.idempotency_key))
+        for (const item of copy.database.items) {
+          const warnings = Array.isArray(item.preview_snapshot?.warnings)
+            ? item.preview_snapshot.warnings
+            : []
+          item.id = [
+            'item',
+            item.batch_id,
+            item.record_id === null ? 'skip' : 'apply',
+            item.user_id ?? 'null',
+            item.work_date ?? 'null',
+            JSON.stringify(warnings),
+          ].join(':')
+        }
+        copy.database.items.sort((left: any, right: any) =>
+          compareText(left.batch_id, right.batch_id)
+          || compareText(left.work_date, right.work_date)
+          || compareText(left.user_id, right.user_id)
+          || compareText(left.id, right.id))
+        for (const record of copy.database.records) {
+          record.first_in_at = normalizeDatabaseInstant(record.first_in_at, 'first_in_at')
+          record.last_out_at = normalizeDatabaseInstant(record.last_out_at, 'last_out_at')
+        }
+        copy.database.records.sort((left: any, right: any) =>
+          compareText(left.user_id, right.user_id)
+          || compareText(left.work_date, right.work_date)
+          || compareText(left.id, right.id))
+        copy.database.groups.sort((left: any, right: any) =>
+          compareText(String(left.name).toLowerCase(), String(right.name).toLowerCase()))
+        copy.database.members.sort((left: any, right: any) =>
+          compareText(left.group_id, right.group_id)
+          || compareText(left.user_id, right.user_id))
+        copy.database.jobs.sort((left: any, right: any) =>
+          compareText(left.idempotency_key, right.idempotency_key))
+        return copy
+      }
+      const w4Residue = await pool.query(
+        `SELECT
+           (SELECT count(*)::int
+              FROM attendance_result_operation_batches
+             WHERE org_id = $1 AND batch_command_id = ANY($2::uuid[])) AS batches,
+           (SELECT count(*)::int
+              FROM attendance_result_operations
+             WHERE org_id = $1 AND batch_command_id = ANY($2::uuid[])) AS operations,
+           (SELECT count(*)::int
+              FROM attendance_result_event_outbox e
+              JOIN attendance_result_operations o
+                ON o.org_id = e.org_id
+               AND o.entrypoint = e.entrypoint
+               AND o.operation_id = e.operation_id
+             WHERE o.org_id = $1 AND o.batch_command_id = ANY($2::uuid[])) AS outbox,
+           (SELECT count(*)::int
+              FROM attendance_record_calculations
+             WHERE org_id = $1 AND source_batch_id = ANY($2::uuid[])) AS calculations,
+           (SELECT count(*)::int
+              FROM attendance_record_segments s
+              JOIN attendance_record_calculations c
+                ON c.org_id = s.org_id
+               AND c.id = s.calculation_id
+             WHERE c.org_id = $1 AND c.source_batch_id = ANY($2::uuid[])) AS segments`,
+        [orgId, batchIds],
+      )
+      const zeroUnexpectedW4Rows = Object.values(w4Residue.rows[0] ?? {})
+        .every((value) => Number(value) === 0)
+      const fixture = normalize({
+        schemaVersion: 1,
+        fixtureName: 'legacy-import-v1',
+        governingSha: '1055e543a3680be9f37462de23483bf61ad4610c',
+        fixedClock: '2026-07-30T12:00:00.000Z',
+        uuidSource: 'sha256(legacy-import-v1:<ordinal>)',
+        sync: {
+          firstExecution: responseShape(syncFirst),
+          directEarlyReplay: responseShape(syncEarly),
+          lockedRace: syncRace.map(responseShape),
+        },
+        async: {
+          firstExecution: responseShape(asyncFirst),
+          earlyReplay: responseShape(asyncEarly),
+          lockedRace: asyncRace.map(responseShape),
+          completedPublicJob: normalize(asyncCompleted),
+        },
+        uploadCleanup,
+        database: {
+          batches: batches.rows,
+          items: items.rows,
+          records: records.rows,
+          groups: groups.rows,
+          members: members.rows.map(({ group_name: _groupName, ...row }) => row),
+          jobs: jobs.rows,
+        },
+        zeroUnexpectedW4Rows,
+      })
+      const output = `${JSON.stringify(fixture, null, 2)}\n`
+      const fixturePath = path.join(__dirname, '../fixtures/attendance/legacy-import-v1.json')
+      const checksumPath = path.join(__dirname, '../fixtures/attendance/legacy-import-v1.sha256')
+      const expectedBytes = await fs.readFile(fixturePath)
+      const checksum = (await fs.readFile(checksumPath, 'utf8')).trim().split(/\s+/)[0]
+      expect(createHash('sha256').update(expectedBytes).digest('hex')).toBe(checksum)
+      const canonicalActual = canonicalizeGolden(JSON.parse(output))
+      const canonicalExpected = canonicalizeGolden(JSON.parse(expectedBytes.toString('utf8')))
+      expect(canonicalActual).toEqual(canonicalExpected)
+      expect(batches.rows.length).toBe(batchIds.length)
+      expect(generatedIdLabels.size).toBeGreaterThanOrEqual(4)
+      expect(zeroUnexpectedW4Rows).toBe(true)
+      expect(uploadCleanup).toMatchObject({ csvPresent: false, metaPresent: false })
+    } finally {
+      vi.useRealTimers()
+      await pool.end().catch(() => undefined)
+    }
+  }, 300_000)
 
 })

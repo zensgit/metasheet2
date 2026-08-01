@@ -12,6 +12,26 @@ import type {
   MultitableProvisioningViewDescriptor,
 } from '../multitable/contracts'
 import type { CollectionDefinition } from './collection'
+import type {
+  ReserveAttendanceLegacyImportPlanFromHostInputV1,
+} from '../attendance/w4c3a-legacy-plan-reservation-host'
+import type {
+  ReserveAttendanceLegacyImportPlanJobResultV1,
+} from '../attendance/w4c3a-legacy-plan-enqueue'
+import type {
+  CommitAttendanceSyncImportPlanFromHostInputV1,
+} from '../attendance/w4c3a-sync-import-host'
+import type {
+  AttendanceSyncImportResponseV1,
+} from '../attendance/w4c3a-sync-import-kernel'
+import type {
+  AttendanceImportAttributionFreezeBuildResultV1,
+  AttendanceImportPolicySourceProjectionInputV1,
+  AttendanceImportPolicySourceProofV1,
+} from '../attendance/w4c3a-import-proof'
+import type {
+  AttendanceImportFrozenAttributionBuildInputV1,
+} from '../attendance/w4c2-frozen-attribution'
 
 export type {
   MultitableProvisioningFieldDescriptor,
@@ -1203,6 +1223,89 @@ export interface PluginServices {
       | { kind: 'deferred'; code: 'ATTENDANCE_SCHEDULED_RUN_ABANDON_DEFERRED' }
       | { kind: 'not_running'; state: 'completed' | 'abandoned' }
       | { kind: 'abandoned'; runId: string; completedUserCount: number }
+    >
+    /**
+     * W4C-3a — values-free V1 legacy-plan processor. Accepts only `{ jobId }`.
+     * Core assembles repository, SERIALIZABLE transaction, locks, preconditions,
+     * and fixed effects internally. Plugin must not pass payload/orgId/rules/
+     * settings/profile/source/effect callbacks. Fail closed when absent for a
+     * V1 job.
+     */
+    processLegacyImportPlan(input: { jobId: string }): Promise<
+      | { kind: 'not_found' }
+      | { kind: 'suspended' }
+      | { kind: 'failed'; reason: string }
+      | { kind: 'completed'; response: unknown }
+    >
+    /**
+     * W4C-3a P07 — core-owned V1 reservation. The plugin supplies one closed
+     * prepared plan; core owns posture, verified identities, authorization,
+     * SERIALIZABLE transaction, and class-00/10/11 locking.
+     */
+    reserveLegacyImportPlan(
+      input: ReserveAttendanceLegacyImportPlanFromHostInputV1,
+    ): Promise<ReserveAttendanceLegacyImportPlanJobResultV1>
+    /**
+     * W4C-3a P06 — core-owned modern synchronous import commit. The plugin
+     * supplies one closed prepareOnly plan; core opens one independent
+     * SERIALIZABLE source/effect transaction and owns class-00/10/11, claim,
+     * calculation, compatibility effects, and seals. Never creates V1
+     * job/plan/chunk/terminal rows and never calls processLegacyImportPlan.
+     */
+    commitSyncImportPlan(
+      input: CommitAttendanceSyncImportPlanFromHostInputV1,
+    ): Promise<AttendanceSyncImportResponseV1>
+    buildImportAttributionFreeze(
+      input: AttendanceImportFrozenAttributionBuildInputV1,
+    ): AttendanceImportAttributionFreezeBuildResultV1
+    buildImportPolicySourceProof(
+      input: AttendanceImportPolicySourceProjectionInputV1,
+    ): AttendanceImportPolicySourceProofV1
+    /**
+     * W4C-3a — canonical lock witnesses for the synchronous import compatibility
+     * bridge. Core owns key derivation; plugin-attendance only acquires these
+     * exact signed keys inside its existing source/effect transaction.
+     */
+    buildLegacyImportReservationLockWitness(input: {
+      orgId: string
+      idempotencyKey: string
+    }):
+      | {
+          rolloutKey: string
+          legacyIdempotencyKey: string
+          helperWaitMs: number
+          transactionLockTimeoutMs: number
+        }
+      | null
+  }
+  /**
+   * W4C-3a P11/P23 — core-owned import rollback boundary. The plugin may pass
+   * only authenticated request identity plus the durable batch id. Core owns
+   * posture resolution, target enumeration, server ids, authorization
+   * rechecks, transaction/locks, and append-only reversal DML. No target list,
+   * SQL, transaction, resolver, or callback crosses this port.
+   */
+  attendanceImportRollback?: {
+    rollbackImportBatchV1(input: {
+      orgId: string
+      batchId: string
+      actorId: string
+      tokenSubjectUserId: string
+    }): Promise<
+      | {
+          kind: 'legacy'
+          id: string
+          deleted: number
+          status: 'rolled_back'
+        }
+      | {
+          kind: 'w4'
+          id: string
+          affected: number
+          restored: number
+          retired: number
+          status: 'rolled_back'
+        }
     >
   }
   notification: NotificationService // Notification service instance

@@ -17,7 +17,12 @@
 const crypto = require('crypto')
 const path = require('path')
 
-const { classifyTable, TRACKED_BUCKETS, W4_CANONICAL_PATH_PREFIXES } = require('./table-classification.cjs')
+const {
+  classifyTable,
+  P25_OPERATIONAL_TABLE_SPECS,
+  TRACKED_BUCKETS,
+  W4_CANONICAL_PATH_PREFIXES,
+} = require('./table-classification.cjs')
 
 const SCANNABLE_EXTENSIONS = new Set(['.ts', '.js', '.cjs', '.mjs', '.sql', '.sh'])
 
@@ -132,7 +137,17 @@ function discoverRuntimeRoots(source) {
 // collector limitation (see the collector's own CI test and the Stage D handoff note), not a
 // silently-claimed guarantee.
 const DML_LINE_PATTERN =
-  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
+  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
+
+const P25_READ_TABLE_PATTERN = new RegExp(
+  `\\b(?:FROM|JOIN)\\s+"?(${Object.keys(P25_OPERATIONAL_TABLE_SPECS).join('|')})"?(?![A-Za-z0-9_])`,
+  'gi',
+)
+
+const ATTENDANCE_RECORD_READ_PATTERN =
+  /\b(?:FROM|JOIN)\s+"?(attendance_records|attendance_current_records)"?(?![A-Za-z0-9_])/gi
+const DYNAMIC_READ_PATTERN = /\b(?:FROM|JOIN)\s+\$\{([^}]+)\}/gi
+const JS_IDENTIFIER_PATTERN = /\b[A-Za-z_$][A-Za-z0-9_$]*\b/g
 
 // Reserved words that can legally follow a DML verb without being a table name — most notably
 // `... ON CONFLICT (...) DO UPDATE SET col = ...` (an upsert), where "SET" immediately follows
@@ -175,7 +190,7 @@ function verbFromKeyword(keyword) {
   if (k.startsWith('TRUNCATE')) return 'truncate'
   if (k.startsWith('MERGE')) return 'merge'
   if (k === 'COPY') return 'copy'
-  if (k.startsWith('CREATE TABLE')) return 'staging_create'
+  if (k.startsWith('CREATE') && k.includes('TABLE')) return 'staging_create'
   if (k.startsWith('DROP TABLE')) return 'staging_drop'
   if (k.startsWith('ALTER TABLE')) return 'staging_alter'
   return 'unknown'
@@ -189,7 +204,7 @@ const SYMBOL_PATTERNS = [
   // Express-style route registration: router.post('/path', ...
   /\b(?:router|r|app)\.(get|post|put|patch|delete)\(\s*(['"`])((?:\\.|(?!\2).)*)\2/,
   // function foo( / async function foo(
-  /^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/,
+  /\b(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/,
   // const foo = ( / const foo = async ( / const foo = function
   /^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:function\b|\()/,
 ]
@@ -256,6 +271,171 @@ function scanFileForDmlSites(relPath, content) {
   return sites
 }
 
+function lineIndexAt(content, index) {
+  return content.slice(0, index).split(/\r?\n/).length - 1
+}
+
+function isDeleteTargetAt(content, fromIndex) {
+  return /\bDELETE\s*$/i.test(content.slice(Math.max(0, fromIndex - 32), fromIndex))
+}
+
+function collectDynamicReadSites(content, lines, tableNames) {
+  const alternation = [...tableNames]
+    .sort((a, b) => b.length - a.length)
+    .map((table) => table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')
+  const literalPattern = new RegExp(`(['"\`])(${alternation})\\1`, 'g')
+  const declarationPattern = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*/g
+  const valueBindings = []
+  const latestBinding = (values, identifier, beforeIndex) => [...values]
+    .reverse()
+    .find((binding) => binding.identifier === identifier && binding.index < beforeIndex)
+  let match
+  while ((match = declarationPattern.exec(content))) {
+    literalPattern.lastIndex = 0
+    const literal = literalPattern.exec(content.slice(declarationPattern.lastIndex))
+    if (literal?.index === 0) {
+      valueBindings.push({ identifier: match[1], index: match.index, tables: new Set([literal[2]]) })
+    }
+  }
+
+  const arrayPattern = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*\[([\s\S]*?)\]/g
+  while ((match = arrayPattern.exec(content))) {
+    literalPattern.lastIndex = 0
+    let literal
+    const tables = new Set()
+    while ((literal = literalPattern.exec(match[2]))) tables.add(literal[2])
+    if (tables.size > 0) valueBindings.push({ identifier: match[1], index: match.index, tables })
+  }
+  valueBindings.sort((a, b) => a.index - b.index)
+
+  const forOfBindings = []
+  const forOfPattern = /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+of\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/g
+  while ((match = forOfPattern.exec(content))) {
+    const sourceBinding = latestBinding(valueBindings, match[2], match.index)
+    forOfBindings.push({
+      identifier: match[1],
+      index: match.index,
+      tables: new Set(sourceBinding?.tables || []),
+    })
+  }
+
+  const inlineForOfPattern = /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+of\s+\[([\s\S]*?)\]\s*\)/g
+  while ((match = inlineForOfPattern.exec(content))) {
+    literalPattern.lastIndex = 0
+    let literal
+    const tables = new Set()
+    while ((literal = literalPattern.exec(match[2]))) tables.add(literal[2])
+    forOfBindings.push({ identifier: match[1], index: match.index, tables })
+  }
+
+  const sites = []
+  DYNAMIC_READ_PATTERN.lastIndex = 0
+  while ((match = DYNAMIC_READ_PATTERN.exec(content))) {
+    const lineIndex = lineIndexAt(content, match.index)
+    if (isDeleteTargetAt(content, match.index)) continue
+    const enclosingSymbol = nearestEnclosingSymbol(lines, lineIndex)
+    const resolved = new Set()
+
+    literalPattern.lastIndex = 0
+    let literal
+    while ((literal = literalPattern.exec(match[1]))) resolved.add(literal[2])
+
+    JS_IDENTIFIER_PATTERN.lastIndex = 0
+    let identifier
+    while ((identifier = JS_IDENTIFIER_PATTERN.exec(match[1]))) {
+      const binding = latestBinding(
+        [...valueBindings, ...forOfBindings].sort((a, b) => a.index - b.index),
+        identifier[0],
+        match.index,
+      )
+      for (const table of binding?.tables || []) resolved.add(table)
+    }
+
+    for (const table of resolved) {
+      sites.push({ lineIndex, table, enclosingSymbol, dynamic: true })
+    }
+  }
+  return sites
+}
+
+// P25 needs more than the DML census: operational state becomes dangerous when a caller reads
+// it as authority. This deliberately scans only SQL table positions (DML targets plus FROM/JOIN),
+// not every string occurrence, and preserves the same nearest-symbol attribution used by the
+// existing generated inventory.
+function scanFileForP25CallPathSites(relPath, content) {
+  const lines = content.split(/\r?\n/)
+  const sites = scanFileForDmlSites(relPath, content)
+    .filter((site) => P25_OPERATIONAL_TABLE_SPECS[site.table])
+    .map((site) => ({ ...site, access: 'write' }))
+
+  P25_READ_TABLE_PATTERN.lastIndex = 0
+  let match
+  while ((match = P25_READ_TABLE_PATTERN.exec(content))) {
+    const lineIndex = lineIndexAt(content, match.index)
+    // DELETE FROM names its write target, not a second read. INSERT ... SELECT and UPDATE ...
+    // FROM still retain their source-table read, which is the evidence this guard needs.
+    if (isDeleteTargetAt(content, match.index)) continue
+    sites.push({
+      relPath,
+      line: lineIndex + 1,
+      verb: 'select',
+      table: match[1],
+      enclosingSymbol: nearestEnclosingSymbol(lines, lineIndex),
+      access: 'read',
+    })
+  }
+  for (const dynamic of collectDynamicReadSites(
+    content,
+    lines,
+    Object.keys(P25_OPERATIONAL_TABLE_SPECS),
+  )) {
+    sites.push({
+      relPath,
+      line: dynamic.lineIndex + 1,
+      verb: 'select',
+      table: dynamic.table,
+      enclosingSymbol: dynamic.enclosingSymbol,
+      access: 'read',
+      dynamic: true,
+    })
+  }
+  return sites
+}
+
+function scanFileForAttendanceRecordReadSites(relPath, content) {
+  const lines = content.split(/\r?\n/)
+  const sites = []
+  ATTENDANCE_RECORD_READ_PATTERN.lastIndex = 0
+  let match
+  while ((match = ATTENDANCE_RECORD_READ_PATTERN.exec(content))) {
+    const table = match[1]
+    const lineIndex = lineIndexAt(content, match.index)
+    if (isDeleteTargetAt(content, match.index)) continue
+    sites.push({
+      relPath,
+      line: lineIndex + 1,
+      table,
+      enclosingSymbol: nearestEnclosingSymbol(lines, lineIndex),
+    })
+  }
+
+  for (const dynamic of collectDynamicReadSites(
+    content,
+    lines,
+    ['attendance_records', 'attendance_current_records'],
+  )) {
+    sites.push({
+      relPath,
+      line: dynamic.lineIndex + 1,
+      table: dynamic.table,
+      enclosingSymbol: dynamic.enclosingSymbol,
+      dynamic: true,
+    })
+  }
+  return sites
+}
+
 // Builds the full raw census across every scannable file under the discovered runtime roots.
 // `source` supplies `readFile(relPath) -> string|null` and `listAllFiles(rootDir) -> relPath[]`.
 function buildRawCensus(source) {
@@ -272,6 +452,42 @@ function buildRawCensus(source) {
       for (const site of scanFileForDmlSites(relPath, content)) {
         sites.push(site)
       }
+    }
+  }
+  sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
+  return { roots, sites }
+}
+
+function buildP25CallPathCensus(source) {
+  const roots = discoverRuntimeRoots(source)
+  const seen = new Set()
+  const sites = []
+  for (const root of roots) {
+    for (const relPath of source.listAllFiles(root)) {
+      if (seen.has(relPath)) continue
+      seen.add(relPath)
+      if (!isScannablePath(relPath)) continue
+      const content = source.readFile(relPath)
+      if (content == null) continue
+      sites.push(...scanFileForP25CallPathSites(relPath, content))
+    }
+  }
+  sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
+  return { roots, sites }
+}
+
+function buildAttendanceRecordReadCensus(source) {
+  const roots = discoverRuntimeRoots(source)
+  const seen = new Set()
+  const sites = []
+  for (const root of roots) {
+    for (const relPath of source.listAllFiles(root)) {
+      if (seen.has(relPath)) continue
+      seen.add(relPath)
+      if (!isScannablePath(relPath)) continue
+      const content = source.readFile(relPath)
+      if (content == null) continue
+      sites.push(...scanFileForAttendanceRecordReadSites(relPath, content))
     }
   }
   sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
@@ -333,7 +549,8 @@ function classifyCensus(rawSites) {
       unclassifiedTableSites.push(site)
       continue
     }
-    const classified = { ...site, bucket }
+    const p25 = P25_OPERATIONAL_TABLE_SPECS[site.table]
+    const classified = p25 ? { ...site, bucket, p25 } : { ...site, bucket }
     if (bucket === 'w4_canonical') {
       if (isCanonicalBoundaryPath(site.relPath)) {
         canonicalSites.push(classified)
@@ -368,7 +585,11 @@ module.exports = {
   parseWorkspacePatterns,
   isScannablePath,
   scanFileForDmlSites,
+  scanFileForP25CallPathSites,
+  scanFileForAttendanceRecordReadSites,
   buildRawCensus,
+  buildP25CallPathCensus,
+  buildAttendanceRecordReadCensus,
   classifyCensus,
   debtKey,
   isCanonicalBoundaryPath,

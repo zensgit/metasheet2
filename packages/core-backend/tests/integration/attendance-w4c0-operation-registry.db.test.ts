@@ -15,8 +15,8 @@
  *  - source-free cancel persists; a canceled key is not a completed replay;
  *  - claim without seal cannot commit (Stage A deferred constraint fires
  *    through the service-layer rows);
- *  - P07 V1 job reservation: created -> congruent existing -> conflicting 409,
- *    with zero operation rows;
+ *  - the predecessor P07 reservation is retired before SQL once W4C-3a makes
+ *    a complete durable plan mandatory;
  *  - advisory-helper deadline protocol: busy waiter maps to the closed
  *    operation busy code (55P03 never escapes) and lock_timeout is restored
  *    after success;
@@ -437,95 +437,32 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
     })
   })
 
-  it('P07 reservation: created -> congruent existing -> conflicting 409; zero operation rows', async () => {
-    const batchRoot = crypto.randomUUID()
-    const legacyBatchId = crypto.randomUUID()
-    const auth = mintAuth({ capability: 'import' })
+  it('retires the predecessor P07 reservation before SQL because it cannot persist a complete W4C-3a plan', async () => {
+    let sqlCalls = 0
+    const noSql = {
+      query: async () => {
+        sqlCalls += 1
+        return { rows: [] }
+      },
+    } as AttendanceW4TransactionClientV1
 
-    const buildIdentities = async (client: PoolClient, fingerprints: readonly string[]) => {
-      const t = trx(client)
-      const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(ORG_SHADOW)
-      await acquireAttendanceCalculationRolloutLock(t, orgKey, 'shared')
-      const posture = await resolveSegmentCalculationPosture(t, ORG_SHADOW)
-      const org: VerifiedAttendanceOrgIdentityV1 = createVerifiedAttendanceOrgIdentityV1({ orgKey: ORG_SHADOW, posture })
-      const batchIdentity = createVerifiedAttendanceOperationIdentityV1({
-        org,
-        kind: 'batch',
-        entrypoint: 'import_batch',
-        source: { sourceKind: 'import_batch', batchCommandId: batchRoot },
-      })
-      const items = fingerprints.map((semanticFingerprint, index) => ({
-        identity: createVerifiedAttendanceOperationIdentityV1({
-          org,
-          kind: 'item',
-          entrypoint: 'import_batch',
-          source: { sourceKind: 'import_item', batchCommandId: batchRoot, ordinal: String(index), semanticFingerprint },
-        }),
-        commandFingerprint: semanticFingerprint,
-      }))
-      return { batchIdentity, items }
-    }
-
-    // First enqueue: creates the V1 job (proof vector validated by the SQL CHECK).
-    let jobId = ''
-    await withClient(async (client) => {
-      await client.query('BEGIN')
-      const { batchIdentity, items } = await buildIdentities(client, [HEX64_A, HEX64_B])
-      const created = await reserveAttendanceImportJobW4V1(trx(client), auth, {
-        batchIdentity,
-        items,
+    await expect(
+      reserveAttendanceImportJobW4V1(noSql, {}, {
+        batchIdentity: {},
+        items: [],
         batchCommandFingerprint: HEX64_A,
-        legacyJob: { batchId: legacyBatchId, createdBy: ACTOR, payload: { rows: 2 }, total: 2 },
-      })
-      expect(created.kind).toBe('created')
-      jobId = (created as { jobId: string }).jobId
-      await client.query('COMMIT')
+        legacyJob: {
+          batchId: crypto.randomUUID(),
+          createdBy: ACTOR,
+          payload: {},
+          total: 0,
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: 'AttendanceW4RegistryError',
+      code: 'W4C3A_DURABLE_PLAN_REQUIRED',
     })
-
-    // Congruent retry: the one existing durable job, no second row, no raw 23505.
-    await withClient(async (client) => {
-      await client.query('BEGIN')
-      const { batchIdentity, items } = await buildIdentities(client, [HEX64_A, HEX64_B])
-      const existing = await reserveAttendanceImportJobW4V1(trx(client), auth, {
-        batchIdentity,
-        items,
-        batchCommandFingerprint: HEX64_A,
-        legacyJob: { batchId: legacyBatchId, createdBy: ACTOR, payload: { rows: 2 }, total: 2 },
-      })
-      expect(existing).toEqual({ kind: 'existing', jobId, status: 'queued' })
-      await client.query('COMMIT')
-    })
-
-    // Same reservation, different batch command fingerprint: 409 before enqueue DML.
-    await withClient(async (client) => {
-      await client.query('BEGIN')
-      const { batchIdentity, items } = await buildIdentities(client, [HEX64_A, HEX64_B])
-      let caught: unknown
-      try {
-        await reserveAttendanceImportJobW4V1(trx(client), auth, {
-          batchIdentity,
-          items,
-          batchCommandFingerprint: HEX64_B,
-          legacyJob: { batchId: legacyBatchId, createdBy: ACTOR, payload: { rows: 2 }, total: 2 },
-        })
-      } catch (error) {
-        caught = error
-      }
-      await client.query('ROLLBACK')
-      expect((caught as AttendanceW4OperationError).code).toBe('ATTENDANCE_OPERATION_CONFLICT')
-    })
-
-    const jobs = await pool.query(
-      'SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1 AND w4_batch_command_id = $2::uuid',
-      [ORG_SHADOW, batchRoot],
-    )
-    expect(jobs.rows[0].n).toBe(1)
-    // Reservation creates NO operation rows.
-    const ops = await pool.query(
-      'SELECT count(*)::int AS n FROM attendance_result_operations WHERE org_id = $1 AND batch_command_id = $2::uuid',
-      [ORG_SHADOW, batchRoot],
-    )
-    expect(ops.rows[0].n).toBe(0)
+    expect(sqlCalls).toBe(0)
   })
 
   it('advisory-helper deadline: contended acquisition maps to the closed operation busy code; lock_timeout restored on success', async () => {

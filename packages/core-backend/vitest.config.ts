@@ -586,6 +586,51 @@ export default defineConfig({
       // gated; excluded here so the no-DB job cannot skip-green it; wired whole-file into
       // the attendance real-DB step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
+      // W4C-3a durable legacy-plan migration: exact manifest/chunk/terminal
+      // constraints, V1 frozen idempotency, direct-corruption congruence, and
+      // guarded down. DATABASE_URL-gated; excluded here so the no-DB lane
+      // cannot skip-green it. The whole file is wired into the attendance
+      // real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts',
+      // W4C-3a durable plan enqueue: SERIALIZABLE authorization, reservation,
+      // revision freeze, and zero-residue failures. DATABASE_URL-gated; excluded
+      // here and run whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts',
+      // W4C-3a record-target precondition locks: two-connection present/missing
+      // commit-order and lock-hold proofs. DATABASE_URL-gated; excluded here so
+      // the no-DB lane cannot skip-green it. The whole file is wired into the
+      // attendance real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
+      // W4C-3a fixed record-effect adapter: exact UPDATE/INSERT branches and
+      // revision-trigger observation on migrated PostgreSQL. DATABASE_URL-gated;
+      // excluded here and run whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-record-effects.db.test.ts',
+      // W4C-3a fixed item-effect adapter: ordered apply/skip projection with
+      // nullable fields and jsonb[] binding. DATABASE_URL-gated; excluded here
+      // and run whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-item-effects.db.test.ts',
+      // W4C-3a P08 child-process restart recovery: process B receives only
+      // DATABASE_URL + jobId. DATABASE_URL-gated; excluded here and run
+      // whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-p08-child-process.db.test.ts',
+      // W4C-3a OD-58 group precondition races and SQL order.
+      'tests/integration/attendance-w4c3a-group-preconditions.db.test.ts',
+      // W4C-3a OD-60 group/batch SQL count legs.
+      'tests/integration/attendance-w4c3a-group-effects.db.test.ts',
+      // W4C-3a full-import authorization recovery matrix.
+      'tests/integration/attendance-w4c3a-auth-recovery.db.test.ts',
+      // W4C-3a canonical import execution, sync/legacy/integration route cutover,
+      // append-only rollback, and rollout-control race gates. These suites require
+      // real PostgreSQL and are whole-file wired into the attendance real-DB step.
+      'tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts',
+      'tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts',
+      // W4C-3a M60 commit-token ordering uses real plugin HTTP routes and
+      // PostgreSQL. Keep it out of the no-DB lane and run the whole file in
+      // the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts',
+      'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
+      'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
+      'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.

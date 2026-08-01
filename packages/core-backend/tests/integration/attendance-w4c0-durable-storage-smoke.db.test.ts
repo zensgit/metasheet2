@@ -17,9 +17,8 @@ import { down } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance
  *    at the DB boundary;
  *  - a persisted `claimed` operation row cannot commit (deferred constraint trigger);
  *  - a completed operation row refuses UPDATE and DELETE;
- *  - attendance_import_jobs accepts the legacy all-null W4 shape, rejects a partial V1
- *    shape, accepts the complete V1 shape with a proof vector verified through the SQL
- *    UUIDv5 function, and freezes `accepted_write_posture` against UPDATE;
+ *  - attendance_import_jobs accepts the legacy all-null W4 shape while the W4C-3a
+ *    successor guard rejects raw, planless V1 inserts before shape checks;
  *  - down() fail-closes BEFORE DDL while any W4 registry row exists (this test inserts a
  *    completed operation row first, so calling down() here must throw and drop nothing).
  *
@@ -200,7 +199,7 @@ describeIfDatabase('W4C-0 Stage A — durable storage migration smoke (real DB)'
     }
   })
 
-  it('enforces the attendance_import_jobs null-all-or-V1-complete shape and frozen fields', async () => {
+  it('allows legacy attendance_import_jobs rows and rejects planless V1 rows at the successor enqueue seam', async () => {
     // Legacy all-null W4 shape inserts unchanged.
     const legacy = (
       await query<{ id: string }>(
@@ -211,19 +210,20 @@ describeIfDatabase('W4C-0 Stage A — durable storage migration smoke (real DB)'
     ).rows[0].id
     jobIds.push(legacy)
 
-    // Partial V1 shape fails the shape constraint.
+    // The successor guard rejects raw V1 writes before shape constraints run.
     await expect(
       query(
         `INSERT INTO attendance_import_jobs (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint)
          VALUES ($1, $2, 'actor-smoke', 'queued', '{}'::jsonb, 1, 'import_batch')`,
         [ORG, uuid()],
       ),
-    ).rejects.toThrow(/chk_aij_w4_shape/)
+    ).rejects.toThrow(/W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED/)
 
-    // Complete V1 shape with a proof vector verified through the canonical SQL function.
+    // The predecessor four-field V1 shape is no longer complete after W4C-3a:
+    // every new V1 job must carry its durable plan in the same transaction.
     const reservation = uuid()
-    const v1 = (
-      await query<{ id: string }>(
+    await expect(
+      query(
         `INSERT INTO attendance_import_jobs
           (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
            w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
@@ -236,30 +236,45 @@ describeIfDatabase('W4C-0 Stage A — durable storage migration smoke (real DB)'
                   'semanticFingerprint', $4::text,
                   'derivedOperationId', attendance_w4_uuidv5($5::uuid, attendance_w4_item_name_bytes($2::uuid, 0, $4))::text,
                   'commandFingerprint', $3::text))
-         RETURNING id::text AS id`,
+        `,
         [ORG, reservation, '9'.repeat(64), HEX64_A, IMPORT_NS],
-      )
-    ).rows[0].id
-    jobIds.push(v1)
-
-    // A rollout-state value is rejected at the job DB boundary.
-    await expect(
-      query(
-        `INSERT INTO attendance_import_jobs
-          (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
-           w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
-           w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
-           w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector)
-         VALUES ($1, $2, 'actor-smoke', 'queued', '{}'::jsonb, 1, 'import_batch', $2, 'import_batch',
-                 'batch:smoke', 'actor-smoke', 'delegated_import', $3, 'eligible', 1, $3, $3, '[]'::jsonb)`,
-        [ORG, uuid(), '8'.repeat(64)],
       ),
-    ).rejects.toThrow(/chk_aij_w4/)
+    ).rejects.toThrow(/W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED/)
 
-    // Frozen accepted posture refuses UPDATE.
-    await expect(
-      query(`UPDATE attendance_import_jobs SET w4_accepted_write_posture = 'authoritative' WHERE id = $1::uuid`, [v1]),
-    ).rejects.toThrow(/W4C0_JOB_FROZEN/)
+    // Pass the successor enqueue seam with an otherwise complete no-target job so
+    // the rollout-state value is rejected specifically by the write-posture CHECK.
+    const invalidPostureJobId = uuid()
+    const invalidPostureBatchId = uuid()
+    const posturePool = new Pool({ connectionString: dbUrl })
+    const postureClient = await posturePool.connect()
+    try {
+      await postureClient.query('BEGIN')
+      await postureClient.query(
+        `SELECT set_config('attendance.w4c3a_enqueue_job_id', $1, true)`,
+        [invalidPostureJobId],
+      )
+      await expect(
+        postureClient.query(
+          `INSERT INTO attendance_import_jobs
+            (id, org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
+             w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
+             w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
+             w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector,
+             w4_legacy_plan_digest, w4_distinct_target_count, w4_operational_branch,
+             w4_legacy_input_fingerprint)
+           VALUES ($1, $2, $3, 'actor-smoke', 'queued', '{}'::jsonb, 1, 'import_batch',
+                   $3, 'import_batch', 'batch:smoke', 'actor-smoke', 'delegated_import',
+                   $4, 'eligible', 0, $4, $4, '[]'::jsonb, $4, 0,
+                   'operational_only_no_target', $4)`,
+          [invalidPostureJobId, ORG, invalidPostureBatchId, '8'.repeat(64)],
+        ),
+      ).rejects.toThrow(/chk_aij_w4_write_posture/)
+    } finally {
+      await postureClient.query('ROLLBACK').catch(() => undefined)
+      postureClient.release()
+      await posturePool.end()
+    }
+
   })
 
   it('down() fail-closes before DDL while W4 registry rows exist', async () => {

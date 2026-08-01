@@ -401,6 +401,8 @@ describe('useAttendanceAdminImportWorkflow', () => {
 
     workflow.importForm.payload = JSON.stringify({
       source: 'manual',
+      convertedArtifactFileId: 'stale-artifact',
+      convertedSheetName: 'stale-sheet',
       columns: ['userId', { id: '', name: 'workDate' }],
     }, null, 2)
     workflow.importMode.value = 'override'
@@ -416,6 +418,8 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(payload.source).toBe('manual')
     expect(payload.mode).toBe('override')
     expect(payload.csvFileId).toBeUndefined()
+    expect(payload.convertedArtifactFileId).toBeUndefined()
+    expect(payload.convertedSheetName).toBeUndefined()
     expect(workflow.buildImportPayload()?.columns).toEqual([
       { id: 'userId', name: 'userId' },
       { id: 'workDate', name: 'workDate' },
@@ -760,11 +764,29 @@ describe('useAttendanceAdminImportWorkflow', () => {
 
   it('X1: a plain .xlsx converts to CSV at selection and loads through applyImportCsvFile', async () => {
     const readFileText = vi.fn(async () => 'should-not-be-read')
-    const { workflow, apiFetch, setStatus } = createWorkflow({ readFileText })
     const file = buildXlsxFile([
       ['日期', '工号', '姓名', '考勤结果'],
       ['2026-06-01', 'EMP001', '张三', '正常'],
     ])
+    const { workflow, apiFetch, setStatus } = createWorkflow({
+      readFileText,
+      apiFetch: vi.fn(async (input: string, init?: RequestInit) => {
+        expect(input).toContain('/api/attendance/import/upload-artifact?')
+        expect(new URL(input, 'http://localhost').searchParams.get('filename')).toBe(file.name)
+        expect(init?.method).toBe('POST')
+        expect(init?.body).toBe(file)
+        expect((init?.headers as Record<string, string>)['Content-Type']).toBe(file.type)
+        return jsonResponse(201, {
+          ok: true,
+          data: {
+            fileId: 'xlsx-artifact-1',
+            sha256: 'a'.repeat(64),
+            bytes: file.size,
+            expiresAt: '2026-06-02T10:00:00.000Z',
+          },
+        })
+      }),
+    })
 
     await workflow.handleImportCsvChange({ target: { files: [file], value: file.name } } as unknown as Event)
 
@@ -779,8 +801,97 @@ describe('useAttendanceAdminImportWorkflow', () => {
 
     const payload = JSON.parse(workflow.importForm.payload)
     expect(payload.csvText).toBe(workflow.importCsvConvertedText.value)
+    expect(payload.convertedArtifactFileId).toBe('xlsx-artifact-1')
+    expect(payload.convertedSheetName).toBe('打卡日报')
+    expect(payload.sha256).toBeUndefined()
+    expect(payload.bytes).toBeUndefined()
     expect(readFileText).not.toHaveBeenCalled()
-    expect(apiFetch).not.toHaveBeenCalled()
+    expect(apiFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('X1: a converted .xlsx uploads one original artifact before a separately uploaded CSV', async () => {
+    const file = buildXlsxFile([
+      ['日期', '工号'],
+      ['2026-06-01', 'EMP001'],
+    ])
+    const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.includes('/api/attendance/import/upload-artifact?')) {
+        expect(init?.body).toBe(file)
+        expect((init?.headers as Record<string, string>)['Content-Type']).toBe(file.type)
+        return jsonResponse(201, {
+          ok: true,
+          data: {
+            fileId: 'xlsx-artifact-2',
+            sha256: 'b'.repeat(64),
+            bytes: file.size,
+            expiresAt: '2026-06-02T10:00:00.000Z',
+          },
+        })
+      }
+      if (input.includes('/api/attendance/import/upload?')) {
+        expect((init?.body as File).name).toBe('6月考勤(5).csv')
+        return jsonResponse(201, {
+          ok: true,
+          data: {
+            fileId: 'csv-file-2',
+            rowCount: 1,
+            bytes: 32,
+            expiresAt: '2026-06-02T10:00:00.000Z',
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const { workflow } = createWorkflow({
+      apiFetch,
+      readImportDebugOptions: () => ({
+        forceUploadCsv: true,
+        forceAsyncImport: false,
+        forceTimeoutOnce: false,
+        pollIntervalMs: null,
+        pollTimeoutMs: null,
+      }),
+    })
+
+    await workflow.handleImportCsvChange({ target: { files: [file], value: file.name } } as unknown as Event)
+    workflow.importForm.payload = JSON.stringify({ source: 'dingtalk_csv' }, null, 2)
+    await workflow.applyImportCsvFile()
+
+    const payload = JSON.parse(workflow.importForm.payload)
+    expect(apiFetch).toHaveBeenCalledTimes(2)
+    expect(payload.csvFileId).toBe('csv-file-2')
+    expect(payload.csvText).toBeUndefined()
+    expect(payload.convertedArtifactFileId).toBe('xlsx-artifact-2')
+    expect(payload.convertedSheetName).toBe('打卡日报')
+  })
+
+  it('X1: an artifact upload error fails closed without writing provenance payload fields', async () => {
+    const file = buildXlsxFile([
+      ['日期', '工号'],
+      ['2026-06-01', 'EMP001'],
+    ])
+    const { workflow, apiFetch, setStatusFromError } = createWorkflow({
+      apiFetch: vi.fn(async (input: string) => {
+        expect(input).toContain('/api/attendance/import/upload-artifact?')
+        return jsonResponse(502, {
+          ok: false,
+          error: { code: 'ARTIFACT_UPLOAD_FAILED', message: 'artifact unavailable' },
+        })
+      }),
+    })
+
+    await workflow.handleImportCsvChange({ target: { files: [file], value: file.name } } as unknown as Event)
+    workflow.importForm.payload = JSON.stringify({ source: 'dingtalk_csv' }, null, 2)
+    await workflow.applyImportCsvFile()
+
+    expect(apiFetch).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(workflow.importForm.payload)).toEqual({ source: 'dingtalk_csv' })
+    expect(workflow.buildImportPayload()).toBeNull()
+    expect(setStatusFromError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Failed to load CSV',
+      'import-preview',
+    )
   })
 
   it('X1: a corrupt .xlsx surfaces an actionable error and clears the selection', async () => {
@@ -802,26 +913,61 @@ describe('useAttendanceAdminImportWorkflow', () => {
 
   it('X1 P2-1: a direct setImportCsvFile(csv) after an xlsx conversion must not reuse the stale converted text', async () => {
     const readFileText = vi.fn(async () => 'userId,workDate\nu-9,2026-06-02\n')
-    const { workflow, setStatus } = createWorkflow({ readFileText })
     const xlsx = buildXlsxFile([
       ['日期', '姓名'],
       ['2026-06-01', '张三'],
     ])
+    const { workflow, setStatus } = createWorkflow({
+      readFileText,
+      apiFetch: vi.fn(async () => jsonResponse(201, {
+        ok: true,
+        data: {
+          fileId: 'xlsx-artifact-reselection',
+          sha256: 'c'.repeat(64),
+          bytes: xlsx.size,
+          expiresAt: '2026-06-02T10:00:00.000Z',
+        },
+      })),
+    })
     await workflow.handleImportCsvChange({ target: { files: [xlsx], value: xlsx.name } } as unknown as Event)
     expect(workflow.importCsvConvertedText.value).toContain('2026-06-01,张三')
 
     const csv = new File(['userId,workDate\nu-9,2026-06-02\n'], 'fresh.csv', { type: 'text/csv' })
+    workflow.importForm.payload = JSON.stringify({ source: 'manual' }, null, 2)
+    await workflow.applyImportCsvFile()
+    expect(JSON.parse(workflow.importForm.payload).convertedArtifactFileId).toBe('xlsx-artifact-reselection')
     workflow.setImportCsvFile(csv)
     expect(workflow.importCsvConvertedText.value).toBe('')
     expect(workflow.importCsvConvertedSheetName.value).toBe('')
+    expect(workflow.importCsvConvertedArtifactFileId.value).toBe('')
 
-    workflow.importForm.payload = JSON.stringify({ source: 'manual' }, null, 2)
     await workflow.applyImportCsvFile()
 
     const payload = JSON.parse(workflow.importForm.payload)
     expect(readFileText).toHaveBeenCalledWith(csv)
     expect(payload.csvText).toBe('userId,workDate\nu-9,2026-06-02\n')
     expect(String(payload.csvText)).not.toContain('张三')
+    expect(payload.convertedArtifactFileId).toBeUndefined()
+    expect(payload.convertedSheetName).toBeUndefined()
     expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('CSV loaded'), 'info', undefined)
+  })
+
+  it('keeps converted provenance fields in the visible field guide order', () => {
+    const { workflow } = createWorkflow()
+    workflow.importForm.payload = JSON.stringify({
+      source: 'dingtalk_csv',
+      csvText: '',
+      csvFileId: '',
+      convertedArtifactFileId: '',
+      convertedSheetName: '',
+    })
+
+    expect(workflow.importTemplateGuide.value?.fieldGuides.map(field => field.field)).toEqual([
+      'source',
+      'csvText',
+      'csvFileId',
+      'convertedArtifactFileId',
+      'convertedSheetName',
+    ])
   })
 })

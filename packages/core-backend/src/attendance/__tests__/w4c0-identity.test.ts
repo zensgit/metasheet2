@@ -20,16 +20,21 @@ import {
   __setAttendanceW4DigestSeamForTests,
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceCalculationTargetLocks,
+  acquireAttendanceImportReservationLocksV1,
+  acquireAttendanceOperationalBulkTargetLockV1,
   acquireAttendanceResultOperationLocks,
   acquireAttendanceScheduledRunLock,
   buildAttendanceCalculationRolloutAdvisoryKey,
   buildAttendanceCalculationTargetAdvisoryKey,
+  buildAttendanceLegacyIdempotencyAdvisoryKey,
+  buildAttendanceOperationalBulkTargetAdvisoryKey,
   buildAttendanceResultOperationAdvisoryKey,
   buildAttendanceScheduledRunAdvisoryKey,
   createVerifiedAttendanceCalculationTargetIdentityV1,
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
   parseCanonicalAttendanceOrgKeyV1,
+  parseCanonicalAttendanceLegacyIdempotencyKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   parseCanonicalAttendanceScheduledRunKeyV1,
   parseCanonicalAttendanceUserIdV1,
@@ -776,10 +781,29 @@ describe('advisory key builders and acquisition helpers', () => {
       maxExclusive: CLASS_11_MIN,
       invoke: () => GOLDEN_OPERATION_KEY_ITEM,
     },
+    buildAttendanceLegacyIdempotencyAdvisoryKey: {
+      min: CLASS_10_MIN,
+      maxExclusive: CLASS_11_MIN,
+      invoke: () =>
+        buildAttendanceLegacyIdempotencyAdvisoryKey(
+          parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+            orgId: ORG,
+            idempotencyKey: 'retry-1',
+          }),
+        ),
+    },
     buildAttendanceCalculationTargetAdvisoryKey: {
       min: CLASS_11_MIN,
       maxExclusive: 0n,
       invoke: () => GOLDEN_TARGET_KEY,
+    },
+    buildAttendanceOperationalBulkTargetAdvisoryKey: {
+      min: CLASS_11_MIN,
+      maxExclusive: 0n,
+      invoke: () =>
+        buildAttendanceOperationalBulkTargetAdvisoryKey(
+          parseCanonicalAttendanceRolloutOrgKeyV1(ORG),
+        ),
     },
   }
 
@@ -789,11 +813,13 @@ describe('advisory key builders and acquisition helpers', () => {
 
   it('gate 16: enumerates every exported build*AdvisoryKey builder (not a hand-written list) and asserts each key falls in exactly one class range', () => {
     const names = exportedAdvisoryKeyBuilderNames()
-    // Sanity: the enumeration itself must find all four real builders, not silently zero.
+    // Sanity: the enumeration itself must find every real builder, not silently zero.
     expect(names.sort()).toEqual(
       [
         'buildAttendanceCalculationRolloutAdvisoryKey',
         'buildAttendanceCalculationTargetAdvisoryKey',
+        'buildAttendanceLegacyIdempotencyAdvisoryKey',
+        'buildAttendanceOperationalBulkTargetAdvisoryKey',
         'buildAttendanceResultOperationAdvisoryKey',
         'buildAttendanceScheduledRunAdvisoryKey',
       ].sort(),
@@ -810,6 +836,12 @@ describe('advisory key builders and acquisition helpers', () => {
       // Every OTHER registered builder's own range must NOT contain this key.
       for (const [otherName, other] of Object.entries(CLASS_EXPECTATIONS)) {
         if (otherName === name) continue
+        if (
+          other.min === expectation.min &&
+          other.maxExclusive === expectation.maxExclusive
+        ) {
+          continue
+        }
         expect(key >= other.min && key < other.maxExclusive).toBe(false)
       }
     }
@@ -835,7 +867,9 @@ describe('advisory key builders and acquisition helpers', () => {
     }
     // class 11: [-2^62, 0)
     expect(GOLDEN_TARGET_KEY >= CLASS_11_MIN && GOLDEN_TARGET_KEY < 0n).toBe(true)
-    // forced equal raw digests still yield four distinct PostgreSQL keys (class bits)
+    // Forced equal raw digests still yield four distinct PostgreSQL keys (class
+    // bits). Builders intentionally sharing a class collide to one key, which
+    // the complete reservation helper de-duplicates before acquisition.
     __setAttendanceW4DigestSeamForTests(() => Buffer.alloc(32, 0x5a))
     try {
       const rolloutKey = buildAttendanceCalculationRolloutAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1(ORG))
@@ -847,12 +881,33 @@ describe('advisory key builders and acquisition helpers', () => {
         source: { sourceKind: 'direct_live_punch', clientOperationId: DIRECT_ID },
       })
       const operationKey = buildAttendanceResultOperationAdvisoryKey(operation)
+      const legacyIdempotencyKey = buildAttendanceLegacyIdempotencyAdvisoryKey(
+        parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+          orgId: ORG,
+          idempotencyKey: 'retry-1',
+        }),
+      )
       const target = createVerifiedAttendanceCalculationTargetIdentityV1({ org, userId: SCHED_USER, workDate: SCHED_DATE })
       const targetKey = buildAttendanceCalculationTargetAdvisoryKey(target)
+      const operationalBulkTargetKey =
+        buildAttendanceOperationalBulkTargetAdvisoryKey(
+          parseCanonicalAttendanceRolloutOrgKeyV1(ORG),
+        )
       const runKey = buildAttendanceScheduledRunAdvisoryKey(
         parseCanonicalAttendanceScheduledRunKeyV1({ orgId: ORG, initiator: 'cron', workDate: SCHED_DATE }),
       )
-      expect(new Set([rolloutKey, operationKey, targetKey, runKey]).size).toBe(4)
+      expect(operationKey).toBe(legacyIdempotencyKey)
+      expect(targetKey).toBe(operationalBulkTargetKey)
+      expect(
+        new Set([
+          rolloutKey,
+          operationKey,
+          legacyIdempotencyKey,
+          targetKey,
+          operationalBulkTargetKey,
+          runKey,
+        ]).size,
+      ).toBe(4)
       // Only the run key lands in the 01 class range under forced-equal raw digests too.
       expect(runKey >= CLASS_01_MIN && runKey < CLASS_01_MAX_EXCLUSIVE).toBe(true)
       for (const key of [rolloutKey, operationKey, targetKey]) {
@@ -992,6 +1047,68 @@ describe('advisory key builders and acquisition helpers', () => {
       .map((call) => BigInt(call.params[0] as string))
     expect(keys.length).toBe(2)
     expect(keys[0] < keys[1]).toBe(true)
+  })
+
+  it('normalizes the legacy key, takes the shipped compatibility lock first, then sorts class-10 keys', async () => {
+    const org = await orgIdentity(ORG, null)
+    const batch = createVerifiedAttendanceOperationIdentityV1({
+      org,
+      kind: 'batch',
+      entrypoint: 'import_batch',
+      source: { sourceKind: 'import_batch', batchCommandId: IMPORT_ROOT },
+    })
+    const legacyKey = parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+      orgId: ORG,
+      idempotencyKey: '  retry-1  ',
+    })
+    expect(legacyKey.idempotencyKey).toBe('retry-1')
+    const key = buildAttendanceLegacyIdempotencyAdvisoryKey(legacyKey)
+    expect(key >= CLASS_10_MIN && key < CLASS_11_MIN).toBe(true)
+
+    const trx = stubTrx()
+    await acquireAttendanceImportReservationLocksV1(trx, [batch], legacyKey)
+    const advisoryCalls = trx.calls.filter((call) =>
+      call.sqlText.includes('pg_advisory'),
+    )
+    expect(advisoryCalls[0]).toEqual({
+      sqlText:
+        'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+      params: [ORG, 'retry-1'],
+    })
+    const acquired = advisoryCalls
+      .slice(1)
+      .map((call) => BigInt(call.params[0] as string))
+    expect(acquired).toHaveLength(2)
+    expect(acquired[0] < acquired[1]).toBe(true)
+
+    __setAttendanceW4DigestSeamForTests(() => Buffer.alloc(32, 0x11))
+    const collided = stubTrx()
+    await acquireAttendanceImportReservationLocksV1(collided, [batch], legacyKey)
+    expect(
+      collided.calls.filter((call) => call.sqlText.includes('pg_advisory')),
+    ).toHaveLength(2)
+    expectCode(
+      () =>
+        parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+          orgId: ORG,
+          idempotencyKey: ' ',
+        }),
+      'W4C3A_LEGACY_IDEMPOTENCY_KEY_INVALID',
+    )
+  })
+
+  it('derives and acquires exactly one class-11 operational bulk sentinel', async () => {
+    const org = parseCanonicalAttendanceRolloutOrgKeyV1(ORG)
+    const key = buildAttendanceOperationalBulkTargetAdvisoryKey(org)
+    expect(key >= CLASS_11_MIN && key < 0n).toBe(true)
+    const trx = stubTrx()
+    await acquireAttendanceOperationalBulkTargetLockV1(trx, org)
+    expect(trx.calls.filter((call) => call.sqlText.includes('pg_advisory'))).toEqual([
+      {
+        sqlText: 'SELECT pg_advisory_xact_lock($1::bigint)',
+        params: [key.toString()],
+      },
+    ])
   })
 
   it('rollout helper is the sole shared/exclusive selector and enum-rejects other modes', async () => {
