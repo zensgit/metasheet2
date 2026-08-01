@@ -37,7 +37,7 @@ All references below are against the pinned baseline.
 | The live group editor stages are `basics | people | schedule | policies`; there is no group-owned `calendar` stage | `apps/web/src/views/AttendanceView.vue:4931-4975` |
 | `editAttendanceGroup(...)` resets the active stage to `basics`, assigns the group id, and thereby enables the member/manager watcher | `apps/web/src/views/AttendanceView.vue:27116-27136,28981-28986` |
 | Current cross-module controls have stable action keys or data hooks for Rule Sets, Holidays, Shifts, Assignments, and Advanced scheduling | `apps/web/src/views/AttendanceView.vue:5418-5435,5534-5565,13886-13915,13926-13960` |
-| The attendance admin shell is intentionally desktop-only on mobile or touch runtimes | `apps/web/src/views/attendance/AttendanceExperienceView.vue:87-88,120-145` |
+| The attendance admin shell blocks editing only when the viewport is narrow and the runtime also has mobile/touch signals; wide coarse-pointer runtimes are not equivalent to the blocked posture | `apps/web/src/views/attendance/AttendanceExperienceView.vue:87-88,138-145,232-245` |
 | In-app redirect validation rejects protocol-relative URLs but is not exported for this feature | `apps/web/src/utils/authRedirect.ts:1-16` |
 
 ## 3. Non-negotiable contracts
@@ -106,6 +106,19 @@ SQL; it must never use `DEFAULT_ORG_ID`. Otherwise the backend query remains
 `group id + authenticated org id`; inaccessible and missing groups expose the
 same 404-shaped response.
 
+Probe success is necessary but is not a bearer token for later requests. Every
+group-ID endpoint reachable from the route host must independently use the same
+authenticated-org rule before its own scoped SQL. R0 must generate and pin an
+endpoint inventory that includes at least the group row, members, managers, and
+each schedule/calendar/rules/preview/effectiveness request mounted by R1 or R2.
+The current members and managers routes, including
+`withAttendanceGroupMemberAccess`, are therefore in the hardening scope; they
+must not retain `getOrgId(req)` selection after the probe is fixed. A global
+attendance-admin or platform-admin capability may satisfy the role check but
+must never permit a caller-selected organization. Body/query/header mismatches,
+missing principal org, and cross-org IDs fail before the endpoint's first scoped
+query with the same unavailable/no-disclosure posture.
+
 The v1 audience is attendance administrators only. The browser route requires
 the `attendanceAdmin` feature while remaining inside the attendance shell; the
 API keeps `attendance:admin`. Group-manager admission is out of scope until a
@@ -119,6 +132,11 @@ On a group route:
   from a competing query or hash default.
 - Admin hash restore, scroll-spy hash writes, remembered-section fallback, and
   section keyboard navigation must not replace the route-owned group step.
+- Hash reads are inert as well as hash writes: a stale but otherwise valid
+  attendance-admin hash must be ignored while a group route is active. Gating
+  only `syncAdminSectionHash(...)` is insufficient because
+  `restoreAdminSectionFromHash(...)` and the observer's initial section selection
+  currently read the hash independently.
 - Refresh reconstructs the same group, step, and optional surface after the
   authorization probe.
 - Back and Forward create and traverse real router history entries.
@@ -130,11 +148,14 @@ Route hydration has a fixed order:
 1. Parse the route step, optional closed `surface`, and safe `returnTo` without
    loading group-scoped data.
 2. Complete the authenticated-org group probe.
-3. Seed the authorized group through a route-aware hydrator. It must not call
+3. Enter route-owned selection mode before the ordinary eager admin loader may
+   seed the first group. A delayed `loadAttendanceGroups()` response must not
+   replace the route group or reset the route step.
+4. Seed the authorized group through a route-aware hydrator. It must not call
    the current bare `editAttendanceGroup(...)` path and then leave its
    `basics` reset in authority.
-4. Apply the mapped group stage or admin surface from the route.
-5. Only after probe success may assigning the selected group trigger member,
+5. Apply the mapped group stage or admin surface from the route.
+6. Only after probe success may assigning the selected group trigger member,
    manager, schedule, calendar, rules, preview, or effectiveness loads.
 
 Refresh of `/schedule` must therefore settle on `schedule`, and refresh of
@@ -212,15 +233,19 @@ independent exact-head review with zero open P1/P2 before merge consideration.
 
 ### R0: authorization and route contract
 
-- Harden group-by-id lookup so client-controlled org values cannot select the
-  group scope.
+- Generate the route-reachable group-ID endpoint inventory, then harden the
+  group probe plus every inventoried endpoint so client-controlled org values
+  cannot select the group scope. Members, managers, and
+  `withAttendanceGroupMemberAccess` are explicit mandatory entries.
 - Add the three named routes and attendance-focus prefix handling without
   granting permissions.
 - Add pure parsers for step, step-scoped `surface`, and `returnTo`.
-- Tests: spoofed query/body/header org, cross-org group, invalid UUID, missing
-  group, authenticated principal with no org id, no `DEFAULT_ORG_ID` fallback,
-  route permission ordering, safe-prefix and near-prefix paths, unsafe return
-  targets, unknown step, and illegal step/surface pairs.
+- Tests: for every inventoried group-ID endpoint, spoofed query/body/header org,
+  cross-org group, authenticated principal with no org id, and no
+  `DEFAULT_ORG_ID` fallback; plus invalid UUID, missing group, route permission
+  ordering, safe-prefix and near-prefix paths, unsafe return targets, unknown
+  step, and illegal step/surface pairs. Role-admin positive legs and forged-org
+  negative legs must be separate so the role guard cannot mask org selection.
 
 R0 does not render or load group-scoped schedule data.
 
@@ -232,11 +257,16 @@ R0 does not render or load group-scoped schedule data.
   `returnTo` through `AttendanceExperienceView` to the existing admin host.
 - Add a route-aware group hydrator or an explicit route-stage parameter; the
   current bare `editAttendanceGroup(...)` reset path is not valid for deep links.
-- Disable competing hash/remembered-section authority only for group routes.
+- Suppress ordinary first-group auto-selection while route-owned hydration is
+  pending or ready, including a list request that started earlier and resolves
+  later. Disable competing hash reads, hash writes, and remembered-section
+  authority only for group routes.
 - Tests: direct load, refresh, Back, Forward, retry, no scoped fetch before
   probe success, no member/manager fetch before probe success, route step
   and `surface` survive group hydration and refresh/Back/Forward, `/schedule`
-  never settles on `basics`, and legacy `/attendance` compatibility.
+  never settles on `basics`, a delayed list response cannot replace the route
+  group or stage, a stale valid hash cannot replace route authority, and legacy
+  `/attendance` compatibility.
 
 ### R2: drawer entry points and evidence
 
@@ -258,7 +288,8 @@ R0 does not render or load group-scoped schedule data.
   admin actions are outside #4711 and must not be silently remapped.
 - Keep drawer quick-view behavior and no-write assertions.
 - Browser matrix: drawer -> route -> return, refresh restoration, Back/Forward,
-  unavailable group, cross-org spoof, desktop and mobile viewport.
+  unavailable group, cross-org spoof, desktop, narrow mobile/touch blocked
+  posture, and wide coarse-pointer non-blocked posture.
 - Capture desktop screenshots only after DOM assertions prove the authorized
   group name, current step, and breadcrumb are present. Mobile/touch evidence
   must instead prove the existing desktop-only recommendation, intact route and
@@ -269,14 +300,16 @@ R0 does not render or load group-scoped schedule data.
 
 The final gate must demonstrate that each guard is load-bearing:
 
-1. Reintroducing body/query/header org precedence makes the cross-org probe
-   test red.
+1. Reintroducing body/query/header org precedence in any inventoried group-ID
+   endpoint makes that endpoint's cross-org test red. Mutating only the initial
+   probe is insufficient.
 2. Starting a scoped fetch before the probe resolves makes the zero-request
    assertion red.
 3. Calling bare `editAttendanceGroup(...)`, or applying the route stage before
    group seeding, makes the refresh/hydration stage test red.
 4. Replacing `router.push` with section selection makes the history test red.
-5. Re-enabling hash sync on a group route makes the route-authority test red.
+5. Re-enabling hash sync or independently re-enabling hash read/restore on a
+   group route makes the stale-hash route-authority test red.
 6. Accepting `//host`, a scheme, or recursive `returnTo` makes the redirect
    matrix red.
 7. Broadening the attendance-focus predicate to `/attendance/admin/groups` as
@@ -285,6 +318,8 @@ The final gate must demonstrate that each guard is load-bearing:
    no-SQL fail-closed test red.
 9. Removing the mobile block or starting the probe on mobile makes the mobile
    zero-request test red.
+10. Allowing an eager or delayed group-list response to call the ordinary
+    first-group seeder makes the route-group/stage race test red.
 
 ## 7. Completion definition
 
