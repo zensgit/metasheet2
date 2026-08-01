@@ -146,6 +146,29 @@ async function createScratch(adminPool: Pool, name: string): Promise<{ pool: Poo
   return { pool, kyselyPool, db: new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kyselyPool }) }) }
 }
 
+async function destroyScratch(
+  adminPool: Pool,
+  name: string,
+  scratch: { pool: Pool; db: Kysely<unknown> },
+): Promise<void> {
+  await scratch.db.destroy()
+  await scratch.pool.end()
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const active = await adminPool.query(
+      'SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = $1',
+      [name],
+    )
+    if (active.rows[0].count === 0) {
+      await adminPool.query(`DROP DATABASE IF EXISTS ${name}`)
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+
+  throw new Error(`Scratch database ${name} still has active connections after pool shutdown`)
+}
+
 async function seedNoTargetJob(pool: Pool, orgId: string): Promise<{ jobId: string; batchId: string }> {
   const jobId = newId()
   const batchId = newId()
@@ -261,9 +284,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
 
   afterAll(async () => {
     for (const current of [pool, kyselyPool, adminPool]) current?.on('error', () => undefined)
-    await db?.destroy()
-    await pool?.end()
-    await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
+    await destroyScratch(adminPool, scratchName, { pool, db })
     await adminPool?.end()
   })
 
@@ -406,9 +427,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
         replay.pool.query('DELETE FROM attendance_import_jobs WHERE id = $1', [seeded.jobId]),
       ).rejects.toThrow(/W4C3A_V1_JOB_DELETE_DENIED/)
     } finally {
-      await replay.db.destroy()
-      await replay.pool.end()
-      await adminPool.query(`DROP DATABASE IF EXISTS ${replayName} WITH (FORCE)`).catch(() => undefined)
+      await destroyScratch(adminPool, replayName, replay)
     }
   })
 
@@ -812,9 +831,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
       expect(Number(historicRecord.rows[0].revision)).toBe(1)
       expect(Number(historicGroup.rows[0].revision)).toBe(1)
     } finally {
-      await upgrade.db.destroy()
-      await upgrade.pool.end()
-      await adminPool.query(`DROP DATABASE IF EXISTS ${upgradeName} WITH (FORCE)`).catch(() => undefined)
+      await destroyScratch(adminPool, upgradeName, upgrade)
     }
 
     const org = `revision-${run}`
@@ -1043,9 +1060,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
       const absent = await blocked.pool.query(`SELECT count(*)::int AS count FROM information_schema.tables WHERE table_name='attendance_import_legacy_execution_plans'`)
       expect(absent.rows[0].count).toBe(0)
     } finally {
-      await blocked.db.destroy()
-      await blocked.pool.end()
-      await adminPool.query(`DROP DATABASE IF EXISTS ${blockedName} WITH (FORCE)`).catch(() => undefined)
+      await destroyScratch(adminPool, blockedName, blocked)
     }
 
     await expect(down(db)).rejects.toThrow(/DOWN_REFUSED/)
@@ -1069,9 +1084,7 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
       ]])
       expect(history.rows[0].count).toBe(0)
     } finally {
-      await empty.db.destroy()
-      await empty.pool.end()
-      await adminPool.query(`DROP DATABASE IF EXISTS ${emptyName} WITH (FORCE)`).catch(() => undefined)
+      await destroyScratch(adminPool, emptyName, empty)
     }
   })
 })
