@@ -194,6 +194,16 @@ export type ReserveAttendanceLegacyImportPlanJobResultV1 =
       readonly kind: 'existing'
       readonly jobId: string
       readonly status: string
+      readonly jobSnapshot: {
+        readonly status: string
+        readonly progress: number
+        readonly total: number
+        readonly error: string | null
+        readonly startedAt: Date | string | null
+        readonly finishedAt: Date | string | null
+        readonly createdAt: Date | string | null
+        readonly updatedAt: Date | string | null
+      }
     }
 
 function requireLowerHex64(value: unknown, code: string): string {
@@ -1450,7 +1460,9 @@ export async function reserveAttendanceLegacyImportPlanJobV1(
   }
 
   const existingJobs = await trx.query(
-    `SELECT id::text AS id, status, created_by, idempotency_key,
+    `SELECT id::text AS id, status, progress, total, error,
+            started_at, finished_at, created_at, updated_at,
+            created_by, idempotency_key,
             w4_actor_id, w4_actor_posture, w4_token_subject_user_id,
             w4_source_ref, w4_command_fingerprint, w4_accepted_write_posture,
             w4_item_count, w4_item_sequence_fingerprint, w4_item_set_fingerprint,
@@ -1488,6 +1500,18 @@ export async function reserveAttendanceLegacyImportPlanJobV1(
       kind: 'existing',
       jobId: String(row.id),
       status: String(row.status),
+      jobSnapshot: {
+        status: String(row.status),
+        progress: Number(row.progress ?? 0),
+        total: Number(row.total ?? 0),
+        error: row.error === null || row.error === undefined
+          ? null
+          : String(row.error),
+        startedAt: row.started_at as Date | string | null,
+        finishedAt: row.finished_at as Date | string | null,
+        createdAt: row.created_at as Date | string | null,
+        updatedAt: row.updated_at as Date | string | null,
+      },
     }
   }
 

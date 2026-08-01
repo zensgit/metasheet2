@@ -36,23 +36,27 @@
  *     rollout -> operation-identity-advisory -> operation-row order completes
  *     without deadlock or bounded-retry exhaustion.
  *
- * The worker driving code in legs 6-7 is a PROTOCOL HARNESS (W4C-0 has zero
- * caller cutover; the production worker/transition writers are later slices) —
- * the two-connection lock/atomicity/visibility assertions are real. Legs 8-9
- * no longer drive planless P07 enqueue; they prove the retirement seam and the
+ * Leg 6 invokes the production null-version atomic commit helper. Leg 7 remains
+ * a protocol harness for the source/transition ordering itself. All
+ * two-connection lock/atomicity/visibility assertions are real. Legs 8-9 no
+ * longer drive planless P07 enqueue; they prove the retirement seam and the
  * suspension zero-job path only.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { Pool, type PoolClient } from 'pg'
 import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceResultOperationLocks,
+  buildAttendanceCalculationRolloutAdvisoryKey,
+  buildAttendanceLegacyIdempotencyAdvisoryKey,
   buildAttendanceResultOperationAdvisoryKey,
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
+  parseCanonicalAttendanceLegacyIdempotencyKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
   __setAttendanceW4MonotonicClockForTests,
@@ -74,6 +78,39 @@ import { normalizeAttendanceSourceOperationEnvelopeV1 } from '../../src/attendan
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
+const require = createRequire(import.meta.url)
+const syncCompatibility = (
+  require('../../../../plugins/plugin-attendance/index.cjs') as {
+    __attendanceW4C3aSyncCompatibilityForTests: {
+      runAttendanceLegacyNullVersionCommitAtomically<T>(input: {
+        db: {
+          transaction(
+            run: (trx: {
+              query(text: string, values?: unknown[]): Promise<unknown[]>
+            }) => Promise<T>,
+          ): Promise<T>
+        }
+        jobId: string
+        orgId: string
+        lockIdentity: string
+        lockWitness: {
+          rolloutKey: string
+          legacyIdempotencyKey: string
+          helperWaitMs: number
+          transactionLockTimeoutMs: number
+        }
+        commitLegacy(
+          trx: { query(text: string, values?: unknown[]): Promise<unknown[]> },
+        ): Promise<T>
+        buildTerminal(result: T): {
+          progress: number
+          total: number
+          payload: Record<string, unknown>
+        }
+      }): Promise<T>
+    }
+  }
+).__attendanceW4C3aSyncCompatibilityForTests
 
 // File-namespaced fixtures (shared DB, append-only registries): per-run random
 // org/user/operation IDs so nothing collides across runs or with other files.
@@ -109,6 +146,43 @@ function trx(client: PoolClient): AttendanceW4TransactionClientV1 {
   return {
     query: (sqlText, params) =>
       client.query(sqlText, params as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>,
+  }
+}
+
+function pluginDb(pool: Pool) {
+  return {
+    async transaction<T>(
+      run: (trx: { query(text: string, values?: unknown[]): Promise<unknown[]> }) => Promise<T>,
+    ): Promise<T> {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const value = await run({
+          query: async (text, values) => (await client.query(text, values as unknown[])).rows,
+        })
+        await client.query('COMMIT')
+        return value
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    },
+  }
+}
+
+function legacyWorkerLockWitness(orgId: string, idempotencyKey: string) {
+  const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+  const legacyKey = parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+    orgId,
+    idempotencyKey,
+  })
+  return {
+    rolloutKey: buildAttendanceCalculationRolloutAdvisoryKey(orgKey).toString(),
+    legacyIdempotencyKey: buildAttendanceLegacyIdempotencyAdvisoryKey(legacyKey).toString(),
+    helperWaitMs: 5000,
+    transactionLockTimeoutMs: 5000,
   }
 }
 
@@ -630,13 +704,16 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
   // Leg 6 — null-version legacy worker: terminal-without-effect is unobservable.
   // -------------------------------------------------------------------------
   it('null-version legacy worker: source effect + terminal status commit atomically under the rollout SHARED lock; a transition waits on exclusive and never observes terminal-without-effect; failure leaves the job nonterminal with zero effect', async () => {
-    const setupJob = async (org: string): Promise<string> => {
+    const setupJob = async (org: string): Promise<{ id: string; idempotencyKey: string }> => {
+      const idempotencyKey = `w4c0-e3-${crypto.randomUUID()}`
       const res = await pool.query(
-        `INSERT INTO attendance_import_jobs (org_id, batch_id, created_by, status, progress, total, payload)
-         VALUES ($1, $2::uuid, $3, 'processing', 0, 1, '{"legacy":true}'::jsonb) RETURNING id::text AS id`,
-        [org, crypto.randomUUID(), ACTOR],
+        `INSERT INTO attendance_import_jobs
+           (org_id, batch_id, created_by, idempotency_key, status, progress, total, payload)
+         VALUES ($1, $2::uuid, $3, $4, 'running', 0, 1, '{"legacy":true}'::jsonb)
+         RETURNING id::text AS id`,
+        [org, crypto.randomUUID(), ACTOR, idempotencyKey],
       )
-      return (res.rows[0] as { id: string }).id
+      return { id: (res.rows[0] as { id: string }).id, idempotencyKey }
     }
     const effectCount = async (org: string): Promise<number> => {
       const res = await pool.query(`SELECT count(*)::int AS n FROM attendance_records WHERE org_id = $1`, [org])
@@ -648,28 +725,52 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
     }
 
     // --- Commit order: worker commits; the waiting transition then sees BOTH. ---
-    const jobId = await setupJob(ORG_WORKER)
-    const worker = await pool.connect()
+    const job = await setupJob(ORG_WORKER)
     const transition = await pool.connect()
+    let releaseWorker!: () => void
+    const holdWorker = new Promise<void>((resolve) => {
+      releaseWorker = resolve
+    })
+    let sourceWritten!: () => void
+    const sourceWriteReached = new Promise<void>((resolve) => {
+      sourceWritten = resolve
+    })
     try {
-      await worker.query('BEGIN')
       const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(ORG_WORKER)
-      await acquireAttendanceCalculationRolloutLock(trx(worker), orgKey, 'shared')
-      // Null-version worker protocol: source effect + terminal status in ONE
-      // transaction under the shared lock.
-      await worker.query(
-        `INSERT INTO attendance_records (user_id, work_date, org_id, status, work_minutes, late_minutes, early_leave_minutes)
-         VALUES ($1, '2026-03-06', $2, 'normal', 480, 0, 0)`,
-        [ACTOR, ORG_WORKER],
-      )
-      await worker.query(`UPDATE attendance_import_jobs SET status = 'completed', progress = 1 WHERE id = $1::uuid`, [
-        jobId,
+      const workerRun = syncCompatibility.runAttendanceLegacyNullVersionCommitAtomically({
+        db: pluginDb(pool),
+        jobId: job.id,
+        orgId: ORG_WORKER,
+        lockIdentity: job.idempotencyKey,
+        lockWitness: legacyWorkerLockWitness(ORG_WORKER, job.idempotencyKey),
+        commitLegacy: async (client) => {
+          await client.query(
+            `INSERT INTO attendance_records
+               (user_id, work_date, org_id, status, work_minutes, late_minutes, early_leave_minutes)
+             VALUES ($1, '2026-03-06', $2, 'normal', 480, 0, 0)`,
+            [ACTOR, ORG_WORKER],
+          )
+          sourceWritten()
+          await holdWorker
+          return { imported: 1, rowCount: 1 }
+        },
+        buildTerminal: () => ({
+          progress: 1,
+          total: 1,
+          payload: { __jobType: 'commit', summary: { processedRows: 1, failedRows: 0 } },
+        }),
+      })
+      await Promise.race([
+        sourceWriteReached,
+        workerRun.then(() => {
+          throw new Error('legacy worker completed before reaching the source-write barrier')
+        }),
       ])
 
-      // Third-connection mid-flight probe: while the worker transaction is open,
+      // Third-connection mid-flight probe: while the production helper transaction is open,
       // NO snapshot anywhere can see terminal-without-effect (both writes are
       // uncommitted together).
-      expect(await jobStatus(jobId)).toBe('processing')
+      expect(await jobStatus(job.id)).toBe('running')
       expect(await effectCount(ORG_WORKER)).toBe(0)
 
       // The transition (exclusive class-`00`) REALLY waits for the worker.
@@ -678,16 +779,17 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
       const transitionAcquire = acquireAttendanceCalculationRolloutLock(trx(transition), orgKey, 'exclusive')
       await waitUntilAdvisoryBlocked(transitionPid)
       // Still nonterminal from every committed snapshot while the transition waits.
-      expect(await jobStatus(jobId)).toBe('processing')
+      expect(await jobStatus(job.id)).toBe('running')
 
-      await worker.query('COMMIT')
+      releaseWorker()
+      await workerRun
       await transitionAcquire
       // Under the exclusive lock, after the worker's atomic commit: terminal AND
       // effect — never terminal-without-effect.
       const seen = await transition.query(
         `SELECT (SELECT status FROM attendance_import_jobs WHERE id = $1::uuid) AS status,
                 (SELECT count(*)::int FROM attendance_records WHERE org_id = $2) AS effects`,
-        [jobId, ORG_WORKER],
+        [job.id, ORG_WORKER],
       )
       expect(seen.rows[0]).toEqual({ status: 'completed', effects: 1 })
       // Re-evaluate then transition (legal initial INSERT: shadow from legacy).
@@ -699,28 +801,35 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
       )
       await transition.query('COMMIT')
     } finally {
-      worker.release()
+      releaseWorker()
       transition.release()
     }
 
     // --- Failure order: rollback after source DML leaves the job nonterminal
     //     with ZERO effect (no half state either way). ---
-    const jobIdRb = await setupJob(ORG_WORKER_RB)
-    await withClient(async (client) => {
-      await client.query('BEGIN')
-      const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(ORG_WORKER_RB)
-      await acquireAttendanceCalculationRolloutLock(trx(client), orgKey, 'shared')
-      await client.query(
-        `INSERT INTO attendance_records (user_id, work_date, org_id, status, work_minutes, late_minutes, early_leave_minutes)
-         VALUES ($1, '2026-03-06', $2, 'normal', 480, 0, 0)`,
-        [ACTOR, ORG_WORKER_RB],
-      )
-      await client.query(`UPDATE attendance_import_jobs SET status = 'completed', progress = 1 WHERE id = $1::uuid`, [
-        jobIdRb,
-      ])
-      await client.query('ROLLBACK')
-    })
-    expect(await jobStatus(jobIdRb)).toBe('processing')
+    const rollbackJob = await setupJob(ORG_WORKER_RB)
+    await expect(
+      syncCompatibility.runAttendanceLegacyNullVersionCommitAtomically({
+        db: pluginDb(pool),
+        jobId: rollbackJob.id,
+        orgId: ORG_WORKER_RB,
+        lockIdentity: rollbackJob.idempotencyKey,
+        lockWitness: legacyWorkerLockWitness(ORG_WORKER_RB, rollbackJob.idempotencyKey),
+        commitLegacy: async (client) => {
+          await client.query(
+            `INSERT INTO attendance_records
+               (user_id, work_date, org_id, status, work_minutes, late_minutes, early_leave_minutes)
+             VALUES ($1, '2026-03-06', $2, 'normal', 480, 0, 0)`,
+            [ACTOR, ORG_WORKER_RB],
+          )
+          return { imported: 1, rowCount: 1 }
+        },
+        buildTerminal: () => {
+          throw new Error('forced-terminal-failure')
+        },
+      }),
+    ).rejects.toThrow('forced-terminal-failure')
+    expect(await jobStatus(rollbackJob.id)).toBe('running')
     expect(await effectCount(ORG_WORKER_RB)).toBe(0)
   }, 30000)
 

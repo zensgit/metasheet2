@@ -73,6 +73,32 @@ const attendancePlugin = require(PLUGIN) as {
         attempt: number,
       ) => Promise<T>,
     ): Promise<T>
+    runAttendanceLegacyNullVersionCommitAtomically<T>(input: {
+      db: {
+        transaction(
+          run: (trx: { query(text: string, values?: unknown[]): Promise<unknown> }) => Promise<T>,
+        ): Promise<T>
+      }
+      jobId: string
+      orgId: string
+      lockIdentity: string
+      lockWitness: unknown
+      commitLegacy(
+        trx: { query(text: string, values?: unknown[]): Promise<unknown> },
+      ): Promise<T>
+      buildTerminal(result: T): {
+        progress: number
+        total: number
+        payload: Record<string, unknown>
+      }
+    }): Promise<T>
+    drainAttendanceImportStartupRecoveryPages(input: {
+      db: { query(text: string, values?: unknown[]): Promise<unknown> }
+      cutoff: string
+      enqueueJob(jobId: string): Promise<void>
+      drainCleanup(jobId: string): Promise<void>
+      pageSize?: number
+    }): Promise<{ jobs: number; cleanups: number }>
   }
 }
 const syncCompatibility =
@@ -138,7 +164,129 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(source).toMatch(
       /const enqueueImportJob = async \(jobId\)[\s\S]{0,800}processAsyncImportCommitJob\(\{\s*jobId\s*\}\)/,
     )
-    expect(source).toMatch(/Re-enqueue queued\/running jobs on startup[\s\S]{0,600}enqueueImportJob\(row\.id\)/)
+    expect(source).toMatch(
+      /Re-enqueue queued\/running jobs on startup[\s\S]{0,600}drainAttendanceImportStartupRecoveryPages\(\{[\s\S]{0,300}enqueueJob: enqueueImportJob/,
+    )
+  })
+
+  it('routes the null-version production worker through the atomic helper', () => {
+    const processJob = source.slice(
+      source.indexOf('const processAsyncImportCommitJob'),
+      source.indexOf('const commitAttendanceImportPayload'),
+    )
+    const legacyStart = processJob.indexOf('// Legacy null-version path only')
+    const legacyPath = processJob.slice(legacyStart)
+    expect(legacyStart).toBeGreaterThan(-1)
+    expect(legacyPath).toMatch(/runAttendanceLegacyNullVersionCommitAtomically\(\{/)
+    expect(legacyPath).toMatch(
+      /commitLegacy:\s*\(trx\)\s*=>\s*commitAttendanceImportPayload\(\{[\s\S]*transactionClient:\s*trx/,
+    )
+    const atomicCommitPath = legacyPath.slice(
+      legacyPath.indexOf('await runAttendanceLegacyNullVersionCommitAtomically'),
+    )
+    expect(atomicCommitPath).not.toMatch(/status:\s*'failed'/)
+  })
+
+  it('accepts the canonical default org in the null-version atomic helper', async () => {
+    const statements: Array<{ text: string; values: unknown[] }> = []
+    const result = await syncCompatibility.runAttendanceLegacyNullVersionCommitAtomically({
+      db: {
+        transaction: async (run) => run({
+          query: async (text, values = []) => {
+            statements.push({ text, values })
+            return text.includes('UPDATE attendance_import_jobs')
+              ? [{ id: '00000000-0000-4000-8000-000000000001' }]
+              : []
+          },
+        }),
+      },
+      jobId: '00000000-0000-4000-8000-000000000001',
+      orgId: 'default',
+      lockIdentity: 'legacy-default-org',
+      lockWitness: {
+        rolloutKey: '1',
+        legacyIdempotencyKey: '2',
+        helperWaitMs: 5000,
+        transactionLockTimeoutMs: 5000,
+      },
+      commitLegacy: async () => ({ imported: 1 }),
+      buildTerminal: () => ({
+        progress: 1,
+        total: 1,
+        payload: { __jobType: 'commit' },
+      }),
+    })
+
+    expect(result).toEqual({ imported: 1 })
+    const terminal = statements.find(({ text }) => text.includes('UPDATE attendance_import_jobs'))
+    expect(terminal?.values.slice(0, 2)).toEqual([
+      '00000000-0000-4000-8000-000000000001',
+      'default',
+    ])
+  })
+
+  it('drains every startup recovery row beyond the 50-row boundary', async () => {
+    const makeUuid = (index: number) =>
+      `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`
+    const jobs = Array.from({ length: 51 }, (_, index) => ({
+      id: makeUuid(index + 1),
+      created_at: new Date(Date.UTC(2026, 6, 31, 0, 0, index)).toISOString(),
+    }))
+    const cleanups = Array.from({ length: 51 }, (_, index) => ({
+      job_id: makeUuid(index + 101),
+      created_at: new Date(Date.UTC(2026, 6, 31, 1, 0, index)).toISOString(),
+    }))
+    const queryParams: unknown[][] = []
+    const page = (
+      rows: Array<{ created_at: string; id?: string; job_id?: string }>,
+      params: unknown[],
+      idKey: 'id' | 'job_id',
+    ) => {
+      const cursorAt = params[1] == null ? null : String(params[1])
+      const cursorId = params[2] == null ? null : String(params[2])
+      const limit = Number(params[3])
+      return rows
+        .filter((row) =>
+          cursorAt === null ||
+          row.created_at > cursorAt ||
+          (row.created_at === cursorAt && String(row[idKey]) > String(cursorId)),
+        )
+        .slice(0, limit)
+    }
+    const enqueued: string[] = []
+    const drained: string[] = []
+
+    const result = await syncCompatibility.drainAttendanceImportStartupRecoveryPages({
+      db: {
+        query: async (text, values = []) => {
+          queryParams.push(values)
+          return text.includes('attendance_import_upload_cleanup_commands')
+            ? page(cleanups, values, 'job_id')
+            : page(jobs, values, 'id')
+        },
+      },
+      cutoff: '2026-08-01T00:00:00.000Z',
+      enqueueJob: async (jobId) => {
+        enqueued.push(jobId)
+      },
+      drainCleanup: async (jobId) => {
+        drained.push(jobId)
+      },
+      pageSize: 50,
+    })
+
+    expect(result).toEqual({ jobs: 51, cleanups: 51 })
+    expect(enqueued).toEqual(jobs.map((row) => row.id))
+    expect(drained).toEqual(cleanups.map((row) => row.job_id))
+    expect(queryParams).toHaveLength(4)
+    expect(queryParams[1].slice(1, 3)).toEqual([
+      jobs[49].created_at,
+      jobs[49].id,
+    ])
+    expect(queryParams[3].slice(1, 3)).toEqual([
+      cleanups[49].created_at,
+      cleanups[49].job_id,
+    ])
   })
 
   it('cuts only commit-async over to the V1 reservation host', () => {
@@ -181,6 +329,8 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(prepare).toBeGreaterThan(portCheck)
     expect(reserve).toBeGreaterThan(prepare)
     expect(enqueue).toBeGreaterThan(reserve)
+    expect(asyncRoute).toContain('mapReservedImportJobRow(jobRow, reservation)')
+    expect(source).toContain('reservation.jobSnapshot')
     expect(asyncRoute).not.toMatch(/INSERT INTO attendance_import_jobs/)
     expect(asyncRoute).not.toContain('sanitizeImportJobPayload')
   })
@@ -853,7 +1003,10 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       source.indexOf('const integrationCreateSchema'),
     )
     expect(startupRecovery).toMatch(
-      /attendance_import_upload_cleanup_commands AS cleanup[\s\S]*failed_retryable[\s\S]*drainImportUploadCleanupCommand\(row\.job_id\)/,
+      /drainAttendanceImportStartupRecoveryPages\(\{[\s\S]*drainCleanup: drainImportUploadCleanupCommand/,
+    )
+    expect(source).toMatch(
+      /attendance_import_upload_cleanup_commands AS cleanup[\s\S]*failed_retryable[\s\S]*await drainCleanup\(row\.job_id\)/,
     )
     expect(source).toMatch(/reason\.code === 'ENOENT'/)
     expect(source).toMatch(/'failed_retryable', 'UPLOAD_DELETE_FAILED'/)

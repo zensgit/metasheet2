@@ -561,7 +561,9 @@ describe('blueprint mutations — real production surfaces', () => {
       /importQueue\.process\([\s\S]*processAsyncImportCommitJob/,
     )
     // Startup requeue
-    expect(source).toMatch(/enqueueImportJob\(row\.id\)/)
+    expect(source).toMatch(
+      /drainAttendanceImportStartupRecoveryPages\(\{[\s\S]{0,300}enqueueJob: enqueueImportJob/,
+    )
     expect(source).toMatch(
       /const enqueueImportJob = async \(jobId\)[\s\S]*processAsyncImportCommitJob\(\{\s*jobId\s*\}\)/,
     )

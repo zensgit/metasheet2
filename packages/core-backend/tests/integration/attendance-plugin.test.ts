@@ -18261,6 +18261,10 @@ attendanceIntegrationDescribe(
         const runsAfterFirst = await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')
         expect(runsAfterFirst).toHaveLength(1)
         expect(runsAfterFirst[0]).toMatchObject({ triggered_by: 'scheduler', dry_run: false })
+        await pool.query(
+          'UPDATE attendance_leave_accrual_runs SET created_at = $1 WHERE id = $2',
+          [now, runsAfterFirst[0].id],
+        )
         expect(await annualSchedItemFor(pool, runsAfterFirst[0].id, uid)).toEqual({ status: 'granted' })
         const lotsAfterFirst = await annualSchedLotsForUser(pool, uid)
         expect(lotsAfterFirst).toHaveLength(1)

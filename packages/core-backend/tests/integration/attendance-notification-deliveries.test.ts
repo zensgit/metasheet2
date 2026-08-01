@@ -213,9 +213,9 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     const workerPool = new Pool({ connectionString: workerDbUrl })
     const runSuffix = Date.now().toString(36)
     const orgId = `c5-worker-${runSuffix}`
-    const fixedNow = new Date('2026-08-01T00:00:00.000Z')
-    const liveLease = new Date('2026-08-01T00:10:00.000Z').toISOString()
-    const pastLease = new Date('2026-07-31T23:00:00.000Z').toISOString()
+    const fixedNow = new Date('2099-08-01T00:00:00.000Z')
+    const liveLease = new Date('2099-08-01T00:10:00.000Z').toISOString()
+    const pastLease = new Date('2099-07-31T23:00:00.000Z').toISOString()
     const sourceId = randomUUID()
     const insertDelivery = async (label: string, overrides: Record<string, unknown> = {}) => {
       const status = String(overrides.status ?? 'pending')
@@ -384,8 +384,8 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     const workerPool = new Pool({ connectionString: workerDbUrl })
     const orgId = `c5-worker-lease-${Date.now().toString(36)}`
     const sourceId = randomUUID()
-    const claimNow = new Date('2026-08-01T00:00:00.000Z')
-    const reclaimNow = new Date('2026-08-01T00:00:10.000Z')
+    const claimNow = new Date('2099-08-01T00:00:00.000Z')
+    const reclaimNow = new Date('2099-08-01T00:00:10.000Z')
     const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
       const r = await workerPool.query(sqlText, params as unknown[])
       return { rows: r.rows, rowCount: r.rowCount }
@@ -457,9 +457,9 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     const runSuffix = Date.now().toString(36)
     const orgId = `c5-outcome-unknown-${runSuffix}`
     const sourceId = randomUUID()
-    const firstNow = new Date('2026-08-01T00:00:00.000Z')
+    const firstNow = new Date('2099-08-01T00:00:00.000Z')
     // beyond computeDeliveryBackoffMs(1)=60s, so the retrying row is due again on batch 2
-    const secondNow = new Date('2026-08-01T00:05:00.000Z')
+    const secondNow = new Date('2099-08-01T00:05:00.000Z')
     let now = firstNow
     const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
       const r = await workerPool.query(sqlText, params as unknown[])
