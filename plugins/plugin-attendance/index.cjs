@@ -2992,7 +2992,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
             ar.meta, u.name AS user_name, u.username AS username,
             u.employee_no AS employee_no, u.department AS department,
             u.position AS position, u.hire_date AS hire_date
-     FROM attendance_records ar
+     FROM attendance_current_records ar
      LEFT JOIN users u ON u.id = ar.user_id
      WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
      ORDER BY ar.work_date DESC
@@ -12968,7 +12968,7 @@ async function loadAttendanceSummary(db, orgId, userId, from, to) {
        COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'absent' THEN 1 ELSE 0 END), 0)::int AS absent_days,
        COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'adjusted' THEN 1 ELSE 0 END), 0)::int AS adjusted_days,
        COALESCE(SUM(CASE WHEN NOT ${countedDaySql} THEN 1 ELSE 0 END), 0)::int AS off_days
-     FROM attendance_records
+     FROM attendance_current_records
      WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4`,
     [userId, orgId, from, to]
   )
@@ -45700,7 +45700,7 @@ module.exports = {
                     ar.meta, u.name AS user_name, u.username AS username,
                     u.employee_no AS employee_no, u.department AS department,
                     u.position AS position, u.hire_date AS hire_date
-             FROM attendance_records ar
+             FROM attendance_current_records ar
              LEFT JOIN users u ON u.id = ar.user_id
              WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
              ORDER BY ar.work_date DESC

@@ -6,6 +6,7 @@ import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import { Pool } from 'pg'
 import { fetch as undiciFetch } from 'undici'
 import type { MetaSheetServer } from '../../src/index'
@@ -16,6 +17,27 @@ const fixturePrefix = `w4c3a-p09p10-p24-${randomUUID().slice(0, 8)}`
 const workDate = '2026-07-20'
 const dingTalkCorpId = `${fixturePrefix}-corp`
 const setupFetch = globalThis.fetch
+const require = createRequire(import.meta.url)
+
+type AttendanceReportSyncHelpers = {
+  syncAttendanceReportRecords(
+    context: Record<string, unknown>,
+    db: { query(sql: string, params?: unknown[]): Promise<unknown[]> },
+    orgId: string,
+    logger: { warn(): void },
+    params: { from: string; to: string; userId: string },
+  ): Promise<{ synced: number; created: number }>
+}
+
+function getAttendanceReportSyncHelpers(): AttendanceReportSyncHelpers {
+  const plugin = require('../../../../plugins/plugin-attendance/index.cjs') as {
+    __attendanceReportFieldCatalogForTests?: AttendanceReportSyncHelpers
+  }
+  if (!plugin.__attendanceReportFieldCatalogForTests) {
+    throw new Error('attendance report sync test seam unavailable')
+  }
+  return plugin.__attendanceReportFieldCatalogForTests
+}
 
 type RouteResponse = { status: number; raw: string; body: Record<string, unknown> | null }
 type BusinessCounts = {
@@ -735,7 +757,7 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     }])
   })
 
-  it('W4C-3a: ordinary record, reminder, and anomaly readers hide retired rows', async () => {
+  it('W4C-3a: ordinary record, summary, report-sync, reminder, anomaly, and export readers hide retired rows', async () => {
     const fixture = await seedActorAndRollout('legacy')
     const activeRecordId = randomUUID()
     const retiredRecordId = randomUUID()
@@ -776,6 +798,66 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       expect(data?.items?.map((item) => item.id)).toEqual([activeRecordId])
       expect(data?.total).toBe(1)
     }
+
+    const summary = await requestHttp(`${baseUrl}/api/attendance/summary?${query}`, {
+      headers: { Authorization: `Bearer ${fixture.token}` },
+    })
+    expect(summary.status, summary.raw).toBe(200)
+    expect(summary.body?.data).toMatchObject({
+      total_days: 1,
+      total_minutes: 480,
+      partial_days: 1,
+    })
+
+    const exported = await requestHttp(`${baseUrl}/api/attendance/export?${query}&format=json`, {
+      headers: { Authorization: `Bearer ${fixture.token}` },
+    })
+    expect(exported.status, exported.raw).toBe(200)
+    const exportData = exported.body?.data as {
+      items?: Array<{ work_date?: string }>
+      total?: number
+    } | undefined
+    expect(exportData?.items?.map((item) => item.work_date)).toEqual([activeWorkDate])
+    expect(exportData?.total).toBe(1)
+
+    const reportStore: Array<{ id: string; data: Record<string, unknown> }> = []
+    const reportRecords = {
+      queryRecords: async ({ filters }: { filters?: Record<string, unknown> }) => {
+        const rowKey = filters?.fld_row_key
+        return reportStore.filter((record) => record.data.fld_row_key === rowKey)
+      },
+      createRecord: async ({ data }: { data: Record<string, unknown> }) => {
+        const record = { id: `report-${reportStore.length + 1}`, data: { ...data } }
+        reportStore.push(record)
+        return record
+      },
+      patchRecord: async () => undefined,
+    }
+    const reportProvisioning = {
+      ensureObject: async () => ({ baseId: 'w4c3a-report-base', sheet: { id: 'w4c3a-report-sheet' } }),
+      resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
+        Object.fromEntries(fieldIds.map((fieldId) => [fieldId, `fld_${fieldId}`])),
+    }
+    const reportDb = {
+      query: async (sql: string, params?: unknown[]) =>
+        (await pool.query(sql, params as unknown[])).rows,
+    }
+    const reportSync = await getAttendanceReportSyncHelpers().syncAttendanceReportRecords(
+      {
+        api: {
+          database: reportDb,
+          multitable: { provisioning: reportProvisioning, records: reportRecords },
+        },
+      },
+      reportDb,
+      fixture.orgId,
+      { warn() {} },
+      { from: activeWorkDate, to: retiredWorkDate, userId: fixture.actorId },
+    )
+    expect(reportSync).toMatchObject({ synced: 1, created: 1 })
+    expect(reportStore.map((record) => record.data.fld_row_key)).toEqual([
+      `${fixture.orgId}:${fixture.actorId}:${activeWorkDate}`,
+    ])
 
     const candidates = await requestHttp(
       `${baseUrl}/api/attendance/manual-missed-punch-reminders/candidates?${query}`,

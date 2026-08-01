@@ -1162,7 +1162,7 @@ describe('attendance report field catalog multitable foundation', () => {
     ]
     const db = {
       query: async (sql: string) => {
-        if (/FROM attendance_records ar/.test(sql)) return attendanceRows
+        if (/FROM attendance_current_records ar/.test(sql)) return attendanceRows
         return [] // system_configs / leave_types / overtime_rules / approved → empty (tolerated)
       },
     }
@@ -1256,7 +1256,7 @@ describe('attendance report field catalog multitable foundation', () => {
     }
     const db = {
       query: async (sql: string, params?: unknown[]) => {
-        if (/FROM attendance_records ar/.test(sql)) return rowsByUser[String(params?.[0])] ?? []
+        if (/FROM attendance_current_records ar/.test(sql)) return rowsByUser[String(params?.[0])] ?? []
         return []
       },
     }
@@ -1417,7 +1417,7 @@ describe('attendance report field catalog multitable foundation', () => {
     ]
     const db = {
       query: async (sql: string) => {
-        if (/FROM attendance_records ar/.test(sql)) return attendanceRows
+        if (/FROM attendance_current_records ar/.test(sql)) return attendanceRows
         return []
       },
     }
@@ -1654,7 +1654,7 @@ describe('attendance report field catalog multitable foundation', () => {
           return [{ id: 'leave-annual', code: 'annual', name: '年假', is_active: true }]
         }
         if (/FROM attendance_overtime_rules/.test(sql)) return []
-        if (/FROM attendance_records/.test(sql) && /AS total_minutes/.test(sql)) {
+        if (/FROM attendance_current_records/.test(sql) && /AS total_minutes/.test(sql)) {
           return [{
             total_days: 2,
             total_minutes: 960,
@@ -1790,7 +1790,7 @@ describe('attendance report field catalog multitable foundation', () => {
     const db = {
       query: async (sql: string) => {
         if (/FROM attendance_leave_types/.test(sql) || /FROM attendance_overtime_rules/.test(sql)) return []
-        if (/FROM attendance_records/.test(sql) && /AS total_minutes/.test(sql)) {
+        if (/FROM attendance_current_records/.test(sql) && /AS total_minutes/.test(sql)) {
           return [{
             total_days: 1,
             total_minutes: 480,
