@@ -32656,13 +32656,9 @@ module.exports = {
       }
 
       const actorRows = await trx.query(
-        `SELECT (
-                  COALESCE(u.is_admin, FALSE)
-                  OR COALESCE(u.role, '') = 'admin'
-                  OR EXISTS (
-                    SELECT 1 FROM user_roles ur
-                     WHERE ur.user_id = u.id AND ur.role_id = 'admin'
-                  )
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
                 ) AS platform_admin
            FROM users u
           WHERE u.id = $1

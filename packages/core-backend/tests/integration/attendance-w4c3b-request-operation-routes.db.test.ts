@@ -590,6 +590,79 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     })
   })
 
+  it('accepts only the DB-backed platform-admin posture as the cross-org override', async () => {
+    const fixture = await seedOrg('shadow')
+
+    const impostorRequestId = await createRequest(fixture, '2049-08-14')
+    const impostorApproval = await loadApprovalCursor(impostorRequestId)
+    const impostorId = randomUUID()
+    await pool.query(
+      `INSERT INTO users
+         (id, email, username, name, password_hash, role, permissions, is_active, is_admin, activation_status)
+       VALUES ($1, $2, $1, 'W4C-3b marker-only admin', 'x', 'admin', '["attendance:approve"]'::jsonb,
+               TRUE, TRUE, 'activated')`,
+      [impostorId, `w4c3b-marker-admin-${impostorId}@example.test`],
+    )
+    await assignApprovalUser(impostorApproval, impostorId)
+    const impostorOperationId = randomUUID()
+    const impostorResponse = await requestJson(
+      `${baseUrl}/api/attendance/requests/${impostorRequestId}/reject`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${await mintToken(impostorId)}` },
+        body: {
+          operationId: impostorOperationId,
+          expectedApprovalVersion: impostorApproval.version,
+          expectedApprovalNode: impostorApproval.node,
+          comment: 'marker-only admin must not cross orgs',
+        },
+      },
+    )
+    expect(impostorResponse.status, impostorResponse.raw).toBe(403)
+    expect(impostorResponse.body?.error?.code).toBe('FORBIDDEN')
+    expect(await requestDecisionResidue(fixture.orgId, impostorRequestId, impostorOperationId)).toEqual({
+      operations: 0,
+      outbox: 0,
+      approval_records: 0,
+    })
+
+    const platformRequestId = await createRequest(fixture, '2049-08-15')
+    const platformApproval = await loadApprovalCursor(platformRequestId)
+    const platformAdminId = randomUUID()
+    await pool.query(
+      `INSERT INTO users
+         (id, email, username, name, password_hash, role, permissions, is_active, is_admin, activation_status)
+       VALUES ($1, $2, $1, 'W4C-3b platform admin', 'x', 'user', '[]'::jsonb,
+               TRUE, FALSE, 'activated')`,
+      [platformAdminId, `w4c3b-platform-admin-${platformAdminId}@example.test`],
+    )
+    await pool.query(
+      "INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')",
+      [platformAdminId],
+    )
+    const platformOperationId = randomUUID()
+    const platformResponse = await requestJson(
+      `${baseUrl}/api/attendance/requests/${platformRequestId}/reject`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${await mintToken(platformAdminId)}` },
+        body: {
+          operationId: platformOperationId,
+          expectedApprovalVersion: platformApproval.version,
+          expectedApprovalNode: platformApproval.node,
+          comment: 'DB-backed platform admin override',
+        },
+      },
+    )
+    expect(platformResponse.status, platformResponse.raw).toBe(200)
+    expect(platformResponse.body?.data).toMatchObject({ requestId: platformRequestId, status: 'rejected' })
+    expect(await requestDecisionResidue(fixture.orgId, platformRequestId, platformOperationId)).toEqual({
+      operations: 1,
+      outbox: 1,
+      approval_records: 1,
+    })
+  })
+
   it('rejects an active same-org approver who is not assigned before decision DML', async () => {
     const fixture = await seedOrg('shadow')
     const requestId = await createRequest(fixture, '2049-08-09')
