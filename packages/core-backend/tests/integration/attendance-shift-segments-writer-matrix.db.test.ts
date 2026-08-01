@@ -222,6 +222,32 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     }
   }
 
+  async function expectBlockedOnScheduleLock(
+    blockedPid: number,
+    orgId: string,
+    userIds: string[],
+  ): Promise<void> {
+    const result = await pool.query(
+      `SELECT classid::bigint AS class_id,
+              objid::bigint AS object_id,
+              hashtext($2::text)::oid::bigint AS expected_class_id,
+              ARRAY(
+                SELECT hashtext(value)::oid::bigint
+                  FROM unnest($3::text[]) AS value
+              ) AS expected_object_ids
+         FROM pg_locks
+        WHERE pid = $1
+          AND locktype = 'advisory'
+          AND granted = false`,
+      [blockedPid, `attendance-schedule:${orgId}`, userIds],
+    )
+    const matched = result.rows.some((row) => (
+      Number(row.class_id) === Number(row.expected_class_id)
+      && row.expected_object_ids.map(Number).includes(Number(row.object_id))
+    ))
+    if (!matched) throw new Error(`blocked on the wrong advisory key: ${JSON.stringify(result.rows)}`)
+  }
+
   async function loadApprovalCursor(requestId: string): Promise<{ version: number; node: string }> {
     const result = await pool.query(
       `SELECT ai.version, ai.current_node_key
@@ -1267,6 +1293,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const orgId = randomUUID()
     const requesterId = randomUUID()
     const counterpartyId = randomUUID()
+    const lockProbeDate = '2049-06-18'
     const requesterDate = '2049-06-19'
     const counterpartyDate = '2049-06-20'
     await seedActiveIdentity(requesterId, orgId)
@@ -1308,13 +1335,13 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
       const calculationPid = Number((await calculationClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
       await calculationClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
       const frozenRequester = await loadPublishedCandidates(calculationClient, {
-        orgId, userId: requesterId, workDates: [requesterDate],
+        orgId, userId: requesterId, workDates: [lockProbeDate],
       })
       const frozenCounterparty = await loadPublishedCandidates(calculationClient, {
-        orgId, userId: counterpartyId, workDates: [counterpartyDate],
+        orgId, userId: counterpartyId, workDates: [lockProbeDate],
       })
-      expect(frozenRequester[0]).toMatchObject({ assignmentId: requesterAssignmentId, shiftId: requesterShift })
-      expect(frozenCounterparty[0]).toMatchObject({ assignmentId: counterpartyAssignmentId, shiftId: counterpartyShift })
+      expect(frozenRequester).toEqual([])
+      expect(frozenCounterparty).toEqual([])
 
       const operationId = randomUUID()
       const approvePromise = postJson(
@@ -1328,7 +1355,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
           comment: 'P18 calculation-first swap',
         },
       )
-      await waitForBlockedPid(calculationPid)
+      const blockedPid = await waitForBlockedPid(calculationPid)
+      await expectBlockedOnScheduleLock(blockedPid, orgId, [requesterId, counterpartyId])
       await calculationClient.query('COMMIT')
 
       const approve = await approvePromise
