@@ -32593,7 +32593,7 @@ module.exports = {
       return camel ?? snake
     }
 
-    async function resolveRequestDecisionActorAccess(trx, route, requestRow) {
+    async function resolveRequestDecisionActorAccess(trx, route, requestRow, options = {}) {
       if (route.tokenSubjectUserId !== route.actorId) {
         throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the decision actor')
       }
@@ -32654,6 +32654,14 @@ module.exports = {
         }
       }
 
+      // Exact operation replay is authorized by its durable operation identity. Preparation still
+      // proves the authenticated actor is an active member of the request org, but intentionally
+      // defers mutable scheduler-scope facts to execute. Otherwise revoking a scheduler scope after
+      // commit makes the same operationId unable to return its already-sealed response.
+      if (options.enforceSchedulerScope === false) {
+        return { actorPosture: 'operator', fullAdmin: false }
+      }
+
       const actorContext = await loadAttendanceScopeContextForUser(trx, orgId, route.actorId)
       const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, trx)
       const facts = await resolveAttendanceRequestApprovalScopeFacts(trx, orgId, requestRow)
@@ -32662,6 +32670,30 @@ module.exports = {
       )
       if (!schedulerAllowed) throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance approval action')
       return { actorPosture: 'operator', fullAdmin: false }
+    }
+
+    function resolveLockedAttendanceApprovalFlowState(approval, flowMeta, flowSteps) {
+      const approvalStepIndex = Number(approval.current_step ?? 0)
+      const stepInRange = Number.isInteger(approvalStepIndex)
+        && approvalStepIndex >= 0
+        && (flowSteps.length === 0 ? approvalStepIndex === 0 : approvalStepIndex < flowSteps.length)
+      const expectedNodeKey = buildAttendanceApprovalNodeKey(approvalStepIndex)
+      const lockedNodeKey = approval.current_node_key || expectedNodeKey
+      const rawMetadataStep = flowMeta.currentStep
+      const metadataStepMatches = rawMetadataStep === undefined
+        || (Number.isInteger(Number(rawMetadataStep)) && Number(rawMetadataStep) === approvalStepIndex)
+      if (!stepInRange || lockedNodeKey !== expectedNodeKey || !metadataStepMatches) {
+        throw new HttpError(
+          409,
+          'APPROVAL_FLOW_STATE_CONFLICT',
+          'Locked approval step does not match the frozen request flow state',
+        )
+      }
+      return {
+        currentStepIndex: approvalStepIndex,
+        currentNodeKey: lockedNodeKey,
+        currentStep: flowSteps[approvalStepIndex],
+      }
     }
 
     const requestDecisionAdapter = {
@@ -32674,7 +32706,12 @@ module.exports = {
         if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
         const requestRow = requestRows[0]
         const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
-        const decisionAccess = await resolveRequestDecisionActorAccess(trx, route, requestRow)
+        const decisionAccess = await resolveRequestDecisionActorAccess(
+          trx,
+          route,
+          requestRow,
+          { enforceSchedulerScope: false },
+        )
         const approvalId = requestRow.approval_instance_id
         if (!approvalId) throw new HttpError(400, 'INVALID_STATE', 'Missing approval instance')
         const approvalRows = await trx.query(
@@ -32686,11 +32723,11 @@ module.exports = {
         const requestMetadata = normalizeMetadata(requestRow.metadata)
         const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
         const flowSteps = normalizeApprovalSteps(flowMeta.steps)
-        const rawStepIndex = Number(flowMeta.currentStep ?? approval.current_step ?? 0)
-        const currentStepIndex = flowSteps.length > 0
-          ? Math.min(Math.max(Number.isFinite(rawStepIndex) ? rawStepIndex : 0, 0), flowSteps.length - 1)
-          : 0
-        const currentNodeKey = approval.current_node_key || buildAttendanceApprovalNodeKey(currentStepIndex)
+        const { currentNodeKey } = resolveLockedAttendanceApprovalFlowState(
+          approval,
+          flowMeta,
+          flowSteps,
+        )
         const expectedApprovalVersionInput = resolveRequestDecisionExpectedValue(
           route.requestBody,
           'expectedApprovalVersion',
@@ -34151,24 +34188,26 @@ module.exports = {
           }
 
           const approval = approvalRows[0]
-          const lockedApprovalNode = approval.current_node_key
-            || buildAttendanceApprovalNodeKey(Number(approval.current_step ?? 0))
-          if (
-            Number(approval.version ?? 0) !== Number(expectedApprovalVersion)
-            || lockedApprovalNode !== expectedApprovalNode
-          ) {
-            throw new HttpError(409, 'APPROVAL_VERSION_CONFLICT', 'Approval version or node changed')
-          }
           const requestMetadata = normalizeMetadata(requestRow.metadata)
-          const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
-          const requestType = requestRow.request_type
           const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
           const flowSteps = normalizeApprovalSteps(flowMeta.steps)
-          const rawStepIndex = Number(flowMeta.currentStep ?? 0)
-          const currentStepIndex = flowSteps.length > 0
-            ? Math.min(Math.max(Number.isFinite(rawStepIndex) ? rawStepIndex : 0, 0), flowSteps.length - 1)
-            : 0
-          const currentStep = flowSteps[currentStepIndex]
+          const lockedFlowState = resolveLockedAttendanceApprovalFlowState(
+            approval,
+            flowMeta,
+            flowSteps,
+          )
+          const lockedApprovalNode = lockedFlowState.currentNodeKey
+          if (
+            approval.status !== 'pending'
+            || Number(approval.version ?? 0) !== Number(expectedApprovalVersion)
+            || lockedApprovalNode !== expectedApprovalNode
+          ) {
+            throw new HttpError(409, 'APPROVAL_VERSION_CONFLICT', 'Approval version, node, or status changed')
+          }
+          const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+          const requestType = requestRow.request_type
+          const currentStepIndex = lockedFlowState.currentStepIndex
+          const currentStep = lockedFlowState.currentStep
 
           // Action authorization (RATIFIED S7 lock §3.1/§3.2 + owner erratum 2026-07-16, OD-S7-0
           // scheduler-scope carve-out). The mode is keyed on the request's CREATION-FROZEN
@@ -34202,11 +34241,10 @@ module.exports = {
           if (isScopeNativeDispatch) {
             await assertDispatchScopeAllowed()
           } else {
-            const currentNodeKey = buildAttendanceApprovalNodeKey(currentStepIndex)
             const actorIsAssigned = await isAttendanceActorAssignedForNode(
               trx,
               approvalId,
-              currentNodeKey,
+              lockedApprovalNode,
               requesterId,
               logger
             )
@@ -34297,7 +34335,11 @@ module.exports = {
                  current_step = $3,
                  current_node_key = $4,
                  updated_at = now()
-             WHERE id = $5 AND version = $6 AND status = $7
+             WHERE id = $5
+               AND version = $6
+               AND status = 'pending'
+               AND current_step = $7
+               AND COALESCE(current_node_key, $8) = $8
              RETURNING id`,
             [
               newStatus,
@@ -34306,7 +34348,8 @@ module.exports = {
               buildAttendanceApprovalNodeKey(nextStepIndex),
               approvalId,
               expectedApprovalVersion,
-              approval.status,
+              currentStepIndex,
+              lockedApprovalNode,
             ]
           )
           if (approvalUpdateRows.length !== 1) {
@@ -34924,11 +34967,18 @@ module.exports = {
     }
 
     async function resolveRequest(req, res, action) {
-      const parsed = requestDecisionActionSchema.safeParse(req.body ?? {})
+      const rawBody = req.body ?? {}
+      const hasOperationId = rawBody && typeof rawBody === 'object' && (
+        Object.prototype.hasOwnProperty.call(rawBody, 'operationId')
+        || Object.prototype.hasOwnProperty.call(rawBody, 'operation_id')
+      )
+      const parsed = hasOperationId
+        ? requestDecisionActionSchema.safeParse(rawBody)
+        : resolveSchema.safeParse(rawBody)
       if (!parsed.success) {
-        res.status(400).json(
-          validationErrorBody('Invalid attendance request decision payload', formatZodValidationDetails(parsed.error)),
-        )
+        res.status(400).json(hasOperationId
+          ? validationErrorBody('Invalid attendance request decision payload', formatZodValidationDetails(parsed.error))
+          : { ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
         return
       }
       const requesterId = getUserId(req)
@@ -34958,8 +35008,9 @@ module.exports = {
         })
         return
       }
+      let operationId = null
       try {
-        const operationId = resolveRequestOperationId(parsed.data)
+        operationId = resolveRequestOperationId(parsed.data)
         const outcome = await w4RequestOperationBoundary.execute({
           kind: 'request_decision',
           operationId,
@@ -34993,7 +35044,7 @@ module.exports = {
             error: {
               code: error.code,
               message: error.message,
-              ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+              ...(operationId && Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
             },
           })
           return
