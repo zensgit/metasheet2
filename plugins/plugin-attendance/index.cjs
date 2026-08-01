@@ -29219,7 +29219,7 @@ module.exports = {
         try {
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
-             FROM attendance_records
+             FROM attendance_current_records
              WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4`,
             [targetUserId, orgId, from, to]
           )
@@ -29229,7 +29229,7 @@ module.exports = {
             `SELECT ar.*, u.name AS user_name, u.username AS username,
                     u.employee_no AS employee_no, u.department AS department,
                     u.position AS position, u.hire_date AS hire_date
-             FROM attendance_records ar
+             FROM attendance_current_records ar
              LEFT JOIN users u ON u.id = ar.user_id
              WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
              ORDER BY ar.work_date DESC
@@ -29475,7 +29475,7 @@ module.exports = {
 	          const userClause = parsed.data.userId ? `AND r.user_id = $${params.push(parsed.data.userId)}` : ''
 	          const candidateRows = await db.query(
 		            `SELECT r.*
-		             FROM attendance_records r
+		             FROM attendance_current_records r
 		             WHERE r.org_id = $1
 		               AND r.work_date BETWEEN $2::date AND $3::date
 		               AND (${buildOwedPunchRecordPredicateSql('r')})
@@ -29631,6 +29631,7 @@ module.exports = {
 	               FROM attendance_records r
 	               WHERE r.org_id = $1
 	                 AND r.id = ANY($2::uuid[])
+	                 AND r.visibility_state = 'active'
 	                 AND COALESCE(r.is_workday, true) = true
 	                 AND (
 	                   (r.status = 'partial' AND (r.first_in_at IS NULL OR r.last_out_at IS NULL))
@@ -29837,7 +29838,7 @@ module.exports = {
 	        try {
 	          const countRows = await db.query(
 	            `SELECT COUNT(*)::int AS total
-	             FROM attendance_records
+	             FROM attendance_current_records
 	             WHERE user_id = $1
 	               AND org_id = $2
 	               AND work_date BETWEEN $3 AND $4
@@ -29850,7 +29851,7 @@ module.exports = {
 
 	          const rows = await db.query(
 	            `SELECT *
-	             FROM attendance_records
+	             FROM attendance_current_records
 	             WHERE user_id = $1
 	               AND org_id = $2
 	               AND work_date BETWEEN $3 AND $4

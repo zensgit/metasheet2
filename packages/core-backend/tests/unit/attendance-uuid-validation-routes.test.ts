@@ -2075,7 +2075,7 @@ describe('attendance UUID route validation', () => {
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params, true)
       if (rbac !== undefined) return rbac
-      if (sql.includes('FROM attendance_records r')) {
+      if (sql.includes('FROM attendance_current_records r')) {
         return [
           attendanceRecordRow({
             id: 'record-1',
@@ -2125,7 +2125,7 @@ describe('attendance UUID route validation', () => {
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRemindRow()]
-      if (sql.includes('FROM attendance_records r')) {
+      if (sql.includes('FROM attendance_current_records r')) {
         return [
           attendanceRecordRow({
             id: 'record-out-of-scope',
@@ -2195,7 +2195,7 @@ describe('attendance UUID route validation', () => {
 
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
-    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_records r'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_current_records r'))).toBe(false)
   })
 
   it('rejects invalid owed-punch anomaly filters before querying records', async () => {

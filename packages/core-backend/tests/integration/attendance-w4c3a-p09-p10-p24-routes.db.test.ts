@@ -325,6 +325,8 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       'attendance_import_batches',
       'attendance_import_items',
       'attendance_records',
+      'attendance_current_records',
+      'attendance_notification_deliveries',
       'attendance_result_operation_batches',
       'attendance_result_operations',
       'attendance_record_calculations',
@@ -731,6 +733,89 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       projection_effect: 'none',
       segments: 0,
     }])
+  })
+
+  it('W4C-3a: ordinary record, reminder, and anomaly readers hide retired rows', async () => {
+    const fixture = await seedActorAndRollout('legacy')
+    const activeRecordId = randomUUID()
+    const retiredRecordId = randomUUID()
+    const activeWorkDate = '2026-07-21'
+    const retiredWorkDate = '2026-07-22'
+    await pool.query(
+      `INSERT INTO attendance_records
+       (id, org_id, user_id, work_date, timezone, first_in_at, last_out_at,
+        work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta,
+        projection_owner, current_calculation_id, visibility_state, visibility_reason,
+        created_at, updated_at)
+       VALUES
+       ($1, $3, $4, $5::date, 'UTC', NULL, $7::timestamptz,
+        480, 0, 0, 'partial', true, '{}'::jsonb,
+        'legacy_untracked', NULL, 'active', 'active', now(), now()),
+       ($2, $3, $4, $6::date, 'UTC', NULL, $8::timestamptz,
+        480, 0, 0, 'partial', true, '{}'::jsonb,
+        'legacy_untracked', NULL, 'retired', 'review_placeholder', now(), now())`,
+      [
+        activeRecordId,
+        retiredRecordId,
+        fixture.orgId,
+        fixture.actorId,
+        activeWorkDate,
+        retiredWorkDate,
+        `${activeWorkDate}T18:00:00.000Z`,
+        `${retiredWorkDate}T18:00:00.000Z`,
+      ],
+    )
+
+    const query = `orgId=${encodeURIComponent(fixture.orgId)}&from=${activeWorkDate}&to=${retiredWorkDate}`
+    for (const pathname of ['/api/attendance/records', '/api/attendance/calendar']) {
+      const response = await requestHttp(`${baseUrl}${pathname}?${query}`, {
+        headers: { Authorization: `Bearer ${fixture.token}` },
+      })
+      expect(response.status, response.raw).toBe(200)
+      const data = response.body?.data as { items?: Array<{ id?: string }>; total?: number } | undefined
+      expect(data?.items?.map((item) => item.id)).toEqual([activeRecordId])
+      expect(data?.total).toBe(1)
+    }
+
+    const candidates = await requestHttp(
+      `${baseUrl}/api/attendance/manual-missed-punch-reminders/candidates?${query}`,
+      { headers: { Authorization: `Bearer ${fixture.token}` } },
+    )
+    expect(candidates.status, candidates.raw).toBe(200)
+    const candidateData = candidates.body?.data as {
+      items?: Array<{ recordId?: string }>
+      total?: number
+    } | undefined
+    expect(candidateData?.items?.map((item) => item.recordId)).toEqual([activeRecordId])
+    expect(candidateData?.total).toBe(1)
+
+    const anomalies = await requestHttp(`${baseUrl}/api/attendance/anomalies?${query}`, {
+      headers: { Authorization: `Bearer ${fixture.token}` },
+    })
+    expect(anomalies.status, anomalies.raw).toBe(200)
+    const anomalyData = anomalies.body?.data as {
+      items?: Array<{ recordId?: string }>
+      total?: number
+    } | undefined
+    expect(anomalyData?.items?.map((item) => item.recordId)).toEqual([activeRecordId])
+    expect(anomalyData?.total).toBe(1)
+
+    const enqueue = await requestJson(
+      `/api/attendance/manual-missed-punch-reminders/enqueue?orgId=${encodeURIComponent(fixture.orgId)}`,
+      fixture.token,
+      {
+        recordIds: [retiredRecordId],
+        message: 'Synthetic retired-record visibility check',
+        idempotencyKey: `${fixturePrefix}-${retiredRecordId}`,
+      },
+    )
+    expect(enqueue.status, enqueue.raw).toBe(409)
+    expect(enqueue.body?.error).toMatchObject({ code: 'MISSED_PUNCH_REMINDER_CANDIDATE_STALE' })
+    const deliveryResidue = await pool.query<{ count: number }>(
+      'SELECT count(*)::int AS count FROM attendance_notification_deliveries WHERE org_id = $1',
+      [fixture.orgId],
+    )
+    expect(deliveryResidue.rows[0].count).toBe(0)
   })
 
   it('P24: dryRun appends one integration audit attempt only, preserving every attendance business table and last_sync_at', async () => {
