@@ -1416,6 +1416,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
         return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
       }
+      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) return [approvalInstanceRow()]
       throw new Error(`unexpected query: ${sql}`)
     })
 
@@ -1427,8 +1428,11 @@ describe('attendance UUID route validation', () => {
 
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
-    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('SELECT * FROM approval_instances'))).toBe(false)
-    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('UPDATE attendance_requests'))).toBe(false)
+    const statements = db.query.mock.calls.map(([sql]) => String(sql))
+    expect(statements.some(sql => sql.includes('SELECT * FROM approval_instances') && sql.includes('FOR UPDATE'))).toBe(true)
+    expect(statements.some(sql => sql.includes('UPDATE approval_instances'))).toBe(false)
+    expect(statements.some(sql => sql.includes('INSERT INTO approval_records'))).toBe(false)
+    expect(statements.some(sql => sql.includes('UPDATE attendance_requests'))).toBe(false)
   })
 
   it('lets scoped non-admin schedulers export records inside their scheduler export scope', async () => {
