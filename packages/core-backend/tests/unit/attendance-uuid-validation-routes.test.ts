@@ -1268,7 +1268,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
         return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
       }
-      if (sql.includes('FROM attendance_records ar')) return [attendanceRecordRow()]
+      if (sql.includes('FROM attendance_current_records ar')) return [attendanceRecordRow()]
       if (sql.includes('FROM attendance_requests') && sql.includes('GROUP BY work_date, request_type')) return []
       if (sql.includes('FROM attendance_leave_types')) return []
       if (sql.includes('FROM attendance_overtime_rules')) return []
@@ -1310,7 +1310,7 @@ describe('attendance UUID route validation', () => {
     expect(scheduleScopeSql).toContain("COALESCE(m.effective_from, DATE '0001-01-01') <= $3::date")
     expect(scheduleScopeSql).toContain("COALESCE(m.effective_to, DATE '9999-12-31') >= $4::date")
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('FROM attendance_records ar'),
+      expect.stringContaining('FROM attendance_current_records ar'),
       ['worker-1', 'default', '2026-06-01', '2026-06-30', 1000],
     )
   })
@@ -1354,7 +1354,7 @@ describe('attendance UUID route validation', () => {
 
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
-    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_records ar'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_current_records ar'))).toBe(false)
   })
 
   it('lets scoped non-admin schedulers prepare import tokens when they have import scope', async () => {
