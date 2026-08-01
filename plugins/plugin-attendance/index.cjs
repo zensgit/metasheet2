@@ -32363,6 +32363,19 @@ module.exports = {
                 JSON.stringify(metadata),
               ]
             )
+		            const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+		              orgId,
+		              requestId,
+		              requestType: 'schedule_dispatch',
+		              subjectUserId: input.userId,
+		              actorUserId: actorAccess.userId,
+		              payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+		              resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+		                orgId,
+		                userId: input.userId,
+		                workDate: input.startDate,
+		              }),
+		            })
             await trx.query(
               `INSERT INTO attendance_schedule_dispatch_requests
                (request_id, org_id, dispatch_type, user_id, target_schedule_group_id, target_attendance_group_id,
@@ -32383,7 +32396,11 @@ module.exports = {
               ]
             )
             const detail = await loadScheduleDispatchDetail(trx, orgId, requestId)
-            return { request: requestRows[0], detail }
+		            return {
+		              request: requestRows[0],
+		              detail,
+		              snapshotToken: buildRequestSnapshotToken(snapshotAppend),
+		            }
           })
           emitEvent('attendance.scheduleDispatch.requested', { orgId, requestId, userId: input.userId })
           res.status(201).json({
@@ -32391,6 +32408,7 @@ module.exports = {
             data: {
               request: mapAttendanceRequestRow(result.request),
               scheduleDispatch: mapScheduleDispatchRequestRow(result.detail),
+		              ...(result.snapshotToken ? { requestSnapshot: result.snapshotToken } : {}),
             },
           })
         } catch (error) {
@@ -32808,6 +32826,19 @@ module.exports = {
                 JSON.stringify(metadata),
               ]
             )
+		            const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+		              orgId,
+		              requestId,
+		              requestType: 'shift_swap',
+		              subjectUserId: requesterSource.userId,
+		              actorUserId,
+		              payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+		              resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+		                orgId,
+		                userId: requesterSource.userId,
+		                workDate: requesterSource.workDate,
+		              }),
+		            })
 
             await trx.query(
               `INSERT INTO attendance_shift_swap_requests
@@ -32861,7 +32892,11 @@ module.exports = {
               ]
             )
             const detail = await loadShiftSwapDetail(trx, orgId, requestId)
-            return { request: requestRows[0], detail }
+		            return {
+		              request: requestRows[0],
+		              detail,
+		              snapshotToken: buildRequestSnapshotToken(snapshotAppend),
+		            }
           })
 
           emitEvent('attendance.shiftSwap.requested', { orgId, requestId, userId: result.request.user_id })
@@ -32870,6 +32905,7 @@ module.exports = {
             data: {
               request: mapAttendanceRequestRow(result.request),
               shiftSwap: mapShiftSwapRequestRow(result.detail),
+		              ...(result.snapshotToken ? { requestSnapshot: result.snapshotToken } : {}),
             },
           })
         } catch (error) {

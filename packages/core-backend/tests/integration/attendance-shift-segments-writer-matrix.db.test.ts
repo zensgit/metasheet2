@@ -126,6 +126,16 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     return `w3wm-${tag}-${randomUUID().slice(0, 8)}`
   }
 
+  async function enableShadowPosture(orgId: string): Promise<void> {
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
+    await pool.query(
+      `INSERT INTO attendance_calculation_rollout_state
+         (org_id, state, engine_version, reason_code, actor_id, version, prior_state)
+       VALUES ($1, 'shadow', 'w4c3b-p12-test', 'TEST_FIXTURE', 'w4c3b-p12-test', 1, NULL)`,
+      [orgId],
+    )
+  }
+
   async function mintToken(userId: string): Promise<string> {
     const res = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin,attendance:approve,attendance:import')}`,
@@ -869,6 +879,68 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     expect(codeOf(create)).toBe(GUARD_CODE)
     expect(await countRows('attendance_schedule_dispatch_requests', orgId)).toBe(0)
     expect(await countRows('attendance_requests', orgId)).toBe(0)
+  })
+
+  it('P12: dedicated shift-swap and schedule-dispatch creates append version-1 snapshots', async () => {
+    const orgId = randomUUID()
+    const actorId = `${orgId}-admin`
+    const token = await mintToken(actorId)
+    await enableShadowPosture(orgId)
+
+    const requesterShift = (await createShiftViaApi(token, orgId, {
+      name: 'P12 requester',
+      workStartTime: '09:00',
+      workEndTime: '13:00',
+    })).body.data.id as string
+    const counterpartyShift = (await createShiftViaApi(token, orgId, {
+      name: 'P12 counterparty',
+      workStartTime: '14:00',
+      workEndTime: '18:00',
+    })).body.data.id as string
+    const requesterAssignmentId = await seedPublishedAssignment(
+      orgId,
+      `${orgId}-requester`,
+      requesterShift,
+      '2049-06-14',
+    )
+    const counterpartyAssignmentId = await seedPublishedAssignment(
+      orgId,
+      `${orgId}-counterparty`,
+      counterpartyShift,
+      '2049-06-15',
+    )
+    const swap = await postJson('/api/attendance/shift-swap-requests', token, orgId, {
+      requesterAssignmentId,
+      counterpartyAssignmentId,
+    })
+    expect(swap.status, swap.raw).toBe(201)
+    expect(swap.body.data.requestSnapshot).toMatchObject({ version: 1 })
+    const swapRequestId = swap.body.data.request.id as string
+
+    await seedDispatchFlow(token, orgId)
+    const scheduleGroupId = await seedScheduleGroup(orgId)
+    const dispatch = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
+      userId: `${orgId}-dispatch-user`,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: requesterShift,
+      startDate: '2049-06-16',
+      endDate: '2049-06-16',
+    })
+    expect(dispatch.status, dispatch.raw).toBe(201)
+    expect(dispatch.body.data.requestSnapshot).toMatchObject({ version: 1 })
+    const dispatchRequestId = dispatch.body.data.request.id as string
+
+    const snapshots = await pool.query(
+      `SELECT request_id::text AS request_id, version, request_type
+         FROM attendance_request_calculation_snapshots
+        WHERE org_id = $1 AND request_id = ANY($2::uuid[])
+        ORDER BY request_type`,
+      [orgId, [swapRequestId, dispatchRequestId]],
+    )
+    expect(snapshots.rows).toEqual([
+      { request_id: dispatchRequestId, version: 1, request_type: 'schedule_dispatch' },
+      { request_id: swapRequestId, version: 1, request_type: 'shift_swap' },
+    ])
   })
 
   it('matrix: schedule publication fails closed when a draft shift became multi-segment', async () => {

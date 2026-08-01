@@ -15,6 +15,7 @@
 
 import crypto from 'node:crypto'
 import {
+  AttendanceW4IdentityError,
   acquireAttendanceCalculationRolloutLock,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
@@ -559,7 +560,19 @@ async function resolveWritePosture(
   orgId: string,
 ): Promise<WritePosture> {
   const trx = asW4Trx(client)
-  const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+  let orgKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
+  try {
+    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+  } catch (error) {
+    if (
+      error instanceof AttendanceW4IdentityError &&
+      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+    ) {
+      // Legacy tenant keys cannot be admitted to the canonical W4 rollout.
+      return 'legacy_projection_only'
+    }
+    throw error
+  }
   await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
   const posture = await resolveSegmentCalculationPosture(trx, orgKey)
   if (posture.writePosture === 'blocked') {
@@ -679,6 +692,7 @@ type LockedRequestRow = {
   id: string
   orgId: string
   userId: string
+  approvalInstanceId: string | null
   requestType: AttendanceRequestSnapshotRequestTypeV1
   status: string
   workDate: string
@@ -702,6 +716,7 @@ async function lockAttendanceRequestRow(
     `SELECT id::text AS id,
             org_id::text AS org_id,
             user_id::text AS user_id,
+            approval_instance_id::text AS approval_instance_id,
             request_type::text AS request_type,
             status::text AS status,
             work_date::text AS work_date,
@@ -757,6 +772,10 @@ async function lockAttendanceRequestRow(
     id: String(row.id),
     orgId,
     userId,
+    approvalInstanceId:
+      typeof row.approval_instance_id === 'string' && row.approval_instance_id.length > 0
+        ? row.approval_instance_id
+        : null,
     requestType: requestType as AttendanceRequestSnapshotRequestTypeV1,
     status,
     workDate: String(row.work_date ?? '').slice(0, 10),
@@ -1164,7 +1183,7 @@ export async function bindAttendanceRequestTerminalSnapshotV1(
     return { kind: 'legacy_skipped', writePosture }
   }
 
-  await lockAttendanceRequestRow(input.client, {
+  const lockedRequest = await lockAttendanceRequestRow(input.client, {
     orgId,
     requestId,
     subjectUserId,
@@ -1173,6 +1192,27 @@ export async function bindAttendanceRequestTerminalSnapshotV1(
   })
 
   const latest = await lockLatestSnapshot(input.client, orgId, requestId)
+
+  // Cross-check the returned row against the request's locked approval instance,
+  // terminal action, and terminal version. The host port must not turn an
+  // arbitrary existing BIGSERIAL value into a request-snapshot binding.
+  if (lockedRequest.approvalInstanceId === null) {
+    fail(W4C3B_REQUEST_SNAPSHOT_ERROR_CODES.BINDING_INVALID, 409, 'Invalid terminal binding')
+  }
+  const recordRows = await queryRows(
+    input.client,
+    `SELECT id::text AS id
+       FROM approval_records
+      WHERE id = $1::bigint
+        AND instance_id = $2
+        AND action = $3
+        AND to_version = $4
+      LIMIT 1`,
+    [approvalRecordId, lockedRequest.approvalInstanceId, input.action, input.approvalVersion],
+  )
+  if (recordRows.length !== 1 || String(recordRows[0].id) !== approvalRecordId) {
+    fail(W4C3B_REQUEST_SNAPSHOT_ERROR_CODES.BINDING_INVALID, 409, 'Invalid terminal binding')
+  }
 
   if (!latest) {
     if (writePosture === 'authoritative') {
@@ -1220,19 +1260,6 @@ export async function bindAttendanceRequestTerminalSnapshotV1(
       409,
       'Request snapshot fingerprint conflict',
     )
-  }
-
-  // Cross-check durable approval_records row identity (same transaction).
-  const recordRows = await queryRows(
-    input.client,
-    `SELECT id::text AS id
-       FROM approval_records
-      WHERE id = $1::bigint
-      LIMIT 1`,
-    [approvalRecordId],
-  )
-  if (recordRows.length !== 1 || String(recordRows[0].id) !== approvalRecordId) {
-    fail(W4C3B_REQUEST_SNAPSHOT_ERROR_CODES.BINDING_INVALID, 409, 'Invalid terminal binding')
   }
 
   const binding = freezeBinding({
