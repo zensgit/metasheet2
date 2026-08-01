@@ -19375,17 +19375,50 @@ attendanceIntegrationDescribe(
           if (!['queued', 'running', 'completed'].includes(status)) {
             throw new Error(`Unexpected async idempotent replay status: ${status || '<empty>'}`)
           }
-          const total = Number(job.total)
-          const progress = Number(job.progress)
-          const processedRows = Number(job.processedRows)
-          const failedRows = Number(job.failedRows)
+          const total = job.total
+          const progress = job.progress
+          const processedRows = job.processedRows
+          const failedRows = job.failedRows
           if (
             !Number.isInteger(total) || total < 0 ||
             !Number.isInteger(progress) || progress < 0 || progress > total ||
             !Number.isInteger(processedRows) || processedRows < 0 || processedRows > total ||
-            !Number.isInteger(failedRows) || failedRows < 0 || failedRows > total
+            !Number.isInteger(failedRows) || failedRows < 0 || failedRows > total ||
+            processedRows + failedRows !== total
           ) {
             throw new Error('Async idempotent replay contains an invalid lifecycle counter')
+          }
+          const progressPercent = job.progressPercent
+          // Mirrors mapImportJobRow's public projection formula. The same projection derives
+          // failedRows as total - processedRows until a terminal summary replaces both values.
+          const expectedProgressPercent = total > 0
+            ? Math.round((progress / total) * 100)
+            : 0
+          if (
+            typeof progressPercent !== 'number' ||
+            !Number.isInteger(progressPercent) ||
+            progressPercent !== expectedProgressPercent
+          ) {
+            throw new Error('Async idempotent replay contains an invalid progress percentage')
+          }
+          if (
+            typeof job.throughputRowsPerSec !== 'number' ||
+            !Number.isFinite(job.throughputRowsPerSec) ||
+            job.throughputRowsPerSec < 0
+          ) {
+            throw new Error('Async idempotent replay contains an invalid throughput')
+          }
+          // canonicalizeGolden receives the output of normalize(), which preserves zero and turns
+          // every positive elapsed duration into this relation marker before either side is compared.
+          const elapsedMsIsValid = job.elapsedMs === 0 || (
+            job.elapsedMs &&
+            typeof job.elapsedMs === 'object' &&
+            job.elapsedMs.type === 'number' &&
+            job.elapsedMs.relation === 'nonnegative' &&
+            Object.keys(job.elapsedMs).length === 2
+          )
+          if (!elapsedMsIsValid) {
+            throw new Error('Async idempotent replay contains an invalid elapsed duration')
           }
           if (status === 'queued' && (progress !== 0 || job.startedAt !== null || job.finishedAt !== null)) {
             throw new Error('Queued async idempotent replay contains a started or finished lifecycle')
