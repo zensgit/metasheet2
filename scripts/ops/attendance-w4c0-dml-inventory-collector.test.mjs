@@ -121,6 +121,20 @@ test('W4C-3a SELECT-inventory mutation: a new direct ordinary base read fails wh
   assert.equal(currentResult.classifiedSites[0]?.posture, 'current')
 })
 
+test('W4C-3a SELECT-inventory mutation: a dynamic base-table member fails while the current view passes', () => {
+  const relPath = 'plugins/plugin-attendance/index.cjs'
+  const scan = (table) => scanFileForAttendanceRecordReadSites(
+    relPath,
+    `async function dynamicSummary() { const tables = ['${table}']; for (const table of tables) await db.query(\`SELECT 1 FROM \${table}\`) }\n`,
+  )
+
+  assert.equal(classifyAttendanceRecordReadSites(scan('attendance_records')).unclassified.length, 1)
+  const currentResult = classifyAttendanceRecordReadSites(scan('attendance_current_records'))
+  assert.deepEqual(currentResult.unclassified, [])
+  assert.equal(currentResult.classifiedSites[0]?.posture, 'current')
+  assert.equal(currentResult.classifiedSites[0]?.dynamic, true)
+})
+
 // -------------------------------------------------------------------------------------------
 // 2. Reproducibility: regenerating the pinned baseline manifest from the pinned ref must byte-
 //    match the committed docs/data-only artifact. This is what makes the artifact auditable —

@@ -27,7 +27,7 @@ const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   entry('plugins/plugin-attendance/index.cjs', 'applyAttendanceResultEdit', 1, 'correction_write_lock'),
   entry('plugins/plugin-attendance/index.cjs', 'generateAbsenceRecords', 1, 'uniqueness_guard'),
   entry('plugins/plugin-attendance/index.cjs', 'flushRecordUpserts', 2, 'import_write_precondition'),
-  entry('plugins/plugin-attendance/index.cjs', 'buildExistingReminderReplay', 1, 'current_row_lock_with_explicit_visibility'),
+  entry('plugins/plugin-attendance/index.cjs', 'enqueueManualMissedPunchReminderTransaction', 1, 'current_row_lock_with_explicit_visibility'),
 ])
 
 function keyOf(site) {

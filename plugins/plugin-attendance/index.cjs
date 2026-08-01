@@ -18445,7 +18445,7 @@ async function resolveAttendanceComprehensiveHoursPreviewPeriod(db, orgId, perio
 
 async function assertAttendanceComprehensiveHoursPreviewSchemaReady(db, orgId, metric) {
   const tables = metric === 'actual'
-    ? ['attendance_records', 'attendance_requests']
+    ? ['attendance_current_records', 'attendance_requests']
     : [
       'attendance_rules',
       'attendance_holidays',
@@ -29612,7 +29612,7 @@ module.exports = {
 	        }
 
 	        try {
-	          const result = await db.transaction(async (trx) => {
+	          const result = await db.transaction(async function enqueueManualMissedPunchReminderTransaction(trx) {
 	            // Serialize the whole idempotency group before looking for source_id rows.
 	            await trx.query(
 	              'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',

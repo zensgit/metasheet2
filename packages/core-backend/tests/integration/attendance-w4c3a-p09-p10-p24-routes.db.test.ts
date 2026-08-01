@@ -1043,18 +1043,9 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     await seedVisibilityRecord(fixture.orgId, fixture.actorId, retiredWorkDate, 'retired', {
       status: 'normal',
     })
-    const db = {
-      query: async (sql: string, params?: unknown[]) => {
-        if (/FROM attendance_current_records/.test(sql)) {
-          return (await pool.query(sql, params as unknown[])).rows
-        }
-        throw Object.assign(new Error('synthetic unavailable context'), { code: '42P01' })
-      },
-    }
-
     const facts = await getAttendanceVisibilityHelpers()
       .__attendanceMakeupPunchForTests
-      .deriveMakeupAnomalyFacts(db, {
+      .deriveMakeupAnomalyFacts(pluginRowsDb(), {
         orgId: fixture.orgId,
         userId: fixture.actorId,
         workDate: retiredWorkDate,

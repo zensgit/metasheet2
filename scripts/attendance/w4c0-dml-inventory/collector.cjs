@@ -146,6 +146,10 @@ const P25_READ_TABLE_PATTERN = new RegExp(
 
 const ATTENDANCE_RECORD_READ_PATTERN =
   /\b(?:FROM|JOIN)\s+"?(attendance_records|attendance_current_records)"?/gi
+const ATTENDANCE_RECORD_DYNAMIC_READ_PATTERN =
+  /\b(?:FROM|JOIN)\s+\$\{\s*[A-Za-z_$][A-Za-z0-9_$]*\s*\}/gi
+const ATTENDANCE_RECORD_TABLE_LITERAL_PATTERN =
+  /(['"])(attendance_records|attendance_current_records)\1/g
 
 // Reserved words that can legally follow a DML verb without being a table name — most notably
 // `... ON CONFLICT (...) DO UPDATE SET col = ...` (an upsert), where "SET" immediately follows
@@ -202,7 +206,7 @@ const SYMBOL_PATTERNS = [
   // Express-style route registration: router.post('/path', ...
   /\b(?:router|r|app)\.(get|post|put|patch|delete)\(\s*(['"`])((?:\\.|(?!\2).)*)\2/,
   // function foo( / async function foo(
-  /^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/,
+  /\b(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/,
   // const foo = ( / const foo = async ( / const foo = function
   /^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:function\b|\()/,
 ]
@@ -319,6 +323,26 @@ function scanFileForAttendanceRecordReadSites(relPath, content) {
       line: lineIndex + 1,
       table,
       enclosingSymbol: nearestEnclosingSymbol(lines, lineIndex),
+    })
+  }
+
+  const dynamicReadSymbols = new Set()
+  ATTENDANCE_RECORD_DYNAMIC_READ_PATTERN.lastIndex = 0
+  while ((match = ATTENDANCE_RECORD_DYNAMIC_READ_PATTERN.exec(content))) {
+    const lineIndex = content.slice(0, match.index).split(/\r?\n/).length - 1
+    dynamicReadSymbols.add(nearestEnclosingSymbol(lines, lineIndex))
+  }
+  ATTENDANCE_RECORD_TABLE_LITERAL_PATTERN.lastIndex = 0
+  while ((match = ATTENDANCE_RECORD_TABLE_LITERAL_PATTERN.exec(content))) {
+    const lineIndex = content.slice(0, match.index).split(/\r?\n/).length - 1
+    const enclosingSymbol = nearestEnclosingSymbol(lines, lineIndex)
+    if (!dynamicReadSymbols.has(enclosingSymbol)) continue
+    sites.push({
+      relPath,
+      line: lineIndex + 1,
+      table: match[2],
+      enclosingSymbol,
+      dynamic: true,
     })
   }
   return sites
