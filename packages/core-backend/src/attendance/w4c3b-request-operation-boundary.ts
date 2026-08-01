@@ -3,10 +3,16 @@
  *
  * The plugin installs the four fixed adapters once at activation. HTTP routes
  * submit closed data only; they cannot supply callbacks, prepared drafts, lock
- * witnesses, or transaction clients. Preparation may lock/read authoritative
- * rows, but the operation preflight and claim always precede the adapter's first
- * request/event/approval/assignment/ledger write. All work shares the same
+ * witnesses, or transaction clients. Preparation may perform the non-locking
+ * reads needed to mint the authorization witness and command envelope. Source
+ * locks and every request/event/approval/assignment/ledger write belong to
+ * execute, after operation replay/preflight. All work shares the same
  * SERIALIZABLE transaction and connection.
+ *
+ * request_create is multiplexed by a host-owned closed routeVariant: generic,
+ * outdoor, schedule_dispatch, and shift_swap share one adapter and one boundary
+ * instance. SourceRef is derived only from (kind, routeVariant) — never from
+ * request body keys.
  */
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
@@ -41,6 +47,17 @@ export const ATTENDANCE_REQUEST_OPERATION_KINDS_V1 = Object.freeze([
 ] as const)
 
 export type AttendanceRequestOperationKindV1 = (typeof ATTENDANCE_REQUEST_OPERATION_KINDS_V1)[number]
+
+/** Closed create-family variants owned by the host; only route code may supply these. */
+export const ATTENDANCE_REQUEST_CREATE_ROUTE_VARIANTS_V1 = Object.freeze([
+  'generic',
+  'outdoor',
+  'schedule_dispatch',
+  'shift_swap',
+] as const)
+
+export type AttendanceRequestCreateRouteVariantV1 =
+  (typeof ATTENDANCE_REQUEST_CREATE_ROUTE_VARIANTS_V1)[number]
 
 export class AttendanceW4RequestBoundaryError extends Error {
   readonly code: string
@@ -146,6 +163,8 @@ export interface AttendanceRequestOperationContextV1 {
   readonly operationId: string | null
   readonly correlationId: string
   readonly acceptedWritePosture: 'legacy_projection_only' | 'shadow' | 'authoritative' | null
+  /** Host-validated create family, or null for non-create kinds. */
+  readonly routeVariant: AttendanceRequestCreateRouteVariantV1 | null
 }
 
 export interface AttendanceRequestOperationAdapterV1<TState = unknown> {
@@ -174,6 +193,12 @@ export interface AttendanceRequestOperationBoundaryInputV1 {
   readonly kind: AttendanceRequestOperationKindV1
   readonly operationId: string | null
   readonly correlationId: string
+  /**
+   * Host-owned create-family discriminator. Required as a closed variant when
+   * kind is request_create; must be null for every other kind. Never read from
+   * arbitrary request body keys — only route code may supply this field.
+   */
+  readonly routeVariant: AttendanceRequestCreateRouteVariantV1 | null
   readonly routeInput: unknown
 }
 
@@ -192,26 +217,69 @@ export interface AttendanceRequestOperationBoundaryDepsV1 {
   adapters: AttendanceRequestOperationAdaptersV1
 }
 
-const SOURCE_REFS: Readonly<Record<AttendanceRequestOperationKindV1, string>> = Object.freeze({
-  request_create: 'plugin-attendance:POST /api/attendance/requests',
+/** Truthful source_ref values for each request_create route family. */
+export const ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1: Readonly<
+  Record<AttendanceRequestCreateRouteVariantV1, string>
+> = Object.freeze({
+  generic: 'plugin-attendance:POST /api/attendance/requests',
+  outdoor: 'plugin-attendance:POST /api/attendance/punch#outdoor-approval',
+  schedule_dispatch: 'plugin-attendance:POST /api/attendance/schedule-dispatch-requests',
+  shift_swap: 'plugin-attendance:POST /api/attendance/shift-swap-requests',
+})
+
+const NON_CREATE_SOURCE_REFS: Readonly<
+  Record<Exclude<AttendanceRequestOperationKindV1, 'request_create'>, string>
+> = Object.freeze({
   request_pending_edit: 'plugin-attendance:PUT /api/attendance/requests/:id',
   request_decision: 'plugin-attendance:POST /api/attendance/requests/:id/:decision',
   request_cancel: 'plugin-attendance:POST /api/attendance/requests/:id/cancel',
 })
 
+function normalizeRouteVariant(
+  kind: AttendanceRequestOperationKindV1,
+  raw: unknown,
+  code: string,
+): AttendanceRequestCreateRouteVariantV1 | null {
+  if (kind === 'request_create') {
+    if (typeof raw !== 'string') fail(code)
+    if (!(ATTENDANCE_REQUEST_CREATE_ROUTE_VARIANTS_V1 as readonly string[]).includes(raw)) {
+      fail(code)
+    }
+    return raw as AttendanceRequestCreateRouteVariantV1
+  }
+  // Non-create kinds must not carry a create-family variant.
+  if (raw !== null) fail(code)
+  return null
+}
+
+function resolveSourceRef(
+  kind: AttendanceRequestOperationKindV1,
+  routeVariant: AttendanceRequestCreateRouteVariantV1 | null,
+): string {
+  if (kind === 'request_create') {
+    if (routeVariant === null) fail('W4C3B_REQUEST_ROUTE_VARIANT_MISMATCH', 500)
+    return ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1[routeVariant]
+  }
+  if (routeVariant !== null) fail('W4C3B_REQUEST_ROUTE_VARIANT_MISMATCH', 500)
+  return NON_CREATE_SOURCE_REFS[kind]
+}
+
 function normalizeInput(input: unknown): AttendanceRequestOperationBoundaryInputV1 {
   const code = 'W4C3B_REQUEST_BOUNDARY_INPUT_INVALID'
-  const fields = exactObject(input, ['kind', 'operationId', 'correlationId', 'routeInput'], code)
+  const fields = exactObject(input, ['kind', 'operationId', 'correlationId', 'routeVariant', 'routeInput'], code)
   const kind = fields.kind
   if (typeof kind !== 'string' || !(ATTENDANCE_REQUEST_OPERATION_KINDS_V1 as readonly string[]).includes(kind)) {
     fail(code)
   }
+  const operationKind = kind as AttendanceRequestOperationKindV1
   const correlationId = fields.correlationId
   if (typeof correlationId !== 'string' || correlationId.length === 0 || correlationId.length > 128) fail(code)
+  const routeVariant = normalizeRouteVariant(operationKind, fields.routeVariant, code)
   return Object.freeze({
-    kind: kind as AttendanceRequestOperationKindV1,
+    kind: operationKind,
     operationId: uuidOrNull(fields.operationId, code),
     correlationId,
+    routeVariant,
     routeInput: frozenJsonCopy(fields.routeInput, code),
   })
 }
@@ -258,6 +326,7 @@ export function createAttendanceRequestOperationBoundaryV1(
             operationId: input.operationId,
             correlationId: input.correlationId,
             acceptedWritePosture: null,
+            routeVariant: input.routeVariant,
           })
           const prepared = await adapter.prepare(shapedTrx, input.routeInput, operation)
 
@@ -305,7 +374,7 @@ export function createAttendanceRequestOperationBoundaryV1(
             orgId: envelope.orgId,
             subjectScope: prepared.subjectScope,
             capability: 'approval_apply',
-            sourceRef: SOURCE_REFS[input.kind],
+            sourceRef: resolveSourceRef(input.kind, input.routeVariant),
           })
           const preflight = await attendanceResultOperationPreflightV1(
             trx,
@@ -330,24 +399,27 @@ export function createAttendanceRequestOperationBoundaryV1(
 
           const identity = preflight.itemIdentities[0]
           if (!identity) fail('W4C3B_REQUEST_OPERATION_IDENTITY_MISSING', 500)
+          const isLegacyCompat = preflight.org.acceptedWritePosture === 'legacy_projection_only'
           const [event] = result.lifecycleEvents
           if (!event) fail('W4C3B_REQUEST_LIFECYCLE_EVENT_MISSING', 500)
-          await enqueueAttendanceResultEventOutboxV1(trx, identity, [{
-            eventKind: event.eventKind,
-            payload: event.payload,
-            payloadSchemaVersion: 1,
-            businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
-              kind: event.eventKind,
-              orgId: envelope.orgId,
-              operationId: identity.id,
-            }),
-          }])
+          if (!isLegacyCompat) {
+            await enqueueAttendanceResultEventOutboxV1(trx, identity, [{
+              eventKind: event.eventKind,
+              payload: event.payload,
+              payloadSchemaVersion: 1,
+              businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
+                kind: event.eventKind,
+                orgId: envelope.orgId,
+                operationId: identity.id,
+              }),
+            }])
+          }
           await sealAttendanceResultOperationV1(trx, identity, {
             responseSnapshot: jsonValue(result.response),
             resolvedRequestId: result.resolvedRequestId,
           })
           return {
-            kind: preflight.org.acceptedWritePosture === 'legacy_projection_only' ? 'legacy_compat' as const : 'executed' as const,
+            kind: isLegacyCompat ? 'legacy_compat' as const : 'executed' as const,
             response: result.response,
           }
         })

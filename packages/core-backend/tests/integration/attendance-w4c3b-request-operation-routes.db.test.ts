@@ -295,6 +295,9 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       expect(replay.status).toBe(201)
       expect(replay.body).toEqual(first.body)
       expect(await counts(fixture.orgId)).toEqual({ requests: 1, snapshots: 1, operations: 1, outbox: 1 })
+      expect(await createResidue(fixture.orgId, createOperationId)).toMatchObject({
+        source_ref: 'plugin-attendance:POST /api/attendance/requests',
+      })
 
       const requestId = first.body?.data?.request?.id
       const snapshot = first.body?.data?.requestSnapshot
@@ -338,6 +341,30 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
         request_type: 'missed_check_in',
       })
     expect(await counts(fixture.orgId)).toEqual({ requests: 1, snapshots: 0, operations: 0, outbox: 0 })
+  })
+
+  it('keeps stable-ID legacy replay durable without creating an outbox row', async () => {
+    const fixture = await seedOrg('legacy')
+    const operationId = randomUUID()
+    const requestOptions = {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}` },
+      body: {
+        operationId,
+        orgId: fixture.orgId,
+        workDate: '2049-08-22',
+        requestType: 'missed_check_in',
+        requestedInAt: '2049-08-22T09:00:00.000Z',
+        reason: 'legacy compatibility replay',
+      },
+    }
+    const first = await requestJson(`${baseUrl}/api/attendance/requests`, requestOptions)
+    const replay = await requestJson(`${baseUrl}/api/attendance/requests`, requestOptions)
+
+    expect(first.status, first.raw).toBe(201)
+    expect(replay.status, replay.raw).toBe(201)
+    expect(replay.body).toEqual(first.body)
+    expect(await counts(fixture.orgId)).toEqual({ requests: 1, snapshots: 0, operations: 1, outbox: 0 })
   })
 
   it('keeps null-ID legacy decision validation bytes unchanged', async () => {
@@ -915,5 +942,499 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       }])
       }
     }
+  })
+
+  async function createResidue(orgId: string, operationId: string | null = null) {
+    const result = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_requests WHERE org_id = $1) AS requests,
+         (SELECT count(*)::int FROM attendance_request_calculation_snapshots WHERE org_id = $1) AS snapshots,
+         (SELECT count(*)::int FROM attendance_schedule_dispatch_requests WHERE org_id = $1) AS schedule_dispatch,
+         (SELECT count(*)::int FROM attendance_shift_swap_requests WHERE org_id = $1) AS shift_swap,
+         (SELECT count(*)::int FROM approval_instances
+           WHERE metadata ->> 'orgId' = $1) AS approval_instances,
+         (SELECT count(*)::int FROM approval_assignments aa
+           JOIN approval_instances ai ON ai.id = aa.instance_id
+          WHERE ai.metadata ->> 'orgId' = $1) AS approval_assignments,
+         (SELECT count(*)::int FROM approval_records ar
+           JOIN approval_instances ai ON ai.id = ar.instance_id
+          WHERE ai.metadata ->> 'orgId' = $1) AS approval_records,
+         (SELECT count(*)::int FROM attendance_events WHERE org_id = $1) AS attendance_events,
+         (SELECT count(*)::int FROM attendance_records WHERE org_id = $1) AS attendance_records,
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1
+             AND entrypoint = 'request_create'
+             AND ($2::uuid IS NULL OR operation_id = $2::uuid)) AS operations,
+         (SELECT count(*)::int FROM attendance_result_event_outbox
+           WHERE org_id = $1
+             AND entrypoint = 'request_create'
+             AND ($2::uuid IS NULL OR operation_id = $2::uuid)) AS outbox,
+         (SELECT source_ref FROM attendance_result_operations
+           WHERE org_id = $1 AND entrypoint = 'request_create'
+             AND ($2::uuid IS NULL OR operation_id = $2::uuid)
+           ORDER BY created_at DESC NULLS LAST
+           LIMIT 1) AS source_ref`,
+      [orgId, operationId],
+    )
+    return result.rows[0] as {
+      requests: number
+      snapshots: number
+      schedule_dispatch: number
+      shift_swap: number
+      approval_instances: number
+      approval_assignments: number
+      approval_records: number
+      attendance_events: number
+      attendance_records: number
+      operations: number
+      outbox: number
+      source_ref: string | null
+    }
+  }
+
+  async function seedOutdoorFlow(orgId: string, token: string) {
+    const flowId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_approval_flows
+         (id, org_id, name, request_type, steps, is_active)
+       VALUES ($1::uuid, $2, 'W4C-3b outdoor flow', 'outdoor_punch', '[]'::jsonb, TRUE)`,
+      [flowId, orgId],
+    )
+    const settings = await requestJson(`${baseUrl}/api/attendance/settings`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: {
+        punchPolicy: {
+          outdoor: {
+            requireApproval: true,
+            requireNote: false,
+            requirePhoto: false,
+            approvalFlowId: flowId,
+          },
+        },
+        geoFence: { enabled: true, lat: 31.23, lng: 121.47, radiusMeters: 100 },
+      },
+    })
+    expect(settings.status, settings.raw).toBe(200)
+    return flowId
+  }
+
+  async function seedScheduleDispatchTargets(orgId: string, actorId: string) {
+    const attendanceGroupId = randomUUID()
+    const scheduleGroupId = randomUUID()
+    const shiftId = randomUUID()
+    const flowId = randomUUID()
+    const subjectUserId = randomUUID()
+    await pool.query(
+      `INSERT INTO users
+         (id, email, username, name, password_hash, role, permissions, is_active, is_admin, activation_status)
+       VALUES ($1, $2, $1, 'dispatch subject', 'x', 'user', '[]'::jsonb, TRUE, FALSE, 'activated')`,
+      [subjectUserId, `w4c3b-dispatch-subject-${subjectUserId}@example.test`],
+    )
+    await pool.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [subjectUserId, orgId])
+    await pool.query(
+      `INSERT INTO attendance_groups (id, org_id, name, code, timezone)
+       VALUES ($1::uuid, $2, 'w4c3b-ag', 'w4c3b-ag', 'UTC')`,
+      [attendanceGroupId, orgId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_schedule_groups
+         (id, org_id, name, code, attendance_group_id, department_ref, source, is_active)
+       VALUES ($1::uuid, $2, 'w4c3b-sg', 'w4c3b-sg', $3::uuid, 'w4c3b-dept', 'manual', TRUE)`,
+      [scheduleGroupId, orgId, attendanceGroupId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shifts (id, org_id, name, work_start_time, work_end_time)
+       VALUES ($1::uuid, $2, 'w4c3b-shift', '09:00', '18:00')`,
+      [shiftId, orgId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_approval_flows
+         (id, org_id, name, request_type, steps, is_active)
+       VALUES ($1::uuid, $2, 'w4c3b-dispatch-flow', 'schedule_dispatch', '[]'::jsonb, TRUE)`,
+      [flowId, orgId],
+    )
+    // Full attendance admin on actor covers dispatch authorization in these fixtures.
+    await pool.query(
+      `UPDATE users SET permissions = $2::jsonb WHERE id = $1`,
+      [actorId, JSON.stringify(['attendance:admin', 'attendance:write', 'attendance:read', 'attendance:approve'])],
+    )
+    return { subjectUserId, scheduleGroupId, shiftId, flowId }
+  }
+
+  async function seedShiftSwapPair(orgId: string, actorId: string) {
+    const counterpartyId = randomUUID()
+    const shiftA = randomUUID()
+    const shiftB = randomUUID()
+    const assignmentA = randomUUID()
+    const assignmentB = randomUUID()
+    const flowId = randomUUID()
+    await pool.query(
+      `INSERT INTO users
+         (id, email, username, name, password_hash, role, permissions, is_active, is_admin, activation_status)
+       VALUES ($1, $2, $1, 'swap counterparty', 'x', 'user', '[]'::jsonb, TRUE, FALSE, 'activated')`,
+      [counterpartyId, `w4c3b-swap-cp-${counterpartyId}@example.test`],
+    )
+    await pool.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [counterpartyId, orgId])
+    await pool.query(
+      `INSERT INTO attendance_shifts (id, org_id, name, work_start_time, work_end_time)
+       VALUES ($1::uuid, $3, 'swap-a', '09:00', '18:00'),
+              ($2::uuid, $3, 'swap-b', '10:00', '19:00')`,
+      [shiftA, shiftB, orgId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status,
+          assignment_kind, slot_index)
+       VALUES
+         ($1::uuid, $3, $4, $5::uuid, '2049-09-01', '2049-09-01', TRUE, 'published', 'regular', 0),
+         ($2::uuid, $3, $6, $7::uuid, '2049-09-02', '2049-09-02', TRUE, 'published', 'regular', 0)`,
+      [assignmentA, assignmentB, orgId, actorId, shiftA, counterpartyId, shiftB],
+    )
+    await pool.query(
+      `INSERT INTO attendance_approval_flows
+         (id, org_id, name, request_type, steps, is_active)
+       VALUES ($1::uuid, $2, 'w4c3b-swap-flow', 'shift_swap', '[]'::jsonb, TRUE)`,
+      [flowId, orgId],
+    )
+    return { counterpartyId, assignmentA, assignmentB, flowId }
+  }
+
+  it('P13 create families: outdoor/schedule_dispatch/shift_swap shadow success with exact source_ref', async () => {
+    // Outdoor
+    {
+      const fixture = await seedOrg('shadow')
+      await seedOutdoorFlow(fixture.orgId, fixture.token)
+      const operationId = randomUUID()
+      const requestOptions = {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${fixture.token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          operationId,
+          orgId: fixture.orgId,
+          eventType: 'check_in',
+          occurredAt: '2020-09-10T01:00:00.000Z',
+          timezone: 'UTC',
+          source: 'mobile',
+          location: { lat: 0, lng: 0 },
+          meta: { outdoor: true, note: 'field' },
+        },
+      }
+      const punch = await requestJson(`${baseUrl}/api/attendance/punch`, requestOptions)
+      const replay = await requestJson(`${baseUrl}/api/attendance/punch`, requestOptions)
+      expect(punch.status, punch.raw).toBe(202)
+      expect(replay.status, replay.raw).toBe(202)
+      expect(replay.body).toEqual(punch.body)
+      expect(punch.body?.data?.pendingApproval).toBe(true)
+      const residue = await createResidue(fixture.orgId, operationId)
+      expect(residue).toMatchObject({
+        requests: 1,
+        snapshots: 1,
+        approval_instances: 1,
+        approval_assignments: 3,
+        approval_records: 0,
+        attendance_events: 0,
+        attendance_records: 0,
+        operations: 1,
+        outbox: 1,
+        source_ref: 'plugin-attendance:POST /api/attendance/punch#outdoor-approval',
+      })
+    }
+
+    // Schedule dispatch
+    {
+      const fixture = await seedOrg('shadow')
+      const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
+      const token = await mintToken(fixture.userId)
+      const operationId = randomUUID()
+      const requestOptions = {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          operationId,
+          userId: targets.subjectUserId,
+          targetScheduleGroupId: targets.scheduleGroupId,
+          targetShiftId: targets.shiftId,
+          startDate: '2049-09-11',
+          endDate: '2049-09-11',
+          approvalFlowId: targets.flowId,
+          reason: 'dispatch shadow',
+        },
+      }
+      const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, requestOptions)
+      const replay = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, requestOptions)
+      expect(create.status, create.raw).toBe(201)
+      expect(replay.status, replay.raw).toBe(201)
+      expect(replay.body).toEqual(create.body)
+      const residue = await createResidue(fixture.orgId, operationId)
+      expect(residue).toMatchObject({
+        requests: 1,
+        snapshots: 1,
+        schedule_dispatch: 1,
+        approval_instances: 1,
+        approval_assignments: 3,
+        approval_records: 0,
+        attendance_events: 0,
+        attendance_records: 0,
+        operations: 1,
+        outbox: 1,
+        source_ref: 'plugin-attendance:POST /api/attendance/schedule-dispatch-requests',
+      })
+    }
+
+    // Shift swap
+    {
+      const fixture = await seedOrg('shadow')
+      const pair = await seedShiftSwapPair(fixture.orgId, fixture.userId)
+      const operationId = randomUUID()
+      const requestOptions = {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${fixture.token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          operationId,
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: pair.assignmentB,
+          approvalFlowId: pair.flowId,
+          reason: 'swap shadow',
+        },
+      }
+      const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, requestOptions)
+      const replay = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, requestOptions)
+      expect(create.status, create.raw).toBe(201)
+      expect(replay.status, replay.raw).toBe(201)
+      expect(replay.body).toEqual(create.body)
+      const residue = await createResidue(fixture.orgId, operationId)
+      expect(residue).toMatchObject({
+        requests: 1,
+        snapshots: 1,
+        shift_swap: 1,
+        approval_instances: 1,
+        approval_assignments: 3,
+        approval_records: 0,
+        attendance_events: 0,
+        attendance_records: 0,
+        operations: 1,
+        outbox: 1,
+        source_ref: 'plugin-attendance:POST /api/attendance/shift-swap-requests',
+      })
+    }
+  })
+
+  it('P13 create families: missing operationId on W4 org fails closed with zero source/shared residue', async () => {
+    // Outdoor missing-ID on shadow fails closed
+    {
+      const fixture = await seedOrg('shadow')
+      await seedOutdoorFlow(fixture.orgId, fixture.token)
+      const before = await createResidue(fixture.orgId)
+      const punch = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${fixture.token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          orgId: fixture.orgId,
+          eventType: 'check_in',
+          occurredAt: '2020-09-12T01:00:00.000Z',
+          timezone: 'UTC',
+          source: 'mobile',
+          location: { lat: 0, lng: 0 },
+          meta: { outdoor: true, note: 'no-id' },
+        },
+      })
+      expect(punch.status, punch.raw).toBe(422)
+      expect(punch.body?.error?.code).toBe('W4C0_OPERATION_ID_REQUIRED')
+      expect(await createResidue(fixture.orgId)).toEqual(before)
+    }
+
+    // Schedule dispatch missing-ID
+    {
+      const fixture = await seedOrg('shadow')
+      const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
+      const token = await mintToken(fixture.userId)
+      const before = await createResidue(fixture.orgId)
+      const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          userId: targets.subjectUserId,
+          targetScheduleGroupId: targets.scheduleGroupId,
+          targetShiftId: targets.shiftId,
+          startDate: '2049-09-13',
+          endDate: '2049-09-13',
+          approvalFlowId: targets.flowId,
+        },
+      })
+      expect(create.status, create.raw).toBe(422)
+      expect(create.body?.error?.code).toBe('W4C0_OPERATION_ID_REQUIRED')
+      expect(await createResidue(fixture.orgId)).toEqual(before)
+    }
+
+    // Shift swap missing-ID
+    {
+      const fixture = await seedOrg('shadow')
+      const pair = await seedShiftSwapPair(fixture.orgId, fixture.userId)
+      const before = await createResidue(fixture.orgId)
+      const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${fixture.token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: pair.assignmentB,
+          approvalFlowId: pair.flowId,
+        },
+      })
+      expect(create.status, create.raw).toBe(422)
+      expect(create.body?.error?.code).toBe('W4C0_OPERATION_ID_REQUIRED')
+      expect(await createResidue(fixture.orgId)).toEqual(before)
+    }
+  })
+
+  it('P13 create families: legacy null-ID preserves zero W4 operation/outbox rows', async () => {
+    {
+      const fixture = await seedOrg('legacy')
+      await seedOutdoorFlow(fixture.orgId, fixture.token)
+      const punch = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${fixture.token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          orgId: fixture.orgId,
+          eventType: 'check_out',
+          occurredAt: '2020-09-14T10:00:00.000Z',
+          timezone: 'UTC',
+          source: 'mobile',
+          location: { lat: 0, lng: 0 },
+          meta: { outdoor: true, note: 'legacy outdoor' },
+        },
+      })
+      expect(punch.status, punch.raw).toBe(202)
+      expect(punch.body?.data?.pendingApproval).toBe(true)
+      expect(Object.keys(punch.body ?? {})).toEqual(['ok', 'data'])
+      expect(Object.keys(punch.body?.data ?? {})).toEqual(['pendingApproval', 'request'])
+      expect(await createResidue(fixture.orgId)).toMatchObject({
+        requests: 1,
+        snapshots: 0,
+        operations: 0,
+        outbox: 0,
+      })
+    }
+
+    {
+      const fixture = await seedOrg('legacy')
+      const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
+      const token = await mintToken(fixture.userId)
+      const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          userId: targets.subjectUserId,
+          targetScheduleGroupId: targets.scheduleGroupId,
+          targetShiftId: targets.shiftId,
+          startDate: '2049-09-15',
+          endDate: '2049-09-15',
+          approvalFlowId: targets.flowId,
+        },
+      })
+      expect(create.status, create.raw).toBe(201)
+      expect(Object.keys(create.body ?? {})).toEqual(['ok', 'data'])
+      expect(Object.keys(create.body?.data ?? {})).toEqual(['request', 'scheduleDispatch'])
+      expect(await createResidue(fixture.orgId)).toMatchObject({
+        requests: 1,
+        schedule_dispatch: 1,
+        snapshots: 0,
+        operations: 0,
+        outbox: 0,
+      })
+    }
+
+    {
+      const fixture = await seedOrg('legacy')
+      const pair = await seedShiftSwapPair(fixture.orgId, fixture.userId)
+      const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${fixture.token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: pair.assignmentB,
+          approvalFlowId: pair.flowId,
+        },
+      })
+      expect(create.status, create.raw).toBe(201)
+      expect(Object.keys(create.body ?? {})).toEqual(['ok', 'data'])
+      expect(Object.keys(create.body?.data ?? {})).toEqual(['request', 'shiftSwap'])
+      expect(await createResidue(fixture.orgId)).toMatchObject({
+        requests: 1,
+        shift_swap: 1,
+        snapshots: 0,
+        operations: 0,
+        outbox: 0,
+      })
+    }
+  })
+
+  it('P13 create families: body routeVariant spoof cannot change host source_ref', async () => {
+    const fixture = await seedOrg('shadow')
+    const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
+    const token = await mintToken(fixture.userId)
+    const operationId = randomUUID()
+    const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'x-org-id': fixture.orgId,
+      },
+      body: {
+        operationId,
+        routeVariant: 'outdoor',
+        userId: targets.subjectUserId,
+        targetScheduleGroupId: targets.scheduleGroupId,
+        targetShiftId: targets.shiftId,
+        startDate: '2049-09-16',
+        endDate: '2049-09-16',
+        approvalFlowId: targets.flowId,
+      },
+    })
+    // strict schema rejects unknown body keys (routeVariant is host-only).
+    expect(create.status, create.raw).toBe(400)
+    expect(await createResidue(fixture.orgId, operationId)).toMatchObject({
+      requests: 0,
+      operations: 0,
+      outbox: 0,
+      schedule_dispatch: 0,
+    })
   })
 })

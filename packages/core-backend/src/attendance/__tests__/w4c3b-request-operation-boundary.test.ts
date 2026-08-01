@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AttendanceW4TransactionClientV1 } from '../w4c0-identity'
 import {
   AttendanceW4RequestBoundaryError,
+  ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1,
   createAttendanceRequestOperationBoundaryV1,
   type AttendanceRequestOperationAdapterV1,
 } from '../w4c3b-request-operation-boundary'
@@ -55,10 +56,12 @@ function preparedState() {
 function adapters(
   events: string[],
   acceptedWritePostures: Array<'legacy_projection_only' | 'shadow' | 'authoritative' | null> = [],
+  routeVariants: Array<string | null> = [],
 ): Record<'request_create' | 'request_pending_edit' | 'request_decision' | 'request_cancel', AttendanceRequestOperationAdapterV1> {
   const adapter: AttendanceRequestOperationAdapterV1 = {
-    async prepare(trx, routeInput) {
+    async prepare(trx, routeInput, operation) {
       events.push('prepare')
+      routeVariants.push(operation.routeVariant)
       expect(Object.isFrozen(routeInput)).toBe(true)
       await trx.query('SELECT 1 AS request_prepare_marker')
       return preparedState()
@@ -107,6 +110,7 @@ describe('W4C-3b request operation boundary', () => {
       kind: 'request_create',
       operationId: null,
       correlationId: 'request-create:legacy',
+      routeVariant: 'generic',
       routeInput: { requestType: 'leave' },
     })).resolves.toEqual({ kind: 'legacy', response: { id: REQUEST_ID } })
 
@@ -115,6 +119,29 @@ describe('W4C-3b request operation boundary', () => {
     expect(client.calls.some(({ sqlText }) => sqlText.includes('FROM users WHERE id = $1'))).toBe(false)
     expect(client.calls.some(({ sqlText }) => sqlText.includes('attendance_result_operations'))).toBe(false)
     expect(client.calls.some(({ sqlText }) => sqlText.includes('attendance_result_event_outbox'))).toBe(false)
+  })
+
+  it('seals stable-ID legacy compatibility without creating an outbox row', async () => {
+    delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    const events: string[] = []
+    const client = fakeClient(null)
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => ({ client, release: vi.fn() }),
+      adapters: adapters(events),
+    })
+
+    await expect(boundary.execute({
+      kind: 'request_create',
+      operationId: OPERATION_ID,
+      correlationId: 'request-create:legacy-compat',
+      routeVariant: 'generic',
+      routeInput: { requestType: 'leave' },
+    })).resolves.toEqual({ kind: 'legacy_compat', response: { id: REQUEST_ID } })
+
+    expect(events).toEqual(['prepare', 'execute'])
+    expect(client.calls.some(({ sqlText }) => sqlText.includes('INSERT INTO attendance_result_operations'))).toBe(true)
+    expect(client.calls.some(({ sqlText }) => sqlText.includes('attendance_result_event_outbox'))).toBe(false)
+    expect(client.calls.some(({ sqlText }) => sqlText.startsWith('UPDATE attendance_result_operations'))).toBe(true)
   })
 
   it('rejects extra top-level keys and nested callbacks before acquiring a connection', async () => {
@@ -127,6 +154,7 @@ describe('W4C-3b request operation boundary', () => {
       kind: 'request_create' as const,
       operationId: OPERATION_ID,
       correlationId: 'request-create:test',
+      routeVariant: 'generic' as const,
       routeInput: { body: { requestType: 'leave' } },
     }
 
@@ -154,6 +182,7 @@ describe('W4C-3b request operation boundary', () => {
         kind: 'request_create',
         operationId: OPERATION_ID,
         correlationId: 'request-create:suspended',
+        routeVariant: 'generic',
         routeInput: { requestType: 'leave' },
       }),
     ).rejects.toMatchObject({ code: 'SEGMENT_CALCULATION_SUSPENDED' })
@@ -180,6 +209,7 @@ describe('W4C-3b request operation boundary', () => {
         kind: 'request_create',
         operationId: OPERATION_ID,
         correlationId: 'request-create:shadow',
+        routeVariant: 'generic',
         routeInput: { requestType: 'leave' },
       }),
     ).resolves.toEqual({ kind: 'executed', response: { id: REQUEST_ID } })
@@ -196,5 +226,119 @@ describe('W4C-3b request operation boundary', () => {
     expect(seal).toBeGreaterThan(outbox)
     expect(client.calls.at(-1)?.sqlText).toBe('COMMIT')
     expect(release).toHaveBeenCalledOnce()
+  })
+
+  it('maps each closed request_create routeVariant to its truthful source_ref', async () => {
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ORG_ID
+    const routeVariants: Array<string | null> = []
+    const capturedSourceRefs: string[] = []
+    const client = fakeClient('shadow')
+    // Capture source_ref from the operations INSERT params (column order fixed by registry).
+    const originalQuery = client.query.bind(client)
+    client.query = async (sqlText: string, params: unknown[] = []) => {
+      if (sqlText.includes('INSERT INTO attendance_result_operations')) {
+        // source_ref is a fixed column in the claim insert; find its position via SQL text.
+        const match = sqlText.match(/INSERT INTO attendance_result_operations\s*\(([^)]+)\)/i)
+        if (match) {
+          const cols = match[1].split(',').map((c) => c.trim())
+          const idx = cols.indexOf('source_ref')
+          if (idx >= 0 && typeof params[idx] === 'string') capturedSourceRefs.push(params[idx] as string)
+        }
+      }
+      return originalQuery(sqlText, params)
+    }
+
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => ({ client, release: vi.fn() }),
+      adapters: adapters([], [], routeVariants),
+    })
+
+    for (const variant of ['generic', 'outdoor', 'schedule_dispatch', 'shift_swap'] as const) {
+      await boundary.execute({
+        kind: 'request_create',
+        operationId: OPERATION_ID,
+        correlationId: `request-create:${variant}`,
+        routeVariant: variant,
+        routeInput: { family: variant },
+      })
+    }
+
+    expect(routeVariants).toEqual(['generic', 'outdoor', 'schedule_dispatch', 'shift_swap'])
+    expect(capturedSourceRefs).toEqual([
+      ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1.generic,
+      ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1.outdoor,
+      ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1.schedule_dispatch,
+      ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1.shift_swap,
+    ])
+  })
+
+  it('fails closed on unknown create variants and non-request_create mismatches before connection', async () => {
+    const acquireConnection = vi.fn()
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection,
+      adapters: adapters([]),
+    })
+
+    await expect(
+      boundary.execute({
+        kind: 'request_create',
+        operationId: OPERATION_ID,
+        correlationId: 'bad-variant',
+        routeVariant: 'not_a_family' as never,
+        routeInput: {},
+      }),
+    ).rejects.toBeInstanceOf(AttendanceW4RequestBoundaryError)
+
+    await expect(
+      boundary.execute({
+        kind: 'request_create',
+        operationId: OPERATION_ID,
+        correlationId: 'null-variant',
+        routeVariant: null,
+        routeInput: {},
+      }),
+    ).rejects.toBeInstanceOf(AttendanceW4RequestBoundaryError)
+
+    await expect(
+      boundary.execute({
+        kind: 'request_decision',
+        operationId: OPERATION_ID,
+        correlationId: 'decision-with-outdoor',
+        routeVariant: 'outdoor' as never,
+        routeInput: {},
+      }),
+    ).rejects.toBeInstanceOf(AttendanceW4RequestBoundaryError)
+
+    await expect(
+      boundary.execute({
+        kind: 'request_pending_edit',
+        operationId: OPERATION_ID,
+        correlationId: 'edit-with-schedule',
+        routeVariant: 'schedule_dispatch' as never,
+        routeInput: {},
+      }),
+    ).rejects.toBeInstanceOf(AttendanceW4RequestBoundaryError)
+
+    expect(acquireConnection).not.toHaveBeenCalled()
+  })
+
+  it('does not accept routeVariant spoofed only inside routeInput — top-level field is required', async () => {
+    const acquireConnection = vi.fn()
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection,
+      adapters: adapters([]),
+    })
+
+    await expect(
+      boundary.execute({
+        kind: 'request_create',
+        operationId: OPERATION_ID,
+        correlationId: 'spoof-body',
+        // missing top-level routeVariant is invalid even if body pretends
+        routeInput: { routeVariant: 'outdoor', body: { routeVariant: 'outdoor' } },
+      } as never),
+    ).rejects.toBeInstanceOf(AttendanceW4RequestBoundaryError)
+
+    expect(acquireConnection).not.toHaveBeenCalled()
   })
 })

@@ -9904,7 +9904,8 @@ function mapImportBatchRow(row) {
 		      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
 		      [String(orgId ?? '') + ':' + String(userId ?? ''), `${String(workDate ?? '')}:${String(requestType ?? '')}`]
 		    )
-		  } catch (_error) {
+		  } catch (error) {
+		    if (client?.__w4CanonicalTrx === true) throw error
 		    // Best-effort: preserve functional behavior if advisory locks are unavailable.
 		  }
 		}
@@ -24438,6 +24439,9 @@ module.exports = {
             },
           })
         : null
+    // Assigned later once request adapters are closed over; outdoor punch may
+    // call it before the assignment line in source order but only after activate.
+    let w4RequestOperationBoundary = null
     // Values-free HTTP mapping for typed W4 boundary/registry/command/authorization errors
     // (closed codes only; the raw caller value is never echoed). Returns true when handled.
     const W4_ERROR_NAMES = new Set([
@@ -29049,186 +29053,58 @@ module.exports = {
           const punchMeta = parsed.data.meta ?? {}
           const outdoorMarker = punchMeta.outdoor === true || punchMeta.outdoorPunch === true
           if (outdoorPolicy.requireApproval === true && (outsideGeofence || outdoorMarker)) {
+            // W4C-3b: outdoor approval create enters the canonical request_create
+            // boundary (routeVariant=outdoor) before first approval/request DML.
+            if (!w4RequestOperationBoundary) {
+              res.status(503).json({
+                ok: false,
+                error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+              })
+              return
+            }
             const eventType = parsed.data.eventType
             const note = typeof punchMeta.note === 'string' ? punchMeta.note.trim() : ''
-            if (outdoorPolicy.requireNote === true && !note) {
-              res.status(422).json({ ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
-              return
-            }
-            // S2 outdoor-punch-photo design-lock (2026-07-10) G3: requirePhoto is nested exactly like
-            // requireNote — both only ever apply to an ACCEPTED outdoor candidate (requireApproval=true
-            // is the precondition for outdoor punches existing at all; with it off, an outside-fence
-            // punch already 403s as LOCATION_RESTRICTED, so there is no "accepted outdoor punch" to
-            // attach evidence to — no separate enforcement path is opened for that case).
-            // G2: any photoFileId supplied is verified against the `files` table (row exists, owner_id
-            // is the punching user, meta.contentType is image/*) — never trusted as a bare client string.
             const rawPhotoFileId = typeof parsed.data.photoFileId === 'string' ? parsed.data.photoFileId.trim() : ''
-            if (outdoorPolicy.requirePhoto === true && !rawPhotoFileId) {
-              res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_REQUIRED', message: '外勤打卡需上传照片证据' } })
-              return
-            }
-            let photoFileId = null
-            if (rawPhotoFileId) {
-              // F2 files-acl-tombstone design-lock (2026-07-10): `DELETE /api/files/:id` now tombstones
-              // the row (`deleted_at`) instead of hard-deleting it — this filter is what makes a
-              // tombstoned id read as "no such evidence" here, same as the pre-tombstone hard-delete did.
-              const photoRows = await db.query('SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL LIMIT 1', [rawPhotoFileId])
-              const photoRow = photoRows[0] ?? null
-              const photoMeta = normalizeMetadata(photoRow?.meta)
-              // H2 photo-evidence-hardening design-lock (2026-07-10) P3-1 AMENDMENT: `meta.contentType`
-              // is client-asserted (multer trusts the multipart part's Content-Type header as-is), so a
-              // forged `image/png` declaration on a non-image body previously passed this check. Rows
-              // written by the sniff-aware upload path (core routes/files.ts) carry `meta.sniffed ===
-              // true` — a PATH MARKER, not a content-type value — and ONLY those rows are held to the
-              // sniffed verdict: `meta.sniffedContentType` must be present and start with `image/`, else
-              // invalid (a magic-byte miss on a real upload is rejected here — this is what closes the
-              // forged-MIME gap). Rows with no `sniffed` key predate this slice and fall back to the
-              // pre-existing `meta.contentType` check byte-for-byte — old evidence is not retroactively
-              // invalidated. (Considered writing `sniffedContentType` unconditionally with a null
-              // sentinel on a miss instead of this separate marker — rejected: JSON key-present-but-null
-              // vs key-absent is a classic wire-format footgun, and a plain boolean path marker is more
-              // explicit and reusable by any future consumer of this table.)
-              let photoContentTypeValid
-              if (photoMeta.sniffed === true) {
-                const sniffedContentType = typeof photoMeta.sniffedContentType === 'string' ? photoMeta.sniffedContentType : ''
-                photoContentTypeValid = sniffedContentType.startsWith('image/')
-              } else {
-                const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
-                photoContentTypeValid = photoContentType.startsWith('image/')
-              }
-              if (!photoRow || photoRow.owner_id !== userId || !photoContentTypeValid) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_INVALID', message: '照片证据无效' } })
-                return
-              }
-              photoFileId = rawPhotoFileId
-            }
-            // Resolve + validate the outdoor_punch approval flow. No silent fall-back to auto-approved.
-            const requestedFlowId = typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId.trim() : ''
-            let flow = null
-            if (requestedFlowId) {
-              flow = await loadApprovalFlow(db, orgId, { flowId: requestedFlowId })
-              if (!flow || flow.requestType !== 'outdoor_punch' || flow.isActive !== true) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: '外勤审批流不存在或未启用' } })
-                return
-              }
-            } else {
-              // #2304 §2.5: with no explicit approvalFlowId, require a UNIQUE active outdoor_punch flow.
-              // `loadApprovalFlow` would silently pick the newest (ORDER BY created_at) when several are
-              // active — that could route approvals to the wrong people. Demand exactly one (LIMIT 2 → ≠1
-              // ⇒ 422), so an ambiguous setup is rejected instead of guessed.
-              const activeFlows = await db.query(
-                `SELECT * FROM attendance_approval_flows
-                 WHERE org_id = $1 AND request_type = 'outdoor_punch' AND is_active = true
-                 ORDER BY created_at DESC LIMIT 2`,
-                [orgId]
-              )
-              if (activeFlows.length !== 1) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: activeFlows.length === 0 ? '外勤审批流未配置' : '存在多个启用的外勤审批流，请指定 approvalFlowId' } })
-                return
-              }
-              flow = mapApprovalFlowRow(activeFlows[0])
-            }
-
-            const draft = {
-              orgId,
-              workDate,
-              requestType: 'outdoor_punch',
-              requestedInAt: eventType === 'check_in' ? occurredAt : null,
-              requestedOutAt: eventType === 'check_out' ? occurredAt : null,
-              reason: note || null,
-              metadata: {
-                outdoorPunch: {
-                  version: 1,
+            try {
+              const operationId = typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null
+              const outcome = await w4RequestOperationBoundary.execute({
+                kind: 'request_create',
+                operationId,
+                correlationId: requestCorrelationId(req, operationId, 'outdoor-create'),
+                routeVariant: 'outdoor',
+                routeInput: {
+                  actorId: userId,
+                  tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId,
+                  requesterName: getUserLabel(req, userId),
+                  orgId,
+                  workDate,
                   eventType,
                   occurredAt: occurredAt.toISOString(),
-                  workDate,
                   timezone,
                   source: parsed.data.source ?? 'mobile',
                   location: parsed.data.location ?? punchMeta.location ?? null,
-                  note: note || null,
-                  detection: outsideGeofence ? 'outside_geofence' : 'marker',
-                  // S2 outdoor-punch-photo design-lock (2026-07-10): photoFileId is written ONLY when a
-                  // verified photo was supplied, so a punch with requirePhoto=false and no photo produces
-                  // the pre-slice metadata.outdoorPunch shape byte-for-byte (no null-valued key added).
-                  ...(photoFileId ? { photoFileId } : {}),
+                  note,
+                  photoFileId: rawPhotoFileId || null,
+                  outsideGeofence: outsideGeofence === true,
+                  outdoorPolicy: {
+                    requireApproval: outdoorPolicy.requireApproval === true,
+                    requireNote: outdoorPolicy.requireNote === true,
+                    requirePhoto: outdoorPolicy.requirePhoto === true,
+                    approvalFlowId: typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId : '',
+                  },
                 },
-                approvalFlow: { id: flow.id, name: flow.name, steps: flow.steps, currentStep: 0 },
-              },
-            }
-            const requestId = randomUUID()
-            const approvalId = `apv_${randomUUID()}`
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation: a dynamic-kind step
-            // anywhere in the flow blocks request-create (flag OFF / port missing / kind unimplemented),
-            // so a later dynamic step cannot start a flow and strand it mid-flight.
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata.approvalFlow.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create (org-scoped port); assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId, userId, flowSteps: draft.metadata.approvalFlow.steps, context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId, requestId, orgId, userId, requesterName: getUserLabel(req, userId), draft, orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata.approvalFlow.steps, 0, approvalPayload.requesterSnapshot
-            )
-            try {
-		          const createResult = await db.transaction(async (trx) => {
-                await acquireAttendanceRequestLock(trx, orgId, userId, workDate, 'outdoor_punch')
-                // Outdoor dedup key includes eventType (#2304 §2.2): same-day outdoor check_in + check_out
-                // can coexist; a 2nd pending/approved of the SAME eventType is the duplicate.
-                const dup = await trx.query(
-                  `SELECT id FROM attendance_requests
-                   WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = 'outdoor_punch'
-                     AND status IN ('pending', 'approved')
-                     AND metadata -> 'outdoorPunch' ->> 'eventType' = $4
-                   LIMIT 1`,
-                  [orgId, userId, workDate, eventType]
-                )
-                if (dup.length > 0) {
-                  throw new HttpError(409, 'DUPLICATE_REQUEST', 'Outdoor punch already pending or approved for this day and event type')
-                }
-                await upsertAttendanceApprovalInstance(trx, approvalPayload)
-                await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-                const rows = await trx.query(
-                  `INSERT INTO attendance_requests
-                   (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-                   RETURNING *`,
-                  [requestId, userId, orgId, workDate, 'outdoor_punch', draft.requestedInAt, draft.requestedOutAt, draft.reason, 'pending', approvalId, JSON.stringify(draft.metadata)]
-                )
-                // W4C-3b P12: append immutable request snapshot v1 after parent exists.
-                // legacy_projection_only is a host no-op (zero rows).
-		                const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
-                  orgId,
-                  requestId,
-                  requestType: 'outdoor_punch',
-                  subjectUserId: userId,
-		                  actorUserId: userId,
-		                  payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
-		                  resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
-		                    orgId,
-		                    userId,
-		                    workDate,
-		                    occurredAt: occurredAt.toISOString(),
-		                  }),
-		                })
-		                return { request: rows[0], snapshotToken: buildRequestSnapshotToken(snapshotAppend) }
-		              })
-		              emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
-		              res.status(202).json({
-		                ok: true,
-		                data: {
-		                  pendingApproval: true,
-		                  request: mapAttendanceRequestRow(createResult.request),
-		                  ...(createResult.snapshotToken ? { requestSnapshot: createResult.snapshotToken } : {}),
-		                },
-		              })
+              })
+              if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+                emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
+              }
+              res.status(202).json(outcome.response)
               return
             } catch (error) {
               if (error instanceof HttpError) {
                 res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
                 return
               }
+              if (respondIfW4BoundaryError(res, error)) return
               throw error
             }
           }
@@ -30653,6 +30529,9 @@ module.exports = {
     }
 
     const shiftSwapCreateSchema = z.object({
+      // W4C-3b: client-stable retry identity; omitted => null-ID legacy path.
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
       requesterAssignmentId: z.string().optional(),
       requester_assignment_id: z.string().optional(),
       counterpartyAssignmentId: z.string().optional(),
@@ -30663,6 +30542,9 @@ module.exports = {
     })
 
     const scheduleDispatchCreateSchema = z.object({
+      // W4C-3b: client-stable retry identity; omitted => null-ID legacy path.
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
       userId: z.string().min(1).optional(),
       user_id: z.string().min(1).optional(),
       targetScheduleGroupId: z.string().optional(),
@@ -31227,7 +31109,8 @@ module.exports = {
             `${String(userId ?? '')}:${String(targetScheduleGroupId ?? '')}:${Number(slotIndex ?? 0)}`,
           ]
         )
-      } catch (_error) {
+      } catch (error) {
+        if (client?.__w4CanonicalTrx === true) throw error
         // Best-effort: if advisory locks are unavailable, the exact source_key unique index still catches exact
         // duplicates, but overlapping windows rely on the pre-insert SELECT.
       }
@@ -32010,135 +31893,1084 @@ module.exports = {
       }
     }
 
-    const requestCreateAdapter = {
-      async prepare(trx, rawInput) {
-        const route = requestBoundaryRouteInputSchema.parse(rawInput)
-        if (!route.orgId || route.requestId !== null) {
-          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
-        }
-        const draft = await resolveAttendanceRequestDraft(
-          trx,
-          route.requestBody,
-          { org_id: route.orgId, user_id: route.actorId },
-        )
-        let makeupPunchPolicy = null
-        if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
-          const settings = await getSettings(trx)
-          if (settings?.makeupPunchPolicy?.enabled === true) makeupPunchPolicy = settings.makeupPunchPolicy
-        }
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
-        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-          orgId: route.orgId,
-          userId: route.actorId,
-          flowSteps: draft.metadata?.approvalFlow?.steps,
-          context,
-        })
-        const approvalPayload = buildAttendanceApprovalInstancePayload({
-          approvalId,
-          requestId,
-          orgId: route.orgId,
-          userId: route.actorId,
-          requesterName: route.requesterName,
+    // W4C-3b: one request_create adapter multiplexes generic + outdoor +
+    // schedule_dispatch + shift_swap. The host supplies routeVariant; body keys
+    // cannot spoof it. prepare owns non-locking reads; execute owns locks and the
+    // first source DML so completed replay can return before source locking.
+    const outdoorCreateRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      requesterName: z.string().min(1),
+      orgId: z.string().min(1),
+      workDate: z.string().min(1),
+      eventType: z.enum(['check_in', 'check_out']),
+      occurredAt: z.string().min(1),
+      timezone: z.string().min(1),
+      source: z.string().min(1),
+      location: z.unknown().nullable(),
+      note: z.string(),
+      photoFileId: z.string().nullable(),
+      outsideGeofence: z.boolean(),
+      outdoorPolicy: z.object({
+        requireApproval: z.boolean().optional(),
+        requireNote: z.boolean().optional(),
+        requirePhoto: z.boolean().optional(),
+        approvalFlowId: z.string().optional(),
+      }).passthrough(),
+    }).strict()
+
+    const scheduleDispatchCreateRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      actorFullAdmin: z.boolean(),
+      requesterName: z.string().min(1),
+      orgId: z.string().min(1),
+      input: z.object({
+        userId: z.string().min(1),
+        targetScheduleGroupId: z.string().min(1),
+        targetShiftId: z.string().min(1),
+        startDate: z.string().min(1),
+        endDate: z.string().min(1),
+        slotIndex: z.number().int().min(0).max(2).nullable().optional(),
+        reason: z.string().nullable().optional(),
+        approvalFlowId: z.string().nullable().optional(),
+      }).passthrough(),
+    }).strict()
+
+    const shiftSwapCreateRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      requesterName: z.string().min(1).nullable(),
+      orgId: z.string().min(1),
+      requesterAssignmentId: z.string().uuid(),
+      counterpartyAssignmentId: z.string().uuid(),
+      approvalFlowId: z.string().uuid().nullable(),
+      reason: z.string().nullable(),
+    }).strict()
+
+    async function prepareGenericRequestCreate(trx, rawInput) {
+      const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      if (!route.orgId || route.requestId !== null) {
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+      }
+      const draft = await resolveAttendanceRequestDraft(
+        trx,
+        route.requestBody,
+        { org_id: route.orgId, user_id: route.actorId },
+      )
+      let makeupPunchPolicy = null
+      if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+        const settings = await getSettings(trx)
+        if (settings?.makeupPunchPolicy?.enabled === true) makeupPunchPolicy = settings.makeupPunchPolicy
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: route.actorId,
+        flowSteps: draft.metadata?.approvalFlow?.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: route.actorId,
+        requesterName: route.requesterName,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata?.approvalFlow?.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      return {
+        orgId: route.orgId,
+        actorId: route.actorId,
+        actorPosture: 'self',
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: route.actorId,
+        subjectScope: { kind: 'self', userId: route.actorId },
+        commandPayload: requestCommandPayload(route.requestBody, draft, 'create'),
+        state: {
+          routeVariant: 'generic',
+          route,
           draft,
-          orgRelations,
-        })
-        const approvalAssignments = buildAttendanceApprovalAssignments(
-          draft.metadata?.approvalFlow?.steps,
-          0,
-          approvalPayload.requesterSnapshot,
-        )
-        return {
+          makeupPunchPolicy,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+        },
+      }
+    }
+
+    async function executeGenericRequestCreate(trx, prepared) {
+      const {
+        route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments,
+      } = prepared.state
+      await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, draft.workDate, draft.requestType)
+      const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+        orgId: route.orgId,
+        userId: route.actorId,
+        workDate: draft.workDate,
+        requestType: draft.requestType,
+      })
+      if (duplicateRequest) {
+        throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+      }
+      if (makeupPunchPolicy) {
+        const enforcement = await enforceMakeupPunchPolicy(trx, {
+          policy: makeupPunchPolicy,
           orgId: route.orgId,
-          actorId: route.actorId,
-          actorPosture: 'self',
-          tokenSubjectUserId: route.tokenSubjectUserId,
           subjectUserId: route.actorId,
-          subjectScope: { kind: 'self', userId: route.actorId },
-          commandPayload: requestCommandPayload(route.requestBody, draft, 'create'),
-          state: { route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments },
-        }
-      },
-      async execute(trx, prepared) {
-        const { route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments } = prepared.state
-        await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, draft.workDate, draft.requestType)
-        const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+          requesterId: route.actorId,
+          requestId: null,
+          draft,
+        })
+        draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const rows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          route.actorId,
+          route.orgId,
+          draft.workDate,
+          draft.requestType,
+          draft.requestedInAt,
+          draft.requestedOutAt,
+          draft.reason,
+          'pending',
+          approvalId,
+          JSON.stringify(draft.metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: draft.requestType,
+        subjectUserId: route.actorId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
           orgId: route.orgId,
           userId: route.actorId,
           workDate: draft.workDate,
-          requestType: draft.requestType,
-        })
-        if (duplicateRequest) {
-          throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
-        }
-        if (makeupPunchPolicy) {
-          const enforcement = await enforceMakeupPunchPolicy(trx, {
-            policy: makeupPunchPolicy,
-            orgId: route.orgId,
-            subjectUserId: route.actorId,
-            requesterId: route.actorId,
-            requestId: null,
-            draft,
-          })
-          draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
-        }
-        await upsertAttendanceApprovalInstance(trx, approvalPayload)
-        await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-        const rows = await trx.query(
-          `INSERT INTO attendance_requests
-           (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-           RETURNING *`,
-          [
-            requestId,
-            route.actorId,
-            route.orgId,
-            draft.workDate,
-            draft.requestType,
-            draft.requestedInAt,
-            draft.requestedOutAt,
-            draft.reason,
-            'pending',
-            approvalId,
-            JSON.stringify(draft.metadata),
-          ],
-        )
-        const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
-          orgId: route.orgId,
-          requestId,
-          requestType: draft.requestType,
-          subjectUserId: route.actorId,
-          actorUserId: route.actorId,
-          payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
-          resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+        }),
+      })
+      const response = {
+        ok: true,
+        data: {
+          request: mapAttendanceRequestRow(rows[0]),
+          ...(buildRequestSnapshotToken(snapshotAppend)
+            ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+            : {}),
+        },
+      }
+      return {
+        response,
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested',
+          payload: {
             orgId: route.orgId,
             userId: route.actorId,
             workDate: draft.workDate,
-          }),
-        })
-        const response = {
+            requestType: draft.requestType,
+          },
+        }],
+      }
+    }
+
+    async function prepareOutdoorRequestCreate(trx, rawInput) {
+      const route = outdoorCreateRouteInputSchema.parse(rawInput)
+      const { outdoorPolicy, eventType, workDate, note } = route
+      const occurredAt = new Date(route.occurredAt)
+      if (Number.isNaN(occurredAt.getTime())) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid outdoor punch occurredAt')
+      }
+      if (outdoorPolicy.requireNote === true && !note) {
+        throw new HttpError(422, 'OUTDOOR_NOTE_REQUIRED', '外勤打卡需填写备注')
+      }
+      const rawPhotoFileId = typeof route.photoFileId === 'string' ? route.photoFileId.trim() : ''
+      if (outdoorPolicy.requirePhoto === true && !rawPhotoFileId) {
+        throw new HttpError(422, 'OUTDOOR_PHOTO_REQUIRED', '外勤打卡需上传照片证据')
+      }
+      let photoFileId = null
+      if (rawPhotoFileId) {
+        const photoRows = await trx.query(
+          'SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+          [rawPhotoFileId],
+        )
+        const photoRow = photoRows[0] ?? null
+        const photoMeta = normalizeMetadata(photoRow?.meta)
+        let photoContentTypeValid
+        if (photoMeta.sniffed === true) {
+          const sniffedContentType = typeof photoMeta.sniffedContentType === 'string' ? photoMeta.sniffedContentType : ''
+          photoContentTypeValid = sniffedContentType.startsWith('image/')
+        } else {
+          const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
+          photoContentTypeValid = photoContentType.startsWith('image/')
+        }
+        if (!photoRow || photoRow.owner_id !== route.actorId || !photoContentTypeValid) {
+          throw new HttpError(422, 'OUTDOOR_PHOTO_INVALID', '照片证据无效')
+        }
+        photoFileId = rawPhotoFileId
+      }
+      const requestedFlowId = typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId.trim() : ''
+      let flow = null
+      if (requestedFlowId) {
+        flow = await loadApprovalFlow(trx, route.orgId, { flowId: requestedFlowId })
+        if (!flow || flow.requestType !== 'outdoor_punch' || flow.isActive !== true) {
+          throw new HttpError(422, 'OUTDOOR_APPROVAL_FLOW_REQUIRED', '外勤审批流不存在或未启用')
+        }
+      } else {
+        const activeFlows = await trx.query(
+          `SELECT * FROM attendance_approval_flows
+           WHERE org_id = $1 AND request_type = 'outdoor_punch' AND is_active = true
+           ORDER BY created_at DESC LIMIT 2`,
+          [route.orgId],
+        )
+        if (activeFlows.length !== 1) {
+          throw new HttpError(
+            422,
+            'OUTDOOR_APPROVAL_FLOW_REQUIRED',
+            activeFlows.length === 0 ? '外勤审批流未配置' : '存在多个启用的外勤审批流，请指定 approvalFlowId',
+          )
+        }
+        flow = mapApprovalFlowRow(activeFlows[0])
+      }
+      const draft = {
+        orgId: route.orgId,
+        workDate,
+        requestType: 'outdoor_punch',
+        requestedInAt: eventType === 'check_in' ? occurredAt : null,
+        requestedOutAt: eventType === 'check_out' ? occurredAt : null,
+        reason: note || null,
+        metadata: {
+          outdoorPunch: {
+            version: 1,
+            eventType,
+            occurredAt: occurredAt.toISOString(),
+            workDate,
+            timezone: route.timezone,
+            source: route.source,
+            location: route.location ?? null,
+            note: note || null,
+            detection: route.outsideGeofence ? 'outside_geofence' : 'marker',
+            ...(photoFileId ? { photoFileId } : {}),
+          },
+          approvalFlow: { id: flow.id, name: flow.name, steps: flow.steps, currentStep: 0 },
+        },
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata.approvalFlow.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: route.actorId,
+        flowSteps: draft.metadata.approvalFlow.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: route.actorId,
+        requesterName: route.requesterName,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata.approvalFlow.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      const requestWrite = {
+        workDate,
+        requestType: 'outdoor_punch',
+        requestedInAt: draft.requestedInAt ? new Date(draft.requestedInAt).toISOString() : null,
+        requestedOutAt: draft.requestedOutAt ? new Date(draft.requestedOutAt).toISOString() : null,
+        reason: draft.reason,
+        minutes: null,
+        leaveTypeId: null,
+        leaveTypeCode: null,
+        overtimeRuleId: null,
+        overtimeRuleName: null,
+        attachmentUrl: null,
+        approvalFlowId: flow.id,
+        outdoorEventType: eventType,
+        outdoorOccurredAt: occurredAt.toISOString(),
+        outdoorTimezone: route.timezone,
+        outdoorSource: route.source,
+        outdoorPhotoFileId: photoFileId,
+        outdoorDetection: route.outsideGeofence ? 'outside_geofence' : 'marker',
+      }
+      return {
+        orgId: route.orgId,
+        actorId: route.actorId,
+        actorPosture: 'self',
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: route.actorId,
+        subjectScope: { kind: 'self', userId: route.actorId },
+        commandPayload: { requestType: 'outdoor_punch', requestWrite },
+        state: {
+          routeVariant: 'outdoor',
+          route,
+          draft,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+          eventType,
+          workDate,
+          occurredAtIso: occurredAt.toISOString(),
+          flow,
+          photoFileId,
+        },
+      }
+    }
+
+    async function executeOutdoorRequestCreate(trx, prepared) {
+      const {
+        route, draft, requestId, approvalId, approvalPayload, approvalAssignments, eventType, workDate,
+        flow, photoFileId,
+      } = prepared.state
+      await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, workDate, 'outdoor_punch')
+      if (photoFileId) {
+        const photoRows = await trx.query(
+          'SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL FOR KEY SHARE',
+          [photoFileId],
+        )
+        const photoRow = photoRows[0] ?? null
+        const photoMeta = normalizeMetadata(photoRow?.meta)
+        const contentType = photoMeta.sniffed === true
+          ? photoMeta.sniffedContentType
+          : photoMeta.contentType
+        if (!photoRow || photoRow.owner_id !== route.actorId || typeof contentType !== 'string' || !contentType.startsWith('image/')) {
+          throw new HttpError(409, 'OUTDOOR_SOURCE_CHANGED', 'Outdoor photo evidence changed during request creation')
+        }
+      }
+      const currentFlow = await loadApprovalFlow(trx, route.orgId, { flowId: flow.id })
+      if (
+        !currentFlow
+        || currentFlow.requestType !== 'outdoor_punch'
+        || currentFlow.isActive !== true
+        || JSON.stringify(currentFlow.steps) !== JSON.stringify(flow.steps)
+      ) {
+        throw new HttpError(409, 'OUTDOOR_SOURCE_CHANGED', 'Outdoor approval flow changed during request creation')
+      }
+      const dup = await trx.query(
+        `SELECT id FROM attendance_requests
+         WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = 'outdoor_punch'
+           AND status IN ('pending', 'approved')
+           AND metadata -> 'outdoorPunch' ->> 'eventType' = $4
+         LIMIT 1`,
+        [route.orgId, route.actorId, workDate, eventType],
+      )
+      if (dup.length > 0) {
+        throw new HttpError(409, 'DUPLICATE_REQUEST', 'Outdoor punch already pending or approved for this day and event type')
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const rows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          route.actorId,
+          route.orgId,
+          workDate,
+          'outdoor_punch',
+          draft.requestedInAt,
+          draft.requestedOutAt,
+          draft.reason,
+          'pending',
+          approvalId,
+          JSON.stringify(draft.metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: 'outdoor_punch',
+        subjectUserId: route.actorId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: route.actorId,
+          workDate,
+          occurredAt: prepared.state.occurredAtIso,
+        }),
+      })
+      return {
+        response: {
           ok: true,
           data: {
+            pendingApproval: true,
             request: mapAttendanceRequestRow(rows[0]),
             ...(buildRequestSnapshotToken(snapshotAppend)
               ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
               : {}),
           },
+        },
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.outdoorPunch.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: route.actorId,
+            workDate,
+            eventType,
+          },
+        }],
+      }
+    }
+
+    async function prepareScheduleDispatchRequestCreate(trx, rawInput) {
+      const route = scheduleDispatchCreateRouteInputSchema.parse(rawInput)
+      const input = route.input
+      const groupRows = await trx.query(
+        `SELECT *
+           FROM attendance_schedule_groups
+          WHERE id = $1 AND org_id = $2 AND is_active = true
+          LIMIT 1`,
+        [input.targetScheduleGroupId, route.orgId],
+      )
+      const targetGroup = groupRows[0]
+      if (!targetGroup) {
+        throw new HttpError(404, 'NOT_FOUND', 'Target schedule group not found')
+      }
+      const shiftRows = await trx.query(
+        `SELECT id
+           FROM attendance_shifts
+          WHERE id = $1 AND org_id = $2
+          LIMIT 1`,
+        [input.targetShiftId, route.orgId],
+      )
+      if (!shiftRows.length) {
+        throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
+      }
+      const settings = await getSettings(trx)
+      const slotResolution = resolveScheduleDispatchSlotIndex(settings, input.slotIndex)
+      const target = buildScheduleDispatchSchedulerScopeTarget({
+        userId: input.userId,
+        targetScheduleGroupId: targetGroup.id,
+        targetDepartmentRef: targetGroup.department_ref ?? null,
+      })
+      const actorAccess = {
+        userId: route.actorId,
+        orgId: route.orgId,
+        fullAdmin: route.actorFullAdmin === true,
+      }
+      await assertScheduleDispatchScopeAllowed(trx, route.orgId, actorAccess, target)
+      const approvalFlow = await resolveScheduleDispatchApprovalFlow(trx, route.orgId, input.approvalFlowId)
+      const sourceKey = buildScheduleDispatchSourceKey({
+        userId: input.userId,
+        targetScheduleGroupId: targetGroup.id,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        slotIndex: slotResolution.slotIndex,
+      })
+      const metadata = {
+        scheduleDispatch: {
+          userId: input.userId,
+          targetScheduleGroupId: targetGroup.id,
+          targetAttendanceGroupId: targetGroup.attendance_group_id ?? null,
+          targetDepartmentRef: targetGroup.department_ref ?? null,
+          targetShiftId: input.targetShiftId,
+          startDate: input.startDate,
+          endDate: input.endDate,
+          slotIndex: slotResolution.slotIndex,
+          sourceKey,
+        },
+        approvalFlow: {
+          id: approvalFlow.id,
+          name: approvalFlow.name,
+          steps: approvalFlow.steps,
+          currentStep: 0,
+        },
+      }
+      const draft = {
+        workDate: input.startDate,
+        requestType: 'schedule_dispatch',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: input.reason,
+        metadata,
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: input.userId,
+        flowSteps: draft.metadata?.approvalFlow?.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: input.userId,
+        requesterName: route.requesterName,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata?.approvalFlow?.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      const crossUser = String(input.userId) !== String(route.actorId)
+      // Human schedule-scope operators are never the internal scheduler posture.
+      const actorPosture = route.actorFullAdmin === true
+        ? 'attendance_admin'
+        : (crossUser ? 'operator' : 'self')
+      const requestWrite = {
+        workDate: input.startDate,
+        requestType: 'schedule_dispatch',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: input.reason ?? null,
+        minutes: null,
+        leaveTypeId: null,
+        leaveTypeCode: null,
+        overtimeRuleId: null,
+        overtimeRuleName: null,
+        attachmentUrl: null,
+        approvalFlowId: approvalFlow.id,
+        targetUserId: input.userId,
+        targetScheduleGroupId: targetGroup.id,
+        targetShiftId: input.targetShiftId,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        slotIndex: slotResolution.slotIndex,
+        sourceKey,
+      }
+      return {
+        orgId: route.orgId,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: input.userId,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [input.userId] }
+          : { kind: 'self', userId: input.userId },
+        commandPayload: { requestType: 'schedule_dispatch', requestWrite },
+        state: {
+          routeVariant: 'schedule_dispatch',
+          route,
+          input,
+          targetGroup,
+          slotResolution,
+          sourceKey,
+          metadata,
+          draft,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+        },
+      }
+    }
+
+    async function executeScheduleDispatchRequestCreate(trx, prepared) {
+      const {
+        route, input, targetGroup, slotResolution, sourceKey, metadata, draft,
+        requestId, approvalId, approvalPayload, approvalAssignments,
+      } = prepared.state
+      await acquireScheduleDispatchWindowLock(
+        trx,
+        route.orgId,
+        input.userId,
+        targetGroup.id,
+        slotResolution.slotIndex,
+      )
+      await acquireAttendanceRequestLock(trx, route.orgId, input.userId, input.startDate, 'schedule_dispatch')
+      const lockedGroupRows = await trx.query(
+        `SELECT * FROM attendance_schedule_groups
+          WHERE id = $1 AND org_id = $2 AND is_active = true
+          FOR UPDATE`,
+        [targetGroup.id, route.orgId],
+      )
+      const lockedGroup = lockedGroupRows[0] ?? null
+      if (
+        !lockedGroup
+        || lockedGroup.attendance_group_id !== targetGroup.attendance_group_id
+        || lockedGroup.department_ref !== targetGroup.department_ref
+      ) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_SOURCE_CHANGED', 'Schedule-dispatch group changed during request creation')
+      }
+      const lockedShiftRows = await trx.query(
+        `SELECT id FROM attendance_shifts
+          WHERE id = $1 AND org_id = $2
+          FOR UPDATE`,
+        [input.targetShiftId, route.orgId],
+      )
+      if (lockedShiftRows.length !== 1) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_SOURCE_CHANGED', 'Schedule-dispatch shift changed during request creation')
+      }
+      await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+        orgId: route.orgId,
+        shiftId: input.targetShiftId,
+        producer: 'schedule_dispatch_create',
+      })
+      await assertScheduleDispatchScopeAllowed(trx, route.orgId, {
+        userId: route.actorId,
+        orgId: route.orgId,
+        fullAdmin: route.actorFullAdmin === true,
+      }, buildScheduleDispatchSchedulerScopeTarget({
+        userId: input.userId,
+        targetScheduleGroupId: lockedGroup.id,
+        targetDepartmentRef: lockedGroup.department_ref ?? null,
+      }))
+      const currentFlow = await resolveScheduleDispatchApprovalFlow(trx, route.orgId, input.approvalFlowId)
+      if (
+        currentFlow.id !== metadata.approvalFlow.id
+        || JSON.stringify(currentFlow.steps) !== JSON.stringify(metadata.approvalFlow.steps)
+      ) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_SOURCE_CHANGED', 'Schedule-dispatch approval flow changed during request creation')
+      }
+      const duplicateRows = await trx.query(
+        `SELECT d.request_id
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1
+            AND d.user_id = $2
+            AND d.target_schedule_group_id = $3
+            AND d.slot_index = $4
+            AND d.start_date <= $6::date
+            AND d.end_date >= $5::date
+            AND r.status IN ('pending', 'approved')
+          LIMIT 1`,
+        [route.orgId, input.userId, targetGroup.id, slotResolution.slotIndex, input.startDate, input.endDate],
+      )
+      if (duplicateRows.length) {
+        throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const requestRows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          input.userId,
+          route.orgId,
+          input.startDate,
+          input.reason,
+          approvalId,
+          JSON.stringify(metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: 'schedule_dispatch',
+        subjectUserId: input.userId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: input.userId,
+          workDate: input.startDate,
+        }),
+      })
+      await trx.query(
+        `INSERT INTO attendance_schedule_dispatch_requests
+         (request_id, org_id, dispatch_type, user_id, target_schedule_group_id, target_attendance_group_id,
+          target_department_ref, target_shift_id, slot_index, start_date, end_date, publish_status, source_key)
+         VALUES ($1, $2, 'daily', $3, $4, $5, $6, $7, $8, $9::date, $10::date, 'pending', $11)`,
+        [
+          requestId,
+          route.orgId,
+          input.userId,
+          targetGroup.id,
+          targetGroup.attendance_group_id ?? null,
+          targetGroup.department_ref ?? null,
+          input.targetShiftId,
+          slotResolution.slotIndex,
+          input.startDate,
+          input.endDate,
+          sourceKey,
+        ],
+      )
+      const detail = await loadScheduleDispatchDetail(trx, route.orgId, requestId)
+      return {
+        response: {
+          ok: true,
+          data: {
+            request: mapAttendanceRequestRow(requestRows[0]),
+            scheduleDispatch: mapScheduleDispatchRequestRow(detail),
+            ...(buildRequestSnapshotToken(snapshotAppend)
+              ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+              : {}),
+          },
+        },
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: input.userId,
+            workDate: input.startDate,
+            requestType: 'schedule_dispatch',
+            requestId,
+          },
+        }],
+      }
+    }
+
+    async function prepareShiftSwapRequestCreate(trx, rawInput) {
+      const route = shiftSwapCreateRouteInputSchema.parse(rawInput)
+      const lockedSourceRows = new Map()
+      for (const assignmentId of [route.requesterAssignmentId, route.counterpartyAssignmentId].sort()) {
+        lockedSourceRows.set(
+          assignmentId,
+          await loadShiftSwapSourceAssignment(trx, route.orgId, assignmentId),
+        )
+      }
+      const requesterRow = lockedSourceRows.get(route.requesterAssignmentId)
+      const counterpartyRow = lockedSourceRows.get(route.counterpartyAssignmentId)
+      const requesterSource = normalizeShiftSwapSourceSnapshot(requesterRow, 'requesterAssignmentId')
+      const counterpartySource = normalizeShiftSwapSourceSnapshot(counterpartyRow, 'counterpartyAssignmentId')
+      if (requesterSource.userId !== route.actorId) {
+        const allowed = await canAccessOtherUsers(route.actorId)
+        if (!allowed) {
+          throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
         }
-        return {
-          response,
-          resolvedRequestId: requestId,
-          lifecycleEvents: [{
-            eventKind: 'attendance.requested',
-            payload: {
-              orgId: route.orgId,
-              userId: route.actorId,
-              workDate: draft.workDate,
-              requestType: draft.requestType,
-            },
-          }],
+      }
+      if (requesterSource.userId === counterpartySource.userId) {
+        throw new HttpError(422, 'SHIFT_SWAP_REQUIRES_TWO_USERS', 'Shift-swap requires two different users')
+      }
+      const sourceKey = buildShiftSwapSourceKey(route.requesterAssignmentId, route.counterpartyAssignmentId)
+      const approvalFlow = await loadActiveApprovalFlowForRequestType(
+        trx,
+        route.orgId,
+        'shift_swap',
+        route.approvalFlowId,
+      )
+      if (route.approvalFlowId && !approvalFlow) {
+        throw new HttpError(
+          422,
+          'SHIFT_SWAP_APPROVAL_FLOW_REQUIRED',
+          'Shift-swap approval flow does not exist or is inactive',
+          singleValidationDetail('approvalFlowId', 'Provide an active shift_swap approvalFlowId'),
+        )
+      }
+      const metadata = {
+        shiftSwap: {
+          requesterAssignmentId: route.requesterAssignmentId,
+          counterpartyAssignmentId: route.counterpartyAssignmentId,
+          requesterUserId: requesterSource.userId,
+          counterpartyUserId: counterpartySource.userId,
+          requesterWorkDate: requesterSource.workDate,
+          counterpartyWorkDate: counterpartySource.workDate,
+        },
+      }
+      if (approvalFlow) {
+        metadata.approvalFlow = {
+          id: approvalFlow.id,
+          name: approvalFlow.name,
+          steps: approvalFlow.steps,
+          currentStep: 0,
         }
+      }
+      const draft = {
+        workDate: requesterSource.workDate,
+        requestType: 'shift_swap',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: route.reason,
+        metadata,
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: requesterSource.userId,
+        flowSteps: draft.metadata?.approvalFlow?.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: requesterSource.userId,
+        requesterName: route.requesterName ?? requesterSource.userId,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata?.approvalFlow?.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      const crossUser = String(requesterSource.userId) !== String(route.actorId)
+      let actorPosture = 'self'
+      if (crossUser) {
+        const fullAdmin = await hasAttendanceAdminAccess(route.actorId)
+        actorPosture = fullAdmin ? 'attendance_admin' : 'operator'
+      }
+      const requestWrite = {
+        workDate: requesterSource.workDate,
+        requestType: 'shift_swap',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: route.reason,
+        minutes: null,
+        leaveTypeId: null,
+        leaveTypeCode: null,
+        overtimeRuleId: null,
+        overtimeRuleName: null,
+        attachmentUrl: null,
+        approvalFlowId: approvalFlow?.id ?? null,
+        requesterAssignmentId: route.requesterAssignmentId,
+        counterpartyAssignmentId: route.counterpartyAssignmentId,
+        requesterUserId: requesterSource.userId,
+        counterpartyUserId: counterpartySource.userId,
+        requesterWorkDate: requesterSource.workDate,
+        counterpartyWorkDate: counterpartySource.workDate,
+        sourceKey,
+      }
+      return {
+        orgId: route.orgId,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: requesterSource.userId,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [requesterSource.userId] }
+          : { kind: 'self', userId: requesterSource.userId },
+        commandPayload: { requestType: 'shift_swap', requestWrite },
+        state: {
+          routeVariant: 'shift_swap',
+          route,
+          requesterSource,
+          counterpartySource,
+          sourceKey,
+          metadata,
+          draft,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+        },
+      }
+    }
+
+    async function executeShiftSwapRequestCreate(trx, prepared) {
+      const {
+        route, requesterSource, counterpartySource, sourceKey, metadata, draft,
+        requestId, approvalId, approvalPayload, approvalAssignments,
+      } = prepared.state
+      const lockedSourceRows = new Map()
+      for (const assignmentId of [route.requesterAssignmentId, route.counterpartyAssignmentId].sort()) {
+        lockedSourceRows.set(
+          assignmentId,
+          await loadShiftSwapSourceAssignment(trx, route.orgId, assignmentId, { forUpdate: true }),
+        )
+      }
+      const lockedRequesterSource = normalizeShiftSwapSourceSnapshot(
+        lockedSourceRows.get(route.requesterAssignmentId),
+        'requesterAssignmentId',
+      )
+      const lockedCounterpartySource = normalizeShiftSwapSourceSnapshot(
+        lockedSourceRows.get(route.counterpartyAssignmentId),
+        'counterpartyAssignmentId',
+      )
+      if (
+        JSON.stringify(lockedRequesterSource) !== JSON.stringify(requesterSource)
+        || JSON.stringify(lockedCounterpartySource) !== JSON.stringify(counterpartySource)
+      ) {
+        throw new HttpError(409, 'SHIFT_SWAP_SOURCE_CHANGED', 'Shift-swap source assignment changed during request creation')
+      }
+      await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+        orgId: route.orgId,
+        shiftRefs: [lockedRequesterSource.shiftId, lockedCounterpartySource.shiftId],
+        producer: 'shift_swap_create',
+      })
+      if (lockedRequesterSource.userId !== route.actorId && !(await canAccessOtherUsers(route.actorId))) {
+        throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
+      }
+      const currentFlow = await loadActiveApprovalFlowForRequestType(
+        trx,
+        route.orgId,
+        'shift_swap',
+        route.approvalFlowId,
+      )
+      const preparedFlow = normalizeMetadata(metadata.approvalFlow)
+      if (
+        (currentFlow?.id ?? null) !== (preparedFlow.id ?? null)
+        || JSON.stringify(currentFlow?.steps ?? []) !== JSON.stringify(preparedFlow.steps ?? [])
+      ) {
+        throw new HttpError(409, 'SHIFT_SWAP_SOURCE_CHANGED', 'Shift-swap approval flow changed during request creation')
+      }
+      await acquireAttendanceRequestLock(
+        trx,
+        route.orgId,
+        requesterSource.userId,
+        requesterSource.workDate,
+        'shift_swap',
+      )
+      const duplicateRows = await trx.query(
+        `SELECT d.request_id
+           FROM attendance_shift_swap_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1 AND d.source_key = $2
+            AND r.status IN ('pending', 'approved')
+          LIMIT 1`,
+        [route.orgId, sourceKey],
+      )
+      if (duplicateRows.length) {
+        throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_REQUEST', 'A shift-swap request already exists for these assignments')
+      }
+      const sourceConflict = await findShiftSwapSourceConflict(
+        trx,
+        route.orgId,
+        [route.requesterAssignmentId, route.counterpartyAssignmentId],
+      )
+      if (sourceConflict) {
+        throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_SOURCE', 'A shift-swap request is already pending or approved for one of these source assignments')
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const requestRows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          requesterSource.userId,
+          route.orgId,
+          requesterSource.workDate,
+          route.reason,
+          approvalId,
+          JSON.stringify(metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: 'shift_swap',
+        subjectUserId: requesterSource.userId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: requesterSource.userId,
+          workDate: requesterSource.workDate,
+        }),
+      })
+      await trx.query(
+        `INSERT INTO attendance_shift_swap_requests
+         (request_id, org_id, requester_user_id, counterparty_user_id,
+          requester_assignment_id, counterparty_assignment_id,
+          requester_work_date, counterparty_work_date,
+          requester_shift_id, counterparty_shift_id,
+          requester_slot_index, counterparty_slot_index,
+          requester_start_date, requester_end_date,
+          counterparty_start_date, counterparty_end_date,
+          requester_publish_status, counterparty_publish_status,
+          requester_producer_type, counterparty_producer_type,
+          requester_assignment_kind, counterparty_assignment_kind,
+          source_key)
+         VALUES
+         ($1, $2, $3, $4,
+          $5, $6,
+          $7, $8,
+          $9, $10,
+          $11, $12,
+          $13, $14,
+          $15, $16,
+          $17, $18,
+          $19, $20,
+          $21, $22,
+          $23)`,
+        [
+          requestId,
+          route.orgId,
+          requesterSource.userId,
+          counterpartySource.userId,
+          requesterSource.id,
+          counterpartySource.id,
+          requesterSource.workDate,
+          counterpartySource.workDate,
+          requesterSource.shiftId,
+          counterpartySource.shiftId,
+          requesterSource.slotIndex,
+          counterpartySource.slotIndex,
+          requesterSource.startDate,
+          requesterSource.endDate,
+          counterpartySource.startDate,
+          counterpartySource.endDate,
+          requesterSource.publishStatus,
+          counterpartySource.publishStatus,
+          requesterSource.producerType,
+          counterpartySource.producerType,
+          requesterSource.assignmentKind,
+          counterpartySource.assignmentKind,
+          sourceKey,
+        ],
+      )
+      const detail = await loadShiftSwapDetail(trx, route.orgId, requestId)
+      return {
+        response: {
+          ok: true,
+          data: {
+            request: mapAttendanceRequestRow(requestRows[0]),
+            shiftSwap: mapShiftSwapRequestRow(detail),
+            ...(buildRequestSnapshotToken(snapshotAppend)
+              ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+              : {}),
+          },
+        },
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: requesterSource.userId,
+            workDate: requesterSource.workDate,
+            requestType: 'shift_swap',
+            requestId,
+          },
+        }],
+      }
+    }
+
+    const requestCreateAdapter = {
+      async prepare(trx, rawInput, operation) {
+        const variant = operation?.routeVariant
+        if (variant === 'generic') return prepareGenericRequestCreate(trx, rawInput)
+        if (variant === 'outdoor') return prepareOutdoorRequestCreate(trx, rawInput)
+        if (variant === 'schedule_dispatch') return prepareScheduleDispatchRequestCreate(trx, rawInput)
+        if (variant === 'shift_swap') return prepareShiftSwapRequestCreate(trx, rawInput)
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+      },
+      async execute(trx, prepared, operation) {
+        const variant = prepared?.state?.routeVariant ?? operation?.routeVariant
+        if (variant === 'generic') return executeGenericRequestCreate(trx, prepared)
+        if (variant === 'outdoor') return executeOutdoorRequestCreate(trx, prepared)
+        if (variant === 'schedule_dispatch') return executeScheduleDispatchRequestCreate(trx, prepared)
+        if (variant === 'shift_swap') return executeShiftSwapRequestCreate(trx, prepared)
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
       },
     }
 
@@ -32149,7 +32981,7 @@ module.exports = {
           throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
         }
         const requestRows = await trx.query(
-          'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
+          'SELECT * FROM attendance_requests WHERE id = $1',
           [route.requestId],
         )
         if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
@@ -32214,6 +33046,16 @@ module.exports = {
       },
       async execute(trx, prepared) {
         const { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments } = prepared.state
+        const lockedRequestRows = await trx.query(
+          'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
+          [route.requestId],
+        )
+        if (
+          lockedRequestRows.length !== 1
+          || JSON.stringify(lockedRequestRows[0]) !== JSON.stringify(existingRequest)
+        ) {
+          throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request changed during edit preparation')
+        }
         const expectedSnapshotVersion = firstDefinedValue(
           route.requestBody.expectedSnapshotVersion,
           route.requestBody.expected_snapshot_version,
@@ -32392,14 +33234,15 @@ module.exports = {
       return 'attendance_admin'
     }
 
-    async function lockLatestRequestSnapshotToken(trx, route, requestRow) {
+    async function loadLatestRequestSnapshotToken(trx, route, requestRow, options = {}) {
+      const lockClause = options.forUpdate === true ? 'FOR UPDATE' : ''
       const snapshotRows = await trx.query(
         `SELECT version, payload_fingerprint
            FROM attendance_request_calculation_snapshots
           WHERE org_id = $1 AND request_id = $2::uuid
           ORDER BY version DESC
           LIMIT 1
-          FOR UPDATE`,
+          ${lockClause}`,
         [requestRow.org_id ?? DEFAULT_ORG_ID, route.requestId],
       )
       const snapshot = snapshotRows[0] ?? null
@@ -32429,7 +33272,7 @@ module.exports = {
       async prepare(trx, rawInput) {
         const route = requestActionBoundaryRouteInputSchema.parse(rawInput)
         const requestRows = await trx.query(
-          'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+          'SELECT * FROM attendance_requests WHERE id = $1::uuid',
           [route.requestId],
         )
         if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
@@ -32443,7 +33286,7 @@ module.exports = {
             userId: route.actorId,
             orgId,
             fullAdmin: await hasAttendanceAdminAccess(route.actorId),
-          }, { forUpdate: true })
+          }, { forUpdate: false })
         }
         const actorPosture = await resolveRequestCancellationActorPosture(
           trx,
@@ -32454,12 +33297,12 @@ module.exports = {
             legacyAuthorization: await resolveRequestLegacyAuthorization(trx, requestRow),
           },
         )
-        const snapshot = await lockLatestRequestSnapshotToken(trx, route, requestRow)
+        const snapshot = await loadLatestRequestSnapshotToken(trx, route, requestRow)
         const approvalId = requestRow.approval_instance_id ?? null
         let approval = null
         if (approvalId) {
           const approvalRows = await trx.query(
-            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            'SELECT * FROM approval_instances WHERE id = $1',
             [approvalId],
           )
           approval = approvalRows[0] ?? null
@@ -32487,10 +33330,52 @@ module.exports = {
       },
       async execute(trx, prepared, operation) {
         const { route, requestRow, approvalId, approval, approvedLeave, actorPosture } = prepared.state
+        const lockedRequestRows = await trx.query(
+          'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+          [route.requestId],
+        )
+        if (
+          lockedRequestRows.length !== 1
+          || JSON.stringify(lockedRequestRows[0]) !== JSON.stringify(requestRow)
+        ) {
+          throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request changed during cancellation preparation')
+        }
+        const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const scopedDispatch = requestRow.request_type === 'schedule_dispatch'
+        if (scopedDispatch) {
+          await assertScheduleDispatchRequestScopeAllowed(trx, requestOrgId, route.requestId, {
+            userId: route.actorId,
+            orgId: requestOrgId,
+            fullAdmin: await hasAttendanceAdminAccess(route.actorId),
+          }, { forUpdate: true })
+        }
+        const lockedActorPosture = await resolveRequestCancellationActorPosture(
+          trx,
+          route,
+          requestRow,
+          {
+            allowScopedOperator: scopedDispatch,
+            legacyAuthorization: operation?.acceptedWritePosture === 'legacy_projection_only',
+          },
+        )
+        if (lockedActorPosture !== actorPosture) {
+          throw new HttpError(409, 'REQUEST_AUTHORIZATION_CHANGED', 'Request cancellation authorization changed')
+        }
+        await loadLatestRequestSnapshotToken(trx, route, requestRow, { forUpdate: true })
+        let lockedApproval = null
+        if (approvalId) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [approvalId],
+          )
+          lockedApproval = approvalRows[0] ?? null
+          if (JSON.stringify(lockedApproval) !== JSON.stringify(approval)) {
+            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation preparation')
+          }
+        }
         if (requestRow.status !== 'pending' && !approvedLeave) {
           throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
         }
-        const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
         let cancellationCalculation = null
         if (approvedLeave && operation.acceptedWritePosture !== 'legacy_projection_only') {
           const requestWorkDate = normalizeDateOnly(requestRow.work_date)
@@ -32522,8 +33407,8 @@ module.exports = {
           }
         }
 
-        if (approvalId && approval) {
-          const newVersion = Number(approval.version ?? 0) + 1
+        if (approvalId && lockedApproval) {
+          const newVersion = Number(lockedApproval.version ?? 0) + 1
           await trx.query(
             'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
             ['cancelled', newVersion, approvalId],
@@ -32539,9 +33424,9 @@ module.exports = {
               route.actorId,
               route.actorName,
               route.requestBody.comment ?? null,
-              approval.status,
+              lockedApproval.status,
               'cancelled',
-              approval.version,
+              lockedApproval.version,
               newVersion,
               JSON.stringify({ ...(route.requestBody.metadata ?? {}), w4ActorPosture: actorPosture }),
               route.ipAddress,
@@ -32747,7 +33632,7 @@ module.exports = {
       async prepare(trx, rawInput, operation) {
         const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
         const requestRows = await trx.query(
-          'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+          'SELECT * FROM attendance_requests WHERE id = $1::uuid',
           [route.requestId],
         )
         if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
@@ -32763,7 +33648,7 @@ module.exports = {
         const approvalId = requestRow.approval_instance_id
         if (!approvalId) throw new HttpError(400, 'INVALID_STATE', 'Missing approval instance')
         const approvalRows = await trx.query(
-          'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+          'SELECT * FROM approval_instances WHERE id = $1',
           [approvalId],
         )
         if (approvalRows.length === 0) throw new HttpError(400, 'INVALID_STATE', 'Approval instance missing')
@@ -32842,7 +33727,7 @@ module.exports = {
       },
     }
 
-    const w4RequestOperationBoundary =
+    w4RequestOperationBoundary =
       attendanceW4SegmentCalculationPort
       && typeof attendanceW4SegmentCalculationPort.createRequestOperationBoundary === 'function'
         ? attendanceW4SegmentCalculationPort.createRequestOperationBoundary({
@@ -32891,6 +33776,7 @@ module.exports = {
             kind: 'request_create',
             operationId,
             correlationId: requestCorrelationId(req, operationId, 'request-create'),
+            routeVariant: 'generic',
             routeInput: {
               actorId: userId,
               tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId,
@@ -33116,193 +34002,54 @@ module.exports = {
           throw error
         }
         if (!await enforceShiftEditWindow(res, [input.startDate, input.endDate])) return
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
 
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
         try {
-          const result = await db.transaction(async (trx) => {
-            const groupRows = await trx.query(
-              `SELECT *
-                 FROM attendance_schedule_groups
-                WHERE id = $1 AND org_id = $2 AND is_active = true
-                LIMIT 1`,
-              [input.targetScheduleGroupId, orgId]
-            )
-            const targetGroup = groupRows[0]
-            if (!targetGroup) {
-              throw new HttpError(404, 'NOT_FOUND', 'Target schedule group not found')
-            }
-            const shiftRows = await trx.query(
-              `SELECT id
-                 FROM attendance_shifts
-                WHERE id = $1 AND org_id = $2
-                LIMIT 1`,
-              [input.targetShiftId, orgId]
-            )
-            if (!shiftRows.length) {
-              throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
-            }
-            // W3 erratum: typed 422 + zero writes when the dispatch targets a
-            // multi-segment shift while segment calculation is OFF for the org.
-            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_create',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'schedule-dispatch-create'),
+            routeVariant: 'schedule_dispatch',
+            routeInput: {
+              actorId: actorAccess.userId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorAccess.userId,
+              actorFullAdmin: actorAccess.fullAdmin === true,
+              requesterName: getUserLabel(req, input.userId),
               orgId,
-              shiftId: input.targetShiftId,
-              producer: 'schedule_dispatch_create',
-            })
-            const settings = await getSettings(trx)
-            const slotResolution = resolveScheduleDispatchSlotIndex(settings, input.slotIndex)
-
-            const target = buildScheduleDispatchSchedulerScopeTarget({
-              userId: input.userId,
-              targetScheduleGroupId: targetGroup.id,
-              targetDepartmentRef: targetGroup.department_ref ?? null,
-            })
-            await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, target)
-
-            await acquireScheduleDispatchWindowLock(trx, orgId, input.userId, targetGroup.id, slotResolution.slotIndex)
-            const approvalFlow = await resolveScheduleDispatchApprovalFlow(trx, orgId, input.approvalFlowId)
-            const sourceKey = buildScheduleDispatchSourceKey({
-              userId: input.userId,
-              targetScheduleGroupId: targetGroup.id,
-              startDate: input.startDate,
-              endDate: input.endDate,
-              slotIndex: slotResolution.slotIndex,
-            })
-            const duplicateRows = await trx.query(
-              `SELECT d.request_id
-                 FROM attendance_schedule_dispatch_requests d
-                 JOIN attendance_requests r ON r.id = d.request_id
-                WHERE d.org_id = $1
-                  AND d.user_id = $2
-                  AND d.target_schedule_group_id = $3
-                  AND d.slot_index = $4
-                  AND d.start_date <= $6::date
-                  AND d.end_date >= $5::date
-                  AND r.status IN ('pending', 'approved')
-                LIMIT 1`,
-              [orgId, input.userId, targetGroup.id, slotResolution.slotIndex, input.startDate, input.endDate]
-            )
-            if (duplicateRows.length) {
-              throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
-            }
-
-            await acquireAttendanceRequestLock(trx, orgId, input.userId, input.startDate, 'schedule_dispatch')
-            const metadata = {
-              scheduleDispatch: {
+              input: {
                 userId: input.userId,
-                targetScheduleGroupId: targetGroup.id,
-                targetAttendanceGroupId: targetGroup.attendance_group_id ?? null,
-                targetDepartmentRef: targetGroup.department_ref ?? null,
+                targetScheduleGroupId: input.targetScheduleGroupId,
                 targetShiftId: input.targetShiftId,
                 startDate: input.startDate,
                 endDate: input.endDate,
-                slotIndex: slotResolution.slotIndex,
-                sourceKey,
+                slotIndex: input.slotIndex ?? null,
+                reason: input.reason ?? null,
+                approvalFlowId: input.approvalFlowId ?? null,
               },
-              approvalFlow: {
-                id: approvalFlow.id,
-                name: approvalFlow.name,
-                steps: approvalFlow.steps,
-                currentStep: 0,
-              },
-            }
-            const draft = {
-              workDate: input.startDate,
-              requestType: 'schedule_dispatch',
-              requestedInAt: null,
-              requestedOutAt: null,
-              reason: input.reason,
-              metadata,
-            }
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId, userId: input.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId,
-              requestId,
-              orgId,
-              userId: input.userId,
-              requesterName: getUserLabel(req, input.userId),
-              draft,
-              orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-            )
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const requestRows = await trx.query(
-              `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-               VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
-               RETURNING *`,
-              [
-                requestId,
-                input.userId,
-                orgId,
-                input.startDate,
-                input.reason,
-                approvalId,
-                JSON.stringify(metadata),
-              ]
-            )
-		            const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
-		              orgId,
-		              requestId,
-		              requestType: 'schedule_dispatch',
-		              subjectUserId: input.userId,
-		              actorUserId: actorAccess.userId,
-		              payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
-		              resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
-		                orgId,
-		                userId: input.userId,
-		                workDate: input.startDate,
-		              }),
-		            })
-            await trx.query(
-              `INSERT INTO attendance_schedule_dispatch_requests
-               (request_id, org_id, dispatch_type, user_id, target_schedule_group_id, target_attendance_group_id,
-                target_department_ref, target_shift_id, slot_index, start_date, end_date, publish_status, source_key)
-               VALUES ($1, $2, 'daily', $3, $4, $5, $6, $7, $8, $9::date, $10::date, 'pending', $11)`,
-              [
-                requestId,
-                orgId,
-                input.userId,
-                targetGroup.id,
-                targetGroup.attendance_group_id ?? null,
-                targetGroup.department_ref ?? null,
-                input.targetShiftId,
-                slotResolution.slotIndex,
-                input.startDate,
-                input.endDate,
-                sourceKey,
-              ]
-            )
-            const detail = await loadScheduleDispatchDetail(trx, orgId, requestId)
-		            return {
-		              request: requestRows[0],
-		              detail,
-		              snapshotToken: buildRequestSnapshotToken(snapshotAppend),
-		            }
-          })
-          emitEvent('attendance.scheduleDispatch.requested', { orgId, requestId, userId: input.userId })
-          res.status(201).json({
-            ok: true,
-            data: {
-              request: mapAttendanceRequestRow(result.request),
-              scheduleDispatch: mapScheduleDispatchRequestRow(result.detail),
-		              ...(result.snapshotToken ? { requestSnapshot: result.snapshotToken } : {}),
             },
           })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            const request = outcome.response?.data?.request
+            emitEvent('attendance.scheduleDispatch.requested', {
+              orgId,
+              requestId: request?.id,
+              userId: input.userId,
+            })
+          }
+          res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message, ...(Array.isArray(error.details) && error.details.length ? { details: error.details } : {}) } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (error?.code === '23505' && error?.constraint === 'uq_attendance_schedule_dispatch_requests_source_key') {
             res.status(409).json({ ok: false, error: { code: 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', message: 'A schedule-dispatch request already exists for this user/group/date window' } })
             return
@@ -33592,209 +34339,41 @@ module.exports = {
         }
 
         const reason = normalizeOptionalText(parsed.data.reason)
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
 
         try {
-          const result = await db.transaction(async (trx) => {
-            const lockedSourceRows = new Map()
-            for (const assignmentId of [requesterAssignmentId, counterpartyAssignmentId].sort()) {
-              lockedSourceRows.set(
-                assignmentId,
-                await loadShiftSwapSourceAssignment(trx, orgId, assignmentId, { forUpdate: true })
-              )
-            }
-            const requesterRow = lockedSourceRows.get(requesterAssignmentId)
-            const counterpartyRow = lockedSourceRows.get(counterpartyAssignmentId)
-            const requesterSource = normalizeShiftSwapSourceSnapshot(requesterRow, 'requesterAssignmentId')
-            const counterpartySource = normalizeShiftSwapSourceSnapshot(counterpartyRow, 'counterpartyAssignmentId')
-
-            // W3 erratum: the swap snapshots both shift ids — a multi-segment shift
-            // fails closed with a typed 422 and zero writes while segment
-            // calculation is OFF for the org.
-            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_create',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'shift-swap-create'),
+            routeVariant: 'shift_swap',
+            routeInput: {
+              actorId: actorUserId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
+              requesterName: getUserLabel(req, '') || null,
               orgId,
-              shiftRefs: [requesterSource.shiftId, counterpartySource.shiftId],
-              producer: 'shift_swap_create',
-            })
-
-            if (requesterSource.userId !== actorUserId) {
-              const allowed = await canAccessOtherUsers(actorUserId)
-              if (!allowed) {
-                throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
-              }
-            }
-            if (requesterSource.userId === counterpartySource.userId) {
-              throw new HttpError(422, 'SHIFT_SWAP_REQUIRES_TWO_USERS', 'Shift-swap requires two different users')
-            }
-
-            const sourceKey = buildShiftSwapSourceKey(requesterAssignmentId, counterpartyAssignmentId)
-            const duplicateRows = await trx.query(
-              `SELECT d.request_id
-                 FROM attendance_shift_swap_requests d
-                 JOIN attendance_requests r ON r.id = d.request_id
-                WHERE d.org_id = $1 AND d.source_key = $2
-                  AND r.status IN ('pending', 'approved')
-                LIMIT 1`,
-              [orgId, sourceKey]
-            )
-            if (duplicateRows.length) {
-              throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_REQUEST', 'A shift-swap request already exists for these assignments')
-            }
-            const sourceConflict = await findShiftSwapSourceConflict(trx, orgId, [requesterAssignmentId, counterpartyAssignmentId])
-            if (sourceConflict) {
-              throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_SOURCE', 'A shift-swap request is already pending or approved for one of these source assignments')
-            }
-
-            await acquireAttendanceRequestLock(trx, orgId, requesterSource.userId, requesterSource.workDate, 'shift_swap')
-            const approvalFlow = await loadActiveApprovalFlowForRequestType(trx, orgId, 'shift_swap', approvalFlowId)
-            if (approvalFlowId && !approvalFlow) {
-              throw new HttpError(422, 'SHIFT_SWAP_APPROVAL_FLOW_REQUIRED', 'Shift-swap approval flow does not exist or is inactive', singleValidationDetail('approvalFlowId', 'Provide an active shift_swap approvalFlowId'))
-            }
-            const metadata = {
-              shiftSwap: {
-                requesterAssignmentId,
-                counterpartyAssignmentId,
-                requesterUserId: requesterSource.userId,
-                counterpartyUserId: counterpartySource.userId,
-                requesterWorkDate: requesterSource.workDate,
-                counterpartyWorkDate: counterpartySource.workDate,
-              },
-            }
-            if (approvalFlow) {
-              metadata.approvalFlow = {
-                id: approvalFlow.id,
-                name: approvalFlow.name,
-                steps: approvalFlow.steps,
-                currentStep: 0,
-              }
-            }
-            const draft = {
-              workDate: requesterSource.workDate,
-              requestType: 'shift_swap',
-              requestedInAt: null,
-              requestedOutAt: null,
-              reason,
-              metadata,
-            }
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId, userId: requesterSource.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId,
-              requestId,
-              orgId,
-              userId: requesterSource.userId,
-              requesterName: getUserLabel(req, requesterSource.userId),
-              draft,
-              orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-            )
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const requestRows = await trx.query(
-              `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-               VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
-               RETURNING *`,
-              [
-                requestId,
-                requesterSource.userId,
-                orgId,
-                requesterSource.workDate,
-                reason,
-                approvalId,
-                JSON.stringify(metadata),
-              ]
-            )
-		            const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
-		              orgId,
-		              requestId,
-		              requestType: 'shift_swap',
-		              subjectUserId: requesterSource.userId,
-		              actorUserId,
-		              payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
-		              resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
-		                orgId,
-		                userId: requesterSource.userId,
-		                workDate: requesterSource.workDate,
-		              }),
-		            })
-
-            await trx.query(
-              `INSERT INTO attendance_shift_swap_requests
-               (request_id, org_id, requester_user_id, counterparty_user_id,
-                requester_assignment_id, counterparty_assignment_id,
-                requester_work_date, counterparty_work_date,
-                requester_shift_id, counterparty_shift_id,
-                requester_slot_index, counterparty_slot_index,
-                requester_start_date, requester_end_date,
-                counterparty_start_date, counterparty_end_date,
-                requester_publish_status, counterparty_publish_status,
-                requester_producer_type, counterparty_producer_type,
-                requester_assignment_kind, counterparty_assignment_kind,
-                source_key)
-               VALUES
-               ($1, $2, $3, $4,
-                $5, $6,
-                $7, $8,
-                $9, $10,
-                $11, $12,
-                $13, $14,
-                $15, $16,
-                $17, $18,
-                $19, $20,
-                $21, $22,
-                $23)`,
-              [
-                requestId,
-                orgId,
-                requesterSource.userId,
-                counterpartySource.userId,
-                requesterSource.id,
-                counterpartySource.id,
-                requesterSource.workDate,
-                counterpartySource.workDate,
-                requesterSource.shiftId,
-                counterpartySource.shiftId,
-                requesterSource.slotIndex,
-                counterpartySource.slotIndex,
-                requesterSource.startDate,
-                requesterSource.endDate,
-                counterpartySource.startDate,
-                counterpartySource.endDate,
-                requesterSource.publishStatus,
-                counterpartySource.publishStatus,
-                requesterSource.producerType,
-                counterpartySource.producerType,
-                requesterSource.assignmentKind,
-                counterpartySource.assignmentKind,
-                sourceKey,
-              ]
-            )
-            const detail = await loadShiftSwapDetail(trx, orgId, requestId)
-		            return {
-		              request: requestRows[0],
-		              detail,
-		              snapshotToken: buildRequestSnapshotToken(snapshotAppend),
-		            }
-          })
-
-          emitEvent('attendance.shiftSwap.requested', { orgId, requestId, userId: result.request.user_id })
-          res.status(201).json({
-            ok: true,
-            data: {
-              request: mapAttendanceRequestRow(result.request),
-              shiftSwap: mapShiftSwapRequestRow(result.detail),
-		              ...(result.snapshotToken ? { requestSnapshot: result.snapshotToken } : {}),
+              requesterAssignmentId,
+              counterpartyAssignmentId,
+              approvalFlowId: approvalFlowId ?? null,
+              reason: reason ?? null,
             },
           })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            const request = outcome.response?.data?.request
+            emitEvent('attendance.shiftSwap.requested', {
+              orgId,
+              requestId: request?.id,
+              userId: request?.user_id ?? request?.userId,
+            })
+          }
+          res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({
@@ -33807,6 +34386,7 @@ module.exports = {
             })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (error?.code === '23505' && error?.constraint === 'uq_attendance_shift_swap_requests_source_key') {
             res.status(409).json({ ok: false, error: { code: 'DUPLICATE_SHIFT_SWAP_REQUEST', message: 'A shift-swap request already exists for these assignments' } })
             return
@@ -34158,6 +34738,7 @@ module.exports = {
 	            kind: 'request_pending_edit',
 	            operationId,
 	            correlationId: requestCorrelationId(req, operationId, 'request-edit'),
+	            routeVariant: null,
 	            routeInput: {
 	              actorId: requesterId,
 	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
@@ -35065,6 +35646,7 @@ module.exports = {
           kind: 'request_decision',
           operationId,
           correlationId: requestCorrelationId(req, operationId, `request-${action}`),
+          routeVariant: null,
           routeInput: {
             actorId: requesterId,
             tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
@@ -35148,6 +35730,7 @@ module.exports = {
           kind: 'request_cancel',
           operationId,
           correlationId: requestCorrelationId(req, operationId, 'request-cancel'),
+          routeVariant: null,
           routeInput: {
             actorId: requesterId,
             tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
