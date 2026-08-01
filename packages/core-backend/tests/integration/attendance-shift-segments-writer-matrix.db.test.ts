@@ -986,6 +986,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('P12: dedicated shift-swap and schedule-dispatch creates append version-1 snapshots', async () => {
     const orgId = randomUUID()
     const actorId = `${orgId}-admin`
+    await seedActiveIdentity(actorId, orgId)
     const token = await mintToken(actorId)
     await enableShadowPosture(orgId)
 
@@ -1001,7 +1002,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     })).body.data.id as string
     const requesterAssignmentId = await seedPublishedAssignment(
       orgId,
-      `${orgId}-requester`,
+      actorId,
       requesterShift,
       '2049-06-14',
     )
@@ -1014,6 +1015,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const swap = await postJson('/api/attendance/shift-swap-requests', token, orgId, {
       requesterAssignmentId,
       counterpartyAssignmentId,
+      operationId: randomUUID(),
     })
     expect(swap.status, swap.raw).toBe(201)
     expect(swap.body.data.requestSnapshot).toMatchObject({ version: 1 })
@@ -1021,12 +1023,15 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
+    const dispatchUserId = `${orgId}-dispatch-user`
+    await seedActiveIdentity(dispatchUserId, orgId)
     const dispatch = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
-      userId: `${orgId}-dispatch-user`,
+      userId: dispatchUserId,
       targetScheduleGroupId: scheduleGroupId,
       targetShiftId: requesterShift,
       startDate: '2049-06-16',
       endDate: '2049-06-16',
+      operationId: randomUUID(),
     })
     expect(dispatch.status, dispatch.raw).toBe(201)
     expect(dispatch.body.data.requestSnapshot).toMatchObject({ version: 1 })
@@ -1325,7 +1330,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
       `/api/attendance/shift-swap-requests/${requestId}/accept`,
       counterpartyToken,
       orgId,
-      {},
+      { operationId: randomUUID() },
     )
     expect(accept.status, accept.raw).toBe(200)
     const approval = await loadApprovalCursor(requestId)
@@ -1405,6 +1410,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
       targetShiftId: shiftId,
       startDate: workDate,
       endDate: workDate,
+      operationId: randomUUID(),
     })
     expect(create.status, create.raw).toBe(201)
     const requestId = create.body.data.request.id as string

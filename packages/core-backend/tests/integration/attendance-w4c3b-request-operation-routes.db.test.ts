@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -7,6 +8,11 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
+import {
+  restoreAttendanceSettingsRow,
+  snapshotAttendanceSettingsRow,
+  type AttendanceSettingsRowSnapshot,
+} from '../utils/attendance-settings-row'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -56,6 +62,8 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
   let server: MetaSheetServer | undefined
   let pool: Pool
   let baseUrl = ''
+  let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
+  const pluginRequire = createRequire(import.meta.url)
   const priorEnv = {
     databaseUrl: process.env.DATABASE_URL,
     rbacBypass: process.env.RBAC_BYPASS,
@@ -277,7 +285,16 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     if (!address || typeof address === 'string') throw new Error('attendance server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
+    settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
   }, 120000)
+
+  afterEach(async () => {
+    if (pool) await restoreAttendanceSettingsRow(pool, settingsRowSnapshot)
+    const plugin = pluginRequire('../../../../plugins/plugin-attendance/index.cjs') as {
+      resetAttendanceSettingsCacheForTests?: () => void
+    }
+    plugin.resetAttendanceSettingsCacheForTests?.()
+  })
 
   afterAll(async () => {
     await pool?.end().catch(() => undefined)
