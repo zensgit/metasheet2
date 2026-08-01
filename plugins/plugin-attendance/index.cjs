@@ -24446,6 +24446,7 @@ module.exports = {
       'AttendanceW4CommandError',
       'AttendanceW4AuthorizationError',
       'AttendanceW4LiveScheduledBoundaryError',
+      'AttendanceW4RequestBoundaryError',
       'AttendanceW4MergePolicyError',
       // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the
       // durable run-creation/resume/outcome/finalization machine's own
@@ -30578,6 +30579,10 @@ module.exports = {
     )
 
     const requestWriteSchema = z.object({
+      // W4C-3b P13: a stable client UUID identifies create/edit retries. Omitted
+      // by every legacy client, which preserves the null-operation path.
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
       workDate: z.string().optional(),
       work_date: z.string().optional(),
       date: z.string().optional(),
@@ -31574,7 +31579,7 @@ module.exports = {
       return clauses.length ? `AND (${clauses.join(' OR ')})` : 'AND FALSE'
     }
 
-    async function resolveAttendanceRequestDraft(parsedData, existingRequest = null) {
+    async function resolveAttendanceRequestDraft(client, parsedData, existingRequest = null) {
       const orgId = existingRequest?.org_id ?? DEFAULT_ORG_ID
       const existingMetadata = normalizeMetadata(existingRequest?.metadata)
       const existingLeaveType = normalizeMetadata(existingMetadata.leaveType)
@@ -31707,7 +31712,7 @@ module.exports = {
       let leaveType = null
       let overtimeRule = null
       if (requestType === 'leave') {
-        leaveType = await loadLeaveType(db, orgId, {
+        leaveType = await loadLeaveType(client, orgId, {
           id: normalizeRequestUuidReferenceInput(
             firstDefinedValue(parsedData.leaveTypeId, parsedData.leave_type_id),
             existingLeaveType.id,
@@ -31730,7 +31735,7 @@ module.exports = {
           durationMinutes = leaveType.defaultMinutesPerDay
         }
       } else if (requestType === 'overtime') {
-        overtimeRule = await loadOvertimeRule(db, orgId, {
+        overtimeRule = await loadOvertimeRule(client, orgId, {
           id: normalizeRequestUuidReferenceInput(
             firstDefinedValue(parsedData.overtimeRuleId, parsedData.overtime_rule_id),
             existingOvertimeRule.id,
@@ -31770,7 +31775,7 @@ module.exports = {
         )
       }
 
-      const approvalFlow = await loadApprovalFlow(db, orgId, {
+      const approvalFlow = await loadApprovalFlow(client, orgId, {
         requestType,
         flowId: normalizeRequestUuidReferenceInput(
           firstDefinedValue(parsedData.approvalFlowId, parsedData.approval_flow_id),
@@ -31819,7 +31824,7 @@ module.exports = {
         }
       }
       if (requestType === 'overtime') {
-        const overtimeSegmentation = await maybeBuildOvertimeSegmentationSnapshot(db, {
+        const overtimeSegmentation = await maybeBuildOvertimeSegmentationSnapshot(client, {
           orgId,
           userId: existingRequest?.user_id,
           workDate,
@@ -31862,7 +31867,7 @@ module.exports = {
               'Cannot freeze overtime attribution without a subject userId',
             )
           }
-          const { adapters } = createPluginAttendanceWorkDateResolver(db)
+          const { adapters } = createPluginAttendanceWorkDateResolver(client)
           const freeze = await adapters.overtime.freezeRequestCreationAnchor({
             orgId,
             userId: createUserId,
@@ -31899,6 +31904,399 @@ module.exports = {
       }
     }
 
+    const requestBoundaryRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      requesterName: z.string().min(1),
+      orgId: z.string().min(1).nullable(),
+      requestId: z.string().uuid().nullable(),
+      requestBody: requestWriteSchema,
+    }).strict()
+
+    function resolveRequestOperationId(parsedData) {
+      const camel = parsedData.operationId ?? null
+      const snake = parsedData.operation_id ?? null
+      if (camel && snake && camel !== snake) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'operationId aliases must match')
+      }
+      return camel ?? snake
+    }
+
+    function requestCorrelationId(req, operationId, kind) {
+      const raw = req.correlationId
+        ?? req.headers?.['x-correlation-id']
+        ?? req.headers?.['x-request-id']
+      const first = Array.isArray(raw) ? raw[0] : raw
+      if (typeof first === 'string' && first.length > 0 && first.length <= 128) return first
+      return `${kind}:${operationId ?? randomUUID()}`
+    }
+
+    function requestCommandPayload(parsedData, draft, mode, requestId = null) {
+      const finalWrite = {
+        workDate: draft.workDate,
+        requestType: draft.requestType,
+        requestedInAt: draft.requestedInAt ? new Date(draft.requestedInAt).toISOString() : null,
+        requestedOutAt: draft.requestedOutAt ? new Date(draft.requestedOutAt).toISOString() : null,
+        reason: draft.reason ?? null,
+        minutes: Number.isFinite(Number(draft.metadata?.minutes)) ? Number(draft.metadata.minutes) : null,
+        leaveTypeId: draft.metadata?.leaveType?.id ?? null,
+        leaveTypeCode: draft.metadata?.leaveType?.code ?? null,
+        overtimeRuleId: draft.metadata?.overtimeRule?.id ?? null,
+        overtimeRuleName: draft.metadata?.overtimeRule?.name ?? null,
+        attachmentUrl: draft.metadata?.attachmentUrl ?? null,
+        approvalFlowId: draft.metadata?.approvalFlow?.id ?? null,
+      }
+      if (mode === 'create') {
+        return { requestType: draft.requestType, requestWrite: finalWrite }
+      }
+
+      const patch = {}
+      const include = (target, aliases) => aliases.some(key => Object.prototype.hasOwnProperty.call(parsedData, key))
+      if (include(parsedData, ['workDate', 'work_date', 'date'])) patch.workDate = finalWrite.workDate
+      if (include(parsedData, ['requestType', 'request_type', 'type'])) patch.requestType = finalWrite.requestType
+      if (include(parsedData, ['requestedInAt', 'requested_in_at', 'clockIn'])) patch.requestedInAt = finalWrite.requestedInAt
+      if (include(parsedData, ['requestedOutAt', 'requested_out_at', 'clockOut'])) patch.requestedOutAt = finalWrite.requestedOutAt
+      if (include(parsedData, ['reason'])) patch.reason = finalWrite.reason
+      if (include(parsedData, ['minutes'])) patch.minutes = finalWrite.minutes
+      if (include(parsedData, ['leaveTypeId', 'leave_type_id'])) patch.leaveTypeId = finalWrite.leaveTypeId
+      if (include(parsedData, ['leaveTypeCode', 'leave_type_code'])) patch.leaveTypeCode = finalWrite.leaveTypeCode
+      if (include(parsedData, ['overtimeRuleId', 'overtime_rule_id'])) patch.overtimeRuleId = finalWrite.overtimeRuleId
+      if (include(parsedData, ['overtimeRuleName', 'overtime_rule_name'])) patch.overtimeRuleName = finalWrite.overtimeRuleName
+      if (include(parsedData, ['attachmentUrl', 'attachment_url'])) patch.attachmentUrl = finalWrite.attachmentUrl
+      if (include(parsedData, ['approvalFlowId', 'approval_flow_id'])) patch.approvalFlowId = finalWrite.approvalFlowId
+      return {
+        requestId,
+        expectedSnapshotVersion: firstDefinedValue(
+          parsedData.expectedSnapshotVersion,
+          parsedData.expected_snapshot_version,
+        ) ?? null,
+        expectedSnapshotHash: firstDefinedValue(
+          parsedData.expectedSnapshotFingerprint,
+          parsedData.expected_snapshot_fingerprint,
+        ) ?? null,
+        patch,
+      }
+    }
+
+    const requestCreateAdapter = {
+      async prepare(trx, rawInput) {
+        const route = requestBoundaryRouteInputSchema.parse(rawInput)
+        if (!route.orgId || route.requestId !== null) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+        }
+        const draft = await resolveAttendanceRequestDraft(
+          trx,
+          route.requestBody,
+          { org_id: route.orgId, user_id: route.actorId },
+        )
+        let makeupPunchPolicy = null
+        if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+          const settings = await getSettings(trx)
+          if (settings?.makeupPunchPolicy?.enabled === true) makeupPunchPolicy = settings.makeupPunchPolicy
+        }
+        const requestId = randomUUID()
+        const approvalId = `apv_${randomUUID()}`
+        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+          orgId: route.orgId,
+          userId: route.actorId,
+          flowSteps: draft.metadata?.approvalFlow?.steps,
+          context,
+        })
+        const approvalPayload = buildAttendanceApprovalInstancePayload({
+          approvalId,
+          requestId,
+          orgId: route.orgId,
+          userId: route.actorId,
+          requesterName: route.requesterName,
+          draft,
+          orgRelations,
+        })
+        const approvalAssignments = buildAttendanceApprovalAssignments(
+          draft.metadata?.approvalFlow?.steps,
+          0,
+          approvalPayload.requesterSnapshot,
+        )
+        return {
+          orgId: route.orgId,
+          actorId: route.actorId,
+          actorPosture: 'self',
+          tokenSubjectUserId: route.tokenSubjectUserId,
+          subjectUserId: route.actorId,
+          subjectScope: { kind: 'self', userId: route.actorId },
+          commandPayload: requestCommandPayload(route.requestBody, draft, 'create'),
+          state: { route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments },
+        }
+      },
+      async execute(trx, prepared) {
+        const { route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments } = prepared.state
+        await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, draft.workDate, draft.requestType)
+        const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+          orgId: route.orgId,
+          userId: route.actorId,
+          workDate: draft.workDate,
+          requestType: draft.requestType,
+        })
+        if (duplicateRequest) {
+          throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+        }
+        if (makeupPunchPolicy) {
+          const enforcement = await enforceMakeupPunchPolicy(trx, {
+            policy: makeupPunchPolicy,
+            orgId: route.orgId,
+            subjectUserId: route.actorId,
+            requesterId: route.actorId,
+            requestId: null,
+            draft,
+          })
+          draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
+        }
+        await upsertAttendanceApprovalInstance(trx, approvalPayload)
+        await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+        const rows = await trx.query(
+          `INSERT INTO attendance_requests
+           (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+           RETURNING *`,
+          [
+            requestId,
+            route.actorId,
+            route.orgId,
+            draft.workDate,
+            draft.requestType,
+            draft.requestedInAt,
+            draft.requestedOutAt,
+            draft.reason,
+            'pending',
+            approvalId,
+            JSON.stringify(draft.metadata),
+          ],
+        )
+        const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+          orgId: route.orgId,
+          requestId,
+          requestType: draft.requestType,
+          subjectUserId: route.actorId,
+          actorUserId: route.actorId,
+          payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
+          resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+            orgId: route.orgId,
+            userId: route.actorId,
+            workDate: draft.workDate,
+          }),
+        })
+        const response = {
+          ok: true,
+          data: {
+            request: mapAttendanceRequestRow(rows[0]),
+            ...(buildRequestSnapshotToken(snapshotAppend)
+              ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+              : {}),
+          },
+        }
+        return {
+          response,
+          resolvedRequestId: requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.requested',
+            payload: {
+              orgId: route.orgId,
+              userId: route.actorId,
+              workDate: draft.workDate,
+              requestType: draft.requestType,
+            },
+          }],
+        }
+      },
+    }
+
+    const requestPendingEditAdapter = {
+      async prepare(trx, rawInput) {
+        const route = requestBoundaryRouteInputSchema.parse(rawInput)
+        if (route.orgId !== null || !route.requestId) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+        }
+        const requestRows = await trx.query(
+          'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
+          [route.requestId],
+        )
+        if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+        const existingRequest = requestRows[0]
+        await ensureAttendanceRequestAccess(existingRequest, route.actorId, 'edit request')
+        if (existingRequest.status !== 'pending') {
+          throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
+        }
+        const draft = await resolveAttendanceRequestDraft(trx, route.requestBody, existingRequest)
+        const makeupTypeInvolved =
+          MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType) ||
+          MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(existingRequest.request_type)
+        let makeupPunchPolicy = null
+        if (makeupTypeInvolved) {
+          const settings = await getSettings(trx)
+          if (settings?.makeupPunchPolicy?.enabled === true) {
+            makeupPunchPolicy = settings.makeupPunchPolicy
+            if (existingRequest.user_id !== route.actorId) {
+              throw new HttpError(
+                422,
+                'MAKEUP_PUNCH_CROSS_USER_FORBIDDEN',
+                'Cross-user editing of makeup punch requests is not allowed while the makeup policy is enabled',
+              )
+            }
+          }
+        }
+        const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
+        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          userId: existingRequest.user_id,
+          flowSteps: draft.metadata?.approvalFlow?.steps,
+          context,
+        })
+        const approvalPayload = buildAttendanceApprovalInstancePayload({
+          approvalId,
+          requestId: route.requestId,
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          userId: existingRequest.user_id,
+          requesterName: existingRequest.user_id,
+          draft,
+          orgRelations,
+        })
+        const approvalAssignments = buildAttendanceApprovalAssignments(
+          draft.metadata?.approvalFlow?.steps,
+          0,
+          approvalPayload.requesterSnapshot,
+        )
+        const crossUser = existingRequest.user_id !== route.actorId
+        return {
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          actorId: route.actorId,
+          actorPosture: crossUser ? 'attendance_admin' : 'self',
+          tokenSubjectUserId: route.tokenSubjectUserId,
+          subjectUserId: existingRequest.user_id,
+          subjectScope: crossUser
+            ? { kind: 'explicit_users', userIds: [existingRequest.user_id] }
+            : { kind: 'self', userId: existingRequest.user_id },
+          commandPayload: requestCommandPayload(route.requestBody, draft, 'edit', route.requestId),
+          state: { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments },
+        }
+      },
+      async execute(trx, prepared) {
+        const { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments } = prepared.state
+        const expectedSnapshotVersion = firstDefinedValue(
+          route.requestBody.expectedSnapshotVersion,
+          route.requestBody.expected_snapshot_version,
+        )
+        const expectedSnapshotFingerprint = firstDefinedValue(
+          route.requestBody.expectedSnapshotFingerprint,
+          route.requestBody.expected_snapshot_fingerprint,
+        )
+        await acquireAttendanceRequestLock(
+          trx,
+          existingRequest.org_id,
+          existingRequest.user_id,
+          draft.workDate,
+          draft.requestType,
+        )
+        const duplicateRows = await trx.query(
+          `SELECT id
+           FROM attendance_requests
+           WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = $4
+             AND status IN ('pending', 'approved') AND id <> $5
+           LIMIT 1`,
+          [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, route.requestId],
+        )
+        if (duplicateRows.length > 0) {
+          throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+        }
+        if (makeupPunchPolicy && MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+          const enforcement = await enforceMakeupPunchPolicy(trx, {
+            policy: makeupPunchPolicy,
+            orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+            subjectUserId: existingRequest.user_id,
+            requesterId: route.actorId,
+            requestId: route.requestId,
+            draft,
+          })
+          draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
+        }
+        const snapshotAppend = await appendRequestCalculationSnapshotOnEdit(trx, {
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          requestId: route.requestId,
+          requestType: draft.requestType,
+          currentRequestType: existingRequest.request_type,
+          subjectUserId: existingRequest.user_id,
+          actorUserId: route.actorId,
+          expectedSnapshotVersion,
+          expectedSnapshotFingerprint,
+          payload: buildRequestSnapshotPayloadFromDraft(draft, draft.metadata),
+          resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+            orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+            userId: existingRequest.user_id,
+            workDate: draft.workDate,
+          }),
+        })
+        await upsertAttendanceApprovalInstance(trx, approvalPayload)
+        await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+        const rows = await trx.query(
+          `UPDATE attendance_requests
+           SET work_date = $2, request_type = $3, requested_in_at = $4, requested_out_at = $5,
+               reason = $6, metadata = $7::jsonb, approval_instance_id = $8, updated_at = now()
+           WHERE id = $1
+           RETURNING *`,
+          [
+            route.requestId,
+            draft.workDate,
+            draft.requestType,
+            draft.requestedInAt,
+            draft.requestedOutAt,
+            draft.reason,
+            JSON.stringify(draft.metadata),
+            approvalId,
+          ],
+        )
+        const snapshotToken = buildRequestSnapshotToken(snapshotAppend)
+        return {
+          response: {
+            ok: true,
+            data: {
+              request: mapAttendanceRequestRow(rows[0]),
+              ...(snapshotToken ? { requestSnapshot: snapshotToken } : {}),
+            },
+          },
+          resolvedRequestId: route.requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.request.updated',
+            payload: {
+              requestId: route.requestId,
+              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+              userId: existingRequest.user_id,
+            },
+          }],
+        }
+      },
+    }
+
+    const unavailableRequestOperationAdapter = {
+      async prepare() {
+        throw new HttpError(503, 'W4C3B_REQUEST_ADAPTER_NOT_READY', 'W4C3B_REQUEST_ADAPTER_NOT_READY')
+      },
+      async execute() {
+        throw new HttpError(503, 'W4C3B_REQUEST_ADAPTER_NOT_READY', 'W4C3B_REQUEST_ADAPTER_NOT_READY')
+      },
+    }
+    const w4RequestOperationBoundary =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.createRequestOperationBoundary === 'function'
+        ? attendanceW4SegmentCalculationPort.createRequestOperationBoundary({
+            adapters: {
+              request_create: requestCreateAdapter,
+              request_pending_edit: requestPendingEditAdapter,
+              request_decision: unavailableRequestOperationAdapter,
+              request_cancel: unavailableRequestOperationAdapter,
+            },
+          })
+        : null
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests',
@@ -31921,143 +32319,44 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        let draft
-        try {
-          draft = await resolveAttendanceRequestDraft(parsed.data, { org_id: orgId, user_id: userId })
-        } catch (error) {
-          if (error instanceof HttpError) {
-            res.status(error.status).json({
-              ok: false,
-              error: {
-                code: error.code,
-                message: error.message,
-                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
-              },
-            })
-            return
-          }
-          throw error
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
         }
-
-        // 补卡规则 MP-2/MP-3: only the three makeup request types read this policy. Gating the settings
-        // read behind the cheap request-type check keeps leave/overtime/etc byte-identical (zero new
-        // queries) when makeupPunchPolicy is disabled. Enforcement itself runs inside the txn below.
-        let makeupPunchPolicy = null
-        if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
-          const settings = await getSettings(db)
-          if (settings?.makeupPunchPolicy?.enabled === true) {
-            makeupPunchPolicy = settings.makeupPunchPolicy
-          }
-        }
-
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
-        // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-        // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-          orgId, userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
-        })
-        const approvalPayload = buildAttendanceApprovalInstancePayload({
-          approvalId,
-          requestId,
-          orgId,
-          userId,
-          requesterName: getUserLabel(req, userId),
-          draft,
-          orgRelations,
-        })
-        const approvalAssignments = buildAttendanceApprovalAssignments(
-          draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-        )
-
         try {
-	          const createResult = await db.transaction(async (trx) => {
-            await acquireAttendanceRequestLock(trx, orgId, userId, draft.workDate, draft.requestType)
-            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_create',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'request-create'),
+            routeInput: {
+              actorId: userId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId,
+              requesterName: getUserLabel(req, userId),
+              orgId,
+              requestId: null,
+              requestBody: parsed.data,
+            },
+          })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            const request = outcome.response?.data?.request
+            emitEvent('attendance.requested', {
               orgId,
               userId,
-              workDate: draft.workDate,
-              requestType: draft.requestType,
+              workDate: request?.workDate,
+              requestType: request?.requestType,
             })
-            if (duplicateRequest) {
-              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
-            }
-            // 补卡规则 MP-2/MP-3: enforce inside the txn, after the lock + duplicate guard, so the quota
-            // count and the insert below are consistent with the per-(org,user,workDate,requestType) lock.
-            // On success, persist a FRESH per-write policy snapshot onto the request metadata that the
-            // final approval will audit (never re-reading the live policy).
-            if (makeupPunchPolicy) {
-              const enforcement = await enforceMakeupPunchPolicy(trx, {
-                policy: makeupPunchPolicy,
-                orgId,
-                subjectUserId: userId,
-                requesterId: userId,
-                requestId: null,
-                draft,
-              })
-              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
-            }
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const rows = await trx.query(
-              `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-               RETURNING *`,
-              [
-                requestId,
-                userId,
-                orgId,
-                draft.workDate,
-                draft.requestType,
-                draft.requestedInAt,
-                draft.requestedOutAt,
-                draft.reason,
-                'pending',
-                approvalId,
-                JSON.stringify(draft.metadata),
-              ]
-            )
-
-            // W4C-3b P12: append immutable request snapshot v1 after parent exists.
-            // legacy_projection_only is a host no-op (zero rows).
-	            const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
-	              orgId,
-	              requestId,
-	              requestType: draft.requestType,
-	              subjectUserId: userId,
-	              actorUserId: userId,
-	              payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
-	              resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
-	                orgId,
-	                userId,
-	                workDate: draft.workDate,
-	              }),
-	            })
-
-	            return { request: rows[0], snapshotToken: buildRequestSnapshotToken(snapshotAppend) }
-	          })
-
-          emitEvent('attendance.requested', {
-            orgId,
-            userId,
-            workDate: draft.workDate,
-            requestType: draft.requestType,
-          })
-	          res.status(201).json({
-	            ok: true,
-	            data: {
-	              request: mapAttendanceRequestRow(createResult.request),
-	              ...(createResult.snapshotToken ? { requestSnapshot: createResult.snapshotToken } : {}),
-	            },
-	          })
+          }
+          res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -32065,6 +32364,7 @@ module.exports = {
           logger.error('Attendance request creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create request' } })
         }
+        return
       })
     )
 
@@ -33273,192 +33573,63 @@ module.exports = {
           return
         }
 
-        const requestId = normalizeUuidString(req.params.id)
+	        const requestId = normalizeUuidString(req.params.id)
 	        if (!requestId) {
 	          respondInvalidUuid(res)
 	          return
 	        }
-	        const expectedSnapshotVersion = firstDefinedValue(
-	          parsed.data.expectedSnapshotVersion,
-	          parsed.data.expected_snapshot_version,
-	        )
-	        const expectedSnapshotFingerprint = firstDefinedValue(
-	          parsed.data.expectedSnapshotFingerprint,
-	          parsed.data.expected_snapshot_fingerprint,
-	        )
-
+	        if (!w4RequestOperationBoundary) {
+	          res.status(503).json({
+	            ok: false,
+	            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+	          })
+	          return
+	        }
 	        try {
-	          const editResult = await db.transaction(async (trx) => {
-            const requestRows = await trx.query(
-              'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
-              [requestId]
-            )
-            if (requestRows.length === 0) {
-              throw new HttpError(404, 'NOT_FOUND', 'Request not found')
-            }
-
-            const existingRequest = requestRows[0]
-            await ensureAttendanceRequestAccess(existingRequest, requesterId, 'edit request')
-            if (existingRequest.status !== 'pending') {
-              throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
-            }
-
-            const draft = await resolveAttendanceRequestDraft(parsed.data, existingRequest)
-
-            // 补卡规则 MP-2/MP-3: only read the policy when a makeup type is involved (existing OR edited
-            // type), so non-makeup edits stay byte-identical. When enabled, cross-user editing of a makeup
-            // request is fail-closed (Q6: cannot yet audit the real submitter). Enabled-gated so disabled
-            // customers keep the current canAccessOtherUsers cross-user edit behavior.
-            const makeupTypeInvolved =
-              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType) ||
-              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(existingRequest.request_type)
-            let makeupPunchPolicy = null
-            if (makeupTypeInvolved) {
-              const settings = await getSettings(db)
-              if (settings?.makeupPunchPolicy?.enabled === true) {
-                makeupPunchPolicy = settings.makeupPunchPolicy
-                if (existingRequest.user_id !== requesterId) {
-                  throw new HttpError(
-                    422,
-                    'MAKEUP_PUNCH_CROSS_USER_FORBIDDEN',
-                    'Cross-user editing of makeup punch requests is not allowed while the makeup policy is enabled'
-                  )
-                }
-              }
-            }
-
-            await acquireAttendanceRequestLock(trx, existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType)
-            const duplicateRows = await trx.query(
-              `SELECT id
-               FROM attendance_requests
-               WHERE org_id = $1
-                 AND user_id = $2
-                 AND work_date = $3
-                 AND request_type = $4
-                 AND status IN ('pending', 'approved')
-                 AND id <> $5
-               LIMIT 1`,
-              [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, requestId]
-            )
-            if (duplicateRows.length > 0) {
-              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
-            }
-
-            // 补卡规则 MP-2/MP-3: enforce on the EDITED makeup type, inside the txn after the lock +
-            // duplicate guard, excluding the current request id from the quota count. Recompute a FRESH
-            // snapshot every successful update — resolveAttendanceRequestDraft rebuilds metadata from
-            // scratch (it never copies makeupPunchPolicySnapshot), so the stale snapshot is dropped and
-            // the metadata siblings (attachmentUrl/approvalFlow) are preserved.
-            if (makeupPunchPolicy && MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
-              const enforcement = await enforceMakeupPunchPolicy(trx, {
-                policy: makeupPunchPolicy,
-                orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-                subjectUserId: existingRequest.user_id,
-                requesterId,
-                requestId,
-                draft,
-              })
-              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
-            }
-
-            const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-              userId: existingRequest.user_id,
-              flowSteps: draft.metadata?.approvalFlow?.steps,
-              context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId,
-              requestId,
-              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-              userId: existingRequest.user_id,
-              requesterName: existingRequest.user_id,
-              draft,
-              orgRelations,
-            })
-	            const approvalAssignments = buildAttendanceApprovalAssignments(
-	              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-	            )
-	            const snapshotAppend = await appendRequestCalculationSnapshotOnEdit(trx, {
-	              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+	          const operationId = resolveRequestOperationId(parsed.data)
+	          const outcome = await w4RequestOperationBoundary.execute({
+	            kind: 'request_pending_edit',
+	            operationId,
+	            correlationId: requestCorrelationId(req, operationId, 'request-edit'),
+	            routeInput: {
+	              actorId: requesterId,
+	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+	              requesterName: getUserLabel(req, requesterId),
+	              orgId: null,
 	              requestId,
-	              requestType: draft.requestType,
-	              currentRequestType: existingRequest.request_type,
-	              subjectUserId: existingRequest.user_id,
-	              actorUserId: requesterId,
-	              expectedSnapshotVersion,
-	              expectedSnapshotFingerprint,
-	              payload: buildRequestSnapshotPayloadFromDraft(draft, draft.metadata),
-	              resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
-	                orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-	                userId: existingRequest.user_id,
-	                workDate: draft.workDate,
-	              }),
-	            })
-	            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const rows = await trx.query(
-              `UPDATE attendance_requests
-               SET work_date = $2,
-                   request_type = $3,
-                   requested_in_at = $4,
-                   requested_out_at = $5,
-                   reason = $6,
-                   metadata = $7::jsonb,
-                   approval_instance_id = $8,
-                   updated_at = now()
-               WHERE id = $1
-               RETURNING *`,
-              [
-                requestId,
-                draft.workDate,
-                draft.requestType,
-                draft.requestedInAt,
-                draft.requestedOutAt,
-                draft.reason,
-                JSON.stringify(draft.metadata),
-                approvalId,
-              ]
-            )
-	            return { request: rows[0], snapshotToken: buildRequestSnapshotToken(snapshotAppend) }
-	          })
-
-	          emitEvent('attendance.request.updated', {
-	            requestId: editResult.request.id,
-	            orgId: editResult.request.org_id ?? DEFAULT_ORG_ID,
-	            userId: editResult.request.user_id,
-	          })
-	          res.json({
-	            ok: true,
-	            data: {
-	              request: mapAttendanceRequestRow(editResult.request),
-	              ...(editResult.snapshotToken ? { requestSnapshot: editResult.snapshotToken } : {}),
+	              requestBody: parsed.data,
 	            },
 	          })
-        } catch (error) {
-          if (error instanceof HttpError) {
-            res.status(error.status).json({
-              ok: false,
-              error: {
-                code: error.code,
-                message: error.message,
-                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
-              },
-            })
-            return
-          }
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance request update failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update request' } })
-        }
+	          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+	            const request = outcome.response?.data?.request
+	            emitEvent('attendance.request.updated', {
+	              requestId,
+	              orgId: request?.orgId ?? DEFAULT_ORG_ID,
+	              userId: request?.userId,
+	            })
+	          }
+	          res.json(outcome.response)
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({
+	              ok: false,
+	              error: {
+	                code: error.code,
+	                message: error.message,
+	                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+	              },
+	            })
+	            return
+	          }
+	          if (respondIfW4BoundaryError(res, error)) return
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance request update failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update request' } })
+	        }
+	        return
       })
     )
 

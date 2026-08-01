@@ -9,7 +9,11 @@
  * SERIALIZABLE transaction and connection.
  */
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
-import { parseCanonicalAttendanceRolloutOrgKeyV1 } from './w4c0-identity'
+import {
+  acquireAttendanceCalculationRolloutLock,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  resolveSegmentCalculationPosture,
+} from './w4c0-identity'
 import {
   createAuthorizedAttendanceWriteContextV1,
   type AttendanceActorPostureV1,
@@ -17,10 +21,13 @@ import {
 } from './w4c0-authorization'
 import {
   attendanceResultOperationPreflightV1,
+  enqueueAttendanceResultEventOutboxV1,
   runAttendanceResultOperationTransactionV1,
   sealAttendanceResultOperationV1,
 } from './w4c0-operation-registry'
 import { AttendanceW4OperationError } from './w4c0-operation-contract'
+import type { AttendanceW4OutboxEventKindV1 } from './w4c0-operation-contract'
+import { computeAttendanceBusinessKeyFingerprintV1 } from './w4c0-fingerprints'
 import {
   normalizeAttendanceSourceOperationEnvelopeV1,
   type NormalizedAttendanceSourceOperationEnvelopeV1,
@@ -129,6 +136,10 @@ export interface AttendanceRequestOperationPreparedV1<TState = unknown> {
 export interface AttendanceRequestOperationExecutionV1 {
   readonly response: unknown
   readonly resolvedRequestId: string | null
+  readonly lifecycleEvents: readonly [{
+    readonly eventKind: AttendanceW4OutboxEventKindV1
+    readonly payload: unknown
+  }]
 }
 
 export interface AttendanceRequestOperationAdapterV1<TState = unknown> {
@@ -249,6 +260,24 @@ export function createAttendanceRequestOperationBoundaryV1(
             return { kind: 'legacy' as const, response: result.response }
           }
 
+          // Null-ID legacy clients predate the W4 identity/liveness contract.
+          // Resolve posture under the canonical shared lock first: ordinary
+          // legacy keeps byte-identical authorization behavior and zero W4
+          // rows, while suspended or W4-enabled orgs still fail closed before
+          // the adapter's first source DML.
+          if (input.operationId === null) {
+            const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(prepared.orgId)
+            await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
+            const posture = await resolveSegmentCalculationPosture(trx, orgKey)
+            if (posture.writePosture === 'blocked') {
+              throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
+            }
+            if (posture.writePosture === 'legacy_projection_only') {
+              const result = await adapter.execute(shapedTrx, prepared)
+              return { kind: 'legacy' as const, response: result.response }
+            }
+          }
+
           const envelope = buildEnvelope(input, prepared)
           const authorization = createAuthorizedAttendanceWriteContextV1({
             actorId: prepared.actorId,
@@ -279,6 +308,18 @@ export function createAttendanceRequestOperationBoundaryV1(
 
           const identity = preflight.itemIdentities[0]
           if (!identity) fail('W4C3B_REQUEST_OPERATION_IDENTITY_MISSING', 500)
+          const [event] = result.lifecycleEvents
+          if (!event) fail('W4C3B_REQUEST_LIFECYCLE_EVENT_MISSING', 500)
+          await enqueueAttendanceResultEventOutboxV1(trx, identity, [{
+            eventKind: event.eventKind,
+            payload: event.payload,
+            payloadSchemaVersion: 1,
+            businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
+              kind: event.eventKind,
+              orgId: envelope.orgId,
+              operationId: identity.id,
+            }),
+          }])
           await sealAttendanceResultOperationV1(trx, identity, {
             responseSnapshot: jsonValue(result.response),
             resolvedRequestId: result.resolvedRequestId,

@@ -63,7 +63,14 @@ function adapters(events: string[]): Record<'request_create' | 'request_pending_
     async execute(trx) {
       events.push('execute')
       await trx.query('INSERT INTO request_execution_marker(id) VALUES ($1)', [REQUEST_ID])
-      return { response: { id: REQUEST_ID }, resolvedRequestId: REQUEST_ID }
+      return {
+        response: { id: REQUEST_ID },
+        resolvedRequestId: REQUEST_ID,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested' as const,
+          payload: { requestId: REQUEST_ID },
+        }],
+      }
     },
   }
   return {
@@ -82,6 +89,28 @@ afterEach(() => {
 })
 
 describe('W4C-3b request operation boundary', () => {
+  it('keeps null-ID legacy execution ahead of the new liveness recheck', async () => {
+    delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    const events: string[] = []
+    const client = fakeClient(null)
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => ({ client, release: vi.fn() }),
+      adapters: adapters(events),
+    })
+
+    await expect(boundary.execute({
+      kind: 'request_create',
+      operationId: null,
+      correlationId: 'request-create:legacy',
+      routeInput: { requestType: 'leave' },
+    })).resolves.toEqual({ kind: 'legacy', response: { id: REQUEST_ID } })
+
+    expect(events).toEqual(['prepare', 'execute'])
+    expect(client.calls.some(({ sqlText }) => sqlText.includes('FROM users WHERE id = $1'))).toBe(false)
+    expect(client.calls.some(({ sqlText }) => sqlText.includes('attendance_result_operations'))).toBe(false)
+    expect(client.calls.some(({ sqlText }) => sqlText.includes('attendance_result_event_outbox'))).toBe(false)
+  })
+
   it('rejects extra top-level keys and nested callbacks before acquiring a connection', async () => {
     const acquireConnection = vi.fn()
     const boundary = createAttendanceRequestOperationBoundaryV1({
@@ -150,11 +179,13 @@ describe('W4C-3b request operation boundary', () => {
 
     const claim = client.calls.findIndex(({ sqlText }) => sqlText.includes('INSERT INTO attendance_result_operations'))
     const sourceDml = client.calls.findIndex(({ sqlText }) => sqlText.includes('request_execution_marker'))
+    const outbox = client.calls.findIndex(({ sqlText }) => sqlText.includes('attendance_result_event_outbox'))
     const seal = client.calls.findIndex(({ sqlText }) => sqlText.startsWith('UPDATE attendance_result_operations'))
     expect(events).toEqual(['prepare', 'execute'])
     expect(claim).toBeGreaterThan(-1)
     expect(sourceDml).toBeGreaterThan(claim)
-    expect(seal).toBeGreaterThan(sourceDml)
+    expect(outbox).toBeGreaterThan(sourceDml)
+    expect(seal).toBeGreaterThan(outbox)
     expect(client.calls.at(-1)?.sqlText).toBe('COMMIT')
     expect(release).toHaveBeenCalledOnce()
   })

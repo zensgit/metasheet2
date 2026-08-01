@@ -102,6 +102,9 @@ const FILES = Object.freeze([
   'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
   'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
   'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
+  // W4C-3b P13 real plugin route proof: create/edit replay, legacy zero-W4
+  // compatibility, and suspended zero-residue behavior.
+  'tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts',
 ])
 
 /**
