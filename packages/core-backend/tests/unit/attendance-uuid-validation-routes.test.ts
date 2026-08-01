@@ -118,6 +118,7 @@ async function createHarness(
               operationId: input.operationId ?? null,
               correlationId: input.correlationId,
               acceptedWritePosture: 'legacy_projection_only',
+              routeVariant: input.routeVariant ?? null,
             }
             const adapter = adapters[input.kind]
             const prepared = await adapter.prepare(trx, input.routeInput, operation)
@@ -564,6 +565,9 @@ function requestDecisionIdentityQueryResult(
     permissions?: string[]
   } = {},
 ) {
+  if (sql.includes('SELECT id, org_id, user_id, approval_instance_id, request_type')) {
+    return [attendanceRequestRow()]
+  }
   if (sql.includes('AS platform_admin') && sql.includes('FROM users u')) {
     return [{ platform_admin: options.platformAdmin ?? false }]
   }
@@ -1198,7 +1202,14 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('SELECT role_id FROM user_roles')) return []
       if (sql.includes('FROM user_permissions')) return []
       if (sql.includes('JOIN role_permissions')) return []
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) {
+      if (sql.includes('SELECT id, org_id, user_id, approval_instance_id, request_type')) {
+        return [attendanceRequestRow({
+          user_id: 'worker-1',
+          request_type: 'time_correction',
+          metadata: {},
+        })]
+      }
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1')) {
         return [attendanceRequestRow({
           user_id: 'worker-1',
           request_type: 'time_correction',
@@ -1252,14 +1263,14 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('SELECT role_id FROM user_roles')) return []
       if (sql.includes('FROM user_permissions')) return []
       if (sql.includes('JOIN role_permissions')) return []
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) {
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1')) {
         return [attendanceRequestRow({
           user_id: 'approver-1',
           request_type: 'time_correction',
           metadata: {},
         })]
       }
-      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) {
+      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1')) {
         return [approvalInstanceRow()]
       }
       if (sql.includes('FROM approval_assignments')) return []
@@ -1305,8 +1316,8 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('FROM user_permissions') && params[1] === 'attendance:approve') return [{ ok: 1 }]
       if (sql.includes('FROM user_permissions')) return []
       if (sql.includes('JOIN role_permissions')) return []
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) return [attendanceRequestRow()]
-      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) return [approvalInstanceRow()]
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1')) return [attendanceRequestRow()]
+      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1')) return [approvalInstanceRow()]
       // S7-0 assignment probe: NO active assignment matches approver-1 at the current node → denied.
       if (sql.includes('FROM approval_assignments')) return []
       if (sql.includes('UPDATE approval_instances')) return [{ id: approvalInstanceId }]
@@ -1347,7 +1358,7 @@ describe('attendance UUID route validation', () => {
       // S7-0 actor-role-ids loader (rbacQueryResult only knows the isAdmin role_id=$2 probe): the
       // scheduler holds no roles; its assignment match comes from the user-type assignment below.
       if (sql.includes('SELECT role_id FROM user_roles')) return []
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) return [attendanceRequestRow()]
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1')) return [attendanceRequestRow()]
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeApproveRow()]
@@ -1355,7 +1366,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
         return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
       }
-      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) return [approvalInstanceRow()]
+      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1')) return [approvalInstanceRow()]
       // S7-0 assignment probe: scheduler-1 IS the active assignee for the current node → authorized
       // by the per-type match (no admin override needed), so approve proceeds exactly as before.
       if (sql.includes('FROM approval_assignments')) return [{ ok: 1 }]
@@ -1401,7 +1412,7 @@ describe('attendance UUID route validation', () => {
       if (identity !== undefined) return identity
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) return [attendanceRequestRow()]
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1')) return [attendanceRequestRow()]
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) {
@@ -1420,7 +1431,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
         return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
       }
-      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) return [approvalInstanceRow()]
+      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1')) return [approvalInstanceRow()]
       throw new Error(`unexpected query: ${sql}`)
     })
 
@@ -1433,7 +1444,8 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
     const statements = db.query.mock.calls.map(([sql]) => String(sql))
-    expect(statements.some(sql => sql.includes('SELECT * FROM approval_instances') && sql.includes('FOR UPDATE'))).toBe(true)
+    expect(statements.some(sql => sql.includes('SELECT * FROM approval_instances'))).toBe(true)
+    expect(statements.some(sql => sql.includes('SELECT * FROM approval_instances') && sql.includes('FOR UPDATE'))).toBe(false)
     expect(statements.some(sql => sql.includes('UPDATE approval_instances'))).toBe(false)
     expect(statements.some(sql => sql.includes('INSERT INTO approval_records'))).toBe(false)
     expect(statements.some(sql => sql.includes('UPDATE attendance_requests'))).toBe(false)
@@ -3511,7 +3523,7 @@ describe('attendance UUID route validation', () => {
         body: {
           workDate: '2026-05-26',
           requestType: 'leave',
-          leaveTypeId: '00000000-0000-4000-8000-000000000000',
+          leaveTypeId: '00000000-0000-4000-8000-000000000312',
           minutes: 60,
         },
         query: {},
