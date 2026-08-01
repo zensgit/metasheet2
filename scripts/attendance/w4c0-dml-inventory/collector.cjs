@@ -140,16 +140,14 @@ const DML_LINE_PATTERN =
   /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
 
 const P25_READ_TABLE_PATTERN = new RegExp(
-  `\\b(?:FROM|JOIN)\\s+"?(${Object.keys(P25_OPERATIONAL_TABLE_SPECS).join('|')})"?`,
+  `\\b(?:FROM|JOIN)\\s+"?(${Object.keys(P25_OPERATIONAL_TABLE_SPECS).join('|')})"?(?![A-Za-z0-9_])`,
   'gi',
 )
 
 const ATTENDANCE_RECORD_READ_PATTERN =
-  /\b(?:FROM|JOIN)\s+"?(attendance_records|attendance_current_records)"?/gi
-const ATTENDANCE_RECORD_DYNAMIC_READ_PATTERN =
-  /\b(?:FROM|JOIN)\s+\$\{\s*[A-Za-z_$][A-Za-z0-9_$]*\s*\}/gi
-const ATTENDANCE_RECORD_TABLE_LITERAL_PATTERN =
-  /(['"])(attendance_records|attendance_current_records)\1/g
+  /\b(?:FROM|JOIN)\s+"?(attendance_records|attendance_current_records)"?(?![A-Za-z0-9_])/gi
+const DYNAMIC_READ_PATTERN = /\b(?:FROM|JOIN)\s+\$\{([^}]+)\}/gi
+const JS_IDENTIFIER_PATTERN = /\b[A-Za-z_$][A-Za-z0-9_$]*\b/g
 
 // Reserved words that can legally follow a DML verb without being a table name — most notably
 // `... ON CONFLICT (...) DO UPDATE SET col = ...` (an upsert), where "SET" immediately follows
@@ -273,8 +271,92 @@ function scanFileForDmlSites(relPath, content) {
   return sites
 }
 
-function isDeleteTarget(line, table) {
-  return new RegExp(`\\bDELETE\\s+FROM\\s+"?${table}"?`, 'i').test(line)
+function lineIndexAt(content, index) {
+  return content.slice(0, index).split(/\r?\n/).length - 1
+}
+
+function isDeleteTargetAt(content, fromIndex) {
+  return /\bDELETE\s*$/i.test(content.slice(Math.max(0, fromIndex - 32), fromIndex))
+}
+
+function collectDynamicReadSites(content, lines, tableNames) {
+  const alternation = [...tableNames]
+    .sort((a, b) => b.length - a.length)
+    .map((table) => table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')
+  const literalPattern = new RegExp(`(['"\`])(${alternation})\\1`, 'g')
+  const declarationPattern = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*/g
+  const valueBindings = []
+  const latestBinding = (values, identifier, beforeIndex) => [...values]
+    .reverse()
+    .find((binding) => binding.identifier === identifier && binding.index < beforeIndex)
+  let match
+  while ((match = declarationPattern.exec(content))) {
+    literalPattern.lastIndex = 0
+    const literal = literalPattern.exec(content.slice(declarationPattern.lastIndex))
+    if (literal?.index === 0) {
+      valueBindings.push({ identifier: match[1], index: match.index, tables: new Set([literal[2]]) })
+    }
+  }
+
+  const arrayPattern = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*\[([\s\S]*?)\]/g
+  while ((match = arrayPattern.exec(content))) {
+    literalPattern.lastIndex = 0
+    let literal
+    const tables = new Set()
+    while ((literal = literalPattern.exec(match[2]))) tables.add(literal[2])
+    if (tables.size > 0) valueBindings.push({ identifier: match[1], index: match.index, tables })
+  }
+  valueBindings.sort((a, b) => a.index - b.index)
+
+  const forOfBindings = []
+  const forOfPattern = /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+of\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/g
+  while ((match = forOfPattern.exec(content))) {
+    const sourceBinding = latestBinding(valueBindings, match[2], match.index)
+    forOfBindings.push({
+      identifier: match[1],
+      index: match.index,
+      tables: new Set(sourceBinding?.tables || []),
+    })
+  }
+
+  const inlineForOfPattern = /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+of\s+\[([\s\S]*?)\]\s*\)/g
+  while ((match = inlineForOfPattern.exec(content))) {
+    literalPattern.lastIndex = 0
+    let literal
+    const tables = new Set()
+    while ((literal = literalPattern.exec(match[2]))) tables.add(literal[2])
+    forOfBindings.push({ identifier: match[1], index: match.index, tables })
+  }
+
+  const sites = []
+  DYNAMIC_READ_PATTERN.lastIndex = 0
+  while ((match = DYNAMIC_READ_PATTERN.exec(content))) {
+    const lineIndex = lineIndexAt(content, match.index)
+    if (isDeleteTargetAt(content, match.index)) continue
+    const enclosingSymbol = nearestEnclosingSymbol(lines, lineIndex)
+    const resolved = new Set()
+
+    literalPattern.lastIndex = 0
+    let literal
+    while ((literal = literalPattern.exec(match[1]))) resolved.add(literal[2])
+
+    JS_IDENTIFIER_PATTERN.lastIndex = 0
+    let identifier
+    while ((identifier = JS_IDENTIFIER_PATTERN.exec(match[1]))) {
+      const binding = latestBinding(
+        [...valueBindings, ...forOfBindings].sort((a, b) => a.index - b.index),
+        identifier[0],
+        match.index,
+      )
+      for (const table of binding?.tables || []) resolved.add(table)
+    }
+
+    for (const table of resolved) {
+      sites.push({ lineIndex, table, enclosingSymbol, dynamic: true })
+    }
+  }
+  return sites
 }
 
 // P25 needs more than the DML census: operational state becomes dangerous when a caller reads
@@ -287,24 +369,36 @@ function scanFileForP25CallPathSites(relPath, content) {
     .filter((site) => P25_OPERATIONAL_TABLE_SPECS[site.table])
     .map((site) => ({ ...site, access: 'write' }))
 
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]
-    P25_READ_TABLE_PATTERN.lastIndex = 0
-    let match
-    while ((match = P25_READ_TABLE_PATTERN.exec(line))) {
-      const table = match[1]
-      // DELETE FROM names its write target, not a second read. INSERT ... SELECT and UPDATE ...
-      // FROM still retain their source-table read, which is the evidence this guard needs.
-      if (isDeleteTarget(line, table)) continue
-      sites.push({
-        relPath,
-        line: i + 1,
-        verb: 'select',
-        table,
-        enclosingSymbol: nearestEnclosingSymbol(lines, i),
-        access: 'read',
-      })
-    }
+  P25_READ_TABLE_PATTERN.lastIndex = 0
+  let match
+  while ((match = P25_READ_TABLE_PATTERN.exec(content))) {
+    const lineIndex = lineIndexAt(content, match.index)
+    // DELETE FROM names its write target, not a second read. INSERT ... SELECT and UPDATE ...
+    // FROM still retain their source-table read, which is the evidence this guard needs.
+    if (isDeleteTargetAt(content, match.index)) continue
+    sites.push({
+      relPath,
+      line: lineIndex + 1,
+      verb: 'select',
+      table: match[1],
+      enclosingSymbol: nearestEnclosingSymbol(lines, lineIndex),
+      access: 'read',
+    })
+  }
+  for (const dynamic of collectDynamicReadSites(
+    content,
+    lines,
+    Object.keys(P25_OPERATIONAL_TABLE_SPECS),
+  )) {
+    sites.push({
+      relPath,
+      line: dynamic.lineIndex + 1,
+      verb: 'select',
+      table: dynamic.table,
+      enclosingSymbol: dynamic.enclosingSymbol,
+      access: 'read',
+      dynamic: true,
+    })
   }
   return sites
 }
@@ -316,8 +410,8 @@ function scanFileForAttendanceRecordReadSites(relPath, content) {
   let match
   while ((match = ATTENDANCE_RECORD_READ_PATTERN.exec(content))) {
     const table = match[1]
-    const lineIndex = content.slice(0, match.index).split(/\r?\n/).length - 1
-    if (isDeleteTarget(lines[lineIndex], table)) continue
+    const lineIndex = lineIndexAt(content, match.index)
+    if (isDeleteTargetAt(content, match.index)) continue
     sites.push({
       relPath,
       line: lineIndex + 1,
@@ -326,22 +420,16 @@ function scanFileForAttendanceRecordReadSites(relPath, content) {
     })
   }
 
-  const dynamicReadSymbols = new Set()
-  ATTENDANCE_RECORD_DYNAMIC_READ_PATTERN.lastIndex = 0
-  while ((match = ATTENDANCE_RECORD_DYNAMIC_READ_PATTERN.exec(content))) {
-    const lineIndex = content.slice(0, match.index).split(/\r?\n/).length - 1
-    dynamicReadSymbols.add(nearestEnclosingSymbol(lines, lineIndex))
-  }
-  ATTENDANCE_RECORD_TABLE_LITERAL_PATTERN.lastIndex = 0
-  while ((match = ATTENDANCE_RECORD_TABLE_LITERAL_PATTERN.exec(content))) {
-    const lineIndex = content.slice(0, match.index).split(/\r?\n/).length - 1
-    const enclosingSymbol = nearestEnclosingSymbol(lines, lineIndex)
-    if (!dynamicReadSymbols.has(enclosingSymbol)) continue
+  for (const dynamic of collectDynamicReadSites(
+    content,
+    lines,
+    ['attendance_records', 'attendance_current_records'],
+  )) {
     sites.push({
       relPath,
-      line: lineIndex + 1,
-      table: match[2],
-      enclosingSymbol,
+      line: dynamic.lineIndex + 1,
+      table: dynamic.table,
+      enclosingSymbol: dynamic.enclosingSymbol,
       dynamic: true,
     })
   }

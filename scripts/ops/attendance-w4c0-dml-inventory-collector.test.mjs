@@ -133,6 +133,20 @@ test('W4C-3a SELECT-inventory mutation: a dynamic base-table member fails while 
   assert.deepEqual(currentResult.unclassified, [])
   assert.equal(currentResult.classifiedSites[0]?.posture, 'current')
   assert.equal(currentResult.classifiedSites[0]?.dynamic, true)
+
+  const bypassShapes = [
+    "const TABLE = 'attendance_records'\nasync function moduleConstant() { return db.query(`SELECT 1 FROM ${TABLE}`) }\n",
+    'const TABLE = `attendance_records`\nasync function backtickConstant() { return db.query(`SELECT 1 FROM ${TABLE}`) }\n',
+    "const TABLE = 'attendance_records'\nasync function wrappedConstant() { return db.query(`SELECT 1 FROM ${quote(TABLE)}`) }\n",
+  ]
+  for (const source of bypassShapes) {
+    const result = classifyAttendanceRecordReadSites(
+      scanFileForAttendanceRecordReadSites(relPath, source),
+    )
+    assert.equal(result.unclassified.length, 1, source)
+    assert.equal(result.unclassified[0]?.table, 'attendance_records')
+    assert.equal(result.unclassified[0]?.dynamic, true)
+  }
 })
 
 // -------------------------------------------------------------------------------------------
@@ -637,7 +651,7 @@ test('P25: generated runtime call-path census classifies every closed-table read
   const { sites } = buildP25CallPathCensus(source)
   const result = classifyP25CallPathSites(sites)
 
-  assert.equal(sites.length, 101, 'the current generated P25 read/write inventory must remain explicit')
+  assert.equal(sites.length, 105, 'the current generated P25 read/write inventory must remain explicit')
   assert.deepEqual(result.unclassified, [], 'a new P25 table/site or renamed wrapper must not inherit a broad allowlist')
   assert.deepEqual(result.countDrift, [], 'an extra P25 access in an existing wrapper must require an explicit classification')
   assert.deepEqual(result.stale, [], 'removing a P25 access must retire its classification deliberately')
@@ -687,6 +701,29 @@ test('P25 mutation: removing the private-worker boundary or adding a non-worker 
       ]),
     (error) => error.code === 'ATTENDANCE_P25_IDENTITY_ADAPTER_PATH_FORBIDDEN',
     'a sync/legacy/integration/rollback wrapper cannot consume a reserved retryable tuple',
+  )
+
+  const hiddenReadShapes = [
+    'async function multilineP25Read() {\n  return db.query(`SELECT * FROM\n attendance_import_jobs`)\n}\n',
+    "const TABLE = 'attendance_import_jobs'\nasync function moduleP25Read() { return db.query(`SELECT * FROM ${TABLE}`) }\n",
+    'const TABLE = `attendance_import_jobs`\nasync function backtickP25Read() { return db.query(`SELECT * FROM ${TABLE}`) }\n',
+    "const TABLE = 'attendance_import_jobs'\nasync function wrappedP25Read() { return db.query(`SELECT * FROM ${quote(TABLE)}`) }\n",
+  ]
+  for (const source of hiddenReadShapes) {
+    const sites = scanFileForP25CallPathSites('plugins/plugin-attendance/index.cjs', source)
+    assert.equal(sites.length, 1, source)
+    assert.equal(sites[0]?.table, 'attendance_import_jobs')
+    assert.equal(classifyP25CallPathSites(sites).unclassified.length, 1, source)
+  }
+
+  const reusedLoopVariable = scanFileForP25CallPathSites(
+    'packages/core-backend/src/db/migrations/example.ts',
+    "async function down() {\n  const checks = ['attendance_import_legacy_execution_plans']\n  for (const table of checks) { await db.query(`SELECT * FROM ${quote(table)}`) }\n  for (const table of ['attendance_import_jobs']) { await drop(table) }\n}\n",
+  )
+  assert.deepEqual(
+    reusedLoopVariable.map((site) => site.table),
+    ['attendance_import_legacy_execution_plans'],
+    'a later same-name loop binding must not contaminate an earlier dynamic SELECT',
   )
 })
 

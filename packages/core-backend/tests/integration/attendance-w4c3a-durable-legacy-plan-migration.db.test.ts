@@ -135,38 +135,87 @@ async function createBase(pool: Pool): Promise<void> {
       user_id text NOT NULL)`)
 }
 
-async function createScratch(adminPool: Pool, name: string): Promise<{ pool: Pool; kyselyPool: Pool; db: Kysely<unknown> }> {
+type ScratchDatabase = { pool: Pool; kyselyPool: Pool; db: Kysely<unknown> }
+
+async function createScratch(adminPool: Pool, name: string): Promise<ScratchDatabase> {
   await adminPool.query(`DROP DATABASE IF EXISTS ${name}`)
   await adminPool.query(`CREATE DATABASE ${name}`)
   const url = new URL(dbUrl as string)
   url.pathname = `/${name}`
   const pool = new Pool({ connectionString: url.toString() })
   const kyselyPool = new Pool({ connectionString: url.toString() })
-  await createBase(pool)
-  return { pool, kyselyPool, db: new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kyselyPool }) }) }
+  const scratch = {
+    pool,
+    kyselyPool,
+    db: new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kyselyPool }) }),
+  }
+  try {
+    await createBase(pool)
+    return scratch
+  } catch (error) {
+    try {
+      await destroyScratch(adminPool, name, scratch)
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], `Failed to initialize and clean scratch database ${name}`)
+    }
+    throw error
+  }
 }
 
 async function destroyScratch(
   adminPool: Pool,
   name: string,
-  scratch: { pool: Pool; db: Kysely<unknown> },
+  scratch: ScratchDatabase,
 ): Promise<void> {
-  await scratch.db.destroy()
-  await scratch.pool.end()
-
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    const active = await adminPool.query(
-      'SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = $1',
-      [name],
-    )
-    if (active.rows[0].count === 0) {
-      await adminPool.query(`DROP DATABASE IF EXISTS ${name}`)
-      return
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25))
+  const asyncErrors: Error[] = []
+  const captureAsyncError = (error: Error): void => {
+    asyncErrors.push(error)
+  }
+  for (const current of [scratch.pool, scratch.kyselyPool]) {
+    current.on('error', captureAsyncError)
   }
 
-  throw new Error(`Scratch database ${name} still has active connections after pool shutdown`)
+  try {
+    const failures: unknown[] = []
+    const shutdown = await Promise.allSettled([
+      scratch.db.destroy(),
+      scratch.pool.end(),
+    ])
+    for (const result of shutdown) {
+      if (result.status === 'rejected') failures.push(result.reason)
+    }
+
+    let dropped = false
+    let activityCheckFailed = false
+    try {
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const active = await adminPool.query(
+          'SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = $1',
+          [name],
+        )
+        if (Number(active.rows[0]?.count) === 0) {
+          await adminPool.query(`DROP DATABASE IF EXISTS ${name}`)
+          dropped = true
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    } catch (error) {
+      activityCheckFailed = true
+      failures.push(error)
+    }
+    if (!dropped && !activityCheckFailed) {
+      failures.push(new Error(`Scratch database ${name} still has active connections after pool shutdown`))
+    }
+    failures.push(...asyncErrors)
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `Failed to clean scratch database ${name}`)
+    }
+  } finally {
+    for (const current of [scratch.pool, scratch.kyselyPool]) {
+      current.off('error', captureAsyncError)
+    }
+  }
 }
 
 async function seedNoTargetJob(pool: Pool, orgId: string): Promise<{ jobId: string; batchId: string }> {
@@ -265,11 +314,16 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
   let pool: Pool
   let kyselyPool: Pool
   let db: Kysely<unknown>
+  const adminAsyncErrors: Error[] = []
+  const captureAdminAsyncError = (error: Error): void => {
+    adminAsyncErrors.push(error)
+  }
 
   beforeAll(async () => {
     const adminUrl = new URL(dbUrl as string)
     adminUrl.pathname = '/postgres'
     adminPool = new Pool({ connectionString: adminUrl.toString() })
+    adminPool.on('error', captureAdminAsyncError)
     const scratch = await createScratch(adminPool, scratchName)
     pool = scratch.pool
     kyselyPool = scratch.kyselyPool
@@ -283,9 +337,25 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
   }, 90000)
 
   afterAll(async () => {
-    for (const current of [pool, kyselyPool, adminPool]) current?.on('error', () => undefined)
-    await destroyScratch(adminPool, scratchName, { pool, db })
-    await adminPool?.end()
+    const failures: unknown[] = []
+    try {
+      if (pool && kyselyPool && db) {
+        await destroyScratch(adminPool, scratchName, { pool, kyselyPool, db })
+      }
+    } catch (error) {
+      failures.push(error)
+    }
+    try {
+      await adminPool?.end()
+    } catch (error) {
+      failures.push(error)
+    } finally {
+      adminPool?.off('error', captureAdminAsyncError)
+    }
+    failures.push(...adminAsyncErrors)
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `Failed to clean W4C-3a scratch database ${scratchName}`)
+    }
   })
 
   it('creates the four job columns, six history/revision tables, named deferred validator, and ten truncate guards', async () => {
