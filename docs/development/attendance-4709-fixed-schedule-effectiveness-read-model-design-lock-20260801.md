@@ -40,6 +40,7 @@ Evidence anchors on the baseline:
 - `apps/web/src/views/AttendanceView.vue:27422-27574`
 - `packages/core-backend/src/db/migrations/zzzz20260204123000_create_attendance_groups.ts:8-49`
 - `packages/core-backend/src/db/migrations/zzzz20260529213000_add_attendance_group_type.ts:12-29`
+- `packages/core-backend/src/db/migrations/zzzz20260724120000_create_attendance_shift_segments.ts:127-149`
 - `docs/development/attendance-group-admin-ux-fixed-schedule-design-20260528.md:40-75`
 
 ## 2. Contradiction That Must Be Resolved
@@ -71,7 +72,7 @@ Recommended table: `attendance_group_fixed_schedule_configs`.
 | `id` | UUID primary key. |
 | `org_id` | Required tenant anchor. Every read and write includes it. |
 | `group_id` | Required attendance group; unique with `org_id`. A composite `(group_id, org_id)` foreign key references `attendance_groups(id, org_id)` with `ON DELETE CASCADE`, so deleting a group cannot strand desired config or add a new delete blocker. |
-| `shift_id` | Required desired shift; runtime validates the shift belongs to the same org. A foreign key to `attendance_shifts(id)` uses `ON DELETE RESTRICT`; the existing canonical shift-delete service adds this config table to its blocker set and returns its typed 409 before attempting the delete. |
+| `shift_id` | Required desired shift. A composite `(shift_id, org_id)` foreign key reuses the existing unique parent key on `attendance_shifts(id, org_id)` and uses `ON DELETE RESTRICT`; the existing canonical shift-delete service adds this config table to its org-scoped blocker set and returns its typed 409 before attempting the delete. Runtime validates the same relation before write. |
 | `start_date` / `end_date` | Required finite desired window; start must not exceed end. |
 | `revision` | Monotonic configuration revision, incremented only when one of the three desired values changes. |
 | `updated_by` / timestamps | Audit attribution only; never used to derive effectiveness. |
@@ -322,10 +323,11 @@ effectiveness data.
 19. Replacing the canonical producer-key builder with raw concatenation, or
     acquiring the config lock after a target lock, makes the key-parity or
     lock-order gate red.
-20. Deleting a group removes its desired config in the same database action;
-    deleting a referenced shift returns the canonical typed 409 with both shift
-    and config intact. Removing either referential/delete-service guard makes its
-    lifecycle leg red.
+20. A real-DB insert pairing org A with a shift from org B fails the composite
+    foreign key. Deleting a group removes its desired config in the same database
+    action; deleting a referenced shift returns the canonical typed 409 with both
+    shift and config intact. Removing either referential/delete-service guard or
+    weakening the shift FK to `shift_id` alone makes its lifecycle leg red.
 
 ## 10. Owner Decision
 
