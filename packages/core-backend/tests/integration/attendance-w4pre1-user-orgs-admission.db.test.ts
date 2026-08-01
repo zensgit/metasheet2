@@ -35,6 +35,7 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const RUN = crypto.randomBytes(4).toString('hex')
 const NS = `w4pre1admit${TS}${RUN}`
+const P28_SHADOW_ORG_ID = '82828282-8282-4828-8828-282828282828'
 
 function orgId(tag: string): string {
   return `${NS}_org_${tag}`
@@ -229,6 +230,48 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
         [org, shift.id],
       )
       expect(assignments.rows).toEqual([])
+    })
+
+    it('P28 admits a multi-segment default shift through the canonical shadow posture seam', async () => {
+      const org = P28_SHADOW_ORG_ID
+      const shift = await seedShift(org, 'p28-shadow', [
+        { startTime: '09:00', endTime: '12:00' },
+        { startTime: '13:00', endTime: '18:00' },
+      ])
+      const testEmail = emailFor('p28-shadow')
+      const previousAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      await query(
+        `INSERT INTO attendance_calculation_rollout_state
+           (org_id, state, engine_version, reason_code, actor_id, version, prior_state)
+         VALUES ($1, 'shadow', 'w4c3b-p28-test', 'TEST_FIXTURE', 'w4c3b-p28-test', 1, NULL)
+         ON CONFLICT (org_id) DO NOTHING`,
+        [org],
+      )
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = org
+
+      try {
+        const { status, json } = await createUserViaRoute({
+          name: 'W4C3B P28 Shadow',
+          email: testEmail,
+          orgId: org,
+          defaultShiftId: shift.id,
+          defaultShiftStartDate: '2026-08-01',
+        })
+
+        expect(status, JSON.stringify(json)).toBe(200)
+        const userId = json.data.user.id as string
+        expect(await userOrgRow(userId, org)).toEqual({ user_id: userId, org_id: org, is_active: true })
+        const assignments = await query<{ user_id: string; shift_id: string }>(
+          `SELECT user_id, shift_id::text AS shift_id
+             FROM attendance_shift_assignments
+            WHERE org_id = $1 AND user_id = $2 AND shift_id = $3::uuid`,
+          [org, userId, shift.id],
+        )
+        expect(assignments.rows).toEqual([{ user_id: userId, shift_id: shift.id }])
+      } finally {
+        if (previousAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+        else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = previousAllowlist
+      }
     })
 
     it('atomicity: a user_orgs write failure rolls back the whole admission (no orphan users row)', async () => {
