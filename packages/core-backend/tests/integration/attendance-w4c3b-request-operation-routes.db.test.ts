@@ -71,14 +71,18 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     return token
   }
 
-  async function seedOrg(state: 'legacy' | 'shadow' | 'suspended') {
+  async function seedOrg(
+    state: 'legacy' | 'shadow' | 'suspended',
+    permission = 'attendance:admin',
+  ) {
     const orgId = randomUUID()
     const userId = randomUUID()
     await pool.query(
       `INSERT INTO users
        (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
-       VALUES ($1, $2, $1, 'W4C-3b request fixture', 'x', 'user', '[]'::jsonb, true, false, now(), now())`,
-      [userId, `w4c3b-request-${userId}@example.test`],
+       VALUES ($1, $2, $1, 'W4C-3b request fixture', 'x', 'user', $3::jsonb,
+               true, false, now(), now())`,
+      [userId, `w4c3b-request-${userId}@example.test`, JSON.stringify([permission])],
     )
     await pool.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)', [userId, orgId])
     await pool.query(
@@ -117,6 +121,94 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     }
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
     return { orgId, userId, token: await mintToken(userId) }
+  }
+
+  async function createRequest(
+    fixture: Awaited<ReturnType<typeof seedOrg>>,
+    workDate: string,
+  ) {
+    const response = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}` },
+      body: {
+        operationId: randomUUID(),
+        orgId: fixture.orgId,
+        workDate,
+        requestType: 'missed_check_in',
+        requestedInAt: `${workDate}T09:00:00.000Z`,
+        reason: 'W4C-3b decision fixture',
+      },
+    })
+    expect(response.status, response.raw).toBe(201)
+    const requestId = response.body?.data?.request?.id
+    expect(typeof requestId).toBe('string')
+    return requestId as string
+  }
+
+  async function loadApprovalCursor(requestId: string) {
+    const result = await pool.query(
+      `SELECT ai.id, ai.version, ai.current_node_key
+         FROM attendance_requests ar
+         JOIN approval_instances ai ON ai.id = ar.approval_instance_id
+        WHERE ar.id = $1::uuid`,
+      [requestId],
+    )
+    expect(result.rows).toHaveLength(1)
+    return {
+      approvalId: String(result.rows[0].id),
+      version: Number(result.rows[0].version),
+      node: String(result.rows[0].current_node_key),
+    }
+  }
+
+  async function assignApprovalUser(
+    approval: Awaited<ReturnType<typeof loadApprovalCursor>>,
+    userId: string,
+  ) {
+    await pool.query(
+      `INSERT INTO approval_assignments
+         (instance_id, assignment_type, assignee_id, node_key, source_step, is_active, metadata)
+       VALUES ($1, 'user', $2, $3, 0, TRUE, '{}'::jsonb)`,
+      [approval.approvalId, userId, approval.node],
+    )
+  }
+
+  async function seedOrgActor(orgId: string, permission: string) {
+    const userId = randomUUID()
+    await pool.query(
+      `INSERT INTO users
+         (id, email, username, name, password_hash, role, permissions, is_active, is_admin, activation_status)
+       VALUES ($1, $2, $1, 'W4C-3b org actor', 'x', 'user', $3::jsonb,
+               TRUE, FALSE, 'activated')`,
+      [userId, `w4c3b-org-actor-${userId}@example.test`, JSON.stringify([permission])],
+    )
+    await pool.query(
+      'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)',
+      [userId, orgId],
+    )
+    return { userId, token: await mintToken(userId) }
+  }
+
+  async function requestDecisionResidue(orgId: string, requestId: string) {
+    const result = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND entrypoint = 'request_decision' AND resolved_request_id = $2::uuid) AS operations,
+         (SELECT count(*)::int
+            FROM attendance_result_event_outbox outbox
+            JOIN attendance_result_operations operation
+              ON operation.org_id = outbox.org_id
+             AND operation.entrypoint = outbox.entrypoint
+             AND operation.operation_id = outbox.operation_id
+           WHERE operation.org_id = $1
+             AND operation.entrypoint = 'request_decision'
+             AND operation.resolved_request_id = $2::uuid) AS outbox,
+         (SELECT count(*)::int FROM approval_records pr
+           JOIN attendance_requests ar ON ar.approval_instance_id = pr.instance_id
+          WHERE ar.org_id = $1 AND ar.id = $2::uuid) AS approval_records`,
+      [orgId, requestId],
+    )
+    return result.rows[0] as { operations: number; outbox: number; approval_records: number }
   }
 
   async function counts(orgId: string) {
@@ -317,5 +409,147 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       [requestId, fixture.orgId],
     )
     expect(persisted.rows).toEqual([{ status: 'approved', resolved_by: null, resolved_at: null }])
+  })
+
+  it('replays a shadow reject with exact approval OCC and no duplicate decision residue', async () => {
+    const fixture = await seedOrg('shadow', 'attendance:approve')
+    const requestId = await createRequest(fixture, '2049-08-06')
+    const approval = await loadApprovalCursor(requestId)
+    await assignApprovalUser(approval, fixture.userId)
+    const operationId = randomUUID()
+    const body = {
+      operationId,
+      expectedApprovalVersion: approval.version,
+      expectedApprovalNode: approval.node,
+      comment: 'reject exactly once',
+    }
+    const headers = { Authorization: `Bearer ${fixture.token}` }
+    const first = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST', headers, body,
+    })
+    const replay = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST', headers, body,
+    })
+    expect(first.status, first.raw).toBe(200)
+    expect(replay.status, replay.raw).toBe(200)
+    expect(replay.body).toEqual(first.body)
+    expect(first.body?.data).toMatchObject({ requestId, status: 'rejected' })
+    expect(await requestDecisionResidue(fixture.orgId, requestId)).toEqual({
+      operations: 1,
+      outbox: 1,
+      approval_records: 1,
+    })
+  })
+
+  it('fails closed on missing OCC, incongruent replay, and a new operation after resolution', async () => {
+    const fixture = await seedOrg('shadow')
+    const requestId = await createRequest(fixture, '2049-08-07')
+    const approval = await loadApprovalCursor(requestId)
+    const headers = { Authorization: `Bearer ${fixture.token}` }
+
+    const missingOcc = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST',
+      headers,
+      body: { operationId: randomUUID(), comment: 'missing OCC' },
+    })
+    expect(missingOcc.status, missingOcc.raw).toBe(400)
+    expect(missingOcc.body?.error?.code).toBe('REQUEST_DECISION_OCC_REQUIRED')
+    expect(await requestDecisionResidue(fixture.orgId, requestId)).toEqual({
+      operations: 0,
+      outbox: 0,
+      approval_records: 0,
+    })
+
+    const operationId = randomUUID()
+    const acceptedBody = {
+      operationId,
+      expectedApprovalVersion: approval.version,
+      expectedApprovalNode: approval.node,
+      comment: 'accepted command',
+    }
+    const accepted = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST', headers, body: acceptedBody,
+    })
+    expect(accepted.status, accepted.raw).toBe(200)
+
+    const conflict = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST',
+      headers,
+      body: { ...acceptedBody, comment: 'different command' },
+    })
+    expect(conflict.status, conflict.raw).toBe(409)
+    expect(conflict.body?.error?.code).toBe('ATTENDANCE_OPERATION_CONFLICT')
+
+    const resolvedRetry = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST',
+      headers,
+      body: {
+        ...acceptedBody,
+        operationId: randomUUID(),
+      },
+    })
+    expect(resolvedRetry.status, resolvedRetry.raw).toBe(400)
+    expect(resolvedRetry.body?.error?.code).toBe('INVALID_STATUS')
+    expect(await requestDecisionResidue(fixture.orgId, requestId)).toEqual({
+      operations: 1,
+      outbox: 1,
+      approval_records: 1,
+    })
+  })
+
+  it('rejects a durable actor without active org membership before decision DML', async () => {
+    const fixture = await seedOrg('shadow')
+    const requestId = await createRequest(fixture, '2049-08-08')
+    const approval = await loadApprovalCursor(requestId)
+    const outsiderId = randomUUID()
+    await pool.query(
+      `INSERT INTO users
+         (id, email, username, name, password_hash, role, permissions, is_active, is_admin, activation_status)
+       VALUES ($1, $2, $1, 'W4C-3b outsider', 'x', 'user', '["attendance:approve"]'::jsonb,
+               TRUE, FALSE, 'activated')`,
+      [outsiderId, `w4c3b-outsider-${outsiderId}@example.test`],
+    )
+    const outsiderToken = await mintToken(outsiderId)
+    const response = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${outsiderToken}` },
+      body: {
+        operationId: randomUUID(),
+        expectedApprovalVersion: approval.version,
+        expectedApprovalNode: approval.node,
+        comment: 'cross-org attempt',
+      },
+    })
+    expect(response.status, response.raw).toBe(403)
+    expect(response.body?.error?.code).toBe('FORBIDDEN')
+    expect(await requestDecisionResidue(fixture.orgId, requestId)).toEqual({
+      operations: 0,
+      outbox: 0,
+      approval_records: 0,
+    })
+  })
+
+  it('rejects an active same-org approver who is not assigned before decision DML', async () => {
+    const fixture = await seedOrg('shadow')
+    const requestId = await createRequest(fixture, '2049-08-09')
+    const approval = await loadApprovalCursor(requestId)
+    const unassigned = await seedOrgActor(fixture.orgId, 'attendance:approve')
+    const response = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${unassigned.token}` },
+      body: {
+        operationId: randomUUID(),
+        expectedApprovalVersion: approval.version,
+        expectedApprovalNode: approval.node,
+        comment: 'same-org unassigned attempt',
+      },
+    })
+    expect(response.status, response.raw).toBe(403)
+    expect(response.body?.error?.code).toBe('FORBIDDEN')
+    expect(await requestDecisionResidue(fixture.orgId, requestId)).toEqual({
+      operations: 0,
+      outbox: 0,
+      approval_records: 0,
+    })
   })
 })

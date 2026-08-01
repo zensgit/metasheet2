@@ -83,6 +83,7 @@ async function createHarness(
 
   const routes = new Map<string, RouteHandler>()
   const db = {
+    __w4CanonicalTrx: true as const,
     query: vi.fn(async () => {
       throw new Error('db disabled in unit harness')
     }),
@@ -105,18 +106,29 @@ async function createHarness(
         },
       },
     },
-    services: commitSyncImportPlan || attendanceW4SegmentCalculation
-      ? {
-          attendanceW4SegmentCalculation: {
-            ...(attendanceW4SegmentCalculation ?? {}),
-            ...(commitSyncImportPlan ? {
+    services: {
+      attendanceW4SegmentCalculation: {
+        createRequestOperationBoundary: ({ adapters }: { adapters: Record<string, any> }) => ({
+          execute: async (input: Record<string, any>) => db.transaction(async (trx: any) => {
+            const operation = {
+              operationId: input.operationId ?? null,
+              correlationId: input.correlationId,
+              acceptedWritePosture: 'legacy_projection_only',
+            }
+            const adapter = adapters[input.kind]
+            const prepared = await adapter.prepare(trx, input.routeInput, operation)
+            const result = await adapter.execute(trx, prepared, operation)
+            return { kind: 'legacy', response: result.response }
+          }),
+        }),
+        ...(attendanceW4SegmentCalculation ?? {}),
+        ...(commitSyncImportPlan ? {
             commitSyncImportPlan,
             buildImportAttributionFreeze: buildAttendanceImportAttributionFreezeV1,
             buildImportPolicySourceProof: buildAttendanceImportPolicySourceProofV1,
-            } : {}),
-          },
-        }
-      : undefined,
+        } : {}),
+      },
+    },
     logger,
   })
 
@@ -537,6 +549,29 @@ function actorContextQueryResult(sql: string) {
   if (sql.includes('SELECT name, role FROM users')) return [{ name: 'Scoped scheduler', role: null }]
   if (sql.includes('FROM attendance_group_members m')) return []
   if (sql.includes('SELECT ur.role_id')) return []
+  return undefined
+}
+
+function requestDecisionIdentityQueryResult(
+  sql: string,
+  options: {
+    platformAdmin?: boolean
+    activeMembership?: boolean
+    permissions?: string[]
+  } = {},
+) {
+  if (sql.includes('AS platform_admin') && sql.includes('FROM users u')) {
+    return [{ platform_admin: options.platformAdmin ?? false }]
+  }
+  if (sql.includes('SELECT 1 FROM user_orgs')) {
+    return options.activeMembership === false ? [] : [{ ok: 1 }]
+  }
+  if (sql.includes('SELECT permission_code FROM user_permissions') && sql.includes('UNION')) {
+    return (options.permissions ?? []).map(permission_code => ({ permission_code }))
+  }
+  if (sql.includes("SELECT COALESCE(to_jsonb(u)->'permissions'")) {
+    return [{ permissions: [] }]
+  }
   return undefined
 }
 
@@ -1159,7 +1194,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('SELECT role_id FROM user_roles')) return []
       if (sql.includes('FROM user_permissions')) return []
       if (sql.includes('JOIN role_permissions')) return []
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) {
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) {
         return [attendanceRequestRow({
           user_id: 'worker-1',
           request_type: 'time_correction',
@@ -1207,11 +1242,13 @@ describe('attendance UUID route validation', () => {
     })
 
     db.query.mockImplementation(async (sql: string) => {
+      const identity = requestDecisionIdentityQueryResult(sql, { platformAdmin: true })
+      if (identity !== undefined) return identity
       if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return [{ ok: 1 }]
       if (sql.includes('SELECT role_id FROM user_roles')) return []
       if (sql.includes('FROM user_permissions')) return []
       if (sql.includes('JOIN role_permissions')) return []
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) {
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) {
         return [attendanceRequestRow({
           user_id: 'approver-1',
           request_type: 'time_correction',
@@ -1222,7 +1259,7 @@ describe('attendance UUID route validation', () => {
         return [approvalInstanceRow()]
       }
       if (sql.includes('FROM approval_assignments')) return []
-      if (sql.includes('UPDATE approval_instances')) return []
+      if (sql.includes('UPDATE approval_instances')) return [{ id: approvalInstanceId }]
       if (sql.includes('UPDATE approval_assignments')) return []
       if (sql.includes('INSERT INTO approval_records')) return []
       throw new Error(`unexpected query: ${sql}`)
@@ -1254,17 +1291,21 @@ describe('attendance UUID route validation', () => {
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const identity = requestDecisionIdentityQueryResult(sql, {
+        permissions: ['attendance:approve'],
+      })
+      if (identity !== undefined) return identity
       if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return []
       // S7-0 actor-role-ids loader (distinct from the isAdmin role_id=$2 probe): approver-1 has no roles.
       if (sql.includes('SELECT role_id FROM user_roles')) return []
       if (sql.includes('FROM user_permissions') && params[1] === 'attendance:approve') return [{ ok: 1 }]
       if (sql.includes('FROM user_permissions')) return []
       if (sql.includes('JOIN role_permissions')) return []
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) return [attendanceRequestRow()]
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) return [attendanceRequestRow()]
       if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) return [approvalInstanceRow()]
       // S7-0 assignment probe: NO active assignment matches approver-1 at the current node → denied.
       if (sql.includes('FROM approval_assignments')) return []
-      if (sql.includes('UPDATE approval_instances')) return []
+      if (sql.includes('UPDATE approval_instances')) return [{ id: approvalInstanceId }]
       if (sql.includes('UPDATE approval_assignments')) return []
       if (sql.includes('INSERT INTO approval_records')) return []
       if (sql.includes('UPDATE attendance_requests')) return []
@@ -1295,12 +1336,14 @@ describe('attendance UUID route validation', () => {
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const identity = requestDecisionIdentityQueryResult(sql)
+      if (identity !== undefined) return identity
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
       // S7-0 actor-role-ids loader (rbacQueryResult only knows the isAdmin role_id=$2 probe): the
       // scheduler holds no roles; its assignment match comes from the user-type assignment below.
       if (sql.includes('SELECT role_id FROM user_roles')) return []
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) return [attendanceRequestRow()]
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) return [attendanceRequestRow()]
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeApproveRow()]
@@ -1312,11 +1355,11 @@ describe('attendance UUID route validation', () => {
       // S7-0 assignment probe: scheduler-1 IS the active assignee for the current node → authorized
       // by the per-type match (no admin override needed), so approve proceeds exactly as before.
       if (sql.includes('FROM approval_assignments')) return [{ ok: 1 }]
-      if (sql.includes('UPDATE approval_instances')) return []
+      if (sql.includes('UPDATE approval_instances')) return [{ id: approvalInstanceId }]
       if (sql.includes('UPDATE approval_assignments')) return []
       if (sql.includes('INSERT INTO approval_assignments')) return []
-      if (sql.includes('INSERT INTO approval_records')) return []
-      if (sql.includes('UPDATE attendance_requests')) return []
+      if (sql.includes('INSERT INTO approval_records')) return [{ id: 'approval-record-1' }]
+      if (sql.includes('UPDATE attendance_requests')) return [{ id: attendanceRequestId }]
       throw new Error(`unexpected query: ${sql}`)
     })
 
@@ -1350,9 +1393,11 @@ describe('attendance UUID route validation', () => {
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const identity = requestDecisionIdentityQueryResult(sql)
+      if (identity !== undefined) return identity
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
-      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) return [attendanceRequestRow()]
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1') && sql.includes('FOR UPDATE')) return [attendanceRequestRow()]
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) {
@@ -3452,7 +3497,7 @@ describe('attendance UUID route validation', () => {
     expect(handler).toBeTypeOf('function')
     const res = createResponse()
 
-    await expect(handler?.(
+    await handler?.(
       {
         params: {},
         body: {
@@ -3469,7 +3514,9 @@ describe('attendance UUID route validation', () => {
       },
       res,
       vi.fn(),
-    )).rejects.toThrow('request lookup failed')
+    )
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } })
     expect((res.body as { error?: { message?: string } } | undefined)?.error?.message).not.toBe('Permission check failed')
   })
 })

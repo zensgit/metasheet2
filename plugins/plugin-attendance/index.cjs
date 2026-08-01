@@ -25027,30 +25027,6 @@ module.exports = {
       return resolveAttendanceUserSchedulerScopeFacts(client, orgId, requestRow?.user_id, { workDate })
     }
 
-    async function assertAttendanceRequestApprovalAllowed(req, { client, requestRow }) {
-      const requesterId = getUserId(req)
-      if (!requesterId) {
-        throw new HttpError(401, 'UNAUTHORIZED', 'User ID not found')
-      }
-      const orgId = requestRow?.org_id ?? getOrgId(req)
-
-      if (await canAccessOtherUsers(requesterId)) return
-
-      const actorContext = await loadAttendanceScopeContextForUser(client, orgId, requesterId)
-      const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, client)
-      const facts = await resolveAttendanceRequestApprovalScopeFacts(client, orgId, requestRow)
-      const allowed = scopes.some(scope =>
-        attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'approve', facts)
-      )
-      if (!allowed) {
-        throw new HttpError(
-          403,
-          'SCHEDULER_SCOPE_FORBIDDEN',
-          'Scheduler scope does not allow this attendance approval action'
-        )
-      }
-    }
-
     async function assertAttendanceRecordExportAllowed(req, res, { orgId, userId, from, to }) {
       const access = await resolveAttendanceSchedulerScopeActor(req, res)
       if (!access) return null
@@ -30638,6 +30614,36 @@ module.exports = {
       return uuid
     }
 
+    function respondIfInvalidRequestUuidReferences(res, input) {
+      const references = [
+        ['leaveTypeId', 'leaveTypeId'],
+        ['leave_type_id', 'leaveTypeId'],
+        ['overtimeRuleId', 'overtimeRuleId'],
+        ['overtime_rule_id', 'overtimeRuleId'],
+        ['approvalFlowId', 'approvalFlowId'],
+        ['approval_flow_id', 'approvalFlowId'],
+      ]
+      try {
+        for (const [key, fieldName] of references) {
+          if (input[key] !== undefined) {
+            normalizeRequestUuidReferenceInput(input[key], null, fieldName)
+          }
+        }
+        return false
+      } catch (error) {
+        if (!(error instanceof HttpError)) throw error
+        res.status(error.status).json({
+          ok: false,
+          error: {
+            code: error.code,
+            message: error.message,
+            ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+          },
+        })
+        return true
+      }
+    }
+
     async function ensureAttendanceRequestAccess(requestRow, requesterId, actionLabel) {
       if (requestRow.user_id === requesterId) return
       const allowed = await canAccessOtherUsers(requesterId)
@@ -31909,13 +31915,21 @@ module.exports = {
       comment: z.string().optional(),
       metadata: z.record(z.unknown()).optional(),
     })
-    const requestOperationActionSchema = resolveSchema.extend({
+    const requestCancellationActionSchema = resolveSchema.extend({
       operationId: z.string().uuid().optional(),
       operation_id: z.string().uuid().optional(),
       expectedSnapshotVersion: z.coerce.number().int().min(0).optional(),
       expected_snapshot_version: z.coerce.number().int().min(0).optional(),
       expectedSnapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
       expected_snapshot_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    })
+    const requestDecisionActionSchema = resolveSchema.extend({
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
+      expectedApprovalVersion: z.coerce.number().int().min(0).optional(),
+      expected_approval_version: z.coerce.number().int().min(0).optional(),
+      expectedApprovalNode: z.string().min(1).max(128).optional(),
+      expected_approval_node: z.string().min(1).max(128).optional(),
     })
     const requestBoundaryRouteInputSchema = z.object({
       actorId: z.string().min(1),
@@ -32294,7 +32308,17 @@ module.exports = {
       tokenSubjectUserId: z.string().min(1),
       actorName: z.string().min(1),
       requestId: z.string().uuid(),
-      requestBody: requestOperationActionSchema,
+      requestBody: requestCancellationActionSchema,
+      ipAddress: z.string().nullable(),
+      userAgent: z.string().nullable(),
+    }).strict()
+    const requestDecisionBoundaryRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      actorName: z.string().min(1),
+      requestId: z.string().uuid(),
+      action: z.enum(['approve', 'reject']),
+      requestBody: requestDecisionActionSchema,
       ipAddress: z.string().nullable(),
       userAgent: z.string().nullable(),
     }).strict()
@@ -32560,14 +32584,179 @@ module.exports = {
       },
     }
 
-    const unavailableRequestOperationAdapter = {
-      async prepare() {
-        throw new HttpError(503, 'W4C3B_REQUEST_ADAPTER_NOT_READY', 'W4C3B_REQUEST_ADAPTER_NOT_READY')
+    function resolveRequestDecisionExpectedValue(body, camelKey, snakeKey, label) {
+      const camel = body[camelKey]
+      const snake = body[snakeKey]
+      if (camel !== undefined && snake !== undefined && camel !== snake) {
+        throw new HttpError(400, 'VALIDATION_ERROR', `${label} aliases must match`)
+      }
+      return camel ?? snake
+    }
+
+    async function resolveRequestDecisionActorAccess(trx, route, requestRow) {
+      if (route.tokenSubjectUserId !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the decision actor')
+      }
+      const actorRows = await trx.query(
+        `SELECT (
+                  COALESCE(u.is_admin, FALSE)
+                  OR COALESCE(u.role, '') = 'admin'
+                  OR EXISTS (
+                    SELECT 1 FROM user_roles ur
+                     WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                  )
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'
+          FOR KEY SHARE`,
+        [route.actorId],
+      )
+      if (actorRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+      if (actorRows[0].platform_admin === true) {
+        return { actorPosture: 'platform_admin', fullAdmin: true }
+      }
+
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE
+          FOR KEY SHARE`,
+        [route.actorId, orgId],
+      )
+      if (membershipRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+
+      const permissionRows = await trx.query(
+        `SELECT permission_code FROM user_permissions WHERE user_id = $1
+         UNION
+         SELECT rp.permission_code
+           FROM user_roles ur
+           JOIN role_permissions rp ON rp.role_id = ur.role_id
+          WHERE ur.user_id = $1`,
+        [route.actorId],
+      )
+      const directUserRows = await trx.query(
+        `SELECT COALESCE(to_jsonb(u)->'permissions', '[]'::jsonb) AS permissions
+           FROM users u WHERE u.id = $1 FOR KEY SHARE`,
+        [route.actorId],
+      )
+      const permissions = new Set(permissionRows.map(row => String(row.permission_code)))
+      for (const permission of normalizeStringArray(directUserRows[0]?.permissions)) permissions.add(permission)
+      const attendanceAdmin = permissions.has('attendance:admin')
+        || permissions.has('attendance:*')
+        || permissions.has('*:*')
+      const attendanceApprover = attendanceAdmin || permissions.has('attendance:approve')
+      if (attendanceApprover) {
+        return {
+          actorPosture: attendanceAdmin ? 'attendance_admin' : 'operator',
+          fullAdmin: attendanceAdmin,
+        }
+      }
+
+      const actorContext = await loadAttendanceScopeContextForUser(trx, orgId, route.actorId)
+      const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, trx)
+      const facts = await resolveAttendanceRequestApprovalScopeFacts(trx, orgId, requestRow)
+      const schedulerAllowed = scopes.some(scope =>
+        attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'approve', facts),
+      )
+      if (!schedulerAllowed) throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance approval action')
+      return { actorPosture: 'operator', fullAdmin: false }
+    }
+
+    const requestDecisionAdapter = {
+      async prepare(trx, rawInput, operation) {
+        const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
+        const requestRows = await trx.query(
+          'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+          [route.requestId],
+        )
+        if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+        const requestRow = requestRows[0]
+        const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const decisionAccess = await resolveRequestDecisionActorAccess(trx, route, requestRow)
+        const approvalId = requestRow.approval_instance_id
+        if (!approvalId) throw new HttpError(400, 'INVALID_STATE', 'Missing approval instance')
+        const approvalRows = await trx.query(
+          'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+          [approvalId],
+        )
+        if (approvalRows.length === 0) throw new HttpError(400, 'INVALID_STATE', 'Approval instance missing')
+        const approval = approvalRows[0]
+        const requestMetadata = normalizeMetadata(requestRow.metadata)
+        const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
+        const flowSteps = normalizeApprovalSteps(flowMeta.steps)
+        const rawStepIndex = Number(flowMeta.currentStep ?? approval.current_step ?? 0)
+        const currentStepIndex = flowSteps.length > 0
+          ? Math.min(Math.max(Number.isFinite(rawStepIndex) ? rawStepIndex : 0, 0), flowSteps.length - 1)
+          : 0
+        const currentNodeKey = approval.current_node_key || buildAttendanceApprovalNodeKey(currentStepIndex)
+        const expectedApprovalVersionInput = resolveRequestDecisionExpectedValue(
+          route.requestBody,
+          'expectedApprovalVersion',
+          'expected_approval_version',
+          'expectedApprovalVersion',
+        )
+        const expectedApprovalNodeInput = resolveRequestDecisionExpectedValue(
+          route.requestBody,
+          'expectedApprovalNode',
+          'expected_approval_node',
+          'expectedApprovalNode',
+        )
+        if (operation.operationId && (expectedApprovalVersionInput === undefined || expectedApprovalNodeInput === undefined)) {
+          throw new HttpError(
+            400,
+            'REQUEST_DECISION_OCC_REQUIRED',
+            'expectedApprovalVersion and expectedApprovalNode are required with operationId',
+          )
+        }
+        const expectedApprovalVersion = expectedApprovalVersionInput ?? Number(approval.version ?? 0)
+        const expectedApprovalNode = expectedApprovalNodeInput ?? currentNodeKey
+        const crossUser = String(requestRow.user_id) !== route.actorId
+        return {
+          orgId,
+          actorId: route.actorId,
+          actorPosture: decisionAccess.actorPosture,
+          tokenSubjectUserId: route.tokenSubjectUserId,
+          subjectUserId: requestRow.user_id,
+          subjectScope: crossUser
+            ? { kind: 'explicit_users', userIds: [requestRow.user_id] }
+            : { kind: 'self', userId: requestRow.user_id },
+          commandPayload: {
+            requestId: route.requestId,
+            approvalRef: approvalId,
+            expectedApprovalVersion,
+            expectedApprovalNode,
+            action: route.action,
+            decisionChannel: 'web',
+            comment: normalizeOptionalText(route.requestBody.comment),
+            meta: route.requestBody.metadata ?? null,
+          },
+          state: {
+            route,
+            expectedApprovalVersion,
+            expectedApprovalNode,
+          },
+        }
       },
-      async execute() {
-        throw new HttpError(503, 'W4C3B_REQUEST_ADAPTER_NOT_READY', 'W4C3B_REQUEST_ADAPTER_NOT_READY')
+      async execute(trx, prepared) {
+        const result = await executeRequestDecisionInTransaction(trx, prepared.state)
+        return {
+          response: { ok: true, data: result },
+          resolvedRequestId: result.requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.resolved',
+            payload: {
+              requestId: result.requestId,
+              status: result.status,
+              orgId: result.orgId,
+              userId: result.userId,
+            },
+          }],
+        }
       },
     }
+
     const w4RequestOperationBoundary =
       attendanceW4SegmentCalculationPort
       && typeof attendanceW4SegmentCalculationPort.createRequestOperationBoundary === 'function'
@@ -32575,7 +32764,7 @@ module.exports = {
             adapters: {
               request_create: requestCreateAdapter,
               request_pending_edit: requestPendingEditAdapter,
-              request_decision: unavailableRequestOperationAdapter,
+              request_decision: requestDecisionAdapter,
               request_cancel: requestCancelAdapter,
             },
           })
@@ -32595,6 +32784,7 @@ module.exports = {
           )
           return
         }
+        if (respondIfInvalidRequestUuidReferences(res, parsed.data)) return
 
         const userId = getUserId(req)
         if (!userId) {
@@ -32637,7 +32827,14 @@ module.exports = {
           res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json({
+              ok: false,
+              error: {
+                code: error.code,
+                message: error.message,
+                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+              },
+            })
             return
           }
           if (respondIfW4BoundaryError(res, error)) return
@@ -33850,6 +34047,7 @@ module.exports = {
           )
           return
         }
+        if (respondIfInvalidRequestUuidReferences(res, parsed.data)) return
 
         const requesterId = getUserId(req)
         if (!requesterId) {
@@ -33917,39 +34115,14 @@ module.exports = {
       })
     )
 
-    async function resolveRequest(req, res, action) {
-      const parsed = resolveSchema.safeParse(req.body ?? {})
-      if (!parsed.success) {
-        res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
-        return
-      }
-
-      const requesterId = getUserId(req)
-      if (!requesterId) {
-        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-        return
-      }
-
-      const requestId = normalizeUuidString(req.params.id)
-      if (!requestId) {
-        respondInvalidUuid(res)
-        return
-      }
-
-      const decisionComment = normalizeOptionalText(parsed.data.comment)
-      if (action === 'reject' && !decisionComment) {
-        res.status(400).json(
-          validationErrorBody(
-            'Rejection comment is required',
-            singleValidationDetail('comment', 'Required when rejecting an attendance request')
-          )
-        )
-        return
-      }
-      const decisionActorName = getUserLabel(req, requesterId)
-
-      try {
-        const result = await db.transaction(async (trx) => {
+    async function executeRequestDecisionInTransaction(trx, state) {
+          const { route, expectedApprovalVersion, expectedApprovalNode } = state
+          const requesterId = route.actorId
+          const requestId = route.requestId
+          const action = route.action
+          const parsed = { data: route.requestBody }
+          const decisionComment = normalizeOptionalText(route.requestBody.comment)
+          const decisionActorName = route.actorName
           const requestRows = await trx.query(
             'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
             [requestId]
@@ -33959,7 +34132,7 @@ module.exports = {
           }
 
           const requestRow = requestRows[0]
-          await assertAttendanceRequestApprovalAllowed(req, { client: trx, requestRow })
+          const decisionAccess = await resolveRequestDecisionActorAccess(trx, route, requestRow)
           if (requestRow.status !== 'pending') {
             throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
           }
@@ -33978,6 +34151,14 @@ module.exports = {
           }
 
           const approval = approvalRows[0]
+          const lockedApprovalNode = approval.current_node_key
+            || buildAttendanceApprovalNodeKey(Number(approval.current_step ?? 0))
+          if (
+            Number(approval.version ?? 0) !== Number(expectedApprovalVersion)
+            || lockedApprovalNode !== expectedApprovalNode
+          ) {
+            throw new HttpError(409, 'APPROVAL_VERSION_CONFLICT', 'Approval version or node changed')
+          }
           const requestMetadata = normalizeMetadata(requestRow.metadata)
           const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
           const requestType = requestRow.request_type
@@ -34013,7 +34194,7 @@ module.exports = {
               trx,
               orgId,
               requestId,
-              { userId: requesterId, orgId, fullAdmin: await hasAttendanceAdminAccess(requesterId) },
+              { userId: requesterId, orgId, fullAdmin: decisionAccess.fullAdmin },
               { forUpdate: true }
             )
           }
@@ -34030,8 +34211,7 @@ module.exports = {
               logger
             )
             if (!actorIsAssigned) {
-              const adminOverride = await hasAttendanceAdminAccess(requesterId)
-              if (!adminOverride) {
+              if (!decisionAccess.fullAdmin) {
                 throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
               }
             }
@@ -34095,7 +34275,7 @@ module.exports = {
           const nextStepIndex = isFinalApproval ? currentStepIndex : currentStepIndex + 1
           // S7-1 §4.1 runtime fail-closed — step-advance: if the step about to become active is dynamic
           // and the trigger set holds (flag OFF / port missing / kind unimplemented), fail BEFORE the
-          // approval_instances UPDATE and the assignment swap. This whole branch runs inside db.transaction,
+          // approval_instances UPDATE and the assignment swap. This whole branch runs inside the canonical transaction,
           // so the throw rolls back atomically — no advanced current_step, no swapped assignments, no
           // appended approval record, and never the legacy admin fallback.
           if (!isFinalApproval) {
@@ -34110,16 +34290,28 @@ module.exports = {
             ? null
             : buildAttendanceApprovalAssignments(flowSteps, nextStepIndex, frozenRequesterSnapshot)
 
-          await trx.query(
+          const approvalUpdateRows = await trx.query(
             `UPDATE approval_instances
              SET status = $1,
                  version = $2,
                  current_step = $3,
                  current_node_key = $4,
                  updated_at = now()
-             WHERE id = $5`,
-            [newStatus, newVersion, nextStepIndex, buildAttendanceApprovalNodeKey(nextStepIndex), approvalId]
+             WHERE id = $5 AND version = $6 AND status = $7
+             RETURNING id`,
+            [
+              newStatus,
+              newVersion,
+              nextStepIndex,
+              buildAttendanceApprovalNodeKey(nextStepIndex),
+              approvalId,
+              expectedApprovalVersion,
+              approval.status,
+            ]
           )
+          if (approvalUpdateRows.length !== 1) {
+            throw new HttpError(409, 'APPROVAL_VERSION_CONFLICT', 'Approval version or status changed')
+          }
 
           if (isFinalApproval) {
             await deactivateAttendanceApprovalAssignments(trx, approvalId)
@@ -34155,8 +34347,8 @@ module.exports = {
               approval.version,
               newVersion,
               JSON.stringify(recordMetadata),
-              req.ip ?? null,
-              req.get('user-agent') ?? null,
+              route.ipAddress,
+              route.userAgent,
             ]
           )
           const approvalRecordIdRaw = approvalRecordRows?.[0]?.id
@@ -34209,7 +34401,7 @@ module.exports = {
               actorAccess: {
                 userId: requesterId,
                 orgId,
-                fullAdmin: await hasAttendanceAdminAccess(requesterId),
+                fullAdmin: decisionAccess.fullAdmin,
               },
             })
             nextMetadata.scheduleDispatchFinalization = {
@@ -34264,26 +34456,34 @@ module.exports = {
             }
           }
 
-	          if (isFinalApproval) {
-	            await trx.query(
-	              `UPDATE attendance_requests
-	               SET status = $2, resolved_by = $3, resolved_at = $4, metadata = $5::jsonb, updated_at = now()
-	               WHERE id = $1`,
-	              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata)]
-	            )
+		          if (isFinalApproval) {
+		            const requestUpdateRows = await trx.query(
+		              `UPDATE attendance_requests
+		               SET status = $2, resolved_by = $3, resolved_at = $4, metadata = $5::jsonb, updated_at = now()
+		               WHERE id = $1 AND org_id = $6 AND status = 'pending'
+		               RETURNING id`,
+		              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata), orgId]
+		            )
+		            if (requestUpdateRows.length !== 1) {
+		              throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request state changed')
+		            }
 	            if (requestType === 'shift_swap' && action !== 'approve') {
 	              await archiveShiftSwapSourceKey(trx, orgId, requestId)
 	            } else if (requestType === 'schedule_dispatch' && action !== 'approve') {
 	              await closeScheduleDispatchRequest(trx, orgId, requestId)
 	            }
-	          } else {
-	            await trx.query(
-	              `UPDATE attendance_requests
-	               SET metadata = $2::jsonb, updated_at = now()
-               WHERE id = $1`,
-              [requestId, JSON.stringify(nextMetadata)]
-            )
-          }
+		          } else {
+		            const requestUpdateRows = await trx.query(
+		              `UPDATE attendance_requests
+		               SET metadata = $2::jsonb, updated_at = now()
+	               WHERE id = $1 AND org_id = $3 AND status = 'pending'
+	               RETURNING id`,
+	              [requestId, JSON.stringify(nextMetadata), orgId]
+	            )
+	            if (requestUpdateRows.length !== 1) {
+	              throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request state changed')
+	            }
+	          }
 
           let record = null
           if (action === 'approve' && isFinalApproval) {
@@ -34721,24 +34921,85 @@ module.exports = {
               total: flowSteps.length,
             },
           }
-        })
+    }
 
-        emitEvent('attendance.resolved', {
-          requestId: result.requestId,
-          status: result.status,
-          orgId: result.orgId,
-          userId: result.userId,
+    async function resolveRequest(req, res, action) {
+      const parsed = requestDecisionActionSchema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        res.status(400).json(
+          validationErrorBody('Invalid attendance request decision payload', formatZodValidationDetails(parsed.error)),
+        )
+        return
+      }
+      const requesterId = getUserId(req)
+      if (!requesterId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return
+      }
+      const requestId = normalizeUuidString(req.params.id)
+      if (!requestId) {
+        respondInvalidUuid(res)
+        return
+      }
+      const decisionComment = normalizeOptionalText(parsed.data.comment)
+      if (action === 'reject' && !decisionComment) {
+        res.status(400).json(
+          validationErrorBody(
+            'Rejection comment is required',
+            singleValidationDetail('comment', 'Required when rejecting an attendance request'),
+          ),
+        )
+        return
+      }
+      if (!w4RequestOperationBoundary) {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
         })
-        res.json({ ok: true, data: result })
+        return
+      }
+      try {
+        const operationId = resolveRequestOperationId(parsed.data)
+        const outcome = await w4RequestOperationBoundary.execute({
+          kind: 'request_decision',
+          operationId,
+          correlationId: requestCorrelationId(req, operationId, `request-${action}`),
+          routeInput: {
+            actorId: requesterId,
+            tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+            actorName: getUserLabel(req, requesterId),
+            requestId,
+            action,
+            requestBody: parsed.data,
+            ipAddress: req.ip ?? null,
+            userAgent: req.get('user-agent') ?? null,
+          },
+        })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+          const result = outcome.response?.data
+          emitEvent('attendance.resolved', {
+            requestId: result?.requestId ?? requestId,
+            status: result?.status,
+            orgId: result?.orgId,
+            userId: result?.userId,
+          })
+        }
+        res.json(outcome.response)
       } catch (error) {
         if (respondShiftComplianceCapExceeded(res, error)) return
         if (error instanceof HttpError) {
-          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          res.status(error.status).json({
+            ok: false,
+            error: {
+              code: error.code,
+              message: error.message,
+              ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+            },
+          })
           return
         }
+        if (respondIfW4BoundaryError(res, error)) return
         if (isDatabaseSchemaError(error)) {
-          // Surface the underlying missing table/column during integration testing and misconfigured deploys.
-          // The response stays generic to avoid leaking schema details to clients.
           logger.error('Attendance resolveRequest failed due to missing tables/columns', error)
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
           return
@@ -34749,7 +35010,7 @@ module.exports = {
     }
 
     async function cancelRequest(req, res) {
-      const parsed = requestOperationActionSchema.safeParse(req.body ?? {})
+      const parsed = requestCancellationActionSchema.safeParse(req.body ?? {})
       if (!parsed.success) {
         res.status(400).json(
           validationErrorBody(
