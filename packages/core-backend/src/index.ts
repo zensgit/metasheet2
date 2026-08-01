@@ -2123,7 +2123,17 @@ export class MetaSheetServer {
                   trx: import('./types/plugin').DatabaseTransaction,
                   orgId: string,
                 ) => {
+                  const shapedTrx = trx as import('./types/plugin').DatabaseTransaction & {
+                    readonly __w4CanonicalTrx?: true
+                  }
                   const rawClient = trx?.__rawClient as AttendanceW4TransactionClientV1 | undefined
+                    ?? (shapedTrx?.__w4CanonicalTrx === true && typeof shapedTrx.query === 'function'
+                      ? {
+                          query: async (sqlText: string, params?: readonly unknown[]) => ({
+                            rows: await shapedTrx.query(sqlText, [...(params ?? [])]),
+                          }),
+                        }
+                      : undefined)
                   if (!rawClient || typeof rawClient.query !== 'function') {
                     throw new Error('W4C3B_TRANSACTION_CLIENT_REQUIRED')
                   }

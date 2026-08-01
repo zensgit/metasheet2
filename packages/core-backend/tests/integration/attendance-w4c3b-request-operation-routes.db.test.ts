@@ -568,6 +568,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
                TRUE, FALSE, 'activated')`,
       [outsiderId, `w4c3b-outsider-${outsiderId}@example.test`],
     )
+    await assignApprovalUser(approval, outsiderId)
     const outsiderToken = await mintToken(outsiderId)
     const operationId = randomUUID()
     const response = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/reject`, {

@@ -108,6 +108,10 @@ async function createHarness(
     },
     services: {
       attendanceW4SegmentCalculation: {
+        resolveOrgSegmentCalculationPosture: async () => ({
+          effectiveState: 'legacy',
+          referenceSegments: false,
+        }),
         createRequestOperationBoundary: ({ adapters }: { adapters: Record<string, any> }) => ({
           execute: async (input: Record<string, any>) => db.transaction(async (trx: any) => {
             const operation = {

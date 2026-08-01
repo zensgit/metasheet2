@@ -32328,11 +32328,19 @@ module.exports = {
       userAgent: z.string().nullable(),
     }).strict()
 
-    async function resolveRequestCancellationActorPosture(trx, route, requestRow, allowScopedOperator) {
+    async function resolveRequestCancellationActorPosture(trx, route, requestRow, options = {}) {
       if (route.tokenSubjectUserId !== route.actorId) {
         throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the cancellation actor')
       }
       if (String(requestRow.user_id) === route.actorId) return 'self'
+
+      if (options.legacyAuthorization === true) {
+        if (options.allowScopedOperator === true) return 'operator'
+        if (await canAccessOtherUsers(route.actorId)) {
+          return await hasAttendanceAdminAccess(route.actorId) ? 'attendance_admin' : 'operator'
+        }
+        throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      }
 
       const actorRows = await trx.query(
         `SELECT EXISTS (
@@ -32357,7 +32365,7 @@ module.exports = {
         [route.actorId, orgId],
       )
       if (membershipRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
-      if (allowScopedOperator) return 'operator'
+      if (options.allowScopedOperator === true) return 'operator'
 
       const permissionRows = await trx.query(
         `SELECT 1
@@ -32441,7 +32449,10 @@ module.exports = {
           trx,
           route,
           requestRow,
-          scopedDispatch,
+          {
+            allowScopedOperator: scopedDispatch,
+            legacyAuthorization: await resolveRequestLegacyAuthorization(trx, requestRow),
+          },
         )
         const snapshot = await lockLatestRequestSnapshotToken(trx, route, requestRow)
         const approvalId = requestRow.approval_instance_id ?? null
@@ -32598,10 +32609,52 @@ module.exports = {
       return camel ?? snake
     }
 
+    async function resolveRequestLegacyAuthorization(trx, requestRow) {
+      const port = attendanceW4SegmentCalculationPort
+      if (!port || typeof port.resolveOrgSegmentCalculationPosture !== 'function') {
+        throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Canonical attendance write boundary unavailable')
+      }
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const posture = await port.resolveOrgSegmentCalculationPosture(trx, orgId)
+      return posture?.effectiveState === 'legacy'
+    }
+
     async function resolveRequestDecisionActorAccess(trx, route, requestRow, options = {}) {
       if (route.tokenSubjectUserId !== route.actorId) {
         throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the decision actor')
       }
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const assertSchedulerScopeAllowed = async () => {
+        const actorContext = await loadAttendanceScopeContextForUser(trx, orgId, route.actorId)
+        const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, trx)
+        const facts = await resolveAttendanceRequestApprovalScopeFacts(trx, orgId, requestRow)
+        const schedulerAllowed = scopes.some(scope =>
+          attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'approve', facts),
+        )
+        if (!schedulerAllowed) {
+          throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance approval action')
+        }
+      }
+
+      // The legacy posture retains the shipped RBAC/scheduler-scope contract. In particular, legacy
+      // callers are not required to have the durable users/user_orgs rows introduced by W4C-3b.
+      // Preparation defers mutable authorization to execute so an exact operation replay can return
+      // its sealed response after an intervening permission change.
+      if (options.legacyAuthorization === true) {
+        if (options.enforceSchedulerScope === false) {
+          return { actorPosture: 'operator', fullAdmin: false }
+        }
+        if (await canAccessOtherUsers(route.actorId)) {
+          const fullAdmin = await hasAttendanceAdminAccess(route.actorId)
+          return {
+            actorPosture: fullAdmin ? 'attendance_admin' : 'operator',
+            fullAdmin,
+          }
+        }
+        await assertSchedulerScopeAllowed()
+        return { actorPosture: 'operator', fullAdmin: false }
+      }
+
       const actorRows = await trx.query(
         `SELECT (
                   COALESCE(u.is_admin, FALSE)
@@ -32623,7 +32676,6 @@ module.exports = {
         return { actorPosture: 'platform_admin', fullAdmin: true }
       }
 
-      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
       const membershipRows = await trx.query(
         `SELECT 1 FROM user_orgs
           WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE
@@ -32667,13 +32719,7 @@ module.exports = {
         return { actorPosture: 'operator', fullAdmin: false }
       }
 
-      const actorContext = await loadAttendanceScopeContextForUser(trx, orgId, route.actorId)
-      const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, trx)
-      const facts = await resolveAttendanceRequestApprovalScopeFacts(trx, orgId, requestRow)
-      const schedulerAllowed = scopes.some(scope =>
-        attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'approve', facts),
-      )
-      if (!schedulerAllowed) throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance approval action')
+      await assertSchedulerScopeAllowed()
       return { actorPosture: 'operator', fullAdmin: false }
     }
 
@@ -32711,11 +32757,12 @@ module.exports = {
         if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
         const requestRow = requestRows[0]
         const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const legacyAuthorization = await resolveRequestLegacyAuthorization(trx, requestRow)
         const decisionAccess = await resolveRequestDecisionActorAccess(
           trx,
           route,
           requestRow,
-          { enforceSchedulerScope: false },
+          { enforceSchedulerScope: false, legacyAuthorization },
         )
         const approvalId = requestRow.approval_instance_id
         if (!approvalId) throw new HttpError(400, 'INVALID_STATE', 'Missing approval instance')
@@ -32781,8 +32828,8 @@ module.exports = {
           },
         }
       },
-      async execute(trx, prepared) {
-        const result = await executeRequestDecisionInTransaction(trx, prepared.state)
+      async execute(trx, prepared, operation) {
+        const result = await executeRequestDecisionInTransaction(trx, prepared.state, operation)
         return {
           response: { ok: true, data: result },
           resolvedRequestId: result.requestId,
@@ -34157,7 +34204,7 @@ module.exports = {
       })
     )
 
-    async function executeRequestDecisionInTransaction(trx, state) {
+    async function executeRequestDecisionInTransaction(trx, state, operation) {
           const { route, expectedApprovalVersion, expectedApprovalNode } = state
           const requesterId = route.actorId
           const requestId = route.requestId
@@ -34174,7 +34221,9 @@ module.exports = {
           }
 
           const requestRow = requestRows[0]
-          const decisionAccess = await resolveRequestDecisionActorAccess(trx, route, requestRow)
+          const decisionAccess = await resolveRequestDecisionActorAccess(trx, route, requestRow, {
+            legacyAuthorization: operation?.acceptedWritePosture === 'legacy_projection_only',
+          })
           if (requestRow.status !== 'pending') {
             throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
           }
