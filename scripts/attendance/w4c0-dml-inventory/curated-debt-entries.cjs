@@ -225,6 +225,10 @@ const CURATED_DEBT_ENTRIES = [
     sharedHook: false,
     canonicalizedBy: 'W4C-3b',
     claims: (site) =>
+      bySymbol(
+        PLUGIN,
+        /^(?:executeGenericRequestCreate|executeOutdoorRequestCreate|executeScheduleDispatchRequestCreate|executeShiftSwapRequestCreate|executeRequestPendingEdit)$/,
+      )(site) ||
       bySymbol(PLUGIN, /^resolveAttendanceRequestDraft$/)(site) ||
       (bySymbol(PLUGIN, /^include$/)(site) && site.table === 'attendance_requests') ||
       (bySymbol(PLUGIN, /^buildWhere$/)(site) && site.table === 'attendance_requests' && site.verb === 'insert') ||
@@ -238,6 +242,7 @@ const CURATED_DEBT_ENTRIES = [
     confidence: 'heuristic',
     canonicalizedBy: 'W4C-3b',
     claims: (site) =>
+      bySymbol(PLUGIN, /^(?:executeRequestCancel|executeShiftSwapConsent)$/)(site) ||
       bySymbol(PLUGIN, /^buildWhere$/)(site) ||
       bySymbol(PLUGIN, /^assertDispatchScopeAllowed$/)(site) ||
       bySymbol(PLUGIN, /^resolveLockedAttendanceApprovalFlowState$/)(site) ||

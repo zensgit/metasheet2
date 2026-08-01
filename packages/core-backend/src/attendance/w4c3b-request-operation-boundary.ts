@@ -9,10 +9,9 @@
  * execute, after operation replay/preflight. All work shares the same
  * SERIALIZABLE transaction and connection.
  *
- * request_create is multiplexed by a host-owned closed routeVariant: generic,
- * outdoor, schedule_dispatch, and shift_swap share one adapter and one boundary
- * instance. SourceRef is derived only from (kind, routeVariant) — never from
- * request body keys.
+ * Host-owned route variants distinguish every specialized write surface that
+ * shares one of the four operation kinds. SourceRef is derived only from the
+ * closed (kind, routeVariant) pair — never from request body keys.
  */
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
@@ -58,6 +57,20 @@ export const ATTENDANCE_REQUEST_CREATE_ROUTE_VARIANTS_V1 = Object.freeze([
 
 export type AttendanceRequestCreateRouteVariantV1 =
   (typeof ATTENDANCE_REQUEST_CREATE_ROUTE_VARIANTS_V1)[number]
+
+export const ATTENDANCE_REQUEST_SPECIALIZED_ROUTE_VARIANTS_V1 = Object.freeze([
+  'schedule_dispatch_cancel',
+  'shift_swap_accept',
+  'shift_swap_reject',
+  'shift_swap_cancel',
+] as const)
+
+export type AttendanceRequestSpecializedRouteVariantV1 =
+  (typeof ATTENDANCE_REQUEST_SPECIALIZED_ROUTE_VARIANTS_V1)[number]
+
+export type AttendanceRequestOperationRouteVariantV1 =
+  | AttendanceRequestCreateRouteVariantV1
+  | AttendanceRequestSpecializedRouteVariantV1
 
 export class AttendanceW4RequestBoundaryError extends Error {
   readonly code: string
@@ -163,11 +176,22 @@ export interface AttendanceRequestOperationContextV1 {
   readonly operationId: string | null
   readonly correlationId: string
   readonly acceptedWritePosture: 'legacy_projection_only' | 'shadow' | 'authoritative' | null
-  /** Host-validated create family, or null for non-create kinds. */
-  readonly routeVariant: AttendanceRequestCreateRouteVariantV1 | null
+  /** Host-validated route family; null is the generic non-create surface. */
+  readonly routeVariant: AttendanceRequestOperationRouteVariantV1 | null
 }
 
 export interface AttendanceRequestOperationAdapterV1<TState = unknown> {
+  /**
+   * Read-only identity projection used by stable-ID preflight. It may read only
+   * durable route identity (for example request org/subject), never mutable
+   * flow/status/evidence required by execute. Completed replay returns before
+   * prepare() is called.
+   */
+  prepareIdentity(
+    trx: AttendanceRequestPluginTrxV1,
+    routeInput: unknown,
+    operation: AttendanceRequestOperationContextV1,
+  ): Promise<AttendanceRequestOperationPreparedV1<unknown>>
   prepare(
     trx: AttendanceRequestPluginTrxV1,
     routeInput: unknown,
@@ -194,11 +218,11 @@ export interface AttendanceRequestOperationBoundaryInputV1 {
   readonly operationId: string | null
   readonly correlationId: string
   /**
-   * Host-owned create-family discriminator. Required as a closed variant when
-   * kind is request_create; must be null for every other kind. Never read from
-   * arbitrary request body keys — only route code may supply this field.
+   * Host-owned route-family discriminator. Create requires its closed family;
+   * non-create generic routes use null and specialized routes use only the
+   * pair allowed by normalizeRouteVariant. Never read this from request data.
    */
-  readonly routeVariant: AttendanceRequestCreateRouteVariantV1 | null
+  readonly routeVariant: AttendanceRequestOperationRouteVariantV1 | null
   readonly routeInput: unknown
 }
 
@@ -235,11 +259,27 @@ const NON_CREATE_SOURCE_REFS: Readonly<
   request_cancel: 'plugin-attendance:POST /api/attendance/requests/:id/cancel',
 })
 
+const SPECIALIZED_SOURCE_REFS: Readonly<Record<AttendanceRequestSpecializedRouteVariantV1, string>> = Object.freeze({
+  schedule_dispatch_cancel: 'plugin-attendance:POST /api/attendance/schedule-dispatch-requests/:id/cancel',
+  shift_swap_accept: 'plugin-attendance:POST /api/attendance/shift-swap-requests/:id/accept',
+  shift_swap_reject: 'plugin-attendance:POST /api/attendance/shift-swap-requests/:id/reject',
+  shift_swap_cancel: 'plugin-attendance:POST /api/attendance/shift-swap-requests/:id/cancel',
+})
+
+const SPECIALIZED_ROUTE_KINDS: Readonly<
+  Record<AttendanceRequestSpecializedRouteVariantV1, AttendanceRequestOperationKindV1>
+> = Object.freeze({
+  schedule_dispatch_cancel: 'request_cancel',
+  shift_swap_accept: 'request_decision',
+  shift_swap_reject: 'request_decision',
+  shift_swap_cancel: 'request_cancel',
+})
+
 function normalizeRouteVariant(
   kind: AttendanceRequestOperationKindV1,
   raw: unknown,
   code: string,
-): AttendanceRequestCreateRouteVariantV1 | null {
+): AttendanceRequestOperationRouteVariantV1 | null {
   if (kind === 'request_create') {
     if (typeof raw !== 'string') fail(code)
     if (!(ATTENDANCE_REQUEST_CREATE_ROUTE_VARIANTS_V1 as readonly string[]).includes(raw)) {
@@ -247,20 +287,31 @@ function normalizeRouteVariant(
     }
     return raw as AttendanceRequestCreateRouteVariantV1
   }
-  // Non-create kinds must not carry a create-family variant.
-  if (raw !== null) fail(code)
-  return null
+  if (raw === null) return null
+  if (
+    typeof raw !== 'string'
+    || !(ATTENDANCE_REQUEST_SPECIALIZED_ROUTE_VARIANTS_V1 as readonly string[]).includes(raw)
+  ) fail(code)
+  const variant = raw as AttendanceRequestSpecializedRouteVariantV1
+  if (SPECIALIZED_ROUTE_KINDS[variant] !== kind) fail(code)
+  return variant
 }
 
 function resolveSourceRef(
   kind: AttendanceRequestOperationKindV1,
-  routeVariant: AttendanceRequestCreateRouteVariantV1 | null,
+  routeVariant: AttendanceRequestOperationRouteVariantV1 | null,
 ): string {
   if (kind === 'request_create') {
     if (routeVariant === null) fail('W4C3B_REQUEST_ROUTE_VARIANT_MISMATCH', 500)
     return ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1[routeVariant]
   }
-  if (routeVariant !== null) fail('W4C3B_REQUEST_ROUTE_VARIANT_MISMATCH', 500)
+  if (routeVariant !== null) {
+    if (
+      !(ATTENDANCE_REQUEST_SPECIALIZED_ROUTE_VARIANTS_V1 as readonly string[]).includes(routeVariant)
+      || SPECIALIZED_ROUTE_KINDS[routeVariant as AttendanceRequestSpecializedRouteVariantV1] !== kind
+    ) fail('W4C3B_REQUEST_ROUTE_VARIANT_MISMATCH', 500)
+    return SPECIALIZED_SOURCE_REFS[routeVariant as AttendanceRequestSpecializedRouteVariantV1]
+  }
   return NON_CREATE_SOURCE_REFS[kind]
 }
 
@@ -303,13 +354,31 @@ function buildEnvelope(
   })
 }
 
+function preparedIdentityCongruent(
+  identity: AttendanceRequestOperationPreparedV1,
+  prepared: AttendanceRequestOperationPreparedV1,
+): boolean {
+  return identity.orgId === prepared.orgId
+    && identity.actorId === prepared.actorId
+    && identity.actorPosture === prepared.actorPosture
+    && identity.tokenSubjectUserId === prepared.tokenSubjectUserId
+    && identity.subjectUserId === prepared.subjectUserId
+    && JSON.stringify(identity.subjectScope) === JSON.stringify(prepared.subjectScope)
+    && JSON.stringify(identity.commandPayload) === JSON.stringify(prepared.commandPayload)
+}
+
 export function createAttendanceRequestOperationBoundaryV1(
   deps: AttendanceRequestOperationBoundaryDepsV1,
 ): AttendanceRequestOperationBoundaryV1 {
   if (typeof deps?.acquireConnection !== 'function') fail('W4C3B_REQUEST_CONNECTION_PROVIDER_INVALID', 500)
   for (const kind of ATTENDANCE_REQUEST_OPERATION_KINDS_V1) {
     const adapter = deps?.adapters?.[kind]
-    if (!adapter || typeof adapter.prepare !== 'function' || typeof adapter.execute !== 'function') {
+    if (
+      !adapter
+      || typeof adapter.prepareIdentity !== 'function'
+      || typeof adapter.prepare !== 'function'
+      || typeof adapter.execute !== 'function'
+    ) {
       fail('W4C3B_REQUEST_ADAPTERS_INVALID', 500)
     }
   }
@@ -328,17 +397,19 @@ export function createAttendanceRequestOperationBoundaryV1(
             acceptedWritePosture: null,
             routeVariant: input.routeVariant,
           })
-          const prepared = await adapter.prepare(shapedTrx, input.routeInput, operation)
+          const identityPrepared = input.operationId === null
+            ? await adapter.prepare(shapedTrx, input.routeInput, operation)
+            : await adapter.prepareIdentity(shapedTrx, input.routeInput, operation)
 
           let canonicalOrg = true
           try {
-            parseCanonicalAttendanceRolloutOrgKeyV1(prepared.orgId)
+            parseCanonicalAttendanceRolloutOrgKeyV1(identityPrepared.orgId)
           } catch {
             canonicalOrg = false
           }
           if (!canonicalOrg) {
             if (input.operationId !== null) fail('W4C3B_REQUEST_ORG_OUTSIDE_W4_DOMAIN')
-            const result = await adapter.execute(shapedTrx, prepared, Object.freeze({
+            const result = await adapter.execute(shapedTrx, identityPrepared, Object.freeze({
               ...operation,
               acceptedWritePosture: 'legacy_projection_only' as const,
             }))
@@ -351,14 +422,14 @@ export function createAttendanceRequestOperationBoundaryV1(
           // rows, while suspended or W4-enabled orgs still fail closed before
           // the adapter's first source DML.
           if (input.operationId === null) {
-            const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(prepared.orgId)
+            const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(identityPrepared.orgId)
             await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
             const posture = await resolveSegmentCalculationPosture(trx, orgKey)
             if (posture.writePosture === 'blocked') {
               throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
             }
             if (posture.writePosture === 'legacy_projection_only') {
-              const result = await adapter.execute(shapedTrx, prepared, Object.freeze({
+              const result = await adapter.execute(shapedTrx, identityPrepared, Object.freeze({
                 ...operation,
                 acceptedWritePosture: 'legacy_projection_only' as const,
               }))
@@ -366,13 +437,13 @@ export function createAttendanceRequestOperationBoundaryV1(
             }
           }
 
-          const envelope = buildEnvelope(input, prepared)
+          const envelope = buildEnvelope(input, identityPrepared)
           const authorization = createAuthorizedAttendanceWriteContextV1({
-            actorId: prepared.actorId,
-            actorPosture: prepared.actorPosture,
-            tokenSubjectUserId: prepared.tokenSubjectUserId,
+            actorId: identityPrepared.actorId,
+            actorPosture: identityPrepared.actorPosture,
+            tokenSubjectUserId: identityPrepared.tokenSubjectUserId,
             orgId: envelope.orgId,
-            subjectScope: prepared.subjectScope,
+            subjectScope: identityPrepared.subjectScope,
             capability: 'approval_apply',
             sourceRef: resolveSourceRef(input.kind, input.routeVariant),
           })
@@ -387,6 +458,13 @@ export function createAttendanceRequestOperationBoundaryV1(
           }
           if (preflight.kind === 'suspended') {
             throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
+          }
+
+          const prepared = input.operationId === null
+            ? identityPrepared
+            : await adapter.prepare(shapedTrx, input.routeInput, operation)
+          if (!preparedIdentityCongruent(identityPrepared, prepared)) {
+            fail('W4C3B_REQUEST_IDENTITY_CHANGED', 409)
           }
 
           const result = await adapter.execute(shapedTrx, prepared, Object.freeze({

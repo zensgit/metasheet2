@@ -59,9 +59,15 @@ function adapters(
   routeVariants: Array<string | null> = [],
 ): Record<'request_create' | 'request_pending_edit' | 'request_decision' | 'request_cancel', AttendanceRequestOperationAdapterV1> {
   const adapter: AttendanceRequestOperationAdapterV1 = {
+    async prepareIdentity(trx, routeInput, operation) {
+      events.push('prepareIdentity')
+      routeVariants.push(operation.routeVariant)
+      expect(Object.isFrozen(routeInput)).toBe(true)
+      await trx.query('SELECT 1 AS request_identity_marker')
+      return preparedState()
+    },
     async prepare(trx, routeInput, operation) {
       events.push('prepare')
-      routeVariants.push(operation.routeVariant)
       expect(Object.isFrozen(routeInput)).toBe(true)
       await trx.query('SELECT 1 AS request_prepare_marker')
       return preparedState()
@@ -138,7 +144,7 @@ describe('W4C-3b request operation boundary', () => {
       routeInput: { requestType: 'leave' },
     })).resolves.toEqual({ kind: 'legacy_compat', response: { id: REQUEST_ID } })
 
-    expect(events).toEqual(['prepare', 'execute'])
+    expect(events).toEqual(['prepareIdentity', 'prepare', 'execute'])
     expect(client.calls.some(({ sqlText }) => sqlText.includes('INSERT INTO attendance_result_operations'))).toBe(true)
     expect(client.calls.some(({ sqlText }) => sqlText.includes('attendance_result_event_outbox'))).toBe(false)
     expect(client.calls.some(({ sqlText }) => sqlText.startsWith('UPDATE attendance_result_operations'))).toBe(true)
@@ -187,7 +193,7 @@ describe('W4C-3b request operation boundary', () => {
       }),
     ).rejects.toMatchObject({ code: 'SEGMENT_CALCULATION_SUSPENDED' })
 
-    expect(events).toEqual(['prepare'])
+    expect(events).toEqual(['prepareIdentity'])
     expect(client.calls.some(({ sqlText }) => sqlText.includes('request_execution_marker'))).toBe(false)
     expect(client.calls.at(-1)?.sqlText).toBe('ROLLBACK')
     expect(release).toHaveBeenCalledOnce()
@@ -218,7 +224,7 @@ describe('W4C-3b request operation boundary', () => {
     const sourceDml = client.calls.findIndex(({ sqlText }) => sqlText.includes('request_execution_marker'))
     const outbox = client.calls.findIndex(({ sqlText }) => sqlText.includes('attendance_result_event_outbox'))
     const seal = client.calls.findIndex(({ sqlText }) => sqlText.startsWith('UPDATE attendance_result_operations'))
-    expect(events).toEqual(['prepare', 'execute'])
+    expect(events).toEqual(['prepareIdentity', 'prepare', 'execute'])
     expect(acceptedWritePostures).toEqual(['shadow'])
     expect(claim).toBeGreaterThan(-1)
     expect(sourceDml).toBeGreaterThan(claim)

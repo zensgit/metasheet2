@@ -31948,6 +31948,93 @@ module.exports = {
       reason: z.string().nullable(),
     }).strict()
 
+    function withoutOperationIdentity(input) {
+      const { operationId: _operationId, operation_id: _operationIdSnake, ...payload } = input
+      return payload
+    }
+
+    function requestCreateIdentityFromRoute(variant, route) {
+      let requestType
+      let requestWrite
+      if (variant === 'generic') {
+        const rawRequestType = firstDefinedValue(
+          route.requestBody.requestType,
+          route.requestBody.request_type,
+          route.requestBody.type,
+        )
+        requestType = typeof rawRequestType === 'string' && rawRequestType.trim()
+          ? rawRequestType.trim()
+          : 'attendance_request'
+        requestWrite = withoutOperationIdentity(route.requestBody)
+      } else if (variant === 'outdoor') {
+        requestType = 'outdoor_punch'
+        requestWrite = {
+          workDate: route.workDate,
+          eventType: route.eventType,
+          occurredAt: route.occurredAt,
+          timezone: route.timezone,
+          source: route.source,
+          location: route.location,
+          note: route.note,
+          photoFileId: route.photoFileId,
+          outsideGeofence: route.outsideGeofence,
+          outdoorPolicy: route.outdoorPolicy,
+        }
+      } else if (variant === 'schedule_dispatch') {
+        requestType = 'schedule_dispatch'
+        requestWrite = route.input
+      } else if (variant === 'shift_swap') {
+        requestType = 'shift_swap'
+        requestWrite = {
+          requesterAssignmentId: route.requesterAssignmentId,
+          counterpartyAssignmentId: route.counterpartyAssignmentId,
+          approvalFlowId: route.approvalFlowId,
+          reason: route.reason,
+        }
+      } else {
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+      }
+      const crossUser = variant === 'schedule_dispatch'
+        && String(route.input.userId) !== String(route.actorId)
+      const subjectUserId = variant === 'schedule_dispatch' ? route.input.userId : route.actorId
+      const actorPosture = variant === 'schedule_dispatch'
+        ? (route.actorFullAdmin === true ? 'attendance_admin' : (crossUser ? 'operator' : 'self'))
+        : 'self'
+      return {
+        orgId: route.orgId,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [subjectUserId] }
+          : { kind: 'self', userId: subjectUserId },
+        commandPayload: { requestType, requestWrite },
+        state: null,
+      }
+    }
+
+    async function prepareRequestCreateIdentity(rawInput, operation) {
+      const variant = operation?.routeVariant
+      if (variant === 'generic') {
+        const route = requestBoundaryRouteInputSchema.parse(rawInput)
+        if (!route.orgId || route.requestId !== null) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+        }
+        return requestCreateIdentityFromRoute(variant, route)
+      }
+      if (variant === 'outdoor') {
+        return requestCreateIdentityFromRoute(variant, outdoorCreateRouteInputSchema.parse(rawInput))
+      }
+      if (variant === 'schedule_dispatch') {
+        return requestCreateIdentityFromRoute(variant, scheduleDispatchCreateRouteInputSchema.parse(rawInput))
+      }
+      if (variant === 'shift_swap') {
+        return requestCreateIdentityFromRoute(variant, shiftSwapCreateRouteInputSchema.parse(rawInput))
+      }
+      throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+    }
+
     async function prepareGenericRequestCreate(trx, rawInput) {
       const route = requestBoundaryRouteInputSchema.parse(rawInput)
       if (!route.orgId || route.requestId !== null) {
@@ -31987,13 +32074,7 @@ module.exports = {
         approvalPayload.requesterSnapshot,
       )
       return {
-        orgId: route.orgId,
-        actorId: route.actorId,
-        actorPosture: 'self',
-        tokenSubjectUserId: route.tokenSubjectUserId,
-        subjectUserId: route.actorId,
-        subjectScope: { kind: 'self', userId: route.actorId },
-        commandPayload: requestCommandPayload(route.requestBody, draft, 'create'),
+        ...requestCreateIdentityFromRoute('generic', route),
         state: {
           routeVariant: 'generic',
           route,
@@ -32215,13 +32296,7 @@ module.exports = {
         outdoorDetection: route.outsideGeofence ? 'outside_geofence' : 'marker',
       }
       return {
-        orgId: route.orgId,
-        actorId: route.actorId,
-        actorPosture: 'self',
-        tokenSubjectUserId: route.tokenSubjectUserId,
-        subjectUserId: route.actorId,
-        subjectScope: { kind: 'self', userId: route.actorId },
-        commandPayload: { requestType: 'outdoor_punch', requestWrite },
+        ...requestCreateIdentityFromRoute('outdoor', route),
         state: {
           routeVariant: 'outdoor',
           route,
@@ -32460,15 +32535,7 @@ module.exports = {
         sourceKey,
       }
       return {
-        orgId: route.orgId,
-        actorId: route.actorId,
-        actorPosture,
-        tokenSubjectUserId: route.tokenSubjectUserId,
-        subjectUserId: input.userId,
-        subjectScope: crossUser
-          ? { kind: 'explicit_users', userIds: [input.userId] }
-          : { kind: 'self', userId: input.userId },
-        commandPayload: { requestType: 'schedule_dispatch', requestWrite },
+        ...requestCreateIdentityFromRoute('schedule_dispatch', route),
         state: {
           routeVariant: 'schedule_dispatch',
           route,
@@ -32749,15 +32816,7 @@ module.exports = {
         sourceKey,
       }
       return {
-        orgId: route.orgId,
-        actorId: route.actorId,
-        actorPosture,
-        tokenSubjectUserId: route.tokenSubjectUserId,
-        subjectUserId: requesterSource.userId,
-        subjectScope: crossUser
-          ? { kind: 'explicit_users', userIds: [requesterSource.userId] }
-          : { kind: 'self', userId: requesterSource.userId },
-        commandPayload: { requestType: 'shift_swap', requestWrite },
+        ...requestCreateIdentityFromRoute('shift_swap', route),
         state: {
           routeVariant: 'shift_swap',
           route,
@@ -32956,7 +33015,10 @@ module.exports = {
     }
 
     const requestCreateAdapter = {
-      async prepare(trx, rawInput, operation) {
+      async prepareIdentity(_trx, rawInput, operation) {
+        return prepareRequestCreateIdentity(rawInput, operation)
+      },
+      prepare: async function prepareRequestCreate(trx, rawInput, operation) {
         const variant = operation?.routeVariant
         if (variant === 'generic') return prepareGenericRequestCreate(trx, rawInput)
         if (variant === 'outdoor') return prepareOutdoorRequestCreate(trx, rawInput)
@@ -32974,15 +33036,98 @@ module.exports = {
       },
     }
 
+    async function loadRequestOperationIdentityRow(trx, route) {
+      const rows = route.orgId
+        ? await trx.query(
+            `SELECT id, org_id, user_id, approval_instance_id, request_type
+               FROM attendance_requests
+              WHERE id = $1::uuid AND org_id = $2
+              LIMIT 1`,
+            [route.requestId, route.orgId],
+          )
+        : await trx.query(
+            `SELECT id, org_id, user_id, approval_instance_id, request_type
+               FROM attendance_requests
+              WHERE id = $1::uuid
+              LIMIT 1`,
+            [route.requestId],
+          )
+      if (rows.length !== 1) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+      return rows[0]
+    }
+
+    function requestPendingEditIdentityPayload(requestBody, requestId, operationId) {
+      const expectedSnapshotVersion = firstDefinedValue(
+        requestBody.expectedSnapshotVersion,
+        requestBody.expected_snapshot_version,
+      )
+      const expectedSnapshotHash = firstDefinedValue(
+        requestBody.expectedSnapshotFingerprint,
+        requestBody.expected_snapshot_fingerprint,
+      )
+      if (operationId && (expectedSnapshotVersion === undefined || expectedSnapshotHash === undefined)) {
+        throw new HttpError(
+          400,
+          'REQUEST_EDIT_OCC_REQUIRED',
+          'expectedSnapshotVersion and expectedSnapshotFingerprint are required with operationId',
+        )
+      }
+      const {
+        operationId: _operationId,
+        operation_id: _operationIdSnake,
+        expectedSnapshotVersion: _expectedVersion,
+        expected_snapshot_version: _expectedVersionSnake,
+        expectedSnapshotFingerprint: _expectedHash,
+        expected_snapshot_fingerprint: _expectedHashSnake,
+        ...patch
+      } = requestBody
+      return {
+        requestId,
+        expectedSnapshotVersion: expectedSnapshotVersion ?? 1,
+        expectedSnapshotHash: expectedSnapshotHash ?? '0'.repeat(64),
+        patch,
+      }
+    }
+
+    async function prepareRequestPendingEditIdentity(trx, rawInput, operation) {
+      const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      if (!route.requestId) {
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+      }
+      const identityRow = await loadRequestOperationIdentityRow(trx, route)
+      const crossUser = String(identityRow.user_id) !== route.actorId
+      return {
+        orgId: identityRow.org_id,
+        actorId: route.actorId,
+        actorPosture: crossUser ? 'attendance_admin' : 'self',
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: identityRow.user_id,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [identityRow.user_id] }
+          : { kind: 'self', userId: identityRow.user_id },
+        commandPayload: requestPendingEditIdentityPayload(
+          route.requestBody,
+          route.requestId,
+          operation.operationId,
+        ),
+        state: null,
+      }
+    }
+
     const requestPendingEditAdapter = {
-      async prepare(trx, rawInput) {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestPendingEditIdentity(trx, rawInput, operation)
+      },
+      prepare: async function prepareRequestPendingEdit(trx, rawInput, operation) {
         const route = requestBoundaryRouteInputSchema.parse(rawInput)
-        if (route.orgId !== null || !route.requestId) {
+        if (!route.requestId) {
           throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
         }
         const requestRows = await trx.query(
-          'SELECT * FROM attendance_requests WHERE id = $1',
-          [route.requestId],
+          route.orgId
+            ? 'SELECT * FROM attendance_requests WHERE id = $1 AND org_id = $2'
+            : 'SELECT * FROM attendance_requests WHERE id = $1',
+          route.orgId ? [route.requestId, route.orgId] : [route.requestId],
         )
         if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
         const existingRequest = requestRows[0]
@@ -33030,21 +33175,13 @@ module.exports = {
           0,
           approvalPayload.requesterSnapshot,
         )
-        const crossUser = existingRequest.user_id !== route.actorId
+        const identity = await prepareRequestPendingEditIdentity(trx, rawInput, operation)
         return {
-          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-          actorId: route.actorId,
-          actorPosture: crossUser ? 'attendance_admin' : 'self',
-          tokenSubjectUserId: route.tokenSubjectUserId,
-          subjectUserId: existingRequest.user_id,
-          subjectScope: crossUser
-            ? { kind: 'explicit_users', userIds: [existingRequest.user_id] }
-            : { kind: 'self', userId: existingRequest.user_id },
-          commandPayload: requestCommandPayload(route.requestBody, draft, 'edit', route.requestId),
+          ...identity,
           state: { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments },
         }
       },
-      async execute(trx, prepared) {
+      execute: async function executeRequestPendingEdit(trx, prepared) {
         const { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments } = prepared.state
         const lockedRequestRows = await trx.query(
           'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
@@ -33154,6 +33291,7 @@ module.exports = {
       actorId: z.string().min(1),
       tokenSubjectUserId: z.string().min(1),
       actorName: z.string().min(1),
+      orgId: z.string().min(1).nullable(),
       requestId: z.string().uuid(),
       requestBody: requestCancellationActionSchema,
       ipAddress: z.string().nullable(),
@@ -33163,6 +33301,7 @@ module.exports = {
       actorId: z.string().min(1),
       tokenSubjectUserId: z.string().min(1),
       actorName: z.string().min(1),
+      orgId: z.string().min(1).nullable(),
       requestId: z.string().uuid(),
       action: z.enum(['approve', 'reject']),
       requestBody: requestDecisionActionSchema,
@@ -33268,15 +33407,96 @@ module.exports = {
       return { version, fingerprint }
     }
 
+    async function resolveStableCrossUserPosture(trx, actorId, fallback, orgId) {
+      const rows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'`,
+        [actorId],
+      )
+      if (rows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this request operation')
+      if (rows[0].platform_admin === true) return 'platform_admin'
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE`,
+        [actorId, orgId],
+      )
+      if (membershipRows.length !== 1) {
+        throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this request operation')
+      }
+      return fallback
+    }
+
+    async function prepareRequestCancelIdentity(trx, rawInput, operation, options = {}) {
+      const route = requestActionBoundaryRouteInputSchema.parse(rawInput)
+      const identityRow = await loadRequestOperationIdentityRow(trx, route)
+      if (
+        (operation.routeVariant === 'schedule_dispatch_cancel' && identityRow.request_type !== 'schedule_dispatch')
+        || (operation.routeVariant === 'shift_swap_cancel' && identityRow.request_type !== 'shift_swap')
+      ) {
+        throw new HttpError(404, 'NOT_FOUND', 'Request not found for this route family')
+      }
+      const crossUser = String(identityRow.user_id) !== route.actorId
+      let actorPosture = options.actorPosture ?? 'self'
+      if (crossUser && options.actorPosture === undefined) {
+        actorPosture = operation.routeVariant === 'schedule_dispatch_cancel'
+          ? 'operator'
+          : await resolveStableCrossUserPosture(trx, route.actorId, 'attendance_admin', identityRow.org_id)
+      }
+      const expectedSnapshotVersion = firstDefinedValue(
+        route.requestBody.expectedSnapshotVersion,
+        route.requestBody.expected_snapshot_version,
+      ) ?? 0
+      const expectedSnapshotHash = firstDefinedValue(
+        route.requestBody.expectedSnapshotFingerprint,
+        route.requestBody.expected_snapshot_fingerprint,
+      ) ?? '0'.repeat(64)
+      return {
+        orgId: identityRow.org_id,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: identityRow.user_id,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [identityRow.user_id] }
+          : { kind: 'self', userId: identityRow.user_id },
+        commandPayload: {
+          requestId: route.requestId,
+          approvalRef: identityRow.approval_instance_id ?? null,
+          expectedSnapshotVersion,
+          expectedSnapshotHash,
+          reason: normalizeOptionalText(route.requestBody.comment),
+          meta: route.requestBody.metadata ?? null,
+        },
+        state: null,
+      }
+    }
+
     const requestCancelAdapter = {
-      async prepare(trx, rawInput) {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestCancelIdentity(trx, rawInput, operation)
+      },
+      prepare: async function prepareRequestCancel(trx, rawInput, operation) {
         const route = requestActionBoundaryRouteInputSchema.parse(rawInput)
         const requestRows = await trx.query(
-          'SELECT * FROM attendance_requests WHERE id = $1::uuid',
-          [route.requestId],
+          route.orgId
+            ? 'SELECT * FROM attendance_requests WHERE id = $1::uuid AND org_id = $2'
+            : 'SELECT * FROM attendance_requests WHERE id = $1::uuid',
+          route.orgId ? [route.requestId, route.orgId] : [route.requestId],
         )
         if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
         const requestRow = requestRows[0]
+        if (
+          (operation.routeVariant === 'schedule_dispatch_cancel' && requestRow.request_type !== 'schedule_dispatch')
+          || (operation.routeVariant === 'shift_swap_cancel' && requestRow.request_type !== 'shift_swap')
+        ) {
+          throw new HttpError(404, 'NOT_FOUND', 'Request not found for this route family')
+        }
         const approvedLeave = requestRow.status === 'approved' && requestRow.request_type === 'leave'
 
         const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
@@ -33307,28 +33527,18 @@ module.exports = {
           )
           approval = approvalRows[0] ?? null
         }
-        const crossUser = String(requestRow.user_id) !== route.actorId
+        const identity = await prepareRequestCancelIdentity(
+          trx,
+          rawInput,
+          operation,
+          operation.operationId === null ? { actorPosture } : undefined,
+        )
         return {
-          orgId,
-          actorId: route.actorId,
-          actorPosture,
-          tokenSubjectUserId: route.tokenSubjectUserId,
-          subjectUserId: requestRow.user_id,
-          subjectScope: crossUser
-            ? { kind: 'explicit_users', userIds: [requestRow.user_id] }
-            : { kind: 'self', userId: requestRow.user_id },
-          commandPayload: {
-            requestId: route.requestId,
-            approvalRef: approvalId,
-            expectedSnapshotVersion: snapshot.version,
-            expectedSnapshotHash: snapshot.fingerprint,
-            reason: normalizeOptionalText(route.requestBody.comment),
-            meta: route.requestBody.metadata ?? null,
-          },
-          state: { route, requestRow, approvalId, approval, approvedLeave, actorPosture },
+          ...identity,
+          state: { route, requestRow, approvalId, approval, approvedLeave, actorPosture: identity.actorPosture },
         }
       },
-      async execute(trx, prepared, operation) {
+      execute: async function executeRequestCancel(trx, prepared, operation) {
         const { route, requestRow, approvalId, approval, approvedLeave, actorPosture } = prepared.state
         const lockedRequestRows = await trx.query(
           'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
@@ -33349,7 +33559,7 @@ module.exports = {
             fullAdmin: await hasAttendanceAdminAccess(route.actorId),
           }, { forUpdate: true })
         }
-        const lockedActorPosture = await resolveRequestCancellationActorPosture(
+        await resolveRequestCancellationActorPosture(
           trx,
           route,
           requestRow,
@@ -33358,9 +33568,6 @@ module.exports = {
             legacyAuthorization: operation?.acceptedWritePosture === 'legacy_projection_only',
           },
         )
-        if (lockedActorPosture !== actorPosture) {
-          throw new HttpError(409, 'REQUEST_AUTHORIZATION_CHANGED', 'Request cancellation authorization changed')
-        }
         await loadLatestRequestSnapshotToken(trx, route, requestRow, { forUpdate: true })
         let lockedApproval = null
         if (approvalId) {
@@ -33409,10 +33616,16 @@ module.exports = {
 
         if (approvalId && lockedApproval) {
           const newVersion = Number(lockedApproval.version ?? 0) + 1
-          await trx.query(
-            'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-            ['cancelled', newVersion, approvalId],
+          const approvalUpdateRows = await trx.query(
+            `UPDATE approval_instances
+                SET status = $1, version = $2, updated_at = now()
+              WHERE id = $3 AND version = $4 AND status = $5
+              RETURNING id`,
+            ['cancelled', newVersion, approvalId, lockedApproval.version, lockedApproval.status],
           )
+          if (approvalUpdateRows.length !== 1) {
+            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation')
+          }
           await deactivateAttendanceApprovalAssignments(trx, approvalId)
           await trx.query(
             `INSERT INTO approval_records
@@ -33458,7 +33671,7 @@ module.exports = {
             requestId: route.requestId,
           })
         }
-        const response = {
+        let response = {
           ok: true,
           data: {
             requestId: route.requestId,
@@ -33468,6 +33681,27 @@ module.exports = {
             reversal,
             ...(cancellationCalculation ? { cancellationCalculation } : {}),
           },
+        }
+        if (operation.routeVariant === 'schedule_dispatch_cancel') {
+          const detail = await loadScheduleDispatchDetail(trx, requestOrgId, route.requestId)
+          response = {
+            ok: true,
+            data: {
+              scheduleDispatch: mapScheduleDispatchRequestRow({
+                ...detail,
+                request_status: 'cancelled',
+                publish_status: 'cancelled',
+              }),
+            },
+          }
+        } else if (operation.routeVariant === 'shift_swap_cancel') {
+          const detail = await loadShiftSwapDetail(trx, requestOrgId, route.requestId)
+          response = {
+            ok: true,
+            data: {
+              shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: 'cancelled' }),
+            },
+          }
         }
         return {
           response,
@@ -33628,12 +33862,223 @@ module.exports = {
       }
     }
 
+    async function prepareRequestDecisionIdentity(trx, rawInput, operation, options = {}) {
+      const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
+      const identityRow = await loadRequestOperationIdentityRow(trx, route)
+      const isShiftSwapConsent = operation.routeVariant === 'shift_swap_accept'
+        || operation.routeVariant === 'shift_swap_reject'
+      if (isShiftSwapConsent) {
+        if (identityRow.request_type !== 'shift_swap') {
+          throw new HttpError(404, 'NOT_FOUND', 'Request not found for this route family')
+        }
+        const expectedAction = operation.routeVariant === 'shift_swap_accept' ? 'approve' : 'reject'
+        if (route.action !== expectedAction) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+        }
+        return {
+          orgId: identityRow.org_id,
+          actorId: route.actorId,
+          actorPosture: 'self',
+          tokenSubjectUserId: route.tokenSubjectUserId,
+          subjectUserId: route.actorId,
+          subjectScope: { kind: 'self', userId: route.actorId },
+          commandPayload: {
+            requestId: route.requestId,
+            approvalRef: identityRow.approval_instance_id ?? `shift-swap:${route.requestId}`,
+            expectedApprovalVersion: 0,
+            expectedApprovalNode: 'shift_swap_consent',
+            action: route.action,
+            decisionChannel: 'web',
+            comment: normalizeOptionalText(route.requestBody.comment),
+            meta: route.requestBody.metadata ?? null,
+          },
+          state: null,
+        }
+      }
+
+      const expectedApprovalVersion = resolveRequestDecisionExpectedValue(
+        route.requestBody,
+        'expectedApprovalVersion',
+        'expected_approval_version',
+        'expectedApprovalVersion',
+      )
+      const expectedApprovalNode = resolveRequestDecisionExpectedValue(
+        route.requestBody,
+        'expectedApprovalNode',
+        'expected_approval_node',
+        'expectedApprovalNode',
+      )
+      if (operation.operationId && (expectedApprovalVersion === undefined || expectedApprovalNode === undefined)) {
+        throw new HttpError(
+          400,
+          'REQUEST_DECISION_OCC_REQUIRED',
+          'expectedApprovalVersion and expectedApprovalNode are required with operationId',
+        )
+      }
+      const crossUser = String(identityRow.user_id) !== route.actorId
+      const actorPosture = options.actorPosture
+        ?? (crossUser && identityRow.request_type === 'schedule_dispatch'
+          ? 'operator'
+          : await resolveStableCrossUserPosture(trx, route.actorId, crossUser ? 'operator' : 'self', identityRow.org_id))
+      return {
+        orgId: identityRow.org_id,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: identityRow.user_id,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [identityRow.user_id] }
+          : { kind: 'self', userId: identityRow.user_id },
+        commandPayload: {
+          requestId: route.requestId,
+          approvalRef: identityRow.approval_instance_id,
+          expectedApprovalVersion: expectedApprovalVersion ?? 0,
+          expectedApprovalNode: expectedApprovalNode ?? 'step:0',
+          action: route.action,
+          decisionChannel: 'web',
+          comment: normalizeOptionalText(route.requestBody.comment),
+          meta: route.requestBody.metadata ?? null,
+        },
+        state: null,
+      }
+    }
+
+    async function prepareShiftSwapConsent(trx, rawInput, operation) {
+      const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
+      const identity = await prepareRequestDecisionIdentity(trx, rawInput, operation)
+      const detail = await loadShiftSwapDetail(trx, route.orgId, route.requestId)
+      if (!detail) throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
+      if (String(detail.counterparty_user_id) !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
+      }
+      if (detail.request_status !== 'pending') {
+        throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
+      }
+      if (detail.counterparty_status !== 'pending') {
+        throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+      }
+      return { ...identity, state: { route } }
+    }
+
+    async function executeShiftSwapConsent(trx, prepared) {
+      const { route } = prepared.state
+      const decision = route.action === 'approve' ? 'accepted' : 'rejected'
+      const row = await loadShiftSwapDetail(trx, route.orgId, route.requestId, { forUpdate: true })
+      if (!row) throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
+      if (String(row.counterparty_user_id) !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
+      }
+      if (row.request_status !== 'pending') {
+        throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
+      }
+      if (row.counterparty_status !== 'pending') {
+        throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+      }
+      const consentRows = await trx.query(
+        `UPDATE attendance_shift_swap_requests
+            SET counterparty_status = $3,
+                counterparty_responded_at = now(),
+                updated_at = now()
+          WHERE org_id = $1 AND request_id = $2 AND counterparty_status = 'pending'
+          RETURNING request_id`,
+        [route.orgId, route.requestId, decision],
+      )
+      if (consentRows.length !== 1) {
+        throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+      }
+
+      if (decision === 'rejected') {
+        if (row.approval_instance_id) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [row.approval_instance_id],
+          )
+          if (approvalRows.length > 0) {
+            const approval = approvalRows[0]
+            const newVersion = Number(approval.version ?? 0) + 1
+            const updateRows = await trx.query(
+              `UPDATE approval_instances
+                  SET status = 'rejected', version = $2, updated_at = now()
+                WHERE id = $1 AND version = $3 AND status = $4
+                RETURNING id`,
+              [row.approval_instance_id, newVersion, approval.version, approval.status],
+            )
+            if (updateRows.length !== 1) {
+              throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during shift-swap rejection')
+            }
+            await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
+            await trx.query(
+              `INSERT INTO approval_records
+               (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+               VALUES ($1, 'reject', $2, $3, $4, $5, 'rejected', $6, $7, $8::jsonb, $9, $10)`,
+              [
+                row.approval_instance_id,
+                route.actorId,
+                route.actorName,
+                route.requestBody.comment ?? null,
+                approval.status,
+                approval.version,
+                newVersion,
+                JSON.stringify(route.requestBody.metadata ?? {}),
+                route.ipAddress,
+                route.userAgent,
+              ],
+            )
+          }
+        }
+        const requestRows = await trx.query(
+          `UPDATE attendance_requests
+              SET status = 'rejected', resolved_by = $3, resolved_at = now(), updated_at = now()
+            WHERE id = $1 AND org_id = $2 AND status = 'pending'
+            RETURNING id`,
+          [route.requestId, route.orgId, route.actorId],
+        )
+        if (requestRows.length !== 1) {
+          throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Shift-swap request changed during rejection')
+        }
+        await archiveShiftSwapSourceKey(trx, route.orgId, route.requestId)
+      }
+
+      const detail = await loadShiftSwapDetail(trx, route.orgId, route.requestId)
+      const response = {
+        ok: true,
+        data: {
+          shiftSwap: mapShiftSwapRequestRow({
+            ...detail,
+            request_status: decision === 'rejected' ? 'rejected' : detail?.request_status,
+          }),
+        },
+      }
+      return {
+        response,
+        resolvedRequestId: route.requestId,
+        lifecycleEvents: [{
+          eventKind: decision === 'rejected' ? 'attendance.resolved' : 'attendance.request.updated',
+          payload: {
+            requestId: route.requestId,
+            orgId: route.orgId,
+            userId: row.requester_user_id,
+            counterpartyUserId: route.actorId,
+            decision,
+          },
+        }],
+      }
+    }
+
     const requestDecisionAdapter = {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestDecisionIdentity(trx, rawInput, operation)
+      },
       async prepare(trx, rawInput, operation) {
+        if (operation.routeVariant === 'shift_swap_accept' || operation.routeVariant === 'shift_swap_reject') {
+          return prepareShiftSwapConsent(trx, rawInput, operation)
+        }
         const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
         const requestRows = await trx.query(
-          'SELECT * FROM attendance_requests WHERE id = $1::uuid',
-          [route.requestId],
+          route.orgId
+            ? 'SELECT * FROM attendance_requests WHERE id = $1::uuid AND org_id = $2'
+            : 'SELECT * FROM attendance_requests WHERE id = $1::uuid',
+          route.orgId ? [route.requestId, route.orgId] : [route.requestId],
         )
         if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
         const requestRow = requestRows[0]
@@ -33682,26 +34127,14 @@ module.exports = {
         }
         const expectedApprovalVersion = expectedApprovalVersionInput ?? Number(approval.version ?? 0)
         const expectedApprovalNode = expectedApprovalNodeInput ?? currentNodeKey
-        const crossUser = String(requestRow.user_id) !== route.actorId
+        const identity = await prepareRequestDecisionIdentity(
+          trx,
+          rawInput,
+          operation,
+          operation.operationId === null ? { actorPosture: decisionAccess.actorPosture } : undefined,
+        )
         return {
-          orgId,
-          actorId: route.actorId,
-          actorPosture: decisionAccess.actorPosture,
-          tokenSubjectUserId: route.tokenSubjectUserId,
-          subjectUserId: requestRow.user_id,
-          subjectScope: crossUser
-            ? { kind: 'explicit_users', userIds: [requestRow.user_id] }
-            : { kind: 'self', userId: requestRow.user_id },
-          commandPayload: {
-            requestId: route.requestId,
-            approvalRef: approvalId,
-            expectedApprovalVersion,
-            expectedApprovalNode,
-            action: route.action,
-            decisionChannel: 'web',
-            comment: normalizeOptionalText(route.requestBody.comment),
-            meta: route.requestBody.metadata ?? null,
-          },
+          ...identity,
           state: {
             route,
             expectedApprovalVersion,
@@ -33710,6 +34143,9 @@ module.exports = {
         }
       },
       async execute(trx, prepared, operation) {
+        if (operation.routeVariant === 'shift_swap_accept' || operation.routeVariant === 'shift_swap_reject') {
+          return executeShiftSwapConsent(trx, prepared)
+        }
         const result = await executeRequestDecisionInTransaction(trx, prepared.state, operation)
         return {
           response: { ok: true, data: result },
@@ -34206,65 +34642,48 @@ module.exports = {
         }
         const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
         if (!actorAccess) return
-        try {
-          const detail = await db.transaction(async (trx) => {
-            const row = await loadScheduleDispatchDetail(trx, orgId, requestId, { forUpdate: true })
-            if (!row) {
-              throw new HttpError(404, 'NOT_FOUND', 'Schedule-dispatch request not found')
-            }
-            await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget(row))
-            if (row.request_status !== 'pending') {
-              throw new HttpError(400, 'INVALID_STATUS', 'Schedule-dispatch request is already resolved')
-            }
-            if (row.approval_instance_id) {
-              const approvalRows = await trx.query(
-                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-                [row.approval_instance_id]
-              )
-              if (approvalRows.length > 0) {
-                const approval = approvalRows[0]
-                const newVersion = Number(approval.version ?? 0) + 1
-                await trx.query(
-                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                  ['cancelled', newVersion, row.approval_instance_id]
-                )
-                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
-                await trx.query(
-                  `INSERT INTO approval_records
-                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                   VALUES ($1, 'revoke', $2, $3, NULL, $4, 'cancelled', $5, $6, '{}'::jsonb, $7, $8)`,
-                  [
-                    row.approval_instance_id,
-                    actorAccess.userId,
-                    getUserLabel(req, actorAccess.userId),
-                    approval.status,
-                    approval.version,
-                    newVersion,
-                    req.ip ?? null,
-                    req.get('user-agent') ?? null,
-                  ]
-                )
-              }
-            }
-            await trx.query(
-              `UPDATE attendance_requests
-                  SET status = 'cancelled',
-                      resolved_by = $3,
-                      resolved_at = now(),
-                      updated_at = now()
-                WHERE id = $1 AND org_id = $2`,
-              [requestId, orgId, actorAccess.userId]
-            )
-            await closeScheduleDispatchRequest(trx, orgId, requestId)
-            return loadScheduleDispatchDetail(trx, orgId, requestId)
+        const parsed = requestCancellationActionSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json(
+            validationErrorBody('Invalid schedule-dispatch cancellation payload', formatZodValidationDetails(parsed.error)),
+          )
+          return
+        }
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
           })
-          emitEvent('attendance.scheduleDispatch.cancelled', { orgId, requestId, userId: detail?.user_id })
-          res.json({ ok: true, data: { scheduleDispatch: mapScheduleDispatchRequestRow({ ...detail, request_status: 'cancelled', publish_status: 'cancelled' }) } })
+          return
+        }
+        try {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_cancel',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'schedule-dispatch-cancel'),
+            routeVariant: 'schedule_dispatch_cancel',
+            routeInput: {
+              actorId: actorAccess.userId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorAccess.userId,
+              actorName: getUserLabel(req, actorAccess.userId),
+              orgId,
+              requestId,
+              requestBody: parsed.data,
+              ipAddress: req.ip ?? null,
+              userAgent: req.get('user-agent') ?? null,
+            },
+          })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            emitEvent('attendance.scheduleDispatch.cancelled', { orgId, requestId })
+          }
+          res.json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule-dispatch tables missing' } })
             return
@@ -34503,6 +34922,13 @@ module.exports = {
     )
 
     async function respondShiftSwapConsent(req, res, decision) {
+      const parsed = requestDecisionActionSchema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        res.status(400).json(
+          validationErrorBody('Invalid shift-swap consent payload', formatZodValidationDetails(parsed.error)),
+        )
+        return
+      }
       const requesterId = getUserId(req)
       if (!requesterId) {
         res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -34514,80 +34940,43 @@ module.exports = {
         respondInvalidUuid(res)
         return
       }
+      if (!w4RequestOperationBoundary) {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+        })
+        return
+      }
       try {
-        const detail = await db.transaction(async (trx) => {
-          const row = await loadShiftSwapDetail(trx, orgId, requestId, { forUpdate: true })
-          if (!row) {
-            throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
-          }
-          if (row.counterparty_user_id !== requesterId) {
-            throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
-          }
-          if (row.request_status !== 'pending') {
-            throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
-          }
-          if (row.counterparty_status !== 'pending') {
-            throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
-          }
-          await trx.query(
-            `UPDATE attendance_shift_swap_requests
-                SET counterparty_status = $3,
-                    counterparty_responded_at = now(),
-                    updated_at = now()
-              WHERE org_id = $1 AND request_id = $2`,
-            [orgId, requestId, decision]
-          )
-          if (decision === 'rejected') {
-            if (row.approval_instance_id) {
-              const approvalRows = await trx.query(
-                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-                [row.approval_instance_id]
-              )
-              if (approvalRows.length > 0) {
-                const approval = approvalRows[0]
-                const newVersion = Number(approval.version ?? 0) + 1
-                await trx.query(
-                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                  ['rejected', newVersion, row.approval_instance_id]
-                )
-                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
-                await trx.query(
-                  `INSERT INTO approval_records
-                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                   VALUES ($1, 'reject', $2, $3, NULL, $4, 'rejected', $5, $6, '{}'::jsonb, $7, $8)`,
-                  [
-                    row.approval_instance_id,
-                    requesterId,
-                    getUserLabel(req, requesterId),
-                    approval.status,
-                    approval.version,
-                    newVersion,
-                    req.ip ?? null,
-                    req.get('user-agent') ?? null,
-                  ]
-                )
-              }
-            }
-	            await trx.query(
-	              `UPDATE attendance_requests
-	                  SET status = 'rejected',
-	                      resolved_by = $3,
-	                      resolved_at = now(),
-	                      updated_at = now()
-	                WHERE id = $1 AND org_id = $2`,
-	              [requestId, orgId, requesterId]
-	            )
-	            await archiveShiftSwapSourceKey(trx, orgId, requestId)
-	          }
-	          return loadShiftSwapDetail(trx, orgId, requestId)
-	        })
-        emitEvent(`attendance.shiftSwap.${decision}`, { orgId, requestId, userId: requesterId })
-        res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: decision === 'rejected' ? 'rejected' : detail.request_status }) } })
+        const operationId = resolveRequestOperationId(parsed.data)
+        const action = decision === 'accepted' ? 'approve' : 'reject'
+        const outcome = await w4RequestOperationBoundary.execute({
+          kind: 'request_decision',
+          operationId,
+          correlationId: requestCorrelationId(req, operationId, `shift-swap-${decision}`),
+          routeVariant: decision === 'accepted' ? 'shift_swap_accept' : 'shift_swap_reject',
+          routeInput: {
+            actorId: requesterId,
+            tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+            actorName: getUserLabel(req, requesterId),
+            orgId,
+            requestId,
+            action,
+            requestBody: parsed.data,
+            ipAddress: req.ip ?? null,
+            userAgent: req.get('user-agent') ?? null,
+          },
+        })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+          emitEvent(`attendance.shiftSwap.${decision}`, { orgId, requestId, userId: requesterId })
+        }
+        res.json(outcome.response)
       } catch (error) {
         if (error instanceof HttpError) {
           res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
           return
         }
+        if (respondIfW4BoundaryError(res, error)) return
         if (isDatabaseSchemaError(error)) {
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
           return
@@ -34613,6 +35002,13 @@ module.exports = {
       'POST',
       '/api/attendance/shift-swap-requests/:id/cancel',
       withPermission('attendance:write', async (req, res) => {
+        const parsed = requestCancellationActionSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json(
+            validationErrorBody('Invalid shift-swap cancellation payload', formatZodValidationDetails(parsed.error)),
+          )
+          return
+        }
         const requesterId = getUserId(req)
         if (!requesterId) {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -34624,70 +35020,41 @@ module.exports = {
           respondInvalidUuid(res)
           return
         }
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
         try {
-          const detail = await db.transaction(async (trx) => {
-            const row = await loadShiftSwapDetail(trx, orgId, requestId, { forUpdate: true })
-            if (!row) {
-              throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
-            }
-            if (row.requester_user_id !== requesterId) {
-              const allowed = await canAccessOtherUsers(requesterId)
-              if (!allowed) {
-                throw new HttpError(403, 'FORBIDDEN', 'No access to cancel shift-swap request')
-              }
-            }
-            if (row.request_status !== 'pending') {
-              throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
-            }
-            if (row.approval_instance_id) {
-              const approvalRows = await trx.query(
-                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-                [row.approval_instance_id]
-              )
-              if (approvalRows.length > 0) {
-                const approval = approvalRows[0]
-                const newVersion = Number(approval.version ?? 0) + 1
-                await trx.query(
-                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                  ['cancelled', newVersion, row.approval_instance_id]
-                )
-                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
-                await trx.query(
-                  `INSERT INTO approval_records
-                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                   VALUES ($1, 'revoke', $2, $3, NULL, $4, 'cancelled', $5, $6, '{}'::jsonb, $7, $8)`,
-                  [
-                    row.approval_instance_id,
-                    requesterId,
-                    getUserLabel(req, requesterId),
-                    approval.status,
-                    approval.version,
-                    newVersion,
-                    req.ip ?? null,
-                    req.get('user-agent') ?? null,
-                  ]
-                )
-              }
-            }
-	            await trx.query(
-	              `UPDATE attendance_requests
-	                  SET status = 'cancelled',
-	                      resolved_by = $3,
-	                      resolved_at = now(),
-	                      updated_at = now()
-	                WHERE id = $1 AND org_id = $2`,
-	              [requestId, orgId, requesterId]
-	            )
-	            await archiveShiftSwapSourceKey(trx, orgId, requestId)
-	            return loadShiftSwapDetail(trx, orgId, requestId)
-	          })
-          emitEvent('attendance.shiftSwap.cancelled', { orgId, requestId, userId: requesterId })
-          res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: 'cancelled' }) } })
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_cancel',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'shift-swap-cancel'),
+            routeVariant: 'shift_swap_cancel',
+            routeInput: {
+              actorId: requesterId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+              actorName: getUserLabel(req, requesterId),
+              orgId,
+              requestId,
+              requestBody: parsed.data,
+              ipAddress: req.ip ?? null,
+              userAgent: req.get('user-agent') ?? null,
+            },
+          })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            emitEvent('attendance.shiftSwap.cancelled', { orgId, requestId, userId: requesterId })
+          }
+          res.json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
             return
@@ -34732,6 +35099,7 @@ module.exports = {
 	          })
 	          return
 	        }
+	        const orgId = getOrgId(req)
 	        try {
 	          const operationId = resolveRequestOperationId(parsed.data)
 	          const outcome = await w4RequestOperationBoundary.execute({
@@ -35588,7 +35956,7 @@ module.exports = {
             requestId,
             status: isFinalApproval ? newStatus : 'pending',
             record,
-            orgId,
+            orgId: null,
             userId: requestRow.user_id,
             approvalStep: {
               index: isFinalApproval ? currentStepIndex : currentStepIndex + 1,
@@ -35622,6 +35990,7 @@ module.exports = {
         respondInvalidUuid(res)
         return
       }
+      const orgId = getOrgId(req)
       const decisionComment = normalizeOptionalText(parsed.data.comment)
       if (action === 'reject' && !decisionComment) {
         res.status(400).json(
@@ -35651,6 +36020,7 @@ module.exports = {
             actorId: requesterId,
             tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
             actorName: getUserLabel(req, requesterId),
+            orgId: null,
             requestId,
             action,
             requestBody: parsed.data,
@@ -35715,6 +36085,7 @@ module.exports = {
         respondInvalidUuid(res)
         return
       }
+      const orgId = getOrgId(req)
 
       if (!w4RequestOperationBoundary) {
         res.status(503).json({
@@ -35735,6 +36106,7 @@ module.exports = {
             actorId: requesterId,
             tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
             actorName: getUserLabel(req, requesterId),
+            orgId: null,
             requestId,
             requestBody: parsed.data,
             ipAddress: req.ip ?? null,

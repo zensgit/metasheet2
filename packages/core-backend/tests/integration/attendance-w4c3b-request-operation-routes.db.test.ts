@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
@@ -216,6 +217,21 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       [orgId, requestId, operationId],
     )
     return result.rows[0] as { operations: number; outbox: number; approval_records: number }
+  }
+
+  async function operationResidue(orgId: string, operationId: string, entrypoint: string) {
+    const result = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND operation_id = $2::uuid AND entrypoint = $3) AS operations,
+         (SELECT count(*)::int FROM attendance_result_event_outbox
+           WHERE org_id = $1 AND operation_id = $2::uuid AND entrypoint = $3) AS outbox,
+         (SELECT source_ref FROM attendance_result_operations
+           WHERE org_id = $1 AND operation_id = $2::uuid AND entrypoint = $3
+           LIMIT 1) AS source_ref`,
+      [orgId, operationId, entrypoint],
+    )
+    return result.rows[0] as { operations: number; outbox: number; source_ref: string | null }
   }
 
   async function dispatchCentralDecision(
@@ -1104,7 +1120,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     // Outdoor
     {
       const fixture = await seedOrg('shadow')
-      await seedOutdoorFlow(fixture.orgId, fixture.token)
+      const flowId = await seedOutdoorFlow(fixture.orgId, fixture.token)
       const operationId = randomUUID()
       const requestOptions = {
         method: 'POST',
@@ -1125,6 +1141,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
         },
       }
       const punch = await requestJson(`${baseUrl}/api/attendance/punch`, requestOptions)
+      await pool.query('UPDATE attendance_approval_flows SET is_active = FALSE WHERE id = $1::uuid', [flowId])
       const replay = await requestJson(`${baseUrl}/api/attendance/punch`, requestOptions)
       expect(punch.status, punch.raw).toBe(202)
       expect(replay.status, replay.raw).toBe(202)
@@ -1170,6 +1187,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
         },
       }
       const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, requestOptions)
+      await pool.query('UPDATE attendance_schedule_groups SET is_active = FALSE WHERE id = $1::uuid', [targets.scheduleGroupId])
       const replay = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, requestOptions)
       expect(create.status, create.raw).toBe(201)
       expect(replay.status, replay.raw).toBe(201)
@@ -1211,6 +1229,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
         },
       }
       const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, requestOptions)
+      await pool.query('UPDATE attendance_approval_flows SET is_active = FALSE WHERE id = $1::uuid', [pair.flowId])
       const replay = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, requestOptions)
       expect(create.status, create.raw).toBe(201)
       expect(replay.status, replay.raw).toBe(201)
@@ -1230,6 +1249,271 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
         source_ref: 'plugin-attendance:POST /api/attendance/shift-swap-requests',
       })
     }
+  })
+
+  it('P13 specialized routes: dispatch cancel and shift-swap consent/cancel are replayable boundary writes', async () => {
+    // Schedule-dispatch cancel.
+    {
+      const fixture = await seedOrg('shadow')
+      const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
+      const token = await mintToken(fixture.userId)
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'x-org-id': fixture.orgId,
+      }
+      const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
+        method: 'POST', headers, body: {
+          operationId: randomUUID(),
+          userId: targets.subjectUserId,
+          targetScheduleGroupId: targets.scheduleGroupId,
+          targetShiftId: targets.shiftId,
+          startDate: '2049-09-20',
+          endDate: '2049-09-20',
+          approvalFlowId: targets.flowId,
+        },
+      })
+      expect(create.status, create.raw).toBe(201)
+      const requestId = create.body?.data?.request?.id
+      const operationId = randomUUID()
+      const options = { method: 'POST', headers, body: { operationId } }
+      const first = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests/${requestId}/cancel`, options)
+      const replay = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests/${requestId}/cancel`, options)
+      expect(first.status, first.raw).toBe(200)
+      expect(replay.status, replay.raw).toBe(200)
+      expect(replay.body).toEqual(first.body)
+      expect(first.body?.data?.scheduleDispatch).toMatchObject({ publishStatus: 'cancelled' })
+      expect(await operationResidue(fixture.orgId, operationId, 'request_cancel')).toMatchObject({
+        operations: 1,
+        outbox: 1,
+        source_ref: 'plugin-attendance:POST /api/attendance/schedule-dispatch-requests/:id/cancel',
+      })
+    }
+
+    // Shift-swap counterparty consent.
+    {
+      const fixture = await seedOrg('shadow')
+      const pair = await seedShiftSwapPair(fixture.orgId, fixture.userId)
+      const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${fixture.token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: {
+          operationId: randomUUID(),
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: pair.assignmentB,
+          approvalFlowId: pair.flowId,
+        },
+      })
+      expect(create.status, create.raw).toBe(201)
+      const requestId = create.body?.data?.request?.id
+      const operationId = randomUUID()
+      const headers = {
+        Authorization: `Bearer ${await mintToken(pair.counterpartyId)}`,
+        'Content-Type': 'application/json',
+        'x-org-id': fixture.orgId,
+      }
+      const options = { method: 'POST', headers, body: { operationId } }
+      const first = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${requestId}/accept`, options)
+      const replay = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${requestId}/accept`, options)
+      expect(first.status, first.raw).toBe(200)
+      expect(replay.status, replay.raw).toBe(200)
+      expect(replay.body).toEqual(first.body)
+      expect(first.body?.data?.shiftSwap).toMatchObject({ counterpartyStatus: 'accepted' })
+      expect(await operationResidue(fixture.orgId, operationId, 'request_decision')).toMatchObject({
+        operations: 1,
+        outbox: 1,
+        source_ref: 'plugin-attendance:POST /api/attendance/shift-swap-requests/:id/accept',
+      })
+    }
+
+    // Shift-swap cancel.
+    {
+      const fixture = await seedOrg('shadow')
+      const pair = await seedShiftSwapPair(fixture.orgId, fixture.userId)
+      const headers = {
+        Authorization: `Bearer ${fixture.token}`,
+        'Content-Type': 'application/json',
+        'x-org-id': fixture.orgId,
+      }
+      const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+        method: 'POST', headers, body: {
+          operationId: randomUUID(),
+          requesterAssignmentId: pair.assignmentA,
+          counterpartyAssignmentId: pair.assignmentB,
+          approvalFlowId: pair.flowId,
+        },
+      })
+      expect(create.status, create.raw).toBe(201)
+      const requestId = create.body?.data?.request?.id
+      const operationId = randomUUID()
+      const options = { method: 'POST', headers, body: { operationId } }
+      const first = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${requestId}/cancel`, options)
+      const replay = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${requestId}/cancel`, options)
+      expect(first.status, first.raw).toBe(200)
+      expect(replay.status, replay.raw).toBe(200)
+      expect(replay.body).toEqual(first.body)
+      expect(first.body?.data?.shiftSwap).toMatchObject({ requestStatus: 'cancelled' })
+      expect(await operationResidue(fixture.orgId, operationId, 'request_cancel')).toMatchObject({
+        operations: 1,
+        outbox: 1,
+        source_ref: 'plugin-attendance:POST /api/attendance/shift-swap-requests/:id/cancel',
+      })
+    }
+  })
+
+  it('P13 cancellation scope: approved non-leave requests fail before durable boundary residue', async () => {
+    const requestTypes = ['overtime', 'time_correction', 'outdoor_punch']
+    for (const requestType of requestTypes) {
+      const fixture = await seedOrg('shadow')
+      const requestId = randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, org_id, user_id, work_date, request_type, status, reason)
+         VALUES ($1::uuid, $2, $3, '2049-09-21', $4, 'approved', 'P13 approved non-leave scope')`,
+        [requestId, fixture.orgId, fixture.userId, requestType],
+      )
+      const before = await counts(fixture.orgId)
+      const response = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/cancel`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${fixture.token}`, 'Content-Type': 'application/json' },
+        body: { operationId: randomUUID(), comment: 'approved non-leave must remain terminal' },
+      })
+      expect(response.status, `${requestType}: ${response.raw}`).toBe(400)
+      expect(response.body?.error?.code).toBe('INVALID_STATUS')
+      expect(await counts(fixture.orgId)).toEqual(before)
+      const persisted = await pool.query(
+        'SELECT status, resolved_by, resolved_at FROM attendance_requests WHERE id = $1::uuid AND org_id = $2',
+        [requestId, fixture.orgId],
+      )
+      expect(persisted.rows).toEqual([{ status: 'approved', resolved_by: null, resolved_at: null }])
+    }
+
+    const specializedCases = [
+      {
+        kind: 'schedule_dispatch',
+        create: async (fixture: Awaited<ReturnType<typeof seedOrg>>) => {
+          const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
+          const response = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${fixture.token}`,
+              'Content-Type': 'application/json',
+              'x-org-id': fixture.orgId,
+            },
+            body: {
+              operationId: randomUUID(),
+              userId: targets.subjectUserId,
+              targetScheduleGroupId: targets.scheduleGroupId,
+              targetShiftId: targets.shiftId,
+              startDate: '2049-09-22',
+              endDate: '2049-09-22',
+              approvalFlowId: targets.flowId,
+            },
+          })
+          return { response, path: 'schedule-dispatch-requests' }
+        },
+      },
+      {
+        kind: 'shift_swap',
+        create: async (fixture: Awaited<ReturnType<typeof seedOrg>>) => {
+          const pair = await seedShiftSwapPair(fixture.orgId, fixture.userId)
+          const response = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${fixture.token}`,
+              'Content-Type': 'application/json',
+              'x-org-id': fixture.orgId,
+            },
+            body: {
+              operationId: randomUUID(),
+              requesterAssignmentId: pair.assignmentA,
+              counterpartyAssignmentId: pair.assignmentB,
+              approvalFlowId: pair.flowId,
+            },
+          })
+          return { response, path: 'shift-swap-requests' }
+        },
+      },
+    ]
+    for (const specialized of specializedCases) {
+      const fixture = await seedOrg('shadow')
+      const { response: created, path: routePath } = await specialized.create(fixture)
+      expect(created.status, created.raw).toBe(201)
+      const requestId = created.body?.data?.request?.id
+      await pool.query(
+        `UPDATE attendance_requests
+            SET status = 'approved'
+          WHERE id = $1::uuid AND org_id = $2`,
+        [requestId, fixture.orgId],
+      )
+      const before = await counts(fixture.orgId)
+      const response = await requestJson(`${baseUrl}/api/attendance/${routePath}/${requestId}/cancel`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${fixture.token}`,
+          'Content-Type': 'application/json',
+          'x-org-id': fixture.orgId,
+        },
+        body: { operationId: randomUUID() },
+      })
+      expect(response.status, `${specialized.kind}: ${response.raw}`).toBe(400)
+      expect(response.body?.error?.code).toBe('INVALID_STATUS')
+      expect(await counts(fixture.orgId)).toEqual(before)
+      const persisted = await pool.query(
+        'SELECT status, resolved_by, resolved_at FROM attendance_requests WHERE id = $1::uuid AND org_id = $2',
+        [requestId, fixture.orgId],
+      )
+      expect(persisted.rows).toEqual([{ status: 'approved', resolved_by: null, resolved_at: null }])
+    }
+  })
+
+  it('P13 specialized routes: spoofed org fails before operation, outbox, or source mutation', async () => {
+    const owner = await seedOrg('shadow')
+    const attacker = await seedOrg('shadow')
+    const pair = await seedShiftSwapPair(owner.orgId, owner.userId)
+    const create = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${owner.token}`,
+        'Content-Type': 'application/json',
+        'x-org-id': owner.orgId,
+      },
+      body: {
+        operationId: randomUUID(),
+        requesterAssignmentId: pair.assignmentA,
+        counterpartyAssignmentId: pair.assignmentB,
+        approvalFlowId: pair.flowId,
+      },
+    })
+    expect(create.status, create.raw).toBe(201)
+    const requestId = create.body?.data?.request?.id
+    const beforeOwner = await counts(owner.orgId)
+    const beforeAttacker = await counts(attacker.orgId)
+    const response = await requestJson(`${baseUrl}/api/attendance/shift-swap-requests/${requestId}/cancel`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${attacker.token}`,
+        'Content-Type': 'application/json',
+        'x-org-id': attacker.orgId,
+      },
+      body: { operationId: randomUUID() },
+    })
+    expect(response.status, response.raw).toBe(404)
+    expect(response.body?.error?.code).toBe('NOT_FOUND')
+    expect(await counts(owner.orgId)).toEqual(beforeOwner)
+    expect(await counts(attacker.orgId)).toEqual(beforeAttacker)
+    const detail = await pool.query(
+      `SELECT ar.status, swap.source_key
+         FROM attendance_requests ar
+         JOIN attendance_shift_swap_requests swap ON swap.request_id = ar.id
+        WHERE ar.id = $1::uuid AND ar.org_id = $2`,
+      [requestId, owner.orgId],
+    )
+    expect(detail.rows).toEqual([{ status: 'pending', source_key: expect.any(String) }])
   })
 
   it('P13 create families: missing operationId on W4 org fails closed with zero source/shared residue', async () => {
@@ -1436,5 +1720,40 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       outbox: 0,
       schedule_dispatch: 0,
     })
+  })
+
+  it('P13 source guard: specialized terminal routes stay delegated and approval updates keep OCC', () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
+    const source = readFileSync(path.join(repoRoot, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+    const routeContracts = [
+      ['/api/attendance/schedule-dispatch-requests/:id/cancel', 'w4RequestOperationBoundary.execute({', "routeVariant: 'schedule_dispatch_cancel'"],
+      ['/api/attendance/shift-swap-requests/:id/accept', "respondShiftSwapConsent(req, res, 'accepted')", null],
+      ['/api/attendance/shift-swap-requests/:id/reject', "respondShiftSwapConsent(req, res, 'rejected')", null],
+      ['/api/attendance/shift-swap-requests/:id/cancel', 'w4RequestOperationBoundary.execute({', "routeVariant: 'shift_swap_cancel'"],
+    ] as const
+    for (const [route, delegate, variant] of routeContracts) {
+      const pathIndex = source.lastIndexOf(`'${route}'`)
+      const start = source.lastIndexOf('context.api.http.addRoute(', pathIndex)
+      const end = source.indexOf('context.api.http.addRoute(', pathIndex + route.length)
+      expect(pathIndex, `${route} must remain registered`).toBeGreaterThan(-1)
+      expect(start, `${route} must remain a host route`).toBeGreaterThan(-1)
+      const body = source.slice(start, end < 0 ? source.length : end)
+      expect(body).toContain(delegate)
+      if (variant) expect(body).toContain(variant)
+      expect(body).not.toMatch(/\b(?:trx|db|client)\.query\s*\(/)
+    }
+    const consentStart = source.indexOf('async function respondShiftSwapConsent(')
+    const consentEnd = source.indexOf('context.api.http.addRoute(', consentStart)
+    const consentBody = source.slice(consentStart, consentEnd)
+    expect(consentStart).toBeGreaterThan(-1)
+    expect(consentBody).toContain('w4RequestOperationBoundary.execute({')
+    expect(consentBody).toContain("routeVariant: decision === 'accepted' ? 'shift_swap_accept' : 'shift_swap_reject'")
+    expect(consentBody).not.toMatch(/\b(?:trx|db|client)\.query\s*\(/)
+    expect(source).toMatch(
+      /UPDATE approval_instances[\s\S]*?WHERE id = \$3 AND version = \$4 AND status = \$5[\s\S]*?RETURNING id/,
+    )
+    expect(source).toMatch(
+      /UPDATE approval_instances[\s\S]*?WHERE id = \$1 AND version = \$3 AND status = \$4[\s\S]*?RETURNING id/,
+    )
   })
 })
