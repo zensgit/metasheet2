@@ -228,7 +228,7 @@ async function insertFrozenLeaveFixture(client: PoolClient, omitSnapshot = false
       WHERE id = $1::uuid AND org_id = $2`,
     [recordId, orgId, priorCalculationId],
   )
-  return { orgId, userId, recordId, requestId, priorCalculationId }
+  return { orgId, userId, workDate: '2026-08-01', recordId, requestId, priorCalculationId }
 }
 
 describeIfDatabase('W4C-3b P14 approved leave cancellation (real PostgreSQL)', () => {
@@ -298,6 +298,31 @@ describeIfDatabase('W4C-3b P14 approved leave cancellation (real PostgreSQL)', (
         correlationId: 'w4c3b-p14-missing',
         mode: 'authoritative',
       })).resolves.toEqual({ kind: 'review_required', reason: 'frozen_request_snapshot_missing' })
+      const after = await client.query(
+        'SELECT count(*)::int AS n FROM attendance_record_calculations WHERE attendance_record_id = $1::uuid',
+        [fixture.recordId],
+      )
+      expect(after.rows[0].n).toBe(before.rows[0].n)
+    })
+  })
+
+  it('does not let a foreign org select the frozen parent and leaves both orgs untouched', async () => {
+    await rollbackTransaction(pool, async (client) => {
+      const fixture = await insertFrozenLeaveFixture(client)
+      const foreignOrgId = uuid()
+      const before = await client.query(
+        'SELECT count(*)::int AS n FROM attendance_record_calculations WHERE attendance_record_id = $1::uuid',
+        [fixture.recordId],
+      )
+      await expect(appendApprovedLeaveCancellationCalculationV1({
+        client,
+        ...fixture,
+        orgId: foreignOrgId,
+        operationId: uuid(),
+        actorId: 'w4c3b-p14-admin',
+        correlationId: 'w4c3b-p14-cross-org',
+        mode: 'authoritative',
+      })).resolves.toEqual({ kind: 'review_required', reason: 'record_missing' })
       const after = await client.query(
         'SELECT count(*)::int AS n FROM attendance_record_calculations WHERE attendance_record_id = $1::uuid',
         [fixture.recordId],

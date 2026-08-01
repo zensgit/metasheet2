@@ -48,6 +48,7 @@ export class ApprovedLeaveCancellationError extends Error {
 }
 
 export type ApprovedLeaveCancellationReviewReasonV1 =
+  | 'record_missing'
   | 'no_current_calculation'
   | 'prior_calculation_not_completed'
   | 'prior_segments_missing'
@@ -78,8 +79,8 @@ export type AppendApprovedLeaveCancellationCalculationInputV1 = Readonly<{
   /** Existing transaction client. The caller owns BEGIN/COMMIT/ROLLBACK. */
   client: W4c3bApprovedLeaveCancellationQueryClient
   orgId: string
-  recordId: string
   userId: string
+  workDate: string
   requestId: string
   operationId: string
   actorId: string
@@ -89,6 +90,7 @@ export type AppendApprovedLeaveCancellationCalculationInputV1 = Readonly<{
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const HEX64_RE = /^[0-9a-f]{64}$/
+const WORK_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 function fail(code: ApprovedLeaveCancellationError['code']): never {
   throw new ApprovedLeaveCancellationError(code)
@@ -193,10 +195,13 @@ export async function appendApprovedLeaveCancellationCalculationV1(
   input: AppendApprovedLeaveCancellationCalculationInputV1,
 ): Promise<AppendApprovedLeaveCancellationCalculationResultV1> {
   const orgId = requireText(input.orgId, 128)
-  const recordId = requireUuid(input.recordId)
   const requestId = requireUuid(input.requestId)
   const operationId = requireUuid(input.operationId)
   const userId = requireText(input.userId, 128)
+  const workDate = requireText(input.workDate, 10)
+  if (!WORK_DATE_RE.test(workDate)) {
+    fail(W4C3B_APPROVED_LEAVE_CANCELLATION_ERROR_CODES.INPUT_INVALID)
+  }
   const actorId = requireText(input.actorId, 128)
   const correlationId = requireText(input.correlationId, 128)
   if (input.mode !== 'shadow' && input.mode !== 'authoritative') {
@@ -208,13 +213,14 @@ export async function appendApprovedLeaveCancellationCalculationV1(
     `SELECT id::text AS id, org_id::text AS org_id, user_id::text AS user_id,
             work_date::text AS work_date, current_calculation_id::text AS current_calculation_id
        FROM attendance_records
-      WHERE id = $1::uuid AND org_id = $2 AND user_id = $3
+      WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
       FOR UPDATE`,
-    [recordId, orgId, userId],
+    [orgId, userId, workDate],
   )
-  if (recordRows.length === 0) fail(W4C3B_APPROVED_LEAVE_CANCELLATION_ERROR_CODES.RECORD_NOT_FOUND)
+  if (recordRows.length === 0) return review('record_missing')
   if (recordRows.length !== 1) fail(W4C3B_APPROVED_LEAVE_CANCELLATION_ERROR_CODES.DATABASE_RESULT_INVALID)
   const record = recordRows[0]
+  const recordId = requireUuid(record.id)
 
   const replayRows = await rows(
     input.client,

@@ -105,6 +105,9 @@ const FILES = Object.freeze([
   // W4C-3b P13 real plugin route proof: create/edit replay, legacy zero-W4
   // compatibility, and suspended zero-residue behavior.
   'tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts',
+  // W4C-3b P14 frozen approved-leave cancellation calculation: real immutable
+  // parent/snapshot proof and cross-org fail-closed behavior.
+  'tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts',
 ])
 
 /**

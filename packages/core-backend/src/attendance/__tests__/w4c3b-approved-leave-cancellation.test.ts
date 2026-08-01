@@ -13,8 +13,8 @@ function input(client: W4c3bApprovedLeaveCancellationQueryClient) {
   return {
     client,
     orgId: 'w4c3b-p14-unit-org',
-    recordId: uuid(),
     userId: 'w4c3b-p14-unit-user',
+    workDate: '2026-08-01',
     requestId: uuid(),
     operationId: uuid(),
     actorId: 'w4c3b-p14-unit-actor',
