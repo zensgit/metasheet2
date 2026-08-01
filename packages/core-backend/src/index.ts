@@ -104,6 +104,7 @@ import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middl
 import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
 import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
 import {
+  buildAttendanceRequestCreationAttributionSnapshotV1,
   createAttendanceLiveScheduledBoundaryV1,
   computeAttendanceOuterSourceDefinitionFingerprintV1,
 } from './attendance/w4c2-live-scheduled-boundary'
@@ -135,6 +136,17 @@ import {
   buildAttendanceImportPolicySourceProofV1,
 } from './attendance/w4c3a-import-proof'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
+// W4C-3b P12: immutable request calculation snapshot plumbing (lock §7.2 / §12.5).
+import {
+  appendAttendanceRequestCreateSnapshotV1,
+  appendAttendanceRequestEditSnapshotV1,
+  bindAttendanceRequestTerminalSnapshotV1,
+  lockAttendanceRequestSnapshotBeforeTerminalDecisionV1,
+  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+  computeAttendanceRequestPayloadFingerprintV1,
+  buildUnsupportedRequestAttributionSnapshotV1,
+  W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
+} from './attendance/w4c3b-request-snapshots'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2101,6 +2113,10 @@ export class MetaSheetServer {
                   computeAttendanceOuterSourceDefinitionFingerprintV1(
                     input as Parameters<typeof computeAttendanceOuterSourceDefinitionFingerprintV1>[0],
                   ),
+                buildRequestCreationAttributionSnapshotV1: (input: unknown) =>
+                  buildAttendanceRequestCreationAttributionSnapshotV1(
+                    input as Parameters<typeof buildAttendanceRequestCreationAttributionSnapshotV1>[0],
+                  ),
                 // W4C-2: one outbox drain pass (lock 7.1a delivery side).
                 drainResultEventOutbox: async (options: {
                   emit: (delivery: {
@@ -2243,6 +2259,33 @@ export class MetaSheetServer {
                       W4_TRANSACTION_LOCK_TIMEOUT_MS,
                   }
                 },
+                // W4C-3b P12 (lock §4.2 / §7.2 / §12.5 / OD-W4C-33):
+                // least-privilege immutable request snapshot plumbing.
+                // Plugin supplies the existing request transaction client;
+                // core owns closed payload fingerprint, append, and terminal
+                // binding. No calculation/outbox/cancellation (P13/P14).
+                appendRequestCalculationSnapshotOnCreate: (
+                  input: Parameters<typeof appendAttendanceRequestCreateSnapshotV1>[0],
+                ) => appendAttendanceRequestCreateSnapshotV1(input),
+                appendRequestCalculationSnapshotOnEdit: (
+                  input: Parameters<typeof appendAttendanceRequestEditSnapshotV1>[0],
+                ) => appendAttendanceRequestEditSnapshotV1(input),
+                lockRequestSnapshotBeforeTerminalDecision: (
+                  input: Parameters<
+                    typeof lockAttendanceRequestSnapshotBeforeTerminalDecisionV1
+                  >[0],
+                ) => lockAttendanceRequestSnapshotBeforeTerminalDecisionV1(input),
+                bindRequestSnapshotOnTerminalDecision: (
+                  input: Parameters<typeof bindAttendanceRequestTerminalSnapshotV1>[0],
+                ) => bindAttendanceRequestTerminalSnapshotV1(input),
+                buildRequestCalculationPayloadFromRequestRow:
+                  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+                computeRequestPayloadFingerprint:
+                  computeAttendanceRequestPayloadFingerprintV1,
+                buildUnsupportedRequestAttributionSnapshot:
+                  buildUnsupportedRequestAttributionSnapshotV1,
+                requestSnapshotTerminalBindingMetaKey:
+                  W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
               }
             : undefined,
         // W4C-3a P11/P23: separate least-privilege rollback port. The CJS

@@ -76,6 +76,7 @@ function createResponse() {
 async function createHarness(
   rbacBypass = 'true',
   commitSyncImportPlan?: CommitSyncImportPlan,
+  attendanceW4SegmentCalculation?: Record<string, unknown>,
 ) {
   process.env.RBAC_BYPASS = rbacBypass
   process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED = 'false'
@@ -104,12 +105,15 @@ async function createHarness(
         },
       },
     },
-    services: commitSyncImportPlan
+    services: commitSyncImportPlan || attendanceW4SegmentCalculation
       ? {
           attendanceW4SegmentCalculation: {
+            ...(attendanceW4SegmentCalculation ?? {}),
+            ...(commitSyncImportPlan ? {
             commitSyncImportPlan,
             buildImportAttributionFreeze: buildAttendanceImportAttributionFreezeV1,
             buildImportPolicySourceProof: buildAttendanceImportPolicySourceProofV1,
+            } : {}),
           },
         }
       : undefined,
@@ -1111,6 +1115,133 @@ describe('attendance UUID route validation', () => {
 
     expect(db.query).not.toHaveBeenCalled()
     expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('forwards the edited request payload but rejects a missing W4 snapshot token before business DML', async () => {
+    const appendEdit = vi.fn(async (input: Record<string, unknown>) => {
+      expect(input).toMatchObject({
+        requestId: attendanceRequestId,
+        currentRequestType: 'time_correction',
+        requestType: 'time_correction',
+        expectedSnapshotVersion: undefined,
+        expectedSnapshotFingerprint: undefined,
+        payload: {
+          schemaVersion: 1,
+          workDate: '2026-06-11',
+          reason: 'corrected',
+        },
+      })
+      const error = new Error('Request snapshot version conflict') as Error & {
+        code: string
+        statusCode: number
+      }
+      error.code = 'W4C3B_REQUEST_SNAPSHOT_EXPECTED_VERSION_CONFLICT'
+      error.statusCode = 409
+      throw error
+    })
+    const buildPayload = vi.fn((input: Record<string, unknown>) => ({
+      schemaVersion: 1,
+      workDate: input.workDate,
+      requestedInAt: input.requestedInAt ?? null,
+      requestedOutAt: input.requestedOutAt ?? null,
+      reason: input.reason ?? null,
+      minutes: input.minutes ?? null,
+      leaveTypeCode: input.leaveTypeCode ?? null,
+      outdoorPunch: input.outdoorPunch ?? null,
+    }))
+    const { db, routes } = await createHarness('true', undefined, {
+      appendRequestCalculationSnapshotOnEdit: appendEdit,
+      buildRequestCalculationPayloadFromRequestRow: buildPayload,
+    })
+
+    db.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return [{ ok: 1 }]
+      if (sql.includes('SELECT role_id FROM user_roles')) return []
+      if (sql.includes('FROM user_permissions')) return []
+      if (sql.includes('JOIN role_permissions')) return []
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) {
+        return [attendanceRequestRow({
+          user_id: 'worker-1',
+          request_type: 'time_correction',
+          metadata: {},
+        })]
+      }
+      if (sql.includes('FROM attendance_approval_flows')) return []
+      if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM attendance_requests') && sql.includes('id <> $5')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'PUT /api/attendance/requests/:id', {
+      params: { id: attendanceRequestId },
+      body: {
+        workDate: '2026-06-11',
+        requestType: 'time_correction',
+        requestedInAt: '2026-06-11T09:05:00.000Z',
+        reason: 'corrected',
+      },
+      user: { id: 'worker-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toMatchObject({
+      ok: false,
+      error: { code: 'W4C3B_REQUEST_SNAPSHOT_EXPECTED_VERSION_CONFLICT' },
+    })
+    expect(buildPayload).toHaveBeenCalledTimes(1)
+    expect(appendEdit).toHaveBeenCalledTimes(1)
+    const statements = db.query.mock.calls.map(([sql]) => String(sql))
+    expect(statements.some(sql => sql.includes('INSERT INTO approval_instances'))).toBe(false)
+    expect(statements.some(sql => sql.includes('UPDATE attendance_requests'))).toBe(false)
+  })
+
+  it('fails a terminal request decision when approval_records RETURNING id is absent', async () => {
+    const lockSnapshot = vi.fn(async () => ({
+      kind: 'missing_shadow_allowed',
+      writePosture: 'shadow',
+    }))
+    const bindSnapshot = vi.fn()
+    const { db, routes } = await createHarness('true', undefined, {
+      lockRequestSnapshotBeforeTerminalDecision: lockSnapshot,
+      bindRequestSnapshotOnTerminalDecision: bindSnapshot,
+    })
+
+    db.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return [{ ok: 1 }]
+      if (sql.includes('SELECT role_id FROM user_roles')) return []
+      if (sql.includes('FROM user_permissions')) return []
+      if (sql.includes('JOIN role_permissions')) return []
+      if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) {
+        return [attendanceRequestRow({
+          user_id: 'approver-1',
+          request_type: 'time_correction',
+          metadata: {},
+        })]
+      }
+      if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) {
+        return [approvalInstanceRow()]
+      }
+      if (sql.includes('FROM approval_assignments')) return []
+      if (sql.includes('UPDATE approval_instances')) return []
+      if (sql.includes('UPDATE approval_assignments')) return []
+      if (sql.includes('INSERT INTO approval_records')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/requests/:id/reject', {
+      params: { id: attendanceRequestId },
+      body: { comment: 'reject' },
+      user: { id: 'approver-1', orgId: 'default', roles: ['admin'] },
+    })
+
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toMatchObject({
+      ok: false,
+      error: { code: 'APPROVAL_RECORD_ID_MISSING' },
+    })
+    expect(lockSnapshot).toHaveBeenCalledTimes(1)
+    expect(bindSnapshot).not.toHaveBeenCalled()
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('UPDATE attendance_requests'))).toBe(false)
   })
 
   it('blocks a non-assignee attendance:approve holder from resolving a request under S7-0', async () => {

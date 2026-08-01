@@ -86,7 +86,7 @@ export interface AttendanceFrozenAttributionBuildInputV1 {
   readonly attributionTailMinutes: number
   /** Approved-overtime windows the resolver considered for this candidate. */
   readonly approvedOvertimeWindows: readonly AttendanceApprovedOvertimeWindowEvidenceV1[]
-  readonly source: 'live_resolution' | 'scheduled_resolution'
+  readonly source: 'live_resolution' | 'request_creation' | 'scheduled_resolution'
 }
 
 /**
@@ -177,7 +177,7 @@ export function computeAttendanceWindowEvidenceFingerprintV1(input: {
  */
 function buildFrozenWorkDateAttributionForSourceV1(
   input: AttendanceImportFrozenAttributionBuildInputV1,
-  source: 'live_resolution' | 'scheduled_resolution' | 'import_resolution',
+  source: 'live_resolution' | 'request_creation' | 'scheduled_resolution' | 'import_resolution',
 ): AttendanceFrozenAttributionBuildResultV1 {
   const orgId = requireNonEmptyString(input.orgId, INVALID)
   const userId = requireNonEmptyString(input.userId, INVALID)
@@ -282,7 +282,13 @@ function buildFrozenWorkDateAttributionForSourceV1(
 export function buildFrozenWorkDateAttributionV2(
   input: AttendanceFrozenAttributionBuildInputV1,
 ): AttendanceFrozenAttributionBuildResultV1 {
-  if (input.source !== 'live_resolution' && input.source !== 'scheduled_resolution') fail(INVALID)
+  if (
+    input.source !== 'live_resolution' &&
+    input.source !== 'request_creation' &&
+    input.source !== 'scheduled_resolution'
+  ) {
+    fail(INVALID)
+  }
   const { source, ...reconstruction } = input
   return buildFrozenWorkDateAttributionForSourceV1(reconstruction, source)
 }

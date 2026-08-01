@@ -755,7 +755,12 @@ function sha256Hex(text: string): string {
  */
 function attributionFromResolution(
   resolution: AttendanceW4ResolvedCandidateV1,
-  args: { orgId: string; userId: string; source: 'live_resolution' | 'scheduled_resolution'; nowIso: string },
+  args: {
+    orgId: string
+    userId: string
+    source: 'live_resolution' | 'request_creation' | 'scheduled_resolution'
+    nowIso: string
+  },
 ): AttendanceAttributionSnapshotV1 {
   if (resolution.kind === 'ambiguous') {
     return unsupportedAttribution('ambiguous', null)
@@ -811,6 +816,25 @@ function attributionFromResolution(
     return unsupportedAttribution('unresolved', sha256Hex(built.code))
   }
   return built.attribution
+}
+
+/**
+ * P12 request-time freeze. The plugin supplies only its in-transaction W2
+ * resolution; core owns strict reconstruction and the `request_creation`
+ * source tag. Unsupported candidates remain explicit review posture.
+ */
+export function buildAttendanceRequestCreationAttributionSnapshotV1(input: {
+  readonly orgId: string
+  readonly userId: string
+  readonly nowIso: string
+  readonly resolution: AttendanceW4ResolvedCandidateV1
+}): AttendanceAttributionSnapshotV1 {
+  return attributionFromResolution(input.resolution, {
+    orgId: input.orgId,
+    userId: input.userId,
+    source: 'request_creation',
+    nowIso: input.nowIso,
+  })
 }
 
 /**

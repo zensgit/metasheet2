@@ -24094,6 +24094,236 @@ module.exports = {
     // Intl probe (which accepts offset forms like "+05:00"). Reads and writes that do
 	    // not carry a timezone value are untouched.
 	    const attendanceW4SegmentCalculationPort = context?.services?.attendanceW4SegmentCalculation ?? null
+
+	    // W4C-3b P12 (lock §7.2 / §12.5 / OD-W4C-33): immutable request calculation
+	    // snapshot plumbing via the least-privilege host port. legacy_projection_only
+	    // is a no-op inside the host (zero snapshot rows). Missing methods keep
+	    // pre-P12 request behavior (byte-identical when posture is legacy).
+	    const rethrowAttendanceRequestSnapshotError = (error) => {
+	      if (error && typeof error === 'object' && typeof error.code === 'string' && String(error.code).startsWith('W4C3B_REQUEST_SNAPSHOT_')) {
+	        const status = Number.isInteger(error.statusCode) ? error.statusCode : 409
+	        throw new HttpError(status, error.code, error.message || error.code)
+	      }
+	      throw error
+	    }
+	    const buildRequestSnapshotPayloadFieldsFromDraft = (draftOrRow, metadata) => {
+	      const meta = normalizeMetadata(metadata ?? draftOrRow?.metadata)
+	      const minutesRaw = meta.minutes
+	      const minutes =
+	        typeof minutesRaw === 'number' && Number.isFinite(minutesRaw) && minutesRaw >= 0
+	          ? Math.trunc(minutesRaw)
+	          : null
+	      const leaveTypeCode =
+	        typeof meta.leaveType?.code === 'string' && meta.leaveType.code.trim()
+	          ? meta.leaveType.code.trim()
+	          : typeof meta.leaveTypeCode === 'string' && meta.leaveTypeCode.trim()
+	            ? meta.leaveTypeCode.trim()
+	            : null
+	      const outdoor = normalizeMetadata(meta.outdoorPunch)
+	      let outdoorPunch = null
+	      if (
+	        outdoor
+	        && (outdoor.eventType === 'check_in' || outdoor.eventType === 'check_out')
+	        && typeof outdoor.occurredAt === 'string'
+	        && outdoor.occurredAt
+	        && typeof outdoor.timezone === 'string'
+	        && outdoor.timezone
+	      ) {
+	        outdoorPunch = {
+	          eventType: outdoor.eventType,
+	          occurredAt: outdoor.occurredAt,
+	          timezone: outdoor.timezone,
+	          source: typeof outdoor.source === 'string' && outdoor.source ? outdoor.source : 'mobile',
+	        }
+	      }
+	      return { minutes, leaveTypeCode, outdoorPunch }
+	    }
+	    const buildRequestSnapshotPayloadFromDraft = (draft, metadata) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.buildRequestCalculationPayloadFromRequestRow !== 'function') return null
+	      return port.buildRequestCalculationPayloadFromRequestRow({
+	        workDate: draft.workDate,
+	        requestedInAt: draft.requestedInAt ?? null,
+	        requestedOutAt: draft.requestedOutAt ?? null,
+	        reason: draft.reason ?? null,
+	        ...buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+	      })
+	    }
+	    const buildUnsupportedRequestSnapshotMaterial = (reason = 'missing') => {
+	      const port = attendanceW4SegmentCalculationPort
+	      const attributionSnapshot =
+	        port && typeof port.buildUnsupportedRequestAttributionSnapshot === 'function'
+	          ? port.buildUnsupportedRequestAttributionSnapshot(reason)
+	          : {
+	              posture: 'unsupported',
+	              sourceSchemaVersion: null,
+	              reason,
+	              sourceFingerprint: null,
+	            }
+	      return { attributionSnapshot, contextSnapshot: null }
+	    }
+	    const resolveRequestCreationSnapshotMaterial = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.buildRequestCreationAttributionSnapshotV1 !== 'function') {
+	        return buildUnsupportedRequestSnapshotMaterial('missing')
+	      }
+	      const defaultRule = await loadDefaultRule(trx, args.orgId)
+	      const workContext = await resolveWorkContext({
+	        db: trx,
+	        orgId: args.orgId,
+	        userId: args.userId,
+	        workDate: args.workDate,
+	        defaultRule,
+	      })
+	      const timezone =
+	        typeof workContext?.rule?.timezone === 'string' && workContext.rule.timezone
+	          ? workContext.rule.timezone
+	          : defaultRule.timezone
+	      const resolution = args.occurredAt
+	        ? await resolveW4LiveCandidateInTransactionV1(trx, {
+	            orgId: args.orgId,
+	            userId: args.userId,
+	            occurredAt: args.occurredAt,
+	            timezone,
+	            calendarWorkDate: args.workDate,
+	          })
+	        : await resolveW4ScheduledCandidateInTransactionV1(trx, {
+	            orgId: args.orgId,
+	            userId: args.userId,
+	            timezone,
+	            calendarWorkDate: args.workDate,
+	          })
+	      const attributionSnapshot = port.buildRequestCreationAttributionSnapshotV1({
+	        orgId: args.orgId,
+	        userId: args.userId,
+	        nowIso: new Date().toISOString(),
+	        resolution,
+	      })
+	      if (!attributionSnapshot || attributionSnapshot.posture !== 'resolved_v2') {
+	        return { attributionSnapshot, contextSnapshot: null }
+	      }
+	      const contextSnapshot = await buildW4ShadowFrozenContextV1(trx, {
+	        orgId: args.orgId,
+	        userId: args.userId,
+	        workDate: attributionSnapshot.value.workDate,
+	        shiftId: attributionSnapshot.value.shiftId,
+	        timezone:
+	          resolution?.fullWinner && typeof resolution.fullWinner.timezone === 'string'
+	            ? resolution.fullWinner.timezone
+	            : timezone,
+	        isWorkday: workContext?.isWorkingDay !== false,
+	        holidayKind: workContext?.holiday?.kind ?? null,
+	      })
+	      if (!contextSnapshot) return buildUnsupportedRequestSnapshotMaterial('unresolved')
+	      return { attributionSnapshot, contextSnapshot }
+	    }
+	    const buildRequestSnapshotToken = (appendResult) =>
+	      appendResult && appendResult.kind === 'appended'
+	        ? {
+	            version: appendResult.snapshot.version,
+	            fingerprint: appendResult.snapshot.payloadFingerprint,
+	          }
+	        : null
+	    const appendRequestCalculationSnapshotOnCreate = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.appendRequestCalculationSnapshotOnCreate !== 'function') return null
+	      try {
+	        return await port.appendRequestCalculationSnapshotOnCreate({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          subjectUserId: args.subjectUserId,
+	          actorUserId: args.actorUserId,
+	          payloadFields: args.payloadFields ?? null,
+	          attributionSnapshot:
+	            args.attributionSnapshot
+	            ?? (typeof port.buildUnsupportedRequestAttributionSnapshot === 'function'
+	              ? port.buildUnsupportedRequestAttributionSnapshot('missing')
+	              : {
+	                posture: 'unsupported',
+	                sourceSchemaVersion: null,
+	                reason: 'missing',
+	                sourceFingerprint: null,
+	              }),
+	          contextSnapshot: args.contextSnapshot ?? null,
+	          resolveSnapshots: args.resolveSnapshots,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const appendRequestCalculationSnapshotOnEdit = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.appendRequestCalculationSnapshotOnEdit !== 'function') return null
+	      try {
+	        return await port.appendRequestCalculationSnapshotOnEdit({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          currentRequestType: args.currentRequestType,
+	          subjectUserId: args.subjectUserId,
+	          actorUserId: args.actorUserId,
+	          expectedSnapshotVersion: args.expectedSnapshotVersion,
+	          expectedSnapshotFingerprint: args.expectedSnapshotFingerprint,
+	          payload: args.payload,
+	          payloadFields: args.payloadFields ?? null,
+	          attributionSnapshot: args.attributionSnapshot,
+	          contextSnapshot: args.contextSnapshot,
+	          resolveSnapshots: args.resolveSnapshots,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const lockRequestSnapshotBeforeTerminalDecision = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.lockRequestSnapshotBeforeTerminalDecision !== 'function') {
+	        return { kind: 'legacy_skipped', writePosture: 'legacy_projection_only' }
+	      }
+	      try {
+	        return await port.lockRequestSnapshotBeforeTerminalDecision({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          subjectUserId: args.subjectUserId,
+	          expectedSnapshotVersion: args.expectedSnapshotVersion,
+	          expectedSnapshotFingerprint: args.expectedSnapshotFingerprint,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const bindRequestSnapshotOnTerminalDecision = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.bindRequestSnapshotOnTerminalDecision !== 'function') {
+	        return { kind: 'legacy_skipped', writePosture: 'legacy_projection_only' }
+	      }
+	      try {
+	        return await port.bindRequestSnapshotOnTerminalDecision({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          subjectUserId: args.subjectUserId,
+	          action: args.action,
+	          approvalVersion: args.approvalVersion,
+	          approvalRecordId: args.approvalRecordId,
+	          expectedSnapshotVersion: args.expectedSnapshotVersion,
+	          expectedSnapshotFingerprint: args.expectedSnapshotFingerprint,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const requestSnapshotTerminalBindingMetaKey =
+	      attendanceW4SegmentCalculationPort
+	      && typeof attendanceW4SegmentCalculationPort.requestSnapshotTerminalBindingMetaKey === 'string'
+	        ? attendanceW4SegmentCalculationPort.requestSnapshotTerminalBindingMetaKey
+	        : 'w4RequestSnapshotTerminalBinding'
+
 	    const buildAttendanceSyncImportReservationLockWitness = ({ orgId, idempotencyKey }) => {
 	      const port = attendanceW4SegmentCalculationPort
 	      if (!port || typeof port.buildLegacyImportReservationLockWitness !== 'function') {
@@ -28943,7 +29173,7 @@ module.exports = {
               draft.metadata.approvalFlow.steps, 0, approvalPayload.requesterSnapshot
             )
             try {
-              const request = await db.transaction(async (trx) => {
+		          const createResult = await db.transaction(async (trx) => {
                 await acquireAttendanceRequestLock(trx, orgId, userId, workDate, 'outdoor_punch')
                 // Outdoor dedup key includes eventType (#2304 §2.2): same-day outdoor check_in + check_out
                 // can coexist; a 2nd pending/approved of the SAME eventType is the duplicate.
@@ -28967,10 +29197,33 @@ module.exports = {
                    RETURNING *`,
                   [requestId, userId, orgId, workDate, 'outdoor_punch', draft.requestedInAt, draft.requestedOutAt, draft.reason, 'pending', approvalId, JSON.stringify(draft.metadata)]
                 )
-                return rows[0]
-              })
-              emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
-              res.status(202).json({ ok: true, data: { pendingApproval: true, request: mapAttendanceRequestRow(request) } })
+                // W4C-3b P12: append immutable request snapshot v1 after parent exists.
+                // legacy_projection_only is a host no-op (zero rows).
+		                const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+                  orgId,
+                  requestId,
+                  requestType: 'outdoor_punch',
+                  subjectUserId: userId,
+		                  actorUserId: userId,
+		                  payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
+		                  resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+		                    orgId,
+		                    userId,
+		                    workDate,
+		                    occurredAt: occurredAt.toISOString(),
+		                  }),
+		                })
+		                return { request: rows[0], snapshotToken: buildRequestSnapshotToken(snapshotAppend) }
+		              })
+		              emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
+		              res.status(202).json({
+		                ok: true,
+		                data: {
+		                  pendingApproval: true,
+		                  request: mapAttendanceRequestRow(createResult.request),
+		                  ...(createResult.snapshotToken ? { requestSnapshot: createResult.snapshotToken } : {}),
+		                },
+		              })
               return
             } catch (error) {
               if (error instanceof HttpError) {
@@ -30330,6 +30583,10 @@ module.exports = {
       attachment_url: z.string().optional(),
       approvalFlowId: z.string().optional(),
       approval_flow_id: z.string().optional(),
+      expectedSnapshotVersion: z.coerce.number().int().min(1).optional(),
+      expected_snapshot_version: z.coerce.number().int().min(1).optional(),
+      expectedSnapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+      expected_snapshot_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
       orgId: z.string().optional(),
       org_id: z.string().optional(),
     })
@@ -31694,7 +31951,7 @@ module.exports = {
         )
 
         try {
-          const request = await db.transaction(async (trx) => {
+	          const createResult = await db.transaction(async (trx) => {
             await acquireAttendanceRequestLock(trx, orgId, userId, draft.workDate, draft.requestType)
             const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
               orgId,
@@ -31743,8 +32000,24 @@ module.exports = {
               ]
             )
 
-            return rows[0]
-          })
+            // W4C-3b P12: append immutable request snapshot v1 after parent exists.
+            // legacy_projection_only is a host no-op (zero rows).
+	            const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+	              orgId,
+	              requestId,
+	              requestType: draft.requestType,
+	              subjectUserId: userId,
+	              actorUserId: userId,
+	              payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
+	              resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+	                orgId,
+	                userId,
+	                workDate: draft.workDate,
+	              }),
+	            })
+
+	            return { request: rows[0], snapshotToken: buildRequestSnapshotToken(snapshotAppend) }
+	          })
 
           emitEvent('attendance.requested', {
             orgId,
@@ -31752,7 +32025,13 @@ module.exports = {
             workDate: draft.workDate,
             requestType: draft.requestType,
           })
-          res.status(201).json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
+	          res.status(201).json({
+	            ok: true,
+	            data: {
+	              request: mapAttendanceRequestRow(createResult.request),
+	              ...(createResult.snapshotToken ? { requestSnapshot: createResult.snapshotToken } : {}),
+	            },
+	          })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -31886,12 +32165,32 @@ module.exports = {
             return
           }
           await ensureAttendanceRequestAccess(rows[0], requesterId, 'view request')
-          const requests = await applyScheduleDispatchMetadataLabelsToRequests(
-            db,
-            orgId,
-            [mapAttendanceRequestRow(rows[0])]
-          )
-          res.json({ ok: true, data: { request: requests[0] } })
+	          const requests = await applyScheduleDispatchMetadataLabelsToRequests(
+	            db,
+	            orgId,
+	            [mapAttendanceRequestRow(rows[0])]
+	          )
+	          const snapshotRows = await db.query(
+	            `SELECT version, payload_fingerprint
+	               FROM attendance_request_calculation_snapshots
+	              WHERE org_id = $1 AND request_id = $2::uuid
+	              ORDER BY version DESC
+	              LIMIT 1`,
+	            [orgId, requestId]
+	          )
+	          const requestSnapshot = snapshotRows.length === 1
+	            ? {
+	                version: Number(snapshotRows[0].version),
+	                fingerprint: String(snapshotRows[0].payload_fingerprint),
+	              }
+	            : null
+	          res.json({
+	            ok: true,
+	            data: {
+	              request: requests[0],
+	              ...(requestSnapshot ? { requestSnapshot } : {}),
+	            },
+	          })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -32918,13 +33217,21 @@ module.exports = {
         }
 
         const requestId = normalizeUuidString(req.params.id)
-        if (!requestId) {
-          respondInvalidUuid(res)
-          return
-        }
+	        if (!requestId) {
+	          respondInvalidUuid(res)
+	          return
+	        }
+	        const expectedSnapshotVersion = firstDefinedValue(
+	          parsed.data.expectedSnapshotVersion,
+	          parsed.data.expected_snapshot_version,
+	        )
+	        const expectedSnapshotFingerprint = firstDefinedValue(
+	          parsed.data.expectedSnapshotFingerprint,
+	          parsed.data.expected_snapshot_fingerprint,
+	        )
 
-        try {
-          const request = await db.transaction(async (trx) => {
+	        try {
+	          const editResult = await db.transaction(async (trx) => {
             const requestRows = await trx.query(
               'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
               [requestId]
@@ -33016,10 +33323,26 @@ module.exports = {
               draft,
               orgRelations,
             })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-            )
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
+	            const approvalAssignments = buildAttendanceApprovalAssignments(
+	              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
+	            )
+	            const snapshotAppend = await appendRequestCalculationSnapshotOnEdit(trx, {
+	              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+	              requestId,
+	              requestType: draft.requestType,
+	              currentRequestType: existingRequest.request_type,
+	              subjectUserId: existingRequest.user_id,
+	              actorUserId: requesterId,
+	              expectedSnapshotVersion,
+	              expectedSnapshotFingerprint,
+	              payload: buildRequestSnapshotPayloadFromDraft(draft, draft.metadata),
+	              resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+	                orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+	                userId: existingRequest.user_id,
+	                workDate: draft.workDate,
+	              }),
+	            })
+	            await upsertAttendanceApprovalInstance(trx, approvalPayload)
             await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
 
             const rows = await trx.query(
@@ -33045,15 +33368,21 @@ module.exports = {
                 approvalId,
               ]
             )
-            return rows[0]
-          })
+	            return { request: rows[0], snapshotToken: buildRequestSnapshotToken(snapshotAppend) }
+	          })
 
-          emitEvent('attendance.request.updated', {
-            requestId: request.id,
-            orgId: request.org_id ?? DEFAULT_ORG_ID,
-            userId: request.user_id,
-          })
-          res.json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
+	          emitEvent('attendance.request.updated', {
+	            requestId: editResult.request.id,
+	            orgId: editResult.request.org_id ?? DEFAULT_ORG_ID,
+	            userId: editResult.request.user_id,
+	          })
+	          res.json({
+	            ok: true,
+	            data: {
+	              request: mapAttendanceRequestRow(editResult.request),
+	              ...(editResult.snapshotToken ? { requestSnapshot: editResult.snapshotToken } : {}),
+	            },
+	          })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({
@@ -33212,6 +33541,20 @@ module.exports = {
           const newVersion = Number(approval.version ?? 0) + 1
           const resolvedAt = new Date()
           let finalOvertimeAnchor = null
+          let lockedRequestSnapshot = null
+
+          // W4C-3b P12: lock latest immutable request snapshot BEFORE any terminal
+          // approval/request DML. Authoritative + missing snapshot fails closed here
+          // (zero terminal writes). Shadow missing is allowed (unsupported pre-W4).
+          // legacy_projection_only is a no-op.
+          if (isFinalApproval) {
+            lockedRequestSnapshot = await lockRequestSnapshotBeforeTerminalDecision(trx, {
+              orgId,
+              requestId,
+              requestType,
+              subjectUserId: requestRow.user_id,
+            })
+          }
 
           // W2: final overtime approval must validate its creation-frozen anchor before any
           // approval/request/accounting write. Throwing here leaves the whole transaction untouched.
@@ -33287,10 +33630,13 @@ module.exports = {
             stepName: currentStep?.name ?? null,
           }
 
-          await trx.query(
+          // W4C-3b P12: RETURNING id is required so the terminal binding records
+          // the durable approval_records primary key (never form_snapshot).
+          const approvalRecordRows = await trx.query(
             `INSERT INTO approval_records
              (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
+             RETURNING id`,
             [
               approvalId,
               action,
@@ -33306,10 +33652,46 @@ module.exports = {
               req.get('user-agent') ?? null,
             ]
           )
+          const approvalRecordIdRaw = approvalRecordRows?.[0]?.id
+          const approvalRecordId =
+            approvalRecordIdRaw === null || approvalRecordIdRaw === undefined
+              ? null
+              : String(approvalRecordIdRaw)
+          if (isFinalApproval && !approvalRecordId) {
+            throw new HttpError(
+              500,
+              'APPROVAL_RECORD_ID_MISSING',
+              'Terminal approval record did not return an id'
+            )
+          }
 
           const nextMetadata = { ...requestMetadata }
           if (finalOvertimeAnchor) {
             nextMetadata[OVERTIME_ATTRIBUTION_KEY] = finalOvertimeAnchor
+          }
+          // W4C-3b P12: seal closed terminal binding from locked snapshot +
+          // approval version + RETURNING id. Mutable form_snapshot is never used.
+          if (isFinalApproval) {
+            const bindResult = await bindRequestSnapshotOnTerminalDecision(trx, {
+              orgId,
+              requestId,
+              requestType,
+              subjectUserId: requestRow.user_id,
+              action,
+              approvalVersion: newVersion,
+              approvalRecordId,
+              expectedSnapshotVersion:
+                lockedRequestSnapshot && lockedRequestSnapshot.kind === 'locked'
+                  ? lockedRequestSnapshot.snapshot.version
+                  : undefined,
+              expectedSnapshotFingerprint:
+                lockedRequestSnapshot && lockedRequestSnapshot.kind === 'locked'
+                  ? lockedRequestSnapshot.snapshot.payloadFingerprint
+                  : undefined,
+            })
+            if (bindResult && (bindResult.kind === 'bound' || bindResult.kind === 'unsupported_pre_w4_shadow')) {
+              nextMetadata[requestSnapshotTerminalBindingMetaKey] = bindResult.binding
+            }
           }
           let scheduleDispatchFinalization = null
           if (requestType === 'schedule_dispatch' && action === 'approve' && isFinalApproval) {
