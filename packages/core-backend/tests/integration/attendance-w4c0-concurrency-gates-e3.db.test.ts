@@ -107,6 +107,7 @@ const syncCompatibility = (
           total: number
           payload: Record<string, unknown>
         }
+        afterCommit?(): Promise<void>
       }): Promise<T>
     }
   }
@@ -331,6 +332,21 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
       )
       if ((res.rows[0] as { n: number }).n > 0) return
       if (Date.now() - start > timeoutMs) throw new Error('waiter never blocked on an advisory lock')
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+
+  async function waitUntilDatabaseLockBlocked(pid: number, timeoutMs = 8000): Promise<void> {
+    const start = Date.now()
+    for (;;) {
+      const res = await pool.query(
+        `SELECT count(*)::int AS n
+           FROM pg_locks
+          WHERE pid = $1 AND locktype <> 'advisory' AND granted = false`,
+        [pid],
+      )
+      if ((res.rows[0] as { n: number }).n > 0) return
+      if (Date.now() - start > timeoutMs) throw new Error('waiter never blocked on the job row lock')
       await new Promise((resolve) => setTimeout(resolve, 25))
     }
   }
@@ -727,6 +743,9 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
     // --- Commit order: worker commits; the waiting transition then sees BOTH. ---
     const job = await setupJob(ORG_WORKER)
     const transition = await pool.connect()
+    const jobMutator = await pool.connect()
+    let jobMutation: Promise<unknown> | null = null
+    let afterCommitSeen = false
     let releaseWorker!: () => void
     const holdWorker = new Promise<void>((resolve) => {
       releaseWorker = resolve
@@ -744,6 +763,10 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
         lockIdentity: job.idempotencyKey,
         lockWitness: legacyWorkerLockWitness(ORG_WORKER, job.idempotencyKey),
         commitLegacy: async (client) => {
+          const isolation = await client.query('SHOW transaction_isolation')
+          expect((isolation[0] as { transaction_isolation: string }).transaction_isolation).toBe(
+            'serializable',
+          )
           await client.query(
             `INSERT INTO attendance_records
                (user_id, work_date, org_id, status, work_minutes, late_minutes, early_leave_minutes)
@@ -759,6 +782,15 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
           total: 1,
           payload: { __jobType: 'commit', summary: { processedRows: 1, failedRows: 0 } },
         }),
+        afterCommit: async () => {
+          const committed = await pool.query(
+            `SELECT (SELECT status FROM attendance_import_jobs WHERE id = $1::uuid) AS status,
+                    (SELECT count(*)::int FROM attendance_records WHERE org_id = $2) AS effects`,
+            [job.id, ORG_WORKER],
+          )
+          expect(committed.rows[0]).toEqual({ status: 'completed', effects: 1 })
+          afterCommitSeen = true
+        },
       })
       await Promise.race([
         sourceWriteReached,
@@ -773,6 +805,16 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
       expect(await jobStatus(job.id)).toBe('running')
       expect(await effectCount(ORG_WORKER)).toBe(0)
 
+      // The helper must lock/recheck the job row after class-00. A concurrent
+      // job mutation cannot cross the source/terminal transaction boundary.
+      await jobMutator.query('BEGIN')
+      const jobMutatorPid = await backendPid(jobMutator)
+      jobMutation = jobMutator.query(
+        `UPDATE attendance_import_jobs SET updated_at = now() WHERE id = $1::uuid`,
+        [job.id],
+      )
+      await waitUntilDatabaseLockBlocked(jobMutatorPid)
+
       // The transition (exclusive class-`00`) REALLY waits for the worker.
       await transition.query('BEGIN')
       const transitionPid = await backendPid(transition)
@@ -783,6 +825,7 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
 
       releaseWorker()
       await workerRun
+      await jobMutation
       await transitionAcquire
       // Under the exclusive lock, after the worker's atomic commit: terminal AND
       // effect — never terminal-without-effect.
@@ -792,6 +835,7 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
         [job.id, ORG_WORKER],
       )
       expect(seen.rows[0]).toEqual({ status: 'completed', effects: 1 })
+      expect(afterCommitSeen).toBe(true)
       // Re-evaluate then transition (legal initial INSERT: shadow from legacy).
       await transition.query(
         `INSERT INTO attendance_calculation_rollout_state
@@ -802,12 +846,15 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
       await transition.query('COMMIT')
     } finally {
       releaseWorker()
+      await jobMutator.query('ROLLBACK').catch(() => undefined)
+      jobMutator.release()
       transition.release()
     }
 
     // --- Failure order: rollback after source DML leaves the job nonterminal
     //     with ZERO effect (no half state either way). ---
     const rollbackJob = await setupJob(ORG_WORKER_RB)
+    let rollbackAfterCommitCount = 0
     await expect(
       syncCompatibility.runAttendanceLegacyNullVersionCommitAtomically({
         db: pluginDb(pool),
@@ -827,10 +874,14 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
         buildTerminal: () => {
           throw new Error('forced-terminal-failure')
         },
+        afterCommit: async () => {
+          rollbackAfterCommitCount += 1
+        },
       }),
     ).rejects.toThrow('forced-terminal-failure')
     expect(await jobStatus(rollbackJob.id)).toBe('running')
     expect(await effectCount(ORG_WORKER_RB)).toBe(0)
+    expect(rollbackAfterCommitCount).toBe(0)
   }, 30000)
 
   // -------------------------------------------------------------------------

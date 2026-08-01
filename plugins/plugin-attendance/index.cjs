@@ -9640,13 +9640,14 @@ function mapImportBatchRow(row) {
 		    ? reservation.jobSnapshot
 		    : null
 		  if (!snapshot || typeof snapshot !== 'object') return row
-		  return {
-		    ...row,
-		    status: snapshot.status,
-		    progress: snapshot.progress,
-		    total: snapshot.total,
-		    error: snapshot.error,
-		    started_at: snapshot.startedAt,
+			  return {
+			    ...row,
+			    status: snapshot.status,
+			    progress: snapshot.progress,
+			    total: snapshot.total,
+			    error: snapshot.error,
+			    w4_execution_reason_code: snapshot.executionReasonCode,
+			    started_at: snapshot.startedAt,
 		    finished_at: snapshot.finishedAt,
 		    created_at: snapshot.createdAt,
 		    updated_at: snapshot.updatedAt,
@@ -9716,6 +9717,7 @@ function mapImportBatchRow(row) {
 			  lockWitness,
 			  commitLegacy,
 			  buildTerminal,
+			  afterCommit = null,
 			}) {
 			  const canonicalJobId = normalizeUuidString(jobId)
 			  const trimmedOrgId = typeof orgId === 'string' ? orgId.trim() : ''
@@ -9731,17 +9733,42 @@ function mapImportBatchRow(row) {
 			  if (!normalizeAttendanceSyncImportLockWitness(lockWitness)) {
 			    throw new Error('ATTENDANCE_IMPORT_LEGACY_ROLLOUT_WITNESS_INVALID')
 			  }
-			  if (typeof commitLegacy !== 'function' || typeof buildTerminal !== 'function') {
+			  if (
+			    typeof commitLegacy !== 'function' ||
+			    typeof buildTerminal !== 'function' ||
+			    (afterCommit !== null && typeof afterCommit !== 'function')
+			  ) {
 			    throw new Error('ATTENDANCE_IMPORT_LEGACY_JOB_ADAPTER_INVALID')
 			  }
 
-			  return db.transaction(async (trx) => {
+			  const commitResult = await db.transaction(async (trx) => {
+			    await trx.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
 			    await acquireAttendanceSyncImportReservationLocks(trx, {
 			      orgId: canonicalOrgId,
 			      idempotencyKey: canonicalLockIdentity,
 			      witness: lockWitness,
 			    })
-			    const commitResult = await commitLegacy(trx)
+			    const lockedJobs = importQueryRows(await trx.query(
+				      `SELECT id::text AS id, org_id, status, idempotency_key
+				         FROM attendance_import_jobs
+				        WHERE id = $1::uuid
+				          AND org_id = $2::text
+				          AND w4_contract_version IS NULL
+				          AND status IN ('queued', 'running')
+				        FOR UPDATE`,
+				      [canonicalJobId, canonicalOrgId]
+				    ))
+				    if (lockedJobs.length !== 1) {
+				      throw new Error('ATTENDANCE_IMPORT_LEGACY_JOB_LOCK_REJECTED')
+				    }
+				    const lockedIdentity = typeof lockedJobs[0].idempotency_key === 'string'
+				      && lockedJobs[0].idempotency_key.trim()
+				      ? lockedJobs[0].idempotency_key.trim()
+				      : canonicalJobId
+				    if (lockedIdentity !== canonicalLockIdentity) {
+				      throw new Error('ATTENDANCE_IMPORT_LEGACY_JOB_IDENTITY_CHANGED')
+				    }
+				    const commitResult = await commitLegacy(trx)
 			    const terminal = buildTerminal(commitResult)
 			    const progress = Number(terminal?.progress)
 			    const total = Number(terminal?.total)
@@ -9769,6 +9796,8 @@ function mapImportBatchRow(row) {
 			    }
 			    return commitResult
 			  })
+			  if (afterCommit) await afterCommit()
+			  return commitResult
 			}
 
 			const ATTENDANCE_IMPORT_STARTUP_RECOVERY_PAGE_SIZE = 50
@@ -26960,7 +26989,8 @@ module.exports = {
 		          if (lockWitness === null) {
 		            throw new Error('ATTENDANCE_IMPORT_LEGACY_ROLLOUT_WITNESS_INVALID')
 		          }
-		          await runAttendanceLegacyNullVersionCommitAtomically({
+			          const uploadFileId = resolveImportUploadFileId(payload)
+			          await runAttendanceLegacyNullVersionCommitAtomically({
 		            db,
 		            jobId: rowId,
 		            orgId,
@@ -26971,9 +27001,10 @@ module.exports = {
 		              orgId,
 		              requesterId,
 		              batchId,
-		              idempotencyKey,
-		              transactionClient: trx,
-		            }),
+			              idempotencyKey,
+			              transactionClient: trx,
+			              deferUploadCleanup: true,
+			            }),
 		            buildTerminal: (commitResult) => {
 		              const { skippedCount, skippedRows } = extractImportJobSkippedSummary(
 		                commitResult,
@@ -27013,9 +27044,15 @@ module.exports = {
 		                  skippedRows,
 		                  idempotencyKey,
 		                }),
-		              }
-		            },
-		          })
+			              }
+			            },
+			            afterCommit: uploadFileId
+			              ? () => deleteImportUpload({
+			                  orgId,
+			                  fileId: uploadFileId,
+			                })
+			              : null,
+			          })
 		        } catch (error) {
 		          logger.error('Attendance async import commit failed', error)
 		          throw error
@@ -27028,7 +27065,7 @@ module.exports = {
 	    // Shared background commit implementation. Intentionally mirrors the sync commit logic but:
 	    // - uses a stable batchId (job.batch_id)
 	    // - does NOT consume commit tokens (token is consumed when the job is enqueued)
-		    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress, prepareOnly = false, integrationId = null, transactionClient = null }) => {
+			    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress, prepareOnly = false, integrationId = null, transactionClient = null, deferUploadCleanup = false }) => {
 		      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
 		      const trustedIntegrationId = normalizeUuidString(integrationId)
 		      const commitStartedAtMs = Date.now()
@@ -28297,8 +28334,8 @@ module.exports = {
 			        }
 			      })
 
-		      if (!prepareOnly && csvFileId) {
-		        await deleteImportUpload({ orgId, fileId: csvFileId })
+			      if (!prepareOnly && csvFileId && !deferUploadCleanup) {
+			        await deleteImportUpload({ orgId, fileId: csvFileId })
 		      }
 
 		      if (prepareOnly) {

@@ -73,6 +73,7 @@ const P25_CALL_PATH_CLASSIFICATIONS = Object.freeze([
   entry('plugins/plugin-attendance/index.cjs', 'processAsyncImportPreviewJob', 'attendance_import_jobs', 'write', 'update', 1, 'operational_status', 'legacy_async_worker'),
   entry('plugins/plugin-attendance/index.cjs', 'drainImportUploadCleanupCommand', 'attendance_import_upload_cleanup_commands', 'read', 'select', 1, 'operational_status', 'upload_cleanup_worker'),
   entry('plugins/plugin-attendance/index.cjs', 'processAsyncImportCommitJob', 'attendance_import_jobs', 'read', 'select', 2, 'operational_status', 'legacy_async_worker'),
+  entry('plugins/plugin-attendance/index.cjs', 'runAttendanceLegacyNullVersionCommitAtomically', 'attendance_import_jobs', 'read', 'select', 1, 'operational_status', 'legacy_async_worker'),
   entry('plugins/plugin-attendance/index.cjs', 'runAttendanceLegacyNullVersionCommitAtomically', 'attendance_import_jobs', 'write', 'update', 1, 'operational_status', 'legacy_async_worker'),
   entry('plugins/plugin-attendance/index.cjs', 'drainAttendanceImportStartupRecoveryPages', 'attendance_import_jobs', 'read', 'select', 2, 'operational_status', 'legacy_async_worker'),
   entry('plugins/plugin-attendance/index.cjs', 'drainAttendanceImportStartupRecoveryPages', 'attendance_import_upload_cleanup_commands', 'read', 'select', 1, 'operational_status', 'upload_cleanup_worker'),

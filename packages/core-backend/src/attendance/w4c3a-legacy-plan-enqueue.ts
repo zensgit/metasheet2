@@ -199,6 +199,7 @@ export type ReserveAttendanceLegacyImportPlanJobResultV1 =
         readonly progress: number
         readonly total: number
         readonly error: string | null
+        readonly executionReasonCode: string | null
         readonly startedAt: Date | string | null
         readonly finishedAt: Date | string | null
         readonly createdAt: Date | string | null
@@ -1461,6 +1462,7 @@ export async function reserveAttendanceLegacyImportPlanJobV1(
 
   const existingJobs = await trx.query(
     `SELECT id::text AS id, status, progress, total, error,
+            w4_execution_reason_code,
             started_at, finished_at, created_at, updated_at,
             created_by, idempotency_key,
             w4_actor_id, w4_actor_posture, w4_token_subject_user_id,
@@ -1507,6 +1509,11 @@ export async function reserveAttendanceLegacyImportPlanJobV1(
         error: row.error === null || row.error === undefined
           ? null
           : String(row.error),
+        executionReasonCode:
+          row.w4_execution_reason_code === null ||
+          row.w4_execution_reason_code === undefined
+            ? null
+            : String(row.w4_execution_reason_code),
         startedAt: row.started_at as Date | string | null,
         finishedAt: row.finished_at as Date | string | null,
         createdAt: row.created_at as Date | string | null,

@@ -3,6 +3,7 @@
  * classification, and the host call is exactly { jobId }.
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -91,6 +92,7 @@ const attendancePlugin = require(PLUGIN) as {
         total: number
         payload: Record<string, unknown>
       }
+      afterCommit?(): Promise<void>
     }): Promise<T>
     drainAttendanceImportStartupRecoveryPages(input: {
       db: { query(text: string, values?: unknown[]): Promise<unknown> }
@@ -183,7 +185,10 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(legacyStart).toBeGreaterThan(-1)
     expect(legacyPath).toMatch(/runAttendanceLegacyNullVersionCommitAtomically\(\{/)
     expect(legacyPath).toMatch(
-      /commitLegacy:\s*\(trx\)\s*=>\s*commitAttendanceImportPayload\(\{[\s\S]*transactionClient:\s*trx/,
+      /commitLegacy:\s*\(trx\)\s*=>\s*commitAttendanceImportPayload\(\{[\s\S]*transactionClient:\s*trx,[\s\S]*deferUploadCleanup:\s*true/,
+    )
+    expect(legacyPath).toMatch(
+      /afterCommit:\s*uploadFileId[\s\S]*deleteImportUpload\(\{[\s\S]*fileId:\s*uploadFileId/,
     )
     const atomicCommitPath = legacyPath.slice(
       legacyPath.indexOf('await runAttendanceLegacyNullVersionCommitAtomically'),
@@ -193,16 +198,42 @@ describe('plugin V1 jobId-only boundary (static)', () => {
 
   it('accepts the canonical default org in the null-version atomic helper', async () => {
     const statements: Array<{ text: string; values: unknown[] }> = []
+    const clients: object[] = []
+    let transactionCount = 0
+    let transactionOpen = false
+    let sourceClient: object | null = null
+    let terminalClient: object | null = null
+    let afterCommitCount = 0
     const result = await syncCompatibility.runAttendanceLegacyNullVersionCommitAtomically({
       db: {
-        transaction: async (run) => run({
-          query: async (text, values = []) => {
-            statements.push({ text, values })
-            return text.includes('UPDATE attendance_import_jobs')
-              ? [{ id: '00000000-0000-4000-8000-000000000001' }]
-              : []
-          },
-        }),
+        transaction: async (run) => {
+          transactionCount += 1
+          transactionOpen = true
+          const client = {
+            query: async (text: string, values: unknown[] = []) => {
+              statements.push({ text, values })
+              if (text.includes('FOR UPDATE')) {
+                return [{
+                  id: '00000000-0000-4000-8000-000000000001',
+                  org_id: 'default',
+                  status: 'running',
+                  idempotency_key: 'legacy-default-org',
+                }]
+              }
+              if (text.includes('UPDATE attendance_import_jobs')) {
+                terminalClient = client
+                return [{ id: '00000000-0000-4000-8000-000000000001' }]
+              }
+              return []
+            },
+          }
+          clients.push(client)
+          try {
+            return await run(client)
+          } finally {
+            transactionOpen = false
+          }
+        },
       },
       jobId: '00000000-0000-4000-8000-000000000001',
       orgId: 'default',
@@ -213,20 +244,89 @@ describe('plugin V1 jobId-only boundary (static)', () => {
         helperWaitMs: 5000,
         transactionLockTimeoutMs: 5000,
       },
-      commitLegacy: async () => ({ imported: 1 }),
+      commitLegacy: async (client) => {
+        sourceClient = client
+        await client.query('SELECT 1 AS source_effect')
+        return { imported: 1 }
+      },
       buildTerminal: () => ({
         progress: 1,
         total: 1,
         payload: { __jobType: 'commit' },
       }),
+      afterCommit: async () => {
+        expect(transactionOpen).toBe(false)
+        afterCommitCount += 1
+      },
     })
 
     expect(result).toEqual({ imported: 1 })
+    expect(transactionCount).toBe(1)
+    expect(clients).toHaveLength(1)
+    expect(sourceClient).toBe(clients[0])
+    expect(terminalClient).toBe(clients[0])
+    expect(afterCommitCount).toBe(1)
+    expect(statements[0]?.text).toBe('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+    const sharedLockIndex = statements.findIndex(({ text }) =>
+      text.includes('pg_advisory_xact_lock_shared'),
+    )
+    const jobLockIndex = statements.findIndex(({ text }) => text.includes('FOR UPDATE'))
+    const sourceIndex = statements.findIndex(({ text }) => text.includes('source_effect'))
+    const terminalIndex = statements.findIndex(({ text }) =>
+      text.includes('UPDATE attendance_import_jobs'),
+    )
+    expect(sharedLockIndex).toBeGreaterThan(0)
+    expect(jobLockIndex).toBeGreaterThan(sharedLockIndex)
+    expect(sourceIndex).toBeGreaterThan(jobLockIndex)
+    expect(terminalIndex).toBeGreaterThan(sourceIndex)
     const terminal = statements.find(({ text }) => text.includes('UPDATE attendance_import_jobs'))
     expect(terminal?.values.slice(0, 2)).toEqual([
       '00000000-0000-4000-8000-000000000001',
       'default',
     ])
+  })
+
+  it('does not run uploaded-source cleanup when terminalization rolls back', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'w4c3a-upload-rollback-'))
+    const uploadedSource = path.join(tempDir, 'source.csv')
+    fs.writeFileSync(uploadedSource, 'userId,workDate\nuser-1,2026-07-31\n')
+    try {
+      await expect(
+        syncCompatibility.runAttendanceLegacyNullVersionCommitAtomically({
+          db: {
+            transaction: async (run) => run({
+              query: async (text) => text.includes('FOR UPDATE')
+                ? [{
+                    id: '00000000-0000-4000-8000-000000000001',
+                    org_id: 'default',
+                    status: 'running',
+                    idempotency_key: 'legacy-default-org',
+                  }]
+                : [],
+            }),
+          },
+          jobId: '00000000-0000-4000-8000-000000000001',
+          orgId: 'default',
+          lockIdentity: 'legacy-default-org',
+          lockWitness: {
+            rolloutKey: '1',
+            legacyIdempotencyKey: '2',
+            helperWaitMs: 5000,
+            transactionLockTimeoutMs: 5000,
+          },
+          commitLegacy: async () => ({ imported: 1 }),
+          buildTerminal: () => {
+            throw new Error('forced-terminal-failure')
+          },
+          afterCommit: async () => {
+            await fs.promises.unlink(uploadedSource)
+          },
+        }),
+      ).rejects.toThrow('forced-terminal-failure')
+      expect(fs.existsSync(uploadedSource)).toBe(true)
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    }
   })
 
   it('keeps the lock-time existing-job snapshot when a later read is already terminal', () => {
@@ -236,6 +336,8 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       progress: 1,
       total: 1,
       error: null,
+      w4_contract_version: 1,
+      w4_execution_reason_code: null,
       started_at: '2026-07-31T00:00:01.000Z',
       finished_at: '2026-07-31T00:00:02.000Z',
       created_at: '2026-07-31T00:00:00.000Z',
@@ -250,6 +352,7 @@ describe('plugin V1 jobId-only boundary (static)', () => {
           progress: 0,
           total: 1,
           error: null,
+          executionReasonCode: 'SEGMENT_CALCULATION_SUSPENDED',
           startedAt: null,
           finishedAt: null,
           createdAt: '2026-07-31T00:00:00.000Z',
@@ -262,10 +365,14 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       status: 'queued',
       progress: 0,
       total: 1,
+      w4_execution_reason_code: 'SEGMENT_CALCULATION_SUSPENDED',
       started_at: null,
       finished_at: null,
       updated_at: '2026-07-31T00:00:00.000Z',
     })
+    expect(
+      syncCompatibility.projectAttendanceImportExecutionReasonCode(projected),
+    ).toEqual({ executionReasonCode: 'SEGMENT_CALCULATION_SUSPENDED' })
     expect(completedRow.status).toBe('completed')
   })
 
