@@ -50,6 +50,60 @@ test('authenticated retirement executor requires baseUrl, token, and stable comm
   )
 })
 
+test('authenticated retirement executor freezes the selected calculation identity and version', async () => {
+  const requests = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), init })
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({ ok: true })
+      },
+    }
+  }
+  try {
+    const retireRecord = createAuthenticatedOpsRetirementExecutor({
+      baseUrl: 'http://127.0.0.1:8900',
+      token: 'token',
+      commandSeed: '11111111-1111-4111-8111-111111111111',
+    })
+    await retireRecord({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      current_calculation_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      current_calculation_version: '7',
+      latest_calculation_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      latest_calculation_version: '8',
+    })
+    await retireRecord({
+      id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      current_calculation_id: null,
+      current_calculation_version: null,
+      latest_calculation_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      latest_calculation_version: '9',
+    })
+
+    assert.equal(requests.length, 2)
+    const firstBody = JSON.parse(requests[0].init.body)
+    assert.equal(firstBody.expectedCalculationId, 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
+    assert.equal(firstBody.expectedCalculationVersion, 7)
+    const secondBody = JSON.parse(requests[1].init.body)
+    assert.equal(secondBody.expectedCalculationId, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee')
+    assert.equal(secondBody.expectedCalculationVersion, 9)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('retirement inventory qualifies record columns after calculation joins', async () => {
+  const source = fs.readFileSync(path.join(opsDir, 'staging-attendance-tooling-teardown.mjs'), 'utf8')
+  assert.match(source, /SELECT record\.id::text AS id/)
+  assert.match(source, /record\.current_calculation_id::text AS current_calculation_id/)
+  assert.match(source, /record\.projection_owner/)
+  assert.match(source, /WHERE \$\{listedFilter\}/)
+})
+
 test('every staging retirement commandSeed is a unique valid UUID', () => {
   const seeds = []
   for (const filename of fs.readdirSync(opsDir).filter((name) => /^staging-attendance-.*-smoke\.mjs$/.test(name))) {
@@ -81,7 +135,7 @@ test('cleanupStagingAttendanceScope refuses W4-backed rows without retireRecord 
   ]
   const db = {
     async query(sql) {
-      if (/FROM attendance_records/.test(sql) && /SELECT id::text/.test(sql)) {
+      if (/FROM attendance_records/.test(sql) && /SELECT record\.id::text/.test(sql)) {
         return { rows }
       }
       if (/attendance_record_calculations/.test(sql) && /COUNT/.test(sql)) {
@@ -207,7 +261,7 @@ test('mixed W4 cleanup success: retire W4 rows then tooling-delete non-W4; resid
         return { rows }
       }
       // Initial listing of scope rows.
-      if (/SELECT id::text AS id, user_id::text AS user_id/.test(sql) && /FROM attendance_records/.test(sql)) {
+      if (/SELECT record\.id::text AS id/.test(sql) && /FROM attendance_records/.test(sql)) {
         return {
           rows: [
             {
@@ -297,7 +351,7 @@ test('missing/invalid executor fails closed before direct record cleanup', async
   let deleted = false
   const db = {
     async query(sql) {
-      if (/FROM attendance_records/.test(sql) && /SELECT id::text/.test(sql)) return { rows }
+      if (/FROM attendance_records/.test(sql) && /SELECT record\.id::text/.test(sql)) return { rows }
       if (/attendance_record_calculations/.test(sql) && /COUNT/.test(sql)) return { rows: [{ n: 1 }] }
       if (/DELETE FROM attendance_records/.test(sql)) {
         deleted = true
@@ -325,7 +379,7 @@ test('non-swallowed retirement errors propagate (no silent residue hide)', async
   let deleted = false
   const db = {
     async query(sql) {
-      if (/FROM attendance_records/.test(sql) && /SELECT id::text/.test(sql)) {
+      if (/FROM attendance_records/.test(sql) && /SELECT record\.id::text/.test(sql)) {
         return {
           rows: [
             {
@@ -370,7 +424,7 @@ test('residue proof fails when non-retired rows remain after cleanup', async () 
   const w4Id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
   const db = {
     async query(sql) {
-      if (/SELECT id::text AS id, user_id/.test(sql)) {
+      if (/SELECT record\.id::text AS id/.test(sql)) {
         return {
           rows: [
             {

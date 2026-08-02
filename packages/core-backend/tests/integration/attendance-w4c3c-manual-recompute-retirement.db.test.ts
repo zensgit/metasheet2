@@ -6,7 +6,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
-import { Pool } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 import { appendOperatorRetirementCalculationV1 } from '../../src/attendance/w4c3c-ops-retirement'
 import {
   appendManualOverrideCalculationV1,
@@ -52,6 +52,18 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
   const clientOf = (c: { query: Pool['query'] }) => ({
     query: async (sql: string, params?: readonly unknown[]) => c.query(sql, [...(params ?? [])]),
   })
+
+  async function calculationVersion(db: Pool | PoolClient, calculationId: string): Promise<number> {
+    const result = await db.query(
+      'SELECT version FROM attendance_record_calculations WHERE id = $1::uuid',
+      [calculationId],
+    )
+    const version = Number(result.rows[0]?.version)
+    if (!Number.isSafeInteger(version) || version < 1) {
+      throw new Error(`W4C3C_TEST_CALCULATION_VERSION_MISSING:${calculationId}`)
+    }
+    return version
+  }
 
   function completeAttribution(forWorkDate = workDate) {
     return {
@@ -441,7 +453,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
     )
   })
 
-  it('mutation: incomplete prior fails with zero current change', async () => {
+  it('mutation: missing expected prior fails with zero current change', async () => {
     // Fresh legacy-only parent (never W4-pointed — pointer guard forbids returning to legacy).
     const legacyOnlyId = randomUUID()
     await pool.query(
@@ -475,7 +487,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
         })
       } catch (error) {
         failed = true
-        expect(String((error as { code?: string }).code || '')).toMatch(/PRIOR_INCOMPLETE/)
+        expect(String((error as { code?: string }).code || '')).toMatch(/VERSION_CONFLICT/)
       }
       expect(failed).toBe(true)
       const after = await client.query(
@@ -526,7 +538,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
           orgId,
           recordId: malformedRecordId,
           expectedCalculationId: malformedPriorId,
-          expectedCalculationVersion: null,
+          expectedCalculationVersion: await calculationVersion(client, malformedPriorId),
           operationId: randomUUID(),
           actorId: userId,
           correlationId: 'malformed-frozen-manual-override',
@@ -584,7 +596,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
           orgId,
           recordId: closedRecordId,
           expectedCalculationId: closedPriorId,
-          expectedCalculationVersion: null,
+          expectedCalculationVersion: await calculationVersion(client, closedPriorId),
           operationId: randomUUID(),
           actorId: userId,
           correlationId: 'closed-cycle-manual-override',
@@ -657,7 +669,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
         orgId,
         recordId: multiRecordId,
         expectedCalculationId: multiPriorId,
-        expectedCalculationVersion: null,
+        expectedCalculationVersion: await calculationVersion(client, multiPriorId),
         operationId,
         actorId: userId,
         correlationId: `multi-${operationId}`,
@@ -737,7 +749,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
         orgId,
         recordId,
         expectedCalculationId: priorCalculationId,
-        expectedCalculationVersion: null,
+        expectedCalculationVersion: await calculationVersion(client, priorCalculationId),
         operationId,
         actorId: userId,
         correlationId: `manual-${operationId}`,
@@ -781,7 +793,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
         orgId,
         recordId,
         expectedCalculationId: manual.calculationId,
-        expectedCalculationVersion: null,
+        expectedCalculationVersion: await calculationVersion(client, manual.calculationId),
         operationId: recomputeOp,
         actorId: userId,
         correlationId: `recompute-${recomputeOp}`,
@@ -821,7 +833,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
         orgId,
         recordId,
         expectedCalculationId: recompute.calculationId,
-        expectedCalculationVersion: null,
+        expectedCalculationVersion: await calculationVersion(client, recompute.calculationId),
         operationId: currentOp,
         actorId: userId,
         correlationId: `current-${currentOp}`,
@@ -1008,7 +1020,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
           orgId,
           recordId: retireRecordId,
           expectedCalculationId: beforeCid,
-          expectedCalculationVersion: null,
+          expectedCalculationVersion: await calculationVersion(client, beforeCid),
           operationId: randomUUID(),
           actorId: userId,
           correlationId: 'should-fail',
@@ -1030,7 +1042,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
           orgId,
           recordId: retireRecordId,
           expectedCalculationId: beforeCid,
-          expectedCalculationVersion: null,
+          expectedCalculationVersion: await calculationVersion(client, beforeCid),
           operationId: randomUUID(),
           actorId: userId,
           correlationId: 'should-fail-manual',
@@ -1162,7 +1174,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
           orgId,
           recordId: importRollbackId,
           expectedCalculationId: irReversalId,
-          expectedCalculationVersion: null,
+          expectedCalculationVersion: await calculationVersion(client2, irReversalId),
           operationId: randomUUID(),
           actorId: userId,
           correlationId: 'ir-manual',
@@ -1191,7 +1203,7 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
           orgId,
           recordId: importRollbackId,
           expectedCalculationId: irReversalId,
-          expectedCalculationVersion: null,
+          expectedCalculationVersion: await calculationVersion(client2, irReversalId),
           operationId: randomUUID(),
           actorId: userId,
           correlationId: 'ir-recompute',

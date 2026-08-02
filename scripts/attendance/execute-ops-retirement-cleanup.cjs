@@ -194,6 +194,9 @@ async function main() {
             r.user_id::text AS user_id,
             r.work_date::text AS work_date,
             r.current_calculation_id::text AS current_calculation_id,
+            current_calc.version AS current_calculation_version,
+            latest_calc.id::text AS latest_calculation_id,
+            latest_calc.version AS latest_calculation_version,
             r.projection_owner,
             r.visibility_state,
             r.visibility_reason,
@@ -205,6 +208,19 @@ async function main() {
        FROM attendance_events e
        JOIN attendance_records r
          ON r.org_id = e.org_id AND r.user_id = e.user_id AND r.work_date = e.work_date
+       LEFT JOIN attendance_record_calculations current_calc
+         ON current_calc.id = r.current_calculation_id
+        AND current_calc.attendance_record_id = r.id
+        AND current_calc.org_id = r.org_id
+       LEFT JOIN LATERAL (
+         SELECT calculation.id, calculation.version
+           FROM attendance_record_calculations calculation
+          WHERE calculation.attendance_record_id = r.id
+            AND calculation.org_id = r.org_id
+            AND calculation.outcome = 'completed'
+          ORDER BY calculation.version DESC
+          LIMIT 1
+       ) latest_calc ON TRUE
       WHERE ${where.join(' AND ')}
         AND r.visibility_reason IS DISTINCT FROM 'operator_retirement'`,
     params,
@@ -265,6 +281,10 @@ async function main() {
           token,
           body: {
             operationId: target.operationId,
+            expectedCalculationId: target.current_calculation_id ?? target.latest_calculation_id ?? null,
+            expectedCalculationVersion: target.current_calculation_id != null
+              ? (target.current_calculation_version == null ? null : Number(target.current_calculation_version))
+              : (target.latest_calculation_version == null ? null : Number(target.latest_calculation_version)),
             reason: `P15 operator cleanup for source=${source}`,
             ticket: `P15-${source}`.slice(0, 128),
           },

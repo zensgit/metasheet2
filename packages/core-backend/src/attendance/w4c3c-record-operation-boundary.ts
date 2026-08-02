@@ -15,7 +15,9 @@
  */
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
+  acquireAttendanceCalculationTargetLocks,
   acquireAttendanceCalculationRolloutLock,
+  createVerifiedAttendanceCalculationTargetIdentityV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
 } from './w4c0-identity'
@@ -146,6 +148,7 @@ export interface AttendanceRecordOperationPreparedV1<TState = unknown> {
   readonly actorPosture: AttendanceActorPostureV1
   readonly tokenSubjectUserId: string | null
   readonly subjectUserId: string
+  readonly targetWorkDate: string
   readonly subjectScope: AttendanceWriteSubjectScopeV1
   readonly commandPayload: Readonly<Record<string, unknown>>
   readonly state: TState
@@ -279,6 +282,7 @@ function preparedIdentityCongruent(
     && identity.actorPosture === prepared.actorPosture
     && identity.tokenSubjectUserId === prepared.tokenSubjectUserId
     && identity.subjectUserId === prepared.subjectUserId
+    && identity.targetWorkDate === prepared.targetWorkDate
     && JSON.stringify(identity.subjectScope) === JSON.stringify(prepared.subjectScope)
     && JSON.stringify(identity.commandPayload) === JSON.stringify(prepared.commandPayload)
 }
@@ -370,6 +374,13 @@ export function createAttendanceRecordOperationBoundaryV1(
           if (preflight.kind === 'suspended') {
             throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
           }
+
+          const targetIdentity = createVerifiedAttendanceCalculationTargetIdentityV1({
+            org: preflight.org,
+            userId: identityPrepared.subjectUserId,
+            workDate: identityPrepared.targetWorkDate,
+          })
+          await acquireAttendanceCalculationTargetLocks(trx, [targetIdentity])
 
           const prepared = input.operationId === null
             ? identityPrepared

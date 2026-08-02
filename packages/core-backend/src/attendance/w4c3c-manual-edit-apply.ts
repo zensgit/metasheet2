@@ -248,6 +248,9 @@ export async function appendManualOverrideCalculationV1(
   ) {
     fail(ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES.INPUT_INVALID)
   }
+  if (expectedCalculationId === null || input.expectedCalculationVersion == null) {
+    fail(ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES.VERSION_CONFLICT, 409)
+  }
   const payloadFingerprint = computeManualEditPayloadFingerprintV1({
     recordId,
     expectedCalculationId,
@@ -325,13 +328,10 @@ export async function appendManualOverrideCalculationV1(
     return Object.freeze({ kind: 'replay', calculationId: String(existing.id) })
   }
 
-  const priorCalculationId =
+  const currentCalculationId =
     typeof record.current_calculation_id === 'string' ? record.current_calculation_id : null
-  if (!priorCalculationId) {
-    // Incomplete legacy provenance: fail/review with zero current change.
-    fail(ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES.PRIOR_INCOMPLETE, 409)
-  }
-  if (expectedCalculationId !== null && priorCalculationId !== expectedCalculationId) {
+  const priorCalculationId = expectedCalculationId
+  if (input.mode === 'authoritative' && currentCalculationId !== priorCalculationId) {
     fail(ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES.VERSION_CONFLICT, 409)
   }
 
@@ -345,15 +345,25 @@ export async function appendManualOverrideCalculationV1(
             input_provenance, provenance_fingerprint, source_definition_fingerprint
        FROM attendance_record_calculations
       WHERE id = $1::uuid AND attendance_record_id = $2::uuid AND org_id = $3
+        AND version = $4
+        AND outcome = 'completed'
+        AND (
+          $5::text <> 'shadow'
+          OR version = (
+            SELECT MAX(latest.version)
+              FROM attendance_record_calculations latest
+             WHERE latest.attendance_record_id = $2::uuid
+               AND latest.org_id = $3
+               AND latest.outcome = 'completed'
+          )
+        )
       FOR UPDATE`,
-    [priorCalculationId, recordId, orgId],
+    [priorCalculationId, recordId, orgId, input.expectedCalculationVersion, input.mode],
   )
   if (calcRows.length !== 1) fail(ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES.VERSION_CONFLICT, 409)
   const prior = calcRows[0]
   if (
-    input.expectedCalculationVersion !== null
-    && input.expectedCalculationVersion !== undefined
-    && Number(prior.version) !== input.expectedCalculationVersion
+    Number(prior.version) !== input.expectedCalculationVersion
   ) {
     fail(ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES.VERSION_CONFLICT, 409)
   }

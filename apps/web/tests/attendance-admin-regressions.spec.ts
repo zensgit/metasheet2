@@ -1113,6 +1113,8 @@ describe('Attendance admin regressions', () => {
     attendanceAnomaliesData = [
       {
         recordId: 'record-a',
+        expectedCalculationId: '00000000-0000-4000-8000-00000000000a',
+        expectedCalculationVersion: 7,
         workDate: '2026-05-13',
         status: 'late',
         firstInAt: '2026-05-13T09:12:00.000Z',
@@ -1153,6 +1155,8 @@ describe('Attendance admin regressions', () => {
     attendanceAnomaliesData = [
       {
         recordId: 'record-a',
+        expectedCalculationId: '00000000-0000-4000-8000-00000000000a',
+        expectedCalculationVersion: 7,
         workDate: '2026-05-13',
         status: 'late',
         firstInAt: '2026-05-13T09:12:00.000Z',
@@ -1194,6 +1198,8 @@ describe('Attendance admin regressions', () => {
     attendanceAnomaliesData = [
       {
         recordId: 'record-a',
+        expectedCalculationId: '00000000-0000-4000-8000-00000000000a',
+        expectedCalculationVersion: 7,
         workDate: '2026-05-13',
         status: 'late',
         firstInAt: '2026-05-13T09:12:00.000Z',
@@ -1240,6 +1246,8 @@ describe('Attendance admin regressions', () => {
     expect(attendanceResultEditPosts).toHaveLength(1)
     expect(attendanceResultEditPosts[0]).toMatchObject({
       recordId: 'record-a',
+      expectedCalculationId: '00000000-0000-4000-8000-00000000000a',
+      expectedCalculationVersion: 7,
       targetStatus: 'normal',
       reason: 'corrected from manager review',
       idempotencyKey: expect.any(String),
@@ -1295,6 +1303,8 @@ describe('Attendance admin regressions', () => {
   function makeBatchAnomaly(recordId: string, over: Record<string, unknown> = {}) {
     return {
       recordId,
+      expectedCalculationId: '00000000-0000-4000-8000-00000000000b',
+      expectedCalculationVersion: 7,
       workDate: '2026-05-13',
       status: 'late',
       firstInAt: '2026-05-13T09:12:00.000Z',
@@ -1360,6 +1370,11 @@ describe('Attendance admin regressions', () => {
     await flushUi(16)
     expect(attendanceResultEditPosts).toHaveLength(2)
     expect(attendanceResultEditPosts.map(p => p.recordId).sort()).toEqual(['record-a', 'record-c'])
+    expect(attendanceResultEditPosts.map(p => p.expectedCalculationVersion)).toEqual([7, 7])
+    expect(attendanceResultEditPosts.map(p => p.expectedCalculationId)).toEqual([
+      '00000000-0000-4000-8000-00000000000b',
+      '00000000-0000-4000-8000-00000000000b',
+    ])
     expect(new Set(attendanceResultEditPosts.map(p => p.idempotencyKey)).size).toBe(2)
     expect(attendanceResultEditPosts[0]).not.toHaveProperty('overrideMetrics')
   })
@@ -8592,6 +8607,8 @@ describe('Attendance admin regressions', () => {
 describe('#3530 batch anomaly resolution (pure)', () => {
   const snap = (recordId: string): BatchAnomalyRowSnapshot => ({
     recordId,
+    expectedCalculationId: null,
+    expectedCalculationVersion: null,
     workDate: '2026-05-13',
     targetUserId: 'user-1',
     sourceStatus: 'late',

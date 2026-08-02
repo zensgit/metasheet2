@@ -59,7 +59,7 @@ describe('W4C-3c active-current helper (P20)', () => {
     })
     expect(seen).toContain("status = 'partial'")
     expect(seen).toContain("status = 'absent'")
-    expect(seen).toContain('first_in_at IS NULL OR last_out_at IS NULL')
+    expect(seen).toContain('current_record.first_in_at IS NULL OR current_record.last_out_at IS NULL')
     expect(seen).not.toContain('extraWhereSql')
   })
 

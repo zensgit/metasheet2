@@ -219,6 +219,7 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     userId: string,
     recordId: string,
     workDate: string,
+    mode: 'shadow' | 'authoritative' = 'authoritative',
   ) {
     const calculationId = randomUUID()
     const operationId = randomUUID()
@@ -308,10 +309,10 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
             projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
             projected_daily_fingerprint, actor_id, correlation_id
           ) VALUES (
-            $1::uuid, $2, $3::uuid, 1, 'calculation', 'authoritative', 'live',
+            $1::uuid, $2, $3::uuid, 1, 'calculation', $19, 'live',
             $4, 1, $5::uuid, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb,
-            '[]'::jsonb, $13::jsonb, 'append', 'segment_authoritative',
-            'completed', 'calculated', 'set_active', 1,
+            '[]'::jsonb, $13::jsonb, 'append', $20,
+            'completed', 'calculated', $21, 1,
             'late', $14::timestamptz, $15::timestamptz, 400, 15, 0,
             $16, $17, $18
           )`,
@@ -334,6 +335,9 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
           'e'.repeat(64),
           userId,
           `route-prior:${calculationId}`,
+          mode,
+          mode === 'authoritative' ? 'segment_authoritative' : 'legacy_shadow',
+          mode === 'authoritative' ? 'set_active' : 'none',
         ],
       )
       await client.query(
@@ -349,17 +353,19 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
           )`,
         [orgId, recordId, calculationId, `${workDate}T01:10:00.000Z`, `${workDate}T10:00:00.000Z`],
       )
-      await client.query(
-        `UPDATE attendance_records
-            SET current_calculation_id = $1::uuid,
-                projection_owner = 'w4',
-                visibility_state = 'active',
-                visibility_reason = 'active'
-          WHERE id = $2::uuid AND org_id = $3`,
-        [calculationId, recordId, orgId],
-      )
+      if (mode === 'authoritative') {
+        await client.query(
+          `UPDATE attendance_records
+              SET current_calculation_id = $1::uuid,
+                  projection_owner = 'w4',
+                  visibility_state = 'active',
+                  visibility_reason = 'active'
+            WHERE id = $2::uuid AND org_id = $3`,
+          [calculationId, recordId, orgId],
+        )
+      }
       await client.query('COMMIT')
-      return { calculationId }
+      return { calculationId, calculationVersion: 1 }
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined)
       throw error
@@ -493,14 +499,14 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       source.indexOf('const manualEditAdapter ='),
       source.indexOf('const recomputeAdapter ='),
     )
-    const authoritative = manualAdapter.slice(manualAdapter.indexOf("if (posture === 'authoritative')"))
-    const editWindow = authoritative.indexOf('resolveAttendanceResultEditWindowContext')
-    const appendCalculation = authoritative.indexOf('const result = await port.appendManualOverrideCalculation')
-    const insertAudit = authoritative.indexOf('insertW4c3cManualResultEditAuditRow')
-    const enqueueNotification = authoritative.indexOf('enqueueAttendanceResultEditNotification')
-    const markNotification = authoritative.indexOf('markAttendanceResultEditNotificationStatus')
-    const responseEdit = authoritative.indexOf('edit: mapResultEditRow(finalAuditRow)')
-    const responseRecord = authoritative.indexOf('record: responseRecord')
+    const w4Path = manualAdapter.slice(manualAdapter.indexOf("if (posture === 'authoritative' || posture === 'shadow')"))
+    const editWindow = w4Path.indexOf('resolveAttendanceResultEditWindowContext')
+    const appendCalculation = w4Path.indexOf('const result = await port.appendManualOverrideCalculation')
+    const insertAudit = w4Path.indexOf('insertW4c3cManualResultEditAuditRow')
+    const enqueueNotification = w4Path.indexOf('enqueueAttendanceResultEditNotification')
+    const markNotification = w4Path.indexOf('markAttendanceResultEditNotificationStatus')
+    const responseEdit = w4Path.indexOf('edit: mapResultEditRow(finalAuditRow)')
+    const responseRecord = w4Path.indexOf('record: responseRecord')
     expect(editWindow).toBeGreaterThanOrEqual(0)
     expect(appendCalculation).toBeGreaterThan(editWindow)
     expect(insertAudit).toBeGreaterThan(appendCalculation)
@@ -548,11 +554,22 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     const cases = [
       {
         path: `/api/attendance/records/${malformedRecordId}/recompute`,
-        body: { policy: 'frozen_prior', operationId: randomUUID() },
+        body: {
+          policy: 'frozen_prior',
+          operationId: randomUUID(),
+          expectedCalculationId: null,
+          expectedCalculationVersion: null,
+        },
       },
       {
         path: `/api/attendance/records/${malformedRecordId}/ops-retirement`,
-        body: { reason: 'cleanup', ticket: 'T-BAD-ID', operationId: randomUUID() },
+        body: {
+          reason: 'cleanup',
+          ticket: 'T-BAD-ID',
+          operationId: randomUUID(),
+          expectedCalculationId: null,
+          expectedCalculationVersion: null,
+        },
       },
     ]
     for (const item of cases) {
@@ -581,6 +598,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         method: 'POST',
         body: {
           operationId: randomUUID(),
+          expectedCalculationId: null,
+          expectedCalculationVersion: null,
           reason: 'x',
           ticket: 't',
           recordId,
@@ -605,14 +624,25 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       const recompute = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/recompute`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
-        body: { policy: 'frozen_prior', operationId: op },
+        body: {
+          policy: 'frozen_prior',
+          operationId: op,
+          expectedCalculationId: null,
+          expectedCalculationVersion: null,
+        },
       })
       expect([403, 401]).toContain(recompute.status)
 
       const retirement = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/ops-retirement`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
-        body: { reason: 'cleanup', ticket: 'T-2', operationId: randomUUID() },
+        body: {
+          reason: 'cleanup',
+          ticket: 'T-2',
+          operationId: randomUUID(),
+          expectedCalculationId: null,
+          expectedCalculationVersion: null,
+        },
       })
       expect([403, 401]).toContain(retirement.status)
 
@@ -641,6 +671,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         reason: 'cross-org',
         ticket: 'T-CROSS',
         operationId: randomUUID(),
+        expectedCalculationId: null,
+        expectedCalculationVersion: null,
       },
     })
     expect([404, 409, 422, 403]).toContain(response.status)
@@ -688,7 +720,14 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     requireServer()
     const fixture = await seedUser({ permission: 'attendance:admin' })
     await seedOrgRollout(fixture.orgId, fixture.userId, 'shadow')
-    const { recordId } = await seedRecord(fixture.orgId, fixture.userId)
+    const { recordId, workDate } = await seedRecord(fixture.orgId, fixture.userId)
+    const prior = await seedAuthoritativePrior(
+      fixture.orgId,
+      fixture.userId,
+      recordId,
+      workDate,
+      'shadow',
+    )
     const operationId = randomUUID()
     const response = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
       method: 'POST',
@@ -699,6 +738,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         overrideMetrics: { workMinutes: 420, lateMinutes: 0 },
         reason: 'shadow compatibility correction',
         operationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion,
         idempotencyKey: operationId,
       },
     })
@@ -728,7 +769,7 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
            WHERE org_id = $1 AND record_id = $3::uuid AND notification_delivery_id IS NOT NULL) AS notified`,
       [fixture.orgId, operationId, recordId],
     )
-    expect(durable.rows[0]).toMatchObject({ operations: 1, outbox: 1, calculations: 0, notified: 1 })
+    expect(durable.rows[0]).toMatchObject({ operations: 1, outbox: 1, calculations: 2, notified: 1 })
   })
 
   it('authoritative manual edit enforces the configured edit window before W4 result DML', async () => {
@@ -744,6 +785,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         targetStatus: 'normal',
         reason: 'expired authoritative correction',
         operationId,
+        expectedCalculationId: null,
+        expectedCalculationVersion: null,
         idempotencyKey: operationId,
       },
     })
@@ -765,6 +808,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       overrideMetrics: { workMinutes: 420, lateMinutes: 0, earlyLeaveMinutes: 0 },
       reason: 'authoritative response contract',
       operationId,
+      expectedCalculationId: prior.calculationId,
+      expectedCalculationVersion: prior.calculationVersion,
       idempotencyKey: operationId,
     }
 
@@ -797,6 +842,21 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     expect(first.body?.data?.edit?.notificationDeliveryId).toEqual(expect.any(String))
     expect(first.body?.data?.calculationId).toEqual(expect.any(String))
     expect(first.body?.data?.calculationId).not.toBe(prior.calculationId)
+    expect(Object.keys(first.body?.data?.record ?? {}).sort()).toEqual([
+      'earlyLeaveMinutes',
+      'firstInAt',
+      'id',
+      'isWorkday',
+      'lastOutAt',
+      'lateMinutes',
+      'meta',
+      'orgId',
+      'status',
+      'timezone',
+      'userId',
+      'workDate',
+      'workMinutes',
+    ])
 
     const afterFirst = await pool.query(
       `SELECT
@@ -859,6 +919,110 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     })
   })
 
+  it('authoritative manual edit rejects a stale calculation version with zero durable effects', async () => {
+    requireServer()
+    const fixture = await seedAdmin()
+    const workDate = new Date().toISOString().slice(0, 10)
+    const { recordId } = await seedRecord(fixture.orgId, fixture.userId, 'late', workDate)
+    const prior = await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate)
+    const operationId = randomUUID()
+
+    const response = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        recordId,
+        targetStatus: 'normal',
+        reason: 'stale expected version must fail',
+        operationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion + 1,
+        idempotencyKey: operationId,
+      },
+    })
+    expect(response.status, response.raw).toBe(409)
+    expect(response.body?.error?.code).toBe('ATTENDANCE_RECORD_VERSION_CONFLICT')
+
+    const residue = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND operation_id = $2::uuid) AS operations,
+         (SELECT count(*)::int FROM attendance_result_event_outbox
+           WHERE org_id = $1 AND operation_id = $2::uuid) AS outbox,
+         (SELECT count(*)::int FROM attendance_record_result_edits
+           WHERE org_id = $1 AND idempotency_key = $2::text) AS edits,
+         (SELECT count(*)::int FROM attendance_record_calculations
+           WHERE org_id = $1 AND attendance_record_id = $3::uuid) AS calculations`,
+      [fixture.orgId, operationId, recordId],
+    )
+    expect(residue.rows[0]).toMatchObject({ operations: 0, outbox: 0, edits: 0, calculations: 1 })
+  })
+
+  it('shadow manual edit rejects a superseded latest calculation with zero second-operation effects', async () => {
+    requireServer()
+    const fixture = await seedUser({ permission: 'attendance:admin' })
+    await seedOrgRollout(fixture.orgId, fixture.userId, 'shadow')
+    const { recordId, workDate } = await seedRecord(fixture.orgId, fixture.userId)
+    const prior = await seedAuthoritativePrior(
+      fixture.orgId,
+      fixture.userId,
+      recordId,
+      workDate,
+      'shadow',
+    )
+    const firstOperationId = randomUUID()
+    const first = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        recordId,
+        targetStatus: 'normal',
+        reason: 'first shadow override',
+        operationId: firstOperationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion,
+        idempotencyKey: firstOperationId,
+      },
+    })
+    expect(first.status, first.raw).toBe(200)
+
+    const staleOperationId = randomUUID()
+    const stale = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        recordId,
+        targetStatus: 'adjusted',
+        reason: 'stale shadow override',
+        operationId: staleOperationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion,
+        idempotencyKey: staleOperationId,
+      },
+    })
+    expect(stale.status, stale.raw).toBe(409)
+    expect(stale.body?.error?.code).toBe('ATTENDANCE_RECORD_VERSION_CONFLICT')
+
+    const residue = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND operation_id = $2::uuid) AS stale_operations,
+         (SELECT count(*)::int FROM attendance_record_result_edits
+           WHERE org_id = $1 AND record_id = $3::uuid) AS edits,
+         (SELECT count(*)::int FROM attendance_record_calculations
+           WHERE org_id = $1 AND attendance_record_id = $3::uuid) AS calculations,
+         (SELECT current_calculation_id FROM attendance_records
+           WHERE org_id = $1 AND id = $3::uuid) AS current_calculation_id`,
+      [fixture.orgId, staleOperationId, recordId],
+    )
+    expect(residue.rows[0]).toMatchObject({
+      stale_operations: 0,
+      edits: 1,
+      calculations: 2,
+      current_calculation_id: null,
+    })
+  })
+
   it('source-level capability matrix positive control is present in the host boundary export', () => {
     requireServer()
     const boundaryPath = path.resolve(
@@ -869,6 +1033,13 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     expect(source).toMatch(/assertRecordOperationCapabilityMatchV1/)
     expect(source).toMatch(/manual_edit:\s*'manual_edit'/)
     expect(source).toMatch(/ops_retirement:\s*'retirement'/)
+    const targetIdentity = source.indexOf('createVerifiedAttendanceCalculationTargetIdentityV1({')
+    const targetLock = source.indexOf('acquireAttendanceCalculationTargetLocks(trx, [targetIdentity])')
+    const secondPrepare = source.indexOf('const prepared = input.operationId === null')
+    expect(targetIdentity).toBeGreaterThanOrEqual(0)
+    expect(targetLock).toBeGreaterThan(targetIdentity)
+    expect(secondPrepare).toBeGreaterThan(targetLock)
+    expect(source.match(/targetWorkDate:/g)).toHaveLength(1)
     const pluginPath = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
       '../../../../plugins/plugin-attendance/index.cjs',
@@ -893,12 +1064,17 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     const fixture = await seedAdmin()
     const workDate = new Date().toISOString().slice(0, 10)
     const { recordId } = await seedRecord(fixture.orgId, fixture.userId, 'late', workDate)
-    await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate)
+    const prior = await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate)
     const operationId = randomUUID()
     const request = {
       method: 'POST' as const,
       headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
-      body: { policy: 'frozen_prior', operationId },
+      body: {
+        policy: 'frozen_prior',
+        operationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion,
+      },
     }
 
     const first = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/recompute`, request)
@@ -918,6 +1094,39 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       [fixture.orgId, operationId, recordId],
     )
     expect(durable.rows[0]).toMatchObject({ operations: 1, outbox: 1, calculations: 2 })
+  })
+
+  it('authoritative recompute rejects a stale expected calculation with zero durable effects', async () => {
+    requireServer()
+    const fixture = await seedAdmin()
+    const workDate = new Date().toISOString().slice(0, 10)
+    const { recordId } = await seedRecord(fixture.orgId, fixture.userId, 'late', workDate)
+    const prior = await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate)
+    const operationId = randomUUID()
+    const response = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/recompute`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        policy: 'frozen_prior',
+        operationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion + 1,
+      },
+    })
+    expect(response.status, response.raw).toBe(409)
+    expect(response.body?.error?.code).toBe('ATTENDANCE_RECORD_VERSION_CONFLICT')
+
+    const residue = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND operation_id = $2::uuid) AS operations,
+         (SELECT count(*)::int FROM attendance_result_event_outbox
+           WHERE org_id = $1 AND operation_id = $2::uuid) AS outbox,
+         (SELECT count(*)::int FROM attendance_record_calculations
+           WHERE org_id = $1 AND attendance_record_id = $3::uuid) AS calculations`,
+      [fixture.orgId, operationId, recordId],
+    )
+    expect(residue.rows[0]).toMatchObject({ operations: 0, outbox: 0, calculations: 1 })
   })
 
   it('current-policy recompute admits only a timezone accepted by the single host validator', () => {
@@ -969,6 +1178,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         reason: 'admin retirement positive',
         ticket: 'T-ADMIN-OK',
         operationId,
+        expectedCalculationId: null,
+        expectedCalculationVersion: null,
       },
     }
     const response = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/ops-retirement`, {
@@ -995,6 +1206,49 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     // First retirement of a legacy-untracked record writes one truthful baseline
     // plus one reversal; replay must not add a third calculation.
     expect(after.rows[0]).toMatchObject({ operations: 1, outbox: 1, calculations: 2 })
+  })
+
+  it('authoritative ops retirement rejects a stale expected calculation with zero durable effects', async () => {
+    requireServer()
+    const fixture = await seedAdmin('attendance:admin')
+    const workDate = new Date().toISOString().slice(0, 10)
+    const { recordId } = await seedRecord(fixture.orgId, fixture.userId, 'late', workDate)
+    const prior = await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate)
+    const operationId = randomUUID()
+    const response = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/ops-retirement`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        reason: 'stale retirement must fail',
+        ticket: 'T-STALE',
+        operationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion + 1,
+      },
+    })
+    expect(response.status, response.raw).toBe(409)
+    expect(response.body?.error?.code).toBe('ATTENDANCE_RECORD_VERSION_CONFLICT')
+
+    const residue = await pool.query(
+      `SELECT current_calculation_id::text AS current_calculation_id,
+              visibility_reason,
+              (SELECT count(*)::int FROM attendance_result_operations
+                WHERE org_id = $2 AND operation_id = $3::uuid) AS operations,
+              (SELECT count(*)::int FROM attendance_result_event_outbox
+                WHERE org_id = $2 AND operation_id = $3::uuid) AS outbox,
+              (SELECT count(*)::int FROM attendance_record_calculations
+                WHERE org_id = $2 AND attendance_record_id = $1::uuid) AS calculations
+         FROM attendance_records
+        WHERE org_id = $2 AND id = $1::uuid`,
+      [recordId, fixture.orgId, operationId],
+    )
+    expect(residue.rows[0]).toMatchObject({
+      current_calculation_id: prior.calculationId,
+      visibility_reason: 'active',
+      operations: 0,
+      outbox: 0,
+      calculations: 1,
+    })
   })
 
   it('live punch cannot reactivate an operator-retired parent and rolls back its event', async () => {
@@ -1084,7 +1338,13 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     const http = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/ops-retirement`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${inactive.token}`, 'X-Org-Id': fixture.orgId },
-      body: { reason: 'inactive', ticket: 'T-INACTIVE', operationId: randomUUID() },
+      body: {
+        reason: 'inactive',
+        ticket: 'T-INACTIVE',
+        operationId: randomUUID(),
+        expectedCalculationId: null,
+        expectedCalculationVersion: null,
+      },
     })
     expect(http.status).toBeGreaterThanOrEqual(400)
 
@@ -1119,7 +1379,13 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     const response = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/ops-retirement`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${outsider.token}`, 'X-Org-Id': fixture.orgId },
-      body: { reason: 'inactive membership', ticket: 'T-MEM', operationId: randomUUID() },
+      body: {
+        reason: 'inactive membership',
+        ticket: 'T-MEM',
+        operationId: randomUUID(),
+        expectedCalculationId: null,
+        expectedCalculationVersion: null,
+      },
     })
     expect(response.status, response.raw).toBe(403)
     expect(response.body?.error?.code).toBe('FORBIDDEN')
@@ -1141,7 +1407,13 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       const response = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/ops-retirement`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${reader.token}`, 'X-Org-Id': fixture.orgId },
-        body: { reason: 'no admin', ticket: 'T-NOADMIN', operationId: randomUUID() },
+        body: {
+          reason: 'no admin',
+          ticket: 'T-NOADMIN',
+          operationId: randomUUID(),
+          expectedCalculationId: null,
+          expectedCalculationVersion: null,
+        },
       })
       expect([401, 403]).toContain(response.status)
       await assertZeroW4ResultDml(recordId)
@@ -1188,6 +1460,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         reason: 'platform admin override',
         ticket: 'T-PLATFORM',
         operationId: randomUUID(),
+        expectedCalculationId: null,
+        expectedCalculationVersion: null,
       },
     })
     expect(response.status, response.raw).toBe(200)
@@ -1273,6 +1547,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         reason: 'legacy retirement attempt',
         ticket: 'T-LEGACY',
         operationId,
+        expectedCalculationId: null,
+        expectedCalculationVersion: null,
       },
     })
     expect(response.status, response.raw).toBe(409)
@@ -1292,6 +1568,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         reason: 'shadow retirement attempt',
         ticket: 'T-SHADOW',
         operationId: randomUUID(),
+        expectedCalculationId: null,
+        expectedCalculationVersion: null,
       },
     })
     expect(response.status, response.raw).toBe(409)

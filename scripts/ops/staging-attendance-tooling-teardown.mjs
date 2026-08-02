@@ -128,13 +128,23 @@ export function createAuthenticatedOpsRetirementExecutor(options) {
     const hex = hash.subarray(0, 16).toString('hex')
     const operationId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 
+    const expectedCalculationId = row.current_calculation_id ?? row.latest_calculation_id ?? null
+    const expectedCalculationVersion = row.current_calculation_id != null
+      ? (row.current_calculation_version == null ? null : Number(row.current_calculation_version))
+      : (row.latest_calculation_version == null ? null : Number(row.latest_calculation_version))
     const response = await fetch(`${baseUrl}/api/attendance/records/${encodeURIComponent(recordId)}/ops-retirement`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ operationId, reason, ticket }),
+      body: JSON.stringify({
+        operationId,
+        expectedCalculationId,
+        expectedCalculationVersion,
+        reason,
+        ticket,
+      }),
     })
     const raw = await response.text()
     let body = null
@@ -254,25 +264,49 @@ export async function cleanupStagingAttendanceScope(db, scope, options = {}) {
   assertBoundedCleanupScope(scope)
   const params = [scope.orgId]
   let filter = 'org_id = $1'
+  let listedFilter = 'record.org_id = $1'
   if (Array.isArray(scope.userIds) && scope.userIds.length > 0) {
     params.push(scope.userIds)
     filter += ` AND user_id = ANY($${params.length}::text[])`
+    listedFilter += ` AND record.user_id = ANY($${params.length}::text[])`
   }
   if (Array.isArray(scope.recordIds) && scope.recordIds.length > 0) {
     params.push(scope.recordIds)
     filter += ` AND id = ANY($${params.length}::uuid[])`
+    listedFilter += ` AND record.id = ANY($${params.length}::uuid[])`
   }
   if (typeof scope.userIdPrefix === 'string' && scope.userIdPrefix.length > 0) {
     params.push(scope.userIdPrefix)
     filter += ` AND left(user_id, $${params.length}) = $${params.length}`
+    listedFilter += ` AND left(record.user_id, $${params.length}) = $${params.length}`
   }
 
   const listed = await db.query(
-    `SELECT id::text AS id, user_id::text AS user_id, work_date::text AS work_date,
-            current_calculation_id::text AS current_calculation_id,
-            projection_owner, visibility_state, visibility_reason
-       FROM attendance_records
-      WHERE ${filter}`,
+    `SELECT record.id::text AS id,
+            record.user_id::text AS user_id,
+            record.work_date::text AS work_date,
+            record.current_calculation_id::text AS current_calculation_id,
+            current_calc.version AS current_calculation_version,
+            latest_calc.id::text AS latest_calculation_id,
+            latest_calc.version AS latest_calculation_version,
+            record.projection_owner,
+            record.visibility_state,
+            record.visibility_reason
+       FROM attendance_records record
+       LEFT JOIN attendance_record_calculations current_calc
+         ON current_calc.id = record.current_calculation_id
+        AND current_calc.attendance_record_id = record.id
+        AND current_calc.org_id = record.org_id
+       LEFT JOIN LATERAL (
+         SELECT calculation.id, calculation.version
+           FROM attendance_record_calculations calculation
+          WHERE calculation.attendance_record_id = record.id
+            AND calculation.org_id = record.org_id
+            AND calculation.outcome = 'completed'
+          ORDER BY calculation.version DESC
+          LIMIT 1
+       ) latest_calc ON TRUE
+      WHERE ${listedFilter}`,
     params,
   )
   const rows = asRows(listed)

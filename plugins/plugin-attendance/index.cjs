@@ -30157,6 +30157,10 @@ module.exports = {
 
 	            return {
 	              recordId: row.id,
+	              expectedCalculationId: row.current_calculation_id ?? row.latest_calculation_id ?? null,
+	              expectedCalculationVersion: row.current_calculation_id != null
+	                ? (row.current_calculation_version == null ? null : Number(row.current_calculation_version))
+	                : (row.latest_calculation_version == null ? null : Number(row.latest_calculation_version)),
 	              workDate,
 	              status: row.status,
 	              isWorkday: row.is_workday,
@@ -30301,9 +30305,11 @@ module.exports = {
 	            lateMinutes: z.number().int().min(0).optional(),
 	            earlyLeaveMinutes: z.number().int().min(0).optional(),
 	          }).optional(),
-	          // Stable caller UUID for W4 claim/seal (lock §4.1). Server never generates one.
-	          operationId: z.string().uuid().optional(),
-	          idempotencyKey: z.string().min(1).max(200),
+		          // Stable caller UUID for W4 claim/seal (lock §4.1). Server never generates one.
+		          operationId: z.string().uuid().optional(),
+		          expectedCalculationId: z.string().uuid().nullable().optional(),
+		          expectedCalculationVersion: z.number().int().min(1).nullable().optional(),
+		          idempotencyKey: z.string().min(1).max(200),
 	        })
 
 	        const parsed = schema.safeParse(req.body ?? {})
@@ -30385,8 +30391,10 @@ module.exports = {
 	              orgId,
 	              actorId: actorUserId,
 	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
-	              recordId: parsed.data.recordId,
-	              targetStatus: parsed.data.targetStatus,
+		              recordId: parsed.data.recordId,
+		              expectedCalculationId: parsed.data.expectedCalculationId ?? null,
+		              expectedCalculationVersion: parsed.data.expectedCalculationVersion ?? null,
+		              targetStatus: parsed.data.targetStatus,
 	              overrideMetrics: parsed.data.overrideMetrics ?? null,
 	              reason,
 	              evidence: evidenceResult.value,
@@ -30420,9 +30428,11 @@ module.exports = {
 	      '/api/attendance/records/:id/recompute',
 	      withPermission('attendance:admin', async (req, res) => {
 	        const schema = z.object({
-	          policy: z.enum(['frozen_prior', 'current_policy']).default('frozen_prior'),
-	          // Required stable caller UUID — no server random fallback (lock §4.1).
-	          operationId: z.string().uuid(),
+		          policy: z.enum(['frozen_prior', 'current_policy']).default('frozen_prior'),
+		          // Required stable caller UUID — no server random fallback (lock §4.1).
+		          operationId: z.string().uuid(),
+		          expectedCalculationId: z.string().uuid().nullable(),
+		          expectedCalculationVersion: z.number().int().min(1).nullable(),
 	        })
 	        const parsed = schema.safeParse(req.body ?? {})
 	        if (!parsed.success) {
@@ -30456,8 +30466,10 @@ module.exports = {
 	              orgId: getOrgId(req),
 	              actorId: actorUserId,
 	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
-	              recordId,
-	              policy: parsed.data.policy,
+		              recordId,
+		              expectedCalculationId: parsed.data.expectedCalculationId,
+		              expectedCalculationVersion: parsed.data.expectedCalculationVersion,
+		              policy: parsed.data.policy,
 	            },
 	          })
 	          res.json(outcome.response)
@@ -30481,8 +30493,10 @@ module.exports = {
 	        const schema = z.object({
 	          reason: z.string().min(1).max(2000),
 	          ticket: z.string().min(1).max(128),
-	          // Required operator command UUID — no server random fallback (lock §4.1).
-	          operationId: z.string().uuid(),
+		          // Required operator command UUID — no server random fallback (lock §4.1).
+		          operationId: z.string().uuid(),
+		          expectedCalculationId: z.string().uuid().nullable(),
+		          expectedCalculationVersion: z.number().int().min(1).nullable(),
 	        })
 	        const parsed = schema.safeParse(req.body ?? {})
 	        if (!parsed.success) {
@@ -30517,8 +30531,10 @@ module.exports = {
 	              actorId: actorUserId,
 	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
 	              actorPosture: 'attendance_admin',
-	              recordId,
-	              reason: parsed.data.reason,
+		              recordId,
+		              expectedCalculationId: parsed.data.expectedCalculationId,
+		              expectedCalculationVersion: parsed.data.expectedCalculationVersion,
+		              reason: parsed.data.reason,
 	              ticket: parsed.data.ticket,
 	            },
 	          })
@@ -34498,18 +34514,67 @@ module.exports = {
         : null
 
     // W4C-3c: manual_edit / recompute / ops_retirement adapters — only entrypoints for these writes.
-    async function loadW4c3cRecordSubjectForOperation(trx, orgId, recordId) {
-      const rows = await trx.query(
-        `SELECT id::text AS id, user_id::text AS user_id, org_id::text AS org_id,
-                work_date::text AS work_date, current_calculation_id::text AS current_calculation_id,
-                visibility_state, visibility_reason, status
-           FROM attendance_records
-          WHERE id = $1::uuid AND org_id = $2
-          LIMIT 1`,
-        [recordId, orgId],
-      )
-      return rows[0] ?? null
-    }
+	    async function loadW4c3cRecordSubjectForOperation(trx, orgId, recordId) {
+	      const rows = await trx.query(
+	        `SELECT r.*,
+	                r.id::text AS id, r.user_id::text AS user_id, r.org_id::text AS org_id,
+	                r.work_date::text AS work_date,
+	                r.current_calculation_id::text AS current_calculation_id,
+	                current_calc.version AS current_calculation_version,
+	                latest_calc.id::text AS latest_calculation_id,
+	                latest_calc.version AS latest_calculation_version
+	           FROM attendance_records r
+	           LEFT JOIN attendance_record_calculations current_calc
+	             ON current_calc.id = r.current_calculation_id
+	            AND current_calc.attendance_record_id = r.id
+	            AND current_calc.org_id = r.org_id
+	           LEFT JOIN LATERAL (
+	             SELECT c.id, c.version
+	               FROM attendance_record_calculations c
+	              WHERE c.attendance_record_id = r.id
+	                AND c.org_id = r.org_id
+	                AND c.outcome = 'completed'
+	              ORDER BY c.version DESC
+	              LIMIT 1
+	           ) latest_calc ON TRUE
+	          WHERE r.id = $1::uuid AND r.org_id = $2
+	          LIMIT 1`,
+	        [recordId, orgId],
+	      )
+	      return rows[0] ?? null
+	    }
+
+	    function resolveW4c3cExpectedCalculation(record, posture) {
+	      if (posture === 'shadow') {
+	        return {
+	          id: record.latest_calculation_id ?? null,
+	          version: record.latest_calculation_version == null
+	            ? null
+	            : Number(record.latest_calculation_version),
+	        }
+	      }
+	      return {
+	        id: record.current_calculation_id ?? null,
+	        version: record.current_calculation_version == null
+	          ? null
+	          : Number(record.current_calculation_version),
+	      }
+	    }
+
+	    function assertW4c3cExpectedCalculation(record, commandPayload, posture) {
+	      if (posture === 'legacy_projection_only') return
+	      const actual = resolveW4c3cExpectedCalculation(record, posture)
+	      if (
+	        commandPayload.expectedCalculationId !== actual.id
+	        || commandPayload.expectedCalculationVersion !== actual.version
+	      ) {
+	        throw new HttpError(
+	          409,
+	          'ATTENDANCE_RECORD_VERSION_CONFLICT',
+	          'attendance record calculation changed; refresh and retry',
+	        )
+	      }
+	    }
 
     /**
      * W4C-3c: in-transaction authorization for manual_edit / recompute / ops_retirement.
@@ -34678,37 +34743,37 @@ module.exports = {
           throw new HttpError(409, 'ATTENDANCE_RECORD_RETIRED', 'attendance record is retired')
         }
         const operations = buildW4c3cManualOperations(routeInput.targetStatus, routeInput.overrideMetrics)
-        const expectedCalculationId = record.current_calculation_id ?? null
-        return Object.freeze({
-          orgId,
-          actorId: String(routeInput.actorId),
-          actorPosture,
-          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
-          subjectUserId: String(record.user_id),
-          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
-          commandPayload: Object.freeze({
-            recordId,
-            expectedCalculationId: null,
-            expectedCalculationVersion: null,
-            operations,
-            reason: String(routeInput.reason || 'manual override'),
+	        return Object.freeze({
+	          orgId,
+	          actorId: String(routeInput.actorId),
+	          actorPosture,
+	          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
+	          subjectUserId: String(record.user_id),
+	          targetWorkDate: String(record.work_date).slice(0, 10),
+	          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
+	          commandPayload: Object.freeze({
+	            recordId,
+	            expectedCalculationId: routeInput.expectedCalculationId ?? null,
+	            expectedCalculationVersion: routeInput.expectedCalculationVersion ?? null,
+	            operations,
+	            reason: String(routeInput.reason || 'manual override'),
             evidence: {
               items: Array.isArray(routeInput.evidence) ? routeInput.evidence : [],
             },
           }),
-          state: Object.freeze({
-            record,
-            routeInput,
-            operations,
-            expectedCalculationId,
-          }),
-        })
-      },
-      async execute(trx, prepared, operation) {
-        const posture = operation.acceptedWritePosture
-        const { routeInput, operations, expectedCalculationId, record } = prepared.state
-        if (posture === 'authoritative') {
-          const port = attendanceW4SegmentCalculationPort
+	          state: Object.freeze({
+	            record,
+	            routeInput,
+	            operations,
+	          }),
+	        })
+	      },
+	      async execute(trx, prepared, operation) {
+	        const posture = operation.acceptedWritePosture
+	        const { routeInput, operations, record } = prepared.state
+	        assertW4c3cExpectedCalculation(record, prepared.commandPayload, posture)
+	        if (posture === 'authoritative' || posture === 'shadow') {
+	          const port = attendanceW4SegmentCalculationPort
           if (!port || typeof port.appendManualOverrideCalculation !== 'function') {
             throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Manual override calculation port unavailable')
           }
@@ -34734,37 +34799,67 @@ module.exports = {
           }
           // editId is durable marker identity; bind it to the sealed operationId for stability.
           const editId = operation.operationId
-          const result = await port.appendManualOverrideCalculation({
+	          const result = await port.appendManualOverrideCalculation({
             client,
             orgId: prepared.orgId,
             recordId: String(record.id),
-            expectedCalculationId,
-            expectedCalculationVersion: null,
+	            expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+	            expectedCalculationVersion: prepared.commandPayload.expectedCalculationVersion,
             operationId: operation.operationId,
             actorId: prepared.actorId,
             correlationId: operation.correlationId,
             reason: prepared.commandPayload.reason,
             evidence: prepared.commandPayload.evidence,
             operations,
-            mode: 'authoritative',
-            editId,
-          })
-          let finalAuditRow = null
-          let responseRecord = null
+	            mode: posture,
+	            editId,
+	          })
+	          if (posture === 'shadow') {
+	            const legacy = await applyAttendanceResultEdit(trx, {
+	              orgId: prepared.orgId,
+	              recordId: String(record.id),
+	              targetStatus: routeInput.targetStatus,
+	              overrideMetrics: routeInput.overrideMetrics ?? null,
+	              reason: prepared.commandPayload.reason,
+	              evidence: routeInput.evidence ?? [],
+	              actorUserId: prepared.actorId,
+	              idempotencyKey: String(routeInput.idempotencyKey),
+	              editWindowDays: routeInput.editWindowDays,
+	              notifyAffectedEmployee: routeInput.notifyAffectedEmployee !== false,
+	            })
+	            return {
+	              response: {
+	                ok: true,
+	                data: {
+	                  alreadyApplied: legacy.alreadyApplied === true,
+	                  edit: legacy.edit,
+	                  record: legacy.record ? buildResultEditSnapshot(legacy.record) : null,
+	                  calculationId: result.calculationId,
+	                  projectedStatus: result.kind === 'appended' ? result.projectedStatus : null,
+	                  mode: posture,
+	                },
+	              },
+	              resolvedRecordId: String(record.id),
+	              resolvedCalculationId: result.calculationId,
+	              lifecycleEvents: [{ eventKind: 'attendance.resolved', payload: { kind: 'manual_edit', recordId: String(record.id) } }],
+	            }
+	          }
+	          let finalAuditRow = null
+	          let responseRecord = null
           // AE-1/AE-2 remain part of the authoritative route contract. Errors
           // propagate so calculation, projection, audit, and notification stay
           // in the same transaction.
           if (result.kind === 'appended') {
-            const beforeSnapshot = {
-              status: record.status,
-              workDate: String(record.work_date).slice(0, 10),
-            }
-            const afterSnapshot = {
-              status: result.projection.status,
-              workMinutes: result.projection.workMinutes,
-              lateMinutes: result.projection.lateMinutes,
-              earlyLeaveMinutes: result.projection.earlyLeaveMinutes,
-            }
+	            const postWriteRecord = await loadW4c3cRecordSubjectForOperation(
+	              trx,
+	              prepared.orgId,
+	              String(record.id),
+	            )
+	            if (!postWriteRecord) {
+	              throw new HttpError(500, 'W4C3C_MANUAL_EDIT_DATABASE_RESULT_INVALID', 'manual edit parent row missing after apply')
+	            }
+	            const beforeSnapshot = buildResultEditSnapshot(record)
+	            const afterSnapshot = buildResultEditSnapshot(postWriteRecord)
             const audit = await insertW4c3cManualResultEditAuditRow(trx, {
               orgId: prepared.orgId,
               recordId: String(record.id),
@@ -34789,7 +34884,7 @@ module.exports = {
             } else {
               const delivery = await enqueueAttendanceResultEditNotification(trx, {
                 orgId: prepared.orgId,
-                record,
+	                record: postWriteRecord,
                 auditRow,
                 beforeStatus: String(record.status ?? ''),
                 targetStatus: result.projection.status,
@@ -34802,15 +34897,17 @@ module.exports = {
                 skippedReason: delivery ? null : 'recipient_unavailable',
               })
             }
-            responseRecord = buildResultEditSnapshot({
-              ...record,
-              status: result.projection.status,
-              work_minutes: result.projection.workMinutes,
-              late_minutes: result.projection.lateMinutes,
-              early_leave_minutes: result.projection.earlyLeaveMinutes,
-            })
-          } else {
-            const replayAuditRows = await trx.query(
+	            responseRecord = afterSnapshot
+	          } else {
+	            const replayRecord = await loadW4c3cRecordSubjectForOperation(
+	              trx,
+	              prepared.orgId,
+	              String(record.id),
+	            )
+	            if (!replayRecord) {
+	              throw new HttpError(500, 'W4C3C_MANUAL_EDIT_DATABASE_RESULT_INVALID', 'manual edit parent row missing on replay')
+	            }
+	            const replayAuditRows = await trx.query(
               `SELECT * FROM attendance_record_result_edits
                 WHERE org_id = $1 AND idempotency_key = $2
                 LIMIT 1`,
@@ -34822,9 +34919,10 @@ module.exports = {
                 'ATTENDANCE_RESULT_EDIT_REPLAY_INCOMPLETE',
                 'manual edit replay is missing its durable audit row',
               )
-            }
-            finalAuditRow = replayAuditRows[0]
-          }
+	            }
+	            finalAuditRow = replayAuditRows[0]
+	            responseRecord = buildResultEditSnapshot(replayRecord)
+	          }
           return {
             response: {
               ok: true,
@@ -34890,25 +34988,26 @@ module.exports = {
           throw new HttpError(409, 'ATTENDANCE_RECORD_RETIRED', 'attendance record is retired')
         }
         const policy = routeInput.policy === 'current_policy' ? 'current_policy' : 'frozen_prior'
-        const expectedCalculationId = record.current_calculation_id ?? null
-        return Object.freeze({
+	        return Object.freeze({
           orgId,
           actorId: String(routeInput.actorId),
           actorPosture,
-          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
-          subjectUserId: String(record.user_id),
-          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
-          commandPayload: Object.freeze({
-            recordId,
-            expectedCalculationId: null,
-            expectedCalculationVersion: null,
-            policy,
-          }),
-          state: Object.freeze({ record, policy, routeInput, expectedCalculationId }),
-        })
-      },
-      async execute(trx, prepared, operation) {
-        const posture = operation.acceptedWritePosture
+	          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
+	          subjectUserId: String(record.user_id),
+	          targetWorkDate: String(record.work_date).slice(0, 10),
+	          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
+	          commandPayload: Object.freeze({
+	            recordId,
+	            expectedCalculationId: routeInput.expectedCalculationId ?? null,
+	            expectedCalculationVersion: routeInput.expectedCalculationVersion ?? null,
+	            policy,
+	          }),
+	          state: Object.freeze({ record, policy, routeInput }),
+	        })
+	      },
+	      async execute(trx, prepared, operation) {
+	        const posture = operation.acceptedWritePosture
+	        assertW4c3cExpectedCalculation(prepared.state.record, prepared.commandPayload, posture)
         if (posture === 'legacy_projection_only') {
           throw new HttpError(409, 'W4C3C_RECOMPUTE_REQUIRES_W4_POSTURE', 'recompute requires shadow or authoritative posture')
         }
@@ -35013,8 +35112,8 @@ module.exports = {
           client,
           orgId: prepared.orgId,
           recordId: String(prepared.state.record.id),
-          expectedCalculationId: prepared.state.expectedCalculationId,
-          expectedCalculationVersion: null,
+	          expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+	          expectedCalculationVersion: prepared.commandPayload.expectedCalculationVersion,
           operationId: operation.operationId,
           actorId: prepared.actorId,
           correlationId: operation.correlationId,
@@ -35053,26 +35152,27 @@ module.exports = {
         const actorPosture = await resolveRecordOperationAdminActorPosture(trx, routeInput, orgId)
         const record = await loadW4c3cRecordSubjectForOperation(trx, orgId, recordId)
         if (!record) throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
-        const expectedCalculationId = record.current_calculation_id ?? null
-        return Object.freeze({
+	        return Object.freeze({
           orgId,
           actorId: String(routeInput.actorId),
           actorPosture,
-          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
-          subjectUserId: String(record.user_id),
-          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
-          commandPayload: Object.freeze({
-            recordId,
-            expectedCalculationId: null,
-            expectedCalculationVersion: null,
-            reason: String(routeInput.reason || 'operator retirement'),
-            ticket: String(routeInput.ticket || 'OPS-RETIRE'),
-          }),
-          state: Object.freeze({ record, routeInput, expectedCalculationId }),
-        })
-      },
-      async execute(trx, prepared, operation) {
-        const posture = operation.acceptedWritePosture
+	          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
+	          subjectUserId: String(record.user_id),
+	          targetWorkDate: String(record.work_date).slice(0, 10),
+	          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
+	          commandPayload: Object.freeze({
+	            recordId,
+	            expectedCalculationId: routeInput.expectedCalculationId ?? null,
+	            expectedCalculationVersion: routeInput.expectedCalculationVersion ?? null,
+	            reason: String(routeInput.reason || 'operator retirement'),
+	            ticket: String(routeInput.ticket || 'OPS-RETIRE'),
+	          }),
+	          state: Object.freeze({ record, routeInput }),
+	        })
+	      },
+	      async execute(trx, prepared, operation) {
+	        const posture = operation.acceptedWritePosture
+	        assertW4c3cExpectedCalculation(prepared.state.record, prepared.commandPayload, posture)
         // RATIFIED §4.1: legacy_projection_only must emit no W4 calculation/pointer/outbox.
         // Do not invent a legacy delete path.
         if (posture !== 'authoritative') {
@@ -35101,8 +35201,8 @@ module.exports = {
           client,
           orgId: prepared.orgId,
           recordId: String(prepared.state.record.id),
-          expectedCalculationId: prepared.state.expectedCalculationId,
-          expectedCalculationVersion: null,
+	          expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+	          expectedCalculationVersion: prepared.commandPayload.expectedCalculationVersion,
           operationId: operation.operationId,
           actorId: prepared.actorId,
           correlationId: operation.correlationId,

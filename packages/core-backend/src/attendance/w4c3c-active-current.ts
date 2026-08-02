@@ -93,6 +93,13 @@ export async function listActiveCurrentAttendanceRecordsForAnomalyListingV1<
           OR status = 'absent'
         )`
     : ''
+  const owedPunchRowClause = range.owedPunchOnly
+    ? ` AND COALESCE(current_record.is_workday, true) = true
+        AND (
+          (current_record.status = 'partial' AND (current_record.first_in_at IS NULL OR current_record.last_out_at IS NULL))
+          OR current_record.status = 'absent'
+        )`
+    : ''
   if (range.countOnly) {
     const result = await query(
       `SELECT COUNT(*)::int AS total
@@ -109,14 +116,30 @@ export async function listActiveCurrentAttendanceRecordsForAnomalyListingV1<
   const limit = range.limit ?? 50
   const offset = range.offset ?? 0
   const result = await query(
-    `SELECT *
-       FROM ${ATTENDANCE_ACTIVE_CURRENT_RELATION_V1}
-      WHERE user_id = $1
-        AND org_id = $2
-        AND work_date BETWEEN $3 AND $4
-        AND COALESCE(is_workday, true) = true
-        AND COALESCE(status, '') <> ALL($5)${owedPunchClause}
-      ORDER BY work_date DESC
+    `SELECT current_record.*,
+            current_calc.version AS current_calculation_version,
+            latest_calc.id::text AS latest_calculation_id,
+            latest_calc.version AS latest_calculation_version
+       FROM ${ATTENDANCE_ACTIVE_CURRENT_RELATION_V1} current_record
+       LEFT JOIN attendance_record_calculations current_calc
+         ON current_calc.id = current_record.current_calculation_id
+        AND current_calc.attendance_record_id = current_record.id
+        AND current_calc.org_id = current_record.org_id
+       LEFT JOIN LATERAL (
+         SELECT calculation.id, calculation.version
+           FROM attendance_record_calculations calculation
+          WHERE calculation.attendance_record_id = current_record.id
+            AND calculation.org_id = current_record.org_id
+            AND calculation.outcome = 'completed'
+          ORDER BY calculation.version DESC
+          LIMIT 1
+       ) latest_calc ON TRUE
+      WHERE current_record.user_id = $1
+        AND current_record.org_id = $2
+        AND current_record.work_date BETWEEN $3 AND $4
+        AND COALESCE(current_record.is_workday, true) = true
+        AND COALESCE(current_record.status, '') <> ALL($5)${owedPunchRowClause}
+      ORDER BY current_record.work_date DESC
       LIMIT $6 OFFSET $7`,
     [range.userId, range.orgId, range.from, range.to, range.excludedStatuses, limit, offset],
   )
