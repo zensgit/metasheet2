@@ -15257,13 +15257,13 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
   return candidates
 }
 
-async function listActiveCurrentOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }) {
+async function listActiveCurrentOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }, explicitPort = null) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   const dates = Array.isArray(workDates)
     ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
     : []
   if (!userId || dates.length === 0) return []
-  const port = requireAttendanceActiveCurrentPort()
+  const port = explicitPort ?? requireAttendanceActiveCurrentPort()
   const rows = await port.listOpenForWorkDateResolver(pluginQueryAdapter(db), {
     orgId: targetOrg,
     userId,
@@ -15279,9 +15279,13 @@ async function listActiveCurrentOpenRecordsForWorkDateResolver(db, { orgId, user
   }))
 }
 
-async function loadOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }) {
+async function loadOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }, explicitPort = null) {
   try {
-    return await listActiveCurrentOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates })
+    return await listActiveCurrentOpenRecordsForWorkDateResolver(
+      db,
+      { orgId, userId, workDates },
+      explicitPort,
+    )
   } catch (error) {
     if (error instanceof HttpError && error.code === 'W4_ACTIVE_CURRENT_PORT_UNAVAILABLE') throw error
     if (isDatabaseSchemaError(error)) return []
@@ -15355,6 +15359,7 @@ async function loadWorkDateAttributionTailMinutes(db) {
 }
 
 function createPluginAttendanceWorkDateResolver(db, options = {}) {
+  const explicitActiveCurrentPort = options.activeCurrent ?? null
   const resolver = createAttendanceWorkDateResolver({
     toWorkDate,
     buildZonedDate,
@@ -15368,7 +15373,7 @@ function createPluginAttendanceWorkDateResolver(db, options = {}) {
       })
     },
     async loadOpenRecords(args) {
-      return loadOpenRecordsForWorkDateResolver(db, args)
+      return loadOpenRecordsForWorkDateResolver(db, args, explicitActiveCurrentPort)
     },
     async loadApprovedOvertimeWindows(args) {
       return loadApprovedOvertimeWindowsForWorkDateResolver(db, args)

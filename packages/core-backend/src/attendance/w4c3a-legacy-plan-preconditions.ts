@@ -8,7 +8,7 @@ import {
 } from './w4c3a-legacy-execution-plan'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import type { VerifiedAttendanceLegacyPlanV1 } from './w4c3a-legacy-plan-worker'
-import { assertParentNotRetiredForOrdinaryWriterV1 } from './w4c3c-ops-retirement'
+import { assertParentNotOperatorRetiredV1 } from './w4c3c-ops-retirement'
 
 type QueryRow = Record<string, unknown>
 
@@ -133,7 +133,9 @@ async function recheckExistingRecord(
   if (recordRows.length !== 1 || recordRows[0]?.id !== write.recordId) {
     return false
   }
-  assertParentNotRetiredForOrdinaryWriterV1(recordRows[0])
+  // A new durable import source may reactivate an import-rollback/review
+  // tombstone (OD-W4C-19). Operator retirement remains terminal.
+  assertParentNotOperatorRetiredV1(recordRows[0])
   const revisionRows = (await trx.query(LOCK_REVISION_SQL, values))
     .rows as QueryRow[]
   if (!revisionMatches(revisionRows, write.targetRevision)) return false

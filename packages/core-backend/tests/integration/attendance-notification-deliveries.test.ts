@@ -21,6 +21,9 @@ import type { WeComMessageConfig } from '../../src/integrations/wecom/client'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
+// Rows default next_attempt_at to the database clock. Keep worker time after
+// insertion without pinning the suite to one calendar day.
+const dueWorkerNow = () => new Date(Date.now() + 5 * 60 * 1000)
 
 async function requireTable(pool: Pool, tableName: string): Promise<void> {
   const tableCheck = await pool.query(`SELECT to_regclass(current_schema() || '.' || $1) AS name`, [tableName])
@@ -667,7 +670,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const worker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [channel],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-c5-dingtalk',
       })
 
@@ -823,7 +826,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const worker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [dingTalkChannel, weComChannel],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-h1-org-inactive',
       })
 
@@ -971,7 +974,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const cardWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(cardSink)],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-e3-card',
       })
       await expect(cardWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
@@ -993,7 +996,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const textWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(textSink)],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-e3-text',
       })
       await expect(textWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
@@ -1014,7 +1017,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const fallbackWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(fallbackSink)],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-e3-appbase',
       })
       await expect(fallbackWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
@@ -1032,7 +1035,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const flagOffWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(flagOffSink)],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-e3-flagoff',
       })
       await expect(flagOffWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
@@ -1172,7 +1175,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const worker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [channel],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-c5-wecom',
       })
 
@@ -1323,7 +1326,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const cardWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(cardSink)],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-s4-wecom-card',
       })
       await expect(cardWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
@@ -1345,7 +1348,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const textWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(textSink)],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-s4-wecom-text',
       })
       await expect(textWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
@@ -1363,7 +1366,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const flagOffWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(flagOffSink)],
-        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        now: dueWorkerNow,
         workerId: 'worker-s4-wecom-flagoff',
       })
       await expect(flagOffWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
@@ -1458,7 +1461,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const worker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [channel],
-        now: () => new Date('2026-08-03T00:00:00.000Z'),
+        now: dueWorkerNow,
         maxAttempts: 2,
         workerId: 'worker-c5-email',
       })
