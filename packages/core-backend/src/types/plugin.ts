@@ -1161,6 +1161,35 @@ export interface PluginServices {
     createRequestOperationBoundary(config: {
       adapters: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
     }): import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1
+    /** W4C-3c: manual_edit / recompute / ops_retirement boundary; adapters captured once. */
+    createRecordOperationBoundary(config: {
+      adapters: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
+    }): import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationBoundaryV1
+    /** W4C-3c: transaction-bound operator retirement calculation (adapter-only). */
+    appendOperatorRetirementCalculation(
+      input: import('../attendance/w4c3c-ops-retirement').AppendOperatorRetirementCalculationInputV1,
+    ): Promise<import('../attendance/w4c3c-ops-retirement').AppendOperatorRetirementCalculationResultV1>
+    /** W4C-3c: transaction-bound recompute calculation (adapter-only). */
+    appendRecomputeCalculation(
+      input: import('../attendance/w4c3c-recompute').AppendRecomputeCalculationInputV1,
+    ): Promise<import('../attendance/w4c3c-recompute').AppendRecomputeCalculationResultV1>
+    /** W4C-3c: transaction-bound manual override calculation (adapter-only). */
+    appendManualOverrideCalculation(
+      input: import('../attendance/w4c3c-manual-edit-apply').AppendManualOverrideCalculationInputV1,
+    ): Promise<import('../attendance/w4c3c-manual-edit-apply').AppendManualOverrideCalculationResultV1>
+    /**
+     * W4C-3c P20: singular canonical active-current helper namespace. Ordinary
+     * readers (anomaly, makeup facts, open-record, DecisionTrace) must call
+     * these — never re-implement the relation/predicate.
+     */
+    activeCurrent: {
+      relation: typeof import('../attendance/w4c3c-active-current').ATTENDANCE_ACTIVE_CURRENT_RELATION_V1
+      visibilityPredicate: typeof import('../attendance/w4c3c-active-current').ATTENDANCE_ACTIVE_CURRENT_VISIBILITY_PREDICATE_V1
+      loadForDecisionTrace: typeof import('../attendance/w4c3c-active-current').loadActiveCurrentAttendanceRecordForDecisionTraceV1
+      listForAnomalyListing: typeof import('../attendance/w4c3c-active-current').listActiveCurrentAttendanceRecordsForAnomalyListingV1
+      loadForMakeupAnomalyFacts: typeof import('../attendance/w4c3c-active-current').loadActiveCurrentAttendanceRecordForMakeupAnomalyFactsV1
+      listOpenForWorkDateResolver: typeof import('../attendance/w4c3c-active-current').listActiveCurrentOpenRecordsForWorkDateResolverV1
+    }
     /** W4C-3b P14: transaction-bound frozen approved-leave cancellation calculation. */
     appendApprovedLeaveCancellationCalculation(
       input: import('../attendance/w4c3b-approved-leave-cancellation').AppendApprovedLeaveCancellationCalculationInputV1,

@@ -62,6 +62,11 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const STEP_ID = 'attendance-real-db-integration'
+const W4C3C_TOOLING_STEP_ID = 'attendance-w4c3c-tooling-contracts'
+const W4C3C_TOOLING_FILES = Object.freeze([
+  'scripts/ops/staging-attendance-tooling-teardown.test.mjs',
+  'scripts/ops/attendance-w4c3c-execute-ops-retirement-cleanup.test.mjs',
+])
 
 const FILES = Object.freeze([
   'tests/integration/attendance-w4c2-timezone-write-guard.db.test.ts',
@@ -108,6 +113,11 @@ const FILES = Object.freeze([
   // W4C-3b P14 frozen approved-leave cancellation calculation: real immutable
   // parent/snapshot proof and cross-org fail-closed behavior.
   'tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts',
+  // W4C-3c manual/recompute/operator: retirement, ordinary-writer block, P20
+  // retired-row legs against real PostgreSQL.
+  'tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts',
+  // W4C-3c plugin HTTP routes through actual loader (auth/capability/operationId).
+  'tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts',
 ])
 
 /**
@@ -241,6 +251,18 @@ test(`attendance real-DB step (id: ${STEP_ID}) lives in job "${REQUIRED_JOB}" â€
       + `silently leave the required test (20.x) gate; duplicated into a second job, a decoy copy `
       + `could anchor the shared first-match-wins step lookup`,
   )
+})
+
+test(`W4C-3c tooling step (id: ${W4C3C_TOOLING_STEP_ID}) lives in required job and invokes both node:test files`, () => {
+  assert.deepEqual(jobsContainingStepId(W4C3C_TOOLING_STEP_ID), [REQUIRED_JOB])
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  const step = extractStepById(workflow, W4C3C_TOOLING_STEP_ID)
+  assert.ok(step && typeof step.run === 'string', 'W4C-3c tooling step must carry a real run script')
+  assert.match(step.run, /\bnode\s+--test\b/)
+  for (const file of W4C3C_TOOLING_FILES) {
+    assert.ok(step.run.includes(file), `${file} must be an argument of the W4C-3c tooling step`)
+    assert.ok(existsSync(join(repoRoot, file)), `${file} must exist on disk`)
+  }
 })
 
 for (const file of FILES) {

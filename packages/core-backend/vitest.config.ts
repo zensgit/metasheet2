@@ -636,6 +636,8 @@ export default defineConfig({
       'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
       'tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts',
       'tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts',
+      'tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts',
+      'tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.

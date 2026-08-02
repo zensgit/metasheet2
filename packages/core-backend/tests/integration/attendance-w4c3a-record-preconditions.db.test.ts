@@ -11,6 +11,7 @@ import {
 } from '../../src/attendance/w4c3a-legacy-execution-plan'
 import { lockAndRecheckAttendanceLegacyRecordPreconditionsV1 } from '../../src/attendance/w4c3a-legacy-plan-preconditions'
 import { applyAttendanceLegacyRecordEffectsV1 } from '../../src/attendance/w4c3a-legacy-plan-record-effects'
+import { appendOperatorRetirementCalculationV1 } from '../../src/attendance/w4c3c-ops-retirement'
 import { acquireAttendanceLegacyPlanClass11V1 } from '../../src/attendance/w4c3a-legacy-plan-processor'
 import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
 import {
@@ -315,6 +316,101 @@ describeIfDatabase('W4C-3a record precondition locks (real PostgreSQL)', () => {
       await writer.query('ROLLBACK').catch(() => undefined)
       await worker.query('ROLLBACK').catch(() => undefined)
       writer.release()
+      worker.release()
+    }
+  })
+
+  it('operator-retired import target fails under the row lock before any effect', async () => {
+    const retiredRecordId = crypto.randomUUID()
+    const retiredUserId = crypto.randomUUID()
+    const retiredWorkDate = '2026-08-05'
+    await pool.query(
+      `INSERT INTO attendance_records (
+         id, org_id, user_id, work_date, first_in_at, last_out_at,
+         work_minutes, late_minutes, early_leave_minutes, status,
+         is_workday, meta, source_batch_id
+       ) VALUES (
+         $1::uuid,$2,$3,$4::date,'2026-08-05T01:00:00.000Z',
+         '2026-08-05T09:00:00.000Z',480,0,0,'normal',true,
+         '{"source":"import"}'::jsonb,$5::uuid
+       )`,
+      [retiredRecordId, orgId, retiredUserId, retiredWorkDate, sourceBatchId],
+    )
+    const retiredWrite = writePlan({
+      orgId,
+      userId: retiredUserId,
+      workDate: retiredWorkDate,
+      recordId: retiredRecordId,
+      sourceBatchId,
+      targetRevision: 1,
+      fingerprint: computeLegacyImportRecordPreconditionFingerprintV1({
+        exists: true,
+        id: retiredRecordId,
+        orgId,
+        userId: retiredUserId,
+        workDate: retiredWorkDate,
+        firstInAt: '2026-08-05T01:00:00.000Z',
+        lastOutAt: '2026-08-05T09:00:00.000Z',
+        workMinutes: 480,
+        lateMinutes: 0,
+        earlyLeaveMinutes: 0,
+        status: 'normal',
+        isWorkday: true,
+        meta: { source: 'import' },
+        sourceBatchId,
+      }),
+      expectedSourceOwnership: sourceBatchId,
+    })
+    const retireClient = await pool.connect()
+    try {
+      await retireClient.query('BEGIN')
+      await appendOperatorRetirementCalculationV1({
+        client: trx(retireClient),
+        orgId,
+        recordId: retiredRecordId,
+        expectedCalculationId: null,
+        expectedCalculationVersion: null,
+        operationId: crypto.randomUUID(),
+        actorId: retiredUserId,
+        correlationId: 'w4c3c-import-terminal-guard',
+        reason: 'real operator retirement fixture',
+        ticket: 'W4C3C-IMPORT-GUARD',
+        mode: 'authoritative',
+      })
+      await retireClient.query('COMMIT')
+    } catch (error) {
+      await retireClient.query('ROLLBACK').catch(() => undefined)
+      throw error
+    } finally {
+      retireClient.release()
+    }
+    const worker = await pool.connect()
+    try {
+      await worker.query('BEGIN')
+      const before = await worker.query(
+        `SELECT status, work_minutes, current_calculation_id::text AS current_calculation_id,
+                visibility_state, visibility_reason
+           FROM attendance_records
+          WHERE id = $1::uuid AND org_id = $2`,
+        [retiredRecordId, orgId],
+      )
+      await expect(
+        lockAndRecheckAttendanceLegacyRecordPreconditionsV1(
+          trx(worker),
+          plan([retiredWrite]),
+        ),
+      ).rejects.toMatchObject({ code: 'ATTENDANCE_RECORD_OPERATOR_RETIRED' })
+      const after = await worker.query(
+        `SELECT status, work_minutes, current_calculation_id::text AS current_calculation_id,
+                visibility_state, visibility_reason
+           FROM attendance_records
+          WHERE id = $1::uuid AND org_id = $2`,
+        [retiredRecordId, orgId],
+      )
+      expect(after.rows).toEqual(before.rows)
+      await worker.query('ROLLBACK')
+    } finally {
+      await worker.query('ROLLBACK').catch(() => undefined)
       worker.release()
     }
   })

@@ -37,6 +37,8 @@ describe('W4C-3b P14 approved leave cancellation boundary', () => {
               user_id: 'w4c3b-p14-unit-user',
               work_date: '2026-08-01',
               current_calculation_id: null,
+              visibility_state: 'active',
+              visibility_reason: 'active',
             }],
           }
         }
@@ -66,6 +68,8 @@ describe('W4C-3b P14 approved leave cancellation boundary', () => {
               user_id: 'w4c3b-p14-unit-user',
               work_date: '2026-08-01',
               current_calculation_id: uuid(),
+              visibility_state: 'retired',
+              visibility_reason: 'operator_retirement',
             }],
           }
         }
@@ -79,5 +83,35 @@ describe('W4C-3b P14 approved leave cancellation boundary', () => {
       calculationId: replayId,
     })
     expect(sql).toHaveLength(2)
+  })
+
+  it('operator-retired approval target fails before calculation or result DML', async () => {
+    const sql: string[] = []
+    const client: W4c3bApprovedLeaveCancellationQueryClient = {
+      query: async (text) => {
+        sql.push(text)
+        if (text.includes('FROM attendance_records')) {
+          return {
+            rows: [{
+              id: uuid(),
+              org_id: 'w4c3b-p14-unit-org',
+              user_id: 'w4c3b-p14-unit-user',
+              work_date: '2026-08-01',
+              current_calculation_id: uuid(),
+              visibility_state: 'retired',
+              visibility_reason: 'operator_retirement',
+            }],
+          }
+        }
+        if (text.includes("entrypoint = 'approval_reversal'")) return { rows: [] }
+        throw new Error(`unexpected query after retirement guard: ${text}`)
+      },
+    }
+
+    await expect(appendApprovedLeaveCancellationCalculationV1(input(client))).rejects.toMatchObject({
+      code: 'ATTENDANCE_RECORD_OPERATOR_RETIRED',
+    })
+    expect(sql).toHaveLength(2)
+    expect(sql.some((text) => /^\s*(INSERT|UPDATE|DELETE|MERGE|COPY)\b/i.test(text))).toBe(false)
   })
 })

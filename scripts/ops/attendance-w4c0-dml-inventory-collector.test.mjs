@@ -28,11 +28,18 @@ const {
   scanFileForAttendanceRecordReadSites,
   isCanonicalBoundaryPath,
   contentHashOfKeys,
+  maskCommentsForDmlScan,
+  hasLiveDmlOnTable,
 } = require(
   path.join(toolDir, 'collector.cjs'),
 )
 const { classifyTrackedSites } = require(path.join(toolDir, 'classify-tracked-sites.cjs'))
 const { CURATED_DEBT_ENTRIES } = require(path.join(toolDir, 'curated-debt-entries.cjs'))
+const {
+  PINNED_BASELINE_REF,
+  PINNED_BASELINE_ARTIFACT_RELPATH,
+  provePinnedBaselineObligation,
+} = require(path.join(toolDir, 'pinned-baseline-obligation.cjs'))
 const {
   P25_CALL_PATH_CLASSIFICATIONS,
   classifyP25CallPathSites,
@@ -53,8 +60,8 @@ const {
   assertP25Use,
 } = require(path.join(toolDir, 'table-classification.cjs'))
 
-const PINNED_REF = 'e0defbe26d7f2e1747e74aa908ca710422812bf7'
-const BASELINE_ARTIFACT_RELPATH = 'docs/development/attendance-w4c0-dml-debt-baseline-e0defbe26.json'
+const PINNED_REF = PINNED_BASELINE_REF
+const BASELINE_ARTIFACT_RELPATH = PINNED_BASELINE_ARTIFACT_RELPATH
 const WORKFLOW_PATH = path.join(rootDir, '.github/workflows/plugin-tests.yml')
 const THIS_TEST_FILENAME = 'attendance-w4c0-dml-inventory-collector.test.mjs'
 
@@ -154,47 +161,31 @@ test('W4C-3a SELECT-inventory mutation: a dynamic base-table member fails while 
 })
 
 // -------------------------------------------------------------------------------------------
-// 2. Reproducibility: regenerating the pinned baseline manifest from the pinned ref must byte-
-//    match the committed docs/data-only artifact. This is what makes the artifact auditable —
-//    a reviewer reruns generate-baseline-manifest.cjs and diffs, rather than trusting hand edits.
+// 2. Separately named pinned-baseline obligation (W4C-3c).
+//    The frozen e0defbe artifact is proven against the pinned ref WITHOUT consulting live
+//    CURATED_DEBT_ENTRIES.claims. Current-tree claims must not retain removed symbols solely to
+//    keep this green; see pinned-baseline-obligation.cjs.
 // -------------------------------------------------------------------------------------------
-test('pinned baseline artifact is byte-reproducible from the pinned ref', () => {
-  const gitSource = createGitRefSource(rootDir, PINNED_REF)
-  const { roots, sites } = buildRawCensus(gitSource)
-  const classified = classifyCensus(sites)
-  const { claimsByEntryId, genericAllowlisted, unclaimed } = classifyTrackedSites(classified.trackedSites)
-
-  assert.deepEqual(unclaimed, [], 'pinned baseline must have zero unclaimed sites (else the committed artifact could not have been generated cleanly)')
-
-  const entries = CURATED_DEBT_ENTRIES.map((entry) => {
-    const claimed = claimsByEntryId.get(entry.id) || []
-    const keys = claimed.map((s) => s.key).sort()
-    return {
-      id: entry.id,
-      title: entry.title,
-      owningSlice: entry.owningSlice,
-      sharedHook: entry.sharedHook,
-      confidence: entry.confidence || 'direct',
-      siteCount: claimed.length,
-      tables: [...new Set(claimed.map((s) => `${s.table}:${s.verb}`))].sort(),
-      symbols: [...new Set(claimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol}`))].sort(),
-      contentHash: contentHashOfKeys(keys),
-    }
-  })
-  const regenerated = {
-    schemaVersion: 1,
-    generatedFromRef: PINNED_REF,
-    lockAnchor: 'docs/development/attendance-issue-4556-w4-segment-calculation-design-lock-20260724.md#8.4',
-    runtimeRoots: roots,
-    debtEntries: entries,
-    genericSharedAllowlist: genericAllowlisted.map((s) => `${s.relPath} :: ${s.enclosingSymbol}`).sort(),
-    manifestContentHash: contentHashOfKeys(classified.trackedSites.map((s) => s.key)),
+test('pinned baseline obligation: frozen artifact covers the pinned ref without live claim crutches', () => {
+  const result = provePinnedBaselineObligation(rootDir)
+  assert.equal(result.ok, true)
+  assert.equal(result.pinnedRef, PINNED_REF)
+  assert.ok(result.trackedSiteCount > 0)
+  // Discriminate: live P05 claims must NOT include the historical post-write patch symbol.
+  const p05 = CURATED_DEBT_ENTRIES.find((entry) => entry.id === 'P05')
+  assert.ok(p05)
+  const syntheticHistorical = {
+    relPath: 'plugins/plugin-attendance/index.cjs',
+    enclosingSymbol: 'attachManualResultEditMarkerToRecord',
+    table: 'attendance_records',
+    verb: 'update',
+    line: 1,
   }
-
-  const committedText = fs.readFileSync(path.join(rootDir, BASELINE_ARTIFACT_RELPATH), 'utf8')
-  const committed = JSON.parse(committedText)
-  assert.deepEqual(regenerated, committed, 'committed baseline artifact must byte-match a fresh regeneration from the pinned ref')
-  assert.equal(committedText, `${JSON.stringify(committed, null, 2)}\n`, 'committed artifact must be exactly what the generator writes (no hand edits)')
+  assert.equal(
+    p05.claims(syntheticHistorical),
+    false,
+    'current P05 must not retain a claim for the removed post-write patch symbol',
+  )
 })
 
 // -------------------------------------------------------------------------------------------
@@ -896,4 +887,413 @@ test('P12-P14/P17-P19/P22/P26-P28 remain visible and explicitly canonicalized by
     /acquireAttendanceScheduleAssignmentLocks\(client, orgId, \[detail\.user_id\], \{ required: true \}\)/,
     'schedule-dispatch finalization must not silently degrade its schedule-fact lock',
   )
+})
+
+// ---------------------------------------------------------------------------
+// W4C-3c: hard zero-bypass — current-tree open debt is empty; live side doors fail.
+// Comments/examples are excluded structurally (maskCommentsForDmlScan).
+// ---------------------------------------------------------------------------
+
+function currentOpenDebtEntries(entries = CURATED_DEBT_ENTRIES) {
+  return entries.filter((entry) => !entry.canonicalizedBy)
+}
+
+test('W4C-3c hard zero-bypass: current-tree open-debt set is exactly empty', () => {
+  const open = currentOpenDebtEntries()
+  assert.deepEqual(
+    open.map((entry) => entry.id),
+    [],
+    'current-tree generated open-debt set must be exactly empty',
+  )
+
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const { trackedSites } = classifyCensus(sites)
+  const { unclaimed } = classifyTrackedSites(trackedSites)
+  assert.deepEqual(unclaimed, [], 'current-tree unclaimed tracked sites must be empty')
+})
+
+test('W4C-3c mutation: removing a canonicalizedBy/current closure reopens debt', () => {
+  const closed = CURATED_DEBT_ENTRIES.filter((entry) => entry.canonicalizedBy)
+  assert.ok(closed.length > 0, 'precondition: at least one closed entry')
+  const mutated = CURATED_DEBT_ENTRIES.map((entry) =>
+    entry.id === 'P05' ? { ...entry, canonicalizedBy: undefined } : entry,
+  )
+  const reopened = currentOpenDebtEntries(mutated)
+  assert.ok(
+    reopened.some((entry) => entry.id === 'P05'),
+    'stripping P05 canonicalizedBy must reopen open debt',
+  )
+  assert.equal(
+    currentOpenDebtEntries().some((entry) => entry.id === 'P05'),
+    false,
+    'live inventory must still keep P05 closed',
+  )
+})
+
+test('W4C-3c: P05/P15/P16/P20 remain visible and explicitly canonicalized', () => {
+  const requiredDebtIds = ['P05', 'P15', 'P16', 'P20']
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const { trackedSites } = classifyCensus(sites)
+  const { claimsByEntryId, unclaimed } = classifyTrackedSites(trackedSites)
+
+  assert.deepEqual(unclaimed, [], 'hard zero-bypass requires unclaimed=0')
+  for (const id of requiredDebtIds) {
+    const entry = byId.get(id)
+    assert.ok(entry, `${id} must remain in the generated debt inventory`)
+    assert.equal(entry.owningSlice, 'W4C-3c')
+    assert.equal(entry.canonicalizedBy, 'W4C-3c', `${id} must carry its completed-slice marker`)
+  }
+  assert.ok((claimsByEntryId.get('P05') || []).length > 0, 'P05 must expose current canonical writers')
+  assert.ok((claimsByEntryId.get('P15') || []).length > 0, 'P15 must expose ops_retirement writers')
+  assert.ok((claimsByEntryId.get('P16') || []).length > 0, 'P16 must expose staging tooling sites')
+  const p16Sites = claimsByEntryId.get('P16') || []
+  const p16ClaimKeys = p16Sites.map((site) =>
+    `${site.relPath}::${site.enclosingSymbol}::${site.table}::${site.verb}`,
+  )
+  assert.equal(
+    new Set(p16ClaimKeys).size,
+    p16ClaimKeys.length,
+    'P16 exact allowlist must reject a second DML site with the same file/symbol/table/verb tuple',
+  )
+  // No historical crutch: removed post-write symbol is not a current claim.
+  const p05Sites = claimsByEntryId.get('P05') || []
+  assert.equal(
+    p05Sites.some((site) => site.enclosingSymbol === 'attachManualResultEditMarkerToRecord'),
+    false,
+    'P05 current claims must not include the removed post-write patch symbol',
+  )
+})
+
+test('W4C-3c structural comment exclusion: comment examples are not live DML sites', () => {
+  const withCommentOnly = [
+    '// DELETE FROM attendance_records WHERE id = 1',
+    '/* UPDATE attendance_records SET status = x */',
+    'const sql = `-- DO NOT: DELETE FROM attendance_records`',
+    'function demo() { return 1 } // UPDATE attendance_records SET x = 1',
+  ].join('\n')
+  const sites = scanFileForDmlSites('probe.cjs', withCommentOnly)
+  assert.deepEqual(
+    sites.filter((site) => site.table === 'attendance_records'),
+    [],
+    'comment/documentation DELETE/UPDATE must not mint DML sites',
+  )
+  assert.equal(hasLiveDmlOnTable(withCommentOnly, 'delete', 'attendance_records'), false)
+  assert.equal(hasLiveDmlOnTable(withCommentOnly, 'update', 'attendance_records'), false)
+
+  const live = "async function evil() { await db.query(`DELETE FROM attendance_records WHERE id = $1`) }\n"
+  assert.equal(hasLiveDmlOnTable(live, 'delete', 'attendance_records'), true)
+  assert.equal(scanFileForDmlSites('probe.cjs', live).length, 1)
+})
+
+test('W4C-3c string-aware comment mask: live DML after JS string containing -- or http:// is preserved', () => {
+  const afterDashDash = [
+    "const s = '--'",
+    'async function live() { await db.query(`DELETE FROM attendance_records WHERE id = $1`) }',
+  ].join('\n')
+  const maskedDash = maskCommentsForDmlScan(afterDashDash)
+  assert.match(maskedDash, /DELETE FROM attendance_records/)
+  assert.equal(hasLiveDmlOnTable(afterDashDash, 'delete', 'attendance_records'), true)
+  assert.equal(scanFileForDmlSites('probe.cjs', afterDashDash).length, 1)
+
+  const afterHttp = [
+    "const u = 'http://x'",
+    'async function live() { await db.query(`UPDATE attendance_records SET status = $1 WHERE id = $2`) }',
+  ].join('\n')
+  const maskedHttp = maskCommentsForDmlScan(afterHttp)
+  assert.match(maskedHttp, /UPDATE attendance_records/)
+  assert.equal(hasLiveDmlOnTable(afterHttp, 'update', 'attendance_records'), true)
+  assert.equal(scanFileForDmlSites('probe.cjs', afterHttp).length, 1)
+
+  // Negative control: SQL -- comment inside a template must not mint live DML,
+  // and must not blank later JS outside the template.
+  const sqlCommentInTemplate = [
+    'const q = `SELECT 1 -- DELETE FROM attendance_records`',
+    'const later = 1',
+    'async function live() { await db.query(`DELETE FROM attendance_events WHERE id = $1`) }',
+  ].join('\n')
+  const maskedSql = maskCommentsForDmlScan(sqlCommentInTemplate)
+  assert.equal(hasLiveDmlOnTable(sqlCommentInTemplate, 'delete', 'attendance_records'), false)
+  assert.equal(hasLiveDmlOnTable(sqlCommentInTemplate, 'delete', 'attendance_events'), true)
+  assert.match(maskedSql, /const later = 1/)
+  assert.match(maskedSql, /DELETE FROM attendance_events/)
+})
+
+test('W4C-3c whole-file scanner catches multiline DML verb/table boundaries', () => {
+  const shapes = [
+    'async function insertBypass() { await db.query(`INSERT INTO\n  attendance_records (id) VALUES ($1)`) }',
+    'async function deleteBypass() { await db.query(`DELETE FROM\n  attendance_events WHERE id = $1`) }',
+    'async function updateBypass() { await db.query(`UPDATE\n  attendance_records SET status = $1`) }',
+  ]
+  const expected = [
+    ['insert', 'attendance_records'],
+    ['delete', 'attendance_events'],
+    ['update', 'attendance_records'],
+  ]
+  for (let index = 0; index < shapes.length; index += 1) {
+    const sites = scanFileForDmlSites('probe.cjs', shapes[index])
+    assert.equal(sites.length, 1, shapes[index])
+    assert.deepEqual([sites[0].verb, sites[0].table], expected[index])
+  }
+})
+
+test('W4C-3c comment masker tracks nested braces inside template expressions', () => {
+  const source = [
+    'const sql = `SELECT ${render({ nested: { value: 1 } })}`',
+    'async function live() {',
+    '  await db.query(`DELETE FROM attendance_records WHERE id = $1`)',
+    '}',
+  ].join('\n')
+  const masked = maskCommentsForDmlScan(source)
+  assert.match(masked, /render\(\{ nested: \{ value: 1 \} \}\)/)
+  assert.equal(hasLiveDmlOnTable(source, 'delete', 'attendance_records'), true)
+  assert.equal(scanFileForDmlSites('probe.cjs', source).length, 1)
+})
+
+test('W4C-3c P16 exact allowlist: new DELETE under allowed file/symbol or different table/verb is unclaimed', () => {
+  const p16 = CURATED_DEBT_ENTRIES.find((entry) => entry.id === 'P16')
+  assert.ok(p16)
+
+  // Known allowlisted site still claims.
+  const allowed = {
+    relPath: 'scripts/ops/staging-attendance-tooling-teardown.mjs',
+    enclosingSymbol: 'runStagingAttendanceRecordTeardown',
+    table: 'attendance_records',
+    verb: 'delete',
+    line: 1,
+  }
+  assert.equal(p16.claims(allowed), true)
+
+  // Mutation A: new DELETE on a different table inside an otherwise allowed file/symbol.
+  const differentTable = {
+    ...allowed,
+    table: 'attendance_events',
+  }
+  assert.equal(p16.claims(differentTable), false)
+  const { unclaimed: unclaimedTable } = classifyTrackedSites([differentTable])
+  assert.equal(unclaimedTable.length, 1, 'different table under allowed symbol must be unclaimed')
+
+  // Mutation B: same table but different verb.
+  const differentVerb = {
+    ...allowed,
+    verb: 'update',
+  }
+  assert.equal(p16.claims(differentVerb), false)
+  const { unclaimed: unclaimedVerb } = classifyTrackedSites([differentVerb])
+  assert.equal(unclaimedVerb.length, 1, 'different verb under allowed symbol must be unclaimed')
+
+  // Mutation C: new DELETE inside an allowed staging file but different enclosingSymbol.
+  const differentSymbol = {
+    relPath: 'scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs',
+    enclosingSymbol: 'operatorShortcutDelete',
+    table: 'attendance_records',
+    verb: 'delete',
+    line: 1,
+  }
+  assert.equal(p16.claims(differentSymbol), false)
+  const { unclaimed: unclaimedSymbol } = classifyTrackedSites([differentSymbol])
+  assert.equal(unclaimedSymbol.length, 1, 'new symbol DELETE must not inherit P16 by path prefix')
+})
+
+test('W4C-3c P15: generate-cleanup-sql never emits live DELETE on attendance_records', () => {
+  const genPath = path.join(rootDir, 'scripts/attendance/generate-cleanup-sql.cjs')
+  const gen = require(genPath)
+  assert.throws(
+    () => gen.buildCleanupSql({ source: 'dingtalk_csv_test' }),
+    (error) => error?.code === 'ATTENDANCE_P15_ORG_REQUIRED',
+  )
+  const plan = gen.buildCleanupSql({ orgId: 'org-test', source: 'dingtalk_csv_test' })
+  assert.equal(plan.forbidsRecordDelete, true)
+  assert.equal(plan.requiresOpsRetirement, true)
+  assert.equal(hasLiveDmlOnTable(plan.sql, 'delete', 'attendance_records'), false)
+  assert.equal(
+    scanFileForDmlSites('scripts/attendance/generate-cleanup-sql.cjs', plan.sql)
+      .filter((site) => site.table === 'attendance_records' && site.verb === 'delete')
+      .length,
+    0,
+  )
+  assert.match(plan.sql, /ops_retirement/)
+  assert.match(
+    plan.sql,
+    /EXISTS\s*\(\s*SELECT 1\s+FROM attendance_record_calculations c\s+WHERE c\.attendance_record_id = r\.id\s+AND c\.org_id = r\.org_id\s*\)/,
+    'a calculation child alone must classify the parent as ops_retirement_required',
+  )
+})
+
+test('W4C-3c mutation: inserting a new live DELETE or UPDATE bypass is caught', () => {
+  const deleteBypass = [
+    'async function operatorShortcut() {',
+    '  await db.query(`DELETE FROM attendance_records WHERE org_id = $1`)',
+    '}',
+  ].join('\n')
+  const updateBypass = [
+    'async function sideDoorPatch() {',
+    '  await db.query(`UPDATE attendance_records SET meta = $1 WHERE id = $2`)',
+    '}',
+  ].join('\n')
+
+  const deleteClassified = classifyOneSyntheticSite(
+    'scripts/ops/attendance-unlisted-operator-tool.mjs',
+    deleteBypass,
+  )
+  const updateClassified = classifyOneSyntheticSite(
+    'packages/core-backend/src/routes/attendance-evil-side-door.ts',
+    updateBypass,
+  )
+  assert.equal(deleteClassified.trackedSites.length, 1)
+  assert.equal(deleteClassified.trackedSites[0].verb, 'delete')
+  assert.equal(updateClassified.trackedSites.length, 1)
+  assert.equal(updateClassified.trackedSites[0].verb, 'update')
+
+  const { unclaimed: unclaimedDelete } = classifyTrackedSites(deleteClassified.trackedSites)
+  const { unclaimed: unclaimedUpdate } = classifyTrackedSites(updateClassified.trackedSites)
+  assert.equal(unclaimedDelete.length, 1, 'live DELETE bypass must be unclaimed')
+  assert.equal(unclaimedUpdate.length, 1, 'live UPDATE bypass must be unclaimed')
+
+  // Comment-only reintroduction of the same text must NOT mint live DML sites.
+  const commentOnly = '// DELETE FROM attendance_records\n// UPDATE attendance_records SET x = 1\n'
+  assert.equal(scanFileForDmlSites('probe.cjs', commentOnly).length, 0)
+  assert.equal(maskCommentsForDmlScan(commentOnly).includes('DELETE'), false)
+  assert.equal(hasLiveDmlOnTable(commentOnly, 'delete', 'attendance_records'), false)
+})
+
+test('W4C-3c P05: post-write patch symbol is fully removed and no live second UPDATE exists', () => {
+  const pluginSource = fs.readFileSync(path.join(rootDir, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+
+  // 1) Dead throw-only helper must not exist — symbol fully removed (P2).
+  assert.doesNotMatch(
+    pluginSource,
+    /\bfunction attachManualResultEditMarkerToRecord\b|\battachManualResultEditMarkerToRecord\s*\(/,
+    'attachManualResultEditMarkerToRecord must be fully removed, not retained as dead throw-only code',
+  )
+
+  // 2) Route goes through record-operation boundary (manual_edit), not direct apply alone.
+  assert.match(pluginSource, /kind:\s*'manual_edit'/)
+  assert.match(pluginSource, /createRecordOperationBoundary/)
+  assert.match(pluginSource, /appendManualOverrideCalculation/)
+
+  // 3) applyAttendanceResultEdit (legacy path only) must not itself UPDATE attendance_records.
+  const applyMatch = pluginSource.match(
+    /async function applyAttendanceResultEdit[\s\S]*?(?=\nasync function batchUpsertAttendanceRecordsValues)/,
+  )
+  assert.ok(applyMatch, 'applyAttendanceResultEdit must exist for legacy_projection_only')
+  assert.equal(
+    hasLiveDmlOnTable(applyMatch[0], 'update', 'attendance_records'),
+    false,
+    'applyAttendanceResultEdit must not contain a second live UPDATE attendance_records',
+  )
+  assert.match(applyMatch[0], /manual_result_edit:\s*frozenMarker/)
+  assert.match(applyMatch[0], /upsertAttendanceRecord\s*\(/)
+
+  // 4) Collector must not see any attachManual attendance_records DML site on HEAD.
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const attachSites = sites.filter(
+    (site) =>
+      site.relPath === 'plugins/plugin-attendance/index.cjs'
+      && site.enclosingSymbol === 'attachManualResultEditMarkerToRecord',
+  )
+  assert.deepEqual(attachSites, [], 'HEAD must not still have an attachManual DML site')
+})
+
+test('W4C-3c P20: singular host-port active-current module backs all four surfaces', () => {
+  const pluginSource = fs.readFileSync(path.join(rootDir, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+  const decisionTrace = fs.readFileSync(
+    path.join(rootDir, 'packages/core-backend/src/services/AttendanceDecisionTrace.ts'),
+    'utf8',
+  )
+  const activeCurrent = fs.readFileSync(
+    path.join(rootDir, 'packages/core-backend/src/attendance/w4c3c-active-current.ts'),
+    'utf8',
+  )
+  const hostIndex = fs.readFileSync(path.join(rootDir, 'packages/core-backend/src/index.ts'), 'utf8')
+
+  // Singular module + host port (not a plugin-local relation constant).
+  assert.match(activeCurrent, /ATTENDANCE_ACTIVE_CURRENT_RELATION_V1/)
+  assert.match(hostIndex, /activeCurrent:\s*Object\.freeze/)
+  assert.match(pluginSource, /attendanceW4ActiveCurrentPort\s*=\s*attendanceW4SegmentCalculationPort\?\.activeCurrent/)
+  assert.doesNotMatch(
+    pluginSource,
+    /const ATTENDANCE_ACTIVE_CURRENT_RELATION\s*=\s*'attendance_current_records'/,
+    'plugin must not copy the relation constant; it must use the host port',
+  )
+  assert.match(pluginSource, /port\.listForAnomalyListing/)
+  assert.match(pluginSource, /port\.loadForMakeupAnomalyFacts/)
+  assert.match(pluginSource, /port\.listOpenForWorkDateResolver/)
+  assert.match(decisionTrace, /loadActiveCurrentAttendanceRecordForDecisionTraceV1/)
+})
+
+test('W4C-3c P20 mutation: bypassing the host port on anomaly listing fails only that surface', () => {
+  const pluginSource = fs.readFileSync(path.join(rootDir, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+  const mutated = pluginSource.replace(
+    /async function listActiveCurrentAttendanceRecordsForAnomalyListing\(db, options\) \{\n  const port = requireAttendanceActiveCurrentPort\(\)\n  return port\.listForAnomalyListing\(pluginQueryAdapter\(db\), options\)\n\}/,
+    `async function listActiveCurrentAttendanceRecordsForAnomalyListing(db, options) {
+  return db.query('SELECT * FROM attendance_records WHERE user_id = $1', [options.userId])
+}`,
+  )
+  assert.match(mutated, /FROM attendance_records WHERE user_id/)
+  // Other surfaces still call the host port.
+  assert.match(mutated, /port\.loadForMakeupAnomalyFacts/)
+  assert.match(mutated, /port\.listOpenForWorkDateResolver/)
+})
+
+test('W4C-3c P21/P25 residual classifications closed honestly', () => {
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  assert.equal(byId.get('P21')?.canonicalizedBy, 'W4C-1/W4C-2')
+  assert.equal(byId.get('P21')?.residualClassification, 'strict_parse_authority_closed_legacy_byte_preserved')
+  assert.equal(byId.get('P25')?.canonicalizedBy, 'W4C-3a')
+  for (const id of ['X01', 'X02', 'X03', 'X04', 'X05']) {
+    assert.equal(byId.get(id)?.canonicalizedBy, 'W4C-3c-residual-classification')
+    assert.ok(byId.get(id)?.residualClassification, `${id} must name its residual classification`)
+    assert.ok(byId.get(id)?.residualEvidence, `${id} must carry evidence-backed residual classification`)
+  }
+})
+
+test('W4C-3c mutation: new side-door business DML is unclaimed under hard zero-bypass', () => {
+  const synthetic = {
+    relPath: 'packages/core-backend/src/routes/evil-attendance-side-door.ts',
+    enclosingSymbol: 'evilRewrite',
+    table: 'attendance_records',
+    verb: 'update',
+    line: 1,
+  }
+  const { unclaimed } = classifyTrackedSites([synthetic])
+  assert.equal(unclaimed.length, 1, 'a new business write side door must not inherit any P0x claim')
+})
+
+test('W4C-3c operator retirement path exists and forbids live DELETE', () => {
+  const opsPath = path.join(rootDir, 'packages/core-backend/src/attendance/w4c3c-ops-retirement.ts')
+  const source = fs.readFileSync(opsPath, 'utf8')
+  assert.match(source, /appendOperatorRetirementCalculationV1/)
+  assert.match(source, /operator_retirement/)
+  assert.match(source, /ops_retirement/)
+  assert.match(source, /set_retired/)
+  assert.equal(
+    hasLiveDmlOnTable(source, 'delete', 'attendance_records'),
+    false,
+    'ops-retirement module must not contain live DELETE on attendance_records',
+  )
+  assert.match(source, /assertToolingOnlyNonW4FixtureTeardownAllowedV1/)
+  assert.match(source, /ATTENDANCE_RECORD_OPERATOR_RETIRED/)
+})
+
+test('W4C-3c mutation: reintroducing live second UPDATE after result edit is caught by scanner', () => {
+  const reintroduced = [
+    'async function attachManualResultEditMarkerToRecord(trx, record, marker) {',
+    '  await trx.query(`UPDATE attendance_records SET meta = $3 WHERE id = $1 AND org_id = $2`, [record.id, record.org_id, marker])',
+    '}',
+  ].join('\n')
+  const sites = scanFileForDmlSites('plugins/plugin-attendance/index.cjs', reintroduced)
+  assert.equal(sites.length, 1)
+  assert.equal(sites[0].verb, 'update')
+  assert.equal(sites[0].enclosingSymbol, 'attachManualResultEditMarkerToRecord')
+  // Historical-only claim is gone: current P05 must not absorb this reintroduction by symbol name alone
+  // when the site is a brand-new write (it would claim by symbol if we kept the crutch — prove we did not).
+  const p05 = CURATED_DEBT_ENTRIES.find((entry) => entry.id === 'P05')
+  assert.equal(p05.claims(sites[0]), false)
+  const classified = classifyCensus(sites)
+  const { unclaimed } = classifyTrackedSites(classified.trackedSites)
+  assert.equal(unclaimed.length, 1, 'reintroduced post-write UPDATE must be unclaimed open debt')
 })

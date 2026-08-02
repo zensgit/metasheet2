@@ -4,6 +4,7 @@ import { Pool, type PoolClient } from 'pg'
 import {
   appendApprovedLeaveCancellationCalculationV1,
 } from '../../src/attendance/w4c3b-approved-leave-cancellation'
+import { appendOperatorRetirementCalculationV1 } from '../../src/attendance/w4c3c-ops-retirement'
 import { calculateAttendanceSegmentsV1 } from '../../src/attendance/w4c1-segment-calculator'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -303,6 +304,57 @@ describeIfDatabase('W4C-3b P14 approved leave cancellation (real PostgreSQL)', (
         [fixture.recordId],
       )
       expect(after.rows[0].n).toBe(before.rows[0].n)
+    })
+  })
+
+  it('operator-retired approval target fails with zero new result DML', async () => {
+    await rollbackTransaction(pool, async (client) => {
+      const fixture = await insertFrozenLeaveFixture(client)
+      const retirement = await appendOperatorRetirementCalculationV1({
+        client,
+        orgId: fixture.orgId,
+        recordId: fixture.recordId,
+        expectedCalculationId: fixture.priorCalculationId,
+        expectedCalculationVersion: null,
+        operationId: uuid(),
+        actorId: 'w4c3b-p14-admin',
+        correlationId: 'w4c3b-p14-operator-retirement',
+        reason: 'real terminal approval fixture',
+        ticket: 'W4C3C-APPROVAL-GUARD',
+        mode: 'authoritative',
+      })
+      expect(retirement.kind).toBe('appended')
+      const before = await client.query(
+        `SELECT current_calculation_id::text AS current_calculation_id,
+                visibility_state, visibility_reason,
+                (SELECT count(*)::int FROM attendance_record_calculations
+                  WHERE attendance_record_id = $1::uuid) AS calculation_count
+           FROM attendance_records WHERE id = $1::uuid`,
+        [fixture.recordId],
+      )
+
+      await expect(appendApprovedLeaveCancellationCalculationV1({
+        client,
+        ...fixture,
+        operationId: uuid(),
+        actorId: 'w4c3b-p14-admin',
+        correlationId: 'w4c3b-p14-must-not-reactivate',
+        mode: 'authoritative',
+      })).rejects.toMatchObject({ code: 'ATTENDANCE_RECORD_OPERATOR_RETIRED' })
+
+      const after = await client.query(
+        `SELECT current_calculation_id::text AS current_calculation_id,
+                visibility_state, visibility_reason,
+                (SELECT count(*)::int FROM attendance_record_calculations
+                  WHERE attendance_record_id = $1::uuid) AS calculation_count
+           FROM attendance_records WHERE id = $1::uuid`,
+        [fixture.recordId],
+      )
+      expect(after.rows).toEqual(before.rows)
+      expect(after.rows[0]).toMatchObject({
+        visibility_state: 'retired',
+        visibility_reason: 'operator_retirement',
+      })
     })
   })
 

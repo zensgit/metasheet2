@@ -22,6 +22,7 @@ import {
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
 } from './w4c1-segment-calculator'
 import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerprints'
+import { assertParentNotRetiredForOrdinaryWriterV1 } from './w4c3c-ops-retirement'
 
 export type W4c3bApprovedLeaveCancellationQueryClient = Readonly<{
   query: (
@@ -211,7 +212,8 @@ export async function appendApprovedLeaveCancellationCalculationV1(
   const recordRows = await rows(
     input.client,
     `SELECT id::text AS id, org_id::text AS org_id, user_id::text AS user_id,
-            work_date::text AS work_date, current_calculation_id::text AS current_calculation_id
+            work_date::text AS work_date, current_calculation_id::text AS current_calculation_id,
+            visibility_state, visibility_reason
        FROM attendance_records
       WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
       FOR UPDATE`,
@@ -232,6 +234,7 @@ export async function appendApprovedLeaveCancellationCalculationV1(
   )
   if (replayRows.length === 1) return Object.freeze({ kind: 'replay', calculationId: String(replayRows[0].id) })
   if (replayRows.length > 1) fail(W4C3B_APPROVED_LEAVE_CANCELLATION_ERROR_CODES.DATABASE_RESULT_INVALID)
+  assertParentNotRetiredForOrdinaryWriterV1(record)
 
   const priorCalculationId = typeof record.current_calculation_id === 'string'
     ? record.current_calculation_id

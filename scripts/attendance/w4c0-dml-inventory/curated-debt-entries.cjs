@@ -71,6 +71,70 @@ function byW4C3aImportRollback(site) {
   )
 }
 
+// Exact P16 allowlist: relPath::enclosingSymbol::table::verb (W4C-3c hard zero-bypass).
+// Enumerated from the live HEAD census of intended staging tooling writers only.
+const P16_EXACT_ALLOWLIST = new Set([
+  "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_events::delete",
+  "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_import_batches::delete",
+  "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_import_items::delete",
+  "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_record_result_edits::delete",
+  "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_requests::delete",
+  "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::seedUsersAndRecords::attendance_records::insert",
+  "scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs::cleanup::attendance_auto_shift_auto_write_runs::delete",
+  "scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs::cleanup::attendance_events::delete",
+  "scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs::cleanup::attendance_shift_assignments::delete",
+  "scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs::insertPunch::attendance_events::insert",
+  "scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs::main::attendance_shift_assignments::insert",
+  "scripts/ops/staging-attendance-c5-delivery-smoke.ts::cleanup::attendance_leave_balance_events::delete",
+  "scripts/ops/staging-attendance-c5-delivery-smoke.ts::cleanup::attendance_leave_balances::delete",
+  "scripts/ops/staging-attendance-c5-delivery-smoke.ts::cleanup::attendance_shift_assignments::delete",
+  "scripts/ops/staging-attendance-c5-delivery-smoke.ts::seedCompTimeBalance::attendance_leave_balances::insert",
+  "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs::cleanupStep::approval_assignments::delete",
+  "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs::cleanupStep::approval_instances::delete",
+  "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs::cleanupStep::approval_records::delete",
+  "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs::cleanupStep::attendance_requests::delete",
+  "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs::cleanupStep::attendance_schedule_dispatch_requests::delete",
+  "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs::cleanupStep::attendance_shift_assignments::delete",
+  "scripts/ops/staging-attendance-inout-merge-s2-3-smoke.mjs::cleanup::approval_instances::delete",
+  "scripts/ops/staging-attendance-inout-merge-s2-3-smoke.mjs::cleanup::attendance_events::delete",
+  "scripts/ops/staging-attendance-inout-merge-s2-3-smoke.mjs::cleanup::attendance_requests::delete",
+  "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs::cleanup::approval_assignments::delete",
+  "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs::cleanup::approval_instances::delete",
+  "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs::cleanup::approval_records::delete",
+  "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs::cleanup::attendance_events::delete",
+  "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs::cleanup::attendance_requests::delete",
+  "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs::seedPartialRecord::attendance_records::insert",
+  "scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs::assertStaleCandidate409::attendance_records::update",
+  "scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs::cleanup::attendance_requests::delete",
+  "scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs::seedCandidateRecords::attendance_requests::insert",
+  "scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs::seedOwedPunchRecord::attendance_records::insert",
+  "scripts/ops/staging-attendance-multi-shift-m5-smoke.mjs::cleanup::attendance_events::delete",
+  "scripts/ops/staging-attendance-multi-shift-m5-smoke.mjs::cleanup::attendance_rotation_assignments::delete",
+  "scripts/ops/staging-attendance-multi-shift-m5-smoke.mjs::cleanup::attendance_shift_assignments::delete",
+  "scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs::assertStatutoryMustPaySetup::attendance_leave_balances::insert",
+  "scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs::cleanup::approval_assignments::delete",
+  "scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs::cleanup::approval_instances::delete",
+  "scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs::cleanup::approval_records::delete",
+  "scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs::cleanup::attendance_events::delete",
+  "scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs::cleanup::attendance_leave_balances::delete",
+  "scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs::cleanup::attendance_requests::delete",
+  "scripts/ops/staging-attendance-overtime-segmentation-o6-smoke.mjs::cleanup::attendance_events::delete",
+  "scripts/ops/staging-attendance-overtime-segmentation-o6-smoke.mjs::cleanup::attendance_leave_balance_events::delete",
+  "scripts/ops/staging-attendance-overtime-segmentation-o6-smoke.mjs::cleanup::attendance_leave_balances::delete",
+  "scripts/ops/staging-attendance-overtime-segmentation-o6-smoke.mjs::cleanup::attendance_requests::delete",
+  "scripts/ops/staging-attendance-report-sync-a2-smoke.mjs::seedAttendanceRecord::attendance_records::insert",
+  "scripts/ops/staging-attendance-schedule-publish-p4-smoke.mjs::cleanup::attendance_shift_assignments::delete",
+  "scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs::cleanupStep::approval_assignments::delete",
+  "scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs::cleanupStep::approval_instances::delete",
+  "scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs::cleanupStep::approval_records::delete",
+  "scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs::cleanupStep::attendance_requests::delete",
+  "scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs::cleanupStep::attendance_shift_assignments::delete",
+  "scripts/ops/staging-attendance-temporary-shift-t6-smoke.mjs::cleanup::attendance_events::delete",
+  "scripts/ops/staging-attendance-temporary-shift-t6-smoke.mjs::cleanup::attendance_requests::delete",
+  "scripts/ops/staging-attendance-temporary-shift-t6-smoke.mjs::cleanup::attendance_shift_assignments::delete",
+  "scripts/ops/staging-attendance-tooling-teardown.mjs::runStagingAttendanceRecordTeardown::attendance_records::delete",
+])
+
 const CURATED_DEBT_ENTRIES = [
   // ---------------------------------------------------------------------------------------
   // P01-P28: section 1.1's illustrative current execution-path inventory.
@@ -132,10 +196,29 @@ const CURATED_DEBT_ENTRIES = [
     title: 'POST /api/attendance/anomaly-result-edits: upsert followed by attachManualResultEditMarkerToRecord UPDATE.',
     owningSlice: 'W4C-3c',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3c',
+    // Post-write meta patch removed; marker is frozen in the same projection write.
+    // Remaining sites are the audit-row insert and notification status update on the
+    // operational audit table — claimed so unclaimed=0 detection stays live.
+    // Current-tree claims only. The removed post-write attachManualResultEditMarkerToRecord
+    // symbol is NOT retained here — pinned-baseline coverage of that historical site is a
+    // separately named obligation (pinned-baseline-obligation.cjs), not a live claim crutch.
+    // Per-writer evidence only (no broad path allowlist). Named adapters:
+    // - legacy AE-1 single-write path (byte-compat)
+    // - W4 calculation append (manual_edit)
+    // - audit/notification operational writers
     claims: (site) =>
       bySymbol(PLUGIN, /^applyAttendanceResultEdit$/)(site) ||
-      bySymbol(PLUGIN, /^attachManualResultEditMarkerToRecord$/)(site) ||
-      bySymbol(PLUGIN, /^markAttendanceResultEditNotificationStatus$/)(site),
+      bySymbol(PLUGIN, /^markAttendanceResultEditNotificationStatus$/)(site) ||
+      bySymbol(PLUGIN, /^insertW4c3cManualResultEditAuditRow$/)(site) ||
+      bySymbol(
+        'packages/core-backend/src/attendance/w4c3c-manual-edit-apply.ts',
+        /^appendManualOverrideCalculationV1$/,
+      )(site) ||
+      bySymbol(
+        'packages/core-backend/src/attendance/w4c3c-recompute.ts',
+        /^appendRecomputeCalculationV1$/,
+      )(site),
   },
   {
     id: 'P06',
@@ -267,14 +350,27 @@ const CURATED_DEBT_ENTRIES = [
     title: 'scripts/attendance/generate-cleanup-sql.cjs: privileged generated record/event deletes.',
     owningSlice: 'W4C-3c',
     sharedHook: false,
-    claims: byPathPrefix('scripts/attendance/generate-cleanup-sql.cjs'),
+    canonicalizedBy: 'W4C-3c',
+    // Generator no longer emits live DELETE on attendance_records. Canonical writer
+    // is appendOperatorRetirementCalculationV1 (ops_retirement boundary body).
+    claims: (site) =>
+      bySymbol(
+        'packages/core-backend/src/attendance/w4c3c-ops-retirement.ts',
+        /^appendOperatorRetirementCalculationV1$/,
+      )(site),
   },
   {
     id: 'P16',
     title: 'Test-user cleanup and staging helpers: dynamic/direct synthetic deletes and inserts.',
     owningSlice: 'W4C-3c',
     sharedHook: false,
-    claims: byPathPrefix('scripts/ops/staging-attendance-'),
+    canonicalizedBy: 'W4C-3c',
+    // Exact allowlist keyed by relPath + enclosingSymbol + table + verb.
+    // A new DELETE/INSERT/UPDATE under an allowed file/symbol but different table/verb
+    // remains unclaimed (hard zero-bypass). No broad startsWith/prefix claims.
+    claims: (site) => P16_EXACT_ALLOWLIST.has(
+      `${site.relPath}::${site.enclosingSymbol}::${site.table}::${site.verb}`,
+    ),
   },
   {
     id: 'P17',
@@ -319,7 +415,8 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Anomaly, makeup-anomaly facts, open-record attribution, and DecisionTrace are direct ordinary readers.',
     owningSlice: 'W4C-3c',
     sharedHook: false,
-    // Reader-side debt (no DML) — out of this collector's write-scan scope by construction.
+    canonicalizedBy: 'W4C-3c',
+    // Reader-side debt (no DML) — closed by canonical active-current helper on all four surfaces.
     claims: () => false,
   },
   {
@@ -327,7 +424,11 @@ const CURATED_DEBT_ENTRIES = [
     title: 'Time conversion has multiple silent UTC/server-local fallback helpers without uniform IANA validation.',
     owningSlice: 'W4C-1/W4C-2',
     sharedHook: false,
-    // Parsing/conversion debt, not a DML site.
+    // Honest residual: W4 authority paths use w4c1-strict-time; legacy_projection_only
+    // preserves current parsing; shadow records non-promotable review. Not a DML site.
+    // Residual classification closed in W4C-1/W4C-2; W4C-3c records completion for zero-bypass.
+    canonicalizedBy: 'W4C-1/W4C-2',
+    residualClassification: 'strict_parse_authority_closed_legacy_byte_preserved',
     claims: () => false,
   },
   {
@@ -405,28 +506,44 @@ const CURATED_DEBT_ENTRIES = [
   {
     id: 'X01',
     title: 'Fixed-schedule group assignment writer (insertAttendanceGroupFixedScheduleAssignments / softDeactivateAttendanceGroupFixedScheduleManagedRows / skipReason).',
+    // owningSlice string preserved for pinned-baseline artifact byte parity; residual closed by W4C-3c.
     owningSlice: 'W4C-3b (unconfirmed)',
     sharedHook: false,
+    // Honest residual: schedule_fact writer (not daily result calculation). Same family as P27/P18.
+    // Not a W4 result-operation bypass; remains claimed so unclaimed=0 stays live.
+    canonicalizedBy: 'W4C-3c-residual-classification',
+    residualClassification: 'non_result_schedule_fact',
+    // Evidence: table-classification bucket schedule_fact for attendance_shift_assignments;
+    // these writers change which shift applies, not attendance_records calculation truth.
+    residualEvidence: 'TABLE_BUCKETS.attendance_shift_assignments=schedule_fact; symbols are fixed-schedule assignment writers only',
     claims: (site) =>
       ['insertAttendanceGroupFixedScheduleAssignments', 'softDeactivateAttendanceGroupFixedScheduleManagedRows', 'skipReason'].includes(
         site.enclosingSymbol,
-      ) && site.relPath === PLUGIN,
+      ) && site.relPath === PLUGIN && site.table === 'attendance_shift_assignments',
   },
   {
     id: 'X02',
     title: 'Payroll cycle summary export writes attendance_shift_assignments as a side effect (handlePayrollCycleSummaryExport).',
     owningSlice: 'W4C-3b (unconfirmed)',
     sharedHook: false,
-    claims: bySymbol(PLUGIN, /^handlePayrollCycleSummaryExport$/),
+    canonicalizedBy: 'W4C-3c-residual-classification',
+    residualClassification: 'non_result_schedule_fact',
+    residualEvidence: 'TABLE_BUCKETS.attendance_shift_assignments=schedule_fact; export side-effect assignment DML only',
+    claims: (site) =>
+      bySymbol(PLUGIN, /^handlePayrollCycleSummaryExport$/)(site) && site.table === 'attendance_shift_assignments',
   },
   {
     id: 'X03',
     title: 'Auto-shift auto-write run/run-item ledger (insertAutoShiftAutoWriteRun / insertAutoShiftAutoWriteRunItem / finalizeAutoShiftAutoWriteRun).',
     owningSlice: 'W4C-3b (unconfirmed)',
     sharedHook: false,
+    canonicalizedBy: 'W4C-3c-residual-classification',
+    residualClassification: 'non_result_schedule_fact_ledger',
+    residualEvidence: 'TABLE_BUCKETS.attendance_auto_shift_auto_write_runs*=schedule_fact; run ledger not daily projection',
     claims: (site) =>
       ['insertAutoShiftAutoWriteRun', 'insertAutoShiftAutoWriteRunItem', 'finalizeAutoShiftAutoWriteRun'].includes(site.enclosingSymbol) &&
-      site.relPath === PLUGIN,
+      site.relPath === PLUGIN &&
+      (site.table === 'attendance_auto_shift_auto_write_runs' || site.table === 'attendance_auto_shift_auto_write_run_items'),
   },
   {
     id: 'X04',
@@ -434,16 +551,32 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-3b (unconfirmed)',
     sharedHook: true,
     confidence: 'heuristic',
+    // Honest residual: shared_hook leave/comp-time ledger, not attendance daily-result truth.
+    canonicalizedBy: 'W4C-3c-residual-classification',
+    residualClassification: 'non_result_shared_hook_ledger',
+    residualEvidence: 'TABLE_BUCKETS.attendance_leave_balances/events/accrual_*=shared_hook; no attendance_records DML',
     claims: (site) =>
       ['applyAnnualLeaveManualAdjustment', 'runAnnualLeaveAccrual', 'existing', 'lots', 'skip'].includes(site.enclosingSymbol) &&
-      site.relPath === PLUGIN,
+      site.relPath === PLUGIN &&
+      [
+        'attendance_leave_balances',
+        'attendance_leave_balance_events',
+        'attendance_leave_accrual_runs',
+        'attendance_leave_accrual_run_items',
+        'attendance_leave_manual_adjustments',
+      ].includes(site.table),
   },
   {
     id: 'X05',
     title: 'AttendanceExpiryService scheduled comp-time/leave-balance expiry sweep.',
     owningSlice: 'W4C-3b (unconfirmed)',
     sharedHook: true,
-    claims: byPathPrefix('packages/core-backend/src/services/AttendanceExpiryService.ts'),
+    canonicalizedBy: 'W4C-3c-residual-classification',
+    residualClassification: 'non_result_shared_hook_ledger',
+    residualEvidence: 'AttendanceExpiryService only touches leave balance ledger tables (shared_hook), never attendance_records',
+    claims: (site) =>
+      site.relPath === 'packages/core-backend/src/services/AttendanceExpiryService.ts' &&
+      (site.table === 'attendance_leave_balances' || site.table === 'attendance_leave_balance_events'),
   },
 ]
 

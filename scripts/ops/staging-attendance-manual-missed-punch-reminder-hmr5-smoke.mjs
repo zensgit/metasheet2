@@ -50,6 +50,10 @@
 //            then confirm one more tick neither duplicates nor resends.
 //   residue: stamped cleanup over every dirtied table, residue=0.
 
+import {
+  cleanupStagingAttendanceScope,
+  createAuthenticatedOpsRetirementExecutor,
+} from './staging-attendance-tooling-teardown.mjs'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
@@ -672,7 +676,20 @@ async function cleanup() {
   // this run's disposable smoke org (never the shared/default org).
   await pool.query('DELETE FROM attendance_notification_deliveries WHERE org_id = $1 AND source_type = $2', [ORG_ID, MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE]).catch(() => undefined)
   await pool.query('DELETE FROM attendance_requests WHERE org_id = $1', [ORG_ID]).catch(() => undefined)
-  await pool.query('DELETE FROM attendance_records WHERE org_id = $1', [ORG_ID]).catch(() => undefined)
+  const retirementToken = adminToken || (typeof TOKEN !== 'undefined' ? TOKEN : '') || process.env.TOKEN || process.env.ADMIN_TOKEN || ''
+  if (!BASE_URL || !retirementToken) {
+    throw new Error('ATTENDANCE_STAGING_RETIREMENT_EXECUTOR_REQUIRED: BASE_URL and TOKEN required before W4-capable record cleanup')
+  }
+  const opsRetirementExecutor = createAuthenticatedOpsRetirementExecutor({
+    baseUrl: BASE_URL,
+    token: retirementToken,
+    commandSeed: '00000000-0000-5000-8000-0000000000e5',
+    ticket: 'STAGING-HMR5',
+  })
+  await cleanupStagingAttendanceScope({ query: async (sql, params) => {
+    const r = await (typeof q === 'function' ? q(sql, params) : pool.query(sql, params))
+    return { rows: r?.rows ?? (Array.isArray(r) ? r : []) }
+  } }, { orgId: ORG_ID, userIdPrefix: (typeof USER_PREFIX !== "undefined" ? USER_PREFIX : undefined), userIds: (typeof ALL_USERS !== "undefined" ? ALL_USERS : undefined) }, { retireRecord: opsRetirementExecutor })
   await pool.query('DELETE FROM attendance_scheduler_scopes WHERE org_id = $1', [ORG_ID]).catch(() => undefined)
   await pool.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [Object.values(USERS)]).catch(() => undefined)
   await pool.query('DELETE FROM user_orgs WHERE org_id = $1', [ORG_ID]).catch(() => undefined)
