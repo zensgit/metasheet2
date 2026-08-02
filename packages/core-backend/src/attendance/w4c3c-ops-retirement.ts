@@ -305,7 +305,7 @@ export async function appendOperatorRetirementCalculationV1(
 
   const priorCalculationId =
     typeof record.current_calculation_id === 'string' ? record.current_calculation_id : null
-  if (expectedCalculationId !== null && priorCalculationId !== expectedCalculationId) {
+  if (priorCalculationId !== expectedCalculationId) {
     fail(ATTENDANCE_OPERATOR_RETIREMENT_ERROR_CODES.VERSION_CONFLICT, 409)
   }
 

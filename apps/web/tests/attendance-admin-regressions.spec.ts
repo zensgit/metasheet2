@@ -832,6 +832,7 @@ describe('Attendance admin regressions', () => {
   })
 
   afterEach(() => {
+    vi.unstubAllGlobals()
     if (app) app.unmount()
     if (container) container.remove()
     if (originalScrollIntoView) {
@@ -1188,6 +1189,12 @@ describe('Attendance admin regressions', () => {
   })
 
   it('overview result-edit submit uses the modal snapshot and does not refresh admin deliveries', async () => {
+    vi.stubGlobal('crypto', {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.fill(0x11)
+        return bytes
+      },
+    })
     attendanceSettingsData = {
       attendanceResultEditPolicy: {
         enabled: true,
@@ -1252,6 +1259,10 @@ describe('Attendance admin regressions', () => {
       reason: 'corrected from manager review',
       idempotencyKey: expect.any(String),
     })
+    expect(attendanceResultEditPosts[0].idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    )
+    expect(attendanceResultEditPosts[0].idempotencyKey).toBe('11111111-1111-4111-9111-111111111111')
     expect(attendanceResultEditPosts[0]).not.toHaveProperty('overrideMetrics')
     expect(
       vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes('/api/attendance/notification-deliveries')),
@@ -1376,6 +1387,11 @@ describe('Attendance admin regressions', () => {
       '00000000-0000-4000-8000-00000000000b',
     ])
     expect(new Set(attendanceResultEditPosts.map(p => p.idempotencyKey)).size).toBe(2)
+    for (const post of attendanceResultEditPosts) {
+      expect(post.idempotencyKey).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      )
+    }
     expect(attendanceResultEditPosts[0]).not.toHaveProperty('overrideMetrics')
   })
 

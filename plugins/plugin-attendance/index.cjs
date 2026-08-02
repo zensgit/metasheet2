@@ -30103,6 +30103,14 @@ module.exports = {
 	            offset,
 	          })
 
+	          const calculationPosture = await db.transaction(async (trx) => {
+	            const port = attendanceW4SegmentCalculationPort
+	            if (!port || typeof port.resolveOrgSegmentCalculationPosture !== 'function') {
+	              throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Canonical attendance write boundary unavailable')
+	            }
+	            return port.resolveOrgSegmentCalculationPosture(trx, orgId)
+	          })
+
 	          const workContextPrefetch = await buildWorkContextPrefetch(db, {
 	            orgId,
 	            userIds: [targetUserId],
@@ -30155,12 +30163,14 @@ module.exports = {
 	              prefetched: workContextPrefetch.prefetched,
 	            })
 
+	            const expectedCalculation = resolveW4c3cExpectedCalculation(
+	              row,
+	              calculationPosture?.effectiveState,
+	            )
 	            return {
 	              recordId: row.id,
-	              expectedCalculationId: row.current_calculation_id ?? row.latest_calculation_id ?? null,
-	              expectedCalculationVersion: row.current_calculation_id != null
-	                ? (row.current_calculation_version == null ? null : Number(row.current_calculation_version))
-	                : (row.latest_calculation_version == null ? null : Number(row.latest_calculation_version)),
+	              expectedCalculationId: expectedCalculation.id,
+	              expectedCalculationVersion: expectedCalculation.version,
 	              workDate,
 	              status: row.status,
 	              isWorkday: row.is_workday,
@@ -34545,7 +34555,7 @@ module.exports = {
 	    }
 
 	    function resolveW4c3cExpectedCalculation(record, posture) {
-	      if (posture === 'shadow') {
+	      if (posture === 'shadow' || posture === 'eligible') {
 	        return {
 	          id: record.latest_calculation_id ?? null,
 	          version: record.latest_calculation_version == null
@@ -34653,26 +34663,20 @@ module.exports = {
       }
       return 'attendance_admin'
     }
-    function buildW4c3cManualOperations(targetStatus, overrideMetrics) {
-      const ops = [{ op: 'set', field: 'status', value: targetStatus }]
-      if (overrideMetrics && typeof overrideMetrics === 'object') {
-        if (overrideMetrics.workMinutes != null) {
-          ops.push({ op: 'set', field: 'workMinutes', value: overrideMetrics.workMinutes })
-        }
-        if (overrideMetrics.lateMinutes != null) {
-          ops.push({ op: 'set', field: 'lateMinutes', value: overrideMetrics.lateMinutes })
-        }
-        if (overrideMetrics.earlyLeaveMinutes != null) {
-          ops.push({ op: 'set', field: 'earlyLeaveMinutes', value: overrideMetrics.earlyLeaveMinutes })
-        }
-      }
-      return ops
+    function buildW4c3cManualOperations(targetStatus, beforeRecord, overrideMetrics) {
+      const normalized = applyResultEditMetricNormalization(targetStatus, beforeRecord, overrideMetrics)
+      return [
+        { op: 'set', field: 'status', value: targetStatus },
+        { op: 'set', field: 'workMinutes', value: normalized.workMinutes },
+        { op: 'set', field: 'lateMinutes', value: normalized.lateMinutes },
+        { op: 'set', field: 'earlyLeaveMinutes', value: normalized.earlyLeaveMinutes },
+      ]
     }
     function w4c3cStableJson(value) {
       return JSON.stringify(value ?? null)
     }
     async function insertW4c3cManualResultEditAuditRow(trx, {
-      orgId, recordId, subjectUserId, workDate, beforeStatus, afterStatus,
+      auditId, orgId, recordId, subjectUserId, workDate, beforeStatus, afterStatus,
       beforeSnapshot, afterSnapshot, reason, evidence, actorUserId, idempotencyKey,
     }) {
       // Complete payload congruence: record, status, metrics (after_snapshot), reason, evidence.
@@ -34686,12 +34690,13 @@ module.exports = {
         [orgId, idempotencyKey],
       )
       if (existing[0]) {
+        const sameAuditId = String(existing[0].id) === String(auditId)
         const sameRecord = String(existing[0].record_id) === String(recordId)
         const sameStatus = String(existing[0].after_status) === String(afterStatus)
         const sameAfter = w4c3cStableJson(existing[0].after_snapshot) === w4c3cStableJson(afterSnapshot)
         const sameReason = String(existing[0].reason ?? '') === String(reason ?? '')
         const sameEvidence = w4c3cStableJson(existing[0].evidence) === w4c3cStableJson(evidence ?? [])
-        if (!sameRecord || !sameStatus || !sameAfter || !sameReason || !sameEvidence) {
+        if (!sameAuditId || !sameRecord || !sameStatus || !sameAfter || !sameReason || !sameEvidence) {
           throw new HttpError(
             409,
             'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT',
@@ -34702,11 +34707,12 @@ module.exports = {
       }
       const inserted = await trx.query(
         `INSERT INTO attendance_record_result_edits
-          (org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
+          (id, org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
            reason, evidence, actor_user_id, idempotency_key)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11, $12)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13)
          RETURNING id::text AS id`,
         [
+          auditId,
           orgId,
           recordId,
           subjectUserId,
@@ -34742,7 +34748,11 @@ module.exports = {
           }
           throw new HttpError(409, 'ATTENDANCE_RECORD_RETIRED', 'attendance record is retired')
         }
-        const operations = buildW4c3cManualOperations(routeInput.targetStatus, routeInput.overrideMetrics)
+	        const operations = buildW4c3cManualOperations(
+	          routeInput.targetStatus,
+	          record,
+	          routeInput.overrideMetrics,
+	        )
 	        return Object.freeze({
 	          orgId,
 	          actorId: String(routeInput.actorId),
@@ -34861,6 +34871,7 @@ module.exports = {
 	            const beforeSnapshot = buildResultEditSnapshot(record)
 	            const afterSnapshot = buildResultEditSnapshot(postWriteRecord)
             const audit = await insertW4c3cManualResultEditAuditRow(trx, {
+              auditId: editId,
               orgId: prepared.orgId,
               recordId: String(record.id),
               subjectUserId: prepared.subjectUserId,
@@ -34940,9 +34951,8 @@ module.exports = {
             lifecycleEvents: [{ eventKind: 'attendance.resolved', payload: { kind: 'manual_edit', recordId: String(record.id) } }],
           }
         }
-        // legacy_projection_only and shadow: single-write compatibility path
-        // (meta marker in the same upsert). The canonical operation boundary
-        // still owns shadow claim/seal and its durable lifecycle outbox.
+        // legacy_projection_only: single-write compatibility path (meta marker
+        // in the same upsert). W4 postures returned through the branch above.
         const legacy = await applyAttendanceResultEdit(trx, {
           orgId: prepared.orgId,
           recordId: String(record.id),

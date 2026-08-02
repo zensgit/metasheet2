@@ -772,6 +772,108 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     expect(durable.rows[0]).toMatchObject({ operations: 1, outbox: 1, calculations: 2, notified: 1 })
   })
 
+  it('shadow status-only edit normalizes the W4 projection and legacy parent identically', async () => {
+    requireServer()
+    const fixture = await seedUser({ permission: 'attendance:admin' })
+    await seedOrgRollout(fixture.orgId, fixture.userId, 'shadow')
+    const { recordId, workDate } = await seedRecord(fixture.orgId, fixture.userId)
+    const prior = await seedAuthoritativePrior(
+      fixture.orgId,
+      fixture.userId,
+      recordId,
+      workDate,
+      'shadow',
+    )
+    const operationId = randomUUID()
+    const response = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        recordId,
+        targetStatus: 'early_leave',
+        reason: 'shadow status-only normalization',
+        operationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion,
+        idempotencyKey: operationId,
+      },
+    })
+    expect(response.status, response.raw).toBe(200)
+    const shadowCalculationId = response.body?.data?.calculationId
+    expect(shadowCalculationId).toEqual(expect.any(String))
+
+    const stored = await pool.query(
+      `SELECT r.status, r.work_minutes, r.late_minutes, r.early_leave_minutes,
+              r.current_calculation_id::text AS current_calculation_id,
+              c.projected_status, c.projected_work_minutes,
+              c.projected_late_minutes, c.projected_early_leave_minutes
+         FROM attendance_records r
+         JOIN attendance_record_calculations c
+           ON c.id = $3::uuid AND c.attendance_record_id = r.id AND c.org_id = r.org_id
+        WHERE r.id = $1::uuid AND r.org_id = $2`,
+      [recordId, fixture.orgId, shadowCalculationId],
+    )
+    expect(stored.rows[0]).toMatchObject({
+      status: 'early_leave',
+      work_minutes: 400,
+      late_minutes: 0,
+      early_leave_minutes: 0,
+      current_calculation_id: null,
+      projected_status: 'early_leave',
+      projected_work_minutes: 400,
+      projected_late_minutes: 0,
+      projected_early_leave_minutes: 0,
+    })
+
+  })
+
+  it('shadow anomaly refresh freezes the latest calculation instead of the current pointer', async () => {
+    requireServer()
+    const fixture = await seedUser({ permission: 'attendance:admin' })
+    await seedOrgRollout(fixture.orgId, fixture.userId, 'shadow')
+    const { recordId, workDate } = await seedRecord(fixture.orgId, fixture.userId)
+    const current = await seedAuthoritativePrior(
+      fixture.orgId,
+      fixture.userId,
+      recordId,
+      workDate,
+      'authoritative',
+    )
+    const operationId = randomUUID()
+    const response = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        recordId,
+        targetStatus: 'late',
+        reason: 'shadow latest calculation freeze',
+        operationId,
+        expectedCalculationId: current.calculationId,
+        expectedCalculationVersion: current.calculationVersion,
+        idempotencyKey: operationId,
+      },
+    })
+    expect(response.status, response.raw).toBe(200)
+    const shadowCalculationId = response.body?.data?.calculationId
+    expect(shadowCalculationId).toEqual(expect.any(String))
+
+    const listing = await requestJson(
+      `${baseUrl}/api/attendance/anomalies?from=${workDate}&to=${workDate}`,
+      { headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId } },
+    )
+    expect(listing.status, listing.raw).toBe(200)
+    const item = listing.body?.data?.items?.find((candidate: { recordId?: string }) => candidate.recordId === recordId)
+    expect(item).toMatchObject({
+      recordId,
+      expectedCalculationId: shadowCalculationId,
+      expectedCalculationVersion: current.calculationVersion + 1,
+      status: 'late',
+      workMinutes: 400,
+      lateMinutes: 15,
+      earlyLeaveMinutes: 0,
+    })
+  })
+
   it('authoritative manual edit enforces the configured edit window before W4 result DML', async () => {
     requireServer()
     const fixture = await seedAdmin()
@@ -838,7 +940,7 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         earlyLeaveMinutes: 0,
       },
     })
-    expect(first.body?.data?.edit?.id).toEqual(expect.any(String))
+    expect(first.body?.data?.edit?.id).toBe(operationId)
     expect(first.body?.data?.edit?.notificationDeliveryId).toEqual(expect.any(String))
     expect(first.body?.data?.calculationId).toEqual(expect.any(String))
     expect(first.body?.data?.calculationId).not.toBe(prior.calculationId)
@@ -873,6 +975,11 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
          (SELECT count(*)::int FROM attendance_record_result_edits e
            JOIN attendance_notification_deliveries d ON d.id = e.notification_delivery_id
           WHERE e.org_id = $1 AND e.record_id = $3::uuid AND e.idempotency_key = $2::text) AS deliveries,
+         (SELECT (r.meta->'manual_result_edit'->>'auditId') = e.id::text
+            FROM attendance_records r
+            JOIN attendance_record_result_edits e
+              ON e.org_id = r.org_id AND e.record_id = r.id
+           WHERE r.org_id = $1 AND r.id = $3::uuid AND e.idempotency_key = $2::text) AS marker_audit_matches,
          (SELECT current_calculation_id::text FROM attendance_records
           WHERE org_id = $1 AND id = $3::uuid) AS current_calculation_id`,
       [fixture.orgId, operationId, recordId],
@@ -884,6 +991,7 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       manual_calculations: 1,
       edits: 1,
       deliveries: 1,
+      marker_audit_matches: true,
       current_calculation_id: first.body?.data?.calculationId,
     })
 
@@ -917,6 +1025,73 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       edits: 1,
       deliveries: 1,
     })
+  })
+
+  it('authoritative status-only edit freezes normalized metrics and refreshes late-tier meta', async () => {
+    requireServer()
+    const fixture = await seedAdmin()
+    const workDate = new Date().toISOString().slice(0, 10)
+    const { recordId } = await seedRecord(fixture.orgId, fixture.userId, 'late', workDate)
+    await pool.query(
+      `UPDATE attendance_records
+          SET meta = '{"severe_late_count":1,"severe_late_minutes":15,"absence_late_count":1}'::jsonb
+        WHERE id = $1::uuid AND org_id = $2`,
+      [recordId, fixture.orgId],
+    )
+    const prior = await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate)
+    const operationId = randomUUID()
+    const response = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        recordId,
+        targetStatus: 'normal',
+        reason: 'status-only normalization',
+        operationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion,
+        idempotencyKey: operationId,
+      },
+    })
+    expect(response.status, response.raw).toBe(200)
+    expect(response.body?.data?.record).toMatchObject({
+      status: 'normal',
+      workMinutes: 400,
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+    })
+
+    const stored = await pool.query(
+      `SELECT r.status, r.work_minutes, r.late_minutes, r.early_leave_minutes, r.meta,
+              c.projected_status, c.projected_work_minutes,
+              c.projected_late_minutes, c.projected_early_leave_minutes,
+              c.manual_override_snapshot
+         FROM attendance_records r
+         JOIN attendance_record_calculations c ON c.id = r.current_calculation_id
+        WHERE r.id = $1::uuid AND r.org_id = $2`,
+      [recordId, fixture.orgId],
+    )
+    expect(stored.rows[0]).toMatchObject({
+      status: 'normal',
+      work_minutes: 400,
+      late_minutes: 0,
+      early_leave_minutes: 0,
+      projected_status: 'normal',
+      projected_work_minutes: 400,
+      projected_late_minutes: 0,
+      projected_early_leave_minutes: 0,
+    })
+    expect(stored.rows[0].meta).toMatchObject({
+      severe_late_count: 0,
+      severe_late_minutes: 0,
+      absence_late_count: 0,
+    })
+    expect(stored.rows[0].manual_override_snapshot?.operations).toEqual([
+      { op: 'set', field: 'status', value: 'normal' },
+      { op: 'set', field: 'workMinutes', value: 400 },
+      { op: 'set', field: 'lateMinutes', value: 0 },
+      { op: 'set', field: 'earlyLeaveMinutes', value: 0 },
+    ])
   })
 
   it('authoritative manual edit rejects a stale calculation version with zero durable effects', async () => {

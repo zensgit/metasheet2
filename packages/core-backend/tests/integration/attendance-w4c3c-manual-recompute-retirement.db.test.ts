@@ -7,7 +7,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import { appendOperatorRetirementCalculationV1 } from '../../src/attendance/w4c3c-ops-retirement'
+import {
+  appendOperatorRetirementCalculationV1,
+  ATTENDANCE_OPERATOR_RETIREMENT_ERROR_CODES,
+} from '../../src/attendance/w4c3c-ops-retirement'
 import {
   appendManualOverrideCalculationV1,
   ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES,
@@ -960,6 +963,63 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
       await client.query('COMMIT')
     } catch (error) {
       await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  })
+
+  it('ops_retirement rejects null expected calculation against a current W4 parent with zero writes', async () => {
+    const targetRecordId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_records
+         (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at,
+          work_minutes, late_minutes, early_leave_minutes, status, is_workday,
+          meta, projection_owner, visibility_state, visibility_reason, updated_at)
+       VALUES ($1::uuid, $2, $3, '2026-08-09'::date, 'UTC', $4::timestamptz, $5::timestamptz,
+               400, 15, 0, 'late', true, '{}'::jsonb, 'legacy_untracked', 'active', 'active', now())`,
+      [targetRecordId, userId, orgId, '2026-08-09T01:10:00.000Z', '2026-08-09T10:00:00.000Z'],
+    )
+    const currentCalculationId = await seedCompletePriorCalculation(pool, { targetRecordId })
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const before = await client.query(
+        `SELECT current_calculation_id::text AS current_calculation_id,
+                visibility_state, visibility_reason,
+                (SELECT count(*)::int FROM attendance_record_calculations
+                  WHERE attendance_record_id = $1::uuid) AS calculation_count
+           FROM attendance_records WHERE id = $1::uuid`,
+        [targetRecordId],
+      )
+      await expect(
+        appendOperatorRetirementCalculationV1({
+          client: clientOf(client) as never,
+          orgId,
+          recordId: targetRecordId,
+          expectedCalculationId: null,
+          expectedCalculationVersion: null,
+          operationId: randomUUID(),
+          actorId: userId,
+          correlationId: 'retirement-null-expected-conflict',
+          reason: 'must not bypass current calculation identity',
+          ticket: 'TICKET-W4C3C-NULL-EXPECTED',
+          mode: 'authoritative',
+        }),
+      ).rejects.toMatchObject({ code: ATTENDANCE_OPERATOR_RETIREMENT_ERROR_CODES.VERSION_CONFLICT })
+      const after = await client.query(
+        `SELECT current_calculation_id::text AS current_calculation_id,
+                visibility_state, visibility_reason,
+                (SELECT count(*)::int FROM attendance_record_calculations
+                  WHERE attendance_record_id = $1::uuid) AS calculation_count
+           FROM attendance_records WHERE id = $1::uuid`,
+        [targetRecordId],
+      )
+      expect(before.rows[0]).toMatchObject({ current_calculation_id: currentCalculationId })
+      expect(after.rows[0]).toEqual(before.rows[0])
+      await client.query('ROLLBACK')
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined)
       throw error
     } finally {
       client.release()

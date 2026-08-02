@@ -28,6 +28,7 @@ import {
 import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerprints'
 import {
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
+  deriveAttendanceLateTierFieldsV1,
   validateFrozenContextShape,
 } from './w4c1-segment-calculator'
 import {
@@ -638,10 +639,6 @@ export async function appendManualOverrideCalculationV1(
       record.meta && typeof record.meta === 'object' && !Array.isArray(record.meta)
         ? (record.meta as Record<string, unknown>)
         : {}
-    const nextMeta = {
-      ...existingMeta,
-      manual_result_edit: metaMarker,
-    }
     // Parent NOT NULL integer columns: never invent zero from unset — prefer projected,
     // then prior projected, then existing parent.
     const parentWork = parentIntegerFromNullable(
@@ -659,6 +656,16 @@ export async function appendManualOverrideCalculationV1(
       priorProjected.earlyLeaveMinutes,
       record.early_leave_minutes,
     )
+    const lateTiers = deriveAttendanceLateTierFieldsV1(
+      parentLate,
+      priorContext.severeLateThresholdMinutes,
+      priorContext.absenceLateThresholdMinutes,
+    )
+    const nextMeta = {
+      ...existingMeta,
+      ...lateTiers,
+      manual_result_edit: metaMarker,
+    }
     const updated = await rows(
       input.client,
       `UPDATE attendance_records
