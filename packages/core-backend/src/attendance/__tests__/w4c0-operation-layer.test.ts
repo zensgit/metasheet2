@@ -480,6 +480,38 @@ describe('W4C-0 Stage C — strict source-command validators (lock 4.1 matrix)',
     expect(approve.commands[0].commandFingerprint).not.toBe(reject.commands[0].commandFingerprint)
   })
 
+  it('accepts only the exact zero-version/zero-hash legacy cancellation marker', () => {
+    const cancellation = (expectedSnapshotVersion: number, expectedSnapshotHash: string) => ({
+      schemaVersion: 1,
+      orgId: ORG,
+      correlationId: 'corr-cancel',
+      command: {
+        schemaVersion: 1,
+        kind: 'request_cancel',
+        subjectUserId: 'user-2',
+        operationId: UUID_1,
+        payload: {
+          requestId: UUID_2,
+          approvalRef: null,
+          expectedSnapshotVersion,
+          expectedSnapshotHash,
+          reason: null,
+          meta: null,
+        },
+      },
+      batch: null,
+    })
+
+    expect(normalizeAttendanceSourceOperationEnvelopeV1(cancellation(0, '0'.repeat(64))))
+      .toMatchObject({ commands: [{ payload: { expectedSnapshotVersion: 0, expectedSnapshotHash: '0'.repeat(64) } }] })
+    expect(normalizeAttendanceSourceOperationEnvelopeV1(cancellation(1, HEX64_A)))
+      .toMatchObject({ commands: [{ payload: { expectedSnapshotVersion: 1, expectedSnapshotHash: HEX64_A } }] })
+    expect(() => normalizeAttendanceSourceOperationEnvelopeV1(cancellation(0, HEX64_A)))
+      .toThrow(AttendanceW4CommandError)
+    expect(() => normalizeAttendanceSourceOperationEnvelopeV1(cancellation(1, '0'.repeat(64))))
+      .toThrow(AttendanceW4CommandError)
+  })
+
   it('scheduled command derives its identity and rejects a caller-supplied operation ID', () => {
     const scheduled = (operationId: string | null) => ({
       schemaVersion: 1,

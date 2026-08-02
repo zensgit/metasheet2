@@ -38,6 +38,11 @@ import {
 } from '../auth/login-alias-service'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
+import {
+  acquireAttendanceCalculationRolloutLock,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  resolveSegmentCalculationPosture,
+} from '../attendance/w4c0-identity'
 
 type AdminUserProfile = {
   id: string
@@ -3493,7 +3498,17 @@ export function adminUsersRouter(): Router {
           }
           const segmentCount = Number(lockedShift.rows[0]?.segment_count ?? 0)
           if (segmentCount > 1) {
-            throw new AttendanceShiftReferenceUnavailableError(segmentCount)
+            let rolloutOrg: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
+            try {
+              rolloutOrg = parseCanonicalAttendanceRolloutOrgKeyV1(attendanceOrgId)
+            } catch {
+              throw new AttendanceShiftReferenceUnavailableError(segmentCount)
+            }
+            await acquireAttendanceCalculationRolloutLock(client, rolloutOrg, 'shared')
+            const posture = await resolveSegmentCalculationPosture(client, rolloutOrg)
+            if (!posture.referenceSegments) {
+              throw new AttendanceShiftReferenceUnavailableError(segmentCount)
+            }
           }
         }
 

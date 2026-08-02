@@ -229,11 +229,14 @@ const PAYLOAD_PARSERS: Readonly<Record<string, PayloadParser>> = Object.freeze({
   },
   request_cancel: (payload) => {
     const p = requireExactKeys(payload, ['requestId', 'approvalRef', 'expectedSnapshotVersion', 'expectedSnapshotHash', 'reason', 'meta'])
+    const expectedSnapshotVersion = parseIntInRange(p.expectedSnapshotVersion, 0)
+    const expectedSnapshotHash = parseHex64(p.expectedSnapshotHash)
+    if ((expectedSnapshotVersion === 0) !== (expectedSnapshotHash === '0'.repeat(64))) fail(INVALID)
     return {
       requestId: parseUuid(p.requestId),
       approvalRef: parseStringOrNull(p.approvalRef, 128),
-      expectedSnapshotVersion: parseIntInRange(p.expectedSnapshotVersion, 1),
-      expectedSnapshotHash: parseHex64(p.expectedSnapshotHash),
+      expectedSnapshotVersion,
+      expectedSnapshotHash,
       reason: parseStringOrNull(p.reason),
       meta: parsePlainObjectOrNull(p.meta),
     }

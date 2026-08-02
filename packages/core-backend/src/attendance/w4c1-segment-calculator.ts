@@ -188,10 +188,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (!isPlainObject(value)) return false
+  if (Object.getOwnPropertySymbols(value).length > 0) return false
   const own = Object.getOwnPropertyNames(value)
   if (own.length !== keys.length) return false
   for (const key of keys) {
     if (!Object.prototype.hasOwnProperty.call(value, key)) return false
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor || descriptor.get || descriptor.set) return false
+  }
+  return true
+}
+
+function hasDenseDataArray(value: unknown): value is unknown[] {
+  if (!Array.isArray(value) || Object.getOwnPropertySymbols(value).length > 0) return false
+  const own = Object.getOwnPropertyNames(value)
+  if (own.length !== value.length + 1 || !own.includes('length')) return false
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (!descriptor || !('value' in descriptor)) return false
   }
   return true
 }
@@ -308,7 +322,7 @@ const SEGMENT_KEYS = [
   'earlyLeaveGraceMinutes',
 ] as const
 
-function validateFrozenContextShape(context: unknown): context is FrozenAttendanceContextV1 {
+export function validateFrozenContextShape(context: unknown): context is FrozenAttendanceContextV1 {
   if (!hasExactKeys(context, CONTEXT_KEYS)) return false
   const ctx = context as Record<string, unknown>
   if (ctx.schemaVersion !== 1) return false
@@ -324,7 +338,7 @@ function validateFrozenContextShape(context: unknown): context is FrozenAttendan
   if (!isNonNegativeInteger(ctx.severeLateThresholdMinutes)) return false
   if (!isNonNegativeInteger(ctx.absenceLateThresholdMinutes)) return false
   const segments = ctx.segments
-  if (!Array.isArray(segments) || segments.length < 1 || segments.length > 3) return false
+  if (!hasDenseDataArray(segments) || segments.length < 1 || segments.length > 3) return false
   let maxLateGrace = 0
   for (let i = 0; i < segments.length; i += 1) {
     const segment = segments[i]

@@ -50,6 +50,12 @@ const activateMocks = vi.hoisted(() => ({
   activatePendingUser: vi.fn(),
 }))
 
+const attendanceW4Mocks = vi.hoisted(() => ({
+  acquireAttendanceCalculationRolloutLock: vi.fn(),
+  parseCanonicalAttendanceRolloutOrgKeyV1: vi.fn((value: unknown) => value),
+  resolveSegmentCalculationPosture: vi.fn(),
+}))
+
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: Request, _res: Response, next: (error?: unknown) => void) => {
     req.user = state.authUser as never
@@ -104,6 +110,8 @@ vi.mock('../../src/auth/invite-tokens', () => ({
 vi.mock('../../src/auth/dingtalk-oauth', () => ({
   getDingTalkRuntimeStatus: dingtalkOauthMocks.getDingTalkRuntimeStatus,
 }))
+
+vi.mock('../../src/attendance/w4c0-identity', () => attendanceW4Mocks)
 
 import { adminUsersRouter } from '../../src/routes/admin-users'
 
@@ -233,6 +241,12 @@ describe('admin-users routes', () => {
     inviteMocks.isInviteTokenExpired.mockClear()
     inviteMocks.isInviteTokenExpired.mockImplementation((token: string) => token === 'eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoiaW52aXRlIiwiZXhwIjoxfQ.sig')
     dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReset()
+    attendanceW4Mocks.acquireAttendanceCalculationRolloutLock.mockReset()
+    attendanceW4Mocks.acquireAttendanceCalculationRolloutLock.mockResolvedValue(undefined)
+    attendanceW4Mocks.parseCanonicalAttendanceRolloutOrgKeyV1.mockReset()
+    attendanceW4Mocks.parseCanonicalAttendanceRolloutOrgKeyV1.mockImplementation((value: unknown) => value)
+    attendanceW4Mocks.resolveSegmentCalculationPosture.mockReset()
+    attendanceW4Mocks.resolveSegmentCalculationPosture.mockResolvedValue({ referenceSegments: false })
     dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
       configured: true,
       available: true,
@@ -2907,6 +2921,86 @@ describe('admin-users routes', () => {
     const userInsertIndex = statements.findIndex((statement) => statement.includes('INSERT INTO users ('))
     expect(lockedShiftIndex).toBeGreaterThanOrEqual(0)
     expect(userInsertIndex).toBeGreaterThan(lockedShiftIndex)
+  })
+
+  it.each([
+    ['explicit attendanceOrgId', {
+      attendanceOrgId: '33333333-3333-4333-8333-333333333333',
+      orgId: '33333333-3333-4333-8333-333333333333',
+    }],
+    ['group/shift-derived org', { orgId: '33333333-3333-4333-8333-333333333333' }],
+  ])('admits a multi-segment default shift only through the canonical posture seam (%s)', async (_label, orgFields) => {
+    const orgId = '33333333-3333-4333-8333-333333333333'
+    const shiftId = '22222222-2222-4222-8222-222222222222'
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    attendanceW4Mocks.resolveSegmentCalculationPosture.mockResolvedValue({ referenceSegments: true })
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = String(sql)
+      if (statement.includes('SELECT id FROM users WHERE lower(username)')) return { rows: [] }
+      if (statement.includes('FROM directory_integrations')) return { rows: [{ found: 1 }] }
+      if (statement.includes('FROM attendance_shifts s') && statement.includes('FOR SHARE')) {
+        return { rows: [{ id: shiftId, segment_count: 2 }] }
+      }
+      if (statement.includes('FROM attendance_shifts')) {
+        return { rows: [{ id: shiftId, name: '双段班' }] }
+      }
+      if (statement.includes('INSERT INTO users (')) return { rows: [] }
+      if (statement.includes('INSERT INTO attendance_shift_assignments')) {
+        expect(params).toEqual([expect.any(String), orgId, expect.any(String), shiftId, '2026-06-01'])
+        return { rows: [{ assignmentId: 'assignment-w4' }] }
+      }
+      if (statement.includes('FROM users') && statement.includes('WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'user-new',
+            email: null,
+            username: 'newuser',
+            name: 'New User',
+            employeeNo: null,
+            department: null,
+            position: null,
+            hireDate: null,
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            last_login_at: null,
+            created_at: '2026-03-12T00:00:00.000Z',
+            updated_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      if (statement.includes('FROM user_roles')) return { rows: [] }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        username: 'newuser',
+        name: 'New User',
+        defaultShiftId: shiftId,
+        defaultShiftStartDate: '2026-06-01',
+        password: 'WelcomePass9A',
+        isActive: true,
+        ...orgFields,
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(attendanceW4Mocks.parseCanonicalAttendanceRolloutOrgKeyV1).toHaveBeenCalledWith(orgId)
+    expect(attendanceW4Mocks.acquireAttendanceCalculationRolloutLock).toHaveBeenCalledWith(
+      expect.anything(),
+      orgId,
+      'shared',
+    )
+    expect(attendanceW4Mocks.resolveSegmentCalculationPosture).toHaveBeenCalledWith(expect.anything(), orgId)
+    const userInsertIndex = pgMocks.query.mock.calls.findIndex(([sql]) => String(sql).includes('INSERT INTO users ('))
+    expect(userInsertIndex).toBeGreaterThanOrEqual(0)
+    expect(attendanceW4Mocks.resolveSegmentCalculationPosture.mock.invocationCallOrder[0])
+      .toBeLessThan(pgMocks.query.mock.invocationCallOrder[userInsertIndex])
   })
 
   it('rejects attendance onboarding when the selected group does not exist', async () => {

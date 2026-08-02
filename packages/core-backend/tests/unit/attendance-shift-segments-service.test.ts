@@ -354,6 +354,27 @@ describe('assertShiftReferenceAllowed (canonical assignability guard)', () => {
       .rejects.toMatchObject({ status: 422, code: ERR.MULTI_SEGMENT_CALCULATION_DISABLED })
   })
 
+  it('admits a multi-segment reference only when the caller supplies the canonical posture capability', async () => {
+    const trx = fakeTrx({ shiftRows: [{ id: SHIFT_ID }], segmentCount: 2 })
+    await expect(service.assertShiftReferenceAllowed(trx, {
+      orgId: 'org-a',
+      shiftId: SHIFT_ID,
+      producer: 'schedule_publication',
+      referenceSegments: true,
+    })).resolves.toBeUndefined()
+  })
+
+  it('an explicit closed posture cannot be widened by the private environment predicate', async () => {
+    process.env[FLAG] = 'org-a'
+    const trx = fakeTrx({ shiftRows: [{ id: SHIFT_ID }], segmentCount: 2 })
+    await expect(service.assertShiftReferenceAllowed(trx, {
+      orgId: 'org-a',
+      shiftId: SHIFT_ID,
+      producer: 'schedule_publication',
+      referenceSegments: false,
+    })).rejects.toMatchObject({ status: 422, code: ERR.MULTI_SEGMENT_CALCULATION_DISABLED })
+  })
+
   it('fails closed when a calculation caller cannot prove the persisted segment count', () => {
     expect(() => service.assertSegmentCalculationAllowed({
       orgId: 'org-a',

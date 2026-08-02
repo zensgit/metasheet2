@@ -9904,7 +9904,8 @@ function mapImportBatchRow(row) {
 		      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
 		      [String(orgId ?? '') + ':' + String(userId ?? ''), `${String(workDate ?? '')}:${String(requestType ?? '')}`]
 		    )
-		  } catch (_error) {
+		  } catch (error) {
+		    if (client?.__w4CanonicalTrx === true) throw error
 		    // Best-effort: preserve functional behavior if advisory locks are unavailable.
 		  }
 		}
@@ -10471,15 +10472,23 @@ function attendanceShiftWindowsOverlapForSlotConflict(leftShift, rightShift) {
   return left.startMinutes < right.endMinutes && right.startMinutes < left.endMinutes
 }
 
-async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId) {
+async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId, options = {}) {
   try {
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
       [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
     )
-  } catch (_error) {
+  } catch (error) {
+    if (options.required === true) throw error
     // Best-effort: preserve save behavior if advisory locks are unavailable.
   }
+}
+
+async function acquireAttendanceScheduleAssignmentReadLock(client, orgId, userId) {
+  await client.query(
+    'SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))',
+    [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
+  )
 }
 
 function getAttendanceScheduleAssignmentConflictType(draftKind, existingKind) {
@@ -10711,14 +10720,14 @@ function isTemporaryShiftOverlayRowForFixedScheduleDraft(row, draft, overlaps = 
   )
 }
 
-async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds) {
+async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds, options = {}) {
   const lockUserIds = Array.from(new Set(
     (Array.isArray(userIds) ? userIds : [])
       .map((value) => String(value || '').trim())
       .filter(Boolean)
   )).sort()
   for (const userId of lockUserIds) {
-    await acquireAttendanceScheduleAssignmentLock(db, orgId, userId)
+    await acquireAttendanceScheduleAssignmentLock(db, orgId, userId, options)
   }
   return lockUserIds
 }
@@ -15074,12 +15083,16 @@ function isPunchWithinShiftWindow(occurredAt, context, workDate, fallbackTimezon
  * Returns ALL published slots for the requested work dates (no LIMIT 1 / row-order winner).
  * Each row is an atomic (workDate, shiftId, segmentIndex=null, absolute window inputs).
  */
-async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId }) {
+async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId, lockScheduleFacts = false }) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   const dates = Array.isArray(workDates)
     ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
     : []
   if (!userId || dates.length === 0) return []
+
+  if (lockScheduleFacts) {
+    await acquireAttendanceScheduleAssignmentReadLock(db, targetOrg, userId)
+  }
 
   const candidates = []
 
@@ -15099,7 +15112,8 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
          AND COALESCE(a.publish_status, 'published') = 'published'
          AND a.start_date <= $3::date
          AND (a.end_date IS NULL OR a.end_date >= $4::date)
-       ORDER BY a.user_id, a.slot_index ASC NULLS FIRST, a.start_date DESC, a.created_at DESC`,
+       ORDER BY a.user_id, a.slot_index ASC NULLS FIRST, a.start_date DESC, a.created_at DESC
+       ${lockScheduleFacts ? 'FOR SHARE OF a' : ''}`,
       [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
     )
     for (const row of assignmentRows || []) {
@@ -15144,7 +15158,8 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
          AND r.is_active = true
          AND a.start_date <= $3::date
          AND (a.end_date IS NULL OR a.end_date >= $4::date)
-       ORDER BY a.start_date DESC, a.created_at DESC`,
+       ORDER BY a.start_date DESC, a.created_at DESC
+       ${lockScheduleFacts ? 'FOR SHARE OF a' : ''}`,
       [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
     )
     for (const row of rotationRows || []) {
@@ -15286,7 +15301,7 @@ async function loadWorkDateAttributionTailMinutes(db) {
   }
 }
 
-function createPluginAttendanceWorkDateResolver(db) {
+function createPluginAttendanceWorkDateResolver(db, options = {}) {
   const resolver = createAttendanceWorkDateResolver({
     toWorkDate,
     buildZonedDate,
@@ -15294,7 +15309,10 @@ function createPluginAttendanceWorkDateResolver(db) {
     normalizeTimeString,
     resolveOvernightFlag,
     async loadPublishedCandidates(args) {
-      return loadPublishedCandidatesForWorkDateResolver(db, args)
+      return loadPublishedCandidatesForWorkDateResolver(db, {
+        ...args,
+        lockScheduleFacts: options.lockScheduleFacts === true,
+      })
     },
     async loadOpenRecords(args) {
       return loadOpenRecordsForWorkDateResolver(db, args)
@@ -22364,7 +22382,11 @@ async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
 // `includeFullWinner` out-params carry the winner's absolute/attribution windows and wall-time
 // provenance for the strict V2 rebuild; without the flag the resolver output is byte-identical.
 async function resolveW4LiveCandidateInTransactionV1(trx, args) {
-  const { adapters } = createPluginAttendanceWorkDateResolver(trx)
+  // P18/P27: the canonical W4 transaction holds a shared lock on every
+  // published assignment candidate it freezes. Schedule publication and
+  // terminal schedule writers take the conflicting row lock, so either commit
+  // order observes one coherent schedule-fact version.
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx, { lockScheduleFacts: true })
   return adapters.live.resolvePunchWorkDate({
     orgId: args.orgId,
     userId: args.userId,
@@ -22377,7 +22399,7 @@ async function resolveW4LiveCandidateInTransactionV1(trx, args) {
 
 // W4C-2: in-transaction W2 re-resolution (freeze step) — scheduled channel.
 async function resolveW4ScheduledCandidateInTransactionV1(trx, args) {
-  const { adapters } = createPluginAttendanceWorkDateResolver(trx)
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx, { lockScheduleFacts: true })
   return adapters.scheduled.resolveScheduledWorkDate({
     orgId: args.orgId,
     userId: args.userId,
@@ -24094,6 +24116,236 @@ module.exports = {
     // Intl probe (which accepts offset forms like "+05:00"). Reads and writes that do
 	    // not carry a timezone value are untouched.
 	    const attendanceW4SegmentCalculationPort = context?.services?.attendanceW4SegmentCalculation ?? null
+
+	    // W4C-3b P12 (lock §7.2 / §12.5 / OD-W4C-33): immutable request calculation
+	    // snapshot plumbing via the least-privilege host port. legacy_projection_only
+	    // is a no-op inside the host (zero snapshot rows). Missing methods keep
+	    // pre-P12 request behavior (byte-identical when posture is legacy).
+	    const rethrowAttendanceRequestSnapshotError = (error) => {
+	      if (error && typeof error === 'object' && typeof error.code === 'string' && String(error.code).startsWith('W4C3B_REQUEST_SNAPSHOT_')) {
+	        const status = Number.isInteger(error.statusCode) ? error.statusCode : 409
+	        throw new HttpError(status, error.code, error.message || error.code)
+	      }
+	      throw error
+	    }
+	    const buildRequestSnapshotPayloadFieldsFromDraft = (draftOrRow, metadata) => {
+	      const meta = normalizeMetadata(metadata ?? draftOrRow?.metadata)
+	      const minutesRaw = meta.minutes
+	      const minutes =
+	        typeof minutesRaw === 'number' && Number.isFinite(minutesRaw) && minutesRaw >= 0
+	          ? Math.trunc(minutesRaw)
+	          : null
+	      const leaveTypeCode =
+	        typeof meta.leaveType?.code === 'string' && meta.leaveType.code.trim()
+	          ? meta.leaveType.code.trim()
+	          : typeof meta.leaveTypeCode === 'string' && meta.leaveTypeCode.trim()
+	            ? meta.leaveTypeCode.trim()
+	            : null
+	      const outdoor = normalizeMetadata(meta.outdoorPunch)
+	      let outdoorPunch = null
+	      if (
+	        outdoor
+	        && (outdoor.eventType === 'check_in' || outdoor.eventType === 'check_out')
+	        && typeof outdoor.occurredAt === 'string'
+	        && outdoor.occurredAt
+	        && typeof outdoor.timezone === 'string'
+	        && outdoor.timezone
+	      ) {
+	        outdoorPunch = {
+	          eventType: outdoor.eventType,
+	          occurredAt: outdoor.occurredAt,
+	          timezone: outdoor.timezone,
+	          source: typeof outdoor.source === 'string' && outdoor.source ? outdoor.source : 'mobile',
+	        }
+	      }
+	      return { minutes, leaveTypeCode, outdoorPunch }
+	    }
+	    const buildRequestSnapshotPayloadFromDraft = (draft, metadata) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.buildRequestCalculationPayloadFromRequestRow !== 'function') return null
+	      return port.buildRequestCalculationPayloadFromRequestRow({
+	        workDate: draft.workDate,
+	        requestedInAt: draft.requestedInAt ?? null,
+	        requestedOutAt: draft.requestedOutAt ?? null,
+	        reason: draft.reason ?? null,
+	        ...buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+	      })
+	    }
+	    const buildUnsupportedRequestSnapshotMaterial = (reason = 'missing') => {
+	      const port = attendanceW4SegmentCalculationPort
+	      const attributionSnapshot =
+	        port && typeof port.buildUnsupportedRequestAttributionSnapshot === 'function'
+	          ? port.buildUnsupportedRequestAttributionSnapshot(reason)
+	          : {
+	              posture: 'unsupported',
+	              sourceSchemaVersion: null,
+	              reason,
+	              sourceFingerprint: null,
+	            }
+	      return { attributionSnapshot, contextSnapshot: null }
+	    }
+	    const resolveRequestCreationSnapshotMaterial = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.buildRequestCreationAttributionSnapshotV1 !== 'function') {
+	        return buildUnsupportedRequestSnapshotMaterial('missing')
+	      }
+	      const defaultRule = await loadDefaultRule(trx, args.orgId)
+	      const workContext = await resolveWorkContext({
+	        db: trx,
+	        orgId: args.orgId,
+	        userId: args.userId,
+	        workDate: args.workDate,
+	        defaultRule,
+	      })
+	      const timezone =
+	        typeof workContext?.rule?.timezone === 'string' && workContext.rule.timezone
+	          ? workContext.rule.timezone
+	          : defaultRule.timezone
+	      const resolution = args.occurredAt
+	        ? await resolveW4LiveCandidateInTransactionV1(trx, {
+	            orgId: args.orgId,
+	            userId: args.userId,
+	            occurredAt: args.occurredAt,
+	            timezone,
+	            calendarWorkDate: args.workDate,
+	          })
+	        : await resolveW4ScheduledCandidateInTransactionV1(trx, {
+	            orgId: args.orgId,
+	            userId: args.userId,
+	            timezone,
+	            calendarWorkDate: args.workDate,
+	          })
+	      const attributionSnapshot = port.buildRequestCreationAttributionSnapshotV1({
+	        orgId: args.orgId,
+	        userId: args.userId,
+	        nowIso: new Date().toISOString(),
+	        resolution,
+	      })
+	      if (!attributionSnapshot || attributionSnapshot.posture !== 'resolved_v2') {
+	        return { attributionSnapshot, contextSnapshot: null }
+	      }
+	      const contextSnapshot = await buildW4ShadowFrozenContextV1(trx, {
+	        orgId: args.orgId,
+	        userId: args.userId,
+	        workDate: attributionSnapshot.value.workDate,
+	        shiftId: attributionSnapshot.value.shiftId,
+	        timezone:
+	          resolution?.fullWinner && typeof resolution.fullWinner.timezone === 'string'
+	            ? resolution.fullWinner.timezone
+	            : timezone,
+	        isWorkday: workContext?.isWorkingDay !== false,
+	        holidayKind: workContext?.holiday?.kind ?? null,
+	      })
+	      if (!contextSnapshot) return buildUnsupportedRequestSnapshotMaterial('unresolved')
+	      return { attributionSnapshot, contextSnapshot }
+	    }
+	    const buildRequestSnapshotToken = (appendResult) =>
+	      appendResult && appendResult.kind === 'appended'
+	        ? {
+	            version: appendResult.snapshot.version,
+	            fingerprint: appendResult.snapshot.payloadFingerprint,
+	          }
+	        : null
+	    const appendRequestCalculationSnapshotOnCreate = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.appendRequestCalculationSnapshotOnCreate !== 'function') return null
+	      try {
+	        return await port.appendRequestCalculationSnapshotOnCreate({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          subjectUserId: args.subjectUserId,
+	          actorUserId: args.actorUserId,
+	          payloadFields: args.payloadFields ?? null,
+	          attributionSnapshot:
+	            args.attributionSnapshot
+	            ?? (typeof port.buildUnsupportedRequestAttributionSnapshot === 'function'
+	              ? port.buildUnsupportedRequestAttributionSnapshot('missing')
+	              : {
+	                posture: 'unsupported',
+	                sourceSchemaVersion: null,
+	                reason: 'missing',
+	                sourceFingerprint: null,
+	              }),
+	          contextSnapshot: args.contextSnapshot ?? null,
+	          resolveSnapshots: args.resolveSnapshots,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const appendRequestCalculationSnapshotOnEdit = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.appendRequestCalculationSnapshotOnEdit !== 'function') return null
+	      try {
+	        return await port.appendRequestCalculationSnapshotOnEdit({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          currentRequestType: args.currentRequestType,
+	          subjectUserId: args.subjectUserId,
+	          actorUserId: args.actorUserId,
+	          expectedSnapshotVersion: args.expectedSnapshotVersion,
+	          expectedSnapshotFingerprint: args.expectedSnapshotFingerprint,
+	          payload: args.payload,
+	          payloadFields: args.payloadFields ?? null,
+	          attributionSnapshot: args.attributionSnapshot,
+	          contextSnapshot: args.contextSnapshot,
+	          resolveSnapshots: args.resolveSnapshots,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const lockRequestSnapshotBeforeTerminalDecision = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.lockRequestSnapshotBeforeTerminalDecision !== 'function') {
+	        return { kind: 'legacy_skipped', writePosture: 'legacy_projection_only' }
+	      }
+	      try {
+	        return await port.lockRequestSnapshotBeforeTerminalDecision({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          subjectUserId: args.subjectUserId,
+	          expectedSnapshotVersion: args.expectedSnapshotVersion,
+	          expectedSnapshotFingerprint: args.expectedSnapshotFingerprint,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const bindRequestSnapshotOnTerminalDecision = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.bindRequestSnapshotOnTerminalDecision !== 'function') {
+	        return { kind: 'legacy_skipped', writePosture: 'legacy_projection_only' }
+	      }
+	      try {
+	        return await port.bindRequestSnapshotOnTerminalDecision({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          subjectUserId: args.subjectUserId,
+	          action: args.action,
+	          approvalVersion: args.approvalVersion,
+	          approvalRecordId: args.approvalRecordId,
+	          expectedSnapshotVersion: args.expectedSnapshotVersion,
+	          expectedSnapshotFingerprint: args.expectedSnapshotFingerprint,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const requestSnapshotTerminalBindingMetaKey =
+	      attendanceW4SegmentCalculationPort
+	      && typeof attendanceW4SegmentCalculationPort.requestSnapshotTerminalBindingMetaKey === 'string'
+	        ? attendanceW4SegmentCalculationPort.requestSnapshotTerminalBindingMetaKey
+	        : 'w4RequestSnapshotTerminalBinding'
+
 	    const buildAttendanceSyncImportReservationLockWitness = ({ orgId, idempotencyKey }) => {
 	      const port = attendanceW4SegmentCalculationPort
 	      if (!port || typeof port.buildLegacyImportReservationLockWitness !== 'function') {
@@ -24187,6 +24439,9 @@ module.exports = {
             },
           })
         : null
+    // Assigned later once request adapters are closed over; outdoor punch may
+    // call it before the assignment line in source order but only after activate.
+    let w4RequestOperationBoundary = null
     // Values-free HTTP mapping for typed W4 boundary/registry/command/authorization errors
     // (closed codes only; the raw caller value is never echoed). Returns true when handled.
     const W4_ERROR_NAMES = new Set([
@@ -24195,6 +24450,8 @@ module.exports = {
       'AttendanceW4CommandError',
       'AttendanceW4AuthorizationError',
       'AttendanceW4LiveScheduledBoundaryError',
+      'AttendanceW4RequestBoundaryError',
+      'ApprovedLeaveCancellationError',
       'AttendanceW4MergePolicyError',
       // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the
       // durable run-creation/resume/outcome/finalization machine's own
@@ -24772,30 +25029,6 @@ module.exports = {
     async function resolveAttendanceRequestApprovalScopeFacts(client, orgId, requestRow) {
       const workDate = normalizeDateOnly(requestRow?.work_date) ?? requestRow?.work_date
       return resolveAttendanceUserSchedulerScopeFacts(client, orgId, requestRow?.user_id, { workDate })
-    }
-
-    async function assertAttendanceRequestApprovalAllowed(req, { client, requestRow }) {
-      const requesterId = getUserId(req)
-      if (!requesterId) {
-        throw new HttpError(401, 'UNAUTHORIZED', 'User ID not found')
-      }
-      const orgId = requestRow?.org_id ?? getOrgId(req)
-
-      if (await canAccessOtherUsers(requesterId)) return
-
-      const actorContext = await loadAttendanceScopeContextForUser(client, orgId, requesterId)
-      const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, client)
-      const facts = await resolveAttendanceRequestApprovalScopeFacts(client, orgId, requestRow)
-      const allowed = scopes.some(scope =>
-        attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'approve', facts)
-      )
-      if (!allowed) {
-        throw new HttpError(
-          403,
-          'SCHEDULER_SCOPE_FORBIDDEN',
-          'Scheduler scope does not allow this attendance approval action'
-        )
-      }
     }
 
     async function assertAttendanceRecordExportAllowed(req, res, { orgId, userId, from, to }) {
@@ -28820,163 +29053,58 @@ module.exports = {
           const punchMeta = parsed.data.meta ?? {}
           const outdoorMarker = punchMeta.outdoor === true || punchMeta.outdoorPunch === true
           if (outdoorPolicy.requireApproval === true && (outsideGeofence || outdoorMarker)) {
+            // W4C-3b: outdoor approval create enters the canonical request_create
+            // boundary (routeVariant=outdoor) before first approval/request DML.
+            if (!w4RequestOperationBoundary) {
+              res.status(503).json({
+                ok: false,
+                error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+              })
+              return
+            }
             const eventType = parsed.data.eventType
             const note = typeof punchMeta.note === 'string' ? punchMeta.note.trim() : ''
-            if (outdoorPolicy.requireNote === true && !note) {
-              res.status(422).json({ ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
-              return
-            }
-            // S2 outdoor-punch-photo design-lock (2026-07-10) G3: requirePhoto is nested exactly like
-            // requireNote — both only ever apply to an ACCEPTED outdoor candidate (requireApproval=true
-            // is the precondition for outdoor punches existing at all; with it off, an outside-fence
-            // punch already 403s as LOCATION_RESTRICTED, so there is no "accepted outdoor punch" to
-            // attach evidence to — no separate enforcement path is opened for that case).
-            // G2: any photoFileId supplied is verified against the `files` table (row exists, owner_id
-            // is the punching user, meta.contentType is image/*) — never trusted as a bare client string.
             const rawPhotoFileId = typeof parsed.data.photoFileId === 'string' ? parsed.data.photoFileId.trim() : ''
-            if (outdoorPolicy.requirePhoto === true && !rawPhotoFileId) {
-              res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_REQUIRED', message: '外勤打卡需上传照片证据' } })
-              return
-            }
-            let photoFileId = null
-            if (rawPhotoFileId) {
-              // F2 files-acl-tombstone design-lock (2026-07-10): `DELETE /api/files/:id` now tombstones
-              // the row (`deleted_at`) instead of hard-deleting it — this filter is what makes a
-              // tombstoned id read as "no such evidence" here, same as the pre-tombstone hard-delete did.
-              const photoRows = await db.query('SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL LIMIT 1', [rawPhotoFileId])
-              const photoRow = photoRows[0] ?? null
-              const photoMeta = normalizeMetadata(photoRow?.meta)
-              // H2 photo-evidence-hardening design-lock (2026-07-10) P3-1 AMENDMENT: `meta.contentType`
-              // is client-asserted (multer trusts the multipart part's Content-Type header as-is), so a
-              // forged `image/png` declaration on a non-image body previously passed this check. Rows
-              // written by the sniff-aware upload path (core routes/files.ts) carry `meta.sniffed ===
-              // true` — a PATH MARKER, not a content-type value — and ONLY those rows are held to the
-              // sniffed verdict: `meta.sniffedContentType` must be present and start with `image/`, else
-              // invalid (a magic-byte miss on a real upload is rejected here — this is what closes the
-              // forged-MIME gap). Rows with no `sniffed` key predate this slice and fall back to the
-              // pre-existing `meta.contentType` check byte-for-byte — old evidence is not retroactively
-              // invalidated. (Considered writing `sniffedContentType` unconditionally with a null
-              // sentinel on a miss instead of this separate marker — rejected: JSON key-present-but-null
-              // vs key-absent is a classic wire-format footgun, and a plain boolean path marker is more
-              // explicit and reusable by any future consumer of this table.)
-              let photoContentTypeValid
-              if (photoMeta.sniffed === true) {
-                const sniffedContentType = typeof photoMeta.sniffedContentType === 'string' ? photoMeta.sniffedContentType : ''
-                photoContentTypeValid = sniffedContentType.startsWith('image/')
-              } else {
-                const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
-                photoContentTypeValid = photoContentType.startsWith('image/')
-              }
-              if (!photoRow || photoRow.owner_id !== userId || !photoContentTypeValid) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_INVALID', message: '照片证据无效' } })
-                return
-              }
-              photoFileId = rawPhotoFileId
-            }
-            // Resolve + validate the outdoor_punch approval flow. No silent fall-back to auto-approved.
-            const requestedFlowId = typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId.trim() : ''
-            let flow = null
-            if (requestedFlowId) {
-              flow = await loadApprovalFlow(db, orgId, { flowId: requestedFlowId })
-              if (!flow || flow.requestType !== 'outdoor_punch' || flow.isActive !== true) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: '外勤审批流不存在或未启用' } })
-                return
-              }
-            } else {
-              // #2304 §2.5: with no explicit approvalFlowId, require a UNIQUE active outdoor_punch flow.
-              // `loadApprovalFlow` would silently pick the newest (ORDER BY created_at) when several are
-              // active — that could route approvals to the wrong people. Demand exactly one (LIMIT 2 → ≠1
-              // ⇒ 422), so an ambiguous setup is rejected instead of guessed.
-              const activeFlows = await db.query(
-                `SELECT * FROM attendance_approval_flows
-                 WHERE org_id = $1 AND request_type = 'outdoor_punch' AND is_active = true
-                 ORDER BY created_at DESC LIMIT 2`,
-                [orgId]
-              )
-              if (activeFlows.length !== 1) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: activeFlows.length === 0 ? '外勤审批流未配置' : '存在多个启用的外勤审批流，请指定 approvalFlowId' } })
-                return
-              }
-              flow = mapApprovalFlowRow(activeFlows[0])
-            }
-
-            const draft = {
-              orgId,
-              workDate,
-              requestType: 'outdoor_punch',
-              requestedInAt: eventType === 'check_in' ? occurredAt : null,
-              requestedOutAt: eventType === 'check_out' ? occurredAt : null,
-              reason: note || null,
-              metadata: {
-                outdoorPunch: {
-                  version: 1,
+            try {
+              const operationId = typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null
+              const outcome = await w4RequestOperationBoundary.execute({
+                kind: 'request_create',
+                operationId,
+                correlationId: requestCorrelationId(req, operationId, 'outdoor-create'),
+                routeVariant: 'outdoor',
+                routeInput: {
+                  actorId: userId,
+                  tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId,
+                  requesterName: getUserLabel(req, userId),
+                  orgId,
+                  workDate,
                   eventType,
                   occurredAt: occurredAt.toISOString(),
-                  workDate,
                   timezone,
                   source: parsed.data.source ?? 'mobile',
                   location: parsed.data.location ?? punchMeta.location ?? null,
-                  note: note || null,
-                  detection: outsideGeofence ? 'outside_geofence' : 'marker',
-                  // S2 outdoor-punch-photo design-lock (2026-07-10): photoFileId is written ONLY when a
-                  // verified photo was supplied, so a punch with requirePhoto=false and no photo produces
-                  // the pre-slice metadata.outdoorPunch shape byte-for-byte (no null-valued key added).
-                  ...(photoFileId ? { photoFileId } : {}),
+                  note,
+                  photoFileId: rawPhotoFileId || null,
+                  outsideGeofence: outsideGeofence === true,
+                  outdoorPolicy: {
+                    requireApproval: outdoorPolicy.requireApproval === true,
+                    requireNote: outdoorPolicy.requireNote === true,
+                    requirePhoto: outdoorPolicy.requirePhoto === true,
+                    approvalFlowId: typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId : '',
+                  },
                 },
-                approvalFlow: { id: flow.id, name: flow.name, steps: flow.steps, currentStep: 0 },
-              },
-            }
-            const requestId = randomUUID()
-            const approvalId = `apv_${randomUUID()}`
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation: a dynamic-kind step
-            // anywhere in the flow blocks request-create (flag OFF / port missing / kind unimplemented),
-            // so a later dynamic step cannot start a flow and strand it mid-flight.
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata.approvalFlow.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create (org-scoped port); assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId, userId, flowSteps: draft.metadata.approvalFlow.steps, context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId, requestId, orgId, userId, requesterName: getUserLabel(req, userId), draft, orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata.approvalFlow.steps, 0, approvalPayload.requesterSnapshot
-            )
-            try {
-              const request = await db.transaction(async (trx) => {
-                await acquireAttendanceRequestLock(trx, orgId, userId, workDate, 'outdoor_punch')
-                // Outdoor dedup key includes eventType (#2304 §2.2): same-day outdoor check_in + check_out
-                // can coexist; a 2nd pending/approved of the SAME eventType is the duplicate.
-                const dup = await trx.query(
-                  `SELECT id FROM attendance_requests
-                   WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = 'outdoor_punch'
-                     AND status IN ('pending', 'approved')
-                     AND metadata -> 'outdoorPunch' ->> 'eventType' = $4
-                   LIMIT 1`,
-                  [orgId, userId, workDate, eventType]
-                )
-                if (dup.length > 0) {
-                  throw new HttpError(409, 'DUPLICATE_REQUEST', 'Outdoor punch already pending or approved for this day and event type')
-                }
-                await upsertAttendanceApprovalInstance(trx, approvalPayload)
-                await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-                const rows = await trx.query(
-                  `INSERT INTO attendance_requests
-                   (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-                   RETURNING *`,
-                  [requestId, userId, orgId, workDate, 'outdoor_punch', draft.requestedInAt, draft.requestedOutAt, draft.reason, 'pending', approvalId, JSON.stringify(draft.metadata)]
-                )
-                return rows[0]
               })
-              emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
-              res.status(202).json({ ok: true, data: { pendingApproval: true, request: mapAttendanceRequestRow(request) } })
+              if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+                emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
+              }
+              res.status(202).json(outcome.response)
               return
             } catch (error) {
               if (error instanceof HttpError) {
                 res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
                 return
               }
+              if (respondIfW4BoundaryError(res, error)) return
               throw error
             }
           }
@@ -30304,6 +30432,10 @@ module.exports = {
     )
 
     const requestWriteSchema = z.object({
+      // W4C-3b P13: a stable client UUID identifies create/edit retries. Omitted
+      // by every legacy client, which preserves the null-operation path.
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
       workDate: z.string().optional(),
       work_date: z.string().optional(),
       date: z.string().optional(),
@@ -30330,6 +30462,10 @@ module.exports = {
       attachment_url: z.string().optional(),
       approvalFlowId: z.string().optional(),
       approval_flow_id: z.string().optional(),
+      expectedSnapshotVersion: z.coerce.number().int().min(1).optional(),
+      expected_snapshot_version: z.coerce.number().int().min(1).optional(),
+      expectedSnapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+      expected_snapshot_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
       orgId: z.string().optional(),
       org_id: z.string().optional(),
     })
@@ -30354,6 +30490,36 @@ module.exports = {
       return uuid
     }
 
+    function respondIfInvalidRequestUuidReferences(res, input) {
+      const references = [
+        ['leaveTypeId', 'leaveTypeId'],
+        ['leave_type_id', 'leaveTypeId'],
+        ['overtimeRuleId', 'overtimeRuleId'],
+        ['overtime_rule_id', 'overtimeRuleId'],
+        ['approvalFlowId', 'approvalFlowId'],
+        ['approval_flow_id', 'approvalFlowId'],
+      ]
+      try {
+        for (const [key, fieldName] of references) {
+          if (input[key] !== undefined) {
+            normalizeRequestUuidReferenceInput(input[key], null, fieldName)
+          }
+        }
+        return false
+      } catch (error) {
+        if (!(error instanceof HttpError)) throw error
+        res.status(error.status).json({
+          ok: false,
+          error: {
+            code: error.code,
+            message: error.message,
+            ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+          },
+        })
+        return true
+      }
+    }
+
     async function ensureAttendanceRequestAccess(requestRow, requesterId, actionLabel) {
       if (requestRow.user_id === requesterId) return
       const allowed = await canAccessOtherUsers(requesterId)
@@ -30363,6 +30529,9 @@ module.exports = {
     }
 
     const shiftSwapCreateSchema = z.object({
+      // W4C-3b: client-stable retry identity; omitted => null-ID legacy path.
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
       requesterAssignmentId: z.string().optional(),
       requester_assignment_id: z.string().optional(),
       counterpartyAssignmentId: z.string().optional(),
@@ -30373,6 +30542,9 @@ module.exports = {
     })
 
     const scheduleDispatchCreateSchema = z.object({
+      // W4C-3b: client-stable retry identity; omitted => null-ID legacy path.
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
       userId: z.string().min(1).optional(),
       user_id: z.string().min(1).optional(),
       targetScheduleGroupId: z.string().optional(),
@@ -30800,7 +30972,12 @@ module.exports = {
         'counterpartyAssignmentId'
       )
 
-      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [requesterSource.userId, counterpartySource.userId])
+      await acquireAttendanceScheduleAssignmentLocks(
+        client,
+        orgId,
+        [requesterSource.userId, counterpartySource.userId],
+        { required: true }
+      )
       await enforceShiftSwapEditWindow(client, [
         requesterSource.workDate,
         counterpartySource.workDate,
@@ -30932,7 +31109,8 @@ module.exports = {
             `${String(userId ?? '')}:${String(targetScheduleGroupId ?? '')}:${Number(slotIndex ?? 0)}`,
           ]
         )
-      } catch (_error) {
+      } catch (error) {
+        if (client?.__w4CanonicalTrx === true) throw error
         // Best-effort: if advisory locks are unavailable, the exact source_key unique index still catches exact
         // duplicates, but overlapping windows rely on the pre-insert SELECT.
       }
@@ -31195,7 +31373,7 @@ module.exports = {
       const settings = await getSettings(client)
       const slotResolution = resolveScheduleDispatchSlotIndex(settings, detail.slot_index)
       await acquireScheduleDispatchWindowLock(client, orgId, detail.user_id, targetGroup.id, slotResolution.slotIndex)
-      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [detail.user_id])
+      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [detail.user_id], { required: true })
       await enforceScheduleDispatchEditWindow(client, [detail.start_date, detail.end_date])
       await assertScheduleDispatchProtectedRowsAbsent(client, { orgId, detail })
 
@@ -31296,7 +31474,7 @@ module.exports = {
       return clauses.length ? `AND (${clauses.join(' OR ')})` : 'AND FALSE'
     }
 
-    async function resolveAttendanceRequestDraft(parsedData, existingRequest = null) {
+    async function resolveAttendanceRequestDraft(client, parsedData, existingRequest = null) {
       const orgId = existingRequest?.org_id ?? DEFAULT_ORG_ID
       const existingMetadata = normalizeMetadata(existingRequest?.metadata)
       const existingLeaveType = normalizeMetadata(existingMetadata.leaveType)
@@ -31429,7 +31607,7 @@ module.exports = {
       let leaveType = null
       let overtimeRule = null
       if (requestType === 'leave') {
-        leaveType = await loadLeaveType(db, orgId, {
+        leaveType = await loadLeaveType(client, orgId, {
           id: normalizeRequestUuidReferenceInput(
             firstDefinedValue(parsedData.leaveTypeId, parsedData.leave_type_id),
             existingLeaveType.id,
@@ -31452,7 +31630,7 @@ module.exports = {
           durationMinutes = leaveType.defaultMinutesPerDay
         }
       } else if (requestType === 'overtime') {
-        overtimeRule = await loadOvertimeRule(db, orgId, {
+        overtimeRule = await loadOvertimeRule(client, orgId, {
           id: normalizeRequestUuidReferenceInput(
             firstDefinedValue(parsedData.overtimeRuleId, parsedData.overtime_rule_id),
             existingOvertimeRule.id,
@@ -31492,7 +31670,7 @@ module.exports = {
         )
       }
 
-      const approvalFlow = await loadApprovalFlow(db, orgId, {
+      const approvalFlow = await loadApprovalFlow(client, orgId, {
         requestType,
         flowId: normalizeRequestUuidReferenceInput(
           firstDefinedValue(parsedData.approvalFlowId, parsedData.approval_flow_id),
@@ -31541,7 +31719,7 @@ module.exports = {
         }
       }
       if (requestType === 'overtime') {
-        const overtimeSegmentation = await maybeBuildOvertimeSegmentationSnapshot(db, {
+        const overtimeSegmentation = await maybeBuildOvertimeSegmentationSnapshot(client, {
           orgId,
           userId: existingRequest?.user_id,
           workDate,
@@ -31584,7 +31762,7 @@ module.exports = {
               'Cannot freeze overtime attribution without a subject userId',
             )
           }
-          const { adapters } = createPluginAttendanceWorkDateResolver(db)
+          const { adapters } = createPluginAttendanceWorkDateResolver(client)
           const freeze = await adapters.overtime.freezeRequestCreationAnchor({
             orgId,
             userId: createUserId,
@@ -31621,6 +31799,2455 @@ module.exports = {
       }
     }
 
+    const resolveSchema = z.object({
+      comment: z.string().optional(),
+      metadata: z.record(z.unknown()).optional(),
+    })
+    const requestCancellationActionSchema = resolveSchema.extend({
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
+      expectedSnapshotVersion: z.coerce.number().int().min(0).optional(),
+      expected_snapshot_version: z.coerce.number().int().min(0).optional(),
+      expectedSnapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+      expected_snapshot_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    })
+    const requestDecisionActionSchema = resolveSchema.extend({
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
+      expectedApprovalVersion: z.coerce.number().int().min(0).optional(),
+      expected_approval_version: z.coerce.number().int().min(0).optional(),
+      expectedApprovalNode: z.string().min(1).max(128).optional(),
+      expected_approval_node: z.string().min(1).max(128).optional(),
+    })
+    const requestBoundaryRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      requesterName: z.string().min(1),
+      orgId: z.string().min(1).nullable(),
+      requestId: z.string().uuid().nullable(),
+      requestBody: requestWriteSchema,
+    }).strict()
+
+    function resolveRequestOperationId(parsedData) {
+      const camel = parsedData.operationId ?? null
+      const snake = parsedData.operation_id ?? null
+      if (camel && snake && camel !== snake) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'operationId aliases must match')
+      }
+      return camel ?? snake
+    }
+
+    function requestCorrelationId(req, operationId, kind) {
+      const raw = req.correlationId
+        ?? req.headers?.['x-correlation-id']
+        ?? req.headers?.['x-request-id']
+      const first = Array.isArray(raw) ? raw[0] : raw
+      if (typeof first === 'string' && first.length > 0 && first.length <= 128) return first
+      return `${kind}:${operationId ?? randomUUID()}`
+    }
+
+    function requestCommandPayload(parsedData, draft, mode, requestId = null) {
+      const finalWrite = {
+        workDate: draft.workDate,
+        requestType: draft.requestType,
+        requestedInAt: draft.requestedInAt ? new Date(draft.requestedInAt).toISOString() : null,
+        requestedOutAt: draft.requestedOutAt ? new Date(draft.requestedOutAt).toISOString() : null,
+        reason: draft.reason ?? null,
+        minutes: Number.isFinite(Number(draft.metadata?.minutes)) ? Number(draft.metadata.minutes) : null,
+        leaveTypeId: draft.metadata?.leaveType?.id ?? null,
+        leaveTypeCode: draft.metadata?.leaveType?.code ?? null,
+        overtimeRuleId: draft.metadata?.overtimeRule?.id ?? null,
+        overtimeRuleName: draft.metadata?.overtimeRule?.name ?? null,
+        attachmentUrl: draft.metadata?.attachmentUrl ?? null,
+        approvalFlowId: draft.metadata?.approvalFlow?.id ?? null,
+      }
+      if (mode === 'create') {
+        return { requestType: draft.requestType, requestWrite: finalWrite }
+      }
+
+      const patch = {}
+      const include = (target, aliases) => aliases.some(key => Object.prototype.hasOwnProperty.call(parsedData, key))
+      if (include(parsedData, ['workDate', 'work_date', 'date'])) patch.workDate = finalWrite.workDate
+      if (include(parsedData, ['requestType', 'request_type', 'type'])) patch.requestType = finalWrite.requestType
+      if (include(parsedData, ['requestedInAt', 'requested_in_at', 'clockIn'])) patch.requestedInAt = finalWrite.requestedInAt
+      if (include(parsedData, ['requestedOutAt', 'requested_out_at', 'clockOut'])) patch.requestedOutAt = finalWrite.requestedOutAt
+      if (include(parsedData, ['reason'])) patch.reason = finalWrite.reason
+      if (include(parsedData, ['minutes'])) patch.minutes = finalWrite.minutes
+      if (include(parsedData, ['leaveTypeId', 'leave_type_id'])) patch.leaveTypeId = finalWrite.leaveTypeId
+      if (include(parsedData, ['leaveTypeCode', 'leave_type_code'])) patch.leaveTypeCode = finalWrite.leaveTypeCode
+      if (include(parsedData, ['overtimeRuleId', 'overtime_rule_id'])) patch.overtimeRuleId = finalWrite.overtimeRuleId
+      if (include(parsedData, ['overtimeRuleName', 'overtime_rule_name'])) patch.overtimeRuleName = finalWrite.overtimeRuleName
+      if (include(parsedData, ['attachmentUrl', 'attachment_url'])) patch.attachmentUrl = finalWrite.attachmentUrl
+      if (include(parsedData, ['approvalFlowId', 'approval_flow_id'])) patch.approvalFlowId = finalWrite.approvalFlowId
+      return {
+        requestId,
+        expectedSnapshotVersion: firstDefinedValue(
+          parsedData.expectedSnapshotVersion,
+          parsedData.expected_snapshot_version,
+        ) ?? null,
+        expectedSnapshotHash: firstDefinedValue(
+          parsedData.expectedSnapshotFingerprint,
+          parsedData.expected_snapshot_fingerprint,
+        ) ?? null,
+        patch,
+      }
+    }
+
+    // W4C-3b: one request_create adapter multiplexes generic + outdoor +
+    // schedule_dispatch + shift_swap. The host supplies routeVariant; body keys
+    // cannot spoof it. prepare owns non-locking reads; execute owns locks and the
+    // first source DML so completed replay can return before source locking.
+    const outdoorCreateRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      requesterName: z.string().min(1),
+      orgId: z.string().min(1),
+      workDate: z.string().min(1),
+      eventType: z.enum(['check_in', 'check_out']),
+      occurredAt: z.string().min(1),
+      timezone: z.string().min(1),
+      source: z.string().min(1),
+      location: z.unknown().nullable(),
+      note: z.string(),
+      photoFileId: z.string().nullable(),
+      outsideGeofence: z.boolean(),
+      outdoorPolicy: z.object({
+        requireApproval: z.boolean().optional(),
+        requireNote: z.boolean().optional(),
+        requirePhoto: z.boolean().optional(),
+        approvalFlowId: z.string().optional(),
+      }).passthrough(),
+    }).strict()
+
+    const scheduleDispatchCreateRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      actorFullAdmin: z.boolean(),
+      requesterName: z.string().min(1),
+      orgId: z.string().min(1),
+      input: z.object({
+        userId: z.string().min(1),
+        targetScheduleGroupId: z.string().min(1),
+        targetShiftId: z.string().min(1),
+        startDate: z.string().min(1),
+        endDate: z.string().min(1),
+        slotIndex: z.number().int().min(0).max(2).nullable().optional(),
+        reason: z.string().nullable().optional(),
+        approvalFlowId: z.string().nullable().optional(),
+      }).passthrough(),
+    }).strict()
+
+    const shiftSwapCreateRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      requesterName: z.string().min(1).nullable(),
+      orgId: z.string().min(1),
+      requesterAssignmentId: z.string().uuid(),
+      counterpartyAssignmentId: z.string().uuid(),
+      approvalFlowId: z.string().uuid().nullable(),
+      reason: z.string().nullable(),
+    }).strict()
+
+    const shiftSwapStoredSubjectScopeSchema = z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('self'), userId: z.string().min(1) }).strict(),
+      z.object({
+        kind: z.literal('explicit_users'),
+        userIds: z.array(z.string().min(1)).length(1),
+      }).strict(),
+    ])
+
+    const SHIFT_SWAP_CREATE_SOURCE_REF = 'plugin-attendance:POST /api/attendance/shift-swap-requests'
+
+    function withoutOperationIdentity(input) {
+      const { operationId: _operationId, operation_id: _operationIdSnake, ...payload } = input
+      return payload
+    }
+
+    function requestCreateIdentityFromRoute(variant, route, identityOverride = null) {
+      let requestType
+      let requestWrite
+      if (variant === 'generic') {
+        const rawRequestType = firstDefinedValue(
+          route.requestBody.requestType,
+          route.requestBody.request_type,
+          route.requestBody.type,
+        )
+        requestType = typeof rawRequestType === 'string' && rawRequestType.trim()
+          ? rawRequestType.trim()
+          : 'attendance_request'
+        requestWrite = withoutOperationIdentity(route.requestBody)
+      } else if (variant === 'outdoor') {
+        requestType = 'outdoor_punch'
+        requestWrite = {
+          workDate: route.workDate,
+          eventType: route.eventType,
+          occurredAt: route.occurredAt,
+          timezone: route.timezone,
+          source: route.source,
+          location: route.location,
+          note: route.note,
+          photoFileId: route.photoFileId,
+          outsideGeofence: route.outsideGeofence,
+          outdoorPolicy: route.outdoorPolicy,
+        }
+      } else if (variant === 'schedule_dispatch') {
+        requestType = 'schedule_dispatch'
+        requestWrite = route.input
+      } else if (variant === 'shift_swap') {
+        requestType = 'shift_swap'
+        requestWrite = {
+          requesterAssignmentId: route.requesterAssignmentId,
+          counterpartyAssignmentId: route.counterpartyAssignmentId,
+          approvalFlowId: route.approvalFlowId,
+          reason: route.reason,
+        }
+      } else {
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+      }
+      const defaultSubjectUserId = variant === 'schedule_dispatch' ? route.input.userId : route.actorId
+      const subjectUserId = identityOverride?.subjectUserId ?? defaultSubjectUserId
+      const crossUser = String(subjectUserId) !== String(route.actorId)
+      const actorPosture = identityOverride?.actorPosture ?? (variant === 'schedule_dispatch'
+        ? (route.actorFullAdmin === true ? 'attendance_admin' : (crossUser ? 'operator' : 'self'))
+        : 'self')
+      return {
+        orgId: route.orgId,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [subjectUserId] }
+          : { kind: 'self', userId: subjectUserId },
+        commandPayload: { requestType, requestWrite },
+        state: null,
+      }
+    }
+
+    async function resolveShiftSwapRequestCreateIdentity(trx, route, operation) {
+      if (operation.operationId) {
+        const operationRows = await trx.query(
+          `SELECT identity_source_kind, source_ref, actor_id, actor_posture, subject_scope
+             FROM attendance_result_operations
+            WHERE org_id = $1
+              AND entrypoint = 'request_create'
+              AND operation_id = $2::uuid`,
+          [route.orgId, operation.operationId],
+        )
+        if (operationRows.length > 1) {
+          throw new HttpError(409, 'ATTENDANCE_OPERATION_CONFLICT', 'Attendance operation identity is ambiguous')
+        }
+        if (operationRows.length === 1) {
+          const operationRow = operationRows[0]
+          if (
+            operationRow.identity_source_kind !== 'direct_request_create'
+            || operationRow.source_ref !== SHIFT_SWAP_CREATE_SOURCE_REF
+          ) {
+            throw new HttpError(409, 'ATTENDANCE_OPERATION_CONFLICT', 'Attendance operation identity does not match this route')
+          }
+          const subjectScope = shiftSwapStoredSubjectScopeSchema.safeParse(operationRow.subject_scope)
+          if (!subjectScope.success) {
+            throw new HttpError(409, 'ATTENDANCE_OPERATION_CONFLICT', 'Attendance operation subject is invalid')
+          }
+          const subjectUserId = subjectScope.data.kind === 'self'
+            ? subjectScope.data.userId
+            : subjectScope.data.userIds[0]
+          return requestCreateIdentityFromRoute('shift_swap', route, {
+            subjectUserId,
+            actorPosture: operationRow.actor_posture,
+          })
+        }
+      }
+
+      const assignmentRows = await trx.query(
+        `SELECT user_id
+           FROM attendance_shift_assignments
+          WHERE id = $1::uuid AND org_id = $2`,
+        [route.requesterAssignmentId, route.orgId],
+      )
+      if (assignmentRows.length !== 1) {
+        throw new HttpError(404, 'SHIFT_ASSIGNMENT_NOT_FOUND', 'Shift assignment not found')
+      }
+      const subjectUserId = String(assignmentRows[0].user_id)
+      const crossUser = subjectUserId !== route.actorId
+      if (crossUser && !(await canAccessOtherUsers(route.actorId))) {
+        throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
+      }
+      const actorPosture = crossUser
+        ? ((await hasAttendanceAdminAccess(route.actorId)) ? 'attendance_admin' : 'operator')
+        : 'self'
+      return requestCreateIdentityFromRoute('shift_swap', route, { subjectUserId, actorPosture })
+    }
+
+    async function prepareRequestCreateIdentity(trx, rawInput, operation) {
+      const variant = operation?.routeVariant
+      if (variant === 'generic') {
+        const route = requestBoundaryRouteInputSchema.parse(rawInput)
+        if (!route.orgId || route.requestId !== null) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+        }
+        return requestCreateIdentityFromRoute(variant, route)
+      }
+      if (variant === 'outdoor') {
+        return requestCreateIdentityFromRoute(variant, outdoorCreateRouteInputSchema.parse(rawInput))
+      }
+      if (variant === 'schedule_dispatch') {
+        return requestCreateIdentityFromRoute(variant, scheduleDispatchCreateRouteInputSchema.parse(rawInput))
+      }
+      if (variant === 'shift_swap') {
+        return resolveShiftSwapRequestCreateIdentity(
+          trx,
+          shiftSwapCreateRouteInputSchema.parse(rawInput),
+          operation,
+        )
+      }
+      throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+    }
+
+    async function prepareGenericRequestCreate(trx, rawInput) {
+      const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      if (!route.orgId || route.requestId !== null) {
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+      }
+      const draft = await resolveAttendanceRequestDraft(
+        trx,
+        route.requestBody,
+        { org_id: route.orgId, user_id: route.actorId },
+      )
+      let makeupPunchPolicy = null
+      if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+        const settings = await getSettings(trx)
+        if (settings?.makeupPunchPolicy?.enabled === true) makeupPunchPolicy = settings.makeupPunchPolicy
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: route.actorId,
+        flowSteps: draft.metadata?.approvalFlow?.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: route.actorId,
+        requesterName: route.requesterName,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata?.approvalFlow?.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      return {
+        ...requestCreateIdentityFromRoute('generic', route),
+        state: {
+          routeVariant: 'generic',
+          route,
+          draft,
+          makeupPunchPolicy,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+        },
+      }
+    }
+
+    async function executeGenericRequestCreate(trx, prepared) {
+      const {
+        route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments,
+      } = prepared.state
+      await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, draft.workDate, draft.requestType)
+      const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+        orgId: route.orgId,
+        userId: route.actorId,
+        workDate: draft.workDate,
+        requestType: draft.requestType,
+      })
+      if (duplicateRequest) {
+        throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+      }
+      if (makeupPunchPolicy) {
+        const enforcement = await enforceMakeupPunchPolicy(trx, {
+          policy: makeupPunchPolicy,
+          orgId: route.orgId,
+          subjectUserId: route.actorId,
+          requesterId: route.actorId,
+          requestId: null,
+          draft,
+        })
+        draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const rows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          route.actorId,
+          route.orgId,
+          draft.workDate,
+          draft.requestType,
+          draft.requestedInAt,
+          draft.requestedOutAt,
+          draft.reason,
+          'pending',
+          approvalId,
+          JSON.stringify(draft.metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: draft.requestType,
+        subjectUserId: route.actorId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: route.actorId,
+          workDate: draft.workDate,
+        }),
+      })
+      const response = {
+        ok: true,
+        data: {
+          request: mapAttendanceRequestRow(rows[0]),
+          ...(buildRequestSnapshotToken(snapshotAppend)
+            ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+            : {}),
+        },
+      }
+      return {
+        response,
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: route.actorId,
+            workDate: draft.workDate,
+            requestType: draft.requestType,
+          },
+        }],
+      }
+    }
+
+    async function prepareOutdoorRequestCreate(trx, rawInput) {
+      const route = outdoorCreateRouteInputSchema.parse(rawInput)
+      const { outdoorPolicy, eventType, workDate, note } = route
+      const occurredAt = new Date(route.occurredAt)
+      if (Number.isNaN(occurredAt.getTime())) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid outdoor punch occurredAt')
+      }
+      if (outdoorPolicy.requireNote === true && !note) {
+        throw new HttpError(422, 'OUTDOOR_NOTE_REQUIRED', '外勤打卡需填写备注')
+      }
+      const rawPhotoFileId = typeof route.photoFileId === 'string' ? route.photoFileId.trim() : ''
+      if (outdoorPolicy.requirePhoto === true && !rawPhotoFileId) {
+        throw new HttpError(422, 'OUTDOOR_PHOTO_REQUIRED', '外勤打卡需上传照片证据')
+      }
+      let photoFileId = null
+      if (rawPhotoFileId) {
+        const photoRows = await trx.query(
+          'SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+          [rawPhotoFileId],
+        )
+        const photoRow = photoRows[0] ?? null
+        const photoMeta = normalizeMetadata(photoRow?.meta)
+        let photoContentTypeValid
+        if (photoMeta.sniffed === true) {
+          const sniffedContentType = typeof photoMeta.sniffedContentType === 'string' ? photoMeta.sniffedContentType : ''
+          photoContentTypeValid = sniffedContentType.startsWith('image/')
+        } else {
+          const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
+          photoContentTypeValid = photoContentType.startsWith('image/')
+        }
+        if (!photoRow || photoRow.owner_id !== route.actorId || !photoContentTypeValid) {
+          throw new HttpError(422, 'OUTDOOR_PHOTO_INVALID', '照片证据无效')
+        }
+        photoFileId = rawPhotoFileId
+      }
+      const requestedFlowId = typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId.trim() : ''
+      let flow = null
+      if (requestedFlowId) {
+        flow = await loadApprovalFlow(trx, route.orgId, { flowId: requestedFlowId })
+        if (!flow || flow.requestType !== 'outdoor_punch' || flow.isActive !== true) {
+          throw new HttpError(422, 'OUTDOOR_APPROVAL_FLOW_REQUIRED', '外勤审批流不存在或未启用')
+        }
+      } else {
+        const activeFlows = await trx.query(
+          `SELECT * FROM attendance_approval_flows
+           WHERE org_id = $1 AND request_type = 'outdoor_punch' AND is_active = true
+           ORDER BY created_at DESC LIMIT 2`,
+          [route.orgId],
+        )
+        if (activeFlows.length !== 1) {
+          throw new HttpError(
+            422,
+            'OUTDOOR_APPROVAL_FLOW_REQUIRED',
+            activeFlows.length === 0 ? '外勤审批流未配置' : '存在多个启用的外勤审批流，请指定 approvalFlowId',
+          )
+        }
+        flow = mapApprovalFlowRow(activeFlows[0])
+      }
+      const draft = {
+        orgId: route.orgId,
+        workDate,
+        requestType: 'outdoor_punch',
+        requestedInAt: eventType === 'check_in' ? occurredAt : null,
+        requestedOutAt: eventType === 'check_out' ? occurredAt : null,
+        reason: note || null,
+        metadata: {
+          outdoorPunch: {
+            version: 1,
+            eventType,
+            occurredAt: occurredAt.toISOString(),
+            workDate,
+            timezone: route.timezone,
+            source: route.source,
+            location: route.location ?? null,
+            note: note || null,
+            detection: route.outsideGeofence ? 'outside_geofence' : 'marker',
+            ...(photoFileId ? { photoFileId } : {}),
+          },
+          approvalFlow: { id: flow.id, name: flow.name, steps: flow.steps, currentStep: 0 },
+        },
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata.approvalFlow.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: route.actorId,
+        flowSteps: draft.metadata.approvalFlow.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: route.actorId,
+        requesterName: route.requesterName,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata.approvalFlow.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      const requestWrite = {
+        workDate,
+        requestType: 'outdoor_punch',
+        requestedInAt: draft.requestedInAt ? new Date(draft.requestedInAt).toISOString() : null,
+        requestedOutAt: draft.requestedOutAt ? new Date(draft.requestedOutAt).toISOString() : null,
+        reason: draft.reason,
+        minutes: null,
+        leaveTypeId: null,
+        leaveTypeCode: null,
+        overtimeRuleId: null,
+        overtimeRuleName: null,
+        attachmentUrl: null,
+        approvalFlowId: flow.id,
+        outdoorEventType: eventType,
+        outdoorOccurredAt: occurredAt.toISOString(),
+        outdoorTimezone: route.timezone,
+        outdoorSource: route.source,
+        outdoorPhotoFileId: photoFileId,
+        outdoorDetection: route.outsideGeofence ? 'outside_geofence' : 'marker',
+      }
+      return {
+        ...requestCreateIdentityFromRoute('outdoor', route),
+        state: {
+          routeVariant: 'outdoor',
+          route,
+          draft,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+          eventType,
+          workDate,
+          occurredAtIso: occurredAt.toISOString(),
+          flow,
+          photoFileId,
+        },
+      }
+    }
+
+    async function executeOutdoorRequestCreate(trx, prepared) {
+      const {
+        route, draft, requestId, approvalId, approvalPayload, approvalAssignments, eventType, workDate,
+        flow, photoFileId,
+      } = prepared.state
+      await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, workDate, 'outdoor_punch')
+      if (photoFileId) {
+        const photoRows = await trx.query(
+          'SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL FOR KEY SHARE',
+          [photoFileId],
+        )
+        const photoRow = photoRows[0] ?? null
+        const photoMeta = normalizeMetadata(photoRow?.meta)
+        const contentType = photoMeta.sniffed === true
+          ? photoMeta.sniffedContentType
+          : photoMeta.contentType
+        if (!photoRow || photoRow.owner_id !== route.actorId || typeof contentType !== 'string' || !contentType.startsWith('image/')) {
+          throw new HttpError(409, 'OUTDOOR_SOURCE_CHANGED', 'Outdoor photo evidence changed during request creation')
+        }
+      }
+      const currentFlow = await loadApprovalFlow(trx, route.orgId, { flowId: flow.id })
+      if (
+        !currentFlow
+        || currentFlow.requestType !== 'outdoor_punch'
+        || currentFlow.isActive !== true
+        || JSON.stringify(currentFlow.steps) !== JSON.stringify(flow.steps)
+      ) {
+        throw new HttpError(409, 'OUTDOOR_SOURCE_CHANGED', 'Outdoor approval flow changed during request creation')
+      }
+      const dup = await trx.query(
+        `SELECT id FROM attendance_requests
+         WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = 'outdoor_punch'
+           AND status IN ('pending', 'approved')
+           AND metadata -> 'outdoorPunch' ->> 'eventType' = $4
+         LIMIT 1`,
+        [route.orgId, route.actorId, workDate, eventType],
+      )
+      if (dup.length > 0) {
+        throw new HttpError(409, 'DUPLICATE_REQUEST', 'Outdoor punch already pending or approved for this day and event type')
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const rows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          route.actorId,
+          route.orgId,
+          workDate,
+          'outdoor_punch',
+          draft.requestedInAt,
+          draft.requestedOutAt,
+          draft.reason,
+          'pending',
+          approvalId,
+          JSON.stringify(draft.metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: 'outdoor_punch',
+        subjectUserId: route.actorId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: route.actorId,
+          workDate,
+          occurredAt: prepared.state.occurredAtIso,
+        }),
+      })
+      return {
+        response: {
+          ok: true,
+          data: {
+            pendingApproval: true,
+            request: mapAttendanceRequestRow(rows[0]),
+            ...(buildRequestSnapshotToken(snapshotAppend)
+              ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+              : {}),
+          },
+        },
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.outdoorPunch.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: route.actorId,
+            workDate,
+            eventType,
+          },
+        }],
+      }
+    }
+
+    async function prepareScheduleDispatchRequestCreate(trx, rawInput) {
+      const route = scheduleDispatchCreateRouteInputSchema.parse(rawInput)
+      const input = route.input
+      const groupRows = await trx.query(
+        `SELECT *
+           FROM attendance_schedule_groups
+          WHERE id = $1 AND org_id = $2 AND is_active = true
+          LIMIT 1`,
+        [input.targetScheduleGroupId, route.orgId],
+      )
+      const targetGroup = groupRows[0]
+      if (!targetGroup) {
+        throw new HttpError(404, 'NOT_FOUND', 'Target schedule group not found')
+      }
+      const shiftRows = await trx.query(
+        `SELECT id
+           FROM attendance_shifts
+          WHERE id = $1 AND org_id = $2
+          LIMIT 1`,
+        [input.targetShiftId, route.orgId],
+      )
+      if (!shiftRows.length) {
+        throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
+      }
+      const settings = await getSettings(trx)
+      const slotResolution = resolveScheduleDispatchSlotIndex(settings, input.slotIndex)
+      const target = buildScheduleDispatchSchedulerScopeTarget({
+        userId: input.userId,
+        targetScheduleGroupId: targetGroup.id,
+        targetDepartmentRef: targetGroup.department_ref ?? null,
+      })
+      const actorAccess = {
+        userId: route.actorId,
+        orgId: route.orgId,
+        fullAdmin: route.actorFullAdmin === true,
+      }
+      await assertScheduleDispatchScopeAllowed(trx, route.orgId, actorAccess, target)
+      const approvalFlow = await resolveScheduleDispatchApprovalFlow(trx, route.orgId, input.approvalFlowId)
+      const sourceKey = buildScheduleDispatchSourceKey({
+        userId: input.userId,
+        targetScheduleGroupId: targetGroup.id,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        slotIndex: slotResolution.slotIndex,
+      })
+      const metadata = {
+        scheduleDispatch: {
+          userId: input.userId,
+          targetScheduleGroupId: targetGroup.id,
+          targetAttendanceGroupId: targetGroup.attendance_group_id ?? null,
+          targetDepartmentRef: targetGroup.department_ref ?? null,
+          targetShiftId: input.targetShiftId,
+          startDate: input.startDate,
+          endDate: input.endDate,
+          slotIndex: slotResolution.slotIndex,
+          sourceKey,
+        },
+        approvalFlow: {
+          id: approvalFlow.id,
+          name: approvalFlow.name,
+          steps: approvalFlow.steps,
+          currentStep: 0,
+        },
+      }
+      const draft = {
+        workDate: input.startDate,
+        requestType: 'schedule_dispatch',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: input.reason,
+        metadata,
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: input.userId,
+        flowSteps: draft.metadata?.approvalFlow?.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: input.userId,
+        requesterName: route.requesterName,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata?.approvalFlow?.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      const crossUser = String(input.userId) !== String(route.actorId)
+      // Human schedule-scope operators are never the internal scheduler posture.
+      const actorPosture = route.actorFullAdmin === true
+        ? 'attendance_admin'
+        : (crossUser ? 'operator' : 'self')
+      const requestWrite = {
+        workDate: input.startDate,
+        requestType: 'schedule_dispatch',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: input.reason ?? null,
+        minutes: null,
+        leaveTypeId: null,
+        leaveTypeCode: null,
+        overtimeRuleId: null,
+        overtimeRuleName: null,
+        attachmentUrl: null,
+        approvalFlowId: approvalFlow.id,
+        targetUserId: input.userId,
+        targetScheduleGroupId: targetGroup.id,
+        targetShiftId: input.targetShiftId,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        slotIndex: slotResolution.slotIndex,
+        sourceKey,
+      }
+      return {
+        ...requestCreateIdentityFromRoute('schedule_dispatch', route),
+        state: {
+          routeVariant: 'schedule_dispatch',
+          route,
+          input,
+          targetGroup,
+          slotResolution,
+          sourceKey,
+          metadata,
+          draft,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+        },
+      }
+    }
+
+    async function executeScheduleDispatchRequestCreate(trx, prepared) {
+      const {
+        route, input, targetGroup, slotResolution, sourceKey, metadata, draft,
+        requestId, approvalId, approvalPayload, approvalAssignments,
+      } = prepared.state
+      await acquireScheduleDispatchWindowLock(
+        trx,
+        route.orgId,
+        input.userId,
+        targetGroup.id,
+        slotResolution.slotIndex,
+      )
+      await acquireAttendanceRequestLock(trx, route.orgId, input.userId, input.startDate, 'schedule_dispatch')
+      const lockedGroupRows = await trx.query(
+        `SELECT * FROM attendance_schedule_groups
+          WHERE id = $1 AND org_id = $2 AND is_active = true
+          FOR UPDATE`,
+        [targetGroup.id, route.orgId],
+      )
+      const lockedGroup = lockedGroupRows[0] ?? null
+      if (
+        !lockedGroup
+        || lockedGroup.attendance_group_id !== targetGroup.attendance_group_id
+        || lockedGroup.department_ref !== targetGroup.department_ref
+      ) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_SOURCE_CHANGED', 'Schedule-dispatch group changed during request creation')
+      }
+      const lockedShiftRows = await trx.query(
+        `SELECT id FROM attendance_shifts
+          WHERE id = $1 AND org_id = $2
+          FOR UPDATE`,
+        [input.targetShiftId, route.orgId],
+      )
+      if (lockedShiftRows.length !== 1) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_SOURCE_CHANGED', 'Schedule-dispatch shift changed during request creation')
+      }
+      await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+        orgId: route.orgId,
+        shiftId: input.targetShiftId,
+        producer: 'schedule_dispatch_create',
+      })
+      await assertScheduleDispatchScopeAllowed(trx, route.orgId, {
+        userId: route.actorId,
+        orgId: route.orgId,
+        fullAdmin: route.actorFullAdmin === true,
+      }, buildScheduleDispatchSchedulerScopeTarget({
+        userId: input.userId,
+        targetScheduleGroupId: lockedGroup.id,
+        targetDepartmentRef: lockedGroup.department_ref ?? null,
+      }))
+      const currentFlow = await resolveScheduleDispatchApprovalFlow(trx, route.orgId, input.approvalFlowId)
+      if (
+        currentFlow.id !== metadata.approvalFlow.id
+        || JSON.stringify(currentFlow.steps) !== JSON.stringify(metadata.approvalFlow.steps)
+      ) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_SOURCE_CHANGED', 'Schedule-dispatch approval flow changed during request creation')
+      }
+      const duplicateRows = await trx.query(
+        `SELECT d.request_id
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1
+            AND d.user_id = $2
+            AND d.target_schedule_group_id = $3
+            AND d.slot_index = $4
+            AND d.start_date <= $6::date
+            AND d.end_date >= $5::date
+            AND r.status IN ('pending', 'approved')
+          LIMIT 1`,
+        [route.orgId, input.userId, targetGroup.id, slotResolution.slotIndex, input.startDate, input.endDate],
+      )
+      if (duplicateRows.length) {
+        throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const requestRows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          input.userId,
+          route.orgId,
+          input.startDate,
+          input.reason,
+          approvalId,
+          JSON.stringify(metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: 'schedule_dispatch',
+        subjectUserId: input.userId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: input.userId,
+          workDate: input.startDate,
+        }),
+      })
+      await trx.query(
+        `INSERT INTO attendance_schedule_dispatch_requests
+         (request_id, org_id, dispatch_type, user_id, target_schedule_group_id, target_attendance_group_id,
+          target_department_ref, target_shift_id, slot_index, start_date, end_date, publish_status, source_key)
+         VALUES ($1, $2, 'daily', $3, $4, $5, $6, $7, $8, $9::date, $10::date, 'pending', $11)`,
+        [
+          requestId,
+          route.orgId,
+          input.userId,
+          targetGroup.id,
+          targetGroup.attendance_group_id ?? null,
+          targetGroup.department_ref ?? null,
+          input.targetShiftId,
+          slotResolution.slotIndex,
+          input.startDate,
+          input.endDate,
+          sourceKey,
+        ],
+      )
+      const detail = await loadScheduleDispatchDetail(trx, route.orgId, requestId)
+      return {
+        response: {
+          ok: true,
+          data: {
+            request: mapAttendanceRequestRow(requestRows[0]),
+            scheduleDispatch: mapScheduleDispatchRequestRow(detail),
+            ...(buildRequestSnapshotToken(snapshotAppend)
+              ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+              : {}),
+          },
+        },
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: input.userId,
+            workDate: input.startDate,
+            requestType: 'schedule_dispatch',
+            requestId,
+          },
+        }],
+      }
+    }
+
+    async function prepareShiftSwapRequestCreate(trx, rawInput) {
+      const route = shiftSwapCreateRouteInputSchema.parse(rawInput)
+      const lockedSourceRows = new Map()
+      for (const assignmentId of [route.requesterAssignmentId, route.counterpartyAssignmentId].sort()) {
+        lockedSourceRows.set(
+          assignmentId,
+          await loadShiftSwapSourceAssignment(trx, route.orgId, assignmentId),
+        )
+      }
+      const requesterRow = lockedSourceRows.get(route.requesterAssignmentId)
+      const counterpartyRow = lockedSourceRows.get(route.counterpartyAssignmentId)
+      const requesterSource = normalizeShiftSwapSourceSnapshot(requesterRow, 'requesterAssignmentId')
+      const counterpartySource = normalizeShiftSwapSourceSnapshot(counterpartyRow, 'counterpartyAssignmentId')
+      if (requesterSource.userId !== route.actorId) {
+        const allowed = await canAccessOtherUsers(route.actorId)
+        if (!allowed) {
+          throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
+        }
+      }
+      if (requesterSource.userId === counterpartySource.userId) {
+        throw new HttpError(422, 'SHIFT_SWAP_REQUIRES_TWO_USERS', 'Shift-swap requires two different users')
+      }
+      const sourceKey = buildShiftSwapSourceKey(route.requesterAssignmentId, route.counterpartyAssignmentId)
+      const approvalFlow = await loadActiveApprovalFlowForRequestType(
+        trx,
+        route.orgId,
+        'shift_swap',
+        route.approvalFlowId,
+      )
+      if (route.approvalFlowId && !approvalFlow) {
+        throw new HttpError(
+          422,
+          'SHIFT_SWAP_APPROVAL_FLOW_REQUIRED',
+          'Shift-swap approval flow does not exist or is inactive',
+          singleValidationDetail('approvalFlowId', 'Provide an active shift_swap approvalFlowId'),
+        )
+      }
+      const metadata = {
+        shiftSwap: {
+          requesterAssignmentId: route.requesterAssignmentId,
+          counterpartyAssignmentId: route.counterpartyAssignmentId,
+          requesterUserId: requesterSource.userId,
+          counterpartyUserId: counterpartySource.userId,
+          requesterWorkDate: requesterSource.workDate,
+          counterpartyWorkDate: counterpartySource.workDate,
+        },
+      }
+      if (approvalFlow) {
+        metadata.approvalFlow = {
+          id: approvalFlow.id,
+          name: approvalFlow.name,
+          steps: approvalFlow.steps,
+          currentStep: 0,
+        }
+      }
+      const draft = {
+        workDate: requesterSource.workDate,
+        requestType: 'shift_swap',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: route.reason,
+        metadata,
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: requesterSource.userId,
+        flowSteps: draft.metadata?.approvalFlow?.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: requesterSource.userId,
+        requesterName: route.requesterName ?? requesterSource.userId,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata?.approvalFlow?.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      const crossUser = String(requesterSource.userId) !== String(route.actorId)
+      let actorPosture = 'self'
+      if (crossUser) {
+        const fullAdmin = await hasAttendanceAdminAccess(route.actorId)
+        actorPosture = fullAdmin ? 'attendance_admin' : 'operator'
+      }
+      const requestWrite = {
+        workDate: requesterSource.workDate,
+        requestType: 'shift_swap',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: route.reason,
+        minutes: null,
+        leaveTypeId: null,
+        leaveTypeCode: null,
+        overtimeRuleId: null,
+        overtimeRuleName: null,
+        attachmentUrl: null,
+        approvalFlowId: approvalFlow?.id ?? null,
+        requesterAssignmentId: route.requesterAssignmentId,
+        counterpartyAssignmentId: route.counterpartyAssignmentId,
+        requesterUserId: requesterSource.userId,
+        counterpartyUserId: counterpartySource.userId,
+        requesterWorkDate: requesterSource.workDate,
+        counterpartyWorkDate: counterpartySource.workDate,
+        sourceKey,
+      }
+      return {
+        ...requestCreateIdentityFromRoute('shift_swap', route, {
+          subjectUserId: requesterSource.userId,
+          actorPosture,
+        }),
+        state: {
+          routeVariant: 'shift_swap',
+          route,
+          requesterSource,
+          counterpartySource,
+          sourceKey,
+          metadata,
+          draft,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+        },
+      }
+    }
+
+    async function executeShiftSwapRequestCreate(trx, prepared) {
+      const {
+        route, requesterSource, counterpartySource, sourceKey, metadata, draft,
+        requestId, approvalId, approvalPayload, approvalAssignments,
+      } = prepared.state
+      const lockedSourceRows = new Map()
+      for (const assignmentId of [route.requesterAssignmentId, route.counterpartyAssignmentId].sort()) {
+        lockedSourceRows.set(
+          assignmentId,
+          await loadShiftSwapSourceAssignment(trx, route.orgId, assignmentId, { forUpdate: true }),
+        )
+      }
+      const lockedRequesterSource = normalizeShiftSwapSourceSnapshot(
+        lockedSourceRows.get(route.requesterAssignmentId),
+        'requesterAssignmentId',
+      )
+      const lockedCounterpartySource = normalizeShiftSwapSourceSnapshot(
+        lockedSourceRows.get(route.counterpartyAssignmentId),
+        'counterpartyAssignmentId',
+      )
+      if (
+        JSON.stringify(lockedRequesterSource) !== JSON.stringify(requesterSource)
+        || JSON.stringify(lockedCounterpartySource) !== JSON.stringify(counterpartySource)
+      ) {
+        throw new HttpError(409, 'SHIFT_SWAP_SOURCE_CHANGED', 'Shift-swap source assignment changed during request creation')
+      }
+      await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+        orgId: route.orgId,
+        shiftRefs: [lockedRequesterSource.shiftId, lockedCounterpartySource.shiftId],
+        producer: 'shift_swap_create',
+      })
+      if (lockedRequesterSource.userId !== route.actorId && !(await canAccessOtherUsers(route.actorId))) {
+        throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
+      }
+      const currentFlow = await loadActiveApprovalFlowForRequestType(
+        trx,
+        route.orgId,
+        'shift_swap',
+        route.approvalFlowId,
+      )
+      const preparedFlow = normalizeMetadata(metadata.approvalFlow)
+      if (
+        (currentFlow?.id ?? null) !== (preparedFlow.id ?? null)
+        || JSON.stringify(currentFlow?.steps ?? []) !== JSON.stringify(preparedFlow.steps ?? [])
+      ) {
+        throw new HttpError(409, 'SHIFT_SWAP_SOURCE_CHANGED', 'Shift-swap approval flow changed during request creation')
+      }
+      await acquireAttendanceRequestLock(
+        trx,
+        route.orgId,
+        requesterSource.userId,
+        requesterSource.workDate,
+        'shift_swap',
+      )
+      const duplicateRows = await trx.query(
+        `SELECT d.request_id
+           FROM attendance_shift_swap_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1 AND d.source_key = $2
+            AND r.status IN ('pending', 'approved')
+          LIMIT 1`,
+        [route.orgId, sourceKey],
+      )
+      if (duplicateRows.length) {
+        throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_REQUEST', 'A shift-swap request already exists for these assignments')
+      }
+      const sourceConflict = await findShiftSwapSourceConflict(
+        trx,
+        route.orgId,
+        [route.requesterAssignmentId, route.counterpartyAssignmentId],
+      )
+      if (sourceConflict) {
+        throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_SOURCE', 'A shift-swap request is already pending or approved for one of these source assignments')
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const requestRows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          requesterSource.userId,
+          route.orgId,
+          requesterSource.workDate,
+          route.reason,
+          approvalId,
+          JSON.stringify(metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: 'shift_swap',
+        subjectUserId: requesterSource.userId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: requesterSource.userId,
+          workDate: requesterSource.workDate,
+        }),
+      })
+      await trx.query(
+        `INSERT INTO attendance_shift_swap_requests
+         (request_id, org_id, requester_user_id, counterparty_user_id,
+          requester_assignment_id, counterparty_assignment_id,
+          requester_work_date, counterparty_work_date,
+          requester_shift_id, counterparty_shift_id,
+          requester_slot_index, counterparty_slot_index,
+          requester_start_date, requester_end_date,
+          counterparty_start_date, counterparty_end_date,
+          requester_publish_status, counterparty_publish_status,
+          requester_producer_type, counterparty_producer_type,
+          requester_assignment_kind, counterparty_assignment_kind,
+          source_key)
+         VALUES
+         ($1, $2, $3, $4,
+          $5, $6,
+          $7, $8,
+          $9, $10,
+          $11, $12,
+          $13, $14,
+          $15, $16,
+          $17, $18,
+          $19, $20,
+          $21, $22,
+          $23)`,
+        [
+          requestId,
+          route.orgId,
+          requesterSource.userId,
+          counterpartySource.userId,
+          requesterSource.id,
+          counterpartySource.id,
+          requesterSource.workDate,
+          counterpartySource.workDate,
+          requesterSource.shiftId,
+          counterpartySource.shiftId,
+          requesterSource.slotIndex,
+          counterpartySource.slotIndex,
+          requesterSource.startDate,
+          requesterSource.endDate,
+          counterpartySource.startDate,
+          counterpartySource.endDate,
+          requesterSource.publishStatus,
+          counterpartySource.publishStatus,
+          requesterSource.producerType,
+          counterpartySource.producerType,
+          requesterSource.assignmentKind,
+          counterpartySource.assignmentKind,
+          sourceKey,
+        ],
+      )
+      const detail = await loadShiftSwapDetail(trx, route.orgId, requestId)
+      return {
+        response: {
+          ok: true,
+          data: {
+            request: mapAttendanceRequestRow(requestRows[0]),
+            shiftSwap: mapShiftSwapRequestRow(detail),
+            ...(buildRequestSnapshotToken(snapshotAppend)
+              ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+              : {}),
+          },
+        },
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: requesterSource.userId,
+            workDate: requesterSource.workDate,
+            requestType: 'shift_swap',
+            requestId,
+          },
+        }],
+      }
+    }
+
+    const requestCreateAdapter = {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestCreateIdentity(trx, rawInput, operation)
+      },
+      prepare: async function prepareRequestCreate(trx, rawInput, operation) {
+        const variant = operation?.routeVariant
+        if (variant === 'generic') return prepareGenericRequestCreate(trx, rawInput)
+        if (variant === 'outdoor') return prepareOutdoorRequestCreate(trx, rawInput)
+        if (variant === 'schedule_dispatch') return prepareScheduleDispatchRequestCreate(trx, rawInput)
+        if (variant === 'shift_swap') return prepareShiftSwapRequestCreate(trx, rawInput)
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+      },
+      async execute(trx, prepared, operation) {
+        const variant = prepared?.state?.routeVariant ?? operation?.routeVariant
+        if (variant === 'generic') return executeGenericRequestCreate(trx, prepared)
+        if (variant === 'outdoor') return executeOutdoorRequestCreate(trx, prepared)
+        if (variant === 'schedule_dispatch') return executeScheduleDispatchRequestCreate(trx, prepared)
+        if (variant === 'shift_swap') return executeShiftSwapRequestCreate(trx, prepared)
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+      },
+    }
+
+    async function loadRequestOperationIdentityRow(trx, route) {
+      const rows = route.orgId
+        ? await trx.query(
+            `SELECT id, org_id, user_id, approval_instance_id, request_type
+               FROM attendance_requests
+              WHERE id = $1::uuid AND org_id = $2
+              LIMIT 1`,
+            [route.requestId, route.orgId],
+          )
+        : await trx.query(
+            `SELECT id, org_id, user_id, approval_instance_id, request_type
+               FROM attendance_requests
+              WHERE id = $1::uuid
+              LIMIT 1`,
+            [route.requestId],
+          )
+      if (rows.length !== 1) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+      return rows[0]
+    }
+
+    function requestPendingEditIdentityPayload(requestBody, requestId, operationId) {
+      const expectedSnapshotVersion = firstDefinedValue(
+        requestBody.expectedSnapshotVersion,
+        requestBody.expected_snapshot_version,
+      )
+      const expectedSnapshotHash = firstDefinedValue(
+        requestBody.expectedSnapshotFingerprint,
+        requestBody.expected_snapshot_fingerprint,
+      )
+      if (operationId && (expectedSnapshotVersion === undefined || expectedSnapshotHash === undefined)) {
+        throw new HttpError(
+          400,
+          'REQUEST_EDIT_OCC_REQUIRED',
+          'expectedSnapshotVersion and expectedSnapshotFingerprint are required with operationId',
+        )
+      }
+      const {
+        operationId: _operationId,
+        operation_id: _operationIdSnake,
+        expectedSnapshotVersion: _expectedVersion,
+        expected_snapshot_version: _expectedVersionSnake,
+        expectedSnapshotFingerprint: _expectedHash,
+        expected_snapshot_fingerprint: _expectedHashSnake,
+        ...patch
+      } = requestBody
+      return {
+        requestId,
+        expectedSnapshotVersion: expectedSnapshotVersion ?? 1,
+        expectedSnapshotHash: expectedSnapshotHash ?? '0'.repeat(64),
+        patch,
+      }
+    }
+
+    async function prepareRequestPendingEditIdentity(trx, rawInput, operation) {
+      const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      if (!route.requestId) {
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+      }
+      const identityRow = await loadRequestOperationIdentityRow(trx, route)
+      const crossUser = String(identityRow.user_id) !== route.actorId
+      return {
+        orgId: identityRow.org_id,
+        actorId: route.actorId,
+        actorPosture: crossUser ? 'attendance_admin' : 'self',
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: identityRow.user_id,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [identityRow.user_id] }
+          : { kind: 'self', userId: identityRow.user_id },
+        commandPayload: requestPendingEditIdentityPayload(
+          route.requestBody,
+          route.requestId,
+          operation.operationId,
+        ),
+        state: null,
+      }
+    }
+
+    const requestPendingEditAdapter = {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestPendingEditIdentity(trx, rawInput, operation)
+      },
+      prepare: async function prepareRequestPendingEdit(trx, rawInput, operation) {
+        const route = requestBoundaryRouteInputSchema.parse(rawInput)
+        if (!route.requestId) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+        }
+        const requestRows = await trx.query(
+          route.orgId
+            ? 'SELECT * FROM attendance_requests WHERE id = $1 AND org_id = $2'
+            : 'SELECT * FROM attendance_requests WHERE id = $1',
+          route.orgId ? [route.requestId, route.orgId] : [route.requestId],
+        )
+        if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+        const existingRequest = requestRows[0]
+        await ensureAttendanceRequestAccess(existingRequest, route.actorId, 'edit request')
+        if (existingRequest.status !== 'pending') {
+          throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
+        }
+        const draft = await resolveAttendanceRequestDraft(trx, route.requestBody, existingRequest)
+        const makeupTypeInvolved =
+          MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType) ||
+          MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(existingRequest.request_type)
+        let makeupPunchPolicy = null
+        if (makeupTypeInvolved) {
+          const settings = await getSettings(trx)
+          if (settings?.makeupPunchPolicy?.enabled === true) {
+            makeupPunchPolicy = settings.makeupPunchPolicy
+            if (existingRequest.user_id !== route.actorId) {
+              throw new HttpError(
+                422,
+                'MAKEUP_PUNCH_CROSS_USER_FORBIDDEN',
+                'Cross-user editing of makeup punch requests is not allowed while the makeup policy is enabled',
+              )
+            }
+          }
+        }
+        const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
+        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          userId: existingRequest.user_id,
+          flowSteps: draft.metadata?.approvalFlow?.steps,
+          context,
+        })
+        const approvalPayload = buildAttendanceApprovalInstancePayload({
+          approvalId,
+          requestId: route.requestId,
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          userId: existingRequest.user_id,
+          requesterName: existingRequest.user_id,
+          draft,
+          orgRelations,
+        })
+        const approvalAssignments = buildAttendanceApprovalAssignments(
+          draft.metadata?.approvalFlow?.steps,
+          0,
+          approvalPayload.requesterSnapshot,
+        )
+        const identity = await prepareRequestPendingEditIdentity(trx, rawInput, operation)
+        return {
+          ...identity,
+          state: { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments },
+        }
+      },
+      execute: async function executeRequestPendingEdit(trx, prepared) {
+        const { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments } = prepared.state
+        const lockedRequestRows = await trx.query(
+          'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
+          [route.requestId],
+        )
+        if (
+          lockedRequestRows.length !== 1
+          || JSON.stringify(lockedRequestRows[0]) !== JSON.stringify(existingRequest)
+        ) {
+          throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request changed during edit preparation')
+        }
+        const expectedSnapshotVersion = firstDefinedValue(
+          route.requestBody.expectedSnapshotVersion,
+          route.requestBody.expected_snapshot_version,
+        )
+        const expectedSnapshotFingerprint = firstDefinedValue(
+          route.requestBody.expectedSnapshotFingerprint,
+          route.requestBody.expected_snapshot_fingerprint,
+        )
+        await acquireAttendanceRequestLock(
+          trx,
+          existingRequest.org_id,
+          existingRequest.user_id,
+          draft.workDate,
+          draft.requestType,
+        )
+        const duplicateRows = await trx.query(
+          `SELECT id
+           FROM attendance_requests
+           WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = $4
+             AND status IN ('pending', 'approved') AND id <> $5
+           LIMIT 1`,
+          [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, route.requestId],
+        )
+        if (duplicateRows.length > 0) {
+          throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+        }
+        if (makeupPunchPolicy && MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+          const enforcement = await enforceMakeupPunchPolicy(trx, {
+            policy: makeupPunchPolicy,
+            orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+            subjectUserId: existingRequest.user_id,
+            requesterId: route.actorId,
+            requestId: route.requestId,
+            draft,
+          })
+          draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
+        }
+        const snapshotAppend = await appendRequestCalculationSnapshotOnEdit(trx, {
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          requestId: route.requestId,
+          requestType: draft.requestType,
+          currentRequestType: existingRequest.request_type,
+          subjectUserId: existingRequest.user_id,
+          actorUserId: route.actorId,
+          expectedSnapshotVersion,
+          expectedSnapshotFingerprint,
+          payload: buildRequestSnapshotPayloadFromDraft(draft, draft.metadata),
+          resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+            orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+            userId: existingRequest.user_id,
+            workDate: draft.workDate,
+          }),
+        })
+        await upsertAttendanceApprovalInstance(trx, approvalPayload)
+        await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+        const rows = await trx.query(
+          `UPDATE attendance_requests
+           SET work_date = $2, request_type = $3, requested_in_at = $4, requested_out_at = $5,
+               reason = $6, metadata = $7::jsonb, approval_instance_id = $8, updated_at = now()
+           WHERE id = $1
+           RETURNING *`,
+          [
+            route.requestId,
+            draft.workDate,
+            draft.requestType,
+            draft.requestedInAt,
+            draft.requestedOutAt,
+            draft.reason,
+            JSON.stringify(draft.metadata),
+            approvalId,
+          ],
+        )
+        const snapshotToken = buildRequestSnapshotToken(snapshotAppend)
+        return {
+          response: {
+            ok: true,
+            data: {
+              request: mapAttendanceRequestRow(rows[0]),
+              ...(snapshotToken ? { requestSnapshot: snapshotToken } : {}),
+            },
+          },
+          resolvedRequestId: route.requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.request.updated',
+            payload: {
+              requestId: route.requestId,
+              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+              userId: existingRequest.user_id,
+            },
+          }],
+        }
+      },
+    }
+
+    const requestActionBoundaryRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      actorName: z.string().min(1),
+      orgId: z.string().min(1).nullable(),
+      requestId: z.string().uuid(),
+      requestBody: requestCancellationActionSchema,
+      ipAddress: z.string().nullable(),
+      userAgent: z.string().nullable(),
+    }).strict()
+    const requestDecisionBoundaryRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      actorName: z.string().min(1),
+      orgId: z.string().min(1).nullable(),
+      requestId: z.string().uuid(),
+      action: z.enum(['approve', 'reject']),
+      requestBody: requestDecisionActionSchema,
+      ipAddress: z.string().nullable(),
+      userAgent: z.string().nullable(),
+    }).strict()
+
+    async function resolveRequestCancellationActorPosture(trx, route, requestRow, options = {}) {
+      if (route.tokenSubjectUserId !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the cancellation actor')
+      }
+      if (String(requestRow.user_id) === route.actorId) return 'self'
+
+      if (options.legacyAuthorization === true) {
+        if (options.allowScopedOperator === true) return 'operator'
+        if (await canAccessOtherUsers(route.actorId)) {
+          return await hasAttendanceAdminAccess(route.actorId) ? 'attendance_admin' : 'operator'
+        }
+        throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      }
+
+      const actorRows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'
+          FOR KEY SHARE`,
+        [route.actorId],
+      )
+      if (actorRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      if (actorRows[0].platform_admin === true) return 'platform_admin'
+
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE
+          FOR KEY SHARE`,
+        [route.actorId, orgId],
+      )
+      if (membershipRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      if (options.allowScopedOperator === true) return 'operator'
+
+      const permissionRows = await trx.query(
+        `SELECT 1
+           WHERE EXISTS (
+             SELECT 1 FROM user_permissions
+              WHERE user_id = $1
+                AND permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM user_roles ur
+             JOIN role_permissions rp ON rp.role_id = ur.role_id
+               WHERE ur.user_id = $1
+                 AND rp.permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM users u
+              WHERE u.id = $1
+                AND COALESCE(to_jsonb(u)->'permissions', '[]'::jsonb) ?| $2::text[]
+           )
+           LIMIT 1`,
+        [route.actorId, ['attendance:admin', 'attendance:*', '*:*']],
+      )
+      if (permissionRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      return 'attendance_admin'
+    }
+
+    async function loadLatestRequestSnapshotToken(trx, route, requestRow, options = {}) {
+      const lockClause = options.forUpdate === true ? 'FOR UPDATE' : ''
+      const snapshotRows = await trx.query(
+        `SELECT version, payload_fingerprint
+           FROM attendance_request_calculation_snapshots
+          WHERE org_id = $1 AND request_id = $2::uuid
+          ORDER BY version DESC
+          LIMIT 1
+          ${lockClause}`,
+        [requestRow.org_id ?? DEFAULT_ORG_ID, route.requestId],
+      )
+      const snapshot = snapshotRows[0] ?? null
+      const version = snapshot ? Number(snapshot.version) : 0
+      const fingerprint = snapshot ? String(snapshot.payload_fingerprint ?? '') : '0'.repeat(64)
+      if (!Number.isSafeInteger(version) || version < 0 || !/^[0-9a-f]{64}$/.test(fingerprint)) {
+        throw new HttpError(409, 'REQUEST_SNAPSHOT_INVALID', 'Request snapshot is invalid')
+      }
+      const expectedVersion = firstDefinedValue(
+        route.requestBody.expectedSnapshotVersion,
+        route.requestBody.expected_snapshot_version,
+      )
+      const expectedFingerprint = firstDefinedValue(
+        route.requestBody.expectedSnapshotFingerprint,
+        route.requestBody.expected_snapshot_fingerprint,
+      )
+      if (expectedVersion !== undefined && Number(expectedVersion) !== version) {
+        throw new HttpError(409, 'REQUEST_SNAPSHOT_VERSION_CONFLICT', 'Request snapshot version conflict')
+      }
+      if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprint) {
+        throw new HttpError(409, 'REQUEST_SNAPSHOT_FINGERPRINT_CONFLICT', 'Request snapshot fingerprint conflict')
+      }
+      return { version, fingerprint }
+    }
+
+    async function resolveStableCrossUserPosture(trx, actorId, fallback, orgId) {
+      const rows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'`,
+        [actorId],
+      )
+      if (rows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this request operation')
+      if (rows[0].platform_admin === true) return 'platform_admin'
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE`,
+        [actorId, orgId],
+      )
+      if (membershipRows.length !== 1) {
+        throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this request operation')
+      }
+      return fallback
+    }
+
+    async function prepareRequestCancelIdentity(trx, rawInput, operation, options = {}) {
+      const route = requestActionBoundaryRouteInputSchema.parse(rawInput)
+      const identityRow = await loadRequestOperationIdentityRow(trx, route)
+      if (
+        (operation.routeVariant === 'schedule_dispatch_cancel' && identityRow.request_type !== 'schedule_dispatch')
+        || (operation.routeVariant === 'shift_swap_cancel' && identityRow.request_type !== 'shift_swap')
+      ) {
+        throw new HttpError(404, 'NOT_FOUND', 'Request not found for this route family')
+      }
+      const crossUser = String(identityRow.user_id) !== route.actorId
+      let actorPosture = options.actorPosture ?? 'self'
+      if (crossUser && options.actorPosture === undefined) {
+        actorPosture = operation.routeVariant === 'schedule_dispatch_cancel'
+          ? 'operator'
+          : await resolveStableCrossUserPosture(trx, route.actorId, 'attendance_admin', identityRow.org_id)
+      }
+      const expectedSnapshotVersion = firstDefinedValue(
+        route.requestBody.expectedSnapshotVersion,
+        route.requestBody.expected_snapshot_version,
+      ) ?? 0
+      const expectedSnapshotHash = firstDefinedValue(
+        route.requestBody.expectedSnapshotFingerprint,
+        route.requestBody.expected_snapshot_fingerprint,
+      ) ?? '0'.repeat(64)
+      return {
+        orgId: identityRow.org_id,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: identityRow.user_id,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [identityRow.user_id] }
+          : { kind: 'self', userId: identityRow.user_id },
+        commandPayload: {
+          requestId: route.requestId,
+          approvalRef: identityRow.approval_instance_id ?? null,
+          expectedSnapshotVersion,
+          expectedSnapshotHash,
+          reason: normalizeOptionalText(route.requestBody.comment),
+          meta: route.requestBody.metadata ?? null,
+        },
+        state: null,
+      }
+    }
+
+    const requestCancelAdapter = {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestCancelIdentity(trx, rawInput, operation)
+      },
+      prepare: async function prepareRequestCancel(trx, rawInput, operation) {
+        const route = requestActionBoundaryRouteInputSchema.parse(rawInput)
+        const requestRows = await trx.query(
+          route.orgId
+            ? 'SELECT * FROM attendance_requests WHERE id = $1::uuid AND org_id = $2'
+            : 'SELECT * FROM attendance_requests WHERE id = $1::uuid',
+          route.orgId ? [route.requestId, route.orgId] : [route.requestId],
+        )
+        if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+        const requestRow = requestRows[0]
+        if (
+          (operation.routeVariant === 'schedule_dispatch_cancel' && requestRow.request_type !== 'schedule_dispatch')
+          || (operation.routeVariant === 'shift_swap_cancel' && requestRow.request_type !== 'shift_swap')
+        ) {
+          throw new HttpError(404, 'NOT_FOUND', 'Request not found for this route family')
+        }
+        const approvedLeave = requestRow.status === 'approved' && requestRow.request_type === 'leave'
+
+        const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const scopedDispatch = requestRow.request_type === 'schedule_dispatch'
+        if (scopedDispatch) {
+          await assertScheduleDispatchRequestScopeAllowed(trx, orgId, route.requestId, {
+            userId: route.actorId,
+            orgId,
+            fullAdmin: await hasAttendanceAdminAccess(route.actorId),
+          }, { forUpdate: false })
+        }
+        const actorPosture = await resolveRequestCancellationActorPosture(
+          trx,
+          route,
+          requestRow,
+          {
+            allowScopedOperator: scopedDispatch,
+            legacyAuthorization: await resolveRequestLegacyAuthorization(trx, requestRow),
+          },
+        )
+        const snapshot = await loadLatestRequestSnapshotToken(trx, route, requestRow)
+        const approvalId = requestRow.approval_instance_id ?? null
+        let approval = null
+        if (approvalId) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1',
+            [approvalId],
+          )
+          approval = approvalRows[0] ?? null
+        }
+        const identity = await prepareRequestCancelIdentity(
+          trx,
+          rawInput,
+          operation,
+          operation.operationId === null ? { actorPosture } : undefined,
+        )
+        return {
+          ...identity,
+          state: { route, requestRow, approvalId, approval, approvedLeave, actorPosture: identity.actorPosture },
+        }
+      },
+      execute: async function executeRequestCancel(trx, prepared, operation) {
+        const { route, requestRow, approvalId, approval, approvedLeave, actorPosture } = prepared.state
+        const lockedRequestRows = await trx.query(
+          'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+          [route.requestId],
+        )
+        if (
+          lockedRequestRows.length !== 1
+          || JSON.stringify(lockedRequestRows[0]) !== JSON.stringify(requestRow)
+        ) {
+          throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request changed during cancellation preparation')
+        }
+        const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const scopedDispatch = requestRow.request_type === 'schedule_dispatch'
+        if (scopedDispatch) {
+          await assertScheduleDispatchRequestScopeAllowed(trx, requestOrgId, route.requestId, {
+            userId: route.actorId,
+            orgId: requestOrgId,
+            fullAdmin: await hasAttendanceAdminAccess(route.actorId),
+          }, { forUpdate: true })
+        }
+        await resolveRequestCancellationActorPosture(
+          trx,
+          route,
+          requestRow,
+          {
+            allowScopedOperator: scopedDispatch,
+            legacyAuthorization: operation?.acceptedWritePosture === 'legacy_projection_only',
+          },
+        )
+        await loadLatestRequestSnapshotToken(trx, route, requestRow, { forUpdate: true })
+        let lockedApproval = null
+        if (approvalId) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [approvalId],
+          )
+          lockedApproval = approvalRows[0] ?? null
+          if (JSON.stringify(lockedApproval) !== JSON.stringify(approval)) {
+            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation preparation')
+          }
+        }
+        if (requestRow.status !== 'pending' && !approvedLeave) {
+          throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
+        }
+        let cancellationCalculation = null
+        if (approvedLeave && operation.acceptedWritePosture !== 'legacy_projection_only') {
+          const requestWorkDate = normalizeDateOnly(requestRow.work_date)
+          if (!requestWorkDate || !/^\d{4}-\d{2}-\d{2}$/.test(requestWorkDate)) {
+            throw new HttpError(409, 'REQUEST_WORK_DATE_INVALID', 'Request work date is invalid')
+          }
+          const port = attendanceW4SegmentCalculationPort
+          if (!port || typeof port.appendApprovedLeaveCancellationCalculation !== 'function' || !operation.operationId) {
+            throw new HttpError(503, 'W4C3B_P14_HOST_PORT_MISSING', 'W4C3B_P14_HOST_PORT_MISSING')
+          }
+          cancellationCalculation = await port.appendApprovedLeaveCancellationCalculation({
+            client: trx,
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            workDate: requestWorkDate,
+            requestId: route.requestId,
+            operationId: operation.operationId,
+            actorId: route.actorId,
+            correlationId: operation.correlationId,
+            mode: operation.acceptedWritePosture === 'authoritative' ? 'authoritative' : 'shadow',
+          })
+          if (cancellationCalculation.kind === 'review_required') {
+            throw new HttpError(
+              409,
+              'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+              'Approved leave cancellation requires attendance review',
+              singleValidationDetail('calculation', cancellationCalculation.reason),
+            )
+          }
+        }
+
+        if (approvalId && lockedApproval) {
+          const newVersion = Number(lockedApproval.version ?? 0) + 1
+          const approvalUpdateRows = await trx.query(
+            `UPDATE approval_instances
+                SET status = $1, version = $2, updated_at = now()
+              WHERE id = $3 AND version = $4 AND status = $5
+              RETURNING id`,
+            ['cancelled', newVersion, approvalId, lockedApproval.version, lockedApproval.status],
+          )
+          if (approvalUpdateRows.length !== 1) {
+            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation')
+          }
+          await deactivateAttendanceApprovalAssignments(trx, approvalId)
+          await trx.query(
+            `INSERT INTO approval_records
+             (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
+            [
+              approvalId,
+              'revoke',
+              route.actorId,
+              route.actorName,
+              route.requestBody.comment ?? null,
+              lockedApproval.status,
+              'cancelled',
+              lockedApproval.version,
+              newVersion,
+              JSON.stringify({ ...(route.requestBody.metadata ?? {}), w4ActorPosture: actorPosture }),
+              route.ipAddress,
+              route.userAgent,
+            ],
+          )
+        }
+
+        const resolvedAt = new Date()
+        const updatedRows = await trx.query(
+          `UPDATE attendance_requests
+              SET status = 'cancelled', resolved_by = $2, resolved_at = $3, updated_at = now()
+            WHERE id = $1::uuid AND org_id = $4 AND status = $5
+            RETURNING *`,
+          [route.requestId, route.actorId, resolvedAt, requestOrgId, requestRow.status],
+        )
+        if (updatedRows.length !== 1) throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request state conflict')
+        if (requestRow.request_type === 'shift_swap') {
+          await archiveShiftSwapSourceKey(trx, requestOrgId, route.requestId)
+        } else if (requestRow.request_type === 'schedule_dispatch') {
+          await closeScheduleDispatchRequest(trx, requestOrgId, route.requestId)
+        }
+
+        let reversal = null
+        if (approvedLeave) {
+          reversal = await reverseLeaveBalanceDeduction(trx, {
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            requestId: route.requestId,
+          })
+        }
+        let response = {
+          ok: true,
+          data: {
+            requestId: route.requestId,
+            status: 'cancelled',
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            reversal,
+            ...(cancellationCalculation ? { cancellationCalculation } : {}),
+          },
+        }
+        if (operation.routeVariant === 'schedule_dispatch_cancel') {
+          const detail = await loadScheduleDispatchDetail(trx, requestOrgId, route.requestId)
+          response = {
+            ok: true,
+            data: {
+              scheduleDispatch: mapScheduleDispatchRequestRow({
+                ...detail,
+                request_status: 'cancelled',
+                publish_status: 'cancelled',
+              }),
+            },
+          }
+        } else if (operation.routeVariant === 'shift_swap_cancel') {
+          const detail = await loadShiftSwapDetail(trx, requestOrgId, route.requestId)
+          response = {
+            ok: true,
+            data: {
+              shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: 'cancelled' }),
+            },
+          }
+        }
+        return {
+          response,
+          resolvedRequestId: route.requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.request.cancelled',
+            payload: {
+              requestId: route.requestId,
+              status: 'cancelled',
+              orgId: requestOrgId,
+              userId: requestRow.user_id,
+            },
+          }],
+        }
+      },
+    }
+
+    function resolveRequestDecisionExpectedValue(body, camelKey, snakeKey, label) {
+      const camel = body[camelKey]
+      const snake = body[snakeKey]
+      if (camel !== undefined && snake !== undefined && camel !== snake) {
+        throw new HttpError(400, 'VALIDATION_ERROR', `${label} aliases must match`)
+      }
+      return camel ?? snake
+    }
+
+    async function resolveRequestLegacyAuthorization(trx, requestRow) {
+      const port = attendanceW4SegmentCalculationPort
+      if (!port || typeof port.resolveOrgSegmentCalculationPosture !== 'function') {
+        throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Canonical attendance write boundary unavailable')
+      }
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const posture = await port.resolveOrgSegmentCalculationPosture(trx, orgId)
+      return posture?.effectiveState === 'legacy'
+    }
+
+    async function resolveRequestDecisionActorAccess(trx, route, requestRow, options = {}) {
+      if (route.tokenSubjectUserId !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the decision actor')
+      }
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const assertSchedulerScopeAllowed = async () => {
+        const actorContext = await loadAttendanceScopeContextForUser(trx, orgId, route.actorId)
+        const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, trx)
+        const facts = await resolveAttendanceRequestApprovalScopeFacts(trx, orgId, requestRow)
+        const schedulerAllowed = scopes.some(scope =>
+          attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'approve', facts),
+        )
+        if (!schedulerAllowed) {
+          throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance approval action')
+        }
+      }
+
+      // The legacy posture retains the shipped RBAC/scheduler-scope contract. In particular, legacy
+      // callers are not required to have the durable users/user_orgs rows introduced by W4C-3b.
+      // Preparation defers mutable authorization to execute so an exact operation replay can return
+      // its sealed response after an intervening permission change.
+      if (options.legacyAuthorization === true) {
+        if (options.enforceSchedulerScope === false) {
+          return { actorPosture: 'operator', fullAdmin: false }
+        }
+        if (await canAccessOtherUsers(route.actorId)) {
+          const fullAdmin = await hasAttendanceAdminAccess(route.actorId)
+          return {
+            actorPosture: fullAdmin ? 'attendance_admin' : 'operator',
+            fullAdmin,
+          }
+        }
+        await assertSchedulerScopeAllowed()
+        return { actorPosture: 'operator', fullAdmin: false }
+      }
+
+      const actorRows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'
+          FOR KEY SHARE`,
+        [route.actorId],
+      )
+      if (actorRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+      if (actorRows[0].platform_admin === true) {
+        return { actorPosture: 'platform_admin', fullAdmin: true }
+      }
+
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE
+          FOR KEY SHARE`,
+        [route.actorId, orgId],
+      )
+      if (membershipRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+
+      const permissionRows = await trx.query(
+        `SELECT permission_code FROM user_permissions WHERE user_id = $1
+         UNION
+         SELECT rp.permission_code
+           FROM user_roles ur
+           JOIN role_permissions rp ON rp.role_id = ur.role_id
+          WHERE ur.user_id = $1`,
+        [route.actorId],
+      )
+      const directUserRows = await trx.query(
+        `SELECT COALESCE(to_jsonb(u)->'permissions', '[]'::jsonb) AS permissions
+           FROM users u WHERE u.id = $1 FOR KEY SHARE`,
+        [route.actorId],
+      )
+      const permissions = new Set(permissionRows.map(row => String(row.permission_code)))
+      for (const permission of normalizeStringArray(directUserRows[0]?.permissions)) permissions.add(permission)
+      const attendanceAdmin = permissions.has('attendance:admin')
+        || permissions.has('attendance:*')
+        || permissions.has('*:*')
+      const attendanceApprover = attendanceAdmin || permissions.has('attendance:approve')
+      if (attendanceApprover) {
+        return {
+          actorPosture: attendanceAdmin ? 'attendance_admin' : 'operator',
+          fullAdmin: attendanceAdmin,
+        }
+      }
+
+      // Exact operation replay is authorized by its durable operation identity. Preparation still
+      // proves the authenticated actor is an active member of the request org, but intentionally
+      // defers mutable scheduler-scope facts to execute. Otherwise revoking a scheduler scope after
+      // commit makes the same operationId unable to return its already-sealed response.
+      if (options.enforceSchedulerScope === false) {
+        return { actorPosture: 'operator', fullAdmin: false }
+      }
+
+      await assertSchedulerScopeAllowed()
+      return { actorPosture: 'operator', fullAdmin: false }
+    }
+
+    function resolveLockedAttendanceApprovalFlowState(approval, flowMeta, flowSteps) {
+      const approvalStepIndex = Number(approval.current_step ?? 0)
+      const stepInRange = Number.isInteger(approvalStepIndex)
+        && approvalStepIndex >= 0
+        && (flowSteps.length === 0 ? approvalStepIndex === 0 : approvalStepIndex < flowSteps.length)
+      const expectedNodeKey = buildAttendanceApprovalNodeKey(approvalStepIndex)
+      const lockedNodeKey = approval.current_node_key || expectedNodeKey
+      const rawMetadataStep = flowMeta.currentStep
+      const metadataStepMatches = rawMetadataStep === undefined
+        || (Number.isInteger(Number(rawMetadataStep)) && Number(rawMetadataStep) === approvalStepIndex)
+      if (!stepInRange || lockedNodeKey !== expectedNodeKey || !metadataStepMatches) {
+        throw new HttpError(
+          409,
+          'APPROVAL_FLOW_STATE_CONFLICT',
+          'Locked approval step does not match the frozen request flow state',
+        )
+      }
+      return {
+        currentStepIndex: approvalStepIndex,
+        currentNodeKey: lockedNodeKey,
+        currentStep: flowSteps[approvalStepIndex],
+      }
+    }
+
+    async function prepareRequestDecisionIdentity(trx, rawInput, operation, options = {}) {
+      const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
+      const identityRow = await loadRequestOperationIdentityRow(trx, route)
+      const isShiftSwapConsent = operation.routeVariant === 'shift_swap_accept'
+        || operation.routeVariant === 'shift_swap_reject'
+      if (isShiftSwapConsent) {
+        if (identityRow.request_type !== 'shift_swap') {
+          throw new HttpError(404, 'NOT_FOUND', 'Request not found for this route family')
+        }
+        const expectedAction = operation.routeVariant === 'shift_swap_accept' ? 'approve' : 'reject'
+        if (route.action !== expectedAction) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+        }
+        return {
+          orgId: identityRow.org_id,
+          actorId: route.actorId,
+          actorPosture: 'self',
+          tokenSubjectUserId: route.tokenSubjectUserId,
+          subjectUserId: route.actorId,
+          subjectScope: { kind: 'self', userId: route.actorId },
+          commandPayload: {
+            requestId: route.requestId,
+            approvalRef: identityRow.approval_instance_id ?? `shift-swap:${route.requestId}`,
+            expectedApprovalVersion: 0,
+            expectedApprovalNode: 'shift_swap_consent',
+            action: route.action,
+            decisionChannel: 'web',
+            comment: normalizeOptionalText(route.requestBody.comment),
+            meta: route.requestBody.metadata ?? null,
+          },
+          state: null,
+        }
+      }
+
+      const expectedApprovalVersion = resolveRequestDecisionExpectedValue(
+        route.requestBody,
+        'expectedApprovalVersion',
+        'expected_approval_version',
+        'expectedApprovalVersion',
+      )
+      const expectedApprovalNode = resolveRequestDecisionExpectedValue(
+        route.requestBody,
+        'expectedApprovalNode',
+        'expected_approval_node',
+        'expectedApprovalNode',
+      )
+      if (operation.operationId && (expectedApprovalVersion === undefined || expectedApprovalNode === undefined)) {
+        throw new HttpError(
+          400,
+          'REQUEST_DECISION_OCC_REQUIRED',
+          'expectedApprovalVersion and expectedApprovalNode are required with operationId',
+        )
+      }
+      const crossUser = String(identityRow.user_id) !== route.actorId
+      const actorPosture = options.actorPosture
+        ?? (crossUser && identityRow.request_type === 'schedule_dispatch'
+          ? 'operator'
+          : await resolveStableCrossUserPosture(trx, route.actorId, crossUser ? 'operator' : 'self', identityRow.org_id))
+      return {
+        orgId: identityRow.org_id,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: identityRow.user_id,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [identityRow.user_id] }
+          : { kind: 'self', userId: identityRow.user_id },
+        commandPayload: {
+          requestId: route.requestId,
+          approvalRef: identityRow.approval_instance_id,
+          expectedApprovalVersion: expectedApprovalVersion ?? 0,
+          expectedApprovalNode: expectedApprovalNode ?? 'step:0',
+          action: route.action,
+          decisionChannel: 'web',
+          comment: normalizeOptionalText(route.requestBody.comment),
+          meta: route.requestBody.metadata ?? null,
+        },
+        state: null,
+      }
+    }
+
+    async function prepareShiftSwapConsent(trx, rawInput, operation) {
+      const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
+      const identity = await prepareRequestDecisionIdentity(trx, rawInput, operation)
+      const detail = await loadShiftSwapDetail(trx, route.orgId, route.requestId)
+      if (!detail) throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
+      if (String(detail.counterparty_user_id) !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
+      }
+      if (detail.request_status !== 'pending') {
+        throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
+      }
+      if (detail.counterparty_status !== 'pending') {
+        throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+      }
+      return { ...identity, state: { route } }
+    }
+
+    async function executeShiftSwapConsent(trx, prepared) {
+      const { route } = prepared.state
+      const decision = route.action === 'approve' ? 'accepted' : 'rejected'
+      const row = await loadShiftSwapDetail(trx, route.orgId, route.requestId, { forUpdate: true })
+      if (!row) throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
+      if (String(row.counterparty_user_id) !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
+      }
+      if (row.request_status !== 'pending') {
+        throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
+      }
+      if (row.counterparty_status !== 'pending') {
+        throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+      }
+      const consentRows = await trx.query(
+        `UPDATE attendance_shift_swap_requests
+            SET counterparty_status = $3,
+                counterparty_responded_at = now(),
+                updated_at = now()
+          WHERE org_id = $1 AND request_id = $2 AND counterparty_status = 'pending'
+          RETURNING request_id`,
+        [route.orgId, route.requestId, decision],
+      )
+      if (consentRows.length !== 1) {
+        throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+      }
+
+      if (decision === 'rejected') {
+        if (row.approval_instance_id) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [row.approval_instance_id],
+          )
+          if (approvalRows.length > 0) {
+            const approval = approvalRows[0]
+            const newVersion = Number(approval.version ?? 0) + 1
+            const updateRows = await trx.query(
+              `UPDATE approval_instances
+                  SET status = 'rejected', version = $2, updated_at = now()
+                WHERE id = $1 AND version = $3 AND status = $4
+                RETURNING id`,
+              [row.approval_instance_id, newVersion, approval.version, approval.status],
+            )
+            if (updateRows.length !== 1) {
+              throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during shift-swap rejection')
+            }
+            await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
+            await trx.query(
+              `INSERT INTO approval_records
+               (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+               VALUES ($1, 'reject', $2, $3, $4, $5, 'rejected', $6, $7, $8::jsonb, $9, $10)`,
+              [
+                row.approval_instance_id,
+                route.actorId,
+                route.actorName,
+                route.requestBody.comment ?? null,
+                approval.status,
+                approval.version,
+                newVersion,
+                JSON.stringify(route.requestBody.metadata ?? {}),
+                route.ipAddress,
+                route.userAgent,
+              ],
+            )
+          }
+        }
+        const requestRows = await trx.query(
+          `UPDATE attendance_requests
+              SET status = 'rejected', resolved_by = $3, resolved_at = now(), updated_at = now()
+            WHERE id = $1 AND org_id = $2 AND status = 'pending'
+            RETURNING id`,
+          [route.requestId, route.orgId, route.actorId],
+        )
+        if (requestRows.length !== 1) {
+          throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Shift-swap request changed during rejection')
+        }
+        await archiveShiftSwapSourceKey(trx, route.orgId, route.requestId)
+      }
+
+      const detail = await loadShiftSwapDetail(trx, route.orgId, route.requestId)
+      const response = {
+        ok: true,
+        data: {
+          shiftSwap: mapShiftSwapRequestRow({
+            ...detail,
+            request_status: decision === 'rejected' ? 'rejected' : detail?.request_status,
+          }),
+        },
+      }
+      return {
+        response,
+        resolvedRequestId: route.requestId,
+        lifecycleEvents: [{
+          eventKind: decision === 'rejected' ? 'attendance.resolved' : 'attendance.request.updated',
+          payload: {
+            requestId: route.requestId,
+            orgId: route.orgId,
+            userId: row.requester_user_id,
+            counterpartyUserId: route.actorId,
+            decision,
+          },
+        }],
+      }
+    }
+
+    const requestDecisionAdapter = {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestDecisionIdentity(trx, rawInput, operation)
+      },
+      async prepare(trx, rawInput, operation) {
+        if (operation.routeVariant === 'shift_swap_accept' || operation.routeVariant === 'shift_swap_reject') {
+          return prepareShiftSwapConsent(trx, rawInput, operation)
+        }
+        const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
+        const requestRows = await trx.query(
+          route.orgId
+            ? 'SELECT * FROM attendance_requests WHERE id = $1::uuid AND org_id = $2'
+            : 'SELECT * FROM attendance_requests WHERE id = $1::uuid',
+          route.orgId ? [route.requestId, route.orgId] : [route.requestId],
+        )
+        if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+        const requestRow = requestRows[0]
+        const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const legacyAuthorization = await resolveRequestLegacyAuthorization(trx, requestRow)
+        const decisionAccess = await resolveRequestDecisionActorAccess(
+          trx,
+          route,
+          requestRow,
+          { enforceSchedulerScope: false, legacyAuthorization },
+        )
+        const approvalId = requestRow.approval_instance_id
+        if (!approvalId) throw new HttpError(400, 'INVALID_STATE', 'Missing approval instance')
+        const approvalRows = await trx.query(
+          'SELECT * FROM approval_instances WHERE id = $1',
+          [approvalId],
+        )
+        if (approvalRows.length === 0) throw new HttpError(400, 'INVALID_STATE', 'Approval instance missing')
+        const approval = approvalRows[0]
+        const requestMetadata = normalizeMetadata(requestRow.metadata)
+        const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
+        const flowSteps = normalizeApprovalSteps(flowMeta.steps)
+        const { currentNodeKey } = resolveLockedAttendanceApprovalFlowState(
+          approval,
+          flowMeta,
+          flowSteps,
+        )
+        const expectedApprovalVersionInput = resolveRequestDecisionExpectedValue(
+          route.requestBody,
+          'expectedApprovalVersion',
+          'expected_approval_version',
+          'expectedApprovalVersion',
+        )
+        const expectedApprovalNodeInput = resolveRequestDecisionExpectedValue(
+          route.requestBody,
+          'expectedApprovalNode',
+          'expected_approval_node',
+          'expectedApprovalNode',
+        )
+        if (operation.operationId && (expectedApprovalVersionInput === undefined || expectedApprovalNodeInput === undefined)) {
+          throw new HttpError(
+            400,
+            'REQUEST_DECISION_OCC_REQUIRED',
+            'expectedApprovalVersion and expectedApprovalNode are required with operationId',
+          )
+        }
+        const expectedApprovalVersion = expectedApprovalVersionInput ?? Number(approval.version ?? 0)
+        const expectedApprovalNode = expectedApprovalNodeInput ?? currentNodeKey
+        const identity = await prepareRequestDecisionIdentity(
+          trx,
+          rawInput,
+          operation,
+          operation.operationId === null ? { actorPosture: decisionAccess.actorPosture } : undefined,
+        )
+        return {
+          ...identity,
+          state: {
+            route,
+            expectedApprovalVersion,
+            expectedApprovalNode,
+          },
+        }
+      },
+      async execute(trx, prepared, operation) {
+        if (operation.routeVariant === 'shift_swap_accept' || operation.routeVariant === 'shift_swap_reject') {
+          return executeShiftSwapConsent(trx, prepared)
+        }
+        const result = await executeRequestDecisionInTransaction(trx, prepared.state, operation)
+        return {
+          response: { ok: true, data: result },
+          resolvedRequestId: result.requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.resolved',
+            payload: {
+              requestId: result.requestId,
+              status: result.status,
+              orgId: result.orgId,
+              userId: result.userId,
+            },
+          }],
+        }
+      },
+    }
+
+    w4RequestOperationBoundary =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.createRequestOperationBoundary === 'function'
+        ? attendanceW4SegmentCalculationPort.createRequestOperationBoundary({
+            adapters: {
+              request_create: requestCreateAdapter,
+              request_pending_edit: requestPendingEditAdapter,
+              request_decision: requestDecisionAdapter,
+              request_cancel: requestCancelAdapter,
+            },
+          })
+        : null
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests',
@@ -31635,6 +34262,7 @@ module.exports = {
           )
           return
         }
+        if (respondIfInvalidRequestUuidReferences(res, parsed.data)) return
 
         const userId = getUserId(req)
         if (!userId) {
@@ -31643,9 +34271,39 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        let draft
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
         try {
-          draft = await resolveAttendanceRequestDraft(parsed.data, { org_id: orgId, user_id: userId })
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_create',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'request-create'),
+            routeVariant: 'generic',
+            routeInput: {
+              actorId: userId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId,
+              requesterName: getUserLabel(req, userId),
+              orgId,
+              requestId: null,
+              requestBody: parsed.data,
+            },
+          })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            const request = outcome.response?.data?.request
+            emitEvent('attendance.requested', {
+              orgId,
+              userId,
+              workDate: request?.workDate,
+              requestType: request?.requestType,
+            })
+          }
+          res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({
@@ -31658,106 +34316,7 @@ module.exports = {
             })
             return
           }
-          throw error
-        }
-
-        // 补卡规则 MP-2/MP-3: only the three makeup request types read this policy. Gating the settings
-        // read behind the cheap request-type check keeps leave/overtime/etc byte-identical (zero new
-        // queries) when makeupPunchPolicy is disabled. Enforcement itself runs inside the txn below.
-        let makeupPunchPolicy = null
-        if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
-          const settings = await getSettings(db)
-          if (settings?.makeupPunchPolicy?.enabled === true) {
-            makeupPunchPolicy = settings.makeupPunchPolicy
-          }
-        }
-
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
-        // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-        // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-          orgId, userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
-        })
-        const approvalPayload = buildAttendanceApprovalInstancePayload({
-          approvalId,
-          requestId,
-          orgId,
-          userId,
-          requesterName: getUserLabel(req, userId),
-          draft,
-          orgRelations,
-        })
-        const approvalAssignments = buildAttendanceApprovalAssignments(
-          draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-        )
-
-        try {
-          const request = await db.transaction(async (trx) => {
-            await acquireAttendanceRequestLock(trx, orgId, userId, draft.workDate, draft.requestType)
-            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
-              orgId,
-              userId,
-              workDate: draft.workDate,
-              requestType: draft.requestType,
-            })
-            if (duplicateRequest) {
-              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
-            }
-            // 补卡规则 MP-2/MP-3: enforce inside the txn, after the lock + duplicate guard, so the quota
-            // count and the insert below are consistent with the per-(org,user,workDate,requestType) lock.
-            // On success, persist a FRESH per-write policy snapshot onto the request metadata that the
-            // final approval will audit (never re-reading the live policy).
-            if (makeupPunchPolicy) {
-              const enforcement = await enforceMakeupPunchPolicy(trx, {
-                policy: makeupPunchPolicy,
-                orgId,
-                subjectUserId: userId,
-                requesterId: userId,
-                requestId: null,
-                draft,
-              })
-              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
-            }
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const rows = await trx.query(
-              `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-               RETURNING *`,
-              [
-                requestId,
-                userId,
-                orgId,
-                draft.workDate,
-                draft.requestType,
-                draft.requestedInAt,
-                draft.requestedOutAt,
-                draft.reason,
-                'pending',
-                approvalId,
-                JSON.stringify(draft.metadata),
-              ]
-            )
-
-            return rows[0]
-          })
-
-          emitEvent('attendance.requested', {
-            orgId,
-            userId,
-            workDate: draft.workDate,
-            requestType: draft.requestType,
-          })
-          res.status(201).json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
-        } catch (error) {
-          if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
-            return
-          }
+          if (respondIfW4BoundaryError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -31765,6 +34324,7 @@ module.exports = {
           logger.error('Attendance request creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create request' } })
         }
+        return
       })
     )
 
@@ -31886,12 +34446,32 @@ module.exports = {
             return
           }
           await ensureAttendanceRequestAccess(rows[0], requesterId, 'view request')
-          const requests = await applyScheduleDispatchMetadataLabelsToRequests(
-            db,
-            orgId,
-            [mapAttendanceRequestRow(rows[0])]
-          )
-          res.json({ ok: true, data: { request: requests[0] } })
+	          const requests = await applyScheduleDispatchMetadataLabelsToRequests(
+	            db,
+	            orgId,
+	            [mapAttendanceRequestRow(rows[0])]
+	          )
+	          const snapshotRows = await db.query(
+	            `SELECT version, payload_fingerprint
+	               FROM attendance_request_calculation_snapshots
+	              WHERE org_id = $1 AND request_id = $2::uuid
+	              ORDER BY version DESC
+	              LIMIT 1`,
+	            [orgId, requestId]
+	          )
+	          const requestSnapshot = snapshotRows.length === 1
+	            ? {
+	                version: Number(snapshotRows[0].version),
+	                fingerprint: String(snapshotRows[0].payload_fingerprint),
+	              }
+	            : null
+	          res.json({
+	            ok: true,
+	            data: {
+	              request: requests[0],
+	              ...(requestSnapshot ? { requestSnapshot } : {}),
+	            },
+	          })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -31930,175 +34510,54 @@ module.exports = {
           throw error
         }
         if (!await enforceShiftEditWindow(res, [input.startDate, input.endDate])) return
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
 
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
         try {
-          const result = await db.transaction(async (trx) => {
-            const groupRows = await trx.query(
-              `SELECT *
-                 FROM attendance_schedule_groups
-                WHERE id = $1 AND org_id = $2 AND is_active = true
-                LIMIT 1`,
-              [input.targetScheduleGroupId, orgId]
-            )
-            const targetGroup = groupRows[0]
-            if (!targetGroup) {
-              throw new HttpError(404, 'NOT_FOUND', 'Target schedule group not found')
-            }
-            const shiftRows = await trx.query(
-              `SELECT id
-                 FROM attendance_shifts
-                WHERE id = $1 AND org_id = $2
-                LIMIT 1`,
-              [input.targetShiftId, orgId]
-            )
-            if (!shiftRows.length) {
-              throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
-            }
-            // W3 erratum: typed 422 + zero writes when the dispatch targets a
-            // multi-segment shift while segment calculation is OFF for the org.
-            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_create',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'schedule-dispatch-create'),
+            routeVariant: 'schedule_dispatch',
+            routeInput: {
+              actorId: actorAccess.userId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorAccess.userId,
+              actorFullAdmin: actorAccess.fullAdmin === true,
+              requesterName: getUserLabel(req, input.userId),
               orgId,
-              shiftId: input.targetShiftId,
-              producer: 'schedule_dispatch_create',
-            })
-            const settings = await getSettings(trx)
-            const slotResolution = resolveScheduleDispatchSlotIndex(settings, input.slotIndex)
-
-            const target = buildScheduleDispatchSchedulerScopeTarget({
-              userId: input.userId,
-              targetScheduleGroupId: targetGroup.id,
-              targetDepartmentRef: targetGroup.department_ref ?? null,
-            })
-            await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, target)
-
-            await acquireScheduleDispatchWindowLock(trx, orgId, input.userId, targetGroup.id, slotResolution.slotIndex)
-            const approvalFlow = await resolveScheduleDispatchApprovalFlow(trx, orgId, input.approvalFlowId)
-            const sourceKey = buildScheduleDispatchSourceKey({
-              userId: input.userId,
-              targetScheduleGroupId: targetGroup.id,
-              startDate: input.startDate,
-              endDate: input.endDate,
-              slotIndex: slotResolution.slotIndex,
-            })
-            const duplicateRows = await trx.query(
-              `SELECT d.request_id
-                 FROM attendance_schedule_dispatch_requests d
-                 JOIN attendance_requests r ON r.id = d.request_id
-                WHERE d.org_id = $1
-                  AND d.user_id = $2
-                  AND d.target_schedule_group_id = $3
-                  AND d.slot_index = $4
-                  AND d.start_date <= $6::date
-                  AND d.end_date >= $5::date
-                  AND r.status IN ('pending', 'approved')
-                LIMIT 1`,
-              [orgId, input.userId, targetGroup.id, slotResolution.slotIndex, input.startDate, input.endDate]
-            )
-            if (duplicateRows.length) {
-              throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
-            }
-
-            await acquireAttendanceRequestLock(trx, orgId, input.userId, input.startDate, 'schedule_dispatch')
-            const metadata = {
-              scheduleDispatch: {
+              input: {
                 userId: input.userId,
-                targetScheduleGroupId: targetGroup.id,
-                targetAttendanceGroupId: targetGroup.attendance_group_id ?? null,
-                targetDepartmentRef: targetGroup.department_ref ?? null,
+                targetScheduleGroupId: input.targetScheduleGroupId,
                 targetShiftId: input.targetShiftId,
                 startDate: input.startDate,
                 endDate: input.endDate,
-                slotIndex: slotResolution.slotIndex,
-                sourceKey,
+                slotIndex: input.slotIndex ?? null,
+                reason: input.reason ?? null,
+                approvalFlowId: input.approvalFlowId ?? null,
               },
-              approvalFlow: {
-                id: approvalFlow.id,
-                name: approvalFlow.name,
-                steps: approvalFlow.steps,
-                currentStep: 0,
-              },
-            }
-            const draft = {
-              workDate: input.startDate,
-              requestType: 'schedule_dispatch',
-              requestedInAt: null,
-              requestedOutAt: null,
-              reason: input.reason,
-              metadata,
-            }
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId, userId: input.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId,
-              requestId,
-              orgId,
-              userId: input.userId,
-              requesterName: getUserLabel(req, input.userId),
-              draft,
-              orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-            )
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const requestRows = await trx.query(
-              `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-               VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
-               RETURNING *`,
-              [
-                requestId,
-                input.userId,
-                orgId,
-                input.startDate,
-                input.reason,
-                approvalId,
-                JSON.stringify(metadata),
-              ]
-            )
-            await trx.query(
-              `INSERT INTO attendance_schedule_dispatch_requests
-               (request_id, org_id, dispatch_type, user_id, target_schedule_group_id, target_attendance_group_id,
-                target_department_ref, target_shift_id, slot_index, start_date, end_date, publish_status, source_key)
-               VALUES ($1, $2, 'daily', $3, $4, $5, $6, $7, $8, $9::date, $10::date, 'pending', $11)`,
-              [
-                requestId,
-                orgId,
-                input.userId,
-                targetGroup.id,
-                targetGroup.attendance_group_id ?? null,
-                targetGroup.department_ref ?? null,
-                input.targetShiftId,
-                slotResolution.slotIndex,
-                input.startDate,
-                input.endDate,
-                sourceKey,
-              ]
-            )
-            const detail = await loadScheduleDispatchDetail(trx, orgId, requestId)
-            return { request: requestRows[0], detail }
-          })
-          emitEvent('attendance.scheduleDispatch.requested', { orgId, requestId, userId: input.userId })
-          res.status(201).json({
-            ok: true,
-            data: {
-              request: mapAttendanceRequestRow(result.request),
-              scheduleDispatch: mapScheduleDispatchRequestRow(result.detail),
             },
           })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            const request = outcome.response?.data?.request
+            emitEvent('attendance.scheduleDispatch.requested', {
+              orgId,
+              requestId: request?.id,
+              userId: input.userId,
+            })
+          }
+          res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message, ...(Array.isArray(error.details) && error.details.length ? { details: error.details } : {}) } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (error?.code === '23505' && error?.constraint === 'uq_attendance_schedule_dispatch_requests_source_key') {
             res.status(409).json({ ok: false, error: { code: 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', message: 'A schedule-dispatch request already exists for this user/group/date window' } })
             return
@@ -32255,65 +34714,48 @@ module.exports = {
         }
         const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
         if (!actorAccess) return
-        try {
-          const detail = await db.transaction(async (trx) => {
-            const row = await loadScheduleDispatchDetail(trx, orgId, requestId, { forUpdate: true })
-            if (!row) {
-              throw new HttpError(404, 'NOT_FOUND', 'Schedule-dispatch request not found')
-            }
-            await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget(row))
-            if (row.request_status !== 'pending') {
-              throw new HttpError(400, 'INVALID_STATUS', 'Schedule-dispatch request is already resolved')
-            }
-            if (row.approval_instance_id) {
-              const approvalRows = await trx.query(
-                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-                [row.approval_instance_id]
-              )
-              if (approvalRows.length > 0) {
-                const approval = approvalRows[0]
-                const newVersion = Number(approval.version ?? 0) + 1
-                await trx.query(
-                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                  ['cancelled', newVersion, row.approval_instance_id]
-                )
-                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
-                await trx.query(
-                  `INSERT INTO approval_records
-                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                   VALUES ($1, 'revoke', $2, $3, NULL, $4, 'cancelled', $5, $6, '{}'::jsonb, $7, $8)`,
-                  [
-                    row.approval_instance_id,
-                    actorAccess.userId,
-                    getUserLabel(req, actorAccess.userId),
-                    approval.status,
-                    approval.version,
-                    newVersion,
-                    req.ip ?? null,
-                    req.get('user-agent') ?? null,
-                  ]
-                )
-              }
-            }
-            await trx.query(
-              `UPDATE attendance_requests
-                  SET status = 'cancelled',
-                      resolved_by = $3,
-                      resolved_at = now(),
-                      updated_at = now()
-                WHERE id = $1 AND org_id = $2`,
-              [requestId, orgId, actorAccess.userId]
-            )
-            await closeScheduleDispatchRequest(trx, orgId, requestId)
-            return loadScheduleDispatchDetail(trx, orgId, requestId)
+        const parsed = requestCancellationActionSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json(
+            validationErrorBody('Invalid schedule-dispatch cancellation payload', formatZodValidationDetails(parsed.error)),
+          )
+          return
+        }
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
           })
-          emitEvent('attendance.scheduleDispatch.cancelled', { orgId, requestId, userId: detail?.user_id })
-          res.json({ ok: true, data: { scheduleDispatch: mapScheduleDispatchRequestRow({ ...detail, request_status: 'cancelled', publish_status: 'cancelled' }) } })
+          return
+        }
+        try {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_cancel',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'schedule-dispatch-cancel'),
+            routeVariant: 'schedule_dispatch_cancel',
+            routeInput: {
+              actorId: actorAccess.userId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorAccess.userId,
+              actorName: getUserLabel(req, actorAccess.userId),
+              orgId,
+              requestId,
+              requestBody: parsed.data,
+              ipAddress: req.ip ?? null,
+              userAgent: req.get('user-agent') ?? null,
+            },
+          })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            emitEvent('attendance.scheduleDispatch.cancelled', { orgId, requestId })
+          }
+          res.json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule-dispatch tables missing' } })
             return
@@ -32388,191 +34830,41 @@ module.exports = {
         }
 
         const reason = normalizeOptionalText(parsed.data.reason)
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
 
         try {
-          const result = await db.transaction(async (trx) => {
-            const lockedSourceRows = new Map()
-            for (const assignmentId of [requesterAssignmentId, counterpartyAssignmentId].sort()) {
-              lockedSourceRows.set(
-                assignmentId,
-                await loadShiftSwapSourceAssignment(trx, orgId, assignmentId, { forUpdate: true })
-              )
-            }
-            const requesterRow = lockedSourceRows.get(requesterAssignmentId)
-            const counterpartyRow = lockedSourceRows.get(counterpartyAssignmentId)
-            const requesterSource = normalizeShiftSwapSourceSnapshot(requesterRow, 'requesterAssignmentId')
-            const counterpartySource = normalizeShiftSwapSourceSnapshot(counterpartyRow, 'counterpartyAssignmentId')
-
-            // W3 erratum: the swap snapshots both shift ids — a multi-segment shift
-            // fails closed with a typed 422 and zero writes while segment
-            // calculation is OFF for the org.
-            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_create',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'shift-swap-create'),
+            routeVariant: 'shift_swap',
+            routeInput: {
+              actorId: actorUserId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
+              requesterName: getUserLabel(req, '') || null,
               orgId,
-              shiftRefs: [requesterSource.shiftId, counterpartySource.shiftId],
-              producer: 'shift_swap_create',
-            })
-
-            if (requesterSource.userId !== actorUserId) {
-              const allowed = await canAccessOtherUsers(actorUserId)
-              if (!allowed) {
-                throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
-              }
-            }
-            if (requesterSource.userId === counterpartySource.userId) {
-              throw new HttpError(422, 'SHIFT_SWAP_REQUIRES_TWO_USERS', 'Shift-swap requires two different users')
-            }
-
-            const sourceKey = buildShiftSwapSourceKey(requesterAssignmentId, counterpartyAssignmentId)
-            const duplicateRows = await trx.query(
-              `SELECT d.request_id
-                 FROM attendance_shift_swap_requests d
-                 JOIN attendance_requests r ON r.id = d.request_id
-                WHERE d.org_id = $1 AND d.source_key = $2
-                  AND r.status IN ('pending', 'approved')
-                LIMIT 1`,
-              [orgId, sourceKey]
-            )
-            if (duplicateRows.length) {
-              throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_REQUEST', 'A shift-swap request already exists for these assignments')
-            }
-            const sourceConflict = await findShiftSwapSourceConflict(trx, orgId, [requesterAssignmentId, counterpartyAssignmentId])
-            if (sourceConflict) {
-              throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_SOURCE', 'A shift-swap request is already pending or approved for one of these source assignments')
-            }
-
-            await acquireAttendanceRequestLock(trx, orgId, requesterSource.userId, requesterSource.workDate, 'shift_swap')
-            const approvalFlow = await loadActiveApprovalFlowForRequestType(trx, orgId, 'shift_swap', approvalFlowId)
-            if (approvalFlowId && !approvalFlow) {
-              throw new HttpError(422, 'SHIFT_SWAP_APPROVAL_FLOW_REQUIRED', 'Shift-swap approval flow does not exist or is inactive', singleValidationDetail('approvalFlowId', 'Provide an active shift_swap approvalFlowId'))
-            }
-            const metadata = {
-              shiftSwap: {
-                requesterAssignmentId,
-                counterpartyAssignmentId,
-                requesterUserId: requesterSource.userId,
-                counterpartyUserId: counterpartySource.userId,
-                requesterWorkDate: requesterSource.workDate,
-                counterpartyWorkDate: counterpartySource.workDate,
-              },
-            }
-            if (approvalFlow) {
-              metadata.approvalFlow = {
-                id: approvalFlow.id,
-                name: approvalFlow.name,
-                steps: approvalFlow.steps,
-                currentStep: 0,
-              }
-            }
-            const draft = {
-              workDate: requesterSource.workDate,
-              requestType: 'shift_swap',
-              requestedInAt: null,
-              requestedOutAt: null,
-              reason,
-              metadata,
-            }
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId, userId: requesterSource.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId,
-              requestId,
-              orgId,
-              userId: requesterSource.userId,
-              requesterName: getUserLabel(req, requesterSource.userId),
-              draft,
-              orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-            )
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const requestRows = await trx.query(
-              `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-               VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
-               RETURNING *`,
-              [
-                requestId,
-                requesterSource.userId,
-                orgId,
-                requesterSource.workDate,
-                reason,
-                approvalId,
-                JSON.stringify(metadata),
-              ]
-            )
-
-            await trx.query(
-              `INSERT INTO attendance_shift_swap_requests
-               (request_id, org_id, requester_user_id, counterparty_user_id,
-                requester_assignment_id, counterparty_assignment_id,
-                requester_work_date, counterparty_work_date,
-                requester_shift_id, counterparty_shift_id,
-                requester_slot_index, counterparty_slot_index,
-                requester_start_date, requester_end_date,
-                counterparty_start_date, counterparty_end_date,
-                requester_publish_status, counterparty_publish_status,
-                requester_producer_type, counterparty_producer_type,
-                requester_assignment_kind, counterparty_assignment_kind,
-                source_key)
-               VALUES
-               ($1, $2, $3, $4,
-                $5, $6,
-                $7, $8,
-                $9, $10,
-                $11, $12,
-                $13, $14,
-                $15, $16,
-                $17, $18,
-                $19, $20,
-                $21, $22,
-                $23)`,
-              [
-                requestId,
-                orgId,
-                requesterSource.userId,
-                counterpartySource.userId,
-                requesterSource.id,
-                counterpartySource.id,
-                requesterSource.workDate,
-                counterpartySource.workDate,
-                requesterSource.shiftId,
-                counterpartySource.shiftId,
-                requesterSource.slotIndex,
-                counterpartySource.slotIndex,
-                requesterSource.startDate,
-                requesterSource.endDate,
-                counterpartySource.startDate,
-                counterpartySource.endDate,
-                requesterSource.publishStatus,
-                counterpartySource.publishStatus,
-                requesterSource.producerType,
-                counterpartySource.producerType,
-                requesterSource.assignmentKind,
-                counterpartySource.assignmentKind,
-                sourceKey,
-              ]
-            )
-            const detail = await loadShiftSwapDetail(trx, orgId, requestId)
-            return { request: requestRows[0], detail }
-          })
-
-          emitEvent('attendance.shiftSwap.requested', { orgId, requestId, userId: result.request.user_id })
-          res.status(201).json({
-            ok: true,
-            data: {
-              request: mapAttendanceRequestRow(result.request),
-              shiftSwap: mapShiftSwapRequestRow(result.detail),
+              requesterAssignmentId,
+              counterpartyAssignmentId,
+              approvalFlowId: approvalFlowId ?? null,
+              reason: reason ?? null,
             },
           })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            const request = outcome.response?.data?.request
+            emitEvent('attendance.shiftSwap.requested', {
+              orgId,
+              requestId: request?.id,
+              userId: request?.user_id ?? request?.userId,
+            })
+          }
+          res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({
@@ -32585,6 +34877,7 @@ module.exports = {
             })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (error?.code === '23505' && error?.constraint === 'uq_attendance_shift_swap_requests_source_key') {
             res.status(409).json({ ok: false, error: { code: 'DUPLICATE_SHIFT_SWAP_REQUEST', message: 'A shift-swap request already exists for these assignments' } })
             return
@@ -32701,6 +34994,13 @@ module.exports = {
     )
 
     async function respondShiftSwapConsent(req, res, decision) {
+      const parsed = requestDecisionActionSchema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        res.status(400).json(
+          validationErrorBody('Invalid shift-swap consent payload', formatZodValidationDetails(parsed.error)),
+        )
+        return
+      }
       const requesterId = getUserId(req)
       if (!requesterId) {
         res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -32712,80 +35012,43 @@ module.exports = {
         respondInvalidUuid(res)
         return
       }
+      if (!w4RequestOperationBoundary) {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+        })
+        return
+      }
       try {
-        const detail = await db.transaction(async (trx) => {
-          const row = await loadShiftSwapDetail(trx, orgId, requestId, { forUpdate: true })
-          if (!row) {
-            throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
-          }
-          if (row.counterparty_user_id !== requesterId) {
-            throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
-          }
-          if (row.request_status !== 'pending') {
-            throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
-          }
-          if (row.counterparty_status !== 'pending') {
-            throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
-          }
-          await trx.query(
-            `UPDATE attendance_shift_swap_requests
-                SET counterparty_status = $3,
-                    counterparty_responded_at = now(),
-                    updated_at = now()
-              WHERE org_id = $1 AND request_id = $2`,
-            [orgId, requestId, decision]
-          )
-          if (decision === 'rejected') {
-            if (row.approval_instance_id) {
-              const approvalRows = await trx.query(
-                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-                [row.approval_instance_id]
-              )
-              if (approvalRows.length > 0) {
-                const approval = approvalRows[0]
-                const newVersion = Number(approval.version ?? 0) + 1
-                await trx.query(
-                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                  ['rejected', newVersion, row.approval_instance_id]
-                )
-                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
-                await trx.query(
-                  `INSERT INTO approval_records
-                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                   VALUES ($1, 'reject', $2, $3, NULL, $4, 'rejected', $5, $6, '{}'::jsonb, $7, $8)`,
-                  [
-                    row.approval_instance_id,
-                    requesterId,
-                    getUserLabel(req, requesterId),
-                    approval.status,
-                    approval.version,
-                    newVersion,
-                    req.ip ?? null,
-                    req.get('user-agent') ?? null,
-                  ]
-                )
-              }
-            }
-	            await trx.query(
-	              `UPDATE attendance_requests
-	                  SET status = 'rejected',
-	                      resolved_by = $3,
-	                      resolved_at = now(),
-	                      updated_at = now()
-	                WHERE id = $1 AND org_id = $2`,
-	              [requestId, orgId, requesterId]
-	            )
-	            await archiveShiftSwapSourceKey(trx, orgId, requestId)
-	          }
-	          return loadShiftSwapDetail(trx, orgId, requestId)
-	        })
-        emitEvent(`attendance.shiftSwap.${decision}`, { orgId, requestId, userId: requesterId })
-        res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: decision === 'rejected' ? 'rejected' : detail.request_status }) } })
+        const operationId = resolveRequestOperationId(parsed.data)
+        const action = decision === 'accepted' ? 'approve' : 'reject'
+        const outcome = await w4RequestOperationBoundary.execute({
+          kind: 'request_decision',
+          operationId,
+          correlationId: requestCorrelationId(req, operationId, `shift-swap-${decision}`),
+          routeVariant: decision === 'accepted' ? 'shift_swap_accept' : 'shift_swap_reject',
+          routeInput: {
+            actorId: requesterId,
+            tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+            actorName: getUserLabel(req, requesterId),
+            orgId,
+            requestId,
+            action,
+            requestBody: parsed.data,
+            ipAddress: req.ip ?? null,
+            userAgent: req.get('user-agent') ?? null,
+          },
+        })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+          emitEvent(`attendance.shiftSwap.${decision}`, { orgId, requestId, userId: requesterId })
+        }
+        res.json(outcome.response)
       } catch (error) {
         if (error instanceof HttpError) {
           res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
           return
         }
+        if (respondIfW4BoundaryError(res, error)) return
         if (isDatabaseSchemaError(error)) {
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
           return
@@ -32811,6 +35074,13 @@ module.exports = {
       'POST',
       '/api/attendance/shift-swap-requests/:id/cancel',
       withPermission('attendance:write', async (req, res) => {
+        const parsed = requestCancellationActionSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json(
+            validationErrorBody('Invalid shift-swap cancellation payload', formatZodValidationDetails(parsed.error)),
+          )
+          return
+        }
         const requesterId = getUserId(req)
         if (!requesterId) {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -32822,70 +35092,41 @@ module.exports = {
           respondInvalidUuid(res)
           return
         }
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
         try {
-          const detail = await db.transaction(async (trx) => {
-            const row = await loadShiftSwapDetail(trx, orgId, requestId, { forUpdate: true })
-            if (!row) {
-              throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
-            }
-            if (row.requester_user_id !== requesterId) {
-              const allowed = await canAccessOtherUsers(requesterId)
-              if (!allowed) {
-                throw new HttpError(403, 'FORBIDDEN', 'No access to cancel shift-swap request')
-              }
-            }
-            if (row.request_status !== 'pending') {
-              throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
-            }
-            if (row.approval_instance_id) {
-              const approvalRows = await trx.query(
-                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-                [row.approval_instance_id]
-              )
-              if (approvalRows.length > 0) {
-                const approval = approvalRows[0]
-                const newVersion = Number(approval.version ?? 0) + 1
-                await trx.query(
-                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                  ['cancelled', newVersion, row.approval_instance_id]
-                )
-                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
-                await trx.query(
-                  `INSERT INTO approval_records
-                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                   VALUES ($1, 'revoke', $2, $3, NULL, $4, 'cancelled', $5, $6, '{}'::jsonb, $7, $8)`,
-                  [
-                    row.approval_instance_id,
-                    requesterId,
-                    getUserLabel(req, requesterId),
-                    approval.status,
-                    approval.version,
-                    newVersion,
-                    req.ip ?? null,
-                    req.get('user-agent') ?? null,
-                  ]
-                )
-              }
-            }
-	            await trx.query(
-	              `UPDATE attendance_requests
-	                  SET status = 'cancelled',
-	                      resolved_by = $3,
-	                      resolved_at = now(),
-	                      updated_at = now()
-	                WHERE id = $1 AND org_id = $2`,
-	              [requestId, orgId, requesterId]
-	            )
-	            await archiveShiftSwapSourceKey(trx, orgId, requestId)
-	            return loadShiftSwapDetail(trx, orgId, requestId)
-	          })
-          emitEvent('attendance.shiftSwap.cancelled', { orgId, requestId, userId: requesterId })
-          res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: 'cancelled' }) } })
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_cancel',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'shift-swap-cancel'),
+            routeVariant: 'shift_swap_cancel',
+            routeInput: {
+              actorId: requesterId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+              actorName: getUserLabel(req, requesterId),
+              orgId,
+              requestId,
+              requestBody: parsed.data,
+              ipAddress: req.ip ?? null,
+              userAgent: req.get('user-agent') ?? null,
+            },
+          })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            emitEvent('attendance.shiftSwap.cancelled', { orgId, requestId, userId: requesterId })
+          }
+          res.json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
             return
@@ -32910,6 +35151,7 @@ module.exports = {
           )
           return
         }
+        if (respondIfInvalidRequestUuidReferences(res, parsed.data)) return
 
         const requesterId = getUserId(req)
         if (!requesterId) {
@@ -32917,203 +35159,76 @@ module.exports = {
           return
         }
 
-        const requestId = normalizeUuidString(req.params.id)
-        if (!requestId) {
-          respondInvalidUuid(res)
-          return
-        }
-
-        try {
-          const request = await db.transaction(async (trx) => {
-            const requestRows = await trx.query(
-              'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
-              [requestId]
-            )
-            if (requestRows.length === 0) {
-              throw new HttpError(404, 'NOT_FOUND', 'Request not found')
-            }
-
-            const existingRequest = requestRows[0]
-            await ensureAttendanceRequestAccess(existingRequest, requesterId, 'edit request')
-            if (existingRequest.status !== 'pending') {
-              throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
-            }
-
-            const draft = await resolveAttendanceRequestDraft(parsed.data, existingRequest)
-
-            // 补卡规则 MP-2/MP-3: only read the policy when a makeup type is involved (existing OR edited
-            // type), so non-makeup edits stay byte-identical. When enabled, cross-user editing of a makeup
-            // request is fail-closed (Q6: cannot yet audit the real submitter). Enabled-gated so disabled
-            // customers keep the current canAccessOtherUsers cross-user edit behavior.
-            const makeupTypeInvolved =
-              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType) ||
-              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(existingRequest.request_type)
-            let makeupPunchPolicy = null
-            if (makeupTypeInvolved) {
-              const settings = await getSettings(db)
-              if (settings?.makeupPunchPolicy?.enabled === true) {
-                makeupPunchPolicy = settings.makeupPunchPolicy
-                if (existingRequest.user_id !== requesterId) {
-                  throw new HttpError(
-                    422,
-                    'MAKEUP_PUNCH_CROSS_USER_FORBIDDEN',
-                    'Cross-user editing of makeup punch requests is not allowed while the makeup policy is enabled'
-                  )
-                }
-              }
-            }
-
-            await acquireAttendanceRequestLock(trx, existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType)
-            const duplicateRows = await trx.query(
-              `SELECT id
-               FROM attendance_requests
-               WHERE org_id = $1
-                 AND user_id = $2
-                 AND work_date = $3
-                 AND request_type = $4
-                 AND status IN ('pending', 'approved')
-                 AND id <> $5
-               LIMIT 1`,
-              [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, requestId]
-            )
-            if (duplicateRows.length > 0) {
-              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
-            }
-
-            // 补卡规则 MP-2/MP-3: enforce on the EDITED makeup type, inside the txn after the lock +
-            // duplicate guard, excluding the current request id from the quota count. Recompute a FRESH
-            // snapshot every successful update — resolveAttendanceRequestDraft rebuilds metadata from
-            // scratch (it never copies makeupPunchPolicySnapshot), so the stale snapshot is dropped and
-            // the metadata siblings (attachmentUrl/approvalFlow) are preserved.
-            if (makeupPunchPolicy && MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
-              const enforcement = await enforceMakeupPunchPolicy(trx, {
-                policy: makeupPunchPolicy,
-                orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-                subjectUserId: existingRequest.user_id,
-                requesterId,
-                requestId,
-                draft,
-              })
-              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
-            }
-
-            const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-              userId: existingRequest.user_id,
-              flowSteps: draft.metadata?.approvalFlow?.steps,
-              context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId,
-              requestId,
-              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-              userId: existingRequest.user_id,
-              requesterName: existingRequest.user_id,
-              draft,
-              orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-            )
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const rows = await trx.query(
-              `UPDATE attendance_requests
-               SET work_date = $2,
-                   request_type = $3,
-                   requested_in_at = $4,
-                   requested_out_at = $5,
-                   reason = $6,
-                   metadata = $7::jsonb,
-                   approval_instance_id = $8,
-                   updated_at = now()
-               WHERE id = $1
-               RETURNING *`,
-              [
-                requestId,
-                draft.workDate,
-                draft.requestType,
-                draft.requestedInAt,
-                draft.requestedOutAt,
-                draft.reason,
-                JSON.stringify(draft.metadata),
-                approvalId,
-              ]
-            )
-            return rows[0]
-          })
-
-          emitEvent('attendance.request.updated', {
-            requestId: request.id,
-            orgId: request.org_id ?? DEFAULT_ORG_ID,
-            userId: request.user_id,
-          })
-          res.json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
-        } catch (error) {
-          if (error instanceof HttpError) {
-            res.status(error.status).json({
-              ok: false,
-              error: {
-                code: error.code,
-                message: error.message,
-                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
-              },
-            })
-            return
-          }
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance request update failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update request' } })
-        }
+	        const requestId = normalizeUuidString(req.params.id)
+	        if (!requestId) {
+	          respondInvalidUuid(res)
+	          return
+	        }
+	        if (!w4RequestOperationBoundary) {
+	          res.status(503).json({
+	            ok: false,
+	            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+	          })
+	          return
+	        }
+	        const orgId = getOrgId(req)
+	        try {
+	          const operationId = resolveRequestOperationId(parsed.data)
+	          const outcome = await w4RequestOperationBoundary.execute({
+	            kind: 'request_pending_edit',
+	            operationId,
+	            correlationId: requestCorrelationId(req, operationId, 'request-edit'),
+	            routeVariant: null,
+	            routeInput: {
+	              actorId: requesterId,
+	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+	              requesterName: getUserLabel(req, requesterId),
+	              orgId: null,
+	              requestId,
+	              requestBody: parsed.data,
+	            },
+	          })
+	          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+	            const request = outcome.response?.data?.request
+	            emitEvent('attendance.request.updated', {
+	              requestId,
+	              orgId: request?.orgId ?? DEFAULT_ORG_ID,
+	              userId: request?.userId,
+	            })
+	          }
+	          res.json(outcome.response)
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({
+	              ok: false,
+	              error: {
+	                code: error.code,
+	                message: error.message,
+	                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+	              },
+	            })
+	            return
+	          }
+	          if (respondIfW4BoundaryError(res, error)) return
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance request update failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update request' } })
+	        }
+	        return
       })
     )
 
-    const resolveSchema = z.object({
-      comment: z.string().optional(),
-      metadata: z.record(z.unknown()).optional(),
-    })
-
-    async function resolveRequest(req, res, action) {
-      const parsed = resolveSchema.safeParse(req.body ?? {})
-      if (!parsed.success) {
-        res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
-        return
-      }
-
-      const requesterId = getUserId(req)
-      if (!requesterId) {
-        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-        return
-      }
-
-      const requestId = normalizeUuidString(req.params.id)
-      if (!requestId) {
-        respondInvalidUuid(res)
-        return
-      }
-
-      const decisionComment = normalizeOptionalText(parsed.data.comment)
-      if (action === 'reject' && !decisionComment) {
-        res.status(400).json(
-          validationErrorBody(
-            'Rejection comment is required',
-            singleValidationDetail('comment', 'Required when rejecting an attendance request')
-          )
-        )
-        return
-      }
-      const decisionActorName = getUserLabel(req, requesterId)
-
-      try {
-        const result = await db.transaction(async (trx) => {
+    async function executeRequestDecisionInTransaction(trx, state, operation) {
+          const { route, expectedApprovalVersion, expectedApprovalNode } = state
+          const requesterId = route.actorId
+          const requestId = route.requestId
+          const action = route.action
+          const parsed = { data: route.requestBody }
+          const decisionComment = normalizeOptionalText(route.requestBody.comment)
+          const decisionActorName = route.actorName
           const requestRows = await trx.query(
             'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
             [requestId]
@@ -33123,7 +35238,9 @@ module.exports = {
           }
 
           const requestRow = requestRows[0]
-          await assertAttendanceRequestApprovalAllowed(req, { client: trx, requestRow })
+          const decisionAccess = await resolveRequestDecisionActorAccess(trx, route, requestRow, {
+            legacyAuthorization: operation?.acceptedWritePosture === 'legacy_projection_only',
+          })
           if (requestRow.status !== 'pending') {
             throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
           }
@@ -33143,15 +35260,25 @@ module.exports = {
 
           const approval = approvalRows[0]
           const requestMetadata = normalizeMetadata(requestRow.metadata)
-          const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
-          const requestType = requestRow.request_type
           const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
           const flowSteps = normalizeApprovalSteps(flowMeta.steps)
-          const rawStepIndex = Number(flowMeta.currentStep ?? 0)
-          const currentStepIndex = flowSteps.length > 0
-            ? Math.min(Math.max(Number.isFinite(rawStepIndex) ? rawStepIndex : 0, 0), flowSteps.length - 1)
-            : 0
-          const currentStep = flowSteps[currentStepIndex]
+          const lockedFlowState = resolveLockedAttendanceApprovalFlowState(
+            approval,
+            flowMeta,
+            flowSteps,
+          )
+          const lockedApprovalNode = lockedFlowState.currentNodeKey
+          if (
+            approval.status !== 'pending'
+            || Number(approval.version ?? 0) !== Number(expectedApprovalVersion)
+            || lockedApprovalNode !== expectedApprovalNode
+          ) {
+            throw new HttpError(409, 'APPROVAL_VERSION_CONFLICT', 'Approval version, node, or status changed')
+          }
+          const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+          const requestType = requestRow.request_type
+          const currentStepIndex = lockedFlowState.currentStepIndex
+          const currentStep = lockedFlowState.currentStep
 
           // Action authorization (RATIFIED S7 lock §3.1/§3.2 + owner erratum 2026-07-16, OD-S7-0
           // scheduler-scope carve-out). The mode is keyed on the request's CREATION-FROZEN
@@ -33177,7 +35304,7 @@ module.exports = {
               trx,
               orgId,
               requestId,
-              { userId: requesterId, orgId, fullAdmin: await hasAttendanceAdminAccess(requesterId) },
+              { userId: requesterId, orgId, fullAdmin: decisionAccess.fullAdmin },
               { forUpdate: true }
             )
           }
@@ -33185,17 +35312,15 @@ module.exports = {
           if (isScopeNativeDispatch) {
             await assertDispatchScopeAllowed()
           } else {
-            const currentNodeKey = buildAttendanceApprovalNodeKey(currentStepIndex)
             const actorIsAssigned = await isAttendanceActorAssignedForNode(
               trx,
               approvalId,
-              currentNodeKey,
+              lockedApprovalNode,
               requesterId,
               logger
             )
             if (!actorIsAssigned) {
-              const adminOverride = await hasAttendanceAdminAccess(requesterId)
-              if (!adminOverride) {
+              if (!decisionAccess.fullAdmin) {
                 throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
               }
             }
@@ -33212,6 +35337,20 @@ module.exports = {
           const newVersion = Number(approval.version ?? 0) + 1
           const resolvedAt = new Date()
           let finalOvertimeAnchor = null
+          let lockedRequestSnapshot = null
+
+          // W4C-3b P12: lock latest immutable request snapshot BEFORE any terminal
+          // approval/request DML. Authoritative + missing snapshot fails closed here
+          // (zero terminal writes). Shadow missing is allowed (unsupported pre-W4).
+          // legacy_projection_only is a no-op.
+          if (isFinalApproval) {
+            lockedRequestSnapshot = await lockRequestSnapshotBeforeTerminalDecision(trx, {
+              orgId,
+              requestId,
+              requestType,
+              subjectUserId: requestRow.user_id,
+            })
+          }
 
           // W2: final overtime approval must validate its creation-frozen anchor before any
           // approval/request/accounting write. Throwing here leaves the whole transaction untouched.
@@ -33245,7 +35384,7 @@ module.exports = {
           const nextStepIndex = isFinalApproval ? currentStepIndex : currentStepIndex + 1
           // S7-1 §4.1 runtime fail-closed — step-advance: if the step about to become active is dynamic
           // and the trigger set holds (flag OFF / port missing / kind unimplemented), fail BEFORE the
-          // approval_instances UPDATE and the assignment swap. This whole branch runs inside db.transaction,
+          // approval_instances UPDATE and the assignment swap. This whole branch runs inside the canonical transaction,
           // so the throw rolls back atomically — no advanced current_step, no swapped assignments, no
           // appended approval record, and never the legacy admin fallback.
           if (!isFinalApproval) {
@@ -33260,16 +35399,33 @@ module.exports = {
             ? null
             : buildAttendanceApprovalAssignments(flowSteps, nextStepIndex, frozenRequesterSnapshot)
 
-          await trx.query(
+          const approvalUpdateRows = await trx.query(
             `UPDATE approval_instances
              SET status = $1,
                  version = $2,
                  current_step = $3,
                  current_node_key = $4,
                  updated_at = now()
-             WHERE id = $5`,
-            [newStatus, newVersion, nextStepIndex, buildAttendanceApprovalNodeKey(nextStepIndex), approvalId]
+             WHERE id = $5
+               AND version = $6
+               AND status = 'pending'
+               AND current_step = $7
+               AND COALESCE(current_node_key, $8) = $8
+             RETURNING id`,
+            [
+              newStatus,
+              newVersion,
+              nextStepIndex,
+              buildAttendanceApprovalNodeKey(nextStepIndex),
+              approvalId,
+              expectedApprovalVersion,
+              currentStepIndex,
+              lockedApprovalNode,
+            ]
           )
+          if (approvalUpdateRows.length !== 1) {
+            throw new HttpError(409, 'APPROVAL_VERSION_CONFLICT', 'Approval version or status changed')
+          }
 
           if (isFinalApproval) {
             await deactivateAttendanceApprovalAssignments(trx, approvalId)
@@ -33287,10 +35443,13 @@ module.exports = {
             stepName: currentStep?.name ?? null,
           }
 
-          await trx.query(
+          // W4C-3b P12: RETURNING id is required so the terminal binding records
+          // the durable approval_records primary key (never form_snapshot).
+          const approvalRecordRows = await trx.query(
             `INSERT INTO approval_records
              (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
+             RETURNING id`,
             [
               approvalId,
               action,
@@ -33302,14 +35461,50 @@ module.exports = {
               approval.version,
               newVersion,
               JSON.stringify(recordMetadata),
-              req.ip ?? null,
-              req.get('user-agent') ?? null,
+              route.ipAddress,
+              route.userAgent,
             ]
           )
+          const approvalRecordIdRaw = approvalRecordRows?.[0]?.id
+          const approvalRecordId =
+            approvalRecordIdRaw === null || approvalRecordIdRaw === undefined
+              ? null
+              : String(approvalRecordIdRaw)
+          if (isFinalApproval && !approvalRecordId) {
+            throw new HttpError(
+              500,
+              'APPROVAL_RECORD_ID_MISSING',
+              'Terminal approval record did not return an id'
+            )
+          }
 
           const nextMetadata = { ...requestMetadata }
           if (finalOvertimeAnchor) {
             nextMetadata[OVERTIME_ATTRIBUTION_KEY] = finalOvertimeAnchor
+          }
+          // W4C-3b P12: seal closed terminal binding from locked snapshot +
+          // approval version + RETURNING id. Mutable form_snapshot is never used.
+          if (isFinalApproval) {
+            const bindResult = await bindRequestSnapshotOnTerminalDecision(trx, {
+              orgId,
+              requestId,
+              requestType,
+              subjectUserId: requestRow.user_id,
+              action,
+              approvalVersion: newVersion,
+              approvalRecordId,
+              expectedSnapshotVersion:
+                lockedRequestSnapshot && lockedRequestSnapshot.kind === 'locked'
+                  ? lockedRequestSnapshot.snapshot.version
+                  : undefined,
+              expectedSnapshotFingerprint:
+                lockedRequestSnapshot && lockedRequestSnapshot.kind === 'locked'
+                  ? lockedRequestSnapshot.snapshot.payloadFingerprint
+                  : undefined,
+            })
+            if (bindResult && (bindResult.kind === 'bound' || bindResult.kind === 'unsupported_pre_w4_shadow')) {
+              nextMetadata[requestSnapshotTerminalBindingMetaKey] = bindResult.binding
+            }
           }
           let scheduleDispatchFinalization = null
           if (requestType === 'schedule_dispatch' && action === 'approve' && isFinalApproval) {
@@ -33320,7 +35515,7 @@ module.exports = {
               actorAccess: {
                 userId: requesterId,
                 orgId,
-                fullAdmin: await hasAttendanceAdminAccess(requesterId),
+                fullAdmin: decisionAccess.fullAdmin,
               },
             })
             nextMetadata.scheduleDispatchFinalization = {
@@ -33375,26 +35570,34 @@ module.exports = {
             }
           }
 
-	          if (isFinalApproval) {
-	            await trx.query(
-	              `UPDATE attendance_requests
-	               SET status = $2, resolved_by = $3, resolved_at = $4, metadata = $5::jsonb, updated_at = now()
-	               WHERE id = $1`,
-	              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata)]
-	            )
+		          if (isFinalApproval) {
+		            const requestUpdateRows = await trx.query(
+		              `UPDATE attendance_requests
+		               SET status = $2, resolved_by = $3, resolved_at = $4, metadata = $5::jsonb, updated_at = now()
+		               WHERE id = $1 AND org_id = $6 AND status = 'pending'
+		               RETURNING id`,
+		              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata), orgId]
+		            )
+		            if (requestUpdateRows.length !== 1) {
+		              throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request state changed')
+		            }
 	            if (requestType === 'shift_swap' && action !== 'approve') {
 	              await archiveShiftSwapSourceKey(trx, orgId, requestId)
 	            } else if (requestType === 'schedule_dispatch' && action !== 'approve') {
 	              await closeScheduleDispatchRequest(trx, orgId, requestId)
 	            }
-	          } else {
-	            await trx.query(
-	              `UPDATE attendance_requests
-	               SET metadata = $2::jsonb, updated_at = now()
-               WHERE id = $1`,
-              [requestId, JSON.stringify(nextMetadata)]
-            )
-          }
+		          } else {
+		            const requestUpdateRows = await trx.query(
+		              `UPDATE attendance_requests
+		               SET metadata = $2::jsonb, updated_at = now()
+	               WHERE id = $1 AND org_id = $3 AND status = 'pending'
+	               RETURNING id`,
+	              [requestId, JSON.stringify(nextMetadata), orgId]
+	            )
+	            if (requestUpdateRows.length !== 1) {
+	              throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request state changed')
+	            }
+	          }
 
           let record = null
           if (action === 'approve' && isFinalApproval) {
@@ -33825,31 +36028,103 @@ module.exports = {
             requestId,
             status: isFinalApproval ? newStatus : 'pending',
             record,
-            orgId,
+            orgId: null,
             userId: requestRow.user_id,
             approvalStep: {
               index: isFinalApproval ? currentStepIndex : currentStepIndex + 1,
               total: flowSteps.length,
             },
           }
-        })
+    }
 
-        emitEvent('attendance.resolved', {
-          requestId: result.requestId,
-          status: result.status,
-          orgId: result.orgId,
-          userId: result.userId,
+    async function resolveRequest(req, res, action) {
+      const rawBody = req.body ?? {}
+      const hasOperationId = rawBody && typeof rawBody === 'object' && (
+        Object.prototype.hasOwnProperty.call(rawBody, 'operationId')
+        || Object.prototype.hasOwnProperty.call(rawBody, 'operation_id')
+      )
+      const parsed = hasOperationId
+        ? requestDecisionActionSchema.safeParse(rawBody)
+        : resolveSchema.safeParse(rawBody)
+      if (!parsed.success) {
+        res.status(400).json(hasOperationId
+          ? validationErrorBody('Invalid attendance request decision payload', formatZodValidationDetails(parsed.error))
+          : { ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+        return
+      }
+      const requesterId = getUserId(req)
+      if (!requesterId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return
+      }
+      const requestId = normalizeUuidString(req.params.id)
+      if (!requestId) {
+        respondInvalidUuid(res)
+        return
+      }
+      const orgId = getOrgId(req)
+      const decisionComment = normalizeOptionalText(parsed.data.comment)
+      if (action === 'reject' && !decisionComment) {
+        res.status(400).json(
+          validationErrorBody(
+            'Rejection comment is required',
+            singleValidationDetail('comment', 'Required when rejecting an attendance request'),
+          ),
+        )
+        return
+      }
+      if (!w4RequestOperationBoundary) {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
         })
-        res.json({ ok: true, data: result })
+        return
+      }
+      let operationId = null
+      try {
+        operationId = resolveRequestOperationId(parsed.data)
+        const outcome = await w4RequestOperationBoundary.execute({
+          kind: 'request_decision',
+          operationId,
+          correlationId: requestCorrelationId(req, operationId, `request-${action}`),
+          routeVariant: null,
+          routeInput: {
+            actorId: requesterId,
+            tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+            actorName: getUserLabel(req, requesterId),
+            orgId: null,
+            requestId,
+            action,
+            requestBody: parsed.data,
+            ipAddress: req.ip ?? null,
+            userAgent: req.get('user-agent') ?? null,
+          },
+        })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+          const result = outcome.response?.data
+          emitEvent('attendance.resolved', {
+            requestId: result?.requestId ?? requestId,
+            status: result?.status,
+            orgId: result?.orgId,
+            userId: result?.userId,
+          })
+        }
+        res.json(outcome.response)
       } catch (error) {
         if (respondShiftComplianceCapExceeded(res, error)) return
         if (error instanceof HttpError) {
-          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          res.status(error.status).json({
+            ok: false,
+            error: {
+              code: error.code,
+              message: error.message,
+              ...(operationId && Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+            },
+          })
           return
         }
+        if (respondIfW4BoundaryError(res, error)) return
         if (isDatabaseSchemaError(error)) {
-          // Surface the underlying missing table/column during integration testing and misconfigured deploys.
-          // The response stays generic to avoid leaking schema details to clients.
           logger.error('Attendance resolveRequest failed due to missing tables/columns', error)
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
           return
@@ -33860,9 +36135,14 @@ module.exports = {
     }
 
     async function cancelRequest(req, res) {
-      const parsed = resolveSchema.safeParse(req.body ?? {})
+      const parsed = requestCancellationActionSchema.safeParse(req.body ?? {})
       if (!parsed.success) {
-        res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+        res.status(400).json(
+          validationErrorBody(
+            'Invalid attendance request cancellation payload',
+            formatZodValidationDetails(parsed.error),
+          ),
+        )
         return
       }
 
@@ -33877,128 +36157,58 @@ module.exports = {
         respondInvalidUuid(res)
         return
       }
+      const orgId = getOrgId(req)
+
+      if (!w4RequestOperationBoundary) {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+        })
+        return
+      }
 
       try {
-        const result = await db.transaction(async (trx) => {
-          const requestRows = await trx.query(
-            'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
-            [requestId]
-          )
-          if (requestRows.length === 0) {
-            throw new HttpError(404, 'NOT_FOUND', 'Request not found')
-          }
-
-          const requestRow = requestRows[0]
-          // #7 (design-lock #3034): a leave may be cancelled AFTER approval (→ reverse its deducted balance
-          // below). The status machine is loosened ONLY for request_type='leave'; every other request type
-          // (shift_swap / schedule_dispatch / …) stays pending-only, unchanged.
-          const isApprovedLeaveCancellation =
-            requestRow.status === 'approved' && requestRow.request_type === 'leave'
-          if (requestRow.status !== 'pending' && !isApprovedLeaveCancellation) {
-            throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
-          }
-          const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
-          if (requestRow.request_type === 'schedule_dispatch') {
-            await assertScheduleDispatchRequestScopeAllowed(trx, requestOrgId, requestId, {
-              userId: requesterId,
-              orgId: requestOrgId,
-              fullAdmin: await hasAttendanceAdminAccess(requesterId),
-            }, { forUpdate: true })
-          }
-
-          if (requestRow.request_type !== 'schedule_dispatch' && requestRow.user_id !== requesterId) {
-            const allowed = await canAccessOtherUsers(requesterId)
-            if (!allowed) {
-              throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
-            }
-          }
-
-          const approvalId = requestRow.approval_instance_id
-          if (approvalId) {
-            const approvalRows = await trx.query(
-              'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-              [approvalId]
-            )
-            if (approvalRows.length > 0) {
-              const approval = approvalRows[0]
-              const newStatus = 'cancelled'
-              const newVersion = Number(approval.version ?? 0) + 1
-
-              await trx.query(
-                'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                [newStatus, newVersion, approvalId]
-              )
-              await deactivateAttendanceApprovalAssignments(trx, approvalId)
-
-              await trx.query(
-                `INSERT INTO approval_records
-                 (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
-                [
-                  approvalId,
-                  'revoke',
-                  requesterId,
-                  getUserLabel(req, requesterId),
-                  parsed.data.comment ?? null,
-                  approval.status,
-                  newStatus,
-                  approval.version,
-                  newVersion,
-                  JSON.stringify(parsed.data.metadata ?? {}),
-                  req.ip ?? null,
-                  req.get('user-agent') ?? null,
-                ]
-              )
-            }
-          }
-
-          const resolvedAt = new Date()
-          await trx.query(
-            `UPDATE attendance_requests
-             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
-             WHERE id = $1`,
-            [requestId, 'cancelled', requesterId, resolvedAt]
-          )
-          if (requestRow.request_type === 'shift_swap') {
-            await archiveShiftSwapSourceKey(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestId)
-          } else if (requestRow.request_type === 'schedule_dispatch') {
-            await closeScheduleDispatchRequest(trx, requestOrgId, requestId)
-          }
-
-          // #7 (design-lock #3034): cancelling an APPROVED leave reverses whatever balance its approval
-          // deducted (annual_leave / comp_time_leave), in the SAME txn. Symmetric + safe for any approved
-          // leave: if nothing was deducted (e.g. annual policy off → no deduct events for this requestId),
-          // the reverse is a no-op. Idempotent inside (a re-cancel finds the existing 'reverse' → no-op).
-          let reversal = null
-          if (isApprovedLeaveCancellation) {
-            reversal = await reverseLeaveBalanceDeduction(trx, {
-              orgId: requestOrgId,
-              userId: requestRow.user_id,
-              requestId,
-            })
-          }
-
-          return {
+        const operationId = resolveRequestOperationId(parsed.data)
+        const outcome = await w4RequestOperationBoundary.execute({
+          kind: 'request_cancel',
+          operationId,
+          correlationId: requestCorrelationId(req, operationId, 'request-cancel'),
+          routeVariant: null,
+          routeInput: {
+            actorId: requesterId,
+            tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+            actorName: getUserLabel(req, requesterId),
+            orgId: null,
             requestId,
-            status: 'cancelled',
-            orgId: requestOrgId,
-            userId: requestRow.user_id,
-            reversal,
-          }
+            requestBody: parsed.data,
+            ipAddress: req.ip ?? null,
+            userAgent: req.get('user-agent') ?? null,
+          },
         })
 
-        emitEvent('attendance.request.cancelled', {
-          requestId: result.requestId,
-          status: result.status,
-          orgId: result.orgId,
-          userId: result.userId,
-        })
-        res.json({ ok: true, data: result })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+          const result = outcome.response?.data
+          emitEvent('attendance.request.cancelled', {
+            requestId: result?.requestId ?? requestId,
+            status: result?.status ?? 'cancelled',
+            orgId: result?.orgId,
+            userId: result?.userId,
+          })
+        }
+        res.json(outcome.response)
       } catch (error) {
         if (error instanceof HttpError) {
-          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          res.status(error.status).json({
+            ok: false,
+            error: {
+              code: error.code,
+              message: error.message,
+              ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+            },
+          })
           return
         }
+        if (respondIfW4BoundaryError(res, error)) return
         if (isDatabaseSchemaError(error)) {
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
           return
@@ -43768,7 +45978,12 @@ module.exports = {
 
           const initialSnapshots = new Map(initialRows.map(row => [`${row.kind}:${row.id}`, attendanceSchedulePublishSnapshot(row)]))
           const result = await db.transaction(async (trx) => {
-            await acquireAttendanceScheduleAssignmentLocks(trx, orgId, initialRows.map(row => row.user_id))
+            await acquireAttendanceScheduleAssignmentLocks(
+              trx,
+              orgId,
+              initialRows.map(row => row.user_id),
+              { required: true },
+            )
             const settings = await getSettings(trx)
             const lockedRows = await loadAttendanceSchedulePublicationRows(trx, orgId, assignmentIds, rotationAssignmentIds, { forUpdate: true })
             const lockedKeys = new Set(lockedRows.map(row => `${row.kind}:${row.id}`))
@@ -43794,6 +46009,15 @@ module.exports = {
             // A draft created while its shift was single-segment must still fail
             // closed here (typed 422, zero writes) if the shift became multi-segment
             // before publication while segment calculation is OFF for the org.
+            // W4C-3b P27: the publication writer consumes the host's one org-scoped
+            // posture seam on THIS transaction. An absent port is the closed legacy
+            // posture; passing the explicit boolean below prevents this route from
+            // consulting the shift service's private environment predicate.
+            const publicationReferencePosture =
+              attendanceW4SegmentCalculationPort
+              && typeof attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture === 'function'
+                ? await attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture(trx, orgId)
+                : { effectiveState: 'legacy', referenceSegments: false }
             const publicationShiftService = getAttendanceShiftService()
             for (const row of lockedRows) {
               if (row.kind === 'shift') {
@@ -43801,6 +46025,7 @@ module.exports = {
                   orgId,
                   shiftId: row.shift_id,
                   producer: 'schedule_publication',
+                  referenceSegments: publicationReferencePosture.referenceSegments,
                 })
               }
             }
@@ -43820,6 +46045,7 @@ module.exports = {
                   orgId,
                   shiftRefs: ruleRow.shift_sequence ?? [],
                   producer: 'schedule_publication',
+                  referenceSegments: publicationReferencePosture.referenceSegments,
                 })
               }
             }

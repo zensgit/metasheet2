@@ -740,7 +740,7 @@ function createAttendanceShiftService(deps) {
    * calculation is disabled for the org. Throws 404 when the shift does not exist
    * in the org.
    */
-  async function assertShiftReferenceAllowed(trx, { orgId, shiftId, producer }) {
+  async function assertShiftReferenceAllowed(trx, { orgId, shiftId, producer, referenceSegments }) {
     const rows = await trx.query(
       'SELECT id FROM attendance_shifts WHERE id = $1 AND org_id = $2 FOR SHARE',
       [shiftId, orgId],
@@ -748,11 +748,12 @@ function createAttendanceShiftService(deps) {
     if (!rows.length) {
       throw new HttpError(404, 'NOT_FOUND', 'Shift not found')
     }
-    await assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer })
+    await assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer, referenceSegments })
   }
 
-  function assertSegmentCalculationAllowed({ orgId, shiftId, segmentCount, producer }) {
-    if (isSegmentCalculationEnabled(orgId)) return
+  function assertSegmentCalculationAllowed({ orgId, shiftId, segmentCount, producer, referenceSegments }) {
+    if (referenceSegments === true) return
+    if (referenceSegments === undefined && isSegmentCalculationEnabled(orgId)) return
     const normalizedCount = Number(segmentCount)
     if (segmentCount == null || !Number.isInteger(normalizedCount) || normalizedCount < 0) {
       throw new HttpError(
@@ -772,9 +773,9 @@ function createAttendanceShiftService(deps) {
     }
   }
 
-  async function assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer }) {
+  async function assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer, referenceSegments }) {
     const segmentCount = await countPersistedSegments(trx, orgId, shiftId)
-    assertSegmentCalculationAllowed({ orgId, shiftId, segmentCount, producer })
+    assertSegmentCalculationAllowed({ orgId, shiftId, segmentCount, producer, referenceSegments })
   }
 
   /**
@@ -784,7 +785,7 @@ function createAttendanceShiftService(deps) {
    * lock and check every org-scoped match; unresolvable legacy names are left to the
    * caller's existing validation.
    */
-  async function assertShiftSequenceReferenceAllowed(trx, { orgId, shiftRefs, producer }) {
+  async function assertShiftSequenceReferenceAllowed(trx, { orgId, shiftRefs, producer, referenceSegments }) {
     const refs = Array.from(new Set((shiftRefs ?? []).map((ref) => String(ref ?? '').trim()).filter(Boolean)))
     if (refs.length === 0) return
     const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -809,7 +810,7 @@ function createAttendanceShiftService(deps) {
     }
     const lockedIds = Array.from(foundIds).sort()
     for (const shiftId of lockedIds) {
-      await assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer })
+      await assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer, referenceSegments })
     }
   }
 

@@ -79,6 +79,15 @@ import type {
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import { ServiceError } from './ApprovalBridgeService'
+import {
+  assertAttendanceCentralMutationFailClosed,
+  attendanceCentralApprovalErrorToServiceFields,
+  authorizeAttendanceCentralReassign,
+  classifyAndLockAttendanceRequestForInstance,
+  filterBulkReassignDiscoveryForAttendance,
+  type AttendanceReassignAuditWitnessV1,
+  AttendanceCentralApprovalError,
+} from '../attendance/w4c3b-central-approval-hooks'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
 import {
   buildApprovalCompletionEvent,
@@ -323,6 +332,58 @@ type AdminJumpEventPayload = {
 type ApprovalDbClient = {
   query: typeof pool.query
   release: () => void
+}
+
+function throwAsServiceError(error: unknown): never {
+  const fields = attendanceCentralApprovalErrorToServiceFields(error)
+  if (fields) {
+    throw new ServiceError(fields.message, fields.statusCode, fields.code)
+  }
+  throw error
+}
+
+async function guardAttendanceCentralMutationOrThrow(
+  client: ApprovalDbClient,
+  instance: ApprovalInstanceRow,
+): Promise<void> {
+  try {
+    await assertAttendanceCentralMutationFailClosed(client, instance)
+  } catch (error) {
+    throwAsServiceError(error)
+  }
+}
+
+/**
+ * W4C-3b R0 test-only concurrency seam for bulkReassignApprovals.
+ * Production callers never set this; tests use it to interleave a second connection
+ * while the reassign txn still holds FOR UPDATE locks.
+ */
+export type W4c3bBulkReassignBarrierPoint =
+  | 'after_instance_lock'
+  | 'after_attendance_auth'
+  | 'before_version_bump'
+
+type W4c3bBulkReassignBarrierFn = (
+  point: W4c3bBulkReassignBarrierPoint,
+  info: { instanceId: string },
+) => Promise<void>
+
+let bulkReassignTestBarrierForTests: W4c3bBulkReassignBarrierFn | null = null
+
+/** Test-only. Pass null to clear. */
+export function __setW4c3bBulkReassignTestBarrierForTests(
+  hook: W4c3bBulkReassignBarrierFn | null,
+): void {
+  bulkReassignTestBarrierForTests = hook
+}
+
+async function awaitBulkReassignTestBarrier(
+  point: W4c3bBulkReassignBarrierPoint,
+  instanceId: string,
+): Promise<void> {
+  if (bulkReassignTestBarrierForTests) {
+    await bulkReassignTestBarrierForTests(point, { instanceId })
+  }
 }
 
 /**
@@ -5368,6 +5429,8 @@ export class ApprovalProductService {
       if (!instance) {
         throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
       }
+      // P17/P26: admin jump mutates assignments — attendance fails closed before DML.
+      await guardAttendanceCentralMutationOrThrow(client, instance)
       if (instance.version !== request.version) {
         throw new ServiceError(
           'Approval instance version mismatch',
@@ -5629,7 +5692,12 @@ export class ApprovalProductService {
           LIMIT 200`,
         [fromUserId],
       )
-      candidateIds = candidates.rows.map((row) => row.instance_id)
+      // P26: discovery excludes unauthorized attendance rows (published_definition_id is not a filter).
+      candidateIds = await filterBulkReassignDiscoveryForAttendance(
+        pool,
+        actor.userId,
+        candidates.rows.map((row) => row.instance_id),
+      )
     }
 
     const result: ApprovalBulkReassignResult = {
@@ -5665,6 +5733,35 @@ export class ApprovalProductService {
           continue
         }
 
+        // Holds instance FOR UPDATE — concurrent decision/reassign must wait here.
+        await awaitBulkReassignTestBarrier('after_instance_lock', instanceId)
+
+        // P26: classify + lock request org before actor/target authorization (never trust JSON org).
+        let attendanceReassignAudit: AttendanceReassignAuditWitnessV1 | null = null
+        const attendanceClass = await classifyAndLockAttendanceRequestForInstance(client, instance)
+        if (attendanceClass.kind === 'attendance') {
+          const auth = await authorizeAttendanceCentralReassign(client, {
+            instance,
+            request: attendanceClass.request,
+            actorId: actor.userId,
+            targetUserId: toUserId,
+          })
+          if (auth.ok === false) {
+            await client.query('ROLLBACK')
+            skip(instanceId, auth.skipReason)
+            continue
+          }
+          attendanceReassignAudit = auth.auditWitness
+          // Target users + user_orgs are locked; concurrent deactivation/membership removal waits.
+          await awaitBulkReassignTestBarrier('after_attendance_auth', instanceId)
+        }
+
+        if (attendanceClass.kind === 'attendance' && !instance.current_node_key) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'not-assigned')
+          continue
+        }
+
         const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
         const requesterId = typeof requesterSnapshot?.id === 'string' ? requesterSnapshot.id : null
         if (requesterId && requesterId === toUserId) {
@@ -5673,6 +5770,7 @@ export class ApprovalProductService {
           continue
         }
 
+        // Source seats: FOR UPDATE so concurrent reassign/decision cannot race seat deactivation.
         const sourceAssignments = await client.query<ApprovalAssignmentRow>(
           `SELECT *
              FROM approval_assignments
@@ -5690,19 +5788,48 @@ export class ApprovalProductService {
           continue
         }
 
-        const targetAssignments = await client.query<{ node_key: string | null }>(
-          `SELECT node_key
+        // Current-node validation: when the instance has a current node, at least one source seat
+        // must still sit on that node (stale/global seats alone cannot reassign).
+        if (attendanceClass.kind === 'attendance' && instance.current_node_key) {
+          const onCurrentNode = sourceAssignments.rows.some(
+            (assignment) => assignment.node_key === instance.current_node_key,
+          )
+          if (!onCurrentNode) {
+            await client.query('ROLLBACK')
+            skip(instanceId, 'not-assigned')
+            continue
+          }
+        }
+
+        // Lock existing target seats. A concurrent active insert is serialized by the
+        // existing idx_approval_assignments_active_unique partial index.
+        const targetAssignments = await client.query<ApprovalAssignmentRow>(
+          `SELECT *
              FROM approval_assignments
             WHERE instance_id = $1
               AND assignment_type = 'user'
               AND assignee_id = $2
               AND is_active = TRUE
-            LIMIT 1`,
+            ORDER BY COALESCE(node_key, ''), created_at ASC
+            FOR UPDATE`,
           [instanceId, toUserId],
         )
         if (targetAssignments.rows.length > 0) {
           await client.query('ROLLBACK')
           skip(instanceId, 'target-already-assignee')
+          continue
+        }
+
+        // Version recheck under the same lock (decision race): a concurrent terminal body that
+        // already advanced version/status cannot both succeed with this reassign.
+        const versionRecheck = await client.query<{ version: number; status: string }>(
+          `SELECT version, status FROM approval_instances WHERE id = $1`,
+          [instanceId],
+        )
+        const live = versionRecheck.rows[0]
+        if (!live || live.status !== 'pending' || Number(live.version) !== Number(instance.version)) {
+          await client.query('ROLLBACK')
+          skip(instanceId, live?.status && live.status !== 'pending' ? 'not-pending' : 'error')
           continue
         }
 
@@ -5748,12 +5875,19 @@ export class ApprovalProductService {
         for (const [epoch, bucket] of reassignmentsByEpoch) {
           createdTaskEvents.push(...(await this.insertAssignments(client, instanceId, bucket, epoch)))
         }
-        await client.query(
+        // After seat DML, still holding instance FOR UPDATE; version predicate is the second gate.
+        await awaitBulkReassignTestBarrier('before_version_bump', instanceId)
+        const versionBump = await client.query(
           `UPDATE approval_instances
               SET version = $2, updated_at = now()
-            WHERE id = $1`,
-          [instanceId, nextVersion],
+            WHERE id = $1 AND version = $3 AND status = 'pending'`,
+          [instanceId, nextVersion, instance.version],
         )
+        if ((versionBump.rowCount ?? 0) !== 1) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'not-pending')
+          continue
+        }
 
         for (const assignment of sourceAssignments.rows) {
           await this.insertApprovalRecord(client, instanceId, {
@@ -5772,6 +5906,9 @@ export class ApprovalProductService {
               nodeKey: assignment.node_key,
               previousAssignmentId: assignment.id,
               reason,
+              ...(attendanceReassignAudit
+                ? { attendanceW4c3bReassign: attendanceReassignAudit }
+                : {}),
             },
             targetUserId: toUserId,
           }, actor)
@@ -5875,6 +6012,20 @@ export class ApprovalProductService {
       if (!armed || Number.isNaN(deadlineMs) || deadlineMs > Date.now() || armed.current_node_timeout_effect !== scannedEffect) {
         await client.query('ROLLBACK')
         return 'skipped_stale'
+      }
+
+      // P26: attendance instances are not timeout-transfer/jump targets on the central path.
+      // Only consume a deadline after proving this scanner call still owns the exact armed row;
+      // stale calls must not clear a newer activation's deadline.
+      try {
+        await assertAttendanceCentralMutationFailClosed(client, instance)
+      } catch (error) {
+        if (error instanceof AttendanceCentralApprovalError) {
+          await consumeTimeout()
+          await client.query('COMMIT')
+          return 'skipped_stale'
+        }
+        throw error
       }
 
       if (!instance.published_definition_id || !instance.current_node_key) {
@@ -6094,6 +6245,9 @@ export class ApprovalProductService {
       if (!instance) {
         throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
       }
+      // P17/P22/P26: attendance instances fail closed before assignment/instance DML
+      // (including adversarial rows carrying published_definition_id).
+      await guardAttendanceCentralMutationOrThrow(client, instance)
       if (!instance.published_definition_id) {
         throw new ServiceError('Approval is not managed by the template runtime', 409, 'APPROVAL_RUNTIME_UNSUPPORTED')
       }

@@ -104,16 +104,20 @@ import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middl
 import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
 import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
 import {
+  buildAttendanceRequestCreationAttributionSnapshotV1,
   createAttendanceLiveScheduledBoundaryV1,
   computeAttendanceOuterSourceDefinitionFingerprintV1,
 } from './attendance/w4c2-live-scheduled-boundary'
 import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
 import {
   AttendanceW4IdentityError,
+  acquireAttendanceCalculationRolloutLock,
   buildAttendanceCalculationRolloutAdvisoryKey,
   buildAttendanceLegacyIdempotencyAdvisoryKey,
   parseCanonicalAttendanceLegacyIdempotencyKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
+  resolveSegmentCalculationPosture,
+  type AttendanceW4TransactionClientV1,
 } from './attendance/w4c0-identity'
 import {
   W4_ADVISORY_HELPER_WAIT_MS,
@@ -135,6 +139,19 @@ import {
   buildAttendanceImportPolicySourceProofV1,
 } from './attendance/w4c3a-import-proof'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
+import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
+import { appendApprovedLeaveCancellationCalculationV1 } from './attendance/w4c3b-approved-leave-cancellation'
+// W4C-3b P12: immutable request calculation snapshot plumbing (lock §7.2 / §12.5).
+import {
+  appendAttendanceRequestCreateSnapshotV1,
+  appendAttendanceRequestEditSnapshotV1,
+  bindAttendanceRequestTerminalSnapshotV1,
+  lockAttendanceRequestSnapshotBeforeTerminalDecisionV1,
+  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+  computeAttendanceRequestPayloadFingerprintV1,
+  buildUnsupportedRequestAttributionSnapshotV1,
+  W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
+} from './attendance/w4c3b-request-snapshots'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -2090,6 +2107,55 @@ export class MetaSheetServer {
                       return { client, release: () => client.release() }
                     },
                   }),
+                createRequestOperationBoundary: (config: {
+                  adapters: import('./attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
+                }) =>
+                  createAttendanceRequestOperationBoundaryV1({
+                    adapters: config.adapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                appendApprovedLeaveCancellationCalculation: (input) =>
+                  appendApprovedLeaveCancellationCalculationV1(input),
+                resolveOrgSegmentCalculationPosture: async (
+                  trx: import('./types/plugin').DatabaseTransaction,
+                  orgId: string,
+                ) => {
+                  const shapedTrx = trx as import('./types/plugin').DatabaseTransaction & {
+                    readonly __w4CanonicalTrx?: true
+                  }
+                  const rawClient = trx?.__rawClient as AttendanceW4TransactionClientV1 | undefined
+                    ?? (shapedTrx?.__w4CanonicalTrx === true && typeof shapedTrx.query === 'function'
+                      ? {
+                          query: async (sqlText: string, params?: readonly unknown[]) => ({
+                            rows: await shapedTrx.query(sqlText, [...(params ?? [])]),
+                          }),
+                        }
+                      : undefined)
+                  if (!rawClient || typeof rawClient.query !== 'function') {
+                    throw new Error('W4C3B_TRANSACTION_CLIENT_REQUIRED')
+                  }
+                  let orgKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return { effectiveState: 'legacy', referenceSegments: false }
+                    }
+                    throw error
+                  }
+                  await acquireAttendanceCalculationRolloutLock(rawClient, orgKey, 'shared')
+                  const posture = await resolveSegmentCalculationPosture(rawClient, orgKey)
+                  return {
+                    effectiveState: posture.effectiveState,
+                    referenceSegments: posture.referenceSegments,
+                  }
+                },
                 // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second
                 // round) — lock §8.2 step 7 second clause. Pure; no DB
                 // access; wraps the module's own private
@@ -2100,6 +2166,10 @@ export class MetaSheetServer {
                 computeOuterSourceDefinitionFingerprintV1: (input: unknown) =>
                   computeAttendanceOuterSourceDefinitionFingerprintV1(
                     input as Parameters<typeof computeAttendanceOuterSourceDefinitionFingerprintV1>[0],
+                  ),
+                buildRequestCreationAttributionSnapshotV1: (input: unknown) =>
+                  buildAttendanceRequestCreationAttributionSnapshotV1(
+                    input as Parameters<typeof buildAttendanceRequestCreationAttributionSnapshotV1>[0],
                   ),
                 // W4C-2: one outbox drain pass (lock 7.1a delivery side).
                 drainResultEventOutbox: async (options: {
@@ -2243,6 +2313,33 @@ export class MetaSheetServer {
                       W4_TRANSACTION_LOCK_TIMEOUT_MS,
                   }
                 },
+                // W4C-3b P12 (lock §4.2 / §7.2 / §12.5 / OD-W4C-33):
+                // least-privilege immutable request snapshot plumbing.
+                // Plugin supplies the existing request transaction client;
+                // core owns closed payload fingerprint, append, and terminal
+                // binding. No calculation/outbox/cancellation (P13/P14).
+                appendRequestCalculationSnapshotOnCreate: (
+                  input: Parameters<typeof appendAttendanceRequestCreateSnapshotV1>[0],
+                ) => appendAttendanceRequestCreateSnapshotV1(input),
+                appendRequestCalculationSnapshotOnEdit: (
+                  input: Parameters<typeof appendAttendanceRequestEditSnapshotV1>[0],
+                ) => appendAttendanceRequestEditSnapshotV1(input),
+                lockRequestSnapshotBeforeTerminalDecision: (
+                  input: Parameters<
+                    typeof lockAttendanceRequestSnapshotBeforeTerminalDecisionV1
+                  >[0],
+                ) => lockAttendanceRequestSnapshotBeforeTerminalDecisionV1(input),
+                bindRequestSnapshotOnTerminalDecision: (
+                  input: Parameters<typeof bindAttendanceRequestTerminalSnapshotV1>[0],
+                ) => bindAttendanceRequestTerminalSnapshotV1(input),
+                buildRequestCalculationPayloadFromRequestRow:
+                  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+                computeRequestPayloadFingerprint:
+                  computeAttendanceRequestPayloadFingerprintV1,
+                buildUnsupportedRequestAttributionSnapshot:
+                  buildUnsupportedRequestAttributionSnapshotV1,
+                requestSnapshotTerminalBindingMetaKey:
+                  W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
               }
             : undefined,
         // W4C-3a P11/P23: separate least-privilege rollback port. The CJS
