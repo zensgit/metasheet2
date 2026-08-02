@@ -21,9 +21,18 @@ import type { WeComMessageConfig } from '../../src/integrations/wecom/client'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
-// Rows default next_attempt_at to the database clock. Keep worker time after
-// insertion without pinning the suite to one calendar day.
-const dueWorkerNow = () => new Date(Date.now() + 5 * 60 * 1000)
+const isolatedDeliveryDueAt = new Date('1900-01-01T00:00:00.000Z')
+const dueWorkerNow = () => new Date('1900-01-02T00:00:00.000Z')
+
+async function makeOrgDeliveriesDue(pool: Pool, orgId: string): Promise<void> {
+  await pool.query(
+    `UPDATE attendance_notification_deliveries
+        SET next_attempt_at = $2
+      WHERE org_id = $1
+        AND status IN ('pending', 'retrying')`,
+    [orgId, isolatedDeliveryDueAt.toISOString()],
+  )
+}
 
 async function requireTable(pool: Pool, tableName: string): Promise<void> {
   const tableCheck = await pool.query(`SELECT to_regclass(current_schema() || '.' || $1) AS name`, [tableName])
@@ -667,6 +676,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
           return { taskId: 'task-c5', requestId: 'req-c5', raw: {} }
         },
       })
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const worker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [channel],
@@ -823,6 +833,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         fetchAccessToken: async () => { weComNetworkTouched = true; return 'access-token' },
         sendTextMessage: async () => { weComNetworkTouched = true; return { errcode: 0, errmsg: 'ok', invalidUserIds: [], raw: {} } },
       })
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const worker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [dingTalkChannel, weComChannel],
@@ -971,6 +982,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       delete process.env.APP_BASE_URL
       await insertDelivery()
       const cardSink = { text: [] as unknown[], card: [] as unknown[] }
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const cardWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(cardSink)],
@@ -993,6 +1005,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       delete process.env.APP_BASE_URL
       await insertDelivery()
       const textSink = { text: [] as unknown[], card: [] as unknown[] }
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const textWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(textSink)],
@@ -1014,6 +1027,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       process.env.APP_BASE_URL = 'https://fallback.example.test'
       await insertDelivery()
       const fallbackSink = { text: [] as unknown[], card: [] as unknown[] }
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const fallbackWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(fallbackSink)],
@@ -1032,6 +1046,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       process.env.PUBLIC_APP_URL = 'https://app.example.test'
       await insertDelivery()
       const flagOffSink = { text: [] as unknown[], card: [] as unknown[] }
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const flagOffWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(flagOffSink)],
@@ -1172,6 +1187,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
           return { errcode: 0, errmsg: 'ok', msgId: 'msg-c5-wecom', invalidUserIds: [], raw: {} }
         },
       })
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const worker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [channel],
@@ -1323,6 +1339,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       delete process.env.APP_BASE_URL
       await insertDelivery()
       const cardSink = { text: [] as unknown[], card: [] as unknown[] }
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const cardWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(cardSink)],
@@ -1345,6 +1362,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       delete process.env.APP_BASE_URL
       await insertDelivery()
       const textSink = { text: [] as unknown[], card: [] as unknown[] }
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const textWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(textSink)],
@@ -1363,6 +1381,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       process.env.PUBLIC_APP_URL = 'https://app.example.test'
       await insertDelivery()
       const flagOffSink = { text: [] as unknown[], card: [] as unknown[] }
+      await makeOrgDeliveriesDue(publicPool, orgId)
       const flagOffWorker = new AttendanceNotificationDeliveryWorker({
         query,
         channels: [buildChannel(flagOffSink)],
@@ -1447,6 +1466,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       ids.ok = await insertEmailRow(okUser)
       ids.fail = await insertEmailRow(failUser)
       ids.noorg = await insertEmailRow(noOrgUser)
+      await makeOrgDeliveriesDue(publicPool, orgId)
 
       const transport = {
         sendMail: async (opts: { to: string }) => {
