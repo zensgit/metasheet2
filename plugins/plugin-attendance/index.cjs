@@ -34688,7 +34688,7 @@ module.exports = {
           subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
           commandPayload: Object.freeze({
             recordId,
-            expectedCalculationId,
+            expectedCalculationId: null,
             expectedCalculationVersion: null,
             operations,
             reason: String(routeInput.reason || 'manual override'),
@@ -34890,6 +34890,7 @@ module.exports = {
           throw new HttpError(409, 'ATTENDANCE_RECORD_RETIRED', 'attendance record is retired')
         }
         const policy = routeInput.policy === 'current_policy' ? 'current_policy' : 'frozen_prior'
+        const expectedCalculationId = record.current_calculation_id ?? null
         return Object.freeze({
           orgId,
           actorId: String(routeInput.actorId),
@@ -34899,11 +34900,11 @@ module.exports = {
           subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
           commandPayload: Object.freeze({
             recordId,
-            expectedCalculationId: record.current_calculation_id ?? null,
+            expectedCalculationId: null,
             expectedCalculationVersion: null,
             policy,
           }),
-          state: Object.freeze({ record, policy, routeInput }),
+          state: Object.freeze({ record, policy, routeInput, expectedCalculationId }),
         })
       },
       async execute(trx, prepared, operation) {
@@ -35012,7 +35013,7 @@ module.exports = {
           client,
           orgId: prepared.orgId,
           recordId: String(prepared.state.record.id),
-          expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+          expectedCalculationId: prepared.state.expectedCalculationId,
           expectedCalculationVersion: null,
           operationId: operation.operationId,
           actorId: prepared.actorId,
@@ -35052,6 +35053,7 @@ module.exports = {
         const actorPosture = await resolveRecordOperationAdminActorPosture(trx, routeInput, orgId)
         const record = await loadW4c3cRecordSubjectForOperation(trx, orgId, recordId)
         if (!record) throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
+        const expectedCalculationId = record.current_calculation_id ?? null
         return Object.freeze({
           orgId,
           actorId: String(routeInput.actorId),
@@ -35061,12 +35063,12 @@ module.exports = {
           subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
           commandPayload: Object.freeze({
             recordId,
-            expectedCalculationId: record.current_calculation_id ?? null,
+            expectedCalculationId: null,
             expectedCalculationVersion: null,
             reason: String(routeInput.reason || 'operator retirement'),
             ticket: String(routeInput.ticket || 'OPS-RETIRE'),
           }),
-          state: Object.freeze({ record, routeInput }),
+          state: Object.freeze({ record, routeInput, expectedCalculationId }),
         })
       },
       async execute(trx, prepared, operation) {
@@ -35099,7 +35101,7 @@ module.exports = {
           client,
           orgId: prepared.orgId,
           recordId: String(prepared.state.record.id),
-          expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+          expectedCalculationId: prepared.state.expectedCalculationId,
           expectedCalculationVersion: null,
           operationId: operation.operationId,
           actorId: prepared.actorId,

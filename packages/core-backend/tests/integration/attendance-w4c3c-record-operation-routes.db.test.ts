@@ -18,6 +18,12 @@ import { Pool } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
 import { appendOperatorRetirementCalculationV1 } from '../../src/attendance/w4c3c-ops-retirement'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
+import {
+  computeAttendanceProvenanceFingerprintV1,
+  computeAttendanceSemanticInputFingerprintV1,
+} from '../../src/attendance/w4c0-fingerprints'
+import { computeAttendanceSourceDefinitionFingerprintV1 } from '../../src/attendance/w4c1-fingerprints'
+import { ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1 } from '../../src/attendance/w4c1-segment-calculator'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -206,6 +212,160 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       [recordId, userId, orgId, workDate, `${workDate}T01:10:00.000Z`, `${workDate}T10:00:00.000Z`, status],
     )
     return { recordId, workDate }
+  }
+
+  async function seedAuthoritativePrior(
+    orgId: string,
+    userId: string,
+    recordId: string,
+    workDate: string,
+  ) {
+    const calculationId = randomUUID()
+    const operationId = randomUUID()
+    const shiftId = randomUUID()
+    const attribution = {
+      posture: 'resolved_v2',
+      value: {
+        schemaVersion: 2,
+        resolverVersion: 'w2-resolver@3',
+        orgId,
+        userId,
+        workDate,
+        shiftId,
+        reasonCode: 'assignment_match',
+        resolvedAt: `${workDate}T00:05:00.000Z`,
+        absoluteWindow: { startAt: `${workDate}T00:00:00.000Z`, endAt: `${workDate}T23:59:59.000Z` },
+        attributionWindow: { startAt: `${workDate}T00:00:00.000Z`, endAt: `${workDate}T23:59:59.000Z` },
+        attributionTailMinutes: 0,
+        extendedByApprovedOvertime: false,
+        windowEvidenceFingerprint: 'a'.repeat(64),
+        source: 'live_resolution',
+      },
+    }
+    const segments = [{
+      index: 0,
+      startTime: '01:00',
+      endTime: '10:00',
+      startDayOffset: 0,
+      endDayOffset: 0,
+      lateGraceMinutes: 0,
+      earlyLeaveGraceMinutes: 0,
+    }]
+    const context = {
+      schemaVersion: 1,
+      selector: 'legacy',
+      orgId,
+      userId,
+      workDate,
+      timezone: 'UTC',
+      shiftId,
+      isWorkday: true,
+      holidayKind: null,
+      calculationGroupId: null,
+      roundingMinutes: 5,
+      severeLateThresholdMinutes: 30,
+      absenceLateThresholdMinutes: 60,
+      segments,
+    }
+    const evidence = [
+      { kind: 'punch', ref: 'ev-in-0', direction: 'check_in', occurredAt: `${workDate}T01:10:00.000Z`, source: 'attendance_event' },
+      { kind: 'punch', ref: 'ev-out-0', direction: 'check_out', occurredAt: `${workDate}T10:00:00.000Z`, source: 'attendance_event' },
+    ]
+    const provenance = {
+      transport: 'live_event',
+      sourceRef: `route-prior:${calculationId}`,
+      artifactSha256: null,
+      normalizedCsvSha256: null,
+      convertedSheetName: null,
+    }
+    const semanticFingerprint = computeAttendanceSemanticInputFingerprintV1({
+      attribution,
+      context,
+      evidence,
+      approvedFacts: [],
+      manualOverride: null,
+      mergePolicy: 'append',
+      calculationTier: 'segment_authoritative',
+      engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
+      snapshotSchemaVersion: 1,
+    })
+    const provenanceFingerprint = computeAttendanceProvenanceFingerprintV1(provenance)
+    const sourceDefinitionFingerprint = computeAttendanceSourceDefinitionFingerprintV1({ attribution, context })
+    if (!sourceDefinitionFingerprint) throw new Error('W4C3C_ROUTE_TEST_SOURCE_DEFINITION_MISSING')
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `INSERT INTO attendance_record_calculations (
+            id, org_id, attendance_record_id, version, calculation_kind, mode, entrypoint,
+            engine_version, snapshot_schema_version, operation_id,
+            semantic_input_fingerprint, provenance_fingerprint, source_definition_fingerprint,
+            attribution_snapshot, context_snapshot, segment_snapshot, evidence_snapshot,
+            approved_facts_snapshot, input_provenance, merge_policy, calculation_tier,
+            outcome, outcome_reason_code, projection_effect, expected_segment_count,
+            projected_status, projected_first_in_at, projected_last_out_at,
+            projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
+            projected_daily_fingerprint, actor_id, correlation_id
+          ) VALUES (
+            $1::uuid, $2, $3::uuid, 1, 'calculation', 'authoritative', 'live',
+            $4, 1, $5::uuid, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb,
+            '[]'::jsonb, $13::jsonb, 'append', 'segment_authoritative',
+            'completed', 'calculated', 'set_active', 1,
+            'late', $14::timestamptz, $15::timestamptz, 400, 15, 0,
+            $16, $17, $18
+          )`,
+        [
+          calculationId,
+          orgId,
+          recordId,
+          ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
+          operationId,
+          semanticFingerprint,
+          provenanceFingerprint,
+          sourceDefinitionFingerprint,
+          JSON.stringify(attribution),
+          JSON.stringify(context),
+          JSON.stringify(segments),
+          JSON.stringify(evidence),
+          JSON.stringify(provenance),
+          `${workDate}T01:10:00.000Z`,
+          `${workDate}T10:00:00.000Z`,
+          'e'.repeat(64),
+          userId,
+          `route-prior:${calculationId}`,
+        ],
+      )
+      await client.query(
+        `INSERT INTO attendance_record_segments (
+            org_id, record_id, calculation_id, segment_index,
+            expected_start_at, expected_end_at, actual_in_at, actual_out_at,
+            work_minutes, late_minutes, early_leave_minutes, status,
+            status_reasons, matched_evidence_refs, unmatched_evidence_refs
+          ) VALUES (
+            $1, $2::uuid, $3::uuid, 0,
+            $4::timestamptz, $5::timestamptz, $4::timestamptz, $5::timestamptz,
+            400, 15, 0, 'late', '["late_check_in"]'::jsonb, '[]'::jsonb, '[]'::jsonb
+          )`,
+        [orgId, recordId, calculationId, `${workDate}T01:10:00.000Z`, `${workDate}T10:00:00.000Z`],
+      )
+      await client.query(
+        `UPDATE attendance_records
+            SET current_calculation_id = $1::uuid,
+                projection_owner = 'w4',
+                visibility_state = 'active',
+                visibility_reason = 'active'
+          WHERE id = $2::uuid AND org_id = $3`,
+        [calculationId, recordId, orgId],
+      )
+      await client.query('COMMIT')
+      return { calculationId }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async function assertZeroW4ResultDml(recordId: string) {
@@ -592,6 +752,113 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     await assertZeroW4ResultDml(recordId)
   })
 
+  it('authoritative manual edit returns the frontend contract and replays without duplicate effects', async () => {
+    requireServer()
+    const fixture = await seedAdmin()
+    const workDate = new Date().toISOString().slice(0, 10)
+    const { recordId } = await seedRecord(fixture.orgId, fixture.userId, 'late', workDate)
+    const prior = await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate)
+    const operationId = randomUUID()
+    const body = {
+      recordId,
+      targetStatus: 'normal',
+      overrideMetrics: { workMinutes: 420, lateMinutes: 0, earlyLeaveMinutes: 0 },
+      reason: 'authoritative response contract',
+      operationId,
+      idempotencyKey: operationId,
+    }
+
+    const first = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body,
+    })
+    expect(first.status, first.raw).toBe(200)
+    expect(first.body?.data).toMatchObject({
+      alreadyApplied: false,
+      mode: 'authoritative',
+      projectedStatus: 'normal',
+      edit: {
+        recordId,
+        beforeStatus: 'late',
+        afterStatus: 'normal',
+        idempotencyKey: operationId,
+        notificationSkippedReason: null,
+      },
+      record: {
+        id: recordId,
+        status: 'normal',
+        workMinutes: 420,
+        lateMinutes: 0,
+        earlyLeaveMinutes: 0,
+      },
+    })
+    expect(first.body?.data?.edit?.id).toEqual(expect.any(String))
+    expect(first.body?.data?.edit?.notificationDeliveryId).toEqual(expect.any(String))
+    expect(first.body?.data?.calculationId).toEqual(expect.any(String))
+    expect(first.body?.data?.calculationId).not.toBe(prior.calculationId)
+
+    const afterFirst = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND entrypoint = 'manual_edit' AND operation_id = $2::uuid) AS operations,
+         (SELECT count(*)::int FROM attendance_result_event_outbox
+           WHERE org_id = $1 AND entrypoint = 'manual_edit' AND operation_id = $2::uuid) AS outbox,
+         (SELECT count(*)::int FROM attendance_record_calculations
+           WHERE org_id = $1 AND attendance_record_id = $3::uuid) AS calculations,
+         (SELECT count(*)::int FROM attendance_record_calculations
+           WHERE org_id = $1 AND attendance_record_id = $3::uuid AND entrypoint = 'manual_override') AS manual_calculations,
+         (SELECT count(*)::int FROM attendance_record_result_edits
+           WHERE org_id = $1 AND record_id = $3::uuid AND idempotency_key = $2::text) AS edits,
+         (SELECT count(*)::int FROM attendance_record_result_edits e
+           JOIN attendance_notification_deliveries d ON d.id = e.notification_delivery_id
+          WHERE e.org_id = $1 AND e.record_id = $3::uuid AND e.idempotency_key = $2::text) AS deliveries,
+         (SELECT current_calculation_id::text FROM attendance_records
+          WHERE org_id = $1 AND id = $3::uuid) AS current_calculation_id`,
+      [fixture.orgId, operationId, recordId],
+    )
+    expect(afterFirst.rows[0]).toMatchObject({
+      operations: 1,
+      outbox: 1,
+      calculations: 2,
+      manual_calculations: 1,
+      edits: 1,
+      deliveries: 1,
+      current_calculation_id: first.body?.data?.calculationId,
+    })
+
+    const replay = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body,
+    })
+    expect(replay.status, replay.raw).toBe(200)
+    expect(replay.body).toEqual(first.body)
+
+    const afterReplay = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND entrypoint = 'manual_edit' AND operation_id = $2::uuid) AS operations,
+         (SELECT count(*)::int FROM attendance_result_event_outbox
+           WHERE org_id = $1 AND entrypoint = 'manual_edit' AND operation_id = $2::uuid) AS outbox,
+         (SELECT count(*)::int FROM attendance_record_calculations
+           WHERE org_id = $1 AND attendance_record_id = $3::uuid) AS calculations,
+         (SELECT count(*)::int FROM attendance_record_result_edits
+           WHERE org_id = $1 AND record_id = $3::uuid AND idempotency_key = $2::text) AS edits,
+         (SELECT count(*)::int FROM attendance_notification_deliveries d
+           JOIN attendance_record_result_edits e ON e.notification_delivery_id = d.id
+          WHERE e.org_id = $1 AND e.record_id = $3::uuid AND e.idempotency_key = $2::text) AS deliveries`,
+      [fixture.orgId, operationId, recordId],
+    )
+    expect(afterReplay.rows[0]).toMatchObject({
+      operations: 1,
+      outbox: 1,
+      calculations: 2,
+      edits: 1,
+      deliveries: 1,
+    })
+  })
+
   it('source-level capability matrix positive control is present in the host boundary export', () => {
     requireServer()
     const boundaryPath = path.resolve(
@@ -619,6 +886,38 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     expect(pluginSource).toMatch(/resolveRecordOperationAdminActorPosture/)
     expect(pluginSource).toMatch(/W4C3C_OPS_RETIREMENT_REQUIRES_AUTHORITATIVE_POSTURE/)
     expect(manualApplySource).not.toMatch(/skipClosedCycleGuard/)
+  })
+
+  it('authoritative frozen-prior recompute replays without mutable-pointer conflicts', async () => {
+    requireServer()
+    const fixture = await seedAdmin()
+    const workDate = new Date().toISOString().slice(0, 10)
+    const { recordId } = await seedRecord(fixture.orgId, fixture.userId, 'late', workDate)
+    await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate)
+    const operationId = randomUUID()
+    const request = {
+      method: 'POST' as const,
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: { policy: 'frozen_prior', operationId },
+    }
+
+    const first = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/recompute`, request)
+    expect(first.status, first.raw).toBe(200)
+    const replay = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/recompute`, request)
+    expect(replay.status, replay.raw).toBe(200)
+    expect(replay.body).toEqual(first.body)
+
+    const durable = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND entrypoint = 'recompute' AND operation_id = $2::uuid) AS operations,
+         (SELECT count(*)::int FROM attendance_result_event_outbox
+           WHERE org_id = $1 AND entrypoint = 'recompute' AND operation_id = $2::uuid) AS outbox,
+         (SELECT count(*)::int FROM attendance_record_calculations
+           WHERE org_id = $1 AND attendance_record_id = $3::uuid) AS calculations`,
+      [fixture.orgId, operationId, recordId],
+    )
+    expect(durable.rows[0]).toMatchObject({ operations: 1, outbox: 1, calculations: 2 })
   })
 
   it('current-policy recompute admits only a timezone accepted by the single host validator', () => {
@@ -662,24 +961,40 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     requireServer()
     const fixture = await seedAdmin('attendance:admin')
     const { recordId } = await seedRecord(fixture.orgId, fixture.userId)
-    const response = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/ops-retirement`, {
-      method: 'POST',
+    const operationId = randomUUID()
+    const request = {
+      method: 'POST' as const,
       headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
       body: {
         reason: 'admin retirement positive',
         ticket: 'T-ADMIN-OK',
-        operationId: randomUUID(),
+        operationId,
       },
+    }
+    const response = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/ops-retirement`, {
+      ...request,
     })
     expect(response.status, response.raw).toBe(200)
     expect(response.body?.ok !== false).toBe(true)
+    const replay = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/ops-retirement`, request)
+    expect(replay.status, replay.raw).toBe(200)
+    expect(replay.body).toEqual(response.body)
     const after = await pool.query(
-      `SELECT visibility_reason, current_calculation_id IS NOT NULL AS has_pointer
+      `SELECT visibility_reason, current_calculation_id IS NOT NULL AS has_pointer,
+              (SELECT count(*)::int FROM attendance_result_operations
+                WHERE org_id = $2 AND entrypoint = 'ops_retirement' AND operation_id = $3::uuid) AS operations,
+              (SELECT count(*)::int FROM attendance_result_event_outbox
+                WHERE org_id = $2 AND entrypoint = 'ops_retirement' AND operation_id = $3::uuid) AS outbox,
+              (SELECT count(*)::int FROM attendance_record_calculations
+                WHERE org_id = $2 AND attendance_record_id = $1::uuid) AS calculations
          FROM attendance_records WHERE id = $1::uuid`,
-      [recordId],
+      [recordId, fixture.orgId, operationId],
     )
     expect(after.rows[0]?.visibility_reason).toBe('operator_retirement')
     expect(after.rows[0]?.has_pointer).toBe(true)
+    // First retirement of a legacy-untracked record writes one truthful baseline
+    // plus one reversal; replay must not add a third calculation.
+    expect(after.rows[0]).toMatchObject({ operations: 1, outbox: 1, calculations: 2 })
   })
 
   it('live punch cannot reactivate an operator-retired parent and rolls back its event', async () => {
