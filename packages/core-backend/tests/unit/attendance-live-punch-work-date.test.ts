@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { listActiveCurrentOpenRecordsForWorkDateResolverV1 } from '../../src/attendance/w4c3c-active-current'
 
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
 const helpers = attendancePlugin.__attendanceLivePunchWorkDateForTests as {
@@ -23,6 +24,37 @@ const helpers = attendancePlugin.__attendanceLivePunchWorkDateForTests as {
     timezone: string
   }>
 }
+
+beforeAll(async () => {
+  const db = {
+    query: async () => [],
+    transaction: async (callback: (client: unknown) => unknown) => callback(db),
+  }
+  await attendancePlugin.activate({
+    api: {
+      database: db,
+      events: { emit: async () => undefined },
+      http: { addRoute: () => undefined },
+    },
+    services: {
+      attendanceW4SegmentCalculation: {
+        activeCurrent: {
+          listOpenForWorkDateResolver: listActiveCurrentOpenRecordsForWorkDateResolverV1,
+        },
+      },
+    },
+    logger: {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+    },
+  })
+})
+
+afterAll(async () => {
+  await attendancePlugin.deactivate()
+})
 
 function overnightRule(overrides: Record<string, unknown> = {}) {
   return {
