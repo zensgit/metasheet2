@@ -34749,6 +34749,8 @@ module.exports = {
             mode: 'authoritative',
             editId,
           })
+          let finalAuditRow = null
+          let responseRecord = null
           // AE-1/AE-2 remain part of the authoritative route contract. Errors
           // propagate so calculation, projection, audit, and notification stay
           // in the same transaction.
@@ -34779,7 +34781,7 @@ module.exports = {
             })
             const auditRow = { id: audit.auditId }
             if (routeInput.notifyAffectedEmployee === false) {
-              await markAttendanceResultEditNotificationStatus(trx, {
+              finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
                 orgId: prepared.orgId,
                 auditRow,
                 skippedReason: 'policy_disabled',
@@ -34793,19 +34795,43 @@ module.exports = {
                 targetStatus: result.projection.status,
                 reason: prepared.commandPayload.reason,
               })
-              await markAttendanceResultEditNotificationStatus(trx, {
+              finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
                 orgId: prepared.orgId,
                 auditRow,
                 deliveryId: delivery?.id ?? null,
                 skippedReason: delivery ? null : 'recipient_unavailable',
               })
             }
+            responseRecord = buildResultEditSnapshot({
+              ...record,
+              status: result.projection.status,
+              work_minutes: result.projection.workMinutes,
+              late_minutes: result.projection.lateMinutes,
+              early_leave_minutes: result.projection.earlyLeaveMinutes,
+            })
+          } else {
+            const replayAuditRows = await trx.query(
+              `SELECT * FROM attendance_record_result_edits
+                WHERE org_id = $1 AND idempotency_key = $2
+                LIMIT 1`,
+              [prepared.orgId, String(routeInput.idempotencyKey)],
+            )
+            if (replayAuditRows.length !== 1) {
+              throw new HttpError(
+                409,
+                'ATTENDANCE_RESULT_EDIT_REPLAY_INCOMPLETE',
+                'manual edit replay is missing its durable audit row',
+              )
+            }
+            finalAuditRow = replayAuditRows[0]
           }
           return {
             response: {
               ok: true,
               data: {
                 alreadyApplied: result.kind === 'replay',
+                edit: mapResultEditRow(finalAuditRow),
+                record: responseRecord,
                 calculationId: result.calculationId,
                 projectedStatus: result.kind === 'appended' ? result.projectedStatus : null,
                 mode: posture,

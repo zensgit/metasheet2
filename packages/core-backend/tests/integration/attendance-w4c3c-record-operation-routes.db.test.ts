@@ -339,11 +339,15 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     const insertAudit = authoritative.indexOf('insertW4c3cManualResultEditAuditRow')
     const enqueueNotification = authoritative.indexOf('enqueueAttendanceResultEditNotification')
     const markNotification = authoritative.indexOf('markAttendanceResultEditNotificationStatus')
+    const responseEdit = authoritative.indexOf('edit: mapResultEditRow(finalAuditRow)')
+    const responseRecord = authoritative.indexOf('record: responseRecord')
     expect(editWindow).toBeGreaterThanOrEqual(0)
     expect(appendCalculation).toBeGreaterThan(editWindow)
     expect(insertAudit).toBeGreaterThan(appendCalculation)
     expect(enqueueNotification).toBeGreaterThan(insertAudit)
     expect(markNotification).toBeGreaterThan(insertAudit)
+    expect(responseEdit).toBeGreaterThan(markNotification)
+    expect(responseRecord).toBeGreaterThan(markNotification)
   })
 
   it('recompute without operationId is 400 validation (no server random)', async () => {
