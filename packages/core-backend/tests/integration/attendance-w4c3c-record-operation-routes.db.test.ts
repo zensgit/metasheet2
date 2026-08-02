@@ -189,9 +189,13 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     return fixture
   }
 
-  async function seedRecord(orgId: string, userId: string, status = 'late') {
+  async function seedRecord(
+    orgId: string,
+    userId: string,
+    status = 'late',
+    workDate = '2026-08-01',
+  ) {
     const recordId = randomUUID()
-    const workDate = '2026-08-01'
     await pool.query(
       `INSERT INTO attendance_records
          (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at,
@@ -324,6 +328,22 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     expect(source).toMatch(/sameAfter/)
     expect(source).toMatch(/sameEvidence/)
     expect(source).toMatch(/after_snapshot/)
+
+    const manualAdapter = source.slice(
+      source.indexOf('const manualEditAdapter ='),
+      source.indexOf('const recomputeAdapter ='),
+    )
+    const authoritative = manualAdapter.slice(manualAdapter.indexOf("if (posture === 'authoritative')"))
+    const editWindow = authoritative.indexOf('resolveAttendanceResultEditWindowContext')
+    const appendCalculation = authoritative.indexOf('const result = await port.appendManualOverrideCalculation')
+    const insertAudit = authoritative.indexOf('insertW4c3cManualResultEditAuditRow')
+    const enqueueNotification = authoritative.indexOf('enqueueAttendanceResultEditNotification')
+    const markNotification = authoritative.indexOf('markAttendanceResultEditNotificationStatus')
+    expect(editWindow).toBeGreaterThanOrEqual(0)
+    expect(appendCalculation).toBeGreaterThan(editWindow)
+    expect(insertAudit).toBeGreaterThan(appendCalculation)
+    expect(enqueueNotification).toBeGreaterThan(insertAudit)
+    expect(markNotification).toBeGreaterThan(insertAudit)
   })
 
   it('recompute without operationId is 400 validation (no server random)', async () => {
@@ -498,6 +518,74 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     } else {
       expect(response.status).toBeGreaterThanOrEqual(400)
     }
+  })
+
+  it('shadow manual edit preserves the legacy projection/response and durable operation', async () => {
+    requireServer()
+    const fixture = await seedUser({ permission: 'attendance:admin' })
+    await seedOrgRollout(fixture.orgId, fixture.userId, 'shadow')
+    const { recordId } = await seedRecord(fixture.orgId, fixture.userId)
+    const operationId = randomUUID()
+    const response = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        recordId,
+        targetStatus: 'normal',
+        overrideMetrics: { workMinutes: 420, lateMinutes: 0 },
+        reason: 'shadow compatibility correction',
+        operationId,
+        idempotencyKey: operationId,
+      },
+    })
+    expect(response.status, response.raw).toBe(200)
+    expect(response.body?.data?.record?.status).toBe('normal')
+
+    const record = await pool.query(
+      `SELECT status, work_minutes, late_minutes, current_calculation_id
+         FROM attendance_records WHERE id = $1::uuid AND org_id = $2`,
+      [recordId, fixture.orgId],
+    )
+    expect(record.rows[0]).toMatchObject({
+      status: 'normal',
+      work_minutes: 420,
+      late_minutes: 0,
+      current_calculation_id: null,
+    })
+    const durable = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND entrypoint = 'manual_edit' AND operation_id = $2::uuid) AS operations,
+         (SELECT count(*)::int FROM attendance_result_event_outbox
+           WHERE org_id = $1 AND entrypoint = 'manual_edit' AND operation_id = $2::uuid) AS outbox,
+         (SELECT count(*)::int FROM attendance_record_calculations
+           WHERE org_id = $1 AND attendance_record_id = $3::uuid) AS calculations,
+         (SELECT count(*)::int FROM attendance_record_result_edits
+           WHERE org_id = $1 AND record_id = $3::uuid AND notification_delivery_id IS NOT NULL) AS notified`,
+      [fixture.orgId, operationId, recordId],
+    )
+    expect(durable.rows[0]).toMatchObject({ operations: 1, outbox: 1, calculations: 0, notified: 1 })
+  })
+
+  it('authoritative manual edit enforces the configured edit window before W4 result DML', async () => {
+    requireServer()
+    const fixture = await seedAdmin()
+    const { recordId } = await seedRecord(fixture.orgId, fixture.userId, 'late', '2025-01-01')
+    const operationId = randomUUID()
+    const response = await requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        recordId,
+        targetStatus: 'normal',
+        reason: 'expired authoritative correction',
+        operationId,
+        idempotencyKey: operationId,
+      },
+    })
+    expect(response.status, response.raw).toBe(422)
+    expect(response.body?.error?.code).toBe('ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED')
+    await assertZeroW4ResultDml(recordId)
   })
 
   it('source-level capability matrix positive control is present in the host boundary export', () => {

@@ -20940,6 +20940,30 @@ function mapResultEditRow(row) {
   }
 }
 
+async function resolveAttendanceResultEditWindowContext(trx, {
+  orgId,
+  userId,
+  workDate,
+  editWindowDays,
+}) {
+  const context = await resolveWorkContext({ db: trx, orgId, userId, workDate })
+  const timezone = context?.rule?.timezone
+  if (!timezone || !isValidTimeZoneIdentifier(timezone)) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve a valid timezone for the edit window (fail-closed)')
+  }
+  const todayKey = toWorkDate(new Date(), timezone)
+  const todayMs = Date.parse(`${todayKey}T00:00:00Z`)
+  const workMs = Date.parse(`${workDate}T00:00:00Z`)
+  if (!Number.isFinite(todayMs) || !Number.isFinite(workMs)) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve the edit window (fail-closed)')
+  }
+  const diffDays = Math.floor((todayMs - workMs) / 86400000)
+  if (diffDays > editWindowDays) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', `work_date is older than the ${editWindowDays}-day edit window`)
+  }
+  return { context, timezone }
+}
+
 // AE-1 transactional write helper. Locks the target record (id+org, cross-org miss → 404 with no leak), runs
 // the editable-source / closed-cycle / edit-window guards, applies the §3.5a normalization via
 // upsertAttendanceRecord (statusOverride + overrideMetrics, NOT a naked status UPDATE so meta tiers stay
@@ -21016,24 +21040,13 @@ async function applyAttendanceResultEdit(trx, options) {
   }
 
   // (4) Resolve the record's effective rule + timezone (drives §3.5a tier recompute + the edit window).
-  const context = await resolveWorkContext({ db: trx, orgId, userId: record.user_id, workDate })
-  const timezone = context?.rule?.timezone
-  if (!timezone || !isValidTimeZoneIdentifier(timezone)) {
-    // Fail-closed: without a resolvable zone the edit window cannot be verified safely.
-    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve a valid timezone for the edit window (fail-closed)')
-  }
-
   // (5) Edit window (§3.3 / §9.1) — work_date within editWindowDays of org-tz today.
-  const todayKey = toWorkDate(new Date(), timezone)
-  const todayMs = Date.parse(`${todayKey}T00:00:00Z`)
-  const workMs = Date.parse(`${workDate}T00:00:00Z`)
-  if (!Number.isFinite(todayMs) || !Number.isFinite(workMs)) {
-    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve the edit window (fail-closed)')
-  }
-  const diffDays = Math.floor((todayMs - workMs) / 86400000)
-  if (diffDays > editWindowDays) {
-    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', `work_date is older than the ${editWindowDays}-day edit window`)
-  }
+  const { context, timezone } = await resolveAttendanceResultEditWindowContext(trx, {
+    orgId,
+    userId: record.user_id,
+    workDate,
+    editWindowDays,
+  })
 
   // W4C-3c: operator-retired parents are terminal for ordinary writers (including manual edit).
   if (String(record.visibility_state ?? '') === 'retired'
@@ -34694,7 +34707,7 @@ module.exports = {
       async execute(trx, prepared, operation) {
         const posture = operation.acceptedWritePosture
         const { routeInput, operations, expectedCalculationId, record } = prepared.state
-        if (posture === 'shadow' || posture === 'authoritative') {
+        if (posture === 'authoritative') {
           const port = attendanceW4SegmentCalculationPort
           if (!port || typeof port.appendManualOverrideCalculation !== 'function') {
             throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Manual override calculation port unavailable')
@@ -34706,6 +34719,12 @@ module.exports = {
               'manual_edit requires a stable caller operationId UUID for W4 postures',
             )
           }
+          await resolveAttendanceResultEditWindowContext(trx, {
+            orgId: prepared.orgId,
+            userId: prepared.subjectUserId,
+            workDate: String(record.work_date).slice(0, 10),
+            editWindowDays: routeInput.editWindowDays,
+          })
           // Shape raw client for the TS apply module.
           const client = {
             query: async (sqlText, params) => {
@@ -34727,10 +34746,12 @@ module.exports = {
             reason: prepared.commandPayload.reason,
             evidence: prepared.commandPayload.evidence,
             operations,
-            mode: posture === 'authoritative' ? 'authoritative' : 'shadow',
+            mode: 'authoritative',
             editId,
           })
-          // AE-1 audit row — errors propagate (no swallow). Congruent replay is explicit.
+          // AE-1/AE-2 remain part of the authoritative route contract. Errors
+          // propagate so calculation, projection, audit, and notification stay
+          // in the same transaction.
           if (result.kind === 'appended') {
             const beforeSnapshot = {
               status: record.status,
@@ -34742,7 +34763,7 @@ module.exports = {
               lateMinutes: result.projection.lateMinutes,
               earlyLeaveMinutes: result.projection.earlyLeaveMinutes,
             }
-            await insertW4c3cManualResultEditAuditRow(trx, {
+            const audit = await insertW4c3cManualResultEditAuditRow(trx, {
               orgId: prepared.orgId,
               recordId: String(record.id),
               subjectUserId: prepared.subjectUserId,
@@ -34756,6 +34777,29 @@ module.exports = {
               actorUserId: prepared.actorId,
               idempotencyKey: String(routeInput.idempotencyKey),
             })
+            const auditRow = { id: audit.auditId }
+            if (routeInput.notifyAffectedEmployee === false) {
+              await markAttendanceResultEditNotificationStatus(trx, {
+                orgId: prepared.orgId,
+                auditRow,
+                skippedReason: 'policy_disabled',
+              })
+            } else {
+              const delivery = await enqueueAttendanceResultEditNotification(trx, {
+                orgId: prepared.orgId,
+                record,
+                auditRow,
+                beforeStatus: String(record.status ?? ''),
+                targetStatus: result.projection.status,
+                reason: prepared.commandPayload.reason,
+              })
+              await markAttendanceResultEditNotificationStatus(trx, {
+                orgId: prepared.orgId,
+                auditRow,
+                deliveryId: delivery?.id ?? null,
+                skippedReason: delivery ? null : 'recipient_unavailable',
+              })
+            }
           }
           return {
             response: {
@@ -34772,7 +34816,9 @@ module.exports = {
             lifecycleEvents: [{ eventKind: 'attendance.resolved', payload: { kind: 'manual_edit', recordId: String(record.id) } }],
           }
         }
-        // legacy_projection_only: single-write AE-1 path (meta marker in same upsert).
+        // legacy_projection_only and shadow: single-write compatibility path
+        // (meta marker in the same upsert). The canonical operation boundary
+        // still owns shadow claim/seal and its durable lifecycle outbox.
         const legacy = await applyAttendanceResultEdit(trx, {
           orgId: prepared.orgId,
           recordId: String(record.id),
