@@ -870,6 +870,73 @@ describeDb('W4C-3c manual / recompute / operator retirement (real DB)', () => {
     }
   })
 
+  it('authoritative recompute refreshes late-tier meta from the final projection', async () => {
+    const tierRecordId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_records
+         (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at,
+          work_minutes, late_minutes, early_leave_minutes, status, is_workday,
+          meta, projection_owner, visibility_state, visibility_reason, updated_at)
+       VALUES ($1::uuid, $2, $3, $4::date, 'UTC', $5::timestamptz, $6::timestamptz,
+               400, 15, 0, 'late', true, $7::jsonb,
+               'legacy_untracked', 'active', 'active', now())`,
+      [
+        tierRecordId,
+        userId,
+        orgId,
+        '2026-08-03',
+        '2026-08-03T01:10:00.000Z',
+        '2026-08-03T10:00:00.000Z',
+        JSON.stringify({
+          severe_late_count: 1,
+          severe_late_minutes: 15,
+          absence_late_count: 0,
+          unrelated_marker: 'preserved',
+        }),
+      ],
+    )
+    const tierPriorId = await seedCompletePriorCalculation(pool, {
+      targetRecordId: tierRecordId,
+    })
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const recompute = await appendRecomputeCalculationV1({
+        client: clientOf(client) as never,
+        orgId,
+        recordId: tierRecordId,
+        expectedCalculationId: tierPriorId,
+        expectedCalculationVersion: await calculationVersion(client, tierPriorId),
+        operationId: randomUUID(),
+        actorId: userId,
+        correlationId: 'recompute-late-tier-meta',
+        policy: 'frozen_prior',
+        mode: 'authoritative',
+      })
+      expect(recompute.kind).toBe('appended')
+
+      const parent = await client.query(
+        `SELECT late_minutes, meta
+           FROM attendance_records
+          WHERE id = $1::uuid AND org_id = $2`,
+        [tierRecordId, orgId],
+      )
+      expect(Number(parent.rows[0].late_minutes)).toBe(10)
+      expect(parent.rows[0].meta).toMatchObject({
+        severe_late_count: 0,
+        severe_late_minutes: 0,
+        absence_late_count: 0,
+        unrelated_marker: 'preserved',
+      })
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      throw error
+    } finally {
+      client.release()
+    }
+  })
+
   it('ops_retirement: same operation+payload replays after authoritative success; different op ALREADY_RETIRED; same op changed payload conflicts', async () => {
     const client = await pool.connect()
     try {

@@ -15,6 +15,7 @@ import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
   calculateAttendanceSegmentsV1,
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
+  deriveAttendanceLateTierFieldsV1,
   validateFrozenContextShape,
 } from './w4c1-segment-calculator'
 import {
@@ -240,7 +241,7 @@ export async function appendRecomputeCalculationV1(
     `SELECT id::text AS id, org_id::text AS org_id, user_id::text AS user_id,
             work_date::text AS work_date,
             current_calculation_id::text AS current_calculation_id,
-            projection_owner, visibility_state, visibility_reason, timezone
+            projection_owner, visibility_state, visibility_reason, timezone, meta
        FROM attendance_records
       WHERE id = $1::uuid AND org_id = $2
       FOR UPDATE`,
@@ -545,6 +546,22 @@ export async function appendRecomputeCalculationV1(
   }
 
   if (input.mode === 'authoritative') {
+    const existingMeta =
+      record.meta && typeof record.meta === 'object' && !Array.isArray(record.meta)
+        ? (record.meta as Record<string, unknown>)
+        : {}
+    const frozenThresholds = context as {
+      severeLateThresholdMinutes: number
+      absenceLateThresholdMinutes: number
+    }
+    const nextMeta = {
+      ...existingMeta,
+      ...deriveAttendanceLateTierFieldsV1(
+        projection.lateMinutes,
+        frozenThresholds.severeLateThresholdMinutes,
+        frozenThresholds.absenceLateThresholdMinutes,
+      ),
+    }
     const updated = await rows(
       input.client,
       `UPDATE attendance_records
@@ -552,8 +569,9 @@ export async function appendRecomputeCalculationV1(
               visibility_state = 'active', visibility_reason = 'active',
               status = $4, first_in_at = $5, last_out_at = $6,
               work_minutes = $7, late_minutes = $8, early_leave_minutes = $9,
+              meta = $10::jsonb,
               updated_at = now()
-        WHERE id = $1::uuid AND org_id = $2 AND current_calculation_id = $10::uuid
+        WHERE id = $1::uuid AND org_id = $2 AND current_calculation_id = $11::uuid
         RETURNING id`,
       [
         recordId,
@@ -565,6 +583,7 @@ export async function appendRecomputeCalculationV1(
         projection.workedMinutes,
         projection.lateMinutes,
         projection.earlyLeaveMinutes,
+        canonicalAttendanceJsonV1(nextMeta),
         priorCalculationId,
       ],
     )
