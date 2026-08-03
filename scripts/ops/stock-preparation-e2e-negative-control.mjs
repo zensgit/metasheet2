@@ -66,7 +66,18 @@ async function main() {
   // `must()` call above is designed to fail (the flag-OFF route genuinely 404s, so `deliberatelyWrong` is
   // false), so `anyFail` is expected to be true and this exits non-zero — but that RED conclusion is now
   // earned by the assertion actually failing, not asserted unconditionally regardless of it.
-  const anyFail = CHECKS.some((c) => !c.ok)
+  //
+  // Deliberate delta from the main harness's exact formula: `CHECKS.length === 0` also counts as failing
+  // here. The main harness always accumulates many checks, so it never hits that edge; this script makes
+  // exactly one `must()` call, so an empty CHECKS array can ONLY mean the one call above never ran (e.g.
+  // it was deleted) — a check that did not happen is not evidence of PASS, and must not silently exit 0.
+  const anyFail = CHECKS.length === 0 || CHECKS.some((c) => !c.ok)
+  // Values-free observed-outcome fields — the evidence, not the exit code by itself (same discipline as
+  // the main harness's own doctrine that "a non-zero script exit is itself not evidence"). These are what
+  // a neutered `must()` actually flips: CHECKS.length stays 1, but every recorded `ok` becomes `true`, so
+  // `negativeControlObservedConclusion` flips from RED to GREEN and diverges from `expectedConclusion`.
+  process.stdout.write(`negativeControlChecksRecorded=${CHECKS.length}\n`)
+  process.stdout.write(`negativeControlObservedConclusion=${anyFail ? 'RED' : 'GREEN'}\n`)
   process.exitCode = anyFail ? 1 : 0
 }
 
@@ -77,6 +88,13 @@ main().catch(async (error) => {
   process.stdout.write('negativeControlReachedAssertion=false\n')
   process.stdout.write('negativeControlRedBecause=HARNESS_ERROR\n')
   process.stdout.write('expectedConclusion=RED\n')
+  // Crash path, not the CHECKS-derivation path: the harness never reached must(), so CHECKS is whatever
+  // it was at the moment of the throw (likely 0). Reported for the same field-shape consistency as the
+  // normal path, not because a crash is "derived from CHECKS" — it is reported here unconditionally
+  // because a fatal error before any assertion ran is itself a failure, same as the main harness's own
+  // top-level .catch().
+  process.stdout.write(`negativeControlChecksRecorded=${CHECKS.length}\n`)
+  process.stdout.write('negativeControlObservedConclusion=RED\n')
   await stopServer().catch(() => {})
   process.exitCode = 1
 })
