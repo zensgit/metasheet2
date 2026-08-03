@@ -922,10 +922,16 @@ async function attemptS6ARealRun() {
     S.s6aFirstRunStatus = firstData.status || '<unregistered>'
     S.s6aBusinessLineCount = Number.isInteger(firstData.businessLineCount) ? firstData.businessLineCount : -1
     S.s6aFirstRunExternalWrite = firstData.externalWrite === false ? 'false' : '<unregistered>'
+    // A refusal's `error.code` here is ALWAYS a member of the frozen sealed-export failure vocabulary (or
+    // the http-routes.cjs error-code set) — never caller-derived text (failure-vocabulary.cjs's own
+    // details discipline guarantees that) — so it is safe to surface directly in the values-free evidence,
+    // the same way the flag-arm probes already surface `${label}Code` above.
+    S.s6aFirstRunErrorCode = firstRun.body?.error?.code || '<none>'
     const firstOk = firstRun.ok && firstData.status === 'COMPLETED' && firstData.mode === 'internal_persist' &&
       firstData.externalWrite === false && firstData.businessLineCount === relation.rows.length
     must('S6-A: first run -> COMPLETED, internal_persist, externalWrite=false, businessLineCount matches',
-      firstOk, `http=${firstRun.status} mode=${S.s6aFirstRunMode} status=${S.s6aFirstRunStatus} lines=${S.s6aBusinessLineCount}`)
+      firstOk,
+      `http=${firstRun.status} mode=${S.s6aFirstRunMode} status=${S.s6aFirstRunStatus} lines=${S.s6aBusinessLineCount} code=${S.s6aFirstRunErrorCode}`)
     S.s6aFirstRun = firstOk ? 'PASS' : 'FAIL'
     if (!firstOk) {
       S.s6aDatabaseObservable = 'NOT_RUN'
