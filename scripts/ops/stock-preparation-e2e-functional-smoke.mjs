@@ -54,7 +54,11 @@ const S = {
   mode: 'functional_testing_synthetic_data',
   substituteForEntityAcceptance: false,
 }
-const CHECKS = []
+// Exported (not just module-private) so other scripts in this lane — specifically
+// stock-preparation-e2e-negative-control.mjs — can derive their own exit code from the SAME array via
+// the SAME `CHECKS.some((c) => !c.ok)` formula main() uses below, instead of hardcoding an exit code that
+// does not actually depend on whether any check failed.
+export const CHECKS = []
 
 export function must(name, ok, detail = '') {
   CHECKS.push({ name, ok: ok === true, detail })
@@ -252,8 +256,11 @@ export async function s6aRunProbe(token, operationId) {
 // flag is off, the route is never mounted at all, so a request to it falls through to the framework's
 // generic unmatched-route 404 (no JSON error envelope, no `error.code`) — it does NOT reach the
 // `STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_DISABLED` HttpRouteError inside the handler
-// (http-routes.cjs ~4900-4911), because that handler is unreachable code under this wiring: the same
-// truthy/falsy check gates both route registration and the handler's local runtime reference. This is
+// (http-routes.cjs ~4900-4911) IN THIS SPECIFIC ARM, because that branch is unreachable when the flag is
+// off (route registration checks only Boolean(runtime); the DISABLED branch fires on falsy runtime). That
+// branch is NOT unreachable in general, though: it also fires when `typeof runtime.run !== 'function'`,
+// which registration does not check — so a truthy-but-malformed runtime still registers the route AND
+// still hits DISABLED at request time. This arm just never constructs that runtime shape. This is
 // confirmed by the existing unit test plugin-integration-core/__tests__/http-routes.test.cjs
 // `testStockPreparationSqlServerSealedSnapshotInternalRoute`, which asserts
 // `disabled.routes.has('POST ' + routePath) === false` for the flag-off construction. So this arm does

@@ -89,6 +89,7 @@ jobs:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
           ACCEPT_EULA: 'Y'
+          # Ephemeral, throwaway container password (destroyed with the job) — not a real credential.
           MSSQL_SA_PASSWORD: 'E2eFunc!Probe2026'
         ports:
           - 1433:1433
