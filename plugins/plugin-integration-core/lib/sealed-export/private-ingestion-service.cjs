@@ -164,7 +164,23 @@ function parseExpiry(manifest) {
   return expiry
 }
 
-function createPrivateIngestionService({
+// THE DI CORE. UNBRANDED, and unbranded on purpose: it adds nothing to
+// `TRUSTED_GENERATION_SOURCES`, so what it returns is refused by
+// `createSealedExportGenerationKernel` exactly as any other duck-typed object is.
+//
+// This mirrors the ratified S5 shape in this same family —
+// `createSqlServerSealedSnapshotServiceCore` is the public, dependency-injected,
+// UNBRANDED core and `createSqlServerSealedSnapshotService` is the branding
+// product wrapper. Splitting here is what let the publicly-exported
+// `…ForTests` verifier grant be DELETED rather than renamed: a hermetic test
+// that only needs the S3 session machinery composes the core over the inert
+// verifier projection, and never needs a trust grant at all.
+//
+// NOT A WIDENING. Before this split an in-process caller could already obtain a
+// branded generation source over an arbitrary verifier, via the exported
+// `…ForTests` factory plus `createPrivateIngestionService`. That path is gone;
+// the core replaces it with one that mints NOTHING.
+function createPrivateIngestionServiceCore({
   metadataStore,
   blobStore,
   manifestVerifier,
@@ -172,7 +188,10 @@ function createPrivateIngestionService({
   clock,
 } = {}) {
   if (
-    !metadataStore
+    !manifestVerifier
+    || typeof manifestVerifier !== 'object'
+    || typeof manifestVerifier.verify !== 'function'
+    || !metadataStore
     || typeof metadataStore.createSession !== 'function'
     || typeof metadataStore.readState !== 'function'
     || typeof metadataStore.listReceipts !== 'function'
@@ -191,7 +210,6 @@ function createPrivateIngestionService({
     || typeof blobStore.readChunk !== 'function'
     || typeof blobStore.readChunkIfPresent !== 'function'
     || typeof blobStore.removeSession !== 'function'
-    || !isTrustedPrivateIngestionManifestVerifier(manifestVerifier)
     || (clock !== undefined && typeof clock !== 'function')
   ) {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
@@ -996,6 +1014,19 @@ function createPrivateIngestionService({
     cleanupSession,
     cleanupExpiredSessions,
   })
+  return service
+}
+
+// THE PRODUCT WRAPPER, and the ONLY writer of `TRUSTED_GENERATION_SOURCES`. The
+// verifier admission check is unchanged and still fails closed with
+// SEALED_EXPORT_INTERNAL_ERROR; what changed is only that the set of objects
+// that can satisfy it has SHRUNK to what
+// `createSqlServerPrivateIngestionManifestVerifier` produces.
+function createPrivateIngestionService(config = {}) {
+  if (!isTrustedPrivateIngestionManifestVerifier(config.manifestVerifier)) {
+    failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+  }
+  const service = createPrivateIngestionServiceCore(config)
   TRUSTED_GENERATION_SOURCES.add(service)
   return service
 }
@@ -1006,5 +1037,6 @@ function isTrustedPrivateIngestionGenerationSource(value) {
 
 module.exports = Object.freeze({
   createPrivateIngestionService,
+  createPrivateIngestionServiceCore,
   isTrustedPrivateIngestionGenerationSource,
 })

@@ -1816,8 +1816,17 @@ const DECLARED_TRUST_MINTING_PATHS = Object.freeze({
   'sqlserverRcsi.resolveCertifiedSqlServerRcsiStrategy': 'certifiedSqlServerRcsiStrategy',
   'sqlserverSnapshot.resolveCertifiedSqlServerSnapshotPageSequenceStrategy':
     'certifiedSqlServerSnapshotPageSequenceStrategy',
-  'sealedExportManifest.createHarnessPrivateIngestionManifestVerifierForTests':
-    'privateIngestionManifestVerifier',
+  // RETIRED 2026-08-02, NOT SILENTLY DROPPED. The row that used to sit here,
+  //   'sealedExportManifest.createHarnessPrivateIngestionManifestVerifierForTests'
+  //     -> 'privateIngestionManifestVerifier',
+  // declared the last caller-controlled trust grant on the sealed-export public
+  // surface. It was deferred as contained by latency; that containment was
+  // RE-TRIAGED and does not hold — index.cjs wires
+  // stock-preparation-sqlserver-runtime.cjs, which requires that module. The
+  // factory is DELETED from lib/, so the ledger loses a row rather than gaining
+  // a renamed one, and the inverse is now EXECUTED below: the public unbranded
+  // projection must NOT mint. `+6` becomes `+5` in the arithmetic at the foot of
+  // this sweep for exactly this row.
   'sealedExportSqlServerService.createSqlServerSealedSnapshotService':
     'sqlServerSealedSnapshotService',
   'sealedExportSqlServerSession.openMssqlSnapshotCaptureContext':
@@ -2321,27 +2330,40 @@ async function publicSurfaceMintsExactlyTheDeclaredTrust() {
     'sealed-export/private-ingestion-manifest-verifier.cjs',
   )
   const signer = crypto.generateKeyPairSync('ed25519')
-  const manifestVerifier =
-    manifestVerifierModule.createHarnessPrivateIngestionManifestVerifierForTests({
+  // THE INVERSE OF THE RETIRED ROW, EXECUTED. The harness grant is gone, so this
+  // asserts the REFUSAL: the surviving public builder produces a verifier with
+  // IDENTICAL behaviour and NO brand. Written as an execution rather than a
+  // deletion so a re-introduction cannot pass by simply removing an assertion —
+  // and the name is asserted absent too, since a grant restored under the old
+  // name would otherwise only show up as a swept-set difference.
+  assert.equal(
+    typeof manifestVerifierModule.createHarnessPrivateIngestionManifestVerifierForTests,
+    'undefined',
+    'the retired harness verifier grant must not be back on the public export table',
+  )
+  const unbrandedVerifier =
+    manifestVerifierModule.createPrivateIngestionManifestVerifier({
       signerKeys: [{
         signerKeyId: 'trust-surface-signer',
         publicKey: signer.publicKey,
       }],
     })
+  assert.equal(typeof unbrandedVerifier.verify, 'function',
+    'the inert projection must still BUILD a verifier — an assertion over a thrown call proves nothing')
   assert.equal(
     manifestVerifierModule.isTrustedPrivateIngestionManifestVerifier(
-      manifestVerifier,
+      unbrandedVerifier,
     ),
-    true,
-    'the latent S3 harness factory is a declared trust-minting residual and must actually mint the brand',
+    false,
+    'the public unbranded verifier projection must NOT carry the trust brand',
   )
-  assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 6,
-    'the declared ledger must be exactly the swept set plus four paths executed directly here and '
+  assert.equal(Object.keys(DECLARED_TRUST_MINTING_PATHS).length, Object.keys(swept).length + 5,
+    'the declared ledger must be exactly the swept set plus three paths executed directly here and '
     + 'the two S5 product paths exercised by the dedicated real-engine certification')
 
   console.log(`  TRUST-SURFACE ${result.calls} calls over ${result.exportCount} exports in `
     + `${reach.modules.length} DERIVED modules, pool=${result.poolSize}: ${Object.keys(swept).length} minting paths `
-    + `swept + 4 executed directly + 2 S5 real-engine paths = `
+    + `swept + 3 executed directly + 2 S5 real-engine paths = `
     + `${Object.keys(DECLARED_TRUST_MINTING_PATHS).length} declared`)
 }
 

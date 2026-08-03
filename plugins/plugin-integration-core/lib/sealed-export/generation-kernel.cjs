@@ -389,7 +389,15 @@ async function computeStoredRowsetDigest(store, generationId, rowKind, expectedC
   })
 }
 
-function createSealedExportGenerationKernel({
+// THE DI CORE. UNBRANDED — the kernel mints no brand at all, so this core adds
+// no trust anywhere; it differs from the product wrapper below in exactly one
+// respect, that it does not require its `ingestionSource` to carry the
+// `TRUSTED_GENERATION_SOURCES` brand. Same S5 shape as
+// `createSqlServerSealedSnapshotServiceCore`: public, injected, unbranded core;
+// admission check on the wrapper. Hermetic S4 suites compose this over
+// `createPrivateIngestionServiceCore`, which is what removed their need for a
+// publicly-exported trust grant.
+function createSealedExportGenerationKernelCore({
   generationStore,
   ingestionSource,
   authority: rawAuthority,
@@ -398,7 +406,11 @@ function createSealedExportGenerationKernel({
 } = {}) {
   if (
     !isTrustedGenerationStore(generationStore)
-    || !isTrustedPrivateIngestionGenerationSource(ingestionSource)
+    || !ingestionSource
+    || typeof ingestionSource !== 'object'
+    || typeof ingestionSource.claimCompletedSessionForGeneration !== 'function'
+    || typeof ingestionSource.readClaimedGenerationChunk !== 'function'
+    || typeof ingestionSource.releaseCompletedSessionGenerationClaim !== 'function'
     || !(evidenceKey instanceof Uint8Array)
     || evidenceKey.length < 32
     || (clock !== undefined && typeof clock !== 'function')
@@ -1434,8 +1446,19 @@ function createSealedExportGenerationKernel({
   })
 }
 
+// THE PRODUCT WRAPPER. The `TRUSTED_GENERATION_SOURCES` admission check is
+// unchanged and still fails closed with SEALED_EXPORT_INTERNAL_ERROR; the wired
+// composition in stock-preparation-sqlserver-runtime.cjs calls THIS.
+function createSealedExportGenerationKernel(config = {}) {
+  if (!isTrustedPrivateIngestionGenerationSource(config.ingestionSource)) {
+    failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+  }
+  return createSealedExportGenerationKernelCore(config)
+}
+
 module.exports = Object.freeze({
   createSealedExportGenerationKernel,
+  createSealedExportGenerationKernelCore,
   LEASE_DURATION_MS,
   ROW_BATCH_SIZE,
 })

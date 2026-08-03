@@ -22,13 +22,13 @@ const {
 } = require(path.join(SEALED_DIR, 'private-ingestion-blob-store.cjs'))
 const {
   createPrivateIngestionService,
+  createPrivateIngestionServiceCore,
 } = require(path.join(SEALED_DIR, 'private-ingestion-service.cjs'))
 const manifestVerifierModule = require(
   path.join(SEALED_DIR, 'private-ingestion-manifest-verifier.cjs'),
 )
 const {
   createPrivateIngestionManifestVerifier,
-  createHarnessPrivateIngestionManifestVerifierForTests,
 } = manifestVerifierModule
 
 const D = (label) => crypto.createHash('sha256').update(`sealed-export-s3:${label}`).digest('hex')
@@ -42,7 +42,9 @@ const DEFAULT_AUTHORITY = Object.freeze({
   systemContentKey: 'sx-pilot-system',
   roleBindingFingerprint: 'sx-pilot-role-binding',
 })
-const MANIFEST_VERIFIER = createHarnessPrivateIngestionManifestVerifierForTests({
+// The INERT verifier projection: identical `verify()` behaviour, NO brand. The
+// publicly-exported `…ForTests` grant that used to build this is DELETED.
+const MANIFEST_VERIFIER = createPrivateIngestionManifestVerifier({
   signerKeys: [{
     signerKeyId: SIGNER_KEY_ID,
     publicKey: SIGNER.publicKey,
@@ -281,7 +283,6 @@ async function refuses(action, expectedReason, label) {
   try {
     assert.deepEqual(Object.keys(manifestVerifierModule).sort(), [
       'SIGNATURE_ALGORITHM',
-      'createHarnessPrivateIngestionManifestVerifierForTests',
       'createPrivateIngestionManifestVerifier',
       'createSqlServerPrivateIngestionManifestVerifier',
       'isTrustedPrivateIngestionManifestVerifier',
@@ -307,7 +308,10 @@ function buildHarness(rootDir, memory, clock, blobOverride, authority = DEFAULT_
   return {
     blobStore,
     metadataStore,
-    service: createPrivateIngestionService({
+    // The UNBRANDED DI core. The two assert.throws below stay pointed at the
+    // BRANDING wrapper `createPrivateIngestionService`, so the admission check
+    // this suite used to satisfy with a `…ForTests` grant is still proven.
+    service: createPrivateIngestionServiceCore({
       metadataStore,
       blobStore,
       manifestVerifier: MANIFEST_VERIFIER,

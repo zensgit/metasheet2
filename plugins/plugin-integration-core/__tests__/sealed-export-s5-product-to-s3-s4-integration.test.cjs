@@ -52,11 +52,14 @@ const {
 const {
   createPrivateIngestionBlobStore,
 } = require(path.join(SEALED_DIR, 'private-ingestion-blob-store.cjs'))
+// UNBRANDED CORES + the inert verifier projection. The publicly-exported
+// `…ForTests` verifier grant this suite used to call is DELETED (#4636
+// residual); `verify()` behaviour is unchanged.
 const {
-  createHarnessPrivateIngestionManifestVerifierForTests,
+  createPrivateIngestionManifestVerifier,
 } = require(path.join(SEALED_DIR, 'private-ingestion-manifest-verifier.cjs'))
 const {
-  createPrivateIngestionService,
+  createPrivateIngestionServiceCore,
 } = require(path.join(SEALED_DIR, 'private-ingestion-service.cjs'))
 const {
   createGenerationStore,
@@ -68,7 +71,7 @@ const {
   AUDIT_TABLE,
 } = require(path.join(SEALED_DIR, 'generation-store.cjs'))
 const {
-  createSealedExportGenerationKernel,
+  createSealedExportGenerationKernelCore,
 } = require(path.join(SEALED_DIR, 'generation-kernel.cjs'))
 
 const OBJECT_KEY = 'orders.lines'
@@ -483,7 +486,7 @@ async function openHarness(pkg) {
   const memory = makeMemoryDb()
   const metadataStore = createPrivateIngestionMetadataStore({ db: memory.api })
   const blobStore = createPrivateIngestionBlobStore({ rootDir })
-  const manifestVerifier = createHarnessPrivateIngestionManifestVerifierForTests(
+  const manifestVerifier = createPrivateIngestionManifestVerifier(
     {
       signerKeys: [
         {
@@ -493,7 +496,7 @@ async function openHarness(pkg) {
       ],
     },
   )
-  const ingestionService = createPrivateIngestionService({
+  const ingestionService = createPrivateIngestionServiceCore({
     metadataStore,
     blobStore,
     manifestVerifier,
@@ -501,7 +504,7 @@ async function openHarness(pkg) {
     clock,
   })
   const generationStore = createGenerationStore({ db: memory.api })
-  const kernel = createSealedExportGenerationKernel({
+  const kernel = createSealedExportGenerationKernelCore({
     generationStore,
     ingestionSource: ingestionService,
     authority: AUTHORITY,

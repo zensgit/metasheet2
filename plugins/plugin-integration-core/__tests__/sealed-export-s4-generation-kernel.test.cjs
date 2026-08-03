@@ -20,8 +20,12 @@ const {
   ACTIVE_POINTER_TABLE,
   AUDIT_TABLE,
 } = require(path.join(SEALED_DIR, 'generation-store.cjs'))
+// UNBRANDED CORES. This suite exercises the S4 kernel over a hermetic S3 source;
+// it needs no trust grant, and the publicly-exported `…ForTests` verifier grant
+// it used to depend on has been DELETED (#4636 residual). The inert verifier
+// projection plus the two DI cores give byte-identical behaviour with no brand.
 const {
-  createSealedExportGenerationKernel,
+  createSealedExportGenerationKernelCore,
   LEASE_DURATION_MS,
   ROW_BATCH_SIZE,
 } = require(path.join(SEALED_DIR, 'generation-kernel.cjs'))
@@ -35,10 +39,10 @@ const {
   createPrivateIngestionBlobStore,
 } = require(path.join(SEALED_DIR, 'private-ingestion-blob-store.cjs'))
 const {
-  createHarnessPrivateIngestionManifestVerifierForTests,
+  createPrivateIngestionManifestVerifier,
 } = require(path.join(SEALED_DIR, 'private-ingestion-manifest-verifier.cjs'))
 const {
-  createPrivateIngestionService,
+  createPrivateIngestionServiceCore,
 } = require(path.join(SEALED_DIR, 'private-ingestion-service.cjs'))
 
 const D = (label) => crypto.createHash('sha256').update(`sealed-export-s4:${label}`).digest('hex')
@@ -55,7 +59,7 @@ const AUTHORITY = Object.freeze({
 const QUALIFICATION_DIGEST = D('qualification')
 const CANONICAL_OBJECT_VERSION = 'sx-s4-canonical-object-v1'
 const EVIDENCE_KEY = crypto.createHash('sha256').update('sx-s4-evidence-key').digest()
-const MANIFEST_VERIFIER = createHarnessPrivateIngestionManifestVerifierForTests({
+const MANIFEST_VERIFIER = createPrivateIngestionManifestVerifier({
   signerKeys: [{
     signerKeyId: SIGNER_KEY_ID,
     publicKey: SIGNER.publicKey,
@@ -460,7 +464,7 @@ async function main() {
   const clock = () => new Date(nowMs)
   const memory = makeMemoryDb()
   const metadataStore = createPrivateIngestionMetadataStore({ db: memory.api })
-  const ingestionService = createPrivateIngestionService({
+  const ingestionService = createPrivateIngestionServiceCore({
     metadataStore,
     blobStore: createPrivateIngestionBlobStore({ rootDir }),
     manifestVerifier: MANIFEST_VERIFIER,
@@ -468,7 +472,7 @@ async function main() {
     clock,
   })
   const generationStore = createGenerationStore({ db: memory.api })
-  const kernel = createSealedExportGenerationKernel({
+  const kernel = createSealedExportGenerationKernelCore({
     generationStore,
     ingestionSource: ingestionService,
     authority: AUTHORITY,
@@ -1172,7 +1176,7 @@ async function main() {
     )
     assert.equal(pointerReads, 0, 'pinned pages never re-read the active pointer')
 
-    const peerKernel = createSealedExportGenerationKernel({
+    const peerKernel = createSealedExportGenerationKernelCore({
       generationStore,
       ingestionSource: ingestionService,
       authority: AUTHORITY,

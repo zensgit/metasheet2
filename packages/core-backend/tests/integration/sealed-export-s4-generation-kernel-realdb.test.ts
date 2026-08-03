@@ -25,7 +25,7 @@ const {
   createGenerationStore,
 } = requireCjs(join(SEALED_EXPORT_LIB, 'generation-store.cjs'))
 const {
-  createSealedExportGenerationKernel,
+  createSealedExportGenerationKernelCore,
   LEASE_DURATION_MS,
   ROW_BATCH_SIZE,
 } = requireCjs(join(SEALED_EXPORT_LIB, 'generation-kernel.cjs'))
@@ -35,11 +35,14 @@ const {
 const {
   createPrivateIngestionBlobStore,
 } = requireCjs(join(SEALED_EXPORT_LIB, 'private-ingestion-blob-store.cjs'))
+// UNBRANDED CORES + the inert verifier projection. The publicly-exported
+// `…ForTests` verifier grant these suites used to call is DELETED (#4636
+// residual); `verify()` behaviour is unchanged.
 const {
-  createHarnessPrivateIngestionManifestVerifierForTests,
+  createPrivateIngestionManifestVerifier,
 } = requireCjs(join(SEALED_EXPORT_LIB, 'private-ingestion-manifest-verifier.cjs'))
 const {
-  createPrivateIngestionService,
+  createPrivateIngestionServiceCore,
 } = requireCjs(join(SEALED_EXPORT_LIB, 'private-ingestion-service.cjs'))
 
 const MIGRATION_068_SQL = readFileSync(
@@ -64,7 +67,7 @@ const AUTHORITY = Object.freeze({
 const QUALIFICATION_DIGEST = digest('qualification')
 const CANONICAL_OBJECT_VERSION = 'sealed-export-s4-realdb-object-v1'
 const EVIDENCE_KEY = createHash('sha256').update('sealed-export-s4-realdb-evidence').digest()
-const MANIFEST_VERIFIER = createHarnessPrivateIngestionManifestVerifierForTests({
+const MANIFEST_VERIFIER = createPrivateIngestionManifestVerifier({
   signerKeys: [{
     signerKeyId: SIGNER_KEY_ID,
     publicKey: SIGNER.publicKey,
@@ -226,9 +229,9 @@ describeDb('sealed-export S4 generation kernel (real PostgreSQL, isolated schema
   let rootDir: string
   let nowMs: number
   let queryHook: ((text: string) => Promise<void>) | null
-  let service: ReturnType<typeof createPrivateIngestionService>
+  let service: ReturnType<typeof createPrivateIngestionServiceCore>
   let generationStore: ReturnType<typeof createGenerationStore>
-  let kernel: ReturnType<typeof createSealedExportGenerationKernel>
+  let kernel: ReturnType<typeof createSealedExportGenerationKernelCore>
 
   async function prepare(label: string, rowCount: number) {
     const data = buildFixture(label, rowCount, nowMs)
@@ -294,7 +297,7 @@ describeDb('sealed-export S4 generation kernel (real PostgreSQL, isolated schema
       }),
     })
     const metadataStore = createPrivateIngestionMetadataStore({ db })
-    service = createPrivateIngestionService({
+    service = createPrivateIngestionServiceCore({
       metadataStore,
       blobStore: createPrivateIngestionBlobStore({ rootDir }),
       manifestVerifier: MANIFEST_VERIFIER,
@@ -302,7 +305,7 @@ describeDb('sealed-export S4 generation kernel (real PostgreSQL, isolated schema
       clock: () => new Date(nowMs),
     })
     generationStore = createGenerationStore({ db })
-    kernel = createSealedExportGenerationKernel({
+    kernel = createSealedExportGenerationKernelCore({
       generationStore,
       ingestionSource: service,
       authority: AUTHORITY,

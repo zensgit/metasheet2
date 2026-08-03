@@ -104,19 +104,29 @@ function buildPrivateIngestionManifestVerifier({ signerKeys } = {}) {
 }
 
 // BUILD-ONLY. A caller-provided signer list never grants trust.
+//
+// This is the INERT PROJECTION of the verifier: byte-for-byte the same
+// `verify()` behaviour as the certified path builds for its own use, with NO
+// brand. A test that needs a verifier's BEHAVIOUR uses this and gets refused by
+// `createPrivateIngestionService` — which is the correct answer, not a gap.
 function createPrivateIngestionManifestVerifier(options) {
   return buildPrivateIngestionManifestVerifier(options)
 }
 
-// Latent S3 harness seam only. This is the sole trust-granting path until a
-// separately reviewed first-party signer registry is wired; there is no runtime
-// consumer in S3.
-function createHarnessPrivateIngestionManifestVerifierForTests(options) {
-  const verifier = buildPrivateIngestionManifestVerifier(options)
-  trustedManifestVerifiers.add(verifier)
-  return verifier
-}
-
+// REMOVED (#4636 residual, re-triaged 2026-08-02): a
+// `createHarnessPrivateIngestionManifestVerifierForTests` used to live here and
+// was PUBLICLY EXPORTED while adding its product to `trustedManifestVerifiers`.
+// It was deferred as contained by latency ("no runtime consumer in S3"); that
+// containment DOES NOT HOLD for this stack any more — `index.cjs` wires
+// `stock-preparation-sqlserver-runtime.cjs`, which requires this module at :15.
+// It is deleted rather than renamed: a narrower same-shape replacement would be
+// the same grant under a different name.
+//
+// `createSqlServerPrivateIngestionManifestVerifier` below is now the ONLY writer
+// of `trustedManifestVerifiers`, and it admits nothing a caller can fabricate —
+// its `sealedSnapshotService` must already carry the `productServices` brand, so
+// the whole ingestion trust chain is rooted in
+// `createSqlServerSealedSnapshotService`.
 function createSqlServerPrivateIngestionManifestVerifier({
   envelope: rawEnvelope,
   sealedSnapshotService,
@@ -144,7 +154,6 @@ function isTrustedPrivateIngestionManifestVerifier(value) {
 module.exports = Object.freeze({
   SIGNATURE_ALGORITHM,
   createPrivateIngestionManifestVerifier,
-  createHarnessPrivateIngestionManifestVerifierForTests,
   createSqlServerPrivateIngestionManifestVerifier,
   isTrustedPrivateIngestionManifestVerifier,
 })

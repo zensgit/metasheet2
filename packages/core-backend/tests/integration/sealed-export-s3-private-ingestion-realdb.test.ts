@@ -27,11 +27,14 @@ const {
 const {
   createPrivateIngestionBlobStore,
 } = requireCjs(join(SEALED_EXPORT_LIB, 'private-ingestion-blob-store.cjs'))
+// UNBRANDED CORES + the inert verifier projection. The publicly-exported
+// `…ForTests` verifier grant these suites used to call is DELETED (#4636
+// residual); `verify()` behaviour is unchanged.
 const {
-  createHarnessPrivateIngestionManifestVerifierForTests,
+  createPrivateIngestionManifestVerifier,
 } = requireCjs(join(SEALED_EXPORT_LIB, 'private-ingestion-manifest-verifier.cjs'))
 const {
-  createPrivateIngestionService,
+  createPrivateIngestionServiceCore,
 } = requireCjs(join(SEALED_EXPORT_LIB, 'private-ingestion-service.cjs'))
 
 const MIGRATION_SQL = readFileSync(
@@ -49,7 +52,7 @@ const AUTHORITY = Object.freeze({
   systemContentKey: 'sealed-export-s3-realdb-system',
   roleBindingFingerprint: 'sealed-export-s3-realdb-role',
 })
-const MANIFEST_VERIFIER = createHarnessPrivateIngestionManifestVerifierForTests({
+const MANIFEST_VERIFIER = createPrivateIngestionManifestVerifier({
   signerKeys: [{
     signerKeyId: SIGNER_KEY_ID,
     publicKey: SIGNER.publicKey,
@@ -211,7 +214,7 @@ describeDb('sealed-export S3 private ingestion (real PostgreSQL, isolated schema
   let testPool: Pool
   let schema: string
   let rootDir: string
-  let service: ReturnType<typeof createPrivateIngestionService>
+  let service: ReturnType<typeof createPrivateIngestionServiceCore>
   let transactionStats: TransactionStats
   let transactionQueryHook: ((text: string) => Promise<void>) | null
 
@@ -248,7 +251,7 @@ describeDb('sealed-export S3 private ingestion (real PostgreSQL, isolated schema
         ),
       }),
     })
-    service = createPrivateIngestionService({
+    service = createPrivateIngestionServiceCore({
       metadataStore,
       blobStore: createPrivateIngestionBlobStore({ rootDir }),
       manifestVerifier: MANIFEST_VERIFIER,
