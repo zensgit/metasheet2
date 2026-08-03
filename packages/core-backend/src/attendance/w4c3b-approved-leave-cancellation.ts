@@ -23,6 +23,7 @@ import {
 } from './w4c1-segment-calculator'
 import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerprints'
 import { assertParentNotRetiredForOrdinaryWriterV1 } from './w4c3c-ops-retirement'
+import { computeAttendanceW4ShadowDiff } from '../services/AttendanceW4CalculationDetail'
 
 export type W4c3bApprovedLeaveCancellationQueryClient = Readonly<{
   query: (
@@ -213,7 +214,8 @@ export async function appendApprovedLeaveCancellationCalculationV1(
     input.client,
     `SELECT id::text AS id, org_id::text AS org_id, user_id::text AS user_id,
             work_date::text AS work_date, current_calculation_id::text AS current_calculation_id,
-            visibility_state, visibility_reason
+            visibility_state, visibility_reason, status, first_in_at, last_out_at,
+            work_minutes, late_minutes, early_leave_minutes
        FROM attendance_records
       WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
       FOR UPDATE`,
@@ -341,6 +343,37 @@ export async function appendApprovedLeaveCancellationCalculationV1(
   })
   const calculationId = crypto.randomUUID()
   const projection = canonical.dailyProjection
+  const attributionRecord = plainObject(attribution)
+  const attributionValue = plainObject(attributionRecord?.value)
+  const resolvedWorkDate = attributionRecord?.posture === 'resolved_v2'
+    && typeof attributionValue?.workDate === 'string'
+    ? attributionValue.workDate
+    : null
+  const shadowDiff = input.mode === 'shadow'
+    ? computeAttendanceW4ShadowDiff({
+        legacy: {
+          workDate,
+          status: typeof record.status === 'string' ? record.status : null,
+          firstInAt: record.first_in_at as string | Date | null,
+          lastOutAt: record.last_out_at as string | Date | null,
+          workMinutes: record.work_minutes === null ? null : Number(record.work_minutes),
+          lateMinutes: record.late_minutes === null ? null : Number(record.late_minutes),
+          earlyLeaveMinutes: record.early_leave_minutes === null ? null : Number(record.early_leave_minutes),
+        },
+        calculated: {
+          workDate: resolvedWorkDate,
+          status: projection.status,
+          firstInAt: projection.firstInAt,
+          lastOutAt: projection.lastOutAt,
+          workMinutes: projection.workedMinutes,
+          lateMinutes: projection.lateMinutes,
+          earlyLeaveMinutes: projection.earlyLeaveMinutes,
+        },
+        segmentCount: canonical.segments.length,
+        outcome: 'completed',
+        workDateMismatch: resolvedWorkDate !== null && resolvedWorkDate !== workDate,
+      })
+    : null
   const nextVersion = Number(prior.version) + 1
   if (!Number.isSafeInteger(nextVersion) || nextVersion < 2) {
     fail(W4C3B_APPROVED_LEAVE_CANCELLATION_ERROR_CODES.DATABASE_RESULT_INVALID)
@@ -357,7 +390,7 @@ export async function appendApprovedLeaveCancellationCalculationV1(
         merge_policy, calculation_tier, outcome, outcome_reason_code, projection_effect,
         expected_segment_count, projected_status, projected_first_in_at, projected_last_out_at,
         projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
-        projected_daily_fingerprint, actor_id, correlation_id
+        projected_daily_fingerprint, shadow_diff_code, shadow_diff, actor_id, correlation_id
       ) VALUES (
         $1::uuid, $2, $3::uuid, $4, 'calculation', $5, 'approval_reversal',
         $6, 1, $7::uuid, $8::uuid,
@@ -366,7 +399,7 @@ export async function appendApprovedLeaveCancellationCalculationV1(
         $16::jsonb, $17::jsonb, $18::jsonb,
         'reversal', $19, 'completed', 'calculated', $20,
         $21, $22, $23, $24, $25, $26, $27, $28,
-        $29, $30
+        $29, $30::jsonb, $31, $32
       )`,
     [
       calculationId,
@@ -405,6 +438,8 @@ export async function appendApprovedLeaveCancellationCalculationV1(
       projection.lateMinutes,
       projection.earlyLeaveMinutes,
       projectedDailyFingerprint(projection),
+      shadowDiff?.code ?? null,
+      shadowDiff ? canonicalAttendanceJsonV1(shadowDiff) : null,
       actorId,
       correlationId,
     ],

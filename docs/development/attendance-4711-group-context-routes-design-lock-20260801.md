@@ -1,6 +1,10 @@
 # Attendance #4711 Group Context Routes Design Lock
 
-Status: **PROPOSED**
+Status: **RATIFIED** on 2026-08-03 against merged SHA
+`8806e9679e3e7a19ba57d310f799c2962dd01680`; `OD-4711-1..7` are decided at
+their recommended values. Ratification authorizes R0 only. It does not
+authorize later slices, merge, deployment, feature flags, customer data,
+production data, or closing #4556.
 
 - Baseline: `9ce340e0f7939f1c1d786acc7eb99bd865a6fac5`
 - Scope: issue #4711 only. This document does not authorize runtime code, merge,
@@ -214,17 +218,21 @@ drawer-entry slice.
 
 | ID | Decision | Recommended value | Status |
 | --- | --- | --- | --- |
-| OD-4711-1 | Route shape | Three canonical paths in section 3.1 | **OPEN** |
-| OD-4711-2 | v1 audience | Attendance administrators only | **OPEN** |
-| OD-4711-3 | Cross-org posture | Authenticated-org probe; missing and inaccessible both appear unavailable | **OPEN** |
-| OD-4711-4 | Route/hash precedence | Route owns group workflow; hash rail is inert there | **OPEN** |
-| OD-4711-5 | Safe return fallback | Attendance group list section | **OPEN** |
-| OD-4711-6 | Mobile scope | Preserve the existing mobile admin block; prove URL/return posture and no overlap, but do not mount group editing or scoped loads | **OPEN** |
-| OD-4711-7 | Existing-surface targeting | Closed route-step/`surface` mapping in section 3.1 | **OPEN** |
+| OD-4711-1 | Route shape | Three canonical paths in section 3.1 | **DECIDED** |
+| OD-4711-2 | v1 audience | Attendance administrators only | **DECIDED** |
+| OD-4711-3 | Cross-org posture | Authenticated-org probe; missing and inaccessible both appear unavailable | **DECIDED** |
+| OD-4711-4 | Route/hash precedence | Route owns group workflow; hash rail is inert there | **DECIDED** |
+| OD-4711-5 | Safe return fallback | Attendance group list section | **DECIDED** |
+| OD-4711-6 | Mobile scope | Preserve the existing mobile admin block; prove URL/return posture and no overlap, but do not mount group editing or scoped loads | **DECIDED** |
+| OD-4711-7 | Existing-surface targeting | Closed route-step/`surface` mapping in section 3.1 | **DECIDED** |
 
 RATIFY means accepting all recommended values unless the owner records an
 explicit alternative. Merging this document while it is PROPOSED is not
 RATIFY and does not authorize the first runtime slice.
+
+The owner RATIFY on 2026-08-03 accepted every recommended value above against
+merged SHA `8806e9679e3e7a19ba57d310f799c2962dd01680` and authorized R0 from
+fresh main. R1 and R2 retain their separate slice and merge gates.
 
 ## 5. Serial delivery plan
 

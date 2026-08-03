@@ -145,8 +145,112 @@ const P25_READ_TABLE_PATTERN = new RegExp(
 
 const ATTENDANCE_RECORD_READ_PATTERN =
   /\b(?:FROM|JOIN)\s+"?(attendance_records|attendance_current_records)"?(?![A-Za-z0-9_])/gi
+const ATTENDANCE_CALCULATION_READ_PATTERN =
+  /\b(?:FROM|JOIN)\s+"?(attendance_record_calculations|attendance_record_segments)"?(?![A-Za-z0-9_])/gi
 const DYNAMIC_READ_PATTERN = /\b(?:FROM|JOIN)\s+\$\{([^}]+)\}/gi
 const JS_IDENTIFIER_PATTERN = /\b[A-Za-z_$][A-Za-z0-9_$]*\b/g
+
+function sqlLiteralContainingIndex(content, index) {
+  let quote = null
+  let start = -1
+  let escaped = false
+  for (let i = 0; i < content.length; i += 1) {
+    const ch = content[i]
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === '\\') {
+        escaped = true
+        continue
+      }
+      if (ch === quote) {
+        if (start < index && index < i) return content.slice(start + 1, i)
+        quote = null
+        start = -1
+      }
+      continue
+    }
+    if (ch === '`' || ch === "'" || ch === '"') {
+      quote = ch
+      start = i
+    }
+  }
+  return null
+}
+
+function maskSqlComments(query) {
+  const src = String(query ?? '')
+  let out = ''
+  let quote = null
+  let i = 0
+  while (i < src.length) {
+    const ch = src[i]
+    const next = src[i + 1]
+    if (quote !== null) {
+      out += ch
+      if (ch === '\\' && i + 1 < src.length) {
+        out += src[i + 1]
+        i += 2
+        continue
+      }
+      if (ch === quote && next === quote) {
+        out += next
+        i += 2
+        continue
+      }
+      if (ch === quote) quote = null
+      i += 1
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      out += ch
+      i += 1
+      continue
+    }
+    if (ch === '-' && next === '-') {
+      out += '  '
+      i += 2
+      while (i < src.length && src[i] !== '\n' && src[i] !== '\r') {
+        out += ' '
+        i += 1
+      }
+      continue
+    }
+    if (ch === '/' && next === '*') {
+      out += '  '
+      i += 2
+      while (i < src.length) {
+        if (src[i] === '*' && src[i + 1] === '/') {
+          out += '  '
+          i += 2
+          break
+        }
+        out += src[i] === '\n' || src[i] === '\r' ? src[i] : ' '
+        i += 1
+      }
+      continue
+    }
+    out += ch
+    i += 1
+  }
+  return out
+}
+
+function requiredPredicateFingerprint(content, index) {
+  const query = sqlLiteralContainingIndex(String(content ?? ''), index)
+  if (!query) return null
+  const maskedQuery = maskSqlComments(query)
+  if (/\b(?:[A-Za-z_$][A-Za-z0-9_$]*\.)?visibility_state\s*=\s*['"]active['"]/i.test(maskedQuery)) {
+    return 'visibility_state=active'
+  }
+  if (/\b(?:attendance_current_records|ATTENDANCE_ACTIVE_CURRENT_RELATION_V1)\b/.test(maskedQuery)) {
+    return 'current_relation=attendance_current_records'
+  }
+  return null
+}
 
 // Reserved words that can legally follow a DML verb without being a table name — most notably
 // `... ON CONFLICT (...) DO UPDATE SET col = ...` (an upsert), where "SET" immediately follows
@@ -580,7 +684,7 @@ function collectDynamicReadSites(content, lines, tableNames) {
     }
 
     for (const table of resolved) {
-      sites.push({ lineIndex, table, enclosingSymbol, dynamic: true })
+      sites.push({ lineIndex, index: match.index, table, enclosingSymbol, dynamic: true })
     }
   }
   return sites
@@ -663,6 +767,41 @@ function scanFileForAttendanceRecordReadSites(relPath, content) {
   return sites
 }
 
+// W4C-4 §12.7: calculation/segment reads must not inherit the attendance-record
+// inventory's allowlist. Every direct read receives an explicit current or history owner.
+function scanFileForAttendanceCalculationReadSites(relPath, content) {
+  const lines = content.split(/\r?\n/)
+  const sites = []
+  ATTENDANCE_CALCULATION_READ_PATTERN.lastIndex = 0
+  let match
+  while ((match = ATTENDANCE_CALCULATION_READ_PATTERN.exec(content))) {
+    const lineIndex = lineIndexAt(content, match.index)
+    if (isDeleteTargetAt(content, match.index)) continue
+    sites.push({
+      relPath,
+      line: lineIndex + 1,
+      table: match[1],
+      enclosingSymbol: nearestEnclosingSymbol(lines, lineIndex),
+      requiredPredicateFingerprint: requiredPredicateFingerprint(content, match.index),
+    })
+  }
+  for (const dynamic of collectDynamicReadSites(
+    content,
+    lines,
+    ['attendance_record_calculations', 'attendance_record_segments'],
+  )) {
+    sites.push({
+      relPath,
+      line: dynamic.lineIndex + 1,
+      table: dynamic.table,
+      enclosingSymbol: dynamic.enclosingSymbol,
+      dynamic: true,
+      requiredPredicateFingerprint: requiredPredicateFingerprint(content, dynamic.index),
+    })
+  }
+  return sites
+}
+
 // Builds the full raw census across every scannable file under the discovered runtime roots.
 // `source` supplies `readFile(relPath) -> string|null` and `listAllFiles(rootDir) -> relPath[]`.
 function buildRawCensus(source) {
@@ -715,6 +854,24 @@ function buildAttendanceRecordReadCensus(source) {
       const content = source.readFile(relPath)
       if (content == null) continue
       sites.push(...scanFileForAttendanceRecordReadSites(relPath, content))
+    }
+  }
+  sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
+  return { roots, sites }
+}
+
+function buildAttendanceCalculationReadCensus(source) {
+  const roots = discoverRuntimeRoots(source)
+  const seen = new Set()
+  const sites = []
+  for (const root of roots) {
+    for (const relPath of source.listAllFiles(root)) {
+      if (seen.has(relPath)) continue
+      seen.add(relPath)
+      if (!isScannablePath(relPath)) continue
+      const content = source.readFile(relPath)
+      if (content == null) continue
+      sites.push(...scanFileForAttendanceCalculationReadSites(relPath, content))
     }
   }
   sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
@@ -816,9 +973,11 @@ module.exports = {
   scanFileForDmlSites,
   scanFileForP25CallPathSites,
   scanFileForAttendanceRecordReadSites,
+  scanFileForAttendanceCalculationReadSites,
   buildRawCensus,
   buildP25CallPathCensus,
   buildAttendanceRecordReadCensus,
+  buildAttendanceCalculationReadCensus,
   classifyCensus,
   debtKey,
   isCanonicalBoundaryPath,

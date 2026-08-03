@@ -170,6 +170,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
               c.attribution_snapshot, c.evidence_snapshot, c.segment_snapshot, c.input_provenance,
               c.projected_status, c.projected_first_in_at, c.projected_last_out_at,
               c.projected_work_minutes, c.projected_late_minutes, c.projected_early_leave_minutes,
+              c.shadow_diff_code, c.shadow_diff,
               r.id::text AS record_id
        FROM attendance_record_calculations c
        JOIN attendance_records r ON r.id = c.attendance_record_id
@@ -326,6 +327,14 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
       projected_work_minutes: null,
       projected_late_minutes: null,
       projected_early_leave_minutes: null,
+      shadow_diff_code: 'review_required',
+      shadow_diff: {
+        schemaVersion: 1,
+        code: 'review_required',
+        changedFields: [],
+        absoluteMinuteDelta: 0,
+        segmentCount: 0,
+      },
     })
     expect(calc.segment_snapshot).toEqual([])
     expect(await segmentCountForCalculation(calc.id)).toBe(0)

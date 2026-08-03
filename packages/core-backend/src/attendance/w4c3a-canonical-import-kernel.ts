@@ -44,6 +44,7 @@ import type {
   VerifiedAttendanceLegacyPlanV1,
 } from './w4c3a-legacy-plan-worker'
 import { assertParentNotOperatorRetiredV1 } from './w4c3c-ops-retirement'
+import { computeAttendanceW4ShadowDiff } from '../services/AttendanceW4CalculationDetail'
 
 const PREIMAGE_FINGERPRINT_DOMAIN =
   'metasheet2:attendance:w4c3a:rollback-preimage-fingerprint:v1'
@@ -1042,6 +1043,39 @@ async function appendCanonicalCalculation(
   if (!terminalIdentity) throw new Error('W4C3A_IMPORT_OPERATION_IDENTITY_MISSING')
   const calculationId = crypto.randomUUID()
   const projection = completed ? canonical.dailyProjection : null
+  const compatibilityProjection = requireCompatibilityProjection(input.write)
+  const resolvedWorkDate = attribution.posture === 'resolved_v2'
+    ? attribution.value.workDate
+    : null
+  const shadowDiff = mode === 'shadow'
+    ? computeAttendanceW4ShadowDiff({
+        legacy: {
+          workDate: input.write.workDate,
+          status: compatibilityProjection.status,
+          firstInAt: compatibilityProjection.firstInAt,
+          lastOutAt: compatibilityProjection.lastOutAt,
+          workMinutes: compatibilityProjection.workMinutes,
+          lateMinutes: compatibilityProjection.lateMinutes,
+          earlyLeaveMinutes: compatibilityProjection.earlyLeaveMinutes,
+        },
+        calculated: projection
+          ? {
+              workDate: resolvedWorkDate,
+              status: projection.status,
+              firstInAt: projection.firstInAt,
+              lastOutAt: projection.lastOutAt,
+              workMinutes: projection.workedMinutes,
+              lateMinutes: projection.lateMinutes,
+              earlyLeaveMinutes: projection.earlyLeaveMinutes,
+            }
+          : null,
+        segmentCount: completed ? canonical.segments.length : 0,
+        outcome,
+        workDateMismatch: resolvedWorkDate !== null && resolvedWorkDate !== input.write.workDate,
+        contextMismatch: outcomeReasonCode === 'context_mismatch',
+        inputMismatch: outcomeReasonCode === 'input_schema_invalid' || outcomeReasonCode === 'import_metric_conflict',
+      })
+    : null
   await trx.query(
     `INSERT INTO attendance_record_calculations (
         id, org_id, attendance_record_id, version, calculation_kind, mode, entrypoint,
@@ -1052,11 +1086,12 @@ async function appendCanonicalCalculation(
         merge_policy, calculation_tier, outcome, outcome_reason_code, projection_effect,
         expected_segment_count, projected_status, projected_first_in_at, projected_last_out_at,
         projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
-        projected_daily_fingerprint, parent_preimage_snapshot, actor_id, correlation_id
+        projected_daily_fingerprint, parent_preimage_snapshot, shadow_diff_code, shadow_diff,
+        actor_id, correlation_id
       ) VALUES (
         $1::uuid,$2,$3::uuid,$4,'calculation',$5,'legacy_import',$6,1,$7::uuid,$8::uuid,
         $9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,'[]'::jsonb,NULL,$16::jsonb,
-        'append',$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29::jsonb,$30,$31
+        'append',$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29::jsonb,$30,$31::jsonb,$32,$33
       )`,
     [
       calculationId,
@@ -1096,6 +1131,8 @@ async function appendCanonicalCalculation(
       projection?.earlyLeaveMinutes ?? null,
       projection ? projectedDailyFingerprint(projection) : null,
       canonicalAttendanceJsonV1(input.preimage),
+      shadowDiff?.code ?? null,
+      shadowDiff ? canonicalAttendanceJsonV1(shadowDiff) : null,
       input.job.actorId,
       `attendance-import:${input.job.batchId}`,
     ],

@@ -158,6 +158,20 @@ describe('① today_status', () => {
     expect(trace.basis.every((b) => b.version.posture === 'undeterminable')).toBe(true)
   })
 
+  it('legacy row with an unknown persisted status ⇒ undeterminable, never echoes the unknown enum', async () => {
+    const q = makeMockQuery([
+      {
+        match: /FROM attendance_current_records/,
+        rows: [{ id: 'r1', status: 'future_status', is_workday: true, work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y' }],
+      },
+    ])
+    const trace = await buildTodayStatusTrace('org1', 'user1', '2026-07-01', q)
+    expect(trace.confidence).toBe('undeterminable')
+    expect(trace.conclusion.status).toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(trace, 'reasonCode')).toBe(false)
+    expect(JSON.stringify(trace)).not.toContain('future_status')
+  })
+
   it('record present ⇒ EXACT response key set + reasonCode is the status column value (scalar, hard rule 5①)', async () => {
     const q = makeMockQuery([
       {
@@ -211,6 +225,41 @@ describe('② late_early — tier legacy fail-closed (not a fabricated zero)', (
     ])
     const trace = await buildLateEarlyTrace('org1', 'user1', '2026-07-01', q)
     expect(trace.conclusion.severeLateCount).toBeNull()
+    const tierEnv = trace.basis.find((b) => b.source.ref === 'attendance_records.meta.tier')
+    expect(tierEnv?.version.posture).toBe('undeterminable')
+  })
+
+  it('legacy row with an unknown persisted status ⇒ undeterminable, never echoes the unknown enum', async () => {
+    const q = makeMockQuery([
+      {
+        match: /FROM attendance_current_records/,
+        rows: [{ id: 'r1', status: 'future_status', is_workday: true, work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y' }],
+      },
+    ])
+    const trace = await buildLateEarlyTrace('org1', 'user1', '2026-07-01', q)
+    expect(trace.confidence).toBe('undeterminable')
+    expect(trace.conclusion.status).toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(trace, 'reasonCode')).toBe(false)
+    expect(JSON.stringify(trace)).not.toContain('future_status')
+  })
+
+  it('present but malformed tier values ⇒ the whole tier snapshot is undeterminable, never fabricated as zero', async () => {
+    const q = makeMockQuery([
+      {
+        match: /FROM attendance_current_records/,
+        rows: [{
+          id: 'r1', status: 'late', is_workday: true, work_minutes: 400, late_minutes: 45, early_leave_minutes: 0,
+          meta: { severe_late_count: 'not-a-number', severe_late_minutes: 45, absence_late_count: 0 },
+          source_batch_id: null, created_at: 'x', updated_at: '2026-07-01T09:00:00Z',
+        }],
+      },
+      { match: /attendance_requests/, rows: [] },
+      ...NO_RULE_HANDLERS,
+    ])
+    const trace = await buildLateEarlyTrace('org1', 'user1', '2026-07-01', q)
+    expect(trace.conclusion.severeLateCount).toBeNull()
+    expect(trace.conclusion.severeLateMinutes).toBeNull()
+    expect(trace.conclusion.absenceLateCount).toBeNull()
     const tierEnv = trace.basis.find((b) => b.source.ref === 'attendance_records.meta.tier')
     expect(tierEnv?.version.posture).toBe('undeterminable')
   })
@@ -292,6 +341,20 @@ describe('③ missing_punch — reuses classifyAttendanceOwedPunch / suggestAtte
     const trace = await buildMissingPunchTrace('org1', 'user1', '2026-07-01', q)
     expect(trace.confidence).toBe('undeterminable')
     expect(Object.prototype.hasOwnProperty.call(trace, 'reasonCode')).toBe(false)
+  })
+
+  it('legacy row with an unknown persisted status ⇒ undeterminable, never invents status_<unknown>', async () => {
+    const q = makeMockQuery([
+      {
+        match: /FROM attendance_current_records/,
+        rows: [{ id: 'r1', status: 'future_status', is_workday: true, work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, meta: {}, source_batch_id: null, created_at: 'x', updated_at: 'y', first_in_at: 'x', last_out_at: 'y' }],
+      },
+    ])
+    const trace = await buildMissingPunchTrace('org1', 'user1', '2026-07-01', q)
+    expect(trace.confidence).toBe('undeterminable')
+    expect(trace.conclusion).toEqual({ missingSide: null, isWorkday: null, suggestedRequestType: null })
+    expect(Object.prototype.hasOwnProperty.call(trace, 'reasonCode')).toBe(false)
+    expect(JSON.stringify(trace)).not.toContain('future_status')
   })
 
   it('absent row ⇒ generation-source environment always undeterminable (no run marker exists, §1-3)', async () => {
@@ -455,6 +518,79 @@ describe('④ overtime_segmentation', () => {
     if (trace === ATTENDANCE_DECISION_TRACE_NOT_FOUND) throw new Error('unexpected not-found')
     expect(trace.coverageNote).toBe('partial_legacy')
     expect(trace.conclusion.segments).toHaveLength(0)
+  })
+
+  it('cross-midnight snapshot with an unknown perDate dayType ⇒ partial_legacy, never coerces that date to restday', async () => {
+    const q = makeMockQuery([
+      {
+        match: /FROM attendance_requests/,
+        rows: [{
+          id: 'req1',
+          metadata: {
+            minutes: 60,
+            overtimeSegmentation: {
+              version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-07-01',
+              crossesMidnight: true, dayType: 'workday', calendar: { effectiveSource: 'calendar_default' },
+              perDate: [
+                { date: '2026-07-01', dayType: 'workday', minutes: 40, calendar: { effectiveSource: 'calendar_default' } },
+                { date: '2026-07-02', dayType: 'future_day_type', minutes: 20, calendar: { effectiveSource: 'weekend_default' } },
+              ],
+              segments: { workdayMinutes: 40, restdayMinutes: 20, holidayMinutes: 0 }, totalMinutes: 60,
+            },
+          },
+          resolved_at: '2026-07-03T10:00:00Z', updated_at: 'y',
+        }],
+      },
+      { match: /FROM attendance_overtime_rules/, rows: [] },
+    ])
+    const trace = await buildOvertimeSegmentationTrace('org1', 'user1', 'req1', q, false)
+    if (trace === ATTENDANCE_DECISION_TRACE_NOT_FOUND) throw new Error('unexpected not-found')
+    expect(trace.coverageNote).toBe('partial_legacy')
+    expect(trace.conclusion.segments).toHaveLength(0)
+    expect(trace.conclusion.totalMinutes).toBe(60)
+    const snapEnv = trace.basis.find((b) => b.source.ref === 'attendance_requests.metadata.overtimeSegmentation')
+    expect(snapEnv?.version.posture).toBe('undeterminable')
+  })
+
+  it.each([
+    ['summary bucket', { workdayMinutes: 'not-a-number', restdayMinutes: 0, holidayMinutes: 0 }, 60, undefined],
+    ['summary total', { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, 'not-a-number', undefined],
+    [
+      'perDate minutes',
+      { workdayMinutes: 40, restdayMinutes: 20, holidayMinutes: 0 },
+      60,
+      [
+        { date: '2026-07-01', dayType: 'workday', minutes: 40, calendar: { effectiveSource: 'calendar_default' } },
+        { date: '2026-07-02', dayType: 'restday', minutes: 'not-a-number', calendar: { effectiveSource: 'weekend_default' } },
+      ],
+    ],
+  ])('malformed persisted %s numeric ⇒ partial_legacy, never a full trace containing fabricated zero', async (_name, segmentBuckets, total, perDate) => {
+    const q = makeMockQuery([
+      {
+        match: /FROM attendance_requests/,
+        rows: [{
+          id: 'req1',
+          metadata: {
+            minutes: 60,
+            overtimeSegmentation: {
+              version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-07-01',
+              dayType: 'workday', calendar: { effectiveSource: 'calendar_default' },
+              ...(perDate ? { crossesMidnight: true, perDate } : {}),
+              segments: segmentBuckets, totalMinutes: total,
+            },
+          },
+          resolved_at: '2026-07-03T10:00:00Z', updated_at: 'y',
+        }],
+      },
+      { match: /FROM attendance_overtime_rules/, rows: [] },
+    ])
+    const trace = await buildOvertimeSegmentationTrace('org1', 'user1', 'req1', q, false)
+    if (trace === ATTENDANCE_DECISION_TRACE_NOT_FOUND) throw new Error('unexpected not-found')
+    expect(trace.coverageNote).toBe('partial_legacy')
+    expect(trace.conclusion.segments).toHaveLength(0)
+    expect(trace.conclusion.totalMinutes).toBe(60)
+    const snapEnv = trace.basis.find((b) => b.source.ref === 'attendance_requests.metadata.overtimeSegmentation')
+    expect(snapEnv?.version.posture).toBe('undeterminable')
   })
 
   it('segment reasonCode is OMITTED (not a fabricated "unknown" literal) when effectiveSource is not a recognized string (§3.1 hard rule 5⑤ precedent applied to ④)', async () => {
