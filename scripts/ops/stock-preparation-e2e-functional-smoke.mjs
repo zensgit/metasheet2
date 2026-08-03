@@ -876,6 +876,155 @@ async function assertS6ARunDatabaseObservableOnFailure(operationId) {
   }
 }
 
+// ── capture-half refusal narrowing (values-free, drives the REAL modules) ───────────────────────────
+// failSealedExport's vocabulary is deliberately cause-free, and SEALED_EXPORT_CAPTURE_FAILED has call
+// sites in FOUR production modules — the token alone cannot say which stage refused. This walks the SAME
+// production sequence the capture service walks, using the SAME production modules and the SAME
+// production SQL builders (never a re-implementation of either), and reports which stage it reaches as
+// closed tokens and counts. It NEVER loosens anything: it only observes, in its own read-only snapshot
+// transaction, after the real run has already failed.
+async function diagnoseS6ACaptureRefusal({
+  approvedConfigVersionId,
+  bindingVersion,
+  identityKeyFile,
+  systemId,
+}) {
+  S.s6aCaptureProbeConnectionConfig = 'NOT_RUN'
+  S.s6aCaptureProbeSession = 'NOT_RUN'
+  S.s6aCaptureProbeSessionReason = '<none>'
+  S.s6aCaptureProbeDriverCode = 'NOT_RUN'
+  S.s6aCaptureProbeMetadata = 'NOT_RUN'
+  S.s6aCaptureProbeOrderingKey = 'NOT_RUN'
+  S.s6aCaptureProbeSourceRead = 'NOT_RUN'
+  S.s6aCaptureProbeSourceReadRows = -1
+  const closedReason = (error) => (
+    error && typeof error.reason === 'string' ? error.reason : '<non-sealed-throw>'
+  )
+  let context = null
+  let connectionConfig = null
+  try {
+    const authority = require_(
+      'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-sqlserver-source-authority.cjs',
+    )
+    const runtimeStore = require_(
+      'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-store.cjs',
+    )
+    const action = require_(
+      'plugins/plugin-integration-core/lib/sealed-export/sqlserver-sealed-snapshot-action.cjs',
+    )
+    const sourceSession = require_(
+      'plugins/plugin-integration-core/lib/sealed-export/sqlserver-sealed-snapshot-source-session.cjs',
+    )
+    // The connection config is DERIVED by the production source authority, not assembled here, so the
+    // probe cannot succeed against connection material the product would never build.
+    const derived = authority.deriveStockPreparationSqlServerSourceAnchors({
+      binding: {
+        approvedConfigVersionId,
+        bindingVersion,
+        canonicalObjectVersion: authority.CANONICAL_OBJECT_VERSION,
+        externalSystemId: systemId,
+        objectKey: runtimeStore.OBJECT_KEY,
+        relationId: runtimeStore.RELATION_ID,
+        tableRef: MSSQL_TABLE,
+        tenantId: TENANT_ID,
+        workspaceId: null,
+      },
+      externalSystem: {
+        config: {
+          sealedSnapshotSqlServer: {
+            database: MSSQL_DATABASE,
+            encrypt: true,
+            instanceName: null,
+            port: MSSQL_PORT,
+            server: MSSQL_HOST,
+            trustServerCertificate: true,
+          },
+        },
+        credentials: {
+          sealedSnapshotSqlServer: {
+            password: MSSQL_READER_PASSWORD,
+            user: MSSQL_READER_LOGIN,
+          },
+        },
+        id: systemId,
+        kind: 'data-source:sql-readonly',
+        role: 'source',
+        status: 'active',
+        tenantId: TENANT_ID,
+        workspaceId: null,
+      },
+      identityKey: fs.readFileSync(identityKeyFile),
+    })
+    connectionConfig = derived.connectionConfig
+    S.s6aCaptureProbeConnectionConfig = 'DERIVED'
+
+    try {
+      context = await sourceSession.openMssqlSnapshotCaptureContext({
+        connectionConfig,
+        tableRef: MSSQL_TABLE,
+      })
+      S.s6aCaptureProbeSession = 'OPENED'
+    } catch (error) {
+      S.s6aCaptureProbeSession = 'REFUSED'
+      S.s6aCaptureProbeSessionReason = closedReason(error)
+    }
+
+    if (context === null) {
+      // The only SEALED_EXPORT_CAPTURE_FAILED site upstream of the snapshot proof is the driver
+      // connect, so a raw connect with the SAME derived config splits "cannot connect at all" from
+      // "connects, refuses later". `error.code` here is the driver's own closed token (ELOGIN,
+      // ESOCKET, ETIMEOUT, ...), never a message.
+      const sql = requireFromPlugin('mssql')
+      const pool = new sql.ConnectionPool(connectionConfig)
+      try {
+        await pool.connect()
+        S.s6aCaptureProbeDriverCode = '<connected>'
+      } catch (error) {
+        S.s6aCaptureProbeDriverCode =
+          error && typeof error.code === 'string' ? error.code : '<no-code>'
+      } finally {
+        try { await pool.close() } catch { /* best-effort */ }
+      }
+      return
+    }
+
+    try {
+      await context.queryMetadata(action.CAPTURE_METADATA_SQL)
+      S.s6aCaptureProbeMetadata = 'PASS'
+    } catch (error) {
+      S.s6aCaptureProbeMetadata = `REFUSED:${closedReason(error)}`
+    }
+
+    const relation = action.CERTIFIED_RELATIONS[runtimeStore.RELATION_ID]
+    try {
+      await context.queryProbe(relation.buildOrderingKeyUniquenessProbeSql(MSSQL_TABLE))
+      S.s6aCaptureProbeOrderingKey = 'PASS'
+    } catch (error) {
+      S.s6aCaptureProbeOrderingKey = `REFUSED:${closedReason(error)}`
+    }
+
+    try {
+      const started = await context.startSourceRead(relation.buildSourceReadSql(MSSQL_TABLE))
+      let rows = 0
+      for await (const _row of started.stream) rows += 1
+      const completion = await started.completion
+      S.s6aCaptureProbeSourceReadRows = rows
+      S.s6aCaptureProbeSourceRead = completion && completion.ok === true ? 'PASS' : 'FAIL'
+    } catch (error) {
+      S.s6aCaptureProbeSourceRead = `REFUSED:${closedReason(error)}`
+    }
+  } catch (error) {
+    if (S.s6aCaptureProbeConnectionConfig === 'NOT_RUN') {
+      S.s6aCaptureProbeConnectionConfig = `REFUSED:${closedReason(error)}`
+    }
+  } finally {
+    if (context !== null) {
+      try { await context.rollback() } catch { /* best-effort */ }
+      try { await context.close() } catch { /* best-effort */ }
+    }
+  }
+}
+
 async function attemptS6ARealRun() {
   const salt = `t${Math.floor(Date.now() / 1000)}`
   const systemId = `e2efunc-s6a-source-${salt}`
@@ -1173,6 +1322,14 @@ async function attemptS6ARealRun() {
       // constraint requires one). This splits which half of the pipeline to look at — the closed
       // `error.code` alone cannot, since many call sites across the codebase share the same token.
       await assertS6ARunDatabaseObservableOnFailure(operationId)
+      // Narrow WHICH stage of the capture half refused, by walking the same production sequence with
+      // the same production modules. Never loosens anything — see diagnoseS6ACaptureRefusal's comment.
+      await diagnoseS6ACaptureRefusal({
+        approvedConfigVersionId,
+        bindingVersion,
+        identityKeyFile,
+        systemId,
+      })
       S.s6aDatabaseObservable = 'NOT_RUN'
       S.s6aReplayRun = 'NOT_RUN'
       S.s6aReplayNoSecondWrite = 'NOT_RUN'
