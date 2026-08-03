@@ -6288,7 +6288,7 @@ function getOrgId(req) {
 
 function getAuthenticatedOrgId(req) {
   const user = req.user
-  const raw = user?.orgId ?? user?.workspaceId ?? user?.tenantId
+  const raw = user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId
   if (typeof raw === 'string' && raw.trim().length > 0) return raw
   if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
   return null
@@ -24695,14 +24695,30 @@ module.exports = {
     }
 
     async function resolveAttendanceSchedulerScopeActor(req, res) {
-      const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
-      if (!routeActorAccess) return null
-      const { userId, orgId } = routeActorAccess
+      const userId = getUserId(req)
+      if (!userId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return null
+      }
+      const orgId = getOrgId(req)
       try {
         const fullAdmin = await hasAttendanceAdminAccess(userId)
         return { userId, orgId, fullAdmin }
       } catch (error) {
         logger.error('Attendance scheduler scope actor resolution failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        return null
+      }
+    }
+
+    async function resolveAttendanceGroupRouteSchedulerScopeActor(req, res) {
+      const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+      if (!actorAccess) return null
+      try {
+        const fullAdmin = await hasAttendanceAdminAccess(actorAccess.userId)
+        return { ...actorAccess, fullAdmin }
+      } catch (error) {
+        logger.error('Attendance group-route scheduler actor resolution failed', error)
         res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
         return null
       }
@@ -35527,7 +35543,7 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-dispatch-requests',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = scheduleDispatchCreateSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
@@ -35612,8 +35628,10 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-dispatch-requests',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const { page, pageSize, offset } = parsePagination(req.query)
-        const access = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'dispatch' })
+        const access = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'dispatch', actorAccess })
         if (!access) return
         const orgId = access.access.orgId
         const status = typeof req.query.status === 'string' && req.query.status.trim() ? req.query.status.trim() : null
@@ -38121,7 +38139,7 @@ module.exports = {
           return
         }
 
-        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!routeActorAccess) return
         const { page, pageSize, offset } = parsePagination(req.query)
         const orgId = routeActorAccess.orgId
@@ -38174,7 +38192,7 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-rules',
       withPermission('attendance:admin', async (req, res) => {
-        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!routeActorAccess) return
         const parsed = rotationRuleCreateSchema.safeParse(normalizeRotationRulePayload(req.body))
         if (!parsed.success) {
@@ -38417,6 +38435,8 @@ module.exports = {
       'GET',
       '/api/attendance/rotation-assignments',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           orgId: z.string().optional(),
           publishStatus: z.enum(['draft', 'pending', 'published', 'all']).optional(),
@@ -38436,7 +38456,7 @@ module.exports = {
 
         const { page, pageSize, offset } = parsePagination(req.query)
         const publishStatusFilter = normalizeAttendanceSchedulePublishStatusFilter(parsed.data.publishStatus)
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view', actorAccess })
         if (!viewAccess) return
         const orgId = viewAccess.access.orgId
 
@@ -38511,7 +38531,7 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-drafts/rotation-assignments',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
         if (!parsed.success) {
@@ -38617,7 +38637,7 @@ module.exports = {
       'PUT',
       '/api/attendance/schedule-drafts/rotation-assignments/:id',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
@@ -38778,7 +38798,7 @@ module.exports = {
       'DELETE',
       '/api/attendance/schedule-drafts/rotation-assignments/:id',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
@@ -38846,7 +38866,7 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-assignments',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
         if (!parsed.success) {
@@ -38960,7 +38980,7 @@ module.exports = {
       'PUT',
       '/api/attendance/rotation-assignments/:id',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
@@ -39131,7 +39151,7 @@ module.exports = {
       'DELETE',
       '/api/attendance/rotation-assignments/:id',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
@@ -43661,6 +43681,8 @@ module.exports = {
       'POST',
       '/api/attendance/groups',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           name: z.string().min(1),
           code: z.string().trim().optional().nullable(),
@@ -43676,7 +43698,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         let name
         let timezone
         let attendanceType
@@ -43727,6 +43749,8 @@ module.exports = {
       'PUT',
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           name: z.string().min(1),
           code: z.string().trim().optional().nullable(),
@@ -43742,7 +43766,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -43832,7 +43856,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44514,9 +44540,11 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-groups',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const { page, pageSize, offset } = parsePagination(req.query)
         const includeInactive = parseBoolean(req.query.includeInactive, false)
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view', actorAccess })
         if (!viewAccess) return
         const orgId = viewAccess.access.orgId
         try {
@@ -44561,12 +44589,14 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view', actorAccess })
         if (!viewAccess) return
         const orgId = viewAccess.access.orgId
         try {
@@ -44673,7 +44703,7 @@ module.exports = {
       'PUT',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = scheduleGroupSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
@@ -44794,7 +44824,7 @@ module.exports = {
           respondInvalidUuid(res)
           return
         }
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const orgId = actorAccess.orgId
         try {
@@ -44857,13 +44887,15 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-groups/:id/members',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
         const { page, pageSize, offset } = parsePagination(req.query)
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view', actorAccess })
         if (!viewAccess) return
         const orgId = viewAccess.access.orgId
         try {
@@ -44925,7 +44957,7 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-groups/:id/members',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = scheduleGroupMemberSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
@@ -45020,7 +45052,7 @@ module.exports = {
           respondInvalidUuid(res, 'memberId')
           return
         }
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const orgId = actorAccess.orgId
         try {
@@ -46016,7 +46048,12 @@ module.exports = {
         const orgId = actorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
         const publishStatusFilter = normalizeAttendanceSchedulePublishStatusFilter(parsed.data.publishStatus)
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const schedulerActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!schedulerActorAccess) return
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, {
+          action: 'view',
+          actorAccess: schedulerActorAccess,
+        })
         if (!viewAccess) return
 
         try {
@@ -46104,7 +46141,7 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-drafts/assignments',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = assignmentCreateSchema.safeParse(normalizeAssignmentPayload(req.body))
         if (!parsed.success) {
@@ -46243,7 +46280,7 @@ module.exports = {
       'PUT',
       '/api/attendance/schedule-drafts/assignments/:id',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = assignmentUpdateSchema.safeParse(normalizeAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
@@ -46439,7 +46476,7 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
           if (!actorAccess) return
           const orgId = actorAccess.orgId
 
@@ -46514,7 +46551,7 @@ module.exports = {
           return
         }
 
-        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!routeActorAccess) return
         const orgId = routeActorAccess.orgId
         const shiftId = normalizeUuidString(parsed.data.shiftId)
@@ -46539,7 +46576,11 @@ module.exports = {
           const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
           if (!windowAccess) return
 
-          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload,
+            actorAccess: routeActorAccess,
+          })
           if (!access) return
 
           const shiftRows = await db.query(
@@ -46643,7 +46684,7 @@ module.exports = {
           return
         }
 
-        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!routeActorAccess) return
         const orgId = routeActorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
@@ -46653,8 +46694,7 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
+          const actorAccess = routeActorAccess
 
           const existingRows = await db.query(
             'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
@@ -46831,7 +46871,7 @@ module.exports = {
       'DELETE',
       '/api/attendance/assignments/:id',
       async (req, res) => {
-        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!routeActorAccess) return
         const orgId = routeActorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
@@ -46841,8 +46881,7 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
+          const actorAccess = routeActorAccess
 
           const existingRows = await db.query(
             'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
@@ -47051,7 +47090,7 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-publications',
       async (req, res) => {
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
         const parsed = schedulePublicationSchema.safeParse(req.body ?? {})
         if (!parsed.success) {

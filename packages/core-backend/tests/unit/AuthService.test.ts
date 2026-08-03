@@ -101,6 +101,40 @@ describe('AuthService.verifyToken', () => {
     expect((user as any).password_hash).toBeUndefined()
   })
 
+  it('preserves the verified token tenant on the database-backed user', async () => {
+    jwtMocks.verify.mockReturnValue({
+      userId: 'u-tenant',
+      email: 'tenant@x',
+      role: 'user',
+      tenantId: 'tenant_42',
+      iat: 0,
+      exp: 0,
+    })
+    poolMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'u-tenant',
+        email: 'tenant@x',
+        name: 'Tenant User',
+        role: 'user',
+        permissions: ['attendance:read'],
+        password_hash: 'hash',
+        is_active: true,
+        activation_status: 'activated',
+        local_password_set: true,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }],
+    })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('tenant-token')
+
+    expect(user?.tenantId).toBe('tenant_42')
+    expect((user as any).password_hash).toBeUndefined()
+  })
+
   it('falls back to stored role/permissions when RBAC lookup fails', async () => {
     process.env.PRODUCT_MODE = 'plm-workbench'
     jwtMocks.verify.mockReturnValue({ userId: 'u2', email: 'user@x', role: 'user', iat: 0, exp: 0 })
@@ -578,6 +612,40 @@ describe('AuthService.login', () => {
 
     expect(result).toBeNull()
     expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('AuthService.resolveSessionTenantId', () => {
+  beforeEach(() => {
+    process.env.NODE_ENV = 'test'
+    poolMocks.query.mockReset()
+    secretManagerMocks.get.mockReset()
+    secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
+  })
+
+  it('uses one active organization when the login request has no tenant hint', async () => {
+    poolMocks.query.mockResolvedValue({ rows: [{ org_id: 'tenant_42' }] })
+
+    const auth = new AuthService()
+    await expect(auth.resolveSessionTenantId('user-1')).resolves.toBe('tenant_42')
+    expect(poolMocks.query).toHaveBeenCalledWith(expect.stringContaining('LIMIT 2'), ['user-1'])
+  })
+
+  it('fails closed when a user has multiple active organizations and no tenant hint', async () => {
+    poolMocks.query.mockResolvedValue({ rows: [{ org_id: 'tenant_a' }, { org_id: 'tenant_b' }] })
+
+    const auth = new AuthService()
+    await expect(auth.resolveSessionTenantId('user-1')).resolves.toBeUndefined()
+  })
+
+  it('accepts a requested organization only when active membership proves it', async () => {
+    poolMocks.query
+      .mockResolvedValueOnce({ rows: [{ org_id: 'tenant_42' }] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const auth = new AuthService()
+    await expect(auth.resolveSessionTenantId('user-1', 'tenant_42')).resolves.toBe('tenant_42')
+    await expect(auth.resolveSessionTenantId('user-1', 'tenant_other')).resolves.toBeUndefined()
   })
 })
 

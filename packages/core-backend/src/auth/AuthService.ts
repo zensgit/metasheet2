@@ -221,7 +221,8 @@ export class AuthService {
         }
       }
 
-      return this.sanitizeUser(user)
+      const tenantId = this.normalizeClaimString(payload.tenantId)
+      return this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
     } catch (error) {
       this.logger.warn('Token verification failed', error instanceof Error ? error : undefined)
       return null
@@ -286,9 +287,7 @@ export class AuthService {
       }
 
       const sessionId = crypto.randomUUID()
-      const tenantId = typeof options.tenantId === 'string' && options.tenantId.trim().length > 0
-        ? options.tenantId.trim()
-        : undefined
+      const tenantId = await this.resolveSessionTenantId(user.id, options.tenantId)
       const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId })
       const payload = this.readTokenPayload(token)
       if (payload?.exp) {
@@ -313,6 +312,47 @@ export class AuthService {
       }
       this.logger.error('Login error', error instanceof Error ? error : undefined)
       return null
+    }
+  }
+
+  async resolveSessionTenantId(userId: string, requestedTenantId?: string): Promise<string | undefined> {
+    const requested = typeof requestedTenantId === 'string' && requestedTenantId.trim().length > 0
+      ? requestedTenantId.trim()
+      : undefined
+    try {
+      const pool = poolManager.get()
+      if (requested) {
+        const result = await pool.query(
+          `SELECT uo.org_id
+           FROM user_orgs uo
+           JOIN users u ON u.id = uo.user_id
+           WHERE uo.user_id = $1
+             AND uo.org_id = $2
+             AND uo.is_active = true
+             AND u.is_active = true
+           LIMIT 1`,
+          [userId, requested],
+        )
+        return result.rows[0]?.org_id === requested ? requested : undefined
+      }
+
+      const result = await pool.query(
+        `SELECT uo.org_id
+         FROM user_orgs uo
+         JOIN users u ON u.id = uo.user_id
+         WHERE uo.user_id = $1
+           AND uo.is_active = true
+           AND u.is_active = true
+         ORDER BY uo.org_id ASC
+         LIMIT 2`,
+        [userId],
+      )
+      return result.rows.length === 1 && typeof result.rows[0]?.org_id === 'string'
+        ? result.rows[0].org_id
+        : undefined
+    } catch (error) {
+      this.logger.warn('Session tenant resolution failed', error instanceof Error ? error : undefined)
+      return undefined
     }
   }
 
@@ -714,8 +754,9 @@ export class AuthService {
         }
       }
 
-      const refreshedUser = this.normalizeClaimString(payload.tenantId)
-        ? { ...user, tenantId: this.normalizeClaimString(payload.tenantId) }
+      const tenantId = await this.resolveSessionTenantId(user.id, this.normalizeClaimString(payload.tenantId))
+      const refreshedUser = tenantId
+        ? { ...user, tenantId }
         : user
       const refreshedToken = this.createToken(refreshedUser, { sid: sessionId })
       const refreshedPayload = this.readTokenPayload(refreshedToken)

@@ -146,7 +146,7 @@ async function createHarness(
 async function invokeRoute(
   routes: Map<string, RouteHandler>,
   key: string,
-  options: { params?: Record<string, string>; body?: unknown; query?: Record<string, unknown>; headers?: Record<string, unknown>; user?: Record<string, unknown> } = {},
+  options: { params?: Record<string, string>; body?: unknown; query?: Record<string, unknown>; headers?: Record<string, unknown>; user?: Record<string, unknown>; authenticatedTenantId?: string } = {},
 ) {
   const handler = routes.get(key)
   expect(handler, key).toBeTypeOf('function')
@@ -158,6 +158,7 @@ async function invokeRoute(
       query: options.query ?? {},
       headers: options.headers ?? {},
       user: options.user ?? { id: 'attendance-user-1', orgId: 'default' },
+      authenticatedTenantId: options.authenticatedTenantId,
       ip: '127.0.0.1',
       get: vi.fn(() => undefined),
     },
@@ -3509,6 +3510,9 @@ describe('attendance UUID route validation', () => {
 
   it('fails closed on forged organizations across the R0 group-route inventory before scoped SQL', async () => {
     const cases = [
+      { key: 'POST /api/attendance/groups', body: { name: 'Scoped group' } },
+      { key: 'PUT /api/attendance/groups/:id', body: { name: 'Scoped group' } },
+      { key: 'DELETE /api/attendance/groups/:id' },
       { key: 'GET /api/attendance/groups/:id' },
       { key: 'GET /api/attendance/groups/:id/members' },
       { key: 'POST /api/attendance/groups/:id/members', body: { userId: 'worker-1' } },
@@ -3625,6 +3629,9 @@ describe('attendance UUID route validation', () => {
 
   it('rejects missing authenticated organizations and does not fall back to DEFAULT_ORG_ID', async () => {
     const cases = [
+      { key: 'POST /api/attendance/groups', body: { name: 'Scoped group' } },
+      { key: 'PUT /api/attendance/groups/:id', body: { name: 'Scoped group' } },
+      { key: 'DELETE /api/attendance/groups/:id' },
       { key: 'GET /api/attendance/groups/:id' },
       { key: 'GET /api/attendance/groups/:id/members' },
       { key: 'POST /api/attendance/groups/:id/members', body: { userId: 'worker-1' } },
@@ -3755,7 +3762,8 @@ describe('attendance UUID route validation', () => {
         body: testCase.body,
         query: { orgId: 'default' },
         headers: { 'x-org-id': 'default' },
-        user: { id: 'admin-1', orgId: 'default' },
+        user: { id: 'admin-1' },
+        authenticatedTenantId: 'default',
       })
 
       expect(res.statusCode, testCase.key).toBe(200)
