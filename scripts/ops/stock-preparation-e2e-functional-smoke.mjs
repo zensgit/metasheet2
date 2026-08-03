@@ -889,6 +889,23 @@ async function attemptS6ARealRun() {
       `flagOn=${flagOn}`)) {
       S.s6aFlagOnRun = 'NOT_RUN'
       S.s6aFlagOnReason = 'RUNTIME_NOT_CONSTRUCTED'
+      // Step 1 diagnostic: index.cjs's try/catch around runtime construction discards the actual cause
+      // and logs ONE fixed warning line on ANY failure (index.cjs, "sealed-snapshot runtime
+      // initialization refused; capability disabled") — by design, not a bug to route around. This does
+      // not change that discard on the production path; it only reports, as closed presence booleans
+      // (never the log's own text, which can carry MULTITABLE_..._RUNTIME_DATABASE_URL's password), which
+      // of two disjoint explanations the flag-on server's OWN log shows: the plugin's catch fired
+      // (construction was attempted and refused) vs. it never fired at all (the server did not even reach
+      // that code path — e.g. it crashed on boot for an unrelated reason such as a port conflict).
+      const flagOnLogPath = path.join(OUT_DIR, 'server-flag-on.log')
+      let logText = ''
+      try {
+        logText = fs.readFileSync(flagOnLogPath, 'utf8')
+      } catch {
+        // log not readable — both presence booleans stay false, which is itself an honest signal
+      }
+      S.s6aFlagOnCatchFired = String(logText.includes('sealed-snapshot runtime initialization refused'))
+      S.s6aFlagOnLogHasEaddrinuse = String(logText.includes('EADDRINUSE'))
       return
     }
 
