@@ -130,8 +130,11 @@ describeIfDatabase(
       )
     }
 
-    async function applyMigration(name: string): Promise<void> {
-      await owner.query(await readMigration(name))
+    // Returns the driver result rather than void so the replay arm's
+    // `.resolves.toBeDefined()` asserts something — a void-returning helper
+    // makes that matcher unsatisfiable, not merely weak.
+    async function applyMigration(name: string): Promise<unknown> {
+      return owner.query(await readMigration(name))
     }
 
     // The necessity arm is only valid BEFORE 075 is applied, so the arms share
@@ -248,7 +251,10 @@ describeIfDatabase(
           runtimeRole,
           runtimePassword,
         ),
-        max: 2,
+        // max: 4 — the contention arm holds `runtime` and checks out TWO more
+        // runtime connections at once. A tighter cap would not fail the test,
+        // it would deadlock it.
+        max: 4,
       })
       provisioningPool = new Pool({
         connectionString: roleConnectionString(
@@ -628,6 +634,11 @@ describeIfDatabase(
           latent.query(await readMigration(LOCK_GRANT_MIGRATION)),
         ).rejects.toMatchObject({ code: '55000' })
       } finally {
+        // The scratch session set custom GUCs and a search_path. Reset them
+        // before the connection returns to the pool, so a later checkout cannot
+        // inherit a half-configured session and turn a real refusal into a
+        // fixture accident.
+        await latent.query('RESET ALL').catch(() => {})
         latent.release()
       }
       await owner
