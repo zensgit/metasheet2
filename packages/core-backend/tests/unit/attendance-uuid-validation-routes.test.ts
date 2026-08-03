@@ -3505,68 +3505,64 @@ describe('attendance UUID route validation', () => {
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/clear', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
     ]
+    const selectors = [
+      { name: 'body', body: { orgId: 'other-org' } },
+      { name: 'query', query: { orgId: 'other-org' } },
+      { name: 'header', headers: { 'x-org-id': 'other-org' } },
+    ]
+
+    for (const testCase of cases) {
+      for (const selector of selectors) {
+        const label = `${testCase.key} (${selector.name})`
+        const { db, routes } = await createHarness()
+        const res = await invokeRoute(routes, testCase.key, {
+          params: testCase.params ?? { id: attendanceGroupId },
+          body: { ...(testCase.body ?? {}), ...(selector.body ?? {}) },
+          query: selector.query,
+          headers: selector.headers,
+          user: { id: 'admin-1', orgId: 'default' },
+        })
+        expect(res.statusCode, label).toBe(404)
+        expect(res.body, label).toEqual({
+          ok: false,
+          error: { code: 'NOT_FOUND', message: 'Group not found' },
+        })
+        expect(db.query, label).not.toHaveBeenCalled()
+        expect(db.transaction, label).not.toHaveBeenCalled()
+      }
+    }
+  })
+
+  it('rejects missing authenticated organizations and does not fall back to DEFAULT_ORG_ID', async () => {
+    const cases = [
+      { key: 'GET /api/attendance/groups/:id' },
+      { key: 'GET /api/attendance/groups/:id/members' },
+      { key: 'POST /api/attendance/groups/:id/members', body: { userId: 'worker-1' } },
+      { key: 'DELETE /api/attendance/groups/:id/members/:userId', params: { id: attendanceGroupId, userId: 'worker-1' } },
+      { key: 'GET /api/attendance/groups/:id/managers' },
+      { key: 'POST /api/attendance/groups/:id/managers', body: { userId: 'manager-1', role: 'owner' } },
+      { key: 'DELETE /api/attendance/groups/:id/managers/:managerId', params: { id: attendanceGroupId, managerId: scheduleGroupMemberId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/preview', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/clear', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+    ]
 
     for (const testCase of cases) {
       const { db, routes } = await createHarness()
       const res = await invokeRoute(routes, testCase.key, {
         params: testCase.params ?? { id: attendanceGroupId },
         body: testCase.body,
-        headers: { 'x-org-id': 'other-org' },
-        user: { id: 'admin-1', orgId: 'default' },
+        user: { id: 'admin-1' },
       })
-      expect(res.statusCode, testCase.key).toBe(404)
+      expect(res.statusCode, testCase.key).toBe(403)
       expect(res.body, testCase.key).toEqual({
         ok: false,
-        error: { code: 'NOT_FOUND', message: 'Group not found' },
+        error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' },
       })
       expect(db.query, testCase.key).not.toHaveBeenCalled()
       expect(db.transaction, testCase.key).not.toHaveBeenCalled()
     }
-  })
-
-  it('rejects missing authenticated organizations and does not fall back to DEFAULT_ORG_ID', async () => {
-    const cases = [
-      'GET /api/attendance/groups/:id',
-      'GET /api/attendance/groups/:id/members',
-      'GET /api/attendance/groups/:id/managers',
-      'POST /api/attendance/groups/:id/fixed-schedule/preview',
-      'POST /api/attendance/groups/:id/fixed-schedule/apply',
-      'POST /api/attendance/groups/:id/fixed-schedule/rebuild',
-      'POST /api/attendance/groups/:id/fixed-schedule/clear',
-    ]
-    const fixedBody = { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' }
-
-    for (const key of cases) {
-      const { db, routes } = await createHarness()
-      const res = await invokeRoute(routes, key, {
-        params: { id: attendanceGroupId },
-        body: key.includes('fixed-schedule') ? fixedBody : undefined,
-        user: { id: 'admin-1' },
-      })
-      expect(res.statusCode, key).toBe(403)
-      expect(res.body, key).toEqual({
-        ok: false,
-        error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' },
-      })
-      expect(db.query, key).not.toHaveBeenCalled()
-      expect(db.transaction, key).not.toHaveBeenCalled()
-    }
-  })
-
-  it.each([
-    { source: 'body', options: { body: { orgId: 'other-org' } } },
-    { source: 'query', options: { query: { orgId: 'other-org' } } },
-  ])('rejects a forged $source organization selector before the group probe', async ({ options }) => {
-    const { db, routes } = await createHarness()
-    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id', {
-      params: { id: attendanceGroupId },
-      ...options,
-      user: { id: 'admin-1', orgId: 'default' },
-    })
-
-    expect(res.statusCode).toBe(404)
-    expect(res.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
-    expect(db.query).not.toHaveBeenCalled()
   })
 
   it('uses the authenticated organization for the group probe and keeps role authorization independent', async () => {
