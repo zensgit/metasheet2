@@ -408,6 +408,69 @@ async function runFlagArm(flagValue, expectEnabled, label) {
   }
 }
 
+// ── S6-A flag NORMALIZATION arms (finding: no arm discriminated the two implementations) ──────────────
+// stock-preparation-runtime-config.cjs's featureEnabled() is
+// `String(env[FLAG] ?? '').trim().toLowerCase() === 'true'` — it NORMALISES before comparing. The
+// exact-match arms above ('1', 'yes') only prove values that fail BOTH a strict `=== 'true'` AND the
+// real normalising comparison stay disabled — every arm before this one happens to agree on the SAME
+// (disabled) answer, so none of them can tell the two implementations apart. 'TRUE', ' true ' (leading +
+// trailing whitespace), and 'True' all normalise to 'true' under trim+lowercase but would NOT survive a
+// naive strict-equals — only arms built from these three values pin the normalising comparison.
+// Each arm builds its OWN throwaway runtime-construction material (never the SQL Server relation, the
+// external-system record, or the provisioning spec attemptS6ARealRun() below sets up — this only proves
+// the runtime CONSTRUCTS for a given flag string, the same signal S6-A's own health capability boolean
+// already carries, not that a run succeeds) so it can run standalone, before the heavier real-run
+// attempt, using only the runtime-database role/URL the workflow already provisioned.
+async function runFlagNormalizationArm(flagValue, label) {
+  if (!RUNTIME_DB_ROLE || !RUNTIME_DB_URL) {
+    S[`${label}Run`] = 'NOT_RUN'
+    S[`${label}Reason`] = 'RUNTIME_DB_ENV_MISSING'
+    must(`flag normalization arm ${label}: runtime constructed`, false, 'runtime DB env not provided by workflow')
+    return
+  }
+  const keysDir = fs.mkdtempSync(path.join(os.tmpdir(), `s6a-e2e-normkeys-${label}-`))
+  const identityKeyFile = path.join(keysDir, 'identity.key')
+  const evidenceKeyFile = path.join(keysDir, 'evidence.key')
+  const qualificationKeyFile = path.join(keysDir, 'qualification.key')
+  const signerKeyFile = path.join(keysDir, 'signer.pem')
+  fs.writeFileSync(identityKeyFile, crypto.randomBytes(32))
+  fs.writeFileSync(evidenceKeyFile, crypto.randomBytes(32))
+  fs.writeFileSync(qualificationKeyFile, crypto.randomBytes(32))
+  const { privateKey } = crypto.generateKeyPairSync('ed25519')
+  fs.writeFileSync(signerKeyFile, privateKey.export({ type: 'pkcs8', format: 'pem' }))
+  const normArtifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), `s6a-e2e-normroot-${label}-`))
+  const runtimeEnv = {
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED: flagValue,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ARTIFACT_ROOT: normArtifactRoot,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_EVIDENCE_KEY_FILE: evidenceKeyFile,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_IDENTITY_KEY_FILE: identityKeyFile,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_QUALIFICATION_KEY_FILE: qualificationKeyFile,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_QUALIFICATION_KEY_ID: `${label}-qual-key-v1`,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_RUNTIME_DATABASE_ROLE: RUNTIME_DB_ROLE,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_RUNTIME_DATABASE_URL: RUNTIME_DB_URL,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_SIGNER_PRIVATE_KEY_FILE: signerKeyFile,
+  }
+  try {
+    await startServer(runtimeEnv, label)
+  } catch (error) {
+    S[`${label}Run`] = 'NOT_RUN'
+    S[`${label}Reason`] = 'RUNTIME_SERVER_START_FAILED'
+    must(`flag normalization arm ${label}: runtime constructed`, false, String(error && error.message || error))
+    return
+  }
+  try {
+    const token = await getDevToken()
+    const health = await requestJson('/api/integration/health', { token })
+    const flagOn = health.body?.capabilities?.stockPreparationSqlServerSealedSnapshot === true
+    S[`${label}HealthFlagOn`] = flagOn
+    must(`flag normalization arm ${label}: string variant normalises to enabled (runtime CONSTRUCTED, not just flag-string-present)`,
+      flagOn, `flagOn=${flagOn}`)
+    S[`${label}Run`] = flagOn ? 'PASS' : 'FAIL'
+  } finally {
+    await stopServer()
+  }
+}
+
 // ── existing chain (T4 extended smoke) ──────────────────────────────────────────────────────────────
 async function runExistingChain(token) {
   const outDir = path.join(OUT_DIR, 'existing-chain')
@@ -896,31 +959,25 @@ async function attemptS6ARealRun() {
 
   // 4. flag-ON restart with the full runtime authority wired.
   //
-  // Temporary diagnostic (same in-process-replay idiom this file's own history already used once —
-  // see the removed error.stack replay noted in the toUtcSecondsIso comment above — captured, then
-  // deleted once the finding lands): `SEALED_EXPORT_BINDING_UNQUALIFIED` is thrown from ~45 call sites
-  // across two files, and this arm's flag-ON server runs in a SEPARATE spawned process, so a monkeypatch
-  // in THIS script's own process cannot see it. A `--require` preload injected into ONLY that spawned
-  // process wraps failSealedExport (patching failure-vocabulary.cjs's export before any other module
-  // requires it, so every downstream destructured reference picks up the wrapped version) and appends a
-  // fresh stack to a file for this reason ONLY — still throws exactly as before, changes no behavior.
-  // Read job-log only (via note()), never written to summary.txt/checks.json.
-  const stackCapturePath = path.join(keysDir, 'binding-unqualified-stacks.txt')
-  const preloadPath = path.join(keysDir, 'capture-binding-unqualified-stack.cjs')
-  fs.writeFileSync(preloadPath, `
-'use strict'
-const fs = require('node:fs')
-const vocab = require(${JSON.stringify(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/sealed-export/failure-vocabulary.cjs'))})
-const original = vocab.failSealedExport
-vocab.failSealedExport = function patched(reason, details) {
-  if (reason === 'SEALED_EXPORT_BINDING_UNQUALIFIED') {
-    try {
-      fs.appendFileSync(${JSON.stringify(stackCapturePath)}, new Error('capture').stack + '\\n---\\n')
-    } catch {}
-  }
-  return original(reason, details)
-}
-`)
+  // RD-E2E finding (root-caused via a temporary --require preload that wrapped failSealedExport and
+  // captured a stack for SEALED_EXPORT_BINDING_UNQUALIFIED — since REMOVED; the preload only ever
+  // observed, it never changed behavior, but any green obtained with production modules monkey-patched
+  // is a green under instrumented modules, so it does not belong in the merged harness). The captured
+  // stack pinned the refusal to stock-preparation-sqlserver-source-authority.cjs's normalizeExternalSystem
+  // -> ownedCanonical -> canonicalCodec.tryFreezeCanonical(raw), called with the FULL adapter-shaped
+  // object external-systems.cjs's rowToAdapterExternalSystem returns for a real DB row (id, tenantId,
+  // workspaceId, kind, role, status, config, credentials, PLUS projectId, name, capabilities,
+  // lastTestedAt, lastError, createdAt, updatedAt). createdAt/updatedAt are always non-null JS `Date`
+  // instances (integration_external_systems.created_at/updated_at are `TIMESTAMPTZ NOT NULL DEFAULT
+  // NOW()`, and no `pg` type-parser override exists anywhere in this repo, confirmed by grep), and the
+  // canonical-json codec's domain explicitly refuses Date (`EXOTIC_OBJECT`) — confirmed locally by
+  // feeding canonical-json.cjs the exact adapter shape with and without Date-typed createdAt/updatedAt
+  // (identical otherwise): `ok:false, violation:'EXOTIC_OBJECT'` with them, `ok:true` without. This
+  // reproduces for ANY external-system row created through the ordinary product API, not just this
+  // harness's fixture — no external-system fixture value can change what rowToAdapterExternalSystem
+  // returns, since createdAt/updatedAt are populated by the database itself on every insert. This is a
+  // genuine product defect (a production-file fix is required — out of scope for this harness-only PR,
+  // and this PR does not attempt one), not a fixture defect; see the PR body for the full report.
   const runtimeEnv = {
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED: 'true',
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ARTIFACT_ROOT: ARTIFACT_ROOT,
@@ -931,7 +988,6 @@ vocab.failSealedExport = function patched(reason, details) {
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_RUNTIME_DATABASE_ROLE: RUNTIME_DB_ROLE,
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_RUNTIME_DATABASE_URL: RUNTIME_DB_URL,
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_SIGNER_PRIVATE_KEY_FILE: signerKeyFile,
-    NODE_OPTIONS: `--require ${preloadPath}`,
   }
   try {
     await startServer(runtimeEnv, 'flag-on')
@@ -1002,16 +1058,14 @@ vocab.failSealedExport = function patched(reason, details) {
       // constraint requires one). This splits which half of the pipeline to look at — the closed
       // `error.code` alone cannot, since many call sites across the codebase share the same token.
       await assertS6ARunDatabaseObservableOnFailure(operationId)
-      // Job-log only (never in the uploaded evidence): the exact call-site stack(s) captured by the
-      // temporary --require preload above, if this failure was SEALED_EXPORT_BINDING_UNQUALIFIED.
-      try {
-        const stacks = fs.readFileSync(stackCapturePath, 'utf8')
-        note('S6-A: BINDING_UNQUALIFIED call-site stack(s) (job log only, not in uploaded evidence)', `\n${stacks}`)
-      } catch {
-        // no capture file — this failure was not BINDING_UNQUALIFIED, or the preload never loaded
-      }
       S.s6aDatabaseObservable = 'NOT_RUN'
       S.s6aReplayRun = 'NOT_RUN'
+      // Finding (review #4724): this early return used to fall straight through to main()'s evidence
+      // write with NO s6aFlagOnRun key at all — absence of a key is not distinguishable from
+      // not-applicable, and this IS the path that actually executes today. Always emit it, on every exit
+      // out of this function, not just the ones above.
+      S.s6aFlagOnRun = 'FAIL'
+      S.s6aFlagOnReason = 'FIRST_RUN_FAILED'
       return
     }
 
@@ -1057,6 +1111,14 @@ export async function main() {
     // Phase 2: exact-match arms — '1' and 'yes' must NOT enable the route.
     await runFlagArm('1', false, 'exactMatch1')
     await runFlagArm('yes', false, 'exactMatchYes')
+
+    // Phase 2b: normalization arms — 'TRUE', ' true ', 'True' MUST enable the route (they normalise to
+    // 'true' under trim+lowercase). Unlike phase 2's arms, these actually distinguish a strict
+    // `=== 'true'` comparison from the real normalising one — see the block comment above
+    // runFlagNormalizationArm().
+    await runFlagNormalizationArm('TRUE', 'normTrueUpper')
+    await runFlagNormalizationArm(' true ', 'normTrueSpaced')
+    await runFlagNormalizationArm('True', 'normTrueTitle')
 
     // Phase 3: existing chain (T4 extended smoke) against a fresh flag-OFF server.
     await startServer({}, 'existing-chain')
