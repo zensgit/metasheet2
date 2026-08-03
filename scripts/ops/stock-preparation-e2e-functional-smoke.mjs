@@ -575,6 +575,31 @@ async function runProvisioningScript(env) {
 // performs — same modules, same env — in-process, so `error.stack` (never surfaced by the script itself)
 // is visible here for diagnosis only. Does not change what the production script or its dependencies do.
 async function diagnoseProvisioningFailureStack(provisioningEnv) {
+  // dbBoundary (sealed-export-lifecycle-provisioning.cjs) catches EVERY error from db.transaction() and,
+  // unless it is already a trusted sealed-export error, discards it and throws a fresh
+  // SEALED_EXPORT_INTERNAL_ERROR — the real driver-level exception (e.g. a Postgres permission/relation
+  // error) never reaches error.stack. Patch pg.Client.prototype.query for the lifetime of this ONE
+  // diagnostic call only (restored in `finally`, values-free: only the driver's own error MESSAGE — schema
+  // shape, never row data — is logged, job-log only) to see what it actually was.
+  const pg = requireFromPlugin('pg')
+  let originalQuery
+  try {
+    originalQuery = pg.Client.prototype.query
+    pg.Client.prototype.query = function patchedQuery(...args) {
+      const result = originalQuery.apply(this, args)
+      if (result && typeof result.catch === 'function') {
+        return result.catch((error) => {
+          note('DIAGNOSTIC (job log only): raw pg query error (message only, no row data)',
+            String(error && error.message || error))
+          throw error
+        })
+      }
+      return result
+    }
+  } catch (error) {
+    originalQuery = null
+    note('DIAGNOSTIC (job log only): could not patch pg.Client.prototype.query', String(error && error.message || error))
+  }
   try {
     const { loadStockPreparationProvisioningConfig } = require_(
       'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-config.cjs',
@@ -610,6 +635,8 @@ async function diagnoseProvisioningFailureStack(provisioningEnv) {
     }
   } catch (error) {
     note('DIAGNOSTIC (job log only): in-process provisioning replay stack', String(error && error.stack || error))
+  } finally {
+    if (originalQuery) pg.Client.prototype.query = originalQuery
   }
 }
 
