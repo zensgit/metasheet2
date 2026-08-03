@@ -3603,6 +3603,41 @@ describe('attendance UUID route validation', () => {
     }
   })
 
+  it('admits attendance admins through the route-mounted surface reads for the authenticated organization', async () => {
+    const cases = [
+      { key: 'GET /api/attendance/rule-sets' },
+      { key: 'POST /api/attendance/rule-sets/preview', body: { config: {}, orgId: 'default' } },
+      { key: 'GET /api/attendance/advanced-scheduling/workbench' },
+      { key: 'GET /api/attendance/shifts' },
+      { key: 'GET /api/attendance/assignments' },
+      { key: 'GET /api/attendance/holidays' },
+    ]
+
+    for (const testCase of cases) {
+      const { db, routes } = await createHarness('false')
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, true)
+        if (rbac !== undefined) return rbac
+        if (sql.includes('COUNT(*)::int AS total')) return [{ total: 0 }]
+        return []
+      })
+
+      const res = await invokeRoute(routes, testCase.key, {
+        body: testCase.body,
+        query: { orgId: 'default' },
+        headers: { 'x-org-id': 'default' },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode, testCase.key).toBe(200)
+      expect(res.body, testCase.key).toMatchObject({ ok: true })
+      expect(
+        db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('attendance_')),
+        testCase.key,
+      ).toBe(true)
+    }
+  })
+
   it('returns the same neutral 404 for a foreign group id before any child-table SQL', async () => {
     const cases = [
       { key: 'GET /api/attendance/groups/:id' },
