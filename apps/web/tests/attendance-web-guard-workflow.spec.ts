@@ -22,4 +22,17 @@ describe('attendance web guard workflow contract', () => {
     expect(workflow).toContain(' attendance-web-guard-workflow.spec --reporter=dot')
     expect(workflow).toContain("if: steps.changes.outputs.relevant == 'true'")
   })
+
+  it('keeps the group-context route host proof in the classifier and targeted run list', () => {
+    expect(workflow.match(/apps\/web\/src\/router\/attendanceGroupContextRoute\.ts/g)).toHaveLength(2)
+    for (const spec of [
+      'attendance-experience-mobile-zh',
+      'attendanceGroupContextRoute',
+      'attendanceGroupContextHost',
+      'attendanceGroupRouteHydration',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(workflow).toContain(` ${spec}`)
+    }
+  })
 })

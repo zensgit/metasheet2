@@ -3,6 +3,9 @@ import { createApp, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { useLocale } from '../src/composables/useLocale'
 import AttendanceExperienceView from '../src/views/attendance/AttendanceExperienceView.vue'
+import { apiFetch } from '../src/utils/api'
+
+vi.mock('../src/utils/api', () => ({ apiFetch: vi.fn() }))
 
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
@@ -93,6 +96,11 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
       history: createMemoryHistory(),
       routes: [
         { path: '/attendance', component: AttendanceExperienceView },
+        {
+          path: '/attendance/admin/groups/:groupId/schedule',
+          name: 'attendance-admin-group-schedule',
+          component: AttendanceExperienceView,
+        },
       ],
     })
     await router.push('/attendance?tab=admin')
@@ -136,5 +144,16 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
     expect(container?.textContent).toContain('建议使用桌面端')
     expect(container?.textContent).toContain('流程设计仅支持桌面端')
     expect(container?.querySelector('[data-testid="attendance-workflow-designer"]')).toBeNull()
+  })
+
+  it('keeps a group route blocked on mobile without starting a probe or scoped request', async () => {
+    vi.mocked(apiFetch).mockClear()
+    await router?.replace('/attendance/admin/groups/11111111-2222-4333-8444-555555555555/schedule')
+    await flushUi(6)
+
+    expect(router?.currentRoute.value.path).toBe('/attendance/admin/groups/11111111-2222-4333-8444-555555555555/schedule')
+    expect(container?.textContent).toContain('建议使用桌面端')
+    expect(container?.querySelector('[data-testid="attendance-admin-center"]')).toBeNull()
+    expect(apiFetch).not.toHaveBeenCalled()
   })
 })

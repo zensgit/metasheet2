@@ -20,10 +20,23 @@
     <section v-else-if="desktopOnlyBlocked" class="attendance-shell__desktop-hint">
       <h3>{{ t.desktopRecommended }}</h3>
       <p>{{ desktopOnlyMessage }}</p>
-      <button class="attendance-shell__btn" type="button" @click="selectTab('overview')">
+      <button class="attendance-shell__btn" type="button" @click="returnFromGroupRoute">
         {{ t.backToOverview }}
       </button>
     </section>
+
+    <AttendanceGroupContextHost
+      v-else-if="groupRouteActive"
+      :key="groupRouteHostKey"
+      :context="routeGroupContext"
+      @return="returnFromGroupRoute"
+    >
+      <template #default="{ group, step, surface, returnTo }">
+        <AttendanceAdminCenter
+          :route-group-context="{ group, step, surface, returnTo }"
+        />
+      </template>
+    </AttendanceGroupContextHost>
 
     <component
       v-else-if="activeView"
@@ -45,9 +58,14 @@ import type { LocationQueryRaw } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { confirmAttendanceSetupPrefillLeave } from './attendanceSetupPrefillLeaveGuard'
+import {
+  isAttendanceGroupContextPath,
+  resolveAttendanceGroupRouteContext,
+} from '../../router/attendanceGroupContextRoute'
 import AttendanceOverview from './AttendanceOverview.vue'
 import AttendanceReportsView from './AttendanceReportsView.vue'
 import AttendanceAdminCenter from './AttendanceAdminCenter.vue'
+import AttendanceGroupContextHost from './AttendanceGroupContextHost.vue'
 import AttendanceWorkflowDesigner from './AttendanceWorkflowDesigner.vue'
 
 type AttendanceTab = 'overview' | 'reports' | 'admin' | 'import' | 'workflow'
@@ -81,6 +99,34 @@ onBeforeRouteLeave(() => confirmAttendanceSetupPrefillLeave(setupPrefillLeaveTr)
 const activeTab = ref<AttendanceTab>('overview')
 const featuresReady = ref(false)
 const isMobile = ref(false)
+
+function firstRouteValue(value: unknown): unknown {
+  return Array.isArray(value) ? value[0] : value
+}
+
+function routeStepFromMetadata(): unknown {
+  const step = firstRouteValue(route.params?.step)
+  if (typeof step === 'string') return step
+  if (route.name === 'attendance-admin-group-schedule') return 'schedule'
+  if (route.name === 'attendance-admin-group-calendar') return 'calendar'
+  if (route.name === 'attendance-admin-group-rules') return 'rules'
+  return undefined
+}
+
+const groupRouteActive = computed(() => isAttendanceGroupContextPath(route.path))
+const routeGroupContext = computed(() => {
+  if (!groupRouteActive.value) return null
+  return resolveAttendanceGroupRouteContext({
+    groupId: firstRouteValue(route.params?.groupId),
+    step: routeStepFromMetadata(),
+    surface: firstRouteValue(route.query.surface),
+    returnTo: firstRouteValue(route.query.returnTo),
+    currentPath: route.path,
+  })
+})
+const groupRouteHostKey = computed(() => routeGroupContext.value
+  ? `${routeGroupContext.value.groupId}:${routeGroupContext.value.step}:${routeGroupContext.value.surface ?? ''}`
+  : route.path)
 
 const canAccessAdmin = computed(() => hasFeature('attendanceAdmin'))
 const canAccessWorkflow = computed(() => hasFeature('workflow'))
@@ -257,6 +303,10 @@ function ensureTabAllowed(nextTab: AttendanceTab): AttendanceTab {
 }
 
 function syncFromRoute(): void {
+  if (groupRouteActive.value) {
+    activeTab.value = ensureTabAllowed('admin')
+    return
+  }
   const queryTab = normalizeTab(route.query.tab)
   activeTab.value = ensureTabAllowed(queryTab)
 }
@@ -285,7 +335,15 @@ async function returnToAdminHome(): Promise<void> {
   await router.replace({ query })
 }
 
-watch(() => route.query.tab, () => {
+async function returnFromGroupRoute(): Promise<void> {
+  if (groupRouteActive.value) {
+    await router.push(routeGroupContext.value?.returnTo ?? '/attendance?tab=admin&section=attendance-admin-groups')
+    return
+  }
+  await selectTab('overview')
+}
+
+watch(() => [route.path, route.name, route.query.tab, route.query.surface, route.query.returnTo, route.params?.groupId, route.params?.step], () => {
   if (!featuresReady.value) return
   syncFromRoute()
 })

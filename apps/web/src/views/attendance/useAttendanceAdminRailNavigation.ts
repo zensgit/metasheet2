@@ -9,6 +9,7 @@ type UseAttendanceAdminRailNavigationOptions = {
   showAdmin: ReadonlyBoolRef
   adminForbidden: ReadonlyBoolRef
   adminNavigationEnabled?: ReadonlyBoolRef
+  adminRouteOwned?: ReadonlyBoolRef
   adminFocusCurrentSectionOnly?: ReadonlyBoolRef
   previousAdminSectionId?: ReadonlyStringRef
   nextAdminSectionId?: ReadonlyStringRef
@@ -25,6 +26,7 @@ export function useAttendanceAdminRailNavigation({
   showAdmin,
   adminForbidden,
   adminNavigationEnabled,
+  adminRouteOwned,
   adminFocusCurrentSectionOnly,
   previousAdminSectionId,
   nextAdminSectionId,
@@ -50,6 +52,10 @@ export function useAttendanceAdminRailNavigation({
   // preserving pre-Wave-3 behavior for any other consumer of this composable.
   function isAdminNavigationEnabled(): boolean {
     return adminNavigationEnabled?.value ?? true
+  }
+
+  function isAdminRouteOwned(): boolean {
+    return adminRouteOwned?.value ?? false
   }
 
   function resolveAdminKeyboardTarget(direction: 'previous' | 'next'): string | null {
@@ -104,7 +110,7 @@ export function useAttendanceAdminRailNavigation({
   }
 
   function readAdminSectionHash(): string | null {
-    if (typeof window === 'undefined') return null
+    if (typeof window === 'undefined' || isAdminRouteOwned()) return null
     const hash = window.location.hash.replace(/^#/, '').trim()
     return isKnownAdminSectionId(hash) ? hash : null
   }
@@ -115,7 +121,7 @@ export function useAttendanceAdminRailNavigation({
   }
 
   function syncAdminSectionHash(id: string): void {
-    if (typeof window === 'undefined' || !isKnownAdminSectionId(id)) return
+    if (typeof window === 'undefined' || isAdminRouteOwned() || !isKnownAdminSectionId(id)) return
     const nextHash = `#${id}`
     if (window.location.hash === nextHash) return
     window.history.replaceState(window.history.state, '', nextHash)
@@ -123,7 +129,7 @@ export function useAttendanceAdminRailNavigation({
 
   async function restoreAdminSectionFromHash(maxAttempts = 4): Promise<boolean> {
     if (adminHashRestoreCompleted || adminHashRestorePending) return false
-    const restoreId = readAdminSectionHash() ?? (isAdminNavigationEnabled() ? readLastKnownAdminSection() : null)
+    const restoreId = readAdminSectionHash() ?? (!isAdminRouteOwned() && isAdminNavigationEnabled() ? readLastKnownAdminSection() : null)
     if (!restoreId) return false
     adminHashRestorePending = true
     try {
@@ -145,11 +151,11 @@ export function useAttendanceAdminRailNavigation({
 
   function syncAdminSectionObserver(): void {
     disconnectAdminSectionObserver()
-    if (typeof window === 'undefined' || adminForbidden.value || !showAdmin.value) return
+    if (typeof window === 'undefined' || adminForbidden.value || !showAdmin.value || !isAdminNavigationEnabled() || isAdminRouteOwned()) return
     const elements = resolveAdminSectionElements()
     if (elements.length === 0) return
     const initialId = readAdminSectionHash()
-      ?? (isAdminNavigationEnabled() ? readLastKnownAdminSection() : null)
+      ?? (!isAdminRouteOwned() && isAdminNavigationEnabled() ? readLastKnownAdminSection() : null)
       ?? elements[0].id
     adminActiveSectionId.value = initialId
     if (typeof window.IntersectionObserver === 'undefined') return
@@ -191,7 +197,7 @@ export function useAttendanceAdminRailNavigation({
   }
 
   async function syncActiveAdminNavLinkIntoView(id: string): Promise<void> {
-    if (typeof window === 'undefined' || !showAdmin.value || !isKnownAdminSectionId(id)) return
+    if (typeof window === 'undefined' || !showAdmin.value || isAdminRouteOwned() || !isKnownAdminSectionId(id)) return
     await nextTick()
     const link = resolveActiveAdminNavLink(id)
     if (!(link instanceof HTMLElement)) return
@@ -217,7 +223,7 @@ export function useAttendanceAdminRailNavigation({
   }
 
   function handleAdminSectionKeyboardNavigation(event: KeyboardEvent): void {
-    if (!showAdmin.value || adminForbidden.value || !isAdminNavigationEnabled()) return
+    if (!showAdmin.value || adminForbidden.value || !isAdminNavigationEnabled() || isAdminRouteOwned()) return
     if (!event.altKey || event.metaKey || event.ctrlKey) return
     if (event.defaultPrevented || isInteractiveAdminKeyboardTarget(event.target)) return
     const direction = event.key === 'ArrowUp'
@@ -287,12 +293,12 @@ export function useAttendanceAdminRailNavigation({
   })
 
   watch(adminActiveSectionId, id => {
-    if (!showAdmin.value || !isAdminNavigationEnabled() || !adminHashSyncReady || !isKnownAdminSectionId(id)) return
+    if (!showAdmin.value || !isAdminNavigationEnabled() || isAdminRouteOwned() || !adminHashSyncReady || !isKnownAdminSectionId(id)) return
     syncAdminSectionHash(id)
   })
 
   watch(adminActiveSectionId, id => {
-    if (!showAdmin.value || !isAdminNavigationEnabled() || !isKnownAdminSectionId(id)) return
+    if (!showAdmin.value || !isAdminNavigationEnabled() || isAdminRouteOwned() || !isKnownAdminSectionId(id)) return
     void syncActiveAdminNavLinkIntoView(id)
   })
 
