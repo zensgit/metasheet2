@@ -357,7 +357,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('creates a legacy-envelope shift with a persisted segment 0 (dual-write)', async () => {
     const orgId = org('create-legacy')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const res = await createShiftViaApi(token, orgId, { name: 'Day', timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00' })
     expect(res.status, res.raw).toBe(201)
     const shift = res.body.data
@@ -377,7 +377,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('creates a multi-segment shift with derived envelope and preview-only capability', async () => {
     const orgId = org('create-multi')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const res = await createShiftViaApi(token, orgId, {
       name: 'Split',
       timezone: 'UTC',
@@ -411,7 +411,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('rejects invalid segment arrays with a typed 422 and zero writes', async () => {
     const orgId = org('create-invalid')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const before = await countRows('attendance_shifts', orgId)
 
     const overlap = await createShiftViaApi(token, orgId, {
@@ -447,7 +447,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('metadata-only PUT preserves segments; start/end-only PUT on a multi-segment shift is rejected', async () => {
     const orgId = org('put-modes')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
 
     const metadata = await putJson(`/api/attendance/shifts/${multiId}`, token, orgId, { name: 'Split Renamed', lateGraceMinutes: 7 })
@@ -488,7 +488,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('blocks converting one segment to multiple while an active assignment references the shift', async () => {
     const orgId = org('put-conversion')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const created = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const shiftId = created.body.data.id as string
     await seedPublishedAssignment(orgId, `${orgId}-worker`, shiftId, '2049-06-10')
@@ -506,7 +506,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('blocks converting one segment to multiple when only ended assignment history references the shift', async () => {
     const orgId = org('put-ended-conversion')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const created = await createShiftViaApi(token, orgId, { name: 'Historic Day', workStartTime: '09:00', workEndTime: '18:00' })
     const shiftId = created.body.data.id as string
     await seedPublishedAssignment(orgId, `${orgId}-worker`, shiftId, '2020-01-06')
@@ -530,7 +530,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const workDate = '2020-01-06'
     await seedActiveIdentity(adminId, orgId)
     await seedActiveIdentity(userId, orgId)
-    const token = await mintToken(adminId)
+    const token = await mintToken(adminId, orgId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Historic Split',
       timezone: 'UTC',
@@ -576,7 +576,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const orgId = org('runtime-punch-guard')
     const userId = `${orgId}-worker`
     const workDate = '2024-10-07'
-    const token = await mintToken(userId)
+    const token = await mintToken(userId, orgId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Punch Split',
       timezone: 'UTC',
@@ -619,7 +619,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('rename + rejected segment conversion is atomic and leaves legacy rotation rules untouched', async () => {
     const orgId = org('put-rename-atomic')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Legacy Named',
       workStartTime: '09:00',
@@ -658,7 +658,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('rename normalization rolls back when the later shift update fails', async () => {
     const orgId = org('rename-update-failure')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Atomic Legacy Name',
       workStartTime: '09:00',
@@ -714,8 +714,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('cross-org: a shift is invisible and unreferenceable from another org', async () => {
     const orgX = org('xorg-x')
     const orgY = org('xorg-y')
-    const tokenX = await mintToken(`${orgX}-admin`)
-    const tokenY = await mintToken(`${orgY}-admin`)
+    const tokenX = await mintToken(`${orgX}-admin`, orgX)
+    const tokenY = await mintToken(`${orgY}-admin`, orgY)
     const multiId = await createMultiShift(tokenX, orgX)
 
     const detail = await requestJson(`${baseUrl}/api/attendance/shifts/${multiId}`, { headers: authHeaders(tokenY, orgY) })
@@ -733,7 +733,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: draft + active assignment create/update return typed 422 with zero writes', async () => {
     const orgId = org('matrix-assign')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
@@ -788,7 +788,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: rotation rule create/update return typed 422 with zero writes', async () => {
     const orgId = org('matrix-rules')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
@@ -818,7 +818,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: generated rotation assignment create/update (draft + active) return typed 422 with zero writes', async () => {
     const orgId = org('matrix-rotasgn')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     // Rule seeded directly: the API create would (correctly) 422 on M.
     const ruleId = randomUUID()
@@ -886,7 +886,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('legacy duplicate-name rotation references fail closed when any matching shift is multi-segment', async () => {
     const orgId = org('matrix-legacy-name')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     await createShiftViaApi(token, orgId, {
       name: 'Duplicate',
       workStartTime: '09:00',
@@ -945,7 +945,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: shift-swap create returns typed 422 with zero writes', async () => {
     const orgId = org('matrix-swap')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Other', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
@@ -965,7 +965,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: schedule-dispatch create returns typed 422 with zero writes', async () => {
     const orgId = org('matrix-dispatch')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
@@ -987,7 +987,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const orgId = randomUUID()
     const actorId = `${orgId}-admin`
     await seedActiveIdentity(actorId, orgId)
-    const token = await mintToken(actorId)
+    const token = await mintToken(actorId, orgId)
     await enableShadowPosture(orgId)
 
     const requesterShift = (await createShiftViaApi(token, orgId, {
@@ -1052,7 +1052,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: schedule publication fails closed when a draft shift became multi-segment', async () => {
     const orgId = org('matrix-publish')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
     const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
@@ -1075,7 +1075,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('P27: schedule publication consumes the canonical posture seam before publishing a multi-segment reference', async () => {
     const orgId = randomUUID()
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'P27 Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
     const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
@@ -1096,7 +1096,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('P27: rotation publication consumes the same posture seam before publishing a multi-segment reference', async () => {
     const orgId = randomUUID()
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'P27 Rotation Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
     const rule = await postJson('/api/attendance/rotation-rules', token, orgId, {
@@ -1129,7 +1129,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const orgId = randomUUID()
     const userId = `${orgId}-worker`
     const workDate = '2049-06-17'
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const shiftId = (await createShiftViaApi(token, orgId, {
       name: 'P27 calculation first',
       workStartTime: '09:00',
@@ -1185,7 +1185,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const orgId = randomUUID()
     const userId = `${orgId}-worker`
     const workDate = '2049-06-18'
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const shiftId = (await createShiftViaApi(token, orgId, {
       name: 'P27 publication first',
       workStartTime: '09:00',
@@ -1303,8 +1303,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const counterpartyDate = '2049-06-20'
     await seedActiveIdentity(requesterId, orgId)
     await seedActiveIdentity(counterpartyId, orgId)
-    const requesterToken = await mintToken(requesterId)
-    const counterpartyToken = await mintToken(counterpartyId)
+    const requesterToken = await mintToken(requesterId, orgId)
+    const counterpartyToken = await mintToken(counterpartyId, orgId)
     await enableShadowPosture(orgId)
 
     const requesterShift = (await createShiftViaApi(requesterToken, orgId, {
@@ -1397,7 +1397,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const workDate = '2049-06-21'
     await seedActiveIdentity(actorId, orgId)
     await seedActiveIdentity(subjectId, orgId)
-    const token = await mintToken(actorId)
+    const token = await mintToken(actorId, orgId)
     await enableShadowPosture(orgId)
     const shiftId = (await createShiftViaApi(token, orgId, {
       name: 'P18 dispatch shift', workStartTime: '09:00', workEndTime: '18:00',
@@ -1501,8 +1501,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const counterpartyId = `${orgId}-b`
     await seedActiveIdentity(requesterId, orgId)
     await seedActiveIdentity(counterpartyId, orgId)
-    const requesterToken = await mintToken(requesterId)
-    const counterpartyToken = await mintToken(counterpartyId)
+    const requesterToken = await mintToken(requesterId, orgId)
+    const counterpartyToken = await mintToken(counterpartyId, orgId)
     const shiftA = (await createShiftViaApi(requesterToken, orgId, { name: 'A', workStartTime: '09:00', workEndTime: '13:00' })).body.data.id as string
     const shiftB = (await createShiftViaApi(requesterToken, orgId, { name: 'B', workStartTime: '14:00', workEndTime: '18:00' })).body.data.id as string
     const assignmentA = await seedPublishedAssignment(orgId, requesterId, shiftA, '2049-06-14')
@@ -1542,7 +1542,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const orgId = org('matrix-dispatch-final')
     const actorId = `${orgId}-admin`
     await seedActiveIdentity(actorId, orgId)
-    const token = await mintToken(actorId)
+    const token = await mintToken(actorId, orgId)
     const shiftId = (await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
@@ -1641,7 +1641,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('delete: typed 409 with zero writes for every durable blocker class', async () => {
     const orgId = org('delete-blockers')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
 
     async function expectDeleteBlocked(shiftId: string, blocker: string) {
       const segmentsBefore = await segmentCount(shiftId)
@@ -1721,7 +1721,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('delete: rejected/cancelled evidence does not block, remains stored, and reads redact the raw UUID', async () => {
     const orgId = org('delete-evidence')
-    const requesterToken = await mintToken(`${orgId}-a`)
+    const requesterToken = await mintToken(`${orgId}-a`, orgId)
     const shiftA = (await createShiftViaApi(requesterToken, orgId, { name: 'Ev A', workStartTime: '09:00', workEndTime: '13:00' })).body.data.id as string
     const shiftB = (await createShiftViaApi(requesterToken, orgId, { name: 'Ev B', workStartTime: '14:00', workEndTime: '18:00' })).body.data.id as string
 
@@ -1847,7 +1847,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('read hardening: an orphaned schedule-dispatch request never trusts or exposes a metadata-only shift UUID', async () => {
     const orgId = org('orphan-dispatch')
     const userId = `${orgId}-user`
-    const token = await mintToken(userId)
+    const token = await mintToken(userId, orgId)
     const orphanRequestId = randomUUID()
     const rawShiftId = randomUUID()
     await pool.query(
@@ -1893,7 +1893,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const plugin = require('../../../../plugins/plugin-attendance/index.cjs')
     const service = plugin.__attendanceShiftServiceForTests.getService()
     const orgId = org('concurrency')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const shiftId = (await createShiftViaApi(token, orgId, { name: 'Race', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
 
     const wrap = (client: import('pg').PoolClient) => ({
