@@ -215,13 +215,20 @@ describeDb('attendance group fixed-schedule config migration (real DB)', () => {
     })()
 
     await writerLocked
+    let signalDeleteLockAttempted!: () => void
+    const deleteLockAttempted = new Promise<void>((resolve) => { signalDeleteLockAttempted = resolve })
     const deleteDb = {
       transaction: async (callback: (trx: { query: (text: string, values?: unknown[]) => Promise<unknown[]> }) => Promise<unknown>) => {
         const client = await pool.connect()
         await client.query('BEGIN')
         try {
           const result = await callback({
-            query: async (text: string, values: unknown[] = []) => (await client.query(text, values)).rows,
+            query: async (text: string, values: unknown[] = []) => {
+              if (text.includes('FROM attendance_shifts') && text.includes('FOR UPDATE')) {
+                signalDeleteLockAttempted()
+              }
+              return (await client.query(text, values)).rows
+            },
           })
           await client.query('COMMIT')
           return result
@@ -234,7 +241,13 @@ describeDb('attendance group fixed-schedule config migration (real DB)', () => {
       },
     }
     const deletion = shiftService.deleteShift(deleteDb, { orgId: 'org-a', shiftId })
-    await new Promise(resolve => setTimeout(resolve, 50))
+    let deletionSettled = false
+    void deletion.then(
+      () => { deletionSettled = true },
+      () => { deletionSettled = true },
+    )
+    await deleteLockAttempted
+    expect(deletionSettled).toBe(false)
     releaseWriter()
 
     await expect(writer).resolves.toMatchObject({ revision: 1 })

@@ -118,6 +118,9 @@ const FILES = Object.freeze([
   'tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts',
   // W4C-3c plugin HTTP routes through actual loader (auth/capability/operationId).
   'tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts',
+  // #4709 FSER-1 desired-config schema, lifecycle, and reference-lock proof.
+  // Keep it excluded from the no-DB lane and whole-file wired into the attendance step.
+  'tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts',
 ])
 
 /**

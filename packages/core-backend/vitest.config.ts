@@ -642,6 +642,9 @@ export default defineConfig({
       // DecisionTrace evidence and strict persisted-schema parsing against real Postgres.
       // Kept out of the no-DB run and invoked by whole filename in plugin-tests.yml.
       'tests/integration/attendance-w4c4-calculation-detail.db.test.ts',
+      // #4709 FSER-1 desired-config migration, composite FKs, idempotent writes,
+      // and reference-writer/delete lock protocol against real PostgreSQL.
+      'tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
