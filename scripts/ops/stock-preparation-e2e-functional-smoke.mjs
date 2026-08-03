@@ -1196,27 +1196,27 @@ async function attemptS6ARealRun() {
   const { privateKey } = crypto.generateKeyPairSync('ed25519')
   fs.writeFileSync(signerKeyFile, privateKey.export({ type: 'pkcs8', format: 'pem' }))
   fs.mkdirSync(ARTIFACT_ROOT, { recursive: true })
-  // FINDING (RD-E2E, R2c) — the capture root is never created by anything in the product.
+  // FIXED (RD-E2E, R2c / R3) — the capture root is now created by the product.
   //
   // stock-preparation-runtime-core.cjs derives `captureRoot = <artifactRoot>/capture` and
   // stock-preparation-sqlserver-runtime.cjs hands it to the sealed-snapshot service as its
-  // `artifactRoot`. The service's very first act in execute() is
-  // `fsPromises.mkdtemp(path.join(artifactRoot, 'sealed-export-s5-'))`, and mkdtemp requires the PARENT
-  // to already exist — it does not create it. No `mkdir` for that path exists anywhere in
-  // lib/sealed-export/, and the failure is caught by a bare `catch` that turns ENOENT into the
-  // cause-free token SEALED_EXPORT_CAPTURE_FAILED. The asymmetry is visible one directory over:
-  // private-ingestion-blob-store.cjs DOES `fs.mkdir(privateRoot, { recursive: true, mode: 0o700 })`
-  // for its own root, so the capture side is the odd one out rather than a deliberate contract.
-  // docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md tells the operator to
-  // set ARTIFACT_ROOT but never says a `capture` subdirectory must exist under it.
+  // `artifactRoot`. sqlserver-sealed-snapshot-service-core.cjs's execute() now does
+  // `fsPromises.mkdir(artifactRoot, { recursive: true, mode: 0o700 })` immediately before its
+  // `mkdtemp`, mirroring private-ingestion-blob-store.cjs's createSessionArea(), which already did the
+  // same for its own structurally identical derived root. `recursive: true` means the product would
+  // create the WHOLE chain, ARTIFACT_ROOT included, if none of it existed — ARTIFACT_ROOT is no longer
+  // a precondition the product depends on either; the mkdirSync above exists only because THIS harness
+  // needs the directory sooner, for the key files it just wrote into it.
   //
-  // This harness therefore creates it, the same way an operator would have to — and RECORDS whether it
-  // already existed, so the evidence block carries the finding instead of hiding it. This is fixture
-  // setup, not a workaround: no production file is changed, and the gap is reported in the PR body.
+  // This harness therefore no longer pre-creates the capture root. Two fields prove the product created
+  // it: `s6aCaptureRootExistedBeforeRun` records that the harness did not, and
+  // `s6aCaptureRootCreatedByProduct` (set after the run, see below) proves the directory exists
+  // afterward despite that — i.e. the product created it, not this harness.
   const captureRoot = path.join(path.resolve(ARTIFACT_ROOT), 'capture')
   S.s6aCaptureRootExistedBeforeRun = String(fs.existsSync(captureRoot))
-  fs.mkdirSync(captureRoot, { recursive: true, mode: 0o700 })
-  S.s6aCaptureRootCreatedByHarness = 'true'
+  // Seeded now, overwritten once the first run completes (below) — so an early return
+  // between here and there still emits the field rather than silently dropping it.
+  S.s6aCaptureRootCreatedByProduct = 'NOT_RUN'
 
   // 1. real SQL Server relation (ephemeral, first-party, synthetic rows only)
   let relation
@@ -1479,6 +1479,12 @@ async function attemptS6ARealRun() {
     // details discipline guarantees that) — so it is safe to surface directly in the values-free evidence,
     // the same way the flag-arm probes already surface `${label}Code` above.
     S.s6aFirstRunErrorCode = firstRun.body?.error?.code || '<none>'
+    // Proves the PRODUCT created the capture root, not this harness: s6aCaptureRootExistedBeforeRun
+    // above is false (the harness never mkdirs `<ARTIFACT_ROOT>/capture`, only `<ARTIFACT_ROOT>`
+    // itself), and the directory exists now regardless of how the run above concluded — execute()'s
+    // mkdir runs before any capture I/O, so it fires whether the walk goes on to succeed or refuse for
+    // an unrelated reason downstream.
+    S.s6aCaptureRootCreatedByProduct = String(fs.existsSync(captureRoot))
     const firstOk = firstRun.ok && firstData.status === 'COMPLETED' && firstData.mode === 'internal_persist' &&
       firstData.externalWrite === false && firstData.businessLineCount === relation.rows.length
     must('S6-A: first run -> COMPLETED, internal_persist, externalWrite=false, businessLineCount matches',

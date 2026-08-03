@@ -243,6 +243,26 @@ function normalizeRun(row, scope, operationId) {
   ) {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
   }
+  // DISCLOSED GAP (R3, observability). `failure_reason` is readable only for
+  // CAPTURE_FAILED — migration 073's ck_integration_sealed_export_stock_prep_failure_shape
+  // enforces the same rule at the DB layer (failure_reason IS NOT NULL iff status =
+  // 'CAPTURE_FAILED'). That means a run that fails LATER — e.g. activation refused by
+  // an authority-table row-lock privilege denial (generation-kernel.cjs's
+  // activateGeneration -> generation-store.cjs's readAuthorityStateForUpdate) — leaves
+  // this row unchanged at whatever RESUMABLE_STATUSES status it already reached (here,
+  // GENERATION_VERIFIED), with no failure_reason and no other column free to record the
+  // attempt: every column below is CHECK-constrained to a fixed shape per status. An
+  // operator reading only the database therefore cannot distinguish "healthy, not yet
+  // retried" from "an activation attempt already failed here" — and the failure in
+  // question is itself a ROLLED-BACK READ (the whole transaction aborts on the
+  // permission-denied SELECT ... FOR UPDATE before any write), so even a freed column
+  // would still never be written on that path without ALSO adding a new out-of-transaction
+  // write. Closing this needs both halves — a schema change here AND a new write path on
+  // the activation failure branch — which is deliberately NOT done in this change: this
+  // store's job is to hold the CHECK-mirrored shape, not to grow a second, looser one for
+  // one failure class, and the activation failure path itself is under a separate,
+  // unresolved ratified-contract question this change does not touch. See the PR
+  // description for the full disclosure.
   if (row.status === 'CAPTURE_FAILED') {
     requiredToken(row.failure_reason)
   } else if (row.failure_reason !== null) {

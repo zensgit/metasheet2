@@ -102,7 +102,14 @@ function createHermeticSqlServerSealedSnapshotServiceForTests(rawConfig) {
         ? true
         : rawConfig.hermeticCapture.snapshotCapable === true,
   })
-  return createSqlServerSealedSnapshotServiceCore({
+  // Optional in-memory-compiled core, for negative-control mutation tests that need
+  // the SAME hermetic capture wiring as every other caller here but a mutated core.
+  // Every existing caller omits this and gets the real, on-disk core, unchanged.
+  const coreFactory =
+    typeof rawConfig.coreFactory === 'function'
+      ? rawConfig.coreFactory
+      : createSqlServerSealedSnapshotServiceCore
+  return coreFactory({
     approvedBindings: rawConfig.approvedBindings,
     artifactRoot: rawConfig.artifactRoot,
     authorityDb: rawConfig.authorityDb,

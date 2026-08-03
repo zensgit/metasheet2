@@ -336,6 +336,30 @@ function main() {
     'the read-set extractor did not notice an added read — it is decorative',
   )
 
+  // Bracket-access sentinel. memberReads() above is a DOTTED-only regex
+  // (`\bsystem\.member`) — it cannot see computed-key access (`system['member']`),
+  // and this module already uses computed-key access in-idiom one line down
+  // (`system.config[SOURCE_CONFIG_KEY]`), so a future read added as
+  // `system['projectId']` would be invisible to the read-set assertion above and
+  // could drift from EXTERNAL_SYSTEM_PROJECTION_FIELDS unnoticed — silently reading
+  // a member the codec never screened once the projection narrowed which members
+  // are canonicalised. Assert the body contains no bracket access on `system` at all.
+  assert.equal(
+    /\bsystem\s*\[/.test(normalizeBody),
+    false,
+    'normalizeExternalSystem() reads a member off `system` via bracket access — the ' +
+    'dotted-only read-set extractor above cannot see this and the member could ' +
+    'drift from EXTERNAL_SYSTEM_PROJECTION_FIELDS unnoticed',
+  )
+  // Extractor self-test: a regex that matches nothing would make the assertion above
+  // pass vacuously, exactly the failure mode this sentinel exists to close. An added
+  // bracket read must actually be detected.
+  assert.equal(
+    /\bsystem\s*\[/.test(`${normalizeBody}\n  const drift = system['projectId']\n`),
+    true,
+    'the bracket-access scan did not notice an added computed-key read — it is decorative',
+  )
+
   // The raw record must be touched exactly once inside normalizeExternalSystem(), by
   // the projection itself. A future direct read off `raw` would bypass the projection
   // entirely and the read-set assertion above would not see it.
@@ -379,6 +403,35 @@ function main() {
     /\braw\s*\.\s*[A-Za-z_$]/.test(`${projectionBody}\n  projected.extra = raw.projectId\n`),
     true,
     'the projection-body scan did not notice a smuggled member read — it is decorative',
+  )
+
+  // Bracket-form of the same hole, one frame down. projectExternalSystem() is
+  // allowed exactly one bracket idiom — the literal `raw[field]` / `projected[field]`
+  // pair inside the EXTERNAL_SYSTEM_PROJECTION_FIELDS loop — and nothing else. A
+  // smuggled `projected['extra'] = raw['projectId']` would bypass both the dotted
+  // scan just above (it is bracket-form, not dotted) and the hasOwnProperty
+  // allowance, so it must be caught here instead. Strip the one legitimate literal
+  // idiom out, then require no bracket access on `raw`/`projected` remains.
+  const strippedProjectionBody = projectionBody
+    .split('raw[field]').join('')
+    .split('projected[field]').join('')
+  assert.equal(
+    /\b(raw|projected)\s*\[/.test(strippedProjectionBody),
+    false,
+    'projectExternalSystem() reads or writes a member via bracket access outside ' +
+    'the raw[field]/projected[field] loop idiom — that member would bypass ' +
+    'EXTERNAL_SYSTEM_PROJECTION_FIELDS entirely',
+  )
+  // Extractor self-test: a smuggled bracket-form member must actually be detected,
+  // through the same stripping the real assertion applies.
+  assert.equal(
+    /\b(raw|projected)\s*\[/.test(
+      `${projectionBody}\n  projected['extra'] = raw['projectId']\n`
+        .split('raw[field]').join('')
+        .split('projected[field]').join(''),
+    ),
+    true,
+    'the projection-body bracket scan did not notice a smuggled member — it is decorative',
   )
 
   // ── 5. PROJECTION DRIFT PIN (side B) — nothing listed may be unread ────────────────

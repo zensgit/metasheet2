@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const fsPromises = require('node:fs/promises')
+const Module = require('node:module')
 const os = require('node:os')
 const path = require('node:path')
 
@@ -150,6 +151,11 @@ async function buildService(options = {}) {
         signerKeyId: material.signerKeyId,
       },
     ],
+    // Every existing caller omits this and gets the real, on-disk core — see
+    // sealed-export-s5-hermetic-service.cjs. Only the capture-root negative control
+    // below passes an in-memory-compiled mutant, so it can reuse this exact fixture
+    // instead of hand-building a second one.
+    coreFactory: options.coreFactory,
   })
   async function setAuthorityForQualification(qualification, overrides = {}) {
     service.verifyQualificationForBinding(
@@ -1142,9 +1148,129 @@ async function signerRevocationAfterArtifactFinalizeRefusesSigning() {
   }
 }
 
+// FINDING (R3, capture-root provisioning) — execute() derives its capture directory
+// from `artifactRoot`, the DERIVED per-run capture path a real caller computes (e.g.
+// stock-preparation-runtime-core.cjs's `<ARTIFACT_ROOT>/capture`), and mkdtemp's a
+// session directory inside it. mkdtemp requires its PARENT to already exist and does
+// not create it. This mirrors private-ingestion-blob-store.cjs's createSessionArea(),
+// which mkdirs its own structurally identical derived root
+// (`<ARTIFACT_ROOT>/private-ingestion`) before ever touching it — so the capture side
+// used to be the odd one out, not a deliberate contract.
+const CORE_MODULE_PATH = require.resolve(
+  '../lib/sealed-export/sqlserver-sealed-snapshot-service-core.cjs',
+)
+
+function compileCoreMutant(mutatedSource) {
+  const mutant = new Module(CORE_MODULE_PATH, module)
+  mutant.filename = CORE_MODULE_PATH
+  mutant.paths = Module._nodeModulePaths(path.dirname(CORE_MODULE_PATH))
+  mutant._compile(mutatedSource, CORE_MODULE_PATH)
+  return mutant.exports.createSqlServerSealedSnapshotServiceCore
+}
+
+// REGRESSION ARM — a multiply-nested, never-created artifactRoot must resolve, and
+// the PRODUCT must be what created it: this test never mkdirs it, only hands the
+// never-created path to execute().
+async function capturePerRunDirectoryIsCreatedByTheProduct() {
+  const containerRoot = await fsPromises.mkdtemp(
+    path.join(os.tmpdir(), 'sealed-export-s5-captureroot-'),
+  )
+  const neverCreated = path.join(containerRoot, 'artifact-root', 'capture')
+  try {
+    assert.equal(fs.existsSync(neverCreated), false)
+    const { service, queryDigest, qualify } = await buildService({
+      artifactRoot: neverCreated,
+    })
+    const qualification = await qualify()
+    const result = await service.execute({
+      envelope: envelopeFor(queryDigest, qualification.qualificationDigest),
+    })
+    assert.equal(result.actionId, SQLSERVER_SEALED_SNAPSHOT_ACTION_ID)
+    const stat = fs.statSync(neverCreated)
+    assert.equal(stat.isDirectory(), true)
+  } finally {
+    await fsPromises.rm(containerRoot, { force: true, recursive: true })
+  }
+}
+
+// NEGATIVE CONTROL — the core is recompiled IN MEMORY with the mkdir removed.
+// Nothing is written into lib/sealed-export/. On the mutant, the same never-created
+// root must refuse with SEALED_EXPORT_CAPTURE_FAILED (the pre-fix behaviour) — and
+// the SAME mutant must still resolve against an ALREADY-EXISTING root, otherwise the
+// refusal could be firing because the mutant is broken in general, not because the
+// mkdir was removed.
+async function capturePerRunDirectoryNegativeControl() {
+  const moduleSource = fs.readFileSync(CORE_MODULE_PATH, 'utf8')
+  const NEEDLE =
+    '        const createdRoot = await fsPromises.mkdir(\n' +
+    '          artifactRoot,\n' +
+    '          { recursive: true, mode: 0o700 },\n' +
+    '        )\n' +
+    '        if (createdRoot !== undefined) {\n' +
+    '          await fsPromises.chmod(artifactRoot, 0o700)\n' +
+    '        }\n'
+  assert.equal(
+    moduleSource.split(NEEDLE).length - 1,
+    1,
+    'the capture-root mkdir is not present exactly once — the negative control ' +
+    'would mutate the wrong thing (or nothing)',
+  )
+  const mutatedSource = moduleSource.replace(NEEDLE, '')
+  assert.notEqual(
+    mutatedSource,
+    moduleSource,
+    'mutation produced a byte-identical module — the negative control would prove nothing',
+  )
+  const mutantCoreFactory = compileCoreMutant(mutatedSource)
+
+  const containerRoot = await fsPromises.mkdtemp(
+    path.join(os.tmpdir(), 'sealed-export-s5-captureroot-neg-'),
+  )
+  const neverCreated = path.join(containerRoot, 'artifact-root', 'capture')
+  const preExisting = path.join(containerRoot, 'already-there')
+  fs.mkdirSync(preExisting, { recursive: true })
+  try {
+    const missing = await buildService({
+      artifactRoot: neverCreated,
+      coreFactory: mutantCoreFactory,
+    })
+    const missingQualification = await missing.qualify()
+    await expectReason(
+      () =>
+        missing.service.execute({
+          envelope: envelopeFor(
+            missing.queryDigest,
+            missingQualification.qualificationDigest,
+          ),
+        }),
+      'SEALED_EXPORT_CAPTURE_FAILED',
+    )
+
+    const present = await buildService({
+      artifactRoot: preExisting,
+      coreFactory: mutantCoreFactory,
+    })
+    const presentQualification = await present.qualify()
+    const result = await present.service.execute({
+      envelope: envelopeFor(
+        present.queryDigest,
+        presentQualification.qualificationDigest,
+      ),
+    })
+    assert.equal(result.actionId, SQLSERVER_SEALED_SNAPSHOT_ACTION_ID)
+  } finally {
+    await fsPromises.rm(containerRoot, { force: true, recursive: true })
+  }
+
+  // The real module, re-read from disk, is untouched by the mutation.
+  assert.equal(fs.readFileSync(CORE_MODULE_PATH, 'utf8'), moduleSource)
+}
+
 async function main() {
   certifiedRelationLookupRejectsPrototypeProperties()
   await positiveHermeticCoreEngine()
+  await capturePerRunDirectoryIsCreatedByTheProduct()
+  await capturePerRunDirectoryNegativeControl()
   await hermeticCoreIsNotHardcodedCertFixtureOnly()
   await callerInjectionStructurallyUnavailable()
   await duplicateRoleBindingFingerprintRefusesAtConstruction()
