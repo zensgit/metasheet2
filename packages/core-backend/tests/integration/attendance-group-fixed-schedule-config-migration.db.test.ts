@@ -111,6 +111,23 @@ describeDb('attendance group fixed-schedule config migration (real DB)', () => {
     expect(rows.rows).toEqual([{ revision: 1 }])
   })
 
+  it('removes the group-org key when no later foreign key depends on it', async () => {
+    await sql`CREATE TABLE attendance_calculation_group_memberships (id uuid PRIMARY KEY)`.execute(db)
+    await sql`CREATE TABLE attendance_calculation_group_membership_operations (id uuid PRIMARY KEY)`.execute(db)
+
+    await membershipMigrationDown(db)
+
+    const constraint = await sql<{ constraint_present: boolean }>`
+      SELECT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conname = 'attendance_groups_id_org_unique'
+           AND conrelid = 'attendance_groups'::regclass
+      ) AS constraint_present
+    `.execute(db)
+    expect(constraint.rows[0]?.constraint_present).toBe(false)
+  })
+
   it('keeps the shared group-org key when the earlier membership migration rolls back', async () => {
     const { groupId, shiftId } = await insertParents('org-a')
     await up(db)
