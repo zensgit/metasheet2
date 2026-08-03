@@ -136,9 +136,9 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     )
   }
 
-  async function mintToken(userId: string): Promise<string> {
+  async function mintToken(userId: string, tenantId?: string): Promise<string> {
     const res = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin,attendance:approve,attendance:import')}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}${tenantId ? `&tenantId=${encodeURIComponent(tenantId)}` : ''}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin,attendance:approve,attendance:import')}`,
     )
     expect(res.status, res.raw).toBe(200)
     return (res.body as { token?: string })?.token ?? ''
@@ -912,7 +912,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: fixed schedule apply and rebuild return typed 422 with zero writes', async () => {
     const orgId = org('matrix-fixed')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
 
     const group = await postJson('/api/attendance/groups', token, orgId, {
@@ -1577,7 +1577,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: automatic matching apply returns typed 422 with zero writes', async () => {
     const orgId = org('matrix-automatch')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
     try {
       const settings = await putJson('/api/attendance/settings', token, orgId, {
