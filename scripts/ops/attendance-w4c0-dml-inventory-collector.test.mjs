@@ -179,6 +179,7 @@ test('W4C-4: generated SELECT inventory classifies every calculation and segment
   )
   assert.deepEqual(result.countDrift, [], 'a new direct read in a known wrapper requires explicit review')
   assert.deepEqual(result.stale, [], 'a removed direct read must retire its historical classification')
+  assert.deepEqual(result.predicateDrift, [], 'current readers must retain their required active-row predicate')
   assert.equal(result.classifiedSites.length, sites.length)
   assert.equal(result.classifiedSites.filter((site) => site.posture === 'current').length, 3)
   assert.ok(result.classifiedSites.some((site) =>
@@ -189,6 +190,28 @@ test('W4C-4: generated SELECT inventory classifies every calculation and segment
     site.enclosingSymbol === 'readShadowTraceCalculation'
       && site.table === 'attendance_record_calculations'
       && site.posture === 'history'))
+
+  const baseSource = createWorktreeSource(rootDir)
+  const mutatedSource = {
+    ...baseSource,
+    readFile: (relPath) => {
+      const content = baseSource.readFile(relPath)
+      if (relPath !== 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts') return content
+      return content.replace(
+        "AND record.visibility_state = 'active'",
+        "AND record.visibility_state = 'retired'",
+      )
+    },
+  }
+  const mutated = classifyAttendanceCalculationReadSites(
+    buildAttendanceCalculationReadCensus(mutatedSource).sites,
+  )
+  assert.deepEqual(mutated.unclassified, [])
+  assert.deepEqual(mutated.countDrift, [])
+  assert.deepEqual(mutated.stale, [])
+  assert.equal(mutated.predicateDrift.length, 1)
+  assert.equal(mutated.predicateDrift[0]?.enclosingSymbol, 'readAuthoritativeTraceCalculation')
+  assert.equal(mutated.predicateDrift[0]?.actual, null)
 })
 
 test('W4C-4 SELECT-inventory mutation: unclassified calculation and segment reads fail closed', () => {

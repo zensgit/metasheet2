@@ -150,6 +150,48 @@ const ATTENDANCE_CALCULATION_READ_PATTERN =
 const DYNAMIC_READ_PATTERN = /\b(?:FROM|JOIN)\s+\$\{([^}]+)\}/gi
 const JS_IDENTIFIER_PATTERN = /\b[A-Za-z_$][A-Za-z0-9_$]*\b/g
 
+function sqlLiteralContainingIndex(content, index) {
+  let quote = null
+  let start = -1
+  let escaped = false
+  for (let i = 0; i < content.length; i += 1) {
+    const ch = content[i]
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === '\\') {
+        escaped = true
+        continue
+      }
+      if (ch === quote) {
+        if (start < index && index < i) return content.slice(start + 1, i)
+        quote = null
+        start = -1
+      }
+      continue
+    }
+    if (ch === '`' || ch === "'" || ch === '"') {
+      quote = ch
+      start = i
+    }
+  }
+  return null
+}
+
+function requiredPredicateFingerprint(content, index) {
+  const query = sqlLiteralContainingIndex(String(content ?? ''), index)
+  if (!query) return null
+  if (/\b(?:[A-Za-z_$][A-Za-z0-9_$]*\.)?visibility_state\s*=\s*['"]active['"]/i.test(query)) {
+    return 'visibility_state=active'
+  }
+  if (/\b(?:attendance_current_records|ATTENDANCE_ACTIVE_CURRENT_RELATION_V1)\b/.test(query)) {
+    return 'current_relation=attendance_current_records'
+  }
+  return null
+}
+
 // Reserved words that can legally follow a DML verb without being a table name — most notably
 // `... ON CONFLICT (...) DO UPDATE SET col = ...` (an upsert), where "SET" immediately follows
 // "UPDATE" with no table name at all (the target is implicit from the INSERT INTO on the same
@@ -582,7 +624,7 @@ function collectDynamicReadSites(content, lines, tableNames) {
     }
 
     for (const table of resolved) {
-      sites.push({ lineIndex, table, enclosingSymbol, dynamic: true })
+      sites.push({ lineIndex, index: match.index, table, enclosingSymbol, dynamic: true })
     }
   }
   return sites
@@ -680,6 +722,7 @@ function scanFileForAttendanceCalculationReadSites(relPath, content) {
       line: lineIndex + 1,
       table: match[1],
       enclosingSymbol: nearestEnclosingSymbol(lines, lineIndex),
+      requiredPredicateFingerprint: requiredPredicateFingerprint(content, match.index),
     })
   }
   for (const dynamic of collectDynamicReadSites(
@@ -693,6 +736,7 @@ function scanFileForAttendanceCalculationReadSites(relPath, content) {
       table: dynamic.table,
       enclosingSymbol: dynamic.enclosingSymbol,
       dynamic: true,
+      requiredPredicateFingerprint: requiredPredicateFingerprint(content, dynamic.index),
     })
   }
   return sites
