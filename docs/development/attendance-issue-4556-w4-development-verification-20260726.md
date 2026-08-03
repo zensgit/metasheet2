@@ -310,7 +310,33 @@ synthetic fixture 的耗时外推为生产容量结论。
 
 所有手工 mutation 均已还原；代码生成重跑后工作树无生成漂移。
 
-### 11.4 诚实边界与停点
+### 11.4 首轮独立门审修复
+
+首轮 exact-head 独立审阅在 `8d9bd1fc9c5717c7e19dcc692d990c29f771a2c2`
+给出两条 P2。修复只补强 inventory 与既有 writer 真库套件，不扩大 W4C-4
+产品运行时范围：
+
+1. calculation SELECT inventory 新增 required predicate fingerprint。当前投影必须
+   继续指向 `attendance_current_records`，authoritative trace 必须继续携带
+   `visibility_state = 'active'`；把后者改为 `retired` 时，unclassified、count 与
+   stale 三门保持绿色，而 predicate 门**精确产生 1 条 drift**。
+2. import、审批撤销、手工编辑与重算四个非 live canonical writer 均通过真实
+   入口创建 shadow calculation，再读取实际持久化行，要求 diff code 非空且
+   code/payload 能被生产 parser 成对解析。四个 writer 分别把入库参数改为
+   `NULL, NULL` 时，各自命名腿均**精确 1/1 failed**；mutation 后产品代码全部还原。
+
+补门后的本机 fresh PostgreSQL 结果：四个 writer + W4C-4 详情 **52/52 PASS**，
+W4C-4 unit/route **40/40 PASS**，inventory **56/56 PASS**，workspace type-check、
+lint、OpenAPI build/validate/generate/closed-schema contract 与 sealed-export S5
+provenance 套件全部通过，第二次 migration 为 no-op。
+
+首轮审阅另记一条非阻断 residual：values-free backlog 当前按闭集 diff code
+聚合，不读取配对 JSON payload；详情与 DecisionTrace 会对 code/payload 成对
+fail closed，但 backlog 本身不证明 payload 完整性。本片不为此扩大查询或迁移
+范围，后续若 backlog 要承担数据完整性告警，应另加显式 invalid-payload posture
+与对应合同。
+
+### 11.5 诚实边界与停点
 
 - 本轮只使用本机 fresh synthetic PostgreSQL；未使用客户或生产数据，未部署，
   未启用 flag，未发送外部通知，也未运行 staging soak。
