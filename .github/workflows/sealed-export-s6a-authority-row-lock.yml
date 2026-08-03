@@ -23,7 +23,16 @@ name: Sealed-export S6-A authority row-lock (migration 075) gate
 on:
   workflow_dispatch:
   pull_request:
-    branches: [main, develop]
+    # Deliberately NO `branches:` filter, unlike 074's gate. Two reasons, both
+    # load-bearing:
+    #   1. This gate ships on a STACKED branch. `branches: [main, develop]`
+    #      would silently skip it on exactly the PR that introduces it, and a
+    #      skipped job is not a passing job.
+    #   2. GitHub will not let a brand-new workflow_dispatch workflow living on
+    #      a feature branch be dispatched until it has run at least once via a
+    #      trigger it responds to — the same idiom
+    #      stock-preparation-e2e-functional-smoke.yml documents.
+    # The `paths` filter below still keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
       - 'packages/core-backend/migrations/068_create_integration_sealed_export_ingestion.sql'
