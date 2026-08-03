@@ -3725,7 +3725,7 @@ describe('attendance UUID route validation', () => {
         params: testCase.params ?? { id: attendanceGroupId },
         body: testCase.body,
         query: testCase.query,
-        user: { id: 'admin-1' },
+        user: { id: 'admin-1', tenantId: 'header-fallback-must-not-count' },
       })
       expect(res.statusCode, testCase.key).toBe(403)
       expect(res.body, testCase.key).toEqual({

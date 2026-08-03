@@ -101,7 +101,7 @@ describe('AuthService.verifyToken', () => {
     expect((user as any).password_hash).toBeUndefined()
   })
 
-  it('preserves the verified token tenant on the database-backed user', async () => {
+  it('preserves a verified token tenant only while active membership proves it', async () => {
     jwtMocks.verify.mockReturnValue({
       userId: 'u-tenant',
       email: 'tenant@x',
@@ -110,21 +110,23 @@ describe('AuthService.verifyToken', () => {
       iat: 0,
       exp: 0,
     })
-    poolMocks.query.mockResolvedValueOnce({
-      rows: [{
-        id: 'u-tenant',
-        email: 'tenant@x',
-        name: 'Tenant User',
-        role: 'user',
-        permissions: ['attendance:read'],
-        password_hash: 'hash',
-        is_active: true,
-        activation_status: 'activated',
-        local_password_set: true,
-        created_at: new Date(),
-        updated_at: new Date(),
-      }],
-    })
+    poolMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u-tenant',
+          email: 'tenant@x',
+          name: 'Tenant User',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: 'hash',
+          is_active: true,
+          activation_status: 'activated',
+          local_password_set: true,
+          created_at: new Date(),
+          updated_at: new Date(),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ org_id: 'tenant_42' }] })
     rbacMocks.isAdmin.mockResolvedValue(false)
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
 
@@ -133,6 +135,47 @@ describe('AuthService.verifyToken', () => {
 
     expect(user?.tenantId).toBe('tenant_42')
     expect((user as any).password_hash).toBeUndefined()
+  })
+
+  it('drops a signed legacy tenant claim when active membership does not prove it', async () => {
+    jwtMocks.verify.mockReturnValue({
+      userId: 'u-legacy',
+      email: 'legacy@x',
+      role: 'user',
+      tenantId: 'forged-tenant',
+      iat: 0,
+      exp: 0,
+    })
+    poolMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u-legacy',
+          email: 'legacy@x',
+          name: 'Legacy User',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: 'hash',
+          is_active: true,
+          activation_status: 'activated',
+          local_password_set: true,
+          created_at: new Date(),
+          updated_at: new Date(),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('legacy-forged-tenant-token')
+
+    expect(user).toBeTruthy()
+    expect(user?.tenantId).toBeUndefined()
+    expect(poolMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('uo.org_id = $2'),
+      ['u-legacy', 'forged-tenant'],
+    )
   })
 
   it('falls back to stored role/permissions when RBAC lookup fails', async () => {

@@ -221,7 +221,10 @@ export class AuthService {
         }
       }
 
-      const tenantId = this.normalizeClaimString(payload.tenantId)
+      const tenantClaim = this.normalizeClaimString(payload.tenantId)
+      const tenantId = tenantClaim
+        ? await this.resolveSessionTenantId(user.id, tenantClaim)
+        : undefined
       return this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
     } catch (error) {
       this.logger.warn('Token verification failed', error instanceof Error ? error : undefined)
