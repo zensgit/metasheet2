@@ -25303,6 +25303,16 @@ module.exports = {
       return assertAttendanceImportRowsAllowed(req, res, { ...options, operation: 'commit' })
     }
 
+    async function assertAttendanceGroupInActorOrg(client, res, { groupId, orgId }) {
+      const rows = await client.query(
+        'SELECT id FROM attendance_groups WHERE id = $1 AND org_id = $2 LIMIT 1',
+        [groupId, orgId]
+      )
+      if (rows.length) return true
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+      return false
+    }
+
     function withAttendanceGroupMemberAccess(handler) {
       return async (req, res, next) => {
         const groupId = normalizeUuidString(req.params.id)
@@ -25316,6 +25326,11 @@ module.exports = {
 
         const invokeHandler = async () => {
           try {
+            const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
+              groupId,
+              orgId: actorAccess.orgId,
+            })
+            if (!groupExists) return
             await handler(req, res, next, actorAccess)
           } catch (error) {
             if (error instanceof HttpError && !res.headersSent) {
@@ -43953,6 +43968,8 @@ module.exports = {
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const countRows = await db.query(
             'SELECT COUNT(*)::int AS total FROM attendance_group_managers WHERE org_id = $1 AND group_id = $2',
             [orgId, groupId]
@@ -44022,6 +44039,8 @@ module.exports = {
         }
 
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const rows = await db.query(
             `INSERT INTO attendance_group_managers (org_id, group_id, user_id, role, created_by, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, now(), now())
@@ -44064,6 +44083,8 @@ module.exports = {
           return
         }
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const rows = await db.query(
             'DELETE FROM attendance_group_managers WHERE id = $1 AND org_id = $2 AND group_id = $3 RETURNING id',
             [managerId, orgId, groupId]
@@ -44130,6 +44151,8 @@ module.exports = {
         }
 
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const preview = await buildAttendanceGroupFixedSchedulePreview(db, {
             orgId,
             groupId,
@@ -44205,6 +44228,8 @@ module.exports = {
         }
 
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId })
           if (!access) return
 
@@ -44289,6 +44314,8 @@ module.exports = {
         }
 
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const access = await assertAttendanceGroupFixedScheduleRebuildAllowed(req, res, { groupId })
           if (!access) return
 
@@ -44376,6 +44403,8 @@ module.exports = {
         }
 
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const access = await assertAttendanceGroupFixedScheduleClearAllowed(req, res, { groupId })
           if (!access) return
 

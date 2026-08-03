@@ -518,6 +518,7 @@ function approvalInstanceRow(overrides: Record<string, unknown> = {}) {
 }
 
 function fixedScheduleQueryResult(sql: string) {
+  if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return { handled: true, rows: [{ id: attendanceGroupId }] }
   if (sql.includes('SELECT * FROM attendance_groups WHERE id = $1')) return { handled: true, rows: [attendanceGroupRow()] }
   if (sql.includes('SELECT * FROM attendance_shifts WHERE id = $1')) return { handled: true, rows: [shiftRow()] }
   // W3 canonical assignability guard: shift FOR SHARE + persisted segment count.
@@ -749,6 +750,7 @@ describe('attendance UUID route validation', () => {
     }
 
     db.query
+      .mockResolvedValueOnce([{ id: groupId }])
       .mockResolvedValueOnce([{ total: 1 }])
       .mockResolvedValueOnce([managerRow])
 
@@ -779,7 +781,9 @@ describe('attendance UUID route validation', () => {
     expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('attendance_group_members')
 
     db.query.mockClear()
-    db.query.mockResolvedValueOnce([{ ...managerRow, role: 'sub_owner' }])
+    db.query
+      .mockResolvedValueOnce([{ id: groupId }])
+      .mockResolvedValueOnce([{ ...managerRow, role: 'sub_owner' }])
 
     const createRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
       params: { id: groupId },
@@ -806,7 +810,9 @@ describe('attendance UUID route validation', () => {
     )
 
     db.query.mockClear()
-    db.query.mockResolvedValueOnce([{ id: managerId }])
+    db.query
+      .mockResolvedValueOnce([{ id: groupId }])
+      .mockResolvedValueOnce([{ id: managerId }])
 
     const deleteRes = await invokeRoute(routes, 'DELETE /api/attendance/groups/:id/managers/:managerId', {
       params: { id: groupId, managerId },
@@ -2948,6 +2954,7 @@ describe('attendance UUID route validation', () => {
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params, true)
       if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
       if (sql.includes('FROM attendance_shift_assignments') && sql.includes('producer_type = $2')) {
         expect(params).toEqual([
           'default',
@@ -3582,6 +3589,52 @@ describe('attendance UUID route validation', () => {
     }
   })
 
+  it('returns the same neutral 404 for a foreign group id before any child-table SQL', async () => {
+    const cases = [
+      { key: 'GET /api/attendance/groups/:id' },
+      { key: 'GET /api/attendance/groups/:id/members' },
+      { key: 'POST /api/attendance/groups/:id/members', body: { userId: 'worker-1' } },
+      { key: 'DELETE /api/attendance/groups/:id/members/:userId', params: { id: attendanceGroupId, userId: 'worker-1' } },
+      { key: 'GET /api/attendance/groups/:id/managers' },
+      { key: 'POST /api/attendance/groups/:id/managers', body: { userId: 'manager-1', role: 'owner' } },
+      { key: 'DELETE /api/attendance/groups/:id/managers/:managerId', params: { id: attendanceGroupId, managerId: scheduleGroupMemberId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/preview', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/clear', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+    ]
+
+    for (const testCase of cases) {
+      const { db, routes } = await createHarness('false')
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, true)
+        if (rbac !== undefined) return rbac
+        if (sql.includes('FROM attendance_groups')) {
+          expect(params.slice(0, 2), testCase.key).toEqual([attendanceGroupId, 'default'])
+          return []
+        }
+        throw new Error(`unexpected child-table SQL: ${sql}`)
+      })
+
+      const res = await invokeRoute(routes, testCase.key, {
+        params: testCase.params ?? { id: attendanceGroupId },
+        body: testCase.body,
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode, testCase.key).toBe(404)
+      expect(res.body, testCase.key).toEqual({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: 'Group not found' },
+      })
+      const scopedSql = db.query.mock.calls
+        .map(([sql]) => String(sql))
+        .filter(sql => sql.includes('attendance_'))
+      expect(scopedSql, testCase.key).toHaveLength(1)
+      expect(scopedSql[0], testCase.key).toContain('FROM attendance_groups')
+    }
+  })
+
   it('admits attendance admins through every R0 group-route endpoint without scheduler scope', async () => {
     const cases = [
       { key: 'GET /api/attendance/groups/:id', status: 200 },
@@ -3618,6 +3671,7 @@ describe('attendance UUID route validation', () => {
         if (rbac !== undefined) return rbac
         const fixedSchedule = fixedScheduleQueryResult(sql)
         if (fixedSchedule.handled) return fixedSchedule.rows
+        if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
         if (sql.includes('FROM attendance_groups g')) return [attendanceGroupRow()]
         if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) return [{ total: 0 }]
         if (sql.includes('SELECT * FROM attendance_group_members')) return []
