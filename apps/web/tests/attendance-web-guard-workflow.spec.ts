@@ -21,6 +21,7 @@ describe('attendance web guard workflow contract', () => {
     expect(workflow.match(/apps\/web\/tests\/attendance-web-guard-workflow\.spec\.ts/g)).toHaveLength(2)
     expect(workflow).toContain(' attendance-web-guard-workflow.spec --reporter=dot')
     expect(workflow).toContain("if: steps.changes.outputs.relevant == 'true'")
+    expect(workflow).toContain('NODE_OPTIONS: --max-old-space-size=8192')
   })
 
   it('keeps the group-context route host proof in the classifier and targeted run list', () => {
