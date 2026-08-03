@@ -190,12 +190,21 @@ function sortedArray(set) {
 // by strict equality on the id rather than by substring on the message — pins whose messages
 // share words otherwise cover for each other. A pin that is deleted, renamed or weakened
 // makes its own self-test RED, because nothing throws.
-// The closed set of pin ids. This is not a comment: pinFail() refuses an id that is not
-// listed, and the coverage assertion at the end of section 4 requires every listed id to have
-// been fired by a self-test. So a new pin cannot be added without being listed, and cannot be
-// listed without a self-test proving it fires — which is the mechanical version of the check
-// that a hand-maintained list of "pins that have self-tests" silently failed at, by omitting
-// `projection-uses`.
+// The closed set of pin ids, held closed from BOTH sides:
+//
+//   * every id raised at a pin call site inside runProjectionPins() is in this list — checked
+//     by PARSING THIS FILE with the same scan the pins themselves use (section 4d), so it
+//     holds for a pin that never fires;
+//   * every id in this list was actually fired by a self-test or a control (section 4c).
+//
+// So a pin cannot be added without being declared, and cannot be declared without a self-test
+// proving it fires. Both halves are load-bearing and both were learned the hard way in this
+// file. A hand-maintained list of "pins that have self-tests" had already drifted, omitting
+// `projection-uses`. And a runtime membership check inside pinFail() — the first attempt at
+// the other half — was NOT enough: it only runs when a pin FIRES, so a pin added with an
+// undeclared id that no self-test triggers went entirely unnoticed. Proven by execution: with
+// `pinDeepEqual('undeclared-smuggled-pin', …)` inserted into runProjectionPins(), the suite
+// printed OK. Only a source scan sees a pin that never fires.
 const DECLARED_PINS = Object.freeze([
   'external-system-uses',
   'normalize-raw-uses',
@@ -208,21 +217,15 @@ const DECLARED_PINS = Object.freeze([
   'system-uses',
 ])
 
+// The ONLY two functions that raise a pin. Kept to two, and named here, because section 4d
+// parses this file for their call sites: a third raiser would put pin ids somewhere the
+// registry scan does not look.
+const PIN_RAISERS = Object.freeze(['pinFail', 'pinDeepEqual'])
+
 function pinFail(pinId, message) {
-  assert.ok(
-    DECLARED_PINS.includes(pinId),
-    'a pin fired under an id that is not in DECLARED_PINS, so nothing requires it to have a '
-    + 'self-test: ' + pinId,
-  )
   const error = new Error('PIN ' + pinId + ': ' + message)
   error.pinId = pinId
   throw error
-}
-
-function pinEqual(pinId, actual, expected, message) {
-  if (actual !== expected) {
-    pinFail(pinId, message + ' (actual ' + String(actual) + ', expected ' + String(expected) + ')')
-  }
 }
 
 function pinDeepEqual(pinId, actual, expected, message) {
@@ -239,6 +242,14 @@ function pinDeepEqual(pinId, actual, expected, message) {
 // asserted whole: a receiver that only ever appears as a member-access receiver (plus its own
 // declaration and value passes to the screening predicate) has a read set that is COMPLETE
 // by construction, because there is no other syntax through which a member could be reached.
+//
+// MAINTENANCE COST, disclosed rather than discovered later. These are MULTISETS, not sets —
+// `config` and `credentials` appear twice below because normalizeExternalSystem() reads each
+// twice. So a refactor that merely reads `system.config` once into a local will RED
+// `system-uses` with no drift whatsoever. That is the intended trade and it must not be
+// loosened to a set: exactness is the whole completeness argument, since "the same members,
+// some number of times" cannot distinguish a read that was removed from one that was added
+// elsewhere. Re-derive the multiset deliberately when the module legitimately changes.
 const SYSTEM_USES = Object.freeze([
   'call-argument|normalizeExternalSystem|canonicalCodec.__internals.isStrictPlainObject@0',
   'property-access-receiver|normalizeExternalSystem|config',
@@ -866,6 +877,56 @@ function main() {
     sortedArray(firedPins),
     [...DECLARED_PINS].sort(),
     'a declared pin has no self-test proving it can fire',
+  )
+
+  // 4d. THE REGISTRY IS CLOSED FROM THE OTHER SIDE TOO. 4c can only see pins that FIRED, so
+  // by itself it does not stop a pin being added under an id nobody declared and nobody
+  // tests — proven by execution: inserting a passing `pinDeepEqual('undeclared-smuggled-pin',
+  // …)` into runProjectionPins() left the suite printing OK. So the pin call sites are read
+  // out of THIS FILE'S OWN SOURCE, by the same parse the pins use, and held equal to
+  // DECLARED_PINS. Dogfooding is the point: if the scan cannot read its own test, it cannot
+  // be trusted to read the module either.
+  const selfReport = analyzeModuleSource({
+    name: path.basename(__filename),
+    text: fs.readFileSync(__filename, 'utf8'),
+  })
+  assert.deepEqual(selfReport.failures, [], 'this test file did not parse cleanly')
+  assert.notEqual(selfReport.functions, null)
+  const pinCallSites = selfReport.functions.runProjectionPins.calls
+    .filter((call) => PIN_RAISERS.includes(call.callee))
+  assert.ok(pinCallSites.length > 0, 'no pin call sites found — the registry scan is looking '
+    + 'in the wrong place')
+  // An id this scan cannot read could be anything, so it is a finding, never a skip.
+  assert.deepEqual(
+    pinCallSites.filter((call) => call.argumentLiterals[0] === null),
+    [],
+    'a pin is raised with an id that is not a string literal — the registry cannot be held '
+    + 'closed against a computed id',
+  )
+  assert.deepEqual(
+    sortedArray(new Set(pinCallSites.map((call) => call.argumentLiterals[0]))),
+    [...DECLARED_PINS].sort(),
+    'the pin ids raised inside runProjectionPins() have drifted from DECLARED_PINS — a pin '
+    + 'was added, renamed or removed without being declared, and nothing would require it to '
+    + 'have a self-test',
+  )
+  // Self-test for the registry scan itself: a smuggled pin must actually be detected. Without
+  // this the scan could be looking at the wrong function and reading as green.
+  const smuggled = analyzeModuleSource({
+    name: 'registry-self-test',
+    text: fs.readFileSync(__filename, 'utf8').replace(
+      "  const systemReads = memberReadReport(normalize, 'system')\n",
+      "  const systemReads = memberReadReport(normalize, 'system')\n"
+      + "  pinDeepEqual('undeclared-smuggled-pin', 1, 1, 'x')\n",
+    ),
+  })
+  assert.deepEqual(smuggled.failures, [])
+  assert.equal(
+    smuggled.functions.runProjectionPins.calls
+      .filter((call) => PIN_RAISERS.includes(call.callee))
+      .some((call) => call.argumentLiterals[0] === 'undeclared-smuggled-pin'),
+    true,
+    'the registry scan did not notice a smuggled pin — it is decorative',
   )
 
   // ── 5. PROJECTION DRIFT PIN (side B) — nothing listed may be unread ────────────────

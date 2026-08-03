@@ -221,6 +221,12 @@ function analyzeFunctionBody(fn, name, failures, subjectId) {
           const value = unwrap(argument)
           return ts.isIdentifier(value) ? value.text : null
         })),
+        // Statically readable string arguments, `null` where an argument is computed. A
+        // caller pinning a registry of literal call arguments MUST treat null as a finding
+        // rather than skip it — an argument this scan cannot read could be anything.
+        argumentLiterals: Object.freeze(node.arguments.map(
+          (argument) => staticStringOf(unwrap(argument)),
+        )),
       }))
     }
     if (ts.isForOfStatement(node)) {
