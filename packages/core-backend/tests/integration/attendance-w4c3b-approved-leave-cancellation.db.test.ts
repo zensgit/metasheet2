@@ -306,11 +306,16 @@ describeIfDatabase('W4C-3b P14 approved leave cancellation (real PostgreSQL)', (
         [result.calculationId, fixture.recordId, fixture.orgId],
       )
       expect(calculation.rows).toHaveLength(1)
-      expect(calculation.rows[0].shadow_diff_code).toEqual(expect.any(String))
       expect(parseAttendanceW4ShadowDiff(
         calculation.rows[0].shadow_diff_code,
         calculation.rows[0].shadow_diff,
-      )).toEqual(calculation.rows[0].shadow_diff)
+      )).toEqual({
+        schemaVersion: 1,
+        code: 'status_changed',
+        changedFields: ['status'],
+        absoluteMinuteDelta: 0,
+        segmentCount: 2,
+      })
     })
   })
 

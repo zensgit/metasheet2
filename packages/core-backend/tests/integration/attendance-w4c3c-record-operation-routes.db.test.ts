@@ -781,11 +781,16 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       [calculationId, recordId, fixture.orgId],
     )
     expect(calculation.rows).toHaveLength(1)
-    expect(calculation.rows[0].shadow_diff_code).toEqual(expect.any(String))
     expect(parseAttendanceW4ShadowDiff(
       calculation.rows[0].shadow_diff_code,
       calculation.rows[0].shadow_diff,
-    )).toEqual(calculation.rows[0].shadow_diff)
+    )).toEqual({
+      schemaVersion: 1,
+      code: 'status_changed',
+      changedFields: ['status', 'workMinutes', 'lateMinutes'],
+      absoluteMinuteDelta: 35,
+      segmentCount: 1,
+    })
   })
 
   it('shadow recompute persists a non-null parsed diff through the real route', async () => {
@@ -799,6 +804,12 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       recordId,
       workDate,
       'shadow',
+    )
+    await pool.query(
+      `UPDATE attendance_records
+          SET status = 'normal', work_minutes = 420, late_minutes = 0
+        WHERE id = $1::uuid AND org_id = $2`,
+      [recordId, fixture.orgId],
     )
     const operationId = randomUUID()
     const response = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/recompute`, {
@@ -822,11 +833,16 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       [calculationId, recordId, fixture.orgId],
     )
     expect(calculation.rows).toHaveLength(1)
-    expect(calculation.rows[0].shadow_diff_code).toEqual(expect.any(String))
     expect(parseAttendanceW4ShadowDiff(
       calculation.rows[0].shadow_diff_code,
       calculation.rows[0].shadow_diff,
-    )).toEqual(calculation.rows[0].shadow_diff)
+    )).toEqual({
+      schemaVersion: 1,
+      code: 'status_changed',
+      changedFields: ['status', 'workMinutes', 'lateMinutes'],
+      absoluteMinuteDelta: 120,
+      segmentCount: 1,
+    })
   })
 
   it('shadow status-only edit normalizes the W4 projection and legacy parent identically', async () => {
