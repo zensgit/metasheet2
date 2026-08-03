@@ -71,6 +71,17 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// The S6-A authority chain's requiredFutureInstant (sealed-export-lifecycle-provisioning.cjs) requires
+// SECONDS-precision UTC ISO-8601 (`/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/`) — a plain
+// `new Date(...).toISOString()` carries a milliseconds component and fails that format check, which
+// surfaces as SEALED_EXPORT_BINDING_UNQUALIFIED with no further detail (confirmed via
+// diagnoseProvisioningFailureStack's error.stack: failSealedExport -> requiredFutureInstant ->
+// normalizeAuthorityInput -> provisionInitialStockPreparationBinding). This mirrors the SAME
+// seconds-truncation the production code's own toUtcSecondsIso helper performs.
+function toUtcSecondsIso(ms) {
+  return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
 // ── config ──────────────────────────────────────────────────────────────────────────────────────────
 const PORT = Number(process.env.E2E_SERVER_PORT || 7801)
 const BASE_URL = `http://127.0.0.1:${PORT}`
@@ -655,14 +666,19 @@ async function attemptS6ARealRun() {
 
   // 3. provisioning spec (inline external-system connection material — no DB registry lookup at
   // provisioning time; the runtime independently re-resolves the SAME record at run time).
+  // bindingExpiresAt and signerExpiresAt share ONE `nowMs` snapshot: normalizeAuthorityInput
+  // (sealed-export-lifecycle-provisioning.cjs) also fail-closes if bindingExpiresAt > signerExpiresAt,
+  // and two separate Date.now() calls truncated to seconds could straddle a second boundary and make
+  // bindingExpiresAt the later of the two by one second — rare but avoidable.
+  const expiresAtIso = toUtcSecondsIso(Date.now() + 24 * 60 * 60 * 1000)
   const provisioningSpec = {
     binding: {
       approvedConfigVersionId,
-      bindingExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      bindingExpiresAt: expiresAtIso,
       bindingId: `e2efunc-binding-id-${salt}`,
       bindingVersion,
       externalSystemId: systemId,
-      signerExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      signerExpiresAt: expiresAtIso,
       tableRef: MSSQL_TABLE,
       tenantId: TENANT_ID,
       workspaceId: null,
