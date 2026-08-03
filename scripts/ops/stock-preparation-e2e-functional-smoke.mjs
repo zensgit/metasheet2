@@ -700,12 +700,52 @@ async function runProvisioningScript(env) {
 // migration/superuser role) rather than the S6-A runtime role, so the proof does not depend on the same
 // identity that (allegedly) wrote the rows also being the one asked to confirm they exist. Values-free:
 // only fixed status tokens and counts are read into the evidence block, no row payload content.
-async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineCount) {
+async function withApplicationPool(fn) {
   const pg = requireFromPlugin('pg')
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
   try {
+    return await fn(pool)
+  } finally {
+    await pool.end()
+  }
+}
+
+// The write state the S6-A walk is supposed to produce EXACTLY ONCE per operationId, as counts and
+// identities rather than payloads. Used on both sides of the replay call: the replay's own HTTP body
+// claiming `mode=internal_noop` is the runtime reporting on itself, and cannot distinguish "did nothing"
+// from "did it all again and reported the first result". Comparing this snapshot before/after can.
+async function snapshotS6AWriteState(pool, operationId) {
+  const run = (await pool.query(
+    `SELECT status, generation_id, ingestion_session_id, business_line_count, source_read_count
+     FROM integration_sealed_export_stock_prep_runs
+     WHERE tenant_id = $1 AND operation_id = $2`,
+    [TENANT_ID, operationId],
+  )).rows[0] || null
+  const counts = {}
+  for (const [key, sql] of [
+    ['runs', 'SELECT COUNT(*)::int AS n FROM integration_sealed_export_stock_prep_runs WHERE tenant_id = $1'],
+    ['generations', 'SELECT COUNT(*)::int AS n FROM integration_sealed_export_generations WHERE tenant_id = $1'],
+    ['ingestionSessions', 'SELECT COUNT(*)::int AS n FROM integration_sealed_export_ingestion_sessions WHERE tenant_id = $1'],
+    ['generationRows', 'SELECT COUNT(*)::int AS n FROM integration_sealed_export_generation_rows WHERE tenant_id = $1'],
+    ['activePointers', 'SELECT COUNT(*)::int AS n FROM integration_sealed_export_active_pointers WHERE tenant_id = $1'],
+  ]) {
+    counts[key] = (await pool.query(sql, [TENANT_ID])).rows[0].n
+  }
+  return {
+    counts,
+    runStatus: run ? run.status : '<none>',
+    // Identities, not payloads: a second generation would change these even if the counts somehow did not.
+    generationId: run && run.generation_id ? run.generation_id : '<none>',
+    ingestionSessionId: run && run.ingestion_session_id ? run.ingestion_session_id : '<none>',
+    businessLineCount: run ? Number(run.business_line_count) : -1,
+    sourceReadCount: run ? Number(run.source_read_count) : -1,
+  }
+}
+
+async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineCount) {
+  return withApplicationPool(async (pool) => {
     const runRows = await pool.query(
-      `SELECT status, source_read_count, business_line_count, generation_id
+      `SELECT status, source_read_count, business_line_count, generation_id, ingestion_session_id
        FROM integration_sealed_export_stock_prep_runs
        WHERE tenant_id = $1 AND operation_id = $2`,
       [TENANT_ID, operationId],
@@ -716,36 +756,99 @@ async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineC
     S.s6aDbRunSourceReadCount = run ? Number(run.source_read_count) : -1
     S.s6aDbRunBusinessLineCount = run ? Number(run.business_line_count) : -1
 
+    // The GENERATION KERNEL's own rows. `applied_row_count` is what the kernel wrote during apply, so
+    // asserting it equals the fixture's row count proves apply actually moved rows, not merely that a
+    // generation row exists in some terminal-looking status.
     let generationFound = false
     let generationStatus = '<none>'
+    let generationAppliedRowCount = -1
     if (run && run.generation_id) {
       const generationRows = await pool.query(
-        `SELECT status FROM integration_sealed_export_generations WHERE generation_id = $1 AND tenant_id = $2`,
+        `SELECT status, applied_row_count FROM integration_sealed_export_generations
+         WHERE generation_id = $1 AND tenant_id = $2`,
         [run.generation_id, TENANT_ID],
       )
       generationFound = generationRows.rows.length === 1
-      generationStatus = generationFound ? generationRows.rows[0].status : '<none>'
+      if (generationFound) {
+        generationStatus = generationRows.rows[0].status
+        generationAppliedRowCount = Number(generationRows.rows[0].applied_row_count)
+      }
     }
     S.s6aDbGenerationRowFound = generationFound ? 'true' : 'false'
     S.s6aDbGenerationStatus = generationStatus
+    S.s6aDbGenerationAppliedRowCount = generationAppliedRowCount
 
-    // Not just "a row exists" — the row the kernel was supposed to write for THIS fixture: the same
+    // The PRIVATE INGESTION session the walk is supposed to have driven to UPLOAD_COMPLETE. Without
+    // this, "capture -> private ingestion -> generation kernel -> apply" would be asserted only at its
+    // two ends, and the middle leg would be inferred rather than observed.
+    let ingestionFound = false
+    let ingestionStatus = '<none>'
+    let ingestionChunksComplete = 'false'
+    if (run && run.ingestion_session_id) {
+      const ingestionRows = await pool.query(
+        `SELECT status, accepted_chunk_count, expected_chunk_count
+         FROM integration_sealed_export_ingestion_sessions
+         WHERE session_id = $1 AND tenant_id = $2`,
+        [run.ingestion_session_id, TENANT_ID],
+      )
+      ingestionFound = ingestionRows.rows.length === 1
+      if (ingestionFound) {
+        ingestionStatus = ingestionRows.rows[0].status
+        ingestionChunksComplete = String(
+          Number(ingestionRows.rows[0].accepted_chunk_count) ===
+          Number(ingestionRows.rows[0].expected_chunk_count),
+        )
+      }
+    }
+    S.s6aDbIngestionSessionFound = ingestionFound ? 'true' : 'false'
+    S.s6aDbIngestionSessionStatus = ingestionStatus
+    S.s6aDbIngestionChunksComplete = ingestionChunksComplete
+
+    // Not just "a row exists" — the rows the kernel was supposed to write for THIS fixture: the same
     // business-line count the HTTP-level assertion already checked on the response body, now confirmed
-    // independently against the persisted row.
+    // independently against the persisted rows, at every leg of the walk.
     const dbOk = run !== null && run.status === 'COMPLETED' && Number(run.source_read_count) === 1 &&
-      Number(run.business_line_count) === expectedBusinessLineCount && generationFound
+      Number(run.business_line_count) === expectedBusinessLineCount && generationFound &&
+      generationAppliedRowCount === expectedBusinessLineCount &&
+      ['VERIFIED', 'ACTIVE'].includes(generationStatus) &&
+      ingestionFound && ingestionStatus === 'UPLOAD_COMPLETE' && ingestionChunksComplete === 'true'
     must(
       'S6-A: database-observable proof — stock_prep_runs row COMPLETED (source_read_count=1, ' +
-      'business_line_count matches the fixture) + a matching generations row exist, queried over a ' +
-      'SEPARATE (superuser, non-runtime-role) connection',
+      'business_line_count matches the fixture) + the ingestion session UPLOAD_COMPLETE with every ' +
+      'chunk accepted + a matching generations row whose applied_row_count matches the fixture, ' +
+      'queried over a SEPARATE (superuser, non-runtime-role) connection',
       dbOk,
       `runFound=${S.s6aDbRunRowFound} runStatus=${S.s6aDbRunStatus} lines=${S.s6aDbRunBusinessLineCount} ` +
-      `genFound=${S.s6aDbGenerationRowFound} genStatus=${S.s6aDbGenerationStatus}`,
+      `genFound=${S.s6aDbGenerationRowFound} genStatus=${S.s6aDbGenerationStatus} ` +
+      `genApplied=${S.s6aDbGenerationAppliedRowCount} ingFound=${S.s6aDbIngestionSessionFound} ` +
+      `ingStatus=${S.s6aDbIngestionSessionStatus} ingChunks=${S.s6aDbIngestionChunksComplete}`,
     )
     S.s6aDatabaseObservable = dbOk ? 'PASS' : 'FAIL'
     return dbOk
-  } finally {
-    await pool.end()
+  })
+}
+
+// Root-cause evidence for the projection fix, taken from the database rather than inferred from a grep.
+// `integration_external_systems.created_at` is TIMESTAMPTZ and this repository installs no
+// `setTypeParser`, so `pg` hands back a native JS Date — which is precisely what canonical-json.cjs
+// refuses (EXOTIC_OBJECT) and why canonicalising the WHOLE adapter record refused every production-shaped
+// record. Reported as a closed boolean/type token; no column VALUE is ever emitted.
+async function reportAdapterTimestampRuntimeType(systemId) {
+  try {
+    await withApplicationPool(async (pool) => {
+      const rows = await pool.query(
+        'SELECT created_at, updated_at FROM integration_external_systems WHERE tenant_id = $1 AND id = $2',
+        [TENANT_ID, systemId],
+      )
+      const row = rows.rows[0] || null
+      S.s6aAdapterRowFound = String(row !== null)
+      S.s6aAdapterCreatedAtIsDate = String(Boolean(row) && row.created_at instanceof Date)
+      S.s6aAdapterUpdatedAtIsDate = String(Boolean(row) && row.updated_at instanceof Date)
+    })
+  } catch {
+    S.s6aAdapterRowFound = '<query-failed>'
+    S.s6aAdapterCreatedAtIsDate = '<query-failed>'
+    S.s6aAdapterUpdatedAtIsDate = '<query-failed>'
   }
 }
 
@@ -858,6 +961,10 @@ async function attemptS6ARealRun() {
     S.s6aFlagOnReason = 'EXTERNAL_SYSTEM_REGISTRATION_FAILED'
     return
   }
+  // The root cause the projection fix addresses, observed against the real database rather than inferred
+  // from "grep found no setTypeParser": read this row's TIMESTAMPTZ columns back over pg and report
+  // whether the driver hands them back as native JS Date. Values-free — the type, never the value.
+  await reportAdapterTimestampRuntimeType(systemId)
 
   // 3. provisioning spec (inline external-system connection material — no DB registry lookup at
   // provisioning time; the runtime independently re-resolves the SAME record at run time).
@@ -959,25 +1066,33 @@ async function attemptS6ARealRun() {
 
   // 4. flag-ON restart with the full runtime authority wired.
   //
-  // RD-E2E finding (root-caused via a temporary --require preload that wrapped failSealedExport and
-  // captured a stack for SEALED_EXPORT_BINDING_UNQUALIFIED — since REMOVED; the preload only ever
-  // observed, it never changed behavior, but any green obtained with production modules monkey-patched
-  // is a green under instrumented modules, so it does not belong in the merged harness). The captured
-  // stack pinned the refusal to stock-preparation-sqlserver-source-authority.cjs's normalizeExternalSystem
-  // -> ownedCanonical -> canonicalCodec.tryFreezeCanonical(raw), called with the FULL adapter-shaped
-  // object external-systems.cjs's rowToAdapterExternalSystem returns for a real DB row (id, tenantId,
+  // RD-E2E finding, NOW FIXED IN A PRODUCTION FILE (R2c) — kept here because the harness is what found
+  // it and what re-proves it. Root-caused via a temporary --require preload that wrapped
+  // failSealedExport and captured a stack for SEALED_EXPORT_BINDING_UNQUALIFIED (since REMOVED; the
+  // preload only ever observed, it never changed behavior, but any green obtained with production
+  // modules monkey-patched is a green under instrumented modules, so it does not belong in the merged
+  // harness). The captured stack pinned the refusal to
+  // stock-preparation-sqlserver-source-authority.cjs's normalizeExternalSystem -> ownedCanonical ->
+  // canonicalCodec.tryFreezeCanonical(raw), called with the FULL adapter-shaped object
+  // external-systems.cjs's rowToAdapterExternalSystem returns for a real DB row (id, tenantId,
   // workspaceId, kind, role, status, config, credentials, PLUS projectId, name, capabilities,
   // lastTestedAt, lastError, createdAt, updatedAt). createdAt/updatedAt are always non-null JS `Date`
   // instances (integration_external_systems.created_at/updated_at are `TIMESTAMPTZ NOT NULL DEFAULT
-  // NOW()`, and no `pg` type-parser override exists anywhere in this repo, confirmed by grep), and the
-  // canonical-json codec's domain explicitly refuses Date (`EXOTIC_OBJECT`) — confirmed locally by
-  // feeding canonical-json.cjs the exact adapter shape with and without Date-typed createdAt/updatedAt
-  // (identical otherwise): `ok:false, violation:'EXOTIC_OBJECT'` with them, `ok:true` without. This
-  // reproduces for ANY external-system row created through the ordinary product API, not just this
-  // harness's fixture — no external-system fixture value can change what rowToAdapterExternalSystem
-  // returns, since createdAt/updatedAt are populated by the database itself on every insert. This is a
-  // genuine product defect (a production-file fix is required — out of scope for this harness-only PR,
-  // and this PR does not attempt one), not a fixture defect; see the PR body for the full report.
+  // NOW()`, and no `pg` type-parser override exists anywhere in this repo, confirmed by grep AND, since
+  // R2c, by reportAdapterTimestampRuntimeType() reading the column back off the real database into
+  // s6aAdapterCreatedAtIsDate), and the canonical-json codec's domain explicitly refuses Date
+  // (`EXOTIC_OBJECT`). This reproduced for ANY external-system row created through the ordinary product
+  // API, not just this harness's fixture.
+  //
+  // The fix does NOT widen the codec and does NOT change rowToAdapterExternalSystem: the source
+  // authority now projects the record down to EXTERNAL_SYSTEM_PROJECTION_FIELDS — the closed set of
+  // members it actually reads — before canonicalising, with every field-set and identity check running
+  // unchanged on the projection. Pinned by
+  // plugins/plugin-integration-core/__tests__/sealed-export-s6a-source-authority-adapter-projection.test.cjs,
+  // which builds its record through the REAL rowToAdapterExternalSystem from a pg-shaped row with
+  // native Date values (the hand-built ISO-string fixture every previous test used is exactly why this
+  // survived), and carries both a string-timestamp positive control and a projection-removed negative
+  // control.
   const runtimeEnv = {
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED: 'true',
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ARTIFACT_ROOT: ARTIFACT_ROOT,
@@ -1060,6 +1175,7 @@ async function attemptS6ARealRun() {
       await assertS6ARunDatabaseObservableOnFailure(operationId)
       S.s6aDatabaseObservable = 'NOT_RUN'
       S.s6aReplayRun = 'NOT_RUN'
+      S.s6aReplayNoSecondWrite = 'NOT_RUN'
       // Finding (review #4724): this early return used to fall straight through to main()'s evidence
       // write with NO s6aFlagOnRun key at all — absence of a key is not distinguishable from
       // not-applicable, and this IS the path that actually executes today. Always emit it, on every exit
@@ -1077,6 +1193,7 @@ async function attemptS6ARealRun() {
     const dbOk = await assertS6ARunDatabaseObservable(operationId, relation.rows.length)
     if (!dbOk) {
       S.s6aReplayRun = 'NOT_RUN'
+      S.s6aReplayNoSecondWrite = 'NOT_RUN'
       // Same rationale as the !firstOk branch above: always emit the roll-up key on every exit out of
       // this function.
       S.s6aFlagOnRun = 'NOT_RUN'
@@ -1084,15 +1201,54 @@ async function attemptS6ARealRun() {
       return
     }
 
+    // Step 4: idempotent replay. "Idempotent" is a claim about WRITES, and the replay's own response
+    // body cannot substantiate it — a runtime that silently ran the whole walk a second time and then
+    // reported the first result would produce a byte-identical `mode=internal_noop` body. So the write
+    // state is snapshotted on both sides of the identical second call and required to be unchanged.
+    const beforeReplay = await withApplicationPool((pool) => snapshotS6AWriteState(pool, operationId))
     const replay = await s6aRunProbe(token, operationId)
     const replayData = replay.body?.data || {}
     S.s6aReplayHttp = replay.status
     S.s6aReplayMode = replayData.mode || '<unregistered>'
-    const replayOk = replay.ok && replayData.mode === 'internal_noop' && replayData.replay === true &&
+    const replayResponseOk = replay.ok && replayData.mode === 'internal_noop' && replayData.replay === true &&
       replayData.sourceReadCount === 1 && replayData.businessLineCount === relation.rows.length &&
       replayData.externalWrite === false
     must('S6-A: replay same operationId -> internal_noop, sourceReadCount=1, same businessLineCount',
-      replayOk, `http=${replay.status} mode=${S.s6aReplayMode}`)
+      replayResponseOk, `http=${replay.status} mode=${S.s6aReplayMode}`)
+
+    const afterReplay = await withApplicationPool((pool) => snapshotS6AWriteState(pool, operationId))
+    const unchanged = JSON.stringify(beforeReplay) === JSON.stringify(afterReplay)
+    S.s6aReplayRunRowCountBefore = beforeReplay.counts.runs
+    S.s6aReplayRunRowCountAfter = afterReplay.counts.runs
+    S.s6aReplayGenerationCountBefore = beforeReplay.counts.generations
+    S.s6aReplayGenerationCountAfter = afterReplay.counts.generations
+    S.s6aReplayIngestionSessionCountBefore = beforeReplay.counts.ingestionSessions
+    S.s6aReplayIngestionSessionCountAfter = afterReplay.counts.ingestionSessions
+    S.s6aReplayGenerationRowCountBefore = beforeReplay.counts.generationRows
+    S.s6aReplayGenerationRowCountAfter = afterReplay.counts.generationRows
+    S.s6aReplayGenerationIdStable = String(beforeReplay.generationId === afterReplay.generationId)
+    S.s6aReplayIngestionSessionIdStable =
+      String(beforeReplay.ingestionSessionId === afterReplay.ingestionSessionId)
+    // Positive control on the snapshot itself: a comparator that always reports "unchanged" (because it
+    // read nothing) would pass this arm vacuously. Require the snapshot to have actually observed the
+    // walk's own writes before its stability is allowed to mean anything.
+    const snapshotIsLive = beforeReplay.counts.runs >= 1 && beforeReplay.counts.generations >= 1 &&
+      beforeReplay.counts.ingestionSessions >= 1 &&
+      beforeReplay.counts.generationRows === relation.rows.length &&
+      beforeReplay.generationId !== '<none>' && beforeReplay.ingestionSessionId !== '<none>'
+    S.s6aReplayWriteStateSnapshotLive = snapshotIsLive ? 'PASS' : 'FAIL'
+    must(
+      'S6-A: replay wrote NOTHING — run/generation/ingestion-session/generation-row counts and the ' +
+      'run row\'s generation_id + ingestion_session_id are byte-identical across the second identical ' +
+      'call (and the snapshot demonstrably observed the first walk\'s writes)',
+      unchanged && snapshotIsLive,
+      `unchanged=${unchanged} snapshotLive=${snapshotIsLive} ` +
+      `gens=${beforeReplay.counts.generations}->${afterReplay.counts.generations} ` +
+      `sessions=${beforeReplay.counts.ingestionSessions}->${afterReplay.counts.ingestionSessions} ` +
+      `genRows=${beforeReplay.counts.generationRows}->${afterReplay.counts.generationRows}`,
+    )
+    S.s6aReplayNoSecondWrite = (unchanged && snapshotIsLive) ? 'PASS' : 'FAIL'
+    const replayOk = replayResponseOk && unchanged && snapshotIsLive
     S.s6aReplayRun = replayOk ? 'PASS' : 'FAIL'
     S.s6aFlagOnRun = (firstOk && dbOk && replayOk) ? 'PASS' : 'FAIL'
   } finally {
