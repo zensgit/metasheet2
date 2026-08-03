@@ -78,7 +78,10 @@ async function testTableScopeAndRunOnlyPoliciesMergeValuesFree() {
       conflictType: 'duplicate_expanded_key',
       policies: [
         { fingerprint: 'sha16:1111111111111111', policy: 'keep_multiple_rows' },
-        { fingerprint: 'sha16:9999999999999999', policy: 'merge_quantity' },
+        // Was merge_quantity; that token is no longer selectable (policy honesty — see
+        // stock-preparation-conflict-policy-honesty.test.cjs). The stale-fingerprint behaviour this
+        // row exercises is independent of which selectable policy it names.
+        { fingerprint: 'sha16:9999999999999999', policy: 'source_correction_required' },
       ],
     },
   })
@@ -102,7 +105,9 @@ async function testTableScopeAndRunOnlyPoliciesMergeValuesFree() {
     conflictType: 'duplicate_expanded_key',
     scope: 'run_only',
     policies: [
-      { fingerprint: 'sha16:2222222222222222', policy: 'skip_selected' },
+      // Was skip_selected; that token is no longer selectable (policy honesty). source_correction_required
+      // is a working policy that is likewise NOT the table-scope value, so it still proves run-only wins.
+      { fingerprint: 'sha16:2222222222222222', policy: 'source_correction_required' },
       { fingerprint: 'sha16:9999999999999999', policy: 'source_correction_required' },
     ],
   })
@@ -118,7 +123,7 @@ async function testTableScopeAndRunOnlyPoliciesMergeValuesFree() {
   assert.equal(review.ignoredPolicyCount, 1, 'same stale fingerprint in run/table scopes is counted once')
   assert.deepEqual(review.policyCounts, {
     keep_multiple_rows: 1,
-    skip_selected: 1,
+    source_correction_required: 1,
   })
   assert.deepEqual(review.scopeCounts, {
     table_scope: 1,
@@ -128,7 +133,7 @@ async function testTableScopeAndRunOnlyPoliciesMergeValuesFree() {
     review.selectedPolicies.map((row) => [row.fingerprint, row.policy, row.scope]),
     [
       ['sha16:1111111111111111', 'keep_multiple_rows', 'table_scope'],
-      ['sha16:2222222222222222', 'skip_selected', 'run_only'],
+      ['sha16:2222222222222222', 'source_correction_required', 'run_only'],
     ],
   )
 
@@ -194,9 +199,31 @@ async function testDefaultHoldDeleteAndValidation() {
   assert.equal(deleted.policyCount, 0)
 }
 
+// Two-point wiring guard. The policy-honesty suite lives in its own file, and this repo's plugin
+// test entrypoint is an explicit `&&` chain — a new .cjs that is never appended to `scripts.test`
+// runs in NO workflow and every claim resting on it is vacuous. A wiring assertion placed INSIDE
+// the new file would be circular (it cannot run if the file is not wired), so it lives here, in a
+// suite that is already in the chain.
+function testPolicyHonestySuiteIsWiredIntoTheTestChain() {
+  const fs = require('node:fs')
+  const suite = 'stock-preparation-conflict-policy-honesty.test.cjs'
+  assert.equal(
+    fs.existsSync(path.join(__dirname, suite)),
+    true,
+    `${suite} must exist`,
+  )
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
+  assert.equal(
+    String(manifest.scripts && manifest.scripts.test).includes(`__tests__/${suite}`),
+    true,
+    `${suite} must be in scripts.test, or the policy-honesty proof runs in no CI workflow`,
+  )
+}
+
 async function main() {
   await testTableScopeAndRunOnlyPoliciesMergeValuesFree()
   await testDefaultHoldDeleteAndValidation()
+  testPolicyHonestySuiteIsWiredIntoTheTestChain()
 
   console.log('stock-preparation-conflict-policies.test.cjs OK')
 }
