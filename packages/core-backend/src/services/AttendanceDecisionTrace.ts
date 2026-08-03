@@ -35,6 +35,7 @@ import {
 } from './AttendanceSetupReadinessAggregate'
 import { loadActiveCurrentAttendanceRecordForDecisionTraceV1 } from '../attendance/w4c3c-active-current'
 import {
+  AttendanceCalculationSchemaUnsupportedError,
   readAttendanceW4TraceEvidence,
   type AttendanceW4TraceProjection,
 } from './AttendanceW4CalculationDetail'
@@ -340,11 +341,30 @@ async function readAttendanceW4DecisionBasis(
   workDate: string,
   runQuery: AttendanceDecisionTraceQueryFn,
 ): Promise<AttendanceW4DecisionBasis | null> {
-  const result = await readAttendanceW4TraceEvidence(orgId, userId, workDate, runQuery)
+  let result: Awaited<ReturnType<typeof readAttendanceW4TraceEvidence>>
+  try {
+    result = await readAttendanceW4TraceEvidence(orgId, userId, workDate, runQuery)
+  } catch (error) {
+    if (!(error instanceof AttendanceCalculationSchemaUnsupportedError)) throw error
+    return {
+      basis: { source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' }, version: { posture: 'undeterminable' } },
+      authoritative: true,
+      unavailable: true,
+      projection: null,
+    }
+  }
   const authoritativeOrg = result.rolloutState === 'authoritative'
     || (result.rolloutState === 'suspended' && result.priorRolloutState === 'authoritative')
   if (authoritativeOrg) {
     if (!result.evidence || result.evidence.mode !== 'authoritative' || result.evidence.projection === null) {
+      return {
+        basis: { source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' }, version: { posture: 'undeterminable' } },
+        authoritative: true,
+        unavailable: true,
+        projection: null,
+      }
+    }
+    if (!isAttendanceRecordStatus(result.evidence.projection.status)) {
       return {
         basis: { source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' }, version: { posture: 'undeterminable' } },
         authoritative: true,
@@ -438,7 +458,7 @@ export async function buildTodayStatusTrace(
         confidence: 'undeterminable',
       }
     }
-    const status = projection.status as AttendanceRecordStatus
+    const status = projection.status
     return {
       category: 'today_status',
       reasonCode: status,
@@ -590,7 +610,7 @@ export async function buildLateEarlyTrace(
         confidence: 'undeterminable',
       }
     }
-    const status = projection.status as AttendanceRecordStatus
+    const status = projection.status
     return {
       category: 'late_early',
       reasonCode: status,

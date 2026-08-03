@@ -355,6 +355,14 @@ fail closed，但 backlog 本身不证明 payload 完整性。本片不为此扩
 3. calculation SELECT inventory 现在也钉住 shadow trace 的 active-row 谓词，
    并在计算 fingerprint 前遮蔽 SQL 行注释与块注释。删除 shadow active 谓词或
    只把同文谓词塞进注释时均 fail closed；collector 全套 **58/58 PASS**。
+4. exact-head 独立复核发现 W4 持久化 schema/闭集异常会从 DecisionTrace 透传为
+   500，与 §12.7 的 “unsupported trace is undeterminable” 冲突。现在只捕获具名
+   `AttendanceCalculationSchemaUnsupportedError`，让 today/late/missing 三类均返回
+   values-free `frozen_evidence_unavailable`；普通查询异常继续抛出。重新变异为透传
+   schema 异常时两条命名合同腿精确 **2/2 failed**，恢复后 W4C-4/DecisionTrace
+   unit **106/106 PASS**。
+5. authoritative projection 的 status 在进入 DecisionTrace 前重新经过本模块闭集
+   validator，不再依赖 W4 与 W5 两份枚举当前恰好同值的类型强转。
 
 以上结果使用重新创建并完整迁移的本机 PostgreSQL 15 数据库
 `ms2_w4c4_final_20260803`；core-backend TypeScript type-check 通过。最终

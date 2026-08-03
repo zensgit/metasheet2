@@ -371,13 +371,43 @@ describe('W4C-4 DecisionTrace immutable authoritative evidence', () => {
     }])
   })
 
-  it('propagates unsupported schema and query errors instead of inferring authoritative evidence', async () => {
-    await expect(buildTodayStatusTrace(
+  it('maps unsupported W4 schema to a values-free undeterminable trace but still propagates query errors', async () => {
+    const unsupportedTrace = await buildTodayStatusTrace(
       ORG_ID,
       USER_ID,
       WORK_DATE,
       makeAuthoritativeTraceQuery({ snapshot_schema_version: 2 }),
-    )).rejects.toBeInstanceOf(AttendanceCalculationSchemaUnsupportedError)
+    )
+    expect(unsupportedTrace).toEqual({
+      category: 'today_status',
+      conclusion: {
+        workDate: WORK_DATE,
+        status: null,
+        isWorkday: null,
+        workMinutes: null,
+        lateMinutes: null,
+        earlyLeaveMinutes: null,
+      },
+      basis: [{
+        source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' },
+        version: { posture: 'undeterminable' },
+      }],
+      confidence: 'undeterminable',
+    })
+    for (const buildTrace of [buildLateEarlyTrace, buildMissingPunchTrace]) {
+      const trace = await buildTrace(
+        ORG_ID,
+        USER_ID,
+        WORK_DATE,
+        makeAuthoritativeTraceQuery({ snapshot_schema_version: 2 }),
+      )
+      expect(trace.confidence).toBe('undeterminable')
+      expect(Object.prototype.hasOwnProperty.call(trace, 'reasonCode')).toBe(false)
+      expect(trace.basis).toEqual([{
+        source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' },
+        version: { posture: 'undeterminable' },
+      }])
+    }
 
     const shadowQuery = (async <T extends QueryResultRow = QueryResultRow>(sql: string) => {
       if (/attendance_calculation_rollout_state/.test(sql)) {
@@ -388,12 +418,17 @@ describe('W4C-4 DecisionTrace immutable authoritative evidence', () => {
     await expect(buildTodayStatusTrace(ORG_ID, USER_ID, WORK_DATE, shadowQuery)).rejects.toThrow('query failed')
   })
 
-  it('rejects an unknown persisted rollout state before reading evidence', async () => {
+  it('maps an unknown persisted rollout state to a values-free undeterminable trace', async () => {
     const query = (async <T extends QueryResultRow = QueryResultRow>(sql: string) => {
       expect(sql).toMatch(/attendance_calculation_rollout_state/)
       return result([{ state: 'future_state', prior_state: null }]) as unknown as QueryResult<T>
     }) as AttendanceDecisionTraceQueryFn
-    await expect(buildTodayStatusTrace(ORG_ID, USER_ID, WORK_DATE, query))
-      .rejects.toBeInstanceOf(AttendanceCalculationSchemaUnsupportedError)
+    const trace = await buildTodayStatusTrace(ORG_ID, USER_ID, WORK_DATE, query)
+    expect(trace.basis).toEqual([{
+      source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' },
+      version: { posture: 'undeterminable' },
+    }])
+    expect(trace.confidence).toBe('undeterminable')
+    expect(trace.conclusion.status).toBeNull()
   })
 })
