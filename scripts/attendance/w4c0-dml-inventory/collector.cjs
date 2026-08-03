@@ -180,13 +180,73 @@ function sqlLiteralContainingIndex(content, index) {
   return null
 }
 
+function maskSqlComments(query) {
+  const src = String(query ?? '')
+  let out = ''
+  let quote = null
+  let i = 0
+  while (i < src.length) {
+    const ch = src[i]
+    const next = src[i + 1]
+    if (quote !== null) {
+      out += ch
+      if (ch === '\\' && i + 1 < src.length) {
+        out += src[i + 1]
+        i += 2
+        continue
+      }
+      if (ch === quote && next === quote) {
+        out += next
+        i += 2
+        continue
+      }
+      if (ch === quote) quote = null
+      i += 1
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      out += ch
+      i += 1
+      continue
+    }
+    if (ch === '-' && next === '-') {
+      out += '  '
+      i += 2
+      while (i < src.length && src[i] !== '\n' && src[i] !== '\r') {
+        out += ' '
+        i += 1
+      }
+      continue
+    }
+    if (ch === '/' && next === '*') {
+      out += '  '
+      i += 2
+      while (i < src.length) {
+        if (src[i] === '*' && src[i + 1] === '/') {
+          out += '  '
+          i += 2
+          break
+        }
+        out += src[i] === '\n' || src[i] === '\r' ? src[i] : ' '
+        i += 1
+      }
+      continue
+    }
+    out += ch
+    i += 1
+  }
+  return out
+}
+
 function requiredPredicateFingerprint(content, index) {
   const query = sqlLiteralContainingIndex(String(content ?? ''), index)
   if (!query) return null
-  if (/\b(?:[A-Za-z_$][A-Za-z0-9_$]*\.)?visibility_state\s*=\s*['"]active['"]/i.test(query)) {
+  const maskedQuery = maskSqlComments(query)
+  if (/\b(?:[A-Za-z_$][A-Za-z0-9_$]*\.)?visibility_state\s*=\s*['"]active['"]/i.test(maskedQuery)) {
     return 'visibility_state=active'
   }
-  if (/\b(?:attendance_current_records|ATTENDANCE_ACTIVE_CURRENT_RELATION_V1)\b/.test(query)) {
+  if (/\b(?:attendance_current_records|ATTENDANCE_ACTIVE_CURRENT_RELATION_V1)\b/.test(maskedQuery)) {
     return 'current_relation=attendance_current_records'
   }
   return null

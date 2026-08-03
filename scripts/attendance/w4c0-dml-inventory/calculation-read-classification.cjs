@@ -35,7 +35,7 @@ const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readAttendanceCalculationDetail', 'attendance_record_segments', 1, 'history', 'authorized_current_or_history_detail'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readAttendanceW4ShadowBacklog', 'attendance_record_calculations', 1, 'history', 'values_free_shadow_backlog'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readAuthoritativeTraceCalculation', 'attendance_record_calculations', 1, 'current', 'immutable_current_trace', 'visibility_state=active'),
-  entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readShadowTraceCalculation', 'attendance_record_calculations', 1, 'history', 'immutable_shadow_trace'),
+  entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readShadowTraceCalculation', 'attendance_record_calculations', 1, 'history', 'immutable_shadow_trace', 'visibility_state=active'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readTraceSegments', 'attendance_record_segments', 1, 'history', 'immutable_authorized_trace_segments'),
   entry('plugins/plugin-attendance/index.cjs', 'loadW4c3cRecordSubjectForOperation', 'attendance_record_calculations', 2, 'history', 'operation_subject_precondition'),
 ])

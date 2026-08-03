@@ -214,6 +214,41 @@ test('W4C-4: generated SELECT inventory classifies every calculation and segment
   assert.equal(mutated.predicateDrift[0]?.actual, null)
 })
 
+test('W4C-4 mutation: a SQL-comment marker cannot satisfy the active predicate fingerprint', () => {
+  for (const query of [
+    "`SELECT 1 FROM attendance_record_calculations /* visibility_state = 'active' */`",
+    "'SELECT 1 FROM attendance_record_calculations /* visibility_state = \'active\' */'",
+  ]) {
+    const source = `async function shadowRead() { return db.query(${query}) }\n`
+    const sites = scanFileForAttendanceCalculationReadSites('packages/core-backend/src/attendance/shadow-read.ts', source)
+    assert.equal(sites.length, 1, query)
+    assert.equal(sites[0]?.requiredPredicateFingerprint, null, query)
+  }
+})
+
+test('W4C-4 mutation: removing shadow active predicate is independently detected', () => {
+  const baseSource = createWorktreeSource(rootDir)
+  const relPath = 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts'
+  const original = baseSource.readFile(relPath)
+  const mutatedSource = {
+    ...baseSource,
+    readFile: (candidate) => {
+      if (candidate !== relPath) return baseSource.readFile(candidate)
+      return original.replace(
+        "AND calculation.mode = 'shadow'\n      WHERE record.org_id = $1 AND record.user_id = $2 AND record.work_date = $3\n        AND record.visibility_state = 'active'",
+        "AND calculation.mode = 'shadow'\n      WHERE record.org_id = $1 AND record.user_id = $2 AND record.work_date = $3\n        /* visibility_state = 'active' */",
+      )
+    },
+  }
+  const result = classifyAttendanceCalculationReadSites(
+    buildAttendanceCalculationReadCensus(mutatedSource).sites,
+  )
+  assert.deepEqual(result.unclassified, [])
+  assert.equal(result.predicateDrift.length, 1)
+  assert.equal(result.predicateDrift[0]?.enclosingSymbol, 'readShadowTraceCalculation')
+  assert.equal(result.predicateDrift[0]?.actual, null)
+})
+
 test('W4C-4 SELECT-inventory mutation: unclassified calculation and segment reads fail closed', () => {
   for (const table of ['attendance_record_calculations', 'attendance_record_segments']) {
     const sites = scanFileForAttendanceCalculationReadSites(
