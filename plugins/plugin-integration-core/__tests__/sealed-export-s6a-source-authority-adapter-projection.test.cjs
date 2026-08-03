@@ -190,7 +190,30 @@ function sortedArray(set) {
 // by strict equality on the id rather than by substring on the message — pins whose messages
 // share words otherwise cover for each other. A pin that is deleted, renamed or weakened
 // makes its own self-test RED, because nothing throws.
+// The closed set of pin ids. This is not a comment: pinFail() refuses an id that is not
+// listed, and the coverage assertion at the end of section 4 requires every listed id to have
+// been fired by a self-test. So a new pin cannot be added without being listed, and cannot be
+// listed without a self-test proving it fires — which is the mechanical version of the check
+// that a hand-maintained list of "pins that have self-tests" silently failed at, by omitting
+// `projection-uses`.
+const DECLARED_PINS = Object.freeze([
+  'external-system-uses',
+  'normalize-raw-uses',
+  'projection-loop-idiom',
+  'projection-member-reads',
+  'projection-uses',
+  'report-clean',
+  'system-dynamic-read',
+  'system-read-set',
+  'system-uses',
+])
+
 function pinFail(pinId, message) {
+  assert.ok(
+    DECLARED_PINS.includes(pinId),
+    'a pin fired under an id that is not in DECLARED_PINS, so nothing requires it to have a '
+    + 'self-test: ' + pinId,
+  )
   const error = new Error('PIN ' + pinId + ': ' + message)
   error.pinId = pinId
   throw error
@@ -569,6 +592,26 @@ const ESCAPES = Object.freeze([
       '  for (const field of SOURCE_CONFIG_FIELDS) {\n',
     ),
   },
+  // The raw record reached inside the projection frame by something the member-read pins do
+  // not model — no named member, no computed key, so only the use multiset sees it.
+  {
+    id: 'projection-raw-alias',
+    pin: 'projection-uses',
+    apply: (source) => anchoredReplace(
+      source,
+      PROJECT_RETURN_LINE,
+      '  const alias = raw\n  void alias\n' + PROJECT_RETURN_LINE,
+    ),
+  },
+  {
+    id: 'projection-projected-escape',
+    pin: 'projection-uses',
+    apply: (source) => anchoredReplace(
+      source,
+      PROJECT_RETURN_LINE,
+      '  void JSON.stringify(projected)\n' + PROJECT_RETURN_LINE,
+    ),
+  },
 ])
 
 function main() {
@@ -721,21 +764,8 @@ function main() {
     firedPins.add(escape.pin)
   }
 
-  // ...and every pin the battery declares is exercised by at least one self-test. A pin
-  // nothing tests is exactly the defect this section exists to fix.
-  assert.deepEqual(
-    sortedArray(firedPins),
-    [
-      'external-system-uses',
-      'normalize-raw-uses',
-      'projection-loop-idiom',
-      'projection-member-reads',
-      'system-dynamic-read',
-      'system-read-set',
-      'system-uses',
-    ],
-    'a declared pin has no self-test proving it can fire',
-  )
+  // (the coverage assertion over DECLARED_PINS is at the end of 4b, once the parse-failure
+  // controls have contributed the `report-clean` pin they exercise.)
 
   // 4b. PARSE-FAILURE CONTROLS. A scanner that reports "zero findings" when it could not
   // read its input is worse than no scanner, so every way the read can fail must produce a
@@ -785,6 +815,7 @@ function main() {
     }
     assert.ok(caught !== null, 'control ' + control.id + ' did not red the pins')
     assert.equal(caught.pinId, 'report-clean')
+    firedPins.add(caught.pinId)
   }
 
   // The same door with the REAL parser and genuinely unparseable text. Asserted separately
@@ -824,6 +855,17 @@ function main() {
   assert.throws(
     () => occurrencesOf(liveReport, 'system', 'noSuchFunction'),
     /never occurs in/,
+  )
+
+  // 4c. PIN COVERAGE, mechanically. Every id the battery may fire is in DECLARED_PINS
+  // (pinFail() refuses any other), and every id in DECLARED_PINS was actually fired by a
+  // self-test or a control above. A pin nothing tests is exactly the defect this section
+  // exists to fix, and a hand-maintained list of "pins that have self-tests" already failed
+  // that check once here by omitting `projection-uses` — so it is derived, not written down.
+  assert.deepEqual(
+    sortedArray(firedPins),
+    [...DECLARED_PINS].sort(),
+    'a declared pin has no self-test proving it can fire',
   )
 
   // ── 5. PROJECTION DRIFT PIN (side B) — nothing listed may be unread ────────────────
