@@ -637,7 +637,7 @@ async function runProvisioningScript(env) {
 // migration/superuser role) rather than the S6-A runtime role, so the proof does not depend on the same
 // identity that (allegedly) wrote the rows also being the one asked to confirm they exist. Values-free:
 // only fixed status tokens and counts are read into the evidence block, no row payload content.
-async function assertS6ARunDatabaseObservable(operationId) {
+async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineCount) {
   const pg = requireFromPlugin('pg')
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
   try {
@@ -666,13 +666,18 @@ async function assertS6ARunDatabaseObservable(operationId) {
     S.s6aDbGenerationRowFound = generationFound ? 'true' : 'false'
     S.s6aDbGenerationStatus = generationStatus
 
+    // Not just "a row exists" — the row the kernel was supposed to write for THIS fixture: the same
+    // business-line count the HTTP-level assertion already checked on the response body, now confirmed
+    // independently against the persisted row.
     const dbOk = run !== null && run.status === 'COMPLETED' && Number(run.source_read_count) === 1 &&
-      generationFound
+      Number(run.business_line_count) === expectedBusinessLineCount && generationFound
     must(
-      'S6-A: database-observable proof — stock_prep_runs row COMPLETED (source_read_count=1) + a matching ' +
-      'generations row exist, queried over a SEPARATE (superuser, non-runtime-role) connection',
+      'S6-A: database-observable proof — stock_prep_runs row COMPLETED (source_read_count=1, ' +
+      'business_line_count matches the fixture) + a matching generations row exist, queried over a ' +
+      'SEPARATE (superuser, non-runtime-role) connection',
       dbOk,
-      `runFound=${S.s6aDbRunRowFound} runStatus=${S.s6aDbRunStatus} genFound=${S.s6aDbGenerationRowFound} genStatus=${S.s6aDbGenerationStatus}`,
+      `runFound=${S.s6aDbRunRowFound} runStatus=${S.s6aDbRunStatus} lines=${S.s6aDbRunBusinessLineCount} ` +
+      `genFound=${S.s6aDbGenerationRowFound} genStatus=${S.s6aDbGenerationStatus}`,
     )
     S.s6aDatabaseObservable = dbOk ? 'PASS' : 'FAIL'
     return dbOk
@@ -722,9 +727,33 @@ async function attemptS6ARealRun() {
 
   // 2. real external system record (must exist BEFORE the runtime attempts a run; visible via the
   // ordinary external-systems HTTP surface, credentials plaintext only inside this request body).
-  const baseToken = await getDevToken()
-  const registered = await registerExternalSystem(baseToken, systemId)
-  const registeredOk = must('S6-A: external system registered', registered.ok, `http=${registered.status}`)
+  //
+  // RD-E2E finding: this step calls the HTTP API, which needs a server actually listening — this file
+  // previously had NO startServer() call here at all. That was masked for a long time by the
+  // stopServer() bug fixed above (the "existing chain" server from the PREVIOUS phase was leaking and
+  // silently answering these requests instead), so this gap was invisible until that masking bug was
+  // fixed: with stopServer() now actually killing the previous server and confirming the port is free,
+  // this step failed outright with a raw "fetch failed" (nothing listening at all) — see dispatched run
+  // 30833734088. A flag-OFF server is sufficient (registration is unrelated to the S6-A flag), and it
+  // MUST be fully stopped again before step 4's flag-ON restart — two servers cannot hold PORT at once,
+  // and stopServer() now enforces exactly that.
+  let registeredOk = false
+  try {
+    await startServer({}, 'pre-flag-on-registration')
+    try {
+      const baseToken = await getDevToken()
+      const registered = await registerExternalSystem(baseToken, systemId)
+      registeredOk = must('S6-A: external system registered', registered.ok, `http=${registered.status}`)
+    } finally {
+      await stopServer()
+    }
+  } catch (error) {
+    S.s6aExternalSystemRegistered = 'FAIL'
+    S.s6aFlagOnRun = 'NOT_RUN'
+    S.s6aFlagOnReason = 'EXTERNAL_SYSTEM_REGISTRATION_FAILED'
+    must('S6-A: external system registered', false, String(error && error.message || error))
+    return
+  }
   S.s6aExternalSystemRegistered = registeredOk ? 'PASS' : 'FAIL'
   if (!registeredOk) {
     S.s6aFlagOnRun = 'NOT_RUN'
@@ -890,7 +919,7 @@ async function attemptS6ARealRun() {
     // Step 3: the HTTP response saying COMPLETED is not proof anything was written — confirm the
     // generation kernel's own rows exist, over a connection independent of the runtime role that wrote
     // them.
-    const dbOk = await assertS6ARunDatabaseObservable(operationId)
+    const dbOk = await assertS6ARunDatabaseObservable(operationId, relation.rows.length)
     if (!dbOk) {
       S.s6aReplayRun = 'NOT_RUN'
       return
@@ -916,20 +945,32 @@ async function attemptS6ARealRun() {
 export async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true })
 
-  // Phase 1: flag-OFF arm.
-  await runFlagArm(undefined, false, 'flagOff')
-
-  // Phase 2: exact-match arms — '1' and 'yes' must NOT enable the route.
-  await runFlagArm('1', false, 'exactMatch1')
-  await runFlagArm('yes', false, 'exactMatchYes')
-
-  // Phase 3: existing chain (T4 extended smoke) against a fresh flag-OFF server.
-  await startServer({}, 'existing-chain')
+  // Phases 1-3 run inside their own try/catch for the SAME reason Phase 4 already had one: an unexpected
+  // throw here (including from stopServer()'s own port-free assertion — see the block comment above
+  // startServer()/stopServer()) must not skip the evidence write at the bottom of this function. A red
+  // job with NO summary.txt/checks.json artifact at all is strictly worse than one that at least names
+  // which phase failed and why — `must()` below records it as a failed check so `overallPass` still
+  // reflects it, and CHECKS already accumulated by any phase that DID complete is preserved, not lost.
   try {
-    const token = await getDevToken()
-    await runExistingChain(token)
-  } finally {
-    await stopServer()
+    // Phase 1: flag-OFF arm.
+    await runFlagArm(undefined, false, 'flagOff')
+
+    // Phase 2: exact-match arms — '1' and 'yes' must NOT enable the route.
+    await runFlagArm('1', false, 'exactMatch1')
+    await runFlagArm('yes', false, 'exactMatchYes')
+
+    // Phase 3: existing chain (T4 extended smoke) against a fresh flag-OFF server.
+    await startServer({}, 'existing-chain')
+    try {
+      const token = await getDevToken()
+      await runExistingChain(token)
+    } finally {
+      await stopServer()
+    }
+  } catch (error) {
+    must('phases 1-3 (flag-gate arms + existing chain) completed without an unexpected harness error',
+      false, String(error && error.message || error))
+    await stopServer().catch(() => {})
   }
 
   // Phase 4: S6-A real flag-ON attempt (best-effort; every failure point reports NOT_RUN honestly).
@@ -939,7 +980,11 @@ export async function main() {
     S.s6aFlagOnRun = S.s6aFlagOnRun || 'NOT_RUN'
     S.s6aFlagOnReason = S.s6aFlagOnReason || 'UNEXPECTED_ERROR'
     must('S6-A flag-ON real run attempted', false, String(error && error.message || error))
-    await stopServer()
+    // .catch(), not a bare await: stopServer() can itself throw (its own port-free assertion — see the
+    // block comment above startServer()/stopServer()), and a throw HERE would escape this catch and skip
+    // the evidence write below entirely, which is exactly the failure mode this whole block exists to
+    // avoid.
+    await stopServer().catch(() => {})
   }
 
   // Overall PASS requires every check that ran to have passed — including the S6-A real-run attempt.
