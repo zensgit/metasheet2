@@ -639,7 +639,7 @@ function createAttendanceShiftService(deps) {
    * ended/inactive history), any rotation-rule shift_sequence reference (id or
    * legacy name; rotation assignments are protected indirectly through their
    * rule), a pending swap requester/counterparty snapshot, or a
-   * pending/published dispatch target. Rejected swap snapshots, cancelled
+   * pending/published dispatch target, or desired fixed-schedule config. Rejected swap snapshots, cancelled
    * dispatch snapshots, and auto-write candidate ids are immutable historical
    * evidence and deliberately NOT blockers.
    */
@@ -651,6 +651,13 @@ function createAttendanceShiftService(deps) {
     )
     const assignmentCount = Number(assignmentRows[0]?.total ?? 0)
     if (assignmentCount > 0) blockers.push({ blocker: 'shift_assignments', count: assignmentCount })
+
+    const fixedConfigRows = await trx.query(
+      'SELECT COUNT(*)::int AS total FROM attendance_group_fixed_schedule_configs WHERE org_id = $1 AND shift_id = $2',
+      [orgId, shiftId],
+    )
+    const fixedConfigCount = Number(fixedConfigRows[0]?.total ?? 0)
+    if (fixedConfigCount > 0) blockers.push({ blocker: 'fixed_schedule_configs', count: fixedConfigCount })
 
     const rotationRows = await trx.query(
       `SELECT COUNT(*)::int AS total

@@ -1148,6 +1148,7 @@ jobs:
             tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts \
             tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts \
             tests/integration/attendance-w4c4-calculation-detail.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

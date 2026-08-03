@@ -410,3 +410,29 @@ describe('applyShiftReferenceLabels (historical evidence reads)', () => {
     expect(rows[1]).toEqual({ requesterShiftId: 'kept', requesterShiftLabel: 'Day Shift', requesterShiftStatus: 'available' })
   })
 })
+
+describe('deleteShift fixed-schedule config blocker', () => {
+  it('returns the canonical typed 409 before deleting a referenced shift', async () => {
+    const shiftId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const statements: string[] = []
+    const trx = {
+      query: async (sql: string) => {
+        statements.push(sql)
+        if (sql.includes('SELECT id, name FROM attendance_shifts')) return [{ id: shiftId, name: 'Day' }]
+        if (sql.includes('attendance_group_fixed_schedule_configs')) return [{ total: 1 }]
+        if (sql.includes('COUNT(*)::int AS total')) return [{ total: 0 }]
+        throw new Error(`unexpected SQL: ${sql}`)
+      },
+    }
+    const db = {
+      transaction: async (callback: (client: typeof trx) => Promise<unknown>) => callback(trx),
+    }
+
+    await expect(service.deleteShift(db, { orgId: 'org-a', shiftId })).rejects.toMatchObject({
+      status: 409,
+      code: ERR.DELETE_BLOCKED,
+      details: [{ field: 'fixed_schedule_configs', message: 'fixed_schedule_configs: 1 reference(s)' }],
+    })
+    expect(statements.some(statement => statement.startsWith('DELETE FROM'))).toBe(false)
+  })
+})
