@@ -3520,6 +3520,12 @@ describe('attendance UUID route validation', () => {
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/clear', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'GET /api/attendance/rule-sets' },
+      { key: 'POST /api/attendance/rule-sets/preview', body: { config: {} } },
+      { key: 'GET /api/attendance/advanced-scheduling/workbench' },
+      { key: 'GET /api/attendance/shifts' },
+      { key: 'GET /api/attendance/assignments' },
+      { key: 'GET /api/attendance/holidays' },
     ]
     const selectors = [
       { name: 'body', body: { orgId: 'other-org' } },
@@ -3567,6 +3573,12 @@ describe('attendance UUID route validation', () => {
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/clear', body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'GET /api/attendance/rule-sets' },
+      { key: 'POST /api/attendance/rule-sets/preview', body: { config: {} } },
+      { key: 'GET /api/attendance/advanced-scheduling/workbench' },
+      { key: 'GET /api/attendance/shifts' },
+      { key: 'GET /api/attendance/assignments' },
+      { key: 'GET /api/attendance/holidays' },
     ]
 
     for (const testCase of cases) {

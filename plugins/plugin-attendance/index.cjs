@@ -39319,7 +39319,9 @@ module.exports = {
       'GET',
       '/api/attendance/rule-sets',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -39844,7 +39846,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         let config = parsed.data.config ?? {}
         let ruleSetId = parsed.data.ruleSetId
 
@@ -45294,7 +45298,9 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" must be on or before "to".' } })
           return
         }
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const rangeStart = from ?? '0001-01-01'
         const rangeEnd = to ?? ATTENDANCE_SCHEDULE_OPEN_END_DATE
 
@@ -45557,7 +45563,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -45961,7 +45969,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
         const publishStatusFilter = normalizeAttendanceSchedulePublishStatusFilter(parsed.data.publishStatus)
         const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
@@ -47602,13 +47612,15 @@ module.exports = {
           return
         }
 
-	        const orgId = getOrgId(req)
-	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
-	        if (!dateRange.ok) {
-	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
-	          return
-	        }
-	        const { from, to } = dateRange
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
+        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+        if (!dateRange.ok) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+          return
+        }
+        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
