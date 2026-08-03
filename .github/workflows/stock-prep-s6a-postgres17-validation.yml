@@ -246,6 +246,29 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s6a_t1
       JWT_SECRET: t1-ci-synthetic-not-a-secret
       PGPASSWORD: postgres
+      # WHY THIS EXISTS, and why the list is migration-replay.yml's and not plugin-tests.yml's.
+      #
+      # Without it this job cannot go green, for reasons that have nothing to do with
+      # PostgreSQL 17. The frozen S6-A package ships migrations that EVERY fresh-database
+      # lane in this repository already excludes for documented, still-open defects
+      # (008 idempotency on the scope column; the gantt FK pointing at pre-fix text view
+      # ids; the legacy user_orgs is_active incompatibility). They are NOT neutralised by
+      # SUPERSEDED_LEGACY_SQL_MIGRATIONS, which only no-ops 042a/048/049.
+      #
+      # This repository keeps TWO deliberately different lists (they are documented as
+      # solving different problems and as not required to converge — see
+      # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md). This job's shape — fresh
+      # database, apply latest, assert Pending 0, then re-run latest and assert
+      # idempotency — is migration-replay.yml's shape, so it takes migration-replay.yml's
+      # list verbatim. plugin-tests.yml's list differs in its final entry and is the
+      # per-PR gate's, not this one's.
+      #
+      # WHAT THIS NARROWS THE CLAIM TO. Evidence from this job means: the frozen
+      # package's migrations, MINUS the six excluded below, apply cleanly and idempotently
+      # on the matrix PostgreSQL major version. It does NOT mean the full unexcluded set
+      # applies on any version — that has never had a green run on any version in this
+      # repository (see #4162), so it is not a PostgreSQL 17 question.
+      MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,zzzz20260114110000_create_user_orgs_table.ts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
