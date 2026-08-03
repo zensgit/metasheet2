@@ -1098,6 +1098,79 @@ async function diagnoseS6ACaptureRefusal({
   }
 }
 
+// ── post-capture refusal narrowing (values-free) ────────────────────────────────────────────────────
+// Once the run row gets PAST the capture half, a SEALED_EXPORT_INTERNAL_ERROR is privateBoundary's
+// catch-all for an UNTRUSTED throw — most often a raw driver error the failure contract deliberately
+// discards. Migration 073's under-scoped grant (repaired by 074, PR #4728) was exactly that shape, so
+// this reports (a) where the run row stopped, (b) the generation/pointer rows the activation step reads,
+// and (c) whether the RUNTIME role can actually perform the reads and locking reads that step needs.
+// Only closed tokens: table names, PostgreSQL SQLSTATE codes, counts and booleans — never a row value.
+async function diagnoseS6APostCaptureRefusal() {
+  const ACTIVATION_TABLES = [
+    'integration_sealed_export_active_pointers',
+    'integration_sealed_export_authority_state',
+    'integration_sealed_export_generation_audit',
+    'integration_sealed_export_generation_rows',
+    'integration_sealed_export_generations',
+    'integration_sealed_export_stock_prep_runs',
+  ]
+  S.s6aPostCaptureGenerationStatus = 'NOT_RUN'
+  S.s6aPostCaptureActivePointerRows = -1
+  S.s6aRuntimeRoleSelect = 'NOT_RUN'
+  S.s6aRuntimeRoleSelectForUpdate = 'NOT_RUN'
+  try {
+    await withApplicationPool(async (pool) => {
+      const generation = await pool.query(
+        `SELECT g.status FROM integration_sealed_export_generations g
+         JOIN integration_sealed_export_stock_prep_runs r ON r.generation_id = g.generation_id
+         WHERE r.tenant_id = $1`,
+        [TENANT_ID],
+      )
+      S.s6aPostCaptureGenerationStatus =
+        generation.rows.length === 1 ? generation.rows[0].status : `<rows:${generation.rows.length}>`
+      const pointers = await pool.query(
+        'SELECT COUNT(*)::int AS n FROM integration_sealed_export_active_pointers WHERE tenant_id = $1',
+        [TENANT_ID],
+      )
+      S.s6aPostCaptureActivePointerRows = pointers.rows[0].n
+    })
+  } catch (error) {
+    S.s6aPostCaptureGenerationStatus = '<query-failed>'
+  }
+  if (!RUNTIME_DB_URL) return
+  const pg = requireFromPlugin('pg')
+  const runtimePool = new pg.Pool({ connectionString: RUNTIME_DB_URL, max: 1 })
+  const plain = []
+  const locking = []
+  try {
+    for (const table of ACTIVATION_TABLES) {
+      // `WHERE false` — a privilege probe, never a data read: PostgreSQL checks the privilege before it
+      // checks whether any row qualifies, so this reports the grant without touching a single row.
+      try {
+        await runtimePool.query(`SELECT 1 FROM ${table} WHERE false`)
+        plain.push(`${table.replace('integration_sealed_export_', '')}:ok`)
+      } catch (error) {
+        plain.push(`${table.replace('integration_sealed_export_', '')}:${error && error.code ? error.code : 'ERR'}`)
+      }
+      // A locking read is what migration 073 got wrong once already: PostgreSQL requires UPDATE
+      // privilege for SELECT ... FOR UPDATE, independent of whether a row exists to lock.
+      try {
+        await runtimePool.query(`SELECT 1 FROM ${table} WHERE false FOR UPDATE`)
+        locking.push(`${table.replace('integration_sealed_export_', '')}:ok`)
+      } catch (error) {
+        locking.push(`${table.replace('integration_sealed_export_', '')}:${error && error.code ? error.code : 'ERR'}`)
+      }
+    }
+    S.s6aRuntimeRoleSelect = plain.join('|')
+    S.s6aRuntimeRoleSelectForUpdate = locking.join('|')
+  } catch {
+    S.s6aRuntimeRoleSelect = '<probe-failed>'
+    S.s6aRuntimeRoleSelectForUpdate = '<probe-failed>'
+  } finally {
+    try { await runtimePool.end() } catch { /* best-effort */ }
+  }
+}
+
 async function attemptS6ARealRun() {
   const salt = `t${Math.floor(Date.now() / 1000)}`
   const systemId = `e2efunc-s6a-source-${salt}`
@@ -1427,6 +1500,8 @@ async function attemptS6ARealRun() {
         identityKeyFile,
         systemId,
       })
+      // ...and if the run row got PAST the capture half, narrow the post-capture half too.
+      await diagnoseS6APostCaptureRefusal()
       S.s6aDatabaseObservable = 'NOT_RUN'
       S.s6aReplayRun = 'NOT_RUN'
       S.s6aReplayNoSecondWrite = 'NOT_RUN'
