@@ -173,7 +173,15 @@ jobs:
             echo "FATAL P0: one-byte mutation did NOT cause verification to fail. The negative control did not fire — 'verification passed' would be indistinguishable from 'verification did not run'." >&2
             exit 1
           fi
-          if ! grep -qiE "checksum mismatch|FAILED|did NOT match" neg.log; then
+          # Checksum-specific strings only. A bare "FAILED"/"-i" pattern would
+          # also match unrelated failures (e.g. verify_windows_zip_zipfile_smoke's
+          # "Windows ZipFile extraction smoke failed for zip package"), which
+          # would let an environment problem masquerade as the negative control
+          # firing. verify_sha() runs before any archive/pwsh checks in
+          # multitable-onprem-package-verify.sh, so on a genuine byte flip only
+          # these checksum-specific strings can appear — but the guard must
+          # assert that itself, not rely on step ordering silently holding.
+          if ! grep -qE "did NOT match|Checksum mismatch for" neg.log; then
             echo "FATAL: negative arm failed for a reason other than the checksum (not exclusive to the byte flip) — cannot attribute the failure to the mutation." >&2
             exit 1
           fi
