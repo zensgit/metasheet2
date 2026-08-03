@@ -26,6 +26,7 @@ import {
 import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerprints'
 import { applyFrozenManualOverrideSnapshotToDailyProjectionV1 } from './w4c3c-manual-override'
 import { assertParentNotRetiredForOrdinaryWriterV1 } from './w4c3c-ops-retirement'
+import { computeAttendanceW4ShadowDiff } from '../services/AttendanceW4CalculationDetail'
 
 export const ATTENDANCE_RECOMPUTE_POLICIES_V1 = Object.freeze([
   'frozen_prior',
@@ -241,7 +242,8 @@ export async function appendRecomputeCalculationV1(
     `SELECT id::text AS id, org_id::text AS org_id, user_id::text AS user_id,
             work_date::text AS work_date,
             current_calculation_id::text AS current_calculation_id,
-            projection_owner, visibility_state, visibility_reason, timezone, meta
+            projection_owner, visibility_state, visibility_reason, timezone, meta,
+            status, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes
        FROM attendance_records
       WHERE id = $1::uuid AND org_id = $2
       FOR UPDATE`,
@@ -250,6 +252,7 @@ export async function appendRecomputeCalculationV1(
   if (recordRows.length === 0) fail(ATTENDANCE_RECOMPUTE_ERROR_CODES.RECORD_NOT_FOUND, 404)
   if (recordRows.length !== 1) fail(ATTENDANCE_RECOMPUTE_ERROR_CODES.DATABASE_RESULT_INVALID, 500)
   const record = recordRows[0]
+  const workDate = String(record.work_date).slice(0, 10)
   // Never reactivate any retired parent through ordinary recompute.
   assertParentNotRetiredForOrdinaryWriterV1(record)
 
@@ -441,6 +444,34 @@ export async function appendRecomputeCalculationV1(
     lateMinutes: overlaidDaily.lateMinutes ?? physicalDaily.lateMinutes,
     earlyLeaveMinutes: overlaidDaily.earlyLeaveMinutes ?? physicalDaily.earlyLeaveMinutes,
   }
+  const resolvedWorkDate = typeof (context as { workDate?: unknown }).workDate === 'string'
+    ? (context as { workDate: string }).workDate
+    : null
+  const shadowDiff = input.mode === 'shadow'
+    ? computeAttendanceW4ShadowDiff({
+        legacy: {
+          workDate,
+          status: typeof record.status === 'string' ? record.status : null,
+          firstInAt: record.first_in_at as string | Date | null,
+          lastOutAt: record.last_out_at as string | Date | null,
+          workMinutes: record.work_minutes === null ? null : Number(record.work_minutes),
+          lateMinutes: record.late_minutes === null ? null : Number(record.late_minutes),
+          earlyLeaveMinutes: record.early_leave_minutes === null ? null : Number(record.early_leave_minutes),
+        },
+        calculated: {
+          workDate: resolvedWorkDate,
+          status: projection.status,
+          firstInAt: projection.firstInAt,
+          lastOutAt: projection.lastOutAt,
+          workMinutes: projection.workedMinutes,
+          lateMinutes: projection.lateMinutes,
+          earlyLeaveMinutes: projection.earlyLeaveMinutes,
+        },
+        segmentCount: canonical.segments.length,
+        outcome: 'completed',
+        workDateMismatch: resolvedWorkDate !== null && resolvedWorkDate !== workDate,
+      })
+    : null
   const nextVersion = Number(prior.version) + 1
   if (!Number.isSafeInteger(nextVersion) || nextVersion < 2) {
     fail(ATTENDANCE_RECOMPUTE_ERROR_CODES.DATABASE_RESULT_INVALID, 500)
@@ -462,7 +493,7 @@ export async function appendRecomputeCalculationV1(
         merge_policy, calculation_tier, outcome, outcome_reason_code, projection_effect,
         expected_segment_count, projected_status, projected_first_in_at, projected_last_out_at,
         projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
-        projected_daily_fingerprint, actor_id, correlation_id
+        projected_daily_fingerprint, shadow_diff_code, shadow_diff, actor_id, correlation_id
       ) VALUES (
         $1::uuid, $2, $3::uuid, $4, 'calculation', $5, 'recompute',
         $6, 1, $7::uuid, $8::uuid,
@@ -471,7 +502,7 @@ export async function appendRecomputeCalculationV1(
         $16::jsonb, $17::jsonb, $18::jsonb,
         'merge', $19, 'completed', 'calculated', $20,
         $21, $22, $23, $24, $25, $26, $27, $28,
-        $29, $30
+        $29, $30::jsonb, $31, $32
       )`,
     [
       calculationId,
@@ -510,6 +541,8 @@ export async function appendRecomputeCalculationV1(
       projection.lateMinutes,
       projection.earlyLeaveMinutes,
       projectedDailyFingerprint(projection),
+      shadowDiff?.code ?? null,
+      shadowDiff ? canonicalAttendanceJsonV1(shadowDiff) : null,
       actorId,
       correlationId,
     ],

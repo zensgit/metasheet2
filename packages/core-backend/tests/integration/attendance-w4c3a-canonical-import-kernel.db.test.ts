@@ -20,6 +20,7 @@ import {
   buildAttendanceImportAttributionFreezeV1,
   buildAttendanceImportPolicySourceProofV1,
 } from '../../src/attendance/w4c3a-import-proof'
+import { parseAttendanceW4ShadowDiff } from '../../src/services/AttendanceW4CalculationDetail'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as addOffStatusUp } from '../../src/db/migrations/zzzz20260731120000_w4c3a_add_off_daily_status'
 
@@ -498,12 +499,13 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
     }
   }
 
-  it('appends a shadow calculation while preserving the compatibility projection', async () => {
+  it('shadow import persists a parsed diff while preserving the compatibility projection', async () => {
     const input = fixture('shadow')
     await execute(input)
     const rows = await pool.query(
       `SELECT r.projection_owner, r.current_calculation_id,
               c.mode, c.outcome, c.projection_effect,
+              c.shadow_diff_code, c.shadow_diff,
               (SELECT count(*)::int FROM attendance_record_segments s WHERE s.calculation_id = c.id) AS segments
          FROM attendance_records r
          JOIN attendance_record_calculations c ON c.attendance_record_id = r.id
@@ -516,8 +518,20 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
       mode: 'shadow',
       outcome: 'completed',
       projection_effect: 'none',
+      shadow_diff_code: 'equal',
+      shadow_diff: {
+        schemaVersion: 1,
+        code: 'equal',
+        changedFields: [],
+        absoluteMinuteDelta: 0,
+        segmentCount: 1,
+      },
       segments: 1,
     }])
+    expect(parseAttendanceW4ShadowDiff(
+      rows.rows[0].shadow_diff_code,
+      rows.rows[0].shadow_diff,
+    )).toEqual(rows.rows[0].shadow_diff)
   })
 
   it('creates and selects an authoritative calculation without a legacy writer call', async () => {

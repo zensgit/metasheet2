@@ -44,6 +44,12 @@ import {
   listAttendanceCalculationGroupMemberships,
   transitionAttendanceCalculationGroupMembership,
 } from '../services/AttendanceCalculationGroupMembership'
+import {
+  ATTENDANCE_CALCULATION_DETAIL_NOT_FOUND,
+  AttendanceCalculationSchemaUnsupportedError,
+  readAttendanceCalculationDetail,
+  readAttendanceW4ShadowBacklog,
+} from '../services/AttendanceW4CalculationDetail'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -1467,6 +1473,113 @@ export function attendanceAdminRouter(): Router {
         return jsonError(res, 503, 'DB_NOT_READY', 'Attendance tables missing')
       }
       return jsonError(res, 500, 'DECISION_TRACE_FAILED', 'Failed to load decision trace')
+    }
+  })
+
+  r.get('/api/attendance-admin/records/:recordId/calculation-detail', async (req: Request, res: Response) => {
+    try {
+      const recordId = String(req.params.recordId || '').trim()
+      const calculationId = String(req.query.calculationId || '').trim()
+      const orgId = String(req.query.orgId || '').trim()
+      if (!UUID_RE.test(recordId) || (calculationId && !UUID_RE.test(calculationId))) {
+        return jsonError(res, 400, 'CALCULATION_DETAIL_ID_INVALID', 'recordId and calculationId must be UUIDs')
+      }
+      if (!orgId) return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      const actorId = getAttendanceAdminRequestUserId(req)
+      if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      if (!(await canReadAttendanceDirectoryReadiness(req, actorId, orgId))) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for calculation detail')
+      }
+      const result = await runAttendanceSetupReadinessReadOnly((readOnlyQuery) =>
+        readAttendanceCalculationDetail(
+          { orgId, recordId, ...(calculationId ? { calculationId } : {}) },
+          readOnlyQuery,
+        ),
+      )
+      if (result === ATTENDANCE_CALCULATION_DETAIL_NOT_FOUND) {
+        return jsonError(res, 404, 'CALCULATION_DETAIL_NOT_FOUND', 'No such calculation detail')
+      }
+      return jsonOk(res, result)
+    } catch (error) {
+      if (error instanceof AttendanceCalculationSchemaUnsupportedError) {
+        return jsonError(res, 409, error.code, 'Stored calculation evidence is unsupported')
+      }
+      if (isDatabaseSchemaError(error)) return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation tables missing')
+      return jsonError(res, 500, 'CALCULATION_DETAIL_FAILED', 'Failed to load calculation detail')
+    }
+  })
+
+  r.get('/api/attendance/records/:recordId/calculation-detail', rbacGuard('attendance', 'read'), async (req: Request, res: Response) => {
+    try {
+      if (Object.prototype.hasOwnProperty.call(req.query, 'userId')) {
+        return jsonError(res, 400, 'USER_ID_NOT_ACCEPTED', 'userId is not accepted on the self calculation-detail host')
+      }
+      const recordId = String(req.params.recordId || '').trim()
+      const calculationId = String(req.query.calculationId || '').trim()
+      if (!UUID_RE.test(recordId) || (calculationId && !UUID_RE.test(calculationId))) {
+        return jsonError(res, 400, 'CALCULATION_DETAIL_ID_INVALID', 'recordId and calculationId must be UUIDs')
+      }
+      const subject = getAttendanceAdminRequestUserId(req)
+      if (!subject) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      const memberships = await query<{ org_id: string }>(
+        `SELECT uo.org_id
+           FROM user_orgs uo
+           JOIN users u ON u.id = uo.user_id
+          WHERE uo.user_id = $1 AND uo.is_active = true AND u.is_active = true
+          ORDER BY uo.org_id ASC`,
+        [subject],
+      )
+      const activeOrgIds = memberships.rows.map((row) => row.org_id)
+      const requestedOrgId = String(req.query.orgId || '').trim()
+      let orgId: string
+      if (activeOrgIds.length === 0) return jsonError(res, 403, 'FORBIDDEN', 'No active org membership')
+      if (!requestedOrgId && activeOrgIds.length === 1) orgId = activeOrgIds[0]
+      else if (!requestedOrgId) return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required (multiple active org memberships)')
+      else if (activeOrgIds.includes(requestedOrgId)) orgId = requestedOrgId
+      else return jsonError(res, 403, 'FORBIDDEN', 'orgId does not match an active org membership')
+
+      const result = await runAttendanceSetupReadinessReadOnly((readOnlyQuery) =>
+        readAttendanceCalculationDetail(
+          { orgId, recordId, subjectUserId: subject, ...(calculationId ? { calculationId } : {}) },
+          readOnlyQuery,
+        ),
+      )
+      if (result === ATTENDANCE_CALCULATION_DETAIL_NOT_FOUND) {
+        return jsonError(res, 404, 'CALCULATION_DETAIL_NOT_FOUND', 'No such calculation detail')
+      }
+      return jsonOk(res, result)
+    } catch (error) {
+      if (error instanceof AttendanceCalculationSchemaUnsupportedError) {
+        return jsonError(res, 409, error.code, 'Stored calculation evidence is unsupported')
+      }
+      if (isDatabaseSchemaError(error)) return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation tables missing')
+      return jsonError(res, 500, 'CALCULATION_DETAIL_FAILED', 'Failed to load calculation detail')
+    }
+  })
+
+  r.get('/api/attendance-admin/calculation-shadow-backlog', async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      const actorId = getAttendanceAdminRequestUserId(req)
+      if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      if (!(await canReadAttendanceDirectoryReadiness(req, actorId, orgId))) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for shadow backlog')
+      }
+      const rawLimit = req.query.limit === undefined ? 50 : Number(req.query.limit)
+      if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 200) {
+        return jsonError(res, 400, 'LIMIT_INVALID', 'limit must be an integer between 1 and 200')
+      }
+      const items = await runAttendanceSetupReadinessReadOnly((readOnlyQuery) =>
+        readAttendanceW4ShadowBacklog(orgId, rawLimit, readOnlyQuery),
+      )
+      return jsonOk(res, { items })
+    } catch (error) {
+      if (error instanceof AttendanceCalculationSchemaUnsupportedError) {
+        return jsonError(res, 409, error.code, 'Stored calculation evidence is unsupported')
+      }
+      if (isDatabaseSchemaError(error)) return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation tables missing')
+      return jsonError(res, 500, 'CALCULATION_SHADOW_BACKLOG_FAILED', 'Failed to load shadow backlog')
     }
   })
 
