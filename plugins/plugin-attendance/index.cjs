@@ -43589,22 +43589,28 @@ module.exports = {
 
         try {
           const rows = await db.query(
-            `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
-             FROM attendance_groups g
-             LEFT JOIN (
-               SELECT group_id, COUNT(*)::int AS member_count
-               FROM attendance_group_members
-               WHERE org_id = $2
-               GROUP BY group_id
-             ) member_counts ON member_counts.group_id = g.id
-             WHERE g.id = $1 AND g.org_id = $2`,
+            `SELECT *
+             FROM attendance_groups
+             WHERE id = $1 AND org_id = $2`,
             [groupId, orgId]
           )
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
             return
           }
-          res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
+          const memberCountRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_group_members
+             WHERE group_id = $1 AND org_id = $2`,
+            [groupId, orgId]
+          )
+          res.json({
+            ok: true,
+            data: mapAttendanceGroupRow({
+              ...rows[0],
+              member_count: Number(memberCountRows[0]?.total ?? 0),
+            }),
+          })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })

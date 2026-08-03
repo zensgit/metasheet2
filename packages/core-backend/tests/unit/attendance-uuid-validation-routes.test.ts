@@ -636,7 +636,9 @@ describe('attendance UUID route validation', () => {
     )
 
     db.query.mockClear()
-    db.query.mockResolvedValueOnce([{ ...groupRow, member_count: 4 }])
+    db.query
+      .mockResolvedValueOnce([groupRow])
+      .mockResolvedValueOnce([{ total: 4 }])
 
     const lookupRes = await invokeRoute(routes, 'GET /api/attendance/groups/:id', {
       params: { id: groupId },
@@ -3610,6 +3612,7 @@ describe('attendance UUID route validation', () => {
         const rbac = rbacQueryResult(sql, params, true)
         if (rbac !== undefined) return rbac
         if (sql.includes('FROM attendance_groups')) {
+          expect(sql, testCase.key).not.toContain('attendance_group_members')
           expect(params.slice(0, 2), testCase.key).toEqual([attendanceGroupId, 'default'])
           return []
         }
@@ -3632,6 +3635,7 @@ describe('attendance UUID route validation', () => {
         .filter(sql => sql.includes('attendance_'))
       expect(scopedSql, testCase.key).toHaveLength(1)
       expect(scopedSql[0], testCase.key).toContain('FROM attendance_groups')
+      expect(scopedSql[0], testCase.key).not.toContain('attendance_group_members')
     }
   })
 
@@ -3673,6 +3677,7 @@ describe('attendance UUID route validation', () => {
         if (fixedSchedule.handled) return fixedSchedule.rows
         if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
         if (sql.includes('FROM attendance_groups g')) return [attendanceGroupRow()]
+        if (sql.includes('SELECT *') && sql.includes('FROM attendance_groups')) return [attendanceGroupRow()]
         if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) return [{ total: 0 }]
         if (sql.includes('SELECT * FROM attendance_group_members')) return []
         if (sql.includes('INSERT INTO attendance_group_members')) return [memberRow]
@@ -3700,9 +3705,13 @@ describe('attendance UUID route validation', () => {
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params, true)
       if (rbac !== undefined) return rbac
-      if (sql.includes('FROM attendance_groups g')) {
+      if (sql.includes('FROM attendance_groups')) {
         expect(params).toEqual([attendanceGroupId, 'default'])
         return [attendanceGroupRow()]
+      }
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) {
+        expect(params).toEqual([attendanceGroupId, 'default'])
+        return [{ total: 0 }]
       }
       throw new Error(`unexpected query: ${sql}`)
     })
