@@ -3526,6 +3526,22 @@ describe('attendance UUID route validation', () => {
       { key: 'GET /api/attendance/shifts' },
       { key: 'GET /api/attendance/assignments' },
       { key: 'GET /api/attendance/holidays' },
+      { key: 'GET /api/attendance/rule-sets/:id' },
+      { key: 'POST /api/attendance/rule-sets', body: { name: 'Scoped rules' } },
+      { key: 'PUT /api/attendance/rule-sets/:id', body: { name: 'Scoped rules' } },
+      { key: 'DELETE /api/attendance/rule-sets/:id' },
+      { key: 'POST /api/attendance/shifts', body: { name: 'Day shift' } },
+      { key: 'PUT /api/attendance/shifts/:id', body: { name: 'Day shift' } },
+      { key: 'DELETE /api/attendance/shifts/:id' },
+      { key: 'POST /api/attendance/assignments', body: { userId: 'worker-1', shiftId, startDate: '2026-06-01' } },
+      { key: 'PUT /api/attendance/assignments/:id', body: { isActive: true } },
+      { key: 'DELETE /api/attendance/assignments/:id' },
+      { key: 'GET /api/attendance/team-availability', query: { groupId: attendanceGroupId, from: '2026-06-01', to: '2026-06-02' } },
+      { key: 'GET /api/attendance/effective-calendar', query: { groupId: attendanceGroupId, from: '2026-06-01', to: '2026-06-02' } },
+      { key: 'POST /api/attendance/effective-calendar/preview', body: { groupId: attendanceGroupId, from: '2026-06-01', to: '2026-06-02' } },
+      { key: 'POST /api/attendance/holidays', body: { date: '2026-06-01', name: 'Scoped holiday' } },
+      { key: 'PUT /api/attendance/holidays/:id', body: { name: 'Scoped holiday' } },
+      { key: 'DELETE /api/attendance/holidays/:id' },
     ]
     const selectors = [
       { name: 'body', body: { orgId: 'other-org' } },
@@ -3545,7 +3561,7 @@ describe('attendance UUID route validation', () => {
         const res = await invokeRoute(routes, testCase.key, {
           params: testCase.params ?? { id: attendanceGroupId },
           body: { ...(testCase.body ?? {}), ...(selector.body ?? {}) },
-          query: selector.query,
+          query: { ...(testCase.query ?? {}), ...(selector.query ?? {}) },
           headers: selector.headers,
           user: { id: 'admin-1', orgId: 'default' },
         })
@@ -3579,6 +3595,22 @@ describe('attendance UUID route validation', () => {
       { key: 'GET /api/attendance/shifts' },
       { key: 'GET /api/attendance/assignments' },
       { key: 'GET /api/attendance/holidays' },
+      { key: 'GET /api/attendance/rule-sets/:id' },
+      { key: 'POST /api/attendance/rule-sets', body: { name: 'Scoped rules' } },
+      { key: 'PUT /api/attendance/rule-sets/:id', body: { name: 'Scoped rules' } },
+      { key: 'DELETE /api/attendance/rule-sets/:id' },
+      { key: 'POST /api/attendance/shifts', body: { name: 'Day shift' } },
+      { key: 'PUT /api/attendance/shifts/:id', body: { name: 'Day shift' } },
+      { key: 'DELETE /api/attendance/shifts/:id' },
+      { key: 'POST /api/attendance/assignments', body: { userId: 'worker-1', shiftId, startDate: '2026-06-01' } },
+      { key: 'PUT /api/attendance/assignments/:id', body: { isActive: true } },
+      { key: 'DELETE /api/attendance/assignments/:id' },
+      { key: 'GET /api/attendance/team-availability', query: { groupId: attendanceGroupId, from: '2026-06-01', to: '2026-06-02' } },
+      { key: 'GET /api/attendance/effective-calendar', query: { groupId: attendanceGroupId, from: '2026-06-01', to: '2026-06-02' } },
+      { key: 'POST /api/attendance/effective-calendar/preview', body: { groupId: attendanceGroupId, from: '2026-06-01', to: '2026-06-02' } },
+      { key: 'POST /api/attendance/holidays', body: { date: '2026-06-01', name: 'Scoped holiday' } },
+      { key: 'PUT /api/attendance/holidays/:id', body: { name: 'Scoped holiday' } },
+      { key: 'DELETE /api/attendance/holidays/:id' },
     ]
 
     for (const testCase of cases) {
@@ -3591,6 +3623,7 @@ describe('attendance UUID route validation', () => {
       const res = await invokeRoute(routes, testCase.key, {
         params: testCase.params ?? { id: attendanceGroupId },
         body: testCase.body,
+        query: testCase.query,
         user: { id: 'admin-1' },
       })
       expect(res.statusCode, testCase.key).toBe(403)

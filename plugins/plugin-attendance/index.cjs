@@ -39361,7 +39361,9 @@ module.exports = {
       'GET',
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const ruleSetId = normalizeUuidString(req.params.id)
         if (!ruleSetId) {
           respondInvalidUuid(res)
@@ -39629,7 +39631,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const payload = {
           name: parsed.data.name,
           description: parsed.data.description ?? null,
@@ -39707,7 +39711,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const ruleSetId = normalizeUuidString(req.params.id)
         if (!ruleSetId) {
           respondInvalidUuid(res)
@@ -39796,7 +39802,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const ruleSetId = normalizeUuidString(req.params.id)
         if (!ruleSetId) {
           respondInvalidUuid(res)
@@ -45629,7 +45637,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
 
         try {
           // W3: one canonical writer — segments (validated) or a synthesized segment 0
@@ -45666,7 +45676,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const shiftId = normalizeUuidString(req.params.id)
         if (!shiftId) {
           respondInvalidUuid(res)
@@ -45697,7 +45709,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const shiftId = normalizeUuidString(req.params.id)
         if (!shiftId) {
           respondInvalidUuid(res)
@@ -46470,7 +46484,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const shiftId = normalizeUuidString(parsed.data.shiftId)
         if (!shiftId) {
           respondInvalidUuid(res, 'shiftId')
@@ -46597,7 +46613,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -46783,7 +46801,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/assignments/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -47323,12 +47343,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
-        const actorId = getUserId(req)
-        if (!actorId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const { orgId, userId: actorId } = actorAccess
         // §3b: scope gate — admin OR manages this group (owner/sub-owner). RBAC_BYPASS short-circuits (tests).
         try {
           if (process.env.RBAC_BYPASS !== 'true'
@@ -47460,12 +47477,9 @@ module.exports = {
           return
         }
 
-        const requesterId = getUserId(req)
-        if (!requesterId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found.' } })
-          return
-        }
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const { orgId, userId: requesterId } = actorAccess
 
         // Per-mode RBAC. Outer withPermission('attendance:read') already
         // gates entry; cross-user / admin checks layer on top.
@@ -47562,8 +47576,11 @@ module.exports = {
           return
         }
 
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+
         try {
-          const orgId = getOrgId(req)
+          const orgId = actorAccess.orgId
           const result = await resolveEffectiveCalendar(db, {
             orgId,
             from,
@@ -47939,7 +47956,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
 
         try {
           const payload = resolveHolidayWritePayload(parsed.data)
@@ -47988,7 +48007,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const holidayId = normalizeUuidString(req.params.id)
         if (!holidayId) {
           respondInvalidUuid(res)
@@ -48045,7 +48066,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/holidays/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const holidayId = normalizeUuidString(req.params.id)
         if (!holidayId) {
           respondInvalidUuid(res)
