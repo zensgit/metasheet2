@@ -358,6 +358,10 @@ not retry, and does not print any value beyond the closed token set.
 
 ## 7. Part G — What this checklist could NOT determine (left explicitly open)
 
+> **There is no Part F.** The lettering runs A, B, C, D, E, G — `G` is for *gaps*. No
+> section is missing and nothing in this document references a Part F; if you were
+> looking for one, you have the complete checklist.
+
 1. The M1 test packet's own privilege and fixture SQL: the packet referenced by #4695
    (draft, SHA-256 `ff3fe07c051468ba7147969fa7b2ee111eb70015056a3de23f6a62cc77b68c28`)
    is not published and not in the repository, so the concrete isolated-database name
