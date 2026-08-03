@@ -387,6 +387,26 @@ async function withSqlServerAdmin(fn) {
   }
 }
 
+// The S6-A capture path's own snapshot-capability proof (sqlserver-sealed-snapshot-source-session.cjs
+// assertSnapshotCapability) REQUIRES sys.databases.snapshot_isolation_state = 1 for the target database
+// — it is OFF by default on a freshly CREATE DATABASE'd database, so a fixture that skips this step gets
+// SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE regardless of how correct its role/grant setup is. This is the
+// SAME incantation + poll-for-effect pattern the existing sealed-export S2/S5 CI evidence scripts already
+// use (scripts/ops/run-sealed-export-s5-sqlserver-evidence.cjs waitForSnapshotState) — reused here rather
+// than re-derived, since ALLOW_SNAPSHOT_ISOLATION can take a moment to actually apply.
+async function waitForSnapshotIsolationOn(pool) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const result = await pool.request().query(`
+SELECT snapshot_isolation_state AS snapshotIsolationState
+FROM sys.databases
+WHERE name = N'${MSSQL_DATABASE}'`)
+    const state = Number(result.recordset?.[0]?.snapshotIsolationState)
+    if (state === 1) return
+    await delay(250)
+  }
+  throw new Error('SQL Server database never reported snapshot_isolation_state=1 after ALLOW_SNAPSHOT_ISOLATION ON')
+}
+
 async function prepareSqlServerRelation(salt) {
   const rows = [0, 1, 2].map((index) => buildBomPayload(index, salt))
   await withSqlServerAdmin(async (pool, sql) => {
@@ -395,6 +415,8 @@ IF DB_ID(N'${MSSQL_DATABASE}') IS NULL
 BEGIN
   CREATE DATABASE ${MSSQL_DATABASE};
 END`)
+    await pool.request().batch(`ALTER DATABASE [${MSSQL_DATABASE}] SET ALLOW_SNAPSHOT_ISOLATION ON;`)
+    await waitForSnapshotIsolationOn(pool)
     await pool.request().batch(`
 IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'${MSSQL_READER_LOGIN}')
 BEGIN
