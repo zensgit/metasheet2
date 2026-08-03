@@ -1,7 +1,10 @@
 # Attendance #4709 Fixed-Schedule Effectiveness Read Model Design Lock
 
 Date: 2026-08-01
-Status: PROPOSED; docs-only; no runtime, migration, route, API, UI, flag, or deployment authorization.
+Status: RATIFIED on 2026-08-03 against merged SHA
+`7abd4e5872946c0ae3c95dfbacf14cf47e1fb700`; `OD-4709-1=(a)`.
+Ratification authorizes FSER-1 only. It does not authorize later slices, merge,
+deployment, flags, staging, production/customer data, or issue closure.
 Issue: `#4709`
 Baseline: `origin/main` at `9ce340e0f7939f1c1d786acc7eb99bd865a6fac5`
 
@@ -331,9 +334,10 @@ effectiveness data.
 
 ## 10. Owner Decision
 
-`OD-4709-1` remains OPEN.
+`OD-4709-1` is DECIDED as `(a)` by the 2026-08-03 owner ratification of
+merged SHA `7abd4e5872946c0ae3c95dfbacf14cf47e1fb700`.
 
-- **(a) Recommended:** add the minimal desired-config record in Section 3 and
+- **(a) DECIDED:** add the minimal desired-config record in Section 3 and
   derive all four states as specified.
 - **(b):** keep assignments as the only durable fact. This can support only
   `not_configured/effective/drifted`; it cannot honestly implement persistent
