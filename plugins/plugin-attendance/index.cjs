@@ -6302,6 +6302,30 @@ function getAuthenticatedUserId(req) {
   return null
 }
 
+function resolveAttendanceGroupRouteActorContext(req, res) {
+  const userId = getAuthenticatedUserId(req)
+  if (!userId) {
+    res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+    return null
+  }
+
+  const orgId = getAuthenticatedOrgId(req)
+  if (!orgId) {
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+    return null
+  }
+
+  const selectorValues = [req.body?.orgId, req.query?.orgId, req.headers['x-org-id']]
+    .flatMap(value => Array.isArray(value) ? value : [value])
+    .filter(value => value !== undefined && value !== null)
+  if (selectorValues.some(value => value !== orgId)) {
+    res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+    return null
+  }
+
+  return { userId, orgId }
+}
+
 function getAuthenticatedTokenSubjectUserId(req) {
   const user = req.user
   // jwtAuthMiddleware exposes the verified principal as canonical id; another
@@ -24623,20 +24647,6 @@ module.exports = {
       }
     }
 
-    async function userManagesAttendanceGroup(orgId, groupId, userId) {
-      const rows = await db.query(
-        `SELECT 1
-         FROM attendance_group_managers
-         WHERE org_id = $1
-           AND group_id = $2
-           AND user_id = $3
-           AND role IN ('owner', 'sub_owner')
-         LIMIT 1`,
-        [orgId, groupId, userId]
-      )
-      return rows.length > 0
-    }
-
     function respondAttendanceSchedulerScopeForbidden(res) {
       res.status(403).json({
         ok: false,
@@ -25287,9 +25297,12 @@ module.exports = {
           return
         }
 
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+
         const invokeHandler = async () => {
           try {
-            await handler(req, res, next)
+            await handler(req, res, next, actorAccess)
           } catch (error) {
             if (error instanceof HttpError && !res.headersSent) {
               res.status(error.status).json({
@@ -25306,20 +25319,13 @@ module.exports = {
           }
         }
 
-        const userId = getUserId(req)
-        if (!userId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
-
         if (process.env.RBAC_BYPASS === 'true') {
           await invokeHandler()
           return
         }
 
         try {
-          const orgId = getOrgId(req)
-          if (await hasAttendanceAdminAccess(userId) || await userManagesAttendanceGroup(orgId, groupId, userId)) {
+          if (await hasAttendanceAdminAccess(actorAccess.userId)) {
             await invokeHandler()
             return
           }
@@ -43543,7 +43549,9 @@ module.exports = {
       'GET',
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -43784,8 +43792,8 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id/members',
-      withAttendanceGroupMemberAccess(async (req, res) => {
-        const orgId = getOrgId(req)
+      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -43829,7 +43837,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/members',
-      withAttendanceGroupMemberAccess(async (req, res) => {
+      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
         const schema = z.object({
           userId: z.string().optional(),
           userIds: z.array(z.string()).optional(),
@@ -43841,7 +43849,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -43887,8 +43895,8 @@ module.exports = {
     context.api.http.addRoute(
       'DELETE',
       '/api/attendance/groups/:id/members/:userId',
-      withAttendanceGroupMemberAccess(async (req, res) => {
-        const orgId = getOrgId(req)
+      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -43920,7 +43928,9 @@ module.exports = {
       'GET',
       '/api/attendance/groups/:id/managers',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -43966,6 +43976,8 @@ module.exports = {
       'POST',
       '/api/attendance/groups/:id/managers',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           userId: z.string().trim().min(1),
           role: z.string(),
@@ -43977,7 +43989,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44002,7 +44014,7 @@ module.exports = {
              ON CONFLICT (org_id, group_id, user_id, role)
              DO UPDATE SET updated_at = attendance_group_managers.updated_at
              RETURNING *`,
-            [orgId, groupId, parsed.data.userId.trim(), role, getUserId(req) ?? null]
+            [orgId, groupId, parsed.data.userId.trim(), role, actorAccess.userId]
           )
           res.json({ ok: true, data: mapAttendanceGroupManagerRow(rows[0]) })
         } catch (error) {
@@ -44024,7 +44036,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/groups/:id/managers/:managerId',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44060,6 +44074,8 @@ module.exports = {
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/preview',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -44073,7 +44089,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44133,6 +44149,8 @@ module.exports = {
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/apply',
       async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -44146,7 +44164,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44215,6 +44233,8 @@ module.exports = {
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/rebuild',
       async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -44228,7 +44248,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44300,6 +44320,8 @@ module.exports = {
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/clear',
       async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -44313,7 +44335,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
