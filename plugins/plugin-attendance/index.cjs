@@ -39394,8 +39394,10 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/rule-templates',
-      withPermission('attendance:admin', async (_req, res) => {
-        const orgId = getOrgId(_req)
+      withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const library = await getTemplateLibrary(db, orgId)
         const versions = await getTemplateLibraryVersions(db, orgId)
         res.json({
@@ -39413,7 +39415,9 @@ module.exports = {
       'GET',
       '/api/attendance/rule-templates/versions/:versionId',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const target = await getTemplateLibraryVersionPayload(db, orgId, req.params.versionId, null)
         if (!target) {
           res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Template version not found' } })
@@ -39430,6 +39434,8 @@ module.exports = {
       'PUT',
       '/api/attendance/rule-templates',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const parsed = templateLibrarySchema.safeParse(req.body ?? {})
         let templates = null
         if (Array.isArray(req.body)) {
@@ -39443,7 +39449,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         try {
           const saved = await saveTemplateLibrary(db, orgId, templates, getUserId(req))
           res.json({ ok: true, data: { templates: saved } })
@@ -39458,6 +39464,8 @@ module.exports = {
       'POST',
       '/api/attendance/rule-templates/restore',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const parsed = templateLibraryRestoreSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'versionId or version is required' } })
@@ -39468,7 +39476,7 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'versionId or version is required' } })
           return
         }
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const target = await getTemplateLibraryVersionPayload(db, orgId, versionId ?? null, version)
         if (!target) {
           res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Template version not found' } })
@@ -39487,8 +39495,10 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/rule-sets/template',
-      withPermission('attendance:admin', async (_req, res) => {
-        const orgId = getOrgId(_req)
+      withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const templateLibrary = await getTemplateLibrary(db, orgId)
         res.json({
           ok: true,

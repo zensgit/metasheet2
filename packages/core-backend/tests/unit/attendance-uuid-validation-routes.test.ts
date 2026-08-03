@@ -3542,6 +3542,11 @@ describe('attendance UUID route validation', () => {
       { key: 'POST /api/attendance/holidays', body: { date: '2026-06-01', name: 'Scoped holiday' } },
       { key: 'PUT /api/attendance/holidays/:id', body: { name: 'Scoped holiday' } },
       { key: 'DELETE /api/attendance/holidays/:id' },
+      { key: 'GET /api/attendance/rule-templates' },
+      { key: 'GET /api/attendance/rule-templates/versions/:versionId', params: { versionId: 'version-1' } },
+      { key: 'PUT /api/attendance/rule-templates', body: { templates: [] } },
+      { key: 'POST /api/attendance/rule-templates/restore', body: { versionId: 'version-1' } },
+      { key: 'GET /api/attendance/rule-sets/template' },
     ]
     const selectors = [
       { name: 'body', body: { orgId: 'other-org' } },
@@ -3611,6 +3616,11 @@ describe('attendance UUID route validation', () => {
       { key: 'POST /api/attendance/holidays', body: { date: '2026-06-01', name: 'Scoped holiday' } },
       { key: 'PUT /api/attendance/holidays/:id', body: { name: 'Scoped holiday' } },
       { key: 'DELETE /api/attendance/holidays/:id' },
+      { key: 'GET /api/attendance/rule-templates' },
+      { key: 'GET /api/attendance/rule-templates/versions/:versionId', params: { versionId: 'version-1' } },
+      { key: 'PUT /api/attendance/rule-templates', body: { templates: [] } },
+      { key: 'POST /api/attendance/rule-templates/restore', body: { versionId: 'version-1' } },
+      { key: 'GET /api/attendance/rule-sets/template' },
     ]
 
     for (const testCase of cases) {
@@ -3644,6 +3654,7 @@ describe('attendance UUID route validation', () => {
       { key: 'GET /api/attendance/shifts' },
       { key: 'GET /api/attendance/assignments' },
       { key: 'GET /api/attendance/holidays' },
+      { key: 'GET /api/attendance/rule-templates' },
     ]
 
     for (const testCase of cases) {
