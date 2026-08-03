@@ -686,6 +686,30 @@ async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineC
   }
 }
 
+// Diagnostic-only counterpart for the first-run FAILURE path — see the call site's comment. Never
+// asserts (no must()); purely reports closed tokens/booleans into the values-free evidence.
+async function assertS6ARunDatabaseObservableOnFailure(operationId) {
+  const pg = requireFromPlugin('pg')
+  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
+  try {
+    const runRows = await pool.query(
+      `SELECT status, failure_reason FROM integration_sealed_export_stock_prep_runs
+       WHERE tenant_id = $1 AND operation_id = $2`,
+      [TENANT_ID, operationId],
+    )
+    const run = runRows.rows[0] || null
+    S.s6aDbRunRowFoundOnFailure = String(run !== null)
+    S.s6aDbRunStatusOnFailure = run ? run.status : '<none>'
+    S.s6aDbRunFailureReason = run && run.failure_reason ? run.failure_reason : '<none>'
+  } catch {
+    S.s6aDbRunRowFoundOnFailure = '<query-failed>'
+    S.s6aDbRunStatusOnFailure = '<query-failed>'
+    S.s6aDbRunFailureReason = '<query-failed>'
+  } finally {
+    await pool.end()
+  }
+}
+
 async function attemptS6ARealRun() {
   const salt = `t${Math.floor(Date.now() / 1000)}`
   const systemId = `e2efunc-s6a-source-${salt}`
@@ -744,6 +768,17 @@ async function attemptS6ARealRun() {
       const baseToken = await getDevToken()
       const registered = await registerExternalSystem(baseToken, systemId)
       registeredOk = must('S6-A: external system registered', registered.ok, `http=${registered.status}`)
+      // Diagnostic (Step 1 discipline applied to this next layer, not a guess): the run-time re-resolves
+      // this SAME external system from the DB (externalSystemRegistry.getExternalSystemForAdapter), and
+      // its credential lookup returns `undefined` — silently dropping the `credentials` property entirely
+      // — if the stored ciphertext is missing or empty. `hasCredentials` is a boolean already exposed by
+      // the ordinary GET route (rowToPublicExternalSystem) — never the credential content itself — so
+      // this is safe to read directly into the values-free evidence.
+      if (registeredOk) {
+        const fetched = await requestJson(`/api/integration/external-systems/${encodeURIComponent(systemId)}`,
+          { token: baseToken, accept: [200] })
+        S.s6aExternalSystemHasCredentials = String(fetched.body?.data?.hasCredentials === true)
+      }
     } finally {
       await stopServer()
     }
@@ -934,6 +969,12 @@ async function attemptS6ARealRun() {
       `http=${firstRun.status} mode=${S.s6aFirstRunMode} status=${S.s6aFirstRunStatus} lines=${S.s6aBusinessLineCount} code=${S.s6aFirstRunErrorCode}`)
     S.s6aFirstRun = firstOk ? 'PASS' : 'FAIL'
     if (!firstOk) {
+      // Diagnostic: does a run row exist at all for this (tenant, operationId)? A refusal upstream of
+      // any capture attempt (binding/qualification resolution) leaves NO row; a refusal DURING capture
+      // leaves a CAPTURE_FAILED row with a persisted `failure_reason` token (migration 073's own CHECK
+      // constraint requires one). This splits which half of the pipeline to look at — the closed
+      // `error.code` alone cannot, since many call sites across the codebase share the same token.
+      await assertS6ARunDatabaseObservableOnFailure(operationId)
       S.s6aDatabaseObservable = 'NOT_RUN'
       S.s6aReplayRun = 'NOT_RUN'
       return
