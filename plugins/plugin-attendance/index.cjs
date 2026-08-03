@@ -24695,12 +24695,9 @@ module.exports = {
     }
 
     async function resolveAttendanceSchedulerScopeActor(req, res) {
-      const userId = getUserId(req)
-      if (!userId) {
-        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-        return null
-      }
-      const orgId = getOrgId(req)
+      const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+      if (!routeActorAccess) return null
+      const { userId, orgId } = routeActorAccess
       try {
         const fullAdmin = await hasAttendanceAdminAccess(userId)
         return { userId, orgId, fullAdmin }
@@ -35530,14 +35527,14 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-dispatch-requests',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = scheduleDispatchCreateSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json(validationErrorBody('Invalid schedule-dispatch request payload', formatZodValidationDetails(parsed.error)))
           return
         }
-        const orgId = getOrgId(req)
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         let input
         try {
           input = normalizeScheduleDispatchCreateInput(parsed.data)
@@ -35615,10 +35612,10 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-dispatch-requests',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const { page, pageSize, offset } = parsePagination(req.query)
         const access = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'dispatch' })
         if (!access) return
+        const orgId = access.access.orgId
         const status = typeof req.query.status === 'string' && req.query.status.trim() ? req.query.status.trim() : null
         const userId = typeof req.query.userId === 'string' && req.query.userId.trim() ? req.query.userId.trim() : null
         const targetScheduleGroupId = typeof req.query.targetScheduleGroupId === 'string' && req.query.targetScheduleGroupId.trim()
@@ -37839,6 +37836,8 @@ module.exports = {
       'GET',
       '/api/attendance/approval-flows',
       withPermission('attendance:admin', async (req, res) => {
+        const actor = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actor) return
         const schema = z.object({
           orgId: z.string().optional(),
           requestType: z.string().optional(),
@@ -37857,7 +37856,7 @@ module.exports = {
         }
 
         const { page, pageSize, offset } = parsePagination(req.query)
-        const orgId = getOrgId(req)
+        const orgId = actor.orgId
         const params = [orgId]
         let filters = ''
         if (parsed.data.requestType) {
@@ -38122,8 +38121,10 @@ module.exports = {
           return
         }
 
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
         const { page, pageSize, offset } = parsePagination(req.query)
-        const orgId = getOrgId(req)
+        const orgId = routeActorAccess.orgId
         const params = [orgId]
         let activeFilter = ''
         if (parsed.data.isActive !== undefined) {
@@ -38173,13 +38174,15 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-rules',
       withPermission('attendance:admin', async (req, res) => {
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
         const parsed = rotationRuleCreateSchema.safeParse(normalizeRotationRulePayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = routeActorAccess.orgId
 
         try {
           const normalizedSequence = await validateRotationShiftSequenceIds(db, orgId, parsed.data.shiftSequence)
@@ -38247,13 +38250,15 @@ module.exports = {
       'PUT',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
         const parsed = rotationRuleUpdateSchema.safeParse(normalizeRotationRulePayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = routeActorAccess.orgId
         const ruleId = normalizeUuidString(req.params.id)
         if (!ruleId) {
           respondInvalidUuid(res)
@@ -38342,7 +38347,9 @@ module.exports = {
       'GET',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const ruleId = normalizeUuidString(req.params.id)
         if (!ruleId) {
           respondInvalidUuid(res)
@@ -38375,7 +38382,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const ruleId = normalizeUuidString(req.params.id)
         if (!ruleId) {
           respondInvalidUuid(res)
@@ -38426,10 +38435,10 @@ module.exports = {
         }
 
         const { page, pageSize, offset } = parsePagination(req.query)
-        const orgId = getOrgId(req)
         const publishStatusFilter = normalizeAttendanceSchedulePublishStatusFilter(parsed.data.publishStatus)
         const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
         if (!viewAccess) return
+        const orgId = viewAccess.access.orgId
 
         try {
           const countParams = [orgId]
@@ -38502,13 +38511,15 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-drafts/rotation-assignments',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const rotationRuleId = normalizeUuidString(parsed.data.rotationRuleId)
         if (!rotationRuleId) {
           respondInvalidUuid(res, 'rotationRuleId')
@@ -38531,7 +38542,7 @@ module.exports = {
           const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
           if (!windowAccess) return
 
-          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload, actorAccess })
           if (!access) return
 
           const ruleRows = await db.query(
@@ -38606,13 +38617,15 @@ module.exports = {
       'PUT',
       '/api/attendance/schedule-drafts/rotation-assignments/:id',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -38620,9 +38633,6 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const existingRows = await db.query(
             'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
@@ -38768,7 +38778,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/schedule-drafts/rotation-assignments/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -38776,9 +38788,6 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const existingRows = await db.query(
             'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
@@ -38837,13 +38846,15 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-assignments',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const rotationRuleId = normalizeUuidString(parsed.data.rotationRuleId)
         if (!rotationRuleId) {
           respondInvalidUuid(res, 'rotationRuleId')
@@ -38866,7 +38877,7 @@ module.exports = {
           const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
           if (!windowAccess) return
 
-          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload, actorAccess })
           if (!access) return
 
           const ruleRows = await db.query(
@@ -38949,13 +38960,15 @@ module.exports = {
       'PUT',
       '/api/attendance/rotation-assignments/:id',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -38963,9 +38976,6 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const existingRows = await db.query(
             'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
@@ -39121,7 +39131,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/rotation-assignments/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -39129,9 +39141,6 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const existingRows = await db.query(
             'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
@@ -39196,7 +39205,9 @@ module.exports = {
       '/api/attendance/rules/default',
       withPermission('attendance:read', async (req, res) => {
         try {
-          const orgId = getOrgId(req)
+          const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+          if (!routeActorAccess) return
+          const orgId = routeActorAccess.orgId
           const rule = await loadDefaultRule(db, orgId)
           res.json({ ok: true, data: rule })
         } catch (error) {
@@ -43551,7 +43562,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -44501,11 +44514,11 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-groups',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const { page, pageSize, offset } = parsePagination(req.query)
         const includeInactive = parseBoolean(req.query.includeInactive, false)
         const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
         if (!viewAccess) return
+        const orgId = viewAccess.access.orgId
         try {
           const activeClause = includeInactive ? '' : 'AND g.is_active = true'
           const countParams = [orgId]
@@ -44548,7 +44561,6 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44556,6 +44568,7 @@ module.exports = {
         }
         const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
         if (!viewAccess) return
+        const orgId = viewAccess.access.orgId
         try {
           const rows = await db.query(
             'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
@@ -44589,12 +44602,14 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-groups',
       withPermission('attendance:admin', async (req, res) => {
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
         const parsed = scheduleGroupCreateSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
+        const orgId = routeActorAccess.orgId
         const actorId = getUserId(req)
         let input
         try {
@@ -44658,19 +44673,19 @@ module.exports = {
       'PUT',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = scheduleGroupSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         try {
           const existingRows = await db.query(
             'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
@@ -44774,7 +44789,6 @@ module.exports = {
       'DELETE',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44782,6 +44796,7 @@ module.exports = {
         }
         const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
         if (!actorAccess) return
+        const orgId = actorAccess.orgId
         try {
           const existingRows = await db.query(
             'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
@@ -44842,7 +44857,6 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-groups/:id/members',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44851,6 +44865,7 @@ module.exports = {
         const { page, pageSize, offset } = parsePagination(req.query)
         const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
         if (!viewAccess) return
+        const orgId = viewAccess.access.orgId
         try {
           let memberFilter = { fullGroup: true, userIds: [] }
           if (!viewAccess.access.fullAdmin) {
@@ -44910,12 +44925,13 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-groups/:id/members',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = scheduleGroupMemberSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -44934,8 +44950,10 @@ module.exports = {
         const access = await assertAttendanceSchedulerScopeAllowed(req, res, {
           action: 'dispatch',
           target: { scheduleGroupIds: [groupId], userIds: input.userIds },
+          actorAccess,
         })
         if (!access) return
+        const orgId = access.orgId
         const actorId = access.userId
         try {
           const created = []
@@ -44992,7 +45010,6 @@ module.exports = {
       'DELETE',
       '/api/attendance/schedule-groups/:id/members/:memberId',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         const memberId = normalizeUuidString(req.params.memberId)
         if (!groupId) {
@@ -45005,6 +45022,7 @@ module.exports = {
         }
         const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
         if (!actorAccess) return
+        const orgId = actorAccess.orgId
         try {
           const existingRows = await db.query(
             `SELECT user_id
@@ -46086,13 +46104,15 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-drafts/assignments',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = assignmentCreateSchema.safeParse(normalizeAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const shiftId = normalizeUuidString(parsed.data.shiftId)
         if (!shiftId) {
           respondInvalidUuid(res, 'shiftId')
@@ -46122,7 +46142,7 @@ module.exports = {
           const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
           if (!windowAccess) return
 
-          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload, actorAccess })
           if (!access) return
 
           const shiftRows = await db.query(
@@ -46223,6 +46243,8 @@ module.exports = {
       'PUT',
       '/api/attendance/schedule-drafts/assignments/:id',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = assignmentUpdateSchema.safeParse(normalizeAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -46236,7 +46258,6 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -46244,8 +46265,7 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
+          const orgId = actorAccess.orgId
 
           const existingRows = await db.query(
             'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
@@ -46412,7 +46432,6 @@ module.exports = {
       'DELETE',
       '/api/attendance/schedule-drafts/assignments/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -46422,6 +46441,7 @@ module.exports = {
         try {
           const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
           if (!actorAccess) return
+          const orgId = actorAccess.orgId
 
           const existingRows = await db.query(
             'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
@@ -47031,6 +47051,8 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-publications',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = schedulePublicationSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -47061,7 +47083,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const actorUserId = getUserId(req) || null
         const preflightOnly = parsed.data.preflightOnly === true
         const requestedKeys = [
@@ -47070,9 +47092,6 @@ module.exports = {
         ].sort()
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const initialRows = await loadAttendanceSchedulePublicationRows(db, orgId, assignmentIds, rotationAssignmentIds)
           if (!assertAttendanceSchedulePublicationTargets(res, initialRows, requestedKeys)) return
 
@@ -47297,7 +47316,9 @@ module.exports = {
       '/api/attendance/comprehensive-hours/preview',
       withPermission('attendance:admin', async (req, res) => {
         try {
-          const result = await previewAttendanceComprehensiveHours(db, getOrgId(req), req.body ?? {})
+          const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+          if (!routeActorAccess) return
+          const result = await previewAttendanceComprehensiveHours(db, routeActorAccess.orgId, req.body ?? {})
           if (!result.ok) {
             res.status(result.status || 400).json({
               ok: false,
