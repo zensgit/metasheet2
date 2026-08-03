@@ -1123,6 +1123,27 @@ async function attemptS6ARealRun() {
   const { privateKey } = crypto.generateKeyPairSync('ed25519')
   fs.writeFileSync(signerKeyFile, privateKey.export({ type: 'pkcs8', format: 'pem' }))
   fs.mkdirSync(ARTIFACT_ROOT, { recursive: true })
+  // FINDING (RD-E2E, R2c) — the capture root is never created by anything in the product.
+  //
+  // stock-preparation-runtime-core.cjs derives `captureRoot = <artifactRoot>/capture` and
+  // stock-preparation-sqlserver-runtime.cjs hands it to the sealed-snapshot service as its
+  // `artifactRoot`. The service's very first act in execute() is
+  // `fsPromises.mkdtemp(path.join(artifactRoot, 'sealed-export-s5-'))`, and mkdtemp requires the PARENT
+  // to already exist — it does not create it. No `mkdir` for that path exists anywhere in
+  // lib/sealed-export/, and the failure is caught by a bare `catch` that turns ENOENT into the
+  // cause-free token SEALED_EXPORT_CAPTURE_FAILED. The asymmetry is visible one directory over:
+  // private-ingestion-blob-store.cjs DOES `fs.mkdir(privateRoot, { recursive: true, mode: 0o700 })`
+  // for its own root, so the capture side is the odd one out rather than a deliberate contract.
+  // docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md tells the operator to
+  // set ARTIFACT_ROOT but never says a `capture` subdirectory must exist under it.
+  //
+  // This harness therefore creates it, the same way an operator would have to — and RECORDS whether it
+  // already existed, so the evidence block carries the finding instead of hiding it. This is fixture
+  // setup, not a workaround: no production file is changed, and the gap is reported in the PR body.
+  const captureRoot = path.join(path.resolve(ARTIFACT_ROOT), 'capture')
+  S.s6aCaptureRootExistedBeforeRun = String(fs.existsSync(captureRoot))
+  fs.mkdirSync(captureRoot, { recursive: true, mode: 0o700 })
+  S.s6aCaptureRootCreatedByHarness = 'true'
 
   // 1. real SQL Server relation (ephemeral, first-party, synthetic rows only)
   let relation
