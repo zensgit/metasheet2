@@ -58,6 +58,13 @@ async function waitForRouteTab(router: Router, expected: string | undefined, max
   }
 }
 
+async function waitForRoutePath(router: Router, expected: string, maxCycles = 30): Promise<void> {
+  for (let i = 0; i < maxCycles; i += 1) {
+    await flushUi(1)
+    if (router.currentRoute.value.fullPath === expected) return
+  }
+}
+
 function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find(
     candidate => candidate.textContent?.trim() === label
@@ -155,5 +162,11 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
     expect(container?.textContent).toContain('建议使用桌面端')
     expect(container?.querySelector('[data-testid="attendance-admin-center"]')).toBeNull()
     expect(apiFetch).not.toHaveBeenCalled()
+
+    findButton(container!, '返回总览').click()
+    await waitForRoutePath(router!, '/attendance')
+
+    expect(router?.currentRoute.value.fullPath).toBe('/attendance')
+    expect(container?.querySelector('[data-testid="attendance-overview"]')).not.toBeNull()
   })
 })

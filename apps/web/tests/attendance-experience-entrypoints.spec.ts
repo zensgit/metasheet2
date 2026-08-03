@@ -17,8 +17,10 @@ const routeState = reactive<{
   params: {},
 })
 
-const replaceSpy = vi.fn(async ({ query }: { query?: Record<string, unknown> }) => {
-  routeState.query = query ?? {}
+const replaceSpy = vi.fn(async (location: { query?: Record<string, unknown> }) => {
+  if (Object.prototype.hasOwnProperty.call(location, 'query')) {
+    routeState.query = location.query ?? {}
+  }
 })
 const pushSpy = vi.fn()
 
@@ -311,5 +313,24 @@ describe('Attendance experience entrypoints', () => {
 
     expect(apiFetch).toHaveBeenNthCalledWith(2, `/api/attendance/groups/${groupB}`)
     expect(container!.querySelector<HTMLElement>('[data-view="admin"]')?.dataset.routeGroup).toBe(groupB)
+  })
+
+  it('routes duplicate group query values to the route-level not-found posture', async () => {
+    const groupId = '11111111-2222-4333-8444-555555555555'
+    routeState.path = `/attendance/admin/groups/${groupId}/schedule`
+    routeState.name = 'attendance-admin-group-schedule'
+    routeState.params = { groupId }
+    routeState.query = { surface: ['assignments', 'shifts'] }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    expect(replaceSpy).toHaveBeenCalledWith({
+      name: 'not-found',
+      params: { pathMatch: ['attendance', 'admin', 'groups', groupId, 'schedule'] },
+    })
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(container!.querySelector('[data-attendance-group-context="unavailable"]')).toBeNull()
   })
 })

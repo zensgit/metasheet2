@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import AttendanceAdminCenter from '../src/views/attendance/AttendanceAdminCenter.vue'
 import { apiFetch } from '../src/utils/api'
@@ -3589,6 +3589,162 @@ describe('Attendance admin regressions', () => {
     } finally {
       Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
       Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+      confirmSpy.mockRestore()
+    }
+  })
+
+  it('keeps a direct group route authoritative through delayed list hydration and stable prop rerenders', async () => {
+    const listedGroup = {
+      id: 'group-a',
+      name: 'Fresh listed group',
+      code: 'fresh',
+      timezone: 'Asia/Shanghai',
+      ruleSetId: 'rule-set-1',
+      attendanceType: 'fixed_shift',
+      description: 'Fresh list value',
+      memberCount: 1,
+    }
+    const routeGroupContext = ref({
+      group: {
+        ...listedGroup,
+        name: 'Probe snapshot',
+        code: 'probe',
+        description: 'Probe value',
+      },
+      step: 'schedule' as const,
+      surface: null,
+      returnTo: '/attendance?tab=admin&section=attendance-admin-groups',
+    })
+    attendanceGroupsData = [listedGroup]
+    const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    let resolveGroups!: (response: Response) => void
+    const delayedGroups = new Promise<Response>((resolve) => {
+      resolveGroups = resolve
+    })
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.startsWith('/api/attendance/groups?') && method === 'GET') {
+        return delayedGroups
+      }
+      return fallback(input, init)
+    })
+
+    const Root = defineComponent({
+      setup() {
+        return () => h(AttendanceView, {
+          mode: 'admin',
+          routeGroupContext: routeGroupContext.value,
+        })
+      },
+    })
+    app = createApp(Root)
+    app.mount(container!)
+    await flushUi(8)
+
+    const requestedUrls = vi.mocked(apiFetch).mock.calls.map(([input]) => String(input))
+    expect(requestedUrls).toContain('/api/attendance/groups/group-a/members')
+    expect(requestedUrls).toContain('/api/attendance/groups/group-a/managers')
+
+    resolveGroups(jsonResponse(200, {
+      ok: true,
+      data: { items: [listedGroup], total: 1 },
+    }))
+    await flushUi(8)
+
+    const nameInput = container!.querySelector<HTMLInputElement>('#attendance-group-name')!
+    expect(nameInput.value).toBe('Fresh listed group')
+    expect(container!.querySelector('[data-attendance-group-workflow-step="schedule"]')?.getAttribute('aria-current')).toBe('step')
+
+    nameInput.value = 'Unsaved operator edit'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    routeGroupContext.value = {
+      ...routeGroupContext.value,
+      group: { ...routeGroupContext.value.group },
+    }
+    await flushUi(4)
+
+    expect(nameInput.value).toBe('Unsaved operator edit')
+    expect(container!.querySelector('[data-attendance-group-workflow-step="schedule"]')?.getAttribute('aria-current')).toBe('step')
+  })
+
+  it('preserves the route group and stage after save or copy and leaves after deleting the route group', async () => {
+    const routeGroup = {
+      id: 'group-a',
+      name: 'Route group',
+      code: 'route',
+      timezone: 'Asia/Shanghai',
+      ruleSetId: 'rule-set-1',
+      attendanceType: 'fixed_shift',
+      description: 'Route-owned group',
+      memberCount: 1,
+    }
+    attendanceGroupsData = [routeGroup]
+    const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    const clearSection = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url === '/api/attendance/groups/group-a' && method === 'PUT') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        Object.assign(routeGroup, body)
+        return jsonResponse(200, { ok: true, data: { ...routeGroup } })
+      }
+      if (url === '/api/attendance/groups' && method === 'POST') {
+        const copied = { ...routeGroup, id: 'group-copy', name: 'Route group copy' }
+        attendanceGroupsData = [copied, routeGroup]
+        return jsonResponse(200, { ok: true, data: copied })
+      }
+      if (url === '/api/attendance/groups/group-a' && method === 'DELETE') {
+        attendanceGroupsData = []
+        return jsonResponse(200, { ok: true, data: { id: 'group-a' } })
+      }
+      return fallback(input, init)
+    })
+
+    try {
+      app = createApp(AttendanceView, {
+        mode: 'admin',
+        routeGroupContext: {
+          group: { ...routeGroup },
+          step: 'schedule',
+          surface: null,
+          returnTo: '/attendance?tab=admin&section=attendance-admin-groups',
+        },
+        onClearSection: clearSection,
+      })
+      app.mount(container!)
+      await flushUi(8)
+
+      setInput(container!, '#attendance-group-name', 'Saved route group')
+      container!.querySelector<HTMLButtonElement>('#attendance-group-stage-basics .attendance__btn--primary')!.click()
+      await flushUi(8)
+
+      expect(container!.querySelector<HTMLInputElement>('#attendance-group-name')?.value).toBe('Saved route group')
+      expect(container!.querySelector('[data-attendance-group-workflow-step="schedule"]')?.getAttribute('aria-current')).toBe('step')
+
+      const routeRow = Array.from(container!.querySelectorAll<HTMLElement>('[data-attendance-group-row]'))
+        .find(row => row.textContent?.includes('Saved route group'))
+      routeRow!.querySelector<HTMLButtonElement>('[data-attendance-group-copy]')!.click()
+      await flushUi(8)
+
+      expect(container!.querySelector<HTMLInputElement>('#attendance-group-name')?.value).toBe('Saved route group')
+      expect(container!.querySelector('[data-attendance-group-workflow-step="schedule"]')?.getAttribute('aria-current')).toBe('step')
+
+      const listCallsBeforeDelete = vi.mocked(apiFetch).mock.calls.filter(([input, init]) =>
+        String(input).startsWith('/api/attendance/groups?')
+        && String(init?.method || 'GET').toUpperCase() === 'GET'
+      ).length
+      container!.querySelector<HTMLButtonElement>('[data-attendance-group-delete]')!.click()
+      await flushUi(6)
+
+      expect(clearSection).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(apiFetch).mock.calls.filter(([input, init]) =>
+        String(input).startsWith('/api/attendance/groups?')
+        && String(init?.method || 'GET').toUpperCase() === 'GET'
+      )).toHaveLength(listCallsBeforeDelete)
+    } finally {
       confirmSpy.mockRestore()
     }
   })

@@ -20,7 +20,7 @@
     <section v-else-if="desktopOnlyBlocked" class="attendance-shell__desktop-hint">
       <h3>{{ t.desktopRecommended }}</h3>
       <p>{{ desktopOnlyMessage }}</p>
-      <button class="attendance-shell__btn" type="button" @click="returnFromGroupRoute">
+      <button class="attendance-shell__btn" type="button" @click="returnFromMobileGroupRoute">
         {{ t.backToOverview }}
       </button>
     </section>
@@ -34,6 +34,7 @@
       <template #default="{ group, step, surface, returnTo }">
         <AttendanceAdminCenter
           :route-group-context="{ group, step, surface, returnTo }"
+          @clear-section="returnFromGroupRoute"
         />
       </template>
     </AttendanceGroupContextHost>
@@ -100,12 +101,8 @@ const activeTab = ref<AttendanceTab>('overview')
 const featuresReady = ref(false)
 const isMobile = ref(false)
 
-function firstRouteValue(value: unknown): unknown {
-  return Array.isArray(value) ? value[0] : value
-}
-
 function routeStepFromMetadata(): unknown {
-  const step = firstRouteValue(route.params?.step)
+  const step = route.params?.step
   if (typeof step === 'string') return step
   if (route.name === 'attendance-admin-group-schedule') return 'schedule'
   if (route.name === 'attendance-admin-group-calendar') return 'calendar'
@@ -113,17 +110,18 @@ function routeStepFromMetadata(): unknown {
   return undefined
 }
 
-const groupRouteActive = computed(() => isAttendanceGroupContextPath(route.path))
+const groupRoutePathActive = computed(() => isAttendanceGroupContextPath(route.path))
 const routeGroupContext = computed(() => {
-  if (!groupRouteActive.value) return null
+  if (!groupRoutePathActive.value) return null
   return resolveAttendanceGroupRouteContext({
-    groupId: firstRouteValue(route.params?.groupId),
+    groupId: route.params?.groupId,
     step: routeStepFromMetadata(),
-    surface: firstRouteValue(route.query.surface),
-    returnTo: firstRouteValue(route.query.returnTo),
+    surface: route.query.surface,
+    returnTo: route.query.returnTo,
     currentPath: route.path,
   })
 })
+const groupRouteActive = computed(() => groupRoutePathActive.value && routeGroupContext.value !== null)
 const groupRouteHostKey = computed(() => routeGroupContext.value
   ? `${routeGroupContext.value.groupId}:${routeGroupContext.value.step}:${routeGroupContext.value.surface ?? ''}`
   : route.path)
@@ -303,7 +301,14 @@ function ensureTabAllowed(nextTab: AttendanceTab): AttendanceTab {
 }
 
 function syncFromRoute(): void {
-  if (groupRouteActive.value) {
+  if (groupRoutePathActive.value) {
+    if (!routeGroupContext.value) {
+      void router.replace({
+        name: 'not-found',
+        params: { pathMatch: route.path.replace(/^\//, '').split('/') },
+      })
+      return
+    }
     activeTab.value = ensureTabAllowed('admin')
     return
   }
@@ -341,6 +346,10 @@ async function returnFromGroupRoute(): Promise<void> {
     return
   }
   await selectTab('overview')
+}
+
+async function returnFromMobileGroupRoute(): Promise<void> {
+  await router.push('/attendance')
 }
 
 watch(() => [route.path, route.name, route.query.tab, route.query.surface, route.query.returnTo, route.params?.groupId, route.params?.step], () => {

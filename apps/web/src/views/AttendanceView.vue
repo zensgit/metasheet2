@@ -27295,7 +27295,7 @@ async function copyAttendanceGroup(item: AttendanceGroup) {
     adminForbidden.value = false
     const copiedGroup = data.data as AttendanceGroup | undefined
     await loadAttendanceGroups()
-    if (copiedGroup?.id) {
+    if (copiedGroup?.id && !props.routeGroupContext) {
       const freshGroup = attendanceGroups.value.find(group => group.id === copiedGroup.id) ?? copiedGroup
       editAttendanceGroup(freshGroup)
     }
@@ -27327,7 +27327,7 @@ async function loadAttendanceGroups() {
       const listedGroup = attendanceGroups.value.find(item => item.id === props.routeGroupContext?.group.id)
       hydrateAttendanceGroupFromRoute(
         props.routeGroupContext,
-        listedGroup ? { ...listedGroup, ...props.routeGroupContext.group } : props.routeGroupContext.group,
+        listedGroup ? { ...props.routeGroupContext.group, ...listedGroup } : props.routeGroupContext.group,
       )
       return
     }
@@ -27386,7 +27386,7 @@ async function saveAttendanceGroup() {
     clearSetupTemplatePrefillPending('group')
     const savedGroup = data.data as AttendanceGroup | undefined
     await loadAttendanceGroups()
-    if (savedGroup?.id) {
+    if (savedGroup?.id && !props.routeGroupContext) {
       const freshGroup = attendanceGroups.value.find(item => item.id === savedGroup.id) ?? savedGroup
       editAttendanceGroup(freshGroup)
     }
@@ -27938,6 +27938,11 @@ async function deleteAttendanceGroup(id: string) {
       throw new Error(readErrorMessage(data, tr('Failed to delete attendance group', '删除考勤分组失败')))
     }
     adminForbidden.value = false
+    if (props.routeGroupContext?.group.id === id) {
+      setStatus(tr('Attendance group deleted.', '考勤分组已删除。'))
+      emit('clear-section')
+      return
+    }
     await loadAttendanceGroups()
     if (attendanceGroupEditingId.value === id) {
       const nextGroup = attendanceGroups.value[0]
@@ -29022,8 +29027,30 @@ watch(recordStatusBreakdown, (items) => {
 }, { immediate: true })
 
 watch(
-  () => [props.initialSectionId, props.initialRequestId, props.routeGroupContext, showAdmin.value, showOverview.value, showReports.value, adminForbidden.value, attendancePluginActive.value] as const,
+  () => [
+    props.initialSectionId,
+    props.initialRequestId,
+    showAdmin.value,
+    showOverview.value,
+    showReports.value,
+    adminForbidden.value,
+    attendancePluginActive.value,
+  ] as const,
   () => {
+    if (props.routeGroupContext) return
+    void focusInitialAttendanceSection()
+  },
+  { immediate: true },
+)
+
+watch(
+  [
+    () => props.routeGroupContext?.group.id,
+    () => props.routeGroupContext?.step,
+    () => props.routeGroupContext?.surface,
+  ],
+  () => {
+    if (!props.routeGroupContext) return
     void focusInitialAttendanceSection()
   },
   { immediate: true },
@@ -29049,7 +29076,7 @@ watch(attendanceGroupMemberGroupId, () => {
     loadAttendanceGroupMembers()
     loadAttendanceGroupManagers()
   }
-})
+}, { immediate: true })
 
 watch(
   () => [
