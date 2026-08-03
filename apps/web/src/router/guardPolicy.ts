@@ -11,18 +11,35 @@
  * Ordering contract (behavior-tested; do not reorder):
  *   1. required-feature gate  → redirect home
  *   2. route permission gate  → redirect home
- *   3. attendance focus mode  → exact-path allowlist, else redirect /attendance
+ *   3. attendance focus mode  → exact-path allowlist + '/attendance/admin/groups/' prefix
+ *      (#4711 R0, reachability only), else redirect /attendance
  *   4. plm-workbench focus    → prefix allowlist, else redirect /plm
  *   5. allow
  */
 import { isRoutePermitted } from './routeAccess'
+import { isAttendanceGroupContextPath } from './attendanceGroupContextRoute'
 
-/** Attendance focus mode allows EXACT paths only (no prefixes — '/attendance/x' redirects). */
+/**
+ * Attendance focus mode allows these EXACT paths, plus — since #4711 R0 — paths exactly
+ * under '/attendance/admin/groups/' via isAttendanceFocusAllowedPath. No other prefixes:
+ * '/attendance/x' still redirects.
+ */
 export const ATTENDANCE_FOCUS_ALLOWED_PATHS: readonly string[] = Object.freeze([
   '/attendance',
   '/p/plugin-attendance/attendance',
   '/settings',
 ])
+
+/**
+ * Attendance-focus reachability predicate (design lock §3.3, #4711 R0). The exact legacy
+ * set is unchanged; a path is additionally reachable only when it is exactly under
+ * '/attendance/admin/groups/'. Prefix neighbors such as '/attendance/admin/groups-evil/…'
+ * remain rejected. This grants reachability ONLY — the required-feature and route
+ * permission gates run before it and it confers no permission.
+ */
+export function isAttendanceFocusAllowedPath(path: string): boolean {
+  return ATTENDANCE_FOCUS_ALLOWED_PATHS.includes(path) || isAttendanceGroupContextPath(path)
+}
 
 /**
  * plm-workbench focus mode allows these prefixes (exact match or `${prefix}/…`).
@@ -114,8 +131,8 @@ export function resolveRouteGuardDecision(
 
   const path = String(input.path || '')
 
-  // 3. attendance focus: exact-path set.
-  if (ctx.attendanceFocused && !ATTENDANCE_FOCUS_ALLOWED_PATHS.includes(path)) {
+  // 3. attendance focus: exact-path set + bounded #4711 group-context prefix.
+  if (ctx.attendanceFocused && !isAttendanceFocusAllowedPath(path)) {
     return { action: 'redirect', target: '/attendance' }
   }
 

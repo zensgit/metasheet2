@@ -30,6 +30,9 @@ declare global {
         [key: string]: unknown
       }
 
+      /** Tenant claim carried by the verified session token, before header fallback. */
+      authenticatedTenantId?: string
+
       /**
        * Request ID for tracing/logging purposes.
        */
