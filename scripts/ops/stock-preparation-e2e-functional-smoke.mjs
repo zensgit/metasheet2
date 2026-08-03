@@ -30,6 +30,7 @@ import { once } from 'node:events'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -159,6 +160,29 @@ export async function requestJson(pathname, { method = 'GET', body, token, accep
 }
 
 // ── server process lifecycle ────────────────────────────────────────────────────────────────────────
+//
+// RD-E2E finding (this lane, S6-A flag-ON arm): `stopServer()` used to send SIGTERM to the `pnpm`
+// wrapper process only, then wait a flat 1500ms and declare the server stopped. Killing that ONE pid is
+// not proof the actual `tsx src/index.ts` process it spawned (via `pnpm run dev:core`) went down with
+// it — a package-manager wrapper does not always forward signals to, or die together with, its own
+// child. When it didn't, the OLD process kept listening on PORT, and the NEXT `startServer()` call's
+// `waitForHealth()` — which only checks "does something answer /health", not "does MY spawn answer" —
+// passed instantly by hitting the STALE process instead of the one it just spawned. Every arm before
+// the flag-ON one expects flagOn===false, so a stale flag-OFF process answering in its place was
+// invisible; only the flag-ON arm (the one arm expecting a DIFFERENT value) exposed it, as
+// `s6aHealthFlagOn=FAIL` with the underlying route never having been restarted at all. Evidence: dispatched
+// run 30831507305 job 91746459841 shows "server (flag-on) healthy" logged 4ms after the provisioning
+// script's own completion line — every other arm transition in that SAME run took ~1.5s (the
+// stopServer→startServer round trip), which a freshly spawned server cannot beat; the only process that
+// could answer in 4ms is one that was ALREADY running the whole time.
+//
+// Fix, entirely inside this harness (no production code touched): (1) spawn detached so the whole
+// process TREE pnpm creates can be signalled as one group, not just the wrapper pid; (2) `stopServer()`
+// now ACTIVELY CONFIRMS the port stopped accepting connections — with a last-resort OS-level sweep for
+// anything still bound to it — instead of assuming a flat delay was enough; a port that will not free is
+// a loud thrown error, never a silent return. This makes "the next arm's health check passed" mean what
+// it says: MY spawn is the one that answered, because nothing else could have been listening on that
+// port when the check began.
 let currentServer = null
 
 async function waitForHealth(deadlineMs) {
@@ -175,6 +199,59 @@ async function waitForHealth(deadlineMs) {
   return false
 }
 
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    let settled = false
+    const socket = net.createConnection({ port, host: '127.0.0.1' })
+    const finish = (free) => {
+      if (settled) return
+      settled = true
+      socket.removeAllListeners()
+      socket.destroy()
+      resolve(free)
+    }
+    socket.once('connect', () => finish(false)) // something accepted the connection — still bound
+    socket.once('error', () => finish(true)) // nothing there (ECONNREFUSED) — free
+    socket.setTimeout(1000, () => finish(true))
+  })
+}
+
+async function waitForPortFree(port, deadlineMs) {
+  const deadline = Date.now() + deadlineMs
+  while (Date.now() < deadline) {
+    if (await isPortFree(port)) return true
+    await delay(250)
+  }
+  return false
+}
+
+// Last-resort fallback if the process-group signal above did not reach whatever is still listening
+// (e.g. it re-parented into a session of its own). Best-effort only: a missing/failing `lsof` here is a
+// no-op, not a crash — `waitForPortFree()` is what actually decides pass/fail for stopServer(), not this.
+async function killAnyProcessOnPort(port) {
+  await new Promise((resolve) => {
+    const finder = spawn('sh', ['-c', `lsof -ti tcp:${port} 2>/dev/null || true`], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    let out = ''
+    finder.stdout.on('data', (chunk) => { out += chunk.toString() })
+    finder.on('close', () => {
+      for (const pidText of out.split('\n').map((s) => s.trim()).filter(Boolean)) {
+        const foundPid = Number(pidText)
+        if (Number.isInteger(foundPid) && foundPid > 0) {
+          try {
+            process.kill(foundPid, 'SIGKILL')
+          } catch {
+            // already gone
+          }
+        }
+      }
+      resolve()
+    })
+    finder.on('error', () => resolve())
+  })
+}
+
 export async function startServer(extraEnv, label) {
   if (currentServer) throw new Error('a server is already running; stop it before starting another')
   const env = { ...BASE_ENV, ...extraEnv }
@@ -187,6 +264,9 @@ export async function startServer(extraEnv, label) {
     cwd: REPO_ROOT,
     env,
     stdio: ['ignore', logFd, logFd],
+    // Its own process group leader, so stopServer() can signal the WHOLE tree pnpm spawns underneath it
+    // (see the block comment above) instead of only the wrapper pid.
+    detached: true,
   })
   currentServer = { proc, logFd, label }
   const healthy = await waitForHealth(HEALTH_TIMEOUT_MS)
@@ -202,15 +282,26 @@ export async function stopServer() {
   if (!currentServer) return
   const { proc, logFd, label } = currentServer
   currentServer = null
+  const pid = proc.pid
+  function killGroup(signal) {
+    if (!pid) return
+    try {
+      // `-pid` targets the whole process group (valid because startServer() spawns with detached: true),
+      // not just the pnpm wrapper — see the block comment above this section.
+      process.kill(-pid, signal)
+    } catch {
+      // ESRCH (already gone) or no process-group support on this platform — best effort either way.
+    }
+  }
   try {
-    proc.kill('SIGTERM')
+    killGroup('SIGTERM')
     await Promise.race([once(proc, 'exit'), delay(8000)])
   } catch {
     // ignore
   }
   if (proc.exitCode === null && proc.signalCode === null) {
+    killGroup('SIGKILL')
     try {
-      proc.kill('SIGKILL')
       await Promise.race([once(proc, 'exit'), delay(3000)])
     } catch {
       // ignore
@@ -221,9 +312,22 @@ export async function stopServer() {
   } catch {
     // ignore
   }
-  note(`server (${label}) stopped`)
-  // Give the OS a beat to release the port before the next spawn.
-  await delay(1500)
+  // The wrapper process exiting is NOT proof the actual server process is gone (that is exactly the bug
+  // this section fixes — see the block comment above). Confirm the port itself stopped accepting
+  // connections before declaring this server stopped; a stale listener here would silently hand the
+  // NEXT startServer()'s health check a WRONG process to talk to instead of the one it is about to spawn.
+  let portFree = await waitForPortFree(PORT, 5000)
+  if (!portFree) {
+    await killAnyProcessOnPort(PORT)
+    portFree = await waitForPortFree(PORT, 5000)
+  }
+  if (!portFree) {
+    throw new Error(
+      `server (${label}) process group did not release port ${PORT} — a stale server may still be listening; ` +
+      'refusing to continue, since the next arm would silently talk to the wrong process',
+    )
+  }
+  note(`server (${label}) stopped`, `port=${PORT} confirmedFree=true`)
 }
 
 // ── auth ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -526,6 +630,57 @@ async function runProvisioningScript(env) {
   })
 }
 
+// ── Step 3 (database-observable proof) ──────────────────────────────────────────────────────────────
+// A 200 with a COMPLETED-looking response body is not evidence the generation kernel actually wrote
+// anything — it is only evidence the HTTP layer said so. This queries the rows the kernel is supposed
+// to have written directly, over a SEPARATE connection using the APPLICATION's own DATABASE_URL (the
+// migration/superuser role) rather than the S6-A runtime role, so the proof does not depend on the same
+// identity that (allegedly) wrote the rows also being the one asked to confirm they exist. Values-free:
+// only fixed status tokens and counts are read into the evidence block, no row payload content.
+async function assertS6ARunDatabaseObservable(operationId) {
+  const pg = requireFromPlugin('pg')
+  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
+  try {
+    const runRows = await pool.query(
+      `SELECT status, source_read_count, business_line_count, generation_id
+       FROM integration_sealed_export_stock_prep_runs
+       WHERE tenant_id = $1 AND operation_id = $2`,
+      [TENANT_ID, operationId],
+    )
+    const run = runRows.rows[0] || null
+    S.s6aDbRunRowFound = run ? 'true' : 'false'
+    S.s6aDbRunStatus = run ? run.status : '<none>'
+    S.s6aDbRunSourceReadCount = run ? Number(run.source_read_count) : -1
+    S.s6aDbRunBusinessLineCount = run ? Number(run.business_line_count) : -1
+
+    let generationFound = false
+    let generationStatus = '<none>'
+    if (run && run.generation_id) {
+      const generationRows = await pool.query(
+        `SELECT status FROM integration_sealed_export_generations WHERE generation_id = $1 AND tenant_id = $2`,
+        [run.generation_id, TENANT_ID],
+      )
+      generationFound = generationRows.rows.length === 1
+      generationStatus = generationFound ? generationRows.rows[0].status : '<none>'
+    }
+    S.s6aDbGenerationRowFound = generationFound ? 'true' : 'false'
+    S.s6aDbGenerationStatus = generationStatus
+
+    const dbOk = run !== null && run.status === 'COMPLETED' && Number(run.source_read_count) === 1 &&
+      generationFound
+    must(
+      'S6-A: database-observable proof — stock_prep_runs row COMPLETED (source_read_count=1) + a matching ' +
+      'generations row exist, queried over a SEPARATE (superuser, non-runtime-role) connection',
+      dbOk,
+      `runFound=${S.s6aDbRunRowFound} runStatus=${S.s6aDbRunStatus} genFound=${S.s6aDbGenerationRowFound} genStatus=${S.s6aDbGenerationStatus}`,
+    )
+    S.s6aDatabaseObservable = dbOk ? 'PASS' : 'FAIL'
+    return dbOk
+  } finally {
+    await pool.end()
+  }
+}
+
 async function attemptS6ARealRun() {
   const salt = `t${Math.floor(Date.now() / 1000)}`
   const systemId = `e2efunc-s6a-source-${salt}`
@@ -727,6 +882,16 @@ async function attemptS6ARealRun() {
       firstOk, `http=${firstRun.status} mode=${S.s6aFirstRunMode} status=${S.s6aFirstRunStatus} lines=${S.s6aBusinessLineCount}`)
     S.s6aFirstRun = firstOk ? 'PASS' : 'FAIL'
     if (!firstOk) {
+      S.s6aDatabaseObservable = 'NOT_RUN'
+      S.s6aReplayRun = 'NOT_RUN'
+      return
+    }
+
+    // Step 3: the HTTP response saying COMPLETED is not proof anything was written — confirm the
+    // generation kernel's own rows exist, over a connection independent of the runtime role that wrote
+    // them.
+    const dbOk = await assertS6ARunDatabaseObservable(operationId)
+    if (!dbOk) {
       S.s6aReplayRun = 'NOT_RUN'
       return
     }
@@ -741,7 +906,7 @@ async function attemptS6ARealRun() {
     must('S6-A: replay same operationId -> internal_noop, sourceReadCount=1, same businessLineCount',
       replayOk, `http=${replay.status} mode=${S.s6aReplayMode}`)
     S.s6aReplayRun = replayOk ? 'PASS' : 'FAIL'
-    S.s6aFlagOnRun = (firstOk && replayOk) ? 'PASS' : 'FAIL'
+    S.s6aFlagOnRun = (firstOk && dbOk && replayOk) ? 'PASS' : 'FAIL'
   } finally {
     await stopServer()
   }
