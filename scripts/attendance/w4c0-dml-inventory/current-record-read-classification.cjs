@@ -34,6 +34,10 @@ const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c3c-ops-retirement.ts', 'buildOperatorRetirementCleanupPlanSqlV1', 1, 'operator_fixture_or_audit'),
   entry('packages/core-backend/src/attendance/w4c3c-recompute.ts', 'appendRecomputeCalculationV1', 1, 'write_lock'),
   entry('packages/core-backend/src/attendance/w4c3c-manual-edit-apply.ts', 'appendManualOverrideCalculationV1', 1, 'write_lock'),
+  entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readAttendanceCalculationDetail', 3, 'calculation_detail_current_or_history_scope'),
+  entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readAuthoritativeTraceCalculation', 1, 'immutable_current_trace_scope'),
+  entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readShadowTraceCalculation', 1, 'immutable_shadow_trace_scope'),
+  entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readTraceSegments', 1, 'immutable_authorized_trace_segment_scope'),
   entry('plugins/plugin-attendance/index.cjs', 'loadW4c3cRecordSubjectForOperation', 1, 'write_precondition'),
 ])
 

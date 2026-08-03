@@ -22,10 +22,12 @@ const {
   buildRawCensus,
   buildP25CallPathCensus,
   buildAttendanceRecordReadCensus,
+  buildAttendanceCalculationReadCensus,
   classifyCensus,
   scanFileForDmlSites,
   scanFileForP25CallPathSites,
   scanFileForAttendanceRecordReadSites,
+  scanFileForAttendanceCalculationReadSites,
   isCanonicalBoundaryPath,
   contentHashOfKeys,
   maskCommentsForDmlScan,
@@ -47,6 +49,9 @@ const {
 const {
   classifyAttendanceRecordReadSites,
 } = require(path.join(toolDir, 'current-record-read-classification.cjs'))
+const {
+  classifyAttendanceCalculationReadSites,
+} = require(path.join(toolDir, 'calculation-read-classification.cjs'))
 const {
   assertP26ActionAndFixtureContract,
   classifyP26ApprovalAssignmentSites,
@@ -158,6 +163,127 @@ test('W4C-3a SELECT-inventory mutation: a dynamic base-table member fails while 
     assert.equal(result.unclassified[0]?.table, 'attendance_records')
     assert.equal(result.unclassified[0]?.dynamic, true)
   }
+})
+
+test('W4C-4: generated SELECT inventory classifies every calculation and segment read', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildAttendanceCalculationReadCensus(source)
+  const result = classifyAttendanceCalculationReadSites(sites)
+
+  assert.ok(sites.some((site) => site.table === 'attendance_record_calculations'))
+  assert.ok(sites.some((site) => site.table === 'attendance_record_segments'))
+  assert.deepEqual(
+    result.unclassified.map((site) => `${site.relPath} :: ${site.enclosingSymbol} :: ${site.table}`),
+    [],
+    'every direct calculation/segment read must have a current or history classification',
+  )
+  assert.deepEqual(result.countDrift, [], 'a new direct read in a known wrapper requires explicit review')
+  assert.deepEqual(result.stale, [], 'a removed direct read must retire its historical classification')
+  assert.deepEqual(result.predicateDrift, [], 'current readers must retain their required active-row predicate')
+  assert.equal(result.classifiedSites.length, sites.length)
+  assert.equal(result.classifiedSites.filter((site) => site.posture === 'current').length, 3)
+  assert.ok(result.classifiedSites.some((site) =>
+    site.enclosingSymbol === 'readAuthoritativeTraceCalculation'
+      && site.table === 'attendance_record_calculations'
+      && site.posture === 'current'))
+  assert.ok(result.classifiedSites.some((site) =>
+    site.enclosingSymbol === 'readShadowTraceCalculation'
+      && site.table === 'attendance_record_calculations'
+      && site.posture === 'history'))
+
+  const baseSource = createWorktreeSource(rootDir)
+  const mutatedSource = {
+    ...baseSource,
+    readFile: (relPath) => {
+      const content = baseSource.readFile(relPath)
+      if (relPath !== 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts') return content
+      return content.replace(
+        "AND record.visibility_state = 'active'",
+        "AND record.visibility_state = 'retired'",
+      )
+    },
+  }
+  const mutated = classifyAttendanceCalculationReadSites(
+    buildAttendanceCalculationReadCensus(mutatedSource).sites,
+  )
+  assert.deepEqual(mutated.unclassified, [])
+  assert.deepEqual(mutated.countDrift, [])
+  assert.deepEqual(mutated.stale, [])
+  assert.equal(mutated.predicateDrift.length, 1)
+  assert.equal(mutated.predicateDrift[0]?.enclosingSymbol, 'readAuthoritativeTraceCalculation')
+  assert.equal(mutated.predicateDrift[0]?.actual, null)
+})
+
+test('W4C-4 mutation: a SQL-comment marker cannot satisfy the active predicate fingerprint', () => {
+  for (const query of [
+    "`SELECT 1 FROM attendance_record_calculations /* visibility_state = 'active' */`",
+    "'SELECT 1 FROM attendance_record_calculations /* visibility_state = \'active\' */'",
+  ]) {
+    const source = `async function shadowRead() { return db.query(${query}) }\n`
+    const sites = scanFileForAttendanceCalculationReadSites('packages/core-backend/src/attendance/shadow-read.ts', source)
+    assert.equal(sites.length, 1, query)
+    assert.equal(sites[0]?.requiredPredicateFingerprint, null, query)
+  }
+})
+
+test('W4C-4 mutation: removing shadow active predicate is independently detected', () => {
+  const baseSource = createWorktreeSource(rootDir)
+  const relPath = 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts'
+  const original = baseSource.readFile(relPath)
+  const mutatedSource = {
+    ...baseSource,
+    readFile: (candidate) => {
+      if (candidate !== relPath) return baseSource.readFile(candidate)
+      return original.replace(
+        "AND calculation.mode = 'shadow'\n      WHERE record.org_id = $1 AND record.user_id = $2 AND record.work_date = $3\n        AND record.visibility_state = 'active'",
+        "AND calculation.mode = 'shadow'\n      WHERE record.org_id = $1 AND record.user_id = $2 AND record.work_date = $3\n        /* visibility_state = 'active' */",
+      )
+    },
+  }
+  const result = classifyAttendanceCalculationReadSites(
+    buildAttendanceCalculationReadCensus(mutatedSource).sites,
+  )
+  assert.deepEqual(result.unclassified, [])
+  assert.equal(result.predicateDrift.length, 1)
+  assert.equal(result.predicateDrift[0]?.enclosingSymbol, 'readShadowTraceCalculation')
+  assert.equal(result.predicateDrift[0]?.actual, null)
+})
+
+test('W4C-4 SELECT-inventory mutation: unclassified calculation and segment reads fail closed', () => {
+  for (const table of ['attendance_record_calculations', 'attendance_record_segments']) {
+    const sites = scanFileForAttendanceCalculationReadSites(
+      'packages/core-backend/src/routes/attendance-unclassified-read.ts',
+      `async function unclassifiedRead() { return db.query(\`SELECT * FROM ${table}\`) }\n`,
+    )
+    const result = classifyAttendanceCalculationReadSites(sites)
+    assert.equal(result.unclassified.length, 1, table)
+    assert.equal(result.unclassified[0]?.table, table)
+  }
+})
+
+test('W4C-4 SELECT-inventory mutation: a direct retired-row read fails closed', () => {
+  const sites = scanFileForAttendanceCalculationReadSites(
+    'packages/core-backend/src/routes/attendance-retired-row-leak.ts',
+    `async function exposeRetiredCalculation() {
+      return db.query(\`SELECT calculation.id
+        FROM attendance_record_calculations calculation
+        JOIN attendance_records record ON record.id = calculation.attendance_record_id
+       WHERE record.visibility_state = 'retired'\`)
+    }\n`,
+  )
+  const result = classifyAttendanceCalculationReadSites(sites)
+  assert.equal(result.unclassified.length, 1)
+  assert.equal(result.unclassified[0]?.table, 'attendance_record_calculations')
+})
+
+test('W4C-4 SELECT-inventory mutation: dynamic calculation table reads fail closed', () => {
+  const sites = scanFileForAttendanceCalculationReadSites(
+    'packages/core-backend/src/routes/attendance-dynamic-read.ts',
+    "const TABLE = 'attendance_record_calculations'\nasync function dynamicRead() { return db.query(`SELECT * FROM ${TABLE}`) }\n",
+  )
+  const result = classifyAttendanceCalculationReadSites(sites)
+  assert.equal(result.unclassified.length, 1)
+  assert.equal(result.unclassified[0]?.dynamic, true)
 })
 
 // -------------------------------------------------------------------------------------------
@@ -393,7 +519,13 @@ test('W4C-3a fixed item-effect DML is classified under the completed P06-P09 cut
 //    vitest-discovered nor covered by vitest.config.ts's exclude list — see module header).
 // -------------------------------------------------------------------------------------------
 test('this collector test file has an explicit CI execution step', () => {
-  assert.match(readWorkflow(), new RegExp(THIS_TEST_FILENAME.replaceAll('.', '\\.')))
+  const workflow = readWorkflow()
+  assert.match(workflow, new RegExp(THIS_TEST_FILENAME.replaceAll('.', '\\.')))
+  assert.match(
+    workflow,
+    /Run attendance W4C-0 Stage D §8\.4 and W4C-4 §12\.7 inventory collectors/,
+    'the required CI step must name the W4C-4 current/history inventory, not only the older DML collector',
+  )
 })
 
 // -------------------------------------------------------------------------------------------
