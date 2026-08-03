@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   up,
 } from '../../src/db/migrations/zzzz20260803120000_create_attendance_group_fixed_schedule_configs'
+import {
+  down as membershipMigrationDown,
+} from '../../src/db/migrations/zzzz20260723140000_create_attendance_calculation_group_memberships'
 
 const require = createRequire(import.meta.url)
 const configServiceLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs')
@@ -39,7 +42,7 @@ describeDb('attendance group fixed-schedule config migration (real DB)', () => {
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         org_id text NOT NULL,
         name text NOT NULL,
-        UNIQUE (id, org_id)
+        CONSTRAINT attendance_groups_id_org_unique UNIQUE (id, org_id)
       )
     `.execute(db)
     await sql`
@@ -106,6 +109,29 @@ describeDb('attendance group fixed-schedule config migration (real DB)', () => {
       SELECT revision FROM attendance_group_fixed_schedule_configs
     `.execute(db)
     expect(rows.rows).toEqual([{ revision: 1 }])
+  })
+
+  it('keeps the shared group-org key when the earlier membership migration rolls back', async () => {
+    const { groupId, shiftId } = await insertParents('org-a')
+    await up(db)
+    await sql`CREATE TABLE attendance_calculation_group_memberships (id uuid PRIMARY KEY)`.execute(db)
+    await sql`CREATE TABLE attendance_calculation_group_membership_operations (id uuid PRIMARY KEY)`.execute(db)
+
+    await membershipMigrationDown(db)
+
+    const constraints = await sql<{ conname: string }>`
+      SELECT conname
+        FROM pg_constraint
+       WHERE conname IN (
+         'attendance_groups_id_org_unique',
+         'attendance_group_fixed_schedule_configs_group_org_fk'
+       )
+    `.execute(db)
+    expect(constraints.rows.map(row => row.conname)).toEqual(expect.arrayContaining([
+      'attendance_groups_id_org_unique',
+      'attendance_group_fixed_schedule_configs_group_org_fk',
+    ]))
+    await insertConfig('org-a', groupId, shiftId)
   })
 
   it('enforces composite organization integrity for both group and shift', async () => {
