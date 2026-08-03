@@ -29,6 +29,12 @@ const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   entry('plugins/plugin-attendance/index.cjs', 'generateAbsenceRecords', 1, 'uniqueness_guard'),
   entry('plugins/plugin-attendance/index.cjs', 'flushRecordUpserts', 2, 'import_write_precondition'),
   entry('plugins/plugin-attendance/index.cjs', 'enqueueManualMissedPunchReminderTransaction', 1, 'current_row_lock_with_explicit_visibility'),
+  // W4C-3c: operator retirement, recompute, and manual override lock the base parent before write.
+  entry('packages/core-backend/src/attendance/w4c3c-ops-retirement.ts', 'appendOperatorRetirementCalculationV1', 1, 'write_lock'),
+  entry('packages/core-backend/src/attendance/w4c3c-ops-retirement.ts', 'buildOperatorRetirementCleanupPlanSqlV1', 1, 'operator_fixture_or_audit'),
+  entry('packages/core-backend/src/attendance/w4c3c-recompute.ts', 'appendRecomputeCalculationV1', 1, 'write_lock'),
+  entry('packages/core-backend/src/attendance/w4c3c-manual-edit-apply.ts', 'appendManualOverrideCalculationV1', 1, 'write_lock'),
+  entry('plugins/plugin-attendance/index.cjs', 'loadW4c3cRecordSubjectForOperation', 1, 'write_precondition'),
 ])
 
 function keyOf(site) {

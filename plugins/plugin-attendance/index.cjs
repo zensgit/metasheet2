@@ -13927,16 +13927,68 @@ const MAKEUP_REQUEST_TYPE_ANOMALY_TABLE = Object.freeze({
 // is intentionally a plain read (no FOR UPDATE): it observes truth, it does not mutate the record, so it
 // must not contend with the concurrent punch/approval write paths. Shared by the MP-2 type gate and the
 // MP-3 snapshot.matchedAnomalyTypes. Fail-closed: an unresolvable / fact-less day yields [].
+// W4C-3c P20: singular active-current helpers from the host port (w4c3c-active-current).
+// Set at activate; fail closed when the least-privilege port is missing.
+let attendanceW4ActiveCurrentPort = null
+// W4C-3c record operation boundary — set at activate; routes resolve at call time.
+let w4RecordOperationBoundary = null
+let attendanceW4SegmentCalculationPortRef = null
+
+function requireAttendanceActiveCurrentPort() {
+  if (!attendanceW4ActiveCurrentPort) {
+    throw new HttpError(
+      503,
+      'W4_ACTIVE_CURRENT_PORT_UNAVAILABLE',
+      'Canonical active-current helper port unavailable',
+    )
+  }
+  return attendanceW4ActiveCurrentPort
+}
+
+function pluginQueryAdapter(dbOrTrx) {
+  return async (sqlText, params) => {
+    const rows = await dbOrTrx.query(sqlText, params ? [...params] : [])
+    return { rows: Array.isArray(rows) ? rows : rows?.rows ?? [] }
+  }
+}
+
+function requireStrictCurrentPolicyTimezone(workContext, record) {
+  const port = attendanceW4SegmentCalculationPortRef
+  if (!port || typeof port.validateIanaTimezone !== 'function') {
+    throw new HttpError(
+      503,
+      'W4_TIMEZONE_VALIDATOR_UNAVAILABLE',
+      'Strict timezone validation service unavailable',
+    )
+  }
+  const candidate =
+    workContext?.rule && typeof workContext.rule.timezone === 'string'
+      ? workContext.rule.timezone
+      : (typeof record?.timezone === 'string' ? record.timezone : null)
+  try {
+    return port.validateIanaTimezone(candidate)
+  } catch (_error) {
+    throw new HttpError(
+      409,
+      'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+      'current_policy recompute requires a valid frozen IANA timezone',
+    )
+  }
+}
+
+async function listActiveCurrentAttendanceRecordsForAnomalyListing(db, options) {
+  const port = requireAttendanceActiveCurrentPort()
+  return port.listForAnomalyListing(pluginQueryAdapter(db), options)
+}
+
+async function loadActiveCurrentAttendanceRecordForMakeupAnomalyFacts(trx, { orgId, userId, workDate }) {
+  const port = requireAttendanceActiveCurrentPort()
+  return port.loadForMakeupAnomalyFacts(pluginQueryAdapter(trx), { orgId, userId, workDate })
+}
+
 async function deriveMakeupAnomalyFacts(trx, { orgId, userId, workDate }) {
   const facts = new Set()
-  const rows = await trx.query(
-    `SELECT status, first_in_at, last_out_at, late_minutes, early_leave_minutes, is_workday, meta
-     FROM attendance_current_records
-     WHERE org_id = $1 AND user_id = $2 AND work_date = $3
-     LIMIT 1`,
-    [orgId, userId, workDate]
-  )
-  const record = rows[0] ?? null
+  const record = await loadActiveCurrentAttendanceRecordForMakeupAnomalyFacts(trx, { orgId, userId, workDate })
   if (record) {
     const status = record.status ? String(record.status) : ''
     const lateMinutes = Number(record.late_minutes ?? 0)
@@ -15205,32 +15257,37 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
   return candidates
 }
 
-async function loadOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }) {
+async function listActiveCurrentOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }, explicitPort = null) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   const dates = Array.isArray(workDates)
     ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
     : []
   if (!userId || dates.length === 0) return []
+  const port = explicitPort ?? requireAttendanceActiveCurrentPort()
+  const rows = await port.listOpenForWorkDateResolver(pluginQueryAdapter(db), {
+    orgId: targetOrg,
+    userId,
+    workDates: dates,
+  })
+  return (rows || []).map((row) => ({
+    orgId: row.org_id,
+    userId: row.user_id,
+    workDate: normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10),
+    firstInAt: row.first_in_at,
+    lastOutAt: row.last_out_at,
+    status: row.status,
+  }))
+}
+
+async function loadOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }, explicitPort = null) {
   try {
-    const rows = await db.query(
-      `SELECT user_id, org_id, work_date, first_in_at, last_out_at, status
-       FROM attendance_current_records
-       WHERE org_id = $1
-         AND user_id = $2
-         AND work_date = ANY($3::date[])
-         AND first_in_at IS NOT NULL
-         AND last_out_at IS NULL`,
-      [targetOrg, userId, dates]
+    return await listActiveCurrentOpenRecordsForWorkDateResolver(
+      db,
+      { orgId, userId, workDates },
+      explicitPort,
     )
-    return (rows || []).map((row) => ({
-      orgId: row.org_id,
-      userId: row.user_id,
-      workDate: normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10),
-      firstInAt: row.first_in_at,
-      lastOutAt: row.last_out_at,
-      status: row.status,
-    }))
   } catch (error) {
+    if (error instanceof HttpError && error.code === 'W4_ACTIVE_CURRENT_PORT_UNAVAILABLE') throw error
     if (isDatabaseSchemaError(error)) return []
     throw error
   }
@@ -15302,6 +15359,7 @@ async function loadWorkDateAttributionTailMinutes(db) {
 }
 
 function createPluginAttendanceWorkDateResolver(db, options = {}) {
+  const explicitActiveCurrentPort = options.activeCurrent ?? null
   const resolver = createAttendanceWorkDateResolver({
     toWorkDate,
     buildZonedDate,
@@ -15315,7 +15373,7 @@ function createPluginAttendanceWorkDateResolver(db, options = {}) {
       })
     },
     async loadOpenRecords(args) {
-      return loadOpenRecordsForWorkDateResolver(db, args)
+      return loadOpenRecordsForWorkDateResolver(db, args, explicitActiveCurrentPort)
     },
     async loadApprovedOvertimeWindows(args) {
       return loadApprovedOvertimeWindowsForWorkDateResolver(db, args)
@@ -19857,6 +19915,20 @@ async function upsertAttendanceRecord(options) {
   const loadedExistingRow = existingRow ?? await loadAttendanceRecordForUpdate(client, { userId, workDate, orgId })
   const existing = loadedExistingRow ? [loadedExistingRow] : []
 
+  // W4C-3c: ordinary punch/import/approval/recompute/manual cannot reactivate
+  // an operator-retired parent — fail closed with zero writes.
+  if (
+    existing[0]
+    && String(existing[0].visibility_state ?? '') === 'retired'
+    && String(existing[0].visibility_reason ?? '') === 'operator_retirement'
+  ) {
+    throw new HttpError(
+      409,
+      'ATTENDANCE_RECORD_OPERATOR_RETIRED',
+      'attendance record is operator-retired',
+    )
+  }
+
   const values = computeAttendanceRecordUpsertValues({
     existingRow: existing[0] ?? null,
     updateFirstInAt,
@@ -20750,21 +20822,9 @@ function buildManualResultEditMarker(editRow, record) {
   }
 }
 
-async function attachManualResultEditMarkerToRecord(trx, record, marker) {
-  if (!record?.id) return record
-  const meta = {
-    ...normalizeMetadata(record.meta),
-    manual_result_edit: marker,
-  }
-  const rows = await trx.query(
-    `UPDATE attendance_records
-        SET meta = $3::jsonb, updated_at = now()
-      WHERE id = $1 AND org_id = $2
-      RETURNING *`,
-    [record.id, record.org_id, JSON.stringify(meta)]
-  )
-  return rows[0] ?? { ...record, meta }
-}
+// W4C-3c P05: post-write attachManualResultEditMarkerToRecord removed entirely.
+// Marker is frozen in the same projection write (legacy) or manual_override_snapshot
+// on the W4 calculation (shadow/authoritative) via the record-operation boundary.
 
 function buildAttendanceResultEditNotificationReasonSummary(reason) {
   const text = typeof reason === 'string' ? reason.trim() : ''
@@ -20880,6 +20940,30 @@ function mapResultEditRow(row) {
   }
 }
 
+async function resolveAttendanceResultEditWindowContext(trx, {
+  orgId,
+  userId,
+  workDate,
+  editWindowDays,
+}) {
+  const context = await resolveWorkContext({ db: trx, orgId, userId, workDate })
+  const timezone = context?.rule?.timezone
+  if (!timezone || !isValidTimeZoneIdentifier(timezone)) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve a valid timezone for the edit window (fail-closed)')
+  }
+  const todayKey = toWorkDate(new Date(), timezone)
+  const todayMs = Date.parse(`${todayKey}T00:00:00Z`)
+  const workMs = Date.parse(`${workDate}T00:00:00Z`)
+  if (!Number.isFinite(todayMs) || !Number.isFinite(workMs)) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve the edit window (fail-closed)')
+  }
+  const diffDays = Math.floor((todayMs - workMs) / 86400000)
+  if (diffDays > editWindowDays) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', `work_date is older than the ${editWindowDays}-day edit window`)
+  }
+  return { context, timezone }
+}
+
 // AE-1 transactional write helper. Locks the target record (id+org, cross-org miss → 404 with no leak), runs
 // the editable-source / closed-cycle / edit-window guards, applies the §3.5a normalization via
 // upsertAttendanceRecord (statusOverride + overrideMetrics, NOT a naked status UPDATE so meta tiers stay
@@ -20956,28 +21040,24 @@ async function applyAttendanceResultEdit(trx, options) {
   }
 
   // (4) Resolve the record's effective rule + timezone (drives §3.5a tier recompute + the edit window).
-  const context = await resolveWorkContext({ db: trx, orgId, userId: record.user_id, workDate })
-  const timezone = context?.rule?.timezone
-  if (!timezone || !isValidTimeZoneIdentifier(timezone)) {
-    // Fail-closed: without a resolvable zone the edit window cannot be verified safely.
-    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve a valid timezone for the edit window (fail-closed)')
-  }
-
   // (5) Edit window (§3.3 / §9.1) — work_date within editWindowDays of org-tz today.
-  const todayKey = toWorkDate(new Date(), timezone)
-  const todayMs = Date.parse(`${todayKey}T00:00:00Z`)
-  const workMs = Date.parse(`${workDate}T00:00:00Z`)
-  if (!Number.isFinite(todayMs) || !Number.isFinite(workMs)) {
-    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve the edit window (fail-closed)')
-  }
-  const diffDays = Math.floor((todayMs - workMs) / 86400000)
-  if (diffDays > editWindowDays) {
-    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', `work_date is older than the ${editWindowDays}-day edit window`)
+  const { context, timezone } = await resolveAttendanceResultEditWindowContext(trx, {
+    orgId,
+    userId: record.user_id,
+    workDate,
+    editWindowDays,
+  })
+
+  // W4C-3c: operator-retired parents are terminal for ordinary writers (including manual edit).
+  if (String(record.visibility_state ?? '') === 'retired'
+    && String(record.visibility_reason ?? '') === 'operator_retirement') {
+    throw new HttpError(409, 'ATTENDANCE_RECORD_OPERATOR_RETIRED', 'attendance record is operator-retired')
   }
 
   // (6) Apply §3.5a normalization and re-write the record through the consistency helper (statusOverride +
   // overrideMetrics fully shadow computeMetrics; meta tiers are recomputed from the FINAL lateMinutes).
   // W2 recompute adapter: preserve frozen work-date attribution (never re-resolve against current schedule).
+  // W4C-3c P05: freeze the manual override marker into THIS write — no post-write meta patch.
   const recordMetaForRecompute = normalizeMetadata(record?.meta)
   const rawFrozenForRecompute = recordMetaForRecompute?.[FROZEN_ATTRIBUTION_KEY]
     ?? recordMetaForRecompute?.workDateAttributionV1
@@ -21001,15 +21081,81 @@ async function applyAttendanceResultEdit(trx, options) {
     ambiguousCode: 'ATTENDANCE_RESULT_EDIT_WORK_DATE_AMBIGUOUS',
     mismatchCode: 'ATTENDANCE_RESULT_EDIT_WORK_DATE_MISMATCH',
   })
-  const recomputeMeta = recomputeResolution.kind === 'resolved'
-    ? {
-        [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
-          recomputeResolution,
-          { orgId, userId: record.user_id },
-        ),
-      }
-    : (frozenForRecompute ? { [FROZEN_ATTRIBUTION_KEY]: frozenForRecompute } : undefined)
   const metrics = applyResultEditMetricNormalization(targetStatus, record, overrideMetrics)
+  const beforeSnapshot = buildResultEditSnapshot(record)
+  // Provisional after-image for the audit row (pre-upsert). The single projection write
+  // below freezes the full marker (including audit id) — no post-write meta UPDATE.
+  const provisionalAfter = {
+    ...beforeSnapshot,
+    status: targetStatus,
+    workMinutes: metrics.workMinutes,
+    lateMinutes: metrics.lateMinutes,
+    earlyLeaveMinutes: metrics.earlyLeaveMinutes,
+  }
+
+  // (7) Immutable audit row first so the marker can carry auditId in the same projection write.
+  // UNIQUE(org_id, idempotency_key) is the concurrency backstop.
+  let auditRow
+  try {
+    const inserted = await trx.query(
+      `INSERT INTO attendance_record_result_edits
+        (org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
+         reason, evidence, actor_user_id, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11, $12)
+       RETURNING *`,
+      [
+        orgId,
+        recordId,
+        record.user_id,
+        workDate,
+        beforeStatus,
+        targetStatus,
+        JSON.stringify(beforeSnapshot),
+        JSON.stringify(provisionalAfter),
+        reason,
+        JSON.stringify(normalizedEvidence),
+        actorUserId,
+        idempotencyKey,
+      ]
+    )
+    auditRow = inserted[0]
+  } catch (error) {
+    if (error?.code === '23505') {
+      const raceRows = await trx.query(
+        'SELECT * FROM attendance_record_result_edits WHERE org_id = $1 AND idempotency_key = $2 LIMIT 1',
+        [orgId, idempotencyKey]
+      )
+      const prior = raceRows[0]
+      if (prior && resultEditPayloadMatches(prior, { recordId, targetStatus, reason, evidence: normalizedEvidence })) {
+        return { alreadyApplied: true, edit: mapResultEditRow(prior), record: null }
+      }
+      throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used with a different payload')
+    }
+    throw error
+  }
+
+  const frozenMarker = buildManualResultEditMarker(auditRow, {
+    status: targetStatus,
+    work_minutes: metrics.workMinutes,
+    late_minutes: metrics.lateMinutes,
+    early_leave_minutes: metrics.earlyLeaveMinutes,
+    work_date: workDate,
+    first_in_at: record.first_in_at,
+    last_out_at: record.last_out_at,
+    is_workday: record.is_workday,
+  })
+  const recomputeMeta = {
+    ...(recomputeResolution.kind === 'resolved'
+      ? {
+          [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+            recomputeResolution,
+            { orgId, userId: record.user_id },
+          ),
+        }
+      : (frozenForRecompute ? { [FROZEN_ATTRIBUTION_KEY]: frozenForRecompute } : {})),
+    // W4C-3c P05: freeze override in the same projection write — no post-write meta patch.
+    manual_result_edit: frozenMarker,
+  }
   const updated = await upsertAttendanceRecord({
     userId: record.user_id,
     orgId,
@@ -21033,53 +21179,7 @@ async function applyAttendanceResultEdit(trx, options) {
     client: trx,
   })
 
-  const beforeSnapshot = buildResultEditSnapshot(record)
-  let afterSnapshot = buildResultEditSnapshot(updated)
-
-  // (7) Write the immutable audit row. The UNIQUE(org_id, idempotency_key) is the concurrency backstop: a
-  // racing same-key insert from another txn surfaces as 23505 → re-run the same compare-then-{ok|409}.
-  let auditRow
-  try {
-    const inserted = await trx.query(
-      `INSERT INTO attendance_record_result_edits
-        (org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
-         reason, evidence, actor_user_id, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11, $12)
-       RETURNING *`,
-      [
-        orgId,
-        recordId,
-        record.user_id,
-        workDate,
-        beforeStatus,
-        targetStatus,
-        JSON.stringify(beforeSnapshot),
-        JSON.stringify(afterSnapshot),
-        reason,
-        JSON.stringify(normalizedEvidence),
-        actorUserId,
-        idempotencyKey,
-      ]
-    )
-    auditRow = inserted[0]
-  } catch (error) {
-    if (error?.code === '23505') {
-      const raceRows = await trx.query(
-        'SELECT * FROM attendance_record_result_edits WHERE org_id = $1 AND idempotency_key = $2 LIMIT 1',
-        [orgId, idempotencyKey]
-      )
-      const prior = raceRows[0]
-      if (prior && resultEditPayloadMatches(prior, { recordId, targetStatus, reason, evidence: normalizedEvidence })) {
-        return { alreadyApplied: true, edit: mapResultEditRow(prior), record: updated }
-      }
-      throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used with a different payload')
-    }
-    throw error
-  }
-
-  const marker = buildManualResultEditMarker(auditRow, updated)
-  const markedRecord = await attachManualResultEditMarkerToRecord(trx, updated, marker)
-  afterSnapshot = buildResultEditSnapshot(markedRecord)
+  const afterSnapshot = buildResultEditSnapshot(updated)
   let finalAuditRow = auditRow
   if (notifyAffectedEmployee === false) {
     finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
@@ -21090,7 +21190,7 @@ async function applyAttendanceResultEdit(trx, options) {
   } else {
     const delivery = await enqueueAttendanceResultEditNotification(trx, {
       orgId,
-      record: markedRecord,
+      record: updated,
       auditRow,
       beforeStatus,
       targetStatus,
@@ -21107,7 +21207,7 @@ async function applyAttendanceResultEdit(trx, options) {
   return {
     alreadyApplied: false,
     edit: mapResultEditRow(finalAuditRow),
-    record: markedRecord,
+    record: updated,
     beforeSnapshot,
     afterSnapshot,
   }
@@ -23756,6 +23856,14 @@ module.exports = {
   __attendanceMakeupPunchForTests: {
     deriveMakeupAnomalyFacts,
   },
+  // W4C-3c test seams — boundary still enforces capability/authorization.
+  get __attendanceW4RecordOperationBoundaryForTests() {
+    return w4RecordOperationBoundary
+  },
+  get __attendanceW4ActiveCurrentPortForTests() {
+    return attendanceW4ActiveCurrentPort
+  },
+  __attendanceW4CurrentPolicyTimezoneForTests: requireStrictCurrentPolicyTimezone,
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
   },
@@ -24116,6 +24224,8 @@ module.exports = {
     // Intl probe (which accepts offset forms like "+05:00"). Reads and writes that do
 	    // not carry a timezone value are untouched.
 	    const attendanceW4SegmentCalculationPort = context?.services?.attendanceW4SegmentCalculation ?? null
+	    // W4C-3c P20: singular active-current helper port (never re-implemented in the plugin).
+	    attendanceW4ActiveCurrentPort = attendanceW4SegmentCalculationPort?.activeCurrent ?? null
 
 	    // W4C-3b P12 (lock §7.2 / §12.5 / OD-W4C-33): immutable request calculation
 	    // snapshot plumbing via the least-privilege host port. legacy_projection_only
@@ -24457,6 +24567,11 @@ module.exports = {
       // durable run-creation/resume/outcome/finalization machine's own
       // values-free error class (w4c2-scheduled-run.ts).
       'AttendanceW4ScheduledRunIdentityError',
+      // W4C-3c manual / recompute / ops_retirement apply modules.
+      'AttendanceW4ManualOverrideError',
+      'AttendanceW4RecomputeError',
+      'AttendanceW4OpsRetirementError',
+      'AttendanceW4RecordBoundaryError',
     ])
     const respondIfW4BoundaryError = (res, error) => {
       if (!error || typeof error !== 'object' || !W4_ERROR_NAMES.has(error.name)) return false
@@ -29940,11 +30055,7 @@ module.exports = {
 
 	        const excludedStatuses = ['normal', 'off', 'adjusted']
 	        const anomalyFilter = parsed.data.filter ?? 'all'
-	        const owedPunchFilterClause = anomalyFilter === 'owed_punch'
-	          ? `AND (${buildOwedPunchRecordPredicateSql()})`
-	          : ''
-
-	        const extractWarnings = (snapshot) => {
+		        const extractWarnings = (snapshot) => {
 	          if (!snapshot || typeof snapshot !== 'object') return []
 	          const out = []
 	          if (Array.isArray(snapshot.warnings)) out.push(...snapshot.warnings)
@@ -29969,32 +30080,36 @@ module.exports = {
 	        }
 
 	        try {
-	          const countRows = await db.query(
-	            `SELECT COUNT(*)::int AS total
-	             FROM attendance_current_records
-	             WHERE user_id = $1
-	               AND org_id = $2
-	               AND work_date BETWEEN $3 AND $4
-	               AND COALESCE(is_workday, true) = true
-	               AND COALESCE(status, '') <> ALL($5)
-	               ${owedPunchFilterClause}`,
-	            [targetUserId, orgId, from, to, excludedStatuses]
-	          )
+	          // W4C-3c P20 anomaly listing: canonical active-current helper surface.
+	          const countRows = await listActiveCurrentAttendanceRecordsForAnomalyListing(db, {
+	            userId: targetUserId,
+	            orgId,
+	            from,
+	            to,
+	            excludedStatuses,
+		            owedPunchOnly: anomalyFilter === 'owed_punch',
+	            countOnly: true,
+	          })
 	          const total = Number(countRows[0]?.total ?? 0)
 
-	          const rows = await db.query(
-	            `SELECT *
-	             FROM attendance_current_records
-	             WHERE user_id = $1
-	               AND org_id = $2
-	               AND work_date BETWEEN $3 AND $4
-	               AND COALESCE(is_workday, true) = true
-	               AND COALESCE(status, '') <> ALL($5)
-	               ${owedPunchFilterClause}
-	             ORDER BY work_date DESC
-	             LIMIT $6 OFFSET $7`,
-	            [targetUserId, orgId, from, to, excludedStatuses, pageSize, offset]
-	          )
+	          const rows = await listActiveCurrentAttendanceRecordsForAnomalyListing(db, {
+	            userId: targetUserId,
+	            orgId,
+	            from,
+	            to,
+	            excludedStatuses,
+		            owedPunchOnly: anomalyFilter === 'owed_punch',
+	            limit: pageSize,
+	            offset,
+	          })
+
+	          const calculationPosture = await db.transaction(async (trx) => {
+	            const port = attendanceW4SegmentCalculationPort
+	            if (!port || typeof port.resolveOrgSegmentCalculationPosture !== 'function') {
+	              throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Canonical attendance write boundary unavailable')
+	            }
+	            return port.resolveOrgSegmentCalculationPosture(trx, orgId)
+	          })
 
 	          const workContextPrefetch = await buildWorkContextPrefetch(db, {
 	            orgId,
@@ -30048,8 +30163,14 @@ module.exports = {
 	              prefetched: workContextPrefetch.prefetched,
 	            })
 
+	            const expectedCalculation = resolveW4c3cExpectedCalculation(
+	              row,
+	              calculationPosture?.effectiveState,
+	            )
 	            return {
 	              recordId: row.id,
+	              expectedCalculationId: expectedCalculation.id,
+	              expectedCalculationVersion: expectedCalculation.version,
 	              workDate,
 	              status: row.status,
 	              isWorkday: row.is_workday,
@@ -30194,7 +30315,11 @@ module.exports = {
 	            lateMinutes: z.number().int().min(0).optional(),
 	            earlyLeaveMinutes: z.number().int().min(0).optional(),
 	          }).optional(),
-	          idempotencyKey: z.string().min(1).max(200),
+		          // Stable caller UUID for W4 claim/seal (lock §4.1). Server never generates one.
+		          operationId: z.string().uuid().optional(),
+		          expectedCalculationId: z.string().uuid().nullable().optional(),
+		          expectedCalculationVersion: z.number().int().min(1).nullable().optional(),
+		          idempotencyKey: z.string().min(1).max(200),
 	        })
 
 	        const parsed = schema.safeParse(req.body ?? {})
@@ -30250,38 +30375,188 @@ module.exports = {
 	          return
 	        }
 
+	        // W4C-3c: only through the record-operation boundary (manual_edit capability).
+	        if (!w4RecordOperationBoundary) {
+	          res.status(503).json({
+	            ok: false,
+	            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical record operation boundary unavailable' },
+	          })
+	          return
+	        }
+	        // operationId: prefer explicit client UUID; allow idempotencyKey only when it is already a UUID.
+	        // Server NEVER invents a random identity (lock §4.1).
+	        const explicitOp =
+	          typeof parsed.data.operationId === 'string' ? parsed.data.operationId.trim().toLowerCase() : ''
+	        const idemAsUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idempotencyKey)
+	          ? idempotencyKey.toLowerCase()
+	          : null
+	        const operationId = explicitOp || idemAsUuid
 	        try {
-	          const result = await db.transaction(async (trx) => applyAttendanceResultEdit(trx, {
-	            orgId,
-	            recordId: parsed.data.recordId,
-	            targetStatus: parsed.data.targetStatus,
-	            overrideMetrics: parsed.data.overrideMetrics ?? null,
-	            reason,
-	            evidence: evidenceResult.value,
-	            actorUserId,
-	            idempotencyKey,
-	            editWindowDays: policy.editWindowDays,
-	            notifyAffectedEmployee: policy.notifyAffectedEmployee !== false,
-	          }))
-	          res.json({
-	            ok: true,
-	            data: {
-	              alreadyApplied: result.alreadyApplied === true,
-	              edit: result.edit,
-	              record: result.record ? buildResultEditSnapshot(result.record) : null,
+	          const outcome = await w4RecordOperationBoundary.execute({
+	            kind: 'manual_edit',
+	            // null is allowed only for legacy_projection_only byte-compat path inside the boundary.
+	            operationId: operationId || null,
+	            correlationId: `manual-edit:${orgId}:${parsed.data.recordId}:${idempotencyKey}`,
+	            routeInput: {
+	              orgId,
+	              actorId: actorUserId,
+	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
+		              recordId: parsed.data.recordId,
+		              expectedCalculationId: parsed.data.expectedCalculationId ?? null,
+		              expectedCalculationVersion: parsed.data.expectedCalculationVersion ?? null,
+		              targetStatus: parsed.data.targetStatus,
+	              overrideMetrics: parsed.data.overrideMetrics ?? null,
+	              reason,
+	              evidence: evidenceResult.value,
+	              idempotencyKey,
+	              editWindowDays: policy.editWindowDays,
+	              notifyAffectedEmployee: policy.notifyAffectedEmployee !== false,
+	              // Surface missing UUID early for W4 postures via adapter.
+	              requireStableOperationId: true,
 	            },
 	          })
+	          res.json(outcome.response)
 	        } catch (error) {
 	          if (error instanceof HttpError) {
 	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
 	            return
 	          }
+	          if (respondIfW4BoundaryError(res, error)) return
 	          if (isDatabaseSchemaError(error)) {
 	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
 	            return
 	          }
 	          logger.error('Attendance result edit failed', error)
 	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to edit attendance result' } })
+	        }
+	      })
+	    )
+
+	    // W4C-3c: prior-policy / current-policy recompute (new capability, not a migration).
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/records/:id/recompute',
+	      withPermission('attendance:admin', async (req, res) => {
+	        const schema = z.object({
+		          policy: z.enum(['frozen_prior', 'current_policy']).default('frozen_prior'),
+		          // Required stable caller UUID — no server random fallback (lock §4.1).
+		          operationId: z.string().uuid(),
+		          expectedCalculationId: z.string().uuid().nullable(),
+		          expectedCalculationVersion: z.number().int().min(1).nullable(),
+	        })
+	        const parsed = schema.safeParse(req.body ?? {})
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+	        const actorUserId = getUserId(req)
+	        if (!actorUserId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+	        if (!w4RecordOperationBoundary) {
+	          res.status(503).json({
+	            ok: false,
+	            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical record operation boundary unavailable' },
+	          })
+	          return
+	        }
+		        const recordId = normalizeUuidString(req.params.id)
+		        if (!recordId) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'record id must be a uuid' } })
+	          return
+	        }
+	        try {
+	          const operationId = String(parsed.data.operationId).toLowerCase()
+	          const outcome = await w4RecordOperationBoundary.execute({
+	            kind: 'recompute',
+	            operationId,
+	            correlationId: `recompute:${getOrgId(req)}:${recordId}:${parsed.data.policy}`,
+	            routeInput: {
+	              orgId: getOrgId(req),
+	              actorId: actorUserId,
+	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
+		              recordId,
+		              expectedCalculationId: parsed.data.expectedCalculationId,
+		              expectedCalculationVersion: parsed.data.expectedCalculationVersion,
+		              policy: parsed.data.policy,
+	            },
+	          })
+	          res.json(outcome.response)
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (respondIfW4BoundaryError(res, error)) return
+	          logger.error('Attendance recompute failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to recompute' } })
+	        }
+	      })
+	    )
+
+	    // W4C-3c: operator retirement — never DELETE; only ops_retirement boundary.
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/records/:id/ops-retirement',
+	      withPermission('attendance:admin', async (req, res) => {
+	        const schema = z.object({
+	          reason: z.string().min(1).max(2000),
+	          ticket: z.string().min(1).max(128),
+		          // Required operator command UUID — no server random fallback (lock §4.1).
+		          operationId: z.string().uuid(),
+		          expectedCalculationId: z.string().uuid().nullable(),
+		          expectedCalculationVersion: z.number().int().min(1).nullable(),
+	        })
+	        const parsed = schema.safeParse(req.body ?? {})
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+	        const actorUserId = getUserId(req)
+	        if (!actorUserId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+	        if (!w4RecordOperationBoundary) {
+	          res.status(503).json({
+	            ok: false,
+	            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical record operation boundary unavailable' },
+	          })
+	          return
+	        }
+		        const recordId = normalizeUuidString(req.params.id)
+		        if (!recordId) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'record id must be a uuid' } })
+	          return
+	        }
+	        try {
+	          const operationId = String(parsed.data.operationId).toLowerCase()
+	          const outcome = await w4RecordOperationBoundary.execute({
+	            kind: 'ops_retirement',
+	            operationId,
+	            correlationId: `ops-retirement:${getOrgId(req)}:${recordId}:${parsed.data.ticket}`,
+	            routeInput: {
+	              orgId: getOrgId(req),
+	              actorId: actorUserId,
+	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
+	              actorPosture: 'attendance_admin',
+		              recordId,
+		              expectedCalculationId: parsed.data.expectedCalculationId,
+		              expectedCalculationVersion: parsed.data.expectedCalculationVersion,
+		              reason: parsed.data.reason,
+	              ticket: parsed.data.ticket,
+	            },
+	          })
+	          res.json(outcome.response)
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (respondIfW4BoundaryError(res, error)) return
+	          logger.error('Attendance ops retirement failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to retire record' } })
 	        }
 	      })
 	    )
@@ -34247,6 +34522,735 @@ module.exports = {
             },
           })
         : null
+
+    // W4C-3c: manual_edit / recompute / ops_retirement adapters — only entrypoints for these writes.
+	    async function loadW4c3cRecordSubjectForOperation(trx, orgId, recordId) {
+	      const rows = await trx.query(
+	        `SELECT r.*,
+	                r.id::text AS id, r.user_id::text AS user_id, r.org_id::text AS org_id,
+	                r.work_date::text AS work_date,
+	                r.current_calculation_id::text AS current_calculation_id,
+	                current_calc.version AS current_calculation_version,
+	                latest_calc.id::text AS latest_calculation_id,
+	                latest_calc.version AS latest_calculation_version
+	           FROM attendance_records r
+	           LEFT JOIN attendance_record_calculations current_calc
+	             ON current_calc.id = r.current_calculation_id
+	            AND current_calc.attendance_record_id = r.id
+	            AND current_calc.org_id = r.org_id
+	           LEFT JOIN LATERAL (
+	             SELECT c.id, c.version
+	               FROM attendance_record_calculations c
+	              WHERE c.attendance_record_id = r.id
+	                AND c.org_id = r.org_id
+	                AND c.outcome = 'completed'
+	              ORDER BY c.version DESC
+	              LIMIT 1
+	           ) latest_calc ON TRUE
+	          WHERE r.id = $1::uuid AND r.org_id = $2
+	          LIMIT 1`,
+	        [recordId, orgId],
+	      )
+	      return rows[0] ?? null
+	    }
+
+	    function resolveW4c3cExpectedCalculation(record, posture) {
+	      if (posture === 'shadow' || posture === 'eligible') {
+	        return {
+	          id: record.latest_calculation_id ?? null,
+	          version: record.latest_calculation_version == null
+	            ? null
+	            : Number(record.latest_calculation_version),
+	        }
+	      }
+	      return {
+	        id: record.current_calculation_id ?? null,
+	        version: record.current_calculation_version == null
+	          ? null
+	          : Number(record.current_calculation_version),
+	      }
+	    }
+
+	    function assertW4c3cExpectedCalculation(record, commandPayload, posture) {
+	      if (posture === 'legacy_projection_only') return
+	      const actual = resolveW4c3cExpectedCalculation(record, posture)
+	      if (
+	        commandPayload.expectedCalculationId !== actual.id
+	        || commandPayload.expectedCalculationVersion !== actual.version
+	      ) {
+	        throw new HttpError(
+	          409,
+	          'ATTENDANCE_RECORD_VERSION_CONFLICT',
+	          'attendance record calculation changed; refresh and retry',
+	        )
+	      }
+	    }
+
+    /**
+     * W4C-3c: in-transaction authorization for manual_edit / recompute / ops_retirement.
+     * Patterned after resolveRequestCancellationActorPosture (token-subject bind, active user,
+     * activated activation_status, active org membership, attendance admin permission).
+     * Platform admin (user_roles.role_id = 'admin') is an explicit override.
+     * Runs before any W4 result DML in prepare().
+     */
+    async function resolveRecordOperationAdminActorPosture(trx, routeInput, orgId) {
+      // Exact product bind: authenticated token subject must equal actor before any W4 result DML.
+      // Patterned after resolveRequestCancellationActorPosture — no null soft-pass, no header/RBAC bypass.
+      const actorId = String(routeInput?.actorId || '')
+      const tokenSubjectUserId =
+        routeInput?.tokenSubjectUserId === null || routeInput?.tokenSubjectUserId === undefined
+          ? ''
+          : String(routeInput.tokenSubjectUserId)
+      if (!actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Record operation requires an actor')
+      }
+      if (tokenSubjectUserId !== actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the record operation actor')
+      }
+
+      const actorRows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'
+          FOR KEY SHARE`,
+        [actorId],
+      )
+      if (actorRows.length !== 1) {
+        throw new HttpError(403, 'FORBIDDEN', 'Record operation actor is inactive or not activated')
+      }
+      if (actorRows[0].platform_admin === true || actorRows[0].platform_admin === 't') {
+        return 'platform_admin'
+      }
+
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE
+          FOR KEY SHARE`,
+        [actorId, orgId],
+      )
+      if (membershipRows.length !== 1) {
+        throw new HttpError(403, 'FORBIDDEN', 'Record operation requires active org membership')
+      }
+
+      const permissionRows = await trx.query(
+        `SELECT 1
+           WHERE EXISTS (
+             SELECT 1 FROM user_permissions
+              WHERE user_id = $1
+                AND permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM user_roles ur
+             JOIN role_permissions rp ON rp.role_id = ur.role_id
+               WHERE ur.user_id = $1
+                 AND rp.permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM users u
+              WHERE u.id = $1
+                AND COALESCE(to_jsonb(u)->'permissions', '[]'::jsonb) ?| $2::text[]
+           )
+           LIMIT 1`,
+        [actorId, ['attendance:admin', 'attendance:*', '*:*']],
+      )
+      if (permissionRows.length !== 1) {
+        throw new HttpError(403, 'FORBIDDEN', 'Record operation requires attendance admin permission')
+      }
+      return 'attendance_admin'
+    }
+    function buildW4c3cManualOperations(targetStatus, beforeRecord, overrideMetrics) {
+      const normalized = applyResultEditMetricNormalization(targetStatus, beforeRecord, overrideMetrics)
+      return [
+        { op: 'set', field: 'status', value: targetStatus },
+        { op: 'set', field: 'workMinutes', value: normalized.workMinutes },
+        { op: 'set', field: 'lateMinutes', value: normalized.lateMinutes },
+        { op: 'set', field: 'earlyLeaveMinutes', value: normalized.earlyLeaveMinutes },
+      ]
+    }
+    function w4c3cStableJson(value) {
+      return JSON.stringify(value ?? null)
+    }
+    async function insertW4c3cManualResultEditAuditRow(trx, {
+      auditId, orgId, recordId, subjectUserId, workDate, beforeStatus, afterStatus,
+      beforeSnapshot, afterSnapshot, reason, evidence, actorUserId, idempotencyKey,
+    }) {
+      // Complete payload congruence: record, status, metrics (after_snapshot), reason, evidence.
+      // Same status with different metrics/reason/evidence is a conflict — never congruent.
+      const existing = await trx.query(
+        `SELECT id::text AS id, record_id::text AS record_id, after_status,
+                after_snapshot, reason, evidence
+           FROM attendance_record_result_edits
+          WHERE org_id = $1 AND idempotency_key = $2
+          LIMIT 1`,
+        [orgId, idempotencyKey],
+      )
+      if (existing[0]) {
+        const sameAuditId = String(existing[0].id) === String(auditId)
+        const sameRecord = String(existing[0].record_id) === String(recordId)
+        const sameStatus = String(existing[0].after_status) === String(afterStatus)
+        const sameAfter = w4c3cStableJson(existing[0].after_snapshot) === w4c3cStableJson(afterSnapshot)
+        const sameReason = String(existing[0].reason ?? '') === String(reason ?? '')
+        const sameEvidence = w4c3cStableJson(existing[0].evidence) === w4c3cStableJson(evidence ?? [])
+        if (!sameAuditId || !sameRecord || !sameStatus || !sameAfter || !sameReason || !sameEvidence) {
+          throw new HttpError(
+            409,
+            'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT',
+            'idempotency key already used with a different payload',
+          )
+        }
+        return { alreadyApplied: true, auditId: existing[0].id }
+      }
+      const inserted = await trx.query(
+        `INSERT INTO attendance_record_result_edits
+          (id, org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
+           reason, evidence, actor_user_id, idempotency_key)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13)
+         RETURNING id::text AS id`,
+        [
+          auditId,
+          orgId,
+          recordId,
+          subjectUserId,
+          workDate,
+          beforeStatus,
+          afterStatus,
+          JSON.stringify(beforeSnapshot),
+          JSON.stringify(afterSnapshot),
+          reason,
+          JSON.stringify(evidence ?? []),
+          actorUserId,
+          idempotencyKey,
+        ],
+      )
+      return { alreadyApplied: false, auditId: inserted[0]?.id ?? null }
+    }
+    const manualEditAdapter = {
+      async prepareIdentity(trx, routeInput) {
+        return this.prepare(trx, routeInput)
+      },
+      async prepare(trx, routeInput) {
+        const orgId = String(routeInput.orgId)
+        const recordId = String(routeInput.recordId)
+        // Authorization before any result DML (capability proved in-transaction).
+        const actorPosture = await resolveRecordOperationAdminActorPosture(trx, routeInput, orgId)
+        const record = await loadW4c3cRecordSubjectForOperation(trx, orgId, recordId)
+        if (!record) throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
+        // Ordinary path: never reactivate any retired parent (operator_retirement keeps required code).
+        if (String(record.visibility_state) === 'retired') {
+          const reason = String(record.visibility_reason || '')
+          if (reason === 'operator_retirement') {
+            throw new HttpError(409, 'ATTENDANCE_RECORD_OPERATOR_RETIRED', 'attendance record is operator-retired')
+          }
+          throw new HttpError(409, 'ATTENDANCE_RECORD_RETIRED', 'attendance record is retired')
+        }
+	        const operations = buildW4c3cManualOperations(
+	          routeInput.targetStatus,
+	          record,
+	          routeInput.overrideMetrics,
+	        )
+	        return Object.freeze({
+	          orgId,
+	          actorId: String(routeInput.actorId),
+	          actorPosture,
+	          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
+	          subjectUserId: String(record.user_id),
+	          targetWorkDate: String(record.work_date).slice(0, 10),
+	          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
+	          commandPayload: Object.freeze({
+	            recordId,
+	            expectedCalculationId: routeInput.expectedCalculationId ?? null,
+	            expectedCalculationVersion: routeInput.expectedCalculationVersion ?? null,
+	            operations,
+	            reason: String(routeInput.reason || 'manual override'),
+            evidence: {
+              items: Array.isArray(routeInput.evidence) ? routeInput.evidence : [],
+            },
+          }),
+	          state: Object.freeze({
+	            record,
+	            routeInput,
+	            operations,
+	          }),
+	        })
+	      },
+	      async execute(trx, prepared, operation) {
+	        const posture = operation.acceptedWritePosture
+	        const { routeInput, operations, record } = prepared.state
+	        assertW4c3cExpectedCalculation(record, prepared.commandPayload, posture)
+	        if (posture === 'authoritative' || posture === 'shadow') {
+	          const port = attendanceW4SegmentCalculationPort
+          if (!port || typeof port.appendManualOverrideCalculation !== 'function') {
+            throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Manual override calculation port unavailable')
+          }
+          if (!operation.operationId) {
+            throw new HttpError(
+              400,
+              'W4C3C_MANUAL_EDIT_OPERATION_ID_REQUIRED',
+              'manual_edit requires a stable caller operationId UUID for W4 postures',
+            )
+          }
+          await resolveAttendanceResultEditWindowContext(trx, {
+            orgId: prepared.orgId,
+            userId: prepared.subjectUserId,
+            workDate: String(record.work_date).slice(0, 10),
+            editWindowDays: routeInput.editWindowDays,
+          })
+          // Shape raw client for the TS apply module.
+          const client = {
+            query: async (sqlText, params) => {
+              const rows = await trx.query(sqlText, params ?? [])
+              return { rows: Array.isArray(rows) ? rows : [] }
+            },
+          }
+          // editId is durable marker identity; bind it to the sealed operationId for stability.
+          const editId = operation.operationId
+	          const result = await port.appendManualOverrideCalculation({
+            client,
+            orgId: prepared.orgId,
+            recordId: String(record.id),
+	            expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+	            expectedCalculationVersion: prepared.commandPayload.expectedCalculationVersion,
+            operationId: operation.operationId,
+            actorId: prepared.actorId,
+            correlationId: operation.correlationId,
+            reason: prepared.commandPayload.reason,
+            evidence: prepared.commandPayload.evidence,
+            operations,
+	            mode: posture,
+	            editId,
+	          })
+	          if (posture === 'shadow') {
+	            const legacy = await applyAttendanceResultEdit(trx, {
+	              orgId: prepared.orgId,
+	              recordId: String(record.id),
+	              targetStatus: routeInput.targetStatus,
+	              overrideMetrics: routeInput.overrideMetrics ?? null,
+	              reason: prepared.commandPayload.reason,
+	              evidence: routeInput.evidence ?? [],
+	              actorUserId: prepared.actorId,
+	              idempotencyKey: String(routeInput.idempotencyKey),
+	              editWindowDays: routeInput.editWindowDays,
+	              notifyAffectedEmployee: routeInput.notifyAffectedEmployee !== false,
+	            })
+	            return {
+	              response: {
+	                ok: true,
+	                data: {
+	                  alreadyApplied: legacy.alreadyApplied === true,
+	                  edit: legacy.edit,
+	                  record: legacy.record ? buildResultEditSnapshot(legacy.record) : null,
+	                  calculationId: result.calculationId,
+	                  projectedStatus: result.kind === 'appended' ? result.projectedStatus : null,
+	                  mode: posture,
+	                },
+	              },
+	              resolvedRecordId: String(record.id),
+	              resolvedCalculationId: result.calculationId,
+	              lifecycleEvents: [{ eventKind: 'attendance.resolved', payload: { kind: 'manual_edit', recordId: String(record.id) } }],
+	            }
+	          }
+	          let finalAuditRow = null
+	          let responseRecord = null
+          // AE-1/AE-2 remain part of the authoritative route contract. Errors
+          // propagate so calculation, projection, audit, and notification stay
+          // in the same transaction.
+          if (result.kind === 'appended') {
+	            const postWriteRecord = await loadW4c3cRecordSubjectForOperation(
+	              trx,
+	              prepared.orgId,
+	              String(record.id),
+	            )
+	            if (!postWriteRecord) {
+	              throw new HttpError(500, 'W4C3C_MANUAL_EDIT_DATABASE_RESULT_INVALID', 'manual edit parent row missing after apply')
+	            }
+	            const beforeSnapshot = buildResultEditSnapshot(record)
+	            const afterSnapshot = buildResultEditSnapshot(postWriteRecord)
+            const audit = await insertW4c3cManualResultEditAuditRow(trx, {
+              auditId: editId,
+              orgId: prepared.orgId,
+              recordId: String(record.id),
+              subjectUserId: prepared.subjectUserId,
+              workDate: String(record.work_date).slice(0, 10),
+              beforeStatus: String(record.status ?? ''),
+              afterStatus: result.projection.status,
+              beforeSnapshot,
+              afterSnapshot,
+              reason: prepared.commandPayload.reason,
+              evidence: routeInput.evidence ?? [],
+              actorUserId: prepared.actorId,
+              idempotencyKey: String(routeInput.idempotencyKey),
+            })
+            const auditRow = { id: audit.auditId }
+            if (routeInput.notifyAffectedEmployee === false) {
+              finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
+                orgId: prepared.orgId,
+                auditRow,
+                skippedReason: 'policy_disabled',
+              })
+            } else {
+              const delivery = await enqueueAttendanceResultEditNotification(trx, {
+                orgId: prepared.orgId,
+	                record: postWriteRecord,
+                auditRow,
+                beforeStatus: String(record.status ?? ''),
+                targetStatus: result.projection.status,
+                reason: prepared.commandPayload.reason,
+              })
+              finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
+                orgId: prepared.orgId,
+                auditRow,
+                deliveryId: delivery?.id ?? null,
+                skippedReason: delivery ? null : 'recipient_unavailable',
+              })
+            }
+	            responseRecord = afterSnapshot
+	          } else {
+	            const replayRecord = await loadW4c3cRecordSubjectForOperation(
+	              trx,
+	              prepared.orgId,
+	              String(record.id),
+	            )
+	            if (!replayRecord) {
+	              throw new HttpError(500, 'W4C3C_MANUAL_EDIT_DATABASE_RESULT_INVALID', 'manual edit parent row missing on replay')
+	            }
+	            const replayAuditRows = await trx.query(
+              `SELECT * FROM attendance_record_result_edits
+                WHERE org_id = $1 AND idempotency_key = $2
+                LIMIT 1`,
+              [prepared.orgId, String(routeInput.idempotencyKey)],
+            )
+            if (replayAuditRows.length !== 1) {
+              throw new HttpError(
+                409,
+                'ATTENDANCE_RESULT_EDIT_REPLAY_INCOMPLETE',
+                'manual edit replay is missing its durable audit row',
+              )
+	            }
+	            finalAuditRow = replayAuditRows[0]
+	            responseRecord = buildResultEditSnapshot(replayRecord)
+	          }
+          return {
+            response: {
+              ok: true,
+              data: {
+                alreadyApplied: result.kind === 'replay',
+                edit: mapResultEditRow(finalAuditRow),
+                record: responseRecord,
+                calculationId: result.calculationId,
+                projectedStatus: result.kind === 'appended' ? result.projectedStatus : null,
+                mode: posture,
+              },
+            },
+            resolvedRecordId: String(record.id),
+            resolvedCalculationId: result.calculationId,
+            lifecycleEvents: [{ eventKind: 'attendance.resolved', payload: { kind: 'manual_edit', recordId: String(record.id) } }],
+          }
+        }
+        // legacy_projection_only: single-write compatibility path (meta marker
+        // in the same upsert). W4 postures returned through the branch above.
+        const legacy = await applyAttendanceResultEdit(trx, {
+          orgId: prepared.orgId,
+          recordId: String(record.id),
+          targetStatus: routeInput.targetStatus,
+          overrideMetrics: routeInput.overrideMetrics ?? null,
+          reason: prepared.commandPayload.reason,
+          evidence: routeInput.evidence ?? [],
+          actorUserId: prepared.actorId,
+          idempotencyKey: String(routeInput.idempotencyKey),
+          editWindowDays: routeInput.editWindowDays,
+          notifyAffectedEmployee: routeInput.notifyAffectedEmployee !== false,
+        })
+        return {
+          response: {
+            ok: true,
+            data: {
+              alreadyApplied: legacy.alreadyApplied === true,
+              edit: legacy.edit,
+              record: legacy.record ? buildResultEditSnapshot(legacy.record) : null,
+            },
+          },
+          resolvedRecordId: String(record.id),
+          resolvedCalculationId: null,
+          lifecycleEvents: [{ eventKind: 'attendance.resolved', payload: { kind: 'manual_edit', recordId: String(record.id) } }],
+        }
+      },
+    }
+    const recomputeAdapter = {
+      async prepareIdentity(trx, routeInput) {
+        return this.prepare(trx, routeInput)
+      },
+      async prepare(trx, routeInput) {
+        const orgId = String(routeInput.orgId)
+        const recordId = String(routeInput.recordId)
+        const actorPosture = await resolveRecordOperationAdminActorPosture(trx, routeInput, orgId)
+        const record = await loadW4c3cRecordSubjectForOperation(trx, orgId, recordId)
+        if (!record) throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
+        if (String(record.visibility_state) === 'retired') {
+          const reason = String(record.visibility_reason || '')
+          if (reason === 'operator_retirement') {
+            throw new HttpError(409, 'ATTENDANCE_RECORD_OPERATOR_RETIRED', 'attendance record is operator-retired')
+          }
+          throw new HttpError(409, 'ATTENDANCE_RECORD_RETIRED', 'attendance record is retired')
+        }
+        const policy = routeInput.policy === 'current_policy' ? 'current_policy' : 'frozen_prior'
+	        return Object.freeze({
+          orgId,
+          actorId: String(routeInput.actorId),
+          actorPosture,
+	          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
+	          subjectUserId: String(record.user_id),
+	          targetWorkDate: String(record.work_date).slice(0, 10),
+	          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
+	          commandPayload: Object.freeze({
+	            recordId,
+	            expectedCalculationId: routeInput.expectedCalculationId ?? null,
+	            expectedCalculationVersion: routeInput.expectedCalculationVersion ?? null,
+	            policy,
+	          }),
+	          state: Object.freeze({ record, policy, routeInput }),
+	        })
+	      },
+	      async execute(trx, prepared, operation) {
+	        const posture = operation.acceptedWritePosture
+	        assertW4c3cExpectedCalculation(prepared.state.record, prepared.commandPayload, posture)
+        if (posture === 'legacy_projection_only') {
+          throw new HttpError(409, 'W4C3C_RECOMPUTE_REQUIRES_W4_POSTURE', 'recompute requires shadow or authoritative posture')
+        }
+        const port = attendanceW4SegmentCalculationPort
+        if (!port || typeof port.appendRecomputeCalculation !== 'function') {
+          throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Recompute calculation port unavailable')
+        }
+        if (!operation.operationId) {
+          throw new HttpError(
+            400,
+            'W4C3C_RECOMPUTE_OPERATION_ID_REQUIRED',
+            'recompute requires a stable caller operationId UUID',
+          )
+        }
+        const client = {
+          query: async (sqlText, params) => ({ rows: await trx.query(sqlText, params ?? []) }),
+        }
+        let currentPolicyAttribution
+        let currentPolicyContext
+        if (prepared.state.policy === 'current_policy') {
+          // Resolve authoritative current schedule attribution and build a real
+          // frozen context through existing resolver + buildW4ShadowFrozenContextV1.
+          // Fail closed with zero writes on incomplete resolution (no empty-segment placeholder).
+          const workDate = String(prepared.state.record.work_date).slice(0, 10)
+          const workContext = await resolveWorkContext({
+            db: trx,
+            orgId: prepared.orgId,
+            userId: prepared.subjectUserId,
+            workDate,
+          })
+          const timezone = requireStrictCurrentPolicyTimezone(workContext, prepared.state.record)
+          const shiftId = workContext?.shiftId || workContext?.rule?.shiftId || null
+          if (!shiftId) {
+            throw new HttpError(
+              409,
+              'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+              'current_policy recompute could not resolve an authoritative shift',
+            )
+          }
+          const { adapters: recomputeAdapters } = createPluginAttendanceWorkDateResolver(trx)
+          const resolution = await recomputeAdapters.recompute.resolveRecomputeWorkDate({
+            orgId: prepared.orgId,
+            userId: prepared.subjectUserId,
+            occurredAt: null,
+            timezone,
+            calendarWorkDate: workDate,
+            frozenAttribution: null,
+            recordMeta: null,
+            includeFullWinner: true,
+          })
+          if (!resolution || resolution.kind !== 'resolved' || !resolution.shiftId) {
+            throw new HttpError(
+              409,
+              'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+              'current_policy recompute work-date resolution is not resolved',
+            )
+          }
+          const attributionSnapshot =
+            typeof port.buildRequestCreationAttributionSnapshotV1 === 'function'
+              ? port.buildRequestCreationAttributionSnapshotV1({
+                  orgId: prepared.orgId,
+                  userId: prepared.subjectUserId,
+                  nowIso: new Date().toISOString(),
+                  resolution,
+                })
+              : null
+          if (!attributionSnapshot || attributionSnapshot.posture !== 'resolved_v2') {
+            throw new HttpError(
+              409,
+              'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+              'current_policy recompute could not freeze resolved_v2 attribution',
+            )
+          }
+          const frozenContext = await buildW4ShadowFrozenContextV1(trx, {
+            orgId: prepared.orgId,
+            userId: prepared.subjectUserId,
+            workDate: attributionSnapshot.value.workDate || workDate,
+            shiftId: attributionSnapshot.value.shiftId || resolution.shiftId,
+            timezone:
+              resolution.fullWinner && typeof resolution.fullWinner.timezone === 'string'
+                ? resolution.fullWinner.timezone
+                : timezone,
+            isWorkday: workContext?.isWorkingDay !== false,
+            holidayKind: workContext?.holiday?.kind ?? null,
+          })
+          if (
+            !frozenContext
+            || !Array.isArray(frozenContext.segments)
+            || frozenContext.segments.length < 1
+            || frozenContext.segments.length > 3
+          ) {
+            throw new HttpError(
+              409,
+              'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+              'current_policy recompute could not build a real frozen context with segments',
+            )
+          }
+          currentPolicyAttribution = attributionSnapshot
+          currentPolicyContext = frozenContext
+        }
+        const result = await port.appendRecomputeCalculation({
+          client,
+          orgId: prepared.orgId,
+          recordId: String(prepared.state.record.id),
+	          expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+	          expectedCalculationVersion: prepared.commandPayload.expectedCalculationVersion,
+          operationId: operation.operationId,
+          actorId: prepared.actorId,
+          correlationId: operation.correlationId,
+          policy: prepared.state.policy,
+          mode: posture === 'authoritative' ? 'authoritative' : 'shadow',
+          currentPolicyAttribution,
+          currentPolicyContext,
+        })
+        return {
+          response: {
+            ok: true,
+            data: {
+              alreadyApplied: result.kind === 'replay',
+              calculationId: result.calculationId,
+              policy: prepared.state.policy,
+              contextDecision: result.kind === 'appended' ? result.contextDecision : null,
+              projectedStatus: result.kind === 'appended' ? result.projectedStatus : null,
+            },
+          },
+          resolvedRecordId: String(prepared.state.record.id),
+          resolvedCalculationId: result.calculationId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.resolved',
+            payload: { kind: 'recompute', policy: prepared.state.policy, recordId: String(prepared.state.record.id) },
+          }],
+        }
+      },
+    }
+    const opsRetirementAdapter = {
+      async prepareIdentity(trx, routeInput) {
+        return this.prepare(trx, routeInput)
+      },
+      async prepare(trx, routeInput) {
+        const orgId = String(routeInput.orgId)
+        const recordId = String(routeInput.recordId)
+        const actorPosture = await resolveRecordOperationAdminActorPosture(trx, routeInput, orgId)
+        const record = await loadW4c3cRecordSubjectForOperation(trx, orgId, recordId)
+        if (!record) throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
+	        return Object.freeze({
+          orgId,
+          actorId: String(routeInput.actorId),
+          actorPosture,
+	          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
+	          subjectUserId: String(record.user_id),
+	          targetWorkDate: String(record.work_date).slice(0, 10),
+	          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
+	          commandPayload: Object.freeze({
+	            recordId,
+	            expectedCalculationId: routeInput.expectedCalculationId ?? null,
+	            expectedCalculationVersion: routeInput.expectedCalculationVersion ?? null,
+	            reason: String(routeInput.reason || 'operator retirement'),
+	            ticket: String(routeInput.ticket || 'OPS-RETIRE'),
+	          }),
+	          state: Object.freeze({ record, routeInput }),
+	        })
+	      },
+	      async execute(trx, prepared, operation) {
+	        const posture = operation.acceptedWritePosture
+	        assertW4c3cExpectedCalculation(prepared.state.record, prepared.commandPayload, posture)
+        // RATIFIED §4.1: legacy_projection_only must emit no W4 calculation/pointer/outbox.
+        // Do not invent a legacy delete path.
+        if (posture !== 'authoritative') {
+          throw new HttpError(
+            409,
+            'W4C3C_OPS_RETIREMENT_REQUIRES_AUTHORITATIVE_POSTURE',
+            'ops_retirement requires authoritative posture',
+          )
+        }
+        const port = attendanceW4SegmentCalculationPort
+        if (!port || typeof port.appendOperatorRetirementCalculation !== 'function') {
+          throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Ops retirement port unavailable')
+        }
+        if (!operation.operationId) {
+          throw new HttpError(
+            400,
+            'W4C3C_OPS_RETIREMENT_OPERATION_ID_REQUIRED',
+            'ops_retirement requires a stable operator command operationId UUID',
+          )
+        }
+        const client = {
+          query: async (sqlText, params) => ({ rows: await trx.query(sqlText, params ?? []) }),
+        }
+        const mode = posture === 'authoritative' ? 'authoritative' : 'shadow'
+        const result = await port.appendOperatorRetirementCalculation({
+          client,
+          orgId: prepared.orgId,
+          recordId: String(prepared.state.record.id),
+	          expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+	          expectedCalculationVersion: prepared.commandPayload.expectedCalculationVersion,
+          operationId: operation.operationId,
+          actorId: prepared.actorId,
+          correlationId: operation.correlationId,
+          reason: prepared.commandPayload.reason,
+          ticket: prepared.commandPayload.ticket,
+          mode,
+        })
+        return {
+          response: {
+            ok: true,
+            data: {
+              alreadyApplied: result.kind === 'replay',
+              calculationId: result.calculationId,
+              visibilityReason: result.kind === 'appended' ? result.visibilityReason : 'operator_retirement',
+            },
+          },
+          resolvedRecordId: String(prepared.state.record.id),
+          resolvedCalculationId: result.calculationId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.resolved',
+            payload: { kind: 'ops_retirement', recordId: String(prepared.state.record.id) },
+          }],
+        }
+      },
+    }
+
+    w4RecordOperationBoundary =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.createRecordOperationBoundary === 'function'
+        ? attendanceW4SegmentCalculationPort.createRecordOperationBoundary({
+            adapters: {
+              manual_edit: manualEditAdapter,
+              recompute: recomputeAdapter,
+              ops_retirement: opsRetirementAdapter,
+            },
+          })
+        : null
+    attendanceW4SegmentCalculationPortRef = attendanceW4SegmentCalculationPort
 
     context.api.http.addRoute(
       'POST',

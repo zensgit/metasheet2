@@ -360,6 +360,16 @@ jobs:
       - name: Attendance W4C-2 CI wiring contract
         run: node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs
 
+      # #4556 W4C-3c P15/P16: node:test behavior contracts are not discovered
+      # by Vitest. Keep cleanup classification, authenticated ops-retirement,
+      # immutable-row guards, and residue failure in the required test matrix.
+      - name: Attendance W4C-3c tooling cleanup contracts
+        id: attendance-w4c3c-tooling-contracts
+        run: |
+          node --test \
+            scripts/ops/staging-attendance-tooling-teardown.test.mjs \
+            scripts/ops/attendance-w4c3c-execute-ops-retirement-cleanup.test.mjs
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -1118,6 +1128,8 @@ jobs:
             tests/integration/attendance-w4c3a-rollout-control.db.test.ts \
             tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
             tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
+            tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts \
+            tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

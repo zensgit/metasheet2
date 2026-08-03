@@ -33,6 +33,7 @@ import {
   runAttendanceSetupReadinessReadOnly,
   type AttendanceSetupReadinessQueryFn,
 } from './AttendanceSetupReadinessAggregate'
+import { loadActiveCurrentAttendanceRecordForDecisionTraceV1 } from '../attendance/w4c3c-active-current'
 
 // -------------------------------------------------------------------------------------------------
 // §4.2 read-only seam — verbatim reuse, not reimplementation (W5-0-G3).
@@ -298,15 +299,14 @@ async function readAttendanceRecordRow(
   workDate: string,
   runQuery: AttendanceDecisionTraceQueryFn,
 ): Promise<AttendanceRecordRow | null> {
-  const result = await runQuery<AttendanceRecordRow>(
-    `SELECT id, status, is_workday, work_minutes, late_minutes, early_leave_minutes, meta, source_batch_id,
-            created_at, updated_at
-       FROM attendance_current_records
-      WHERE org_id = $1 AND user_id = $2 AND work_date = $3
-      LIMIT 1`,
-    [orgId, userId, workDate],
+  // W4C-3c P20 DecisionTrace surface: canonical active-current helper.
+  return loadActiveCurrentAttendanceRecordForDecisionTraceV1<AttendanceRecordRow>(
+    async (sqlText, params) => {
+      const result = await runQuery<AttendanceRecordRow>(sqlText, [...(params ?? [])])
+      return { rows: result.rows }
+    },
+    { orgId, userId, workDate },
   )
-  return result.rows[0] ?? null
 }
 
 /** §3.3①E3 correction environment — `attendance_record_result_edits` (AE-1, no FK on `record_id`,
@@ -631,17 +631,16 @@ export async function buildMissingPunchTrace(
   workDate: string,
   runQuery: AttendanceDecisionTraceQueryFn,
 ): Promise<AttendanceMissingPunchTraceResponse> {
-  const recordResult = await runQuery<
-    AttendanceRecordRow & { first_in_at: string | null; last_out_at: string | null }
-  >(
-    `SELECT id, status, is_workday, work_minutes, late_minutes, early_leave_minutes, meta, source_batch_id,
-            created_at, updated_at, first_in_at, last_out_at
-       FROM attendance_current_records
-      WHERE org_id = $1 AND user_id = $2 AND work_date = $3
-      LIMIT 1`,
-    [orgId, userId, workDate],
+  // W4C-3c P20 DecisionTrace missing-punch surface: same active-current helper.
+  type MissingPunchRecord = AttendanceRecordRow & { first_in_at: string | null; last_out_at: string | null }
+  const record = await loadActiveCurrentAttendanceRecordForDecisionTraceV1<MissingPunchRecord>(
+    async (sqlText, params) => {
+      const result = await runQuery<MissingPunchRecord>(sqlText, [...(params ?? [])])
+      return { rows: result.rows }
+    },
+    { orgId, userId, workDate },
+    'id, status, is_workday, work_minutes, late_minutes, early_leave_minutes, meta, source_batch_id, created_at, updated_at, first_in_at, last_out_at',
   )
-  const record = recordResult.rows[0] ?? null
   const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
   // §3.3③ fail-closed: no record AND the current rule cannot resolve ⇒整类 undeterminable.
   if (!record) {

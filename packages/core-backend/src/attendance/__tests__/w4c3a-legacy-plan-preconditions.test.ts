@@ -27,6 +27,8 @@ const EXISTING_ROW = {
   is_workday: true,
   meta: { source: 'import' },
   source_batch_id: BATCH_ID,
+  visibility_state: 'active',
+  visibility_reason: 'active',
 }
 
 function existingWrite(
@@ -154,6 +156,24 @@ describe('lockAndRecheckAttendanceLegacyRecordPreconditionsV1', () => {
       ),
     ).resolves.toBe(false)
     expect(db.query).toHaveBeenCalledTimes(1)
+  })
+
+  it('operator-retired import target fails before revision/effect SQL', async () => {
+    const db = queryStub([[
+      {
+        ...EXISTING_ROW,
+        visibility_state: 'retired',
+        visibility_reason: 'operator_retirement',
+      },
+    ]])
+    await expect(
+      lockAndRecheckAttendanceLegacyRecordPreconditionsV1(
+        db,
+        plan([existingWrite()]),
+      ),
+    ).rejects.toMatchObject({ code: 'ATTENDANCE_RECORD_OPERATOR_RETIRED' })
+    expect(db.query).toHaveBeenCalledTimes(1)
+    expect(String(db.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
   })
 
   it('fails closed when a frozen-missing row appears after its revision lock', async () => {

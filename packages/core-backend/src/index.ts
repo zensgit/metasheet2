@@ -141,6 +141,18 @@ import {
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
 import { appendApprovedLeaveCancellationCalculationV1 } from './attendance/w4c3b-approved-leave-cancellation'
+import { createAttendanceRecordOperationBoundaryV1 } from './attendance/w4c3c-record-operation-boundary'
+import { appendOperatorRetirementCalculationV1 } from './attendance/w4c3c-ops-retirement'
+import { appendRecomputeCalculationV1 } from './attendance/w4c3c-recompute'
+import { appendManualOverrideCalculationV1 } from './attendance/w4c3c-manual-edit-apply'
+import {
+  ATTENDANCE_ACTIVE_CURRENT_RELATION_V1,
+  ATTENDANCE_ACTIVE_CURRENT_VISIBILITY_PREDICATE_V1,
+  loadActiveCurrentAttendanceRecordForDecisionTraceV1,
+  listActiveCurrentAttendanceRecordsForAnomalyListingV1,
+  loadActiveCurrentAttendanceRecordForMakeupAnomalyFactsV1,
+  listActiveCurrentOpenRecordsForWorkDateResolverV1,
+} from './attendance/w4c3c-active-current'
 // W4C-3b P12: immutable request calculation snapshot plumbing (lock §7.2 / §12.5).
 import {
   appendAttendanceRequestCreateSnapshotV1,
@@ -2117,6 +2129,31 @@ export class MetaSheetServer {
                       return { client, release: () => client.release() }
                     },
                   }),
+                // W4C-3c: manual_edit / recompute / ops_retirement boundary.
+                createRecordOperationBoundary: (config: {
+                  adapters: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
+                }) =>
+                  createAttendanceRecordOperationBoundaryV1({
+                    adapters: config.adapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                appendOperatorRetirementCalculation: (input) =>
+                  appendOperatorRetirementCalculationV1(input),
+                appendRecomputeCalculation: (input) =>
+                  appendRecomputeCalculationV1(input),
+                appendManualOverrideCalculation: (input) =>
+                  appendManualOverrideCalculationV1(input),
+                activeCurrent: Object.freeze({
+                  relation: ATTENDANCE_ACTIVE_CURRENT_RELATION_V1,
+                  visibilityPredicate: ATTENDANCE_ACTIVE_CURRENT_VISIBILITY_PREDICATE_V1,
+                  loadForDecisionTrace: loadActiveCurrentAttendanceRecordForDecisionTraceV1,
+                  listForAnomalyListing: listActiveCurrentAttendanceRecordsForAnomalyListingV1,
+                  loadForMakeupAnomalyFacts: loadActiveCurrentAttendanceRecordForMakeupAnomalyFactsV1,
+                  listOpenForWorkDateResolver: listActiveCurrentOpenRecordsForWorkDateResolverV1,
+                }),
                 appendApprovedLeaveCancellationCalculation: (input) =>
                   appendApprovedLeaveCancellationCalculationV1(input),
                 resolveOrgSegmentCalculationPosture: async (

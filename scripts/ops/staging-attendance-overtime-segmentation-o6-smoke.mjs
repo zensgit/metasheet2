@@ -9,6 +9,10 @@
 // and cleanup. It restores attendance settings and deletes only rows bearing its
 // unique synthetic user/stamp.
 
+import {
+  cleanupStagingAttendanceScope,
+  createAuthenticatedOpsRetirementExecutor,
+} from './staging-attendance-tooling-teardown.mjs'
 import { randomUUID } from 'crypto'
 import pg from 'pg'
 
@@ -379,11 +383,27 @@ async function cleanup() {
           WHERE org_id = $1 AND user_id = $2 AND meta->>'requestId' = ANY($3::text[])`,
         [ORG_ID, USER, requestIds],
       ).catch(() => undefined)
-      await q(
-        `DELETE FROM attendance_records
-          WHERE org_id = $1 AND user_id = $2 AND work_date = ANY($3::date[])`,
-        [ORG_ID, USER, [WORK_DATE, REST_DATE, HOLIDAY_DATE]],
-      ).catch(() => undefined)
+      {
+        const retirementToken = process.env.TOKEN || process.env.ADMIN_TOKEN || ''
+        if (!BASE_URL || !retirementToken) {
+          throw new Error('ATTENDANCE_STAGING_RETIREMENT_EXECUTOR_REQUIRED: BASE_URL and TOKEN required for record cleanup')
+        }
+        await cleanupStagingAttendanceScope(
+          { query: async (sql, params) => {
+            const r = await pool.query(sql, params)
+            return { rows: r?.rows ?? [] }
+          } },
+          { orgId: ORG_ID, userIds: [USER] },
+          {
+            retireRecord: createAuthenticatedOpsRetirementExecutor({
+              baseUrl: BASE_URL,
+              token: retirementToken,
+              commandSeed: '00000000-0000-5000-8000-000000000006',
+              ticket: 'STAGING-O6',
+            }),
+          },
+        )
+      }
       await q(
         `DELETE FROM attendance_requests WHERE org_id = $1 AND id = ANY($2::uuid[])`,
         [ORG_ID, requestIds],

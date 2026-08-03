@@ -8,6 +8,7 @@ import {
 } from './w4c3a-legacy-execution-plan'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import type { VerifiedAttendanceLegacyPlanV1 } from './w4c3a-legacy-plan-worker'
+import { assertParentNotOperatorRetiredV1 } from './w4c3c-ops-retirement'
 
 type QueryRow = Record<string, unknown>
 
@@ -101,7 +102,8 @@ const LOCK_RECORD_SQL = `
   SELECT id::text AS id, org_id, user_id, work_date::text AS work_date,
          first_in_at, last_out_at, work_minutes, late_minutes,
          early_leave_minutes, status, is_workday, meta,
-         source_batch_id::text AS source_batch_id
+         source_batch_id::text AS source_batch_id,
+         visibility_state, visibility_reason
   FROM attendance_records
   WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
   FOR UPDATE
@@ -131,6 +133,9 @@ async function recheckExistingRecord(
   if (recordRows.length !== 1 || recordRows[0]?.id !== write.recordId) {
     return false
   }
+  // A new durable import source may reactivate an import-rollback/review
+  // tombstone (OD-W4C-19). Operator retirement remains terminal.
+  assertParentNotOperatorRetiredV1(recordRows[0])
   const revisionRows = (await trx.query(LOCK_REVISION_SQL, values))
     .rows as QueryRow[]
   if (!revisionMatches(revisionRows, write.targetRevision)) return false

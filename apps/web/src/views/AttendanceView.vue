@@ -10377,6 +10377,8 @@ interface AttendancePunchEvent {
 
 interface AttendanceAnomaly {
   recordId: string
+  expectedCalculationId: string | null
+  expectedCalculationVersion: number | null
   workDate: string
   status: string
   isWorkday?: boolean
@@ -10408,6 +10410,8 @@ type AttendanceResultEditAdminCapability = 'unknown' | 'checking' | 'allowed' | 
 
 interface AttendanceResultEditSnapshot {
   recordId: string
+  expectedCalculationId: string | null
+  expectedCalculationVersion: number | null
   userId: string
   workDate: string
   sourceStatus: string
@@ -16886,10 +16890,24 @@ async function ensureAttendanceResultEditCapability(): Promise<boolean> {
 }
 
 function attendanceResultEditIdempotencyKey(): string {
-  try {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
-  } catch { /* fall through */ }
-  return `attendance-result-edit-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+  const cryptoApi = globalThis.crypto as {
+    randomUUID?: () => string
+    getRandomValues?: <T extends ArrayBufferView>(array: T) => T
+  } | undefined
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
+
+  const bytes = new Uint8Array(16)
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    cryptoApi.getRandomValues(bytes)
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256)
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
 function normalizeAttendanceResultStatus(value: unknown): string {
@@ -16990,6 +17008,8 @@ async function openResultEditModal(item: AttendanceAnomaly): Promise<void> {
   attendanceResultEditModal.open = true
   attendanceResultEditModal.snapshot = {
     recordId: item.recordId,
+    expectedCalculationId: item.expectedCalculationId,
+    expectedCalculationVersion: item.expectedCalculationVersion,
     userId: normalizedUserId() ?? currentUserId.value ?? '',
     workDate: item.workDate,
     sourceStatus: normalizeAttendanceResultStatus(item.status),
@@ -17044,6 +17064,8 @@ async function submitResultEditModal(): Promise<void> {
     const body = {
       orgId: normalizedOrgId(),
       recordId: snapshot.recordId,
+      expectedCalculationId: snapshot.expectedCalculationId,
+      expectedCalculationVersion: snapshot.expectedCalculationVersion,
       targetStatus: attendanceResultEditModal.targetStatus,
       reason: attendanceResultEditModal.reason.trim() || undefined,
       evidence: buildAttendanceResultEditEvidence(),
@@ -17180,6 +17202,8 @@ async function openBatchAnomalyModal(): Promise<void> {
     batchClientId: attendanceResultEditIdempotencyKey(),
     rows: rows.map(item => ({
       recordId: item.recordId,
+      expectedCalculationId: item.expectedCalculationId,
+      expectedCalculationVersion: item.expectedCalculationVersion,
       workDate: item.workDate,
       targetUserId: normalizedUserId() ?? currentUserId.value ?? '',
       sourceStatus: normalizeAttendanceResultStatus(item.status),
@@ -17223,6 +17247,8 @@ async function submitBatchAnomalyModal(): Promise<void> {
           const body = {
             orgId: normalizedOrgId(),
             recordId: row.recordId,
+            expectedCalculationId: row.expectedCalculationId,
+            expectedCalculationVersion: row.expectedCalculationVersion,
             targetStatus,
             reason,
             evidence,

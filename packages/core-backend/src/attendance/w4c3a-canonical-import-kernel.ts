@@ -43,6 +43,7 @@ import type {
   AttendanceLegacyPlanWorkerJobV1,
   VerifiedAttendanceLegacyPlanV1,
 } from './w4c3a-legacy-plan-worker'
+import { assertParentNotOperatorRetiredV1 } from './w4c3c-ops-retirement'
 
 const PREIMAGE_FINGERPRINT_DOMAIN =
   'metasheet2:attendance:w4c3a:rollback-preimage-fingerprint:v1'
@@ -356,6 +357,9 @@ function preimageFingerprint(input: Record<string, unknown>): string {
 }
 
 function frozenPresentPreimage(row: QueryRow): Record<string, unknown> {
+  // A new durable import source may reactivate an import-rollback/review
+  // tombstone (OD-W4C-19). Operator retirement remains terminal.
+  assertParentNotOperatorRetiredV1(row)
   const projectionOwner = String(row.projection_owner)
   const currentCalculationId =
     row.current_calculation_id === null ? null : String(row.current_calculation_id)

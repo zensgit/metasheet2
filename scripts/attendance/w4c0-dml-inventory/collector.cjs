@@ -127,9 +127,8 @@ function discoverRuntimeRoots(source) {
 
 // Matches the verb + immediately-following bare/quoted table identifier for the statement forms
 // named in §8.4: INSERT/UPDATE/DELETE/TRUNCATE/MERGE, COPY FROM|TO, and staging CREATE/DROP/ALTER
-// TABLE. Multi-line statements are matched per physical line (a template literal that splits
-// `INSERT INTO\n  table` across lines will not be caught here — see the collector's stated
-// limitations in the CI test/handoff, not silently claimed as covered).
+// TABLE. The pattern runs against the structurally masked whole file so whitespace between a
+// verb and table name may include newlines.
 // Case-sensitive by design: this codebase's real SQL is written in uppercase keywords
 // (verified against the runtime roots before this pattern was chosen); a case-insensitive
 // pattern instead matches ordinary English prose in comments ("update a record") and floods the
@@ -236,37 +235,265 @@ function nearestEnclosingSymbol(lines, dmlLineIndex) {
   return '(module-scope)'
 }
 
+/**
+ * String-aware comment masker for DML scanning. Layout (newlines + approximate
+ * column width) is preserved so 1-based line numbers remain meaningful.
+ *
+ * Outside JS/TS string/template tokens:
+ *  - mask `//` line comments and `/* ... *\/` block comments
+ *  - do NOT mask `--` (that is not a JS comment and must not blank later live DML
+ *    after a string like `const s = '--'` or `const u = 'http://x'`)
+ *
+ * Inside template literals (typical SQL):
+ *  - preserve template content for DML scan
+ *  - mask SQL line comments `-- ...` and block comments `/* ... *\/` only within
+ *    that template token (never blank later JS after the closing backtick)
+ *  - handle `${ ... }` interpolations by re-entering JS code mode recursively
+ *
+ * Inside single/double-quoted JS strings: never treat `//`, `--`, or `/*` as comments.
+ */
+function maskCommentsForDmlScan(content) {
+  const src = String(content ?? '')
+  const n = src.length
+  let out = ''
+  let i = 0
+  /** @type {Array<'code' | 'squote' | 'dquote' | 'template' | 'template_expr'>} */
+  const stack = ['code']
+  /** One brace-depth counter for each nested template expression on the stack. */
+  const templateExpressionBraceDepth = []
+
+  function maskJsLineComment() {
+    out += '  '
+    i += 2
+    while (i < n && src[i] !== '\n' && src[i] !== '\r') {
+      out += ' '
+      i += 1
+    }
+  }
+
+  function maskJsBlockComment() {
+    out += '  '
+    i += 2
+    while (i < n) {
+      if (src[i] === '\n' || src[i] === '\r') {
+        out += src[i]
+        i += 1
+        continue
+      }
+      if (src[i] === '*' && src[i + 1] === '/') {
+        out += '  '
+        i += 2
+        return
+      }
+      out += ' '
+      i += 1
+    }
+  }
+
+  function maskSqlLineCommentInTemplate() {
+    out += '  '
+    i += 2
+    while (i < n && src[i] !== '\n' && src[i] !== '\r' && src[i] !== '`') {
+      out += ' '
+      i += 1
+    }
+  }
+
+  function maskSqlBlockCommentInTemplate() {
+    out += '  '
+    i += 2
+    while (i < n && src[i] !== '`') {
+      if (src[i] === '\n' || src[i] === '\r') {
+        out += src[i]
+        i += 1
+        continue
+      }
+      if (src[i] === '*' && src[i + 1] === '/') {
+        out += '  '
+        i += 2
+        return
+      }
+      out += ' '
+      i += 1
+    }
+  }
+
+  while (i < n) {
+    const mode = stack[stack.length - 1]
+    const ch = src[i]
+    const next = src[i + 1]
+
+    if (mode === 'code' || mode === 'template_expr') {
+      if (ch === '/' && next === '/') {
+        maskJsLineComment()
+        continue
+      }
+      if (ch === '/' && next === '*') {
+        maskJsBlockComment()
+        continue
+      }
+      if (ch === "'" ) {
+        stack.push('squote')
+        out += ch
+        i += 1
+        continue
+      }
+      if (ch === '"') {
+        stack.push('dquote')
+        out += ch
+        i += 1
+        continue
+      }
+      if (ch === '`') {
+        stack.push('template')
+        out += ch
+        i += 1
+        continue
+      }
+      if (mode === 'template_expr' && ch === '{') {
+        templateExpressionBraceDepth[templateExpressionBraceDepth.length - 1] += 1
+        out += ch
+        i += 1
+        continue
+      }
+      if (mode === 'template_expr' && ch === '}') {
+        const depthIndex = templateExpressionBraceDepth.length - 1
+        if (templateExpressionBraceDepth[depthIndex] > 0) {
+          templateExpressionBraceDepth[depthIndex] -= 1
+          out += ch
+          i += 1
+          continue
+        }
+        stack.pop()
+        templateExpressionBraceDepth.pop()
+        out += ch
+        i += 1
+        continue
+      }
+      out += ch
+      i += 1
+      continue
+    }
+
+    if (mode === 'squote') {
+      if (ch === '\\' && i + 1 < n) {
+        out += ch
+        out += src[i + 1]
+        i += 2
+        continue
+      }
+      if (ch === "'") {
+        stack.pop()
+        out += ch
+        i += 1
+        continue
+      }
+      out += ch
+      i += 1
+      continue
+    }
+
+    if (mode === 'dquote') {
+      if (ch === '\\' && i + 1 < n) {
+        out += ch
+        out += src[i + 1]
+        i += 2
+        continue
+      }
+      if (ch === '"') {
+        stack.pop()
+        out += ch
+        i += 1
+        continue
+      }
+      out += ch
+      i += 1
+      continue
+    }
+
+    if (mode === 'template') {
+      // Template SQL: mask SQL comments only inside this token.
+      if (ch === '-' && next === '-') {
+        maskSqlLineCommentInTemplate()
+        continue
+      }
+      if (ch === '/' && next === '*') {
+        maskSqlBlockCommentInTemplate()
+        continue
+      }
+      if (ch === '\\' && i + 1 < n) {
+        out += ch
+        out += src[i + 1]
+        i += 2
+        continue
+      }
+      if (ch === '`' ) {
+        stack.pop()
+        out += ch
+        i += 1
+        continue
+      }
+      if (ch === '$' && next === '{') {
+        out += '${'
+        i += 2
+        stack.push('template_expr')
+        templateExpressionBraceDepth.push(0)
+        continue
+      }
+      out += ch
+      i += 1
+      continue
+    }
+
+    out += ch
+    i += 1
+  }
+  return out
+}
+
+/**
+ * After structural comment masking, detect a live DML verb targeting a table.
+ * Used by P15/P16 guards and tests — comments/examples never count.
+ */
+function hasLiveDmlOnTable(content, verb, table) {
+  const masked = maskCommentsForDmlScan(String(content ?? ''))
+  const sites = scanFileForDmlSites('__live_dml_probe__', masked)
+  const verbNorm = String(verb).toLowerCase()
+  const tableNorm = String(table)
+  return sites.some((site) => site.verb === verbNorm && site.table === tableNorm)
+}
+
 // Scans one file's content for DML sites. Returns an array of raw sites (before bucket
 // classification) with 1-based line numbers retained ONLY as informational metadata — the debt
 // key never includes the line number (an unrelated edit elsewhere in the file must not red this
-// guard).
+// guard). Comments and documentation examples are masked first so they cannot mint sites.
 function scanFileForDmlSites(relPath, content) {
-  const lines = content.split(/\r?\n/)
+  const masked = maskCommentsForDmlScan(content)
+  // Original lines for symbol attribution (function names live in non-comment code).
+  const originalLines = String(content ?? '').split(/\r?\n/)
   const sites = []
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]
-    DML_LINE_PATTERN.lastIndex = 0
-    let m
-    while ((m = DML_LINE_PATTERN.exec(line))) {
-      const verb = verbFromKeyword(m[1])
-      const table = m[2]
-      if (SQL_RESERVED_NON_TABLE_WORDS.has(table.toUpperCase())) continue
-      // §8.4 scans "staging-table CREATE/DROP/ALTER" — i.e. runtime staging-table lifecycle
-      // (e.g. a temp table created inside an import-commit code path), not ordinary schema
-      // migration DDL. Migration files legitimately reshape tables on every release; treating
-      // every `ALTER TABLE` in a migration as source/effect/result debt would conflate schema
-      // evolution with calculation-truth writes. Migration files are still scanned for real row
-      // mutation (INSERT/UPDATE/DELETE backfills), just not for CREATE/DROP/ALTER TABLE.
-      const isStagingDdlVerb = verb === 'staging_create' || verb === 'staging_drop' || verb === 'staging_alter'
-      if (isStagingDdlVerb && isMigrationPath(relPath)) continue
-      sites.push({
-        relPath,
-        line: i + 1,
-        verb,
-        table,
-        enclosingSymbol: nearestEnclosingSymbol(lines, i),
-      })
-    }
+  DML_LINE_PATTERN.lastIndex = 0
+  let m
+  while ((m = DML_LINE_PATTERN.exec(masked))) {
+    const verb = verbFromKeyword(m[1])
+    const table = m[2]
+    if (SQL_RESERVED_NON_TABLE_WORDS.has(table.toUpperCase())) continue
+    // §8.4 scans "staging-table CREATE/DROP/ALTER" — i.e. runtime staging-table lifecycle
+    // (e.g. a temp table created inside an import-commit code path), not ordinary schema
+    // migration DDL. Migration files legitimately reshape tables on every release; treating
+    // every `ALTER TABLE` in a migration as source/effect/result debt would conflate schema
+    // evolution with calculation-truth writes. Migration files are still scanned for real row
+    // mutation (INSERT/UPDATE/DELETE backfills), just not for CREATE/DROP/ALTER TABLE.
+    const isStagingDdlVerb = verb === 'staging_create' || verb === 'staging_drop' || verb === 'staging_alter'
+    if (isStagingDdlVerb && isMigrationPath(relPath)) continue
+    const lineIndex = lineIndexAt(masked, m.index)
+    sites.push({
+      relPath,
+      line: lineIndex + 1,
+      verb,
+      table,
+      enclosingSymbol: nearestEnclosingSymbol(originalLines, lineIndex),
+    })
   }
   return sites
 }
@@ -584,6 +811,8 @@ module.exports = {
   discoverRuntimeRoots,
   parseWorkspacePatterns,
   isScannablePath,
+  maskCommentsForDmlScan,
+  hasLiveDmlOnTable,
   scanFileForDmlSites,
   scanFileForP25CallPathSites,
   scanFileForAttendanceRecordReadSites,
