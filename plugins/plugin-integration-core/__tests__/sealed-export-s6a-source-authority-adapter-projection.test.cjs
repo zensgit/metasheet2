@@ -217,10 +217,50 @@ const DECLARED_PINS = Object.freeze([
   'system-uses',
 ])
 
-// The ONLY two functions that raise a pin. Kept to two, and named here, because section 4d
-// parses this file for their call sites: a third raiser would put pin ids somewhere the
-// registry scan does not look.
+// The ONLY two functions that raise a pin. Section 4d parses this file for their call sites.
+//
+// A hand-maintained list of raisers would REINTRODUCE the very gap 4d exists to close, one
+// level up: a third raiser (`function pinAlias(id, m) { pinFail(id, m) }`) puts pin ids
+// somewhere the callee filter never looks, and a pin smuggled through it that passes on the
+// real module fires no self-test either, so 4c cannot see it. Proven by execution before it
+// was closed: with such an alias added, the suite printed OK.
+//
+// So this list is not trusted on its own. Section 4d pins the ENTIRE CALLEE MULTISET of
+// runProjectionPins() — the same shape as the receiver use multisets, for the same reason:
+// enumerating the raisers does not converge, but asserting the whole call inventory does.
+// Adding ANY call inside runProjectionPins(), raiser or not, REDs and forces a deliberate
+// re-derivation.
 const PIN_RAISERS = Object.freeze(['pinFail', 'pinDeepEqual'])
+const RUN_PROJECTION_PINS_CALLEES = Object.freeze([
+  'JSON.stringify',
+  'analyzeModuleSource',
+  'memberReadReport',
+  'memberReadReport',
+  'memberReadReport',
+  'memberReadReport',
+  'memberReadReport',
+  'occurrencesOf',
+  'occurrencesOf',
+  'occurrencesOf',
+  'occurrencesOf',
+  'occurrencesOf',
+  'pinDeepEqual',
+  'pinDeepEqual',
+  'pinDeepEqual',
+  'pinDeepEqual',
+  'pinDeepEqual',
+  'pinDeepEqual',
+  'pinDeepEqual',
+  'pinDeepEqual',
+  'pinFail',
+  'pinFail',
+  'pinFail',
+  'projectionDynamicAccesses.map',
+  'projectionRawDynamic.concat',
+  'sortedArray',
+  'sortedArray',
+  'systemReads.dynamic.map',
+])
 
 function pinFail(pinId, message) {
   const error = new Error('PIN ' + pinId + ': ' + message)
@@ -380,13 +420,16 @@ function runProjectionPins(moduleText, options = {}) {
   // is pinned to the exported list. Without the second half, `for (const field of
   // SOURCE_CONFIG_FIELDS)` would keep `raw[field]` looking legitimate while projecting a
   // different set.
+  // Written without a chained call on purpose: `a.concat(b).map(…)` has a callee this scan
+  // cannot read, and section 4d refuses an unreadable callee rather than tolerating one.
+  const projectionRawDynamic = memberReadReport(projection, 'raw').dynamic
+  const projectionProjectedDynamic = memberReadReport(projection, 'projected').dynamic
+  const projectionDynamicAccesses = projectionRawDynamic.concat(projectionProjectedDynamic)
+  const projectionDynamicKeys = projectionDynamicAccesses.map((access) => access.keyIdentifier)
   pinDeepEqual(
     'projection-loop-idiom',
     {
-      keys: sortedArray(new Set([
-        ...memberReadReport(projection, 'raw').dynamic,
-        ...memberReadReport(projection, 'projected').dynamic,
-      ].map((access) => access.keyIdentifier))),
+      keys: sortedArray(new Set(projectionDynamicKeys)),
       forOf: projection.forOf,
     },
     {
@@ -892,8 +935,34 @@ function main() {
   })
   assert.deepEqual(selfReport.failures, [], 'this test file did not parse cleanly')
   assert.notEqual(selfReport.functions, null)
-  const pinCallSites = selfReport.functions.runProjectionPins.calls
-    .filter((call) => PIN_RAISERS.includes(call.callee))
+  const selfCalls = selfReport.functions.runProjectionPins.calls
+  // FIRST, and this is what makes the pin-id scan below trustworthy: the callee filter it
+  // applies is only as good as the list of raisers, and that list is hand-maintained. A third
+  // raiser would put pin ids somewhere the filter never looks — proven by execution:
+  // `function pinAlias(id, m) { pinFail(id, m) }` plus a passing `pinAlias('smuggled', …)`
+  // inside runProjectionPins() left the suite printing OK, because the call site was filtered
+  // out and no self-test fired it. Enumerating raisers does not converge; pinning the whole
+  // call inventory does. Any call added here, raiser or not, REDs.
+  assert.deepEqual(
+    selfCalls.filter((call) => call.callee === null),
+    [],
+    'runProjectionPins() makes a call whose callee this scan cannot read — an unreadable '
+    + 'callee could be a pin raiser, so it is a finding rather than a skip',
+  )
+  assert.deepEqual(
+    selfCalls.map((call) => call.callee).sort(),
+    [...RUN_PROJECTION_PINS_CALLEES].sort(),
+    'the calls made inside runProjectionPins() have drifted — re-derive '
+    + 'RUN_PROJECTION_PINS_CALLEES deliberately. A new callee may be a pin raiser that '
+    + 'PIN_RAISERS does not list, which would hide its pin ids from the registry scan below',
+  )
+  assert.deepEqual(
+    PIN_RAISERS.filter((raiser) => !RUN_PROJECTION_PINS_CALLEES.includes(raiser)),
+    [],
+    'a declared pin raiser is never called inside runProjectionPins() — the registry scan '
+    + 'would be filtering on a name that does not occur',
+  )
+  const pinCallSites = selfCalls.filter((call) => PIN_RAISERS.includes(call.callee))
   assert.ok(pinCallSites.length > 0, 'no pin call sites found — the registry scan is looking '
     + 'in the wrong place')
   // An id this scan cannot read could be anything, so it is a finding, never a skip.
