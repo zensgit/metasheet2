@@ -95,11 +95,12 @@ async function createHarness(
     warn: vi.fn(),
     error: vi.fn(),
   }
+  const eventEmit = vi.fn()
 
   await attendancePlugin.activate({
     api: {
       database: db,
-      events: { emit: vi.fn() },
+      events: { emit: eventEmit },
       http: {
         addRoute(method: string, path: string, handler: RouteHandler) {
           routes.set(`${method.toUpperCase()} ${path}`, handler)
@@ -140,7 +141,7 @@ async function createHarness(
   db.query.mockClear()
   db.transaction.mockClear()
 
-  return { db, logger, routes }
+  return { db, eventEmit, logger, routes }
 }
 
 async function invokeRoute(
@@ -3845,6 +3846,71 @@ describe('attendance UUID route validation', () => {
     }
   })
 
+  it('checks foreign fixed-schedule groups before scheduler-scope SQL for non-admin actors', async () => {
+    const cases = [
+      { key: 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', params: { groupId: attendanceGroupId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', params: { id: attendanceGroupId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', params: { id: attendanceGroupId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/clear', params: { id: attendanceGroupId } },
+    ]
+
+    for (const testCase of cases) {
+      const { db, routes } = await createHarness('false')
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params)
+        if (rbac !== undefined) return rbac
+        if (sql.includes('SELECT id FROM attendance_groups')) {
+          expect(params, testCase.key).toEqual([attendanceGroupId, 'default'])
+          return []
+        }
+        throw new Error(`unexpected scoped SQL: ${sql}`)
+      })
+
+      const res = await invokeRoute(routes, testCase.key, {
+        params: testCase.params,
+        body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+        user: { id: 'scheduler-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode, testCase.key).toBe(404)
+      expect(res.body, testCase.key).toEqual({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: 'Group not found' },
+      })
+      const attendanceSql = db.query.mock.calls
+        .map(([sql]) => String(sql))
+        .filter(sql => sql.includes('attendance_'))
+      expect(attendanceSql, testCase.key).toHaveLength(1)
+      expect(attendanceSql[0], testCase.key).toContain('FROM attendance_groups')
+      expect(attendanceSql[0], testCase.key).not.toContain('attendance_scheduler_scopes')
+      expect(db.transaction, testCase.key).not.toHaveBeenCalled()
+    }
+  })
+
+  it('keeps fixed-schedule preview admin-only at runtime before group SQL', async () => {
+    const { db, eventEmit, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      throw new Error(`unexpected scoped SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/fixed-schedule/preview', {
+      params: { id: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('attendance_'))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(eventEmit).not.toHaveBeenCalled()
+  })
+
   it('admits attendance admins through every R0 group-route endpoint without scheduler scope', async () => {
     const cases = [
       { key: 'GET /api/attendance/groups/:id', status: 200 },
@@ -3934,7 +4000,7 @@ describe('attendance UUID route validation', () => {
   })
 
   it('saves fixed-schedule desired config through dispatch authorization without assignment writes', async () => {
-    const { db, routes } = await createHarness('false')
+    const { db, eventEmit, routes } = await createHarness('false')
     const configId = '00000000-0000-4000-8000-000000000399'
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params, true)
@@ -3972,6 +4038,57 @@ describe('attendance UUID route validation', () => {
     expect(sql).not.toContain('attendance_shift_assignments')
     expect(sql).not.toContain('attendance_notification')
     expect(sql).not.toContain('attendance_outbox')
+    expect(eventEmit).not.toHaveBeenCalled()
+  })
+
+  it('lets a dispatch-scoped non-admin scheduler save fixed-schedule desired config', async () => {
+    const { db, eventEmit, routes } = await createHarness('false')
+    const configId = '00000000-0000-4000-8000-000000000399'
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('SELECT id FROM attendance_groups')) return [{ id: attendanceGroupId }]
+      if (sql.includes('FROM attendance_scheduler_scopes')) {
+        expect(params).toEqual(['default', 'scheduler-1', [], []])
+        return [schedulerScopeFixedScheduleRow(['dispatch'])]
+      }
+      if (sql.includes('SELECT id FROM attendance_shifts')) {
+        expect(params).toEqual([shiftId, 'default'])
+        return [{ id: shiftId }]
+      }
+      if (sql.includes('INSERT INTO attendance_group_fixed_schedule_configs')) {
+        expect(params).toEqual(['default', attendanceGroupId, shiftId, '2026-06-01', '2026-06-30', 'scheduler-1'])
+        return [{
+          id: configId,
+          org_id: 'default',
+          group_id: attendanceGroupId,
+          shift_id: shiftId,
+          start_date: '2026-06-01',
+          end_date: '2026-06-30',
+          revision: 1,
+          updated_by: 'scheduler-1',
+          created_at: '2026-08-03T00:00:00.000Z',
+          updated_at: '2026-08-03T00:00:00.000Z',
+        }]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', {
+      params: { groupId: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: { id: configId, orgId: 'default', updatedBy: 'scheduler-1' },
+    })
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(eventEmit).not.toHaveBeenCalled()
   })
 
   it('requires fixed-schedule dispatch authority before saving desired config', async () => {
