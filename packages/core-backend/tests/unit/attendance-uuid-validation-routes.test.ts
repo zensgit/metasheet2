@@ -4016,7 +4016,7 @@ describe('attendance UUID route validation', () => {
     for (const testCase of cases) {
       for (const selector of selectors) {
         const label = `${testCase.key} (${selector.name})`
-        const { db, routes } = await createHarness()
+        const { db, routes } = await createHarness('false')
         const res = await invokeRoute(routes, testCase.key, {
           params: testCase.params,
           body: { ...body, ...(selector.body ?? {}) },
@@ -4031,6 +4031,25 @@ describe('attendance UUID route validation', () => {
     }
   })
 
+  it('admits a real RBAC attendance admin to preview only after trusted actor resolution', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/fixed-schedule/preview', {
+      params: { id: 'not-a-uuid' },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(db.query).toHaveBeenCalled()
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
   it('fails every fixed-schedule route closed when authenticated actor context is incomplete', async () => {
     const cases = [
       { key: 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', params: { groupId: attendanceGroupId } },
@@ -4042,17 +4061,18 @@ describe('attendance UUID route validation', () => {
     const body = { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' }
 
     for (const testCase of cases) {
-      const { db: missingUserDb, routes: missingUserRoutes } = await createHarness()
+      const { db: missingUserDb, routes: missingUserRoutes } = await createHarness('false')
       const missingUser = await invokeRoute(missingUserRoutes, testCase.key, {
         params: testCase.params,
         body,
+        headers: { 'x-user-id': 'forged-header-user' },
         user: { orgId: 'default' },
       })
       expect(missingUser.statusCode, `${testCase.key} (missing user)`).toBe(401)
       expect(missingUserDb.query, `${testCase.key} (missing user)`).not.toHaveBeenCalled()
       expect(missingUserDb.transaction, `${testCase.key} (missing user)`).not.toHaveBeenCalled()
 
-      const { db: missingOrgDb, routes: missingOrgRoutes } = await createHarness()
+      const { db: missingOrgDb, routes: missingOrgRoutes } = await createHarness('false')
       const missingOrg = await invokeRoute(missingOrgRoutes, testCase.key, {
         params: testCase.params,
         body,

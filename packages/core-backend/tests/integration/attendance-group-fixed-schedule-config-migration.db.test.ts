@@ -11,6 +11,7 @@ import {
 
 const require = createRequire(import.meta.url)
 const configServiceLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs')
+const shiftServiceLib = require('../../../../plugins/plugin-attendance/lib/attendance-shift-service.cjs')
 
 class FakeHttpError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -47,6 +48,25 @@ describeDb('attendance group fixed-schedule config migration (real DB)', () => {
         org_id text NOT NULL,
         name text NOT NULL,
         UNIQUE (id, org_id)
+      )
+    `.execute(db)
+    await sql`CREATE TABLE attendance_shift_segments (org_id text NOT NULL, shift_id uuid NOT NULL)`.execute(db)
+    await sql`CREATE TABLE attendance_shift_assignments (org_id text NOT NULL, shift_id uuid NOT NULL)`.execute(db)
+    await sql`CREATE TABLE attendance_rotation_rules (org_id text NOT NULL, shift_sequence jsonb NOT NULL DEFAULT '[]'::jsonb)`.execute(db)
+    await sql`CREATE TABLE attendance_requests (id uuid PRIMARY KEY, status text NOT NULL)`.execute(db)
+    await sql`
+      CREATE TABLE attendance_shift_swap_requests (
+        org_id text NOT NULL,
+        request_id uuid NOT NULL,
+        requester_shift_id uuid,
+        counterparty_shift_id uuid
+      )
+    `.execute(db)
+    await sql`
+      CREATE TABLE attendance_schedule_dispatch_requests (
+        org_id text NOT NULL,
+        target_shift_id uuid NOT NULL,
+        publish_status text NOT NULL
       )
     `.execute(db)
   })
@@ -142,5 +162,91 @@ describeDb('attendance group fixed-schedule config migration (real DB)', () => {
     expect(statements.filter(statement => statement.includes('FROM attendance_shifts'))).toHaveLength(3)
     expect(statements.filter(statement => statement.includes('FROM attendance_shifts'))
       .every(statement => statement.includes('FOR SHARE'))).toBe(true)
+  })
+
+  it('holds the shift reference lock through config commit so canonical delete returns typed 409', async () => {
+    const { groupId, shiftId } = await insertParents('org-a')
+    await up(db)
+    const configService = configServiceLib.createAttendanceGroupFixedScheduleConfigService({ HttpError: FakeHttpError })
+    const shiftService = shiftServiceLib.createAttendanceShiftService({
+      HttpError: FakeHttpError,
+      randomUUID,
+      resolveShiftTiming: () => { throw new Error('not used') },
+      normalizeWorkingDays: (value: unknown) => value,
+      mapShiftRow: (row: Record<string, unknown>) => row,
+      DEFAULT_SHIFT: {},
+      DEFAULT_ORG_ID: 'default',
+      normalizeLegacyRotationRulesForShiftName: (value: unknown) => value,
+    })
+
+    let releaseWriter!: () => void
+    const writerCanFinish = new Promise<void>((resolve) => { releaseWriter = resolve })
+    let signalWriterLocked!: () => void
+    const writerLocked = new Promise<void>((resolve) => { signalWriterLocked = resolve })
+    const writerClient = await pool.connect()
+    const writer = (async () => {
+      await writerClient.query('BEGIN')
+      try {
+        const result = await configService.upsertConfig({
+          query: async (text: string, values: unknown[]) => {
+            const response = await writerClient.query(text, values)
+            if (text.includes('FROM attendance_shifts')) {
+              signalWriterLocked()
+              await writerCanFinish
+            }
+            return response.rows
+          },
+        }, {
+          orgId: 'org-a',
+          groupId,
+          shiftId,
+          startDate: '2026-08-01',
+          endDate: '2026-08-31',
+          updatedBy: 'admin-1',
+        })
+        await writerClient.query('COMMIT')
+        return result
+      } catch (error) {
+        await writerClient.query('ROLLBACK')
+        throw error
+      } finally {
+        writerClient.release()
+      }
+    })()
+
+    await writerLocked
+    const deleteDb = {
+      transaction: async (callback: (trx: { query: (text: string, values?: unknown[]) => Promise<unknown[]> }) => Promise<unknown>) => {
+        const client = await pool.connect()
+        await client.query('BEGIN')
+        try {
+          const result = await callback({
+            query: async (text: string, values: unknown[] = []) => (await client.query(text, values)).rows,
+          })
+          await client.query('COMMIT')
+          return result
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        } finally {
+          client.release()
+        }
+      },
+    }
+    const deletion = shiftService.deleteShift(deleteDb, { orgId: 'org-a', shiftId })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    releaseWriter()
+
+    await expect(writer).resolves.toMatchObject({ revision: 1 })
+    await expect(deletion).rejects.toMatchObject({ status: 409, code: 'ATTENDANCE_SHIFT_DELETE_BLOCKED' })
+    const configRows = await sql<{ total: string }>`
+      SELECT COUNT(*)::text AS total FROM attendance_group_fixed_schedule_configs
+       WHERE org_id = 'org-a' AND group_id = ${groupId} AND shift_id = ${shiftId}
+    `.execute(db)
+    const shiftRows = await sql<{ total: string }>`
+      SELECT COUNT(*)::text AS total FROM attendance_shifts WHERE org_id = 'org-a' AND id = ${shiftId}
+    `.execute(db)
+    expect(configRows.rows[0]!.total).toBe('1')
+    expect(shiftRows.rows[0]!.total).toBe('1')
   })
 })

@@ -44287,9 +44287,13 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/preview',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
         if (!actorAccess) return
+        if (!actorAccess.fullAdmin) {
+          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+          return
+        }
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -44358,7 +44362,7 @@ module.exports = {
           logger.error('Attendance group fixed schedule preview failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview fixed schedule' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
