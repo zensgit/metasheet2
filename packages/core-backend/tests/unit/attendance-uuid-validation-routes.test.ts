@@ -3998,8 +3998,42 @@ describe('attendance UUID route validation', () => {
     }
   })
 
-  it('uses authenticated actor context on every existing fixed-schedule route', async () => {
+  it('rejects every forged actor selector on every existing fixed-schedule route', async () => {
     const cases = [
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/preview', params: { id: attendanceGroupId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', params: { id: attendanceGroupId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', params: { id: attendanceGroupId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/clear', params: { id: attendanceGroupId } },
+    ]
+    const body = { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' }
+    const selectors = [
+      { name: 'body org', body: { orgId: 'other-org' } },
+      { name: 'query org', query: { orgId: 'other-org' } },
+      { name: 'header org', headers: { 'x-org-id': 'other-org' } },
+      { name: 'header user', headers: { 'x-user-id': 'forged-user' } },
+    ]
+
+    for (const testCase of cases) {
+      for (const selector of selectors) {
+        const label = `${testCase.key} (${selector.name})`
+        const { db, routes } = await createHarness()
+        const res = await invokeRoute(routes, testCase.key, {
+          params: testCase.params,
+          body: { ...body, ...(selector.body ?? {}) },
+          query: selector.query,
+          headers: selector.headers,
+          user: { id: 'admin-1', orgId: 'default' },
+        })
+        expect(res.statusCode, label).toBe(403)
+        expect(db.query, label).not.toHaveBeenCalled()
+        expect(db.transaction, label).not.toHaveBeenCalled()
+      }
+    }
+  })
+
+  it('fails every fixed-schedule route closed when authenticated actor context is incomplete', async () => {
+    const cases = [
+      { key: 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', params: { groupId: attendanceGroupId } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/preview', params: { id: attendanceGroupId } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', params: { id: attendanceGroupId } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', params: { id: attendanceGroupId } },
@@ -4008,38 +4042,28 @@ describe('attendance UUID route validation', () => {
     const body = { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' }
 
     for (const testCase of cases) {
-      const { db, routes } = await createHarness()
-      const res = await invokeRoute(routes, testCase.key, {
+      const { db: missingUserDb, routes: missingUserRoutes } = await createHarness()
+      const missingUser = await invokeRoute(missingUserRoutes, testCase.key, {
         params: testCase.params,
         body,
-        headers: { 'x-user-id': 'forged-user' },
-        user: { id: 'admin-1', orgId: 'default' },
+        user: { orgId: 'default' },
       })
-      expect(res.statusCode, testCase.key).toBe(403)
-      expect(db.query, testCase.key).not.toHaveBeenCalled()
-      expect(db.transaction, testCase.key).not.toHaveBeenCalled()
+      expect(missingUser.statusCode, `${testCase.key} (missing user)`).toBe(401)
+      expect(missingUserDb.query, `${testCase.key} (missing user)`).not.toHaveBeenCalled()
+      expect(missingUserDb.transaction, `${testCase.key} (missing user)`).not.toHaveBeenCalled()
+
+      const { db: missingOrgDb, routes: missingOrgRoutes } = await createHarness()
+      const missingOrg = await invokeRoute(missingOrgRoutes, testCase.key, {
+        params: testCase.params,
+        body,
+        user: { id: 'admin-1' },
+      })
+      expect(missingOrg.statusCode, `${testCase.key} (missing org)`).toBe(403)
+      expect(missingOrg.body, `${testCase.key} (missing org)`).toMatchObject({
+        error: { message: 'Authenticated organization not found' },
+      })
+      expect(missingOrgDb.query, `${testCase.key} (missing org)`).not.toHaveBeenCalled()
+      expect(missingOrgDb.transaction, `${testCase.key} (missing org)`).not.toHaveBeenCalled()
     }
-  })
-
-  it('fails fixed-schedule routes closed when authenticated actor context is incomplete', async () => {
-    const body = { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' }
-    const { db: missingUserDb, routes: missingUserRoutes } = await createHarness()
-    const missingUser = await invokeRoute(missingUserRoutes, 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', {
-      params: { groupId: attendanceGroupId },
-      body,
-      user: { orgId: 'default' },
-    })
-    expect(missingUser.statusCode).toBe(401)
-    expect(missingUserDb.query).not.toHaveBeenCalled()
-
-    const { db: missingOrgDb, routes: missingOrgRoutes } = await createHarness()
-    const missingOrg = await invokeRoute(missingOrgRoutes, 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', {
-      params: { groupId: attendanceGroupId },
-      body,
-      user: { id: 'admin-1' },
-    })
-    expect(missingOrg.statusCode).toBe(403)
-    expect(missingOrg.body).toMatchObject({ error: { message: 'Authenticated organization not found' } })
-    expect(missingOrgDb.query).not.toHaveBeenCalled()
   })
 })
