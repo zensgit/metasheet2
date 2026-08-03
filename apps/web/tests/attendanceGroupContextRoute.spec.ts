@@ -222,6 +222,9 @@ describe('normalizeAttendanceGroupReturnTo (safe return target, OD-4711-5)', () 
   it.each([
     '//evil.example/attendance', // protocol-relative
     '//attendance',
+    '/attendance/%2e%2e/login', // encoded dot traversal
+    '/attendance%2f..%2flogin', // encoded slash traversal
+    '/attendance/..\\login', // backslash traversal
     'https://evil.example/attendance', // scheme
     'http://evil.example',
     'javascript:alert(1)',

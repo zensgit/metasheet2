@@ -2981,16 +2981,12 @@ describe('attendance UUID route validation', () => {
     expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
   })
 
-  it('lets scoped non-admin schedulers clear fixed schedule rows inside their attendance group scope', async () => {
+  it('keeps fixed-schedule clear admin-only even inside scheduler scope', async () => {
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
-      const actor = actorContextQueryResult(sql)
-      if (actor !== undefined) return actor
-      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeClearRow()]
-      if (sql.includes('FROM attendance_shift_assignments') && sql.includes('producer_type = $2')) return []
       throw new Error(`unexpected query: ${sql}`)
     })
 
@@ -3000,13 +2996,10 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(200)
-    expect(res.body).toMatchObject({ ok: true, data: { cleared: true } })
-    expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('FROM attendance_scheduler_scopes'),
-      ['default', 'scheduler-1', [], []],
-    )
-    expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_scheduler_scopes'))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
   })
 
   it('rejects scoped fixed schedule clears outside the attendance group scope and does not clear', async () => {
@@ -3031,8 +3024,9 @@ describe('attendance UUID route validation', () => {
     })
 
     expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
     expect(db.transaction).not.toHaveBeenCalled()
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_scheduler_scopes'))).toBe(false)
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('producer_type = $2'))).toBe(false)
   })
 
@@ -3065,17 +3059,12 @@ describe('attendance UUID route validation', () => {
     expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
   })
 
-  it('lets scoped non-admin schedulers apply fixed schedules inside their attendance group dispatch scope', async () => {
+  it('keeps fixed-schedule apply admin-only even inside scheduler dispatch scope', async () => {
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
-      const actor = actorContextQueryResult(sql)
-      if (actor !== undefined) return actor
-      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeFixedScheduleRow(['dispatch'])]
-      const fixedSchedule = fixedScheduleQueryResult(sql)
-      if (fixedSchedule.handled) return fixedSchedule.rows
       throw new Error(`unexpected query: ${sql}`)
     })
 
@@ -3085,13 +3074,10 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(201)
-    expect(res.body).toMatchObject({ ok: true, data: { applied: true } })
-    expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('FROM attendance_scheduler_scopes'),
-      ['default', 'scheduler-1', [], []],
-    )
-    expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_scheduler_scopes'))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
   })
 
   it('rejects scoped fixed schedule applies without dispatch scope and does not apply', async () => {
@@ -3113,22 +3099,18 @@ describe('attendance UUID route validation', () => {
     })
 
     expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
     expect(db.transaction).not.toHaveBeenCalled()
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_scheduler_scopes'))).toBe(false)
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO attendance_shift_assignments'))).toBe(false)
   })
 
-  it('requires both clear and dispatch scope before scoped fixed schedule rebuilds', async () => {
+  it('keeps fixed-schedule rebuild admin-only even with clear and dispatch scope', async () => {
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
-      const actor = actorContextQueryResult(sql)
-      if (actor !== undefined) return actor
-      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeFixedScheduleRow(['clear', 'dispatch'])]
-      const fixedSchedule = fixedScheduleQueryResult(sql)
-      if (fixedSchedule.handled) return fixedSchedule.rows
       throw new Error(`unexpected query: ${sql}`)
     })
 
@@ -3138,9 +3120,10 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(200)
-    expect(res.body).toMatchObject({ ok: true, data: { rebuilt: true } })
-    expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_scheduler_scopes'))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
   })
 
   it('rejects scoped fixed schedule rebuilds without clear scope and does not rebuild', async () => {
@@ -3162,8 +3145,9 @@ describe('attendance UUID route validation', () => {
     })
 
     expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
     expect(db.transaction).not.toHaveBeenCalled()
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_scheduler_scopes'))).toBe(false)
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO attendance_shift_assignments'))).toBe(false)
   })
 
@@ -3537,7 +3521,12 @@ describe('attendance UUID route validation', () => {
     for (const testCase of cases) {
       for (const selector of selectors) {
         const label = `${testCase.key} (${selector.name})`
-        const { db, routes } = await createHarness()
+        const { db, routes } = await createHarness('false')
+        db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+          const rbac = rbacQueryResult(sql, params, true)
+          if (rbac !== undefined) return rbac
+          throw new Error(`unexpected scoped SQL: ${sql}`)
+        })
         const res = await invokeRoute(routes, testCase.key, {
           params: testCase.params ?? { id: attendanceGroupId },
           body: { ...(testCase.body ?? {}), ...(selector.body ?? {}) },
@@ -3550,7 +3539,7 @@ describe('attendance UUID route validation', () => {
           ok: false,
           error: { code: 'NOT_FOUND', message: 'Group not found' },
         })
-        expect(db.query, label).not.toHaveBeenCalled()
+        expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('attendance_')), label).toBe(false)
         expect(db.transaction, label).not.toHaveBeenCalled()
       }
     }
@@ -3572,7 +3561,12 @@ describe('attendance UUID route validation', () => {
     ]
 
     for (const testCase of cases) {
-      const { db, routes } = await createHarness()
+      const { db, routes } = await createHarness('false')
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, true)
+        if (rbac !== undefined) return rbac
+        throw new Error(`unexpected scoped SQL: ${sql}`)
+      })
       const res = await invokeRoute(routes, testCase.key, {
         params: testCase.params ?? { id: attendanceGroupId },
         body: testCase.body,
@@ -3583,8 +3577,67 @@ describe('attendance UUID route validation', () => {
         ok: false,
         error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' },
       })
-      expect(db.query, testCase.key).not.toHaveBeenCalled()
+      expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('attendance_')), testCase.key).toBe(false)
       expect(db.transaction, testCase.key).not.toHaveBeenCalled()
+    }
+  })
+
+  it('admits attendance admins through every R0 group-route endpoint without scheduler scope', async () => {
+    const cases = [
+      { key: 'GET /api/attendance/groups/:id', status: 200 },
+      { key: 'GET /api/attendance/groups/:id/members', status: 200 },
+      { key: 'POST /api/attendance/groups/:id/members', status: 200, body: { userId: 'worker-1' } },
+      { key: 'DELETE /api/attendance/groups/:id/members/:userId', status: 200, params: { id: attendanceGroupId, userId: 'worker-1' } },
+      { key: 'GET /api/attendance/groups/:id/managers', status: 200 },
+      { key: 'POST /api/attendance/groups/:id/managers', status: 200, body: { userId: 'manager-1', role: 'owner' } },
+      { key: 'DELETE /api/attendance/groups/:id/managers/:managerId', status: 200, params: { id: attendanceGroupId, managerId: scheduleGroupMemberId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/preview', status: 200, body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', status: 201, body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', status: 200, body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/clear', status: 200, body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' } },
+    ]
+    const memberRow = {
+      id: scheduleGroupMemberId,
+      org_id: 'default',
+      group_id: attendanceGroupId,
+      user_id: 'worker-1',
+      created_at: '2026-05-30T10:00:00.000Z',
+      updated_at: '2026-05-30T10:00:00.000Z',
+    }
+    const managerRow = {
+      ...memberRow,
+      user_id: 'manager-1',
+      role: 'owner',
+      created_by: 'admin-1',
+    }
+
+    for (const testCase of cases) {
+      const { db, routes } = await createHarness('false')
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, true)
+        if (rbac !== undefined) return rbac
+        const fixedSchedule = fixedScheduleQueryResult(sql)
+        if (fixedSchedule.handled) return fixedSchedule.rows
+        if (sql.includes('FROM attendance_groups g')) return [attendanceGroupRow()]
+        if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) return [{ total: 0 }]
+        if (sql.includes('SELECT * FROM attendance_group_members')) return []
+        if (sql.includes('INSERT INTO attendance_group_members')) return [memberRow]
+        if (sql.includes('DELETE FROM attendance_group_members')) return [{ id: scheduleGroupMemberId }]
+        if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_managers')) return [{ total: 0 }]
+        if (sql.includes('SELECT *') && sql.includes('FROM attendance_group_managers')) return []
+        if (sql.includes('INSERT INTO attendance_group_managers')) return [managerRow]
+        if (sql.includes('DELETE FROM attendance_group_managers')) return [{ id: scheduleGroupMemberId }]
+        throw new Error(`unexpected query: ${sql}`)
+      })
+
+      const res = await invokeRoute(routes, testCase.key, {
+        params: testCase.params ?? { id: attendanceGroupId },
+        body: testCase.body,
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode, testCase.key).toBe(testCase.status)
+      expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_scheduler_scopes')), testCase.key).toBe(false)
     }
   })
 

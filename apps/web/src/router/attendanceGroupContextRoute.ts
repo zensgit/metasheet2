@@ -165,13 +165,23 @@ export function normalizeAttendanceGroupReturnTo(value: unknown, currentPath?: u
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(candidate)) return ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO
 
   const pathOnly = pathPartOnly(candidate)
+  if (pathOnly.includes('\\') || /%(?:2e|2f|5c)/i.test(pathOnly)) {
+    return ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(candidate, 'http://attendance.local')
+  } catch {
+    return ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO
+  }
+  const normalizedPath = parsed.pathname
   // Under /attendance exactly ('/attendance' or '/attendance/…' — '/attendance-evil' fails).
-  if (pathOnly !== '/attendance' && !pathOnly.startsWith('/attendance/')) {
+  if (normalizedPath !== '/attendance' && !normalizedPath.startsWith('/attendance/')) {
     return ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO
   }
   // Never return to the current group route itself (return loop).
   if (typeof currentPath === 'string' && currentPath.trim()) {
-    if (pathOnly === pathPartOnly(currentPath.trim())) return ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO
+    if (normalizedPath === pathPartOnly(currentPath.trim())) return ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO
   }
   // No nested returnTo recursion.
   const queryStart = candidate.indexOf('?')
@@ -181,7 +191,7 @@ export function normalizeAttendanceGroupReturnTo(value: unknown, currentPath?: u
       return ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO
     }
   }
-  return candidate
+  return `${parsed.pathname}${parsed.search}${parsed.hash}`
 }
 
 /** Fully parsed group-context route, or null for the not-found posture. */

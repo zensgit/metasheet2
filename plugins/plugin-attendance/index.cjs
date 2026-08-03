@@ -44162,7 +44162,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/apply',
-      async (req, res) => {
+      withPermission('attendance:admin', async (req, res) => {
         const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
         if (!actorAccess) return
         const schema = z.object({
@@ -44240,13 +44240,13 @@ module.exports = {
           logger.error('Attendance group fixed schedule apply failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to apply fixed schedule' } })
         }
-      }
+      })
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/rebuild',
-      async (req, res) => {
+      withPermission('attendance:admin', async (req, res) => {
         const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
         if (!actorAccess) return
         const schema = z.object({
@@ -44327,13 +44327,13 @@ module.exports = {
           logger.error('Attendance group fixed schedule rebuild failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rebuild fixed schedule' } })
         }
-      }
+      })
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/clear',
-      async (req, res) => {
+      withPermission('attendance:admin', async (req, res) => {
         const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
         if (!actorAccess) return
         const schema = z.object({
@@ -44398,7 +44398,7 @@ module.exports = {
           logger.error('Attendance group fixed schedule clear failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to clear fixed schedule' } })
         }
-      }
+      })
     )
 
     const scheduleGroupSchema = z.object({
