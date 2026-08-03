@@ -423,7 +423,7 @@ async function runFlagArm(flagValue, expectEnabled, label) {
 // attempt, using only the runtime-database role/URL the workflow already provisioned.
 async function runFlagNormalizationArm(flagValue, label) {
   if (!RUNTIME_DB_ROLE || !RUNTIME_DB_URL) {
-    S[`${label}Run`] = 'NOT_RUN'
+    S[`${label}Pass`] = 'NOT_RUN'
     S[`${label}Reason`] = 'RUNTIME_DB_ENV_MISSING'
     must(`flag normalization arm ${label}: runtime constructed`, false, 'runtime DB env not provided by workflow')
     return
@@ -453,7 +453,7 @@ async function runFlagNormalizationArm(flagValue, label) {
   try {
     await startServer(runtimeEnv, label)
   } catch (error) {
-    S[`${label}Run`] = 'NOT_RUN'
+    S[`${label}Pass`] = 'NOT_RUN'
     S[`${label}Reason`] = 'RUNTIME_SERVER_START_FAILED'
     must(`flag normalization arm ${label}: runtime constructed`, false, String(error && error.message || error))
     return
@@ -465,7 +465,7 @@ async function runFlagNormalizationArm(flagValue, label) {
     S[`${label}HealthFlagOn`] = flagOn
     must(`flag normalization arm ${label}: string variant normalises to enabled (runtime CONSTRUCTED, not just flag-string-present)`,
       flagOn, `flagOn=${flagOn}`)
-    S[`${label}Run`] = flagOn ? 'PASS' : 'FAIL'
+    S[`${label}Pass`] = flagOn ? 'PASS' : 'FAIL'
   } finally {
     await stopServer()
   }
@@ -1063,8 +1063,10 @@ async function attemptS6ARealRun() {
       // Finding (review #4724): this early return used to fall straight through to main()'s evidence
       // write with NO s6aFlagOnRun key at all — absence of a key is not distinguishable from
       // not-applicable, and this IS the path that actually executes today. Always emit it, on every exit
-      // out of this function, not just the ones above.
-      S.s6aFlagOnRun = 'FAIL'
+      // out of this function, not just the ones above. NOT_RUN (not FAIL): this is the phase ROLL-UP key,
+      // and its vocabulary elsewhere in this function is PASS/NOT_RUN — "the walk did not establish its
+      // claim", not "the walk ran and failed" (that per-step verdict is S.s6aFirstRun, set above).
+      S.s6aFlagOnRun = 'NOT_RUN'
       S.s6aFlagOnReason = 'FIRST_RUN_FAILED'
       return
     }
@@ -1075,6 +1077,10 @@ async function attemptS6ARealRun() {
     const dbOk = await assertS6ARunDatabaseObservable(operationId, relation.rows.length)
     if (!dbOk) {
       S.s6aReplayRun = 'NOT_RUN'
+      // Same rationale as the !firstOk branch above: always emit the roll-up key on every exit out of
+      // this function.
+      S.s6aFlagOnRun = 'NOT_RUN'
+      S.s6aFlagOnReason = 'DATABASE_OBSERVABLE_FAILED'
       return
     }
 
