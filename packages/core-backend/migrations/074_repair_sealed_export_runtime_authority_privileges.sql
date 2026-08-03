@@ -25,7 +25,7 @@
 --   deletable. Note that has_table_privilege(role, table, 'UPDATE') stays FALSE
 --   for a column-level grant — that is expected, not a missing grant.
 --
--- Gap 2 — runtime role cannot read back its own audit insert.
+-- Gap 3 — runtime role cannot read back its own audit insert.
 --   073:583-588 grants INSERT only on
 --   integration_sealed_export_generation_audit to the runtime role, but every
 --   write helper in db.cjs appends RETURNING (insertOne db.cjs:231, insertMany
@@ -37,8 +37,8 @@
 --   guard trigger from 069:582 is untouched and no UPDATE/DELETE privilege is
 --   granted here.
 --
--- Deliberately NOT repaired here (see the PR body): the runtime role holds only
--- SELECT on integration_sealed_export_authority_state (073:571-576) while
+-- Gap 2 — deliberately NOT repaired here (see the PR body). The runtime role
+-- holds only SELECT on integration_sealed_export_authority_state (073:571-576) while
 -- generation-kernel.cjs:934 locks that row via generation-store.cjs:383 on the
 -- activation path (stock-preparation-runtime-core.cjs:470/480). Granting that
 -- lock would invert a ratified assertion —
@@ -151,7 +151,7 @@ BEGIN
     provisioning_role
   );
 
-  -- Gap 2: read-back of the runtime's own INSERT ... RETURNING on the audit
+  -- Gap 3: read-back of the runtime's own INSERT ... RETURNING on the audit
   -- ledger. No UPDATE/DELETE is granted, so audit rows stay append-only.
   EXECUTE format(
     'GRANT SELECT ON TABLE %I.%I TO %I',
