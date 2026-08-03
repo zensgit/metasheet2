@@ -48,11 +48,11 @@ describe('attendance advanced scheduling scope foundation', () => {
       ['PUT', '/api/attendance/scheduler-scopes/:id'],
       ['DELETE', '/api/attendance/scheduler-scopes/:id'],
       ['POST', '/api/attendance/groups/:id/fixed-schedule/preview'],
+      ['POST', '/api/attendance/groups/:id/fixed-schedule/apply'],
+      ['POST', '/api/attendance/groups/:id/fixed-schedule/rebuild'],
+      ['POST', '/api/attendance/groups/:id/fixed-schedule/clear'],
     ].forEach(([method, path]) => expectAdminRoute(method, path))
     expect(pluginSource).toContain('SCHEDULER_SCOPE_FORBIDDEN')
-    expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/apply')
-    expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/rebuild')
-    expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/clear')
     expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/approve')
     expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/reject')
     expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups')

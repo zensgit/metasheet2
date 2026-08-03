@@ -24,6 +24,7 @@ import {
 } from '../../src/attendance/w4c0-fingerprints'
 import { computeAttendanceSourceDefinitionFingerprintV1 } from '../../src/attendance/w4c1-fingerprints'
 import { ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1 } from '../../src/attendance/w4c1-segment-calculator'
+import { parseAttendanceW4ShadowDiff } from '../../src/services/AttendanceW4CalculationDetail'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -716,7 +717,7 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     }
   })
 
-  it('shadow manual edit preserves the legacy projection/response and durable operation', async () => {
+  it('shadow manual edit persists a non-null parsed diff and preserves the legacy projection', async () => {
     requireServer()
     const fixture = await seedUser({ permission: 'attendance:admin' })
     await seedOrgRollout(fixture.orgId, fixture.userId, 'shadow')
@@ -745,6 +746,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     })
     expect(response.status, response.raw).toBe(200)
     expect(response.body?.data?.record?.status).toBe('normal')
+    const calculationId = response.body?.data?.calculationId
+    expect(calculationId).toEqual(expect.any(String))
 
     const record = await pool.query(
       `SELECT status, work_minutes, late_minutes, current_calculation_id
@@ -770,6 +773,76 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       [fixture.orgId, operationId, recordId],
     )
     expect(durable.rows[0]).toMatchObject({ operations: 1, outbox: 1, calculations: 2, notified: 1 })
+
+    const calculation = await pool.query(
+      `SELECT shadow_diff_code, shadow_diff
+         FROM attendance_record_calculations
+        WHERE id = $1::uuid AND attendance_record_id = $2::uuid AND org_id = $3`,
+      [calculationId, recordId, fixture.orgId],
+    )
+    expect(calculation.rows).toHaveLength(1)
+    expect(parseAttendanceW4ShadowDiff(
+      calculation.rows[0].shadow_diff_code,
+      calculation.rows[0].shadow_diff,
+    )).toEqual({
+      schemaVersion: 1,
+      code: 'status_changed',
+      changedFields: ['status', 'workMinutes', 'lateMinutes'],
+      absoluteMinuteDelta: 35,
+      segmentCount: 1,
+    })
+  })
+
+  it('shadow recompute persists a non-null parsed diff through the real route', async () => {
+    requireServer()
+    const fixture = await seedUser({ permission: 'attendance:admin' })
+    await seedOrgRollout(fixture.orgId, fixture.userId, 'shadow')
+    const { recordId, workDate } = await seedRecord(fixture.orgId, fixture.userId)
+    const prior = await seedAuthoritativePrior(
+      fixture.orgId,
+      fixture.userId,
+      recordId,
+      workDate,
+      'shadow',
+    )
+    await pool.query(
+      `UPDATE attendance_records
+          SET status = 'normal', work_minutes = 420, late_minutes = 0
+        WHERE id = $1::uuid AND org_id = $2`,
+      [recordId, fixture.orgId],
+    )
+    const operationId = randomUUID()
+    const response = await requestJson(`${baseUrl}/api/attendance/records/${recordId}/recompute`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      body: {
+        policy: 'frozen_prior',
+        operationId,
+        expectedCalculationId: prior.calculationId,
+        expectedCalculationVersion: prior.calculationVersion,
+      },
+    })
+    expect(response.status, response.raw).toBe(200)
+    const calculationId = response.body?.data?.calculationId
+    expect(calculationId).toEqual(expect.any(String))
+
+    const calculation = await pool.query(
+      `SELECT shadow_diff_code, shadow_diff
+         FROM attendance_record_calculations
+        WHERE id = $1::uuid AND attendance_record_id = $2::uuid AND org_id = $3`,
+      [calculationId, recordId, fixture.orgId],
+    )
+    expect(calculation.rows).toHaveLength(1)
+    expect(parseAttendanceW4ShadowDiff(
+      calculation.rows[0].shadow_diff_code,
+      calculation.rows[0].shadow_diff,
+    )).toEqual({
+      schemaVersion: 1,
+      code: 'status_changed',
+      changedFields: ['status', 'workMinutes', 'lateMinutes'],
+      absoluteMinuteDelta: 120,
+      segmentCount: 1,
+    })
   })
 
   it('shadow status-only edit normalizes the W4 projection and legacy parent identically', async () => {

@@ -71,9 +71,9 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     rollout: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
   }
 
-  async function mintToken(userId: string): Promise<string> {
+  async function mintToken(userId: string, tenantId?: string): Promise<string> {
     const response = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}${tenantId ? `&tenantId=${encodeURIComponent(tenantId)}` : ''}&roles=admin&perms=${encodeURIComponent('*:*')}`,
     )
     const token = response.body?.token
     if (typeof token !== 'string' || !token) throw new Error(`failed to mint token: ${response.raw}`)
@@ -129,7 +129,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       )
     }
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
-    return { orgId, userId, token: await mintToken(userId) }
+    return { orgId, userId, token: await mintToken(userId, orgId) }
   }
 
   async function createRequest(
@@ -195,7 +195,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)',
       [userId, orgId],
     )
-    return { userId, token: await mintToken(userId) }
+    return { userId, token: await mintToken(userId, orgId) }
   }
 
   async function requestDecisionResidue(orgId: string, requestId: string, operationId: string | null = null) {
@@ -1183,7 +1183,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     {
       const fixture = await seedOrg('shadow')
       const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
-      const token = await mintToken(fixture.userId)
+      const token = await mintToken(fixture.userId, fixture.orgId)
       const operationId = randomUUID()
       const requestOptions = {
         method: 'POST',
@@ -1295,7 +1295,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     {
       const fixture = await seedOrg('shadow')
       const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
-      const token = await mintToken(fixture.userId)
+      const token = await mintToken(fixture.userId, fixture.orgId)
       const headers = {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
@@ -1351,7 +1351,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       const requestId = create.body?.data?.request?.id
       const operationId = randomUUID()
       const headers = {
-        Authorization: `Bearer ${await mintToken(pair.counterpartyId)}`,
+        Authorization: `Bearer ${await mintToken(pair.counterpartyId, fixture.orgId)}`,
         'Content-Type': 'application/json',
         'x-org-id': fixture.orgId,
       }
@@ -1587,7 +1587,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     {
       const fixture = await seedOrg('shadow')
       const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
-      const token = await mintToken(fixture.userId)
+      const token = await mintToken(fixture.userId, fixture.orgId)
       const before = await createResidue(fixture.orgId)
       const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
         method: 'POST',
@@ -1670,7 +1670,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     {
       const fixture = await seedOrg('legacy')
       const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
-      const token = await mintToken(fixture.userId)
+      const token = await mintToken(fixture.userId, fixture.orgId)
       const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
         method: 'POST',
         headers: {
@@ -1731,7 +1731,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
   it('P13 create families: body routeVariant spoof cannot change host source_ref', async () => {
     const fixture = await seedOrg('shadow')
     const targets = await seedScheduleDispatchTargets(fixture.orgId, fixture.userId)
-    const token = await mintToken(fixture.userId)
+    const token = await mintToken(fixture.userId, fixture.orgId)
     const operationId = randomUUID()
     const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
       method: 'POST',

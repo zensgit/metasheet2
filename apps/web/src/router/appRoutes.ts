@@ -85,6 +85,33 @@ export const appRoutes: RouteRecordRaw[] = [
     component: AttendanceExperienceView,
     meta: { title: 'Attendance', titleZh: '考勤', requiresAuth: true, requiredFeature: 'attendance' }
   },
+  // #4711 R0 (design lock docs/development/attendance-4711-group-context-routes-design-lock-20260801.md,
+  // OD-4711-1/-2): canonical group-context routes. Permission-neutral: requiresAuth plus the
+  // attendanceAdmin feature gate (design lock §3.2 — v1 audience is attendance administrators),
+  // with NO permissions/roles/requiresAdmin additions. R0 mounts NO group-scoped content and
+  // loads NO group data: the attendance shell hosts the URL until the R1 route-context host
+  // lands. The step union is closed by these three literal paths — unknown steps fall through
+  // to the not-found catch-all. Closed step/surface/returnTo parsing lives in
+  // src/router/attendanceGroupContextRoute.ts; attendance-focus reachability in
+  // src/router/guardPolicy.ts (isAttendanceFocusAllowedPath).
+  {
+    path: '/attendance/admin/groups/:groupId/schedule',
+    name: 'attendance-admin-group-schedule',
+    component: AttendanceExperienceView,
+    meta: { title: 'Group Schedule', titleZh: '班组排班', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
+  },
+  {
+    path: '/attendance/admin/groups/:groupId/calendar',
+    name: 'attendance-admin-group-calendar',
+    component: AttendanceExperienceView,
+    meta: { title: 'Group Calendar', titleZh: '班组日历', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
+  },
+  {
+    path: '/attendance/admin/groups/:groupId/rules',
+    name: 'attendance-admin-group-rules',
+    component: AttendanceExperienceView,
+    meta: { title: 'Group Rules', titleZh: '班组规则', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
+  },
   {
     path: ROUTE_PATHS.MULTITABLE_COMMENT_INBOX,
     name: AppRouteNames.MULTITABLE_COMMENT_INBOX,

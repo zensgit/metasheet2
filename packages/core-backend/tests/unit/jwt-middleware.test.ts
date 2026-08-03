@@ -103,6 +103,7 @@ describe('jwt auth middleware', () => {
       id: 'user-1',
       tenantId: 'tenant_42',
     })
+    expect(req.authenticatedTenantId).toBe('tenant_42')
     expect(next).toHaveBeenCalledTimes(1)
   })
 
@@ -136,6 +137,7 @@ describe('jwt auth middleware', () => {
       id: 'user-bound',
       tenantId: 'tenant_bound',
     })
+    expect(req.authenticatedTenantId).toBe('tenant_bound')
     expect(next).toHaveBeenCalledTimes(1)
   })
 
@@ -168,6 +170,7 @@ describe('jwt auth middleware', () => {
       id: 'user-2',
       tenantId: 'tenant_legacy',
     })
+    expect(req.authenticatedTenantId).toBeUndefined()
     expect(next).toHaveBeenCalledTimes(1)
   })
 

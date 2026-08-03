@@ -6,6 +6,7 @@ import {
 } from '../../src/attendance/w4c3b-approved-leave-cancellation'
 import { appendOperatorRetirementCalculationV1 } from '../../src/attendance/w4c3c-ops-retirement'
 import { calculateAttendanceSegmentsV1 } from '../../src/attendance/w4c1-segment-calculator'
+import { parseAttendanceW4ShadowDiff } from '../../src/services/AttendanceW4CalculationDetail'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -281,6 +282,40 @@ describeIfDatabase('W4C-3b P14 approved leave cancellation (real PostgreSQL)', (
         [result.calculationId],
       )
       expect(children.rows[0].n).toBe(2)
+    })
+  })
+
+  it('shadow approval cancellation persists a non-null parsed diff', async () => {
+    await rollbackTransaction(pool, async (client) => {
+      const fixture = await insertFrozenLeaveFixture(client)
+      const result = await appendApprovedLeaveCancellationCalculationV1({
+        client,
+        ...fixture,
+        operationId: uuid(),
+        actorId: 'w4c3b-p14-admin',
+        correlationId: 'w4c3b-p14-shadow-diff',
+        mode: 'shadow',
+      })
+      expect(result.kind).toBe('appended')
+      if (result.kind !== 'appended') throw new Error('expected appended shadow cancellation calculation')
+
+      const calculation = await client.query(
+        `SELECT shadow_diff_code, shadow_diff
+           FROM attendance_record_calculations
+          WHERE id = $1::uuid AND attendance_record_id = $2::uuid AND org_id = $3`,
+        [result.calculationId, fixture.recordId, fixture.orgId],
+      )
+      expect(calculation.rows).toHaveLength(1)
+      expect(parseAttendanceW4ShadowDiff(
+        calculation.rows[0].shadow_diff_code,
+        calculation.rows[0].shadow_diff,
+      )).toEqual({
+        schemaVersion: 1,
+        code: 'status_changed',
+        changedFields: ['status'],
+        absoluteMinuteDelta: 0,
+        segmentCount: 2,
+      })
     })
   })
 

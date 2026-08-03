@@ -8,6 +8,7 @@ const authServiceMocks = vi.hoisted(() => ({
   verifyToken: vi.fn(),
   createToken: vi.fn(),
   readTokenPayload: vi.fn(),
+  resolveSessionTenantId: vi.fn(),
 }))
 
 const inviteTokenMocks = vi.hoisted(() => ({
@@ -217,6 +218,8 @@ describe('auth login routes', () => {
     authServiceMocks.verifyToken.mockReset()
     authServiceMocks.createToken.mockReset()
     authServiceMocks.readTokenPayload.mockReset()
+    authServiceMocks.resolveSessionTenantId.mockReset()
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue(undefined)
     inviteTokenMocks.verifyInviteToken.mockReset()
     pgMocks.query.mockReset()
     bcryptMocks.hash.mockReset()
@@ -1274,6 +1277,7 @@ describe('auth login routes', () => {
       isNewUser: false,
     })
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:admin', 'workflow:read'])
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue('tenant_42')
     authServiceMocks.createToken.mockReturnValue('jwt-dingtalk-token')
     authServiceMocks.readTokenPayload.mockReturnValue({
       exp: expSeconds,
