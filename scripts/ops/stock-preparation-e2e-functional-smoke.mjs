@@ -895,6 +895,32 @@ async function attemptS6ARealRun() {
   }
 
   // 4. flag-ON restart with the full runtime authority wired.
+  //
+  // Temporary diagnostic (same in-process-replay idiom this file's own history already used once —
+  // see the removed error.stack replay noted in the toUtcSecondsIso comment above — captured, then
+  // deleted once the finding lands): `SEALED_EXPORT_BINDING_UNQUALIFIED` is thrown from ~45 call sites
+  // across two files, and this arm's flag-ON server runs in a SEPARATE spawned process, so a monkeypatch
+  // in THIS script's own process cannot see it. A `--require` preload injected into ONLY that spawned
+  // process wraps failSealedExport (patching failure-vocabulary.cjs's export before any other module
+  // requires it, so every downstream destructured reference picks up the wrapped version) and appends a
+  // fresh stack to a file for this reason ONLY — still throws exactly as before, changes no behavior.
+  // Read job-log only (via note()), never written to summary.txt/checks.json.
+  const stackCapturePath = path.join(keysDir, 'binding-unqualified-stacks.txt')
+  const preloadPath = path.join(keysDir, 'capture-binding-unqualified-stack.cjs')
+  fs.writeFileSync(preloadPath, `
+'use strict'
+const fs = require('node:fs')
+const vocab = require(${JSON.stringify(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/sealed-export/failure-vocabulary.cjs'))})
+const original = vocab.failSealedExport
+vocab.failSealedExport = function patched(reason, details) {
+  if (reason === 'SEALED_EXPORT_BINDING_UNQUALIFIED') {
+    try {
+      fs.appendFileSync(${JSON.stringify(stackCapturePath)}, new Error('capture').stack + '\\n---\\n')
+    } catch {}
+  }
+  return original(reason, details)
+}
+`)
   const runtimeEnv = {
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED: 'true',
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ARTIFACT_ROOT: ARTIFACT_ROOT,
@@ -905,6 +931,7 @@ async function attemptS6ARealRun() {
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_RUNTIME_DATABASE_ROLE: RUNTIME_DB_ROLE,
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_RUNTIME_DATABASE_URL: RUNTIME_DB_URL,
     MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_SIGNER_PRIVATE_KEY_FILE: signerKeyFile,
+    NODE_OPTIONS: `--require ${preloadPath}`,
   }
   try {
     await startServer(runtimeEnv, 'flag-on')
@@ -975,6 +1002,14 @@ async function attemptS6ARealRun() {
       // constraint requires one). This splits which half of the pipeline to look at — the closed
       // `error.code` alone cannot, since many call sites across the codebase share the same token.
       await assertS6ARunDatabaseObservableOnFailure(operationId)
+      // Job-log only (never in the uploaded evidence): the exact call-site stack(s) captured by the
+      // temporary --require preload above, if this failure was SEALED_EXPORT_BINDING_UNQUALIFIED.
+      try {
+        const stacks = fs.readFileSync(stackCapturePath, 'utf8')
+        note('S6-A: BINDING_UNQUALIFIED call-site stack(s) (job log only, not in uploaded evidence)', `\n${stacks}`)
+      } catch {
+        // no capture file — this failure was not BINDING_UNQUALIFIED, or the preload never loaded
+      }
       S.s6aDatabaseObservable = 'NOT_RUN'
       S.s6aReplayRun = 'NOT_RUN'
       return
