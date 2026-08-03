@@ -742,6 +742,48 @@ async function snapshotS6AWriteState(pool, operationId) {
   }
 }
 
+// Positive control on the OBSERVABILITY QUERIES THEMSELVES, independent of whether the walk succeeds.
+// assertS6ARunDatabaseObservable() and snapshotS6AWriteState() only execute on a successful walk, so
+// until one happens their SQL is unexercised text: a mistyped column would surface later as a FAIL that
+// is indistinguishable from a real defect. This runs the SAME queries against a scope that matches
+// nothing — proving they parse and every column resolves — on EVERY dispatch, including failing ones.
+async function assertS6AObservabilityQueriesResolve() {
+  try {
+    await withApplicationPool(async (pool) => {
+      const snapshot = await snapshotS6AWriteState(pool, '<no-such-operation-id>')
+      if (snapshot.runStatus !== '<none>' || snapshot.generationId !== '<none>') {
+        throw new Error('pre-flight scope unexpectedly matched a run row')
+      }
+      await pool.query(
+        `SELECT status, source_read_count, business_line_count, generation_id, ingestion_session_id
+         FROM integration_sealed_export_stock_prep_runs
+         WHERE tenant_id = $1 AND operation_id = $2`,
+        [TENANT_ID, '<no-such-operation-id>'],
+      )
+      await pool.query(
+        `SELECT status, applied_row_count FROM integration_sealed_export_generations
+         WHERE generation_id = $1 AND tenant_id = $2`,
+        ['<no-such-generation-id>', TENANT_ID],
+      )
+      await pool.query(
+        `SELECT status, accepted_chunk_count, expected_chunk_count
+         FROM integration_sealed_export_ingestion_sessions
+         WHERE session_id = $1 AND tenant_id = $2`,
+        ['<no-such-session-id>', TENANT_ID],
+      )
+    })
+    S.s6aObservabilityQueriesResolve = 'PASS'
+  } catch (error) {
+    S.s6aObservabilityQueriesResolve = 'FAIL'
+    must('S6-A: the database-observability queries parse and every column resolves (schema pre-flight, '
+      + 'scope matches nothing)', false, String(error && error.message || error))
+    return false
+  }
+  must('S6-A: the database-observability queries parse and every column resolves (schema pre-flight, '
+    + 'scope matches nothing)', true, 'preflight=PASS')
+  return true
+}
+
 async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineCount) {
   return withApplicationPool(async (pool) => {
     const runRows = await pool.query(
@@ -894,12 +936,31 @@ async function diagnoseS6ACaptureRefusal({
   S.s6aCaptureProbeSessionReason = '<none>'
   S.s6aCaptureProbeDriverCode = 'NOT_RUN'
   S.s6aCaptureProbeMetadata = 'NOT_RUN'
+  S.s6aCaptureProbeMetadataStrictObject = 'NOT_RUN'
+  S.s6aCaptureProbeMetadataTypes = 'NOT_RUN'
   S.s6aCaptureProbeOrderingKey = 'NOT_RUN'
   S.s6aCaptureProbeSourceRead = 'NOT_RUN'
   S.s6aCaptureProbeSourceReadRows = -1
+  S.s6aCaptureProbeRowStrictObject = 'NOT_RUN'
+  S.s6aCaptureProbeRowTypes = 'NOT_RUN'
   const closedReason = (error) => (
     error && typeof error.reason === 'string' ? error.reason : '<non-sealed-throw>'
   )
+  // VALUES-FREE by construction: emits the row's KEY NAMES — which are fixed aliases written by the
+  // production SQL builders, not customer data — and the `typeof` of each value. Never a value. This is
+  // what discriminates the row-shape family of SEALED_EXPORT_CAPTURE_FAILED sites (hasExactKeys, the
+  // strict-plain-object predicate, and the per-field normalizers) from every other family.
+  const shapeOf = (row) => {
+    if (row === null || typeof row !== 'object') return `<${typeof row}>`
+    return Object.keys(row)
+      .sort()
+      .map((key) => {
+        const value = row[key]
+        const kind = value === null ? 'null' : typeof value
+        return `${key}:${kind}`
+      })
+      .join('|')
+  }
   let context = null
   let connectionConfig = null
   try {
@@ -989,8 +1050,11 @@ async function diagnoseS6ACaptureRefusal({
     }
 
     try {
-      await context.queryMetadata(action.CAPTURE_METADATA_SQL)
+      const metadataRow = await context.queryMetadata(action.CAPTURE_METADATA_SQL)
       S.s6aCaptureProbeMetadata = 'PASS'
+      S.s6aCaptureProbeMetadataStrictObject =
+        String(canonicalCodec.__internals.isStrictPlainObject(metadataRow))
+      S.s6aCaptureProbeMetadataTypes = shapeOf(metadataRow)
     } catch (error) {
       S.s6aCaptureProbeMetadata = `REFUSED:${closedReason(error)}`
     }
@@ -1006,7 +1070,16 @@ async function diagnoseS6ACaptureRefusal({
     try {
       const started = await context.startSourceRead(relation.buildSourceReadSql(MSSQL_TABLE))
       let rows = 0
-      for await (const _row of started.stream) rows += 1
+      for await (const row of started.stream) {
+        if (rows === 0) {
+          // The FIRST streamed row is the one the production row normalizer sees first, so its shape
+          // is what decides hasExactKeys / isStrictPlainObject / the per-field normalizers.
+          S.s6aCaptureProbeRowStrictObject =
+            String(canonicalCodec.__internals.isStrictPlainObject(row))
+          S.s6aCaptureProbeRowTypes = shapeOf(row)
+        }
+        rows += 1
+      }
       const completion = await started.completion
       S.s6aCaptureProbeSourceReadRows = rows
       S.s6aCaptureProbeSourceRead = completion && completion.ok === true ? 'PASS' : 'FAIL'
@@ -1114,6 +1187,9 @@ async function attemptS6ARealRun() {
   // from "grep found no setTypeParser": read this row's TIMESTAMPTZ columns back over pg and report
   // whether the driver hands them back as native JS Date. Values-free — the type, never the value.
   await reportAdapterTimestampRuntimeType(systemId)
+  // Prove the observability queries themselves are sound BEFORE the walk needs them, so a green/red
+  // verdict from them later is about the walk and not about their own SQL.
+  await assertS6AObservabilityQueriesResolve()
 
   // 3. provisioning spec (inline external-system connection material — no DB registry lookup at
   // provisioning time; the runtime independently re-resolves the SAME record at run time).

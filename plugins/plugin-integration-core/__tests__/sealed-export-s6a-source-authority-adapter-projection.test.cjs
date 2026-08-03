@@ -354,6 +354,33 @@ function main() {
     'a member is read directly off the un-projected externalSystem argument',
   )
 
+  // ...and one frame DOWN. The projection function itself is the last place an unlisted
+  // member could be smuggled in (`projected.extra = raw.projectId`), and the read-set
+  // scan above never looks at its body. It must touch `raw` ONLY through
+  // hasOwnProperty.call(raw, field) and raw[field] — never a dotted member access.
+  const projectionBody = functionBody(
+    moduleSource,
+    'function projectExternalSystem(raw) {',
+  )
+  assert.equal(
+    /\braw\s*\.\s*[A-Za-z_$]/.test(projectionBody),
+    false,
+    'projectExternalSystem() reads a named member off the raw record — that member would '
+    + 'bypass EXTERNAL_SYSTEM_PROJECTION_FIELDS entirely',
+  )
+  assert.deepEqual(
+    sortedArray(memberReads(projectionBody, 'projected')),
+    [],
+    'projectExternalSystem() writes or reads a NAMED member on the projection — every '
+    + 'member must go through the EXTERNAL_SYSTEM_PROJECTION_FIELDS loop',
+  )
+  // Extractor self-test for this body too: an added dotted read must be detected.
+  assert.equal(
+    /\braw\s*\.\s*[A-Za-z_$]/.test(`${projectionBody}\n  projected.extra = raw.projectId\n`),
+    true,
+    'the projection-body scan did not notice a smuggled member read — it is decorative',
+  )
+
   // ── 5. PROJECTION DRIFT PIN (side B) — nothing listed may be unread ────────────────
   // Iterates the EXPORTED list, never a literal copy of it: adding a ninth member makes
   // this loop run a ninth arm, and poisoning a member nothing reads produces no refusal,
