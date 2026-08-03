@@ -132,6 +132,20 @@ export const ATTENDANCE_RECORD_STATUS_VALUES = [
 ] as const
 export type AttendanceRecordStatus = (typeof ATTENDANCE_RECORD_STATUS_VALUES)[number]
 
+function isAttendanceRecordStatus(value: unknown): value is AttendanceRecordStatus {
+  return (
+    typeof value === 'string' &&
+    (ATTENDANCE_RECORD_STATUS_VALUES as readonly string[]).includes(value)
+  )
+}
+
+function parsePersistedNonNegativeInteger(value: unknown): number | null {
+  if (typeof value !== 'number' && typeof value !== 'string') return null
+  if (typeof value === 'string' && value.trim() === '') return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null
+}
+
 // -------------------------------------------------------------------------------------------------
 // Row shapes read directly off storage (documented per-table so a future maintainer does not have
 // to re-derive them from migrations/index.cjs — same discipline as the W4-0 module).
@@ -464,7 +478,25 @@ export async function buildTodayStatusTrace(
     }
   }
 
-  const status = record.status as AttendanceRecordStatus
+  if (!isAttendanceRecordStatus(record.status)) {
+    return {
+      category: 'today_status',
+      conclusion: {
+        workDate,
+        status: null,
+        isWorkday: null,
+        workMinutes: null,
+        lateMinutes: null,
+        earlyLeaveMinutes: null,
+      },
+      basis: [
+        { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'undeterminable' } },
+      ],
+      confidence: 'undeterminable',
+    }
+  }
+
+  const status = record.status
   const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
   const correction = await readMostRecentResultEdit(orgId, userId, workDate, runQuery)
 
@@ -594,7 +626,26 @@ export async function buildLateEarlyTrace(
     }
   }
 
-  const status = record.status as AttendanceRecordStatus
+
+  if (!isAttendanceRecordStatus(record.status)) {
+    return {
+      category: 'late_early',
+      conclusion: {
+        lateMinutes: null,
+        earlyLeaveMinutes: null,
+        severeLateCount: null,
+        severeLateMinutes: null,
+        absenceLateCount: null,
+        status: null,
+      },
+      basis: [
+        { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'undeterminable' } },
+      ],
+      confidence: 'undeterminable',
+    }
+  }
+
+  const status = record.status
   const meta = (record.meta ?? {}) as Record<string, unknown>
   // §1-2 / §3.2 last row: tier counts are a HALF-snapshot — the RESULT is frozen in `meta` at
   // upsert time, but the threshold VALUE itself is not. Legacy rows predating #3055 never carry
@@ -604,6 +655,18 @@ export async function buildLateEarlyTrace(
     Object.prototype.hasOwnProperty.call(meta, 'severe_late_count') &&
     Object.prototype.hasOwnProperty.call(meta, 'severe_late_minutes') &&
     Object.prototype.hasOwnProperty.call(meta, 'absence_late_count')
+  const tierValues = hasTierKeys
+    ? {
+        severeLateCount: parsePersistedNonNegativeInteger(meta.severe_late_count),
+        severeLateMinutes: parsePersistedNonNegativeInteger(meta.severe_late_minutes),
+        absenceLateCount: parsePersistedNonNegativeInteger(meta.absence_late_count),
+      }
+    : null
+  const hasValidTierSnapshot =
+    tierValues !== null &&
+    tierValues.severeLateCount !== null &&
+    tierValues.severeLateMinutes !== null &&
+    tierValues.absenceLateCount !== null
   const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
   const correction = await readMostRecentResultEdit(orgId, userId, workDate, runQuery)
   const remediation = await runQuery<{ id: string; metadata: Record<string, unknown> | null; created_at: string }>(
@@ -624,7 +687,9 @@ export async function buildLateEarlyTrace(
     },
     {
       source: { kind: 'record', ref: 'attendance_records.meta.tier' },
-      version: hasTierKeys ? { posture: 'snapshot_frozen', asOf: record.updated_at } : { posture: 'undeterminable' },
+      version: hasValidTierSnapshot
+        ? { posture: 'snapshot_frozen', asOf: record.updated_at }
+        : { posture: 'undeterminable' },
     },
     currentRuleBasisEnv(rule),
   ]
@@ -663,9 +728,9 @@ export async function buildLateEarlyTrace(
     conclusion: {
       lateMinutes: record.late_minutes,
       earlyLeaveMinutes: record.early_leave_minutes,
-      severeLateCount: hasTierKeys ? Number(meta.severe_late_count) || 0 : null,
-      severeLateMinutes: hasTierKeys ? Number(meta.severe_late_minutes) || 0 : null,
-      absenceLateCount: hasTierKeys ? Number(meta.absence_late_count) || 0 : null,
+      severeLateCount: hasValidTierSnapshot ? tierValues.severeLateCount : null,
+      severeLateMinutes: hasValidTierSnapshot ? tierValues.severeLateMinutes : null,
+      absenceLateCount: hasValidTierSnapshot ? tierValues.absenceLateCount : null,
       status,
     },
     basis,
@@ -836,9 +901,9 @@ export async function buildMissingPunchTrace(
     { orgId, userId, workDate },
     'id, status, is_workday, work_minutes, late_minutes, early_leave_minutes, meta, source_batch_id, created_at, updated_at, first_in_at, last_out_at',
   )
-  const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
   // §3.3③ fail-closed: no record AND the current rule cannot resolve ⇒整类 undeterminable.
   if (!record) {
+    const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
     const basis: AttendanceDecisionTraceBasisEnv[] = [
       { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'undeterminable' } },
     ]
@@ -851,6 +916,18 @@ export async function buildMissingPunchTrace(
     }
   }
 
+  if (!isAttendanceRecordStatus(record.status)) {
+    return {
+      category: 'missing_punch',
+      conclusion: { missingSide: null, isWorkday: null, suggestedRequestType: null },
+      basis: [
+        { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'undeterminable' } },
+      ],
+      confidence: 'undeterminable',
+    }
+  }
+
+  const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
   const classification = classifyAttendanceOwedPunch(record)
   const suggested = suggestAttendanceRequestType(record)
   const remediation = await runQuery<{ id: string; created_at: string; metadata: Record<string, unknown> | null }>(
@@ -997,12 +1074,45 @@ export async function buildOvertimeSegmentationTrace(
   // (R4). `snapshot.dayType` is also validated here (never `?? 'restday'` — a malformed/legacy
   // `dayType` outside the closed set falls through to the `partial_legacy` branch instead of a
   // fabricated default, §3.1 hard rule 3).
+  const snapshotSegments =
+    snapshot &&
+    typeof snapshot.segments === 'object' &&
+    snapshot.segments !== null &&
+    !Array.isArray(snapshot.segments)
+      ? snapshot.segments as Record<string, unknown>
+      : null
+  const snapshotWorkdayMinutes = parsePersistedNonNegativeInteger(snapshotSegments?.workdayMinutes)
+  const snapshotRestdayMinutes = parsePersistedNonNegativeInteger(snapshotSegments?.restdayMinutes)
+  const snapshotHolidayMinutes = parsePersistedNonNegativeInteger(snapshotSegments?.holidayMinutes)
+  const snapshotTotalMinutes = parsePersistedNonNegativeInteger(snapshot?.totalMinutes)
+  const rawPerDate = snapshot?.perDate
+  const parsedPerDate = Array.isArray(rawPerDate)
+    ? rawPerDate.map((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+        const item = entry as Record<string, unknown>
+        const minutes = parsePersistedNonNegativeInteger(item.minutes)
+        if (!OVERTIME_DAY_TYPES.has(item.dayType as string) || minutes === null) return null
+        return {
+          dayType: item.dayType as AttendanceOvertimeDayType,
+          minutes,
+          calendar: item.calendar,
+        }
+      })
+    : null
+  const perDateValid =
+    rawPerDate === undefined ||
+    (parsedPerDate !== null && parsedPerDate.every((entry) => entry !== null))
   const snapshotValid =
     !!snapshot &&
     typeof snapshot === 'object' &&
     snapshot.version === OVERTIME_SEGMENTATION_VERSION &&
     snapshot.engine === OVERTIME_SEGMENTATION_ENGINE &&
     OVERTIME_DAY_TYPES.has(snapshot.dayType as string) &&
+    snapshotWorkdayMinutes !== null &&
+    snapshotRestdayMinutes !== null &&
+    snapshotHolidayMinutes !== null &&
+    snapshotTotalMinutes !== null &&
+    perDateValid &&
     row.resolved_at != null
   // Never fabricated from `updated_at` (§3.2 "不得伪造时点") — `undefined` when the request has not
   // been through terminal review; envs below fail closed to `undeterminable` rather than borrow it.
@@ -1016,23 +1126,21 @@ export async function buildOvertimeSegmentationTrace(
   let totalMinutes = 0
 
   if (snapshotValid) {
-    const segs = (snapshot!.segments ?? {}) as Record<string, unknown>
-    workdayMinutes = Number(segs.workdayMinutes) || 0
-    restdayMinutes = Number(segs.restdayMinutes) || 0
-    holidayMinutes = Number(segs.holidayMinutes) || 0
-    totalMinutes = Number(snapshot!.totalMinutes) || 0
+    workdayMinutes = snapshotWorkdayMinutes
+    restdayMinutes = snapshotRestdayMinutes
+    holidayMinutes = snapshotHolidayMinutes
+    totalMinutes = snapshotTotalMinutes
     // §9 W5-0-G7 two-user ⑤ fidelity note carried over to ④: `crossesMidnight` snapshots
     // (`buildCrossMidnightOvertimeSegmentationSnapshot`, `index.cjs:10669-10715`) carry a `perDate`
     // array — one entry PER SPANNED DATE, each with its own `dayType`/`minutes`/`calendar`. Walking
     // it (instead of collapsing to the primary date only) keeps Σsegments[].minutes === totalMinutes
     // and preserves each date's own `reasonCode`/`holidayName` (R2 — no discarded storage rows).
-    const perDate = Array.isArray(snapshot!.perDate) ? (snapshot!.perDate as Array<Record<string, unknown>>) : null
-    const segmentSources: Array<{ dayType: unknown; minutes: unknown; calendar: unknown }> =
-      perDate && perDate.length > 0
-        ? perDate.map((entry) => ({ dayType: entry.dayType, minutes: entry.minutes, calendar: entry.calendar }))
+    const segmentSources: Array<{ dayType: AttendanceOvertimeDayType; minutes: number; calendar: unknown }> =
+      parsedPerDate && parsedPerDate.length > 0
+        ? parsedPerDate as Array<{ dayType: AttendanceOvertimeDayType; minutes: number; calendar: unknown }>
         : [
             {
-              dayType: snapshot!.dayType,
+              dayType: snapshot!.dayType as AttendanceOvertimeDayType,
               minutes:
                 snapshot!.dayType === 'workday'
                   ? workdayMinutes
@@ -1041,14 +1149,13 @@ export async function buildOvertimeSegmentationTrace(
                     : restdayMinutes,
               calendar: snapshot!.calendar,
             },
-          ]
+        ]
     for (const entry of segmentSources) {
-      const dayType = OVERTIME_DAY_TYPES.has(entry.dayType as string) ? (entry.dayType as AttendanceOvertimeDayType) : 'restday'
       const calendar = (entry.calendar ?? {}) as Record<string, unknown>
       const effectiveSource = typeof calendar.effectiveSource === 'string' && calendar.effectiveSource ? calendar.effectiveSource : undefined
       segments.push({
-        dayType,
-        minutes: Number(entry.minutes) || 0,
+        dayType: entry.dayType,
+        minutes: entry.minutes,
         ...(effectiveSource ? { reasonCode: effectiveSource } : {}),
         holidayName: typeof calendar.holidayName === 'string' ? calendar.holidayName : null,
       })
@@ -1059,7 +1166,7 @@ export async function buildOvertimeSegmentationTrace(
     })
   } else {
     basis.push({ source: { kind: 'snapshot', ref: 'attendance_requests.metadata.overtimeSegmentation' }, version: { posture: 'undeterminable' } })
-    totalMinutes = Number(metadata.minutes) || 0
+    totalMinutes = parsePersistedNonNegativeInteger(metadata.minutes) ?? 0
   }
 
   const overtimeRule = metadata.overtimeRule
