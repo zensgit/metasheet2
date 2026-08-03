@@ -6,9 +6,12 @@
 // This is deliberately a FAILING run. It reuses the SAME startServer/stopServer/getDevToken/
 // s6aRunProbe/must functions the main harness (stock-preparation-e2e-functional-smoke.mjs) uses — not a
 // re-implementation — and asserts the WRONG expectation on purpose: that the flag-OFF S6-A route
-// returns 200 instead of the real 404 STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_DISABLED. Because the
-// route genuinely 404s when the flag is absent, this assertion genuinely fails and the process exits
-// non-zero, so the CI job it runs in genuinely goes RED.
+// returns 200 instead of the real 404 (the route is not registered at all when the flag is off — see the
+// block comment above runFlagArm() in stock-preparation-e2e-functional-smoke.mjs; it is a generic
+// unmatched-route 404, not the STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_DISABLED JSON error, which is
+// unreachable dead code under current wiring). Because the route genuinely 404s when the flag is absent,
+// this assertion genuinely fails and the process exits non-zero, so the CI job it runs in genuinely goes
+// RED.
 //
 // Purpose: prove the harness's real assertion machinery (the same `must()` used everywhere else in this
 // lane) is load-bearing — a harness that can only ever report PASS proves nothing (repo standing
@@ -35,7 +38,7 @@ async function main() {
     // remove the one deliberately-red arm this lane is required to carry.
     const deliberatelyWrong = probe.status === 200
     must('NEGATIVE CONTROL (expected to fail): flag-OFF S6-A route returns 200', deliberatelyWrong,
-      `http=${probe.status} (real behavior is 404 DISABLED; this arm asserts the wrong thing on purpose)`)
+      `http=${probe.status} (real behavior is 404, route not registered; this arm asserts the wrong thing on purpose)`)
     // If the probe genuinely came back 200, the S6-A gate is broken for real — that is NOT the intended
     // negative-control signal, it is a live product bug, and must be reported as such, not folded into
     // "the harness can fail" story.

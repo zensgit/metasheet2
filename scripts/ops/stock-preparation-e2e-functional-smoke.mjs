@@ -235,6 +235,26 @@ export async function s6aRunProbe(token, operationId) {
   })
 }
 
+// NOTE on the DISABLED error code: plugin-integration-core only ADDS the S6-A route to the Express app
+// (registerIntegrationRoutes, http-routes.cjs ~5003-5006) when services.stockPreparationSqlServerRuntime
+// is truthy at plugin-construction time — i.e. only when the flag was already 'true' at boot. When the
+// flag is off, the route is never mounted at all, so a request to it falls through to the framework's
+// generic unmatched-route 404 (no JSON error envelope, no `error.code`) — it does NOT reach the
+// `STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_DISABLED` HttpRouteError inside the handler
+// (http-routes.cjs ~4900-4911), because that handler is unreachable code under this wiring: the same
+// truthy/falsy check gates both route registration and the handler's local runtime reference. This is
+// confirmed by the existing unit test plugin-integration-core/__tests__/http-routes.test.cjs
+// `testStockPreparationSqlServerSealedSnapshotInternalRoute`, which asserts
+// `disabled.routes.has('POST ' + routePath) === false` for the flag-off construction. So this arm does
+// NOT assert the specific JSON error code (that would be asserting dead code) — it asserts three things
+// together, which is what actually distinguishes "genuinely gated" from "route never wired / auth or
+// prefix broken / typo'd path", none of which a bare `http === 404` can rule out on its own:
+//   1. /api/integration/health capability boolean reads false (a deliberate signal — Boolean(runtime) —
+//      not an absence: plugin-integration-core/index.cjs ~96)
+//   2. a SIBLING route that is ALWAYS registered regardless of the flag (mvp/readiness) answers 200 in
+//      the SAME server process — proving the server, auth, and /api/integration prefix are alive, so the
+//      S6-A 404 cannot be explained by "nothing is mounted"
+//   3. the S6-A path itself returns 404
 async function runFlagArm(flagValue, expectEnabled, label) {
   await startServer(
     flagValue === undefined
@@ -246,15 +266,20 @@ async function runFlagArm(flagValue, expectEnabled, label) {
     const token = await getDevToken()
     const health = await requestJson('/api/integration/health', { token })
     const flagOn = health.body?.capabilities?.stockPreparationSqlServerSealedSnapshot === true
+    const sibling = await requestJson('/api/integration/stock-preparation/mvp/readiness', { token, accept: [200] })
     const probe = await s6aRunProbe(token, `probe-${label}-${crypto.randomUUID()}`)
     S[`${label}HealthFlagOn`] = flagOn
+    S[`${label}SiblingRouteHttp`] = sibling.status
     S[`${label}Http`] = probe.status
+    // Informational only (kept for evidence/debuggability) — NOT part of the pass condition. See the
+    // block comment above: this code is unreachable dead code under current route-registration wiring
+    // when the flag is off, so requiring it here would assert a claim the shipped code cannot make true.
     S[`${label}Code`] = probe.body?.error?.code || '<none>'
     const pass = expectEnabled
-      ? flagOn === true
-      : flagOn === false && probe.status === 404 && probe.body?.error?.code === 'STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_DISABLED'
-    must(`flag arm ${label}: ${expectEnabled ? 'flag reads enabled' : '404 DISABLED (flag not enabled)'}`, pass,
-      `flagOn=${flagOn} http=${probe.status} code=${S[`${label}Code`]}`)
+      ? flagOn === true && sibling.ok
+      : flagOn === false && sibling.ok && probe.status === 404
+    must(`flag arm ${label}: ${expectEnabled ? 'flag reads enabled (+ sibling route alive)' : 'flag reads disabled + sibling route alive + S6-A 404'}`,
+      pass, `flagOn=${flagOn} siblingHttp=${sibling.status} http=${probe.status} code=${S[`${label}Code`]}`)
     S[`${label}Pass`] = pass ? 'PASS' : 'FAIL'
   } finally {
     await stopServer()
@@ -566,12 +591,24 @@ async function attemptS6ARealRun() {
   }
   const provisioned = await runProvisioningScript(provisioningEnv)
   let provisionedOk = false
+  let provisioningFailureCode = '<unparseable>'
   try {
     const parsed = JSON.parse(provisioned.stdout.trim().split('\n').pop() || '{}')
     provisionedOk = provisioned.code === 0 && parsed.ok === true && parsed.externalWrite === false && parsed.valuesFree === true
     S.s6aProvisioningChanged = typeof parsed.changed === 'boolean' ? String(parsed.changed) : '<unregistered>'
+    // The provisioning script's own failure contract declares `valuesFree: true` on its `code` field
+    // (plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs)
+    // — safe to surface for diagnosis. Job-log only (process.stderr): this is NOT written to
+    // summary.txt/checks.json, which are uploaded as CI artifacts and must stay strictly values-free —
+    // the failure-vocabulary `code` enum is trusted, but keeping it out of the retained evidence artifact
+    // is the conservative choice.
+    if (!provisionedOk && typeof parsed.code === 'string') provisioningFailureCode = parsed.code
   } catch {
     provisionedOk = false
+  }
+  if (!provisionedOk) {
+    note('S6-A: provisioning script failure detail (job log only, not in uploaded evidence)',
+      `code=${provisioningFailureCode}`)
   }
   must('S6-A: provisioning script -> ok:true, externalWrite:false, valuesFree:true', provisionedOk,
     `exit=${provisioned.code}`)
