@@ -475,7 +475,7 @@ CREATE TABLE ${MSSQL_TABLE} (
 // regardless of how correct the fixture data is. This function only OBSERVES; it does not change what the
 // production code does.
 async function diagnoseOrderingKeyProbeShape() {
-  const { CERTIFIED_RELATIONS } = requireFromPlugin(
+  const { CERTIFIED_RELATIONS } = require_(
     'plugins/plugin-integration-core/lib/sealed-export/sqlserver-sealed-snapshot-action.cjs',
   )
   const relation = CERTIFIED_RELATIONS['sqlserver.relation.rowid_payload.v1']
