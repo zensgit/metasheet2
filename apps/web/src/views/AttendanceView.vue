@@ -11872,6 +11872,7 @@ const ruleTemplateLoading = ref(false)
 const ruleTemplateSaving = ref(false)
 const ruleTemplateRestoring = ref(false)
 const attendanceGroupLoading = ref(false)
+let attendanceGroupLoadGeneration = 0
 const attendanceGroupSaving = ref(false)
 const attendanceGroupMemberLoading = ref(false)
 const attendanceGroupMemberSaving = ref(false)
@@ -27308,6 +27309,7 @@ async function copyAttendanceGroup(item: AttendanceGroup) {
 }
 
 async function loadAttendanceGroups() {
+  const generation = ++attendanceGroupLoadGeneration
   attendanceGroupLoading.value = true
   try {
     const previousRouteGroup = props.routeGroupContext
@@ -27315,11 +27317,13 @@ async function loadAttendanceGroups() {
       : undefined
     const query = buildQuery({ orgId: normalizedOrgId(), pageSize: '200' })
     const response = await apiFetch(`/api/attendance/groups?${query.toString()}`)
+    if (generation !== attendanceGroupLoadGeneration) return
     if (response.status === 403) {
       adminForbidden.value = true
       return
     }
     const data = await response.json()
+    if (generation !== attendanceGroupLoadGeneration) return
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
@@ -27346,9 +27350,12 @@ async function loadAttendanceGroups() {
       resetAttendanceGroupForm()
     }
   } catch (error: any) {
+    if (generation !== attendanceGroupLoadGeneration) return
     setStatus(readErrorMessage(error, tr('Failed to load attendance groups', '加载考勤分组失败')), 'error')
   } finally {
-    attendanceGroupLoading.value = false
+    if (generation === attendanceGroupLoadGeneration) {
+      attendanceGroupLoading.value = false
+    }
   }
 }
 

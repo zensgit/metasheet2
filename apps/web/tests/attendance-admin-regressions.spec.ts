@@ -3806,10 +3806,17 @@ describe('Attendance admin regressions', () => {
     }
     const savedNames: string[] = []
     const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    let listCalls = 0
+    let resolveOldestList!: (response: Response) => void
+    const oldestList = new Promise<Response>((resolve) => {
+      resolveOldestList = resolve
+    })
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.startsWith('/api/attendance/groups?') && method === 'GET') {
+        listCalls += 1
+        if (listCalls === 1) return oldestList
         return jsonResponse(200, { ok: true, data: { items: [], total: 250, page: 1, pageSize: 200 } })
       }
       if (url === '/api/attendance/groups/group-a' && method === 'PUT') {
@@ -3837,6 +3844,13 @@ describe('Attendance admin regressions', () => {
       .click()
     setInput(container!, '#attendance-group-name', 'First saved value')
     save()
+    await flushUi(8)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-group-name')?.value).toBe('First saved value')
+
+    resolveOldestList(jsonResponse(200, {
+      ok: true,
+      data: { items: [routeGroup], total: 250, page: 1, pageSize: 200 },
+    }))
     await flushUi(8)
     expect(container!.querySelector<HTMLInputElement>('#attendance-group-name')?.value).toBe('First saved value')
 
