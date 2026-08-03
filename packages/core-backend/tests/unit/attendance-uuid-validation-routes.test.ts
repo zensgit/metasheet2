@@ -3910,4 +3910,136 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({ ok: true, data: { id: attendanceGroupId } })
   })
+
+  it('saves fixed-schedule desired config through dispatch authorization without assignment writes', async () => {
+    const { db, routes } = await createHarness('false')
+    const configId = '00000000-0000-4000-8000-000000000399'
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT id FROM attendance_groups')) return [{ id: attendanceGroupId }]
+      if (sql.includes('SELECT id FROM attendance_shifts')) return [{ id: shiftId }]
+      if (sql.includes('INSERT INTO attendance_group_fixed_schedule_configs')) {
+        expect(params).toEqual(['default', attendanceGroupId, shiftId, '2026-06-01', '2026-06-30', 'admin-1'])
+        return [{
+          id: configId,
+          org_id: 'default',
+          group_id: attendanceGroupId,
+          shift_id: shiftId,
+          start_date: '2026-06-01',
+          end_date: '2026-06-30',
+          revision: 1,
+          updated_by: 'admin-1',
+          created_at: '2026-08-03T00:00:00.000Z',
+          updated_at: '2026-08-03T00:00:00.000Z',
+        }]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', {
+      params: { groupId: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { id: configId, revision: 1, updatedBy: 'admin-1' } })
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+    const sql = db.query.mock.calls.map(([statement]) => String(statement)).join('\n')
+    expect(sql).not.toContain('attendance_shift_assignments')
+    expect(sql).not.toContain('attendance_notification')
+    expect(sql).not.toContain('attendance_outbox')
+  })
+
+  it('requires fixed-schedule dispatch authority before saving desired config', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('SELECT id FROM attendance_groups')) return [{ id: attendanceGroupId }]
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeFixedScheduleRow(['clear'])]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', {
+      params: { groupId: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects fixed-schedule actor and organization spoofing before scoped SQL', async () => {
+    const cases = [
+      { name: 'body org', options: { body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30', orgId: 'other-org' } } },
+      { name: 'query org', options: { query: { orgId: 'other-org' } } },
+      { name: 'header org', options: { headers: { 'x-org-id': 'other-org' } } },
+      { name: 'header user', options: { headers: { 'x-user-id': 'other-user' } } },
+    ]
+    const defaultBody = { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' }
+
+    for (const testCase of cases) {
+      const { db, routes } = await createHarness()
+      const res = await invokeRoute(routes, 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', {
+        params: { groupId: attendanceGroupId },
+        body: defaultBody,
+        ...testCase.options,
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+      expect(res.statusCode, testCase.name).toBe(403)
+      expect(db.query, testCase.name).not.toHaveBeenCalled()
+      expect(db.transaction, testCase.name).not.toHaveBeenCalled()
+    }
+  })
+
+  it('uses authenticated actor context on every existing fixed-schedule route', async () => {
+    const cases = [
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/preview', params: { id: attendanceGroupId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', params: { id: attendanceGroupId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', params: { id: attendanceGroupId } },
+      { key: 'POST /api/attendance/groups/:id/fixed-schedule/clear', params: { id: attendanceGroupId } },
+    ]
+    const body = { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' }
+
+    for (const testCase of cases) {
+      const { db, routes } = await createHarness()
+      const res = await invokeRoute(routes, testCase.key, {
+        params: testCase.params,
+        body,
+        headers: { 'x-user-id': 'forged-user' },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+      expect(res.statusCode, testCase.key).toBe(403)
+      expect(db.query, testCase.key).not.toHaveBeenCalled()
+      expect(db.transaction, testCase.key).not.toHaveBeenCalled()
+    }
+  })
+
+  it('fails fixed-schedule routes closed when authenticated actor context is incomplete', async () => {
+    const body = { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' }
+    const { db: missingUserDb, routes: missingUserRoutes } = await createHarness()
+    const missingUser = await invokeRoute(missingUserRoutes, 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', {
+      params: { groupId: attendanceGroupId },
+      body,
+      user: { orgId: 'default' },
+    })
+    expect(missingUser.statusCode).toBe(401)
+    expect(missingUserDb.query).not.toHaveBeenCalled()
+
+    const { db: missingOrgDb, routes: missingOrgRoutes } = await createHarness()
+    const missingOrg = await invokeRoute(missingOrgRoutes, 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', {
+      params: { groupId: attendanceGroupId },
+      body,
+      user: { id: 'admin-1' },
+    })
+    expect(missingOrg.statusCode).toBe(403)
+    expect(missingOrg.body).toMatchObject({ error: { message: 'Authenticated organization not found' } })
+    expect(missingOrgDb.query).not.toHaveBeenCalled()
+  })
 })
