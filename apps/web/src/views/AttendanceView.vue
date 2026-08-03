@@ -27310,6 +27310,9 @@ async function copyAttendanceGroup(item: AttendanceGroup) {
 async function loadAttendanceGroups() {
   attendanceGroupLoading.value = true
   try {
+    const previousRouteGroup = props.routeGroupContext
+      ? attendanceGroups.value.find(item => item.id === props.routeGroupContext?.group.id)
+      : undefined
     const query = buildQuery({ orgId: normalizedOrgId(), pageSize: '200' })
     const response = await apiFetch(`/api/attendance/groups?${query.toString()}`)
     if (response.status === 403) {
@@ -27327,7 +27330,9 @@ async function loadAttendanceGroups() {
       const listedGroup = attendanceGroups.value.find(item => item.id === props.routeGroupContext?.group.id)
       hydrateAttendanceGroupFromRoute(
         props.routeGroupContext,
-        listedGroup ? { ...props.routeGroupContext.group, ...listedGroup } : props.routeGroupContext.group,
+        listedGroup
+          ? { ...props.routeGroupContext.group, ...listedGroup }
+          : previousRouteGroup ?? props.routeGroupContext.group,
       )
       return
     }
@@ -27385,6 +27390,9 @@ async function saveAttendanceGroup() {
     // populated instead of resetting, so the reset-side clear never fires here).
     clearSetupTemplatePrefillPending('group')
     const savedGroup = data.data as AttendanceGroup | undefined
+    if (savedGroup?.id && props.routeGroupContext?.group.id === savedGroup.id) {
+      hydrateAttendanceGroupFromRoute(props.routeGroupContext, savedGroup)
+    }
     await loadAttendanceGroups()
     if (savedGroup?.id && !props.routeGroupContext) {
       const freshGroup = attendanceGroups.value.find(item => item.id === savedGroup.id) ?? savedGroup
@@ -29071,8 +29079,8 @@ watch(
   },
 )
 
-watch(attendanceGroupMemberGroupId, () => {
-  if (attendancePluginActive.value) {
+watch([attendanceGroupMemberGroupId, attendancePluginActive], ([, pluginActive]) => {
+  if (pluginActive) {
     loadAttendanceGroupMembers()
     loadAttendanceGroupManagers()
   }

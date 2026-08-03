@@ -18,10 +18,15 @@ describe('attendance web guard workflow contract', () => {
   })
 
   it('keeps this contract spec in the classifier and targeted run list', () => {
+    const stepStart = workflow.indexOf('      - name: Run attendance web guard specs (targeted)')
+    const nextStepStart = workflow.indexOf('\n      - name:', stepStart + 1)
+    const targetedStep = workflow.slice(stepStart, nextStepStart === -1 ? undefined : nextStepStart)
+    expect(stepStart).toBeGreaterThan(-1)
     expect(workflow.match(/apps\/web\/tests\/attendance-web-guard-workflow\.spec\.ts/g)).toHaveLength(2)
     expect(workflow).toContain(' attendance-web-guard-workflow.spec --reporter=dot')
     expect(workflow).toContain("if: steps.changes.outputs.relevant == 'true'")
-    expect(workflow).toContain('NODE_OPTIONS: --max-old-space-size=8192')
+    expect(targetedStep).toContain('NODE_OPTIONS: --max-old-space-size=8192')
+    expect(workflow.match(/NODE_OPTIONS: --max-old-space-size=8192/g)).toHaveLength(1)
   })
 
   it('keeps the group-context route host proof in the classifier and targeted run list', () => {

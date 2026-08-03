@@ -11,20 +11,26 @@ import {
   type BatchAnomalyRowSnapshot,
 } from '../src/views/attendance/batchAnomalyResolution'
 
+type MockPlugin = { name: string; status: 'active' | 'inactive' | 'failed' }
+const pluginHarness = vi.hoisted(() => ({
+  initialPlugins: [{ name: 'plugin-attendance', status: 'active' }] as MockPlugin[],
+  plugins: null as { value: MockPlugin[] } | null,
+  fetchPlugins: vi.fn(),
+}))
+
 vi.mock('../src/composables/usePlugins', () => ({
-  usePlugins: () => ({
-    plugins: ref([
-      {
-        name: 'plugin-attendance',
-        status: 'active',
-      },
-    ]),
-    views: ref([]),
-    navItems: ref([]),
-    loading: ref(false),
-    error: ref(null),
-    fetchPlugins: vi.fn().mockResolvedValue(undefined),
-  }),
+  usePlugins: () => {
+    const plugins = ref<MockPlugin[]>(pluginHarness.initialPlugins)
+    pluginHarness.plugins = plugins
+    return {
+      plugins,
+      views: ref([]),
+      navItems: ref([]),
+      loading: ref(false),
+      error: ref(null),
+      fetchPlugins: pluginHarness.fetchPlugins,
+    }
+  },
 }))
 
 vi.mock('../src/utils/api', () => ({
@@ -142,6 +148,10 @@ describe('Attendance admin regressions', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    pluginHarness.initialPlugins = [{ name: 'plugin-attendance', status: 'active' }]
+    if (pluginHarness.plugins) pluginHarness.plugins.value = pluginHarness.initialPlugins
+    pluginHarness.fetchPlugins.mockReset()
+    pluginHarness.fetchPlugins.mockResolvedValue(undefined)
     attendanceSettingsData = null
     attendanceSettingsFail = false
     attendanceSettingsSaveData = null
@@ -3593,6 +3603,40 @@ describe('Attendance admin regressions', () => {
     }
   })
 
+  it('loads route members and managers when plugin activation follows group hydration', async () => {
+    const routeGroup = {
+      id: 'group-a',
+      name: 'Cold route group',
+      code: 'cold',
+      timezone: 'Asia/Shanghai',
+      ruleSetId: 'rule-set-1',
+      attendanceType: 'fixed_shift',
+      description: 'Cold route activation',
+      memberCount: 1,
+    }
+    attendanceGroupsData = [routeGroup]
+    pluginHarness.initialPlugins = []
+    pluginHarness.fetchPlugins.mockImplementation(async () => {
+      pluginHarness.plugins!.value = [{ name: 'plugin-attendance', status: 'active' }]
+    })
+
+    app = createApp(AttendanceView, {
+      mode: 'admin',
+      routeGroupContext: {
+        group: routeGroup,
+        step: 'schedule',
+        surface: null,
+        returnTo: '/attendance?tab=admin&section=attendance-admin-groups',
+      },
+    })
+    app.mount(container!)
+    await flushUi(10)
+
+    const requestedUrls = vi.mocked(apiFetch).mock.calls.map(([input]) => String(input))
+    expect(requestedUrls).toContain('/api/attendance/groups/group-a/members')
+    expect(requestedUrls).toContain('/api/attendance/groups/group-a/managers')
+  })
+
   it('keeps a direct group route authoritative through delayed list hydration and stable prop rerenders', async () => {
     const listedGroup = {
       id: 'group-a',
@@ -3747,6 +3791,60 @@ describe('Attendance admin regressions', () => {
     } finally {
       confirmSpy.mockRestore()
     }
+  })
+
+  it('keeps the saved response authoritative when the route group is outside the first list page', async () => {
+    const routeGroup = {
+      id: 'group-a',
+      name: 'Probe snapshot',
+      code: 'probe',
+      timezone: 'Asia/Shanghai',
+      ruleSetId: 'rule-set-1',
+      attendanceType: 'fixed_shift',
+      description: 'Outside first page',
+      memberCount: 1,
+    }
+    const savedNames: string[] = []
+    const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.startsWith('/api/attendance/groups?') && method === 'GET') {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 250, page: 1, pageSize: 200 } })
+      }
+      if (url === '/api/attendance/groups/group-a' && method === 'PUT') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        savedNames.push(String(body.name))
+        return jsonResponse(200, { ok: true, data: { ...routeGroup, ...body } })
+      }
+      return fallback(input, init)
+    })
+
+    app = createApp(AttendanceView, {
+      mode: 'admin',
+      routeGroupContext: {
+        group: routeGroup,
+        step: 'schedule',
+        surface: null,
+        returnTo: '/attendance?tab=admin&section=attendance-admin-groups',
+      },
+    })
+    app.mount(container!)
+    await flushUi(8)
+
+    const save = () => container!
+      .querySelector<HTMLButtonElement>('#attendance-group-stage-basics .attendance__btn--primary')!
+      .click()
+    setInput(container!, '#attendance-group-name', 'First saved value')
+    save()
+    await flushUi(8)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-group-name')?.value).toBe('First saved value')
+
+    setInput(container!, '#attendance-group-name', 'Second saved value')
+    save()
+    await flushUi(8)
+    expect(savedNames).toEqual(['First saved value', 'Second saved value'])
+    expect(container!.querySelector<HTMLInputElement>('#attendance-group-name')?.value).toBe('Second saved value')
   })
 
   it('keeps attendance setup flows on user pickers and resolved labels instead of UUID handoffs', async () => {
