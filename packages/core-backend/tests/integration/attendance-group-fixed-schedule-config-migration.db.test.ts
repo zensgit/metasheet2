@@ -116,8 +116,12 @@ describeDb('attendance group fixed-schedule config migration (real DB)', () => {
     const { groupId, shiftId } = await insertParents('org-a')
     await up(db)
     const service = configServiceLib.createAttendanceGroupFixedScheduleConfigService({ HttpError: FakeHttpError })
+    const statements: string[] = []
     const client = {
-      query: async (text: string, values: unknown[]) => (await pool.query(text, values)).rows,
+      query: async (text: string, values: unknown[]) => {
+        statements.push(text)
+        return (await pool.query(text, values)).rows
+      },
     }
     const desired = {
       orgId: 'org-a',
@@ -135,5 +139,8 @@ describeDb('attendance group fixed-schedule config migration (real DB)', () => {
     expect(first).toMatchObject({ revision: 1, updatedBy: 'admin-1' })
     expect(replay).toMatchObject({ revision: 1, updatedBy: 'admin-1' })
     expect(changed).toMatchObject({ revision: 2, endDate: '2026-09-30', updatedBy: 'admin-2' })
+    expect(statements.filter(statement => statement.includes('FROM attendance_shifts'))).toHaveLength(3)
+    expect(statements.filter(statement => statement.includes('FROM attendance_shifts'))
+      .every(statement => statement.includes('FOR SHARE'))).toBe(true)
   })
 })

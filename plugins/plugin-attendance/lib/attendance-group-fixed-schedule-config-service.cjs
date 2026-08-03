@@ -37,7 +37,7 @@ function createAttendanceGroupFixedScheduleConfigService({ HttpError }) {
     }
 
     const shiftRows = await trx.query(
-      'SELECT id FROM attendance_shifts WHERE id = $1 AND org_id = $2 LIMIT 1',
+      'SELECT id FROM attendance_shifts WHERE id = $1 AND org_id = $2 FOR SHARE',
       [input.shiftId, input.orgId],
     )
     if (!shiftRows.length) {
