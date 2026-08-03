@@ -69,7 +69,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
   async function mintToken(userId: string, perms: string): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent(perms)}`)
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
@@ -112,7 +112,12 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
   }
 
   function dateOnly(value: unknown): string {
-    if (value instanceof Date) return value.toISOString().slice(0, 10)
+    if (value instanceof Date) {
+      const year = value.getFullYear()
+      const month = String(value.getMonth() + 1).padStart(2, '0')
+      const day = String(value.getDate()).padStart(2, '0')
+      return `${year}-${month}-${day}`
+    }
     return String(value ?? '').slice(0, 10)
   }
 

@@ -128,7 +128,12 @@ function addDaysToDateKeyForTest(dateKey: string, days: number): string {
 }
 
 function dateOnlyForTest(value: unknown): string {
-  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  if (value instanceof Date) {
+    const year = value.getFullYear()
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
   return String(value ?? '').slice(0, 10)
 }
 
@@ -554,7 +559,7 @@ attendanceIntegrationDescribe(
     const testUserId = randomUUID()
     await ensureActiveImportIdentitiesForTest(testUserId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -1877,7 +1882,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-lookup-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2017,7 +2022,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-alias-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2278,7 +2283,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-validation-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2381,7 +2386,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-delete-assignment-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2447,7 +2452,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-delete-rotation-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2531,7 +2536,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-schedule-conflict-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2750,7 +2755,7 @@ attendanceIntegrationDescribe(
     const workDate = '2026-07-08'
     const saturdayDate = '2026-07-11'
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3209,10 +3214,10 @@ attendanceIntegrationDescribe(
     let rotationRuleId: string | undefined
 
     const adminTokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const employeeTokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&roles=user&perms=attendance:read,attendance:write`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&tenantId=default&roles=user&perms=attendance:read,attendance:write`
     )
     const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
     const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
@@ -3481,7 +3486,7 @@ attendanceIntegrationDescribe(
     const rotationRuleIds: string[] = []
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3785,7 +3790,7 @@ attendanceIntegrationDescribe(
     const rotationRuleIds: string[] = []
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -4039,7 +4044,7 @@ attendanceIntegrationDescribe(
     let fixedGroupId: string | undefined
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -4451,7 +4456,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const adminUserId = `attendance-shift-edit-window-admin-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -4667,8 +4672,8 @@ attendanceIntegrationDescribe(
          ON CONFLICT DO NOTHING`,
         [adminUserId, employeeUserId],
       )
-      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
-      const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&roles=user&perms=attendance:read,attendance:write`)
+      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&tenantId=default&roles=user&perms=attendance:read,attendance:write`)
       adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
       if (!adminToken || !employeeToken) return
@@ -4759,7 +4764,7 @@ attendanceIntegrationDescribe(
       // Compliance enforcement is orthogonal to RBAC (it runs after the dispatch check, inside the
       // txn). Bypass RBAC so each save path reaches the guard without per-route permission plumbing.
       process.env.RBAC_BYPASS = 'true'
-      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       if (!adminToken) return
       const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
@@ -4940,7 +4945,7 @@ attendanceIntegrationDescribe(
     let shiftId: string | undefined
     try {
       process.env.RBAC_BYPASS = 'true'
-      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       if (!adminToken) return
       const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
@@ -7761,7 +7766,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const adminUserId = `attendance-small-org-admin-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -7923,7 +7928,7 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(scopedUserId)}&roles=user&perms=attendance:read,attendance:write`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(scopedUserId)}&tenantId=default&roles=user&perms=attendance:read,attendance:write`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8094,7 +8099,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-uuid-like-name-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8228,7 +8233,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-delete-rule-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8287,7 +8292,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-rotation-rename-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8466,7 +8471,7 @@ attendanceIntegrationDescribe(
     const userId = randomUUID()
     await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8603,7 +8608,7 @@ attendanceIntegrationDescribe(
     const firstInAt = new Date(`${workDate}T22:05:00+08:00`).toISOString()
     const lastOutAt = new Date(`${nextDate}T05:55:00+08:00`).toISOString()
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8718,7 +8723,7 @@ attendanceIntegrationDescribe(
     const firstInAt = new Date(`${workDate}T09:05:00+08:00`).toISOString()
     const lastOutAt = new Date(`${workDate}T17:55:00+08:00`).toISOString()
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8824,7 +8829,7 @@ attendanceIntegrationDescribe(
     const morningDate = addDaysToDateKeyForTest(overnightDate, 1)
     const overlapPunchAt = new Date(`${morningDate}T06:00:00+08:00`).toISOString()
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8948,7 +8953,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-snake-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9113,7 +9118,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-compat-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9172,7 +9177,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-compat-rot-pay-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9285,7 +9290,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-missing-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9843,7 +9848,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-group-guard-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-group-guard-${Date.now().toString(36)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9901,7 +9906,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-tz-guard-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-tz-guard-${Date.now().toString(36)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -10217,7 +10222,7 @@ attendanceIntegrationDescribe(
     async function getAdminToken(userId: string): Promise<string | undefined> {
       if (!baseUrl) return undefined
       const tokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
       )
       return (tokenRes.body as { token?: string } | undefined)?.token
     }
@@ -11776,7 +11781,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-request-record-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -11911,7 +11916,7 @@ attendanceIntegrationDescribe(
 
     const runSuffix = Date.now().toString(36)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-item-${runSuffix}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-item-${runSuffix}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -12132,7 +12137,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-leave-guard-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-leave-guard-${Date.now().toString(36)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -12205,7 +12210,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-read-by-id-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-read-by-id-${Date.now().toString(36)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -12641,7 +12646,7 @@ attendanceIntegrationDescribe(
     const userId = randomUUID()
     await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -15707,7 +15712,7 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -15774,7 +15779,7 @@ attendanceIntegrationDescribe(
     let groupId: string | undefined
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(m1)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(m1)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
       const auth = { Authorization: `Bearer ${token}` }
@@ -15817,7 +15822,7 @@ attendanceIntegrationDescribe(
 
       // (3) §3b scope gate: an outsider (non-admin, not a group manager) → 403
       process.env.RBAC_BYPASS = 'false'
-      const outsiderTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(outsider)}&roles=employee&perms=attendance:read`)
+      const outsiderTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(outsider)}&tenantId=default&roles=employee&perms=attendance:read`)
       const outsiderToken = (outsiderTokenRes.body as { token?: string } | undefined)?.token
       if (outsiderToken) {
         const forbidden = await requestJson(`${baseUrl}/api/attendance/team-availability?groupId=${groupId}&from=${workDate}&to=${workDate}`, { headers: { Authorization: `Bearer ${outsiderToken}` } })
@@ -15869,7 +15874,7 @@ attendanceIntegrationDescribe(
       )
 
       const tokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
       )
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
@@ -15968,7 +15973,7 @@ attendanceIntegrationDescribe(
       )
 
       const adminTokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
       )
       const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       expect(adminToken).toBeTruthy()
@@ -16050,7 +16055,7 @@ attendanceIntegrationDescribe(
     } finally {
       if (originalSettings) {
         const cleanupTokenRes = await requestJson(
-          `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&roles=admin&perms=attendance:admin`
+          `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&tenantId=default&roles=admin&perms=attendance:admin`
         )
         const cleanupToken = (cleanupTokenRes.body as { token?: string } | undefined)?.token
         if (cleanupToken) {
@@ -16127,7 +16132,7 @@ attendanceIntegrationDescribe(
       )
 
       const adminTokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
       )
       const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       expect(adminToken).toBeTruthy()
@@ -16191,7 +16196,7 @@ attendanceIntegrationDescribe(
       expect(longItems.flatMap(item => item.layers).some((layer: any) => layer.kind === 'calendar_policy')).toBe(false)
     } finally {
       const cleanupTokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&roles=admin&perms=attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&tenantId=default&roles=admin&perms=attendance:admin`
       ).catch(() => null)
       const cleanupToken = (cleanupTokenRes?.body as { token?: string } | undefined)?.token
       if (cleanupToken) {
@@ -16250,7 +16255,7 @@ attendanceIntegrationDescribe(
       )
 
       const tokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
       )
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
@@ -16323,17 +16328,17 @@ attendanceIntegrationDescribe(
 
       // Read-only token for cross-user RBAC negative case
       const readOnlyRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=user&perms=attendance:read`
       )
       const readOnlyToken = (readOnlyRes.body as { token?: string } | undefined)?.token
       // Read + approve token for cross-user RBAC positive case
       const approveRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read,attendance:approve`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=user&perms=attendance:read,attendance:approve`
       )
       const approveToken = (approveRes.body as { token?: string } | undefined)?.token
       // Admin token for groupId / 404 case
       const adminRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
       )
       const adminToken = (adminRes.body as { token?: string } | undefined)?.token
       expect(readOnlyToken).toBeTruthy()
@@ -16604,7 +16609,7 @@ attendanceIntegrationDescribe(
     const roleName = `Effective Calendar Role ${runSuffix}`
 
     const adminTokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
     )
     const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
     expect(adminToken).toBeTruthy()
