@@ -874,6 +874,29 @@ describe('attendance UUID route validation', () => {
     expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('attendance_group_members')
   })
 
+  it('preserves group-manager authorization for the independent team-availability read', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = attendanceReadOnlyRbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_group_managers') && sql.includes('SELECT 1')) {
+        expect(params).toEqual(['default', attendanceGroupId, 'owner-user-1'])
+        return [{ ok: 1 }]
+      }
+      if (sql.includes('FROM attendance_groups')) return []
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/team-availability', {
+      query: { groupId: attendanceGroupId, from: '2026-06-01', to: '2026-06-01' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(404)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } })
+    expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).toContain('FROM attendance_group_managers')
+  })
+
   it('rejects non-manager member writes without touching membership rows', async () => {
     const { db, routes } = await createHarness('false')
     const groupId = '00000000-0000-4000-8000-000000000101'

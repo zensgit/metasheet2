@@ -24647,6 +24647,20 @@ module.exports = {
       }
     }
 
+    async function userManagesAttendanceGroup(orgId, groupId, userId) {
+      const rows = await db.query(
+        `SELECT 1
+         FROM attendance_group_managers
+         WHERE org_id = $1
+           AND group_id = $2
+           AND user_id = $3
+           AND role IN ('owner', 'sub_owner')
+         LIMIT 1`,
+        [orgId, groupId, userId]
+      )
+      return rows.length > 0
+    }
+
     function respondAttendanceSchedulerScopeForbidden(res) {
       res.status(403).json({
         ok: false,
