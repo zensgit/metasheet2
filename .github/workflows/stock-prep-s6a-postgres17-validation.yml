@@ -1,0 +1,414 @@
+name: Stock-prep S6-A PostgreSQL 17 validation (frozen package)
+
+# EVIDENCE ONLY — T1 for issue #4695 gap 2 ("PostgreSQL is 17 while the
+# unchanged packet is validated only on 15/16").
+#
+# This workflow downloads the ALREADY-PUBLISHED, FROZEN S6-A release asset
+# named below, verifies its bytes against the pinned SHA-256 before any use
+# (fail closed), runs the existing scripts/ops/multitable-onprem-package-verify.sh
+# five-check verifier against it unmodified, and exercises the package's own
+# migration runner (packages/core-backend/dist/src/db/migrate.js) against
+# ephemeral, isolated PostgreSQL 15/16/17 service containers so the same
+# migrations proven on 15/16 elsewhere are also proven to apply cleanly on 17.
+#
+# It never rebuilds or repacks the package, never sets or flips
+# MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED (the flag stays
+# default/OFF and is never referenced here), never connects a customer
+# source, never provisions SQL Server or any customer-facing role, and never
+# touches an entity machine. A passing run here is CONTROLLED SYNTHETIC
+# FUNCTIONAL evidence only — it does not establish real-customer production,
+# sealed-snapshot semantics, high scale, external write, rollout, or
+# PLM/ERP/CRM/SRM generalization (see #4695). It also does not close #4695
+# gap 3 (isolated-database / SELECT-only-principal creation) — the ephemeral
+# CI database here is not a DBA-provisioned entity-machine database.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: stock-prep-onprem-s6a-20260731-a45a2fe3f
+  PACKAGE_FILE: metasheet-multitable-onprem-v2.5.0-s6a-a45a2fe3f-20260731.zip
+  # FROZEN S6-A PINS (#4695). LAW — never recomputed, only verified against.
+  PACKAGE_SHA256_PIN: 0b80d927732e4866296e053a88958fc0b9fb44ee648cb200ee7116a3cdd72759
+  SERVICE_RUNTIME_SHA_PIN: a45a2fe3fa818b6b90830418a55a6b9f635e91c9
+  PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN: b5f40b3c9d56c04d4ff9001678f2cd9603c1bb1665bfe27decc0411a0e0270e6
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Job 1: download the frozen asset, verify it fail-closed, and prove the
+  # negative control actually discriminates (mandatory per task spec).
+  # ---------------------------------------------------------------------
+  verify-frozen-package:
+    name: Verify frozen package (fail-closed) + one-byte negative control
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Environment guard (pwsh required by the packaged zip verifier)
+        run: |
+          set -euo pipefail
+          command -v pwsh >/dev/null 2>&1 || {
+            echo "ENVIRONMENT GAP: pwsh not found on this runner; the packaged"
+            echo "verifier's Windows ZipFile extraction smoke cannot run."
+            exit 1
+          }
+
+      - name: Download frozen release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            -p "$PACKAGE_FILE" \
+            -p "SHA256SUMS" \
+            --clobber
+
+      - name: Fail-closed — downloaded bytes must equal the frozen pin
+        run: |
+          set -euo pipefail
+          actual="$(sha256sum "$PACKAGE_FILE" | awk '{print $1}')"
+          echo "computedPackageSha256=${actual}"
+          if [[ "$actual" != "$PACKAGE_SHA256_PIN" ]]; then
+            echo "FATAL: downloaded package SHA-256 does not equal the frozen packageSha256 pin. Aborting — never proceeding to 'test it anyway'." >&2
+            exit 1
+          fi
+          echo "packageSha256PinMatch=PASS"
+
+      - name: Run existing multitable-onprem-package-verify.sh (report-comparable with postfreeze-zip.verify.json)
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/multitable-onprem-package-verify.sh
+          mkdir -p "${RUNNER_TEMP}/pkgroot-verify"
+          EXTRACT_ROOT="${RUNNER_TEMP}/pkgroot-verify" \
+          VERIFY_REPORT_JSON="${RUNNER_TEMP}/verify-report.json" \
+          VERIFY_REPORT_MD="${RUNNER_TEMP}/verify-report.md" \
+            scripts/ops/multitable-onprem-package-verify.sh "$PACKAGE_FILE"
+          echo "PKG_ROOT=${RUNNER_TEMP}/pkgroot-verify/${PACKAGE_FILE%.zip}" >> "$GITHUB_ENV"
+
+      - name: Build provenance gitCommit must equal serviceRuntimeSha pin
+        run: |
+          set -euo pipefail
+          actual_git_commit="$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).gitCommit)" "${PKG_ROOT}/BUILD_PROVENANCE.json")"
+          echo "buildProvenanceGitCommit=${actual_git_commit}"
+          if [[ "$actual_git_commit" != "$SERVICE_RUNTIME_SHA_PIN" ]]; then
+            echo "FATAL: BUILD_PROVENANCE.json gitCommit does not equal the frozen serviceRuntimeSha pin." >&2
+            exit 1
+          fi
+          echo "buildProvenanceGitCommitPinMatch=PASS"
+
+      - name: Sealed-export frozenManifestDigest must equal packageProvenanceManifestDigest pin
+        run: |
+          set -euo pipefail
+          actual_digest="$(node -e "
+            const p = require(process.argv[1]);
+            const r = p.verifySealedExportRuntimePackageProvenance({ repoRoot: process.argv[2] });
+            if (r.verified !== true) { process.exit(1); }
+            console.log(r.frozenManifestDigest);
+          " "${PKG_ROOT}/plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs" "${PKG_ROOT}")"
+          echo "frozenManifestDigest=${actual_digest}"
+          if [[ "$actual_digest" != "$PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN" ]]; then
+            echo "FATAL: frozenManifestDigest does not equal the frozen packageProvenanceManifestDigest pin." >&2
+            exit 1
+          fi
+          echo "frozenManifestDigestPinMatch=PASS"
+
+      - name: One-byte negative control — mandatory, exclusive, hard-fails the job if it does not fire
+        run: |
+          set -euo pipefail
+          mkdir -p neg-control/positive neg-control/negative
+          cp "$PACKAGE_FILE" "neg-control/positive/$PACKAGE_FILE"
+          cp SHA256SUMS "neg-control/positive/SHA256SUMS"
+          cp "$PACKAGE_FILE" "neg-control/negative/$PACKAGE_FILE"
+          cp SHA256SUMS "neg-control/negative/SHA256SUMS"
+
+          # Flip exactly one byte (bitwise complement, i.e. XOR 0xFF) at a fixed
+          # offset in the negative copy only. Pure dd/od/printf — no heredoc, so
+          # there is no risk of YAML block-scalar indentation corrupting a
+          # nested script (e.g. a Python IndentationError from inherited spaces).
+          negfile="neg-control/negative/$PACKAGE_FILE"
+          offset=2048
+          orig_byte_dec="$(dd if="$negfile" bs=1 skip="$offset" count=1 2>/dev/null | od -An -tu1 | tr -d ' ')"
+          flipped_byte_dec=$(( 255 - orig_byte_dec ))
+          flipped_octal_escape="$(printf '\\%03o' "$flipped_byte_dec")"
+          printf "$flipped_octal_escape" | dd of="$negfile" bs=1 seek="$offset" count=1 conv=notrunc 2>/dev/null
+
+          pos_sha="$(sha256sum "neg-control/positive/$PACKAGE_FILE" | awk '{print $1}')"
+          neg_sha="$(sha256sum "neg-control/negative/$PACKAGE_FILE" | awk '{print $1}')"
+          echo "positiveArmSha256=${pos_sha}"
+          echo "negativeArmSha256=${neg_sha}"
+          if [[ "$pos_sha" != "$PACKAGE_SHA256_PIN" ]]; then
+            echo "FATAL: positive arm (unmutated copy) does not match the pin — negative control setup is broken." >&2
+            exit 1
+          fi
+          if [[ "$neg_sha" == "$PACKAGE_SHA256_PIN" ]]; then
+            echo "FATAL: one-byte mutation did not change the SHA-256 (should be impossible)." >&2
+            exit 1
+          fi
+
+          set +e
+          scripts/ops/multitable-onprem-package-verify.sh "neg-control/positive/$PACKAGE_FILE" >pos.log 2>&1
+          pos_rc=$?
+          scripts/ops/multitable-onprem-package-verify.sh "neg-control/negative/$PACKAGE_FILE" >neg.log 2>&1
+          neg_rc=$?
+          set -e
+
+          echo "positiveArmExitCode=${pos_rc}"
+          echo "negativeArmExitCode=${neg_rc}"
+          echo "--- positive arm output ---"
+          cat pos.log
+          echo "--- negative arm output ---"
+          cat neg.log
+
+          if [[ "$pos_rc" -ne 0 ]]; then
+            echo "FATAL: positive arm (identical layout, unmutated bytes) unexpectedly failed verification." >&2
+            exit 1
+          fi
+          if [[ "$neg_rc" -eq 0 ]]; then
+            echo "FATAL P0: one-byte mutation did NOT cause verification to fail. The negative control did not fire — 'verification passed' would be indistinguishable from 'verification did not run'." >&2
+            exit 1
+          fi
+          if ! grep -qiE "checksum mismatch|FAILED|did NOT match" neg.log; then
+            echo "FATAL: negative arm failed for a reason other than the checksum (not exclusive to the byte flip) — cannot attribute the failure to the mutation." >&2
+            exit 1
+          fi
+          echo "oneByteNegativeCheck=PASS"
+
+      - name: Upload verify evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t1-verify-frozen-package-evidence
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/verify-report.json
+            ${{ runner.temp }}/verify-report.md
+            pos.log
+            neg.log
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "releaseTag=${RELEASE_TAG}"
+            echo "packageFile=${PACKAGE_FILE}"
+            echo "packageSha256=${PACKAGE_SHA256_PIN}"
+            echo "packageSha256PinMatch=PASS"
+            echo "packageVerification=PASS"
+            echo "buildProvenanceGitCommitPinMatch=PASS"
+            echo "frozenManifestDigestPinMatch=PASS"
+            echo "oneByteNegativeCheck=PASS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Job 2: exercise the frozen, verified package's own migration runner
+  # against ephemeral PostgreSQL 15/16/17 so a reader sees the matrix, not
+  # a single green cell. 15/16 are the already-validated control legs; 17
+  # is the gap this workflow exists to close.
+  # ---------------------------------------------------------------------
+  migrate-postgres:
+    name: Migrate on PostgreSQL ${{ matrix.pg }}
+    needs: verify-frozen-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['15', '16', '17']
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_s6a_t1
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_s6a_t1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s6a_t1
+      JWT_SECRET: t1-ci-synthetic-not-a-secret
+      PGPASSWORD: postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download frozen release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            -p "$PACKAGE_FILE" \
+            -p "SHA256SUMS" \
+            --clobber
+
+      - name: Fail-closed — downloaded bytes must equal the frozen pin
+        run: |
+          set -euo pipefail
+          actual="$(sha256sum "$PACKAGE_FILE" | awk '{print $1}')"
+          if [[ "$actual" != "$PACKAGE_SHA256_PIN" ]]; then
+            echo "FATAL: downloaded package SHA-256 does not equal the frozen packageSha256 pin. Aborting." >&2
+            exit 1
+          fi
+          echo "packageSha256PinMatch=PASS"
+
+      - name: Run existing multitable-onprem-package-verify.sh
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/multitable-onprem-package-verify.sh
+          mkdir -p "${RUNNER_TEMP}/pkgroot"
+          EXTRACT_ROOT="${RUNNER_TEMP}/pkgroot" \
+            scripts/ops/multitable-onprem-package-verify.sh "$PACKAGE_FILE"
+          echo "PKG_ROOT=${RUNNER_TEMP}/pkgroot/${PACKAGE_FILE%.zip}" >> "$GITHUB_ENV"
+
+      - name: Confirm the live server actually is PostgreSQL ${{ matrix.pg }}
+        run: |
+          set -euo pipefail
+          command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
+          server_version_num="$(psql -h 127.0.0.1 -U postgres -d metasheet_s6a_t1 -tAc 'SHOW server_version_num')"
+          server_major=$(( server_version_num / 10000 ))
+          echo "postgresServerVersionMajor=${server_major}"
+          if [[ "${server_major}" != "${{ matrix.pg }}" ]]; then
+            echo "FATAL: live server major version (${server_major}) does not match the matrix leg (${{ matrix.pg }}) — evidence would not actually distinguish PostgreSQL versions." >&2
+            exit 1
+          fi
+          echo "postgresServerVersionPinMatch=PASS"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Matches the package's own package.json packageManager pin
+          # (verified by multitable-onprem-package-verify.sh) and the
+          # multitable-onprem-package-build.yml build/apply contract.
+          version: 9.15.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the frozen package's own pinned dependencies (frozen lockfile — never relaxed)
+        working-directory: ${{ env.PKG_ROOT }}
+        run: pnpm install --frozen-lockfile --reporter=append-only
+
+      - name: Migration status before apply (expect a fresh, unmigrated database)
+        working-directory: ${{ env.PKG_ROOT }}
+        run: |
+          set -euo pipefail
+          node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/migrate-list-pre.log"
+          applied_pre="$(grep -oE '^Applied: [0-9]+' "${RUNNER_TEMP}/migrate-list-pre.log" | awk '{print $2}')"
+          echo "migrationsAppliedPre=${applied_pre}"
+          if [[ "${applied_pre}" != "0" ]]; then
+            echo "FATAL: database was not fresh before apply (Applied != 0) — a positive result afterward would not prove real work happened." >&2
+            exit 1
+          fi
+
+      - name: Apply all migrations (packages/core-backend/dist/src/db/migrate.js, default latest)
+        working-directory: ${{ env.PKG_ROOT }}
+        run: node packages/core-backend/dist/src/db/migrate.js
+
+      - name: Migration status after apply (expect zero pending)
+        working-directory: ${{ env.PKG_ROOT }}
+        run: |
+          set -euo pipefail
+          node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/migrate-list-post.log"
+          pending_post="$(grep -oE '^Pending: [0-9]+' "${RUNNER_TEMP}/migrate-list-post.log" | awk '{print $2}')"
+          applied_post="$(grep -oE '^Applied: [0-9]+' "${RUNNER_TEMP}/migrate-list-post.log" | awk '{print $2}')"
+          echo "migrationsAppliedPost=${applied_post}"
+          echo "migrationsPendingPost=${pending_post}"
+          if [[ "${pending_post}" != "0" ]]; then
+            echo "FATAL: migrations did not apply cleanly end to end (Pending != 0 after latest)." >&2
+            exit 1
+          fi
+
+      - name: Confirm migration 073 (sealed-export stock-prep runtime authority) specifically applied
+        working-directory: ${{ env.PKG_ROOT }}
+        run: node packages/core-backend/dist/src/db/migrate.js --confirm 073_create_sealed_export_stock_prep_runtime_authority
+
+      - name: Idempotent replay — re-run latest against an already-migrated database
+        working-directory: ${{ env.PKG_ROOT }}
+        run: node packages/core-backend/dist/src/db/migrate.js
+
+      - name: Upload per-version evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t1-migrate-postgres-${{ matrix.pg }}-evidence
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/migrate-list-pre.log
+            ${{ runner.temp }}/migrate-list-post.log
+
+      - name: Values-free evidence (this leg)
+        run: |
+          {
+            echo "postgresMajorVersion=${{ matrix.pg }}"
+            echo "postgresServerVersionPinMatch=PASS"
+            echo "packageSha256PinMatch=PASS"
+            echo "dependencyInstall=PASS"
+            echo "migrationsAppliedPre=0"
+            echo "migrationApply=PASS"
+            echo "migrationsPendingPost=0"
+            echo "migration073Confirmed=PASS"
+            echo "migrationReplayIdempotent=PASS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Job 3: gate on both jobs above and publish one combined, values-free
+  # evidence block.
+  # ---------------------------------------------------------------------
+  evidence-summary:
+    name: T1 evidence summary
+    needs: [verify-frozen-package, migrate-postgres]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both upstream jobs to have fully succeeded
+        env:
+          VERIFY_RESULT: ${{ needs.verify-frozen-package.result }}
+          MIGRATE_RESULT: ${{ needs.migrate-postgres.result }}
+        run: |
+          set -euo pipefail
+          echo "verify-frozen-package result: ${VERIFY_RESULT}"
+          echo "migrate-postgres (all of 15/16/17) result: ${MIGRATE_RESULT}"
+          if [[ "${VERIFY_RESULT}" != "success" || "${MIGRATE_RESULT}" != "success" ]]; then
+            echo "One or more T1 gates did not pass; overall FAIL." >&2
+            exit 1
+          fi
+
+      - name: Values-free combined evidence block
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "serviceRuntimeSha=${SERVICE_RUNTIME_SHA_PIN}"
+            echo "releaseTag=${RELEASE_TAG}"
+            echo "packageFile=${PACKAGE_FILE}"
+            echo "packageSha256=${PACKAGE_SHA256_PIN}"
+            echo "packageProvenanceManifestDigest=${PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN}"
+            echo "packageVerification=PASS"
+            echo "oneByteNegativeCheck=PASS"
+            echo "postgresMajorVersionsExercised=15,16,17"
+            echo "postgresGapVersion=17"
+            echo "postgresGapVersionValidation=PASS"
+            echo "migrationApplyAllVersions=PASS"
+            echo "migrationReplayIdempotentAllVersions=PASS"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "entityMachineInvolved=false"
+            echo "flagChanged=false"
+            echo "flagDefaultAndFinal=OFF"
+            echo "externalWrite=false"
+            echo "overallT1Result=PASS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
