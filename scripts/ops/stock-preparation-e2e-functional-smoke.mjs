@@ -494,10 +494,12 @@ async function diagnoseOrderingKeyProbeShape() {
     await pool.connect()
     const result = await pool.request().query(probeSql)
     const row = result.recordset && result.recordset[0]
+    // Values here are closed-vocabulary counts (0..3), never business data — safe even outside the
+    // job-log-only boundary, but kept there anyway for consistency with the rest of this diagnostic.
     const shape = row
-      ? Object.keys(row).map((key) => `${key}:${typeof row[key]}`).join(',')
+      ? Object.keys(row).map((key) => `${key}:${typeof row[key]}=${JSON.stringify(row[key])}`).join(',')
       : '<no-row>'
-    note('DIAGNOSTIC (job log only): ordering-key probe column JS types', shape)
+    note('DIAGNOSTIC (job log only): ordering-key probe column JS types+values', shape)
   } catch (error) {
     note('DIAGNOSTIC (job log only): ordering-key probe query itself failed', String(error && error.message || error))
   } finally {
@@ -552,6 +554,52 @@ async function runProvisioningScript(env) {
     proc.stderr.on('data', (c) => { stderr += c.toString() })
     proc.on('close', (code) => resolve({ code, stdout, stderr }))
   })
+}
+
+// TEMPORARY bounded diagnostic (job-log only, never in uploaded evidence): the provisioning SCRIPT
+// (plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs)
+// deliberately discards everything except a closed `code` enum on failure (values-free by design — see
+// its own header). To find WHICH of the many failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED') call
+// sites in the S5/S6-A authority chain is actually firing, this replays the SAME construction the script
+// performs — same modules, same env — in-process, so `error.stack` (never surfaced by the script itself)
+// is visible here for diagnosis only. Does not change what the production script or its dependencies do.
+async function diagnoseProvisioningFailureStack(provisioningEnv) {
+  try {
+    const { loadStockPreparationProvisioningConfig } = require_(
+      'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-config.cjs',
+    )
+    const { createStockPreparationProvisioningDatabase } = require_(
+      'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-database.cjs',
+    )
+    const { createStockPreparationRuntimeProvisioning } = require_(
+      'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-provisioning.cjs',
+    )
+    const mergedEnv = { ...process.env, ...provisioningEnv }
+    const config = loadStockPreparationProvisioningConfig({ env: mergedEnv })
+    const database = createStockPreparationProvisioningDatabase({
+      connectionString: config.provisioningDatabaseUrl,
+      expectedRole: config.provisioningDatabaseRole,
+    })
+    try {
+      const service = createStockPreparationRuntimeProvisioning({
+        artifactRoot: config.artifactRoot,
+        identityKey: config.identityKey,
+        privateSignerMaterial: config.privateSignerMaterial,
+        provisioningDatabase: database,
+        qualificationKeyring: config.qualificationKeyring,
+      })
+      await service.provisionInitial(config.spec)
+      note('DIAGNOSTIC (job log only): in-process provisioning replay unexpectedly SUCCEEDED')
+    } finally {
+      try {
+        await database.close()
+      } catch {
+        // best-effort
+      }
+    }
+  } catch (error) {
+    note('DIAGNOSTIC (job log only): in-process provisioning replay stack', String(error && error.stack || error))
+  }
 }
 
 async function attemptS6ARealRun() {
@@ -677,6 +725,7 @@ async function attemptS6ARealRun() {
   if (!provisionedOk) {
     note('S6-A: provisioning script failure detail (job log only, not in uploaded evidence)',
       `code=${provisioningFailureCode}`)
+    await diagnoseProvisioningFailureStack(provisioningEnv)
   }
   must('S6-A: provisioning script -> ok:true, externalWrite:false, valuesFree:true', provisionedOk,
     `exit=${provisioned.code}`)
