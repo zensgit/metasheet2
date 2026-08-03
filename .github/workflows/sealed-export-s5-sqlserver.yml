@@ -33,8 +33,10 @@ on:
       - 'packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql'
       - 'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql'
       - 'packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql'
+      - 'packages/core-backend/migrations/074_repair_sealed_export_runtime_authority_privileges.sql'
       - 'packages/core-backend/tests/integration/sealed-export-signer-authority-lifecycle-migration.db.test.ts'
       - 'packages/core-backend/tests/integration/sealed-export-s6a-runtime-authority.db.test.ts'
+      - 'packages/core-backend/tests/integration/sealed-export-s6a-grant-repair.db.test.ts'
       - 'scripts/ops/run-sealed-export-s5-sqlserver-evidence.cjs'
       - 'scripts/ops/verify-sealed-export-s5-sqlserver-evidence.cjs'
       - 'scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1'
@@ -202,6 +204,13 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest
           --config vitest.integration.config.ts run
           tests/integration/sealed-export-s6a-runtime-authority.db.test.ts
+          --reporter=dot
+
+      - name: Run real-Postgres S6-A grant-repair gate (migration 074)
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/sealed-export-s6a-grant-repair.db.test.ts
           --reporter=dot
 
       - name: Download sealed-export S5 evidence
