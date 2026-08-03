@@ -460,7 +460,53 @@ CREATE TABLE ${MSSQL_TABLE} (
       await dbPool.close()
     }
   })
+  await diagnoseOrderingKeyProbeShape()
   return { rows, projectId: rows[0].projectId, snapshotBatchId: rows[0].snapshotBatchId }
+}
+
+// TEMPORARY bounded diagnostic (job-log only, never in uploaded evidence) for the
+// SEALED_EXPORT_BINDING_UNQUALIFIED root-cause investigation: runs the SAME
+// buildOrderingKeyUniquenessProbeSql SQL text the production capture path (proveOrderingKey in
+// sqlserver-sealed-snapshot-service-core.cjs) runs, as the SAME reader login, and reports the JS typeof of
+// each returned bigint-cast column. normalizeProbeCount(value) in that file only accepts
+// Number.isSafeInteger(value) or a decimal string — if the mssql/tedious driver decodes `CAST(... AS
+// bigint)` as a native JS `bigint` primitive (typeof 'bigint'), normalizeProbeCount returns null for every
+// field and proveOrderingKey's `nullKeyRows === null` branch fails closed with BINDING_UNQUALIFIED
+// regardless of how correct the fixture data is. This function only OBSERVES; it does not change what the
+// production code does.
+async function diagnoseOrderingKeyProbeShape() {
+  const { CERTIFIED_RELATIONS } = requireFromPlugin(
+    'plugins/plugin-integration-core/lib/sealed-export/sqlserver-sealed-snapshot-action.cjs',
+  )
+  const relation = CERTIFIED_RELATIONS['sqlserver.relation.rowid_payload.v1']
+  const probeSql = relation.buildOrderingKeyUniquenessProbeSql(MSSQL_TABLE)
+  const sql = requireFromPlugin('mssql')
+  const pool = new sql.ConnectionPool({
+    server: MSSQL_HOST,
+    port: MSSQL_PORT,
+    user: MSSQL_READER_LOGIN,
+    password: MSSQL_READER_PASSWORD,
+    database: MSSQL_DATABASE,
+    options: { encrypt: true, trustServerCertificate: true },
+    connectionTimeout: 15000,
+  })
+  try {
+    await pool.connect()
+    const result = await pool.request().query(probeSql)
+    const row = result.recordset && result.recordset[0]
+    const shape = row
+      ? Object.keys(row).map((key) => `${key}:${typeof row[key]}`).join(',')
+      : '<no-row>'
+    note('DIAGNOSTIC (job log only): ordering-key probe column JS types', shape)
+  } catch (error) {
+    note('DIAGNOSTIC (job log only): ordering-key probe query itself failed', String(error && error.message || error))
+  } finally {
+    try {
+      await pool.close()
+    } catch {
+      // best-effort
+    }
+  }
 }
 
 async function registerExternalSystem(token, systemId) {
