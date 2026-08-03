@@ -15,26 +15,60 @@ name: Stock Preparation E2E Functional Smoke
 # core-backend server-process environment for the duration of one arm — never in a committed file, never
 # as a repository/environment variable default, and the process is always restarted flag-OFF afterward.
 #
-# Two jobs:
-#   functional-smoke   — the real lane: flag-OFF arm, exact-match arm ('1'/'yes' must NOT enable it),
-#                         the EXISTING T4 extended-smoke chain reproduced against this local server, and
-#                         a best-effort real S6-A flag-ON run (capture -> ingestion -> generation kernel
-#                         -> apply) over a first-party ephemeral SQL Server relation. Any part that
-#                         cannot complete is reported NOT_RUN in the values-free result block — never as
-#                         PASS — and the job goes red if any check that DID run failed.
-#   negative-control    — deliberately RED. Reuses the SAME assertion machinery as functional-smoke and
-#                         asserts a wrong expectation on purpose, proving the harness can genuinely fail
-#                         (not a check "that did not happen").
+# Three jobs:
+#   contract            — pull_request only: syntax-checks the harness scripts (no server, no DB, no
+#                         secrets). Exists ONLY so GitHub registers this workflow_dispatch workflow while
+#                         it lives on a feature branch — GitHub will not let a brand-new workflow_dispatch
+#                         workflow be manually dispatched until it has run at least once via a trigger it
+#                         responds to (docs: a workflow_dispatch workflow must be on the default branch,
+#                         OR have already executed via another trigger, to appear as dispatchable). This
+#                         is the SAME idiom stock-preparation-prep-line-extended-smoke.yml and the
+#                         sealed-export-s2/s5 workflows already use in this repo.
+#   functional-smoke     — the real lane, workflow_dispatch only: flag-OFF arm, exact-match arm
+#                         ('1'/'yes' must NOT enable it), the EXISTING T4 extended-smoke chain reproduced
+#                         against this local server, and a best-effort real S6-A flag-ON run (capture ->
+#                         ingestion -> generation kernel -> apply) over a first-party ephemeral SQL Server
+#                         relation. Any part that cannot complete is reported NOT_RUN in the values-free
+#                         result block — never as PASS — and the job goes red if any check that DID run
+#                         failed.
+#   negative-control     — workflow_dispatch only, deliberately RED. Reuses the SAME assertion machinery
+#                         as functional-smoke and asserts a wrong expectation on purpose, proving the
+#                         harness can genuinely fail (not a check "that did not happen").
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/stock-preparation-e2e-functional-smoke.yml'
+      - 'scripts/ops/stock-preparation-e2e-functional-smoke.mjs'
+      - 'scripts/ops/stock-preparation-e2e-negative-control.mjs'
+      - 'scripts/ops/stock-preparation-e2e-provision-postgres-roles-and-migrate.mjs'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  contract:
+    name: harness syntax contract (no server, no DB, no secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - name: Syntax-check the E2E harness scripts
+        run: |
+          node --check scripts/ops/stock-preparation-e2e-functional-smoke.mjs
+          node --check scripts/ops/stock-preparation-e2e-negative-control.mjs
+          node --check scripts/ops/stock-preparation-e2e-provision-postgres-roles-and-migrate.mjs
+
   functional-smoke:
     name: containerized functional smoke (existing chain + S6-A flag arms)
+    if: github.event_name == 'workflow_dispatch'
+    needs: contract
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -161,6 +195,8 @@ jobs:
 
   negative-control:
     name: negative control (deliberately RED — proves the harness can fail)
+    if: github.event_name == 'workflow_dispatch'
+    needs: contract
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
