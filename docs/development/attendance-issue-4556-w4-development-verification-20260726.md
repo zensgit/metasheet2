@@ -254,3 +254,70 @@ WIP checkpoint 在实现车道遗留的共享库 `ms2_w4c2` 上跑出 1 条红�
 - 本轮不含 deploy、flag、staging soak、客户数据或客户 UAT。
 - candidate 通过 exact-head 独立门且为 0 P1/P2 后，仍必须停在 #4612 的 owner
   合并裁点；门审结论不能替代合并授权。
+
+## 11. 2026-08-03 W4C-4 shadow ledger and detail 候选验证
+
+本节只追加 W4C-4 的候选证据，不改写前述历史判定。实现基线为
+`8806e9679e3e7a19ba57d310f799c2962dd01680`，产品代码与测试检查点为
+`9a0ace06077bc99604affa7f414e14e21202452a`。本节入仓后，最终 PR head
+将由 fresh exact-head CI 与独立对抗审另行绑定；当前记录本身不构成合并授权。
+
+### 11.1 交付范围
+
+- 双宿主只读详情：管理员宿主要求 org 成员或平台管理员，员工宿主从 token
+  subject 派生用户并在任何详情 SQL 前验证 active `user_orgs`；显式历史
+  `calculationId` 仍同时约束 record、org 与 subject。
+- append-only shadow diff：12 个闭集 code、闭集 changed-field、neutral label、
+  critical posture 与 values-free backlog 聚合；五类 canonical writer 在同一
+  calculation INSERT 中持久化 code + payload。
+- DecisionTrace：authoritative 只读当前指针所指的冻结 calculation/segments；
+  shadow 只提供明确标注的非权威 basis；schema、enum、segment 数量或冻结上下文
+  不可解释时 fail closed，不回退重算当前规则。
+- OpenAPI 与生成 SDK 覆盖 admin/self detail 和 admin backlog；响应 schema
+  `additionalProperties: false`，不输出 raw user/shift/group/request ID 或 snapshot。
+- 生成式 SELECT inventory 对 calculation/segment 读点逐一归类；新增未分类、
+  动态表名或 retired-row ordinary read 均使 CI 失败。
+
+### 11.2 exact-base 本地实跑
+
+| 门 | 结果 |
+| --- | --- |
+| W4C-4 unit + route contracts | **2 files / 40 passed** |
+| core-backend TypeScript type-check | **PASS** |
+| workspace lint | **PASS** |
+| generated DML/SELECT inventory + positive-control mutations | **56/56 PASS** |
+| OpenAPI build / security validate / SDK generation / generated diff | **PASS / clean** |
+| OpenAPI closed-schema contract | **3/3 PASS** |
+| fresh PostgreSQL migrations | **PASS**（native PostgreSQL 15，独立数据库） |
+| W5 DecisionTrace + W4C-4 real DB | **52/52 PASS**（44 + 8） |
+| W4C-2/3a/3b/3c canonical writer regression | **32/32 PASS**（8 + 7 + 4 + 13） |
+| W4C-2 posture + W4C-4 diff persistence | **13/13 PASS**（5 + 8） |
+| `git diff --check` | **PASS** |
+
+W4C-4 真库套件使用 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` 执行四类代表查询：
+当前指针详情、显式历史详情、source-batch reversal target、shadow backlog；每类都
+断言预期表实际进入执行计划。该证据证明查询可执行并保持作用域谓词，不把小型
+synthetic fixture 的耗时外推为生产容量结论。
+
+### 11.3 判别力 mutation
+
+| mutation | 预期且实得 |
+| --- | --- |
+| live shadow writer 强制把持久化 diff code 改为 `equal` | posture 真库套件精确 **1/5 failed**，命中 `review_required` 持久化腿 |
+| DecisionTrace 禁用 authoritative 冻结投影分支 | W4C-4 真库套件精确 **1/8 failed**，`grounded` 变为 `undeterminable` |
+| inventory 注入未分类 calculation/segment read、动态表名或 retired-row ordinary read | 对应 collector 正控逐项失败；最终正控 **56/56 PASS** |
+| self detail 去除首查询或后续 calculation/segment 的 subject/org 谓词 | 既有 real-DB mutation seam 暴露同 org 他人 fixture，负例失败 |
+
+所有手工 mutation 均已还原；代码生成重跑后工作树无生成漂移。
+
+### 11.4 诚实边界与停点
+
+- 本轮只使用本机 fresh synthetic PostgreSQL；未使用客户或生产数据，未部署，
+  未启用 flag，未发送外部通知，也未运行 staging soak。
+- real-DB 路由测试使用与生产顺序等价的认证/RBAC middleware 加真实
+  `user_orgs` 数据；生产完整认证栈由 route/unit 与现有 RBAC 回归共同覆盖，
+  本节不把该 harness 宣称为端到端登录验证。
+- W4C-4 当前仍是 Draft/HOLD 候选。fresh exact-head required checks 与独立
+  对抗审 `0 P1 / 0 P2` 均未在本节写作时完成；二者完成后仍须停在 owner 合并闸。
+- W4C-5 具名 synthetic staging 的七日 soak 继续受独立 owner 授权约束；本片
+  不授权 flag、部署、soak、生产/客户数据或关闭 #4556。
