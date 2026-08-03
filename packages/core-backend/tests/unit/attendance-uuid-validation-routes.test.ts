@@ -4244,4 +4244,34 @@ describe('attendance UUID route validation', () => {
     expect(res.body).toMatchObject({ error: { code: 'DB_NOT_READY' } })
     expect(db.query).toHaveBeenCalledTimes(1)
   })
+
+  it('requires attendance admin permission for effectiveness reads and admits an authenticated admin', async () => {
+    const invokeEffectiveness = async (admin: boolean) => {
+      const { db, routes } = await createHarness('false')
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, admin)
+        if (rbac !== undefined) return rbac
+        if (sql.includes('SELECT id FROM attendance_groups')) return [{ id: attendanceGroupId }]
+        if (sql.includes('FROM attendance_group_fixed_schedule_configs')) return []
+        if (sql.includes('FROM attendance_group_members')) return []
+        if (sql.includes('FROM attendance_shift_assignments')) return []
+        throw new Error(`unexpected query: ${sql}`)
+      })
+      const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/effectiveness', {
+        params: { groupId: attendanceGroupId },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+      return { db, res }
+    }
+
+    const denied = await invokeEffectiveness(false)
+    expect(denied.res.statusCode).toBe(403)
+    expect(denied.res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(denied.db.query.mock.calls.some(([sql]) => String(sql).includes('attendance_groups'))).toBe(false)
+
+    const allowed = await invokeEffectiveness(true)
+    expect(allowed.res.statusCode).toBe(200)
+    expect(allowed.res.body).toMatchObject({ ok: true, data: { state: 'not_configured' } })
+    expect(allowed.db.query.mock.calls.some(([sql]) => String(sql).includes('attendance_groups'))).toBe(true)
+  })
 })

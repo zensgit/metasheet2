@@ -226,13 +226,30 @@ describeDb('attendance group fixed-schedule effectiveness (real DB)', () => {
     // becomes an eligible different key, changing the result to configuration_changed.
   })
 
-  it('16: the canonical producer-key builder receives the desired values', async () => {
+  it('16: a foreign-org membership for the same group cannot affect target coverage', async () => {
+    await configure(); await members('member-a'); await assignment()
+    await pool.query(
+      'INSERT INTO attendance_group_members (org_id, group_id, user_id) VALUES ($1, $2, $3)',
+      ['foreign-org', groupId, 'foreign-member'],
+    )
+    const result = await read()
+    expect(result).toMatchObject({
+      state: 'effective',
+      reasonCodes: ['EFFECTIVE'],
+      coverage: { targetMembers: 1, matchingMembers: 1, missingMembers: 0 },
+    })
+    expect(JSON.stringify(result)).not.toContain('foreign-member')
+    // Mutation proof: remove `org_id = $1` from the membership query and the
+    // foreign member becomes a missing target, changing the state to pending_apply.
+  })
+
+  it('17: the canonical producer-key builder receives the desired values', async () => {
     await configure(); await members('member-a'); await assignment()
     expect(await read()).toMatchObject({ desired: { shiftId, startDate: '2026-08-01', endDate: '2026-08-31', revision: 1 }, evaluatedAt: now })
     expect(canonicalBuilderCalls).toEqual([{ groupId, shiftId, startDate: '2026-08-01', endDate: '2026-08-31' }])
   })
 
-  it('17: group ownership is org-scoped before dependent reads', async () => {
+  it('18: group ownership is org-scoped before dependent reads', async () => {
     await expect(service.getEffectiveness(db(), { orgId: 'foreign-org', groupId })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
     expect(queryLog).toHaveLength(1)
   })
