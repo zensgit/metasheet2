@@ -132,16 +132,24 @@ jobs:
           echo "SQL Server never became ready within timeout"
           exit 1
 
-      - name: Generate CI-local ephemeral secrets (never logged, scoped to this run only)
+      - name: Generate CI-local ephemeral secrets (masked, never logged, scoped to this run only)
         run: |
           set -euo pipefail
+          jwt_secret="$(openssl rand -hex 32)"
+          enc_key="$(openssl rand -hex 32)"
+          runtime_password="$(openssl rand -hex 16)"
+          provisioning_password="$(openssl rand -hex 16)"
+          echo "::add-mask::$jwt_secret"
+          echo "::add-mask::$enc_key"
+          echo "::add-mask::$runtime_password"
+          echo "::add-mask::$provisioning_password"
           {
-            echo "E2E_JWT_SECRET=$(openssl rand -hex 32)"
-            echo "E2E_INTEGRATION_ENCRYPTION_KEY=$(openssl rand -hex 32)"
+            echo "E2E_JWT_SECRET=$jwt_secret"
+            echo "E2E_INTEGRATION_ENCRYPTION_KEY=$enc_key"
             echo "E2E_S6A_RUNTIME_DB_ROLE=e2e_s6a_runtime"
-            echo "E2E_S6A_RUNTIME_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "E2E_S6A_RUNTIME_DB_PASSWORD=$runtime_password"
             echo "E2E_S6A_PROVISIONING_DB_ROLE=e2e_s6a_provision"
-            echo "E2E_S6A_PROVISIONING_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "E2E_S6A_PROVISIONING_DB_PASSWORD=$provisioning_password"
           } >> "$GITHUB_ENV"
 
       - name: Provision sealed-export Postgres roles, then run migrations with both roles visible
@@ -241,12 +249,16 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
         run: pnpm --filter @metasheet/core-backend run migrate
 
-      - name: Generate CI-local ephemeral secrets (never logged, scoped to this run only)
+      - name: Generate CI-local ephemeral secrets (masked, never logged, scoped to this run only)
         run: |
           set -euo pipefail
+          jwt_secret="$(openssl rand -hex 32)"
+          enc_key="$(openssl rand -hex 32)"
+          echo "::add-mask::$jwt_secret"
+          echo "::add-mask::$enc_key"
           {
-            echo "E2E_JWT_SECRET=$(openssl rand -hex 32)"
-            echo "E2E_INTEGRATION_ENCRYPTION_KEY=$(openssl rand -hex 32)"
+            echo "E2E_JWT_SECRET=$jwt_secret"
+            echo "E2E_INTEGRATION_ENCRYPTION_KEY=$enc_key"
           } >> "$GITHUB_ENV"
 
       - name: Run negative control (this step is EXPECTED to fail)

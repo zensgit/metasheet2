@@ -43,6 +43,13 @@ function quotedIdentifier(value) {
   return `"${value.replaceAll('"', '""')}"`
 }
 
+// CREATE ROLE is a utility (DDL) statement — PostgreSQL's grammar does not accept a $n bind parameter
+// in the PASSWORD clause of a utility statement (only DML goes through the parameterized executor
+// path), so the password must be inlined as a quoted SQL string literal.
+function quotedLiteral(value) {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
 async function main() {
   const superuserUrl = requiredEnv('PG_SUPERUSER_URL')
   const runtimeRole = requiredEnv('RUNTIME_ROLE')
@@ -55,12 +62,10 @@ async function main() {
     const client = await pool.connect()
     try {
       await client.query(
-        `CREATE ROLE ${quotedIdentifier(runtimeRole)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD $1`,
-        [runtimePassword],
+        `CREATE ROLE ${quotedIdentifier(runtimeRole)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD ${quotedLiteral(runtimePassword)}`,
       )
       await client.query(
-        `CREATE ROLE ${quotedIdentifier(provisioningRole)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD $1`,
-        [provisioningPassword],
+        `CREATE ROLE ${quotedIdentifier(provisioningRole)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD ${quotedLiteral(provisioningPassword)}`,
       )
     } finally {
       client.release()

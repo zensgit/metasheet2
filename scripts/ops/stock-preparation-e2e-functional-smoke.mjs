@@ -164,6 +164,9 @@ export async function startServer(extraEnv, label) {
   if (currentServer) throw new Error('a server is already running; stop it before starting another')
   const env = { ...BASE_ENV, ...extraEnv }
   const logPath = path.join(OUT_DIR, `server-${label}.log`)
+  // Self-sufficient regardless of caller: main() mkdir's OUT_DIR, but the negative-control entry point
+  // calls startServer() directly without ever creating it first.
+  fs.mkdirSync(OUT_DIR, { recursive: true })
   const logFd = fs.openSync(logPath, 'a')
   const proc = spawn('pnpm', ['--filter', '@metasheet/core-backend', 'run', 'dev:core'], {
     cwd: REPO_ROOT,
