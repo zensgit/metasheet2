@@ -91,9 +91,9 @@ async function testTableScopeAndRunOnlyPoliciesMergeValuesFree() {
       conflictType: 'duplicate_expanded_key',
       policies: [
         { fingerprint: 'sha16:1111111111111111', policy: 'keep_multiple_rows' },
-        // Was merge_quantity; that token is no longer selectable (policy honesty — see
-        // stock-preparation-conflict-policy-honesty.test.cjs). The stale-fingerprint behaviour this
-        // row exercises is independent of which selectable policy it names.
+        // Was merge_quantity; that token is no longer selectable (see the POLICY HONESTY section
+        // below). The stale-fingerprint behaviour this row exercises is independent of which
+        // selectable policy it names.
         { fingerprint: 'sha16:9999999999999999', policy: 'source_correction_required' },
       ],
     },
