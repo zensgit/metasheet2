@@ -4508,3 +4508,103 @@ paths:
                 type: string
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance-admin/records/{recordId}/calculation-detail:
+    get:
+      summary: Read immutable attendance calculation detail as an administrator
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: orgId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: calculationId
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Immutable calculation detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceW4CalculationDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/attendance/records/{recordId}/calculation-detail:
+    get:
+      summary: Read the signed-in user's immutable attendance calculation detail
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: orgId
+          schema: { type: string }
+        - in: query
+          name: calculationId
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Immutable calculation detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceW4CalculationDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/attendance-admin/calculation-shadow-backlog:
+    get:
+      summary: Read values-free attendance shadow difference backlog counts
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Values-free shadow difference aggregates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceW4ShadowBacklogItem' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }

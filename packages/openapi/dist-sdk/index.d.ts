@@ -6660,6 +6660,152 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance-admin/records/{recordId}/calculation-detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read immutable attendance calculation detail as an administrator */
+        get: {
+            parameters: {
+                query: {
+                    orgId: string;
+                    calculationId?: string;
+                };
+                header?: never;
+                path: {
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Immutable calculation detail */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: components["schemas"]["AttendanceW4CalculationDetail"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/records/{recordId}/calculation-detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the signed-in user's immutable attendance calculation detail */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    calculationId?: string;
+                };
+                header?: never;
+                path: {
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Immutable calculation detail */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: components["schemas"]["AttendanceW4CalculationDetail"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance-admin/calculation-shadow-backlog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read values-free attendance shadow difference backlog counts */
+        get: {
+            parameters: {
+                query: {
+                    orgId: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Values-free shadow difference aggregates */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                items: components["schemas"]["AttendanceW4ShadowBacklogItem"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/audit-logs": {
         parameters: {
             query?: never;
@@ -14788,6 +14934,86 @@ export interface components {
             created_at?: string;
             /** Format: date-time */
             updated_at?: string;
+        };
+        AttendanceW4ShadowDiff: {
+            /** @enum {integer} */
+            schemaVersion: 1;
+            /** @enum {string} */
+            code: "equal" | "expected_break_exclusion" | "status_changed" | "work_minutes_mismatch" | "late_minutes_mismatch" | "early_leave_minutes_mismatch" | "missing_boundary_mismatch" | "work_date_mismatch" | "context_mismatch" | "input_mismatch" | "review_required" | "legacy_uncomparable";
+            changedFields: ("workDate" | "status" | "firstInAt" | "lastOutAt" | "workMinutes" | "lateMinutes" | "earlyLeaveMinutes" | "context" | "input")[];
+            absoluteMinuteDelta: number;
+            segmentCount: number;
+        };
+        AttendanceW4CalculationSegment: {
+            index: number;
+            /** Format: date-time */
+            expectedStartAt: string;
+            /** Format: date-time */
+            expectedEndAt: string;
+            /** Format: date-time */
+            actualInAt: string | null;
+            /** Format: date-time */
+            actualOutAt: string | null;
+            workMinutes: number;
+            lateMinutes: number;
+            earlyLeaveMinutes: number;
+            /** @enum {string} */
+            status: "normal" | "late" | "early_leave" | "late_early" | "missing_check_in" | "missing_check_out" | "missing_both";
+            statusReasons: ("within_window" | "late_check_in" | "early_check_out" | "missing_check_in" | "missing_check_out" | "missing_both" | "approved_correction_applied" | "approved_leave_overlay" | "approved_overtime_overlay" | "dst_fold_start_earlier" | "dst_fold_end_later")[];
+        };
+        AttendanceW4Calculation: {
+            /** Format: uuid */
+            id: string;
+            version: number;
+            /** @enum {string} */
+            kind: "legacy_baseline" | "calculation" | "reversal";
+            /** @enum {string} */
+            mode: "shadow" | "authoritative";
+            /** @enum {string} */
+            entrypoint: "live" | "legacy_import" | "integration_sync" | "correction" | "approved_leave" | "approved_overtime" | "outdoor_approval" | "manual_override" | "recompute" | "scheduled" | "approval_reversal" | "import_rollback" | "ops_retirement";
+            engineVersion: string;
+            /** @enum {integer} */
+            snapshotSchemaVersion: 1;
+            /** @enum {string} */
+            outcome: "baseline" | "completed" | "review_required" | "reversed";
+            /** @enum {string} */
+            outcomeReasonCode: "calculated" | "shadow_only" | "legacy_projection_baseline" | "ambiguous_segment_match" | "duplicate_check_in" | "duplicate_check_out" | "dst_gap_local_time" | "dst_fold_shared_boundary_ambiguous" | "invalid_timezone" | "invalid_segment_order" | "invalid_evidence_order" | "overlapping_actual_intervals" | "evidence_outside_attribution_window" | "missing_frozen_context" | "legacy_attribution_not_upgradeable" | "frozen_evidence_unavailable" | "context_resolution_ambiguous" | "context_mismatch" | "input_schema_invalid" | "legacy_time_ingress_not_authoritative" | "approved_fact_conflict" | "manual_override_invalid" | "import_metric_conflict" | "import_rollback_reversal" | "operator_retirement";
+            /** @enum {string} */
+            projectionEffect: "none" | "set_active" | "set_retired";
+            expectedSegmentCount: number;
+            /** @enum {string|null} */
+            projectedStatus: "normal" | "late" | "early_leave" | "late_early" | "partial" | "absent" | "adjusted" | "off" | null;
+            projectedWorkMinutes: number | null;
+            projectedLateMinutes: number | null;
+            projectedEarlyLeaveMinutes: number | null;
+            shadowDiff: components["schemas"]["AttendanceW4ShadowDiff"] | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        AttendanceW4CalculationDetail: {
+            /** Format: uuid */
+            recordId: string;
+            calculation: components["schemas"]["AttendanceW4Calculation"] | null;
+            segments: components["schemas"]["AttendanceW4CalculationSegment"][];
+            current: {
+                /** @enum {string} */
+                projectionOwner: "legacy_untracked" | "w4";
+                /** @enum {string} */
+                visibilityState: "active" | "retired";
+                /** @enum {string} */
+                visibilityReason: "active" | "review_placeholder" | "import_rollback" | "operator_retirement";
+                /** @enum {string} */
+                posture: "shadow" | "authoritative" | "undeterminable";
+            };
+        };
+        AttendanceW4ShadowBacklogItem: {
+            /** @enum {string} */
+            entrypoint: "live" | "legacy_import" | "integration_sync" | "correction" | "approved_leave" | "approved_overtime" | "outdoor_approval" | "manual_override" | "recompute" | "scheduled" | "approval_reversal" | "import_rollback" | "ops_retirement";
+            /** @enum {string} */
+            code: "expected_break_exclusion" | "status_changed" | "work_minutes_mismatch" | "late_minutes_mismatch" | "early_leave_minutes_mismatch" | "missing_boundary_mismatch" | "work_date_mismatch" | "context_mismatch" | "input_mismatch" | "review_required" | "legacy_uncomparable";
+            label: string;
+            critical: boolean;
+            count: number;
         };
         AttendanceRequest: {
             id?: string;

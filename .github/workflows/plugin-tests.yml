@@ -480,13 +480,30 @@ jobs:
             tests/unit/attendance-shift-segments-service.test.ts \
             --reporter=dot
 
-      # #4556 W4C-0 Stage D: section 8.4 source/effect/result mechanical bypass guard. A
+      # #4556 W4C-4 §12.7/§12.9: immutable detail/trace, auth-order and
+      # comparator mutation legs plus generated OpenAPI/SDK parity. Whole-file
+      # names are explicit so a path-filter or default-suite exclusion cannot
+      # turn this contract into skip-shaped green.
+      - name: Run attendance W4C-4 calculation detail and diff contracts
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-w4c4-calculation-detail.test.ts \
+            tests/unit/attendance-w4c4-calculation-detail-routes.test.ts \
+            --reporter=dot
+          pnpm --filter @metasheet/openapi build
+          pnpm --filter @metasheet/openapi validate
+          pnpm --filter @metasheet/openapi generate:sdk
+          git diff --exit-code -- packages/openapi/dist packages/openapi/dist-sdk/index.d.ts
+          node --test scripts/ops/attendance-w4c4-openapi-contract.test.mjs
+
+      # #4556 W4C-0 Stage D / W4C-4 §12.7: source/effect/result mechanical bypass guard plus
+      # generated calculation/segment current-history SELECT inventory. A
       # node:test (.test.mjs) file — invisible to both `pnpm --filter core-backend test` and
       # vitest.config.ts's exclude list — so it must be named explicitly here or it silently
       # never runs. Scans the exact-head worktree for new/renamed/unclassified attendance DML
       # against the pinned e0defbe26 debt baseline and its curated P01-P28/X01-X05 entries, and
       # re-proves the pinned baseline artifact is byte-reproducible from that ref.
-      - name: Run attendance W4C-0 Stage D §8.4 DML inventory collector
+      - name: Run attendance W4C-0 Stage D §8.4 and W4C-4 §12.7 inventory collectors
         run: |
           # The byte-reproducibility leg re-generates the baseline manifest FROM the pinned
           # commit itself (git ls-tree against e0defbe26…). actions/checkout is a shallow
@@ -1130,6 +1147,7 @@ jobs:
             tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
             tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts \
             tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts \
+            tests/integration/attendance-w4c4-calculation-detail.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

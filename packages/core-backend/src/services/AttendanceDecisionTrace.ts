@@ -34,6 +34,11 @@ import {
   type AttendanceSetupReadinessQueryFn,
 } from './AttendanceSetupReadinessAggregate'
 import { loadActiveCurrentAttendanceRecordForDecisionTraceV1 } from '../attendance/w4c3c-active-current'
+import {
+  AttendanceCalculationSchemaUnsupportedError,
+  readAttendanceW4TraceEvidence,
+  type AttendanceW4TraceProjection,
+} from './AttendanceW4CalculationDetail'
 
 // -------------------------------------------------------------------------------------------------
 // §4.2 read-only seam — verbatim reuse, not reimplementation (W5-0-G3).
@@ -127,6 +132,20 @@ export const ATTENDANCE_RECORD_STATUS_VALUES = [
   'off',
 ] as const
 export type AttendanceRecordStatus = (typeof ATTENDANCE_RECORD_STATUS_VALUES)[number]
+
+function isAttendanceRecordStatus(value: unknown): value is AttendanceRecordStatus {
+  return (
+    typeof value === 'string' &&
+    (ATTENDANCE_RECORD_STATUS_VALUES as readonly string[]).includes(value)
+  )
+}
+
+function parsePersistedNonNegativeInteger(value: unknown): number | null {
+  if (typeof value !== 'number' && typeof value !== 'string') return null
+  if (typeof value === 'string' && value.trim() === '') return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null
+}
 
 // -------------------------------------------------------------------------------------------------
 // Row shapes read directly off storage (documented per-table so a future maintainer does not have
@@ -309,6 +328,74 @@ async function readAttendanceRecordRow(
   )
 }
 
+type AttendanceW4DecisionBasis = {
+  readonly basis: AttendanceDecisionTraceBasisEnv
+  readonly authoritative: boolean
+  readonly unavailable: boolean
+  readonly projection: AttendanceW4TraceProjection | null
+}
+
+async function readAttendanceW4DecisionBasis(
+  orgId: string,
+  userId: string,
+  workDate: string,
+  runQuery: AttendanceDecisionTraceQueryFn,
+): Promise<AttendanceW4DecisionBasis | null> {
+  let result: Awaited<ReturnType<typeof readAttendanceW4TraceEvidence>>
+  try {
+    result = await readAttendanceW4TraceEvidence(orgId, userId, workDate, runQuery)
+  } catch (error) {
+    if (!(error instanceof AttendanceCalculationSchemaUnsupportedError)) throw error
+    return {
+      basis: { source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' }, version: { posture: 'undeterminable' } },
+      authoritative: true,
+      unavailable: true,
+      projection: null,
+    }
+  }
+  const authoritativeOrg = result.rolloutState === 'authoritative'
+    || (result.rolloutState === 'suspended' && result.priorRolloutState === 'authoritative')
+  if (authoritativeOrg) {
+    if (!result.evidence || result.evidence.mode !== 'authoritative' || result.evidence.projection === null) {
+      return {
+        basis: { source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' }, version: { posture: 'undeterminable' } },
+        authoritative: true,
+        unavailable: true,
+        projection: null,
+      }
+    }
+    if (!isAttendanceRecordStatus(result.evidence.projection.status)) {
+      return {
+        basis: { source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' }, version: { posture: 'undeterminable' } },
+        authoritative: true,
+        unavailable: true,
+        projection: null,
+      }
+    }
+    return {
+      basis: {
+        source: { kind: 'snapshot', ref: 'attendance_record_calculations:authoritative' },
+        version: { posture: 'snapshot_frozen', asOf: result.evidence.createdAt, snapshotVersion: '1' },
+      },
+      authoritative: true,
+      unavailable: false,
+      projection: result.evidence.projection,
+    }
+  }
+  if (result.evidence?.mode === 'shadow') {
+    return {
+      basis: {
+        source: { kind: 'snapshot', ref: 'attendance_record_calculations:shadow' },
+        version: { posture: 'current_live_no_history' },
+      },
+      authoritative: false,
+      unavailable: false,
+      projection: null,
+    }
+  }
+  return null
+}
+
 /** §3.3①E3 correction environment — `attendance_record_result_edits` (AE-1, no FK on `record_id`,
  *  keyed to the record's SUBJECT column `user_id` here — §4.1 distinguishes it from `actor_user_id`,
  *  the operator column). Returns the MOST RECENT correction row, if any. */
@@ -353,6 +440,40 @@ export async function buildTodayStatusTrace(
   workDate: string,
   runQuery: AttendanceDecisionTraceQueryFn,
 ): Promise<AttendanceTodayStatusTraceResponse> {
+  const w4 = await readAttendanceW4DecisionBasis(orgId, userId, workDate, runQuery)
+  if (w4?.authoritative) {
+    const projection = w4.projection
+    if (!projection) {
+      return {
+        category: 'today_status',
+        conclusion: {
+          workDate,
+          status: null,
+          isWorkday: null,
+          workMinutes: null,
+          lateMinutes: null,
+          earlyLeaveMinutes: null,
+        },
+        basis: [w4.basis],
+        confidence: 'undeterminable',
+      }
+    }
+    const status = projection.status
+    return {
+      category: 'today_status',
+      reasonCode: status,
+      conclusion: {
+        workDate,
+        status,
+        isWorkday: projection.isWorkday,
+        workMinutes: projection.workMinutes,
+        lateMinutes: projection.lateMinutes,
+        earlyLeaveMinutes: projection.earlyLeaveMinutes,
+      },
+      basis: [w4.basis],
+      confidence: 'grounded',
+    }
+  }
   const record = await readAttendanceRecordRow(orgId, userId, workDate, runQuery)
   // §3.3① fail-closed: "record 行不存在 ⇒ 整类 undeterminable" — every environment undeterminable,
   // and `reasonCode` (whose only closed set is the `status` column) has no value to report — the
@@ -377,7 +498,25 @@ export async function buildTodayStatusTrace(
     }
   }
 
-  const status = record.status as AttendanceRecordStatus
+  if (!isAttendanceRecordStatus(record.status)) {
+    return {
+      category: 'today_status',
+      conclusion: {
+        workDate,
+        status: null,
+        isWorkday: null,
+        workMinutes: null,
+        lateMinutes: null,
+        earlyLeaveMinutes: null,
+      },
+      basis: [
+        { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'undeterminable' } },
+      ],
+      confidence: 'undeterminable',
+    }
+  }
+
+  const status = record.status
   const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
   const correction = await readMostRecentResultEdit(orgId, userId, workDate, runQuery)
 
@@ -395,6 +534,7 @@ export async function buildTodayStatusTrace(
     // here is only the current rule-resolution identity, always `current_live_no_history`.
     currentRuleBasisEnv(rule),
   ]
+  if (w4) basis.push(w4.basis)
   if (correction) {
     basis.push({
       source: { kind: 'audit', ref: 'attendance_record_result_edits' },
@@ -452,6 +592,40 @@ export async function buildLateEarlyTrace(
   workDate: string,
   runQuery: AttendanceDecisionTraceQueryFn,
 ): Promise<AttendanceLateEarlyTraceResponse> {
+  const w4 = await readAttendanceW4DecisionBasis(orgId, userId, workDate, runQuery)
+  if (w4?.authoritative) {
+    const projection = w4.projection
+    if (!projection) {
+      return {
+        category: 'late_early',
+        conclusion: {
+          lateMinutes: null,
+          earlyLeaveMinutes: null,
+          severeLateCount: null,
+          severeLateMinutes: null,
+          absenceLateCount: null,
+          status: null,
+        },
+        basis: [w4.basis],
+        confidence: 'undeterminable',
+      }
+    }
+    const status = projection.status
+    return {
+      category: 'late_early',
+      reasonCode: status,
+      conclusion: {
+        lateMinutes: projection.lateMinutes,
+        earlyLeaveMinutes: projection.earlyLeaveMinutes,
+        severeLateCount: projection.severeLateCount,
+        severeLateMinutes: projection.severeLateMinutes,
+        absenceLateCount: projection.absenceLateCount,
+        status,
+      },
+      basis: [w4.basis],
+      confidence: 'grounded',
+    }
+  }
   const record = await readAttendanceRecordRow(orgId, userId, workDate, runQuery)
   if (!record) {
     const basis: AttendanceDecisionTraceBasisEnv[] = [
@@ -472,7 +646,26 @@ export async function buildLateEarlyTrace(
     }
   }
 
-  const status = record.status as AttendanceRecordStatus
+
+  if (!isAttendanceRecordStatus(record.status)) {
+    return {
+      category: 'late_early',
+      conclusion: {
+        lateMinutes: null,
+        earlyLeaveMinutes: null,
+        severeLateCount: null,
+        severeLateMinutes: null,
+        absenceLateCount: null,
+        status: null,
+      },
+      basis: [
+        { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'undeterminable' } },
+      ],
+      confidence: 'undeterminable',
+    }
+  }
+
+  const status = record.status
   const meta = (record.meta ?? {}) as Record<string, unknown>
   // §1-2 / §3.2 last row: tier counts are a HALF-snapshot — the RESULT is frozen in `meta` at
   // upsert time, but the threshold VALUE itself is not. Legacy rows predating #3055 never carry
@@ -482,6 +675,18 @@ export async function buildLateEarlyTrace(
     Object.prototype.hasOwnProperty.call(meta, 'severe_late_count') &&
     Object.prototype.hasOwnProperty.call(meta, 'severe_late_minutes') &&
     Object.prototype.hasOwnProperty.call(meta, 'absence_late_count')
+  const tierValues = hasTierKeys
+    ? {
+        severeLateCount: parsePersistedNonNegativeInteger(meta.severe_late_count),
+        severeLateMinutes: parsePersistedNonNegativeInteger(meta.severe_late_minutes),
+        absenceLateCount: parsePersistedNonNegativeInteger(meta.absence_late_count),
+      }
+    : null
+  const hasValidTierSnapshot =
+    tierValues !== null &&
+    tierValues.severeLateCount !== null &&
+    tierValues.severeLateMinutes !== null &&
+    tierValues.absenceLateCount !== null
   const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
   const correction = await readMostRecentResultEdit(orgId, userId, workDate, runQuery)
   const remediation = await runQuery<{ id: string; metadata: Record<string, unknown> | null; created_at: string }>(
@@ -502,10 +707,13 @@ export async function buildLateEarlyTrace(
     },
     {
       source: { kind: 'record', ref: 'attendance_records.meta.tier' },
-      version: hasTierKeys ? { posture: 'snapshot_frozen', asOf: record.updated_at } : { posture: 'undeterminable' },
+      version: hasValidTierSnapshot
+        ? { posture: 'snapshot_frozen', asOf: record.updated_at }
+        : { posture: 'undeterminable' },
     },
     currentRuleBasisEnv(rule),
   ]
+  if (w4) basis.push(w4.basis)
   if (correction) {
     basis.push({
       source: { kind: 'audit', ref: 'attendance_record_result_edits' },
@@ -540,9 +748,9 @@ export async function buildLateEarlyTrace(
     conclusion: {
       lateMinutes: record.late_minutes,
       earlyLeaveMinutes: record.early_leave_minutes,
-      severeLateCount: hasTierKeys ? Number(meta.severe_late_count) || 0 : null,
-      severeLateMinutes: hasTierKeys ? Number(meta.severe_late_minutes) || 0 : null,
-      absenceLateCount: hasTierKeys ? Number(meta.absence_late_count) || 0 : null,
+      severeLateCount: hasValidTierSnapshot ? tierValues.severeLateCount : null,
+      severeLateMinutes: hasValidTierSnapshot ? tierValues.severeLateMinutes : null,
+      absenceLateCount: hasValidTierSnapshot ? tierValues.absenceLateCount : null,
       status,
     },
     basis,
@@ -613,6 +821,54 @@ export function suggestAttendanceRequestType(row: {
   return null
 }
 
+function classifyAttendanceW4MissingProjection(projection: AttendanceW4TraceProjection): {
+  readonly missingSide: AttendanceMissingSide | null
+  readonly owedPunchReason: string
+  readonly suggestedRequestType: AttendanceSuggestedRequestType | null
+} {
+  if (!projection.isWorkday) {
+    return { missingSide: null, owedPunchReason: 'non_workday', suggestedRequestType: null }
+  }
+  const missingIn = projection.segments.some(
+    (segment) => segment.status === 'missing_check_in' || segment.status === 'missing_both',
+  )
+  const missingOut = projection.segments.some(
+    (segment) => segment.status === 'missing_check_out' || segment.status === 'missing_both',
+  )
+  const missingSide: AttendanceMissingSide | null = missingIn && missingOut
+    ? 'both'
+    : missingIn
+      ? 'check_in'
+      : missingOut
+        ? 'check_out'
+        : null
+  if (projection.status === 'absent') {
+    return { missingSide: missingSide ?? 'both', owedPunchReason: 'absent_workday', suggestedRequestType: 'leave' }
+  }
+  if (projection.status === 'partial') {
+    if (missingSide === 'both') {
+      return { missingSide, owedPunchReason: 'partial_missing_both', suggestedRequestType: 'missed_check_in' }
+    }
+    if (missingSide === 'check_in') {
+      return { missingSide, owedPunchReason: 'partial_missing_check_in', suggestedRequestType: 'missed_check_in' }
+    }
+    if (missingSide === 'check_out') {
+      return { missingSide, owedPunchReason: 'partial_missing_check_out', suggestedRequestType: 'missed_check_out' }
+    }
+    return { missingSide: null, owedPunchReason: 'partial_complete', suggestedRequestType: 'time_correction' }
+  }
+  const suggestedRequestType = projection.status === 'late'
+    || projection.status === 'early_leave'
+    || projection.status === 'late_early'
+    ? 'time_correction'
+    : null
+  return {
+    missingSide,
+    owedPunchReason: `status_${projection.status}`,
+    suggestedRequestType,
+  }
+}
+
 export interface AttendanceMissingPunchTraceResponse {
   category: 'missing_punch'
   reasonCode?: string
@@ -631,6 +887,30 @@ export async function buildMissingPunchTrace(
   workDate: string,
   runQuery: AttendanceDecisionTraceQueryFn,
 ): Promise<AttendanceMissingPunchTraceResponse> {
+  const w4 = await readAttendanceW4DecisionBasis(orgId, userId, workDate, runQuery)
+  if (w4?.authoritative) {
+    const projection = w4.projection
+    if (!projection) {
+      return {
+        category: 'missing_punch',
+        conclusion: { missingSide: null, isWorkday: null, suggestedRequestType: null },
+        basis: [w4.basis],
+        confidence: 'undeterminable',
+      }
+    }
+    const classification = classifyAttendanceW4MissingProjection(projection)
+    return {
+      category: 'missing_punch',
+      reasonCode: classification.owedPunchReason,
+      conclusion: {
+        missingSide: classification.missingSide,
+        isWorkday: projection.isWorkday,
+        suggestedRequestType: classification.suggestedRequestType,
+      },
+      basis: [w4.basis],
+      confidence: 'grounded',
+    }
+  }
   // W4C-3c P20 DecisionTrace missing-punch surface: same active-current helper.
   type MissingPunchRecord = AttendanceRecordRow & { first_in_at: string | null; last_out_at: string | null }
   const record = await loadActiveCurrentAttendanceRecordForDecisionTraceV1<MissingPunchRecord>(
@@ -641,9 +921,9 @@ export async function buildMissingPunchTrace(
     { orgId, userId, workDate },
     'id, status, is_workday, work_minutes, late_minutes, early_leave_minutes, meta, source_batch_id, created_at, updated_at, first_in_at, last_out_at',
   )
-  const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
   // §3.3③ fail-closed: no record AND the current rule cannot resolve ⇒整类 undeterminable.
   if (!record) {
+    const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
     const basis: AttendanceDecisionTraceBasisEnv[] = [
       { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'undeterminable' } },
     ]
@@ -656,6 +936,18 @@ export async function buildMissingPunchTrace(
     }
   }
 
+  if (!isAttendanceRecordStatus(record.status)) {
+    return {
+      category: 'missing_punch',
+      conclusion: { missingSide: null, isWorkday: null, suggestedRequestType: null },
+      basis: [
+        { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'undeterminable' } },
+      ],
+      confidence: 'undeterminable',
+    }
+  }
+
+  const rule = await resolveCurrentRuleGraceParams(orgId, userId, runQuery)
   const classification = classifyAttendanceOwedPunch(record)
   const suggested = suggestAttendanceRequestType(record)
   const remediation = await runQuery<{ id: string; created_at: string; metadata: Record<string, unknown> | null }>(
@@ -672,6 +964,7 @@ export async function buildMissingPunchTrace(
     { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'snapshot_frozen', asOf: record.updated_at } },
     currentRuleBasisEnv(rule),
   ]
+  if (w4) basis.push(w4.basis)
   if (record.status === 'absent') {
     basis.push({ source: { kind: 'policy_gate', ref: 'auto_absence_generation' }, version: { posture: 'undeterminable' } })
   }
@@ -801,12 +1094,45 @@ export async function buildOvertimeSegmentationTrace(
   // (R4). `snapshot.dayType` is also validated here (never `?? 'restday'` — a malformed/legacy
   // `dayType` outside the closed set falls through to the `partial_legacy` branch instead of a
   // fabricated default, §3.1 hard rule 3).
+  const snapshotSegments =
+    snapshot &&
+    typeof snapshot.segments === 'object' &&
+    snapshot.segments !== null &&
+    !Array.isArray(snapshot.segments)
+      ? snapshot.segments as Record<string, unknown>
+      : null
+  const snapshotWorkdayMinutes = parsePersistedNonNegativeInteger(snapshotSegments?.workdayMinutes)
+  const snapshotRestdayMinutes = parsePersistedNonNegativeInteger(snapshotSegments?.restdayMinutes)
+  const snapshotHolidayMinutes = parsePersistedNonNegativeInteger(snapshotSegments?.holidayMinutes)
+  const snapshotTotalMinutes = parsePersistedNonNegativeInteger(snapshot?.totalMinutes)
+  const rawPerDate = snapshot?.perDate
+  const parsedPerDate = Array.isArray(rawPerDate)
+    ? rawPerDate.map((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+        const item = entry as Record<string, unknown>
+        const minutes = parsePersistedNonNegativeInteger(item.minutes)
+        if (!OVERTIME_DAY_TYPES.has(item.dayType as string) || minutes === null) return null
+        return {
+          dayType: item.dayType as AttendanceOvertimeDayType,
+          minutes,
+          calendar: item.calendar,
+        }
+      })
+    : null
+  const perDateValid =
+    rawPerDate === undefined ||
+    (parsedPerDate !== null && parsedPerDate.every((entry) => entry !== null))
   const snapshotValid =
     !!snapshot &&
     typeof snapshot === 'object' &&
     snapshot.version === OVERTIME_SEGMENTATION_VERSION &&
     snapshot.engine === OVERTIME_SEGMENTATION_ENGINE &&
     OVERTIME_DAY_TYPES.has(snapshot.dayType as string) &&
+    snapshotWorkdayMinutes !== null &&
+    snapshotRestdayMinutes !== null &&
+    snapshotHolidayMinutes !== null &&
+    snapshotTotalMinutes !== null &&
+    perDateValid &&
     row.resolved_at != null
   // Never fabricated from `updated_at` (§3.2 "不得伪造时点") — `undefined` when the request has not
   // been through terminal review; envs below fail closed to `undeterminable` rather than borrow it.
@@ -820,23 +1146,21 @@ export async function buildOvertimeSegmentationTrace(
   let totalMinutes = 0
 
   if (snapshotValid) {
-    const segs = (snapshot!.segments ?? {}) as Record<string, unknown>
-    workdayMinutes = Number(segs.workdayMinutes) || 0
-    restdayMinutes = Number(segs.restdayMinutes) || 0
-    holidayMinutes = Number(segs.holidayMinutes) || 0
-    totalMinutes = Number(snapshot!.totalMinutes) || 0
+    workdayMinutes = snapshotWorkdayMinutes
+    restdayMinutes = snapshotRestdayMinutes
+    holidayMinutes = snapshotHolidayMinutes
+    totalMinutes = snapshotTotalMinutes
     // §9 W5-0-G7 two-user ⑤ fidelity note carried over to ④: `crossesMidnight` snapshots
     // (`buildCrossMidnightOvertimeSegmentationSnapshot`, `index.cjs:10669-10715`) carry a `perDate`
     // array — one entry PER SPANNED DATE, each with its own `dayType`/`minutes`/`calendar`. Walking
     // it (instead of collapsing to the primary date only) keeps Σsegments[].minutes === totalMinutes
     // and preserves each date's own `reasonCode`/`holidayName` (R2 — no discarded storage rows).
-    const perDate = Array.isArray(snapshot!.perDate) ? (snapshot!.perDate as Array<Record<string, unknown>>) : null
-    const segmentSources: Array<{ dayType: unknown; minutes: unknown; calendar: unknown }> =
-      perDate && perDate.length > 0
-        ? perDate.map((entry) => ({ dayType: entry.dayType, minutes: entry.minutes, calendar: entry.calendar }))
+    const segmentSources: Array<{ dayType: AttendanceOvertimeDayType; minutes: number; calendar: unknown }> =
+      parsedPerDate && parsedPerDate.length > 0
+        ? parsedPerDate as Array<{ dayType: AttendanceOvertimeDayType; minutes: number; calendar: unknown }>
         : [
             {
-              dayType: snapshot!.dayType,
+              dayType: snapshot!.dayType as AttendanceOvertimeDayType,
               minutes:
                 snapshot!.dayType === 'workday'
                   ? workdayMinutes
@@ -845,14 +1169,13 @@ export async function buildOvertimeSegmentationTrace(
                     : restdayMinutes,
               calendar: snapshot!.calendar,
             },
-          ]
+        ]
     for (const entry of segmentSources) {
-      const dayType = OVERTIME_DAY_TYPES.has(entry.dayType as string) ? (entry.dayType as AttendanceOvertimeDayType) : 'restday'
       const calendar = (entry.calendar ?? {}) as Record<string, unknown>
       const effectiveSource = typeof calendar.effectiveSource === 'string' && calendar.effectiveSource ? calendar.effectiveSource : undefined
       segments.push({
-        dayType,
-        minutes: Number(entry.minutes) || 0,
+        dayType: entry.dayType,
+        minutes: entry.minutes,
         ...(effectiveSource ? { reasonCode: effectiveSource } : {}),
         holidayName: typeof calendar.holidayName === 'string' ? calendar.holidayName : null,
       })
@@ -863,7 +1186,7 @@ export async function buildOvertimeSegmentationTrace(
     })
   } else {
     basis.push({ source: { kind: 'snapshot', ref: 'attendance_requests.metadata.overtimeSegmentation' }, version: { posture: 'undeterminable' } })
-    totalMinutes = Number(metadata.minutes) || 0
+    totalMinutes = parsePersistedNonNegativeInteger(metadata.minutes) ?? 0
   }
 
   const overtimeRule = metadata.overtimeRule
