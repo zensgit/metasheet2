@@ -145,6 +145,8 @@ const P25_READ_TABLE_PATTERN = new RegExp(
 
 const ATTENDANCE_RECORD_READ_PATTERN =
   /\b(?:FROM|JOIN)\s+"?(attendance_records|attendance_current_records)"?(?![A-Za-z0-9_])/gi
+const ATTENDANCE_CALCULATION_READ_PATTERN =
+  /\b(?:FROM|JOIN)\s+"?(attendance_record_calculations|attendance_record_segments)"?(?![A-Za-z0-9_])/gi
 const DYNAMIC_READ_PATTERN = /\b(?:FROM|JOIN)\s+\$\{([^}]+)\}/gi
 const JS_IDENTIFIER_PATTERN = /\b[A-Za-z_$][A-Za-z0-9_$]*\b/g
 
@@ -663,6 +665,39 @@ function scanFileForAttendanceRecordReadSites(relPath, content) {
   return sites
 }
 
+// W4C-4 §12.7: calculation/segment reads must not inherit the attendance-record
+// inventory's allowlist. Every direct read receives an explicit current or history owner.
+function scanFileForAttendanceCalculationReadSites(relPath, content) {
+  const lines = content.split(/\r?\n/)
+  const sites = []
+  ATTENDANCE_CALCULATION_READ_PATTERN.lastIndex = 0
+  let match
+  while ((match = ATTENDANCE_CALCULATION_READ_PATTERN.exec(content))) {
+    const lineIndex = lineIndexAt(content, match.index)
+    if (isDeleteTargetAt(content, match.index)) continue
+    sites.push({
+      relPath,
+      line: lineIndex + 1,
+      table: match[1],
+      enclosingSymbol: nearestEnclosingSymbol(lines, lineIndex),
+    })
+  }
+  for (const dynamic of collectDynamicReadSites(
+    content,
+    lines,
+    ['attendance_record_calculations', 'attendance_record_segments'],
+  )) {
+    sites.push({
+      relPath,
+      line: dynamic.lineIndex + 1,
+      table: dynamic.table,
+      enclosingSymbol: dynamic.enclosingSymbol,
+      dynamic: true,
+    })
+  }
+  return sites
+}
+
 // Builds the full raw census across every scannable file under the discovered runtime roots.
 // `source` supplies `readFile(relPath) -> string|null` and `listAllFiles(rootDir) -> relPath[]`.
 function buildRawCensus(source) {
@@ -715,6 +750,24 @@ function buildAttendanceRecordReadCensus(source) {
       const content = source.readFile(relPath)
       if (content == null) continue
       sites.push(...scanFileForAttendanceRecordReadSites(relPath, content))
+    }
+  }
+  sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
+  return { roots, sites }
+}
+
+function buildAttendanceCalculationReadCensus(source) {
+  const roots = discoverRuntimeRoots(source)
+  const seen = new Set()
+  const sites = []
+  for (const root of roots) {
+    for (const relPath of source.listAllFiles(root)) {
+      if (seen.has(relPath)) continue
+      seen.add(relPath)
+      if (!isScannablePath(relPath)) continue
+      const content = source.readFile(relPath)
+      if (content == null) continue
+      sites.push(...scanFileForAttendanceCalculationReadSites(relPath, content))
     }
   }
   sites.sort((a, b) => (a.relPath === b.relPath ? a.line - b.line : a.relPath < b.relPath ? -1 : 1))
@@ -816,9 +869,11 @@ module.exports = {
   scanFileForDmlSites,
   scanFileForP25CallPathSites,
   scanFileForAttendanceRecordReadSites,
+  scanFileForAttendanceCalculationReadSites,
   buildRawCensus,
   buildP25CallPathCensus,
   buildAttendanceRecordReadCensus,
+  buildAttendanceCalculationReadCensus,
   classifyCensus,
   debtKey,
   isCanonicalBoundaryPath,

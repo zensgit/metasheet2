@@ -113,8 +113,11 @@ import {
 } from './w4c0-fingerprints'
 import { parseAttendanceInstantMsV1 } from './w4c1-strict-time'
 import {
+  ATTENDANCE_DAILY_STATUSES_V1,
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
   calculateAttendanceSegmentsV1,
+  type AttendanceCalculatedSegmentV1,
+  type AttendanceDailyStatusV1,
   type AttendanceSegmentCalculationResultV1,
 } from './w4c1-segment-calculator'
 import {
@@ -123,6 +126,7 @@ import {
 } from './w4c1-fingerprints'
 import type {
   AttendanceAttributionSnapshotV1,
+  ApprovedAttendanceFactV1,
   AttendanceEvidenceV1,
   FrozenAttendanceContextV1,
 } from './w4c0-write-boundary-types'
@@ -136,6 +140,11 @@ import {
   type AttendanceScheduledRunMemberInputV1,
   type AttendanceScheduledRunMembershipResolverV1,
 } from './w4c2-scheduled-run'
+import {
+  computeAttendanceW4ShadowDiff,
+  type AttendanceW4ComparableDailyProjection,
+} from '../services/AttendanceW4CalculationDetail'
+import { isExpectedAttendanceShadowDifferenceV1 } from './w4c2-shadow-expected-differences'
 
 // ---------------------------------------------------------------------------
 // Errors.
@@ -555,8 +564,28 @@ function isStrictInstant(value: unknown): boolean {
   }
 }
 
-interface ShadowTargetRow {
+interface ShadowTargetRow extends AttendanceW4ComparableDailyProjection {
   id: string
+}
+
+function approvedFactMinutes(
+  facts: readonly ApprovedAttendanceFactV1[],
+  kind: 'leave' | 'overtime',
+): number {
+  return facts.reduce((total, fact) => {
+    if (fact.kind !== kind) return total
+    return total + Math.max(0, Math.floor(fact.coverage.minutes))
+  }, 0)
+}
+
+function hasW4Anomaly(segments: readonly AttendanceCalculatedSegmentV1[]): boolean {
+  return segments.some((segment) =>
+    segment.status === 'late'
+    || segment.status === 'early_leave'
+    || segment.status === 'late_early'
+    || segment.status === 'missing_check_in'
+    || segment.status === 'missing_check_out'
+    || segment.status === 'missing_both')
 }
 
 async function lockShadowParentRecord(
@@ -569,11 +598,27 @@ async function lockShadowParentRecord(
   const target = createVerifiedAttendanceCalculationTargetIdentityV1({ org, userId, workDate })
   await acquireAttendanceCalculationTargetLocks(client, [target])
   const result = await client.query(
-    'SELECT id::text AS id FROM attendance_records WHERE user_id = $1 AND org_id = $2 AND work_date = $3 FOR UPDATE',
+    `SELECT id::text AS id, work_date::text AS "workDate", status,
+            first_in_at AS "firstInAt", last_out_at AS "lastOutAt",
+            work_minutes AS "workMinutes", late_minutes AS "lateMinutes",
+            early_leave_minutes AS "earlyLeaveMinutes"
+       FROM attendance_records
+      WHERE user_id = $1 AND org_id = $2 AND work_date = $3
+      FOR UPDATE`,
     [userId, org.orgId as unknown as string, workDate],
   )
   if (result.rows.length === 0) return null
-  return { id: String(result.rows[0].id) }
+  const row = result.rows[0]
+  return {
+    id: String(row.id),
+    workDate: String(row.workDate),
+    status: row.status === null ? null : String(row.status),
+    firstInAt: row.firstInAt as string | Date | null,
+    lastOutAt: row.lastOutAt as string | Date | null,
+    workMinutes: row.workMinutes === null ? null : Number(row.workMinutes),
+    lateMinutes: row.lateMinutes === null ? null : Number(row.lateMinutes),
+    earlyLeaveMinutes: row.earlyLeaveMinutes === null ? null : Number(row.earlyLeaveMinutes),
+  }
 }
 
 async function nextCalculationVersion(
@@ -597,7 +642,7 @@ interface ShadowCalculationRowInput {
   context: FrozenAttendanceContextV1 | null
   segmentSnapshot: unknown[]
   evidence: unknown[]
-  approvedFacts: unknown[]
+  approvedFacts: ApprovedAttendanceFactV1[]
   inputProvenance: Record<string, unknown>
   provenanceRef: AttendanceInputProvenanceRefV1
   mergePolicy: 'append'
@@ -607,6 +652,7 @@ interface ShadowCalculationRowInput {
   dailyProjection: AttendanceSegmentCalculationResultV1['dailyProjection']
   actorId: string
   correlationId: string
+  legacyProjection: AttendanceW4ComparableDailyProjection
 }
 
 /**
@@ -647,6 +693,51 @@ async function insertShadowCalculation(
   const calculationId = crypto.randomUUID()
   const completed = input.outcome === 'completed'
   const projection = completed ? input.dailyProjection : null
+  const resolvedWorkDate = input.attribution.posture === 'resolved_v2'
+    ? input.attribution.value.workDate
+    : null
+  const shadowDiffCandidate = computeAttendanceW4ShadowDiff({
+    legacy: input.legacyProjection,
+    calculated: projection
+      ? {
+          workDate: resolvedWorkDate,
+          status: projection.status,
+          firstInAt: projection.firstInAt,
+          lastOutAt: projection.lastOutAt,
+          workMinutes: projection.workedMinutes,
+          lateMinutes: projection.lateMinutes,
+          earlyLeaveMinutes: projection.earlyLeaveMinutes,
+        }
+      : null,
+    segmentCount: completed ? input.segments.length : 0,
+    outcome: input.outcome,
+    workDateMismatch: resolvedWorkDate !== null && resolvedWorkDate !== input.legacyProjection.workDate,
+    contextMismatch: input.outcomeReasonCode === 'context_mismatch',
+    inputMismatch: input.outcomeReasonCode === 'input_schema_invalid'
+      || input.outcomeReasonCode === 'import_metric_conflict',
+  })
+  const legacyStatus = input.legacyProjection.status
+  const projectedStatus = projection?.status ?? null
+  const expectedRosterDifference = completed && projection !== null
+    && typeof legacyStatus === 'string'
+    && (ATTENDANCE_DAILY_STATUSES_V1 as readonly string[]).includes(legacyStatus)
+    && typeof projectedStatus === 'string'
+    && (ATTENDANCE_DAILY_STATUSES_V1 as readonly string[]).includes(projectedStatus)
+    ? isExpectedAttendanceShadowDifferenceV1({
+        shadowDiffCode: shadowDiffCandidate.code,
+        legacyStatus: legacyStatus as AttendanceDailyStatusV1,
+        w4Status: projectedStatus as AttendanceDailyStatusV1,
+        w4CorrectionApplied: input.segments.some((segment) => segment.reasons.includes('approved_correction_applied')),
+        w4AnomalyPresent: hasW4Anomaly(input.segments),
+        legacyLeaveMinutes: approvedFactMinutes(input.approvedFacts, 'leave'),
+        legacyOvertimeMinutes: approvedFactMinutes(input.approvedFacts, 'overtime'),
+      })
+    : false
+  // The ratified roster entry deliberately presents as `status_changed`; it is
+  // non-critical under §10.1 and must not be relabeled as break exclusion.
+  const shadowDiff = expectedRosterDifference
+    ? Object.freeze({ ...shadowDiffCandidate, code: 'status_changed' as const })
+    : shadowDiffCandidate
   await client.query(
     `INSERT INTO attendance_record_calculations (
         id, org_id, attendance_record_id, version, calculation_kind, mode, entrypoint,
@@ -657,7 +748,7 @@ async function insertShadowCalculation(
         merge_policy, calculation_tier, outcome, outcome_reason_code, projection_effect,
         expected_segment_count, projected_status, projected_first_in_at, projected_last_out_at,
         projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
-        actor_id, correlation_id
+        shadow_diff_code, shadow_diff, actor_id, correlation_id
       ) VALUES (
         $1::uuid, $2, $3::uuid, $4, 'calculation', 'shadow', $5,
         $6, 1, $7::uuid,
@@ -667,7 +758,7 @@ async function insertShadowCalculation(
         $17, 'legacy_shadow', $18, $19, 'none',
         $20, $21, $22, $23,
         $24, $25, $26,
-        $27, $28
+        $27, $28::jsonb, $29, $30
       )`,
     [
       calculationId,
@@ -699,6 +790,8 @@ async function insertShadowCalculation(
       completed && projection ? projection.workedMinutes : null,
       completed && projection ? projection.lateMinutes : null,
       completed && projection ? projection.earlyLeaveMinutes : null,
+      shadowDiff.code,
+      JSON.stringify(shadowDiff),
       input.actorId,
       input.correlationId,
     ],
@@ -1280,6 +1373,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
             dailyProjection: null,
             actorId: authorization.actorId,
             correlationId,
+            legacyProjection: parent,
           })
           calculationId = inserted.calculationId
           semanticFingerprint = inserted.semanticFingerprint
@@ -1559,6 +1653,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
             dailyProjection: identityDrift ? null : calculation.dailyProjection,
             actorId: authorization.actorId,
             correlationId,
+            legacyProjection: parent,
           })
           calculationId = inserted.calculationId
           semanticFingerprint = inserted.semanticFingerprint
@@ -2042,6 +2137,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
                 dailyProjection: calculation.dailyProjection,
                 actorId: authorization.actorId,
                 correlationId: envelope.correlationId,
+                legacyProjection: parent,
               })
               calculationId = insertedCalc.calculationId
             }

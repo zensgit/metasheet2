@@ -42,6 +42,7 @@ import {
   AttendanceW4ManualOverrideError,
 } from './w4c3c-manual-override'
 import { assertParentNotRetiredForOrdinaryWriterV1 } from './w4c3c-ops-retirement'
+import { computeAttendanceW4ShadowDiff } from '../services/AttendanceW4CalculationDetail'
 
 export const ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES = Object.freeze({
   ...ATTENDANCE_MANUAL_OVERRIDE_ERROR_CODES,
@@ -454,6 +455,34 @@ export async function appendManualOverrideCalculationV1(
     lateMinutes: overlaid.lateMinutes,
     earlyLeaveMinutes: overlaid.earlyLeaveMinutes,
   }
+  const resolvedWorkDate = typeof (priorContext as { workDate?: unknown }).workDate === 'string'
+    ? (priorContext as { workDate: string }).workDate
+    : null
+  const shadowDiff = input.mode === 'shadow'
+    ? computeAttendanceW4ShadowDiff({
+        legacy: {
+          workDate,
+          status: typeof record.status === 'string' ? record.status : null,
+          firstInAt: record.first_in_at as string | Date | null,
+          lastOutAt: record.last_out_at as string | Date | null,
+          workMinutes: record.work_minutes === null ? null : Number(record.work_minutes),
+          lateMinutes: record.late_minutes === null ? null : Number(record.late_minutes),
+          earlyLeaveMinutes: record.early_leave_minutes === null ? null : Number(record.early_leave_minutes),
+        },
+        calculated: {
+          workDate: resolvedWorkDate,
+          status: projection.status,
+          firstInAt: projection.firstInAt,
+          lastOutAt: projection.lastOutAt,
+          workMinutes: projection.workedMinutes,
+          lateMinutes: projection.lateMinutes,
+          earlyLeaveMinutes: projection.earlyLeaveMinutes,
+        },
+        segmentCount: expectedSegmentCount,
+        outcome: 'completed',
+        workDateMismatch: resolvedWorkDate !== null && resolvedWorkDate !== workDate,
+      })
+    : null
   const nextVersion = Number(prior.version) + 1
   if (!Number.isSafeInteger(nextVersion) || nextVersion < 2) {
     fail(ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES.DATABASE_RESULT_INVALID, 500)
@@ -518,7 +547,7 @@ export async function appendManualOverrideCalculationV1(
         merge_policy, calculation_tier, outcome, outcome_reason_code, projection_effect,
         expected_segment_count, projected_status, projected_first_in_at, projected_last_out_at,
         projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
-        projected_daily_fingerprint, actor_id, correlation_id
+        projected_daily_fingerprint, shadow_diff_code, shadow_diff, actor_id, correlation_id
       ) VALUES (
         $1::uuid, $2, $3::uuid, $4, 'calculation', $5, 'manual_override',
         $6, 1, $7::uuid, $8::uuid,
@@ -527,7 +556,7 @@ export async function appendManualOverrideCalculationV1(
         $16::jsonb, $17::jsonb, $18::jsonb,
         'override', $19, 'completed', 'calculated', $20,
         $21, $22, $23, $24, $25, $26, $27, $28,
-        $29, $30
+        $29, $30::jsonb, $31, $32
       )`,
     [
       calculationId,
@@ -565,6 +594,8 @@ export async function appendManualOverrideCalculationV1(
       projection.lateMinutes,
       projection.earlyLeaveMinutes,
       projectedDailyFingerprint(projection),
+      shadowDiff?.code ?? null,
+      shadowDiff ? canonicalAttendanceJsonV1(shadowDiff) : null,
       actorId,
       correlationId,
     ],

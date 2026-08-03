@@ -34,6 +34,10 @@ import {
   type AttendanceSetupReadinessQueryFn,
 } from './AttendanceSetupReadinessAggregate'
 import { loadActiveCurrentAttendanceRecordForDecisionTraceV1 } from '../attendance/w4c3c-active-current'
+import {
+  readAttendanceW4TraceEvidence,
+  type AttendanceW4TraceProjection,
+} from './AttendanceW4CalculationDetail'
 
 // -------------------------------------------------------------------------------------------------
 // §4.2 read-only seam — verbatim reuse, not reimplementation (W5-0-G3).
@@ -309,6 +313,55 @@ async function readAttendanceRecordRow(
   )
 }
 
+type AttendanceW4DecisionBasis = {
+  readonly basis: AttendanceDecisionTraceBasisEnv
+  readonly authoritative: boolean
+  readonly unavailable: boolean
+  readonly projection: AttendanceW4TraceProjection | null
+}
+
+async function readAttendanceW4DecisionBasis(
+  orgId: string,
+  userId: string,
+  workDate: string,
+  runQuery: AttendanceDecisionTraceQueryFn,
+): Promise<AttendanceW4DecisionBasis | null> {
+  const result = await readAttendanceW4TraceEvidence(orgId, userId, workDate, runQuery)
+  const authoritativeOrg = result.rolloutState === 'authoritative'
+    || (result.rolloutState === 'suspended' && result.priorRolloutState === 'authoritative')
+  if (authoritativeOrg) {
+    if (!result.evidence || result.evidence.mode !== 'authoritative' || result.evidence.projection === null) {
+      return {
+        basis: { source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' }, version: { posture: 'undeterminable' } },
+        authoritative: true,
+        unavailable: true,
+        projection: null,
+      }
+    }
+    return {
+      basis: {
+        source: { kind: 'snapshot', ref: 'attendance_record_calculations:authoritative' },
+        version: { posture: 'snapshot_frozen', asOf: result.evidence.createdAt, snapshotVersion: '1' },
+      },
+      authoritative: true,
+      unavailable: false,
+      projection: result.evidence.projection,
+    }
+  }
+  if (result.evidence?.mode === 'shadow') {
+    return {
+      basis: {
+        source: { kind: 'snapshot', ref: 'attendance_record_calculations:shadow' },
+        version: { posture: 'current_live_no_history' },
+      },
+      authoritative: false,
+      unavailable: false,
+      projection: null,
+    }
+  }
+  return null
+}
+
 /** §3.3①E3 correction environment — `attendance_record_result_edits` (AE-1, no FK on `record_id`,
  *  keyed to the record's SUBJECT column `user_id` here — §4.1 distinguishes it from `actor_user_id`,
  *  the operator column). Returns the MOST RECENT correction row, if any. */
@@ -353,6 +406,40 @@ export async function buildTodayStatusTrace(
   workDate: string,
   runQuery: AttendanceDecisionTraceQueryFn,
 ): Promise<AttendanceTodayStatusTraceResponse> {
+  const w4 = await readAttendanceW4DecisionBasis(orgId, userId, workDate, runQuery)
+  if (w4?.authoritative) {
+    const projection = w4.projection
+    if (!projection) {
+      return {
+        category: 'today_status',
+        conclusion: {
+          workDate,
+          status: null,
+          isWorkday: null,
+          workMinutes: null,
+          lateMinutes: null,
+          earlyLeaveMinutes: null,
+        },
+        basis: [w4.basis],
+        confidence: 'undeterminable',
+      }
+    }
+    const status = projection.status as AttendanceRecordStatus
+    return {
+      category: 'today_status',
+      reasonCode: status,
+      conclusion: {
+        workDate,
+        status,
+        isWorkday: projection.isWorkday,
+        workMinutes: projection.workMinutes,
+        lateMinutes: projection.lateMinutes,
+        earlyLeaveMinutes: projection.earlyLeaveMinutes,
+      },
+      basis: [w4.basis],
+      confidence: 'grounded',
+    }
+  }
   const record = await readAttendanceRecordRow(orgId, userId, workDate, runQuery)
   // §3.3① fail-closed: "record 行不存在 ⇒ 整类 undeterminable" — every environment undeterminable,
   // and `reasonCode` (whose only closed set is the `status` column) has no value to report — the
@@ -395,6 +482,7 @@ export async function buildTodayStatusTrace(
     // here is only the current rule-resolution identity, always `current_live_no_history`.
     currentRuleBasisEnv(rule),
   ]
+  if (w4) basis.push(w4.basis)
   if (correction) {
     basis.push({
       source: { kind: 'audit', ref: 'attendance_record_result_edits' },
@@ -452,6 +540,40 @@ export async function buildLateEarlyTrace(
   workDate: string,
   runQuery: AttendanceDecisionTraceQueryFn,
 ): Promise<AttendanceLateEarlyTraceResponse> {
+  const w4 = await readAttendanceW4DecisionBasis(orgId, userId, workDate, runQuery)
+  if (w4?.authoritative) {
+    const projection = w4.projection
+    if (!projection) {
+      return {
+        category: 'late_early',
+        conclusion: {
+          lateMinutes: null,
+          earlyLeaveMinutes: null,
+          severeLateCount: null,
+          severeLateMinutes: null,
+          absenceLateCount: null,
+          status: null,
+        },
+        basis: [w4.basis],
+        confidence: 'undeterminable',
+      }
+    }
+    const status = projection.status as AttendanceRecordStatus
+    return {
+      category: 'late_early',
+      reasonCode: status,
+      conclusion: {
+        lateMinutes: projection.lateMinutes,
+        earlyLeaveMinutes: projection.earlyLeaveMinutes,
+        severeLateCount: projection.severeLateCount,
+        severeLateMinutes: projection.severeLateMinutes,
+        absenceLateCount: projection.absenceLateCount,
+        status,
+      },
+      basis: [w4.basis],
+      confidence: 'grounded',
+    }
+  }
   const record = await readAttendanceRecordRow(orgId, userId, workDate, runQuery)
   if (!record) {
     const basis: AttendanceDecisionTraceBasisEnv[] = [
@@ -506,6 +628,7 @@ export async function buildLateEarlyTrace(
     },
     currentRuleBasisEnv(rule),
   ]
+  if (w4) basis.push(w4.basis)
   if (correction) {
     basis.push({
       source: { kind: 'audit', ref: 'attendance_record_result_edits' },
@@ -613,6 +736,54 @@ export function suggestAttendanceRequestType(row: {
   return null
 }
 
+function classifyAttendanceW4MissingProjection(projection: AttendanceW4TraceProjection): {
+  readonly missingSide: AttendanceMissingSide | null
+  readonly owedPunchReason: string
+  readonly suggestedRequestType: AttendanceSuggestedRequestType | null
+} {
+  if (!projection.isWorkday) {
+    return { missingSide: null, owedPunchReason: 'non_workday', suggestedRequestType: null }
+  }
+  const missingIn = projection.segments.some(
+    (segment) => segment.status === 'missing_check_in' || segment.status === 'missing_both',
+  )
+  const missingOut = projection.segments.some(
+    (segment) => segment.status === 'missing_check_out' || segment.status === 'missing_both',
+  )
+  const missingSide: AttendanceMissingSide | null = missingIn && missingOut
+    ? 'both'
+    : missingIn
+      ? 'check_in'
+      : missingOut
+        ? 'check_out'
+        : null
+  if (projection.status === 'absent') {
+    return { missingSide: missingSide ?? 'both', owedPunchReason: 'absent_workday', suggestedRequestType: 'leave' }
+  }
+  if (projection.status === 'partial') {
+    if (missingSide === 'both') {
+      return { missingSide, owedPunchReason: 'partial_missing_both', suggestedRequestType: 'missed_check_in' }
+    }
+    if (missingSide === 'check_in') {
+      return { missingSide, owedPunchReason: 'partial_missing_check_in', suggestedRequestType: 'missed_check_in' }
+    }
+    if (missingSide === 'check_out') {
+      return { missingSide, owedPunchReason: 'partial_missing_check_out', suggestedRequestType: 'missed_check_out' }
+    }
+    return { missingSide: null, owedPunchReason: 'partial_complete', suggestedRequestType: 'time_correction' }
+  }
+  const suggestedRequestType = projection.status === 'late'
+    || projection.status === 'early_leave'
+    || projection.status === 'late_early'
+    ? 'time_correction'
+    : null
+  return {
+    missingSide,
+    owedPunchReason: `status_${projection.status}`,
+    suggestedRequestType,
+  }
+}
+
 export interface AttendanceMissingPunchTraceResponse {
   category: 'missing_punch'
   reasonCode?: string
@@ -631,6 +802,30 @@ export async function buildMissingPunchTrace(
   workDate: string,
   runQuery: AttendanceDecisionTraceQueryFn,
 ): Promise<AttendanceMissingPunchTraceResponse> {
+  const w4 = await readAttendanceW4DecisionBasis(orgId, userId, workDate, runQuery)
+  if (w4?.authoritative) {
+    const projection = w4.projection
+    if (!projection) {
+      return {
+        category: 'missing_punch',
+        conclusion: { missingSide: null, isWorkday: null, suggestedRequestType: null },
+        basis: [w4.basis],
+        confidence: 'undeterminable',
+      }
+    }
+    const classification = classifyAttendanceW4MissingProjection(projection)
+    return {
+      category: 'missing_punch',
+      reasonCode: classification.owedPunchReason,
+      conclusion: {
+        missingSide: classification.missingSide,
+        isWorkday: projection.isWorkday,
+        suggestedRequestType: classification.suggestedRequestType,
+      },
+      basis: [w4.basis],
+      confidence: 'grounded',
+    }
+  }
   // W4C-3c P20 DecisionTrace missing-punch surface: same active-current helper.
   type MissingPunchRecord = AttendanceRecordRow & { first_in_at: string | null; last_out_at: string | null }
   const record = await loadActiveCurrentAttendanceRecordForDecisionTraceV1<MissingPunchRecord>(
@@ -672,6 +867,7 @@ export async function buildMissingPunchTrace(
     { source: { kind: 'record', ref: 'attendance_records' }, version: { posture: 'snapshot_frozen', asOf: record.updated_at } },
     currentRuleBasisEnv(rule),
   ]
+  if (w4) basis.push(w4.basis)
   if (record.status === 'absent') {
     basis.push({ source: { kind: 'policy_gate', ref: 'auto_absence_generation' }, version: { posture: 'undeterminable' } })
   }
