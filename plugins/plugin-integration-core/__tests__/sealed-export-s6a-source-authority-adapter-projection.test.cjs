@@ -42,6 +42,11 @@ const {
 const {
   __internals: externalSystemsInternals,
 } = require('../lib/external-systems.cjs')
+const {
+  analyzeModuleSource,
+  memberReadReport,
+  occurrencesOf,
+} = require('./support/sealed-export-member-read-scan.cjs')
 
 const SOURCE_AUTHORITY_PATH = require.resolve(
   '../lib/sealed-export/stock-preparation-sqlserver-source-authority.cjs',
@@ -157,47 +162,414 @@ function refuses(action, reason = 'SEALED_EXPORT_BINDING_UNQUALIFIED') {
   return caught
 }
 
-// ── module-source extraction (used by the drift pin) ─────────────────────────────────
-// Brace-matched extraction of one function BODY (excluding the signature, so the
-// parameter names themselves are not counted as reads). Self-tested below — an
-// extractor that silently matches nothing reads as green, which is the whole failure
-// mode this pin exists to avoid.
-function functionBody(source, signature) {
-  const start = source.indexOf(signature)
-  assert.notEqual(start, -1, 'signature not found in module source: ' + signature)
-  assert.equal(
-    source.indexOf(signature, start + 1),
-    -1,
-    'signature is not unique in module source: ' + signature,
-  )
-  const open = source.indexOf('{', start + signature.length - 1)
-  assert.notEqual(open, -1, 'no opening brace after signature: ' + signature)
-  let depth = 0
-  for (let index = open; index < source.length; index += 1) {
-    const char = source[index]
-    if (char === '{') depth += 1
-    else if (char === '}') {
-      depth -= 1
-      if (depth === 0) return source.slice(open + 1, index)
-    }
-  }
-  throw new Error('unbalanced braces after signature: ' + signature)
-}
-
-function memberReads(body, receiver) {
-  const pattern = new RegExp('\\b' + receiver + '\\.([A-Za-z_$][A-Za-z0-9_$]*)', 'g')
-  const found = new Set()
-  let match = pattern.exec(body)
-  while (match !== null) {
-    found.add(match[1])
-    match = pattern.exec(body)
-  }
-  return found
-}
-
 function sortedArray(set) {
   return [...set].sort()
 }
+
+// ── the drift pins ───────────────────────────────────────────────────────────────────
+//
+// WHAT REPLACED WHAT, and why, because the previous shape of this section was itself the
+// defect. It extracted a function body by COUNTING BRACES over the raw module text and then
+// applied regexes to the extracted string. That counter is not comment-aware, so a comment
+// carrying one unbalanced brace truncated the body at that point and EVERYTHING BELOW IT
+// BECAME UNPINNED. Proven by execution rather than argued: inserting
+//
+//     // the closing } of the config block above
+//     connectionConfig.appName = String(system['name'] ?? 'metasheet')
+//
+// into normalizeExternalSystem() left this suite GREEN while the read was LIVE
+// (`record.name === 'REAL SYSTEM NAME'`, `connectionConfig.appName === 'metasheet'` — the
+// projected record has no `name`, which is exactly the drift the pin exists to catch). The
+// DOTTED form after the same truncation was green too, so the truncation also defeated the
+// pre-existing dotted read-set assertion. A cleverer counter is not the fix: enumerating
+// lexical edge cases does not converge, and this repository has already paid for that lesson
+// twice. The extraction is now a REAL PARSE — see support/sealed-export-member-read-scan.cjs.
+//
+// Each pin carries a stable `pinId`. Every pin has a companion self-test in ESCAPES below
+// that applies a mutation to the module source in memory and asserts THAT pin fires, matched
+// by strict equality on the id rather than by substring on the message — pins whose messages
+// share words otherwise cover for each other. A pin that is deleted, renamed or weakened
+// makes its own self-test RED, because nothing throws.
+function pinFail(pinId, message) {
+  const error = new Error('PIN ' + pinId + ': ' + message)
+  error.pinId = pinId
+  throw error
+}
+
+function pinEqual(pinId, actual, expected, message) {
+  if (actual !== expected) {
+    pinFail(pinId, message + ' (actual ' + String(actual) + ', expected ' + String(expected) + ')')
+  }
+}
+
+function pinDeepEqual(pinId, actual, expected, message) {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    pinFail(
+      pinId,
+      message + '\n  actual:   ' + JSON.stringify(actual)
+      + '\n  expected: ' + JSON.stringify(expected),
+    )
+  }
+}
+
+// The exact use multiset of each pinned receiver. Derived from the module as it stands and
+// asserted whole: a receiver that only ever appears as a member-access receiver (plus its own
+// declaration and value passes to the screening predicate) has a read set that is COMPLETE
+// by construction, because there is no other syntax through which a member could be reached.
+const SYSTEM_USES = Object.freeze([
+  'call-argument|normalizeExternalSystem|canonicalCodec.__internals.isStrictPlainObject@0',
+  'property-access-receiver|normalizeExternalSystem|config',
+  'property-access-receiver|normalizeExternalSystem|config',
+  'property-access-receiver|normalizeExternalSystem|credentials',
+  'property-access-receiver|normalizeExternalSystem|credentials',
+  'property-access-receiver|normalizeExternalSystem|id',
+  'property-access-receiver|normalizeExternalSystem|kind',
+  'property-access-receiver|normalizeExternalSystem|role',
+  'property-access-receiver|normalizeExternalSystem|status',
+  'property-access-receiver|normalizeExternalSystem|tenantId',
+  'property-access-receiver|normalizeExternalSystem|workspaceId',
+  'variable-name|normalizeExternalSystem|',
+])
+const NORMALIZE_RAW_USES = Object.freeze([
+  'call-argument|normalizeExternalSystem|projectExternalSystem@0',
+  'parameter|normalizeExternalSystem|',
+])
+const PROJECTION_RAW_USES = Object.freeze([
+  'call-argument|projectExternalSystem|Object.prototype.hasOwnProperty.call@0',
+  'call-argument|projectExternalSystem|canonicalCodec.__internals.isStrictPlainObject@0',
+  'element-access-receiver|projectExternalSystem|<dynamic>',
+  'parameter|projectExternalSystem|',
+])
+const PROJECTION_PROJECTED_USES = Object.freeze([
+  'element-access-receiver|projectExternalSystem|<dynamic>',
+  'other|projectExternalSystem|ReturnStatement',
+  'variable-name|projectExternalSystem|',
+])
+// THE THIRD FRAME. `externalSystem` is the argument as it arrives — BEFORE the projection and
+// BEFORE isStrictPlainObject() has screened anything — so a member read here is the only one
+// in this module that can fire an accessor on a record nothing has vetted. A ban on member
+// ACCESS would not close it: `const { name } = externalSystem`, `{ ...externalSystem }` and
+// `JSON.stringify(externalSystem)` all read the record without one. The multiset is pinned
+// instead, and the two call forms pin the CALLEE — "passed to some function" would admit
+// JSON.stringify.
+const EXTERNAL_SYSTEM_USES = Object.freeze([
+  'binding-element|deriveStockPreparationSqlServerSourceAnchors|',
+  'binding-element|resolveStockPreparationSqlServerSource|',
+  'call-argument|deriveStockPreparationSqlServerSourceAnchors|normalizeExternalSystem@0',
+  'shorthand-argument|resolveStockPreparationSqlServerSource|'
+    + 'deriveStockPreparationSqlServerSourceAnchors@0',
+])
+
+function runProjectionPins(moduleText, options = {}) {
+  const report = analyzeModuleSource({
+    name: 'stock-preparation-sqlserver-source-authority.cjs',
+    text: moduleText,
+    parseOverride: options.parseOverride,
+  })
+
+  // 4.0 — the scan could READ its input. Checked first and separately: a scan that reports
+  // "nothing found" because it could not parse is worse than no scan, so the report presents
+  // `functions === null` (not an empty object) when it failed, and every pin below would
+  // crash rather than pass vacuously if this door were removed.
+  if (report.failures.length > 0 || report.functions === null || report.occurrences === null) {
+    pinFail('report-clean', 'the module source could not be read: '
+      + JSON.stringify(report.failures))
+  }
+
+  const normalize = report.functions.normalizeExternalSystem
+  const projection = report.functions.projectExternalSystem
+  if (normalize === undefined) pinFail('report-clean', 'normalizeExternalSystem() not found')
+  if (projection === undefined) pinFail('report-clean', 'projectExternalSystem() not found')
+
+  // 4.1 — nothing read may be missing from the list, and nothing listed may be unread.
+  // Derived from the module's own parse, never from a second hand-written list. A
+  // string-literal computed key names a member exactly as a dotted access does, so
+  // `system['projectId']` lands in this same set: bracket drift is drift, not a syntax
+  // question, which is what makes this assertion complete rather than dotted-only.
+  const systemReads = memberReadReport(normalize, 'system')
+  pinDeepEqual(
+    'system-read-set',
+    systemReads.static,
+    sortedArray(EXTERNAL_SYSTEM_PROJECTION_FIELDS),
+    'members read off the projected external system have drifted from '
+    + 'EXTERNAL_SYSTEM_PROJECTION_FIELDS',
+  )
+
+  // 4.2 — a computed key that names no member statically cannot be checked against the list
+  // at all, so it is refused outright rather than passed over in silence.
+  pinDeepEqual(
+    'system-dynamic-read',
+    systemReads.dynamic.map((access) => access.keyIdentifier),
+    [],
+    'normalizeExternalSystem() reads a member off `system` through a computed key that names '
+    + 'no member statically — such a read cannot be held against '
+    + 'EXTERNAL_SYSTEM_PROJECTION_FIELDS at all',
+  )
+
+  // 4.3 — and the read set above is complete only because `system` is reachable no other way.
+  pinDeepEqual(
+    'system-uses',
+    occurrencesOf(report, 'system', 'normalizeExternalSystem'),
+    SYSTEM_USES,
+    '`system` is used inside normalizeExternalSystem() in a way the read-set pin above does '
+    + 'not model — destructuring, a spread, a value pass or an unreadable receiver could all '
+    + 'reach a member without appearing as a member access',
+  )
+
+  // 4.4 — the raw record is touched exactly once inside normalizeExternalSystem(), by the
+  // projection itself, and this pins WHAT it is passed to rather than only how often it
+  // appears.
+  pinDeepEqual(
+    'normalize-raw-uses',
+    occurrencesOf(report, 'raw', 'normalizeExternalSystem'),
+    NORMALIZE_RAW_USES,
+    'the raw external-system record is used inside normalizeExternalSystem() by something '
+    + 'other than the single projectExternalSystem(raw) call — that use would bypass the '
+    + 'projection entirely',
+  )
+
+  // 4.5 — one frame DOWN. The projection function is the last place an unlisted member could
+  // be smuggled in, and the read-set scan above never looks at its body. It must touch `raw`
+  // and `projected` only through the loop idiom — never a named member, dotted or bracketed.
+  pinDeepEqual(
+    'projection-member-reads',
+    {
+      raw: memberReadReport(projection, 'raw').static,
+      projected: memberReadReport(projection, 'projected').static,
+    },
+    { raw: [], projected: [] },
+    'projectExternalSystem() reads or writes a NAMED member on the raw record or on the '
+    + 'projection — that member would bypass EXTERNAL_SYSTEM_PROJECTION_FIELDS entirely',
+  )
+
+  // 4.6 — the one bracket idiom the projection is allowed is the loop variable, and the loop
+  // is pinned to the exported list. Without the second half, `for (const field of
+  // SOURCE_CONFIG_FIELDS)` would keep `raw[field]` looking legitimate while projecting a
+  // different set.
+  pinDeepEqual(
+    'projection-loop-idiom',
+    {
+      keys: sortedArray(new Set([
+        ...memberReadReport(projection, 'raw').dynamic,
+        ...memberReadReport(projection, 'projected').dynamic,
+      ].map((access) => access.keyIdentifier))),
+      forOf: projection.forOf,
+    },
+    {
+      keys: ['field'],
+      forOf: [{ bindingName: 'field', iterableName: 'EXTERNAL_SYSTEM_PROJECTION_FIELDS' }],
+    },
+    'projectExternalSystem() reaches a member through a computed key that is not the '
+    + 'EXTERNAL_SYSTEM_PROJECTION_FIELDS loop variable',
+  )
+
+  // 4.7 — same completeness argument as 4.3, for the projection frame.
+  pinDeepEqual(
+    'projection-uses',
+    {
+      raw: occurrencesOf(report, 'raw', 'projectExternalSystem'),
+      projected: occurrencesOf(report, 'projected', 'projectExternalSystem'),
+    },
+    { raw: PROJECTION_RAW_USES, projected: PROJECTION_PROJECTED_USES },
+    '`raw` or `projected` is used inside projectExternalSystem() in a way the member-read '
+    + 'pins above do not model',
+  )
+
+  // 4.8 — THE THIRD FRAME, upstream of both the projection and isStrictPlainObject().
+  pinDeepEqual(
+    'external-system-uses',
+    occurrencesOf(report, 'externalSystem'),
+    EXTERNAL_SYSTEM_USES,
+    'the un-projected externalSystem argument is used somewhere other than its two parameter '
+    + 'declarations, the normalizeExternalSystem(externalSystem, …) call and the value pass '
+    + 'into deriveStockPreparationSqlServerSourceAnchors — a read here happens BEFORE the '
+    + 'projection and BEFORE the record has been screened, so it can fire an accessor on a '
+    + 'hostile record',
+  )
+
+  return report
+}
+
+// Each entry is an escape that was PROVEN to leave this suite green before the parse-based
+// pins existed, or a neuter of a pin that must not be allowed to pass. `pin` is the id that
+// must fire — asserted by strict equality, so no pin can be covered for by another.
+function anchoredReplace(source, anchor, replacement) {
+  assert.equal(
+    source.split(anchor).length - 1,
+    1,
+    'mutation anchor is not present exactly once — the self-test would mutate the wrong '
+    + 'thing (or nothing): ' + anchor,
+  )
+  return source.split(anchor).join(replacement)
+}
+
+const CRED_LINE =
+  '    || !canonicalCodec.__internals.isStrictPlainObject(system.credentials)\n'
+const PORT_LINE = '  if (endpoint.port !== null) connectionConfig.port = endpoint.port\n'
+const DERIVE_BINDING_LINE = '  const binding = normalizeBindingDraft(rawBinding)\n'
+const PROJECT_RETURN_LINE = '  return projected\n'
+const PROJECT_LOOP_LINE = '  for (const field of EXTERNAL_SYSTEM_PROJECTION_FIELDS) {\n'
+const TRUNCATING_COMMENT = '  // the closing } of the config block above\n'
+
+const ESCAPES = Object.freeze([
+  // (1) proven escape — a bracket read folded into a condition.
+  {
+    id: 'bracket-read-in-condition',
+    pin: 'system-read-set',
+    apply: (source) => anchoredReplace(
+      source,
+      CRED_LINE,
+      CRED_LINE + "    || (system['projectId'] ?? 'd') === '__never__'\n",
+    ),
+  },
+  // (2) proven escape — a bracket read smuggled into the returned connection config.
+  {
+    id: 'bracket-read-into-connection-config',
+    pin: 'system-read-set',
+    apply: (source) => anchoredReplace(
+      source,
+      PORT_LINE,
+      PORT_LINE + "  connectionConfig.appName = String(system['name'] ?? 'metasheet')\n",
+    ),
+  },
+  // (3) THE COMMENT-TRUNCATION ESCAPE. (2) preceded by a comment carrying one unbalanced
+  // brace. Against the brace counter this was GREEN with the read LIVE.
+  {
+    id: 'bracket-read-after-truncating-comment',
+    pin: 'system-read-set',
+    apply: (source) => anchoredReplace(
+      source,
+      PORT_LINE,
+      PORT_LINE + TRUNCATING_COMMENT
+      + "  connectionConfig.appName = String(system['name'] ?? 'metasheet')\n",
+    ),
+  },
+  // (4) the DOTTED variant after the same truncation — green too, which is how the
+  // truncation defeated the pre-existing dotted read-set assertion as well.
+  {
+    id: 'dotted-read-after-truncating-comment',
+    pin: 'system-read-set',
+    apply: (source) => anchoredReplace(
+      source,
+      PORT_LINE,
+      PORT_LINE + TRUNCATING_COMMENT
+      + "  connectionConfig.appName = String(system.name ?? 'metasheet')\n",
+    ),
+  },
+  // (5) THE THIRD FRAME — a bracket read off the un-projected, unscreened record.
+  {
+    id: 'third-frame-bracket-read',
+    pin: 'external-system-uses',
+    apply: (source) => anchoredReplace(
+      source,
+      DERIVE_BINDING_LINE,
+      DERIVE_BINDING_LINE
+      + "  const smuggled = externalSystem && externalSystem['name']\n  void smuggled\n",
+    ),
+  },
+  // The third frame reached WITHOUT any member access — the forms a member-access ban would
+  // have missed, and the reason the pin is a use multiset instead.
+  {
+    id: 'third-frame-destructure',
+    pin: 'external-system-uses',
+    apply: (source) => anchoredReplace(
+      source,
+      DERIVE_BINDING_LINE,
+      DERIVE_BINDING_LINE + '  const { name } = externalSystem\n  void name\n',
+    ),
+  },
+  {
+    id: 'third-frame-spread',
+    pin: 'external-system-uses',
+    apply: (source) => anchoredReplace(
+      source,
+      DERIVE_BINDING_LINE,
+      DERIVE_BINDING_LINE + '  const copy = { ...externalSystem }\n  void copy\n',
+    ),
+  },
+  {
+    id: 'third-frame-value-escape',
+    pin: 'external-system-uses',
+    apply: (source) => anchoredReplace(
+      source,
+      DERIVE_BINDING_LINE,
+      DERIVE_BINDING_LINE + '  void JSON.stringify(externalSystem)\n',
+    ),
+  },
+  // Plain dotted drift, the case the original regex did catch — it must still RED.
+  {
+    id: 'dotted-drift',
+    pin: 'system-read-set',
+    apply: (source) => anchoredReplace(
+      source,
+      PORT_LINE,
+      PORT_LINE + '  connectionConfig.appName = String(system.projectId)\n',
+    ),
+  },
+  // A computed key that names no member statically: not checkable against the list, so it
+  // must be refused rather than skipped.
+  {
+    id: 'dynamic-key-read',
+    pin: 'system-dynamic-read',
+    apply: (source) => anchoredReplace(
+      source,
+      PORT_LINE,
+      PORT_LINE + '  const key = String(endpoint.database)\n'
+      + '  void system[key]\n',
+    ),
+  },
+  // `system` reached through a shape the read-set model does not cover.
+  {
+    id: 'system-destructure',
+    pin: 'system-uses',
+    apply: (source) => anchoredReplace(
+      source,
+      PORT_LINE,
+      PORT_LINE + '  const { ...rest } = system\n  void rest\n',
+    ),
+  },
+  // A second use of the raw record inside normalizeExternalSystem, bypassing the projection.
+  {
+    id: 'normalize-raw-second-use',
+    pin: 'normalize-raw-uses',
+    apply: (source) => anchoredReplace(
+      source,
+      PORT_LINE,
+      PORT_LINE + '  const bypass = raw\n  void bypass\n',
+    ),
+  },
+  // One frame down: a named member smuggled through the projection, dotted…
+  {
+    id: 'projection-dotted-smuggle',
+    pin: 'projection-member-reads',
+    apply: (source) => anchoredReplace(
+      source,
+      PROJECT_RETURN_LINE,
+      '  projected.extra = raw.projectId\n' + PROJECT_RETURN_LINE,
+    ),
+  },
+  // …and bracketed, which the old string-stripping scan needed a separate assertion for.
+  {
+    id: 'projection-bracket-smuggle',
+    pin: 'projection-member-reads',
+    apply: (source) => anchoredReplace(
+      source,
+      PROJECT_RETURN_LINE,
+      "  projected['extra'] = raw['projectId']\n" + PROJECT_RETURN_LINE,
+    ),
+  },
+  // The loop idiom neutered: `raw[field]` still looks legitimate while a different set is
+  // projected.
+  {
+    id: 'projection-loop-retargeted',
+    pin: 'projection-loop-idiom',
+    apply: (source) => anchoredReplace(
+      source,
+      PROJECT_LOOP_LINE,
+      '  for (const field of SOURCE_CONFIG_FIELDS) {\n',
+    ),
+  },
+])
 
 function main() {
   const moduleSource = fs.readFileSync(SOURCE_AUTHORITY_PATH, 'utf8')
@@ -306,132 +678,152 @@ function main() {
   // The real module, re-read from disk, is untouched by the mutation.
   assert.equal(fs.readFileSync(SOURCE_AUTHORITY_PATH, 'utf8'), moduleSource)
 
-  // ── 4. PROJECTION DRIFT PIN (side A) — nothing read may be missing from the list ───
-  // Derived from the module's own source, never from a second hand-written list. If
-  // normalizeExternalSystem() starts reading a ninth member, this REDs instead of the
-  // member being silently dropped.
-  const normalizeBody = functionBody(
-    moduleSource,
-    'function normalizeExternalSystem(raw, binding) {',
-  )
-  const reads = memberReads(normalizeBody, 'system')
+  // ── 4. PROJECTION DRIFT PIN — over a real parse of the module's own source ─────────
+  // The pins themselves are defined above runProjectionPins(); this is where the REAL
+  // module is held to them. It must pass, and every self-test below must fail — both
+  // directions are required, because "everything passes" and "the pins are decorative"
+  // are otherwise indistinguishable.
+  const liveReport = runProjectionPins(moduleSource)
+  assert.deepEqual(liveReport.failures, [])
+
+  // 4a. SELF-TESTS. Every pin has at least one entry here. Each applies a mutation to the
+  // module source IN MEMORY, and asserts the pin fires — matched on `pinId` by strict
+  // equality, never on message text, so no pin can be covered for by another that happens
+  // to share a word. Deleting, renaming or weakening a pin REDs its own self-test, because
+  // then nothing throws.
+  const firedPins = new Set()
+  for (const escape of ESCAPES) {
+    const mutated = escape.apply(moduleSource)
+    assert.notEqual(
+      mutated,
+      moduleSource,
+      'self-test mutation produced a byte-identical module — it would prove nothing: '
+      + escape.id,
+    )
+    let caught = null
+    try {
+      runProjectionPins(mutated)
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(
+      caught !== null,
+      'the drift pins did not notice a proven escape — they are decorative: ' + escape.id,
+    )
+    // Strict equality on the id, not a substring of the message: several pins share
+    // vocabulary, and a substring match would let one pin's red be read as another's.
+    assert.equal(
+      caught.pinId,
+      escape.pin,
+      'escape ' + escape.id + ' fired the wrong pin (' + String(caught.pinId)
+      + ' instead of ' + escape.pin + ') — an incidental red is not a pin',
+    )
+    firedPins.add(escape.pin)
+  }
+
+  // ...and every pin the battery declares is exercised by at least one self-test. A pin
+  // nothing tests is exactly the defect this section exists to fix.
   assert.deepEqual(
-    sortedArray(reads),
-    [...EXTERNAL_SYSTEM_PROJECTION_FIELDS].sort(),
-    'members read off the projected external system have drifted from ' +
-    'EXTERNAL_SYSTEM_PROJECTION_FIELDS',
+    sortedArray(firedPins),
+    [
+      'external-system-uses',
+      'normalize-raw-uses',
+      'projection-loop-idiom',
+      'projection-member-reads',
+      'system-dynamic-read',
+      'system-read-set',
+      'system-uses',
+    ],
+    'a declared pin has no self-test proving it can fire',
   )
 
-  // Extractor self-test: a regex that matches nothing would make the assertion above
-  // pass vacuously for an empty list, and adding a read must actually be detected.
-  assert.equal(reads.size, EXTERNAL_SYSTEM_PROJECTION_FIELDS.length)
-  assert.ok(reads.size > 0)
-  const driftedReads = memberReads(
-    normalizeBody + '\n  const drift = system.projectId\n',
-    'system',
-  )
-  assert.notDeepEqual(
-    sortedArray(driftedReads),
-    [...EXTERNAL_SYSTEM_PROJECTION_FIELDS].sort(),
-    'the read-set extractor did not notice an added read — it is decorative',
-  )
+  // 4b. PARSE-FAILURE CONTROLS. A scanner that reports "zero findings" when it could not
+  // read its input is worse than no scanner, so every way the read can fail must produce a
+  // FAILURE and never an empty read set. `functions === null` rather than `{}` is what makes
+  // that structural: a caller that skipped the failure check would crash, not pass.
+  const parseControls = [
+    {
+      id: 'parser-throws',
+      expect: 'SOURCE_PARSE_FAILED',
+      parseOverride: () => { throw new Error('parser exploded') },
+    },
+    {
+      id: 'parser-returns-non-object',
+      expect: 'SOURCE_PARSE_FAILED',
+      parseOverride: () => null,
+    },
+    {
+      id: 'diagnostics-not-observable',
+      expect: 'SOURCE_PARSE_UNVERIFIABLE',
+      parseOverride: () => ({ forEachChild() {} }),
+    },
+    {
+      id: 'source-not-walkable',
+      expect: 'SOURCE_PARSE_UNVERIFIABLE',
+      parseOverride: () => ({ parseDiagnostics: [] }),
+    },
+  ]
+  for (const control of parseControls) {
+    const report = analyzeModuleSource({
+      name: 'control',
+      text: moduleSource,
+      parseOverride: control.parseOverride,
+    })
+    assert.deepEqual(
+      report.failures.map((failure) => failure.checkId),
+      [control.expect],
+      'parse-failure control did not fail closed: ' + control.id,
+    )
+    // The load-bearing half: NOT an empty read set.
+    assert.equal(report.functions, null, 'control ' + control.id + ' exposed functions')
+    assert.equal(report.occurrences, null, 'control ' + control.id + ' exposed occurrences')
+    let caught = null
+    try {
+      runProjectionPins(moduleSource, { parseOverride: control.parseOverride })
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(caught !== null, 'control ' + control.id + ' did not red the pins')
+    assert.equal(caught.pinId, 'report-clean')
+  }
 
-  // Bracket-access sentinel. memberReads() above is a DOTTED-only regex
-  // (`\bsystem\.member`) — it cannot see computed-key access (`system['member']`),
-  // and this module already uses computed-key access in-idiom one line down
-  // (`system.config[SOURCE_CONFIG_KEY]`), so a future read added as
-  // `system['projectId']` would be invisible to the read-set assertion above and
-  // could drift from EXTERNAL_SYSTEM_PROJECTION_FIELDS unnoticed — silently reading
-  // a member the codec never screened once the projection narrowed which members
-  // are canonicalised. Assert the body contains no bracket access on `system` at all.
-  assert.equal(
-    /\bsystem\s*\[/.test(normalizeBody),
-    false,
-    'normalizeExternalSystem() reads a member off `system` via bracket access — the ' +
-    'dotted-only read-set extractor above cannot see this and the member could ' +
-    'drift from EXTERNAL_SYSTEM_PROJECTION_FIELDS unnoticed',
-  )
-  // Extractor self-test: a regex that matches nothing would make the assertion above
-  // pass vacuously, exactly the failure mode this sentinel exists to close. An added
-  // bracket read must actually be detected.
-  assert.equal(
-    /\bsystem\s*\[/.test(`${normalizeBody}\n  const drift = system['projectId']\n`),
-    true,
-    'the bracket-access scan did not notice an added computed-key read — it is decorative',
-  )
-
-  // The raw record must be touched exactly once inside normalizeExternalSystem(), by
-  // the projection itself. A future direct read off `raw` would bypass the projection
-  // entirely and the read-set assertion above would not see it.
-  const rawMentions = normalizeBody.match(/\braw\b/g) || []
+  // The same door with the REAL parser and genuinely unparseable text. Asserted separately
+  // because the TypeScript JS parser is aggressively error-tolerant: if the sample below
+  // parsed clean this control would be decorative, which is the very defect being fixed.
+  const UNPARSEABLE = 'function projectExternalSystem(raw) {\n  const x = ((( ]]]\n'
+  const unparseableReport = analyzeModuleSource({ name: 'control', text: UNPARSEABLE })
   assert.deepEqual(
-    rawMentions,
-    ['raw'],
-    'the raw external-system record is referenced more than once inside ' +
-    'normalizeExternalSystem() — something reads it outside the projection',
+    unparseableReport.failures.map((failure) => failure.checkId),
+    ['SOURCE_PARSE_FAILED'],
+    'unparseable source did not fail closed — it reported a clean, empty scan',
   )
-  // Same hazard one frame up: nothing may read a member off the un-projected value
-  // before it reaches normalizeExternalSystem().
-  assert.equal(
-    /\bexternalSystem\s*\./.test(moduleSource),
-    false,
-    'a member is read directly off the un-projected externalSystem argument',
-  )
+  assert.equal(unparseableReport.functions, null)
+  assert.equal(unparseableReport.occurrences, null)
 
-  // ...and one frame DOWN. The projection function itself is the last place an unlisted
-  // member could be smuggled in (`projected.extra = raw.projectId`), and the read-set
-  // scan above never looks at its body. It must touch `raw` ONLY through
-  // hasOwnProperty.call(raw, field) and raw[field] — never a dotted member access.
-  const projectionBody = functionBody(
-    moduleSource,
-    'function projectExternalSystem(raw) {',
-  )
-  assert.equal(
-    /\braw\s*\.\s*[A-Za-z_$]/.test(projectionBody),
-    false,
-    'projectExternalSystem() reads a named member off the raw record — that member would '
-    + 'bypass EXTERNAL_SYSTEM_PROJECTION_FIELDS entirely',
-  )
+  // Positive control for the controls: the SAME analyzer on the REAL source reads cleanly.
+  // Without it, an analyzer that failed on everything would satisfy every assertion above.
+  assert.deepEqual(liveReport.failures, [])
+  assert.notEqual(liveReport.functions, null)
+  assert.equal(typeof liveReport.functions.normalizeExternalSystem, 'object')
+  assert.equal(typeof liveReport.functions.projectExternalSystem, 'object')
+
+  // A missing source text is also a failure, not an empty scan.
+  const noTextReport = analyzeModuleSource({ name: 'control' })
   assert.deepEqual(
-    sortedArray(memberReads(projectionBody, 'projected')),
-    [],
-    'projectExternalSystem() writes or reads a NAMED member on the projection — every '
-    + 'member must go through the EXTERNAL_SYSTEM_PROJECTION_FIELDS loop',
+    noTextReport.failures.map((failure) => failure.checkId),
+    ['SOURCE_UNREADABLE'],
   )
-  // Extractor self-test for this body too: an added dotted read must be detected.
-  assert.equal(
-    /\braw\s*\.\s*[A-Za-z_$]/.test(`${projectionBody}\n  projected.extra = raw.projectId\n`),
-    true,
-    'the projection-body scan did not notice a smuggled member read — it is decorative',
-  )
+  assert.equal(noTextReport.functions, null)
 
-  // Bracket-form of the same hole, one frame down. projectExternalSystem() is
-  // allowed exactly one bracket idiom — the literal `raw[field]` / `projected[field]`
-  // pair inside the EXTERNAL_SYSTEM_PROJECTION_FIELDS loop — and nothing else. A
-  // smuggled `projected['extra'] = raw['projectId']` would bypass both the dotted
-  // scan just above (it is bracket-form, not dotted) and the hasOwnProperty
-  // allowance, so it must be caught here instead. Strip the one legitimate literal
-  // idiom out, then require no bracket access on `raw`/`projected` remains.
-  const strippedProjectionBody = projectionBody
-    .split('raw[field]').join('')
-    .split('projected[field]').join('')
-  assert.equal(
-    /\b(raw|projected)\s*\[/.test(strippedProjectionBody),
-    false,
-    'projectExternalSystem() reads or writes a member via bracket access outside ' +
-    'the raw[field]/projected[field] loop idiom — that member would bypass ' +
-    'EXTERNAL_SYSTEM_PROJECTION_FIELDS entirely',
+  // ...and an identifier lookup that finds nothing THROWS rather than returning an empty
+  // multiset, so a renamed receiver cannot make a use-allowlist pin pass vacuously.
+  assert.throws(
+    () => occurrencesOf(liveReport, 'noSuchIdentifierAnywhere'),
+    /never occurs in the source/,
   )
-  // Extractor self-test: a smuggled bracket-form member must actually be detected,
-  // through the same stripping the real assertion applies.
-  assert.equal(
-    /\b(raw|projected)\s*\[/.test(
-      `${projectionBody}\n  projected['extra'] = raw['projectId']\n`
-        .split('raw[field]').join('')
-        .split('projected[field]').join(''),
-    ),
-    true,
-    'the projection-body bracket scan did not notice a smuggled member — it is decorative',
+  assert.throws(
+    () => occurrencesOf(liveReport, 'system', 'noSuchFunction'),
+    /never occurs in/,
   )
 
   // ── 5. PROJECTION DRIFT PIN (side B) — nothing listed may be unread ────────────────
