@@ -71,11 +71,11 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-// The S6-A authority chain's requiredFutureInstant (sealed-export-lifecycle-provisioning.cjs) requires
-// SECONDS-precision UTC ISO-8601 (`/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/`) — a plain
+// The S6-A authority chain's requiredFutureInstant (sealed-export-lifecycle-provisioning.cjs:168-180)
+// requires SECONDS-precision UTC ISO-8601 (`/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/`) — a plain
 // `new Date(...).toISOString()` carries a milliseconds component and fails that format check, which
-// surfaces as SEALED_EXPORT_BINDING_UNQUALIFIED with no further detail (confirmed via
-// diagnoseProvisioningFailureStack's error.stack: failSealedExport -> requiredFutureInstant ->
+// surfaces as SEALED_EXPORT_BINDING_UNQUALIFIED with no further detail (root-caused via a temporary
+// error.stack replay of provisionInitial, since removed: failSealedExport -> requiredFutureInstant ->
 // normalizeAuthorityInput -> provisionInitialStockPreparationBinding). This mirrors the SAME
 // seconds-truncation the production code's own toUtcSecondsIso helper performs.
 function toUtcSecondsIso(ms) {
@@ -471,55 +471,7 @@ CREATE TABLE ${MSSQL_TABLE} (
       await dbPool.close()
     }
   })
-  await diagnoseOrderingKeyProbeShape()
   return { rows, projectId: rows[0].projectId, snapshotBatchId: rows[0].snapshotBatchId }
-}
-
-// TEMPORARY bounded diagnostic (job-log only, never in uploaded evidence) for the
-// SEALED_EXPORT_BINDING_UNQUALIFIED root-cause investigation: runs the SAME
-// buildOrderingKeyUniquenessProbeSql SQL text the production capture path (proveOrderingKey in
-// sqlserver-sealed-snapshot-service-core.cjs) runs, as the SAME reader login, and reports the JS typeof of
-// each returned bigint-cast column. normalizeProbeCount(value) in that file only accepts
-// Number.isSafeInteger(value) or a decimal string — if the mssql/tedious driver decodes `CAST(... AS
-// bigint)` as a native JS `bigint` primitive (typeof 'bigint'), normalizeProbeCount returns null for every
-// field and proveOrderingKey's `nullKeyRows === null` branch fails closed with BINDING_UNQUALIFIED
-// regardless of how correct the fixture data is. This function only OBSERVES; it does not change what the
-// production code does.
-async function diagnoseOrderingKeyProbeShape() {
-  const { CERTIFIED_RELATIONS } = require_(
-    'plugins/plugin-integration-core/lib/sealed-export/sqlserver-sealed-snapshot-action.cjs',
-  )
-  const relation = CERTIFIED_RELATIONS['sqlserver.relation.rowid_payload.v1']
-  const probeSql = relation.buildOrderingKeyUniquenessProbeSql(MSSQL_TABLE)
-  const sql = requireFromPlugin('mssql')
-  const pool = new sql.ConnectionPool({
-    server: MSSQL_HOST,
-    port: MSSQL_PORT,
-    user: MSSQL_READER_LOGIN,
-    password: MSSQL_READER_PASSWORD,
-    database: MSSQL_DATABASE,
-    options: { encrypt: true, trustServerCertificate: true },
-    connectionTimeout: 15000,
-  })
-  try {
-    await pool.connect()
-    const result = await pool.request().query(probeSql)
-    const row = result.recordset && result.recordset[0]
-    // Values here are closed-vocabulary counts (0..3), never business data — safe even outside the
-    // job-log-only boundary, but kept there anyway for consistency with the rest of this diagnostic.
-    const shape = row
-      ? Object.keys(row).map((key) => `${key}:${typeof row[key]}=${JSON.stringify(row[key])}`).join(',')
-      : '<no-row>'
-    note('DIAGNOSTIC (job log only): ordering-key probe column JS types+values', shape)
-  } catch (error) {
-    note('DIAGNOSTIC (job log only): ordering-key probe query itself failed', String(error && error.message || error))
-  } finally {
-    try {
-      await pool.close()
-    } catch {
-      // best-effort
-    }
-  }
 }
 
 async function registerExternalSystem(token, systemId) {
@@ -565,79 +517,6 @@ async function runProvisioningScript(env) {
     proc.stderr.on('data', (c) => { stderr += c.toString() })
     proc.on('close', (code) => resolve({ code, stdout, stderr }))
   })
-}
-
-// TEMPORARY bounded diagnostic (job-log only, never in uploaded evidence): the provisioning SCRIPT
-// (plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs)
-// deliberately discards everything except a closed `code` enum on failure (values-free by design — see
-// its own header). To find WHICH of the many failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED') call
-// sites in the S5/S6-A authority chain is actually firing, this replays the SAME construction the script
-// performs — same modules, same env — in-process, so `error.stack` (never surfaced by the script itself)
-// is visible here for diagnosis only. Does not change what the production script or its dependencies do.
-async function diagnoseProvisioningFailureStack(provisioningEnv) {
-  // dbBoundary (sealed-export-lifecycle-provisioning.cjs) catches EVERY error from db.transaction() and,
-  // unless it is already a trusted sealed-export error, discards it and throws a fresh
-  // SEALED_EXPORT_INTERNAL_ERROR — the real driver-level exception (e.g. a Postgres permission/relation
-  // error) never reaches error.stack. Patch pg.Client.prototype.query for the lifetime of this ONE
-  // diagnostic call only (restored in `finally`, values-free: only the driver's own error MESSAGE — schema
-  // shape, never row data — is logged, job-log only) to see what it actually was.
-  const pg = requireFromPlugin('pg')
-  let originalQuery
-  try {
-    originalQuery = pg.Client.prototype.query
-    pg.Client.prototype.query = function patchedQuery(...args) {
-      const result = originalQuery.apply(this, args)
-      if (result && typeof result.catch === 'function') {
-        return result.catch((error) => {
-          note('DIAGNOSTIC (job log only): raw pg query error (message only, no row data)',
-            String(error && error.message || error))
-          throw error
-        })
-      }
-      return result
-    }
-  } catch (error) {
-    originalQuery = null
-    note('DIAGNOSTIC (job log only): could not patch pg.Client.prototype.query', String(error && error.message || error))
-  }
-  try {
-    const { loadStockPreparationProvisioningConfig } = require_(
-      'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-config.cjs',
-    )
-    const { createStockPreparationProvisioningDatabase } = require_(
-      'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-database.cjs',
-    )
-    const { createStockPreparationRuntimeProvisioning } = require_(
-      'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-provisioning.cjs',
-    )
-    const mergedEnv = { ...process.env, ...provisioningEnv }
-    const config = loadStockPreparationProvisioningConfig({ env: mergedEnv })
-    const database = createStockPreparationProvisioningDatabase({
-      connectionString: config.provisioningDatabaseUrl,
-      expectedRole: config.provisioningDatabaseRole,
-    })
-    try {
-      const service = createStockPreparationRuntimeProvisioning({
-        artifactRoot: config.artifactRoot,
-        identityKey: config.identityKey,
-        privateSignerMaterial: config.privateSignerMaterial,
-        provisioningDatabase: database,
-        qualificationKeyring: config.qualificationKeyring,
-      })
-      await service.provisionInitial(config.spec)
-      note('DIAGNOSTIC (job log only): in-process provisioning replay unexpectedly SUCCEEDED')
-    } finally {
-      try {
-        await database.close()
-      } catch {
-        // best-effort
-      }
-    }
-  } catch (error) {
-    note('DIAGNOSTIC (job log only): in-process provisioning replay stack', String(error && error.stack || error))
-  } finally {
-    if (originalQuery) pg.Client.prototype.query = originalQuery
-  }
 }
 
 async function attemptS6ARealRun() {
@@ -766,9 +645,19 @@ async function attemptS6ARealRun() {
     provisionedOk = false
   }
   if (!provisionedOk) {
+    // Known finding (root-caused via a temporary error.stack + pg-driver replay, since removed from this
+    // script): if this code is SEALED_EXPORT_INTERNAL_ERROR, the underlying cause — confirmed against a
+    // real Postgres 16 container — is a raw "permission denied for table
+    // integration_sealed_export_signer_public_keys" that migrations/073_create_sealed_export_stock_prep_
+    // runtime_authority.sql's own GRANT statement causes: it grants the provisioning role only
+    // SELECT, INSERT on that table, but provisionInitialStockPreparationBinding
+    // (sealed-export-lifecycle-provisioning.cjs) runs `SELECT ... FOR UPDATE` against it
+    // (trx.selectOneForUpdate, via db.cjs:212) — a locking read that Postgres requires UPDATE privilege
+    // for, independent of whether a row exists to lock. This reproduces for ANY tenant's first S6-A
+    // provisioning attempt under migration 073's grants as written, not just this harness's fixture; it is
+    // a production finding to report, not something this E2E harness can or should paper over.
     note('S6-A: provisioning script failure detail (job log only, not in uploaded evidence)',
       `code=${provisioningFailureCode}`)
-    await diagnoseProvisioningFailureStack(provisioningEnv)
   }
   must('S6-A: provisioning script -> ok:true, externalWrite:false, valuesFree:true', provisionedOk,
     `exit=${provisioned.code}`)
