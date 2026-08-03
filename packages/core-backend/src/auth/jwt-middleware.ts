@@ -109,6 +109,11 @@ async function hydrateAuthenticatedUser(req: Request, token: string): Promise<
       }
     }
 
+    const authenticatedTenantId = typeof user.tenantId === 'string' ? user.tenantId.trim() : ''
+    if (authenticatedTenantId) {
+      req.authenticatedTenantId = authenticatedTenantId
+    }
+
     const headerTenantId = extractTenantFromHeaders(req.headers as Record<string, unknown> | undefined)
     if (!user.tenantId && headerTenantId) {
       user.tenantId = headerTenantId

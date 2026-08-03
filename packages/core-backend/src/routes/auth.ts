@@ -454,7 +454,7 @@ async function loadAuthPermissions(userId: string): Promise<string[]> {
 
 async function issueAuthSessionToken(user: User, req: Request): Promise<string> {
   const sessionId = randomUUID()
-  const tenantId = resolveRequestTenantId(req)
+  const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
   const tokenUser = tenantId ? { ...user, tenantId } : user
   const token = authService.createToken(tokenUser, { sid: sessionId })
   const payload = authService.readTokenPayload(token)
@@ -625,7 +625,7 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
     }
 
     // 注册成功，自动生成token
-    const tenantId = resolveRequestTenantId(req)
+    const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
     const token = authService.createToken(tenantId ? { ...user, tenantId } : user)
     logger.info(`Successful registration for ${cleanEmail} from ${ip}`)
 

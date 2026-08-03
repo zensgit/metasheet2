@@ -107,7 +107,7 @@ describeDb('W4C-2 strict IANA timezone write guard (#4607 P3-4, real DB, route l
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
     const res = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=w4c2tz-admin-${RUN}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin')}`,
+      `${baseUrl}/api/auth/dev-token?userId=w4c2tz-admin-${RUN}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin')}`,
     )
     adminToken = (res.body as { token?: string } | undefined)?.token ?? ''
     if (!adminToken) throw new Error('failed to mint dev token')
