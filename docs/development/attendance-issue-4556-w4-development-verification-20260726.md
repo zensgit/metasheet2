@@ -336,7 +336,32 @@ fail closed，但 backlog 本身不证明 payload 完整性。本片不为此扩
 范围，后续若 backlog 要承担数据完整性告警，应另加显式 invalid-payload posture
 与对应合同。
 
-### 11.5 诚实边界与停点
+### 11.5 后续精确性加固
+
+后续复核没有扩大 W4C-4 运行时范围，收紧了三处原证据只能证明“非空”或可被
+相邻守卫代挡的断言：
+
+1. import、审批撤销、手工编辑与重算 writer 的真实库用例不再只验证 diff
+   可解析，而是逐项断言闭集 `code`、排序后的 `changedFields`、
+   `absoluteMinuteDelta` 与 `segmentCount`。把三条可变 writer 的持久化结果统一
+   替换为结构合法但语义错误的 `equal` payload 时，三条命名腿精确 **3/3
+   failed**；恢复后本节六个真实库文件合跑 **101/101 PASS**。
+2. DecisionTrace 对持久化 record status、tier 数值及 overtime snapshot 数值与
+   `perDate.dayType` 做闭集解析。未知 status 不再回显或参与推导，畸形数值不再
+   被伪造为零，未知 day type 不再被默认为 restday；对应 unit/route 合跑
+   **109/109 PASS**。把 status validator 变异为“任意字符串通过”时，today、
+   late/early、missing-punch 三条未知状态腿精确 **3/3 failed**，恢复后 **3/3
+   PASS**。
+3. calculation SELECT inventory 现在也钉住 shadow trace 的 active-row 谓词，
+   并在计算 fingerprint 前遮蔽 SQL 行注释与块注释。删除 shadow active 谓词或
+   只把同文谓词塞进注释时均 fail closed；collector 全套 **58/58 PASS**。
+
+以上结果使用重新创建并完整迁移的本机 PostgreSQL 15 数据库
+`ms2_w4c4_final_20260803`；core-backend TypeScript type-check 通过。最终
+GitHub required checks 与独立 exact-head 对抗审仍绑定后续推送 SHA，本段不把
+本机结果替代为合并授权。
+
+### 11.6 诚实边界与停点
 
 - 本轮只使用本机 fresh synthetic PostgreSQL；未使用客户或生产数据，未部署，
   未启用 flag，未发送外部通知，也未运行 staging soak。
