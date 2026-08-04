@@ -23,7 +23,30 @@ class StockPreparationRuntimePersistFailure extends Error {
 }
 
 function remintPersistFailure(error) {
-  if (!(error instanceof StockPreparationSyncRunPersistError)) return null
+  // Observed in dispatched run 30890457411 (mid-tier, 2500 rows). Returning null here made the caller
+  // rethrow the RAW error (`failure || error`); privateBoundary in stock-preparation-runtime-core.cjs
+  // only passes through trusted sealed-export errors, StockPreparationRuntimePersistFailure, and
+  // StockPreparationSealedSnapshotDecodeError — anything else collapses into
+  // failSealedExport('SEALED_EXPORT_INTERNAL_ERROR'), which mapRuntimeError then serves as a bare 503.
+  //
+  // The consequence is worse than an ugly message. Business persist runs AFTER activation, so the
+  // operator sees a 503 on a run whose generation is already ACTIVE and whose run row is ACTIVATED —
+  // a partially-completed state reported as an outright failure. The obvious next action is to retry,
+  // and with a one-shot, irreversible binding that is the one action that cannot be taken back.
+  //
+  // A non-first-party throw is exactly WHEN identity matters most, and it was exactly when identity was
+  // discarded. It now reports as a persist failure like any other.
+  //
+  // NO new vocabulary: STOCK_PREPARATION_PERSIST_FAILED already exists for this case and is already the
+  // fallback for a first-party error with an unrecognised status. The surfaced HTTP status is unchanged
+  // at 503 — mapRuntimeError forwards `error.status` for this class, and this class carries 503 — so
+  // only the code becomes specific. Callers keying on the status see no change.
+  if (!(error instanceof StockPreparationSyncRunPersistError)) {
+    return new StockPreparationRuntimePersistFailure(
+      503,
+      'STOCK_PREPARATION_PERSIST_FAILED',
+    )
+  }
   if (error.status === 409) {
     return new StockPreparationRuntimePersistFailure(
       409,

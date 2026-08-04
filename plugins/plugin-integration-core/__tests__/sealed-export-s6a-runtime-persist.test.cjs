@@ -160,6 +160,42 @@ async function main() {
     },
   )
   console.log('sealed-export-s6a-runtime-persist.test.cjs OK')
+  await nonFirstPartyThrowKeepsIdentity()
+}
+
+// R14: a NON-first-party throw out of the persist unit-of-work must keep its identity.
+// Before this, remintPersistFailure returned null for anything that was not a
+// StockPreparationSyncRunPersistError, the caller rethrew the RAW error, privateBoundary in
+// runtime-core did not recognise it, and it collapsed into SEALED_EXPORT_INTERNAL_ERROR — served as a
+// bare 503 on a run whose generation was already ACTIVE (dispatched run 30890457411).
+async function nonFirstPartyThrowKeepsIdentity() {
+  const rawContext = contextFixture([])
+  const CANARY = 'multitable-internal-detail-must-not-cross-the-boundary'
+  rawContext.api.multitable.records.runStockPreparationPersistUnitOfWork =
+    async () => {
+      // Deliberately NOT a StockPreparationSyncRunPersistError — this is the whole point.
+      const err = new Error(CANARY)
+      err.code = 'SOME_UPSTREAM_CODE'
+      throw err
+    }
+  const rawPersist = createStockPreparationRuntimePersist({ context: rawContext })
+  await assert.rejects(
+    () => rawPersist({
+      decoded: decodedFixture(),
+      scope: { tenantId: 'tenant-1', workspaceId: null },
+    }),
+    (error) => {
+      // The discriminating assertion. Before the fix this was a trusted sealed-export
+      // SEALED_EXPORT_INTERNAL_ERROR (or the raw Error), never a persist failure.
+      assert.equal(isStockPreparationRuntimePersistFailure(error), true)
+      assert.equal(error.status, 503, 'status must be UNCHANGED — this fix is identity, not behaviour')
+      assert.equal(error.code, 'STOCK_PREPARATION_PERSIST_FAILED')
+      // values-free: the upstream detail must not ride out on the boundary error.
+      assert.equal(String(error.message).includes(CANARY), false)
+      assert.equal(JSON.stringify(error).includes(CANARY), false)
+      return true
+    },
+  )
 }
 
 main().catch((error) => {
