@@ -11041,15 +11041,63 @@ async function softDeactivateAttendanceGroupFixedScheduleManagedRows(db, input, 
   return rows.map(mapAssignmentRow)
 }
 
+class AttendanceGroupFixedScheduleTransactionAbort extends Error {
+  constructor(result) {
+    super(result.message)
+    this.result = result
+  }
+}
+
+async function runAttendanceGroupFixedScheduleTransaction(db, operation) {
+  return db.transaction(async (trx) => {
+    const result = await operation(trx)
+    if (!result.ok) {
+      throw new AttendanceGroupFixedScheduleTransactionAbort(result)
+    }
+    return result
+  })
+}
+
+function respondAttendanceGroupFixedScheduleTransactionAbort(res, error) {
+  if (!(error instanceof AttendanceGroupFixedScheduleTransactionAbort)) return false
+  const result = error.result
+  res.status(result.status).json({
+    ok: false,
+    error: {
+      code: result.code,
+      message: result.message,
+      ...(result.details === undefined ? {} : { details: result.details }),
+    },
+  })
+  return true
+}
+
 async function applyAttendanceGroupFixedSchedule(db, input) {
+  // FSER-3 (#4709): consume the desired config inside this transaction. Validation of
+  // group/shift/date/targets and the config row lock (or first-create insert) happen
+  // here, BEFORE any per-user target lock taken by the plan builder below; a failed
+  // apply rolls the first-create config insert back with every other write.
+  const { config } = await getAttendanceGroupFixedScheduleConfigService().resolveConfigForApplyRebuild(db, {
+    orgId: input.orgId,
+    groupId: input.groupId,
+    shiftId: input.shiftId,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    expectedConfigRevision: input.expectedConfigRevision,
+    updatedBy: input.updatedBy,
+  })
+  // The transactionally reloaded config row is authoritative; never materialize from a
+  // client-supplied shadow copy once the config exists. For a matching candidate these
+  // values are identical, preserving the existing producer key and response shape.
+  const effectiveInput = { ...input, shiftId: config.shiftId, startDate: config.startDate, endDate: config.endDate }
   // W3 erratum: typed 422 + zero writes when a multi-segment shift is applied while
   // authoritative segment calculation is OFF for the org.
   await getAttendanceShiftService().assertShiftReferenceAllowed(db, {
-    orgId: input.orgId,
-    shiftId: input.shiftId,
+    orgId: effectiveInput.orgId,
+    shiftId: effectiveInput.shiftId,
     producer: 'fixed_schedule_apply',
   })
-  const result = await buildAttendanceGroupFixedSchedulePlan(db, input, { lockTargets: true })
+  const result = await buildAttendanceGroupFixedSchedulePlan(db, effectiveInput, { lockTargets: true })
   if (!result.ok) return result
   const plan = result.data
   if (plan.blockingConflicts.length > 0) {
@@ -11062,18 +11110,18 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
     }
   }
 
-  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
-  const created = await insertAttendanceGroupFixedScheduleAssignments(db, input, plan.wouldCreate, producerMetadata)
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(effectiveInput, randomUUID())
+  const created = await insertAttendanceGroupFixedScheduleAssignments(db, effectiveInput, plan.wouldCreate, producerMetadata)
 
   // S1 daily compliance cap: project every user that received a managed row over the apply window and
   // roll the whole apply back (throw → txn rollback → 422) if any day would exceed the cap. Guards the
   // bulk side-door alongside the per-record save routes (no known bypass window).
   for (const targetUserId of new Set(plan.wouldCreate.map((item) => item.userId))) {
     await enforceShiftComplianceCap(db, {
-      orgId: input.orgId,
+      orgId: effectiveInput.orgId,
       userId: targetUserId,
-      fromDate: input.startDate,
-      toDate: input.endDate,
+      fromDate: effectiveInput.startDate,
+      toDate: effectiveInput.endDate,
     })
   }
 
@@ -11088,14 +11136,27 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
 }
 
 async function rebuildAttendanceGroupFixedSchedule(db, input) {
+  // FSER-3 (#4709): same config-consumption contract as apply — the config row is
+  // locked (or atomically first-created) before any target lock, and the reloaded row
+  // is the only authoritative source of the materialized values.
+  const { config } = await getAttendanceGroupFixedScheduleConfigService().resolveConfigForApplyRebuild(db, {
+    orgId: input.orgId,
+    groupId: input.groupId,
+    shiftId: input.shiftId,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    expectedConfigRevision: input.expectedConfigRevision,
+    updatedBy: input.updatedBy,
+  })
+  const effectiveInput = { ...input, shiftId: config.shiftId, startDate: config.startDate, endDate: config.endDate }
   // W3 erratum: typed 422 + zero writes when a multi-segment shift is rebuilt while
   // authoritative segment calculation is OFF for the org.
   await getAttendanceShiftService().assertShiftReferenceAllowed(db, {
-    orgId: input.orgId,
-    shiftId: input.shiftId,
+    orgId: effectiveInput.orgId,
+    shiftId: effectiveInput.shiftId,
     producer: 'fixed_schedule_rebuild',
   })
-  const result = await buildAttendanceGroupFixedSchedulePlan(db, input, {
+  const result = await buildAttendanceGroupFixedSchedulePlan(db, effectiveInput, {
     lockTargets: true,
     lockManagedRowsForProducerKey: true,
   })
@@ -11111,26 +11172,26 @@ async function rebuildAttendanceGroupFixedSchedule(db, input) {
     }
   }
 
-  const activeManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
-  await acquireAttendanceScheduleAssignmentLocks(db, input.orgId, activeManagedRows.map(row => row.user_id))
-  const lockedManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
+  const activeManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, effectiveInput)
+  await acquireAttendanceScheduleAssignmentLocks(db, effectiveInput.orgId, activeManagedRows.map(row => row.user_id))
+  const lockedManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, effectiveInput)
   const targetUserIds = new Set(plan.target.userIds)
   const deactivateIds = lockedManagedRows
     .filter(row => !targetUserIds.has(String(row.user_id || '').trim()))
     .map(row => row.id)
 
-  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
-  const created = await insertAttendanceGroupFixedScheduleAssignments(db, input, plan.wouldCreate, producerMetadata)
-  const deactivated = await softDeactivateAttendanceGroupFixedScheduleManagedRows(db, input, deactivateIds)
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(effectiveInput, randomUUID())
+  const created = await insertAttendanceGroupFixedScheduleAssignments(db, effectiveInput, plan.wouldCreate, producerMetadata)
+  const deactivated = await softDeactivateAttendanceGroupFixedScheduleManagedRows(db, effectiveInput, deactivateIds)
 
   // S1 daily compliance cap: project after BOTH insert + deactivate so the resolver sees the final
   // active set (stale managed rows already deactivated). Throw → txn rollback → 422 on any over-cap day.
   for (const targetUserId of new Set(plan.wouldCreate.map((item) => item.userId))) {
     await enforceShiftComplianceCap(db, {
-      orgId: input.orgId,
+      orgId: effectiveInput.orgId,
       userId: targetUserId,
-      fromDate: input.startDate,
-      toDate: input.endDate,
+      fromDate: effectiveInput.startDate,
+      toDate: effectiveInput.endDate,
     })
   }
 
@@ -23855,6 +23916,16 @@ module.exports = {
   __attendanceShiftServiceForTests: {
     lib: attendanceShiftServiceLib,
     getService: getAttendanceShiftService,
+  },
+  // FSER-3 (#4709): direct-call seam for the fixed-schedule apply/rebuild write paths
+  // so lock-order (config FOR UPDATE before any per-user advisory target lock) and
+  // canonical producer-key parity can be proven without a full HTTP harness.
+  __attendanceGroupFixedScheduleForTests: {
+    applyAttendanceGroupFixedSchedule,
+    rebuildAttendanceGroupFixedSchedule,
+    buildAttendanceGroupFixedScheduleProducerKey,
+    runAttendanceGroupFixedScheduleTransaction,
+    configServiceLib: attendanceGroupFixedScheduleConfigServiceLib,
   },
   __attendanceLivePunchWorkDateForTests: {
     getPunchShiftWindow,
@@ -44423,6 +44494,7 @@ module.exports = {
           startDate: z.string().min(1),
           endDate: z.string().min(1),
           orgId: z.string().optional(),
+          expectedConfigRevision: z.number().int().min(1).optional(),
         }).strict()
 
         const parsed = schema.safeParse(req.body ?? {})
@@ -44463,29 +44535,21 @@ module.exports = {
           const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess })
           if (!access) return
 
-          const result = await db.transaction((trx) => applyAttendanceGroupFixedSchedule(trx, {
+          const result = await runAttendanceGroupFixedScheduleTransaction(db, (trx) => applyAttendanceGroupFixedSchedule(trx, {
             orgId,
             groupId,
             shiftId,
             startDate,
             endDate,
+            expectedConfigRevision: parsed.data.expectedConfigRevision,
+            updatedBy: access.userId,
           }))
-          if (!result.ok) {
-            res.status(result.status).json({
-              ok: false,
-              error: {
-                code: result.code,
-                message: result.message,
-                details: result.details,
-              },
-            })
-            return
-          }
           for (const assignment of result.data.created) {
             emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
           }
           res.status(201).json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondAttendanceGroupFixedScheduleTransactionAbort(res, error)) return
           if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
@@ -44509,6 +44573,7 @@ module.exports = {
           startDate: z.string().min(1),
           endDate: z.string().min(1),
           orgId: z.string().optional(),
+          expectedConfigRevision: z.number().int().min(1).optional(),
         }).strict()
 
         const parsed = schema.safeParse(req.body ?? {})
@@ -44549,24 +44614,15 @@ module.exports = {
           const access = await assertAttendanceGroupFixedScheduleRebuildAllowed(req, res, { groupId, actorAccess })
           if (!access) return
 
-          const result = await db.transaction((trx) => rebuildAttendanceGroupFixedSchedule(trx, {
+          const result = await runAttendanceGroupFixedScheduleTransaction(db, (trx) => rebuildAttendanceGroupFixedSchedule(trx, {
             orgId,
             groupId,
             shiftId,
             startDate,
             endDate,
+            expectedConfigRevision: parsed.data.expectedConfigRevision,
+            updatedBy: access.userId,
           }))
-          if (!result.ok) {
-            res.status(result.status).json({
-              ok: false,
-              error: {
-                code: result.code,
-                message: result.message,
-                details: result.details,
-              },
-            })
-            return
-          }
           for (const assignment of result.data.created) {
             emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
           }
@@ -44575,6 +44631,7 @@ module.exports = {
           }
           res.json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondAttendanceGroupFixedScheduleTransactionAbort(res, error)) return
           if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {

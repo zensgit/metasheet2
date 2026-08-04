@@ -5420,7 +5420,7 @@
                           class="attendance__btn"
                           type="button"
                           data-attendance-group-rule-policy-rule-sets-open
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets); closeAttendanceGroupRulePolicyDrawer()"
+                          @click="openAttendanceGroupRoute('rules', 'rule-sets'); closeAttendanceGroupRulePolicyDrawer()"
                         >
                           {{ tr('Open Rule Sets', '打开规则集') }}
                         </button>
@@ -5428,7 +5428,7 @@
                           class="attendance__btn"
                           type="button"
                           data-attendance-group-rule-policy-holidays-open
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays); closeAttendanceGroupRulePolicyDrawer()"
+                          @click="openAttendanceGroupRoute('calendar', null); closeAttendanceGroupRulePolicyDrawer()"
                         >
                           {{ tr('Open Holidays', '打开节假日') }}
                         </button>
@@ -5535,7 +5535,7 @@
                           class="attendance__btn attendance__btn--compact"
                           type="button"
                           data-attendance-group-work-time-holidays-open
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays); closeAttendanceGroupWorkTimeDrawer()"
+                          @click="openAttendanceGroupRoute('calendar', null); closeAttendanceGroupWorkTimeDrawer()"
                         >
                           {{ tr('Open Holidays', '打开节假日') }}
                         </button>
@@ -5545,21 +5545,24 @@
                         <button
                           class="attendance__btn"
                           type="button"
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.shifts); closeAttendanceGroupWorkTimeDrawer()"
+                          data-attendance-group-work-time-shifts-open
+                          @click="openAttendanceGroupRoute('schedule', 'shifts'); closeAttendanceGroupWorkTimeDrawer()"
                         >
                           {{ tr('Open Shifts', '打开班次') }}
                         </button>
                         <button
                           class="attendance__btn"
                           type="button"
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.assignments); closeAttendanceGroupWorkTimeDrawer()"
+                          data-attendance-group-work-time-assignments-open
+                          @click="openAttendanceGroupRoute('schedule', 'assignments'); closeAttendanceGroupWorkTimeDrawer()"
                         >
                           {{ tr('Open Assignments', '打开排班分配') }}
                         </button>
                         <button
                           class="attendance__btn"
                           type="button"
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench); closeAttendanceGroupWorkTimeDrawer()"
+                          data-attendance-group-work-time-advanced-scheduling-open
+                          @click="openAttendanceGroupRoute('schedule', 'advanced-scheduling'); closeAttendanceGroupWorkTimeDrawer()"
                         >
                           {{ tr('Open Advanced scheduling', '打开高级排班') }}
                         </button>
@@ -5651,7 +5654,8 @@
                       <button
                         class="attendance__btn"
                         type="button"
-                        @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.assignments)"
+                        data-attendance-group-fixed-schedule-assignments-open
+                        @click="openAttendanceGroupRoute('schedule', 'assignments')"
                       >
                         {{ tr('Open Assignments', '打开排班分配') }}
                       </button>
@@ -5793,7 +5797,8 @@
                       <button
                         class="attendance__btn"
                         type="button"
-                        @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench)"
+                        data-attendance-group-advanced-scheduling-open
+                        @click="openAttendanceGroupRoute('schedule', 'advanced-scheduling')"
                       >
                         {{ tr('Open Advanced scheduling', '打开高级排班') }}
                       </button>
@@ -10230,6 +10235,11 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (event: 'clear-section'): void
+  (event: 'open-group-route', target: {
+    groupId: string
+    step: AttendanceGroupRouteStep
+    surface: AttendanceGroupRouteSurface | null
+  }): void
 }>()
 
 const { locale, isZh } = useLocale()
@@ -14061,6 +14071,33 @@ const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
   )
 )
 
+function openAttendanceGroupRoute(
+  step: AttendanceGroupRouteStep,
+  surface: AttendanceGroupRouteSurface | null,
+): void {
+  const groupId = String(props.routeGroupContext?.group.id || attendanceGroupEditingId.value || '').trim()
+  if (!groupId) return
+  emit('open-group-route', { groupId, step, surface })
+}
+
+function attendanceGroupSummaryRouteTarget(actionKey: string): {
+  step: AttendanceGroupRouteStep
+  surface: AttendanceGroupRouteSurface | null
+} | null {
+  switch (actionKey) {
+    case 'open-shifts':
+      return { step: 'schedule', surface: 'shifts' }
+    case 'open-assignments':
+      return { step: 'schedule', surface: 'assignments' }
+    case 'open-advanced-scheduling':
+      return { step: 'schedule', surface: 'advanced-scheduling' }
+    case 'open-rule-sets':
+      return { step: 'rules', surface: 'rule-sets' }
+    default:
+      return null
+  }
+}
+
 function handleAttendanceGroupSummaryAction(action: AttendanceGroupSummaryAction) {
   if (action.drawer === 'rule-policy') {
     openAttendanceGroupRulePolicyDrawer()
@@ -14072,6 +14109,11 @@ function handleAttendanceGroupSummaryAction(action: AttendanceGroupSummaryAction
   }
   if (action.drawer === 'punch-method') {
     openAttendanceGroupPunchMethodDrawer()
+    return
+  }
+  const routeTarget = attendanceGroupSummaryRouteTarget(action.key)
+  if (routeTarget) {
+    openAttendanceGroupRoute(routeTarget.step, routeTarget.surface)
     return
   }
   if (action.sectionId) {

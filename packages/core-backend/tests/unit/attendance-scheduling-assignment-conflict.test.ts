@@ -6,6 +6,22 @@ const require = createRequire(import.meta.url)
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
 const helpers = attendancePlugin.__attendanceReportFieldCatalogForTests
 
+function fixedScheduleConfigRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: '00000000-0000-4000-8000-000000000401',
+    org_id: 'org-a',
+    group_id: 'group-a',
+    shift_id: 'shift-a',
+    start_date: '2026-06-01',
+    end_date: '2026-06-30',
+    revision: 1,
+    updated_by: 'operator-a',
+    created_at: '2026-06-01T00:00:00.000Z',
+    updated_at: '2026-06-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
 const provenanceMigrationSource = readFileSync(
   new URL('../../src/db/migrations/zzzz20260528200000_add_attendance_shift_assignment_provenance.ts', import.meta.url),
   'utf8',
@@ -447,6 +463,10 @@ describe('attendance scheduling assignment conflict guard', () => {
 
   it('applies fixed-schedule group plans by locking users, skipping exact matches, and inserting only missing rows', async () => {
     const pendingRows = [
+      [{ id: 'group-a' }],
+      [fixedScheduleConfigRow()],
+      [{ id: 'shift-a' }],
+      [{ present: 1 }],
       // W3 canonical assignability guard runs first: shift FOR SHARE + segment count.
       [{ id: 'shift-a' }],
       [{ total: 0 }],
@@ -533,6 +553,10 @@ describe('attendance scheduling assignment conflict guard', () => {
 
   it('uses one producer run id across multiple fixed-schedule creates without mutating skips', async () => {
     const pendingRows = [
+      [{ id: 'group-a' }],
+      [fixedScheduleConfigRow()],
+      [{ id: 'shift-a' }],
+      [{ present: 1 }],
       // W3 canonical assignability guard runs first: shift FOR SHARE + segment count.
       [{ id: 'shift-a' }],
       [{ total: 0 }],
@@ -598,63 +622,26 @@ describe('attendance scheduling assignment conflict guard', () => {
     expect(queries.join('\n')).not.toMatch(/\bUPDATE attendance_shift_assignments\b/i)
   })
 
-  it('leaves open-ended fixed-schedule creates under an explicit null-ended producer key', async () => {
-    const pendingRows = [
-      // W3 canonical assignability guard runs first: shift FOR SHARE + segment count.
-      [{ id: 'shift-a' }],
-      [{ total: 0 }],
-      [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }],
-      [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }],
-      [{ user_id: 'user-a' }],
-      [],
-      [],
-      [],
-      [],
-    ]
-    const db = {
-      query: vi.fn(async (sql: string, params: any[] = []) => {
-        if (/\bINSERT INTO attendance_shift_assignments\b/i.test(String(sql))) {
-          return [
-            {
-              id: params[0],
-              org_id: params[1],
-              user_id: params[2],
-              shift_id: params[3],
-              start_date: params[4],
-              end_date: params[5],
-              is_active: true,
-              producer_type: params[6],
-              producer_ref_id: params[7],
-              producer_key: params[8],
-              producer_run_id: params[9],
-            },
-          ]
-        }
-        return pendingRows.shift() ?? []
-      }),
-    }
+  it('rejects open-ended direct applies because desired config windows are finite', async () => {
+    const db = { query: vi.fn() }
 
-    const result = await helpers.applyAttendanceGroupFixedSchedule(db, {
+    await expect(helpers.applyAttendanceGroupFixedSchedule(db, {
       orgId: 'org-a',
       groupId: 'group-a',
       shiftId: 'shift-a',
       startDate: '2026-06-01',
       endDate: null,
-    })
-
-    expect(result.ok).toBe(true)
-    expect(result.data.created).toEqual([
-      expect.objectContaining({
-        userId: 'user-a',
-        endDate: null,
-        producerKey: 'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:null',
-      }),
-    ])
+    })).rejects.toMatchObject({ status: 400, code: 'VALIDATION_ERROR' })
+    expect(db.query).not.toHaveBeenCalled()
   })
 
   it('refuses fixed-schedule group applies without inserting when a blocking conflict exists', async () => {
     const db = {
       query: vi.fn()
+        .mockResolvedValueOnce([{ id: 'group-a' }])
+        .mockResolvedValueOnce([fixedScheduleConfigRow()])
+        .mockResolvedValueOnce([{ id: 'shift-a' }])
+        .mockResolvedValueOnce([{ present: 1 }])
         // W3 canonical assignability guard runs first: shift FOR SHARE + segment count.
         .mockResolvedValueOnce([{ id: 'shift-a' }])
         .mockResolvedValueOnce([{ total: 0 }])
@@ -726,6 +713,7 @@ describe('attendance scheduling assignment conflict guard', () => {
     const db = {
       query: vi.fn(async (sql: string, params: any[] = []) => {
         const text = String(sql)
+        if (/FROM attendance_group_fixed_schedule_configs/.test(text)) return [fixedScheduleConfigRow()]
         if (/FROM attendance_groups/.test(text)) return [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }]
         if (/FROM attendance_shifts/.test(text)) return [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }]
         if (/FROM attendance_group_members/.test(text)) return [{ user_id: 'user-create' }, { user_id: 'user-managed' }, { user_id: 'user-unmanaged' }]
@@ -799,6 +787,7 @@ describe('attendance scheduling assignment conflict guard', () => {
     const db = {
       query: vi.fn(async (sql: string) => {
         const text = String(sql)
+        if (/FROM attendance_group_fixed_schedule_configs/.test(text)) return [fixedScheduleConfigRow()]
         if (/FROM attendance_groups/.test(text)) return [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }]
         if (/FROM attendance_shifts/.test(text)) return [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }]
         if (/FROM attendance_group_members/.test(text)) return [{ user_id: 'user-a' }]
