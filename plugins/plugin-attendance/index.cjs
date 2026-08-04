@@ -14,6 +14,7 @@ const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolv
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
+const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
 const {
   DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   MAX_ATTRIBUTION_TAIL_MINUTES,
@@ -8329,6 +8330,18 @@ function getAttendanceGroupFixedScheduleConfigService() {
       .createAttendanceGroupFixedScheduleConfigService({ HttpError })
   }
   return attendanceGroupFixedScheduleConfigService
+}
+
+let attendanceGroupFixedScheduleEffectivenessService = null
+function getAttendanceGroupFixedScheduleEffectivenessService() {
+  if (!attendanceGroupFixedScheduleEffectivenessService) {
+    attendanceGroupFixedScheduleEffectivenessService = attendanceGroupFixedScheduleEffectivenessServiceLib
+      .createAttendanceGroupFixedScheduleEffectivenessService({
+        HttpError,
+        buildAttendanceGroupFixedScheduleProducerKey,
+      })
+  }
+  return attendanceGroupFixedScheduleEffectivenessService
 }
 
 function assertWorkContextSegmentCalculationAllowed(orgId, workContext) {
@@ -44212,6 +44225,40 @@ module.exports = {
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to remove group manager' } })
         }
       })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups/:groupId/fixed-schedule/effectiveness',
+      async (req, res, next) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+        if (!actorAccess) return
+        return withPermission('attendance:admin', async (permissionReq, permissionRes) => {
+          const groupId = normalizeUuidString(permissionReq.params.groupId)
+          if (!groupId) {
+            respondInvalidUuid(permissionRes, 'groupId')
+            return
+          }
+          try {
+            const effectiveness = await getAttendanceGroupFixedScheduleEffectivenessService().getEffectiveness(db, {
+              orgId: actorAccess.orgId,
+              groupId,
+            })
+            permissionRes.json({ ok: true, data: effectiveness })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              permissionRes.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            if (isDatabaseSchemaError(error)) {
+              permissionRes.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance fixed schedule tables missing' } })
+              return
+            }
+            logger.error('Attendance group fixed schedule effectiveness read failed', error)
+            permissionRes.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read fixed schedule effectiveness' } })
+          }
+        })(req, res, next)
+      }
     )
 
     context.api.http.addRoute(

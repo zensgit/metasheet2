@@ -255,6 +255,7 @@ async function assertRealDbProofWiring() {
     'node __tests__/sealed-export-s6a-runtime-authority-migration.test.cjs',
     'node __tests__/sealed-export-s6a-runtime-store.test.cjs',
     'node __tests__/sealed-export-s6a-source-authority.test.cjs',
+    'node __tests__/sealed-export-s6a-source-authority-adapter-projection.test.cjs',
     'node __tests__/sealed-export-s6a-runtime-config.test.cjs',
     'node __tests__/sealed-export-s6a-runtime-persist.test.cjs',
     'node __tests__/sealed-export-s6a-runtime-core.test.cjs',

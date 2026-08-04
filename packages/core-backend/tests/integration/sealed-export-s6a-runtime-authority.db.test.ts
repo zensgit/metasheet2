@@ -494,12 +494,114 @@ describeIfDatabase('sealed-export S6-A runtime authority (real Postgres)', () =>
         )`,
       ),
     ).rejects.toMatchObject({ code: '42501' })
+    // RETRACTION (R5, migration 075). This block previously asserted
+    //
+    //   await expect(client.query(
+    //     'SELECT * FROM integration_sealed_export_authority_state FOR UPDATE',
+    //   )).rejects.toMatchObject({ code: '42501' })
+    //
+    // That clause OVER-ASSERTED: it conflated taking a ROW LOCK with
+    // MUTATING authority state. The posture this suite exists to defend is
+    // that the runtime role cannot MODIFY authority state. "It cannot LOCK
+    // it" is a strictly stronger and different claim, and it is one the
+    // ratified design forbids us to hold:
+    //
+    //   docs/development/
+    //   stock-prep-sealed-export-manifest-capability-spike-20260727.md
+    //   §6.1 (:297-301) — "Before the final visibility CAS, the server
+    //   repeats the same local verification in the activation transaction;
+    //   it performs no external probe there. A revoked, superseded, expired,
+    //   or mismatched binding/qualification quarantines the unactivated
+    //   generation."
+    //   §7 (:383-385) — "The server verifies system binding, key state,
+    //   expiry, signature, and request nonce before accepting any chunk,
+    //   before sealing, and again in the final activation transaction."
+    //
+    // The activation transaction is REQUIRED to re-verify authority, and the
+    // row lock is what makes that re-verification race-free against the
+    // concurrent revocation §7 demands ("a revoked key cannot start, resume,
+    // seal, apply, or activate"). Holding the old clause meant
+    // generation-kernel.cjs:934's trx.readAuthorityStateForUpdate() could
+    // only ever be refused 42501 and converted to
+    // SEALED_EXPORT_INTERNAL_ERROR, so no S6-A generation could be
+    // activated at all.
+    //
+    // The clause below replaces it with the real invariant. Every refusal
+    // this test already made about UPDATE/INSERT/DELETE on that table is
+    // kept verbatim (the signer_status UPDATE above is untouched) and the
+    // authority-bearing surface is now enumerated rather than sampled.
+    // Deliberately no assertion is made here about the `updated_at` column:
+    // 075 grants the runtime role UPDATE (updated_at) precisely so the lock
+    // can be taken, so an assertion on it would re-encode the same
+    // lock/mutate conflation one level down. Everything asserted below is
+    // refused identically under 073, under 073+074, and under 073+074+075 —
+    // that is what makes it an invariant rather than a fixture artefact.
+    //
+    // This fixture deliberately stops at 073 (see migrationNames), so it
+    // remains the 073 capability matrix. The post-grant world — necessity of
+    // 075, minimality of the grant, and this same non-mutation invariant
+    // after the grant — is proven in
+    // packages/core-backend/tests/integration/
+    // sealed-export-s6a-authority-row-lock.db.test.ts.
+    for (const column of [
+      'signer_key_id',
+      'signer_status',
+      'signer_expires_at',
+      'binding_current',
+      'binding_expires_at',
+      'qualification_digest',
+      'qualification_current',
+      'qualification_expires_at',
+      'tenant_id',
+    ]) {
+      await expect(
+        client.query(
+          `UPDATE integration_sealed_export_authority_state
+           SET ${column} = NULL
+           WHERE false`,
+        ),
+      ).rejects.toMatchObject({ code: '42501' })
+    }
     await expect(
       client.query(
-        `SELECT *
-         FROM integration_sealed_export_authority_state
-         FOR UPDATE`,
+        `INSERT INTO integration_sealed_export_authority_state (
+          tenant_id,
+          tenant_domain_binding,
+          system_content_key,
+          role_binding_fingerprint,
+          signer_key_id,
+          signer_status,
+          signer_expires_at,
+          binding_current,
+          binding_expires_at,
+          qualification_digest,
+          qualification_current,
+          qualification_expires_at
+        ) VALUES (
+          'forbidden',
+          'tenant-domain-s6a',
+          'system-content-s6a',
+          'role-binding-s6a',
+          $1,
+          'ACTIVE',
+          '2099-01-01T00:00:00.000Z',
+          TRUE,
+          '2099-01-01T00:00:00.000Z',
+          $2,
+          TRUE,
+          '2099-01-01T00:00:00.000Z'
+        )`,
+        [signerKeyId, qualificationDigest],
       ),
+    ).rejects.toMatchObject({ code: '42501' })
+    await expect(
+      client.query(
+        `DELETE FROM integration_sealed_export_authority_state
+         WHERE false`,
+      ),
+    ).rejects.toMatchObject({ code: '42501' })
+    await expect(
+      client.query('TRUNCATE integration_sealed_export_authority_state'),
     ).rejects.toMatchObject({ code: '42501' })
     await client.query('RESET ROLE')
   })

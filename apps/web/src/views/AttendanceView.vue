@@ -10085,6 +10085,9 @@ import {
   useAttendanceAdminRail,
 } from './attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
+import type { AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../router/attendanceGroupContextRoute'
+import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupRouteContext'
+import { hydrateAttendanceGroupRoute } from './attendance/attendanceGroupRouteHydration'
 import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
   applyPayrollSummaryFieldsToConfig,
@@ -10210,11 +10213,18 @@ const props = withDefaults(
     mode?: AttendancePageMode
     initialSectionId?: string
     initialRequestId?: string
+    routeGroupContext?: {
+      group: AttendanceAuthorizedGroup
+      step: AttendanceGroupRouteStep
+      surface: AttendanceGroupRouteSurface | null
+      returnTo: string
+    } | null
   }>(),
   {
     mode: 'overview',
     initialSectionId: '',
     initialRequestId: '',
+    routeGroupContext: null,
   }
 )
 
@@ -11862,6 +11872,7 @@ const ruleTemplateLoading = ref(false)
 const ruleTemplateSaving = ref(false)
 const ruleTemplateRestoring = ref(false)
 const attendanceGroupLoading = ref(false)
+let attendanceGroupLoadGeneration = 0
 const attendanceGroupSaving = ref(false)
 const attendanceGroupMemberLoading = ref(false)
 const attendanceGroupMemberSaving = ref(false)
@@ -14650,6 +14661,7 @@ const {
 // gates hash-restore/scroll-spy/keyboard-nav so a hidden workspace doesn't
 // silently mutate `adminActiveSectionId` or scroll behind the task home.
 function hasExplicitAdminSectionTarget(): boolean {
+  if (props.routeGroupContext) return true
   if (isKnownAdminSectionId(props.initialSectionId.trim())) return true
   if (typeof window === 'undefined') return false
   return isKnownAdminSectionId(window.location.hash.replace(/^#/, '').trim())
@@ -14657,6 +14669,7 @@ function hasExplicitAdminSectionTarget(): boolean {
 
 const adminTaskHomeOpen = ref(!hasExplicitAdminSectionTarget())
 const showAdminSectionWorkspace = computed(() => showAdmin.value && !adminTaskHomeOpen.value)
+const routeGroupContextActive = computed(() => Boolean(props.routeGroupContext))
 
 // W4-1 (Wave 4 onboarding design-lock §6/§9 W4-1): seven-step setup-readiness wizard shell.
 // The composable owns fetch/state; this parent only wires load triggers + canonical navigation
@@ -15054,6 +15067,7 @@ const {
   showAdmin,
   adminForbidden,
   adminNavigationEnabled: showAdminSectionWorkspace,
+  adminRouteOwned: routeGroupContextActive,
   adminFocusCurrentSectionOnly: adminFocusedMode,
   previousAdminSectionId: computed(() => previousAdminSectionNavItem.value?.id ?? ''),
   nextAdminSectionId: computed(() => nextAdminSectionNavItem.value?.id ?? ''),
@@ -15280,6 +15294,10 @@ function showAdminTaskHome(): void {
 }
 
 async function focusInitialAttendanceSection(): Promise<void> {
+  if (showAdmin.value && props.routeGroupContext) {
+    hydrateAttendanceGroupFromRoute(props.routeGroupContext)
+    return
+  }
   const targetId = props.initialSectionId.trim()
   if (!targetId || !attendancePluginActive.value) return
 
@@ -27139,8 +27157,8 @@ function resetAttendanceGroupFixedSchedulePreview() {
   attendanceGroupFixedSchedulePreviewForm.shiftId = shifts.value[0]?.id ?? attendanceGroupFixedSchedulePreviewForm.shiftId
 }
 
-function editAttendanceGroup(item: AttendanceGroup) {
-  attendanceGroupActiveStage.value = 'basics'
+function editAttendanceGroup(item: AttendanceGroup, stage: AttendanceGroupWorkflowStage = 'basics') {
+  attendanceGroupActiveStage.value = stage
   const groupChanged = attendanceGroupMemberGroupId.value !== item.id
   attendanceGroupEditingId.value = item.id
   attendanceGroupForm.name = item.name
@@ -27168,6 +27186,21 @@ function startCreateAttendanceGroup() {
 
 function selectAttendanceGroup(item: AttendanceGroup) {
   editAttendanceGroup(item)
+}
+
+function hydrateAttendanceGroupFromRoute(context: NonNullable<typeof props.routeGroupContext>, group = context.group): void {
+  const hydration = hydrateAttendanceGroupRoute({
+    groups: attendanceGroups.value,
+    total: attendanceGroupsTotal.value,
+    group,
+    step: context.step,
+    surface: context.surface,
+    currentStage: attendanceGroupActiveStage.value,
+  })
+  attendanceGroups.value = hydration.groups
+  attendanceGroupsTotal.value = hydration.total
+  editAttendanceGroup(group, hydration.stage)
+  selectAdminSection(hydration.section)
 }
 
 function selectAttendanceGroupStage(stage: AttendanceGroupWorkflowStage): void {
@@ -27263,7 +27296,7 @@ async function copyAttendanceGroup(item: AttendanceGroup) {
     adminForbidden.value = false
     const copiedGroup = data.data as AttendanceGroup | undefined
     await loadAttendanceGroups()
-    if (copiedGroup?.id) {
+    if (copiedGroup?.id && !props.routeGroupContext) {
       const freshGroup = attendanceGroups.value.find(group => group.id === copiedGroup.id) ?? copiedGroup
       editAttendanceGroup(freshGroup)
     }
@@ -27276,22 +27309,38 @@ async function copyAttendanceGroup(item: AttendanceGroup) {
 }
 
 async function loadAttendanceGroups() {
+  const generation = ++attendanceGroupLoadGeneration
   attendanceGroupLoading.value = true
   try {
+    const previousRouteGroup = props.routeGroupContext
+      ? attendanceGroups.value.find(item => item.id === props.routeGroupContext?.group.id)
+      : undefined
     const query = buildQuery({ orgId: normalizedOrgId(), pageSize: '200' })
     const response = await apiFetch(`/api/attendance/groups?${query.toString()}`)
+    if (generation !== attendanceGroupLoadGeneration) return
     if (response.status === 403) {
       adminForbidden.value = true
       return
     }
     const data = await response.json()
+    if (generation !== attendanceGroupLoadGeneration) return
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
     adminForbidden.value = false
-    const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
     attendanceGroups.value = data.data?.items ?? []
     attendanceGroupsTotal.value = typeof data.data?.total === 'number' ? data.data.total : attendanceGroups.value.length
+    if (props.routeGroupContext) {
+      const listedGroup = attendanceGroups.value.find(item => item.id === props.routeGroupContext?.group.id)
+      hydrateAttendanceGroupFromRoute(
+        props.routeGroupContext,
+        listedGroup
+          ? { ...props.routeGroupContext.group, ...listedGroup }
+          : previousRouteGroup ?? props.routeGroupContext.group,
+      )
+      return
+    }
+    const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
     const selected = selectedId ? attendanceGroups.value.find(item => item.id === selectedId) : null
     if (selected) {
       editAttendanceGroup(selected)
@@ -27301,9 +27350,12 @@ async function loadAttendanceGroups() {
       resetAttendanceGroupForm()
     }
   } catch (error: any) {
+    if (generation !== attendanceGroupLoadGeneration) return
     setStatus(readErrorMessage(error, tr('Failed to load attendance groups', '加载考勤分组失败')), 'error')
   } finally {
-    attendanceGroupLoading.value = false
+    if (generation === attendanceGroupLoadGeneration) {
+      attendanceGroupLoading.value = false
+    }
   }
 }
 
@@ -27345,8 +27397,11 @@ async function saveAttendanceGroup() {
     // populated instead of resetting, so the reset-side clear never fires here).
     clearSetupTemplatePrefillPending('group')
     const savedGroup = data.data as AttendanceGroup | undefined
+    if (savedGroup?.id && props.routeGroupContext?.group.id === savedGroup.id) {
+      hydrateAttendanceGroupFromRoute(props.routeGroupContext, savedGroup)
+    }
     await loadAttendanceGroups()
-    if (savedGroup?.id) {
+    if (savedGroup?.id && !props.routeGroupContext) {
       const freshGroup = attendanceGroups.value.find(item => item.id === savedGroup.id) ?? savedGroup
       editAttendanceGroup(freshGroup)
     }
@@ -27898,6 +27953,11 @@ async function deleteAttendanceGroup(id: string) {
       throw new Error(readErrorMessage(data, tr('Failed to delete attendance group', '删除考勤分组失败')))
     }
     adminForbidden.value = false
+    if (props.routeGroupContext?.group.id === id) {
+      setStatus(tr('Attendance group deleted.', '考勤分组已删除。'))
+      emit('clear-section')
+      return
+    }
     await loadAttendanceGroups()
     if (attendanceGroupEditingId.value === id) {
       const nextGroup = attendanceGroups.value[0]
@@ -28982,8 +29042,30 @@ watch(recordStatusBreakdown, (items) => {
 }, { immediate: true })
 
 watch(
-  () => [props.initialSectionId, props.initialRequestId, showAdmin.value, showOverview.value, showReports.value, adminForbidden.value, attendancePluginActive.value] as const,
+  () => [
+    props.initialSectionId,
+    props.initialRequestId,
+    showAdmin.value,
+    showOverview.value,
+    showReports.value,
+    adminForbidden.value,
+    attendancePluginActive.value,
+  ] as const,
   () => {
+    if (props.routeGroupContext) return
+    void focusInitialAttendanceSection()
+  },
+  { immediate: true },
+)
+
+watch(
+  [
+    () => props.routeGroupContext?.group.id,
+    () => props.routeGroupContext?.step,
+    () => props.routeGroupContext?.surface,
+  ],
+  () => {
+    if (!props.routeGroupContext) return
     void focusInitialAttendanceSection()
   },
   { immediate: true },
@@ -29004,12 +29086,12 @@ watch(
   },
 )
 
-watch(attendanceGroupMemberGroupId, () => {
-  if (attendancePluginActive.value) {
+watch([attendanceGroupMemberGroupId, attendancePluginActive], ([, pluginActive]) => {
+  if (pluginActive) {
     loadAttendanceGroupMembers()
     loadAttendanceGroupManagers()
   }
-})
+}, { immediate: true })
 
 watch(
   () => [
