@@ -2077,7 +2077,22 @@ async function runS6AMidTierScaleWalk() {
   // provisionInitialStockPreparationBinding's activeBinding lookup is scoped only by
   // {tenant_id, workspace_id, object_key}, so a second, DIFFERENT binding identity under the SAME tenant
   // would refuse SEALED_EXPORT_BINDING_UNQUALIFIED against the primary's already-ACTIVE binding.
-  const tenantId = `${SCALE_TENANT_ID_PREFIX}-${label}`
+  // Per-job restructure made the dedicated tenant unnecessary AND made it the prime suspect.
+  //
+  // It existed to avoid colliding with the primary walk's ACTIVE binding inside a SHARED database (073's
+  // unique index on the constant `((1))` permits exactly one ACTIVE binding table-wide). Each scale arm
+  // now has its OWN Postgres, so there is no primary binding here to collide with — the reason is gone.
+  //
+  // What the dedicated tenant DID do is make this arm's setup differ from the primary's in two ways at
+  // once: a different tenant, and — because phases 1-3 do not run in this job — no existing chain ever
+  // run against it. The primary arm's own comment says its tenant was warmed by exactly that
+  // ("the existing-chain phase already ran this once for the SAME tenant").
+  //
+  // The bisect (4/50/600/2500 all fail, primary at 3 passes) says the difference is the ARM, not the
+  // volume. So: use the SAME tenant as the primary and warm it the SAME way, and see whether the arm
+  // starts passing. If it does, the harness was the defect. If it still fails, the difference is
+  // somewhere else and this rules out the largest remaining candidate.
+  const tenantId = TENANT_ID
 
   S[`${keyPrefix}RowCount`] = rowCount
 
@@ -2274,7 +2289,22 @@ async function runS6ARejectionArm() {
   // Dedicated tenant — see the comment in runS6AMidTierScaleWalk / above SCALE_TENANT_ID_PREFIX. Also
   // keeps this arm's (intentionally refused, so it writes no generation rows) attempt from sharing ANY
   // state with the mid-tier arm's tenant, though that arm's writes would not collide either way.
-  const tenantId = `${SCALE_TENANT_ID_PREFIX}-${label}`
+  // Per-job restructure made the dedicated tenant unnecessary AND made it the prime suspect.
+  //
+  // It existed to avoid colliding with the primary walk's ACTIVE binding inside a SHARED database (073's
+  // unique index on the constant `((1))` permits exactly one ACTIVE binding table-wide). Each scale arm
+  // now has its OWN Postgres, so there is no primary binding here to collide with — the reason is gone.
+  //
+  // What the dedicated tenant DID do is make this arm's setup differ from the primary's in two ways at
+  // once: a different tenant, and — because phases 1-3 do not run in this job — no existing chain ever
+  // run against it. The primary arm's own comment says its tenant was warmed by exactly that
+  // ("the existing-chain phase already ran this once for the SAME tenant").
+  //
+  // The bisect (4/50/600/2500 all fail, primary at 3 passes) says the difference is the ARM, not the
+  // volume. So: use the SAME tenant as the primary and warm it the SAME way, and see whether the arm
+  // starts passing. If it does, the harness was the defect. If it still fails, the difference is
+  // somewhere else and this rules out the largest remaining candidate.
+  const tenantId = TENANT_ID
 
   S[`${keyPrefix}RowCount`] = rowCount
   S[`${keyPrefix}Bound`] = MAX_BUSINESS_LINES
