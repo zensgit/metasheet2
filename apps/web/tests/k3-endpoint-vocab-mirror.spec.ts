@@ -31,10 +31,10 @@ const CORRESPONDENCE: ReadonlyArray<
   ['material', 'savePath', 'materialSavePath', 'the only write this first version performs'],
   ['material', 'submitPath', 'materialSubmitPath', 'declared; Submit is OFF in the first version'],
   ['material', 'auditPath', 'materialAuditPath', 'declared; Audit is OFF in the first version'],
-  // Documented gap, found by writing this test: the server declares a Material read path and the client
-  // form has no counterpart. GetDetail is exactly what the first version's post-save read-back needs, so
-  // this null is a KNOWN GAP to close in P3 — recorded here rather than left invisible.
-  ['material', 'readPath', null, 'KNOWN GAP: no client field; P3 read-back needs it'],
+  // Was a KNOWN GAP when this test was written — the server declared readPath and the client had no
+  // counterpart, so the post-save read-back had nothing to call. CLOSED in P3: materialReadPath now exists
+  // and is mirrored here, which is what turns "we added a field" into "the field agrees with the server".
+  ['material', 'readPath', 'materialReadPath', 'P3 post-save GetDetail read-back'],
   ['bom', 'savePath', 'bomSavePath', 'declared; BOM writes are OFF in the first version'],
   ['bom', 'submitPath', 'bomSubmitPath', 'declared; BOM Submit is OFF'],
   ['bom', 'auditPath', 'bomAuditPath', 'declared; BOM Audit is OFF'],
