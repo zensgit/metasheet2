@@ -56,6 +56,20 @@ describe('attendance shift segment analysis', () => {
 
   it('validates W5 flex policy, core coverage, and rejects multi-segment flex without silent reset', () => {
     expect(normalizeAttendanceShiftFlexPolicy(undefined)).toEqual({ mode: 'strict' })
+    const malformed = normalizeAttendanceShiftFlexPolicy({
+      mode: 'flex_required_duration',
+      requiredMinutes: '480',
+      arrivalWindowBeforeMinutes: null,
+      arrivalWindowAfterMinutes: '0',
+      coreStartTime: null,
+      coreEndTime: null,
+    })
+    const malformedAnalysis = analyzeAttendanceShiftFlexPolicy(malformed, 1, tr, '09:00')
+    expect(malformedAnalysis.errors).toEqual([
+      'Required minutes must be an integer from 1 to 1440.',
+      'Arrival window before minutes must be a non-negative integer.',
+      'Arrival window after minutes must be a non-negative integer.',
+    ])
     // 09:00 ±60 covers core 10:00-15:00 with required 480.
     const ok = analyzeAttendanceShiftFlexPolicy({
       mode: 'flex_required_duration',

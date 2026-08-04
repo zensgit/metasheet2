@@ -8573,8 +8573,9 @@ paths:
             Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
             (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
             (segments combined with legacy start/end fields), or
-            ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (discriminated flex policy
-            rejection, including multi-segment flex).
+            ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex
+            rejection after request-shape validation, including multi-segment
+            flex or core-hours coverage failure).
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -8694,7 +8695,10 @@ paths:
             ATTENDANCE_SHIFT_SEGMENTS_INVALID,
             ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or
             ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update
-            on a multi-segment shift).
+            on a multi-segment shift); or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID
+            for a canonical semantic flex rejection after request-shape
+            validation, including multi-segment flex or core-hours coverage
+            failure.
     delete:
       summary: Delete attendance shift
       security:

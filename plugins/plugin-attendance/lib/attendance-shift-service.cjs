@@ -197,7 +197,7 @@ function createAttendanceShiftService(deps) {
    * `segmentStartTime` is required when core hours are set.
    */
   function validateFlexPolicy(rawPolicy, segmentCount, segmentStartTime = null) {
-    if (rawPolicy === undefined || rawPolicy === null) {
+    if (rawPolicy === undefined) {
       return {
         mode: 'strict',
         requiredMinutes: null,
@@ -206,6 +206,9 @@ function createAttendanceShiftService(deps) {
         coreStartTime: null,
         coreEndTime: null,
       }
+    }
+    if (rawPolicy === null) {
+      throw flexValidationError(fieldDetail('flexPolicy', 'flexPolicy must be an object'))
     }
     if (!rawPolicy || typeof rawPolicy !== 'object' || Array.isArray(rawPolicy)) {
       throw flexValidationError(fieldDetail('flexPolicy', 'flexPolicy must be an object'))

@@ -189,9 +189,15 @@ export function normalizeAttendanceShiftFlexPolicy(
   if (record.mode === 'flex_required_duration') {
     return {
       mode: 'flex_required_duration',
-      requiredMinutes: Number(record.requiredMinutes) || 480,
-      arrivalWindowBeforeMinutes: Number(record.arrivalWindowBeforeMinutes) || 0,
-      arrivalWindowAfterMinutes: Number(record.arrivalWindowAfterMinutes) || 0,
+      requiredMinutes: typeof record.requiredMinutes === 'number'
+        ? record.requiredMinutes
+        : Number.NaN,
+      arrivalWindowBeforeMinutes: typeof record.arrivalWindowBeforeMinutes === 'number'
+        ? record.arrivalWindowBeforeMinutes
+        : Number.NaN,
+      arrivalWindowAfterMinutes: typeof record.arrivalWindowAfterMinutes === 'number'
+        ? record.arrivalWindowAfterMinutes
+        : Number.NaN,
       coreStartTime: typeof record.coreStartTime === 'string' ? record.coreStartTime : null,
       coreEndTime: typeof record.coreEndTime === 'string' ? record.coreEndTime : null,
     }

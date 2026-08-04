@@ -192,6 +192,10 @@ describe('validateFlexPolicy (W5)', () => {
     })
   })
 
+  it('rejects explicit null instead of silently resetting to strict', () => {
+    expectFlexInvalid(null, 1, 'flexPolicy')
+  })
+
   it('accepts single-segment flex whose every clamped arrival covers core', () => {
     // 09:00 ±60 => [08:00,10:00]; required 480 covers core 10:00-15:00.
     expect(service.validateFlexPolicy({

@@ -87,8 +87,12 @@ Migration:
 | Route schema | `shiftFlexPolicySchema` on create/update |
 | OpenAPI | `AttendanceShiftFlexPolicy` + shift request bodies; segment reason enum |
 | UI | `AttendanceShiftFlexPolicyEditor.vue` + `AttendanceView.vue` list/explain |
+| Required CI provenance | `plugin-tests.yml` SHA-256 pin refreshed in the sealed-export package manifest |
 
-Error code: `ATTENDANCE_SHIFT_FLEX_POLICY_INVALID` (typed 422, zero writes).
+Request-shape violations are the existing route-level `VALIDATION_ERROR` 400.
+After that shape gate, canonical semantic flex rejection uses
+`ATTENDANCE_SHIFT_FLEX_POLICY_INVALID` (typed 422, zero writes), including
+multi-segment flex and core-hours coverage failure.
 
 ## 4. Focused verification commands
 
@@ -129,10 +133,12 @@ org, production/customer data, or external notification was used.
 
 | Gate | Result |
 | --- | --- |
-| Core policy/calculator/strict-regression/service matrix | 5 files / 171 tests PASS |
+| Core policy/calculator/strict-regression/service matrix | 5 files / 172 tests PASS |
 | Web analysis/editor helpers + mounted preservation/reset interaction | 1 file / 10 tests PASS |
+| Existing mounted strict request-body regressions | 2 files / 186 tests PASS |
 | Isolated PostgreSQL migration + canonical writer | 1 file / 2 tests PASS |
 | Required-CI two-point wiring guard | 96 tests PASS |
+| Sealed-export package provenance pin verifier | PASS |
 | Core backend TypeScript | PASS |
 | Web Vue/TypeScript | BASELINE-RED; W5 adds no diagnostic (same three pre-existing TS2550 errors on clean base) |
 | OpenAPI build + security validation | PASS |
@@ -184,6 +190,10 @@ a TypeScript diagnostic; this slice does not modify those unrelated files.
 - The real-DB flex migration/writer suite is excluded from the no-DB lane and
   named as a whole file in the required attendance PostgreSQL step; the wiring
   guard pins both locations.
+- Because that required-step edit changes the pinned workflow bytes, the
+  sealed-export package-provenance manifest carries the matching SHA-256. Its
+  exact verifier passes; fresh GitHub product-matrix checks remain the final
+  evidence for the full SQL Server lane.
 - Two product readings remain explicit owner gates rather than inferred
   acceptance: missing arrival currently resolves to the arrival-window open,
   and optional core hours are a positive same-day interval. Rejecting either
