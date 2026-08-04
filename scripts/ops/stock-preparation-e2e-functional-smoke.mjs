@@ -24,6 +24,15 @@
 // dependencies installed, and the two sealed-export Postgres roles + all migrations already applied. It
 // manages its OWN core-backend server process lifecycle (multiple restarts, one per env-var arm) and never
 // touches the deployed entity host or any `origin`-tracked production configuration.
+//
+// R9 restructure — E2E_S6A_ARM ('primary' | 'midtier' | 'rejection', default 'primary'): a single
+// invocation of this script executes exactly ONE arm's S6-A work, never two, because each arm provisions
+// its OWN ACTIVE sealed-export binding and migrations/073's single-ACTIVE-binding-in-the-whole-table
+// constraint (a RATIFIED design, never widened) means a second arm's provisioning attempt in the SAME
+// database permanently fails once any earlier arm's binding is ACTIVE. See the block comment above the
+// S6A_ARM constant for the full rationale, and
+// scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs for how the primary-vs-mid-tier timing slope
+// is reassembled downstream from separate job outputs now that the arms are separate processes.
 
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -45,6 +54,15 @@ const requireFromPlugin = createRequire(
 const canonicalCodec = require_(
   'plugins/plugin-integration-core/lib/sealed-export/canonical-json.cjs',
 )
+// The product's OWN declared row-count bound (stock-preparation-sealed-snapshot-decoder.cjs's
+// MAX_BUSINESS_LINES, itself derived from stock-preparation-sync-run-persist.cjs's
+// PERSIST_MAX_PLAN_LINES = 500*50-1 = 24999). Read from the product rather than hardcoded here, so the
+// rejection arm below always tests "one over whatever the product currently declares", never a stale
+// number this harness invented independently.
+const sealedSnapshotDecoder = require_(
+  'plugins/plugin-integration-core/lib/stock-preparation-sealed-snapshot-decoder.cjs',
+)
+const MAX_BUSINESS_LINES = sealedSnapshotDecoder.MAX_BUSINESS_LINES
 
 function require_(relativePath) {
   return requireFromPlugin(path.join(REPO_ROOT, relativePath))
@@ -113,6 +131,85 @@ const MSSQL_TABLE = 'dbo.stock_prep_e2e_rows'
 const MSSQL_READER_LOGIN = 'e2e_s6a_reader'
 const MSSQL_READER_PASSWORD = `E2eReader_${crypto.randomBytes(9).toString('hex')}!Aa1`
 
+// ── R9 scale-leg config ─────────────────────────────────────────────────────────────────────────────
+//
+// The declared bound (packages/core-backend/migrations/073_*.sql CHECK business_line_count BETWEEN 1 AND
+// 24999; runtime guards at stock-preparation-runtime-store.cjs:234/:591; MAX_BUSINESS_LINES above) had —
+// until this leg — never been exercised end-to-end, only in a pure in-process decoder unit test. This
+// config block parameterises the row count so that gap can be closed WITHOUT changing what today's
+// default dispatch does.
+function parsePositiveInt(raw, fallback) {
+  if (raw === undefined || raw === null || raw === '') return fallback
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`invalid positive integer for E2E_S6A_ROW_COUNT-style env var: ${JSON.stringify(raw)}`)
+  }
+  return parsed
+}
+// The S6-A fixture row count (requirement 1). Default 3 preserves EXACTLY today's behaviour: the primary
+// walk below (attemptS6ARealRun) always seeds exactly DEFAULT_S6A_ROW_COUNT rows regardless of this
+// value, and the NEW mid-tier + rejection scale legs only execute when this env var requests something
+// other than the default — see S6A_SCALE_REQUESTED. A default (unset) dispatch therefore runs the SAME
+// single 3-row walk it always has; the scale legs report NOT_RUN/SCALE_NOT_REQUESTED instead of executing.
+const DEFAULT_S6A_ROW_COUNT = 3
+const S6A_ROW_COUNT = parsePositiveInt(process.env.E2E_S6A_ROW_COUNT, DEFAULT_S6A_ROW_COUNT)
+const S6A_SCALE_REQUESTED = S6A_ROW_COUNT !== DEFAULT_S6A_ROW_COUNT
+// One over the product's OWN declared bound (requirement 6) — never independently invented, always
+// "whatever MAX_BUSINESS_LINES currently is, plus one".
+const S6A_REJECTION_ROW_COUNT = MAX_BUSINESS_LINES + 1
+
+// ── R9 restructure: one arm per process ─────────────────────────────────────────────────────────────
+//
+// migrations/073_create_sealed_export_stock_prep_runtime_authority.sql's
+// uniq_integration_sealed_export_stock_prep_single_customer is a UNIQUE INDEX on the CONSTANT expression
+// `(1)` WHERE status='ACTIVE' — at most ONE ACTIVE binding in the ENTIRE table, across every tenant, not
+// just within one tenant (the comment directly above that index in the migration: "S6-A is deliberately
+// single-customer... a later multi-customer profile must use a separately ratified schema/version rather
+// than widening this index" — a RATIFIED constraint this harness works within, never around). There is
+// also no retirement path: BINDING_TABLE has exactly three operations repo-wide (selectOneForUpdate +
+// insertOne in sealed-export-lifecycle-provisioning.cjs, selectOne in stock-preparation-runtime-store.cjs)
+// — no UPDATE, no DELETE — so once ANY arm's binding goes ACTIVE, it is ACTIVE forever. Running the
+// primary walk, the mid-tier walk and the rejection arm in the SAME process against the SAME database (as
+// this file did before this restructure) therefore meant the primary walk's binding permanently blocked
+// both scale arms' own provisioning attempts — dispatched runs 30880831626 and 30881132451 both show the
+// primary walk activating its binding, then both scale arms failing provisioning with
+// SEALED_EXPORT_INTERNAL_ERROR. The only fix within the ratified single-ACTIVE-binding design is to give
+// each arm its OWN pristine database — which GitHub Actions can only do PER JOB (`services:` containers
+// are scoped to a job, not a step, not a process). E2E_S6A_ARM selects exactly ONE arm's S6-A work per
+// process; a run never touches more than one arm. Default 'primary' reproduces exactly what this whole
+// file did before this env var existed (Phases 1-4 below, unconditionally) — see the functional-smoke /
+// scale-midtier / scale-rejection jobs in .github/workflows/stock-preparation-e2e-functional-smoke.yml.
+// The two-point slope this file used to compute in-process from the primary and mid-tier walks' own
+// timings (now impossible — they are different processes, different job runs, potentially different
+// wall-clock machines) is computed by a dedicated downstream job instead, from job outputs each arm
+// publishes — see scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs.
+const S6A_VALID_ARMS = new Set(['primary', 'midtier', 'rejection'])
+const S6A_ARM = String(process.env.E2E_S6A_ARM || 'primary').trim()
+if (!S6A_VALID_ARMS.has(S6A_ARM)) {
+  throw new Error(`invalid E2E_S6A_ARM: ${JSON.stringify(process.env.E2E_S6A_ARM)} (want one of: ${[...S6A_VALID_ARMS].join(', ')})`)
+}
+// The S6-A run POST gets its OWN timeout (requirement 4), separate from REQUEST_TIMEOUT_MS (20s, sized
+// for cheap health/flag probes) — a real capture of thousands of rows needs materially longer, and using
+// the same 20s budget for both would make every scale-leg POST time out by construction, not by measurement.
+const S6A_POST_TIMEOUT_MS = Number(process.env.E2E_S6A_POST_TIMEOUT_MS || 240000)
+// T-SQL hard-caps a multi-row `INSERT ... VALUES (...), (...), ...` statement at 1000 rows (this is a row
+// count limit, not a byte-length limit, so the one oversized-payload row in a batch does not change it).
+// 500 leaves comfortable headroom under that cap.
+const SQLSERVER_INSERT_BATCH_SIZE = 500
+// The scale legs CANNOT reuse TENANT_ID (the primary walk's tenant): the S6-A route hardcodes
+// `workspaceId: null` server-side (http-routes.cjs's stockPreparationSqlServerSealedSnapshotRun), and
+// provisionInitialStockPreparationBinding's own `activeBinding` lookup is scoped ONLY by
+// `{tenant_id, workspace_id, object_key}` — NOT by binding_version or external_system_id
+// (sealed-export-lifecycle-provisioning.cjs ~line 491). Once the primary walk's binding is ACTIVE for
+// TENANT_ID, a second provisioning attempt for a DIFFERENT binding identity under the SAME
+// (tenant, workspace, object_key) finds that row, fails `initialProvisioningMatches` (different
+// binding_version/external_system_id) and `initialProvisioningCanRefreshQualification` (same match
+// requirement), and refuses SEALED_EXPORT_BINDING_UNQUALIFIED — permanently, not just on the first
+// attempt. Verified by reading the function directly, not run. Each scale arm therefore gets its OWN
+// dedicated tenant (workspaceId stays null, matching what the route hardcodes), making its
+// {tenant_id, workspace_id, object_key} scope disjoint from the primary's and from every other arm's.
+const SCALE_TENANT_ID_PREFIX = 'e2efunc-tenant-scale'
+
 const BASE_ENV = Object.freeze({
   ...process.env,
   DISABLE_WORKFLOW: 'true',
@@ -133,12 +230,17 @@ if (!process.env.DATABASE_URL) {
 }
 
 // ── tiny HTTP helper ────────────────────────────────────────────────────────────────────────────────
-export async function requestJson(pathname, { method = 'GET', body, token, accept = [200] } = {}) {
-  const headers = { 'x-tenant-id': TENANT_ID }
+// `timeoutMs` (requirement 4) defaults to REQUEST_TIMEOUT_MS so every EXISTING call site is unaffected;
+// only callers that explicitly pass a longer budget (the S6-A scale-leg POSTs) get one.
+// `tenantId` defaults to the module TENANT_ID so every EXISTING call site is unaffected; the scale legs
+// pass their OWN dedicated tenant explicitly — see the comment above SCALE_TENANT_ID_PREFIX for why they
+// cannot share TENANT_ID with the primary walk.
+export async function requestJson(pathname, { method = 'GET', body, token, accept = [200], timeoutMs = REQUEST_TIMEOUT_MS, tenantId = TENANT_ID } = {}) {
+  const headers = { 'x-tenant-id': tenantId }
   if (token) headers.Authorization = `Bearer ${token}`
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await fetch(`${BASE_URL}${pathname}`, {
       method,
@@ -331,9 +433,11 @@ export async function stopServer() {
 }
 
 // ── auth ─────────────────────────────────────────────────────────────────────────────────────────────
-export async function getDevToken() {
+// `tenantId` defaults to the module TENANT_ID (every EXISTING call site is unaffected); the scale legs
+// pass their own — see the comment above SCALE_TENANT_ID_PREFIX.
+export async function getDevToken(tenantId = TENANT_ID) {
   const res = await fetch(
-    `${BASE_URL}/api/auth/dev-token?userId=${encodeURIComponent(ADMIN_USER_ID)}&tenantId=${encodeURIComponent(TENANT_ID)}&roles=admin&expiresIn=2h`,
+    `${BASE_URL}/api/auth/dev-token?userId=${encodeURIComponent(ADMIN_USER_ID)}&tenantId=${encodeURIComponent(tenantId)}&roles=admin&expiresIn=2h`,
     { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
   )
   if (!res.ok) throw new Error(`dev-token request failed: http=${res.status}`)
@@ -345,12 +449,26 @@ export async function getDevToken() {
 }
 
 // ── control arms ─────────────────────────────────────────────────────────────────────────────────────
-export async function s6aRunProbe(token, operationId) {
+// `timeoutMs` (requirement 4) is optional and defaults to requestJson's own default (REQUEST_TIMEOUT_MS)
+// — every EXISTING caller (the flag arms, the primary walk) is unaffected; only the scale legs pass a
+// longer S6A_POST_TIMEOUT_MS explicitly.
+//
+// `500` was ADDED to `accept` below for the rejection arm (runS6ARejectionArm): a SealedExportError (the
+// class every sealed-export refusal throws, failure-vocabulary.cjs) carries no `.status`/`.code`, only
+// `.reason` — so http-routes.cjs's sendError()/inferHttpStatus() (read directly at http-routes.cjs:437-458,
+// not guessed) falls through every named-error branch to the generic `return 500` at the end, with
+// `inferErrorCode()` falling back to `error.name` ('SealedExportError'). 500 is therefore the ACTUAL status
+// the product returns for an internal sealed-export refusal, not a guess. This only WIDENS which statuses
+// count as `ok` here — every existing caller of this function still asserts an EXACT `probe.status === 404`
+// (or similar) itself, independent of `ok`, so nothing that passed before is weakened by also accepting 500.
+export async function s6aRunProbe(token, operationId, { timeoutMs, tenantId } = {}) {
   return requestJson('/api/integration/internal/stock-preparation/sqlserver-sealed-snapshot/run', {
     method: 'POST',
     token,
+    tenantId,
     body: { operationId },
-    accept: [200, 201, 404, 400, 403, 409, 422, 503],
+    accept: [200, 201, 400, 403, 404, 409, 422, 500, 503],
+    timeoutMs,
   })
 }
 
@@ -531,13 +649,23 @@ function canonicalText(value) {
   return result.bytes.toString('utf8')
 }
 
-function buildBomPayload(index, salt) {
+// Deterministic oversized-payload padding (requirement 3). designQty is the ONLY sealed-snapshot payload
+// field with no decoder length cap: stock-preparation-sealed-snapshot-decoder.cjs's positiveDecimal only
+// bounds the INTEGER part to Number.MAX_SAFE_INTEGER (verified by reading the function directly — every
+// OTHER field goes through boundedString/nullableString, capped at 512 by default, 64 for designUnit, 32
+// for lineStatus, 1024 for pathKey). An all-zero fraction keeps the DECODED numeric value harmless (1,
+// via `Number('1.000...0')`) while making the WIRE payload text exceed nvarchar(4000) — the fixture/
+// contract mismatch this leg fixes (sqlserver-sealed-snapshot-action.cjs's "Never CAST to nvarchar(4000)"
+// comment). Fixed length, no randomness: fixture generation stays deterministic run to run.
+const OVERSIZED_DESIGN_QTY_FRACTION_DIGITS = 4500
+
+function buildBomPayload(index, salt, { oversized = false } = {}) {
   const projectId = `s6a-e2e-${salt}`
   return {
     bomLevel: index === 0 ? 0 : 1,
     childDrawingNo: `E2E-CHILD-${index + 1}-${salt}`,
     childVersion: null,
-    designQty: '1.5',
+    designQty: oversized ? `1.${'0'.repeat(OVERSIZED_DESIGN_QTY_FRACTION_DIGITS)}` : '1.5',
     designUnit: 'EA',
     lineStatus: 'active',
     parentDrawingNo: index === 0 ? null : `E2E-CHILD-1-${salt}`,
@@ -592,8 +720,48 @@ WHERE name = N'${MSSQL_DATABASE}'`)
   throw new Error('SQL Server database never reported snapshot_isolation_state=1 after ALLOW_SNAPSHOT_ISOLATION ON')
 }
 
-async function prepareSqlServerRelation(salt) {
-  const rows = [0, 1, 2].map((index) => buildBomPayload(index, salt))
+// Batched insert (requirement 2): a single INSERT...VALUES statement for thousands of rows is not just
+// slow, it is ILLEGAL — T-SQL caps a multi-row VALUES list at 1000 rows per statement. SQLSERVER_INSERT_
+// BATCH_SIZE (500) stays well under that. Each chunk gets its OWN `request()` (mssql parameter names are
+// scoped to a single Request), so parameter names are reused per-chunk (`rowId0..rowId499`), not globally
+// unique — deterministic, no randomness, same content every run for the same (salt, rowCount, oversized).
+async function insertRowsBatched(dbPool, sql, rows) {
+  for (let start = 0; start < rows.length; start += SQLSERVER_INSERT_BATCH_SIZE) {
+    const chunk = rows.slice(start, start + SQLSERVER_INSERT_BATCH_SIZE)
+    const request = dbPool.request()
+    const values = []
+    chunk.forEach((rowPayload, offset) => {
+      const rowIdParam = `rowId${offset}`
+      const payloadParam = `payload${offset}`
+      request.input(rowIdParam, sql.Int, start + offset + 1)
+      // nvarchar(max) (requirement 3): matches the product's own capture query, which CASTs to
+      // nvarchar(max) and explicitly comments "Never CAST to nvarchar(4000)"
+      // (sqlserver-sealed-snapshot-action.cjs buildRowIdPayloadSourceSql). `sql.MAX` (=65535, verified
+      // against the mssql@10.0.4 source: lib/base/index.js's `exports.exports.MAX = 65535`) exceeds
+      // datatypes.js's declare() `length > 4000` threshold, so `sql.NVarChar(sql.MAX)` renders as
+      // `nvarchar(max)` in the generated parameter declaration, not a numeric length.
+      request.input(payloadParam, sql.NVarChar(sql.MAX), canonicalText(rowPayload))
+      values.push(`(@${rowIdParam}, 1, @${payloadParam})`)
+    })
+    await request.query(`INSERT INTO ${MSSQL_TABLE} (row_id, payload_version, payload) VALUES ${values.join(',')}`)
+  }
+}
+
+// `rowCount` (requirement 1) and `oversizedLastRow` (requirement 3) both default to today's exact
+// behaviour (3 plain rows) — the ONE existing call site below (attemptS6ARealRun's `prepareSqlServerRelation(salt)`)
+// is therefore untouched and produces byte-identical fixture content to before this leg existed. The NEW
+// scale-leg call sites (runS6AMidTierScaleWalk, runS6ARejectionArm) pass both explicitly.
+async function prepareSqlServerRelation(salt, rowCount = DEFAULT_S6A_ROW_COUNT, { oversizedLastRow = false } = {}) {
+  const rows = []
+  for (let index = 0; index < rowCount; index += 1) {
+    rows.push(buildBomPayload(index, salt, { oversized: oversizedLastRow && index === rowCount - 1 }))
+  }
+  // Positive control (requirement 3): prove the fixture we are ABOUT to seed actually needs nvarchar(max)
+  // — i.e. this number is not merely asserted, it is measured off the SAME canonicalText() the insert
+  // below uses.
+  const oversizedPayloadTextLength = oversizedLastRow
+    ? canonicalText(rows[rows.length - 1]).length
+    : null
   await withSqlServerAdmin(async (pool, sql) => {
     await pool.request().batch(`
 IF DB_ID(N'${MSSQL_DATABASE}') IS NULL
@@ -628,27 +796,20 @@ IF OBJECT_ID(N'${MSSQL_TABLE}', N'U') IS NOT NULL DROP TABLE ${MSSQL_TABLE};
 CREATE TABLE ${MSSQL_TABLE} (
   row_id int NOT NULL PRIMARY KEY,
   payload_version int NOT NULL,
-  payload nvarchar(4000) NOT NULL
+  payload nvarchar(max) NOT NULL
 );`)
-      const request = dbPool.request()
-      const values = []
-      rows.forEach((rowPayload, index) => {
-        const rowIdParam = `rowId${index}`
-        const payloadParam = `payload${index}`
-        request.input(rowIdParam, sql.Int, index + 1)
-        request.input(payloadParam, sql.NVarChar(4000), canonicalText(rowPayload))
-        values.push(`(@${rowIdParam}, 1, @${payloadParam})`)
-      })
-      await request.query(`INSERT INTO ${MSSQL_TABLE} (row_id, payload_version, payload) VALUES ${values.join(',')}`)
+      await insertRowsBatched(dbPool, sql, rows)
       await dbPool.request().batch(`GRANT SELECT ON OBJECT::${MSSQL_TABLE} TO [${MSSQL_READER_LOGIN}];`)
     } finally {
       await dbPool.close()
     }
   })
-  return { rows, projectId: rows[0].projectId, snapshotBatchId: rows[0].snapshotBatchId }
+  return { rows, projectId: rows[0].projectId, snapshotBatchId: rows[0].snapshotBatchId, oversizedPayloadTextLength }
 }
 
-async function registerExternalSystem(token, systemId) {
+// `tenantId` is optional (requestJson's own default TENANT_ID applies when omitted) — the ONE existing
+// call site (attemptS6ARealRun's) is unaffected; the scale legs pass their own.
+async function registerExternalSystem(token, systemId, tenantId) {
   const body = {
     id: systemId,
     name: 'e2e-func-s6a-source',
@@ -673,7 +834,7 @@ async function registerExternalSystem(token, systemId) {
     },
   }
   const res = await requestJson('/api/integration/external-systems', {
-    method: 'POST', token, body, accept: [200, 201],
+    method: 'POST', token, body, accept: [200, 201], tenantId,
   })
   return res
 }
@@ -714,12 +875,14 @@ async function withApplicationPool(fn) {
 // identities rather than payloads. Used on both sides of the replay call: the replay's own HTTP body
 // claiming `mode=internal_noop` is the runtime reporting on itself, and cannot distinguish "did nothing"
 // from "did it all again and reported the first result". Comparing this snapshot before/after can.
-async function snapshotS6AWriteState(pool, operationId) {
+// `tenantId` defaults to the module TENANT_ID (the ONE existing call sites — attemptS6ARealRun's — are
+// unaffected); the scale legs pass their own dedicated tenant.
+async function snapshotS6AWriteState(pool, operationId, tenantId = TENANT_ID) {
   const run = (await pool.query(
     `SELECT status, generation_id, ingestion_session_id, business_line_count, source_read_count
      FROM integration_sealed_export_stock_prep_runs
      WHERE tenant_id = $1 AND operation_id = $2`,
-    [TENANT_ID, operationId],
+    [tenantId, operationId],
   )).rows[0] || null
   const counts = {}
   for (const [key, sql] of [
@@ -729,7 +892,7 @@ async function snapshotS6AWriteState(pool, operationId) {
     ['generationRows', 'SELECT COUNT(*)::int AS n FROM integration_sealed_export_generation_rows WHERE tenant_id = $1'],
     ['activePointers', 'SELECT COUNT(*)::int AS n FROM integration_sealed_export_active_pointers WHERE tenant_id = $1'],
   ]) {
-    counts[key] = (await pool.query(sql, [TENANT_ID])).rows[0].n
+    counts[key] = (await pool.query(sql, [tenantId])).rows[0].n
   }
   return {
     counts,
@@ -784,19 +947,24 @@ async function assertS6AObservabilityQueriesResolve() {
   return true
 }
 
-async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineCount) {
+// `keyPrefix`/`label`/`tenantId` (all default to the ORIGINAL 's6a'/'S6-A'/TENANT_ID) let the scale legs
+// below reuse this exact query/assertion logic under their OWN evidence-key namespace and tenant instead
+// of silently overwriting the primary walk's fields or colliding with its data — the default params mean
+// the ONE existing call site (`assertS6ARunDatabaseObservable(operationId, relation.rows.length)`) is
+// untouched and produces byte-identical key names, message text and query scope to before this leg existed.
+async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineCount, keyPrefix = 's6a', label = 'S6-A', tenantId = TENANT_ID) {
   return withApplicationPool(async (pool) => {
     const runRows = await pool.query(
       `SELECT status, source_read_count, business_line_count, generation_id, ingestion_session_id
        FROM integration_sealed_export_stock_prep_runs
        WHERE tenant_id = $1 AND operation_id = $2`,
-      [TENANT_ID, operationId],
+      [tenantId, operationId],
     )
     const run = runRows.rows[0] || null
-    S.s6aDbRunRowFound = run ? 'true' : 'false'
-    S.s6aDbRunStatus = run ? run.status : '<none>'
-    S.s6aDbRunSourceReadCount = run ? Number(run.source_read_count) : -1
-    S.s6aDbRunBusinessLineCount = run ? Number(run.business_line_count) : -1
+    S[`${keyPrefix}DbRunRowFound`] = run ? 'true' : 'false'
+    S[`${keyPrefix}DbRunStatus`] = run ? run.status : '<none>'
+    S[`${keyPrefix}DbRunSourceReadCount`] = run ? Number(run.source_read_count) : -1
+    S[`${keyPrefix}DbRunBusinessLineCount`] = run ? Number(run.business_line_count) : -1
 
     // The GENERATION KERNEL's own rows. `applied_row_count` is what the kernel wrote during apply, so
     // asserting it equals the fixture's row count proves apply actually moved rows, not merely that a
@@ -808,7 +976,7 @@ async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineC
       const generationRows = await pool.query(
         `SELECT status, applied_row_count FROM integration_sealed_export_generations
          WHERE generation_id = $1 AND tenant_id = $2`,
-        [run.generation_id, TENANT_ID],
+        [run.generation_id, tenantId],
       )
       generationFound = generationRows.rows.length === 1
       if (generationFound) {
@@ -816,9 +984,9 @@ async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineC
         generationAppliedRowCount = Number(generationRows.rows[0].applied_row_count)
       }
     }
-    S.s6aDbGenerationRowFound = generationFound ? 'true' : 'false'
-    S.s6aDbGenerationStatus = generationStatus
-    S.s6aDbGenerationAppliedRowCount = generationAppliedRowCount
+    S[`${keyPrefix}DbGenerationRowFound`] = generationFound ? 'true' : 'false'
+    S[`${keyPrefix}DbGenerationStatus`] = generationStatus
+    S[`${keyPrefix}DbGenerationAppliedRowCount`] = generationAppliedRowCount
 
     // The PRIVATE INGESTION session the walk is supposed to have driven to UPLOAD_COMPLETE. Without
     // this, "capture -> private ingestion -> generation kernel -> apply" would be asserted only at its
@@ -831,7 +999,7 @@ async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineC
         `SELECT status, accepted_chunk_count, expected_chunk_count
          FROM integration_sealed_export_ingestion_sessions
          WHERE session_id = $1 AND tenant_id = $2`,
-        [run.ingestion_session_id, TENANT_ID],
+        [run.ingestion_session_id, tenantId],
       )
       ingestionFound = ingestionRows.rows.length === 1
       if (ingestionFound) {
@@ -842,9 +1010,9 @@ async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineC
         )
       }
     }
-    S.s6aDbIngestionSessionFound = ingestionFound ? 'true' : 'false'
-    S.s6aDbIngestionSessionStatus = ingestionStatus
-    S.s6aDbIngestionChunksComplete = ingestionChunksComplete
+    S[`${keyPrefix}DbIngestionSessionFound`] = ingestionFound ? 'true' : 'false'
+    S[`${keyPrefix}DbIngestionSessionStatus`] = ingestionStatus
+    S[`${keyPrefix}DbIngestionChunksComplete`] = ingestionChunksComplete
 
     // Not just "a row exists" — the rows the kernel was supposed to write for THIS fixture: the same
     // business-line count the HTTP-level assertion already checked on the response body, now confirmed
@@ -855,17 +1023,17 @@ async function assertS6ARunDatabaseObservable(operationId, expectedBusinessLineC
       ['VERIFIED', 'ACTIVE'].includes(generationStatus) &&
       ingestionFound && ingestionStatus === 'UPLOAD_COMPLETE' && ingestionChunksComplete === 'true'
     must(
-      'S6-A: database-observable proof — stock_prep_runs row COMPLETED (source_read_count=1, ' +
+      `${label}: database-observable proof — stock_prep_runs row COMPLETED (source_read_count=1, ` +
       'business_line_count matches the fixture) + the ingestion session UPLOAD_COMPLETE with every ' +
       'chunk accepted + a matching generations row whose applied_row_count matches the fixture, ' +
       'queried over a SEPARATE (superuser, non-runtime-role) connection',
       dbOk,
-      `runFound=${S.s6aDbRunRowFound} runStatus=${S.s6aDbRunStatus} lines=${S.s6aDbRunBusinessLineCount} ` +
-      `genFound=${S.s6aDbGenerationRowFound} genStatus=${S.s6aDbGenerationStatus} ` +
-      `genApplied=${S.s6aDbGenerationAppliedRowCount} ingFound=${S.s6aDbIngestionSessionFound} ` +
-      `ingStatus=${S.s6aDbIngestionSessionStatus} ingChunks=${S.s6aDbIngestionChunksComplete}`,
+      `runFound=${S[`${keyPrefix}DbRunRowFound`]} runStatus=${S[`${keyPrefix}DbRunStatus`]} lines=${S[`${keyPrefix}DbRunBusinessLineCount`]} ` +
+      `genFound=${S[`${keyPrefix}DbGenerationRowFound`]} genStatus=${S[`${keyPrefix}DbGenerationStatus`]} ` +
+      `genApplied=${S[`${keyPrefix}DbGenerationAppliedRowCount`]} ingFound=${S[`${keyPrefix}DbIngestionSessionFound`]} ` +
+      `ingStatus=${S[`${keyPrefix}DbIngestionSessionStatus`]} ingChunks=${S[`${keyPrefix}DbIngestionChunksComplete`]}`,
     )
-    S.s6aDatabaseObservable = dbOk ? 'PASS' : 'FAIL'
+    S[`${keyPrefix}DatabaseObservable`] = dbOk ? 'PASS' : 'FAIL'
     return dbOk
   })
 }
@@ -894,25 +1062,102 @@ async function reportAdapterTimestampRuntimeType(systemId) {
   }
 }
 
+// Values-free failure-class probe. One boolean per FIRST-PARTY error class name we ship, read from the
+// server log this harness already captures. Never emits a message, a value, a path, or anything outside
+// this closed list — the list IS the contract.
+const MULTITABLE_ERROR_CLASSES = Object.freeze([
+  'MultitableUnitOfWorkUnavailableError',
+  'MultitableUnitOfWorkScopeError',
+  'MultitableProjectNamespaceError',
+  'StockPreparationSyncRunPersistError',
+  'StockPreparationRuntimePersistFailure',
+  'TypeError',
+])
+
+function probeServerLogForErrorClass(serverLabel, keyPrefix) {
+  const logPath = path.join(OUT_DIR, `server-${serverLabel}.log`)
+  let text = ''
+  try {
+    text = fs.readFileSync(logPath, 'utf8')
+  } catch {
+    // "Could not look" must not read as "found nothing" — a check that did not run is not a check that
+    // passed. This lane has shipped that confusion before.
+    S[`${keyPrefix}ErrorClassProbe`] = 'LOG_UNREADABLE'
+    return
+  }
+  const hits = MULTITABLE_ERROR_CLASSES.filter((name) => text.includes(name))
+  S[`${keyPrefix}ErrorClassProbe`] = hits.length > 0 ? 'MATCHED' : 'NO_CLASS_MATCHED'
+  for (const name of MULTITABLE_ERROR_CLASSES) {
+    S[`${keyPrefix}ErrClass_${name}`] = String(text.includes(name))
+  }
+}
+
 // Diagnostic-only counterpart for the first-run FAILURE path — see the call site's comment. Never
-// asserts (no must()); purely reports closed tokens/booleans into the values-free evidence.
-async function assertS6ARunDatabaseObservableOnFailure(operationId) {
+// asserts (no must()); purely reports closed tokens/booleans into the values-free evidence. `keyPrefix`/
+// `tenantId` default to 's6a'/TENANT_ID (the ONE existing call site is unaffected); the scale legs pass
+// their own.
+async function assertS6ARunDatabaseObservableOnFailure(operationId, keyPrefix = 's6a', tenantId = TENANT_ID) {
   const pg = requireFromPlugin('pg')
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
   try {
     const runRows = await pool.query(
       `SELECT status, failure_reason FROM integration_sealed_export_stock_prep_runs
        WHERE tenant_id = $1 AND operation_id = $2`,
-      [TENANT_ID, operationId],
+      [tenantId, operationId],
     )
     const run = runRows.rows[0] || null
-    S.s6aDbRunRowFoundOnFailure = String(run !== null)
-    S.s6aDbRunStatusOnFailure = run ? run.status : '<none>'
-    S.s6aDbRunFailureReason = run && run.failure_reason ? run.failure_reason : '<none>'
+    S[`${keyPrefix}DbRunRowFoundOnFailure`] = String(run !== null)
+    S[`${keyPrefix}DbRunStatusOnFailure`] = run ? run.status : '<none>'
+    S[`${keyPrefix}DbRunFailureReason`] = run && run.failure_reason ? run.failure_reason : '<none>'
+    // Run 30889715065 made this necessary. The mid-tier arm returned HTTP 503
+    // SEALED_EXPORT_INTERNAL_ERROR while THIS probe reported the run row as ACTIVATED — and ACTIVATED is
+    // the second-to-last state (CAPTURED -> INGESTED -> ACTIVATED -> COMPLETED), so the caller was told
+    // the operation failed at the point where the generation should already be live.
+    //
+    // The probe could not answer the only question that matters to an operator holding a
+    // non-repeatable window: IS THE DATA ACTUALLY LIVE? It read the run row and not the generation row.
+    // Without that, "retry" and "do not retry" are indistinguishable — and with a one-shot,
+    // irreversible binding, guessing wrong is expensive in one direction and useless in the other.
+    //
+    // Closed tokens and counts only; no identifiers, no business values.
+    const genRows = await pool.query(
+      `SELECT g.status, g.applied_row_count
+         FROM integration_sealed_export_generations g
+         JOIN integration_sealed_export_stock_prep_runs r
+           ON r.generation_id = g.generation_id AND r.tenant_id = g.tenant_id
+        WHERE r.tenant_id = $1 AND r.operation_id = $2`,
+      [tenantId, operationId],
+    )
+    const gen = genRows.rows[0] || null
+    S[`${keyPrefix}DbGenerationRowFoundOnFailure`] = String(gen !== null)
+    S[`${keyPrefix}DbGenerationStatusOnFailure`] = gen ? gen.status : '<none>'
+    S[`${keyPrefix}DbGenerationAppliedRowCountOnFailure`] =
+      gen && gen.applied_row_count !== null ? Number(gen.applied_row_count) : -1
+    // NAME THIS FOR WHAT THE QUERY PROVES, NOT FOR THE QUESTION IT WAS ASKED.
+    // An earlier version of this line was called `DbDataLiveOnFailure` and reported
+    // 'YES_DATA_IS_LIVE_DESPITE_ERROR'. That over-claimed. The query above reads
+    // integration_sealed_export_generations — the SEALED-EXPORT generation. It says nothing about the
+    // stock-preparation BUSINESS tables, which are written afterwards by persistStockPreparation()
+    // through the multitable API, downstream of activation — and which is the more likely place a
+    // 2500-row run fails, since the throw site immediately after that call raises the same
+    // SEALED_EXPORT_INTERNAL_ERROR token observed here.
+    //
+    // "The generation is active" and "the business data is live" are different claims. Reporting the
+    // first under a name that asserts the second is exactly the kind of confident-but-unearned evidence
+    // this lane exists to prevent. The business side stays UNKNOWN because this harness does not query
+    // it — stated, not silently omitted.
+    S[`${keyPrefix}DbSealedExportGenerationOnFailure`] =
+      gen && gen.status === 'ACTIVE'
+        ? 'GENERATION_ACTIVE_BUSINESS_PERSIST_UNKNOWN'
+        : 'GENERATION_NOT_ACTIVE_OR_ABSENT'
   } catch {
-    S.s6aDbRunRowFoundOnFailure = '<query-failed>'
-    S.s6aDbRunStatusOnFailure = '<query-failed>'
-    S.s6aDbRunFailureReason = '<query-failed>'
+    S[`${keyPrefix}DbRunRowFoundOnFailure`] = '<query-failed>'
+    S[`${keyPrefix}DbRunStatusOnFailure`] = '<query-failed>'
+    S[`${keyPrefix}DbRunFailureReason`] = '<query-failed>'
+    S[`${keyPrefix}DbGenerationRowFoundOnFailure`] = '<query-failed>'
+    S[`${keyPrefix}DbGenerationStatusOnFailure`] = '<query-failed>'
+    S[`${keyPrefix}DbGenerationAppliedRowCountOnFailure`] = -1
+    S[`${keyPrefix}DbSealedExportGenerationOnFailure`] = '<query-failed>'
   } finally {
     await pool.end()
   }
@@ -1467,7 +1712,14 @@ async function attemptS6ARealRun() {
     await requestJson('/api/integration/stock-preparation/mvp/ensure', { method: 'POST', token, body: {}, accept: [200, 201] })
 
     const operationId = `s6a-e2e-op-${salt}`
-    const firstRun = await s6aRunProbe(token, operationId)
+    // Wall-clock (requirement 4), on the S6-A POST's own timeout — additive evidence only; this walk's
+    // PASS/FAIL semantics are unchanged. Published as this job's own `primary_duration_ms` output (R9
+    // restructure) and reassembled downstream, together with the mid-tier arm's own duration from its OWN
+    // job, into the primary (N=3) data point for the scale-slope job's two-point fit — see
+    // scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs.
+    const firstRunStartedAtMs = Date.now()
+    const firstRun = await s6aRunProbe(token, operationId, { timeoutMs: S6A_POST_TIMEOUT_MS })
+    S.s6aFirstRunPostDurationMs = Date.now() - firstRunStartedAtMs
     const firstData = firstRun.body?.data || {}
     S.s6aFirstRunHttp = firstRun.status
     S.s6aFirstRunMode = firstData.mode || '<unregistered>'
@@ -1541,7 +1793,9 @@ async function attemptS6ARealRun() {
     // reported the first result would produce a byte-identical `mode=internal_noop` body. So the write
     // state is snapshotted on both sides of the identical second call and required to be unchanged.
     const beforeReplay = await withApplicationPool((pool) => snapshotS6AWriteState(pool, operationId))
-    const replay = await s6aRunProbe(token, operationId)
+    const replayStartedAtMs = Date.now()
+    const replay = await s6aRunProbe(token, operationId, { timeoutMs: S6A_POST_TIMEOUT_MS })
+    S.s6aReplayPostDurationMs = Date.now() - replayStartedAtMs
     const replayData = replay.body?.data || {}
     S.s6aReplayHttp = replay.status
     S.s6aReplayMode = replayData.mode || '<unregistered>'
@@ -1591,58 +1845,757 @@ async function attemptS6ARealRun() {
   }
 }
 
-// ── negative arm helper (exported for the workflow's separate negative-control job) ───────────────────
-export async function main() {
-  fs.mkdirSync(OUT_DIR, { recursive: true })
+// ── R9 scale legs (each its OWN arm/process/job — see S6A_ARM — gated on S6A_SCALE_REQUESTED) ──────────
+//
+// Closes the gap this leg exists for: the 24999-row bound had, until now, only ever been exercised by a
+// pure in-process decoder unit test (stock-preparation-sealed-snapshot-decoder.test.cjs) — no SQL Server
+// capture, private ingestion, generation kernel, apply, activation or HTTP layer had ANY scale coverage.
+//
+// Reuses attemptS6ARealRun's helper functions (prepareSqlServerRelation, registerExternalSystem,
+// runProvisioningScript, assertS6ARunDatabaseObservable, snapshotS6AWriteState, withApplicationPool,
+// s6aRunProbe, getDevToken, startServer/stopServer) rather than re-deriving them — attemptS6ARealRun
+// ITSELF IS UNCHANGED (its one internal call `prepareSqlServerRelation(salt)` keeps using this module's
+// new optional-parameter defaults, which reproduce exactly what it always passed).
 
-  // Phases 1-3 run inside their own try/catch for the SAME reason Phase 4 already had one: an unexpected
-  // throw here (including from stopServer()'s own port-free assertion — see the block comment above
-  // startServer()/stopServer()) must not skip the evidence write at the bottom of this function. A red
-  // job with NO summary.txt/checks.json artifact at all is strictly worse than one that at least names
-  // which phase failed and why — `must()` below records it as a failed check so `overallPass` still
-  // reflects it, and CHECKS already accumulated by any phase that DID complete is preserved, not lost.
+// All four come from the SAME check (stock-preparation-runtime-store.cjs's loadCurrentAuthority, lines
+// ~355-388), which runs BEFORE capture even starts and is checked once, at the top of runInternal —
+// before the capture that reads whatever rowCount is in the table. A rejection-arm response carrying one
+// of these means the run never got far enough to exercise the row-count bound at all, most plausibly
+// because the 5-minute qualification window (QUALIFICATION_TTL_MS = 5*60*1000,
+// sqlserver-sealed-snapshot-service-core.cjs:122) had ALREADY elapsed by the time the POST reached this
+// check — i.e. between provisioning and the POST being received, NOT during the capture that follows (the
+// rejection arm's own row-count seeding happens BEFORE provisioning issues the qualification — see
+// setupS6AScaleBinding — so seeding time is not charged against this window at all; only server-restart +
+// request-dispatch overhead is). The mid-tier walk is the one with MORE exposure to the TTL, not this
+// arm: it runs all the way through capture -> ingestion -> generation, and generation-kernel.cjs's OWN
+// check (line ~280) fires AFTER capture, so a slow capture-through-generation sequence pushes toward the
+// deadline in a way this arm's early-exit (refuses at the manifest check, inside the SAME try block as
+// the capture call, before ingestion/generation ever start) cannot. Treating one of these as "the bound
+// was proven" would still be GREEN for the wrong reason regardless of which arm sees it; runS6ARejectionArm
+// below treats them as inconclusive (see s6aRejectionElapsedSinceQualificationMs for the timing evidence
+// that would explain it), and runS6AMidTierScaleWalk parses the same reason into
+// s6aMidTierFirstRunReasonToken as a diagnostic (not a pass/fail classification — a mid-tier TTL casualty
+// is legitimately a FAILED walk, not an inconclusive one, since completing IS what that arm claims).
+const SEALED_EXPORT_AUTHORITY_EXPIRY_FAMILY = new Set([
+  'SEALED_EXPORT_SIGNER_UNENROLLED',
+  'SEALED_EXPORT_SIGNER_EXPIRED',
+  'SEALED_EXPORT_SIGNER_REVOKED',
+  'SEALED_EXPORT_BINDING_UNQUALIFIED',
+])
+
+// A SealedExportError (the ONLY class every sealed-export refusal throws — failure-vocabulary.cjs) has no
+// `.status`/`.code`, only `.reason`. http-routes.cjs's sendError()/inferHttpStatus()/inferErrorCode()
+// (read directly at http-routes.cjs:406-458, not guessed here) therefore fall through every named-error
+// branch to the generic `return 500`, with `inferErrorCode()` falling back to `error.name`
+// ('SealedExportError') — the actual reason token only survives in `error.message`, which
+// SealedExportError's constructor sets to the FIXED string `'sealed-export refusal: ' + reason` (`reason`
+// is guaranteed to be a closed-vocabulary member by failSealedExport() — never caller-derived text — so
+// this string is values-free by construction). This parses that fixed shape back out; a message that does
+// not match it yields `null`, never a guess.
+function extractSealedExportReasonFromMessage(message) {
+  if (typeof message !== 'string') return null
+  const match = /^sealed-export refusal: ([A-Z_]+)$/.exec(message)
+  return match ? match[1] : null
+}
+
+// Shared setup for a scale-leg arm: SQL Server relation (batched, optionally with an oversized last row)
+// -> external-system registration (its own throwaway flag-OFF server) -> provisioning (issues the
+// 5-minute qualification the caller must race against). Returns enough for the caller to either run the
+// flag-ON walk (mid-tier) or a single flag-ON refusal probe (rejection), or to explain why it could not.
+// `tenantId` is supplied by the caller (deterministically `${SCALE_TENANT_ID_PREFIX}-${label}` — see the
+// comment above SCALE_TENANT_ID_PREFIX for why this arm cannot share TENANT_ID or any other arm's
+// tenant), not re-derived here, so a caller that needs it BEFORE setup completes (e.g. for a pre-arm
+// baseline snapshot) and this function compute the identical value from a single source of truth.
+// Existing-chain warm-up for a scale arm. Reuses the SAME script the primary job's phase 3 runs, so
+// this is not a narrower stand-in for it. Failure here is reported, NOT fatal: the point of the
+// experiment is to observe whether warming changes the arm's outcome, and aborting on a warm-up problem
+// would destroy that observation.
+async function runExistingChainWarmup(token, label) {
   try {
-    // Phase 1: flag-OFF arm.
-    await runFlagArm(undefined, false, 'flagOff')
+    await runExistingChain(token)
+    return String(S.existingChainScriptExit) === '0'
+  } catch {
+    return false
+  }
+}
 
-    // Phase 2: exact-match arms — '1' and 'yes' must NOT enable the route.
-    await runFlagArm('1', false, 'exactMatch1')
-    await runFlagArm('yes', false, 'exactMatchYes')
+async function setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow, artifactRoot, tenantId }) {
+  const systemId = `e2efunc-s6a-${label}-source-${salt}`
+  const bindingVersion = `e2efunc-${label}-binding-${salt}`
+  const approvedConfigVersionId = `e2efunc-${label}-config-${salt}`
+  const qualificationKeyId = `e2efunc-${label}-qual-key-v1`
 
-    // Phase 2b: normalization arms — 'TRUE', ' true ', 'True' MUST enable the route (they normalise to
-    // 'true' under trim+lowercase). Unlike phase 2's arms, these actually distinguish a strict
-    // `=== 'true'` comparison from the real normalising one — see the block comment above
-    // runFlagNormalizationArm().
-    await runFlagNormalizationArm('TRUE', 'normTrueUpper')
-    await runFlagNormalizationArm(' true ', 'normTrueSpaced')
-    await runFlagNormalizationArm('True', 'normTrueTitle')
+  const keysDir = fs.mkdtempSync(path.join(os.tmpdir(), `s6a-e2e-${label}-keys-`))
+  const identityKeyFile = path.join(keysDir, 'identity.key')
+  const evidenceKeyFile = path.join(keysDir, 'evidence.key')
+  const qualificationKeyFile = path.join(keysDir, 'qualification.key')
+  const signerKeyFile = path.join(keysDir, 'signer.pem')
+  fs.writeFileSync(identityKeyFile, crypto.randomBytes(32))
+  fs.writeFileSync(evidenceKeyFile, crypto.randomBytes(32))
+  fs.writeFileSync(qualificationKeyFile, crypto.randomBytes(32))
+  const { privateKey } = crypto.generateKeyPairSync('ed25519')
+  fs.writeFileSync(signerKeyFile, privateKey.export({ type: 'pkcs8', format: 'pem' }))
+  fs.mkdirSync(artifactRoot, { recursive: true })
 
-    // Phase 3: existing chain (T4 extended smoke) against a fresh flag-OFF server.
-    await startServer({}, 'existing-chain')
+  let relation = null
+  try {
+    relation = await prepareSqlServerRelation(salt, rowCount, { oversizedLastRow })
+    must(`${label}: SQL Server relation + SELECT-only login prepared (rowCount=${rowCount})`, true,
+      `rows=${relation.rows.length}`)
+  } catch (error) {
+    must(`${label}: SQL Server relation + SELECT-only login prepared (rowCount=${rowCount})`, false,
+      String(error && error.message || error))
+    return { ok: false, reason: 'SQLSERVER_RELATION_SETUP_FAILED', relation: null }
+  }
+
+  let registeredOk = false
+  let hasCredentials = 'unknown'
+  try {
+    await startServer({}, `pre-flag-on-registration-${label}`)
     try {
-      const token = await getDevToken()
-      await runExistingChain(token)
+      const baseToken = await getDevToken(tenantId)
+      // THIRD single-variable experiment. Ruled out so far, each on its own:
+      //   * row count — fails at 4, 50, 600 and 2500 alike (primary passes at 3)
+      //   * dedicated tenant — switching this arm to TENANT_ID changed nothing
+      //   * MVP provisioning — mvp/ensure returns 201, ready=true, 9 tables all ensured
+      // What remains is the one difference the primary arm's own comment points at: its tenant was
+      // WARMED by the existing chain earlier in its job ("the existing-chain phase already ran this once
+      // for the SAME tenant"). Phases 1-3 do not run in a scale job, so this arm's tenant never was.
+      // This is the right window for it: the flag-OFF server is already up and the token is already held.
+      const chainWarmupOk = await runExistingChainWarmup(baseToken, label)
+      S[`s6a${label === 'midtier' ? 'MidTier' : 'Rejection'}ExistingChainWarmup`] = chainWarmupOk ? 'PASS' : 'FAIL'
+      const registered = await registerExternalSystem(baseToken, systemId, tenantId)
+      registeredOk = must(`${label}: external system registered`, registered.ok, `http=${registered.status}`)
+      if (registeredOk) {
+        const fetched = await requestJson(`/api/integration/external-systems/${encodeURIComponent(systemId)}`,
+          { token: baseToken, accept: [200], tenantId })
+        hasCredentials = String(fetched.body?.data?.hasCredentials === true)
+      }
     } finally {
       await stopServer()
     }
   } catch (error) {
-    must('phases 1-3 (flag-gate arms + existing chain) completed without an unexpected harness error',
-      false, String(error && error.message || error))
-    await stopServer().catch(() => {})
+    must(`${label}: external system registered`, false, String(error && error.message || error))
+    return { ok: false, reason: 'EXTERNAL_SYSTEM_REGISTRATION_FAILED', relation, hasCredentials }
+  }
+  if (!registeredOk) {
+    return { ok: false, reason: 'EXTERNAL_SYSTEM_REGISTRATION_FAILED', relation, hasCredentials }
   }
 
-  // Phase 4: S6-A real flag-ON attempt (best-effort; every failure point reports NOT_RUN honestly).
+  const expiresAtIso = toUtcSecondsIso(Date.now() + 24 * 60 * 60 * 1000)
+  const provisioningSpec = {
+    binding: {
+      approvedConfigVersionId,
+      bindingExpiresAt: expiresAtIso,
+      bindingId: `e2efunc-${label}-binding-id-${salt}`,
+      bindingVersion,
+      externalSystemId: systemId,
+      signerExpiresAt: expiresAtIso,
+      tableRef: MSSQL_TABLE,
+      tenantId,
+      workspaceId: null,
+    },
+    externalSystem: {
+      config: {
+        sealedSnapshotSqlServer: {
+          database: MSSQL_DATABASE,
+          encrypt: true,
+          instanceName: null,
+          port: MSSQL_PORT,
+          server: MSSQL_HOST,
+          trustServerCertificate: true,
+        },
+      },
+      credentials: {
+        sealedSnapshotSqlServer: {
+          password: MSSQL_READER_PASSWORD,
+          user: MSSQL_READER_LOGIN,
+        },
+      },
+      id: systemId,
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      status: 'active',
+      tenantId,
+      workspaceId: null,
+    },
+  }
+  const specFile = path.join(keysDir, 'provisioning-spec.json')
+  fs.writeFileSync(specFile, JSON.stringify(provisioningSpec))
+
+  const provisioningEnv = {
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ARTIFACT_ROOT: artifactRoot,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_IDENTITY_KEY_FILE: identityKeyFile,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_QUALIFICATION_KEY_FILE: qualificationKeyFile,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_QUALIFICATION_KEY_ID: qualificationKeyId,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_SIGNER_PRIVATE_KEY_FILE: signerKeyFile,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_PROVISIONING_DATABASE_ROLE: PROVISIONING_DB_ROLE,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_PROVISIONING_DATABASE_URL: PROVISIONING_DB_URL,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_PROVISIONING_SPEC_FILE: specFile,
+  }
+  const provisioned = await runProvisioningScript(provisioningEnv)
+  let provisionedOk = false
+  // Parity with the primary walk (see the S6-A provisioning block above): capture the child's closed-set
+  // failure code, not just its exit status. Run 30880831626 proved why this matters — BOTH scale arms
+  // reported `PROVISIONING_FAILED exit=1` and the 2008-line job log contained ZERO SEALED_EXPORT_* tokens,
+  // so the failure was completely undiagnosable. An exit code is not a reason.
+  let provisioningFailureCode = '<unparsed>'
   try {
-    await attemptS6ARealRun()
+    const parsed = JSON.parse(provisioned.stdout.trim().split('\n').pop() || '{}')
+    provisionedOk = provisioned.code === 0 && parsed.ok === true && parsed.externalWrite === false && parsed.valuesFree === true
+    if (!provisionedOk && typeof parsed.code === 'string') provisioningFailureCode = parsed.code
+  } catch {
+    provisionedOk = false
+  }
+  // The instant provisioning succeeds is the instant the qualification this arm must race against was
+  // issued (stock-preparation-runtime-provisioning.cjs sets qualification_expires_at = now +
+  // QUALIFICATION_TTL_MS here) — requirement 4's "elapsed time since qualification issuance" is measured
+  // from THIS timestamp, taken right after this step, not an estimate. It is taken after
+  // runProvisioningScript's own process RETURNS, not at the instant the script computed the qualification
+  // internally — every elapsed figure below therefore UNDERSTATES true elapsed time by that process's own
+  // tail (JSON serialization, stdout flush, process exit), which is the conservative direction for
+  // reporting evidence but the WRONG direction if this number were ever used to predict how close to the
+  // TTL a run actually was.
+  const qualificationIssuedAtMs = Date.now()
+  must(`${label}: provisioning script -> ok:true, externalWrite:false, valuesFree:true`, provisionedOk,
+    `exit=${provisioned.code} code=${provisioningFailureCode}`)
+  if (!provisionedOk) {
+    // Closed-set token only — never the child's raw stderr, which is not values-free.
+    return {
+      ok: false,
+      reason: 'PROVISIONING_FAILED',
+      provisioningFailureCode,
+      relation,
+      hasCredentials,
+      qualificationIssuedAtMs,
+    }
+  }
+
+  const runtimeEnv = {
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED: 'true',
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ARTIFACT_ROOT: artifactRoot,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_EVIDENCE_KEY_FILE: evidenceKeyFile,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_IDENTITY_KEY_FILE: identityKeyFile,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_QUALIFICATION_KEY_FILE: qualificationKeyFile,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_QUALIFICATION_KEY_ID: qualificationKeyId,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_RUNTIME_DATABASE_ROLE: RUNTIME_DB_ROLE,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_RUNTIME_DATABASE_URL: RUNTIME_DB_URL,
+    MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_SIGNER_PRIVATE_KEY_FILE: signerKeyFile,
+  }
+  return { ok: true, relation, hasCredentials, qualificationIssuedAtMs, runtimeEnv, systemId, tenantId }
+}
+
+// Mid-tier calibration walk (requirements 5 & 7): a FULL first-run + database-observable + idempotent-
+// replay walk at S6A_ROW_COUNT rows (default suggestion ~2500), run BEFORE the rejection arm so its
+// timing predicts the full-scale (MAX_BUSINESS_LINES) cost rather than requiring an actual 24999-row run
+// in CI. Carries the oversized-payload row (requirement 3 — "one leg, not two").
+async function runS6AMidTierScaleWalk() {
+  const keyPrefix = 's6aMidTier'
+  const label = 'midtier'
+  const rowCount = S6A_ROW_COUNT
+  const salt = `${label}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
+  const artifactRoot = path.join(path.resolve(ARTIFACT_ROOT), label)
+  // Dedicated tenant (requirement, see SCALE_TENANT_ID_PREFIX): this arm's provisioning attempt MUST NOT
+  // share TENANT_ID with the primary walk — the S6-A route hardcodes workspaceId:null and
+  // provisionInitialStockPreparationBinding's activeBinding lookup is scoped only by
+  // {tenant_id, workspace_id, object_key}, so a second, DIFFERENT binding identity under the SAME tenant
+  // would refuse SEALED_EXPORT_BINDING_UNQUALIFIED against the primary's already-ACTIVE binding.
+  // Per-job restructure made the dedicated tenant unnecessary AND made it the prime suspect.
+  //
+  // It existed to avoid colliding with the primary walk's ACTIVE binding inside a SHARED database (073's
+  // unique index on the constant `((1))` permits exactly one ACTIVE binding table-wide). Each scale arm
+  // now has its OWN Postgres, so there is no primary binding here to collide with — the reason is gone.
+  //
+  // What the dedicated tenant DID do is make this arm's setup differ from the primary's in two ways at
+  // once: a different tenant, and — because phases 1-3 do not run in this job — no existing chain ever
+  // run against it. The primary arm's own comment says its tenant was warmed by exactly that
+  // ("the existing-chain phase already ran this once for the SAME tenant").
+  //
+  // The bisect (4/50/600/2500 all fail, primary at 3 passes) says the difference is the ARM, not the
+  // volume. So: use the SAME tenant as the primary and warm it the SAME way, and see whether the arm
+  // starts passing. If it does, the harness was the defect. If it still fails, the difference is
+  // somewhere else and this rules out the largest remaining candidate.
+  const tenantId = TENANT_ID
+
+  S[`${keyPrefix}RowCount`] = rowCount
+
+  // Baseline taken at the TOP of this arm, before it does anything at all (including before its own SQL
+  // Server relation prep). It is a DELTA, not an absolute count — and that defensive choice is now
+  // load-bearing rather than hypothetical: this arm no longer uses a dedicated tenant (see above), so the
+  // baseline is no longer guaranteed to be zero-ish. The original comment anticipated exactly this change
+  // ("any future change that shares a tenant across arms again") and the delta form survives it intact.
+  const preArmSnapshot = await withApplicationPool((pool) => snapshotS6AWriteState(pool, '<no-such-operation-id>', tenantId))
+
+  const setup = await setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow: true, artifactRoot, tenantId })
+  S[`${keyPrefix}OversizedPayloadTextLength`] = setup.relation?.oversizedPayloadTextLength ?? -1
+  if (setup.relation?.oversizedPayloadTextLength != null) {
+    must(`${keyPrefix}: oversized fixture row's canonical payload text exceeds nvarchar(4000) (the fixture/contract mismatch this leg fixes)`,
+      setup.relation.oversizedPayloadTextLength > 4000,
+      `length=${setup.relation.oversizedPayloadTextLength}`)
+  }
+  if (!setup.ok) {
+    S[`${keyPrefix}Run`] = 'NOT_RUN'
+    S[`${keyPrefix}Reason`] = setup.reason
+    // Surface the closed-set provisioning token in the values-free block, not just in the job log —
+    // run 30880831626 produced PROVISIONING_FAILED with no recoverable reason anywhere.
+    if (setup.provisioningFailureCode) S[`${keyPrefix}ProvisioningCode`] = setup.provisioningFailureCode
+    return
+  }
+
+  try {
+    await startServer(setup.runtimeEnv, `arm-${label}`)
   } catch (error) {
-    S.s6aFlagOnRun = S.s6aFlagOnRun || 'NOT_RUN'
-    S.s6aFlagOnReason = S.s6aFlagOnReason || 'UNEXPECTED_ERROR'
-    must('S6-A flag-ON real run attempted', false, String(error && error.message || error))
-    // .catch(), not a bare await: stopServer() can itself throw (its own port-free assertion — see the
-    // block comment above startServer()/stopServer()), and a throw HERE would escape this catch and skip
-    // the evidence write below entirely, which is exactly the failure mode this whole block exists to
-    // avoid.
-    await stopServer().catch(() => {})
+    S[`${keyPrefix}Run`] = 'NOT_RUN'
+    S[`${keyPrefix}Reason`] = 'RUNTIME_SERVER_START_FAILED'
+    must(`${keyPrefix}: flag-ON server started with runtime authority constructed`, false, String(error && error.message || error))
+    return
+  }
+
+  try {
+    const token = await getDevToken(tenantId)
+    const health = await requestJson('/api/integration/health', { token, tenantId })
+    const flagOn = health.body?.capabilities?.stockPreparationSqlServerSealedSnapshot === true
+    S[`${keyPrefix}HealthFlagOn`] = flagOn ? 'PASS' : 'FAIL'
+    if (!must(`${keyPrefix}: health reports runtime CONSTRUCTED (not just flag-string-true)`, flagOn, `flagOn=${flagOn}`)) {
+      S[`${keyPrefix}Run`] = 'NOT_RUN'
+      S[`${keyPrefix}Reason`] = 'RUNTIME_NOT_CONSTRUCTED'
+      return
+    }
+
+    // Bisect finding (runs 30890457411/30892944152/30893149026/30893387635): this arm fails at 4, 50,
+    // 600 and 2500 rows alike, so row count is irrelevant — the difference is the ARM, not the volume.
+    // The primary arm's tenant has the FULL existing chain run against it earlier in the same job (see
+    // that arm's own comment: "the existing-chain phase already ran this once for the SAME tenant").
+    // A scale arm's dedicated tenant has only ever had mvp/ensure. If provisioning is the gap, this is
+    // where it shows — and until now the response was discarded, so a 200 carrying INCOMPLETE
+    // provisioning passed silently and every downstream failure was opaque.
+    const mvpEnsure = await requestJson('/api/integration/stock-preparation/mvp/ensure', { method: 'POST', token, body: {}, accept: [200, 201], tenantId })
+    const mvpData = mvpEnsure.body && mvpEnsure.body.data ? mvpEnsure.body.data : {}
+    S[`${keyPrefix}MvpEnsureHttp`] = mvpEnsure.status
+    S[`${keyPrefix}MvpEnsureReady`] = typeof mvpData.ready === 'boolean' ? String(mvpData.ready) : '<absent>'
+    // Corrected after run 30894094075: the first version of this assertion also required
+    // `incompleteCount === 0`, but those counters belong to the READINESS endpoint's response, not to
+    // ensure's. ensureStockPreparationMvpTargets returns `{ ready: tables.every(t => t.ensured), tables,
+    // evidence }` — no readyCount, no incompleteCount. So that run's FAIL was MY assertion being wrong
+    // about the contract, not the product being wrong. Asserting a field an endpoint never returns
+    // produces a confident red that means nothing, which is the mirror image of the confident green this
+    // lane keeps guarding against.
+    S[`${keyPrefix}MvpEnsureTableCount`] = Array.isArray(mvpData.tables) ? mvpData.tables.length : -1
+    S[`${keyPrefix}MvpEnsureAllEnsured`] =
+      Array.isArray(mvpData.tables) && mvpData.tables.length > 0
+        ? String(mvpData.tables.every((table) => table && table.ensured === true))
+        : '<absent>'
+    // Derived from the tables array rather than trusting `ready` alone — `ready` is computed from
+    // `every(t => t.ensured)`, and an EMPTY array would make `every` vacuously true.
+    must(`${label}: mvp/ensure provisioned this arm's dedicated tenant (ready, non-empty, all ensured)`,
+      mvpData.ready === true
+        && Array.isArray(mvpData.tables)
+        && mvpData.tables.length > 0
+        && mvpData.tables.every((table) => table && table.ensured === true),
+      `http=${mvpEnsure.status} ready=${S[`${keyPrefix}MvpEnsureReady`]} tables=${S[`${keyPrefix}MvpEnsureTableCount`]} allEnsured=${S[`${keyPrefix}MvpEnsureAllEnsured`]}`)
+
+    const operationId = `s6a-e2e-${label}-op-${salt}`
+    // Wall-clock + elapsed-since-qualification (requirement 4), on its OWN timeout (S6A_POST_TIMEOUT_MS),
+    // separate from REQUEST_TIMEOUT_MS.
+    const firstRunStartedAtMs = Date.now()
+    const firstRun = await s6aRunProbe(token, operationId, { timeoutMs: S6A_POST_TIMEOUT_MS, tenantId })
+    S[`${keyPrefix}FirstRunPostDurationMs`] = Date.now() - firstRunStartedAtMs
+    S[`${keyPrefix}FirstRunElapsedSinceQualificationMs`] = Date.now() - setup.qualificationIssuedAtMs
+    const firstData = firstRun.body?.data || {}
+    S[`${keyPrefix}FirstRunHttp`] = firstRun.status
+    S[`${keyPrefix}FirstRunMode`] = firstData.mode || '<unregistered>'
+    S[`${keyPrefix}FirstRunStatus`] = firstData.status || '<unregistered>'
+    S[`${keyPrefix}BusinessLineCount`] = Number.isInteger(firstData.businessLineCount) ? firstData.businessLineCount : -1
+    S[`${keyPrefix}FirstRunErrorCode`] = firstRun.body?.error?.code || '<none>'
+    // Diagnostic only (this arm's PASS/FAIL is unaffected — completing IS what it claims, so a TTL
+    // casualty here is legitimately a failure, not inconclusive the way it is for the rejection arm).
+    // Parses the same fixed 'sealed-export refusal: <REASON>' shape s6aRejection* does — see
+    // extractSealedExportReasonFromMessage — so a TTL blowout during this arm's (longer) capture ->
+    // ingestion -> generation sequence is legible as SEALED_EXPORT_BINDING_UNQUALIFIED /
+    // SEALED_EXPORT_SIGNER_EXPIRED etc. instead of only the generic 'SealedExportError' code.
+    S[`${keyPrefix}FirstRunReasonToken`] =
+      extractSealedExportReasonFromMessage(firstRun.body?.error?.message) || S[`${keyPrefix}FirstRunErrorCode`]
+    const firstOk = firstRun.ok && firstData.status === 'COMPLETED' && firstData.mode === 'internal_persist' &&
+      firstData.externalWrite === false && firstData.businessLineCount === rowCount
+    must(`${keyPrefix}: first run -> COMPLETED, internal_persist, externalWrite=false, businessLineCount matches (rowCount=${rowCount})`,
+      firstOk,
+      `http=${firstRun.status} mode=${S[`${keyPrefix}FirstRunMode`]} status=${S[`${keyPrefix}FirstRunStatus`]} ` +
+      `lines=${S[`${keyPrefix}BusinessLineCount`]} code=${S[`${keyPrefix}FirstRunErrorCode`]} ` +
+      `reason=${S[`${keyPrefix}FirstRunReasonToken`]} durationMs=${S[`${keyPrefix}FirstRunPostDurationMs`]}`)
+    S[`${keyPrefix}FirstRun`] = firstOk ? 'PASS' : 'FAIL'
+    if (!firstOk) {
+      await assertS6ARunDatabaseObservableOnFailure(operationId, keyPrefix, tenantId)
+      // The bisect localised the throw to the multitable write layer but did NOT name it. All four
+      // classes that layer raises (plugin-scope.ts) are non-first-party from the persist module's view —
+      // which is exactly why identity was lost before #4744: structural, not incidental. WHICH of them
+      // decides whether this is a scope/namespace misconfiguration of this arm's dedicated tenant or a
+      // missing host hook, and those need opposite fixes.
+      //
+      // Needs NO product change. This harness already writes the server's stdout/stderr to
+      // OUT_DIR/server-<label>.log and already asserts on substrings of it (the flag-ON arm's EADDRINUSE
+      // check). Reporting one BOOLEAN per first-party CLASS NAME is values-free by construction: a closed
+      // list of identifiers we ship — never a message, never a value, never a path.
+      probeServerLogForErrorClass(`arm-${label}`, keyPrefix)
+      S[`${keyPrefix}DatabaseObservable`] = 'NOT_RUN'
+      S[`${keyPrefix}ReplayRun`] = 'NOT_RUN'
+      S[`${keyPrefix}Run`] = 'NOT_RUN'
+      S[`${keyPrefix}Reason`] = 'FIRST_RUN_FAILED'
+      return
+    }
+
+    const dbOk = await assertS6ARunDatabaseObservable(operationId, rowCount, keyPrefix, 'S6-A mid-tier scale', tenantId)
+    if (!dbOk) {
+      S[`${keyPrefix}ReplayRun`] = 'NOT_RUN'
+      S[`${keyPrefix}Run`] = 'NOT_RUN'
+      S[`${keyPrefix}Reason`] = 'DATABASE_OBSERVABLE_FAILED'
+      return
+    }
+
+    const beforeReplay = await withApplicationPool((pool) => snapshotS6AWriteState(pool, operationId, tenantId))
+    const replayStartedAtMs = Date.now()
+    const replay = await s6aRunProbe(token, operationId, { timeoutMs: S6A_POST_TIMEOUT_MS, tenantId })
+    S[`${keyPrefix}ReplayPostDurationMs`] = Date.now() - replayStartedAtMs
+    S[`${keyPrefix}ReplayElapsedSinceQualificationMs`] = Date.now() - setup.qualificationIssuedAtMs
+    const replayData = replay.body?.data || {}
+    S[`${keyPrefix}ReplayHttp`] = replay.status
+    S[`${keyPrefix}ReplayMode`] = replayData.mode || '<unregistered>'
+    const replayResponseOk = replay.ok && replayData.mode === 'internal_noop' && replayData.replay === true &&
+      replayData.sourceReadCount === 1 && replayData.businessLineCount === rowCount && replayData.externalWrite === false
+    must(`${keyPrefix}: replay same operationId -> internal_noop, sourceReadCount=1, same businessLineCount`,
+      replayResponseOk, `http=${replay.status} mode=${S[`${keyPrefix}ReplayMode`]} durationMs=${S[`${keyPrefix}ReplayPostDurationMs`]}`)
+
+    const afterReplay = await withApplicationPool((pool) => snapshotS6AWriteState(pool, operationId, tenantId))
+    const unchanged = JSON.stringify(beforeReplay) === JSON.stringify(afterReplay)
+    S[`${keyPrefix}ReplayGenerationIdStable`] = String(beforeReplay.generationId === afterReplay.generationId)
+    S[`${keyPrefix}ReplayIngestionSessionIdStable`] =
+      String(beforeReplay.ingestionSessionId === afterReplay.ingestionSessionId)
+    // DELTA against preArmSnapshot, not an absolute count — see the comment above preArmSnapshot. This is
+    // the ONLY line that differs from attemptS6ARealRun's equivalent check; everything else here mirrors
+    // it exactly.
+    const generationRowsDelta = beforeReplay.counts.generationRows - preArmSnapshot.counts.generationRows
+    const snapshotIsLive = beforeReplay.counts.runs >= 1 && beforeReplay.counts.generations >= 1 &&
+      beforeReplay.counts.ingestionSessions >= 1 &&
+      generationRowsDelta === rowCount &&
+      beforeReplay.generationId !== '<none>' && beforeReplay.ingestionSessionId !== '<none>'
+    S[`${keyPrefix}ReplayWriteStateSnapshotLive`] = snapshotIsLive ? 'PASS' : 'FAIL'
+    must(
+      `${keyPrefix}: replay wrote NOTHING — run/generation/ingestion-session/generation-row counts and the ` +
+      'run row\'s generation_id + ingestion_session_id are byte-identical across the second identical ' +
+      'call (and this arm\'s OWN delta against its pre-arm baseline demonstrably observed its first walk\'s writes)',
+      unchanged && snapshotIsLive,
+      `unchanged=${unchanged} snapshotLive=${snapshotIsLive} generationRowsDelta=${generationRowsDelta}`,
+    )
+    S[`${keyPrefix}ReplayNoSecondWrite`] = (unchanged && snapshotIsLive) ? 'PASS' : 'FAIL'
+    const replayOk = replayResponseOk && unchanged && snapshotIsLive
+    S[`${keyPrefix}ReplayRun`] = replayOk ? 'PASS' : 'FAIL'
+    S[`${keyPrefix}Run`] = (firstOk && dbOk && replayOk) ? 'PASS' : 'FAIL'
+  } finally {
+    await stopServer()
+  }
+}
+
+// Rejection arm (requirement 6): the product MUST refuse rowCount = MAX_BUSINESS_LINES + 1. GREEN means
+// refused-and-provably-because-of-the-bound; RED means either accepted (a real defect) or refused for an
+// unrelated, inconclusive reason (the authority-expiry family above) — a generic "did it refuse" check
+// would go GREEN in that second case too, proving nothing about the bound.
+//
+// Cost characteristic worth naming plainly: the bound is only checked AFTER a full capture of every row
+// completes (stock-preparation-runtime-core.cjs:337's `manifest.totalRows > MAX_BUSINESS_LINES` check, in
+// the SAME try block as the capture call) — there is no cheap pre-flight refusal. A 25000-row rejection
+// costs a full-scale capture, same as the mid-tier walk's first run; this arm PROVES that in `s6aRejectionPostDurationMs`,
+// it does not merely assert it.
+async function runS6ARejectionArm() {
+  const keyPrefix = 's6aRejection'
+  const label = 'rejection'
+  const rowCount = S6A_REJECTION_ROW_COUNT
+  const salt = `${label}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
+  const artifactRoot = path.join(path.resolve(ARTIFACT_ROOT), label)
+  // Dedicated tenant — see the comment in runS6AMidTierScaleWalk / above SCALE_TENANT_ID_PREFIX. Also
+  // keeps this arm's (intentionally refused, so it writes no generation rows) attempt from sharing ANY
+  // state with the mid-tier arm's tenant, though that arm's writes would not collide either way.
+  // Per-job restructure made the dedicated tenant unnecessary AND made it the prime suspect.
+  //
+  // It existed to avoid colliding with the primary walk's ACTIVE binding inside a SHARED database (073's
+  // unique index on the constant `((1))` permits exactly one ACTIVE binding table-wide). Each scale arm
+  // now has its OWN Postgres, so there is no primary binding here to collide with — the reason is gone.
+  //
+  // What the dedicated tenant DID do is make this arm's setup differ from the primary's in two ways at
+  // once: a different tenant, and — because phases 1-3 do not run in this job — no existing chain ever
+  // run against it. The primary arm's own comment says its tenant was warmed by exactly that
+  // ("the existing-chain phase already ran this once for the SAME tenant").
+  //
+  // The bisect (4/50/600/2500 all fail, primary at 3 passes) says the difference is the ARM, not the
+  // volume. So: use the SAME tenant as the primary and warm it the SAME way, and see whether the arm
+  // starts passing. If it does, the harness was the defect. If it still fails, the difference is
+  // somewhere else and this rules out the largest remaining candidate.
+  const tenantId = TENANT_ID
+
+  S[`${keyPrefix}RowCount`] = rowCount
+  S[`${keyPrefix}Bound`] = MAX_BUSINESS_LINES
+
+  const setup = await setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow: true, artifactRoot, tenantId })
+  S[`${keyPrefix}OversizedPayloadTextLength`] = setup.relation?.oversizedPayloadTextLength ?? -1
+  if (setup.relation?.oversizedPayloadTextLength != null) {
+    must(`${keyPrefix}: oversized fixture row's canonical payload text exceeds nvarchar(4000)`,
+      setup.relation.oversizedPayloadTextLength > 4000,
+      `length=${setup.relation.oversizedPayloadTextLength}`)
+  }
+  if (!setup.ok) {
+    S[`${keyPrefix}Run`] = 'NOT_RUN'
+    S[`${keyPrefix}Reason`] = setup.reason
+    // Surface the closed-set provisioning token in the values-free block, not just in the job log —
+    // run 30880831626 produced PROVISIONING_FAILED with no recoverable reason anywhere.
+    if (setup.provisioningFailureCode) S[`${keyPrefix}ProvisioningCode`] = setup.provisioningFailureCode
+    return
+  }
+
+  try {
+    await startServer(setup.runtimeEnv, `arm-${label}`)
+  } catch (error) {
+    S[`${keyPrefix}Run`] = 'NOT_RUN'
+    S[`${keyPrefix}Reason`] = 'RUNTIME_SERVER_START_FAILED'
+    must(`${keyPrefix}: flag-ON server started with runtime authority constructed`, false, String(error && error.message || error))
+    return
+  }
+
+  try {
+    const token = await getDevToken(tenantId)
+    const health = await requestJson('/api/integration/health', { token, tenantId })
+    const flagOn = health.body?.capabilities?.stockPreparationSqlServerSealedSnapshot === true
+    S[`${keyPrefix}HealthFlagOn`] = flagOn ? 'PASS' : 'FAIL'
+    // Explicit must() here, not a silent early return into NOT_RUN: a scale dispatch where the flag-on
+    // restart quietly failed (or the route never mounted) would otherwise surface as a 404
+    // STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_DISABLED from the probe below — which IS a "refusal" by
+    // HTTP status, but proves NOTHING about the row-count bound. Gating here, as a hard FAIL rather than
+    // NOT_RUN, keeps "refused" and "never actually tested" from looking identical to a caller only
+    // reading s6aRejectionRun.
+    if (!must(`${keyPrefix}: health reports runtime CONSTRUCTED before the refusal probe (not just flag-string-true)`,
+      flagOn, `flagOn=${flagOn}`)) {
+      S[`${keyPrefix}Run`] = 'FAIL'
+      S[`${keyPrefix}Reason`] = 'RUNTIME_NOT_CONSTRUCTED'
+      return
+    }
+
+    // Bisect finding (runs 30890457411/30892944152/30893149026/30893387635): this arm fails at 4, 50,
+    // 600 and 2500 rows alike, so row count is irrelevant — the difference is the ARM, not the volume.
+    // The primary arm's tenant has the FULL existing chain run against it earlier in the same job (see
+    // that arm's own comment: "the existing-chain phase already ran this once for the SAME tenant").
+    // A scale arm's dedicated tenant has only ever had mvp/ensure. If provisioning is the gap, this is
+    // where it shows — and until now the response was discarded, so a 200 carrying INCOMPLETE
+    // provisioning passed silently and every downstream failure was opaque.
+    const mvpEnsure = await requestJson('/api/integration/stock-preparation/mvp/ensure', { method: 'POST', token, body: {}, accept: [200, 201], tenantId })
+    const mvpData = mvpEnsure.body && mvpEnsure.body.data ? mvpEnsure.body.data : {}
+    S[`${keyPrefix}MvpEnsureHttp`] = mvpEnsure.status
+    S[`${keyPrefix}MvpEnsureReady`] = typeof mvpData.ready === 'boolean' ? String(mvpData.ready) : '<absent>'
+    // Corrected after run 30894094075: the first version of this assertion also required
+    // `incompleteCount === 0`, but those counters belong to the READINESS endpoint's response, not to
+    // ensure's. ensureStockPreparationMvpTargets returns `{ ready: tables.every(t => t.ensured), tables,
+    // evidence }` — no readyCount, no incompleteCount. So that run's FAIL was MY assertion being wrong
+    // about the contract, not the product being wrong. Asserting a field an endpoint never returns
+    // produces a confident red that means nothing, which is the mirror image of the confident green this
+    // lane keeps guarding against.
+    S[`${keyPrefix}MvpEnsureTableCount`] = Array.isArray(mvpData.tables) ? mvpData.tables.length : -1
+    S[`${keyPrefix}MvpEnsureAllEnsured`] =
+      Array.isArray(mvpData.tables) && mvpData.tables.length > 0
+        ? String(mvpData.tables.every((table) => table && table.ensured === true))
+        : '<absent>'
+    // Derived from the tables array rather than trusting `ready` alone — `ready` is computed from
+    // `every(t => t.ensured)`, and an EMPTY array would make `every` vacuously true.
+    must(`${label}: mvp/ensure provisioned this arm's dedicated tenant (ready, non-empty, all ensured)`,
+      mvpData.ready === true
+        && Array.isArray(mvpData.tables)
+        && mvpData.tables.length > 0
+        && mvpData.tables.every((table) => table && table.ensured === true),
+      `http=${mvpEnsure.status} ready=${S[`${keyPrefix}MvpEnsureReady`]} tables=${S[`${keyPrefix}MvpEnsureTableCount`]} allEnsured=${S[`${keyPrefix}MvpEnsureAllEnsured`]}`)
+
+    const operationId = `s6a-e2e-${label}-op-${salt}`
+    const startedAtMs = Date.now()
+    let probe
+    try {
+      probe = await s6aRunProbe(token, operationId, { timeoutMs: S6A_POST_TIMEOUT_MS, tenantId })
+    } catch (error) {
+      // A capture of `rowCount` rows that never returns within S6A_POST_TIMEOUT_MS is itself an honest
+      // limit to report, not a script crash — same NOT_RUN discipline as every other unreachable step in
+      // this file.
+      S[`${keyPrefix}PostDurationMs`] = Date.now() - startedAtMs
+      S[`${keyPrefix}Run`] = 'NOT_RUN'
+      S[`${keyPrefix}Reason`] = 'POST_TIMED_OUT_OR_FAILED'
+      must(`${keyPrefix}: refusal probe completed within its own timeout (${S6A_POST_TIMEOUT_MS}ms)`, false,
+        String(error && error.message || error))
+      return
+    }
+    S[`${keyPrefix}PostDurationMs`] = Date.now() - startedAtMs
+    S[`${keyPrefix}ElapsedSinceQualificationMs`] = Date.now() - setup.qualificationIssuedAtMs
+    S[`${keyPrefix}Http`] = probe.status
+    const accepted = probe.status === 200 && probe.body?.data?.status === 'COMPLETED'
+    const directCode = probe.body?.error?.code || '<none>'
+    const messageReason = extractSealedExportReasonFromMessage(probe.body?.error?.message)
+    const effectiveReason = messageReason || directCode
+    S[`${keyPrefix}ErrorCode`] = directCode
+    S[`${keyPrefix}ReasonToken`] = effectiveReason
+    const isAuthorityExpiryFamily = SEALED_EXPORT_AUTHORITY_EXPIRY_FAMILY.has(effectiveReason)
+    S[`${keyPrefix}AuthorityExpiryFamily`] = String(isAuthorityExpiryFamily)
+    const provesBound = !accepted && !isAuthorityExpiryFamily
+    must(
+      `${keyPrefix}: rowCount=${rowCount} (bound=${MAX_BUSINESS_LINES}+1) is refused — never COMPLETED — and the ` +
+      'refusal is not merely an authority/qualification-window artifact (see AuthorityExpiryFamily)',
+      provesBound,
+      `http=${probe.status} accepted=${accepted} code=${directCode} reason=${effectiveReason} ` +
+      `authorityExpiryFamily=${isAuthorityExpiryFamily} durationMs=${S[`${keyPrefix}PostDurationMs`]} ` +
+      `elapsedSinceQualificationMs=${S[`${keyPrefix}ElapsedSinceQualificationMs`]}`,
+    )
+    S[`${keyPrefix}Run`] = provesBound ? 'PASS' : 'FAIL'
+  } finally {
+    await stopServer()
+  }
+}
+
+// R9 restructure: the two-point slope (primary walk duration vs. mid-tier walk duration) used to be
+// computed HERE, in-process, because all three arms ran sequentially in the same process and could read
+// each other's S fields directly. They no longer can — see the "R9 restructure: one arm per process"
+// block comment above S6A_ARM. Each arm now only ever knows its OWN duration; the slope is reassembled
+// downstream, from job outputs, by scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs (invoked by
+// the workflow's `scale-slope` job) — never fabricated here from a single arm's partial view.
+
+// ── negative arm helper (exported for the workflow's separate negative-control job) ───────────────────
+export async function main() {
+  fs.mkdirSync(OUT_DIR, { recursive: true })
+
+  // Evidence that is true regardless of which arm this process is (R9 restructure — see the block
+  // comment above S6A_ARM). s6aBoundMaxBusinessLines and s6aPrimaryRowCount are compile-time constants of
+  // THIS file, reported here rather than re-derived downstream — the scale-slope aggregator job reads
+  // them off the primary arm's own job output instead of re-requiring product code, so there is exactly
+  // ONE place that knows what the product's declared bound is and what the primary walk's row count is.
+  S.s6aArm = S6A_ARM
+  S.s6aBoundMaxBusinessLines = MAX_BUSINESS_LINES
+  S.s6aPrimaryRowCount = DEFAULT_S6A_ROW_COUNT
+
+  if (S6A_ARM === 'primary') {
+    // Phases 1-3 run inside their own try/catch for the SAME reason Phase 4 already had one: an unexpected
+    // throw here (including from stopServer()'s own port-free assertion — see the block comment above
+    // startServer()/stopServer()) must not skip the evidence write at the bottom of this function. A red
+    // job with NO summary.txt/checks.json artifact at all is strictly worse than one that at least names
+    // which phase failed and why — `must()` below records it as a failed check so `overallPass` still
+    // reflects it, and CHECKS already accumulated by any phase that DID complete is preserved, not lost.
+    try {
+      // Phase 1: flag-OFF arm.
+      await runFlagArm(undefined, false, 'flagOff')
+
+      // Phase 2: exact-match arms — '1' and 'yes' must NOT enable the route.
+      await runFlagArm('1', false, 'exactMatch1')
+      await runFlagArm('yes', false, 'exactMatchYes')
+
+      // Phase 2b: normalization arms — 'TRUE', ' true ', 'True' MUST enable the route (they normalise to
+      // 'true' under trim+lowercase). Unlike phase 2's arms, these actually distinguish a strict
+      // `=== 'true'` comparison from the real normalising one — see the block comment above
+      // runFlagNormalizationArm().
+      await runFlagNormalizationArm('TRUE', 'normTrueUpper')
+      await runFlagNormalizationArm(' true ', 'normTrueSpaced')
+      await runFlagNormalizationArm('True', 'normTrueTitle')
+
+      // Phase 3: existing chain (T4 extended smoke) against a fresh flag-OFF server.
+      await startServer({}, 'existing-chain')
+      try {
+        const token = await getDevToken()
+        await runExistingChain(token)
+      } finally {
+        await stopServer()
+      }
+    } catch (error) {
+      must('phases 1-3 (flag-gate arms + existing chain) completed without an unexpected harness error',
+        false, String(error && error.message || error))
+      await stopServer().catch(() => {})
+    }
+
+    // Phase 4: S6-A real flag-ON attempt (best-effort; every failure point reports NOT_RUN honestly).
+    try {
+      await attemptS6ARealRun()
+    } catch (error) {
+      S.s6aFlagOnRun = S.s6aFlagOnRun || 'NOT_RUN'
+      S.s6aFlagOnReason = S.s6aFlagOnReason || 'UNEXPECTED_ERROR'
+      must('S6-A flag-ON real run attempted', false, String(error && error.message || error))
+      // .catch(), not a bare await: stopServer() can itself throw (its own port-free assertion — see the
+      // block comment above startServer()/stopServer()), and a throw HERE would escape this catch and skip
+      // the evidence write below entirely, which is exactly the failure mode this whole block exists to
+      // avoid.
+      await stopServer().catch(() => {})
+    }
+  }
+
+  // Phase 5 (R9, restructured onto separate jobs — see the block comment above S6A_ARM): the mid-tier
+  // calibration walk and the rejection arm each provision their OWN ACTIVE binding, and this whole
+  // process can only ever be ONE arm, so at most one of the three branches below ever does real work.
+  S.s6aScaleRequested = String(S6A_SCALE_REQUESTED)
+  S.s6aScaleRowCount = S6A_ROW_COUNT
+  if (S6A_ARM === 'midtier') {
+    if (!S6A_SCALE_REQUESTED) {
+      // Unlike the pre-restructure single-process design, this branch being REACHED AT ALL means the
+      // scale-midtier job ran — and that job's own workflow-level `if:` gate exists SPECIFICALLY to keep
+      // it from running unless scale was requested. Reaching here with scale not requested therefore
+      // means that gate did not do its job (or someone re-ran/dispatched this job directly) — a silent
+      // NOT_RUN here would be exactly the "skipped job reported as a pass" failure mode this whole
+      // restructure must avoid, just arriving through a different door. This is a hard FAIL, not a
+      // declined-optional-work NOT_RUN — see negative-control.mjs's own `CHECKS.length === 0` guard for
+      // the same principle applied to an empty-CHECKS harness.
+      S.s6aMidTierRun = 'NOT_RUN'
+      S.s6aMidTierReason = 'SCALE_NOT_REQUESTED'
+      must('S6-A mid-tier scale leg: this dedicated job ran but E2E_S6A_ROW_COUNT does not request scale '
+        + '(the workflow-level job gate should have skipped this job entirely)', false, `rowCount=${S6A_ROW_COUNT}`)
+    } else if (!RUNTIME_DB_ROLE || !RUNTIME_DB_URL || !PROVISIONING_DB_ROLE || !PROVISIONING_DB_URL) {
+      // Same precondition attemptS6ARealRun already guards on — the workflow always provides these, so
+      // seeing them missing here is itself noteworthy, not a normal "nothing to do" path, hence must().
+      S.s6aMidTierRun = 'NOT_RUN'
+      S.s6aMidTierReason = 'RUNTIME_DB_ENV_MISSING'
+      must('S6-A mid-tier scale leg attempted', false, 'runtime/provisioning DB env not provided by workflow')
+    } else {
+      // This job's database is fresh — it never ran attemptS6ARealRun(), which is where this preflight
+      // used to run (once per dispatch, ahead of the primary walk). A mistyped column here would
+      // otherwise surface later as a database-observable FAIL indistinguishable from a real defect — see
+      // assertS6AObservabilityQueriesResolve()'s own comment.
+      await assertS6AObservabilityQueriesResolve()
+      try {
+        await runS6AMidTierScaleWalk()
+      } catch (error) {
+        S.s6aMidTierRun = S.s6aMidTierRun || 'NOT_RUN'
+        S.s6aMidTierReason = S.s6aMidTierReason || 'UNEXPECTED_ERROR'
+        must('S6-A mid-tier scale walk attempted', false, String(error && error.message || error))
+        await stopServer().catch(() => {})
+      }
+    }
+  } else if (S6A_ARM === 'rejection') {
+    if (!S6A_SCALE_REQUESTED) {
+      // Same hard-FAIL discipline as the mid-tier branch above — see its comment.
+      S.s6aRejectionRun = 'NOT_RUN'
+      S.s6aRejectionReason = 'SCALE_NOT_REQUESTED'
+      must('S6-A rejection arm: this dedicated job ran but E2E_S6A_ROW_COUNT does not request scale '
+        + '(the workflow-level job gate should have skipped this job entirely)', false, `rowCount=${S6A_ROW_COUNT}`)
+    } else if (!RUNTIME_DB_ROLE || !RUNTIME_DB_URL || !PROVISIONING_DB_ROLE || !PROVISIONING_DB_URL) {
+      S.s6aRejectionRun = 'NOT_RUN'
+      S.s6aRejectionReason = 'RUNTIME_DB_ENV_MISSING'
+      must('S6-A rejection arm attempted', false, 'runtime/provisioning DB env not provided by workflow')
+    } else {
+      try {
+        await runS6ARejectionArm()
+      } catch (error) {
+        S.s6aRejectionRun = S.s6aRejectionRun || 'NOT_RUN'
+        S.s6aRejectionReason = S.s6aRejectionReason || 'UNEXPECTED_ERROR'
+        must('S6-A rejection arm attempted', false, String(error && error.message || error))
+        await stopServer().catch(() => {})
+      }
+    }
+  } else {
+    // S6A_ARM === 'primary': the mid-tier walk and rejection arm no longer run in THIS process (see the
+    // block comment above S6A_ARM) — they are the scale-midtier/scale-rejection jobs' job now, regardless
+    // of whether scale was requested for this dispatch. The REASON differs by whether scale was actually
+    // requested, so this never reads as "scale was not requested" when it was: SCALE_NOT_REQUESTED
+    // reproduces the exact wording this file used before this restructure (default-dispatch parity), and
+    // RUNS_IN_DEDICATED_JOB is the new, honest answer for a scale dispatch, whose actual mid-tier/
+    // rejection evidence lives in the scale-midtier/scale-rejection jobs' own summary.txt instead.
+    const reason = S6A_SCALE_REQUESTED ? 'RUNS_IN_DEDICATED_JOB' : 'SCALE_NOT_REQUESTED'
+    S.s6aMidTierRun = 'NOT_RUN'
+    S.s6aMidTierReason = reason
+    S.s6aRejectionRun = 'NOT_RUN'
+    S.s6aRejectionReason = reason
   }
 
   // Overall PASS requires every check that ran to have passed — including the S6-A real-run attempt.

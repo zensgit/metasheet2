@@ -5,9 +5,35 @@ name: Stock Preparation E2E Functional Smoke
 # is functional testing on synthetic data ONLY. It is NOT the #4695 controlled acceptance (one real
 # customer, the entity machine, an S6-B owner-gated single flag-on window — see
 # docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md) and does NOT substitute for
-# it: no real-customer claim, no scale claim, no external-write claim, no rollout claim is established
-# here. This lane never deploys, never arms, and never touches any #4695 frozen input or the deployed
-# entity host.
+# it: no real-customer claim, no external-write claim, no rollout claim is established here. This lane
+# never deploys, never arms, and never touches any #4695 frozen input or the deployed entity host.
+#
+# SCALE (R9, gated by the `s6a_row_count` input below): at the default input (3, or a dispatch with no
+# input at all), this lane is UNCHANGED from before R9 — one 3-row S6-A walk, no scale legs, no scale
+# claim. Dispatching with `s6a_row_count` set to anything else ALSO runs a mid-tier calibration walk at
+# that row count (full capture -> private ingestion -> generation kernel -> apply -> activation -> replay,
+# the SAME idempotency assertions as the 3-row walk, plus one oversized-payload row proving the fixture's
+# nvarchar(max) column is load-bearing) and a rejection arm at the product's declared bound (24999) + 1,
+# which MUST be refused. What this DOES establish when scale is requested: the 24999-row bound is refused
+# end-to-end (not just in the pure in-process decoder unit test that was, until R9, the only place it was
+# ever exercised), and a measured per-row slope from two REAL data points (3 rows, N rows) PREDICTS the
+# cost of a full 24999-row run. What it does NOT establish, even when scale is requested: an actual
+# completed run AT 24999 rows (the predicted cost is an extrapolation, not a measurement), a real-customer
+# claim, or a rollout claim.
+#
+# R9 RESTRUCTURE — one arm, one job, one database: migrations/073's
+# uniq_integration_sealed_export_stock_prep_single_customer index allows AT MOST ONE ACTIVE sealed-export
+# binding in the ENTIRE integration_sealed_export_stock_prep_bindings table, across every tenant (a
+# RATIFIED, deliberately single-customer constraint per that migration's own comment — never widened here
+# or anywhere), and there is no retirement path for a binding once ACTIVE. Running the primary walk, the
+# mid-tier walk and the rejection arm sequentially in ONE job against ONE database (as this lane did
+# before this restructure) meant the primary walk's binding permanently blocked both scale arms' own
+# provisioning (dispatched runs 30880831626, 30881132451: both scale arms failed with
+# SEALED_EXPORT_INTERNAL_ERROR after the primary walk activated its binding). Each arm therefore now runs
+# in its OWN job, against its OWN ephemeral Postgres + SQL Server — `services:` containers are scoped to a
+# job, never to a step or a process. scripts/ops/stock-preparation-e2e-functional-smoke.mjs's E2E_S6A_ARM
+# env var ('primary' | 'midtier' | 'rejection', default 'primary') selects which ONE arm a given
+# invocation runs; see the block comment above that constant in the script for the full rationale.
 #
 # Dispatch-only. Postgres and SQL Server are ephemeral, first-party GitHub Actions service containers
 # seeded ONLY with synthetic fixture rows generated inside this job. The S6-A feature flag
@@ -15,7 +41,7 @@ name: Stock Preparation E2E Functional Smoke
 # core-backend server-process environment for the duration of one arm — never in a committed file, never
 # as a repository/environment variable default, and the process is always restarted flag-OFF afterward.
 #
-# Three jobs:
+# Six jobs:
 #   contract            — pull_request only: syntax-checks the harness scripts (no server, no DB, no
 #                         secrets). Exists ONLY so GitHub registers this workflow_dispatch workflow while
 #                         it lives on a feature branch — GitHub will not let a brand-new workflow_dispatch
@@ -24,14 +50,35 @@ name: Stock Preparation E2E Functional Smoke
 #                         OR have already executed via another trigger, to appear as dispatchable). This
 #                         is the SAME idiom stock-preparation-prep-line-extended-smoke.yml and the
 #                         sealed-export-s2/s5 workflows already use in this repo.
-#   functional-smoke     — the real lane, workflow_dispatch only: flag-OFF arm, exact-match arm
-#                         ('1'/'yes' must NOT enable it), the EXISTING T4 extended-smoke chain reproduced
-#                         against this local server, and a best-effort real S6-A flag-ON run (capture ->
-#                         ingestion -> generation kernel -> apply) over a first-party ephemeral SQL Server
-#                         relation. Any part that cannot complete is reported NOT_RUN in the values-free
-#                         result block — never as PASS — and the job goes red if any check that DID run
-#                         failed.
-#   negative-control     — workflow_dispatch only. Reuses the SAME assertion machinery as
+#   functional-smoke     — the primary arm (E2E_S6A_ARM=primary), workflow_dispatch only: flag-OFF arm,
+#                         exact-match arm ('1'/'yes' must NOT enable it), the EXISTING T4 extended-smoke
+#                         chain reproduced against this local server, and a best-effort real S6-A flag-ON
+#                         run (capture -> ingestion -> generation kernel -> apply) over a first-party
+#                         ephemeral SQL Server relation, ALWAYS 3 rows regardless of `s6a_row_count` — this
+#                         is the ONE job whose behaviour at the default input is unchanged from before R9
+#                         even existed. Any part that cannot complete is reported NOT_RUN in the
+#                         values-free result block — never as PASS — and the job goes red if any check
+#                         that DID run failed. Publishes its own row count/duration/roll-up outcome, plus
+#                         the product's own declared row-count bound, as job outputs for the scale-slope
+#                         job below.
+#   scale-midtier        — the mid-tier arm (E2E_S6A_ARM=midtier), its OWN Postgres + SQL Server, gated to
+#                         run ONLY when `s6a_row_count` requests scale (default input: this job is
+#                         SKIPPED, never reported as a pass). Publishes its own row count/duration/roll-up
+#                         outcome as job outputs.
+#   scale-rejection       — the rejection arm (E2E_S6A_ARM=rejection) at the product's declared bound + 1,
+#                         its OWN Postgres + SQL Server, gated identically to scale-midtier. Publishes its
+#                         own row count/duration/roll-up outcome as job outputs.
+#   scale-slope           — always() (so it runs and reports NOT_RUN even at the default input, and even
+#                         if a scale job failed), reassembles the two-point slope (primary vs. mid-tier
+#                         duration) from the outputs the three jobs above publish — this can no longer be
+#                         computed in-process now that the arms are separate jobs. NEVER fabricates a number: if
+#                         scale was not requested, or either data point is missing, every slope field
+#                         reports NOT_RUN. This job's OWN exit code is about its OWN plumbing (did every
+#                         job that reported success actually publish the duration it should have; did the
+#                         scale jobs' gate correctly skip them when scale was not requested; etc.) — never
+#                         about whether an individual arm's S6-A walk passed, which is already that arm's
+#                         own job colour. See scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs.
+#   negative-control      — workflow_dispatch only. Reuses the SAME assertion machinery as
 #                         functional-smoke and asserts a wrong expectation on purpose, proving the
 #                         harness can genuinely fail (not a check "that did not happen").
 #                         The SCRIPT is expected to exit non-zero; this JOB is green exactly when the
@@ -48,7 +95,17 @@ on:
       - 'scripts/ops/stock-preparation-e2e-functional-smoke.mjs'
       - 'scripts/ops/stock-preparation-e2e-negative-control.mjs'
       - 'scripts/ops/stock-preparation-e2e-provision-postgres-roles-and-migrate.mjs'
+      - 'scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs'
   workflow_dispatch:
+    inputs:
+      s6a_row_count:
+        description: >-
+          S6-A fixture row count. Default 3 = today's behaviour, no scale legs. Any other value (e.g.
+          2500) ALSO runs a mid-tier calibration walk at that row count plus a fixed rejection arm at the
+          product's declared bound (24999) + 1 — see the SCALE paragraph above.
+        required: false
+        default: '3'
+        type: string
 
 permissions:
   contents: read
@@ -70,13 +127,31 @@ jobs:
           node --check scripts/ops/stock-preparation-e2e-functional-smoke.mjs
           node --check scripts/ops/stock-preparation-e2e-negative-control.mjs
           node --check scripts/ops/stock-preparation-e2e-provision-postgres-roles-and-migrate.mjs
+          node --check scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs
 
   functional-smoke:
-    name: containerized functional smoke (existing chain + S6-A flag arms)
+    name: containerized functional smoke (existing chain + S6-A flag arms, primary S6-A arm)
     if: github.event_name == 'workflow_dispatch'
     needs: contract
     runs-on: ubuntu-latest
+    # 45m was sized for (and, after the R9 restructure, is AGAIN exactly) this job's workload: flag arms +
+    # existing chain + one 3-row S6-A walk. R9 briefly bumped this to 90m because the mid-tier calibration
+    # walk and rejection arm ran in-process, in this SAME job, on a scale dispatch — they no longer do
+    # (migrations/073's single-ACTIVE-binding-in-the-whole-table constraint means they cannot share this
+    # job's database with the primary walk at all; see the R9 RESTRUCTURE comment above). This job's own
+    # workload is therefore identical at every input, scale requested or not — see the scale-midtier and
+    # scale-rejection jobs below for where that work now runs, each with its own timeout sized for it.
     timeout-minutes: 45
+    outputs:
+      # Consumed by the scale-slope job below to reassemble the two-point slope now that the arms are
+      # separate jobs — see that job's own comment. s6aPrimaryRowCount/s6aBoundMaxBusinessLines are
+      # compile-time constants of the harness script itself, published here (rather than re-derived
+      # downstream) so there is exactly ONE place that knows the primary walk's row count and the
+      # product's own declared row-count bound.
+      primary_row_count: ${{ steps.arm_outputs.outputs.row_count }}
+      primary_duration_ms: ${{ steps.arm_outputs.outputs.duration_ms }}
+      primary_run: ${{ steps.arm_outputs.outputs.run }}
+      max_business_lines: ${{ steps.arm_outputs.outputs.max_business_lines }}
     services:
       postgres:
         image: postgres:16
@@ -182,18 +257,55 @@ jobs:
           MSSQL_PORT: '1433'
           MSSQL_USERNAME: sa
           MSSQL_PASSWORD: 'E2eFunc!Probe2026'
+          # R9: default '3' reproduces exactly the pre-R9 single 3-row walk (no scale legs). See the
+          # workflow-level SCALE comment and the `s6a_row_count` input description above. This job ALWAYS
+          # runs the primary arm — E2E_S6A_ARM is set explicitly (not left to the script's own default)
+          # so that is true by construction, not by coincidence of an unset env var.
+          E2E_S6A_ARM: primary
+          E2E_S6A_ROW_COUNT: ${{ github.event.inputs.s6a_row_count || '3' }}
         run: node scripts/ops/stock-preparation-e2e-functional-smoke.mjs
 
       - name: Write step summary
         if: always()
         run: |
-          echo "## Stock Preparation E2E Functional Smoke" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Stock Preparation E2E Functional Smoke (primary arm)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Functional testing on synthetic data only. Does NOT substitute for the #4695 controlled" >> "$GITHUB_STEP_SUMMARY"
-          echo "acceptance and establishes no real-customer, scale, external-write, or rollout claim." >> "$GITHUB_STEP_SUMMARY"
+          echo "acceptance and establishes no real-customer, external-write, or rollout claim. R9: the" >> "$GITHUB_STEP_SUMMARY"
+          echo "mid-tier calibration walk and rejection arm no longer run in THIS job (see s6aMidTierReason/" >> "$GITHUB_STEP_SUMMARY"
+          echo "s6aRejectionReason below) — they are the scale-midtier/scale-rejection jobs now, and the" >> "$GITHUB_STEP_SUMMARY"
+          echo "two-point slope is the scale-slope job's summary, not this one's." >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
           cat output/stock-preparation-e2e-functional-smoke/summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Extract R9 arm evidence as job outputs (primary arm; NOT_RUN if the field is absent)
+        id: arm_outputs
+        if: always()
+        run: |
+          # `set +e` is deliberate and load-bearing here — SAME rationale as the negative-control job's own
+          # `field()` step below: GitHub runs `run:` under `bash -e`, and a `grep` that matches nothing
+          # exits non-zero, which under `-e` would kill this step BEFORE it writes the NOT_RUN fallback.
+          # Do not "tidy" this back to `set -e`.
+          set +e
+          set -u
+          file="output/stock-preparation-e2e-functional-smoke/summary.txt"
+          field() {
+            local v
+            if [[ -f "$file" ]]; then
+              v=$(grep -E "^$1=" "$file" | tail -1 | cut -d= -f2-)
+            else
+              v=""
+            fi
+            if [[ -z "$v" ]]; then echo "NOT_RUN"; else echo "$v"; fi
+          }
+          {
+            echo "row_count=$(field s6aPrimaryRowCount)"
+            echo "duration_ms=$(field s6aFirstRunPostDurationMs)"
+            echo "run=$(field s6aFlagOnRun)"
+            echo "max_business_lines=$(field s6aBoundMaxBusinessLines)"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Upload values-free evidence
         if: always()
@@ -205,6 +317,430 @@ jobs:
             output/stock-preparation-e2e-functional-smoke/checks.json
             output/stock-preparation-e2e-functional-smoke/existing-chain/summary.txt
             output/stock-preparation-e2e-functional-smoke/existing-chain/checks.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  scale-midtier:
+    name: R9 scale leg — mid-tier calibration walk (own Postgres + SQL Server)
+    # Gated so this job is SKIPPED (never reported as a pass) unless `s6a_row_count` requests scale — the
+    # SAME condition, computed the SAME way, as scale-rejection below and as
+    # scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs's own independent re-derivation of
+    # "was scale requested" (see that script's SCALE_REQUESTED_INPUT — it does not infer this from
+    # whether this job ran, on purpose).
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.s6a_row_count != '' &&
+      github.event.inputs.s6a_row_count != '3'
+    needs: contract
+    runs-on: ubuntu-latest
+    # The mid-tier walk is a full capture -> private ingestion -> generation kernel -> apply -> activation
+    # -> idempotent-replay walk at whatever row count `s6a_row_count` requests, plus its own SQL Server
+    # relation prep (batched inserts) and external-system registration/provisioning ahead of that —
+    # comfortable headroom, not a claim it always needs this long.
+    timeout-minutes: 60
+    outputs:
+      midtier_row_count: ${{ steps.arm_outputs.outputs.row_count }}
+      midtier_duration_ms: ${{ steps.arm_outputs.outputs.duration_ms }}
+      midtier_run: ${{ steps.arm_outputs.outputs.run }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          # Ephemeral, throwaway container password (destroyed with the job) — not a real credential.
+          MSSQL_SA_PASSWORD: 'E2eFunc!Probe2026'
+        ports:
+          - 1433:1433
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 40); do
+            if pnpm --filter plugin-integration-core exec node -e "
+              const sql = require('mssql');
+              new sql.ConnectionPool({server:'127.0.0.1',port:1433,user:'sa',password:'E2eFunc!Probe2026',database:'master',options:{encrypt:true,trustServerCertificate:true},connectionTimeout:3000})
+                .connect().then(p => p.close()).then(() => process.exit(0)).catch(() => process.exit(1));
+            "; then
+              echo "SQL Server ready on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: SQL Server not ready yet; sleeping 5s"
+            sleep 5
+          done
+          echo "SQL Server never became ready within timeout"
+          exit 1
+
+      - name: Generate CI-local ephemeral secrets (masked, never logged, scoped to this run only)
+        run: |
+          set -euo pipefail
+          jwt_secret="$(openssl rand -hex 32)"
+          enc_key="$(openssl rand -hex 32)"
+          runtime_password="$(openssl rand -hex 16)"
+          provisioning_password="$(openssl rand -hex 16)"
+          echo "::add-mask::$jwt_secret"
+          echo "::add-mask::$enc_key"
+          echo "::add-mask::$runtime_password"
+          echo "::add-mask::$provisioning_password"
+          {
+            echo "E2E_JWT_SECRET=$jwt_secret"
+            echo "E2E_INTEGRATION_ENCRYPTION_KEY=$enc_key"
+            echo "E2E_S6A_RUNTIME_DB_ROLE=e2e_s6a_runtime"
+            echo "E2E_S6A_RUNTIME_DB_PASSWORD=$runtime_password"
+            echo "E2E_S6A_PROVISIONING_DB_ROLE=e2e_s6a_provision"
+            echo "E2E_S6A_PROVISIONING_DB_PASSWORD=$provisioning_password"
+          } >> "$GITHUB_ENV"
+
+      - name: Provision sealed-export Postgres roles, then run migrations with both roles visible
+        env:
+          PG_SUPERUSER_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
+          RUNTIME_ROLE: ${{ env.E2E_S6A_RUNTIME_DB_ROLE }}
+          RUNTIME_PASSWORD: ${{ env.E2E_S6A_RUNTIME_DB_PASSWORD }}
+          PROVISIONING_ROLE: ${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}
+          PROVISIONING_PASSWORD: ${{ env.E2E_S6A_PROVISIONING_DB_PASSWORD }}
+        run: node scripts/ops/stock-preparation-e2e-provision-postgres-roles-and-migrate.mjs
+
+      - name: Run containerized functional smoke (mid-tier arm)
+        id: smoke
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
+          E2E_JWT_SECRET: ${{ env.E2E_JWT_SECRET }}
+          E2E_INTEGRATION_ENCRYPTION_KEY: ${{ env.E2E_INTEGRATION_ENCRYPTION_KEY }}
+          E2E_S6A_RUNTIME_DB_ROLE: ${{ env.E2E_S6A_RUNTIME_DB_ROLE }}
+          E2E_S6A_RUNTIME_DB_URL: postgresql://${{ env.E2E_S6A_RUNTIME_DB_ROLE }}:${{ env.E2E_S6A_RUNTIME_DB_PASSWORD }}@127.0.0.1:5432/metasheet
+          E2E_S6A_PROVISIONING_DB_ROLE: ${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}
+          E2E_S6A_PROVISIONING_DB_URL: postgresql://${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}:${{ env.E2E_S6A_PROVISIONING_DB_PASSWORD }}@127.0.0.1:5432/metasheet
+          MSSQL_HOST: 127.0.0.1
+          MSSQL_PORT: '1433'
+          MSSQL_USERNAME: sa
+          MSSQL_PASSWORD: 'E2eFunc!Probe2026'
+          E2E_S6A_ARM: midtier
+          # This job only runs (see the job-level `if:` above) when this input requests scale, so the raw
+          # input is passed straight through — no `|| '3'` fallback (that fallback exists on
+          # functional-smoke's identically-named env var only to cover a default dispatch, which never
+          # reaches this job).
+          E2E_S6A_ROW_COUNT: ${{ github.event.inputs.s6a_row_count }}
+        run: node scripts/ops/stock-preparation-e2e-functional-smoke.mjs
+
+      - name: Write step summary
+        if: always()
+        run: |
+          echo "## Stock Preparation E2E Functional Smoke (R9 mid-tier scale arm)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Functional testing on synthetic data only. Does NOT substitute for the #4695 controlled" >> "$GITHUB_STEP_SUMMARY"
+          echo "acceptance and establishes no real-customer, external-write, or rollout claim." >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat output/stock-preparation-e2e-functional-smoke/summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Extract R9 arm evidence as job outputs (mid-tier arm; NOT_RUN if the field is absent)
+        id: arm_outputs
+        if: always()
+        run: |
+          # `set +e` is deliberate and load-bearing — see the SAME step in the functional-smoke job above.
+          set +e
+          set -u
+          file="output/stock-preparation-e2e-functional-smoke/summary.txt"
+          field() {
+            local v
+            if [[ -f "$file" ]]; then
+              v=$(grep -E "^$1=" "$file" | tail -1 | cut -d= -f2-)
+            else
+              v=""
+            fi
+            if [[ -z "$v" ]]; then echo "NOT_RUN"; else echo "$v"; fi
+          }
+          {
+            echo "row_count=$(field s6aMidTierRowCount)"
+            echo "duration_ms=$(field s6aMidTierFirstRunPostDurationMs)"
+            echo "run=$(field s6aMidTierRun)"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload values-free evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-preparation-e2e-functional-smoke-scale-midtier
+          path: |
+            output/stock-preparation-e2e-functional-smoke/summary.txt
+            output/stock-preparation-e2e-functional-smoke/checks.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  scale-rejection:
+    name: R9 scale leg — rejection arm at bound+1 (own Postgres + SQL Server)
+    # Gated identically to scale-midtier above — see that job's comment.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.s6a_row_count != '' &&
+      github.event.inputs.s6a_row_count != '3'
+    needs: contract
+    runs-on: ubuntu-latest
+    # The rejection arm seeds MAX_BUSINESS_LINES+1 (~25000) rows in batches of 500, then the product reads
+    # the WHOLE table during capture before refusing at the row-count check — there is no cheap pre-flight
+    # refusal (see runS6ARejectionArm's own comment in the harness script). Comfortable headroom, not a
+    # claim it always needs this long.
+    timeout-minutes: 60
+    outputs:
+      rejection_row_count: ${{ steps.arm_outputs.outputs.row_count }}
+      rejection_duration_ms: ${{ steps.arm_outputs.outputs.duration_ms }}
+      rejection_run: ${{ steps.arm_outputs.outputs.run }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          # Ephemeral, throwaway container password (destroyed with the job) — not a real credential.
+          MSSQL_SA_PASSWORD: 'E2eFunc!Probe2026'
+        ports:
+          - 1433:1433
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 40); do
+            if pnpm --filter plugin-integration-core exec node -e "
+              const sql = require('mssql');
+              new sql.ConnectionPool({server:'127.0.0.1',port:1433,user:'sa',password:'E2eFunc!Probe2026',database:'master',options:{encrypt:true,trustServerCertificate:true},connectionTimeout:3000})
+                .connect().then(p => p.close()).then(() => process.exit(0)).catch(() => process.exit(1));
+            "; then
+              echo "SQL Server ready on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: SQL Server not ready yet; sleeping 5s"
+            sleep 5
+          done
+          echo "SQL Server never became ready within timeout"
+          exit 1
+
+      - name: Generate CI-local ephemeral secrets (masked, never logged, scoped to this run only)
+        run: |
+          set -euo pipefail
+          jwt_secret="$(openssl rand -hex 32)"
+          enc_key="$(openssl rand -hex 32)"
+          runtime_password="$(openssl rand -hex 16)"
+          provisioning_password="$(openssl rand -hex 16)"
+          echo "::add-mask::$jwt_secret"
+          echo "::add-mask::$enc_key"
+          echo "::add-mask::$runtime_password"
+          echo "::add-mask::$provisioning_password"
+          {
+            echo "E2E_JWT_SECRET=$jwt_secret"
+            echo "E2E_INTEGRATION_ENCRYPTION_KEY=$enc_key"
+            echo "E2E_S6A_RUNTIME_DB_ROLE=e2e_s6a_runtime"
+            echo "E2E_S6A_RUNTIME_DB_PASSWORD=$runtime_password"
+            echo "E2E_S6A_PROVISIONING_DB_ROLE=e2e_s6a_provision"
+            echo "E2E_S6A_PROVISIONING_DB_PASSWORD=$provisioning_password"
+          } >> "$GITHUB_ENV"
+
+      - name: Provision sealed-export Postgres roles, then run migrations with both roles visible
+        env:
+          PG_SUPERUSER_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
+          RUNTIME_ROLE: ${{ env.E2E_S6A_RUNTIME_DB_ROLE }}
+          RUNTIME_PASSWORD: ${{ env.E2E_S6A_RUNTIME_DB_PASSWORD }}
+          PROVISIONING_ROLE: ${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}
+          PROVISIONING_PASSWORD: ${{ env.E2E_S6A_PROVISIONING_DB_PASSWORD }}
+        run: node scripts/ops/stock-preparation-e2e-provision-postgres-roles-and-migrate.mjs
+
+      - name: Run containerized functional smoke (rejection arm)
+        id: smoke
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
+          E2E_JWT_SECRET: ${{ env.E2E_JWT_SECRET }}
+          E2E_INTEGRATION_ENCRYPTION_KEY: ${{ env.E2E_INTEGRATION_ENCRYPTION_KEY }}
+          E2E_S6A_RUNTIME_DB_ROLE: ${{ env.E2E_S6A_RUNTIME_DB_ROLE }}
+          E2E_S6A_RUNTIME_DB_URL: postgresql://${{ env.E2E_S6A_RUNTIME_DB_ROLE }}:${{ env.E2E_S6A_RUNTIME_DB_PASSWORD }}@127.0.0.1:5432/metasheet
+          E2E_S6A_PROVISIONING_DB_ROLE: ${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}
+          E2E_S6A_PROVISIONING_DB_URL: postgresql://${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}:${{ env.E2E_S6A_PROVISIONING_DB_PASSWORD }}@127.0.0.1:5432/metasheet
+          MSSQL_HOST: 127.0.0.1
+          MSSQL_PORT: '1433'
+          MSSQL_USERNAME: sa
+          MSSQL_PASSWORD: 'E2eFunc!Probe2026'
+          E2E_S6A_ARM: rejection
+          # Same rationale as scale-midtier above: no `|| '3'` fallback, this job only runs when scale is
+          # requested. The rejection arm's OWN row count is always MAX_BUSINESS_LINES+1 regardless of the
+          # exact value here — this env var only feeds the script's S6A_SCALE_REQUESTED gate (see
+          # runS6ARejectionArm's caller in main()).
+          E2E_S6A_ROW_COUNT: ${{ github.event.inputs.s6a_row_count }}
+        run: node scripts/ops/stock-preparation-e2e-functional-smoke.mjs
+
+      - name: Write step summary
+        if: always()
+        run: |
+          echo "## Stock Preparation E2E Functional Smoke (R9 rejection scale arm)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Functional testing on synthetic data only. Does NOT substitute for the #4695 controlled" >> "$GITHUB_STEP_SUMMARY"
+          echo "acceptance and establishes no real-customer, external-write, or rollout claim." >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat output/stock-preparation-e2e-functional-smoke/summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Extract R9 arm evidence as job outputs (rejection arm; NOT_RUN if the field is absent)
+        id: arm_outputs
+        if: always()
+        run: |
+          # `set +e` is deliberate and load-bearing — see the SAME step in the functional-smoke job above.
+          set +e
+          set -u
+          file="output/stock-preparation-e2e-functional-smoke/summary.txt"
+          field() {
+            local v
+            if [[ -f "$file" ]]; then
+              v=$(grep -E "^$1=" "$file" | tail -1 | cut -d= -f2-)
+            else
+              v=""
+            fi
+            if [[ -z "$v" ]]; then echo "NOT_RUN"; else echo "$v"; fi
+          }
+          {
+            echo "row_count=$(field s6aRejectionRowCount)"
+            echo "duration_ms=$(field s6aRejectionPostDurationMs)"
+            echo "run=$(field s6aRejectionRun)"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload values-free evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-preparation-e2e-functional-smoke-scale-rejection
+          path: |
+            output/stock-preparation-e2e-functional-smoke/summary.txt
+            output/stock-preparation-e2e-functional-smoke/checks.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  scale-slope:
+    name: R9 scale-leg slope (values-free; NOT_RUN if either data point is missing)
+    # always(): this job must run — and correctly report NOT_RUN — even at the default input (where
+    # scale-midtier/scale-rejection are skipped), and even if a scale job itself went red. Its own
+    # plumbing self-check (see scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs) is what keeps
+    # THAT from silently reading as an honest NOT_RUN.
+    if: always() && github.event_name == 'workflow_dispatch'
+    needs: [functional-smoke, scale-midtier, scale-rejection]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Compute R9 two-point slope from job outputs (values-free; NOT_RUN if either data point is missing)
+        id: slope
+        env:
+          # The SAME raw input the scale jobs' own `if:` gates use — computed independently here rather
+          # than inferred from whether those jobs ran, so a gate malfunction (job ran/skipped when it
+          # should not have) is DETECTABLE by comparing the two, not assumed away.
+          SCALE_REQUESTED_INPUT: ${{ github.event.inputs.s6a_row_count }}
+          # Bracket notation is required for hyphenated job ids in an expression context — dot notation on
+          # `needs.scale-midtier` is not "scale" minus "midtier", it silently resolves to nothing.
+          PRIMARY_JOB_RESULT: ${{ needs['functional-smoke'].result }}
+          PRIMARY_ROW_COUNT: ${{ needs['functional-smoke'].outputs.primary_row_count }}
+          PRIMARY_DURATION_MS: ${{ needs['functional-smoke'].outputs.primary_duration_ms }}
+          PRIMARY_RUN: ${{ needs['functional-smoke'].outputs.primary_run }}
+          MAX_BUSINESS_LINES: ${{ needs['functional-smoke'].outputs.max_business_lines }}
+          MIDTIER_JOB_RESULT: ${{ needs['scale-midtier'].result }}
+          MIDTIER_ROW_COUNT: ${{ needs['scale-midtier'].outputs.midtier_row_count }}
+          MIDTIER_DURATION_MS: ${{ needs['scale-midtier'].outputs.midtier_duration_ms }}
+          MIDTIER_RUN: ${{ needs['scale-midtier'].outputs.midtier_run }}
+          REJECTION_JOB_RESULT: ${{ needs['scale-rejection'].result }}
+          REJECTION_ROW_COUNT: ${{ needs['scale-rejection'].outputs.rejection_row_count }}
+          REJECTION_DURATION_MS: ${{ needs['scale-rejection'].outputs.rejection_duration_ms }}
+          REJECTION_RUN: ${{ needs['scale-rejection'].outputs.rejection_run }}
+        run: node scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs
+
+      - name: Write step summary
+        if: always()
+        run: |
+          echo "## Stock Preparation E2E — R9 scale-leg slope" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Reassembled from the functional-smoke/scale-midtier/scale-rejection jobs' own outputs —" >> "$GITHUB_STEP_SUMMARY"
+          echo "see each job's own summary for that arm's full evidence. slopePlumbingCheck is about THIS" >> "$GITHUB_STEP_SUMMARY"
+          echo "job's own wiring (did every job that reported success publish its duration, did the scale" >> "$GITHUB_STEP_SUMMARY"
+          echo "jobs' gate skip them correctly when scale was not requested) — never about whether an" >> "$GITHUB_STEP_SUMMARY"
+          echo "individual arm's S6-A walk passed, which is that arm's own job colour." >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat output/stock-preparation-e2e-scale-slope/summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload values-free evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-preparation-e2e-scale-slope
+          path: output/stock-preparation-e2e-scale-slope/summary.txt
           if-no-files-found: warn
           retention-days: 14
 
