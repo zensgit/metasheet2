@@ -24,6 +24,15 @@
 // dependencies installed, and the two sealed-export Postgres roles + all migrations already applied. It
 // manages its OWN core-backend server process lifecycle (multiple restarts, one per env-var arm) and never
 // touches the deployed entity host or any `origin`-tracked production configuration.
+//
+// R9 restructure — E2E_S6A_ARM ('primary' | 'midtier' | 'rejection', default 'primary'): a single
+// invocation of this script executes exactly ONE arm's S6-A work, never two, because each arm provisions
+// its OWN ACTIVE sealed-export binding and migrations/073's single-ACTIVE-binding-in-the-whole-table
+// constraint (a RATIFIED design, never widened) means a second arm's provisioning attempt in the SAME
+// database permanently fails once any earlier arm's binding is ACTIVE. See the block comment above the
+// S6A_ARM constant for the full rationale, and
+// scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs for how the primary-vs-mid-tier timing slope
+// is reassembled downstream from separate job outputs now that the arms are separate processes.
 
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -148,6 +157,37 @@ const S6A_SCALE_REQUESTED = S6A_ROW_COUNT !== DEFAULT_S6A_ROW_COUNT
 // One over the product's OWN declared bound (requirement 6) — never independently invented, always
 // "whatever MAX_BUSINESS_LINES currently is, plus one".
 const S6A_REJECTION_ROW_COUNT = MAX_BUSINESS_LINES + 1
+
+// ── R9 restructure: one arm per process ─────────────────────────────────────────────────────────────
+//
+// migrations/073_create_sealed_export_stock_prep_runtime_authority.sql's
+// uniq_integration_sealed_export_stock_prep_single_customer is a UNIQUE INDEX on the CONSTANT expression
+// `(1)` WHERE status='ACTIVE' — at most ONE ACTIVE binding in the ENTIRE table, across every tenant, not
+// just within one tenant (the comment directly above that index in the migration: "S6-A is deliberately
+// single-customer... a later multi-customer profile must use a separately ratified schema/version rather
+// than widening this index" — a RATIFIED constraint this harness works within, never around). There is
+// also no retirement path: BINDING_TABLE has exactly three operations repo-wide (selectOneForUpdate +
+// insertOne in sealed-export-lifecycle-provisioning.cjs, selectOne in stock-preparation-runtime-store.cjs)
+// — no UPDATE, no DELETE — so once ANY arm's binding goes ACTIVE, it is ACTIVE forever. Running the
+// primary walk, the mid-tier walk and the rejection arm in the SAME process against the SAME database (as
+// this file did before this restructure) therefore meant the primary walk's binding permanently blocked
+// both scale arms' own provisioning attempts — dispatched runs 30880831626 and 30881132451 both show the
+// primary walk activating its binding, then both scale arms failing provisioning with
+// SEALED_EXPORT_INTERNAL_ERROR. The only fix within the ratified single-ACTIVE-binding design is to give
+// each arm its OWN pristine database — which GitHub Actions can only do PER JOB (`services:` containers
+// are scoped to a job, not a step, not a process). E2E_S6A_ARM selects exactly ONE arm's S6-A work per
+// process; a run never touches more than one arm. Default 'primary' reproduces exactly what this whole
+// file did before this env var existed (Phases 1-4 below, unconditionally) — see the functional-smoke /
+// scale-midtier / scale-rejection jobs in .github/workflows/stock-preparation-e2e-functional-smoke.yml.
+// The two-point slope this file used to compute in-process from the primary and mid-tier walks' own
+// timings (now impossible — they are different processes, different job runs, potentially different
+// wall-clock machines) is computed by a dedicated downstream job instead, from job outputs each arm
+// publishes — see scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs.
+const S6A_VALID_ARMS = new Set(['primary', 'midtier', 'rejection'])
+const S6A_ARM = String(process.env.E2E_S6A_ARM || 'primary').trim()
+if (!S6A_VALID_ARMS.has(S6A_ARM)) {
+  throw new Error(`invalid E2E_S6A_ARM: ${JSON.stringify(process.env.E2E_S6A_ARM)} (want one of: ${[...S6A_VALID_ARMS].join(', ')})`)
+}
 // The S6-A run POST gets its OWN timeout (requirement 4), separate from REQUEST_TIMEOUT_MS (20s, sized
 // for cheap health/flag probes) — a real capture of thousands of rows needs materially longer, and using
 // the same 20s budget for both would make every scale-leg POST time out by construction, not by measurement.
@@ -1598,8 +1638,10 @@ async function attemptS6ARealRun() {
 
     const operationId = `s6a-e2e-op-${salt}`
     // Wall-clock (requirement 4), on the S6-A POST's own timeout — additive evidence only; this walk's
-    // PASS/FAIL semantics are unchanged. Doubles as the primary (N=3) data point for the scale legs'
-    // two-point slope fit (computeS6AScaleSlope), when a scale run is requested.
+    // PASS/FAIL semantics are unchanged. Published as this job's own `primary_duration_ms` output (R9
+    // restructure) and reassembled downstream, together with the mid-tier arm's own duration from its OWN
+    // job, into the primary (N=3) data point for the scale-slope job's two-point fit — see
+    // scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs.
     const firstRunStartedAtMs = Date.now()
     const firstRun = await s6aRunProbe(token, operationId, { timeoutMs: S6A_POST_TIMEOUT_MS })
     S.s6aFirstRunPostDurationMs = Date.now() - firstRunStartedAtMs
@@ -1728,7 +1770,7 @@ async function attemptS6ARealRun() {
   }
 }
 
-// ── R9 scale legs (gated on S6A_SCALE_REQUESTED — see the config block near the top) ───────────────────
+// ── R9 scale legs (each its OWN arm/process/job — see S6A_ARM — gated on S6A_SCALE_REQUESTED) ──────────
 //
 // Closes the gap this leg exists for: the 24999-row bound had, until now, only ever been exercised by a
 // pure in-process decoder unit test (stock-preparation-sealed-snapshot-decoder.test.cjs) — no SQL Server
@@ -2208,134 +2250,152 @@ async function runS6ARejectionArm() {
   }
 }
 
-// Per-row slope (requirement 5): a genuine two-point linear fit from the primary walk (3 rows, always
-// run) and the mid-tier walk (S6A_ROW_COUNT rows), so the full-scale (MAX_BUSINESS_LINES) cost is
-// PREDICTED, not discovered by actually running it in CI. NOT_RUN if either data point's timing is
-// missing (e.g. the mid-tier walk failed before reaching its first-run POST) — never computed from a
-// partial/garbage input.
-function computeS6AScaleSlope() {
-  const primaryMs = S.s6aFirstRunPostDurationMs
-  const primaryN = DEFAULT_S6A_ROW_COUNT
-  const midTierMs = S.s6aMidTierFirstRunPostDurationMs
-  const midTierN = S.s6aMidTierRowCount
-  if (
-    !Number.isFinite(primaryMs) || !Number.isFinite(midTierMs) ||
-    !Number.isFinite(midTierN) || midTierN === primaryN
-  ) {
-    S.s6aScaleSlopeMsPerRow = 'NOT_RUN'
-    S.s6aScaleSlopeInterceptMs = 'NOT_RUN'
-    S.s6aScalePredictedFullScaleMs = 'NOT_RUN'
-    S.s6aScalePredictedAtRejectionRowCountMs = 'NOT_RUN'
-    return
-  }
-  const slope = (midTierMs - primaryMs) / (midTierN - primaryN)
-  const intercept = primaryMs - slope * primaryN
-  S.s6aScaleSlopeMsPerRow = Number(slope.toFixed(3))
-  S.s6aScaleSlopeInterceptMs = Number(intercept.toFixed(1))
-  S.s6aScalePredictedFullScaleMs = Math.round(intercept + slope * MAX_BUSINESS_LINES)
-  S.s6aScalePredictedAtRejectionRowCountMs = Math.round(intercept + slope * S6A_REJECTION_ROW_COUNT)
-}
+// R9 restructure: the two-point slope (primary walk duration vs. mid-tier walk duration) used to be
+// computed HERE, in-process, because all three arms ran sequentially in the same process and could read
+// each other's S fields directly. They no longer can — see the "R9 restructure: one arm per process"
+// block comment above S6A_ARM. Each arm now only ever knows its OWN duration; the slope is reassembled
+// downstream, from job outputs, by scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs (invoked by
+// the workflow's `scale-slope` job) — never fabricated here from a single arm's partial view.
 
 // ── negative arm helper (exported for the workflow's separate negative-control job) ───────────────────
 export async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true })
 
-  // Phases 1-3 run inside their own try/catch for the SAME reason Phase 4 already had one: an unexpected
-  // throw here (including from stopServer()'s own port-free assertion — see the block comment above
-  // startServer()/stopServer()) must not skip the evidence write at the bottom of this function. A red
-  // job with NO summary.txt/checks.json artifact at all is strictly worse than one that at least names
-  // which phase failed and why — `must()` below records it as a failed check so `overallPass` still
-  // reflects it, and CHECKS already accumulated by any phase that DID complete is preserved, not lost.
-  try {
-    // Phase 1: flag-OFF arm.
-    await runFlagArm(undefined, false, 'flagOff')
+  // Evidence that is true regardless of which arm this process is (R9 restructure — see the block
+  // comment above S6A_ARM). s6aBoundMaxBusinessLines and s6aPrimaryRowCount are compile-time constants of
+  // THIS file, reported here rather than re-derived downstream — the scale-slope aggregator job reads
+  // them off the primary arm's own job output instead of re-requiring product code, so there is exactly
+  // ONE place that knows what the product's declared bound is and what the primary walk's row count is.
+  S.s6aArm = S6A_ARM
+  S.s6aBoundMaxBusinessLines = MAX_BUSINESS_LINES
+  S.s6aPrimaryRowCount = DEFAULT_S6A_ROW_COUNT
 
-    // Phase 2: exact-match arms — '1' and 'yes' must NOT enable the route.
-    await runFlagArm('1', false, 'exactMatch1')
-    await runFlagArm('yes', false, 'exactMatchYes')
-
-    // Phase 2b: normalization arms — 'TRUE', ' true ', 'True' MUST enable the route (they normalise to
-    // 'true' under trim+lowercase). Unlike phase 2's arms, these actually distinguish a strict
-    // `=== 'true'` comparison from the real normalising one — see the block comment above
-    // runFlagNormalizationArm().
-    await runFlagNormalizationArm('TRUE', 'normTrueUpper')
-    await runFlagNormalizationArm(' true ', 'normTrueSpaced')
-    await runFlagNormalizationArm('True', 'normTrueTitle')
-
-    // Phase 3: existing chain (T4 extended smoke) against a fresh flag-OFF server.
-    await startServer({}, 'existing-chain')
+  if (S6A_ARM === 'primary') {
+    // Phases 1-3 run inside their own try/catch for the SAME reason Phase 4 already had one: an unexpected
+    // throw here (including from stopServer()'s own port-free assertion — see the block comment above
+    // startServer()/stopServer()) must not skip the evidence write at the bottom of this function. A red
+    // job with NO summary.txt/checks.json artifact at all is strictly worse than one that at least names
+    // which phase failed and why — `must()` below records it as a failed check so `overallPass` still
+    // reflects it, and CHECKS already accumulated by any phase that DID complete is preserved, not lost.
     try {
-      const token = await getDevToken()
-      await runExistingChain(token)
-    } finally {
-      await stopServer()
+      // Phase 1: flag-OFF arm.
+      await runFlagArm(undefined, false, 'flagOff')
+
+      // Phase 2: exact-match arms — '1' and 'yes' must NOT enable the route.
+      await runFlagArm('1', false, 'exactMatch1')
+      await runFlagArm('yes', false, 'exactMatchYes')
+
+      // Phase 2b: normalization arms — 'TRUE', ' true ', 'True' MUST enable the route (they normalise to
+      // 'true' under trim+lowercase). Unlike phase 2's arms, these actually distinguish a strict
+      // `=== 'true'` comparison from the real normalising one — see the block comment above
+      // runFlagNormalizationArm().
+      await runFlagNormalizationArm('TRUE', 'normTrueUpper')
+      await runFlagNormalizationArm(' true ', 'normTrueSpaced')
+      await runFlagNormalizationArm('True', 'normTrueTitle')
+
+      // Phase 3: existing chain (T4 extended smoke) against a fresh flag-OFF server.
+      await startServer({}, 'existing-chain')
+      try {
+        const token = await getDevToken()
+        await runExistingChain(token)
+      } finally {
+        await stopServer()
+      }
+    } catch (error) {
+      must('phases 1-3 (flag-gate arms + existing chain) completed without an unexpected harness error',
+        false, String(error && error.message || error))
+      await stopServer().catch(() => {})
     }
-  } catch (error) {
-    must('phases 1-3 (flag-gate arms + existing chain) completed without an unexpected harness error',
-      false, String(error && error.message || error))
-    await stopServer().catch(() => {})
+
+    // Phase 4: S6-A real flag-ON attempt (best-effort; every failure point reports NOT_RUN honestly).
+    try {
+      await attemptS6ARealRun()
+    } catch (error) {
+      S.s6aFlagOnRun = S.s6aFlagOnRun || 'NOT_RUN'
+      S.s6aFlagOnReason = S.s6aFlagOnReason || 'UNEXPECTED_ERROR'
+      must('S6-A flag-ON real run attempted', false, String(error && error.message || error))
+      // .catch(), not a bare await: stopServer() can itself throw (its own port-free assertion — see the
+      // block comment above startServer()/stopServer()), and a throw HERE would escape this catch and skip
+      // the evidence write below entirely, which is exactly the failure mode this whole block exists to
+      // avoid.
+      await stopServer().catch(() => {})
+    }
   }
 
-  // Phase 4: S6-A real flag-ON attempt (best-effort; every failure point reports NOT_RUN honestly).
-  try {
-    await attemptS6ARealRun()
-  } catch (error) {
-    S.s6aFlagOnRun = S.s6aFlagOnRun || 'NOT_RUN'
-    S.s6aFlagOnReason = S.s6aFlagOnReason || 'UNEXPECTED_ERROR'
-    must('S6-A flag-ON real run attempted', false, String(error && error.message || error))
-    // .catch(), not a bare await: stopServer() can itself throw (its own port-free assertion — see the
-    // block comment above startServer()/stopServer()), and a throw HERE would escape this catch and skip
-    // the evidence write below entirely, which is exactly the failure mode this whole block exists to
-    // avoid.
-    await stopServer().catch(() => {})
-  }
-
-  // Phase 5 (R9): scale legs — mid-tier calibration walk, rejection arm at the bound+1, and the slope
-  // predicting full-scale cost. GATED on S6A_SCALE_REQUESTED (E2E_S6A_ROW_COUNT set to something other
-  // than the default 3): a default dispatch reports NOT_RUN/SCALE_NOT_REQUESTED for every field below,
-  // with NO must() call — declining work nobody asked for is not a failure, and this keeps a default
-  // dispatch's overallPass computation identical to before this leg existed.
+  // Phase 5 (R9, restructured onto separate jobs — see the block comment above S6A_ARM): the mid-tier
+  // calibration walk and the rejection arm each provision their OWN ACTIVE binding, and this whole
+  // process can only ever be ONE arm, so at most one of the three branches below ever does real work.
   S.s6aScaleRequested = String(S6A_SCALE_REQUESTED)
   S.s6aScaleRowCount = S6A_ROW_COUNT
-  if (!S6A_SCALE_REQUESTED) {
-    S.s6aMidTierRun = 'NOT_RUN'
-    S.s6aMidTierReason = 'SCALE_NOT_REQUESTED'
-    S.s6aRejectionRun = 'NOT_RUN'
-    S.s6aRejectionReason = 'SCALE_NOT_REQUESTED'
-    S.s6aScaleSlopeMsPerRow = 'NOT_RUN'
-    S.s6aScaleSlopeInterceptMs = 'NOT_RUN'
-    S.s6aScalePredictedFullScaleMs = 'NOT_RUN'
-    S.s6aScalePredictedAtRejectionRowCountMs = 'NOT_RUN'
-  } else if (!RUNTIME_DB_ROLE || !RUNTIME_DB_URL || !PROVISIONING_DB_ROLE || !PROVISIONING_DB_URL) {
-    // Same precondition attemptS6ARealRun already guards on — the workflow always provides these, so
-    // seeing them missing here is itself noteworthy, not a normal "nothing to do" path, hence must().
-    S.s6aMidTierRun = 'NOT_RUN'
-    S.s6aMidTierReason = 'RUNTIME_DB_ENV_MISSING'
-    S.s6aRejectionRun = 'NOT_RUN'
-    S.s6aRejectionReason = 'RUNTIME_DB_ENV_MISSING'
-    S.s6aScaleSlopeMsPerRow = 'NOT_RUN'
-    S.s6aScaleSlopeInterceptMs = 'NOT_RUN'
-    S.s6aScalePredictedFullScaleMs = 'NOT_RUN'
-    S.s6aScalePredictedAtRejectionRowCountMs = 'NOT_RUN'
-    must('S6-A scale legs attempted', false, 'runtime/provisioning DB env not provided by workflow')
+  if (S6A_ARM === 'midtier') {
+    if (!S6A_SCALE_REQUESTED) {
+      // Unlike the pre-restructure single-process design, this branch being REACHED AT ALL means the
+      // scale-midtier job ran — and that job's own workflow-level `if:` gate exists SPECIFICALLY to keep
+      // it from running unless scale was requested. Reaching here with scale not requested therefore
+      // means that gate did not do its job (or someone re-ran/dispatched this job directly) — a silent
+      // NOT_RUN here would be exactly the "skipped job reported as a pass" failure mode this whole
+      // restructure must avoid, just arriving through a different door. This is a hard FAIL, not a
+      // declined-optional-work NOT_RUN — see negative-control.mjs's own `CHECKS.length === 0` guard for
+      // the same principle applied to an empty-CHECKS harness.
+      S.s6aMidTierRun = 'NOT_RUN'
+      S.s6aMidTierReason = 'SCALE_NOT_REQUESTED'
+      must('S6-A mid-tier scale leg: this dedicated job ran but E2E_S6A_ROW_COUNT does not request scale '
+        + '(the workflow-level job gate should have skipped this job entirely)', false, `rowCount=${S6A_ROW_COUNT}`)
+    } else if (!RUNTIME_DB_ROLE || !RUNTIME_DB_URL || !PROVISIONING_DB_ROLE || !PROVISIONING_DB_URL) {
+      // Same precondition attemptS6ARealRun already guards on — the workflow always provides these, so
+      // seeing them missing here is itself noteworthy, not a normal "nothing to do" path, hence must().
+      S.s6aMidTierRun = 'NOT_RUN'
+      S.s6aMidTierReason = 'RUNTIME_DB_ENV_MISSING'
+      must('S6-A mid-tier scale leg attempted', false, 'runtime/provisioning DB env not provided by workflow')
+    } else {
+      // This job's database is fresh — it never ran attemptS6ARealRun(), which is where this preflight
+      // used to run (once per dispatch, ahead of the primary walk). A mistyped column here would
+      // otherwise surface later as a database-observable FAIL indistinguishable from a real defect — see
+      // assertS6AObservabilityQueriesResolve()'s own comment.
+      await assertS6AObservabilityQueriesResolve()
+      try {
+        await runS6AMidTierScaleWalk()
+      } catch (error) {
+        S.s6aMidTierRun = S.s6aMidTierRun || 'NOT_RUN'
+        S.s6aMidTierReason = S.s6aMidTierReason || 'UNEXPECTED_ERROR'
+        must('S6-A mid-tier scale walk attempted', false, String(error && error.message || error))
+        await stopServer().catch(() => {})
+      }
+    }
+  } else if (S6A_ARM === 'rejection') {
+    if (!S6A_SCALE_REQUESTED) {
+      // Same hard-FAIL discipline as the mid-tier branch above — see its comment.
+      S.s6aRejectionRun = 'NOT_RUN'
+      S.s6aRejectionReason = 'SCALE_NOT_REQUESTED'
+      must('S6-A rejection arm: this dedicated job ran but E2E_S6A_ROW_COUNT does not request scale '
+        + '(the workflow-level job gate should have skipped this job entirely)', false, `rowCount=${S6A_ROW_COUNT}`)
+    } else if (!RUNTIME_DB_ROLE || !RUNTIME_DB_URL || !PROVISIONING_DB_ROLE || !PROVISIONING_DB_URL) {
+      S.s6aRejectionRun = 'NOT_RUN'
+      S.s6aRejectionReason = 'RUNTIME_DB_ENV_MISSING'
+      must('S6-A rejection arm attempted', false, 'runtime/provisioning DB env not provided by workflow')
+    } else {
+      try {
+        await runS6ARejectionArm()
+      } catch (error) {
+        S.s6aRejectionRun = S.s6aRejectionRun || 'NOT_RUN'
+        S.s6aRejectionReason = S.s6aRejectionReason || 'UNEXPECTED_ERROR'
+        must('S6-A rejection arm attempted', false, String(error && error.message || error))
+        await stopServer().catch(() => {})
+      }
+    }
   } else {
-    try {
-      await runS6AMidTierScaleWalk()
-    } catch (error) {
-      S.s6aMidTierRun = S.s6aMidTierRun || 'NOT_RUN'
-      S.s6aMidTierReason = S.s6aMidTierReason || 'UNEXPECTED_ERROR'
-      must('S6-A mid-tier scale walk attempted', false, String(error && error.message || error))
-      await stopServer().catch(() => {})
-    }
-    try {
-      await runS6ARejectionArm()
-    } catch (error) {
-      S.s6aRejectionRun = S.s6aRejectionRun || 'NOT_RUN'
-      S.s6aRejectionReason = S.s6aRejectionReason || 'UNEXPECTED_ERROR'
-      must('S6-A rejection arm attempted', false, String(error && error.message || error))
-      await stopServer().catch(() => {})
-    }
-    computeS6AScaleSlope()
+    // S6A_ARM === 'primary': the mid-tier walk and rejection arm no longer run in THIS process (see the
+    // block comment above S6A_ARM) — they are the scale-midtier/scale-rejection jobs' job now, regardless
+    // of whether scale was requested for this dispatch. The REASON differs by whether scale was actually
+    // requested, so this never reads as "scale was not requested" when it was: SCALE_NOT_REQUESTED
+    // reproduces the exact wording this file used before this restructure (default-dispatch parity), and
+    // RUNS_IN_DEDICATED_JOB is the new, honest answer for a scale dispatch, whose actual mid-tier/
+    // rejection evidence lives in the scale-midtier/scale-rejection jobs' own summary.txt instead.
+    const reason = S6A_SCALE_REQUESTED ? 'RUNS_IN_DEDICATED_JOB' : 'SCALE_NOT_REQUESTED'
+    S.s6aMidTierRun = 'NOT_RUN'
+    S.s6aMidTierReason = reason
+    S.s6aRejectionRun = 'NOT_RUN'
+    S.s6aRejectionReason = reason
   }
 
   // Overall PASS requires every check that ran to have passed — including the S6-A real-run attempt.
