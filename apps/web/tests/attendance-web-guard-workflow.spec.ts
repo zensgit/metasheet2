@@ -36,6 +36,7 @@ describe('attendance web guard workflow contract', () => {
       'attendanceGroupContextRoute',
       'attendanceGroupContextHost',
       'attendanceGroupRouteHydration',
+      'attendance-group-context-history',
     ]) {
       expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
       expect(workflow).toContain(` ${spec}`)

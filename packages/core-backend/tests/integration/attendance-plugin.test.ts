@@ -4042,6 +4042,8 @@ attendanceIntegrationDescribe(
     let originalSettings: Record<string, unknown> = {}
     const shiftIds: string[] = []
     let fixedGroupId: string | undefined
+    let failedFirstApplyGroupId: string | undefined
+    let failedFirstRebuildGroupId: string | undefined
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
@@ -4361,6 +4363,109 @@ attendanceIntegrationDescribe(
       const fixedBaseAssignmentId = fixedBaseRows.rows[0]?.id
       expect(fixedBaseAssignmentId).toBeTruthy()
       if (!fixedBaseAssignmentId) return
+      const fixedConfigRows = await pool.query(
+        `SELECT shift_id, start_date::text, end_date::text, revision
+           FROM attendance_group_fixed_schedule_configs
+          WHERE org_id = 'default' AND group_id = $1`,
+        [fixedGroupId],
+      )
+      expect(fixedConfigRows.rows).toEqual([expect.objectContaining({
+        shift_id: baseShiftId,
+        start_date: fixedDate,
+        end_date: fixedDate,
+        revision: 1,
+      })])
+
+      const failedGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `temp-shift-failed-first-${runSuffix}`,
+          timezone: 'UTC',
+          attendanceType: 'fixed_shift',
+          description: 'first apply rollback proof',
+        }),
+      })
+      expect(failedGroupRes.status, JSON.stringify(failedGroupRes.body)).toBe(200)
+      failedFirstApplyGroupId = (failedGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(failedFirstApplyGroupId).toBeTruthy()
+      if (!failedFirstApplyGroupId) return
+      const failedMemberRes = await requestJson(
+        `${baseUrl}/api/attendance/groups/${failedFirstApplyGroupId}/members`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ userIds: [fixedUserId] }),
+        },
+      )
+      expect(failedMemberRes.status, JSON.stringify(failedMemberRes.body)).toBe(200)
+      const failedFirstApplyRes = await requestJson(
+        `${baseUrl}/api/attendance/groups/${failedFirstApplyGroupId}/fixed-schedule/apply`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ shiftId: replacementShiftId, startDate: fixedDate, endDate: fixedDate }),
+        },
+      )
+      expect(failedFirstApplyRes.status, JSON.stringify(failedFirstApplyRes.body)).toBe(409)
+      expect((failedFirstApplyRes.body as { error?: { code?: string } } | undefined)?.error?.code)
+        .toBe('ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT')
+      const failedFirstApplyResidue = await pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM attendance_group_fixed_schedule_configs WHERE org_id = 'default' AND group_id = $1) AS configs,
+           (SELECT COUNT(*)::int FROM attendance_shift_assignments
+             WHERE org_id = 'default'
+               AND producer_type = 'attendance_group_fixed_schedule'
+               AND producer_ref_id = $1) AS assignments`,
+        [failedFirstApplyGroupId],
+      )
+      expect(failedFirstApplyResidue.rows[0]).toEqual({ configs: 0, assignments: 0 })
+
+      const failedRebuildGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `temp-shift-failed-first-rebuild-${runSuffix}`,
+          timezone: 'UTC',
+          attendanceType: 'fixed_shift',
+          description: 'first rebuild rollback proof',
+        }),
+      })
+      expect(failedRebuildGroupRes.status, JSON.stringify(failedRebuildGroupRes.body)).toBe(200)
+      failedFirstRebuildGroupId = (failedRebuildGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(failedFirstRebuildGroupId).toBeTruthy()
+      if (!failedFirstRebuildGroupId) return
+      const failedRebuildMemberRes = await requestJson(
+        `${baseUrl}/api/attendance/groups/${failedFirstRebuildGroupId}/members`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ userIds: [fixedUserId] }),
+        },
+      )
+      expect(failedRebuildMemberRes.status, JSON.stringify(failedRebuildMemberRes.body)).toBe(200)
+      const failedFirstRebuildRes = await requestJson(
+        `${baseUrl}/api/attendance/groups/${failedFirstRebuildGroupId}/fixed-schedule/rebuild`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ shiftId: replacementShiftId, startDate: fixedDate, endDate: fixedDate }),
+        },
+      )
+      expect(failedFirstRebuildRes.status, JSON.stringify(failedFirstRebuildRes.body)).toBe(409)
+      expect((failedFirstRebuildRes.body as { error?: { code?: string } } | undefined)?.error?.code)
+        .toBe('ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT')
+      const failedFirstRebuildResidue = await pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM attendance_group_fixed_schedule_configs WHERE org_id = 'default' AND group_id = $1) AS configs,
+           (SELECT COUNT(*)::int FROM attendance_shift_assignments
+             WHERE org_id = 'default'
+               AND producer_type = 'attendance_group_fixed_schedule'
+               AND producer_ref_id = $1) AS assignments`,
+        [failedFirstRebuildGroupId],
+      )
+      expect(failedFirstRebuildResidue.rows[0]).toEqual({ configs: 0, assignments: 0 })
+
       const fixedTempDraftRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
         method: 'POST',
         headers,
@@ -4394,10 +4499,23 @@ attendanceIntegrationDescribe(
         replaces: { assignmentId: fixedBaseAssignmentId },
       })
 
+      const changedConfigRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/config`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ shiftId: baseShiftId, startDate: staleTempDate, endDate: staleTempDate }),
+      })
+      expect(changedConfigRes.status, JSON.stringify(changedConfigRes.body)).toBe(200)
+      const changedConfigRevision = (changedConfigRes.body as { data?: { revision?: number } } | undefined)?.data?.revision
+      expect(changedConfigRevision).toBe(2)
       const staleApplyRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/apply`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ shiftId: baseShiftId, startDate: staleTempDate, endDate: staleTempDate }),
+        body: JSON.stringify({
+          shiftId: baseShiftId,
+          startDate: staleTempDate,
+          endDate: staleTempDate,
+          expectedConfigRevision: changedConfigRevision,
+        }),
       })
       expect(staleApplyRes.status, JSON.stringify(staleApplyRes.body)).toBe(201)
       await pool.query(
@@ -4412,7 +4530,12 @@ attendanceIntegrationDescribe(
       const staleRebuildRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/rebuild`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ shiftId: baseShiftId, startDate: staleTempDate, endDate: staleTempDate }),
+        body: JSON.stringify({
+          shiftId: baseShiftId,
+          startDate: staleTempDate,
+          endDate: staleTempDate,
+          expectedConfigRevision: changedConfigRevision,
+        }),
       })
       expect(staleRebuildRes.status, JSON.stringify(staleRebuildRes.body)).toBe(409)
       expect((staleRebuildRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT')
@@ -4442,6 +4565,14 @@ attendanceIntegrationDescribe(
       if (fixedGroupId) {
         await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [fixedGroupId]).catch(() => undefined)
         await pool.query('DELETE FROM attendance_groups WHERE id = $1', [fixedGroupId]).catch(() => undefined)
+      }
+      if (failedFirstApplyGroupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [failedFirstApplyGroupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [failedFirstApplyGroupId]).catch(() => undefined)
+      }
+      if (failedFirstRebuildGroupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [failedFirstRebuildGroupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [failedFirstRebuildGroupId]).catch(() => undefined)
       }
       if (shiftIds.length > 0) {
         await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [shiftIds]).catch(() => undefined)

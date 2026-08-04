@@ -7,6 +7,7 @@ import {
   ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO,
   ATTENDANCE_GROUP_ROUTE_PATH_PREFIX,
   ATTENDANCE_GROUP_ROUTE_STEPS,
+  buildAttendanceGroupRouteHref,
   isAttendanceGroupContextPath,
   isAttendanceGroupId,
   normalizeAttendanceGroupReturnTo,
@@ -198,6 +199,40 @@ describe('parseAttendanceGroupRouteSurface + resolveAttendanceGroupRouteTarget (
     expect(parseAttendanceGroupRouteSurface('schedule', undefined)).toEqual({ ok: true, surface: null })
     expect(parseAttendanceGroupRouteSurface('rules', null)).toEqual({ ok: false })
     expect(parseAttendanceGroupRouteSurface('calendar', undefined)).toEqual({ ok: true, surface: null })
+  })
+})
+
+describe('buildAttendanceGroupRouteHref (R2 entry points)', () => {
+  it.each([
+    ['schedule', 'shifts', 'schedule?surface=shifts'],
+    ['schedule', 'assignments', 'schedule?surface=assignments'],
+    ['schedule', 'advanced-scheduling', 'schedule?surface=advanced-scheduling'],
+    ['calendar', null, 'calendar?returnTo='],
+    ['rules', 'rule-sets', 'rules?surface=rule-sets'],
+  ] as const)('builds the canonical %s/%s destination', (step, surface, expectedFragment) => {
+    const href = buildAttendanceGroupRouteHref({
+      groupId: VALID_UUID,
+      step,
+      surface,
+      returnTo: '/attendance?tab=admin&section=attendance-admin-groups',
+    })
+    expect(href).toContain(`/attendance/admin/groups/${VALID_UUID}/${expectedFragment}`)
+    expect(href).toContain('returnTo=%2Fattendance%3Ftab%3Dadmin%26section%3Dattendance-admin-groups')
+  })
+
+  it('fails closed for an invalid group id or illegal step/surface pair', () => {
+    expect(buildAttendanceGroupRouteHref({
+      groupId: 'group-a',
+      step: 'schedule',
+      surface: 'assignments',
+      returnTo: '/attendance',
+    })).toBeNull()
+    expect(buildAttendanceGroupRouteHref({
+      groupId: VALID_UUID,
+      step: 'calendar',
+      surface: 'shifts',
+      returnTo: '/attendance',
+    })).toBeNull()
   })
 })
 

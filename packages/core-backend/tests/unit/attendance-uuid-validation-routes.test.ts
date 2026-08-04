@@ -519,12 +519,30 @@ function approvalInstanceRow(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function fixedScheduleQueryResult(sql: string) {
+function fixedScheduleConfigRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: '00000000-0000-4000-8000-000000000399',
+    org_id: 'default',
+    group_id: attendanceGroupId,
+    shift_id: shiftId,
+    start_date: '2026-06-01',
+    end_date: '2026-06-30',
+    revision: 1,
+    updated_by: 'admin-1',
+    created_at: '2026-08-03T00:00:00.000Z',
+    updated_at: '2026-08-03T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function fixedScheduleQueryResult(sql: string, config = fixedScheduleConfigRow()) {
   if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return { handled: true, rows: [{ id: attendanceGroupId }] }
   if (sql.includes('SELECT * FROM attendance_groups WHERE id = $1')) return { handled: true, rows: [attendanceGroupRow()] }
   if (sql.includes('SELECT * FROM attendance_shifts WHERE id = $1')) return { handled: true, rows: [shiftRow()] }
   // W3 canonical assignability guard: shift FOR SHARE + persisted segment count.
   if (sql.includes('FROM attendance_shifts') && sql.includes('FOR SHARE')) return { handled: true, rows: [shiftRow()] }
+  if (sql.includes('SELECT 1 AS present') && sql.includes('FROM attendance_group_members')) return { handled: true, rows: [{ present: 1 }] }
+  if (sql.includes('FROM attendance_group_fixed_schedule_configs') && sql.includes('FOR UPDATE')) return { handled: true, rows: [config] }
   if (sql.includes('FROM attendance_shift_segments')) return { handled: true, rows: [{ total: 1 }] }
   if (sql.includes('SELECT DISTINCT user_id') && sql.includes('FROM attendance_group_members')) {
     return { handled: true, rows: [{ user_id: 'worker-1' }] }
@@ -3076,6 +3094,31 @@ describe('attendance UUID route validation', () => {
     })
     expect(db.transaction).toHaveBeenCalledTimes(1)
     expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
+  })
+
+  it('returns the typed config-changed 409 before assignment writes for a stale apply revision', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      const fixedSchedule = fixedScheduleQueryResult(sql, fixedScheduleConfigRow({ revision: 2 }))
+      if (fixedSchedule.handled) return fixedSchedule.rows
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/fixed-schedule/apply', {
+      params: { id: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30', expectedConfigRevision: 1 },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toMatchObject({
+      ok: false,
+      error: { code: 'ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED' },
+    })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO attendance_shift_assignments'))).toBe(false)
   })
 
   it('lets scoped non-admin schedulers apply fixed schedules inside their attendance group dispatch scope', async () => {

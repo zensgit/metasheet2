@@ -70,7 +70,7 @@ or source rows in GitHub comments or evidence artifacts.
 
 Any mismatch is a terminal `STOP_AND_REPORT`; do not deploy.
 
-## 2. Create PostgreSQL Roles Before Migration 073
+## 2. Create PostgreSQL Roles Before Migrations 073, 074 And 075
 
 Migration `073_create_sealed_export_stock_prep_runtime_authority` is recorded
 once by Kysely. The two roles and both PostgreSQL settings must exist before
@@ -104,11 +104,39 @@ Then run the packaged migration entry point and confirm the exact migration:
 node packages/core-backend/dist/src/db/migrate.js --list
 node packages/core-backend/dist/src/db/migrate.js
 node packages/core-backend/dist/src/db/migrate.js --confirm 073_create_sealed_export_stock_prep_runtime_authority
+node packages/core-backend/dist/src/db/migrate.js --confirm 074_repair_sealed_export_runtime_authority_privileges
+node packages/core-backend/dist/src/db/migrate.js --confirm 075_grant_sealed_export_runtime_authority_row_lock
 Remove-Item Env:PGOPTIONS -ErrorAction SilentlyContinue
 ```
 
-If migration 073 was already recorded without the two grants, stop. Do not
-rerun the SQL file manually and do not enable the feature flag.
+`PGOPTIONS` must stay set for the WHOLE migration run, not just around 073.
+Migrations 074 and 075 read the SAME two settings and take the SAME
+NOTICE-and-return branch when those settings are absent (074 lines 64-78, 075
+lines 107-121). A run that sets them only for 073 records 074 and 075 as
+applied while their grants are latent, and reports NOTHING wrong.
+
+If migration 073, 074 or 075 was already recorded without the two grants, stop.
+Do not rerun the SQL file manually and do not enable the feature flag.
+
+Then confirm the grants actually landed. `--confirm` proves a migration was
+RECORDED; it does not prove the grants exist, because the latent branch records
+the migration too. All three predicates must return true:
+
+```sql
+SELECT
+  has_column_privilege('<provisioning-role>',
+    'integration_sealed_export_signer_public_keys', 'updated_at', 'UPDATE') AS grant_074,
+  has_column_privilege('<runtime-role>',
+    'integration_sealed_export_authority_state', 'updated_at', 'UPDATE')    AS grant_075,
+  has_table_privilege('<runtime-role>',
+    'integration_sealed_export_generation_audit', 'SELECT')                 AS grant_073;
+```
+
+Why these two migrations exist, so a reader can judge whether a latent grant
+matters: without 074 provisioning fails at the signer-key row lock; without 075
+the final activation transaction fails to lock the authority state. Both surface
+at RUNTIME as a bare PostgreSQL `42501`, already wrapped by the time an operator
+sees it. Both were verified on PostgreSQL 16 AND 17.
 
 ## 3. Deploy With The Feature Flag Off
 

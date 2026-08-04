@@ -648,6 +648,9 @@ export default defineConfig({
       // #4709 FSER-2 effectiveness read model requires real PostgreSQL and is run as a
       // whole file in the attendance real-DB workflow step.
       'tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts',
+      // #4709 FSER-3 first-config atomicity and true two-connection convergence require
+      // real PostgreSQL; the whole file is explicitly run in plugin-tests.yml.
+      'tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.

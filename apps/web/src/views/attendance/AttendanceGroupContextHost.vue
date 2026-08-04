@@ -14,6 +14,7 @@
   <section v-else class="attendance-group-context" data-attendance-group-context="ready">
     <header class="attendance-group-context__breadcrumb">
       <span>{{ state.group.name }}</span>
+      <span aria-hidden="true">/</span>
       <span>{{ stepLabel }}</span>
     </header>
     <slot
@@ -53,3 +54,11 @@ const stepLabel = computed(() => {
   return tr('Schedule', '排班')
 })
 </script>
+
+<style scoped>
+.attendance-group-context__breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+</style>
