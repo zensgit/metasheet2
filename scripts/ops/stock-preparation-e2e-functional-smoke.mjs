@@ -1895,9 +1895,15 @@ async function setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow, a
   }
   const provisioned = await runProvisioningScript(provisioningEnv)
   let provisionedOk = false
+  // Parity with the primary walk (see the S6-A provisioning block above): capture the child's closed-set
+  // failure code, not just its exit status. Run 30880831626 proved why this matters — BOTH scale arms
+  // reported `PROVISIONING_FAILED exit=1` and the 2008-line job log contained ZERO SEALED_EXPORT_* tokens,
+  // so the failure was completely undiagnosable. An exit code is not a reason.
+  let provisioningFailureCode = '<unparsed>'
   try {
     const parsed = JSON.parse(provisioned.stdout.trim().split('\n').pop() || '{}')
     provisionedOk = provisioned.code === 0 && parsed.ok === true && parsed.externalWrite === false && parsed.valuesFree === true
+    if (!provisionedOk && typeof parsed.code === 'string') provisioningFailureCode = parsed.code
   } catch {
     provisionedOk = false
   }
@@ -1912,9 +1918,17 @@ async function setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow, a
   // TTL a run actually was.
   const qualificationIssuedAtMs = Date.now()
   must(`${label}: provisioning script -> ok:true, externalWrite:false, valuesFree:true`, provisionedOk,
-    `exit=${provisioned.code}`)
+    `exit=${provisioned.code} code=${provisioningFailureCode}`)
   if (!provisionedOk) {
-    return { ok: false, reason: 'PROVISIONING_FAILED', relation, hasCredentials, qualificationIssuedAtMs }
+    // Closed-set token only — never the child's raw stderr, which is not values-free.
+    return {
+      ok: false,
+      reason: 'PROVISIONING_FAILED',
+      provisioningFailureCode,
+      relation,
+      hasCredentials,
+      qualificationIssuedAtMs,
+    }
   }
 
   const runtimeEnv = {
@@ -1966,6 +1980,9 @@ async function runS6AMidTierScaleWalk() {
   if (!setup.ok) {
     S[`${keyPrefix}Run`] = 'NOT_RUN'
     S[`${keyPrefix}Reason`] = setup.reason
+    // Surface the closed-set provisioning token in the values-free block, not just in the job log —
+    // run 30880831626 produced PROVISIONING_FAILED with no recoverable reason anywhere.
+    if (setup.provisioningFailureCode) S[`${keyPrefix}ProvisioningCode`] = setup.provisioningFailureCode
     return
   }
 
@@ -2114,6 +2131,9 @@ async function runS6ARejectionArm() {
   if (!setup.ok) {
     S[`${keyPrefix}Run`] = 'NOT_RUN'
     S[`${keyPrefix}Reason`] = setup.reason
+    // Surface the closed-set provisioning token in the values-free block, not just in the job log —
+    // run 30880831626 produced PROVISIONING_FAILED with no recoverable reason anywhere.
+    if (setup.provisioningFailureCode) S[`${keyPrefix}ProvisioningCode`] = setup.provisioningFailureCode
     return
   }
 
