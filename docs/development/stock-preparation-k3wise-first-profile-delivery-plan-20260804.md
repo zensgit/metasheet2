@@ -869,3 +869,64 @@ rowErrors: 0
 **这是本轮同一形态的第四次**(见 B.11):动手之前没先查现有材料里是否已有答案。
 前三次查的对象是代码,这次是**我自己两小时前写的文档**。
 纪律补一条:**回读自己的台账,和查代码同等优先** —— 台账存在的意义就是不必重推。
+
+
+---
+
+## 附录 D — P4 结构性阻塞:新包没有验证通道(2026-08-04,实测)
+
+> 附录 C 提的是「五项 provenance 有三项记不了」。本附录提的是**更前置的一件**:
+> 就算三项都定义好了,**从 main 出的新包今天也没有地方跑验证**。
+
+### D.1 pg17 通道绑死冻结包,且不可覆盖
+
+`.github/workflows/stock-prep-s6a-postgres17-validation.yml`
+
+| 事实 | 证据 |
+|---|---|
+| 工作流名字自陈 | `Stock-prep S6-A PostgreSQL 17 validation **(frozen package)**` |
+| 只接受 dispatch,**无 inputs** | `on: workflow_dispatch:` 之下无 `inputs:` ⇒ pin 无法在触发时覆盖 |
+| 三个 pin 是硬编码 env | `:35` `PACKAGE_SHA256_PIN` / `:36` `SERVICE_RUNTIME_SHA_PIN` / `:37` `PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN` |
+| 用于 fail-closed 比对 | `:77` / `:99` / `:115`,不符即失败 |
+| 还带正负控 | `:145` 正控(正确包 SHA 必须匹配)/ `:149` 负控(错误包必须不匹配) |
+| 冻结制,**禁止重钉** | 注释原文:`FROZEN S6-A PINS (#4695). LAW — never recomputed, only verified against.` |
+
+**⇒ 这条通道不是"pin 过期了去更新一下",它按设计只验证那一个冻结包。**
+去改它就是 owner 明令禁止的**虚假 provenance 配对**。
+
+### D.2 而它验证的那个包是不可部署的
+
+冻结包 `packageSha256 = 0b80d927…` 已被证实**三处失效**:缺 074、缺 075、且自带 `Date` 投影缺陷
+(冻结件 `:167` 是 `ownedCanonical(raw)`,main 上 `:233` 已是 `ownedCanonical(projectExternalSystem(raw))`)。
+
+**所以现状是:唯一的 pg17 验证通道,正在验证一个不能部署的产物。**
+
+### D.3 当前 main 的两项可计算值(供 owner 决策用)
+
+| 字段 | 当前 main 的值 |
+|---|---|
+| service runtime sha(= main HEAD) | `543c9fbd2f9ad71dbd86834c452da32474898bd2` |
+| package provenance manifest digest | `c2e0735aecbf61a60f777d6a1e94b3b20f5efe8c5a891a2394dec351e6a6416e` |
+| 对照:pg17 钉住的旧值 | `b5f40b3c9d56c04d4ff9001678f2cd9603c1bb1665bfe27decc0411a0e0270e6` |
+
+两值不同,**这是正确的** —— 冻结包与当前 main 本就不是同一物。不一致不是缺陷,
+**把它们改成一致才是缺陷**。
+
+### D.4 因此 P4 的真实前置是四问不是三问
+
+在附录 C 三问之前,还有一问:
+
+> **新包用哪条验证通道?** 候选:(a) 新建一条与 pg17 同形但 pin 新包的工作流;
+> (b) 给 pg17 加 dispatch inputs 使 pin 可传入(**会削弱它现有的 fail-closed 性质**,需单独裁);
+> (c) 先不验证,仅出包并记录 provenance,验证留到实体机窗口。
+
+**我不替 owner 选。** (b) 直接触碰一条自称 LAW 的冻结判据;
+本轮已经在"另造更窄同类物"上栽过一次(B.10),不重复第二次。
+
+### D.5 本附录没做什么
+
+- **没有**改任何 pin;
+- **没有**新建验证工作流;
+- **没有** dispatch 任何工作流;
+- 本地出包尝试止步于 `apps/web/dist` 缺失(需完整前端构建),未继续 —— 因为在 D.4 答复前,
+  出一个无处验证、且 provenance 有两项指向未定义的包,不构成交付。
