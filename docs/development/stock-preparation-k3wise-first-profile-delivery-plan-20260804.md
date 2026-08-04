@@ -550,27 +550,27 @@ catalog 化 readPath、fixture GetDetail 三项**已重贴到 P2/P3**,不在 P1 
 |---|---|---|
 | 基线 | 有效 | 勘察基线 `7da5d9e55b0f`;复核 main `2a2a5eee4f`;六个被勘察根目录 diff 为空 |
 | P0 同步/评审 #4744 | 完成 | 业务补丁逐字节相同、pin 一致、CI 已跑 |
-| P0 合并 #4744 | **未完成** | `gh pr view 4744` → OPEN / mergeCommit=null;`git log origin/main --grep='(#4744)'` 空 @`2a2a5eee4f` |
+| P0 合并 #4744 | **MERGED** | `94d03fab5` @ origin/main(2026-08-04 复核) |
 | P0 #4736 标记 superseded | 标题已标,**状态仍 OPEN** | `gh pr view 4736` → OPEN,title 带 `[SUPERSEDED]` |
 | #4739 规模腿 | MERGED | `431d25699`;24999 双侧、斜率 3.457 ms/行、全量 POST 86.8s |
 | #4723 duplicate-key 422 | MERGED | `4784d8fb8` |
 | #4741 operator preflight | MERGED,**未进包** | `d76f6993a`;build/verify/pins 三处 grep 0 命中;runbook `:191` 引用 |
 | 迁移 074/075 | 已落 main,**零 provenance 覆盖** | `PINNED_MIGRATIONS:58-116` 止于 073;pins 向量 074/075 零命中 |
-| P1 catalog | 未开始 | 14 个非测试文件带 `/K3API/` 字面量,其间仅 2 条 require 边 |
+| P1 catalog | **步骤 1 MERGED**(镜像 tripwire);步骤 2 待 owner 裁 | `b6a39366a` (#4750);步骤 2 建议不做,理由见 #4750 |
 | P1 五个孤儿套件 | 未接线 | 磁盘 161 vs 链内 149;`k3-save-body-composer.parity` / `k3-wise-material-presets` / `k3-df-t1-target-payload-preview` / `read-smoke` / `read-smoke-contract` |
-| P1 FE K3 面通道 | 零必需检查覆盖 | `run-required-web-tests.sh:12-15` 隔离;不在 `integration-guard-run-web-specs.sh:14`;不在 `guarded-paths.mjs:30-143` |
+| P1 FE K3 面通道 | **已覆盖**(roster + `on.push.paths` 双侧) | #4750;CI 日志实证 `ok 4 - POSTURE: …` 于 integration-guard |
 | P2 读腿 | **已建且已门控** | 配置面 + 运行时 + list 闸门 + 备料 intake,均在 `package.json:9` → 必需 `integration-guard` |
 | P2 清洗腿 | 已建且已门控,但治理预览面被 PLM 完整批次硬耦合 | `confirm-writes.cjs:345,:349,:354`;`resolveCompleteBatchLines:275-315` |
 | P2 物料 diff 预览面 | **不存在** | `sync-run-plan.cjs:18` 明确排除 K3/ERP/SQL;`erp_material_master` 是 upsert 缓存(`erp-material-sync-persist.cjs:41-46`) |
-| P2 B4 绑定物 | **不存在,本轮产出** | 仓内唯一预设常量是 `k3wise.bom-list-by-material-id.v1`;FE 目录 `readSourceTemplateCatalog.ts:148-212` 是扩展起点 |
+| P2 K3→intake 映射 | **产品早已完整**;#4751 造的平行件已撤回 | 见附录 B.9/B.10。intake 别名表本就认 `FNumber/FItemID/FName/FModel`;撤回件 `6a38ac06e` (#4755) |
 | P2 canonical 命名 | **待 owner 裁** | 注册表出厂为空 `:570`;`stock_preparation.v1` 仅见设计文档 `gip-d0-…:233` |
 | P2 物料对账冻结合同 | 已存在、LATENT、默认 OFF | `material-reconciliation-templates.cjs:6-13,:19,:22-23`;测试在门控链内 |
 | P3 K3 Save | **已建、已接线、LIVE** | 适配器 `:1982/:2009/:2013`;`index.cjs:253`;e2e 套件在链内 |
 | P3 实时写闸门 | 仅一个布尔 | `pipeline-runner.cjs:642`;无 flag、无 env、无 host 白名单(grep 零命中) |
 | P3 行上限 | **不存在** | `sampleLimit` 被 `dryRun &&` 守住(`:594,:607`);默认 1000×100 |
-| P3 dry-run→apply 绑定 | **不存在** | `/run` 不收 token/confirm;C6 机制可复用(`external-write-dry-run.cjs:129-180,:793-801`) |
+| P3 dry-run→apply 绑定 | **在 C6 路径上已存在且内容绑定;K3 走的 pipeline 路径上不存在** | 见附录 B.1–B.3。C6 token 绑 `rowFingerprints`(`buildRevision:652` / apply 比对 `:799`);K3 侧姿态由 #4753 钉死(`bed3af38a`) |
 | P3 行级幂等账本 | **不存在,本轮外** | key 只用于贴标签(`:455-469`);`pipeline-runner.cjs:857-858` 自述重复写 |
-| P3 GetDetail 读回 | 原语在包内,**写后从未调用** | profile `:189-193`;结果全取自 Save 响应 `:2100-2111` |
+| P3 GetDetail 读回 | 客户端字段**已补**(#4752 `1c78a4632`);**写后调用仍未接** | `materialReadPath` 四声明点齐全;Save 响应仍是唯一结果来源 `:2100-2111` |
 | P3 Save-only 锁 | 已建,**opt-in**;预览元数据不一致 | `:385-408,:420-424,:1994-2002`;`previewUpsert:1664-1665` 缺 save-only 覆盖 |
 | P3 死信 replay | 第二实时写入口 | 路由 `http-routes.cjs:140` → handler `:4978-4991` → runner `:846-854` |
 | P4 出包/校验机制 | 已建;build 与 pg17 验证均 **dispatch-only** | build wf `:3-4`;pg17 wf `:24-25` |
@@ -850,3 +850,22 @@ rowErrors: 0
 
 **不建议**由我单方面把 `mappingVersion` 定义掉:它是**合同面**的字段,
 本轮已经在"另造更窄同类物"上栽过一次(B.10),不重复。
+
+### C.3 注记:C 的一半是重新推导了 §5 已记的东西
+
+写完附录 C 才回读 §5,发现「五字段 2 有归宿 / 3 缺失」**正文状态表里早就有**,
+连缺的三项名字都一样(`profileVersion` / `mappingVersion` / `clientHelperSha`)。
+§5 还多给了一条我没独立得出的信息:
+
+> 阶段依赖边:**P4-3 依赖 P1**(`profileVersion` / `mappingVersion` 的真源是 P1 catalog)
+
+**所以 C 的净增量只有两条**(它们确实是新的,§5 没有):
+
+1. `mappingVersion` **不只是"缺失",是名字被占用** —— `stock-preparation-mvp-generation.cjs:151/169`
+   里的同名字段指 PLM BOM 版本比对。照字面去仓里取值会**记录一个错的东西**,
+   这比"缺失"危险,因为它会成功。
+2. client helper SHA **是三个不是一个** —— sidecar 钉的是三个 helper 脚本,合成一个会掩盖单个变化。
+
+**这是本轮同一形态的第四次**(见 B.11):动手之前没先查现有材料里是否已有答案。
+前三次查的对象是代码,这次是**我自己两小时前写的文档**。
+纪律补一条:**回读自己的台账,和查代码同等优先** —— 台账存在的意义就是不必重推。
