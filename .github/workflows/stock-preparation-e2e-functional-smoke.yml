@@ -31,9 +31,15 @@ name: Stock Preparation E2E Functional Smoke
 #                         relation. Any part that cannot complete is reported NOT_RUN in the values-free
 #                         result block — never as PASS — and the job goes red if any check that DID run
 #                         failed.
-#   negative-control     — workflow_dispatch only, deliberately RED. Reuses the SAME assertion machinery
-#                         as functional-smoke and asserts a wrong expectation on purpose, proving the
+#   negative-control     — workflow_dispatch only. Reuses the SAME assertion machinery as
+#                         functional-smoke and asserts a wrong expectation on purpose, proving the
 #                         harness can genuinely fail (not a check "that did not happen").
+#                         The SCRIPT is expected to exit non-zero; this JOB is green exactly when the
+#                         discriminator is intact, and red when it is not. Non-zero exit alone is NOT
+#                         the criterion — a crash also exits non-zero — so the job additionally pins
+#                         observed==expected==RED, reachedAssertion, checksRecorded, and
+#                         redBecause==ASSERTION_FAILED_AS_INTENDED. Previously nothing asserted this
+#                         job's colour at all, so a neutered must() would have flipped it green unseen.
 
 on:
   pull_request:
@@ -203,7 +209,7 @@ jobs:
           retention-days: 14
 
   negative-control:
-    name: negative control (deliberately RED — proves the harness can fail)
+    name: negative control (green iff the harness can still genuinely fail)
     if: github.event_name == 'workflow_dispatch'
     needs: contract
     runs-on: ubuntu-latest
@@ -262,9 +268,63 @@ jobs:
             echo "E2E_INTEGRATION_ENCRYPTION_KEY=$enc_key"
           } >> "$GITHUB_ENV"
 
-      - name: Run negative control (this step is EXPECTED to fail)
+      - name: Run negative control and assert it went RED for the RIGHT reason
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
           E2E_JWT_SECRET: ${{ env.E2E_JWT_SECRET }}
           E2E_INTEGRATION_ENCRYPTION_KEY: ${{ env.E2E_INTEGRATION_ENCRYPTION_KEY }}
-        run: node scripts/ops/stock-preparation-e2e-negative-control.mjs
+        run: |
+          # `set +e` is deliberate and load-bearing. GitHub runs `run:` under `bash -e`, and the script
+          # below is EXPECTED to exit non-zero — under `-e` the step dies on that pipeline before a single
+          # assertion runs, which is exactly how the first attempt at this gate failed (run 30870041141:
+          # the script emitted all-correct fields, no FATAL was printed, step still exited 1).
+          # `-e` must therefore be OFF here; every failure path below is explicit and ends at `exit "$fail"`.
+          # Do not "tidy" this back to `set -e`.
+          set +e
+          set -u
+          out_file="$RUNNER_TEMP/negative-control.out"
+          node scripts/ops/stock-preparation-e2e-negative-control.mjs | tee "$out_file"
+          script_exit=${PIPESTATUS[0]}
+
+          # Read a field, or the sentinel <ABSENT>. An absent field must FAIL, never silently pass:
+          # a check that could not be evaluated is not a check that passed.
+          field() {
+            local v
+            v=$(grep -E "^$1=" "$out_file" | tail -1 | cut -d= -f2-)
+            if [[ -z "$v" ]]; then echo "<ABSENT>"; else echo "$v"; fi
+          }
+          observed=$(field negativeControlObservedConclusion)
+          expected=$(field expectedConclusion)
+          reached=$(field negativeControlReachedAssertion)
+          recorded=$(field negativeControlChecksRecorded)
+          because=$(field negativeControlRedBecause)
+
+          fail=0
+          note() { echo "FATAL: $1" >&2; fail=1; }
+
+          # 1. The script must have exited non-zero. Necessary, NOT sufficient — a crash also does this,
+          #    which is exactly why the remaining conditions exist.
+          [[ "$script_exit" -ne 0 ]] || note "negative control exited 0 — the harness can no longer fail (a neutered must() does this)"
+          # 2. Observed conclusion must be RED and must equal what the script itself declared it expects.
+          [[ "$observed" == "RED" ]]   || note "observedConclusion=$observed (want RED)"
+          [[ "$expected" == "RED" ]]   || note "expectedConclusion=$expected (want RED)"
+          [[ "$observed" == "$expected" ]] || note "observed/expected diverged: $observed vs $expected"
+          # 3. The assertion must actually have been reached, and exactly one must() call recorded.
+          #    Guards the crash path (reached=false) and the deleted-assertion path (recorded=0).
+          [[ "$reached" == "true" ]]   || note "reachedAssertion=$reached — the script died before asserting; a crash is not a working discriminator"
+          [[ "$recorded" == "1" ]]     || note "checksRecorded=$recorded (want exactly 1)"
+          # 4. RED for the RIGHT reason. HARNESS_ERROR is a crash; GATE_BROKEN_PROBE_RETURNED_200 is a
+          #    live product bug that must surface as a product bug, not be absorbed into "harness can fail".
+          [[ "$because" == "ASSERTION_FAILED_AS_INTENDED" ]] || note "redBecause=$because (want ASSERTION_FAILED_AS_INTENDED)"
+
+          {
+            echo "negativeControlScriptExit=${script_exit}"
+            echo "negativeControlObservedConclusion=${observed}"
+            echo "negativeControlExpectedConclusion=${expected}"
+            echo "negativeControlReachedAssertion=${reached}"
+            echo "negativeControlChecksRecorded=${recorded}"
+            echo "negativeControlRedBecause=${because}"
+            echo "negativeControlDiscriminatorIntact=$([[ $fail -eq 0 ]] && echo PASS || echo FAIL)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$fail"
