@@ -1280,6 +1280,8 @@ paths:
                   type: array
                   deprecated: true
                   items: { type: integer }
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId: { type: string }
               required: [name]
       responses:
@@ -1297,9 +1299,11 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '422':
           description: >-
-            Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
-            (invalid segment array) or ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
-            (segments combined with legacy start/end fields).
+            Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
+            (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
+            (segments combined with legacy start/end fields), or
+            ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (discriminated flex policy
+            rejection, including multi-segment flex).
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -1364,6 +1368,8 @@ paths:
                 workingDays:
                   type: array
                   items: { type: integer }
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId: { type: string }
       responses:
         '200':

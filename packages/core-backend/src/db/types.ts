@@ -1173,6 +1173,13 @@ export interface AttendanceShiftsTable {
   rounding_minutes: number
   working_days: JSONColumnType<number[] | null>
   is_overnight: Generated<boolean>
+  /** W5: strict (default) | flex_required_duration. Discriminated flex columns below. */
+  flex_mode: Generated<'strict' | 'flex_required_duration'>
+  flex_required_minutes: number | null
+  flex_arrival_window_before_minutes: number | null
+  flex_arrival_window_after_minutes: number | null
+  flex_core_start_time: string | null
+  flex_core_end_time: string | null
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

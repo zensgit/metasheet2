@@ -2320,10 +2320,68 @@ components:
         plannedMinutes:
           type: integer
           description: >-
-            Sum of per-segment planned minutes; breaks between segments are
-            never counted.
+            Sum of per-segment planned minutes for strict shifts (breaks between
+            segments are never counted). For flex_required_duration this is the
+            required duration in minutes.
+        flexPolicy:
+          $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
+        flexEligible:
+          type: boolean
+          description: >-
+            True only when the shift has exactly one segment. Multi-segment flex
+            is rejected in v1 (OD-4556-3).
         capabilities:
           $ref: '#/components/schemas/AttendanceShiftCapabilities'
+    AttendanceShiftFlexPolicy:
+      description: >-
+        W5 flexible attendance policy (design lock §3.3). Discriminated by mode.
+        flex_required_duration is valid only for a one-segment shift;
+        multi-segment flex is rejected with a typed 422 and zero writes. Absent
+        flexPolicy on create defaults to strict.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - mode
+          properties:
+            mode:
+              type: string
+              enum:
+                - strict
+        - type: object
+          additionalProperties: false
+          required:
+            - mode
+            - requiredMinutes
+            - arrivalWindowBeforeMinutes
+            - arrivalWindowAfterMinutes
+          properties:
+            mode:
+              type: string
+              enum:
+                - flex_required_duration
+            requiredMinutes:
+              type: integer
+              minimum: 1
+              maximum: 1440
+            arrivalWindowBeforeMinutes:
+              type: integer
+              minimum: 0
+            arrivalWindowAfterMinutes:
+              type: integer
+              minimum: 0
+            coreStartTime:
+              type: string
+              nullable: true
+              description: >-
+                Optional same-day core-hours start (HH:MM) in the shift
+                timezone.
+              pattern: ^(?:[01]\d|2[0-3]):[0-5]\d$
+            coreEndTime:
+              type: string
+              nullable: true
+              description: Optional same-day core-hours end (HH:MM) in the shift timezone.
+              pattern: ^(?:[01]\d|2[0-3]):[0-5]\d$
     AttendanceShiftSegment:
       type: object
       properties:
@@ -8486,6 +8544,8 @@ paths:
                   deprecated: true
                   items:
                     type: integer
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId:
                   type: string
               required:
@@ -8510,10 +8570,11 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '422':
           description: >-
-            Typed segment rejection with zero writes:
-            ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array) or
-            ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with
-            legacy start/end fields).
+            Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
+            (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
+            (segments combined with legacy start/end fields), or
+            ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (discriminated flex policy
+            rejection, including multi-segment flex).
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -8596,6 +8657,8 @@ paths:
                   type: array
                   items:
                     type: integer
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId:
                   type: string
       responses:
