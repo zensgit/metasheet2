@@ -5,9 +5,21 @@ name: Stock Preparation E2E Functional Smoke
 # is functional testing on synthetic data ONLY. It is NOT the #4695 controlled acceptance (one real
 # customer, the entity machine, an S6-B owner-gated single flag-on window — see
 # docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md) and does NOT substitute for
-# it: no real-customer claim, no scale claim, no external-write claim, no rollout claim is established
-# here. This lane never deploys, never arms, and never touches any #4695 frozen input or the deployed
-# entity host.
+# it: no real-customer claim, no external-write claim, no rollout claim is established here. This lane
+# never deploys, never arms, and never touches any #4695 frozen input or the deployed entity host.
+#
+# SCALE (R9, gated by the `s6a_row_count` input below): at the default input (3, or a dispatch with no
+# input at all), this lane is UNCHANGED from before R9 — one 3-row S6-A walk, no scale legs, no scale
+# claim. Dispatching with `s6a_row_count` set to anything else ALSO runs a mid-tier calibration walk at
+# that row count (full capture -> private ingestion -> generation kernel -> apply -> activation -> replay,
+# the SAME idempotency assertions as the 3-row walk, plus one oversized-payload row proving the fixture's
+# nvarchar(max) column is load-bearing) and a rejection arm at the product's declared bound (24999) + 1,
+# which MUST be refused. What this DOES establish when scale is requested: the 24999-row bound is refused
+# end-to-end (not just in the pure in-process decoder unit test that was, until R9, the only place it was
+# ever exercised), and a measured per-row slope from two REAL data points (3 rows, N rows) PREDICTS the
+# cost of a full 24999-row run. What it does NOT establish, even when scale is requested: an actual
+# completed run AT 24999 rows (the predicted cost is an extrapolation, not a measurement), a real-customer
+# claim, or a rollout claim.
 #
 # Dispatch-only. Postgres and SQL Server are ephemeral, first-party GitHub Actions service containers
 # seeded ONLY with synthetic fixture rows generated inside this job. The S6-A feature flag
@@ -26,11 +38,12 @@ name: Stock Preparation E2E Functional Smoke
 #                         sealed-export-s2/s5 workflows already use in this repo.
 #   functional-smoke     — the real lane, workflow_dispatch only: flag-OFF arm, exact-match arm
 #                         ('1'/'yes' must NOT enable it), the EXISTING T4 extended-smoke chain reproduced
-#                         against this local server, and a best-effort real S6-A flag-ON run (capture ->
+#                         against this local server, a best-effort real S6-A flag-ON run (capture ->
 #                         ingestion -> generation kernel -> apply) over a first-party ephemeral SQL Server
-#                         relation. Any part that cannot complete is reported NOT_RUN in the values-free
-#                         result block — never as PASS — and the job goes red if any check that DID run
-#                         failed.
+#                         relation, and — only when `s6a_row_count` requests it — the mid-tier + rejection
+#                         scale legs described above. Any part that cannot complete is reported NOT_RUN in
+#                         the values-free result block — never as PASS — and the job goes red if any check
+#                         that DID run failed.
 #   negative-control     — workflow_dispatch only. Reuses the SAME assertion machinery as
 #                         functional-smoke and asserts a wrong expectation on purpose, proving the
 #                         harness can genuinely fail (not a check "that did not happen").
@@ -49,6 +62,15 @@ on:
       - 'scripts/ops/stock-preparation-e2e-negative-control.mjs'
       - 'scripts/ops/stock-preparation-e2e-provision-postgres-roles-and-migrate.mjs'
   workflow_dispatch:
+    inputs:
+      s6a_row_count:
+        description: >-
+          S6-A fixture row count. Default 3 = today's behaviour, no scale legs. Any other value (e.g.
+          2500) ALSO runs a mid-tier calibration walk at that row count plus a fixed rejection arm at the
+          product's declared bound (24999) + 1 — see the SCALE paragraph above.
+        required: false
+        default: '3'
+        type: string
 
 permissions:
   contents: read
@@ -76,7 +98,13 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: contract
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45m was sized for the pre-R9 lane (flag arms + existing chain + one 3-row S6-A walk). A scale
+    # dispatch (s6a_row_count != 3) additionally runs a mid-tier calibration walk (its own SQL Server
+    # relation prep, external-system registration, provisioning, and flag-ON server restart) plus a
+    # rejection arm whose capture reads the WHOLE bound+1-row table before refusing — comfortable headroom
+    # for that, not a claim that it always needs this long; a default (s6a_row_count=3) dispatch finishes
+    # in the same time it always did.
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:16
@@ -182,6 +210,9 @@ jobs:
           MSSQL_PORT: '1433'
           MSSQL_USERNAME: sa
           MSSQL_PASSWORD: 'E2eFunc!Probe2026'
+          # R9: default '3' reproduces exactly the pre-R9 single 3-row walk (no scale legs). See the
+          # workflow-level SCALE comment and the `s6a_row_count` input description above.
+          E2E_S6A_ROW_COUNT: ${{ github.event.inputs.s6a_row_count || '3' }}
         run: node scripts/ops/stock-preparation-e2e-functional-smoke.mjs
 
       - name: Write step summary
@@ -190,7 +221,9 @@ jobs:
           echo "## Stock Preparation E2E Functional Smoke" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Functional testing on synthetic data only. Does NOT substitute for the #4695 controlled" >> "$GITHUB_STEP_SUMMARY"
-          echo "acceptance and establishes no real-customer, scale, external-write, or rollout claim." >> "$GITHUB_STEP_SUMMARY"
+          echo "acceptance and establishes no real-customer, external-write, or rollout claim. Scale" >> "$GITHUB_STEP_SUMMARY"
+          echo "evidence (s6aMidTier*/s6aRejection* below) is present only when this dispatch's" >> "$GITHUB_STEP_SUMMARY"
+          echo "s6a_row_count input was set to something other than the default 3 — see s6aScaleRequested." >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
           cat output/stock-preparation-e2e-functional-smoke/summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
