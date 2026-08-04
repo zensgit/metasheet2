@@ -52,7 +52,7 @@ Attendance product runtime was not edited.
 Without Windows-host product evidence, the runner reports:
 
 - PQA-01..PQA-10 = `BLOCKED`
-- `residue = 0`
+- `residue = null` (not measured)
 - `deploymentAuthorized = false`
 
 It never invents product PASS. Old package claims from issue #4629
@@ -98,15 +98,20 @@ Package dry build requires prebuilt `apps/web/dist` and
 `packages/core-backend/dist` (or a CI build job). Do not install dependencies
 or deploy as part of this preparation note.
 
-## Windows-host-only gaps
+## Windows CI evidence and remaining gaps
 
-The following remain Windows-host / CI-windows gaps and are intentionally not
-claimed here:
+Workflow run
+[`30893406976`](https://github.com/zensgit/metasheet2/actions/runs/30893406976)
+completed both jobs successfully on the pre-hardening tooling head
+`ac10e39416621d0c300090cb73dd8b0e7e3c566b`. It proves the full package build,
+the `windows-2025` preflight/start/health/bootstrap/stop lifecycle, a fresh
+isolated PostgreSQL 17 migration plus second pass, and PM2 cleanup after
+deliberate gateway-start failure. This is package/runtime lifecycle evidence
+only; a fresh run on the final PR head remains part of the exact-head gate and
+is recorded on the PR rather than back-editing this document after the run.
 
-- Full package build with real web/backend dist on this workstation
-- `windows-2025` runner lifecycle (preflight/start/health/bootstrap/stop)
-- Fresh PostgreSQL 17 isolated DB migrate + second migration pass
-- PM2 residue proof after deliberate gateway failure
+The following remain intentionally unclaimed:
+
 - Product PQA-01..10 synthetic execution and evidence capture
 - Any LAN ingress, staging, or customer-path validation
 

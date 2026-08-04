@@ -11,7 +11,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const DEFAULT_EXPECTED_SHA = '676ed2433813139216d77685021a5b5c1acdb235'
 const ALLOWED_STATUSES = new Set(['PASS', 'BLOCKED', 'FAIL'])
 
 function parseArgs(argv) {
@@ -279,14 +278,32 @@ export function runWindowsNativeQaMatrix(options = {}) {
   const matrix = readJson(matrixPath)
   const pin = readJson(pinPath)
   const packageSha = resolvePackageSourceSha(rootDir)
-  const expectedSourceSha = normalizeSha(
-    options.expectedSourceSha ||
-      process.env.ATTENDANCE_WINDOWS_NATIVE_EXPECTED_SOURCE_SHA ||
-      pin.expectedSourceSha ||
-      matrix.expectedSourceSha ||
-      DEFAULT_EXPECTED_SHA,
-    'expectedSourceSha',
+  const pinnedSourceSha = normalizeSha(
+    pin.expectedSourceSha,
+    'pin.expectedSourceSha',
   )
+  const matrixSourceSha = normalizeSha(
+    matrix.expectedSourceSha,
+    'matrix.expectedSourceSha',
+  )
+  if (matrixSourceSha !== pinnedSourceSha) {
+    throw new Error(
+      `Risk matrix expectedSourceSha must match the QA pin: matrix=${matrixSourceSha} pin=${pinnedSourceSha}`,
+    )
+  }
+  const expectedSourceOverride =
+    options.expectedSourceSha ||
+    process.env.ATTENDANCE_WINDOWS_NATIVE_EXPECTED_SOURCE_SHA ||
+    ''
+  if (expectedSourceOverride) {
+    const normalizedOverride = normalizeSha(expectedSourceOverride, 'expectedSourceSha override')
+    if (normalizedOverride !== pinnedSourceSha) {
+      throw new Error(
+        `Expected source SHA override must match the QA pin: override=${normalizedOverride} pin=${pinnedSourceSha}`,
+      )
+    }
+  }
+  const expectedSourceSha = pinnedSourceSha
 
   if (pin.deploymentAuthorized !== false || matrix.deploymentAuthorized !== false) {
     throw new Error('QA pin/matrix must explicitly keep deploymentAuthorized=false (Draft/HOLD)')
@@ -333,14 +350,14 @@ export function runWindowsNativeQaMatrix(options = {}) {
   const counts = { PASS: 0, BLOCKED: 0, FAIL: 0 }
   for (const item of cases) counts[item.status] += 1
 
-  let residue = 0
+  let residue = null
   if (evidence.residue != null) {
     residue = Number(evidence.residue)
     if (!Number.isFinite(residue)) {
       throw new Error(`Evidence residue must be numeric; got: ${evidence.residue}`)
     }
   }
-  if (residue !== 0) {
+  if (residue !== null && residue !== 0) {
     throw new Error(`Residue check failed: residue=${residue} (required 0)`)
   }
 
@@ -372,7 +389,7 @@ function printReport(report, asJson) {
   console.log('[attendance-windows-native-qa-runner] DRAFT/HOLD risk matrix report')
   console.log(`  campaign: ${report.campaign}`)
   console.log(`  sourceSha: ${report.sourceSha}`)
-  console.log(`  residue: ${report.residue}`)
+  console.log(`  residue: ${report.residue ?? 'not measured'}`)
   console.log(
     `  counts: PASS=${report.counts.PASS} BLOCKED=${report.counts.BLOCKED} FAIL=${report.counts.FAIL}`,
   )

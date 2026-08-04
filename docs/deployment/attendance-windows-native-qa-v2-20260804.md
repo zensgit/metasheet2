@@ -115,7 +115,7 @@ Never reuse a customer or production password.
 ## 7. Risk matrix runner
 
 The matrix is runnable without inventing product PASS. Without host evidence it
-honestly reports `BLOCKED` for PQA-01..10 with `residue=0`:
+honestly reports `BLOCKED` for PQA-01..10 with `residue=null` (not measured):
 
 ```powershell
 node .\scripts\ops\attendance-windows-native-qa-runner.mjs --root .

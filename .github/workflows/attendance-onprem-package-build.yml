@@ -188,6 +188,8 @@ jobs:
   verify-windows-native:
     if: ${{ inputs.run_windows_native_qa_v2 }}
     needs: build-package
+    permissions:
+      contents: read
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
@@ -226,6 +228,23 @@ jobs:
             Select-Object -Last 1
           if ($null -eq $zip) {
             throw 'Windows ZIP package is missing'
+          }
+          $checksumPath = "$($zip.FullName).sha256"
+          if (-not (Test-Path -LiteralPath $checksumPath)) {
+            throw "Windows ZIP checksum is missing: $checksumPath"
+          }
+          $checksumLine = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
+          if ($checksumLine -notmatch '^([0-9a-fA-F]{64})\s+\*?(.+)$') {
+            throw "Windows ZIP checksum has an invalid format: $checksumPath"
+          }
+          $expectedHash = $Matches[1].ToLowerInvariant()
+          $expectedName = [System.IO.Path]::GetFileName($Matches[2].Trim())
+          if ($expectedName -ne $zip.Name) {
+            throw "Windows ZIP checksum names $expectedName, expected $($zip.Name)"
+          }
+          $actualHash = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Windows ZIP checksum mismatch: actual=$actualHash expected=$expectedHash"
           }
           $extract = Join-Path $env:RUNNER_TEMP 'attendance windows native package'
           Expand-Archive -LiteralPath $zip.FullName -DestinationPath $extract

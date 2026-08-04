@@ -38,13 +38,13 @@ function seedPackageRoot(root, { sourceSha = PINNED_SHA } = {}) {
   })
 }
 
-test('runner reports honest BLOCKED for PQA-01..10 without host evidence and residue=0', () => {
+test('runner reports honest BLOCKED for PQA-01..10 without inventing residue evidence', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'win-qa-runner-'))
   try {
     seedPackageRoot(root)
     const report = runWindowsNativeQaMatrix({ root })
     assert.equal(report.sourceSha, PINNED_SHA)
-    assert.equal(report.residue, 0)
+    assert.equal(report.residue, null)
     assert.equal(report.deploymentAuthorized, false)
     assert.equal(report.status, 'DRAFT_HOLD')
     assert.equal(report.counts.PASS, 0)
@@ -68,6 +68,22 @@ test('runner reports honest BLOCKED for PQA-01..10 without host evidence and res
     const pqa10 = report.cases.find((item) => item.id === 'PQA-10')
     assert.equal(pqa10.status, 'BLOCKED')
     assert.match(pqa10.reason, /Do not invent PASS|Windows-host synthetic evidence/i)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('runner rejects an expected source SHA override that differs from the QA pin', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'win-qa-runner-'))
+  try {
+    seedPackageRoot(root)
+    assert.throws(
+      () => runWindowsNativeQaMatrix({
+        root,
+        expectedSourceSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      }),
+      /override must match the QA pin/,
+    )
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
