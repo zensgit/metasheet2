@@ -63,7 +63,7 @@ export const HELPER_BASENAME_ALLOWLIST = Object.freeze([
 // repo-parity test fails loudly otherwise) — R5 (route-coverage 22/33 -> 33/33) re-pinned the
 // extended smoke's digest below; the W6 sibling is untouched by R5 and keeps its prior digest.
 export const HELPER_CONTENT_SHA256 = Object.freeze({
-  'stock-preparation-prep-line-extended-smoke.mjs': 'e6970a867ca9778e986022f16f34c0c1af48ceb0c4d6b8b94bea46e8a50d9317',
+  'stock-preparation-prep-line-extended-smoke.mjs': '8b9ce94fc810fb4627592b4793a4e36cb8e0a2ae95b6f107d18d246a60c845a6',
   'stock-preparation-mvp-postdeploy-smoke.mjs': 'e5265a2a8052ddc34866438a1ee3356b5d2aa1a106c8199f5e2fbbe4f2614df4',
 })
 export const HELPER_SIBLING_REQUIREMENTS = Object.freeze({

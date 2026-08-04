@@ -45,7 +45,7 @@ $script:Pm2EnvironmentAllowlist = @(
 # R5 (route-coverage 22/33 -> 33/33) re-pinned the extended smoke's digest below; the other two
 # frozen helpers are untouched by R5 and keep their prior digests.
 $script:FrozenHelperSha256 = [ordered]@{
-  'stock-preparation-prep-line-extended-smoke.mjs' = 'e6970a867ca9778e986022f16f34c0c1af48ceb0c4d6b8b94bea46e8a50d9317'
+  'stock-preparation-prep-line-extended-smoke.mjs' = '8b9ce94fc810fb4627592b4793a4e36cb8e0a2ae95b6f107d18d246a60c845a6'
   'stock-preparation-mvp-postdeploy-smoke.mjs' = 'e5265a2a8052ddc34866438a1ee3356b5d2aa1a106c8199f5e2fbbe4f2614df4'
   'stock-preparation-rca-window-pm2-sample.mjs' = '09cc76024bd98fd4ce86cfa834eea3b94680482d0d0970600da008a19a6731ec'
 }
