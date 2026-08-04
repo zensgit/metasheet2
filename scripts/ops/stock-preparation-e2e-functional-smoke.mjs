@@ -1062,6 +1062,36 @@ async function reportAdapterTimestampRuntimeType(systemId) {
   }
 }
 
+// Values-free failure-class probe. One boolean per FIRST-PARTY error class name we ship, read from the
+// server log this harness already captures. Never emits a message, a value, a path, or anything outside
+// this closed list — the list IS the contract.
+const MULTITABLE_ERROR_CLASSES = Object.freeze([
+  'MultitableUnitOfWorkUnavailableError',
+  'MultitableUnitOfWorkScopeError',
+  'MultitableProjectNamespaceError',
+  'StockPreparationSyncRunPersistError',
+  'StockPreparationRuntimePersistFailure',
+  'TypeError',
+])
+
+function probeServerLogForErrorClass(serverLabel, keyPrefix) {
+  const logPath = path.join(OUT_DIR, `server-${serverLabel}.log`)
+  let text = ''
+  try {
+    text = fs.readFileSync(logPath, 'utf8')
+  } catch {
+    // "Could not look" must not read as "found nothing" — a check that did not run is not a check that
+    // passed. This lane has shipped that confusion before.
+    S[`${keyPrefix}ErrorClassProbe`] = 'LOG_UNREADABLE'
+    return
+  }
+  const hits = MULTITABLE_ERROR_CLASSES.filter((name) => text.includes(name))
+  S[`${keyPrefix}ErrorClassProbe`] = hits.length > 0 ? 'MATCHED' : 'NO_CLASS_MATCHED'
+  for (const name of MULTITABLE_ERROR_CLASSES) {
+    S[`${keyPrefix}ErrClass_${name}`] = String(text.includes(name))
+  }
+}
+
 // Diagnostic-only counterpart for the first-run FAILURE path — see the call site's comment. Never
 // asserts (no must()); purely reports closed tokens/booleans into the values-free evidence. `keyPrefix`/
 // `tenantId` default to 's6a'/TENANT_ID (the ONE existing call site is unaffected); the scale legs pass
@@ -2156,6 +2186,17 @@ async function runS6AMidTierScaleWalk() {
     S[`${keyPrefix}FirstRun`] = firstOk ? 'PASS' : 'FAIL'
     if (!firstOk) {
       await assertS6ARunDatabaseObservableOnFailure(operationId, keyPrefix, tenantId)
+      // The bisect localised the throw to the multitable write layer but did NOT name it. All four
+      // classes that layer raises (plugin-scope.ts) are non-first-party from the persist module's view —
+      // which is exactly why identity was lost before #4744: structural, not incidental. WHICH of them
+      // decides whether this is a scope/namespace misconfiguration of this arm's dedicated tenant or a
+      // missing host hook, and those need opposite fixes.
+      //
+      // Needs NO product change. This harness already writes the server's stdout/stderr to
+      // OUT_DIR/server-<label>.log and already asserts on substrings of it (the flag-ON arm's EADDRINUSE
+      // check). Reporting one BOOLEAN per first-party CLASS NAME is values-free by construction: a closed
+      // list of identifiers we ship — never a message, never a value, never a path.
+      probeServerLogForErrorClass(`arm-${label}`, keyPrefix)
       S[`${keyPrefix}DatabaseObservable`] = 'NOT_RUN'
       S[`${keyPrefix}ReplayRun`] = 'NOT_RUN'
       S[`${keyPrefix}Run`] = 'NOT_RUN'
