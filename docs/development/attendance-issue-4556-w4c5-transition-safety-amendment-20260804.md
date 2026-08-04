@@ -19,14 +19,14 @@ operator transition boundary:
 1. `packages/core-backend/src/attendance/w4c3a-rollout-control.ts:36-42`
    accepts every rollout state as a target. The command rejects only a no-op;
    it does not enforce the seven legal source/target pairs in the lock.
-2. `:261-286` silently creates a missing org row as
+2. `:261-288` silently creates a missing org row as
    `scope='synthetic_staging'` without proving that the org is the exact named
    allowlisted synthetic org.
-3. `:332-363` locks source operation rows, jobs, batches, items, targets, and
+3. `:332-370` locks source operation rows, jobs, batches, items, targets, and
    records, but it does not inspect request snapshots, legacy request facts,
    unresolved ingress reviews, all incomplete operations, or the full
    retryable-job posture matrix required by the lock.
-4. `:474-509` checks only legacy batch closure/preimage before updating state.
+4. `:474-505` checks only legacy batch closure/preimage before updating state.
    Its rollout event stores empty evidence and the normalized `correlationId`
    is not persisted.
 5. The existing tests prove closure/transition serialization and legacy-batch
