@@ -323,7 +323,6 @@ export const ALWAYS_PREP_LINE_ROUTES = Object.freeze([
   `${API}/target/ensure`,
   `${API}/sandbox-target/readiness`,
   `${API}/sandbox-target/ensure`,
-  `${API}/options/sync`,
   `${API}/snapshot-batches`,
   `${API}/snapshot-batches/:id/diff`,
   `${API}/snapshot-batches/:id/diff/rows`,
@@ -334,6 +333,8 @@ export const ALWAYS_PREP_LINE_ROUTES = Object.freeze([
 export const OPTIONAL_PREP_LINE_ROUTES = Object.freeze([
   `${API}/mvp/source-runs/plm-bom`,
   `${API}/mvp/source-runs/erp-materials`,
+  // DESTRUCTIVE — opt-in only, see --allow-canonical-option-overwrite below.
+  `${API}/options/sync`,
 ])
 
 export const PREP_LINE_ROUTE_UNIVERSE = new Set([...ALWAYS_PREP_LINE_ROUTES, ...OPTIONAL_PREP_LINE_ROUTES])
@@ -488,7 +489,7 @@ export function formatSummaryBlock(summary) {
   return lines.join('\n')
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = {
     baseUrl: '',
     tenantId: '',
@@ -510,6 +511,7 @@ function parseArgs(argv) {
     else if (flag === '--out-dir') args.outDir = next()
     else if (flag === '--approved-source-config-id') args.approvedSourceConfigId = next()
     else if (flag === '--approved-erp-source-config-id') args.approvedErpSourceConfigId = next()
+    else if (flag === '--allow-canonical-option-overwrite') args.allowCanonicalOptionOverwrite = true
     else throw new Error(`unknown flag: ${flag}`)
   }
   if (!args.baseUrl) throw new Error('--base-url is required')
@@ -646,13 +648,38 @@ async function main() {
     sandboxEnsure2.body?.data?.mode !== 'sandbox_create',
     `http1=${sandboxEnsure1.status} mode1=${S.sandboxEnsure1Mode} http2=${sandboxEnsure2.status} mode2=${S.sandboxEnsure2Mode}`)
 
-  const targetOptionsSync = await req(`${API}/options/sync${scope()}`, {
-    method: 'POST', body: { optionSets: buildTargetOptionSetsFixture() }, accept: [200], label: 'target-options-sync',
-  })
-  S.targetOptionsSyncHttp = targetOptionsSync.status
-  must('R5 B3 options/sync (CANONICAL, non-MVP — distinct from mvp/options/sync below) -> 200',
-    targetOptionsSync.ok && targetOptionsSync.body?.data?.ok === true,
-    `http=${targetOptionsSync.status}`)
+  // ── R5 B3 options/sync — OPT-IN ONLY, and deliberately so ────────────────────────────────────
+  // This route is DESTRUCTIVE on a SHARED CURATED surface and there is no way to aim it elsewhere:
+  //   * the request face accepts only { tenantId, workspaceId, projectId, optionSets }
+  //     (http-routes.cjs stockPreparationOptionSyncInput; the GHSA-m6qv-2rpf-q7mh hardening
+  //     deliberately strips every steering vector, INCLUDING `template`), so the handler always falls
+  //     through to STOCK_PREPARATION_MAIN_TABLE_TEMPLATE — the CANONICAL table
+  //     (stock-preparation-option-sync.cjs default `input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE`);
+  //   * the write is a documented FULL OVERWRITE — field-option-sync-runtime.cjs:
+  //     "replace + update_from_source = full overwrite, no read, no merge";
+  //   * a first-party producer of these exact keys ships in the product: the admin Integration
+  //     Workbench posts operator-authored option sets to this same route, so the values being
+  //     overwritten are curated, not incidental;
+  //   * there is NO read face for current options (readCurrentOptions is internal to the runtime and
+  //     used only for non-default modes), so this smoke CANNOT read-then-restore. Section 10 retires
+  //     every other tenant-level asset this run mutates; this one is not restorable at all.
+  // And the blast radius is not hypothetical: this script's own workflow defaults METASHEET_BASE_URL to
+  // the shared deployed host, so an always-armed version would silently flatten curated option sets
+  // there on any dispatch that did not override base_url.
+  // Hence: opt-in. The operator passing --allow-canonical-option-overwrite is accepting the overwrite.
+  if (args.allowCanonicalOptionOverwrite) {
+    const targetOptionsSync = await req(`${API}/options/sync${scope()}`, {
+      method: 'POST', body: { optionSets: buildTargetOptionSetsFixture() }, accept: [200], label: 'target-options-sync',
+    })
+    S.targetOptionsSyncHttp = targetOptionsSync.status
+    must('R5 B3 options/sync (CANONICAL, non-MVP, opt-in destructive) -> 200',
+      targetOptionsSync.ok && targetOptionsSync.body?.data?.ok === true,
+      `http=${targetOptionsSync.status}`)
+  } else {
+    // NOT_RUN, never PASS — a route that was deliberately not exercised must not read as covered.
+    S.targetOptionsSyncHttp = 'NOT_RUN_OPT_IN_REQUIRED'
+    process.stderr.write('[t4-smoke] R5 B3 options/sync NOT_RUN: destructive canonical overwrite; pass --allow-canonical-option-overwrite to exercise it\n')
+  }
 
   const ensure = await req(`${API}/mvp/ensure${scope()}`, { method: 'POST', body: {}, accept: [200, 201], label: 'mvp-ensure' })
   S.ensureHttp = ensure.status
@@ -1154,7 +1181,8 @@ async function main() {
   const exercisedRoutes = [...touchedRouteTemplates].filter((route) => PREP_LINE_ROUTE_UNIVERSE.has(route))
   S.prepLineRoutesExercised = exercisedRoutes.length
   S.prepLineRoutesExpected = ALWAYS_PREP_LINE_ROUTES.length +
-    (args.approvedSourceConfigId ? 1 : 0) + (args.approvedErpSourceConfigId ? 1 : 0)
+    (args.approvedSourceConfigId ? 1 : 0) + (args.approvedErpSourceConfigId ? 1 : 0) +
+    (args.allowCanonicalOptionOverwrite ? 1 : 0)
   must("R5 prep-line route coverage: routes exercised this run === expected for this run's opt-in flags",
     S.prepLineRoutesExercised === S.prepLineRoutesExpected,
     `exercised=${S.prepLineRoutesExercised} expected=${S.prepLineRoutesExpected}`)

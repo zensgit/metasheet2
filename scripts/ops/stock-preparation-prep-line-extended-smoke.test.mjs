@@ -28,6 +28,7 @@ import {
   runApprovedSourcePrelude,
   safeCode,
   safeT4Mode,
+  parseArgs,
 } from './stock-preparation-prep-line-extended-smoke.mjs'
 
 import {
@@ -408,9 +409,9 @@ test('R5 normalizePrepLineRouteTemplate: strips the query string and normalizes 
   )
 })
 
-test('R5 route roster: 31 always + 2 optional = 33, no duplicates, and every entry is a REAL registered route (or the auth status route)', () => {
-  assert.equal(ALWAYS_PREP_LINE_ROUTES.length, 31)
-  assert.equal(OPTIONAL_PREP_LINE_ROUTES.length, 2)
+test('R5 route roster: 30 always + 3 optional = 33, no duplicates, and every entry is a REAL registered route (or the auth status route)', () => {
+  assert.equal(ALWAYS_PREP_LINE_ROUTES.length, 30)
+  assert.equal(OPTIONAL_PREP_LINE_ROUTES.length, 3)
   assert.equal(PREP_LINE_ROUTE_UNIVERSE.size, 33)
   const all = [...ALWAYS_PREP_LINE_ROUTES, ...OPTIONAL_PREP_LINE_ROUTES]
   assert.equal(new Set(all).size, all.length, 'no duplicate route template in the roster')
@@ -504,4 +505,31 @@ test('R5 B4 run: the sentinel-registration callback is REQUIRED — omitting it 
     /registerSentinels/,
   )
   assert.equal(calls.length, 0, 'no request may run without the leak-scan registration contract')
+})
+
+// ── R5 P1 fix: options/sync is a DESTRUCTIVE canonical overwrite and must be opt-in ────────────────
+// The adversarial gate on #4736 found this route full-replaces operator-curated option sets on the
+// canonical table, with no read face to restore from, on a workflow whose default base URL is the
+// shared deployed host. These assertions pin the gating so it cannot silently regress to always-arm.
+test('R5 P1: options/sync is OPTIONAL, never ALWAYS — it must not be armed by default', () => {
+  const route = '/api/integration/stock-preparation/options/sync'
+  assert.ok(!ALWAYS_PREP_LINE_ROUTES.includes(route),
+    'options/sync must NOT be in the unconditional roster: it destroys curated canonical option sets')
+  assert.ok(OPTIONAL_PREP_LINE_ROUTES.includes(route),
+    'options/sync must be declared OPTIONAL so the coverage count stays honest when it is skipped')
+  // Not merely "somewhere in the universe" — the two lists must be disjoint, or membership proves nothing.
+  assert.equal(ALWAYS_PREP_LINE_ROUTES.filter((r) => OPTIONAL_PREP_LINE_ROUTES.includes(r)).length, 0)
+})
+
+test('R5 P1: --allow-canonical-option-overwrite is required, defaults off, and a lookalike cannot arm it', () => {
+  const base = ['node', 'x', '--base-url', 'http://localhost:1']
+  assert.equal(parseArgs(base).allowCanonicalOptionOverwrite, undefined,
+    'absent flag must leave the destructive write disarmed')
+  assert.equal(parseArgs([...base, '--allow-canonical-option-overwrite']).allowCanonicalOptionOverwrite, true)
+  // Negative control. parseArgs is fail-closed on unknown flags, which is STRONGER than silently
+  // ignoring them: a misspelling aborts the run rather than producing a quietly-unarmed one that an
+  // operator would misread as "I passed the flag, so the overwrite happened / did not happen".
+  assert.throws(() => parseArgs([...base, '--allow-canonical-option-overwrites']), /unknown flag/)
+  // A different opt-in flag must not arm this one — proves the flags are not aliased.
+  assert.equal(parseArgs([...base, '--approved-source-config-id', 'cfg']).allowCanonicalOptionOverwrite, undefined)
 })
