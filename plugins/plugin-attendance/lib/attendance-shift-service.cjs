@@ -42,6 +42,12 @@
  * W3 does NOT implement authoritative segment calculation (W4). There is no
  * calculation here; the flag only gates whether multi-segment shifts may be
  * referenced by scheduling writers.
+ *
+ * W5 flexible single-segment mode (design lock §3.3 / §9.6):
+ *   - strict discriminated flexPolicy on the shift row (default strict);
+ *   - flex_required_duration only when the shift has exactly one segment;
+ *   - multi-segment flex is a typed 422 with zero writes;
+ *   - legacy envelope bytes for strict shifts stay unchanged.
  */
 
 const SEGMENT_MIN = 1
@@ -61,10 +67,35 @@ const SHIFT_SERVICE_ERROR = Object.freeze({
   MULTI_SEGMENT_CALCULATION_DISABLED: 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED',
   SEGMENT_CONVERSION_BLOCKED: 'ATTENDANCE_SHIFT_SEGMENT_CONVERSION_BLOCKED',
   DELETE_BLOCKED: 'ATTENDANCE_SHIFT_DELETE_BLOCKED',
+  FLEX_POLICY_INVALID: 'ATTENDANCE_SHIFT_FLEX_POLICY_INVALID',
 })
 
 const TIME_PATTERN = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/
 const SEGMENT_INPUT_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+const FLEX_MAX_REQUIRED_MINUTES = 1440
+const FLEX_STRICT_KEYS = Object.freeze(['mode'])
+const FLEX_REQUIRED_KEYS = Object.freeze([
+  'mode',
+  'requiredMinutes',
+  'arrivalWindowBeforeMinutes',
+  'arrivalWindowAfterMinutes',
+  'coreStartTime',
+  'coreEndTime',
+])
+
+function hasClosedFlexPolicyShape(value, requiredKeys, allowedKeys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== null && proto !== Object.prototype) return false
+  if (Object.getOwnPropertySymbols(value).length > 0) return false
+  const ownKeys = Object.getOwnPropertyNames(value)
+  if (requiredKeys.some((key) => !ownKeys.includes(key))) return false
+  if (ownKeys.some((key) => !allowedKeys.includes(key))) return false
+  return ownKeys.every((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return descriptor && !descriptor.get && !descriptor.set
+  })
+}
 
 function isMissingSchemaError(error) {
   if (error?.code === '42P01' || error?.code === '42703') return true
@@ -120,6 +151,224 @@ function createAttendanceShiftService(deps) {
 
   function fieldDetail(field, message) {
     return [{ field, message }]
+  }
+
+  function flexValidationError(details) {
+    return new HttpError(
+      422,
+      SHIFT_SERVICE_ERROR.FLEX_POLICY_INVALID,
+      details[0]?.message || 'Invalid flex policy',
+      details,
+    )
+  }
+
+  function parseClockMinutesStrict(value) {
+    if (typeof value !== 'string' || !SEGMENT_INPUT_TIME_PATTERN.test(value)) return null
+    const hours = Number(value.slice(0, 2))
+    const minutes = Number(value.slice(3, 5))
+    return hours * 60 + minutes
+  }
+
+  /**
+   * Authoring guarantee: every allowed clamped expected-start covers optional core.
+   * latestPermittedStart <= coreStart AND earliestPermittedStart + required >= coreEnd.
+   */
+  function flexCoreHoursCoveredByAllClampedIntervals({
+    segmentStartMinutes,
+    arrivalWindowBeforeMinutes,
+    arrivalWindowAfterMinutes,
+    requiredMinutes,
+    coreStartMinutes,
+    coreEndMinutes,
+  }) {
+    if (!(coreEndMinutes > coreStartMinutes)) return false
+    if (!(requiredMinutes > 0)) return false
+    if (arrivalWindowBeforeMinutes < 0 || arrivalWindowAfterMinutes < 0) return false
+    const earliestPermittedStart = segmentStartMinutes - arrivalWindowBeforeMinutes
+    const latestPermittedStart = segmentStartMinutes + arrivalWindowAfterMinutes
+    return latestPermittedStart <= coreStartMinutes
+      && earliestPermittedStart + requiredMinutes >= coreEndMinutes
+  }
+
+  /**
+   * Strict discriminated flex policy validation (design lock §3.3).
+   * multi-segment flex is rejected. Optional core hours must be coverable by
+   * every clamped arrival (authoring-only; no new runtime reasonCode).
+   * `segmentStartTime` is required when core hours are set.
+   */
+  function validateFlexPolicy(rawPolicy, segmentCount, segmentStartTime = null) {
+    if (rawPolicy === undefined) {
+      return {
+        mode: 'strict',
+        requiredMinutes: null,
+        arrivalWindowBeforeMinutes: null,
+        arrivalWindowAfterMinutes: null,
+        coreStartTime: null,
+        coreEndTime: null,
+      }
+    }
+    if (rawPolicy === null) {
+      throw flexValidationError(fieldDetail('flexPolicy', 'flexPolicy must be an object'))
+    }
+    if (!rawPolicy || typeof rawPolicy !== 'object' || Array.isArray(rawPolicy)) {
+      throw flexValidationError(fieldDetail('flexPolicy', 'flexPolicy must be an object'))
+    }
+    const mode = rawPolicy.mode
+    if (mode === 'strict') {
+      if (!hasClosedFlexPolicyShape(rawPolicy, FLEX_STRICT_KEYS, FLEX_STRICT_KEYS)) {
+        throw flexValidationError(
+          fieldDetail('flexPolicy', 'strict flexPolicy may only carry mode'),
+        )
+      }
+      return {
+        mode: 'strict',
+        requiredMinutes: null,
+        arrivalWindowBeforeMinutes: null,
+        arrivalWindowAfterMinutes: null,
+        coreStartTime: null,
+        coreEndTime: null,
+      }
+    }
+    if (mode !== 'flex_required_duration') {
+      throw flexValidationError(
+        fieldDetail('flexPolicy.mode', 'flexPolicy.mode must be strict or flex_required_duration'),
+      )
+    }
+    if (!hasClosedFlexPolicyShape(
+      rawPolicy,
+      ['mode', 'requiredMinutes', 'arrivalWindowBeforeMinutes', 'arrivalWindowAfterMinutes'],
+      FLEX_REQUIRED_KEYS,
+    )) {
+      throw flexValidationError(
+        fieldDetail('flexPolicy', 'flex_required_duration contains missing or unknown fields'),
+      )
+    }
+    if (!Number.isInteger(segmentCount) || segmentCount < 1) {
+      throw flexValidationError(fieldDetail('segments', 'flex policy requires a validated segment set'))
+    }
+    if (segmentCount !== 1) {
+      throw flexValidationError(
+        fieldDetail(
+          'flexPolicy.mode',
+          'flex_required_duration is supported only for a one-segment shift',
+        ),
+      )
+    }
+    const requiredMinutes = rawPolicy.requiredMinutes
+    if (
+      !Number.isInteger(requiredMinutes)
+      || requiredMinutes <= 0
+      || requiredMinutes > FLEX_MAX_REQUIRED_MINUTES
+    ) {
+      throw flexValidationError(
+        fieldDetail(
+          'flexPolicy.requiredMinutes',
+          `requiredMinutes must be an integer in 1..${FLEX_MAX_REQUIRED_MINUTES}`,
+        ),
+      )
+    }
+    const arrivalWindowBeforeMinutes = rawPolicy.arrivalWindowBeforeMinutes
+    if (!Number.isInteger(arrivalWindowBeforeMinutes) || arrivalWindowBeforeMinutes < 0) {
+      throw flexValidationError(
+        fieldDetail(
+          'flexPolicy.arrivalWindowBeforeMinutes',
+          'arrivalWindowBeforeMinutes must be a non-negative integer',
+        ),
+      )
+    }
+    const arrivalWindowAfterMinutes = rawPolicy.arrivalWindowAfterMinutes
+    if (!Number.isInteger(arrivalWindowAfterMinutes) || arrivalWindowAfterMinutes < 0) {
+      throw flexValidationError(
+        fieldDetail(
+          'flexPolicy.arrivalWindowAfterMinutes',
+          'arrivalWindowAfterMinutes must be a non-negative integer',
+        ),
+      )
+    }
+    const coreStartRaw = rawPolicy.coreStartTime === undefined ? null : rawPolicy.coreStartTime
+    const coreEndRaw = rawPolicy.coreEndTime === undefined ? null : rawPolicy.coreEndTime
+    if ((coreStartRaw === null) !== (coreEndRaw === null)) {
+      throw flexValidationError(
+        fieldDetail('flexPolicy.coreStartTime', 'coreStartTime and coreEndTime must both be set or both null'),
+      )
+    }
+    let coreStartTime = null
+    let coreEndTime = null
+    if (coreStartRaw !== null) {
+      coreStartTime = normalizeSegmentInputTime(coreStartRaw)
+      coreEndTime = normalizeSegmentInputTime(coreEndRaw)
+      if (!coreStartTime) {
+        throw flexValidationError(
+          fieldDetail('flexPolicy.coreStartTime', 'coreStartTime must use HH:MM format'),
+        )
+      }
+      if (!coreEndTime) {
+        throw flexValidationError(
+          fieldDetail('flexPolicy.coreEndTime', 'coreEndTime must use HH:MM format'),
+        )
+      }
+      const coreStartMin = parseClockMinutesStrict(coreStartTime)
+      const coreEndMin = parseClockMinutesStrict(coreEndTime)
+      if (coreStartMin === null || coreEndMin === null || coreEndMin <= coreStartMin) {
+        throw flexValidationError(
+          fieldDetail('flexPolicy.coreEndTime', 'core hours must be a positive same-day interval'),
+        )
+      }
+      const segmentStartMin = parseClockMinutesStrict(segmentStartTime)
+      if (segmentStartMin === null) {
+        throw flexValidationError(
+          fieldDetail(
+            'flexPolicy.coreStartTime',
+            'core hours require a single-segment startTime to prove every clamped arrival covers core',
+          ),
+        )
+      }
+      if (!flexCoreHoursCoveredByAllClampedIntervals({
+        segmentStartMinutes: segmentStartMin,
+        arrivalWindowBeforeMinutes,
+        arrivalWindowAfterMinutes,
+        requiredMinutes,
+        coreStartMinutes: coreStartMin,
+        coreEndMinutes: coreEndMin,
+      })) {
+        throw flexValidationError(
+          fieldDetail(
+            'flexPolicy.coreStartTime',
+            'core hours must be covered by every allowed clamped arrival '
+              + '(latest permitted start <= coreStart and earliest permitted start + requiredMinutes >= coreEnd)',
+          ),
+        )
+      }
+    }
+    return {
+      mode: 'flex_required_duration',
+      requiredMinutes,
+      arrivalWindowBeforeMinutes,
+      arrivalWindowAfterMinutes,
+      coreStartTime,
+      coreEndTime,
+    }
+  }
+
+  function mapFlexPolicyFromRow(shiftRow) {
+    const mode = shiftRow.flex_mode === 'flex_required_duration'
+      ? 'flex_required_duration'
+      : 'strict'
+    if (mode === 'strict') {
+      return { mode: 'strict' }
+    }
+    return {
+      mode: 'flex_required_duration',
+      requiredMinutes: Number(shiftRow.flex_required_minutes),
+      arrivalWindowBeforeMinutes: Number(shiftRow.flex_arrival_window_before_minutes),
+      arrivalWindowAfterMinutes: Number(shiftRow.flex_arrival_window_after_minutes),
+      coreStartTime: shiftRow.flex_core_start_time
+        ? (normalizeTimeString(shiftRow.flex_core_start_time) || null)
+        : null,
+      coreEndTime: shiftRow.flex_core_end_time
+        ? (normalizeTimeString(shiftRow.flex_core_end_time) || null)
+        : null,
+    }
   }
 
   /**
@@ -299,18 +548,25 @@ function createAttendanceShiftService(deps) {
 
   /**
    * Full shift DTO: legacy envelope fields (compatibility projection), segments,
-   * calculationMode, plannedMinutes, and the values-safe capability block.
+   * calculationMode, plannedMinutes, flexPolicy, and the values-safe capability block.
    */
   function mapShiftWithSegments(shiftRow, segmentRows, orgId) {
     const base = mapShiftRow(shiftRow)
     const persisted = (segmentRows ?? []).map(mapSegmentRow)
     const segments = persisted.length > 0 ? persisted : synthesizeSegmentsFromEnvelope(shiftRow)
     const envelope = deriveEnvelopeFromSegments(segments)
+    const flexPolicy = mapFlexPolicyFromRow(shiftRow)
+    // Flex planned minutes are the required duration, not the outer envelope.
+    const plannedMinutes = flexPolicy.mode === 'flex_required_duration'
+      ? flexPolicy.requiredMinutes
+      : envelope.plannedMinutes
     return {
       ...base,
       segments: segments.map(mapSegmentOutput),
       calculationMode: segments.length > 1 ? 'segments' : 'envelope',
-      plannedMinutes: envelope.plannedMinutes,
+      plannedMinutes,
+      flexPolicy,
+      flexEligible: segments.length === 1,
       capabilities: buildShiftCapabilities(orgId ?? base.orgId),
     }
   }
@@ -421,12 +677,22 @@ function createAttendanceShiftService(deps) {
       envelope.plannedMinutes = deriveEnvelopeFromSegments(segments).plannedMinutes
     }
 
+    const flexPolicy = validateFlexPolicy(
+      input.flexPolicy,
+      segments.length,
+      segments[0]?.startTime ?? null,
+    )
+
     const shiftId = randomUUID()
     return db.transaction(async (trx) => {
       const rows = await trx.query(
         `INSERT INTO attendance_shifts
-         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight,
+          late_grace_minutes, early_grace_minutes, rounding_minutes, working_days,
+          flex_mode, flex_required_minutes, flex_arrival_window_before_minutes,
+          flex_arrival_window_after_minutes, flex_core_start_time, flex_core_end_time)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
+                 $12, $13, $14, $15, $16, $17)
          RETURNING *`,
         [
           shiftId,
@@ -440,6 +706,12 @@ function createAttendanceShiftService(deps) {
           input.earlyGraceMinutes ?? DEFAULT_SHIFT.earlyGraceMinutes,
           input.roundingMinutes ?? DEFAULT_SHIFT.roundingMinutes,
           JSON.stringify(normalizeWorkingDays(input.workingDays ?? DEFAULT_SHIFT.workingDays)),
+          flexPolicy.mode,
+          flexPolicy.requiredMinutes,
+          flexPolicy.arrivalWindowBeforeMinutes,
+          flexPolicy.arrivalWindowAfterMinutes,
+          flexPolicy.coreStartTime,
+          flexPolicy.coreEndTime,
         ],
       )
       await insertSegmentRows(trx, orgId, shiftId, segments)
@@ -560,6 +832,36 @@ function createAttendanceShiftService(deps) {
       const workEndTime = envelope ? envelope.workEndTime : existing.work_end_time
       const isOvernight = envelope ? envelope.isOvernight : (existing.is_overnight === true || existing.is_overnight === 't')
 
+      // Flex policy: explicit patch wins; otherwise re-validate the stored policy
+      // against the post-update segment count (blocks multi-segment flex) and
+      // the final segment-0 start (core-hours authoring guarantee).
+      const finalSegmentCount = segments
+        ? segments.length
+        : (currentSegmentCount === 0 ? 1 : currentSegmentCount)
+      let finalSegmentStartTime = segments?.[0]?.startTime ?? null
+      if (finalSegmentStartTime == null) {
+        const existingSegments = await loadSegmentsByShiftId(trx, orgId, [shiftId])
+        const rows = existingSegments.get(String(shiftId)) ?? []
+        if (rows.length > 0) {
+          const ordered = rows
+            .slice()
+            .sort((a, b) => Number(a.segment_index) - Number(b.segment_index))
+          finalSegmentStartTime = normalizeTimeString(ordered[0].start_time)
+        } else {
+          finalSegmentStartTime = normalizeTimeString(existing.work_start_time)
+        }
+      }
+      let flexPolicy
+      if (patch.flexPolicy !== undefined) {
+        flexPolicy = validateFlexPolicy(patch.flexPolicy, finalSegmentCount, finalSegmentStartTime)
+      } else {
+        flexPolicy = validateFlexPolicy(
+          mapFlexPolicyFromRow(existing),
+          finalSegmentCount,
+          finalSegmentStartTime,
+        )
+      }
+
       const rows = await trx.query(
         `UPDATE attendance_shifts
             SET name = $3,
@@ -571,6 +873,12 @@ function createAttendanceShiftService(deps) {
                 early_grace_minutes = $9,
                 rounding_minutes = $10,
                 working_days = $11::jsonb,
+                flex_mode = $12,
+                flex_required_minutes = $13,
+                flex_arrival_window_before_minutes = $14,
+                flex_arrival_window_after_minutes = $15,
+                flex_core_start_time = $16,
+                flex_core_end_time = $17,
                 updated_at = now()
           WHERE id = $1 AND org_id = $2
           RETURNING *`,
@@ -586,6 +894,12 @@ function createAttendanceShiftService(deps) {
           earlyGraceMinutes,
           roundingMinutes,
           JSON.stringify(workingDays),
+          flexPolicy.mode,
+          flexPolicy.requiredMinutes,
+          flexPolicy.arrivalWindowBeforeMinutes,
+          flexPolicy.arrivalWindowAfterMinutes,
+          flexPolicy.coreStartTime,
+          flexPolicy.coreEndTime,
         ],
       )
 
@@ -863,6 +1177,8 @@ function createAttendanceShiftService(deps) {
 
   return {
     validateShiftSegments,
+    validateFlexPolicy,
+    mapFlexPolicyFromRow,
     deriveEnvelopeFromSegments,
     synthesizeSegmentsFromEnvelope,
     isSegmentCalculationEnabled,

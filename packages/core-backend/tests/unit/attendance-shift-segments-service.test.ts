@@ -161,6 +161,109 @@ describe('validateShiftSegments', () => {
   })
 })
 
+describe('validateFlexPolicy (W5)', () => {
+  function expectFlexInvalid(
+    input: unknown,
+    segmentCount: number,
+    fieldFragment: string,
+    segmentStartTime: string | null = '09:00',
+  ) {
+    try {
+      service.validateFlexPolicy(input, segmentCount, segmentStartTime)
+    } catch (error) {
+      const typed = error as FakeHttpError
+      expect(typed).toBeInstanceOf(FakeHttpError)
+      expect(typed.status).toBe(422)
+      expect(typed.code).toBe(ERR.FLEX_POLICY_INVALID)
+      expect((typed.details ?? []).some((detail) => detail.field.includes(fieldFragment))).toBe(true)
+      return
+    }
+    expect.unreachable(`expected validateFlexPolicy to reject: ${JSON.stringify(input)}`)
+  }
+
+  it('defaults absent policy to strict', () => {
+    expect(service.validateFlexPolicy(undefined, 1)).toEqual({
+      mode: 'strict',
+      requiredMinutes: null,
+      arrivalWindowBeforeMinutes: null,
+      arrivalWindowAfterMinutes: null,
+      coreStartTime: null,
+      coreEndTime: null,
+    })
+  })
+
+  it('rejects explicit null instead of silently resetting to strict', () => {
+    expectFlexInvalid(null, 1, 'flexPolicy')
+  })
+
+  it('accepts single-segment flex whose every clamped arrival covers core', () => {
+    // 09:00 ±60 => [08:00,10:00]; required 480 covers core 10:00-15:00.
+    expect(service.validateFlexPolicy({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 60,
+      arrivalWindowAfterMinutes: 60,
+      coreStartTime: '10:00',
+      coreEndTime: '15:00',
+    }, 1, '09:00')).toEqual({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 60,
+      arrivalWindowAfterMinutes: 60,
+      coreStartTime: '10:00',
+      coreEndTime: '15:00',
+    })
+  })
+
+  it('rejects multi-segment flex (OD-4556-3)', () => {
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 0,
+      arrivalWindowAfterMinutes: 0,
+    }, 2, 'flexPolicy.mode')
+  })
+
+  it('rejects unknown keys in both discriminated branches', () => {
+    expectFlexInvalid({ mode: 'strict', requiredMinutes: 480 }, 1, 'flexPolicy')
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 0,
+      arrivalWindowAfterMinutes: 0,
+      unexpected: true,
+    }, 1, 'flexPolicy')
+  })
+
+  it('rejects incomplete core hours and both core-coverage inequalities independently', () => {
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 0,
+      arrivalWindowAfterMinutes: 0,
+      coreStartTime: '10:00',
+    }, 1, 'flexPolicy.coreStartTime')
+    // P1: latest > coreStart even though requiredMinutes >= core duration
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 60,
+      arrivalWindowAfterMinutes: 120,
+      coreStartTime: '10:00',
+      coreEndTime: '15:00',
+    }, 1, 'flexPolicy.coreStartTime', '09:00')
+    // P1: earliest + required < coreEnd even though latest <= coreStart and duration-only holds
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 360,
+      arrivalWindowBeforeMinutes: 120,
+      arrivalWindowAfterMinutes: 0,
+      coreStartTime: '09:00',
+      coreEndTime: '15:00',
+    }, 1, 'flexPolicy.coreStartTime', '09:00')
+  })
+})
+
 describe('deriveEnvelopeFromSegments', () => {
   it('sums per-segment minutes and never counts the break (480, not 540)', () => {
     const envelope = service.deriveEnvelopeFromSegments([

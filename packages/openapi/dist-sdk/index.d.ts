@@ -2469,6 +2469,7 @@ export interface paths {
                         workingDays?: number[];
                         /** @deprecated */
                         working_days?: number[];
+                        flexPolicy?: components["schemas"]["AttendanceShiftFlexPolicy"];
                         orgId?: string;
                     };
                 };
@@ -2489,7 +2490,7 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
-                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array) or ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with legacy start/end fields). */
+                /** @description Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with legacy start/end fields), or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex rejection after request-shape validation, including multi-segment flex or core-hours coverage failure). */
                 422: {
                     headers: {
                         [name: string]: unknown;
@@ -2564,6 +2565,7 @@ export interface paths {
                         earlyGraceMinutes?: number;
                         roundingMinutes?: number;
                         workingDays?: number[];
+                        flexPolicy?: components["schemas"]["AttendanceShiftFlexPolicy"];
                         orgId?: string;
                     };
                 };
@@ -2598,7 +2600,7 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID, ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a multi-segment shift). */
+                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID, ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a multi-segment shift); or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID for a canonical semantic flex rejection after request-shape validation, including multi-segment flex or core-hours coverage failure. */
                 422: {
                     headers: {
                         [name: string]: unknown;
@@ -15683,9 +15685,27 @@ export interface components {
             segments?: components["schemas"]["AttendanceShiftSegment"][];
             /** @enum {string} */
             calculationMode?: "envelope" | "segments";
-            /** @description Sum of per-segment planned minutes; breaks between segments are never counted. */
+            /** @description Sum of per-segment planned minutes for strict shifts (breaks between segments are never counted). For flex_required_duration this is the required duration in minutes. */
             plannedMinutes?: number;
+            flexPolicy?: components["schemas"]["AttendanceShiftFlexPolicy"];
+            /** @description True only when the shift has exactly one segment. Multi-segment flex is rejected in v1 (OD-4556-3). */
+            flexEligible?: boolean;
             capabilities?: components["schemas"]["AttendanceShiftCapabilities"];
+        };
+        /** @description W5 flexible attendance policy (design lock §3.3). Discriminated by mode. flex_required_duration is valid only for a one-segment shift; multi-segment flex is rejected with a typed 422 and zero writes. Absent flexPolicy on create defaults to strict. */
+        AttendanceShiftFlexPolicy: {
+            /** @enum {string} */
+            mode: "strict";
+        } | {
+            /** @enum {string} */
+            mode: "flex_required_duration";
+            requiredMinutes: number;
+            arrivalWindowBeforeMinutes: number;
+            arrivalWindowAfterMinutes: number;
+            /** @description Optional same-day core-hours start (HH:MM) in the shift timezone. */
+            coreStartTime?: string | null;
+            /** @description Optional same-day core-hours end (HH:MM) in the shift timezone. */
+            coreEndTime?: string | null;
         };
         AttendanceShiftSegment: {
             /** @description Persisted segment row id; null when synthesized from the legacy envelope. */
