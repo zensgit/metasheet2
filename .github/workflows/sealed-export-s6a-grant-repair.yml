@@ -35,12 +35,19 @@ permissions:
 
 jobs:
   grant-repair-gate:
-    name: Sealed-export S6-A grant repair gate
+    name: Sealed-export S6-A grant repair gate (pg${{ matrix.pg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # 074/075 had ZERO PostgreSQL 17 coverage: the only pg17 lane in the repo validates the
+        # FROZEN package, whose migration tree stops at 073. Column-level GRANT semantics are
+        # exactly the kind of thing that can differ across majors, so the gate must run on both.
+        pg: ['16', '17']
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16
+        image: postgres:${{ matrix.pg }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
