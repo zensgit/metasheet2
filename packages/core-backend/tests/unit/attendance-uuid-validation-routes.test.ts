@@ -4138,7 +4138,10 @@ describe('attendance UUID route validation', () => {
   })
 
   it('rejects every forged actor selector on every existing fixed-schedule route', async () => {
+    // Mutation proof: moving fixed-schedule actor resolution behind scoped work makes
+    // the effectiveness GET leg call db.query before its 403 assertion.
     const cases = [
+      { key: 'GET /api/attendance/groups/:groupId/fixed-schedule/effectiveness', params: { groupId: attendanceGroupId } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/preview', params: { id: attendanceGroupId } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', params: { id: attendanceGroupId } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', params: { id: attendanceGroupId } },
@@ -4192,6 +4195,7 @@ describe('attendance UUID route validation', () => {
   it('fails every fixed-schedule route closed when authenticated actor context is incomplete', async () => {
     const cases = [
       { key: 'PUT /api/attendance/groups/:groupId/fixed-schedule/config', params: { groupId: attendanceGroupId } },
+      { key: 'GET /api/attendance/groups/:groupId/fixed-schedule/effectiveness', params: { groupId: attendanceGroupId } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/preview', params: { id: attendanceGroupId } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/apply', params: { id: attendanceGroupId } },
       { key: 'POST /api/attendance/groups/:id/fixed-schedule/rebuild', params: { id: attendanceGroupId } },
@@ -4224,5 +4228,50 @@ describe('attendance UUID route validation', () => {
       expect(missingOrgDb.query, `${testCase.key} (missing org)`).not.toHaveBeenCalled()
       expect(missingOrgDb.transaction, `${testCase.key} (missing org)`).not.toHaveBeenCalled()
     }
+  })
+
+  it('fails the effectiveness route closed for missing schema after trusted actor resolution', async () => {
+    // Mutation proof: removing the route's schema-error branch changes this 503 to 500.
+    const { db, routes } = await createHarness()
+    db.query.mockRejectedValue(Object.assign(new Error('relation does not exist'), { code: '42P01' }))
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/effectiveness', {
+      params: { groupId: attendanceGroupId },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ error: { code: 'DB_NOT_READY' } })
+    expect(db.query).toHaveBeenCalledTimes(1)
+  })
+
+  it('requires attendance admin permission for effectiveness reads and admits an authenticated admin', async () => {
+    const invokeEffectiveness = async (admin: boolean) => {
+      const { db, routes } = await createHarness('false')
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, admin)
+        if (rbac !== undefined) return rbac
+        if (sql.includes('SELECT id FROM attendance_groups')) return [{ id: attendanceGroupId }]
+        if (sql.includes('FROM attendance_group_fixed_schedule_configs')) return []
+        if (sql.includes('FROM attendance_group_members')) return []
+        if (sql.includes('FROM attendance_shift_assignments')) return []
+        throw new Error(`unexpected query: ${sql}`)
+      })
+      const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/effectiveness', {
+        params: { groupId: attendanceGroupId },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+      return { db, res }
+    }
+
+    const denied = await invokeEffectiveness(false)
+    expect(denied.res.statusCode).toBe(403)
+    expect(denied.res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(denied.db.query.mock.calls.some(([sql]) => String(sql).includes('attendance_groups'))).toBe(false)
+
+    const allowed = await invokeEffectiveness(true)
+    expect(allowed.res.statusCode).toBe(200)
+    expect(allowed.res.body).toMatchObject({ ok: true, data: { state: 'not_configured' } })
+    expect(allowed.db.query.mock.calls.some(([sql]) => String(sql).includes('attendance_groups'))).toBe(true)
   })
 })
