@@ -20,7 +20,7 @@
     <section v-else-if="desktopOnlyBlocked" class="attendance-shell__desktop-hint">
       <h3>{{ t.desktopRecommended }}</h3>
       <p>{{ desktopOnlyMessage }}</p>
-      <button class="attendance-shell__btn" type="button" @click="returnFromMobileGroupRoute">
+      <button class="attendance-shell__btn" type="button" @click="returnFromGroupRoute">
         {{ t.backToOverview }}
       </button>
     </section>
@@ -35,6 +35,7 @@
         <AttendanceAdminCenter
           :route-group-context="{ group, step, surface, returnTo }"
           @clear-section="returnFromGroupRoute"
+          @open-group-route="openGroupRoute"
         />
       </template>
     </AttendanceGroupContextHost>
@@ -60,9 +61,11 @@ import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { confirmAttendanceSetupPrefillLeave } from './attendanceSetupPrefillLeaveGuard'
 import {
+  buildAttendanceGroupRouteHref,
   isAttendanceGroupContextPath,
   resolveAttendanceGroupRouteContext,
 } from '../../router/attendanceGroupContextRoute'
+import type { AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../../router/attendanceGroupContextRoute'
 import AttendanceOverview from './AttendanceOverview.vue'
 import AttendanceReportsView from './AttendanceReportsView.vue'
 import AttendanceAdminCenter from './AttendanceAdminCenter.vue'
@@ -250,6 +253,7 @@ const activeView = computed(() => {
         props: {
           initialSectionId: adminInitialSectionId.value,
           onClearSection: returnToAdminHome,
+          onOpenGroupRoute: openGroupRoute,
         },
       }
     case 'import':
@@ -260,6 +264,7 @@ const activeView = computed(() => {
         props: {
           initialSectionId: 'attendance-admin-import',
           onClearSection: returnToAdminHome,
+          onOpenGroupRoute: openGroupRoute,
         },
       }
     case 'workflow':
@@ -348,8 +353,20 @@ async function returnFromGroupRoute(): Promise<void> {
   await selectTab('overview')
 }
 
-async function returnFromMobileGroupRoute(): Promise<void> {
-  await router.push('/attendance')
+async function openGroupRoute(target: {
+  groupId: string
+  step: AttendanceGroupRouteStep
+  surface: AttendanceGroupRouteSurface | null
+}): Promise<void> {
+  if (groupRouteActive.value && routeGroupContext.value?.groupId !== target.groupId) return
+  const href = buildAttendanceGroupRouteHref({
+    ...target,
+    returnTo: groupRouteActive.value
+      ? routeGroupContext.value?.returnTo ?? '/attendance?tab=admin&section=attendance-admin-groups'
+      : route.fullPath,
+  })
+  if (!href) return
+  await router.push(href)
 }
 
 watch(() => [route.path, route.name, route.query.tab, route.query.surface, route.query.returnTo, route.params?.groupId, route.params?.step], () => {
