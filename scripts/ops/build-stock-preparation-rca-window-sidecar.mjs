@@ -11,7 +11,7 @@ const FROZEN_RUNTIME_SHA = 'd87e086fd1218b4cfb150177d43f2c52904b1d6d'
 // R5 (route-coverage 22/33 -> 33/33) re-pinned the extended smoke's digest below; the other two
 // frozen helpers are untouched by R5 and keep their prior digests.
 const FROZEN_HELPERS = Object.freeze({
-  'stock-preparation-prep-line-extended-smoke.mjs': '300e8e6691dc3e1df05bab62844f2794335abe714818c1bff31cd9d9b196ce58',
+  'stock-preparation-prep-line-extended-smoke.mjs': 'e6970a867ca9778e986022f16f34c0c1af48ceb0c4d6b8b94bea46e8a50d9317',
   'stock-preparation-mvp-postdeploy-smoke.mjs': 'e5265a2a8052ddc34866438a1ee3356b5d2aa1a106c8199f5e2fbbe4f2614df4',
   'stock-preparation-rca-window-pm2-sample.mjs': '09cc76024bd98fd4ce86cfa834eea3b94680482d0d0970600da008a19a6731ec',
 })

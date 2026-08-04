@@ -1027,8 +1027,14 @@ async function main() {
   S.mappingSummaryHttp = mappingSummary.status
   const mappingSummaryMatched = safeCount(mappingSummary.body?.data?.matchStatusCounts?.matched)
   S.mappingSummaryMatchedDelta = mappingSummaryMatched - mappingSummaryBaselineMatched
+  // safeCount collapses a missing/non-numeric field to -1: without the >=0 guard on BOTH sides, a
+  // response that dropped matchStatusCounts.matched entirely (baseline -1, current -1) or dropped it
+  // only on the baseline read (baseline -1, current a real N) could manufacture a passing delta from
+  // the -1 sentinel rather than from a real confirmed row — the exact failure mode this A6 delta
+  // exists to rule out.
   must('R5 A6 material-mappings/summary -> 200, never 501, matched-count delta >=1 vs the §3b baseline (this run confirmed >=1 mapping)',
-    mappingSummary.ok && mappingSummary.status !== 501 && S.mappingSummaryMatchedDelta >= 1,
+    mappingSummary.ok && mappingSummary.status !== 501 &&
+    mappingSummaryBaselineMatched >= 0 && mappingSummaryMatched >= 0 && S.mappingSummaryMatchedDelta >= 1,
     `http=${mappingSummary.status} delta=${S.mappingSummaryMatchedDelta}`)
 
   const unitSummary = await req(`${API}/unit-conversions/summary${scope({ projectId: fixture.projectId })}`, { label: 'unit-conversions-summary' })
@@ -1036,7 +1042,8 @@ async function main() {
   const unitSummaryActive = safeCount(unitSummary.body?.data?.activeRuleCount)
   S.unitSummaryActiveDelta = unitSummaryActive - unitSummaryBaselineActive
   must('R5 A7 unit-conversions/summary -> 200, never 501, active-rule-count delta >=1 vs the §3b baseline (this run confirmed the generic unit rule)',
-    unitSummary.ok && unitSummary.status !== 501 && S.unitSummaryActiveDelta >= 1,
+    unitSummary.ok && unitSummary.status !== 501 &&
+    unitSummaryBaselineActive >= 0 && unitSummaryActive >= 0 && S.unitSummaryActiveDelta >= 1,
     `http=${unitSummary.status} delta=${S.unitSummaryActiveDelta}`)
 
   // ── 9. generation run 2: the FULL ready flip — 3/3 lines, zero unresolved blocking ───────────
