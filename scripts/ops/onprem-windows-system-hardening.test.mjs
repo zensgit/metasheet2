@@ -411,6 +411,13 @@ test('PM2 startup helper replaces stale app definitions instead of restart-only 
   const script = readScript('scripts/ops/attendance-onprem-start-pm2.ps1')
 
   assert.match(script, /function Get-Pm2AppProcess/)
+  assert.match(script, /Get-Command 'pm2\.cmd'/)
+  assert.match(script, /process\.stdin\.on\('end'/)
+  assert.match(script, /\$retainedKeyList = \$RetiredSensitiveEnvKeys -join ','/)
+  assert.match(
+    script,
+    /Windows PowerShell 5\.1 converts native stderr[\s\S]+\$ErrorActionPreference = 'Continue'[\s\S]+\$existingApp = Get-Pm2AppProcess/,
+  )
   assert.match(script, /function Test-Pm2AppMatchesTarget/)
   assert.match(script, /pm_exec_path/)
   assert.match(script, /pm_cwd/)

@@ -45,6 +45,7 @@ function verify_windows_entrypoints() {
   local root="$1"
   local start_script="${root}/start-pm2.bat"
   local deploy_script="${root}/deploy-${run_label}.bat"
+  local native_entrypoint
 
   if ! search_fixed_string '-RootDir "%~dp0."' "$start_script"; then
     die "start-pm2.bat must pass -RootDir \"%~dp0.\" to avoid Windows path quoting bugs"
@@ -54,6 +55,23 @@ function verify_windows_entrypoints() {
     if ! search_fixed_string '-RootDir "%~dp0."' "$deploy_script"; then
       die "deploy-${run_label}.bat must pass -RootDir \"%~dp0.\" to avoid Windows path quoting bugs"
     fi
+  fi
+
+  if [[ -f "${root}/windows-native-preflight.bat" ]]; then
+    for native_entrypoint in \
+      "windows-native-preflight.bat" \
+      "windows-native-start.bat" \
+      "windows-native-stop.bat" \
+      "windows-native-healthcheck.bat" \
+      "windows-native-bootstrap-admin.bat"
+    do
+      if ! search_fixed_string '-RootDir "%~dp0."' "${root}/${native_entrypoint}"; then
+        die "${native_entrypoint} must pass -RootDir \"%~dp0.\""
+      fi
+      if search_fixed_string 'wsl.exe' "${root}/${native_entrypoint}"; then
+        die "${native_entrypoint} must not invoke WSL"
+      fi
+    done
   fi
 }
 
@@ -74,6 +92,174 @@ function verify_workspace_manifest() {
   fi
 }
 
+function verify_workspace_runtime_dependencies() {
+  local root="$1"
+  command -v node >/dev/null 2>&1 || die "node is required to verify packaged workspace runtime dependencies"
+
+  node - "$root" <<'NODE' || die "One or more packaged workspace runtime dependencies are missing"
+const fs = require('node:fs')
+const path = require('node:path')
+
+const root = process.argv[2]
+const consumerManifests = [
+  'packages/core-backend/package.json',
+  'plugins/plugin-attendance/package.json',
+]
+const packageRoots = ['packages', 'plugins']
+const packagedByName = new Map()
+
+for (const packageRoot of packageRoots) {
+  const absoluteRoot = path.join(root, packageRoot)
+  if (!fs.existsSync(absoluteRoot)) continue
+
+  for (const entry of fs.readdirSync(absoluteRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const manifestPath = path.join(absoluteRoot, entry.name, 'package.json')
+    if (!fs.existsSync(manifestPath)) continue
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    if (manifest.name) packagedByName.set(manifest.name, { manifest, manifestPath })
+  }
+}
+
+const failures = []
+for (const relativeManifest of consumerManifests) {
+  const manifestPath = path.join(root, relativeManifest)
+  const consumer = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+
+  for (const section of ['dependencies', 'optionalDependencies']) {
+    for (const [dependencyName, version] of Object.entries(consumer[section] || {})) {
+      if (!String(version).startsWith('workspace:')) continue
+      const packaged = packagedByName.get(dependencyName)
+      if (!packaged) {
+        failures.push(`${relativeManifest}: missing workspace runtime dependency ${dependencyName}`)
+        continue
+      }
+
+      for (const entrypointField of ['main', 'module']) {
+        const entrypoint = packaged.manifest[entrypointField]
+        if (!entrypoint) continue
+        const entrypointPath = path.resolve(path.dirname(packaged.manifestPath), entrypoint)
+        if (!fs.existsSync(entrypointPath)) {
+          failures.push(`${dependencyName}: missing ${entrypointField} entrypoint ${entrypoint}`)
+        }
+      }
+    }
+  }
+}
+
+if (failures.length > 0) {
+  for (const failure of failures) console.error(failure)
+  process.exit(1)
+}
+NODE
+}
+
+function verify_exact_source_sha() {
+  local root="$1"
+  local source_file="${root}/SOURCE_SHA"
+  local tooling_file="${root}/QA_TOOLING_SHA"
+  local pin_file="${root}/scripts/ops/attendance-windows-native-qa-v2.pin.json"
+  local root_pin="${root}/attendance-windows-native-qa-v2.pin.json"
+  local package_sha=""
+  local tooling_sha=""
+  local expected_sha=""
+  local manifest=""
+
+  [[ -f "$source_file" ]] || die "SOURCE_SHA missing from package root"
+  package_sha="$(tr -d '[:space:]' < "$source_file" | tr '[:upper:]' '[:lower:]')"
+  [[ "$package_sha" =~ ^[0-9a-f]{40}$ ]] || die "SOURCE_SHA must be an exact 40-char git SHA"
+  [[ -f "$tooling_file" ]] || die "QA_TOOLING_SHA missing from package root"
+  tooling_sha="$(tr -d '[:space:]' < "$tooling_file" | tr '[:upper:]' '[:lower:]')"
+  [[ "$tooling_sha" =~ ^[0-9a-f]{40}$ ]] || die "QA_TOOLING_SHA must be an exact 40-char git SHA"
+
+  if [[ -f "$pin_file" ]]; then
+    :
+  elif [[ -f "$root_pin" ]]; then
+    pin_file="$root_pin"
+  elif [[ "${ENFORCE_WINDOWS_NATIVE_QA_PIN:-0}" != "1" && -z "${EXPECTED_SOURCE_SHA:-}" ]]; then
+    pin_file=""
+  else
+    die "attendance-windows-native-qa-v2.pin.json missing from package"
+  fi
+
+  if [[ -n "$pin_file" ]]; then
+    node - "$pin_file" <<'NODE' || die "QA pin validation failed"
+const fs = require('node:fs')
+const pin = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+if (!pin.expectedSourceSha || !/^[0-9a-f]{40}$/.test(String(pin.expectedSourceSha))) {
+  console.error('pin.expectedSourceSha must be a 40-char lowercase git SHA')
+  process.exit(2)
+}
+if (pin.deploymentAuthorized !== false) {
+  console.error('pin.deploymentAuthorized must be the boolean false (Draft/HOLD)')
+  process.exit(2)
+}
+if (String(pin.status || '').toUpperCase() !== 'DRAFT_HOLD') {
+  console.error('pin.status must be DRAFT_HOLD')
+  process.exit(2)
+}
+if (pin.syntheticDataOnly !== true) {
+  console.error('pin.syntheticDataOnly must be the boolean true')
+  process.exit(2)
+}
+NODE
+  fi
+
+  # Always verify package-internal exact SHA consistency (SOURCE_SHA <-> manifest).
+  # Enforce campaign pin equality when EXPECTED_SOURCE_SHA is set or
+  # ENFORCE_WINDOWS_NATIVE_QA_PIN=1 (Windows native QA path).
+  if [[ -n "${EXPECTED_SOURCE_SHA:-}" || "${ENFORCE_WINDOWS_NATIVE_QA_PIN:-0}" == "1" ]]; then
+    if [[ -n "${EXPECTED_SOURCE_SHA:-}" ]]; then
+      expected_sha="$(printf '%s' "$EXPECTED_SOURCE_SHA" | tr '[:upper:]' '[:lower:]')"
+    else
+      expected_sha="$(
+        node - "$pin_file" <<'NODE'
+const fs = require('node:fs')
+const pin = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+process.stdout.write(String(pin.expectedSourceSha).toLowerCase())
+NODE
+      )"
+    fi
+    [[ "$expected_sha" =~ ^[0-9a-f]{40}$ ]] || die "EXPECTED_SOURCE_SHA must be an exact 40-char git SHA"
+    [[ "$package_sha" == "$expected_sha" ]] || die "Exact source SHA mismatch: package=${package_sha} expected=${expected_sha}"
+  fi
+
+  manifest="$(ls -1 "${root}"/metasheet-attendance-onprem-*.json 2>/dev/null | head -n 1 || true)"
+  [[ -n "$manifest" ]] || die "Package JSON manifest with sourceSha is missing"
+  node - "$manifest" "$package_sha" "$tooling_sha" "$([[ -n "$pin_file" ]] && printf '1' || printf '0')" <<'NODE' || die "Package manifest SHA verification failed"
+const fs = require('node:fs')
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const expected = process.argv[3]
+const expectedTooling = process.argv[4]
+const isWindowsQa = process.argv[5] === '1'
+const actual = String(manifest.sourceSha || '').toLowerCase()
+if (actual !== expected) {
+  console.error(`manifest.sourceSha mismatch: ${actual} != ${expected}`)
+  process.exit(1)
+}
+const actualTooling = String(manifest.qaToolingSha || '').toLowerCase()
+if (actualTooling !== expectedTooling) {
+  console.error(`manifest.qaToolingSha mismatch: ${actualTooling} != ${expectedTooling}`)
+  process.exit(1)
+}
+if (isWindowsQa) {
+  const qa = manifest.windowsNativeQa || {}
+  if (qa.deploymentAuthorized !== false) {
+    console.error('manifest.windowsNativeQa.deploymentAuthorized must be the boolean false')
+    process.exit(1)
+  }
+  if (String(qa.status || '').toUpperCase() !== 'DRAFT_HOLD') {
+    console.error('manifest.windowsNativeQa.status must be DRAFT_HOLD')
+    process.exit(1)
+  }
+  if (qa.syntheticDataOnly !== true) {
+    console.error('manifest.windowsNativeQa.syntheticDataOnly must be the boolean true')
+    process.exit(1)
+  }
+}
+NODE
+}
+
 function verify_onprem_env_templates() {
   local root="$1"
   local rel
@@ -84,6 +270,100 @@ function verify_onprem_env_templates() {
     local abs="${root}/${rel}"
     grep -q '^JWT_SECRET=change-me$' "$abs" || die "${rel} must retain JWT_SECRET=change-me placeholder"
     grep -q '^BCRYPT_SALT_ROUNDS=12$' "$abs" || die "${rel} must pin BCRYPT_SALT_ROUNDS=12"
+  done
+
+  local windows_env="${root}/docker/app.env.attendance-windows-native.qa.example"
+  if [[ -f "$windows_env" ]]; then
+    grep -q '^JWT_SECRET=change-me$' "$windows_env" \
+      || die "Windows native QA env must retain JWT_SECRET=change-me placeholder"
+    grep -q '^ATTENDANCE_IMPORT_UPLOAD_DIR=storage/attendance-import$' "$windows_env" \
+      || die "Windows native QA env must use a package-relative upload path"
+    grep -q '^WINDOWS_NATIVE_GATEWAY_HOST=127.0.0.1$' "$windows_env" \
+      || die "Windows native QA gateway must bind to loopback by default"
+    grep -q '^POSTGRES_DB=metasheet_windows_qa$' "$windows_env" \
+      || die "Windows native QA package must pin the dedicated database name"
+    grep -q '/metasheet_windows_qa$' "$windows_env" \
+      || die "Windows native QA DATABASE_URL must target the dedicated database"
+  fi
+}
+
+function verify_windows_native_gateway() {
+  local root="$1"
+  local gateway="${root}/scripts/ops/attendance-windows-native-gateway.mjs"
+  local config="${root}/ecosystem.windows-native.config.cjs"
+  local start="${root}/scripts/ops/attendance-windows-native-start.ps1"
+  local runner="${root}/scripts/ops/attendance-windows-native-qa-runner.mjs"
+  local matrix="${root}/scripts/ops/attendance-windows-native-qa-risk-matrix.json"
+
+  command -v node >/dev/null 2>&1 || die "node is required to verify the Windows native gateway"
+  node --check "$gateway" >/dev/null \
+    || die "Windows native gateway has invalid JavaScript syntax"
+  node --check "$config" >/dev/null \
+    || die "Windows native PM2 config has invalid JavaScript syntax"
+  node --check "$runner" >/dev/null \
+    || die "Windows native QA runner has invalid JavaScript syntax"
+  node -e "JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8'))" "$matrix" \
+    || die "Windows native QA risk matrix is not valid JSON"
+  search_fixed_string 'metasheet-windows-gateway' "$config" \
+    || die "Windows native PM2 config must name the gateway process"
+  search_fixed_string 'attendance-windows-native-preflight.ps1' "$start" \
+    || die "Windows native start must run preflight before deployment"
+  search_fixed_string 'attendance-onprem-deploy-run.ps1' "$start" \
+    || die "Windows native start must run migrations and the packaged backend"
+  search_fixed_string 'Run windows-native-stop.bat before starting again' "$start" \
+    || die "Windows native start must reject ambiguous reuse of existing PM2 apps"
+  search_fixed_string 'Remove-WindowsNativePm2Apps' "$start" \
+    || die "Windows native start must clean up both package-owned PM2 apps after failure"
+  search_fixed_string 'PM2 cleanup failed' \
+    "${root}/scripts/ops/attendance-windows-native-common.ps1" \
+    || die "Windows native PM2 cleanup must surface delete/save failures"
+  search_fixed_string 'Assert-WindowsNativeExactSourceSha' \
+    "${root}/scripts/ops/attendance-windows-native-common.ps1" \
+    || die "Windows native common helpers must enforce exact source SHA"
+  search_fixed_string 'Assert-WindowsNativeExactSourceSha' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must fail closed on source SHA mismatch"
+  search_fixed_string 'multitable-onprem-bootstrap-admin.ps1' \
+    "${root}/scripts/ops/attendance-windows-native-bootstrap-admin.ps1" \
+    || die "Windows native admin bootstrap must delegate to the existing native PostgreSQL helper"
+  search_fixed_string 'Assert-WindowsNativeLoopbackHost' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must enforce loopback-only runtime hosts"
+  search_fixed_string 'Attendance opt-in is forbidden' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must reject attendance rollout opt-ins"
+  search_fixed_string 'External integration configuration is forbidden' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must reject external integration configuration"
+  search_fixed_string 'APPROVAL_BREACH_DINGTALK_' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must reject DingTalk breach webhooks"
+  search_fixed_string 'ENABLE_ATTENDANCE_SCHEDULER_LEADER_LOCK' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must reject the attendance leader-lock opt-in"
+  search_fixed_string 'metasheet_windows_qa' \
+    "${root}/scripts/ops/attendance-windows-native-preflight.ps1" \
+    || die "Windows native preflight must pin the dedicated local QA database"
+  search_fixed_string "headers['x-forwarded-for'] = remoteAddress" "$gateway" \
+    || die "Windows native gateway must replace client-supplied forwarding identity"
+  search_fixed_string 'gateway host must be loopback' "$gateway" \
+    || die "Windows native gateway must enforce a loopback listener"
+  search_fixed_string 'DRAFT_HOLD' "$runner" \
+    || die "Windows native QA runner must keep Draft/HOLD posture"
+  search_fixed_string 'PQA-10' "$matrix" \
+    || die "Windows native QA risk matrix must include PQA-10 re-evaluation"
+  local native_dependency
+  for native_dependency in \
+    "${root}/windows-native-bootstrap-admin.bat" \
+    "${root}/scripts/ops/attendance-windows-native-"* \
+    "${root}/scripts/ops/attendance-onprem-deploy-run.ps1" \
+    "${root}/scripts/ops/attendance-onprem-start-pm2.ps1" \
+    "${root}/scripts/ops/attendance-onprem-publish-web-dist.ps1" \
+    "${root}/scripts/ops/multitable-onprem-bootstrap-admin.ps1"
+  do
+    if grep -Eiq 'wsl\.exe|wsl[[:space:]]+-' "$native_dependency"; then
+      die "Windows native dependency must not invoke WSL: ${native_dependency#${root}/}"
+    fi
   done
 }
 
@@ -250,10 +530,18 @@ esac
 pkg_name="$(head -n 1 "$list_file" | cut -d/ -f1)"
 pkg_root="${EXTRACT_ROOT}/${pkg_name}"
 run_label="$(printf '%s' "$pkg_name" | sed -nE 's/^.*-(run[0-9]+)(-.+)?$/\1/p')"
+windows_native_qa=0
+if [[ -f "${pkg_root}/attendance-windows-native-qa-v2.pin.json" ]] \
+  || [[ -f "${pkg_root}/scripts/ops/attendance-windows-native-qa-v2.pin.json" ]] \
+  || grep -l '"windowsNativeQa"' "${pkg_root}"/metasheet-attendance-onprem-*.json >/dev/null 2>&1; then
+  windows_native_qa=1
+fi
 
 required=(
   "start-pm2.bat"
   "start-pm2-remote.bat"
+  "SOURCE_SHA"
+  "QA_TOOLING_SHA"
   "apps/web/dist/index.html"
   "apps/web/package.json"
   "packages/core-backend/dist/src/index.js"
@@ -271,6 +559,7 @@ required=(
   "plugins/plugin-attendance/index.cjs"
   "scripts/ops/attendance-onprem-start-pm2.ps1"
   "scripts/ops/attendance-onprem-deploy-run.ps1"
+  "scripts/ops/multitable-onprem-bootstrap-admin.ps1"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
   "scripts/ops/attendance-onprem-publish-web-dist.sh"
@@ -287,6 +576,31 @@ required=(
   "docs/deployment/attendance-windows-wsl-direct-commands-20260306.md"
   "docs/deployment/attendance-windows-wsl-customer-profiled-commands-20260306.md"
 )
+
+if [[ "$windows_native_qa" == "1" ]]; then
+  required+=(
+    "windows-native-preflight.bat"
+    "windows-native-start.bat"
+    "windows-native-stop.bat"
+    "windows-native-healthcheck.bat"
+    "windows-native-bootstrap-admin.bat"
+    "attendance-windows-native-qa-v2.pin.json"
+    "scripts/ops/attendance-windows-native-common.ps1"
+    "scripts/ops/attendance-windows-native-preflight.ps1"
+    "scripts/ops/attendance-windows-native-start.ps1"
+    "scripts/ops/attendance-windows-native-stop.ps1"
+    "scripts/ops/attendance-windows-native-healthcheck.ps1"
+    "scripts/ops/attendance-windows-native-bootstrap-admin.ps1"
+    "scripts/ops/attendance-windows-native-gateway.mjs"
+    "scripts/ops/attendance-windows-native-qa-v2.pin.json"
+    "scripts/ops/attendance-windows-native-qa-risk-matrix.json"
+    "scripts/ops/attendance-windows-native-qa-runner.mjs"
+    "docker/app.env.attendance-windows-native.qa.example"
+    "ecosystem.windows-native.config.cjs"
+    "docs/deployment/attendance-windows-native-qa-v2-20260804.md"
+    "docs/development/attendance-windows-native-qa-v2-verification-20260804.md"
+  )
+fi
 
 for rel in "${required[@]}"; do
   [[ -e "${pkg_root}/${rel}" ]] || die "Required package content missing: ${rel}"
@@ -314,7 +628,12 @@ fi
 
 verify_onprem_env_templates "$pkg_root"
 verify_workspace_manifest "$pkg_root"
+verify_workspace_runtime_dependencies "$pkg_root"
+verify_exact_source_sha "$pkg_root"
 verify_web_dist_publish_entrypoints "$pkg_root"
+if [[ "$windows_native_qa" == "1" ]]; then
+  verify_windows_native_gateway "$pkg_root"
+fi
 verify_core_backend_migration_set "$pkg_root"
 
 if search_extended_regex 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "${pkg_root}/apps/web/dist"; then
