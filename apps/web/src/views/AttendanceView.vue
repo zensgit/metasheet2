@@ -8936,6 +8936,11 @@
                   :analysis="shiftSegmentAnalysis"
                   :preview-only="shiftSegmentPreviewOnly"
                 />
+                <AttendanceShiftFlexPolicyEditor
+                  v-model:policy="shiftForm.flexPolicy"
+                  :flex-eligible="shiftSegmentAnalysis.flexEligible"
+                  :analysis="shiftFlexAnalysis"
+                />
                 <label class="attendance__field" for="attendance-shift-late-grace">
                   <span>{{ tr('Late grace (min)', '迟到宽限（分钟）') }}</span>
                   <input
@@ -8993,6 +8998,7 @@
                       <th>{{ tr('Name', '名称') }}</th>
                       <th>{{ tr('Timezone', '时区') }}</th>
                       <th>{{ tr('Segments', '时段') }}</th>
+                      <th>{{ tr('Flex', '弹性') }}</th>
                       <th>{{ tr('Planned', '计划时长') }}</th>
                       <th>{{ tr('Working days', '工作日') }}</th>
                       <th>{{ tr('Actions', '操作') }}</th>
@@ -9011,6 +9017,9 @@
                         >
                           {{ tr('Preview only', '仅供预览') }}
                         </span>
+                      </td>
+                      <td>
+                        <span data-attendance-shift-list-flex>{{ shiftFlexLabel(shift) }}</span>
                       </td>
                       <td class="attendance__tabular-number">{{ shiftPlannedMinutes(shift) }} {{ tr('min', '分钟') }}</td>
                       <td>{{ shift.workingDays.join(',') }}</td>
@@ -9924,6 +9933,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import AttendanceShiftSegmentsEditor from './attendance/AttendanceShiftSegmentsEditor.vue'
+import AttendanceShiftFlexPolicyEditor from './attendance/AttendanceShiftFlexPolicyEditor.vue'
 import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
 // W5-1 (Wave 5 explainability design-lock, RATIFIED §6/§9 W5-1): dual-face decision-trace wiring.
 import AttendanceDecisionTrace from './attendance/AttendanceDecisionTrace.vue'
@@ -9943,12 +9953,17 @@ import AttendanceContextHelp from './attendance/AttendanceContextHelp.vue'
 import type { AttendanceContextHelpEvidenceLink } from './attendance/attendanceContextHelp'
 import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
 import {
+  analyzeAttendanceShiftFlexPolicy,
   analyzeAttendanceShiftSegments,
   calculateAttendanceShiftPlannedMinutes,
   cloneAttendanceShiftSegmentDrafts,
+  defaultAttendanceShiftFlexPolicy,
+  formatAttendanceShiftFlexPolicy,
   formatAttendanceShiftSegments,
   isAttendanceShiftPreviewOnly,
+  normalizeAttendanceShiftFlexPolicy,
   normalizeAttendanceShiftSegments,
+  type AttendanceShiftFlexPolicy,
   type AttendanceShiftSegment,
   type AttendanceShiftSegmentCapabilities,
   type AttendanceShiftSegmentDraft,
@@ -11339,6 +11354,8 @@ interface AttendanceShift {
   segments?: AttendanceShiftSegment[]
   calculationMode?: 'envelope' | 'segments'
   plannedMinutes?: number
+  flexPolicy?: AttendanceShiftFlexPolicy
+  flexEligible?: boolean
   capabilities?: AttendanceShiftSegmentCapabilities
 }
 
@@ -14996,6 +15013,7 @@ function applySetupTemplate(): void {
       endTime: plan.shift.workEndTime,
       endDayOffset: plan.shift.workEndTime <= plan.shift.workStartTime ? 1 : 0,
     }])
+    shiftForm.flexPolicy = defaultAttendanceShiftFlexPolicy()
     shiftForm.lateGraceMinutes = plan.shift.lateGraceMinutes
     shiftForm.earlyGraceMinutes = plan.shift.earlyGraceMinutes
     shiftForm.roundingMinutes = plan.shift.roundingMinutes
@@ -15982,6 +16000,7 @@ const shiftForm = reactive({
       endDayOffset: 0,
     },
   ] as AttendanceShiftSegmentDraft[],
+  flexPolicy: defaultAttendanceShiftFlexPolicy() as AttendanceShiftFlexPolicy,
   lateGraceMinutes: 10,
   earlyGraceMinutes: 10,
   roundingMinutes: 5,
@@ -26359,8 +26378,17 @@ function syncShiftEnvelopeFields(): void {
 }
 
 const shiftSegmentAnalysis = computed(() => analyzeAttendanceShiftSegments(shiftForm.segments, tr))
+const shiftFlexAnalysis = computed(() => analyzeAttendanceShiftFlexPolicy(
+  shiftForm.flexPolicy,
+  shiftForm.segments.length,
+  tr,
+  shiftForm.segments[0]?.startTime ?? null,
+))
 
-const shiftSegmentValidationErrors = computed(() => shiftSegmentAnalysis.value.errors)
+const shiftSegmentValidationErrors = computed(() => [
+  ...shiftSegmentAnalysis.value.errors,
+  ...shiftFlexAnalysis.value.errors,
+])
 const editingShift = computed(() => (
   shiftEditingId.value
     ? shifts.value.find(shift => shift.id === shiftEditingId.value) ?? null
@@ -26376,7 +26404,14 @@ function shiftSegmentsLabel(shift: AttendanceShift): string {
   return formatAttendanceShiftSegments(shift, tr)
 }
 
+function shiftFlexLabel(shift: AttendanceShift): string {
+  return formatAttendanceShiftFlexPolicy(shift.flexPolicy, tr)
+}
+
 function shiftPlannedMinutes(shift: AttendanceShift): number {
+  if (shift.flexPolicy?.mode === 'flex_required_duration') {
+    return shift.plannedMinutes ?? shift.flexPolicy.requiredMinutes
+  }
   return calculateAttendanceShiftPlannedMinutes(shift)
 }
 
@@ -26399,6 +26434,7 @@ function resetShiftForm() {
     endTime: '18:00',
     endDayOffset: 0,
   }])
+  shiftForm.flexPolicy = defaultAttendanceShiftFlexPolicy()
   shiftForm.lateGraceMinutes = 10
   shiftForm.earlyGraceMinutes = 10
   shiftForm.roundingMinutes = 5
@@ -26412,6 +26448,7 @@ function editShift(shift: AttendanceShift) {
   shiftForm.workStartTime = shift.workStartTime
   shiftForm.workEndTime = shift.workEndTime
   replaceShiftSegments(normalizeAttendanceShiftSegments(shift))
+  shiftForm.flexPolicy = normalizeAttendanceShiftFlexPolicy(shift.flexPolicy)
   shiftForm.lateGraceMinutes = shift.lateGraceMinutes
   shiftForm.earlyGraceMinutes = shift.earlyGraceMinutes
   shiftForm.roundingMinutes = shift.roundingMinutes
@@ -26457,6 +26494,16 @@ async function saveShift() {
   shiftSaving.value = true
   const isEditing = Boolean(shiftEditingId.value)
   try {
+    const flexPolicyPayload = shiftForm.flexPolicy.mode === 'strict'
+      ? { mode: 'strict' as const }
+      : {
+          mode: 'flex_required_duration' as const,
+          requiredMinutes: Number(shiftForm.flexPolicy.requiredMinutes) || 0,
+          arrivalWindowBeforeMinutes: Number(shiftForm.flexPolicy.arrivalWindowBeforeMinutes) || 0,
+          arrivalWindowAfterMinutes: Number(shiftForm.flexPolicy.arrivalWindowAfterMinutes) || 0,
+          coreStartTime: shiftForm.flexPolicy.coreStartTime || null,
+          coreEndTime: shiftForm.flexPolicy.coreEndTime || null,
+        }
     const payload = {
       name: shiftForm.name,
       timezone: shiftForm.timezone,
@@ -26467,6 +26514,7 @@ async function saveShift() {
         endTime: segment.endTime,
         endDayOffset: segment.endDayOffset,
       })),
+      flexPolicy: flexPolicyPayload,
       lateGraceMinutes: Number(shiftForm.lateGraceMinutes) || 0,
       earlyGraceMinutes: Number(shiftForm.earlyGraceMinutes) || 0,
       roundingMinutes: Number(shiftForm.roundingMinutes) || 0,

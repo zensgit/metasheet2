@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest'
+import { createApp, h, nextTick, ref } from 'vue'
+import AttendanceShiftFlexPolicyEditor from '../src/views/attendance/AttendanceShiftFlexPolicyEditor.vue'
 import {
+  analyzeAttendanceShiftFlexPolicy,
   analyzeAttendanceShiftSegments,
   calculateAttendanceShiftPlannedMinutes,
   isAttendanceShiftPreviewOnly,
+  normalizeAttendanceShiftFlexPolicy,
   normalizeAttendanceShiftSegments,
   parseAttendanceShiftClockMinutes,
+  type AttendanceShiftFlexPolicy,
   type AttendanceShiftSegmentDraft,
 } from '../src/views/attendance/attendanceShiftSegments'
 
@@ -47,6 +52,129 @@ describe('attendance shift segment analysis', () => {
       flexEligible: false,
       compatibilityEnvelope: '08:00 - 17:00',
     })
+  })
+
+  it('validates W5 flex policy, core coverage, and rejects multi-segment flex without silent reset', () => {
+    expect(normalizeAttendanceShiftFlexPolicy(undefined)).toEqual({ mode: 'strict' })
+    const malformed = normalizeAttendanceShiftFlexPolicy({
+      mode: 'flex_required_duration',
+      requiredMinutes: '480',
+      arrivalWindowBeforeMinutes: null,
+      arrivalWindowAfterMinutes: '0',
+      coreStartTime: null,
+      coreEndTime: null,
+    })
+    const malformedAnalysis = analyzeAttendanceShiftFlexPolicy(malformed, 1, tr, '09:00')
+    expect(malformedAnalysis.errors).toEqual([
+      'Required minutes must be an integer from 1 to 1440.',
+      'Arrival window before minutes must be a non-negative integer.',
+      'Arrival window after minutes must be a non-negative integer.',
+    ])
+    // 09:00 ±60 covers core 10:00-15:00 with required 480.
+    const ok = analyzeAttendanceShiftFlexPolicy({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 60,
+      arrivalWindowAfterMinutes: 60,
+      coreStartTime: '10:00',
+      coreEndTime: '15:00',
+    }, 1, tr, '09:00')
+    expect(ok.errors).toEqual([])
+    expect(ok.plannedMinutes).toBe(480)
+
+    // after=120 => latest start 11:00 > coreStart 10:00 (duration-only would pass)
+    const uncoveredLatest = analyzeAttendanceShiftFlexPolicy({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 60,
+      arrivalWindowAfterMinutes: 120,
+      coreStartTime: '10:00',
+      coreEndTime: '15:00',
+    }, 1, tr, '09:00')
+    expect(uncoveredLatest.errors.some((error) => error.includes('Core hours must be covered'))).toBe(true)
+
+    // earliest+required cannot reach core end (duration-only would pass: 360>=360)
+    const uncoveredEarliest = analyzeAttendanceShiftFlexPolicy({
+      mode: 'flex_required_duration',
+      requiredMinutes: 360,
+      arrivalWindowBeforeMinutes: 120,
+      arrivalWindowAfterMinutes: 0,
+      coreStartTime: '09:00',
+      coreEndTime: '15:00',
+    }, 1, tr, '09:00')
+    expect(uncoveredEarliest.errors.some((error) => error.includes('Core hours must be covered'))).toBe(true)
+
+    // Multi-segment flex: preserve policy intent in the analyzer input; surface error
+    // (UI must not silently rewrite flexPolicy to strict — save is blocked instead).
+    const multiPolicy = {
+      mode: 'flex_required_duration' as const,
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 0,
+      arrivalWindowAfterMinutes: 0,
+      coreStartTime: null,
+      coreEndTime: null,
+    }
+    const multi = analyzeAttendanceShiftFlexPolicy(multiPolicy, 2, tr)
+    expect(multi.errors).toContain(
+      'Flexible required-duration mode is available only for a one-segment shift.',
+    )
+    expect(multiPolicy.mode).toBe('flex_required_duration')
+  })
+
+  it('keeps the selected flex policy visible when segments become ineligible and allows an explicit reset', async () => {
+    const policy = ref<AttendanceShiftFlexPolicy>({ mode: 'strict' })
+    const flexEligible = ref(true)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({
+      setup() {
+        return () => h(AttendanceShiftFlexPolicyEditor, {
+          policy: policy.value,
+          'onUpdate:policy': (next: AttendanceShiftFlexPolicy) => {
+            policy.value = next
+          },
+          flexEligible: flexEligible.value,
+          analysis: analyzeAttendanceShiftFlexPolicy(
+            policy.value,
+            flexEligible.value ? 1 : 2,
+            tr,
+            '09:00',
+          ),
+        })
+      },
+    })
+
+    try {
+      app.mount(container)
+      const mode = container.querySelector<HTMLSelectElement>('[data-attendance-shift-flex-mode]')!
+      mode.value = 'flex_required_duration'
+      mode.dispatchEvent(new Event('change', { bubbles: true }))
+      await nextTick()
+
+      expect(policy.value).toEqual({
+        mode: 'flex_required_duration',
+        requiredMinutes: 480,
+        arrivalWindowBeforeMinutes: 60,
+        arrivalWindowAfterMinutes: 120,
+        coreStartTime: null,
+        coreEndTime: null,
+      })
+
+      flexEligible.value = false
+      await nextTick()
+      expect(policy.value.mode).toBe('flex_required_duration')
+      expect(mode.value).toBe('flex_required_duration')
+      expect(container.querySelector('[data-attendance-shift-flex-errors]')?.textContent)
+        .toContain('Flexible required-duration mode is available only for a one-segment shift.')
+
+      mode.value = 'strict'
+      mode.dispatchEvent(new Event('change', { bubbles: true }))
+      await nextTick()
+      expect(policy.value).toEqual({ mode: 'strict' })
+    } finally {
+      app.unmount()
+      container.remove()
+    }
   })
 
   it('keeps one final cross-midnight segment on the originating shift day', () => {

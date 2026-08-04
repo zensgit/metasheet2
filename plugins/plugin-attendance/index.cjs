@@ -22683,7 +22683,59 @@ async function buildW4ShadowFrozenContextV1(trx, args) {
   const absenceLateThresholdMinutes = Number.isFinite(Number(rule?.absenceLateThresholdMinutes))
     ? Math.max(0, Number(rule.absenceLateThresholdMinutes))
     : DEFAULT_RULE.absenceLateThresholdMinutes
-  return {
+  // W5: freeze flex policy from the shift row. Absent/strict columns => omit
+  // flexPolicy so legacy W4 frozen-context bytes stay exact for strict shifts.
+  const flexMode = shift.flex_mode === 'flex_required_duration'
+    ? 'flex_required_duration'
+    : 'strict'
+  let flexPolicy = null
+  if (flexMode === 'flex_required_duration') {
+    // Multi-segment flex is rejected at write time; fail closed here too so a
+    // corrupted row cannot become a frozen multi-segment flex context.
+    if (segments.length !== 1) return null
+    const requiredMinutes = Math.floor(Number(shift.flex_required_minutes))
+    const arrivalWindowBeforeMinutes = Math.floor(Number(shift.flex_arrival_window_before_minutes))
+    const arrivalWindowAfterMinutes = Math.floor(Number(shift.flex_arrival_window_after_minutes))
+    if (
+      !Number.isInteger(requiredMinutes) || requiredMinutes <= 0 || requiredMinutes > 1440
+      || !Number.isInteger(arrivalWindowBeforeMinutes) || arrivalWindowBeforeMinutes < 0
+      || !Number.isInteger(arrivalWindowAfterMinutes) || arrivalWindowAfterMinutes < 0
+    ) {
+      return null
+    }
+    const coreStartTime = shift.flex_core_start_time
+      ? normalizeTimeString(shift.flex_core_start_time)
+      : null
+    const coreEndTime = shift.flex_core_end_time
+      ? normalizeTimeString(shift.flex_core_end_time)
+      : null
+    if ((coreStartTime === null) !== (coreEndTime === null)) return null
+    // Re-check the authoring core-coverage guarantee at freeze time so a
+    // corrupted row cannot enter the w4c1 calculator path.
+    if (coreStartTime !== null && coreEndTime !== null) {
+      const parseHm = (value) => {
+        if (typeof value !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) return null
+        return Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5))
+      }
+      const segmentStartMin = parseHm(segments[0].startTime)
+      const coreStartMin = parseHm(coreStartTime)
+      const coreEndMin = parseHm(coreEndTime)
+      if (segmentStartMin === null || coreStartMin === null || coreEndMin === null) return null
+      if (!(coreEndMin > coreStartMin)) return null
+      const earliest = segmentStartMin - arrivalWindowBeforeMinutes
+      const latest = segmentStartMin + arrivalWindowAfterMinutes
+      if (!(latest <= coreStartMin && earliest + requiredMinutes >= coreEndMin)) return null
+    }
+    flexPolicy = {
+      mode: 'flex_required_duration',
+      requiredMinutes,
+      arrivalWindowBeforeMinutes,
+      arrivalWindowAfterMinutes,
+      coreStartTime,
+      coreEndTime,
+    }
+  }
+  const context = {
     schemaVersion: 1,
     selector: 'legacy',
     orgId,
@@ -22699,6 +22751,8 @@ async function buildW4ShadowFrozenContextV1(trx, args) {
     absenceLateThresholdMinutes,
     segments,
   }
+  if (flexPolicy) context.flexPolicy = flexPolicy
+  return context
 }
 
 async function generateAbsenceRecords(db, orgId, workDate, timezone, userIds) {
@@ -25883,6 +25937,20 @@ module.exports = {
       endDayOffset: z.number().int().min(0).max(1).optional(),
     }).strict()
 
+    // W5: route-level shape gate only; strict discriminated validation and
+    // multi-segment rejection live in the canonical shift service.
+    const shiftFlexPolicySchema = z.union([
+      z.object({ mode: z.literal('strict') }).strict(),
+      z.object({
+        mode: z.literal('flex_required_duration'),
+        requiredMinutes: z.number().int().min(1).max(1440),
+        arrivalWindowBeforeMinutes: z.number().int().min(0),
+        arrivalWindowAfterMinutes: z.number().int().min(0),
+        coreStartTime: z.string().nullable().optional(),
+        coreEndTime: z.string().nullable().optional(),
+      }).strict(),
+    ])
+
     const shiftCreateSchema = z.object({
       name: z.string().trim().min(1).max(200),
       timezone: z.string().optional(),
@@ -25894,6 +25962,7 @@ module.exports = {
       earlyGraceMinutes: z.number().int().min(0).optional(),
       roundingMinutes: z.number().int().min(0).optional(),
       workingDays: z.array(z.number().int().min(0).max(6)).optional(),
+      flexPolicy: shiftFlexPolicySchema.optional(),
       orgId: z.string().optional(),
     }).strict()
     const shiftUpdateSchema = shiftCreateSchema.partial()

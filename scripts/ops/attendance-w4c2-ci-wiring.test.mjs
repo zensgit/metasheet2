@@ -121,6 +121,8 @@ const FILES = Object.freeze([
   // #4709 FSER-1 desired-config schema, lifecycle, and reference-lock proof.
   // Keep it excluded from the no-DB lane and whole-file wired into the attendance step.
   'tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts',
+  // #4556 W5 flex schema + canonical writer create/update/rollback proof.
+  'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
 ])
 
 /**

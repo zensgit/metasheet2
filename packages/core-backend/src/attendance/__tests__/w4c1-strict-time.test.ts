@@ -15,6 +15,7 @@ import {
   isAttendanceCalendarDateKeyV1,
   isAttendanceWallTimeHHMMV1,
   parseAttendanceInstantMsV1,
+  resolveAttendanceInstantBoundaryMetadataV1,
   resolveAttendanceLocalWallTimeV1,
   validateAttendanceIanaTimezoneV1,
 } from '../w4c1-strict-time'
@@ -167,6 +168,17 @@ describe('supporting guards', () => {
     expect(attendanceZoneOffsetMinutesAtV1('Asia/Shanghai', Date.UTC(2026, 6, 1))).toBe(480)
     expect(attendanceZoneOffsetMinutesAtV1('America/New_York', Date.UTC(2026, 6, 1))).toBe(-240)
     expect(attendanceZoneOffsetMinutesAtV1('America/New_York', Date.UTC(2026, 0, 15))).toBe(-300)
+  })
+
+  it('describes explicit instants on both sides of a DST fold', () => {
+    expect(resolveAttendanceInstantBoundaryMetadataV1(
+      'America/New_York',
+      Date.UTC(2026, 10, 1, 5, 30, 15, 123),
+    )).toEqual({ offsetMinutes: -240, fold: 'fold_earlier' })
+    expect(resolveAttendanceInstantBoundaryMetadataV1(
+      'America/New_York',
+      Date.UTC(2026, 10, 1, 6, 30, 15, 123),
+    )).toEqual({ offsetMinutes: -300, fold: 'fold_later' })
   })
 
   it('validates calendar date keys and HH:MM wall times strictly', () => {

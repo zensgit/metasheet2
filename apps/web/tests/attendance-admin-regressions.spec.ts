@@ -1049,6 +1049,7 @@ describe('Attendance admin regressions', () => {
           { segmentIndex: 0, startTime: '09:00', startDayOffset: 0, endTime: '12:00', endDayOffset: 0 },
           { segmentIndex: 1, startTime: '13:00', startDayOffset: 0, endTime: '17:00', endDayOffset: 0 },
         ],
+        flexPolicy: { mode: 'strict' },
         lateGraceMinutes: 10,
         earlyGraceMinutes: 10,
         roundingMinutes: 5,
