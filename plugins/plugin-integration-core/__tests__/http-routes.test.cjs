@@ -5196,7 +5196,7 @@ async function testTableActionConflictPolicyRoutes() {
       conflictPolicyReview: {
         conflictType: 'duplicate_expanded_key',
         scope: 'run_only',
-        policies: [{ fingerprint, policy: 'skip_selected' }],
+        policies: [{ fingerprint, policy: 'source_correction_required' }],
       },
     },
   })
@@ -5204,7 +5204,7 @@ async function testTableActionConflictPolicyRoutes() {
   assert.equal(res.body.data.counts.manual_confirm, 1, 'policy review does not release duplicate rows from manual_confirm')
   const review = res.body.data.evidence.plan.conflictPolicyReview
   assert.equal(review.writeEffect, 'manual_confirm_held')
-  assert.equal(review.selectedPolicies[0].policy, 'skip_selected', 'run-only policy overrides table-scope evidence')
+  assert.equal(review.selectedPolicies[0].policy, 'source_correction_required', 'run-only policy overrides table-scope evidence')
   assert.equal(review.selectedPolicies[0].scope, 'run_only')
   assert.equal(JSON.stringify(review).includes('P-001'), false, 'policy evidence is values-free')
   const token = res.body.data.dryRunToken
@@ -5218,12 +5218,84 @@ async function testTableActionConflictPolicyRoutes() {
       conflictPolicyReview: {
         conflictType: 'duplicate_expanded_key',
         scope: 'run_only',
-        policies: [{ fingerprint, policy: 'skip_selected' }],
+        policies: [{ fingerprint, policy: 'source_correction_required' }],
       },
     },
   })
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'apply rejects client-supplied conflict policy review')
+
+  // POLICY HONESTY at the route boundary: selecting an unimplemented duplicate policy fails 422 with
+  // a named code, on BOTH the run-only (dry-run body) and table-scope (admin PUT) selection paths.
+  // Previously the API accepted all six tokens and the three inert ones silently held the rows.
+  for (const policy of ['merge_quantity', 'select_representative', 'skip_selected']) {
+    res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: READ_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: {
+        parameters: { projectNo: 'P-001' },
+        conflictPolicyReview: {
+          conflictType: 'duplicate_expanded_key',
+          scope: 'run_only',
+          policies: [{ fingerprint, policy }],
+        },
+      },
+    })
+    assert.equal(res.statusCode, 422, `dry-run must refuse run-only ${policy}`)
+    assert.equal(res.body.error.code, 'CONFLICT_POLICY_NOT_IMPLEMENTED')
+    assert.deepEqual(res.body.error.details.allowedPolicies, ['hold', 'keep_multiple_rows', 'source_correction_required'])
+
+    res = await invoke(routes, 'PUT', '/api/integration/table-actions/:actionId/conflict-policies', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { conflictType: 'duplicate_expanded_key', policies: [{ fingerprint, policy }] },
+    })
+    assert.equal(res.statusCode, 422, `table-scope save must refuse ${policy}`)
+    assert.equal(res.body.error.code, 'CONFLICT_POLICY_NOT_IMPLEMENTED')
+  }
+
+  // POSITIVE CONTROL at the route boundary — the working policies still go through both paths, so
+  // the assertions above are not passing merely because everything is refused.
+  for (const policy of ['hold', 'keep_multiple_rows', 'source_correction_required']) {
+    res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: READ_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: {
+        parameters: { projectNo: 'P-001' },
+        conflictPolicyReview: {
+          conflictType: 'duplicate_expanded_key',
+          scope: 'run_only',
+          policies: [{ fingerprint, policy }],
+        },
+      },
+    })
+    assertOkResponse(res, 200)
+    assert.equal(
+      res.body.data.evidence.plan.conflictPolicyReview.selectedPolicies[0].policy,
+      policy,
+      `run-only ${policy} must still be accepted`,
+    )
+
+    res = await invoke(routes, 'PUT', '/api/integration/table-actions/:actionId/conflict-policies', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { conflictType: 'duplicate_expanded_key', policies: [{ fingerprint, policy }] },
+    })
+    assertOkResponse(res, 200)
+    assert.equal(res.body.data.policies[0].policy, policy, `table-scope ${policy} must still be accepted`)
+  }
+
+  // The dry-run diagnostics stop advertising the three refused tokens as choices, but still name
+  // them so a stored selection can be explained rather than rendered as an unknown value.
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 200)
+  const honestyDiagnostics = res.body.data.evidence.plan.duplicateExpandedKeyDiagnostics
+  assert.deepEqual(honestyDiagnostics.allowedPolicies, ['hold', 'keep_multiple_rows', 'source_correction_required'])
+  assert.deepEqual(honestyDiagnostics.unimplementedPolicies, ['merge_quantity', 'select_representative', 'skip_selected'])
 
   res = await invoke(routes, 'DELETE', '/api/integration/table-actions/:actionId/conflict-policies', {
     user: ADMIN_USER,

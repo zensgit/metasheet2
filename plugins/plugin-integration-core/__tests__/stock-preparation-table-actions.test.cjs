@@ -668,6 +668,178 @@ async function testSavedSourceCorrectionPolicyKeepsDuplicateHeldAndWritesNothing
   }
 }
 
+// POLICY HONESTY — the two STORED boundaries, tested at their real call sites.
+//
+// merge_quantity / select_representative / skip_selected are unimplemented by decision and are
+// refused 422 CONFLICT_POLICY_NOT_IMPLEMENTED when a client SELECTS one. Both places where such a
+// value can arrive from STORAGE must keep working, or the guard would turn stored artifacts into
+// new failures. The two call sites are exercised separately below.
+
+// (a) The table-scope policy store, end-to-end through dry-run AND apply. The record is written
+//     straight into storage because today's write path refuses to create one.
+async function testStoredUnimplementedTableScopePolicyStillDryRunsAndApplies() {
+  for (const policy of ['merge_quantity', 'select_representative', 'skip_selected']) {
+    const storage = createMemoryStorage()
+    const source = createSourceAdapter(duplicateRootPlmData())
+    const records = createRecordsApi()
+    const action = normalizeStockPreparationActionConfig(baseAction())
+    const fingerprint = rootPartFingerprint()
+
+    // Seed the policy store as an older release would have — never through today's guarded write.
+    const { __internals: policyInternals } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-policies.cjs'))
+    storage.map.set(policyInternals.conflictPolicyStoreKey(action), {
+      version: 1,
+      conflictType: 'duplicate_expanded_key',
+      actionId: action.actionId,
+      targetScopeFingerprint: policyInternals.targetScopeFingerprint(action),
+      policies: [{ fingerprint, policy, approvedAt: '2026-06-08T09:00:00.000Z', approvedBy: 'admin-user' }],
+    })
+
+    const dryRun = await dryRunStockPreparationAction({
+      action,
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+      policyStore: storage,
+      plannedAt: '2026-06-08T09:00:00.000Z',
+    })
+
+    // The stored token loads, reaches the planner, and holds under the catch-all reason — exactly
+    // the behaviour it had before the selection guard existed.
+    assert.equal(dryRun.status, 'manual_confirm_required', `stored ${policy} still plans`)
+    const resolution = dryRun.evidence.plan.duplicateExpandedKeyResolution
+    assert.equal(resolution.heldReasonCounts.unsupported_policy, 1, `stored ${policy} still holds as unsupported_policy`)
+    assert.equal(resolution.heldPolicies[0].policy, policy, 'the held row still names the stored token')
+    assert.equal(dryRun.evidence.plan.conflictPolicyReview.selectedPolicies[0].policy, policy)
+    assert.equal(typeof dryRun.dryRunToken, 'string')
+
+    // And apply still completes rather than erroring out on the stored value.
+    const result = await applyStockPreparationAction({
+      sandboxPolicy: SANDBOX_POLICY,
+      action,
+      parameters: { projectNo: 'P-001' },
+      dryRunToken: dryRun.dryRunToken,
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+      policyStore: storage,
+      permission: 'write',
+      acceptManualConfirmHold: true,
+    })
+    assert.equal(result.status, 'held', `stored ${policy} apply completes and holds`)
+    assert.equal(result.apply.counts.held, 1)
+    assert.equal(result.apply.counts.created, 0, `stored ${policy} must never create rows`)
+    assert.equal(result.apply.counts.updated, 0, `stored ${policy} must never patch rows`)
+  }
+
+  // POSITIVE CONTROL: a working policy still resolves through the very same stored path, so the
+  // assertions above are not passing merely because every stored policy holds.
+  const storage = createMemoryStorage()
+  const source = createSourceAdapter(duplicateRootPlmData())
+  const records = createRecordsApi()
+  const action = normalizeStockPreparationActionConfig(baseAction())
+  await saveTableScopeConflictPolicies({
+    action,
+    policyStore: storage,
+    approver: 'admin-user',
+    request: {
+      conflictType: 'duplicate_expanded_key',
+      policies: [{ fingerprint: rootPartFingerprint(), policy: 'keep_multiple_rows' }],
+    },
+  })
+  const resolvedDryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    plannedAt: '2026-06-08T09:00:00.000Z',
+  })
+  assert.equal(
+    resolvedDryRun.evidence.plan.duplicateExpandedKeyResolution.resolvedGroupCount,
+    1,
+    'keep_multiple_rows still resolves through the same stored table-scope path',
+  )
+}
+
+// (b) The SERVER-MINTED dry-run token record, at applyStockPreparationAction's own call site.
+//     A token issued before the selection guard landed can still carry an unimplemented policy;
+//     re-validating it as a fresh selection would 422 a stored artifact.
+//     What this pins: apply's normalization ACCEPTS the stored value and proceeds to the ordinary
+//     revision check. (It cannot reach a successful apply, because buildRevision hashes
+//     conflictPolicyReview — rewriting the token's review necessarily changes the revision.)
+async function testStoredDryRunTokenPolicyIsNotRevalidatedAsASelection() {
+  for (const policy of ['merge_quantity', 'select_representative', 'skip_selected']) {
+    const storage = createMemoryStorage()
+    const source = createSourceAdapter(duplicateRootPlmData())
+    const records = createRecordsApi()
+    const action = normalizeStockPreparationActionConfig(baseAction())
+
+    // Mint a real token the normal way, with a policy that is selectable today.
+    const dryRun = await dryRunStockPreparationAction({
+      action,
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+      policyStore: storage,
+      plannedAt: '2026-06-08T09:00:00.000Z',
+      conflictPolicyReview: {
+        conflictType: 'duplicate_expanded_key',
+        scope: 'run_only',
+        policies: [{ fingerprint: rootPartFingerprint(), policy: 'hold' }],
+      },
+    })
+    assert.equal(typeof dryRun.dryRunToken, 'string')
+
+    // Rewrite the STORED record to name an unimplemented policy — i.e. a token minted under the
+    // older contract. This has to go around the write path, which now refuses to produce one.
+    const tokenKey = [...storage.map.keys()].find((key) => key.startsWith('integration:table-action:dry-run-token:'))
+    assert.equal(typeof tokenKey, 'string', 'the dry-run token record must be in the store')
+    const record = storage.map.get(tokenKey)
+    record.conflictPolicyReview = {
+      conflictType: 'duplicate_expanded_key',
+      scope: 'run_only',
+      policies: [{ fingerprint: rootPartFingerprint(), policy }],
+    }
+    storage.map.set(tokenKey, record)
+
+    let caught
+    try {
+      await applyStockPreparationAction({
+        sandboxPolicy: SANDBOX_POLICY,
+        action,
+        parameters: { projectNo: 'P-001' },
+        dryRunToken: dryRun.dryRunToken,
+        sourceAdapter: source.adapter,
+        recordsApi: records.recordsApi,
+        tokenStore: storage,
+        policyStore: storage,
+        permission: 'write',
+        acceptManualConfirmHold: true,
+      })
+    } catch (error) {
+      caught = error
+    }
+
+    // The load-bearing assertion: apply did NOT reject the stored token for naming an
+    // unimplemented policy. It got past normalization to the ordinary revision check.
+    assert.notEqual(
+      caught && caught.code,
+      'CONFLICT_POLICY_NOT_IMPLEMENTED',
+      `a stored dry-run token naming ${policy} must not be re-validated as a fresh selection`,
+    )
+    assert.equal(
+      caught && caught.code,
+      'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH',
+      'the stored review is accepted, so apply proceeds to the normal revision check',
+    )
+    assert.equal(records.calls.some((call) => call[0] === 'createRecord'), false, 'no rows are written')
+  }
+}
+
 async function testLargeBomBoundedDryRunBlocksApplyToken() {
   const source = createSourceAdapter(childBomPlmData())
   const records = createRecordsApi()
@@ -1022,6 +1194,8 @@ async function main() {
   await testApplyRequiresTokenRecomputesAndScopesTarget()
   await testSavedKeepMultipleRowsPolicyRequiresFreshReviewAndAppliesResolvedRows()
   await testSavedSourceCorrectionPolicyKeepsDuplicateHeldAndWritesNothing()
+  await testStoredUnimplementedTableScopePolicyStillDryRunsAndApplies()
+  await testStoredDryRunTokenPolicyIsNotRevalidatedAsASelection()
   await testLargeBomBoundedDryRunBlocksApplyToken()
   await testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites()
   await testMissingChildBomDryRunBlocksApplyTokenAndWrites()
