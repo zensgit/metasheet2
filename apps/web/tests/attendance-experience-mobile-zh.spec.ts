@@ -166,7 +166,8 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
     findButton(container!, '返回总览').click()
     await waitForRoutePath(router!, '/attendance')
 
-    expect(router?.currentRoute.value.fullPath).toBe('/attendance')
-    expect(container?.querySelector('[data-testid="attendance-overview"]')).not.toBeNull()
+    expect(router?.currentRoute.value.fullPath).toBe('/attendance?tab=admin&section=attendance-admin-groups')
+    expect(container?.textContent).toContain('建议使用桌面端')
+    expect(container?.querySelector('[data-testid="attendance-admin-center"]')).toBeNull()
   })
 })

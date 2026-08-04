@@ -3712,6 +3712,57 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-attendance-group-workflow-step="schedule"]')?.getAttribute('aria-current')).toBe('step')
   })
 
+  it('keeps route group A authoritative after a stale list selection changes the editor to group B', async () => {
+    const routeGroup = {
+      id: 'group-a',
+      name: 'Route group A',
+      code: 'route-a',
+      timezone: 'Asia/Shanghai',
+      ruleSetId: 'rule-set-1',
+      attendanceType: 'fixed_shift',
+      description: 'Route-owned group',
+      memberCount: 1,
+    }
+    const staleGroup = {
+      ...routeGroup,
+      id: 'group-b',
+      name: 'Stale list group B',
+      code: 'route-b',
+    }
+    attendanceGroupsData = [routeGroup, staleGroup]
+    const openGroupRoute = vi.fn()
+
+    app = createApp(AttendanceView, {
+      mode: 'admin',
+      routeGroupContext: {
+        group: routeGroup,
+        step: 'schedule',
+        surface: null,
+        returnTo: '/attendance?tab=admin&section=attendance-admin-groups',
+      },
+      onOpenGroupRoute: openGroupRoute,
+    })
+    app.mount(container!)
+    await flushUi(8)
+
+    const staleRow = Array.from(container!.querySelectorAll<HTMLElement>('[data-attendance-group-row]'))
+      .find(row => row.textContent?.includes('Stale list group B'))
+    expect(staleRow).toBeTruthy()
+    staleRow!.querySelector<HTMLButtonElement>('.attendance__group-list-main')!.click()
+    await flushUi(4)
+
+    container!.querySelector<HTMLButtonElement>('[data-attendance-group-workflow-step="schedule"]')!.click()
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-assignments-open]')!.click()
+    await flushUi(2)
+
+    expect(openGroupRoute).toHaveBeenCalledWith({
+      groupId: 'group-a',
+      step: 'schedule',
+      surface: 'assignments',
+    })
+  })
+
   it('preserves the route group and stage after save or copy and leaves after deleting the route group', async () => {
     const routeGroup = {
       id: 'group-a',
@@ -5419,7 +5470,8 @@ describe('Attendance admin regressions', () => {
   })
 
   it('navigates from attendance group summary cards without issuing API writes', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    const openGroupRoute = vi.fn()
+    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5444,19 +5496,30 @@ describe('Attendance admin regressions', () => {
     await flushUi(2)
 
     const beforeNavCalls = vi.mocked(apiFetch).mock.calls.length
-    const openShifts = summaryGrid!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-shifts"]')
-    expect(openShifts).toBeTruthy()
-    openShifts!.click()
-    await flushUi(4)
+    const expectedRoutes = [
+      ['open-shifts', { groupId: 'group-a', step: 'schedule', surface: 'shifts' }],
+      ['open-assignments', { groupId: 'group-a', step: 'schedule', surface: 'assignments' }],
+      ['open-advanced-scheduling', { groupId: 'group-a', step: 'schedule', surface: 'advanced-scheduling' }],
+      ['open-rule-sets', { groupId: 'group-a', step: 'rules', surface: 'rule-sets' }],
+    ] as const
+    for (const [actionKey] of expectedRoutes) {
+      const action = summaryGrid!.querySelector<HTMLButtonElement>(
+        `[data-attendance-group-summary-action="${actionKey}"]`,
+      )
+      expect(action).toBeTruthy()
+      action!.click()
+      await flushUi(2)
+    }
 
     const newCalls = vi.mocked(apiFetch).mock.calls.slice(beforeNavCalls)
     expect(newCalls).toHaveLength(0)
-    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-shifts')!).display).not.toBe('none')
-    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).toBe('none')
+    expect(openGroupRoute.mock.calls.map(([target]) => target)).toEqual(expectedRoutes.map(([, target]) => target))
+    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).not.toBe('none')
   })
 
   it('opens the Holidays surface from the fixed-shift work-time drawer without writes', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    const openGroupRoute = vi.fn()
+    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5482,8 +5545,95 @@ describe('Attendance admin regressions', () => {
 
     expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toHaveLength(0)
     expect(container!.querySelector('[data-attendance-group-work-time-drawer]')).toBeNull()
-    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-holidays')!).display).not.toBe('none')
-    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).toBe('none')
+    expect(openGroupRoute).toHaveBeenCalledWith({ groupId: 'group-a', step: 'calendar', surface: null })
+    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).not.toBe('none')
+  })
+
+  it('routes the fixed-shift drawer and schedule-stage controls through the group route event', async () => {
+    const openGroupRoute = vi.fn()
+    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+    const beforeCalls = vi.mocked(apiFetch).mock.calls.length
+
+    const openWorkTimeAction = () => {
+      container!.querySelector<HTMLButtonElement>(
+        '[data-attendance-group-summary-action="open-work-time-drawer"]',
+      )!.click()
+    }
+    for (const [selector, target] of [
+      ['[data-attendance-group-work-time-shifts-open]', { groupId: 'group-a', step: 'schedule', surface: 'shifts' }],
+      ['[data-attendance-group-work-time-assignments-open]', { groupId: 'group-a', step: 'schedule', surface: 'assignments' }],
+      ['[data-attendance-group-work-time-advanced-scheduling-open]', { groupId: 'group-a', step: 'schedule', surface: 'advanced-scheduling' }],
+    ] as const) {
+      openWorkTimeAction()
+      await flushUi(2)
+      container!.querySelector<HTMLButtonElement>(selector)!.click()
+      await flushUi(2)
+      expect(openGroupRoute).toHaveBeenLastCalledWith(target)
+      expect(container!.querySelector('[data-attendance-group-work-time-drawer]')).toBeNull()
+    }
+
+    const openRulePolicyAction = () => {
+      container!.querySelector<HTMLButtonElement>(
+        '[data-attendance-group-summary-action="open-rule-policy-drawer"]',
+      )!.click()
+    }
+    for (const [selector, target] of [
+      ['[data-attendance-group-rule-policy-rule-sets-open]', { groupId: 'group-a', step: 'rules', surface: 'rule-sets' }],
+      ['[data-attendance-group-rule-policy-holidays-open]', { groupId: 'group-a', step: 'calendar', surface: null }],
+    ] as const) {
+      openRulePolicyAction()
+      await flushUi(2)
+      container!.querySelector<HTMLButtonElement>(selector)!.click()
+      await flushUi(2)
+      expect(openGroupRoute).toHaveBeenLastCalledWith(target)
+      expect(container!.querySelector('[data-attendance-group-rule-policy-drawer]')).toBeNull()
+    }
+
+    container!.querySelector<HTMLButtonElement>('[data-attendance-group-workflow-step="schedule"]')!.click()
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-assignments-open]')!.click()
+    await flushUi(2)
+    expect(openGroupRoute).toHaveBeenLastCalledWith({
+      groupId: 'group-a',
+      step: 'schedule',
+      surface: 'assignments',
+    })
+    expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toHaveLength(0)
+  })
+
+  it('routes the non-fixed schedule-stage control to advanced scheduling', async () => {
+    attendanceGroupsData = [{
+      id: 'group-a',
+      name: 'Rotation Team',
+      code: 'rotation-team',
+      timezone: 'Asia/Shanghai',
+      ruleSetId: 'rule-set-1',
+      attendanceType: 'scheduled_shift',
+      description: 'Rotation schedule group',
+      memberCount: 1,
+    }]
+    const openGroupRoute = vi.fn()
+    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-group-workflow-step="schedule"]')!.click()
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-group-advanced-scheduling-open]')!.click()
+    await flushUi(2)
+
+    expect(openGroupRoute).toHaveBeenCalledWith({
+      groupId: 'group-a',
+      step: 'schedule',
+      surface: 'advanced-scheduling',
+    })
   })
 
   it('previews fixed schedule coverage and disables apply when blocking conflicts exist', async () => {

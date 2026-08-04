@@ -217,6 +217,37 @@ export interface AttendanceGroupRouteContext {
   returnTo: string
 }
 
+export interface AttendanceGroupRouteNavigation {
+  groupId: string
+  step: AttendanceGroupRouteStep
+  surface: AttendanceGroupRouteSurface | null
+  returnTo: string
+}
+
+/**
+ * Build one canonical group-context URL for R2 entry points. The same closed
+ * step/surface parser used by route hydration validates the destination, and
+ * returnTo is normalized before it enters browser history.
+ */
+export function buildAttendanceGroupRouteHref(
+  input: AttendanceGroupRouteNavigation,
+): string | null {
+  if (!isAttendanceGroupId(input.groupId)) return null
+  const parsedSurface = parseAttendanceGroupRouteSurface(
+    input.step,
+    input.surface === null ? undefined : input.surface,
+  )
+  if (!parsedSurface.ok || !resolveAttendanceGroupRouteTarget(input.step, parsedSurface.surface)) {
+    return null
+  }
+
+  const path = `${ATTENDANCE_GROUP_ROUTE_PATH_PREFIX}${input.groupId}/${input.step}`
+  const query = new URLSearchParams()
+  if (parsedSurface.surface) query.set('surface', parsedSurface.surface)
+  query.set('returnTo', normalizeAttendanceGroupReturnTo(input.returnTo, path))
+  return `${path}?${query.toString()}`
+}
+
 /**
  * Combined pure parser for one route resolution (design lock §3.3 hydration step 1 — parse
  * only, no data loading). Any invalid groupId, unknown step, or illegal step/surface pair
