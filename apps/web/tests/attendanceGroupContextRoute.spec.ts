@@ -194,9 +194,9 @@ describe('parseAttendanceGroupRouteSurface + resolveAttendanceGroupRouteTarget (
     }
   })
 
-  it('absent surface (undefined or null) means the step default host', () => {
+  it('only an omitted surface means the step default host; a valueless query is rejected', () => {
     expect(parseAttendanceGroupRouteSurface('schedule', undefined)).toEqual({ ok: true, surface: null })
-    expect(parseAttendanceGroupRouteSurface('rules', null)).toEqual({ ok: true, surface: null })
+    expect(parseAttendanceGroupRouteSurface('rules', null)).toEqual({ ok: false })
     expect(parseAttendanceGroupRouteSurface('calendar', undefined)).toEqual({ ok: true, surface: null })
   })
 })
