@@ -8,8 +8,10 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const FROZEN_RUNTIME_SHA = 'd87e086fd1218b4cfb150177d43f2c52904b1d6d'
+// R5 (route-coverage 22/33 -> 33/33) re-pinned the extended smoke's digest below; the other two
+// frozen helpers are untouched by R5 and keep their prior digests.
 const FROZEN_HELPERS = Object.freeze({
-  'stock-preparation-prep-line-extended-smoke.mjs': '912f3ef75c4487dbdd946486d4cb7374f1c3ea1eb126c3b68381ad11963f0049',
+  'stock-preparation-prep-line-extended-smoke.mjs': '300e8e6691dc3e1df05bab62844f2794335abe714818c1bff31cd9d9b196ce58',
   'stock-preparation-mvp-postdeploy-smoke.mjs': 'e5265a2a8052ddc34866438a1ee3356b5d2aa1a106c8199f5e2fbbe4f2614df4',
   'stock-preparation-rca-window-pm2-sample.mjs': '09cc76024bd98fd4ce86cfa834eea3b94680482d0d0970600da008a19a6731ec',
 })

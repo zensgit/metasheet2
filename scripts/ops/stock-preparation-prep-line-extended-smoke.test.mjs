@@ -1,22 +1,30 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
 
 // T4 (#3751, closeout §5b) companion contract test — the harness itself, no live server needed.
 // Same posture as stock-preparation-mvp-postdeploy-smoke.test.mjs: pin the fixture invariants the
 // deployed run depends on, the closed values-free projections, and the sanitizing output layer.
 
 import {
+  ALWAYS_PREP_LINE_ROUTES,
+  OPTIONAL_PREP_LINE_ROUTES,
+  PREP_LINE_ROUTE_UNIVERSE,
   PREP_LINE_ROW_KEYS,
   SUMMARY_HEADER,
   T4_ALLOWED_ERROR_CODES,
   T4_ALLOWED_MODES,
+  buildApprovedErpSourcePrelude,
   buildApprovedSourcePrelude,
   buildExtendedSmokeFixture,
+  buildTargetOptionSetsFixture,
   formatSummaryBlock,
+  normalizePrepLineRouteTemplate,
   prepLineRowProjectionValid,
   prepLineRowResolved,
   buildRequestDefaults,
   requestJson,
+  runApprovedErpSourcePrelude,
   runApprovedSourcePrelude,
   safeCode,
   safeT4Mode,
@@ -31,6 +39,8 @@ import {
   buildOptionSetsFixture,
   leakScan,
 } from './stock-preparation-mvp-postdeploy-smoke.mjs'
+
+const require = createRequire(import.meta.url)
 
 test('fixture: salted, 3-line BOM with parent refs, and every value-bearing token is a sentinel', () => {
   const fixture = buildExtendedSmokeFixture('t123', 'stockprep-t4')
@@ -352,4 +362,146 @@ test('request defaults: main()\'s per-request wiring carries --tenant-id into EV
   assert.deepEqual(defaults, { token: 'tok_9', timeoutMs: 1234, tenantId: 'tenant_probe' })
   const noTenant = buildRequestDefaults({ tenantId: '', timeoutMs: 1234 }, 'tok_9')
   assert.equal(noTenant.tenantId, '', 'empty stays empty — requestJson/buildRequestHeaders omit the header')
+})
+
+// ── R5 (route-coverage 22/33 -> 33/33): 11 previously-untouched prep-line routes ─────────────────
+
+test('R5 fixture: sandboxObjectId carries the required namespace prefix and salts per run; both new fields are sentinels', () => {
+  const fixture = buildExtendedSmokeFixture('t123')
+  assert.match(fixture.sandboxObjectId, /^plm_stock_preparation_sandbox_smoke_t123$/)
+  assert.ok(fixture.sandboxLabel.length > 0)
+  assert.ok(fixture.sentinels.includes(fixture.sandboxObjectId))
+  assert.ok(fixture.sentinels.includes(fixture.sandboxLabel))
+  const other = buildExtendedSmokeFixture('t124')
+  assert.notEqual(other.sandboxObjectId, fixture.sandboxObjectId)
+})
+
+test('R5 target option-set fixture covers exactly the 4 declared source keys of the canonical/sandbox template', () => {
+  const sets = buildTargetOptionSetsFixture()
+  assert.deepEqual(Object.keys(sets).sort(), [
+    'blank_type', 'material_type', 'plm_stock_preparation_decision_v1', 'stock_preparation_status',
+  ])
+  for (const [key, options] of Object.entries(sets)) {
+    assert.ok(Array.isArray(options) && options.length > 0, `${key} must be a non-empty option array`)
+    for (const option of options) assert.ok(typeof option.value === 'string' && option.value.length > 0)
+  }
+})
+
+test('R5 normalizePrepLineRouteTemplate: strips the query string and normalizes the two dynamic snapshot-batch segments', () => {
+  assert.equal(normalizePrepLineRouteTemplate('/api/integration/status?tenantId=t1'), '/api/integration/status')
+  assert.equal(
+    normalizePrepLineRouteTemplate('/api/integration/stock-preparation/mvp/readiness?tenantId=t1&workspaceId=w1'),
+    '/api/integration/stock-preparation/mvp/readiness',
+  )
+  assert.equal(
+    normalizePrepLineRouteTemplate('/api/integration/stock-preparation/snapshot-batches/smoke_t4_batch_t123/diff?tenantId=t1'),
+    '/api/integration/stock-preparation/snapshot-batches/:id/diff',
+  )
+  assert.equal(
+    normalizePrepLineRouteTemplate('/api/integration/stock-preparation/snapshot-batches/smoke_t4_batch_t123/diff/rows?tenantId=t1'),
+    '/api/integration/stock-preparation/snapshot-batches/:id/diff/rows',
+  )
+  // A plain (non-dynamic) route with no query string is left untouched.
+  assert.equal(
+    normalizePrepLineRouteTemplate('/api/integration/stock-preparation/snapshot-batches'),
+    '/api/integration/stock-preparation/snapshot-batches',
+  )
+})
+
+test('R5 route roster: 31 always + 2 optional = 33, no duplicates, and every entry is a REAL registered route (or the auth status route)', () => {
+  assert.equal(ALWAYS_PREP_LINE_ROUTES.length, 31)
+  assert.equal(OPTIONAL_PREP_LINE_ROUTES.length, 2)
+  assert.equal(PREP_LINE_ROUTE_UNIVERSE.size, 33)
+  const all = [...ALWAYS_PREP_LINE_ROUTES, ...OPTIONAL_PREP_LINE_ROUTES]
+  assert.equal(new Set(all).size, all.length, 'no duplicate route template in the roster')
+
+  // Cross-check against the ACTUAL registered route table — the roster is not a free-standing guess.
+  const { ROUTES } = require('../../plugins/plugin-integration-core/lib/http-routes.cjs')
+  const registeredStockPrepPaths = new Set(
+    ROUTES.filter(([, path]) => path.startsWith('/api/integration/stock-preparation/')).map(([, path]) => path),
+  )
+  assert.equal(registeredStockPrepPaths.size, 32, 'the registered stock-preparation route count moved — update the R5 roster deliberately')
+  for (const route of all) {
+    if (route === '/api/integration/status') continue
+    // Path-param routes are registered with ':snapshotBatchId', not our ':id' — normalize before compare.
+    const registeredForm = route.replace('/snapshot-batches/:id/', '/snapshot-batches/:snapshotBatchId/')
+    assert.ok(registeredStockPrepPaths.has(registeredForm), `roster entry ${route} is not a registered route`)
+  }
+})
+
+test('R5 B4 fixture: closed body shape, own sentinel — never reuses the PLM prelude\'s config id', () => {
+  const prelude = buildApprovedErpSourcePrelude('t123', { approvedErpSourceConfigId: 'cfg_erp_ref_1' })
+  assert.deepEqual(Object.keys(prelude.body).sort(), ['readSourceConfigId', 'syncRunId'])
+  assert.equal(prelude.body.readSourceConfigId, 'cfg_erp_ref_1')
+  assert.deepEqual(prelude.sentinels, ['cfg_erp_ref_1'])
+  assert.throws(() => buildApprovedErpSourcePrelude('t123', {}))
+  const scoped = buildApprovedErpSourcePrelude('t123', { approvedErpSourceConfigId: 'cfg_erp_ref_1', workspaceId: 'w9' })
+  assert.equal(scoped.body.workspaceId, 'w9')
+})
+
+test('R5 B4 run: auto-persist OFF (byte-for-byte read-only projection) -> ok, but the must() detail never claims the write path', async () => {
+  const offResponse = {
+    status: 200,
+    body: { ok: true, data: { sourceRun: 'erp_material', status: 'succeeded', mode: 'dry_run', evidence: { sourceChannel: 'erp:k3-wise-webapi' } } },
+  }
+  const { calls, req } = scriptedReq([offResponse])
+  const { checks, must } = collectMust()
+  const summary = {}
+  const registered = []
+  await runApprovedErpSourcePrelude({
+    salt: 't123', args: { approvedErpSourceConfigId: 'cfg_erp_ref_1' }, req, must, summary,
+    registerSentinels: (list) => registered.push(...list),
+  })
+  assert.equal(calls.length, 1)
+  assert.ok(calls[0].pathname.endsWith('/mvp/source-runs/erp-materials'))
+  assert.equal(checks.length, 1)
+  assert.equal(checks[0].ok, true)
+  assert.match(checks[0].name, /auto-persist OFF/)
+  assert.match(checks[0].name, /NOT claimed as verified/)
+  assert.equal(summary.erpSourceRunAutoPersistArm, 'OFF')
+  assert.deepEqual(registered, ['cfg_erp_ref_1'])
+})
+
+test('R5 B4 run: auto-persist ON (a real internal write is claimed and evidenced) -> ok, must() detail claims the write path', async () => {
+  const onResponse = {
+    status: 201,
+    body: {
+      ok: true,
+      data: {
+        mode: 'internal_persist',
+        evidence: { internalWriteExecuted: true },
+        autoPersist: { persisted: true, mode: 'created', created: { materials: 2, run: 1 } },
+      },
+    },
+  }
+  const { checks, must } = collectMust()
+  const summary = {}
+  await runApprovedErpSourcePrelude({
+    salt: 't123', args: { approvedErpSourceConfigId: 'cfg_erp_ref_1' }, req: scriptedReq([onResponse]).req, must, summary,
+    registerSentinels: () => {},
+  })
+  assert.equal(checks.length, 1)
+  assert.equal(checks[0].ok, true)
+  assert.match(checks[0].name, /auto-persist ON/)
+  assert.equal(summary.erpSourceRunAutoPersistArm, 'ON')
+})
+
+test('R5 B4 run: a response that claims internal_persist WITHOUT internalWriteExecuted/autoPersist evidence FAILS (no free pass on the mode string alone)', async () => {
+  const lying = { status: 201, body: { ok: true, data: { mode: 'internal_persist', evidence: { internalWriteExecuted: false } } } }
+  const { checks, must } = collectMust()
+  await runApprovedErpSourcePrelude({
+    salt: 't123', args: { approvedErpSourceConfigId: 'cfg_erp_ref_1' }, req: scriptedReq([lying]).req, must, summary: {},
+    registerSentinels: () => {},
+  })
+  assert.equal(checks[0].ok, false, 'a claimed internal_persist without real evidence must fail, not pass on the mode string')
+})
+
+test('R5 B4 run: the sentinel-registration callback is REQUIRED — omitting it throws before any request', async () => {
+  const { calls, req } = scriptedReq([{ status: 200, body: { ok: true, data: { mode: 'dry_run', evidence: {} } } }])
+  const { must } = collectMust()
+  await assert.rejects(
+    () => runApprovedErpSourcePrelude({ salt: 't123', args: { approvedErpSourceConfigId: 'cfg_erp_ref_1' }, req, must, summary: {} }),
+    /registerSentinels/,
+  )
+  assert.equal(calls.length, 0, 'no request may run without the leak-scan registration contract')
 })
