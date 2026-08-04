@@ -13,6 +13,8 @@ const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
 const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolver.cjs')
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
+const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
+const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
 const {
   DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   MAX_ATTRIBUTION_TAIL_MINUTES,
@@ -8319,6 +8321,27 @@ function getAttendanceShiftService() {
     })
   }
   return attendanceShiftService
+}
+
+let attendanceGroupFixedScheduleConfigService = null
+function getAttendanceGroupFixedScheduleConfigService() {
+  if (!attendanceGroupFixedScheduleConfigService) {
+    attendanceGroupFixedScheduleConfigService = attendanceGroupFixedScheduleConfigServiceLib
+      .createAttendanceGroupFixedScheduleConfigService({ HttpError })
+  }
+  return attendanceGroupFixedScheduleConfigService
+}
+
+let attendanceGroupFixedScheduleEffectivenessService = null
+function getAttendanceGroupFixedScheduleEffectivenessService() {
+  if (!attendanceGroupFixedScheduleEffectivenessService) {
+    attendanceGroupFixedScheduleEffectivenessService = attendanceGroupFixedScheduleEffectivenessServiceLib
+      .createAttendanceGroupFixedScheduleEffectivenessService({
+        HttpError,
+        buildAttendanceGroupFixedScheduleProducerKey,
+      })
+  }
+  return attendanceGroupFixedScheduleEffectivenessService
 }
 
 function assertWorkContextSegmentCalculationAllowed(orgId, workContext) {
@@ -24692,6 +24715,38 @@ module.exports = {
       if (!violation) return true
       respondShiftEditWindowExceeded(res, violation)
       return false
+    }
+
+    async function resolveAttendanceFixedScheduleRouteActorContext(req, res) {
+      const userId = getAuthenticatedUserId(req)
+      if (!userId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return null
+      }
+      const orgId = getAuthenticatedOrgId(req)
+      if (!orgId) {
+        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+        return null
+      }
+
+      const orgSelectors = [req.body?.orgId, req.query?.orgId, req.headers['x-org-id']]
+        .flatMap(value => Array.isArray(value) ? value : [value])
+        .filter(value => value !== undefined && value !== null)
+      const userSelectors = [req.headers['x-user-id']]
+        .flatMap(value => Array.isArray(value) ? value : [value])
+        .filter(value => value !== undefined && value !== null)
+      if (orgSelectors.some(value => value !== orgId) || userSelectors.some(value => value !== userId)) {
+        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+        return null
+      }
+
+      try {
+        return { userId, orgId, fullAdmin: await hasAttendanceAdminAccess(userId) }
+      } catch (error) {
+        logger.error('Attendance fixed schedule actor resolution failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        return null
+      }
     }
 
     async function resolveAttendanceSchedulerScopeActor(req, res) {
@@ -44173,11 +44228,119 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups/:groupId/fixed-schedule/effectiveness',
+      async (req, res, next) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+        if (!actorAccess) return
+        return withPermission('attendance:admin', async (permissionReq, permissionRes) => {
+          const groupId = normalizeUuidString(permissionReq.params.groupId)
+          if (!groupId) {
+            respondInvalidUuid(permissionRes, 'groupId')
+            return
+          }
+          try {
+            const effectiveness = await getAttendanceGroupFixedScheduleEffectivenessService().getEffectiveness(db, {
+              orgId: actorAccess.orgId,
+              groupId,
+            })
+            permissionRes.json({ ok: true, data: effectiveness })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              permissionRes.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            if (isDatabaseSchemaError(error)) {
+              permissionRes.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance fixed schedule tables missing' } })
+              return
+            }
+            logger.error('Attendance group fixed schedule effectiveness read failed', error)
+            permissionRes.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read fixed schedule effectiveness' } })
+          }
+        })(req, res, next)
+      }
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/groups/:groupId/fixed-schedule/config',
+      async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+        if (!actorAccess) return
+        const schema = z.object({
+          shiftId: z.string().min(1),
+          startDate: z.string().min(1),
+          endDate: z.string().min(1),
+          orgId: z.string().optional(),
+        }).strict()
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const groupId = normalizeUuidString(req.params.groupId)
+        if (!groupId) {
+          respondInvalidUuid(res, 'groupId')
+          return
+        }
+        const shiftId = normalizeUuidString(parsed.data.shiftId)
+        if (!shiftId) {
+          respondInvalidUuid(res, 'shiftId')
+          return
+        }
+        const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
+        const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
+        if (!startDate || !endDate || startDate > endDate) {
+          res.status(400).json({
+            ok: false,
+            error: { code: 'VALIDATION_ERROR', message: 'A valid startDate on or before endDate is required.' },
+          })
+          return
+        }
+
+        try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
+            groupId,
+            orgId: actorAccess.orgId,
+          })
+          if (!groupExists) return
+          const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess })
+          if (!access) return
+          const config = await db.transaction(trx => getAttendanceGroupFixedScheduleConfigService().upsertConfig(trx, {
+            orgId: access.orgId,
+            groupId,
+            shiftId,
+            startDate,
+            endDate,
+            updatedBy: access.userId,
+          }))
+          res.json({ ok: true, data: config })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group fixed schedule config save failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save fixed schedule config' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/preview',
-      withPermission('attendance:admin', async (req, res) => {
-        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+      async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
         if (!actorAccess) return
+        if (!actorAccess.fullAdmin) {
+          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+          return
+        }
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -44246,14 +44409,14 @@ module.exports = {
           logger.error('Attendance group fixed schedule preview failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview fixed schedule' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/apply',
-      withPermission('attendance:admin', async (req, res) => {
-        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+      async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
         if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
@@ -44297,7 +44460,7 @@ module.exports = {
         try {
           const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
           if (!groupExists) return
-          const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId })
+          const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess })
           if (!access) return
 
           const result = await db.transaction((trx) => applyAttendanceGroupFixedSchedule(trx, {
@@ -44332,14 +44495,14 @@ module.exports = {
           logger.error('Attendance group fixed schedule apply failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to apply fixed schedule' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/rebuild',
-      withPermission('attendance:admin', async (req, res) => {
-        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+      async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
         if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
@@ -44383,7 +44546,7 @@ module.exports = {
         try {
           const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
           if (!groupExists) return
-          const access = await assertAttendanceGroupFixedScheduleRebuildAllowed(req, res, { groupId })
+          const access = await assertAttendanceGroupFixedScheduleRebuildAllowed(req, res, { groupId, actorAccess })
           if (!access) return
 
           const result = await db.transaction((trx) => rebuildAttendanceGroupFixedSchedule(trx, {
@@ -44421,14 +44584,14 @@ module.exports = {
           logger.error('Attendance group fixed schedule rebuild failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rebuild fixed schedule' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/clear',
-      withPermission('attendance:admin', async (req, res) => {
-        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+      async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
         if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
@@ -44472,7 +44635,7 @@ module.exports = {
         try {
           const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
           if (!groupExists) return
-          const access = await assertAttendanceGroupFixedScheduleClearAllowed(req, res, { groupId })
+          const access = await assertAttendanceGroupFixedScheduleClearAllowed(req, res, { groupId, actorAccess })
           if (!access) return
 
           const result = await db.transaction((trx) => clearAttendanceGroupFixedScheduleManagedRows(trx, {
@@ -44494,7 +44657,7 @@ module.exports = {
           logger.error('Attendance group fixed schedule clear failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to clear fixed schedule' } })
         }
-      })
+      }
     )
 
     const scheduleGroupSchema = z.object({

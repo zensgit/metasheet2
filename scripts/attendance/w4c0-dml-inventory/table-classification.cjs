@@ -83,6 +83,7 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_groups: 'reference',
   attendance_group_members: 'reference',
   attendance_group_managers: 'reference',
+  attendance_group_fixed_schedule_configs: 'reference',
   attendance_schedule_groups: 'reference',
   attendance_schedule_group_members: 'reference',
   attendance_holidays: 'reference',

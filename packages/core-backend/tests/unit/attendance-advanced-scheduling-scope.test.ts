@@ -28,6 +28,16 @@ function expectDirectAsyncRoute(method: string, path: string) {
   expect(pluginSource).toMatch(pattern)
 }
 
+function expectTrustedAdminRoute(method: string, path: string) {
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(
+    `['"]${method}['"],\\s*\\n\\s*['"]${escaped}['"],\\s*\\n\\s*async \\(req, res\\) => \\{\\s*`
+      + 'const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext\\(req, res\\)\\s*'
+      + 'if \\(!actorAccess\\) return\\s*if \\(!actorAccess\\.fullAdmin\\)',
+  )
+  expect(pluginSource).toMatch(pattern)
+}
+
 describe('attendance advanced scheduling scope foundation', () => {
   it('creates separate scheduling tables without mutating existing attendance group membership tables', () => {
     expect(migrationSource).toContain("createTable('attendance_schedule_groups')")
@@ -47,12 +57,12 @@ describe('attendance advanced scheduling scope foundation', () => {
       ['POST', '/api/attendance/scheduler-scopes'],
       ['PUT', '/api/attendance/scheduler-scopes/:id'],
       ['DELETE', '/api/attendance/scheduler-scopes/:id'],
-      ['POST', '/api/attendance/groups/:id/fixed-schedule/preview'],
-      ['POST', '/api/attendance/groups/:id/fixed-schedule/apply'],
-      ['POST', '/api/attendance/groups/:id/fixed-schedule/rebuild'],
-      ['POST', '/api/attendance/groups/:id/fixed-schedule/clear'],
     ].forEach(([method, path]) => expectAdminRoute(method, path))
     expect(pluginSource).toContain('SCHEDULER_SCOPE_FORBIDDEN')
+    expectTrustedAdminRoute('POST', '/api/attendance/groups/:id/fixed-schedule/preview')
+    expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/apply')
+    expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/rebuild')
+    expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/clear')
     expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/approve')
     expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/reject')
     expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups')
