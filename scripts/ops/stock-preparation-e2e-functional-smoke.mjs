@@ -2097,9 +2097,10 @@ async function runS6AMidTierScaleWalk() {
   S[`${keyPrefix}RowCount`] = rowCount
 
   // Baseline taken at the TOP of this arm, before it does anything at all (including before its own SQL
-  // Server relation prep). This arm's tenant is dedicated (see above), so in practice this baseline is
-  // always zero-ish — kept as a DELTA (not an absolute count) anyway as defense in depth against any
-  // future change that shares a tenant across arms again.
+  // Server relation prep). It is a DELTA, not an absolute count — and that defensive choice is now
+  // load-bearing rather than hypothetical: this arm no longer uses a dedicated tenant (see above), so the
+  // baseline is no longer guaranteed to be zero-ish. The original comment anticipated exactly this change
+  // ("any future change that shares a tenant across arms again") and the delta form survives it intact.
   const preArmSnapshot = await withApplicationPool((pool) => snapshotS6AWriteState(pool, '<no-such-operation-id>', tenantId))
 
   const setup = await setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow: true, artifactRoot, tenantId })
