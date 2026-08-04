@@ -75,15 +75,22 @@ Add one member-safe read projection beside the existing admin aggregate:
 
 The route is read-only and uses `attendance:read`. Its subject and organization
 come only from the authenticated principal. It accepts no body, `userId`, or
-`orgId`; any such query override is rejected before scoped SQL. `x-user-id` and
-`x-org-id` never become identity sources.
+`orgId`; any such body or query selector is rejected with a typed 400 before
+scoped SQL. `x-user-id` and `x-org-id` never become identity sources: a header
+may be present only when it is byte-equal to the authenticated principal, while
+a mismatched header is a 403 before scoped SQL. This preserves the existing
+development-token client posture without allowing a header to select identity.
+An authenticated principal without an organization receives a values-free 403
+before membership or effectiveness SQL.
 
 The route first proves in one org-scoped query that the authenticated subject
-is active, has an active `user_orgs` membership in the authenticated
-organization, and is an `attendance_group_members` member of the named group in
-that same organization. Missing group, missing or inactive organization
-membership, inactive subject, and non-membership use the same values-free 404
-shape. Only after that proof may it load the desired configuration and managed
+has `users.is_active = true` and
+`COALESCE(users.activation_status, 'activated') = 'activated'`, has an active
+`user_orgs` membership in the authenticated organization, and is an
+`attendance_group_members` member of the named group in that same organization.
+Missing group, missing or inactive organization membership, inactive or
+non-activated subject, and non-membership use the same values-free 404 shape.
+Only after that proof may it load the desired configuration and managed
 assignment facts.
 
 The server may compute the existing full group derivation internally, but the
@@ -122,7 +129,9 @@ Recommended response:
 The group `state` and `reasonCodes` are byte-identical projections of the same
 canonical derivation used by the admin route. Applicability is derived in that
 same module from the already loaded member/assignment facts. Neither the route
-nor the frontend reimplements the four-state predicates.
+nor the frontend reimplements the four-state predicates. Parity tests inject one
+evaluation instant into one canonical derivation; they do not compare two live
+wall-clock calls and call that equality.
 
 ## 3. Surface Wiring After Repair
 
@@ -145,16 +154,21 @@ mismatch. No error becomes `not_configured`, `pending_apply`, or `effective`.
 ## 4. Completion Gates
 
 1. Two-user/same-org and two-org matrices prove the `/me` route can read only
-   the token subject's membership and applicability. Inactive `users` and
-   inactive or missing `user_orgs` rows are separate negative legs.
+   the token subject's membership and applicability. Inactive `users`,
+   non-activated `users`, and inactive or missing `user_orgs` rows are separate
+   negative legs.
 2. Removing the subject predicate, authenticated-org predicate, or either
    active-membership predicate makes a named negative leg red.
-3. A forged `userId`, `orgId`, `x-user-id`, or `x-org-id` is rejected before
-   config/member/assignment SQL.
-4. Non-member, inactive subject, inactive or missing org membership, and
-   missing group responses are byte-identical 404s.
-5. Admin and self projections over the same fixture return the same `state`,
-   `reasonCodes`, desired revision, and evaluation instant.
+3. A body/query `userId` or `orgId` is always rejected with the typed 400; a
+   mismatched `x-user-id` or `x-org-id` is rejected with 403; byte-equal headers
+   are tolerated but never used as identity. Every rejection precedes
+   config/member/assignment SQL. Missing authenticated org is a separate 403
+   leg before SQL.
+4. Non-member, inactive or non-activated subject, inactive or missing org
+   membership, and missing group responses are byte-identical 404s.
+5. Admin and self projections over the same fixture and one injected evaluation
+   instant return the same `state`, `reasonCodes`, desired revision, and
+   `evaluatedAt`.
 6. The self response exact-key test rejects `coverage`, `drift`, `managedSets`,
    `producerKey`, and every raw user identifier at any nesting depth.
 7. Each surface imports the shared parser/composable; repository scan finds no
@@ -182,7 +196,8 @@ mismatch. No error becomes `not_configured`, `pending_apply`, or `effective`.
 `OD-4709-2` remains **OPEN**.
 
 - **(a) RECOMMENDED:** add the narrow authenticated-member projection in
-  section 2, then complete all FSER-4 surfaces and gates in sections 3-4.
+  section 2, including its declared values-free desired shift/window/revision
+  projection, then complete all FSER-4 surfaces and gates in sections 3-4.
 - **(b):** keep the current admin-only API and narrow FSER-4 to group drawer,
   admin trace, and report. Employee schedule and self trace remain explicitly
   deferred and the original four-surface completion gate is amended before any
