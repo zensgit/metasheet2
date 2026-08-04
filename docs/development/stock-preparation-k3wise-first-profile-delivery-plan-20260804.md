@@ -811,3 +811,42 @@ rowErrors: 0
 
 **纪律**:动手实现任何"补上缺失的一环"之前,先把一条**真实输入**喂给下游,看它是不是已经能吃。
 一次实验的成本远低于一个平行实现,更远低于一个冲突的键。
+
+---
+
+## 附录 C — P4 前置盘点:五项 provenance 里只有两项今天可记(2026-08-04)
+
+> owner 要求「serviceRuntimeSha、profileVersion、mappingVersion、manifest SHA256、client helper SHA **分别**记录」。
+> 逐项在仓里核实,**其中三项不是"去某处取值"那么简单**。趁四票收尾先盘,免得 P4 开工才发现。
+
+| 字段 | 现状 | 证据 |
+|---|---|---|
+| `serviceRuntimeSha` | ✅ **已记录** | `scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1` |
+| manifest SHA256 | ✅ **已记录**,名为 `packageSha256` | 同上 |
+| `profileVersion` | ❌ **全仓 0 处** | `grep -rl profileVersion scripts/ .github/workflows/ lib/` = 0 文件 |
+| `mappingVersion` | ⚠️ **名字存在,含义完全不同** | 仅见 `stock-preparation-mvp-generation.cjs:151/169`,那里是 `mapping.plmVersion` —— **PLM BOM 的版本比对**,不是包 provenance。**照字面取值会记录错的东西。** |
+| client helper SHA | ⚠️ **无该名字;实体是三个 helper 脚本的 digest** | `build-stock-preparation-rca-window-sidecar.mjs` 钉的是 `stock-preparation-mvp-postdeploy-smoke.mjs`、`stock-preparation-prep-line-extended-smoke.mjs`、`stock-preparation-rca-window-pm2-sample.mjs`。新包要记的是这三者在新 HEAD 上的 digest,**不是一个 SHA 而是三个**。 |
+
+### C.1 因此 P4 不是"跑一下现成工具"
+
+出包工具本身是现成的(`multitable-onprem-package-build.sh`、
+`stock-preparation-s6a-onprem-acceptance.ps1`、`stock-prep-s6a-postgres17-validation.yml`),
+但**五项分记里有三项需要先定义清楚**:
+
+1. **`profileVersion` 指什么?** 候选:sealed-export profile 的 `profileId`+版本、
+   K3 document template 的 `k3wise.material.v1`、或 read-source profile。**三者都存在且不同**,
+   记错一个就是虚假 provenance。
+2. **`mappingVersion` 在 #4751 撤回后指什么?** 原设想是那个映射模块的版本;它已撤回,
+   而真实映射是 intake 的别名表 —— 那是运行时代码的一部分,**其"版本"就是 `serviceRuntimeSha`**。
+   若确认如此,这一项应当**合并进 runtime sha 而不是另立一个字段**(否则是同一事实的两个记录点,
+   会漂移)。
+3. **client helper SHA 是三个不是一个** —— 分记时要三行,合成一个会掩盖单个 helper 的变化,
+   而那正是 RC-A sidecar tripwire 当初要防的。
+
+### C.2 建议
+
+**P4 开工前先答 C.1 的三问**(纯定义,不需编码)。否则出的包会带一份
+「字段齐了但有两项指向错误对象」的 provenance —— 那比缺字段更糟,因为它看起来是完整的。
+
+**不建议**由我单方面把 `mappingVersion` 定义掉:它是**合同面**的字段,
+本轮已经在"另造更窄同类物"上栽过一次(B.10),不重复。
