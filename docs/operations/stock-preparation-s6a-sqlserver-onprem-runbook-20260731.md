@@ -170,6 +170,28 @@ The provisioning spec contains private connection material. Store it only in
 the controlled secret area and remove the transient copy after successful
 provisioning. Its external-system identity and source configuration must match
 the approved server-side external-system record used by the runtime.
+
+That record is a PREREQUISITE this runbook does not create. Nothing earlier in
+this document, and nothing in the PostgreSQL readiness checklist, produces it —
+so treat it as an input to be confirmed BEFORE the window, not a step inside it.
+
+The first-party surface that creates and lists it is:
+
+```text
+POST /api/integration/external-systems     (create/update; admin)
+GET  /api/integration/external-systems     (list; admin — read-only, safe to run now)
+```
+
+Confirm with the GET, before the window, that a record exists whose identity
+fields equal the ones in the provisioning spec: `id`, `tenantId`,
+`workspaceId` (JSON `null`), `kind`, `role`, `status`. A mismatch on any of
+them is refused as `SEALED_EXPORT_BINDING_UNQUALIFIED` — a token that reads as
+"the binding is bad" and does not say which field disagreed.
+
+`scripts/ops/stock-preparation-s6a-operator-preflight.mjs` checks this same
+identity agreement offline and names the disagreeing input. It cannot check
+agreement against the DATABASE (that needs the running service), so the GET
+above and the preflight are complementary, not alternatives.
 This single-customer v1 route has no workspace selector: both
 `binding.workspaceId` and `externalSystem.workspaceId` must be JSON `null`.
 Any non-null workspace scope is refused before qualification.
