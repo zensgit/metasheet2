@@ -52,8 +52,8 @@ Evidence on the baseline:
   in FSER-4.
 - `plugins/plugin-attendance/index.cjs:44301-44333` exposes only the
   `attendance:admin` route.
-- `plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs:71-155`
-  derives aggregate counts, and `:158-211` always loads all group members and
+- `plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs:71-156`
+  derives aggregate counts, and `:158-212` always loads all group members and
   managed rows before returning the aggregate response.
 - `apps/web/src/views/attendance/AttendanceEmployeeWorkspace.vue:355-409` is
   the existing employee self-service rule surface.
@@ -76,10 +76,10 @@ Add one member-safe read projection beside the existing admin aggregate:
 The route is read-only and uses `attendance:read`. Its subject and organization
 come only from the authenticated principal. It accepts no body, `userId`, or
 `orgId`; any such body or query selector is rejected with a typed 400 before
-scoped SQL. `x-user-id` and `x-org-id` never become identity sources: a header
-may be present only when it is byte-equal to the authenticated principal, while
-a mismatched header is a 403 before scoped SQL. This preserves the existing
-development-token client posture without allowing a header to select identity.
+scoped SQL. `x-user-id` and `x-org-id` never become identity sources. Existing
+bearer/development-token clients that send no identity headers continue
+unchanged; when a header is present it is tolerated only when byte-equal to the
+authenticated principal, while a mismatch is a 403 before scoped SQL.
 An authenticated principal without an organization receives a values-free 403
 before membership or effectiveness SQL.
 
@@ -149,7 +149,8 @@ methods but no status derivation.
 
 The client displays an explicit unavailable/unknown posture on 401, 403, 404,
 503, malformed JSON, unknown state/reason/applicability, or response-shape
-mismatch. No error becomes `not_configured`, `pending_apply`, or `effective`.
+mismatch. No error becomes `not_configured`, `configuration_changed`,
+`pending_apply`, or `effective`.
 
 ## 4. Completion Gates
 
