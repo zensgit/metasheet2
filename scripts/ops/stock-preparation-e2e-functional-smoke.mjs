@@ -2104,13 +2104,26 @@ async function runS6AMidTierScaleWalk() {
     const mvpData = mvpEnsure.body && mvpEnsure.body.data ? mvpEnsure.body.data : {}
     S[`${keyPrefix}MvpEnsureHttp`] = mvpEnsure.status
     S[`${keyPrefix}MvpEnsureReady`] = typeof mvpData.ready === 'boolean' ? String(mvpData.ready) : '<absent>'
-    S[`${keyPrefix}MvpEnsureReadyCount`] = Number.isInteger(mvpData.readyCount) ? mvpData.readyCount : -1
-    S[`${keyPrefix}MvpEnsureIncompleteCount`] = Number.isInteger(mvpData.incompleteCount) ? mvpData.incompleteCount : -1
-    // NOT a hard failure: if provisioning IS complete here, the gap is elsewhere and this arm must keep
-    // going so the next stage can name it. Reported either way, asserted so a regression is visible.
-    must(`${label}: mvp/ensure reports fully-provisioned MVP tables on this arm's dedicated tenant`,
-      mvpData.ready === true && mvpData.incompleteCount === 0,
-      `http=${mvpEnsure.status} ready=${S[`${keyPrefix}MvpEnsureReady`]} readyCount=${S[`${keyPrefix}MvpEnsureReadyCount`]} incomplete=${S[`${keyPrefix}MvpEnsureIncompleteCount`]}`)
+    // Corrected after run 30894094075: the first version of this assertion also required
+    // `incompleteCount === 0`, but those counters belong to the READINESS endpoint's response, not to
+    // ensure's. ensureStockPreparationMvpTargets returns `{ ready: tables.every(t => t.ensured), tables,
+    // evidence }` — no readyCount, no incompleteCount. So that run's FAIL was MY assertion being wrong
+    // about the contract, not the product being wrong. Asserting a field an endpoint never returns
+    // produces a confident red that means nothing, which is the mirror image of the confident green this
+    // lane keeps guarding against.
+    S[`${keyPrefix}MvpEnsureTableCount`] = Array.isArray(mvpData.tables) ? mvpData.tables.length : -1
+    S[`${keyPrefix}MvpEnsureAllEnsured`] =
+      Array.isArray(mvpData.tables) && mvpData.tables.length > 0
+        ? String(mvpData.tables.every((table) => table && table.ensured === true))
+        : '<absent>'
+    // Derived from the tables array rather than trusting `ready` alone — `ready` is computed from
+    // `every(t => t.ensured)`, and an EMPTY array would make `every` vacuously true.
+    must(`${label}: mvp/ensure provisioned this arm's dedicated tenant (ready, non-empty, all ensured)`,
+      mvpData.ready === true
+        && Array.isArray(mvpData.tables)
+        && mvpData.tables.length > 0
+        && mvpData.tables.every((table) => table && table.ensured === true),
+      `http=${mvpEnsure.status} ready=${S[`${keyPrefix}MvpEnsureReady`]} tables=${S[`${keyPrefix}MvpEnsureTableCount`]} allEnsured=${S[`${keyPrefix}MvpEnsureAllEnsured`]}`)
 
     const operationId = `s6a-e2e-${label}-op-${salt}`
     // Wall-clock + elapsed-since-qualification (requirement 4), on its OWN timeout (S6A_POST_TIMEOUT_MS),
@@ -2279,13 +2292,26 @@ async function runS6ARejectionArm() {
     const mvpData = mvpEnsure.body && mvpEnsure.body.data ? mvpEnsure.body.data : {}
     S[`${keyPrefix}MvpEnsureHttp`] = mvpEnsure.status
     S[`${keyPrefix}MvpEnsureReady`] = typeof mvpData.ready === 'boolean' ? String(mvpData.ready) : '<absent>'
-    S[`${keyPrefix}MvpEnsureReadyCount`] = Number.isInteger(mvpData.readyCount) ? mvpData.readyCount : -1
-    S[`${keyPrefix}MvpEnsureIncompleteCount`] = Number.isInteger(mvpData.incompleteCount) ? mvpData.incompleteCount : -1
-    // NOT a hard failure: if provisioning IS complete here, the gap is elsewhere and this arm must keep
-    // going so the next stage can name it. Reported either way, asserted so a regression is visible.
-    must(`${label}: mvp/ensure reports fully-provisioned MVP tables on this arm's dedicated tenant`,
-      mvpData.ready === true && mvpData.incompleteCount === 0,
-      `http=${mvpEnsure.status} ready=${S[`${keyPrefix}MvpEnsureReady`]} readyCount=${S[`${keyPrefix}MvpEnsureReadyCount`]} incomplete=${S[`${keyPrefix}MvpEnsureIncompleteCount`]}`)
+    // Corrected after run 30894094075: the first version of this assertion also required
+    // `incompleteCount === 0`, but those counters belong to the READINESS endpoint's response, not to
+    // ensure's. ensureStockPreparationMvpTargets returns `{ ready: tables.every(t => t.ensured), tables,
+    // evidence }` — no readyCount, no incompleteCount. So that run's FAIL was MY assertion being wrong
+    // about the contract, not the product being wrong. Asserting a field an endpoint never returns
+    // produces a confident red that means nothing, which is the mirror image of the confident green this
+    // lane keeps guarding against.
+    S[`${keyPrefix}MvpEnsureTableCount`] = Array.isArray(mvpData.tables) ? mvpData.tables.length : -1
+    S[`${keyPrefix}MvpEnsureAllEnsured`] =
+      Array.isArray(mvpData.tables) && mvpData.tables.length > 0
+        ? String(mvpData.tables.every((table) => table && table.ensured === true))
+        : '<absent>'
+    // Derived from the tables array rather than trusting `ready` alone — `ready` is computed from
+    // `every(t => t.ensured)`, and an EMPTY array would make `every` vacuously true.
+    must(`${label}: mvp/ensure provisioned this arm's dedicated tenant (ready, non-empty, all ensured)`,
+      mvpData.ready === true
+        && Array.isArray(mvpData.tables)
+        && mvpData.tables.length > 0
+        && mvpData.tables.every((table) => table && table.ensured === true),
+      `http=${mvpEnsure.status} ready=${S[`${keyPrefix}MvpEnsureReady`]} tables=${S[`${keyPrefix}MvpEnsureTableCount`]} allEnsured=${S[`${keyPrefix}MvpEnsureAllEnsured`]}`)
 
     const operationId = `s6a-e2e-${label}-op-${salt}`
     const startedAtMs = Date.now()
