@@ -47,6 +47,48 @@ const RESOLUTION_FIELDS = Object.freeze([
   'systemContentKey',
   'tenantDomainBinding',
 ])
+// The CLOSED set of members this module reads off the external-system record, and
+// therefore the only members that are canonicalised.
+//
+// WHY THIS EXISTS. The value handed to normalizeExternalSystem() at request time is
+// the ADAPTER-shaped record produced by lib/external-systems.cjs's
+// rowToAdapterExternalSystem() (see stock-preparation-runtime-core.cjs's loadSource(),
+// which re-fetches it via externalSystemRegistry.getExternalSystemForAdapter()). That
+// record carries `createdAt`/`updatedAt` copied straight off the pg row — and, since
+// this repository installs no `setTypeParser` anywhere, `pg` hands back native JS
+// `Date` objects for TIMESTAMPTZ. canonical-json.cjs's domain refuses a `Date`
+// (violation token EXOTIC_OBJECT), so canonicalising the WHOLE record refused every
+// production-shaped record before a single field-set or identity check could run —
+// SEALED_EXPORT_BINDING_UNQUALIFIED, HTTP 422, a CAPTURE_FAILED run row.
+//
+// The fix is a projection, not a widened codec: the codec's domain is a
+// security-sensitive contract and stays exactly as narrow as it was, and
+// rowToAdapterExternalSystem() — a shared adapter contract with other consumers —
+// is untouched. Every field-set, identity and shape check below runs unchanged, on
+// the projection.
+//
+// NARROWING DISCLOSED. Members OUTSIDE this list are no longer canonicalised, so a
+// value that would previously have refused the whole record (a lone surrogate in
+// `name`, an exotic object in `capabilities`) now simply never reaches the codec.
+// That is the intended and entire blast radius: nothing in this module reads those
+// members, so nothing derived from them can enter an anchor, a digest or a
+// connection config.
+//
+// CLOSED AND PINNED. This list is not a hand-maintained comment: it is mechanically
+// held equal to the set of members normalizeExternalSystem() actually reads by
+// __tests__/sealed-export-s6a-source-authority-adapter-projection.test.cjs, which
+// derives that set from this module's own source and fails on drift in EITHER
+// direction (a member added here that nothing reads; a member read that is not here).
+const EXTERNAL_SYSTEM_PROJECTION_FIELDS = Object.freeze([
+  'config',
+  'credentials',
+  'id',
+  'kind',
+  'role',
+  'status',
+  'tenantId',
+  'workspaceId',
+])
 
 function refuse() {
   failSealedExport('SEALED_EXPORT_BINDING_UNQUALIFIED')
@@ -163,8 +205,32 @@ function normalizeBindingDraft(raw) {
   })
 }
 
+// Project the external-system record down to EXTERNAL_SYSTEM_PROJECTION_FIELDS, the
+// closed set this module reads, BEFORE anything is canonicalised.
+//
+// The container itself is still screened by the codec's own strict-plain-object
+// predicate first, so the hostile-input guarantees canonicalising the whole record
+// used to provide at the top level — no proxy, no accessor properties, no symbol
+// keys, no non-enumerable properties, prototype is Object.prototype or null — are
+// unchanged; only then is a plain data read of a whitelisted key possible.
+//
+// A member is copied only when it is an OWN property: an absent `workspaceId` must
+// keep reaching the `?? null` comparison below as `undefined`, exactly as it did
+// before this projection existed. Writing `undefined` into the projection instead
+// would make the codec refuse (UNSUPPORTED_TYPE) a record it previously accepted.
+function projectExternalSystem(raw) {
+  if (!canonicalCodec.__internals.isStrictPlainObject(raw)) refuse()
+  const projected = {}
+  for (const field of EXTERNAL_SYSTEM_PROJECTION_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(raw, field)) {
+      projected[field] = raw[field]
+    }
+  }
+  return projected
+}
+
 function normalizeExternalSystem(raw, binding) {
-  const system = ownedCanonical(raw)
+  const system = ownedCanonical(projectExternalSystem(raw))
   if (
     !canonicalCodec.__internals.isStrictPlainObject(system)
     || system.id !== binding.externalSystemId
@@ -348,6 +414,7 @@ module.exports = Object.freeze({
   BINDING_DRAFT_FIELDS,
   CANONICAL_OBJECT_VERSION,
   CONNECTOR_KIND,
+  EXTERNAL_SYSTEM_PROJECTION_FIELDS,
   RESOLUTION_FIELDS,
   ROLE_ID,
   SOURCE_CONFIG_FIELDS,

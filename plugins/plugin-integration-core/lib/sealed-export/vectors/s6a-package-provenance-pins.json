@@ -35,7 +35,7 @@
       "sqlserver-sealed-snapshot-source-session.cjs": "2bbacc82e92de87569ec91a0d13464eac99f22f5649b64302821bd974803a39e",
       "sqlserver-sealed-snapshot-action.cjs": "031c03ca3e6260786ba0cbfaa0c5c26c00f76089550393e151b021bdd3bec979",
       "sqlserver-sealed-snapshot-service.cjs": "46e4c8e5ff085a6e0903d19e0a108cb0fddb37e7fae0eaf0966c54dba386a5b7",
-      "sqlserver-sealed-snapshot-service-core.cjs": "e5911692a4664a5eb1fd743b50936668eb501b3a70e040c3d292014eb83ae79e",
+      "sqlserver-sealed-snapshot-service-core.cjs": "c4da13321f6571fc74f10a876357141343ee9be180084049a503dc5603df39c4",
       "sealed-export-binding-qualification.cjs": "6b2995cb996ecfa07f348f8d09a12e4a4faa1045c3f4b941f815794bdb603a65",
       "sealed-export-signer-authority.cjs": "164babbb0ca576babacb15d3d83058e526fef7181e0a5c5ff4e729e476f7ebe1",
       "sealed-export-signer-authority-store.cjs": "043e79eca72ffc79a07c06b133acc1aca2bc5bb4828d164b86038fb10f2e7c72",
@@ -48,9 +48,9 @@
       "stock-preparation-runtime-database.cjs": "65ed8bf595f3d6abc91f1ff7dc7a279a4626df2897a6c0b7d685c20eb40fc28e",
       "stock-preparation-runtime-persist.cjs": "7f8e980adbe5a83ccbb582e2530a5382f8888b8ccf17214c506764951065e4bd",
       "stock-preparation-runtime-provisioning.cjs": "1324a2acb86699de8e564ad2a34f8b00ec1417aa550f2bd096f4d5080209e94a",
-      "stock-preparation-runtime-store.cjs": "0de5bbc549f7b8f9eeef34e6f94912e0ce1c0d956751b2ca171c000a86da7a48",
+      "stock-preparation-runtime-store.cjs": "bc7754897378247c94306d6f424cf1a281731692e83f5e3dd71ebd03359d6127",
       "stock-preparation-sqlserver-runtime.cjs": "f6c0e10a4c995e42077cf8b8487b167c5f2e89e89621d274f7937ae6898231dd",
-      "stock-preparation-sqlserver-source-authority.cjs": "8428e46af9adebf115a71ae2fa6c5ad631c1e278a888e42f976120ecb9994d66"
+      "stock-preparation-sqlserver-source-authority.cjs": "f0327261ecefd199c22df8a682cdaa058e5349e90e1a9809fe433b9e4cc54070"
     }
   },
   "externalModules": {
@@ -67,7 +67,7 @@
     "pg": "^8.11.3"
   },
   "runtimeFiles": {
-    "pluginPackageJson": "d47ff10ceb5708a5904c86b3053d0575ed18be9e2d21f0f3b986e7bf7b9ae00a",
+    "pluginPackageJson": "50b23aebe4bc38d57d25c198c2a07ce32c9714b81f72572078227661fe656f15",
     "pnpmLock": "8ca98ceef0c84b821c4b20a0f0cf0b50b87dfb51a26b6a2d21a9912a1733680f",
     "pluginIndex": "c2a800452d175e2b00a476b3e0d3fab6f65e16031789b91a0304dd1dc45a0cee",
     "pluginHttpRoutes": "b288d7dc4e51362bdd3f74c578510ce46378c83116ae0e34723e81519baf62eb",
@@ -82,7 +82,7 @@
     "s5ExactEvidenceVerifier": "cf16c8b02ce817f5ef66053ed93c28b06cb10c04827810b467968bc4503e7fe4",
     "s5SignerAuthorityMemoryDb": "7dd984783e6783c521022c0025edccb215a386980c264ec5cbd497b1eae46084",
     "s5SignerLifecycleRealDbTest": "fee8295234946f8ad93f9b6d0168e272e9c4cfabae964d9dd219d635b7bdbf36",
-    "s6aRuntimeAuthorityRealDbTest": "10c9eb64d03dfe8a7c6f04b51cfccbddc8239b4bcce956b0d490c5c40ee5ae5c",
+    "s6aRuntimeAuthorityRealDbTest": "609da9054db15ced3567417b31ae743f2c3be1656f5e3d0874a77c3a4cbd0375",
     "s6aAcceptancePs51Test": "835c7c6ce943d82e0378a40a27c7fd1e8b79b526faa8ca4c8066e4231a4bfb0f",
     "s6aProductRuntimeTest": "de978adafa8b89772cefa921c2051f434bf346bf5c2978bef3424ee70f51ba3f",
     "multitableOnpremPackageBuild": "463c7d73c6c7f2d1b6cdf0820d7a06974a9c463dd5e98bbbaf1c996e1dc4ed99",

@@ -1150,6 +1150,30 @@ function createSqlServerSealedSnapshotServiceCore(rawConfig) {
 
     try {
       try {
+        // artifactRoot is the DERIVED per-run capture directory the caller computed
+        // (stock-preparation-runtime-core.cjs's `<ARTIFACT_ROOT>/capture`), not the
+        // operator-supplied ARTIFACT_ROOT itself. mkdtemp requires its parent to
+        // already exist and does not create it, so without this the first run
+        // against a freshly-provisioned ARTIFACT_ROOT refused with the cause-free
+        // SEALED_EXPORT_CAPTURE_FAILED (ENOENT swallowed by the catch below).
+        // Mirrors private-ingestion-blob-store.cjs's createSessionArea(), which
+        // mkdirs its own analogous derived root (`<ARTIFACT_ROOT>/private-ingestion`)
+        // the same way. Unlike that sibling, this only chmods a directory THIS CALL
+        // created (`recursive: true` resolves to the first path it created, or
+        // `undefined` if the whole chain already existed) — `mode: 0o700` on mkdir
+        // already yields exactly 0700 for a newly-created directory under any
+        // realistic umask, so the guarded chmod is redundant-but-harmless there, and
+        // its only live effect would otherwise be chmodding a directory this call did
+        // NOT create — including one a caller shares for other purposes (test-support
+        // composition documented at the top of this file has passed shared paths like
+        // `/tmp` here). Never re-mode something this call didn't make.
+        const createdRoot = await fsPromises.mkdir(
+          artifactRoot,
+          { recursive: true, mode: 0o700 },
+        )
+        if (createdRoot !== undefined) {
+          await fsPromises.chmod(artifactRoot, 0o700)
+        }
         directory = await fsPromises.mkdtemp(
           path.join(artifactRoot, 'sealed-export-s5-'),
         )
