@@ -762,3 +762,52 @@ B.7 把 P3 剩余写成两件,并暗示 demo 接线(#4754)覆盖了其中的「�
 
 **一条纪律**:本轮两次把"更窄的东西"说成"点名的那件事"(这次;以及正文把已存在的审批闸列为待建)。
 两次都是**声明问题不是代码问题** —— 交付前对每条"这实现了 X"逐条问"X 的原文是什么,我做的是不是它"。
+
+### B.9 二次勘误:B.8 也错了 —— 产品路径不但存在,而且早于 P2 就完整
+
+B.8 把「产品路径 K3 `GetDetail` 读 → `erpMaterials` 落库」写成**未开始**。**实测证伪。**
+
+`stock-preparation-readonly-source-run.cjs` 把 `erp:k3-wise-webapi` 列为受支持源 kind(:72/:83/:90),
+读出的行经 fieldMap → `intake.erpMaterials`(:782)→ `assertIntakeReady` 形状校验(:783,
+不符即 422 `SOURCE_RUN_REQUIRED_SHAPE_MISSING`)→ `http-routes.cjs:4079` 在 flag 下直接喂落库。
+
+更关键:`stock-preparation-readonly-intake.cjs:232-247` 的别名表**本来就认 K3 原始列名**
+(`FNumber`/`FItemID`/`FName`/`FModel`)。把一行原始 K3 数据直接喂进去:
+
+```
+rowErrors: 0
+{ erpMaterialCode:"MAT-EXISTING", erpMaterialInternalId:"1001",
+  erpMaterialName:"Existing material", erpSpec:"SPEC-A", … }
+```
+
+**⇒ 这条链在 P2 动工之前就是完整的。**
+
+### B.10 因此 #4751 是缺陷,已撤回(#4755)
+
+我加的映射不是"补上缺失的一环",是**对已完成工作另造的更窄同类物**,而且身份派生冲突:
+
+| 同一行经过 | `erpMaterialId` |
+|---|---|
+| #4751 映射 | `k3:1001` |
+| 产品 intake | `stockprep_erp_material_6f377ca0768a9e0d` |
+
+`erpMaterialId` 是落库的 **key field**(`…erp-material-sync-persist.cjs:98`)⇒ 一个物料两个键 ⇒ **落两行**。
+零产品调用方,故未造成实际损坏;但**接线是计划里的下一步**,接上即断幂等。
+
+产品那个派生还更好:**按 source system 命名空间隔离**,两个 ERP 都编号 1001 也不撞;`k3:${id}` 没有这个性质。
+
+**#4754 需返工**(它调用了被移除的模块),已解除 arming。替代做法是把原始行直接喂 intake ——
+比原来更强,因为那才是真实路径。
+
+### B.11 这一轮我在同一件事上错了三次,记下形态
+
+1. 把**已存在**的人工审批闸写成待建(B.1 修正);
+2. 把 demo 接线说成产品接线(B.8 修正);
+3. 把**早已完整**的产品路径写成未开始,并据此造了个冲突的平行件(B.9/B.10 修正)。
+
+三次都不是代码写坏,是**没先去被测目标里查它是否已经做了这件事**。
+第三次的模块头注释里我自己写着「the only thing genuinely missing between the two is this mapping」——
+**文档在论证"我不是冗余的"这件事本身,就是该去查的信号**,不是可以跳过检查的理由。
+
+**纪律**:动手实现任何"补上缺失的一环"之前,先把一条**真实输入**喂给下游,看它是不是已经能吃。
+一次实验的成本远低于一个平行实现,更远低于一个冲突的键。
