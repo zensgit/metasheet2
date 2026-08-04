@@ -2093,7 +2093,24 @@ async function runS6AMidTierScaleWalk() {
       return
     }
 
-    await requestJson('/api/integration/stock-preparation/mvp/ensure', { method: 'POST', token, body: {}, accept: [200, 201], tenantId })
+    // Bisect finding (runs 30890457411/30892944152/30893149026/30893387635): this arm fails at 4, 50,
+    // 600 and 2500 rows alike, so row count is irrelevant — the difference is the ARM, not the volume.
+    // The primary arm's tenant has the FULL existing chain run against it earlier in the same job (see
+    // that arm's own comment: "the existing-chain phase already ran this once for the SAME tenant").
+    // A scale arm's dedicated tenant has only ever had mvp/ensure. If provisioning is the gap, this is
+    // where it shows — and until now the response was discarded, so a 200 carrying INCOMPLETE
+    // provisioning passed silently and every downstream failure was opaque.
+    const mvpEnsure = await requestJson('/api/integration/stock-preparation/mvp/ensure', { method: 'POST', token, body: {}, accept: [200, 201], tenantId })
+    const mvpData = mvpEnsure.body && mvpEnsure.body.data ? mvpEnsure.body.data : {}
+    S[`${keyPrefix}MvpEnsureHttp`] = mvpEnsure.status
+    S[`${keyPrefix}MvpEnsureReady`] = typeof mvpData.ready === 'boolean' ? String(mvpData.ready) : '<absent>'
+    S[`${keyPrefix}MvpEnsureReadyCount`] = Number.isInteger(mvpData.readyCount) ? mvpData.readyCount : -1
+    S[`${keyPrefix}MvpEnsureIncompleteCount`] = Number.isInteger(mvpData.incompleteCount) ? mvpData.incompleteCount : -1
+    // NOT a hard failure: if provisioning IS complete here, the gap is elsewhere and this arm must keep
+    // going so the next stage can name it. Reported either way, asserted so a regression is visible.
+    must(`${label}: mvp/ensure reports fully-provisioned MVP tables on this arm's dedicated tenant`,
+      mvpData.ready === true && mvpData.incompleteCount === 0,
+      `http=${mvpEnsure.status} ready=${S[`${keyPrefix}MvpEnsureReady`]} readyCount=${S[`${keyPrefix}MvpEnsureReadyCount`]} incomplete=${S[`${keyPrefix}MvpEnsureIncompleteCount`]}`)
 
     const operationId = `s6a-e2e-${label}-op-${salt}`
     // Wall-clock + elapsed-since-qualification (requirement 4), on its OWN timeout (S6A_POST_TIMEOUT_MS),
@@ -2251,7 +2268,24 @@ async function runS6ARejectionArm() {
       return
     }
 
-    await requestJson('/api/integration/stock-preparation/mvp/ensure', { method: 'POST', token, body: {}, accept: [200, 201], tenantId })
+    // Bisect finding (runs 30890457411/30892944152/30893149026/30893387635): this arm fails at 4, 50,
+    // 600 and 2500 rows alike, so row count is irrelevant — the difference is the ARM, not the volume.
+    // The primary arm's tenant has the FULL existing chain run against it earlier in the same job (see
+    // that arm's own comment: "the existing-chain phase already ran this once for the SAME tenant").
+    // A scale arm's dedicated tenant has only ever had mvp/ensure. If provisioning is the gap, this is
+    // where it shows — and until now the response was discarded, so a 200 carrying INCOMPLETE
+    // provisioning passed silently and every downstream failure was opaque.
+    const mvpEnsure = await requestJson('/api/integration/stock-preparation/mvp/ensure', { method: 'POST', token, body: {}, accept: [200, 201], tenantId })
+    const mvpData = mvpEnsure.body && mvpEnsure.body.data ? mvpEnsure.body.data : {}
+    S[`${keyPrefix}MvpEnsureHttp`] = mvpEnsure.status
+    S[`${keyPrefix}MvpEnsureReady`] = typeof mvpData.ready === 'boolean' ? String(mvpData.ready) : '<absent>'
+    S[`${keyPrefix}MvpEnsureReadyCount`] = Number.isInteger(mvpData.readyCount) ? mvpData.readyCount : -1
+    S[`${keyPrefix}MvpEnsureIncompleteCount`] = Number.isInteger(mvpData.incompleteCount) ? mvpData.incompleteCount : -1
+    // NOT a hard failure: if provisioning IS complete here, the gap is elsewhere and this arm must keep
+    // going so the next stage can name it. Reported either way, asserted so a regression is visible.
+    must(`${label}: mvp/ensure reports fully-provisioned MVP tables on this arm's dedicated tenant`,
+      mvpData.ready === true && mvpData.incompleteCount === 0,
+      `http=${mvpEnsure.status} ready=${S[`${keyPrefix}MvpEnsureReady`]} readyCount=${S[`${keyPrefix}MvpEnsureReadyCount`]} incomplete=${S[`${keyPrefix}MvpEnsureIncompleteCount`]}`)
 
     const operationId = `s6a-e2e-${label}-op-${salt}`
     const startedAtMs = Date.now()
