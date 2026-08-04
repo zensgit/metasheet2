@@ -1079,10 +1079,41 @@ async function assertS6ARunDatabaseObservableOnFailure(operationId, keyPrefix = 
     S[`${keyPrefix}DbRunRowFoundOnFailure`] = String(run !== null)
     S[`${keyPrefix}DbRunStatusOnFailure`] = run ? run.status : '<none>'
     S[`${keyPrefix}DbRunFailureReason`] = run && run.failure_reason ? run.failure_reason : '<none>'
+    // Run 30889715065 made this necessary. The mid-tier arm returned HTTP 503
+    // SEALED_EXPORT_INTERNAL_ERROR while THIS probe reported the run row as ACTIVATED — and ACTIVATED is
+    // the second-to-last state (CAPTURED -> INGESTED -> ACTIVATED -> COMPLETED), so the caller was told
+    // the operation failed at the point where the generation should already be live.
+    //
+    // The probe could not answer the only question that matters to an operator holding a
+    // non-repeatable window: IS THE DATA ACTUALLY LIVE? It read the run row and not the generation row.
+    // Without that, "retry" and "do not retry" are indistinguishable — and with a one-shot,
+    // irreversible binding, guessing wrong is expensive in one direction and useless in the other.
+    //
+    // Closed tokens and counts only; no identifiers, no business values.
+    const genRows = await pool.query(
+      `SELECT g.status, g.applied_row_count
+         FROM integration_sealed_export_generations g
+         JOIN integration_sealed_export_stock_prep_runs r
+           ON r.generation_id = g.generation_id AND r.tenant_id = g.tenant_id
+        WHERE r.tenant_id = $1 AND r.operation_id = $2`,
+      [tenantId, operationId],
+    )
+    const gen = genRows.rows[0] || null
+    S[`${keyPrefix}DbGenerationRowFoundOnFailure`] = String(gen !== null)
+    S[`${keyPrefix}DbGenerationStatusOnFailure`] = gen ? gen.status : '<none>'
+    S[`${keyPrefix}DbGenerationAppliedRowCountOnFailure`] =
+      gen && gen.applied_row_count !== null ? Number(gen.applied_row_count) : -1
+    // The operator-facing reading, derived — not a second opinion, just the two rows stated together.
+    S[`${keyPrefix}DbDataLiveOnFailure`] =
+      gen && gen.status === 'ACTIVE' ? 'YES_DATA_IS_LIVE_DESPITE_ERROR' : 'NO_OR_UNKNOWN'
   } catch {
     S[`${keyPrefix}DbRunRowFoundOnFailure`] = '<query-failed>'
     S[`${keyPrefix}DbRunStatusOnFailure`] = '<query-failed>'
     S[`${keyPrefix}DbRunFailureReason`] = '<query-failed>'
+    S[`${keyPrefix}DbGenerationRowFoundOnFailure`] = '<query-failed>'
+    S[`${keyPrefix}DbGenerationStatusOnFailure`] = '<query-failed>'
+    S[`${keyPrefix}DbGenerationAppliedRowCountOnFailure`] = -1
+    S[`${keyPrefix}DbDataLiveOnFailure`] = '<query-failed>'
   } finally {
     await pool.end()
   }

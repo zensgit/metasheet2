@@ -111,6 +111,24 @@ if (!scaleRequested) {
     plumbingFailures.push('MIDTIER_JOB_DID_NOT_RUN_DESPITE_SCALE_REQUESTED')
     slopeNotRunReason = 'MIDTIER_JOB_SKIPPED'
   }
+  // Run 30889715065 is why this exists. The mid-tier arm FAILED (HTTP 503,
+  // SEALED_EXPORT_INTERNAL_ERROR) after 2812ms, and this aggregator fitted a line straight through that
+  // number: slope 0.972 ms/row, extrapolating 24999 rows to ~24.7s. That figure was meaningless — 2812ms
+  // is how long the arm took to FAIL, not how long a successful walk of 2500 rows takes.
+  //
+  // The independent tell was already in the same run: the rejection arm really did walk 25000 rows in
+  // 2560ms, an order of magnitude away from what the fit predicted for that row count. Two numbers from
+  // one run contradicting each other is what a bad fit looks like.
+  //
+  // A missing data point was already refused. A data point from a FAILED run is not missing — it is
+  // WRONG, which is worse, because it produces a confident number instead of a NOT_RUN. Both arms must
+  // have PASSED before either is fitted.
+  if (slopeNotRunReason === null && S.primaryRun !== 'PASS') {
+    slopeNotRunReason = 'PRIMARY_RUN_NOT_PASS'
+  }
+  if (slopeNotRunReason === null && S.midTierRun !== 'PASS') {
+    slopeNotRunReason = 'MIDTIER_RUN_NOT_PASS'
+  }
   if (rejectionJobResult === 'skipped') {
     plumbingFailures.push('REJECTION_JOB_DID_NOT_RUN_DESPITE_SCALE_REQUESTED')
     // The rejection arm's own outcome is NOT part of the two-point slope fit (see below) — its being
