@@ -1103,9 +1103,23 @@ async function assertS6ARunDatabaseObservableOnFailure(operationId, keyPrefix = 
     S[`${keyPrefix}DbGenerationStatusOnFailure`] = gen ? gen.status : '<none>'
     S[`${keyPrefix}DbGenerationAppliedRowCountOnFailure`] =
       gen && gen.applied_row_count !== null ? Number(gen.applied_row_count) : -1
-    // The operator-facing reading, derived — not a second opinion, just the two rows stated together.
-    S[`${keyPrefix}DbDataLiveOnFailure`] =
-      gen && gen.status === 'ACTIVE' ? 'YES_DATA_IS_LIVE_DESPITE_ERROR' : 'NO_OR_UNKNOWN'
+    // NAME THIS FOR WHAT THE QUERY PROVES, NOT FOR THE QUESTION IT WAS ASKED.
+    // An earlier version of this line was called `DbDataLiveOnFailure` and reported
+    // 'YES_DATA_IS_LIVE_DESPITE_ERROR'. That over-claimed. The query above reads
+    // integration_sealed_export_generations — the SEALED-EXPORT generation. It says nothing about the
+    // stock-preparation BUSINESS tables, which are written afterwards by persistStockPreparation()
+    // through the multitable API, downstream of activation — and which is the more likely place a
+    // 2500-row run fails, since the throw site immediately after that call raises the same
+    // SEALED_EXPORT_INTERNAL_ERROR token observed here.
+    //
+    // "The generation is active" and "the business data is live" are different claims. Reporting the
+    // first under a name that asserts the second is exactly the kind of confident-but-unearned evidence
+    // this lane exists to prevent. The business side stays UNKNOWN because this harness does not query
+    // it — stated, not silently omitted.
+    S[`${keyPrefix}DbSealedExportGenerationOnFailure`] =
+      gen && gen.status === 'ACTIVE'
+        ? 'GENERATION_ACTIVE_BUSINESS_PERSIST_UNKNOWN'
+        : 'GENERATION_NOT_ACTIVE_OR_ABSENT'
   } catch {
     S[`${keyPrefix}DbRunRowFoundOnFailure`] = '<query-failed>'
     S[`${keyPrefix}DbRunStatusOnFailure`] = '<query-failed>'
@@ -1113,7 +1127,7 @@ async function assertS6ARunDatabaseObservableOnFailure(operationId, keyPrefix = 
     S[`${keyPrefix}DbGenerationRowFoundOnFailure`] = '<query-failed>'
     S[`${keyPrefix}DbGenerationStatusOnFailure`] = '<query-failed>'
     S[`${keyPrefix}DbGenerationAppliedRowCountOnFailure`] = -1
-    S[`${keyPrefix}DbDataLiveOnFailure`] = '<query-failed>'
+    S[`${keyPrefix}DbSealedExportGenerationOnFailure`] = '<query-failed>'
   } finally {
     await pool.end()
   }
