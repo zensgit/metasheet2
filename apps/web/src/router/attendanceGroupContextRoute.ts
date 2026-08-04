@@ -55,6 +55,20 @@ export type AttendanceGroupRouteTarget =
         | 'attendance-admin-rule-sets'
     }
 
+/** Group workflow stage carried by the public route step, independent of surface. */
+export function resolveAttendanceGroupRouteStage(
+  step: AttendanceGroupRouteStep,
+): 'schedule' | 'policies' | null {
+  switch (step) {
+    case 'schedule':
+      return 'schedule'
+    case 'rules':
+      return 'policies'
+    case 'calendar':
+      return null
+  }
+}
+
 /** Safe return fallback (OD-4711-5): the attendance group list section. */
 export const ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO =
   '/attendance?tab=admin&section=attendance-admin-groups'
@@ -89,7 +103,7 @@ export type AttendanceGroupRouteSurfaceParse =
   | { ok: false }
 
 /**
- * Step-scoped closed surface parser. Absent (`undefined`/`null`) means the step's default
+ * Step-scoped closed surface parser. Absent (`undefined`) means the step's default
  * host (`{ ok: true, surface: null }`). A present value must be in the step's row of the
  * closed table; anything else — including non-string query values — is `{ ok: false }`.
  */
@@ -97,7 +111,7 @@ export function parseAttendanceGroupRouteSurface(
   step: AttendanceGroupRouteStep,
   value: unknown,
 ): AttendanceGroupRouteSurfaceParse {
-  if (value === undefined || value === null) return { ok: true, surface: null }
+  if (value === undefined) return { ok: true, surface: null }
   if (typeof value !== 'string') return { ok: false }
   return (ATTENDANCE_GROUP_STEP_SURFACES[step] as readonly string[]).includes(value)
     ? { ok: true, surface: value as AttendanceGroupRouteSurface }
