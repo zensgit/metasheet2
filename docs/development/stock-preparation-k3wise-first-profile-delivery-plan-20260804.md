@@ -598,3 +598,57 @@ catalog 化 readPath、fixture GetDetail 三项**已重贴到 P2/P3**,不在 P1 
   运行时不可达);条件步骤会绿而不执行(`integration-guard.yml:479`),所以证据要贴 run id **加**执行日志行。
 - **声明面越小越好**。不承重的声明**删掉**,不是加限定词;本轮被杀的结论多数是"过强声明"而非坏代码。
 - **空读先怀疑读法**。本地工作树不是 main:引用一律经 `git show <sha>:<path>`,行号是该 blob 的行号。
+---
+
+## 附录 A — P1/P2 开工后的实测修正(2026-08-04,写在计划正文之后,不改正文)
+
+> 计划正文是勘察产物;本附录是**开工后跑出来的**修正。两者冲突时以本附录为准,并标注理由。
+
+### A.1 `material.v1` / `bom.v1` 是 K3 **模板 id**,不是备料侧规范形状
+
+计划正文把它们写成待建的规范形状。**实测:仓内 `material.v1` / `materialV1` / `MATERIAL_V1` 只出现在
+`adapters/k3-wise-document-templates.cjs`,即 K3 模板 id(`k3wise.material.v1`)。**
+
+而备料 sealed-snapshot decoder 的 16 字段闭集是 **BOM 形状**
+(`bomLevel` / `childDrawingNo` / `parentDrawingNo` / `designQty` / `designUnit` / `sourceBomId` …,
+`stock-preparation-sealed-snapshot-decoder.cjs:18-35`)—— **它不是物料主数据的入口**。
+
+⇒ **K3 物料读的接点不是 sealed-export decoder**,而是:
+
+```
+POST /api/integration/stock-preparation/mvp/source-runs/erp-materials   (http-routes.cjs:82)
+POST /api/integration/stock-preparation/mvp/erp-materials/sync          (http-routes.cjs:86)
+     → persistStockPreparationErpMaterialSync(stock-preparation-erp-material-sync-persist.cjs:345)
+       入参 { context, permission, recordsApi, provisioning, targetProjectId, syncRunId, erpMaterials }
+       admin fail-closed 在任何 provisioning/records 访问之前(:352)
+       ERP 物料主数据是**租户级缓存**,非按 PLM 项目分域
+```
+
+**后果**:P2 的工作量比正文假设的小 —— 不是"建规范形状",是"把 K3 读的产出喂进 `erpMaterials`"。
+其下游(`material-mappings/candidates` → `/candidates/sync` → `/confirm` → `prep-lines` → `generation/run`)
+已在 T4 既有链的 ALWAYS 名册内、已被跑过。
+
+### A.2 K3 mock 链今天就端到端跑通,且首版边界是它的既有不变量
+
+`node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs` 实跑通过:
+
+```
+step 5a  K3 testConnection ok
+step 6   K3 Save-only 写 2 条,0 Submit,0 Audit      ← 首版边界,既有不变量
+step 6b  BOM Save-only 1 条(v1 Data 模板字段)
+step 7a  SQL 只读探针从 t_ICItem 返回 1 行
+step 7b  中间表 upsert 1 行
+step 7c  安全护栏拒绝对 t_ICItem(K3 核心表)的 INSERT
+step 8-9 证据编译器 PASS,0 issues
+```
+
+⇒ **P3 的"Save-only、Submit/Audit 关闭"不是待建约束,是已被断言的不变量**;
+"不得直写 K3 核心表"同样已有护栏。该 demo 自己标注 `mock pass ≠ customer live pass`,不得据此声称客户可用。
+
+**P2/P3 剩余的真实缺口据此收窄为三件**:
+1. **GetDetail 回读核验** —— P1 已记为 KNOWN GAP(服务端有 `readPath`,前端表单无对应字段);
+2. **人工审批闸** —— dry-run 与 apply 之间;
+3. **把 K3 读产出接进 `erpMaterials`**(A.1 的接点)。
+
+> **不因此调低正文的人天估计。** 本轮实测反复证明:首次跑通的东西没有一次是一遍过的
+> (规模腿从"从未工作"到"验到上界"用了十三次 dispatch)。编码量小 ≠ 首次跑通快。
