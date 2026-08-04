@@ -652,3 +652,91 @@ step 8-9 证据编译器 PASS,0 issues
 
 > **不因此调低正文的人天估计。** 本轮实测反复证明:首次跑通的东西没有一次是一遍过的
 > (规模腿从"从未工作"到"验到上界"用了十三次 dispatch)。编码量小 ≠ 首次跑通快。
+
+---
+
+## 附录 B — P3 实测:人工审批闸已存在,但不在 K3 那条路上(2026-08-04)
+
+> 与附录 A 同性质:**开工后跑出来的**修正,与正文冲突时以本附录为准。
+> 结论全部来自读代码,逐条带 `file:line`,可复核。
+
+### B.1 我本要造的东西已经有了 —— 而且比我会写的强
+
+`plugins/plugin-integration-core/lib/external-write-dry-run.cjs`
+
+| 性质 | 证据 |
+|---|---|
+| apply 必须带 token | `:1026` 无 token ⇒ 400 `C6_WRITE_DRY_RUN_TOKEN_REQUIRED` |
+| 单次消费 | `:150` consume / get+delete;`:146` `CONSUMING_TOKEN_KEYS` 防并发双消费 ⇒ 409 |
+| 30 分钟 TTL | `:13`;过期 ⇒ 409 |
+| 绑范围 | `:167` pipeline + tenant + workspace + **dryRunUser** + ownerPrincipal 任一不符 ⇒ 409 |
+| **绑内容** | `:799` apply 重算 plan 比对 `revision`;`buildRevision`(`:652`)哈希含 **`rowFingerprints`**、`counts`、`completeSourceRead`、`writableFields`、`keyFields`、`fieldMappings` |
+
+**含义**:dry-run 与 apply 之间源数据变了 ⇒ 指纹变 ⇒ revision 变 ⇒ 409。
+这是**内容绑定**的批准,不是"再点一次确认"。**正文把「人工审批闸」列为待建,是错的。**
+
+### B.2 但它不覆盖 K3
+
+模块自己写着(`:246`):
+
+> an opt-in target (S1b-2 multitable, **S2 K3**) supplies its own profile
+
+已接线的只有 `data-source:sql-write-gated`(`:18`)与 `metasheet:multitable`
+(`http-routes.cjs:1054`)。**K3 的 profile 属于 S2,不属于本轮。**
+
+### B.3 K3 走的另一条路上,"批准"目前等价于一个布尔
+
+```
+pipeline-runner.cjs:642   if (!dryRun && cleanRecords.length > 0) {
+pipeline-runner.cjs:643     await context.targetAdapter.upsert({ … })
+```
+
+- `pipeline-runner.cjs:335` `createAdapter(targetSystem, { role:'target' })`
+- `contracts.cjs:222-236` —— registry **完全不读 `role`**
+- `http-routes.cjs:3266` `pipelinesRun`:仅 `requireAccess(req,'write')`,不要 token
+- `http-routes.cjs:3276` `pipelinesDryRun`:强制 `dryRun:true`,**不发 token**
+
+⇒ 两端点之间零绑定。**先 dry-run 再 run,与直接 run,服务端无法区分。**
+
+**可达性是实测的,不是推断的**(四项):
+
+| 核实 | 结果 |
+|---|---|
+| adapter metadata | `roles: ['target']` —— K3 就是被声明的写目标 |
+| registry 按 role 拦? | 不拦(`contracts.cjs:222`) |
+| pipelinesCreate target kind 白名单? | 无 |
+| material 默认 operations | `['upsert']`(`k3-wise-document-templates.cjs:98`) |
+
+不是理论可达,是**默认形态**。
+
+### B.4 这不是漏洞
+
+两条路都要 `write` 访问权。**不是权限绕过**,是**两阶段确认在这条路上不存在**。
+按本仓纪律,这类事实属于计划文档,不属于安全披露面。
+
+### B.5 已有的硬锁 —— 这条是好的,别动
+
+`k3-wise-webapi-adapter.cjs:420` 规范化时**删掉** `submitPath`/`auditPath`,并在 merge **之后**
+钉 `lifecycle='save-only'`(operator overlay 覆盖不掉);`:2000` `autoSubmit = saveOnly ? false : requested`。
+
+⇒ owner 首版边界里的「Submit/Audit 关闭」是**运行期不变量**,不是配置约定。
+已有覆盖:`k3-wise-adapters.test.cjs:1635`。本轮**不重复造**。
+
+### B.6 本轮做了什么(#4753)
+
+按三选一里的 **C**:不改写路径行为,把**姿态钉死**。
+
+- 正控:两个已接线 profile 各自**接受**自己的 kind(用与姿态断言完全相同的调用形状)
+- 姿态:两者都**拒绝** `erp:k3-wise-webapi`,且拒绝必须带 422 / `C6_WRITE_TARGET_REQUIRED` /
+  `expectedKind`+`actualKind` —— 证明是因 **kind** 被拒,而非系统形状不合法
+- mutation:把 `K3_CONNECTOR_KIND` 换成已覆盖的 kind(模拟「K3 拿到了 profile」)⇒ **2 条红**
+
+**未做 A/B**(注册 connector profile / 让 `gated` 承重):两者都是写路径上的产品行为变更,
+当前约束为"不得外部写、不得 arming"。**由 owner 裁。**
+
+### B.7 对正文的修正
+
+| 正文 | 改为 |
+|---|---|
+| P3「人工审批闸」= 待建 | **已建**(C6 路径,内容绑定);K3 的 profile 属 S2 |
+| P3 剩余三件 | 剩 **两** 件:GetDetail 回读接线(客户端字段已由 #4752 补)、把 K3 读产出接进 `erpMaterials` |
