@@ -1906,6 +1906,19 @@ function extractSealedExportReasonFromMessage(message) {
 // comment above SCALE_TENANT_ID_PREFIX for why this arm cannot share TENANT_ID or any other arm's
 // tenant), not re-derived here, so a caller that needs it BEFORE setup completes (e.g. for a pre-arm
 // baseline snapshot) and this function compute the identical value from a single source of truth.
+// Existing-chain warm-up for a scale arm. Reuses the SAME script the primary job's phase 3 runs, so
+// this is not a narrower stand-in for it. Failure here is reported, NOT fatal: the point of the
+// experiment is to observe whether warming changes the arm's outcome, and aborting on a warm-up problem
+// would destroy that observation.
+async function runExistingChainWarmup(token, label) {
+  try {
+    await runExistingChain(token)
+    return String(S.existingChainScriptExit) === '0'
+  } catch {
+    return false
+  }
+}
+
 async function setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow, artifactRoot, tenantId }) {
   const systemId = `e2efunc-s6a-${label}-source-${salt}`
   const bindingVersion = `e2efunc-${label}-binding-${salt}`
@@ -1941,6 +1954,16 @@ async function setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow, a
     await startServer({}, `pre-flag-on-registration-${label}`)
     try {
       const baseToken = await getDevToken(tenantId)
+      // THIRD single-variable experiment. Ruled out so far, each on its own:
+      //   * row count — fails at 4, 50, 600 and 2500 alike (primary passes at 3)
+      //   * dedicated tenant — switching this arm to TENANT_ID changed nothing
+      //   * MVP provisioning — mvp/ensure returns 201, ready=true, 9 tables all ensured
+      // What remains is the one difference the primary arm's own comment points at: its tenant was
+      // WARMED by the existing chain earlier in its job ("the existing-chain phase already ran this once
+      // for the SAME tenant"). Phases 1-3 do not run in a scale job, so this arm's tenant never was.
+      // This is the right window for it: the flag-OFF server is already up and the token is already held.
+      const chainWarmupOk = await runExistingChainWarmup(baseToken, label)
+      S[`s6a${label === 'midtier' ? 'MidTier' : 'Rejection'}ExistingChainWarmup`] = chainWarmupOk ? 'PASS' : 'FAIL'
       const registered = await registerExternalSystem(baseToken, systemId, tenantId)
       registeredOk = must(`${label}: external system registered`, registered.ok, `http=${registered.status}`)
       if (registeredOk) {
