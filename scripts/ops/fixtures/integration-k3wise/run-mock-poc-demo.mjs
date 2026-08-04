@@ -11,6 +11,8 @@
 //   5. Adapter testConnection on both
 //   6. Adapter Material Save-only upsert against mock K3 (autoSubmit=false, autoAudit=false)
 //   7. SQL channel read/upsert probes to verify the mock matches channel contract
+//   7a-2. The row just READ is fed to the REAL stock-prep intake (no per-connector mapper):
+//         0 row errors, key stable and source-namespaced, incomplete row rejected
 //   8. Compose evidence JSON (hardcoded for the values we just produced)
 //   9. evidence compiler: buildEvidenceReport(packet, evidence) → assert PASS
 //
@@ -32,6 +34,9 @@ const __dirname = path.dirname(__filename)
 const require = createRequire(import.meta.url)
 const { createK3WiseWebApiAdapter } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs')
 const { createK3WiseSqlServerChannel } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs')
+const {
+  normalizeStockPreparationReadonlyIntake,
+} = require('../../../../plugins/plugin-integration-core/lib/stock-preparation-readonly-intake.cjs')
 
 function assert(cond, message) {
   if (!cond) throw new Error(`mock PoC demo FAIL: ${message}`)
@@ -163,6 +168,82 @@ async function main() {
       console.log(`✓ step 7a: SQL channel readonly probe returned ${sqlReadResult.records.length} row from t_ICItem`)
     } catch (error) {
       throw new Error(`SQL channel readonly probe failed: ${error.message}`)
+    }
+
+    // 7a-2. The row we JUST READ goes through the REAL stock-prep intake.
+    //
+    // This exercises the product path (source-run -> normalizeStockPreparationReadonlyIntake ->
+    // persist), not a per-connector mapper: the intake's alias lists already accept raw K3
+    // columns. An earlier version of this step called a separate K3 mapper, which turned out to
+    // duplicate the intake AND derive a conflicting erpMaterialId; that mapper was retracted.
+    // Feeding the intake the actual read output means a drift between "what the read returns"
+    // and "what the intake accepts" fails HERE rather than at a customer.
+    try {
+      const sourceRow = sqlReadResult.records[0]
+      const intakeRun = normalizeStockPreparationReadonlyIntake({
+        sourceSystem: 'erp_k3',
+        runId: 'mock-poc-intake',
+        startedAt: '2026-08-04T00:00:00.000Z',
+        createdBy: 'system',
+        erpMaterials: [sourceRow],
+      })
+
+      // Zero row errors IS the claim: the intake understood the raw K3 shape with no mapper.
+      assert(
+        intakeRun.evidence.result.rowErrors === 0,
+        `raw K3 row must produce 0 intake row errors, got ${intakeRun.evidence.result.rowErrors}`,
+      )
+      const intake = intakeRun.erpMaterials[0]
+      assert(intake.erpMaterialCode === sourceRow.FNumber, 'FNumber must land as erpMaterialCode')
+      assert(
+        intake.erpMaterialInternalId === String(sourceRow.FItemID),
+        'FItemID must land as erpMaterialInternalId',
+      )
+      assert(intake.erpMaterialName === sourceRow.FName, 'FName must land as erpMaterialName')
+
+      // Identity must be STABLE (re-reading the same material must not create a second row --
+      // erpMaterialId is the persist's key field) and NAMESPACED by source system (two ERPs that
+      // both number a material 1001 must not collide).
+      const again = normalizeStockPreparationReadonlyIntake({
+        sourceSystem: 'erp_k3',
+        runId: 'mock-poc-intake-2',
+        startedAt: '2026-08-04T00:00:00.000Z',
+        createdBy: 'system',
+        erpMaterials: [sourceRow],
+      }).erpMaterials[0].erpMaterialId
+      assert(again === intake.erpMaterialId, 'the same material must derive the same key on re-read')
+
+      const otherSystem = normalizeStockPreparationReadonlyIntake({
+        sourceSystem: 'erp_other',
+        runId: 'mock-poc-intake-3',
+        startedAt: '2026-08-04T00:00:00.000Z',
+        createdBy: 'system',
+        erpMaterials: [sourceRow],
+      }).erpMaterials[0].erpMaterialId
+      assert(
+        otherSystem !== intake.erpMaterialId,
+        'the same internal id from another source system must not collide',
+      )
+
+      // Negative control: without it, everything above would also pass if the intake were a
+      // pass-through that validated nothing. A row with no internal id must be a ROW ERROR.
+      const incomplete = normalizeStockPreparationReadonlyIntake({
+        sourceSystem: 'erp_k3',
+        runId: 'mock-poc-intake-neg',
+        startedAt: '2026-08-04T00:00:00.000Z',
+        createdBy: 'system',
+        erpMaterials: [{ FNumber: sourceRow.FNumber }],
+      })
+      assert(
+        incomplete.evidence.result.rowErrors > 0,
+        'a row without an internal id must be a row error, not a silent pass',
+      )
+
+      console.log(
+        '\u2713 step 7a-2: raw read row accepted by the real stock-prep intake (0 row errors; key stable and source-namespaced; incomplete row rejected)',
+      )
+    } catch (error) {
+      throw new Error(`K3 read -> stock-prep intake failed: ${error.message}`)
     }
     try {
       const middleWriteResult = await sqlChannel.upsert({
