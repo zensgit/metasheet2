@@ -1071,9 +1071,22 @@ function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegi
         // disagrees with its code is how three earlier defects on this PR hid.)
         //
         // Server-side wiring only, never request-sourced: the values come from the PIPELINE
-        // record, and the pipeline itself is resolved by an exact scope match upstream, so a
-        // request claiming a different tenant/workspace never reaches this branch. That property
-        // is asserted in http-routes-plm-k3wise-poc.test.cjs, not merely stated here.
+        // record, and the pipeline is resolved by an exact scope match upstream, so a request
+        // claiming a different tenant/workspace does not reach this branch.
+        //
+        // COVERAGE, STATED EXACTLY (round 11 caught the previous wording overclaiming). The
+        // round-10 comment said this property "is asserted in http-routes-plm-k3wise-poc" — it
+        // is not, or not fully:
+        //   * the test covers the WORKSPACE half only; the tenant half exits earlier through a
+        //     different door (403 TENANT_MISMATCH) and is uncovered;
+        //   * the test drives its own fake pipeline registry, so the real upstream guard in
+        //     `lib/pipelines.cjs` does not execute in it;
+        //   * it is not gate-exclusive — neutering the harness's own workspace comparison still
+        //     leaves a 404 door standing.
+        // What the test DOES prove, and all it proves, is the property that matters here: a
+        // spoofed-workspace request reaches ZERO B4 lookups. The upstream guard's own negative
+        // case belongs to `pipelines.test.cjs`, whose fixtures are all single-workspace today —
+        // filed as follow-up rather than claimed.
         b4: {
           readSourceConfigs,
           tenantId: pipeline.tenantId,

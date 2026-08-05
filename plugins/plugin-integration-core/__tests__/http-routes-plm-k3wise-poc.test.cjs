@@ -827,10 +827,14 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   // scope match, so a request claiming a different workspace never reaches the B4 branch at all.
   // Assert that, rather than the comment's wording.
   const spoofed = await dryRunWith(() => [], { requestWorkspaceId: 'ws_attacker_supplied' })
+  // The load-bearing assertion. Neutering the upstream scope match makes this RED.
   assert.equal(spoofed.listArgs.length, 0,
     'a request claiming a different workspace must not even reach the B4 lookup')
-  assert.notEqual(spoofed.res.statusCode, 200,
-    'and it must not succeed')
+  // NOT an independent assertion, and labelled rather than dropped: in this harness NO
+  // configuration of this route returns 200 (an honest call with 0 rows is 400; with a ratified
+  // row it is 500 on missing credentials), so `!== 200` is true by fixture construction. Kept
+  // only as a shape guard; the line above is what carries the property.
+  assert.notEqual(spoofed.res.statusCode, 200, 'and it must not succeed (vacuous here — see above)')
 
   const related = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
   const relatedDetails = ((related.res.body && related.res.body.error) || {}).details || {}
