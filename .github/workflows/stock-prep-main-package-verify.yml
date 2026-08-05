@@ -586,12 +586,22 @@ jobs:
       #
       # Without it this job cannot go green for reasons that have nothing to do
       # with the package built here. The repository's migration set contains
-      # migrations that EVERY fresh-database lane already excludes for
-      # documented, still-open defects (008's idempotency on the scope column;
-      # the gantt FK pointing at pre-fix text view ids; the legacy user_orgs
-      # is_active incompatibility; 042a's missing last_accessed column). They are
-      # NOT neutralised by SUPERSEDED_LEGACY_SQL_MIGRATIONS, which only no-ops
+      # migrations that the fresh-database lanes exclude for documented,
+      # still-open defects (008's idempotency on the scope column; 042a's
+      # missing last_accessed column; the gantt FK pointing at pre-fix text view
+      # ids; the legacy user_orgs is_active incompatibility). They are NOT
+      # neutralised by SUPERSEDED_LEGACY_SQL_MIGRATIONS, which only no-ops
       # 042a/048/049 among these.
+      #
+      # Do NOT read that as "every lane excludes all of them". Mechanically it is
+      # not true, and the difference is precisely why this lane pins ONE NAMED
+      # list rather than a notion of "the usual exclusions". Counted over every
+      # MIGRATION_EXCLUDE assignment in .github/workflows (9 occurrences as of
+      # 2026-08-04): 008, 042a and the gantt migration appear in 9/9;
+      # zzzz20260114110000_create_user_orgs_table.ts appears in 7/9 —
+      # plugin-tests.yml (:616 and :1294) does NOT exclude it. So "every lane
+      # already excludes these" would be an overclaim, and a union of all lists
+      # would be a different, wider set than the one this job actually runs.
       #
       # The repository keeps TWO deliberately different lists, documented as
       # solving different problems and as not required to converge — see
