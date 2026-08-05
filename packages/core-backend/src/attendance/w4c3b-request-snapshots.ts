@@ -127,6 +127,13 @@ const REQUEST_TYPES = Object.freeze([
   'schedule_dispatch',
 ] as const)
 
+/**
+ * W4C-5 transition-safety amendment section 3: the rollout-control eligibility/authority
+ * predicate reuses this exact closed calculation-affecting request-type set rather than a
+ * second copied list, so the two callers cannot silently diverge.
+ */
+export const ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1 = REQUEST_TYPES
+
 export type AttendanceRequestSnapshotRequestTypeV1 =
   (typeof REQUEST_TYPES)[number]
 

@@ -793,7 +793,7 @@ test('P25: generated runtime call-path census classifies every closed-table read
   const { sites } = buildP25CallPathCensus(source)
   const result = classifyP25CallPathSites(sites)
 
-  assert.equal(sites.length, 105, 'the current generated P25 read/write inventory must remain explicit')
+  assert.equal(sites.length, 109, 'the current generated P25 read/write inventory must remain explicit')
   assert.deepEqual(result.unclassified, [], 'a new P25 table/site or renamed wrapper must not inherit a broad allowlist')
   assert.deepEqual(result.countDrift, [], 'an extra P25 access in an existing wrapper must require an explicit classification')
   assert.deepEqual(result.stale, [], 'removing a P25 access must retire its classification deliberately')
