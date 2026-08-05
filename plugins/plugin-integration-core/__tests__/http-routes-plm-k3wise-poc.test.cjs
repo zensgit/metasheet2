@@ -421,7 +421,7 @@ function createPipelineRegistry(db) {
   }
 }
 
-function createHarness() {
+function createHarness({ readSourceConfigStore } = {}) {
   const db = createMockDb()
   const externalSystemRegistry = createExternalSystemRegistry()
   const pipelineRegistry = createPipelineRegistry(db)
@@ -509,8 +509,13 @@ function createHarness() {
         async deleteTemplate() { return { deleted: 0 } },
         async instantiateTemplate() { return {} },
       },
-      // S2-c: satisfy requireService('readSourceConfigStore', ...) — this harness never exercises it.
-      readSourceConfigStore: {
+      // S2-c: satisfy requireService('readSourceConfigStore', ...). REVIEW P2-1 (round 9): this
+      // used to say "this harness never exercises it", and that was the gap — the B4 consumption
+      // SCOPE (tenant / workspace / pipeline-endpoint relation) is built in
+      // resolveC6WritePlanInputs and was verified only by a COPY of it in the profile suite, so
+      // fail-open widenings there stayed green. An injectable store lets a test drive the REAL
+      // route and observe the real scope.
+      readSourceConfigStore: readSourceConfigStore || {
         async saveVersion() { return {} },
         async list() { return [] },
         async get() { return {} },
@@ -668,6 +673,158 @@ async function createRouteControlPlaneScenario(routes) {
     k3,
     pipeline: res.body.data,
   }
+}
+
+// REVIEW P2-1 (round 9): the B4 consumption SCOPE is assembled in http-routes'
+// `resolveC6WritePlanInputs` — tenantId, workspaceId, and the pipeline-endpoint relation. That
+// function is not exported, and the profile suite assembles the same object itself ("exactly the
+// way http-routes does"), so it judged a COPY: five anchored mutations to the real call sites —
+// including two FAIL-OPEN ones (workspaceId collapsed to null; pipelineSystemIds widened with an
+// unrelated system) — left every suite green. The second reinstates the round-3 defect of one
+// system's read contract vouching for another system's write.
+//
+// This drives the REAL route and observes the REAL scope object.
+const PROBE_WORKSPACE_ID = 'ws_b4_probe'
+
+async function assertB4ScopeIsWiredThroughTheRoute() {
+  const {
+    K3WISE_MATERIAL_LIST_B4_TEMPLATE,
+  } = require(path.join(__dirname, '..', 'lib', 'read-source-k3-material-list-b4-contract.cjs'))
+  const { contentKeyFor } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
+  const { normalizeReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
+
+  function ratifiedRow({ systemId, workspaceId = 'ws_k3_poc' }) {
+    const config = { ...K3WISE_MATERIAL_LIST_B4_TEMPLATE, systemId }
+    return {
+      id: `rsc_${systemId}`,
+      object: 'material',
+      status: 'approved',
+      workspaceId,
+      config,
+      contentKey: contentKeyFor(normalizeReadSourceConfig(config)),
+    }
+  }
+
+  // `rows` is what the store returns; `listArgs` records what the ROUTE asked for.
+  async function dryRunWith(rows) {
+    const listArgs = []
+    const harness = createHarness({
+      readSourceConfigStore: {
+        async saveVersion() { return {} },
+        async list(args) { listArgs.push(args); return rows(harnessScenario) },
+        async get() { return {} },
+        async approve() { return {} },
+        async retire() { return {} },
+        async listAudit() { return [] },
+        async getForRuntime() { return {} },
+      },
+    })
+    // Minimal WORKSPACE-SCOPED scenario, built here rather than by bending the shared PoC one:
+    // the probe needs a workspace-scoped pipeline (against a null-workspace pipeline, "collapse
+    // workspaceId to null" is indistinguishable from correct behaviour), and a workspace-scoped
+    // pipeline resolves only workspace-scoped systems.
+    const mkSystem = async (body) => {
+      const r = await invoke(harness.routes, 'POST', '/api/integration/external-systems', {
+        user: WRITE_USER,
+        body: { workspaceId: PROBE_WORKSPACE_ID, tenantId: TENANT_ID, ...body },
+      })
+      assertOkResponse(r, 201)
+      return r.body.data
+    }
+    const plm = await mkSystem({
+      name: 'PLM probe', kind: 'plm:yuantus-wrapper', role: 'source', status: 'active', config: {},
+    })
+    const k3 = await mkSystem({
+      name: 'K3 probe', kind: 'erp:k3-wise-webapi', role: 'target', status: 'active',
+      config: {
+        baseUrl: 'https://k3.example.test',
+        autoSubmit: false,
+        autoAudit: false,
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
+      },
+      credentials: { username: 'demo', password: 'secret', acctId: '001' },
+    })
+    assert.equal(plm.workspaceId, PROBE_WORKSPACE_ID, 'the probe systems must actually be workspace-scoped')
+    const mkPipeline = await invoke(harness.routes, 'POST', '/api/integration/pipelines', {
+      user: WRITE_USER,
+      body: {
+        ...materialPipelineBody({ sourceSystemId: plm.id, targetSystemId: k3.id }),
+        workspaceId: PROBE_WORKSPACE_ID,
+        name: 'B4 scope wiring probe',
+        // The PoC mappings include sourceId/revision, which the C6 field allowlist correctly
+        // refuses — the dry-run would never reach the B4 branch.
+        fieldMappings: [
+          { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
+          { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
+        ],
+      },
+    })
+    assertOkResponse(mkPipeline, 201)
+    assert.equal(mkPipeline.body.data.workspaceId, PROBE_WORKSPACE_ID,
+      'the probe pipeline must be workspace-scoped, or the workspaceId assertion cannot discriminate')
+    const harnessScenario = { plm, k3, pipeline: mkPipeline.body.data }
+    const res = await invoke(harness.routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+      user: WRITE_USER,
+      params: { id: mkPipeline.body.data.id },
+      body: { tenantId: TENANT_ID, workspaceId: PROBE_WORKSPACE_ID },
+    })
+    return { res, listArgs, scenario: harnessScenario }
+  }
+
+  // (1) THE SCOPE THE ROUTE ASKS FOR. Kills the "drop readSourceConfigs" and "*ANY*" mutations:
+  // if the wiring stops passing the store, nothing is recorded here.
+  const seen = await dryRunWith(() => [])
+  assert.ok(seen.listArgs.length >= 1,
+    'the route must consult the read-source config store for the B4 binding — nothing was asked')
+  const args = seen.listArgs[0]
+  assert.equal(args.tenantId, TENANT_ID, 'B4 lookup must be scoped to the PIPELINE tenant')
+  assert.equal(args.status, 'approved', 'only approved bindings may be consulted')
+  assert.equal(args.limit, 500, 'the bounded page limit must reach the store')
+  // EXACT value, not merely present: collapsing this to a constant `null` is a FAIL-OPEN
+  // widening (a tenant-level binding would vouch for a workspace-scoped pipeline).
+  assert.equal(args.workspaceId, PROBE_WORKSPACE_ID,
+    'the workspace scope must be the PIPELINE\'s workspace, not a constant')
+
+  // (2) FAIL-OPEN #1 — a binding for an UNRELATED system must not satisfy the gate. This is the
+  // one that reinstates "one system's read contract vouching for another system's write".
+  const foreign = await dryRunWith(() => [ratifiedRow({ systemId: 'some-other-system-entirely' })])
+  const foreignErr = (foreign.res.body && foreign.res.body.error) || {}
+  const foreignDetails = foreignErr.details || {}
+  // Assert the COUNT, not merely "it failed": widening pipelineSystemIds makes this binding
+  // COUNT, and the dry-run may still fail downstream for an unrelated reason — a bare
+  // `status !== 200` passes either way and proves nothing. (It did: M15/M18 survived it.)
+  assert.equal(foreignDetails.code, 'C6_WRITE_B4_BINDING_REQUIRED',
+    `an unrelated system's binding must leave the gate unsatisfied, got: ${JSON.stringify(foreignErr)}`)
+  assert.equal(foreignDetails.bindingCount, 0,
+    'an unrelated system\'s binding must not be COUNTED — this is the round-3 defect (one system vouching for another)')
+
+  // (3) POSITIVE CONTROL — the same shape bound to a real pipeline endpoint behaves DIFFERENTLY.
+  // Without this, a route that refused every dry-run would satisfy (2).
+  // (4) THE APPLY CALL SITE. Behavioural coverage of apply would need a fully successful K3
+  // dry-run in this harness (credentials, source rows, token) — not achieved here, and stated
+  // rather than glossed. Dropping `readSourceConfigs` on apply fails CLOSED (the apply recompute
+  // re-runs the same gate and refuses), so this is "the feature silently dies", not a security
+  // hole. It is covered STRUCTURALLY: both call sites must pass the same inputs, and the
+  // positive control below proves the check can actually fail.
+  const routesSrc = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'lib', 'http-routes.cjs'), 'utf8')
+  // `= ` anchors this to CALL SITES: the declaration `function resolveC6WritePlanInputs({...})`
+  // otherwise matched too and made the count 3 (the same trap the requestJson enumeration hit).
+  const callSites = [...routesSrc.matchAll(/= resolveC6WritePlanInputs\(\{([^}]*)\}\)/g)].map((m) => m[1])
+  assert.equal(callSites.length, 2, `expected the dry-run and apply call sites, found ${callSites.length}`)
+  assert.deepEqual(callSites[0].split(',').map((t) => t.trim()).filter(Boolean).sort(),
+    callSites[1].split(',').map((t) => t.trim()).filter(Boolean).sort(),
+    'the apply call site must pass the SAME inputs as dry-run, or the revision fence compares different plans')
+  assert.ok(callSites.every((site) => /\breadSourceConfigs\b/.test(site)),
+    'both call sites must pass readSourceConfigs — without it the B4 gate is unreachable')
+  // POSITIVE CONTROL for the structural check itself.
+  assert.equal(/\breadSourceConfigs\b/.test('{ targetSystem, pipeline, context }'), false,
+    'the structural check must be able to FAIL — otherwise it asserts nothing')
+
+  const related = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
+  const relatedDetails = ((related.res.body && related.res.body.error) || {}).details || {}
+  assert.notEqual(relatedDetails.bindingCount, 0,
+    'a binding on a real pipeline endpoint MUST be counted — otherwise the check above passes vacuously')
 }
 
 async function main() {
@@ -838,6 +995,8 @@ async function main() {
   assert.equal(res.body.data[0].sourcePayload.rawPayload, '[redacted]')
   assert.equal(res.body.data[0].transformedPayload.FNumber, 'BAD-02')
   assert.equal(res.body.data[0].payloadRedacted, true)
+
+  await assertB4ScopeIsWiredThroughTheRoute()
 
   console.log('✓ http-routes-plm-k3wise-poc: REST PLM -> K3 WISE mock control-plane chain passed')
 }

@@ -209,6 +209,18 @@ function normalizeBaseUrl(value) {
       field: 'config.baseUrl',
     })
   }
+  // REVIEW P3-1 (round 9): this validated the SCHEME ONLY, while every sibling path field
+  // (readPath / loginPath / tokenPath / healthPath) goes through the repo allowlist. baseUrl's
+  // path is merged into the produced pathname by buildEndpointUrl, so it is a path like the
+  // others and it was the one exempt from the rule. Concretely,
+  // `baseUrl=https://k3/K3API/Material/Submit%2Fx` survived: `%2F` is never decoded, so the
+  // segment reads `Submit%2Fx` and the vocabulary check does not match it.
+  if (url.pathname && url.pathname !== '/' && !isSafeRelativeReadPath(url.pathname.replace(/\/+$/, '') || '/')) {
+    throw new AdapterValidationError('K3 WISE WebAPI baseUrl path must be a safe relative path', {
+      code: 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE',
+      field: 'config.baseUrl',
+    })
+  }
   return url.toString()
 }
 
@@ -260,8 +272,13 @@ const K3_WRITE_ENDPOINT_WORD_SET = new Set(K3_WRITE_ENDPOINT_WORDS)
 //   /K3API/Material/Submit/GetDetail (verb carried by baseUrl, then a read path appended)
 // Now EVERY segment is tested, on its pre-first-dot portion, so an extension, a trailing
 // segment, or a verb sitting in baseUrl's path all match. `buildEndpointUrl` merges baseUrl's
-// path into the produced pathname, so checking every segment covers baseUrl without a second
+// path into the produced pathname, so checking every segment reaches baseUrl without a second
 // code path — the thing this line has repeatedly got wrong is having two.
+//
+// CORRECTED (round 9): the sentence above used to claim this "covers baseUrl", full stop. It
+// does not on its own — the segment comparison is literal, so a percent-encoded verb in baseUrl
+// (`Submit%2Fx`) never matches. baseUrl's PATH SHAPE is now validated in `normalizeBaseUrl` by
+// the same allowlist every sibling path field uses; the two together are what cover it.
 //
 // This widens the MATCH SHAPE. It does not close VOCABULARY: an unlisted verb still passes, and
 // only a positive readPath catalogue (deferred by the lock) would change that.

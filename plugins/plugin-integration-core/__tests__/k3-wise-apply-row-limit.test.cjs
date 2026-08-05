@@ -932,6 +932,37 @@ test('REVIEW P2-1 (round 8): the wire gate is WIRED INTO requestJson, not merely
   assert.ok(okCalls.length > 0, 'the control adapter must actually reach the network')
 })
 
+test('REVIEW P3-1 (round 9): baseUrl PATH is validated like every sibling path field', () => {
+  // `normalizeBaseUrl` validated the SCHEME only, while readPath/loginPath/tokenPath/healthPath
+  // all go through the repo allowlist — and baseUrl's path is merged into the produced pathname,
+  // so it is a path like the others. The segment comparison is literal, so a percent-encoded verb
+  // (`Submit%2Fx`) never matched it: the vocabulary check alone does NOT cover baseUrl, which an
+  // earlier comment of mine claimed it did.
+  const mk = (baseUrl) => createK3WiseWebApiAdapter({
+    system: {
+      kind: 'erp:k3-wise-webapi',
+      config: { baseUrl, objects: { material: { operations: ['read'], readPath: '/GetDetail' } } },
+      credentials: { acctId: 'a', username: 'u', password: 'p' },
+    },
+    fetchImpl: async () => jsonResponse(200, {}),
+  })
+  for (const baseUrl of ['https://k3.x/K3API/Material/Submit%2Fx', 'https://k3.x/K3API/Mat erial',
+    'https://k3.x/K3API/%00', 'https://k3.x/K3API/a%5Cb']) {
+    assert.throws(() => mk(baseUrl),
+      (error) => error.details && error.details.code === 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE',
+      `baseUrl ${baseUrl} must be refused`)
+  }
+  // POSITIVE CONTROL: real deployment baseUrls must still construct — host-only, trailing slash,
+  // a mount path, a port, and a dotted version segment.
+  for (const baseUrl of ['https://k3.example.test', 'https://k3.example.test/', 'https://k3.example.test/K3API',
+    'http://10.0.0.1:8080/K3API/', 'https://k3.x/K3API/v1.0']) {
+    assert.doesNotThrow(() => mk(baseUrl), `${baseUrl} is a legitimate deployment baseUrl`)
+  }
+  // And a traversal spelling is RESOLVED by the URL parser before the check, so what is validated
+  // is what is used: `%2e%2e` collapses to a plain path rather than sneaking past as literal text.
+  assert.equal(new URL('https://k3.x/K3API/%2e%2e/Material').pathname, '/Material')
+})
+
 test('REVIEW P1-F1/P1-F2 EXCLUSIVITY: the config-time check and the wire gate are independent', () => {
   // Two fail-closed doors covering for each other has already bitten this line twice. Each door
   // must be shown to catch something the other does not, or one of them is decoration.
