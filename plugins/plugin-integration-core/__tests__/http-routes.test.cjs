@@ -5966,7 +5966,7 @@ async function testReadSmokeRoute() {
     readMode: 'list',
     readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
     readListBodyKey: 'Data',
-    readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
+    readListFields: ['FItemID', 'FNumber', 'FName', 'FModel', 'FUnitID'],
     readListOrderBy: 'FNumber',
     readListFilterField: 'FNumber',
     readListFilterMode: 'contains_like',
