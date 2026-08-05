@@ -30,6 +30,7 @@ import {
   __setW4C3aRolloutControlAfterExclusiveLockForTests,
   closeLegacyRollbackWindowV1,
   transitionAttendanceCalculationRolloutV1,
+  type EvidenceReferencesV1,
 } from '../../src/attendance/w4c3a-rollout-control'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -37,6 +38,17 @@ const describeIfDatabase = dbUrl ? describe : describe.skip
 const run = crypto.randomUUID().replace(/-/g, '').slice(0, 10)
 const hex = (value: string) => value.repeat(64)
 const id = () => crypto.randomUUID()
+// W4C-5 amendment (this file predates it and was never updated): transitionAttendanceCalculationRolloutV1
+// now requires expectedState/expectedVersion/evidenceManifestSha256/evidenceReferences (an
+// exact-key-match input contract, rejected synchronously before any lock/DB work otherwise).
+// Every call site below targets a freshly seeded org's first-ever transition
+// (legacy/version=1, no bootstrap row yet), and none is a resume pair, so the base evidence
+// reference set is always correct here.
+const baseEvidenceRefs = (seed: string): EvidenceReferencesV1 => Object.freeze({
+  imageSha: `img-${seed}`,
+  ownerAuthorizationRef: `owner-${seed}`,
+  syntheticOrgRef: `org-${seed}`,
+}) as EvidenceReferencesV1
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve: (() => void) | undefined
@@ -1577,6 +1589,10 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
         correlationId: id(),
         engineVersion: 'w4c3a-race-test',
         targetState: 'shadow',
+        expectedState: 'legacy',
+        expectedVersion: 1,
+        evidenceManifestSha256: hex('1'),
+        evidenceReferences: baseEvidenceRefs(`${raceOrgId}-close-first`),
         reasonCode: 'rollout_transition',
       })
       await entered.promise
@@ -1656,6 +1672,10 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
         correlationId: id(),
         engineVersion: 'w4c3a-race-test',
         targetState: 'shadow',
+        expectedState: 'legacy',
+        expectedVersion: 1,
+        evidenceManifestSha256: hex('2'),
+        evidenceReferences: baseEvidenceRefs(`${raceOrgId}-rollback-first`),
         reasonCode: 'rollout_transition',
       }).finally(() => { transitionSettled = true })
       await new Promise((resolve) => setTimeout(resolve, 75))
