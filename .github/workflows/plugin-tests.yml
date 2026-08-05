@@ -1151,6 +1151,7 @@ jobs:
             tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts \
             tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts \
             tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts \
             tests/integration/attendance-shift-flex-policy-migration.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
