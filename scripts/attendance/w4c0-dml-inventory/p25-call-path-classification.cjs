@@ -40,6 +40,11 @@ const P25_CALL_PATH_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_upload_cleanup_commands', 'write', 'insert', 1, 'operational_status', 'private_worker'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'lockJobsBatchesAndItems', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'loadBatchReferenceState', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
+  // W4C-5: retryable-job posture, non-terminal-legacy-job, and incomplete-operation predicates
+  // each read attendance_import_jobs under the exclusive rollout lock to re-evaluate section 3.
+  entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'countRetryableJobPostureMismatches', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
+  entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'countNonterminalNullVersionLegacyJobs', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
+  entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'countIncompleteOperations', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
   entry('packages/core-backend/src/attendance/w4c3a-sync-import-host.ts', 'assertNoBlockingV1Job', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'sync_rejection_preflight'),
   entry('packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage.ts', 'down', 'attendance_import_jobs', 'read', 'select', 1, 'schema_migration', 'migration'),
   entry('packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts', 'rejectExistingV1', 'attendance_import_jobs', 'read', 'select', 1, 'schema_migration', 'migration'),
