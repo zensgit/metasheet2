@@ -52,6 +52,7 @@ export function createMockK3WebApiServer({
   includeSessionId = true,
 } = {}) {
   const calls = []
+  const savedMaterials = new Map()
 
   async function readBody(req) {
     return new Promise((resolve, reject) => {
@@ -124,7 +125,32 @@ export function createMockK3WebApiServer({
         })
         return
       }
+      // Full-chain support: remember the saved material so GetDetail can serve the
+      // post-save READ-BACK (the ruled chain's last link). Stateless before this, the mock
+      // could prove Save happened but never that the write is READABLE afterwards.
+      savedMaterials.set(fNumber, { ...(body?.Model || body?.Data), FItemID: savedMaterials.get(fNumber)?.FItemID ?? 9000 + savedMaterials.size + 1 })
       jsonResponse(res, 200, { success: true, externalId: `mock-${fNumber}`, billNo: fNumber })
+      return
+    }
+    if (pathname === '/K3API/Material/GetDetail') {
+      if (!requireMethod(req, res, 'POST')) return
+      const number = body?.Data?.FNumber ?? body?.Data?.Number
+      const stored = savedMaterials.get(number)
+      if (stored) {
+        jsonResponse(res, 200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, FItemID: stored.FItemID, Data: { ...stored, FNumber: number } }],
+        })
+        return
+      }
+      // K3's real "not found" is a BUSINESS-level failure, not a 404 — same shape the
+      // C6 lookup maps to "absent" and the read-back negative control asserts on.
+      jsonResponse(res, 200, {
+        StatusCode: 200,
+        Message: 'Successful',
+        Data: [{ FStatus: false, FItemID: 0, FMessage: `mock K3 row-level fail for ${number}: required base-data object missing` }],
+      })
       return
     }
     if (pathname === '/K3API/Material/Submit') {
