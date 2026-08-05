@@ -93,6 +93,9 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
    (preset `k3wise.material-list.v1`)⇒ 期望 values-free 证据:业务成功、行数 ≤10、零泄漏键。
 2. **建/核窗口 pipeline**:`POST /api/integration/pipelines` —— target=K3 系统(config 已含
    `objects.material.profile`,由部署包 FE/记录保证)、fieldMappings 与 B4 一致。
+   ⚠️ **source 必须是非 K3 系统**(见 §7.3)。本步原文只写了 target,没写 source ——
+   彩排驱动器正是在这个空白处猜了「K3 当 source」,而那**在结构上不可能成立**。窗口不可重试,
+   所以 source 必须在建 pipeline 前就被指定并核实。
 3. **dry-run**:`POST /api/integration/pipelines/<id>/external-write/dry-run`
    (body 仅 `tenantId/workspaceId/maxRows?`;K3 目标 maxRows 天花板=3)
    ⇒ 核验 `status=ready`、counts(`sourceRows≤3`,add/update 分布符合预期)、取得 `dryRunToken`。
@@ -118,9 +121,15 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 > 前三条各自由独立对抗复审构造的可执行利用推动;每条都有 mutation 探针。
 **异常恢复**:任何一步失败 ⇒ 修正后**从步骤 3 重走**(重新人工批准)。replay 已禁用,by design。
 
-## 6b. 对抗复审记录(2026-08-05,四轮)
+## 6b. 对抗复审记录(2026-08-05,**共十一轮**;下表为前四轮)
 
-窗口 runbook 落地后经四轮独立 exact-head 对抗复审,累计 **3 P1 + 8 P2 CONFIRMED**,全部已修。
+窗口 runbook 落地后经**十一轮**独立 exact-head 对抗复审(本节表格记前四轮;第五至十一轮见 #4769
+的逐轮 disposition 评论)。**同一缺陷类累计逃逸八次**:字段→跨文件→跨 profile 条件→检查早于
+归一化→`?`/`#`→单点段→段内尾点→匹配锚点。终局解法不是第九条正则,而是把守卫移到**唯一线上
+咽喉点**(`requestJson`)并对**产出的** pathname 判定,再以必填 `intent` 关闭覆盖面。
+另一再现模式:「守卫被测但**接线**未被测」出现四次(healthPath、wire gate、B4 scope、apply 侧)。
+
+前四轮累计 **3 P1 + 8 P2 CONFIRMED**,全部已修。
 P1 的三条是**同一个类的三条轴**,而我每轮只封住了刚被展示的那个实例:
 
 | 轴 | 逃逸方式 | 修法 |
@@ -135,7 +144,67 @@ P1 的三条是**同一个类的三条轴**,而我每轮只封住了刚被展示
 **方法学结论**:声称"某一类已关闭"时,**交付物必须是机械断言而非清单** ——
 本线现有 sweep 契约(遍历源码枚举读取点、要求三集合全覆盖、带匹配下限防空过)即为此。
 
-## 7. 唯一未完成项
+## 7. 未完成项
 
-**实体机窗口执行本身。** 其每一环的载体、判据与恢复路径如上;代码侧无剩余工作。
-窗口 PASS 后在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。
+### 7.0 勘误(2026-08-05,owner 复审后):本节原文「代码侧无剩余工作」为**假**,撤回
+
+原文断言「唯一未完成项 = 实体机窗口执行本身;代码侧无剩余工作」。owner 复审 staging 彩排
+PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
+
+| 敞口 | 内容 |
+|---|---|
+| A | 普通 `POST /api/integration/pipelines/:id/run` 仍可**绕过 C6 token** 直接写 K3 |
+| B | 命名 profile 的 `savePath` 仍可被操作员覆盖成 `Submit`/`Audit` |
+
+两条都不是窗口操作问题,是代码侧的写路径敞口 —— 即本节当时的断言方向就是错的。
+**教训按仓内纪律记录**:「收官」类断言必须由独立门审给出,不能由交付方自证;本节原文正是
+自证。见 `feedback_completion_claim_phrasing` 与 `feedback_adversarial_review_catches_overclaims_not_just_bugs`。
+
+### 7.1 当前真实剩余(2026-08-05)
+
+| # | 项 | 状态 | 阻塞于 |
+|---|---|---|---|
+| R1 | **#4769** 前置门:C6-only 写入口(`/run` 与 replay 双拒)、Save endpoint 钉死、C6 消费 approved B4 binding | ✅ **MERGED 2026-08-05T18:01Z**(main `65edb98c6`),9/9 required 绿含 `integration-guard` | — |
+| R2 | **#4768** staging 彩排 | 已 rebase 到 main;exact-head 复审 **CHANGES-REQUESTED**:驱动器把 K3 当 pipeline **source**,而任何 K3 配置都不能充当 C6 source(`readSourceRows` 发裸 read ⇒ `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED`/`K3_WISE_READ_KEY_REQUIRED`,**零 HTTP 调用**)⇒ 步骤 3–9 不可达 | **owner 裁决:换哪个 source**(见下 7.3) |
+| R3 | 彩排跑绿(dispatch-only workflow,PR checks **不**执行它) | 未开始 | R2 |
+| R4 | 本 MD 与计划按彩排实测同步(§8 前置) | 未开始 | R3 |
+| R5 | 目标环境 mint B4 并记三元组 | 未开始 | 运维授权(#4628) |
+| R6 | 出最终包(从 main,走 P4 lane) | 未开始 | R5 |
+| R7 | 实体机窗口执行 + 本文 §8 验收记录 | 未开始 | R6 + 三项授权位 |
+
+**R5–R7 全部阻塞在 owner/运维侧**(部署授权、建角色、external-system 记录、翻授权位、排窗),
+**不是编码工作**。R1–R4 是代码/文档侧,其中 R1 已达合并水位。
+
+### 7.3 待 owner 裁决:窗口/彩排的 **source 系统**
+
+**结论先说**:**K3 不能充当 C6 pipeline 的 source。** 这不是配置问题,是结构问题 ——
+`external-write-dry-run.cjs:427` 的 `readSourceRows()` 发的是裸 `read({object, limit, cursor})`,
+不带 key、不带 read-smoke marker。对真 adapter 用驱动器逐字配置实测三种写法:
+
+| 变体 | 结果 | HTTP 调用 |
+|---|---|---|
+| `readMode:'list'`(驱动器原样) | `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` | **0** |
+| 省略 `readMode`(默认 detail) | `K3_WISE_READ_KEY_REQUIRED` | **0** |
+| `readMode:'single_record_detail'` | `K3_WISE_READ_KEY_REQUIRED` | **0** |
+
+「零 HTTP 调用」是要点:失败发生在**任何字节上线之前**,所以 dry-run/token/apply/回读/负控
+全部不可达 —— 而那正是彩排与窗口的全部内容。
+
+**不可采取的修法**:把 read-smoke marker 透传进 `readSourceRows` 以放宽
+`K3_WISE_READ_LIST_ROUTE_UNSUPPORTED`。那是**借诊断通道夹带安全放宽**,须升 owner 裁,
+不能由彩排 lane 自行决定。
+
+**选项**(选择直接决定彩排/窗口证明了什么):
+
+| 选项 | 需要 | 证明力 |
+|---|---|---|
+| `data-source:sql-readonly` | staging 可达的库凭据 | 与仓内已裁先例一致(C6 套件与 offline demo 均用它) |
+| `metasheet:staging-source` | 先经 API 建并灌一张表 | 完全自足、无外部依赖;离客户形态最远 |
+| `plm:yuantus-wrapper` | 可达的 PLM 端点 | **最接近真实形态**(`PLM material → K3 WISE` 是本线的规范管道) |
+
+**建议 = PLM**:彩排的价值与它同窗口的相似度成正比。代价是 staging 需要一个可达 PLM。
+**此项未定之前,R2/R3 不可推进,窗口 §6 步 2 也不完整。**
+
+### 7.2 窗口 PASS 后
+
+在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。
