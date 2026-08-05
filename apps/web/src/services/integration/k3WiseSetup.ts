@@ -1940,6 +1940,13 @@ export function parseMaterialReferenceShapesFromSchema(schema: unknown): Record<
   return shapes
 }
 
+// K3WriteDecision (owner, 20260805): the customer material profile is selected UNCONDITIONALLY
+// by the setup payload — not a form option. Making it optional would put the Save-only hard lock
+// and the frozen maxApplyRows cap back under operator-form control, which is exactly the posture
+// the decision closes. The id must equal the server's MATERIAL_CUSTOMER_PROFILE_ID — the endpoint
+// vocabulary mirror asserts that equality by require, so a drift is a required-check RED.
+export const K3_WISE_MATERIAL_CUSTOMER_PROFILE_ID = 'material-k3wise-customer-profile-v1'
+
 export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayloads {
   const workspaceId = optionalString(form.workspaceId) ?? null
   const baseSystem = {
@@ -1975,6 +1982,9 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
       autoAudit: form.autoAudit,
       objects: {
         material: {
+          // Unconditional named-profile selection (K3WriteDecision) — arms the adapter's
+          // save-only lifecycle lock AND the frozen maxApplyRows=3 cap, non-overridable.
+          profile: K3_WISE_MATERIAL_CUSTOMER_PROFILE_ID,
           savePath: trim(form.materialSavePath),
           ...(optionalString(form.materialReadPath) ? { readPath: trim(form.materialReadPath) } : {}),
           ...(optionalString(form.materialSubmitPath) ? { submitPath: trim(form.materialSubmitPath) } : {}),

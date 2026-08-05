@@ -57,7 +57,7 @@ const READ_SMOKE_PRESETS = Object.freeze({
             }),
           }),
           readListBodyKey: 'Data',
-          readListFields: Object.freeze(['FNumber', 'FName', 'FModel', 'FUnitID']),
+          readListFields: Object.freeze(['FItemID', 'FNumber', 'FName', 'FModel', 'FUnitID']),
           readListOrderBy: 'FNumber',
           readListFilterField: 'FNumber',
           readListFilterMode: 'contains_like',
