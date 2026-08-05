@@ -612,6 +612,8 @@ async function createRouteControlPlaneScenario(routes) {
         baseUrl: 'https://k3.example.test',
         autoSubmit: false,
         autoAudit: false,
+        // RATIFIED (owner, 20260805): material writes require the named customer profile.
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
       },
       credentials: {
         username: 'demo',

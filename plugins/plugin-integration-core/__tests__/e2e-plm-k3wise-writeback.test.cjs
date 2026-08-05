@@ -231,6 +231,7 @@ function createExternalSystemRegistry({ k3FetchMock }) {
         baseUrl: 'https://k3.example.test',
         autoSubmit: false,
         autoAudit: false,
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
       },
       credentials: {
         username: 'demo',

@@ -92,6 +92,10 @@ async function main() {
         healthPath: '/K3API/Health',
         autoSubmit: false,
         autoAudit: false,
+        // RATIFIED (owner, 20260805): material writes require the named customer profile —
+        // the save-only lock and maxApplyRows=3 arm through it. BOM (step 6b) is out of the
+        // guard's scope and keeps the generic template.
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
       },
     }
     const k3Adapter = createK3WiseWebApiAdapter({ system: k3System, fetchImpl: globalThis.fetch })

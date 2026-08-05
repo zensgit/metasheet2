@@ -1,8 +1,9 @@
 # B4 绑定物草案 — K3 WISE material-list 读绑定(待 RATIFY)
 
-> 状态:**DRAFT — 待 owner RATIFY**。本文件是 S5 的批准对象;代码层冻结已由
-> `read-source-k3-material-list-b4-contract.cjs` + 其测试(链内)承载,本文只陈述与对照,
-> 不另立记录点。RATIFY 后本节头改为 RATIFIED 并注 SHA。
+> 状态:**RATIFIED — owner 2026-08-05,原文「同意 + RATIFY」**(五项清单整体批准,连同
+> replay 禁用与存量无 profile config 关死两守卫、`fieldMapDigest` 首版不加)。
+> 代码层冻结由 `read-source-k3-material-list-b4-contract.cjs` + 其测试(链内)承载,
+> 本文只陈述与对照,不另立记录点。守卫落地记录见交付计划附录 E.5。
 
 ## 1. 四参数(对应裁决点名的 profileId/configVersion/数据子集/行数上限)
 
@@ -35,11 +36,11 @@ mutation 证实偷放第二自由度即红。
 
 ## 5. RATIFY 清单(逐项可答)
 
-- [ ] profileId 下划线形 `k3wise.material_list.v1`(含对此前建议的勘误)
-- [ ] 数据子集五列 + FNumber contains_like + `Data.DATA`
-- [ ] fieldMap 仅 `FUnitID→baseUnit`
-- [ ] 读上限沿用 10/次(不另发明)
-- [ ] 两层冻结语义(模板 pin + mint 记录)
+- [x] profileId 下划线形 `k3wise.material_list.v1`(含对此前建议的勘误)
+- [x] 数据子集五列 + FNumber contains_like + `Data.DATA`
+- [x] fieldMap 仅 `FUnitID→baseUnit`
+- [x] 读上限沿用 10/次(不另发明)
+- [x] 两层冻结语义(模板 pin + mint 记录)
 
 ## 6. RATIFY 后的链路(裁决既定序)
 

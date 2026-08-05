@@ -126,10 +126,11 @@ test('an operator overlay can neither raise nor remove the pinned cap', async ()
   assert.deepEqual(fetchPair.calls, [], 'overlay-raised cap must not open the network either')
 })
 
-test('the cap is profile-scoped by design: a profile-less material object has no cap', async () => {
-  // Documents the boundary: the cap arrives ONLY via the named profile pin. A generic
-  // template config (no `profile` key) is the pre-existing behaviour, untouched by this
-  // slice — the FE setup change is what makes the profile selection unconditional.
+test('RATIFIED FLIP: a profile-less material object cannot write AT ALL — zero network', async () => {
+  // The previous version of this test DOCUMENTED the boundary it did not endorse: no
+  // profile -> no cap, written=4. The owner ratified closing it (20260805): K3 material
+  // upsert requires the named customer profile, one guard shutting every unarmed entry
+  // (legacy stored configs, replay, future routes). Updated deliberately, not deleted.
   const fetchPair = countingFetch()
   const adapter = adapterWith(
     {
@@ -142,6 +143,10 @@ test('the cap is profile-scoped by design: a profile-less material object has no
     },
     fetchPair,
   )
-  const result = await adapter.upsert({ object: 'material', records: records(4), keyFields: ['FNumber'] })
-  assert.equal(result.written, 4, 'no profile -> no cap (this test documents the boundary, it does not endorse it)')
+  await assert.rejects(
+    adapter.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] }),
+    (error) => error.details && error.details.code === 'K3_WISE_MATERIAL_PROFILE_REQUIRED',
+    'even a single-row write must be refused without the profile',
+  )
+  assert.deepEqual(fetchPair.calls, [], 'refusal precedes login — K3 never sees the attempt')
 })
