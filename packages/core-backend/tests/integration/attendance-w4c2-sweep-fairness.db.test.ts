@@ -414,4 +414,108 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
       expect(await lastAttemptAt(b.runId)).not.toBeNull()
     }, 60000)
   })
+
+  // =============================================================================================
+  // #4774 P1-1 regression guard — the scan became a row-lock WAITER when it was converted from a
+  // pure `SELECT` to `UPDATE ... RETURNING`, and the scan's transaction sits OUTSIDE the
+  // per-candidate try/catch in `sweepAttendanceScheduledRunsOnceV1`. Before the `FOR UPDATE SKIP
+  // LOCKED` fix, a concurrent holder of a row lock on ONE selected `running` row blocked the
+  // scan's `UPDATE` statement until `lock_timeout` (5000ms, `W4_TRANSACTION_LOCK_TIMEOUT_MS`)
+  // aborted it with `55P03` — a SQLSTATE `isRetryableSqlState()` does NOT cover — which propagated
+  // out of the tick and killed ALL candidates for that tick (0 processed), where the pre-#4770
+  // plain-`SELECT` scan never waited on a row lock at all. This is a strict regression of section
+  // 1.7's own containment invariant ("one stuck candidate cannot block the others in the same
+  // scan") for the scan phase specifically.
+  // =============================================================================================
+  describe('tick-level containment under a concurrent row lock (regression guard, #4774 P1-1)', () => {
+    it('one candidate row-locked by a concurrent connection does not kill the tick; it is excluded THIS tick and the other candidates are still processed', async () => {
+      const workDate = '2026-03-07'
+      const a = await createStuckRun('lockguard-a', workDate)
+      const b = await createStuckRun('lockguard-b', workDate)
+      const c = await createStuckRun('lockguard-c', workDate)
+
+      // A separate connection durably holds a row lock on candidate `b` — modeling the sweep's
+      // OWN per-candidate `finalizeAttendanceScheduledRunV1`/`abandonAttendanceScheduledRunV1`
+      // step-3 `SELECT ... FOR UPDATE` (both reachable, default-multi-worker topology per the
+      // gate's Orientation section), or a second concurrent scan worker.
+      const lockConn = await pool.connect()
+      await lockConn.query('BEGIN')
+      await lockConn.query('SELECT * FROM attendance_scheduled_runs WHERE run_id = $1::uuid FOR UPDATE', [b.runId])
+
+      try {
+        const started = Date.now()
+        const result = await withAllowlist([a.orgId, b.orgId, c.orgId], () =>
+          sweepAttendanceScheduledRunsOnceV1(pool, { limit: 25, async recoverCandidate() {} }),
+        )
+        const elapsedMs = Date.now() - started
+
+        // Must not have waited out the 5000ms `lock_timeout` — `FOR UPDATE SKIP LOCKED` excludes
+        // the locked candidate from the scan instead of blocking on its row lock. (Pre-fix this
+        // assertion is moot — the call above throws `55P03` before returning at all.)
+        expect(elapsedMs).toBeLessThan(4000)
+
+        // `b` (locked) is excluded from THIS tick's candidate set entirely; `a` and `c` are
+        // unaffected and processed normally — values-free containment restored.
+        expect(result).toEqual({ scanned: 2, finalized: 0, notReady: 2, skipped: 0, errored: 0, backlogRemaining: 3 })
+        expect(await lastAttemptAt(a.runId)).not.toBeNull()
+        expect(await lastAttemptAt(c.runId)).not.toBeNull()
+        // `b` was never reached by this tick — still un-stamped, still running, NOT counted as
+        // `errored` (it is simply deferred to a later tick once the lock releases).
+        expect(await lastAttemptAt(b.runId)).toBeNull()
+        expect(await runState(b.runId)).toBe('running')
+      } finally {
+        await lockConn.query('ROLLBACK').catch(() => undefined)
+        lockConn.release()
+      }
+    }, 30000)
+  })
+
+  // =============================================================================================
+  // #4774 P2-2 regression guard — the PR's "Fairness design" claim ("two concurrent scans cannot
+  // both durably 'own' the same candidate") was empirically FALSE at head `76ecd793e` (measured
+  // overlap 6/6 — the inner `SELECT` took no lock, so both scans read the same `state='running'`
+  // rows; the SERIALIZABLE write-conflict that followed was absorbed by the helper's own `40001`
+  // retry, which then re-selected the same still-`running` rows). `FOR UPDATE SKIP LOCKED` (the
+  // SAME fix as P1-1) makes the claim true: a row already locked by a concurrent scan is skipped,
+  // not duplicated.
+  // =============================================================================================
+  describe('multi-worker exclusivity (regression guard, #4774 P2-2)', () => {
+    it('two concurrent scans against the same backlog claim disjoint candidate sets — zero overlap, full coverage', async () => {
+      const workDate = '2026-03-08'
+      const seeded: Array<{ orgId: string; runId: string }> = []
+      for (let i = 0; i < 6; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- sequential seeding, same rationale as gate 1.
+        seeded.push(await createStuckRun(`overlap-${i}`, workDate))
+      }
+      const orgIds = seeded.map((r) => r.orgId)
+
+      const clientA = await pool.connect()
+      const clientB = await pool.connect()
+      try {
+        const [candidatesA, candidatesB] = await withAllowlist(orgIds, () =>
+          Promise.all([
+            runAttendanceResultOperationTransactionV1(clientA as unknown as AttendanceW4TransactionClientV1, (trx) =>
+              scanAttendanceScheduledRunSweepCandidatesV1(trx, 25),
+            ),
+            runAttendanceResultOperationTransactionV1(clientB as unknown as AttendanceW4TransactionClientV1, (trx) =>
+              scanAttendanceScheduledRunSweepCandidatesV1(trx, 25),
+            ),
+          ]),
+        )
+        const idsA = new Set(candidatesA.map((c) => c.runId))
+        const idsB = new Set(candidatesB.map((c) => c.runId))
+        const overlap = [...idsA].filter((id) => idsB.has(id))
+        expect(overlap, 'FOR UPDATE SKIP LOCKED must make two concurrent scans claim disjoint rows').toEqual([])
+
+        // Nobody starved, nobody double-counted: the union of both scans' claims covers exactly
+        // the seeded backlog.
+        const union = new Set([...idsA, ...idsB])
+        expect(union.size).toBe(seeded.length)
+        for (const s of seeded) expect(union.has(s.runId)).toBe(true)
+      } finally {
+        clientA.release()
+        clientB.release()
+      }
+    }, 30000)
+  })
 })
