@@ -246,3 +246,40 @@ test('ADVERSARIAL P1-1b: an overlay cannot author the read BODY either (endpoint
   assert.equal(JSON.stringify(bodies[0]).includes('SmuggledEnvelope'), false,
     'an overlay-authored body template must never reach the wire')
 })
+
+test('SWEEP CONTRACT: every objectConfig field the adapter reads is TRIAGED', () => {
+  // The round-2 fix claimed the request-shape hole was closed "class-wide". A mechanical sweep
+  // of this very file falsified that claim: 35 objectConfig reads, 15 outside the lists —
+  // including saveMethod (the Save VERB) and the readBom* body channel. Claims like "the class
+  // is closed" cannot rest on my memory, so the sweep IS the assertion: a new objectConfig
+  // field entering the adapter without triage fails HERE.
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const adapterPath = path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs')
+  const src = fs.readFileSync(adapterPath, 'utf8')
+  const reads = new Set([...src.matchAll(/objectConfig\.([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]))
+  assert.ok(reads.size >= 30, `the sweep must actually find reads (found ${reads.size}) — a regex that matches nothing would pass vacuously`)
+
+  const {
+    K3_PROFILE_PINNED_REQUEST_KEYS,
+    K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
+    K3_PROFILE_TRIAGED_SAFE_KEYS,
+  } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+  const triaged = new Set([
+    ...K3_PROFILE_PINNED_REQUEST_KEYS,
+    ...K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
+    ...K3_PROFILE_TRIAGED_SAFE_KEYS,
+  ])
+  const untriaged = [...reads].filter((k) => !triaged.has(k)).sort()
+  assert.deepEqual(untriaged, [],
+    'untriaged objectConfig field(s) — decide: profile-pinned, forbidden-overlay, or documented-safe')
+})
+
+test('an overlay cannot WIDEN the profile\'s operations (reachability is profile-owned)', () => {
+  const { __internals } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+  const effective = __internals.normalizeObjects({
+    objects: { material: { profile: PROFILE_ID, operations: ['upsert', 'read', 'delete'] } },
+  })
+  assert.deepEqual(effective.material.operations, ['upsert', 'read'],
+    'the profile\'s operation set is the reachable set — an overlay must not add to it')
+})

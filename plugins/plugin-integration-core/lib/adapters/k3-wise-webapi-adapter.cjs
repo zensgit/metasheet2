@@ -60,8 +60,20 @@ const K3_PROFILE_ARMED = Symbol('k3CustomerProfileArmed')
 // the key/body are addressed. Re-pinned from the profile literal after the operator merge; a
 // key absent from the literal is DELETED rather than left to the overlay (review P1-1: an
 // overlay-supplied readPath/readMethod is a wider hole than the savePath one that was fixed).
+// MECHANICAL SWEEP (self-check after the round-2 fix claimed the CLASS was closed): every
+// `objectConfig.<field>` read site in this file was enumerated — 35 fields, of which 15 fell
+// outside the first two lists. The claim "class-wide" was FALSE as first written. The lists
+// below are the swept result; the sweep is reproducible:
+//   node -e 'const s=require("fs").readFileSync(FILE,"utf8");
+//            new Set([...s.matchAll(/objectConfig\.([A-Za-z_][A-Za-z0-9_]*)/g)].map(m=>m[1]))'
+// Anything added to this adapter that reads a NEW objectConfig field must be triaged into one
+// of: pinned (profile owns it), forbidden (profile does not declare it), or documented-safe.
 const K3_PROFILE_PINNED_REQUEST_KEYS = Object.freeze([
   'savePath', 'readPath', 'readMethod', 'bodyKey', 'keyParam', 'path', 'endpointPath',
+  // Swept in: the Save VERB is as much a request-shape choice as the Save PATH
+  // (`method: objectConfig.saveMethod || 'POST'`), and keyField selects which record field
+  // becomes the K3 key — both profile-owned.
+  'saveMethod', 'keyField',
 ])
 // Body/endpoint-shaping keys the customer profile deliberately does not declare. An overlay
 // carrying one of these authors a request the profile never sanctioned.
@@ -70,6 +82,32 @@ const K3_PROFILE_FORBIDDEN_OVERLAY_KEYS = Object.freeze([
   'readBodyTemplate', 'readListBodyTemplate', 'readListBodyKey', 'readMode',
   'readListFields', 'readListOrderBy', 'readListFilterField', 'readListFilterMode',
   'readListFilterEscape', 'topField', 'pageIndexField', 'pageSizeField', 'maxListLimit',
+  // Swept in: lifecycle VERBS (their paths are already deleted, but a surviving verb key is
+  // dead weight that a future path re-introduction would silently re-arm).
+  'submitMethod', 'auditMethod',
+  // Swept in: the BOM read body channel — a second `readBodyTemplate` under a different name.
+  // The customer profile is material-only and declares none of these.
+  'readBomBodyTemplate', 'readBomBodyKey', 'readBomParentKeyField',
+  // Swept in: builder hooks and the raw template escape hatch. JSON config cannot carry a
+  // function, so these are not reachable from an operator payload today — deleted anyway so
+  // the guarantee does not depend on that remaining true.
+  'buildBody', 'buildLifecycleBody', 'k3Template',
+])
+// Fields the sweep found that are deliberately NOT in either list, each with its reason. The
+// contract test asserts pinned + forbidden + this set covers EVERY objectConfig read, so a new
+// field cannot enter the adapter untriaged.
+const K3_PROFILE_TRIAGED_SAFE_KEYS = Object.freeze([
+  // Pinned by the save-only block itself, above — not via the generic loop.
+  'lifecycle', 'maxApplyRows',
+  // Operator-owned by design: the FE sends the per-field reference schema. It cannot choose an
+  // endpoint or a verb; its influence on the Save body is bounded by the projection, which the
+  // byte-exact body test pins.
+  'schema',
+  // Cosmetic.
+  'label',
+  // Gates which operations are reachable; the profile's own value is re-pinned below so an
+  // overlay cannot widen it.
+  'operations',
 ])
 
 const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
@@ -463,6 +501,8 @@ function normalizeObjects(config) {
       for (const key of K3_PROFILE_FORBIDDEN_OVERLAY_KEYS) {
         delete normalized[name][key]
       }
+      // Operations are profile-owned too: an overlay must not widen what is reachable.
+      if (Array.isArray(base.operations)) normalized[name].operations = [...base.operations]
       // HARD LOCK (K3WriteDecision): the profile's apply row cap is pinned AFTER the merge,
       // from the profile literal — an operator overlay can neither raise nor remove it.
       if (Number.isInteger(base.maxApplyRows) && base.maxApplyRows > 0) {
@@ -2249,6 +2289,9 @@ function resolveEffectiveK3WiseObjects(config) {
 module.exports = {
   K3_WISE_WEBAPI_ADAPTER_METADATA,
   resolveEffectiveK3WiseObjects,
+  K3_PROFILE_PINNED_REQUEST_KEYS,
+  K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
+  K3_PROFILE_TRIAGED_SAFE_KEYS,
   K3WiseWebApiAdapterError,
   createK3WiseWebApiAdapter,
   createK3WiseWebApiAdapterFactory,
