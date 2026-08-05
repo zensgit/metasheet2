@@ -11,6 +11,8 @@
 //   5. Adapter testConnection on both
 //   6. Adapter Material Save-only upsert against mock K3 (autoSubmit=false, autoAudit=false)
 //   7. SQL channel read/upsert probes to verify the mock matches channel contract
+//   7d. THE RULED CHAIN end-to-end: read -> clean -> C6 dry-run -> approval token ->
+//       Save-only -> GetDetail read-back (value-verified) + never-saved negative control
 //   7a-2. The row just READ is fed to the REAL stock-prep intake (no per-connector mapper):
 //         0 row errors, key stable and source-namespaced, incomplete row rejected
 //   8. Compose evidence JSON (hardcoded for the values we just produced)
@@ -34,6 +36,16 @@ const __dirname = path.dirname(__filename)
 const require = createRequire(import.meta.url)
 const { createK3WiseWebApiAdapter } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs')
 const { createK3WiseSqlServerChannel } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs')
+const {
+  K3_WISE_C6_MAX_APPLY_ROWS,
+  K3_WISE_C6_WRITE_PROFILE,
+  createK3WiseC6WriteSource,
+  deriveK3WiseC6PlannerTargetConfig,
+} = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-c6-write-profile.cjs')
+const {
+  applyExternalWrite,
+  dryRunExternalWrite,
+} = require('../../../../plugins/plugin-integration-core/lib/external-write-dry-run.cjs')
 const {
   normalizeStockPreparationReadonlyIntake,
 } = require('../../../../plugins/plugin-integration-core/lib/stock-preparation-readonly-intake.cjs')
@@ -264,6 +276,105 @@ async function main() {
     }
     assert(sqlWriteRejected, 'SQL safety: write to t_ICItem must be rejected')
     console.log('✓ step 7c: SQL safety guard rejected INSERT into t_ICItem (core table)')
+
+    // 7d. THE RULED CHAIN, end to end: 读 → 清洗 → dry-run → token(人工批准的机械代理)
+    // → K3 Material Save-only → GetDetail 回读验证. Every hop is the REAL module — the C6
+    // planner, the C6 K3 write profile, the K3 adapter over real HTTP to the mock server.
+    // The only fakes are the wire's far end and the token store.
+    try {
+      const chainRows = [{ code: 'MAT-CHAIN-001', name: 'Chain material', spec: 'SPEC-CHAIN' }]
+      const chainTarget = {
+        id: 'chain-k3-target',
+        name: 'Chain K3 target',
+        kind: 'erp:k3-wise-webapi',
+        role: 'target',
+        status: 'active',
+        credentials: { username: 'demo', password: 'demo', acctId: 'AIS_TEST' },
+        config: {
+          baseUrl,
+          autoSubmit: false,
+          autoAudit: false,
+          objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
+        },
+      }
+      const chainPipeline = {
+        id: 'pipe_chain',
+        tenantId: 'tenant_demo',
+        workspaceId: null,
+        sourceSystemId: 'source_demo',
+        sourceObject: 'materials',
+        targetSystemId: chainTarget.id,
+        targetObject: 'material',
+        createdBy: 'demo-operator',
+        fieldMappings: [
+          { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
+          { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
+          { sourceField: 'spec', targetField: 'FModel' },
+        ],
+      }
+      const flatConfig = deriveK3WiseC6PlannerTargetConfig({
+        system: chainTarget, object: 'material', fieldMappings: chainPipeline.fieldMappings,
+      })
+      const tokenMap = new Map()
+      const tokenStore = {
+        async get(key) { return tokenMap.get(key) || null },
+        async set(key, value) { tokenMap.set(key, JSON.parse(JSON.stringify(value))) },
+        async consume(key) { const v = tokenMap.get(key) || null; tokenMap.delete(key); return v },
+        async delete(key) { tokenMap.delete(key) },
+      }
+      const chainInputs = () => ({
+        pipeline: chainPipeline,
+        sourceSystem: { id: 'source_demo', kind: 'data-source:sql-readonly' },
+        targetSystem: { ...chainTarget, config: flatConfig },
+        sourceAdapter: { async read() { return { records: chainRows, done: true } } },
+        dataSourceWrites: createK3WiseC6WriteSource({
+          system: chainTarget,
+          createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: globalThis.fetch }),
+        }),
+        targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
+        tokenStore,
+        dryRunUser: 'demo-operator',
+        dataSourceOwnerPrincipal: 'demo-owner',
+        maxRows: K3_WISE_C6_MAX_APPLY_ROWS,
+      })
+
+      const chainDryRun = await dryRunExternalWrite(chainInputs())
+      assert(chainDryRun.status === 'ready', `chain dry-run must be ready, got ${chainDryRun.status}`)
+      assert(chainDryRun.dryRunToken, 'chain dry-run must mint the approval token')
+      assert(chainDryRun.counts.add === 1, 'a new material must plan as add')
+
+      const chainApply = await applyExternalWrite({
+        ...chainInputs(),
+        dryRunToken: chainDryRun.dryRunToken,
+        applyUser: 'demo-operator',
+      })
+      assert(chainApply.counts.written === 1, `chain apply must write 1, got ${chainApply.counts.written}`)
+
+      // THE LAST LINK — post-save GetDetail read-back, value-verified (not presence-only):
+      // the read must return the material JUST WRITTEN with the APPROVED name carried through.
+      const readBackAdapter = createK3WiseWebApiAdapter({ system: chainTarget, fetchImpl: globalThis.fetch })
+      const readBack = await readBackAdapter.read({ object: 'material', filters: { FNumber: 'MAT-CHAIN-001' } })
+      assert(readBack.records.length === 1, 'read-back must return the saved material')
+      assert(readBack.records[0].FNumber === 'MAT-CHAIN-001', 'read-back key must match')
+      assert(readBack.records[0].FName === 'Chain material',
+        'read-back must carry the APPROVED value — presence alone proves nothing')
+
+      // Negative control: a never-saved number must be a business-level miss, proving the
+      // read-back above found the WRITE, not canned data.
+      let readBackMissRefused = false
+      try {
+        await readBackAdapter.read({ object: 'material', filters: { FNumber: 'MAT-NEVER-SAVED' } })
+      } catch (error) {
+        readBackMissRefused = error?.details?.code === 'K3_WISE_READ_BUSINESS_ERROR'
+      }
+      assert(readBackMissRefused, 'a never-saved material must be a business-level read miss')
+
+      const chainSubmits = mockK3.calls.filter((call) => /\/(Submit|Audit)$/.test(call.pathname))
+      assert(chainSubmits.length === 0, 'the FULL chain must stay Save-only: 0 Submit, 0 Audit')
+      console.log('✓ step 7d: RULED CHAIN end-to-end — read → clean → dry-run → token → Save-only → GetDetail read-back (value-verified; never-saved miss refused; 0 Submit/Audit)')
+    } catch (error) {
+      throw new Error(`ruled-chain end-to-end failed: ${error.message}`)
+    }
 
     // 8-9. Compose evidence + run compiler
     const evidence = {
