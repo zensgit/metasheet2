@@ -41,6 +41,16 @@ function sanitizeMockBody(value) {
   )
 }
 
+// Owner review (2026-08-05, staging-window-rehearsal point F): the mock previously accepted
+// every call with no session check at all — a driver bug that dropped the auth header would
+// still rehearse "clean". These are the SAME literal values the mock has always issued (Login's
+// sessionId + the Set-Cookie value below); factored out so the requireSession gate checks
+// against the exact values the mock itself hands out, not a re-typed copy that could drift.
+const MOCK_SESSION_ID = 'mock-session-1'
+const MOCK_SESSION_COOKIE_NAME = 'K3SESSION'
+const MOCK_SESSION_COOKIE_VALUE = 'mock-cookie-1'
+const MOCK_SESSION_HEADER = 'x-k3-session'
+
 export function createMockK3WebApiServer({
   logger = () => {},
   seedListRows: seedListRowsOption = [],
@@ -51,6 +61,12 @@ export function createMockK3WebApiServer({
   rowFailFNumbers = new Set(),
   includeSessionCookie = true,
   includeSessionId = true,
+  // F: default OFF so every existing caller (mock-k3-webapi-server.test.mjs, run-mock-poc-demo.mjs,
+  // and any other fixture that never authenticates against this specific mock instance) is
+  // unaffected. The staging-window-rehearsal runner turns this ON — the real K3WiseWebApiAdapter
+  // always logs in first and carries the session header/cookie on every subsequent call, so an
+  // honest rehearsal client sees no behavior change; a client that DROPPED the auth wiring would.
+  requireSession = false,
 } = {}) {
   const calls = []
   const savedMaterials = new Map()
@@ -72,8 +88,21 @@ export function createMockK3WebApiServer({
   function jsonResponse(res, status, payload, { setCookie = includeSessionCookie } = {}) {
     res.statusCode = status
     res.setHeader('Content-Type', 'application/json')
-    if (setCookie) res.setHeader('Set-Cookie', 'K3SESSION=mock-cookie-1; Path=/; HttpOnly')
+    if (setCookie) res.setHeader('Set-Cookie', `${MOCK_SESSION_COOKIE_NAME}=${MOCK_SESSION_COOKIE_VALUE}; Path=/; HttpOnly`)
     res.end(JSON.stringify(payload))
+  }
+
+  // F: everything except /K3API/Login must carry the session the mock itself issued — either the
+  // X-K3-Session header (what the real adapter sends when Login returns a sessionId) or the
+  // equivalent cookie (what it sends when Login returns only a Set-Cookie). A substring check on
+  // the incoming Cookie header because the real adapter forwards the ENTIRE raw Set-Cookie value
+  // (including `; Path=/; HttpOnly`) back as its request Cookie header — not a re-parsed pair.
+  function hasValidSession(req) {
+    const headerValue = req.headers[MOCK_SESSION_HEADER]
+    if (typeof headerValue === 'string' && headerValue === MOCK_SESSION_ID) return true
+    const cookieHeader = req.headers.cookie
+    if (typeof cookieHeader === 'string' && cookieHeader.includes(`${MOCK_SESSION_COOKIE_NAME}=${MOCK_SESSION_COOKIE_VALUE}`)) return true
+    return false
   }
 
   function requireMethod(req, res, expectedMethod) {
@@ -103,11 +132,19 @@ export function createMockK3WebApiServer({
     calls.push(safeCall)
     logger(safeCall)
 
+    // F: the gate runs AFTER the call is logged (rejected calls stay visible for debugging, same
+    // as the existing method-not-allowed path) and BEFORE any routing — Login is the one path
+    // exempt (it is how a session is obtained in the first place).
+    if (requireSession && pathname !== '/K3API/Login' && !hasValidSession(req)) {
+      jsonResponse(res, 401, { success: false, message: 'session required' }, { setCookie: false })
+      return
+    }
+
     if (pathname === '/K3API/Login') {
       if (!requireMethod(req, res, 'POST')) return
       jsonResponse(res, 200, {
         success: true,
-        ...(includeSessionId ? { sessionId: 'mock-session-1' } : {}),
+        ...(includeSessionId ? { sessionId: MOCK_SESSION_ID } : {}),
       })
       return
     }

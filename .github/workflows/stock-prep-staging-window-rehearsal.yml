@@ -215,7 +215,20 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          if grep -qE "/K3API/Material/(Submit|Audit)" "${RUNNER_TEMP}/mock-k3.log"; then
+          # Owner review (point E): the mock's stdout log used to carry NOTHING per-call, so the
+          # Submit/Audit absence check below always passed — vacuously, on an empty stream, not
+          # because save-only actually held. POSITIVE CONTROL FIRST: prove the log is really
+          # recording calls (run-mock-k3-server.mjs now wires a `K3CALL <METHOD> <pathname>`
+          # logger) before trusting an absence-based assertion built on top of it.
+          get_list_calls="$(grep -c "K3CALL POST /K3API/Material/GetList" "${RUNNER_TEMP}/mock-k3.log" || true)"
+          save_calls="$(grep -c "K3CALL POST /K3API/Material/Save" "${RUNNER_TEMP}/mock-k3.log" || true)"
+          echo "wireGetListCallsLogged=${get_list_calls:-0}"
+          echo "wireSaveCallsLogged=${save_calls:-0}"
+          if [ "${get_list_calls:-0}" -lt 1 ] || [ "${save_calls:-0}" -lt 1 ]; then
+            echo "FATAL: positive control failed — mock-k3.log shows GetList=${get_list_calls:-0} Save=${save_calls:-0} K3CALL lines; the log is not actually recording wire calls, so the Submit/Audit absence check below would be meaningless" >&2
+            exit 1
+          fi
+          if grep -qE "K3CALL POST /K3API/Material/(Submit|Audit)" "${RUNNER_TEMP}/mock-k3.log"; then
             echo "FATAL: the wire saw a Submit/Audit call — save-only was violated end to end" >&2
             exit 1
           fi
