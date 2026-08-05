@@ -14,6 +14,7 @@
  */
 import {
   acquireAttendanceCalculationRolloutLock,
+  acquireAttendanceCalculationRolloutLockSessionExclusiveV1,
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceResultOperationLocks,
   createVerifiedAttendanceCalculationTargetIdentityV1,
@@ -21,6 +22,7 @@ import {
   parseCanonicalAttendanceRolloutOrgKeyV1,
   rehydrateVerifiedAttendanceOperationIdentityV1,
   rehydrateVerifiedAttendanceOrgIdentityV1,
+  releaseAttendanceCalculationRolloutLockSessionExclusiveV1,
   type AttendanceAcceptedWritePostureV1,
   type AttendanceRolloutStateV1,
   type AttendanceW4TransactionClientV1,
@@ -624,11 +626,27 @@ async function allOrgBatchIds(trx: AttendanceW4TransactionClientV1, orgId: strin
 
 // ---------------------------------------------------------------------------
 // Amendment section 3: additional database-backed transition predicates.
-// Each locks (`FOR UPDATE`) the exact rows it inspects so a concurrent writer
-// targeting the same rows blocks behind this transaction rather than racing
-// its read. Every helper returns a values-free count; the caller decides
-// applicability per the requested pair and fails closed with zero rollout DML
-// before any predicate short-circuits.
+//
+// RETRACTION (W4C-5 P1-2, PR #4773 exact-head independent gate, 20260805): this block
+// previously asserted "each locks (`FOR UPDATE`) the exact rows it inspects so a concurrent
+// writer targeting the same rows blocks behind this transaction rather than racing its read."
+// That is false for every predicate here: each is INSERT-shaped (a brand-new
+// attendance_import_jobs/attendance_records/attendance_record_calculations/attendance_requests
+// row that did not exist in the snapshot), and `FOR UPDATE` only re-fetches the latest committed
+// version of rows ALREADY visible to the transaction's snapshot — it cannot retroactively admit,
+// or block the creation of, a row inserted after that snapshot was taken. What actually makes
+// these reads trustworthy is `transitionAttendanceCalculationRolloutV1` acquiring the org
+// rollout lock EXCLUSIVE at SESSION level, in its own statement, strictly before
+// `BEGIN ISOLATION LEVEL SERIALIZABLE` is issued (see
+// `acquireAttendanceCalculationRolloutLockSessionExclusiveV1` in w4c0-identity.ts) — this
+// guarantees the SERIALIZABLE snapshot these predicates read under is taken strictly after every
+// previous SHARED-lock holder (every legitimate job/record/request writer, lock section 9)
+// released, so their commits are visible here. `FOR UPDATE` remains correct and load-bearing for
+// its original purpose (re-evaluating UPDATE-shaped drift on rows already in scope), just not for
+// admitting new rows.
+//
+// Every helper returns a values-free count; the caller decides applicability per the requested
+// pair and fails closed with zero rollout DML before any predicate short-circuits.
 // ---------------------------------------------------------------------------
 
 /** Every rollout transition: every retryable V1 job's frozen posture must equal the pair's. */
@@ -774,10 +792,21 @@ function isRetryableControlPrecondition(error: unknown): boolean {
 }
 
 /**
- * An advisory-lock waiter can retain a SERIALIZABLE snapshot from before the
- * holder committed. The first post-lock precondition failure therefore gets
- * one whole-transaction retry; a genuinely invalid control action fails again
- * from a fresh snapshot. This is control-plane only and never retries DML.
+ * A caller that acquires its exclusive rollout lock with `pg_advisory_xact_lock` INSIDE an
+ * already-BEGUN SERIALIZABLE transaction (`closeLegacyRollbackWindowV1`, unchanged by W4C-5 —
+ * its lock section 9 predicates are the batch-closure ones, out of this amendment's scope) can
+ * retain a snapshot from before the previous holder committed, because PostgreSQL fixes a
+ * SERIALIZABLE snapshot at the START of the first statement executed — including one that
+ * itself blocks. The first post-lock precondition failure therefore gets one whole-transaction
+ * retry for that caller; a genuinely invalid control action fails again from a fresh snapshot.
+ *
+ * `transitionAttendanceCalculationRolloutV1` no longer depends on this retry for that purpose
+ * (W4C-5 P1-2 fix): it acquires its exclusive lock at SESSION level, in its own statement,
+ * strictly before this function is ever called — see
+ * `acquireAttendanceCalculationRolloutLockSessionExclusiveV1` in w4c0-identity.ts — so the
+ * transaction `runAttendanceResultOperationTransactionV1` opens here always has a snapshot that
+ * postdates the wait. The retry remains in place for it too, as defense-in-depth against any
+ * other transient SQLSTATE 40001/40P01-adjacent precondition race, never for DML.
  */
 async function runControlTransaction<T>(
   connection: AttendanceW4TransactionClientV1,
@@ -834,110 +863,126 @@ export async function transitionAttendanceCalculationRolloutV1(
   rawInput: TransitionAttendanceCalculationRolloutInputV1,
 ): Promise<AttendanceW4C3aRolloutControlResultV1> {
   const input = normalizeTransitionInput(rawInput)
-  return runControlTransaction(connection, async (trx) => {
-    const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
-    await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'exclusive')
-    await afterExclusiveRolloutLockForTests?.('transition')
+  const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
+  // W4C-5 P1-2 fix: the exclusive rollout lock is acquired at SESSION level, as its own
+  // standalone statement, strictly BEFORE `BEGIN ISOLATION LEVEL SERIALIZABLE` is ever issued
+  // on this connection (`runControlTransaction` -> `runAttendanceResultOperationTransactionV1`
+  // opens that transaction). `connection` must therefore be idle (no open transaction) on
+  // entry — the same precondition the function already had, since it always opened its own
+  // transaction. See `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`'s doc comment
+  // for why this — and not any transaction-scoped acquisition, no matter how early inside the
+  // transaction — is what makes every section 3 predicate below actually re-evaluate a snapshot
+  // that postdates the wait.
+  await acquireAttendanceCalculationRolloutLockSessionExclusiveV1(connection, orgKey)
+  await afterExclusiveRolloutLockForTests?.('transition')
+  try {
+    return await runControlTransaction(connection, async (trx) => {
+      // Section 3 predicate 1: exact named org (`scope='synthetic_staging'` is enforced by the
+      // durable CHECK constraint on every row this boundary can ever write).
+      const orgAllowlisted = isAttendanceCalculationOrgAllowlistedV1(input.orgId)
+      if (!orgAllowlisted) fail('W4C3A_ROLLOUT_CONTROL_ORG_NOT_ALLOWLISTED')
 
-    // Section 3 predicate 1: exact named org (`scope='synthetic_staging'` is enforced by the
-    // durable CHECK constraint on every row this boundary can ever write).
-    const orgAllowlisted = isAttendanceCalculationOrgAllowlistedV1(input.orgId)
-    if (!orgAllowlisted) fail('W4C3A_ROLLOUT_CONTROL_ORG_NOT_ALLOWLISTED')
-
-    const persisted = await lockRolloutStateForBootstrapOrRead(
-      trx,
-      input.orgId,
-      input.actorId,
-      input.engineVersion,
-      input.expectedState,
-      input.targetState,
-      orgAllowlisted,
-    )
-
-    // Section 2.4 / completion gate 4: a stale caller belief about current state/version is
-    // rejected under lock, with zero rollout DML, even though the input-time matrix check
-    // already passed against the CLAIMED pair.
-    if (persisted.state !== input.expectedState || persisted.version !== input.expectedVersion) {
-      fail('W4C3A_ROLLOUT_CONTROL_STALE_EXPECTED_STATE')
-    }
-    const currentState = persisted.state
-    // Re-derive from the authoritative post-lock state (identical to the input-time check by
-    // construction once staleness has been ruled out, but never trusts the caller's claim alone).
-    const legal = findLegalTransition(currentState, input.targetState)
-    if (!legal) fail('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
-
-    const batchIds = await allOrgBatchIds(trx, input.orgId)
-    await lockControlDomain(trx, input.orgId, batchIds)
-    for (const batchId of batchIds) {
-      const state = await loadBatchReferenceState(trx, input.orgId, batchId)
-      if (!state.closed && !state.hasFrozenPreimage) fail('W4C3A_ROLLOUT_CONTROL_UNCLOSED_BATCH')
-    }
-
-    const retryableJobMismatches = await countRetryableJobPostureMismatches(
-      trx,
-      input.orgId,
-      legal.comparisonWritePosture,
-    )
-    if (retryableJobMismatches > 0) fail('W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_POSTURE_MISMATCH')
-
-    let nonterminalLegacyJobs = 0
-    if (CALCULATION_ENTRY_TARGETS.has(input.targetState)) {
-      nonterminalLegacyJobs = await countNonterminalNullVersionLegacyJobs(trx, input.orgId)
-      if (nonterminalLegacyJobs > 0) fail('W4C3A_ROLLOUT_CONTROL_LEGACY_JOB_ACTIVE')
-    }
-
-    let incompleteOperations = 0
-    let unresolvedReviews = 0
-    let defectiveRequestSnapshots = 0
-    if (ELIGIBILITY_AUTHORITY_TARGETS.has(input.targetState)) {
-      incompleteOperations = await countIncompleteOperations(trx, input.orgId)
-      if (incompleteOperations > 0) fail('W4C3A_ROLLOUT_CONTROL_INCOMPLETE_OPERATION')
-      unresolvedReviews = await countUnresolvedIngressReviews(trx, input.orgId)
-      if (unresolvedReviews > 0) fail('W4C3A_ROLLOUT_CONTROL_UNRESOLVED_REVIEW')
-      defectiveRequestSnapshots = await countDefectivePendingRequestSnapshots(trx, input.orgId)
-      if (defectiveRequestSnapshots > 0) fail('W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE')
-    }
-
-    // Section 2.8 literal order: the event insert is attempted FIRST; the rollout-state UPDATE
-    // happens only after it succeeds. Both share one transaction, so either order is atomic —
-    // a failure at any point rolls back both — but this ordering also lets a same-transaction
-    // failure-injection hook independently exercise each of gate 7's two clauses.
-    await beforeEventInsertForTests?.()
-    await trx.query(
-      `INSERT INTO attendance_calculation_rollout_events
-       (org_id, prior_state, new_state, reason_code, engine_version, actor_id, evidence)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-      [
+      const persisted = await lockRolloutStateForBootstrapOrRead(
+        trx,
         input.orgId,
-        currentState,
-        input.targetState,
-        input.reasonCode,
-        input.engineVersion,
         input.actorId,
-        JSON.stringify({
-          schemaVersion: 1,
-          manifestSha256: input.evidenceManifestSha256,
-          correlationId: input.correlationId,
-          comparisonWritePosture: legal.comparisonWritePosture,
-          preconditionCounts: {
-            retryableJobPostureMismatches: retryableJobMismatches,
-            nonterminalLegacyJobs,
-            incompleteOperations,
-            unresolvedReviews,
-            defectiveRequestSnapshots,
-          },
-          references: input.evidenceReferences,
-        }),
-      ],
-    )
-    await beforeStateUpdateForTests?.()
-    await trx.query(
-      `UPDATE attendance_calculation_rollout_state
-          SET state = $2, prior_state = state, engine_version = $3, reason_code = $4,
-              actor_id = $5, changed_at = now(), version = version + 1
-        WHERE org_id = $1`,
-      [input.orgId, input.targetState, input.engineVersion, input.reasonCode, input.actorId],
-    )
-    return Object.freeze({ orgId: input.orgId, state: input.targetState, batchId: null })
-  })
+        input.engineVersion,
+        input.expectedState,
+        input.targetState,
+        orgAllowlisted,
+      )
+
+      // Section 2.4 / completion gate 4: a stale caller belief about current state/version is
+      // rejected under lock, with zero rollout DML, even though the input-time matrix check
+      // already passed against the CLAIMED pair.
+      if (persisted.state !== input.expectedState || persisted.version !== input.expectedVersion) {
+        fail('W4C3A_ROLLOUT_CONTROL_STALE_EXPECTED_STATE')
+      }
+      const currentState = persisted.state
+      // Re-derive from the authoritative post-lock state (identical to the input-time check by
+      // construction once staleness has been ruled out, but never trusts the caller's claim alone).
+      const legal = findLegalTransition(currentState, input.targetState)
+      if (!legal) fail('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
+
+      const batchIds = await allOrgBatchIds(trx, input.orgId)
+      await lockControlDomain(trx, input.orgId, batchIds)
+      for (const batchId of batchIds) {
+        const state = await loadBatchReferenceState(trx, input.orgId, batchId)
+        if (!state.closed && !state.hasFrozenPreimage) fail('W4C3A_ROLLOUT_CONTROL_UNCLOSED_BATCH')
+      }
+
+      const retryableJobMismatches = await countRetryableJobPostureMismatches(
+        trx,
+        input.orgId,
+        legal.comparisonWritePosture,
+      )
+      if (retryableJobMismatches > 0) fail('W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_POSTURE_MISMATCH')
+
+      let nonterminalLegacyJobs = 0
+      if (CALCULATION_ENTRY_TARGETS.has(input.targetState)) {
+        nonterminalLegacyJobs = await countNonterminalNullVersionLegacyJobs(trx, input.orgId)
+        if (nonterminalLegacyJobs > 0) fail('W4C3A_ROLLOUT_CONTROL_LEGACY_JOB_ACTIVE')
+      }
+
+      let incompleteOperations = 0
+      let unresolvedReviews = 0
+      let defectiveRequestSnapshots = 0
+      if (ELIGIBILITY_AUTHORITY_TARGETS.has(input.targetState)) {
+        incompleteOperations = await countIncompleteOperations(trx, input.orgId)
+        if (incompleteOperations > 0) fail('W4C3A_ROLLOUT_CONTROL_INCOMPLETE_OPERATION')
+        unresolvedReviews = await countUnresolvedIngressReviews(trx, input.orgId)
+        if (unresolvedReviews > 0) fail('W4C3A_ROLLOUT_CONTROL_UNRESOLVED_REVIEW')
+        defectiveRequestSnapshots = await countDefectivePendingRequestSnapshots(trx, input.orgId)
+        if (defectiveRequestSnapshots > 0) fail('W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE')
+      }
+
+      // Section 2.8 literal order: the event insert is attempted FIRST; the rollout-state UPDATE
+      // happens only after it succeeds. Both share one transaction, so either order is atomic —
+      // a failure at any point rolls back both — but this ordering also lets a same-transaction
+      // failure-injection hook independently exercise each of gate 7's two clauses.
+      await beforeEventInsertForTests?.()
+      await trx.query(
+        `INSERT INTO attendance_calculation_rollout_events
+         (org_id, prior_state, new_state, reason_code, engine_version, actor_id, evidence)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+        [
+          input.orgId,
+          currentState,
+          input.targetState,
+          input.reasonCode,
+          input.engineVersion,
+          input.actorId,
+          JSON.stringify({
+            schemaVersion: 1,
+            manifestSha256: input.evidenceManifestSha256,
+            correlationId: input.correlationId,
+            comparisonWritePosture: legal.comparisonWritePosture,
+            preconditionCounts: {
+              retryableJobPostureMismatches: retryableJobMismatches,
+              nonterminalLegacyJobs,
+              incompleteOperations,
+              unresolvedReviews,
+              defectiveRequestSnapshots,
+            },
+            references: input.evidenceReferences,
+          }),
+        ],
+      )
+      await beforeStateUpdateForTests?.()
+      await trx.query(
+        `UPDATE attendance_calculation_rollout_state
+            SET state = $2, prior_state = state, engine_version = $3, reason_code = $4,
+                actor_id = $5, changed_at = now(), version = version + 1
+          WHERE org_id = $1`,
+        [input.orgId, input.targetState, input.engineVersion, input.reasonCode, input.actorId],
+      )
+      return Object.freeze({ orgId: input.orgId, state: input.targetState, batchId: null })
+    })
+  } finally {
+    // Released unconditionally, including on the input-validation/staleness/predicate-failure
+    // paths above (all of which throw): a busy-error 503 is the correct outward-facing outcome
+    // for lock-timeout expiry, but a normal success or precondition rejection must never leave
+    // the session holding this lock for the next checkout of this pooled connection.
+    await releaseAttendanceCalculationRolloutLockSessionExclusiveV1(connection, orgKey)
+  }
 }

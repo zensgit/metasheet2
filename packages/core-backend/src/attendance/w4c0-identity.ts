@@ -1225,7 +1225,11 @@ async function acquireLegacyImportCompatibilityLock(
 /**
  * The ONLY place allowed to select pg_advisory_xact_lock_shared versus
  * pg_advisory_xact_lock for the org rollout key. Source, rollback, transition, and closure
- * all import this helper (later slices); there is no copied namespace or local hash.
+ * all import this helper (later slices); there is no copied namespace or local hash. The one
+ * deliberate sibling is `acquireAttendanceCalculationRolloutLockSessionExclusiveV1` below —
+ * same key derivation, session-scoped instead of transaction-scoped, for the one caller
+ * (the canonical transition boundary, W4C-5 P1-2) that must not fix its SERIALIZABLE snapshot
+ * before the wait resolves.
  * Its own budget/acquisition timeout maps to values-free
  * `503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` after the caller rolls back.
  */
@@ -1241,6 +1245,74 @@ export async function acquireAttendanceCalculationRolloutLock(
       ? 'SELECT pg_advisory_xact_lock_shared($1::bigint)'
       : 'SELECT pg_advisory_xact_lock($1::bigint)'
   await acquireKeysWithDeadline(trx, 'rollout', acquisitionSql, [key])
+}
+
+/**
+ * W4C-5 P1-2 fix. PostgreSQL fixes a SERIALIZABLE transaction's snapshot at the START of the
+ * FIRST statement executed inside it — including a statement that itself blocks (e.g. a
+ * transaction-scoped `pg_advisory_xact_lock` wait). So no matter how early
+ * `acquireAttendanceCalculationRolloutLock(trx, org, 'exclusive')` is called inside an
+ * already-BEGUN transaction, a defect committed by a legitimate shared-lock holder WHILE this
+ * caller is waiting is invisible to every predicate this transaction later reads: the snapshot
+ * predates the wait's resolution, not just the transaction's own BEGIN.
+ *
+ * This function closes that window by construction, not by narrowing it: it acquires the SAME
+ * advisory key at SESSION level (`pg_advisory_lock`, not `_xact_`), as its own standalone
+ * (autocommit) statement, on a connection that must not yet be inside a transaction. Advisory
+ * locks share one lock table regardless of session-vs-transaction scope (PostgreSQL docs
+ * 9.27.9 / 13.3.5), so this still correctly blocks behind every existing
+ * `pg_advisory_xact_lock_shared` writer and every other exclusive holder on the same key. The
+ * caller then issues `BEGIN ISOLATION LEVEL SERIALIZABLE` as a SEPARATE, LATER statement on the
+ * same connection — over the standard synchronous (non-pipelined) `pg`/`PoolClient` protocol,
+ * that statement is not even dispatched until this function's blocking call has already
+ * returned. The new transaction's snapshot can therefore only be established strictly AFTER
+ * this acquisition succeeded, which is strictly AFTER every previous holder released (committed
+ * or rolled back) — there is no statement, blocking or not, that straddles the "waiting" and
+ * "snapshot fixed" instants.
+ *
+ * Crash safety: PostgreSQL releases every session-level advisory lock automatically when the
+ * backend session ends (docs 9.27.9 / 13.3.5) — an unhandled process crash necessarily drops
+ * the TCP connection to that backend, which the server treats identically to a session end, so
+ * no lock survives a crash. The caller's own `finally` release
+ * (`releaseAttendanceCalculationRolloutLockSessionExclusiveV1`) exists for the NORMAL
+ * (non-crash) return path, so a pooled connection is never returned to the pool still holding
+ * this lock for an unrelated future checkout.
+ */
+export async function acquireAttendanceCalculationRolloutLockSessionExclusiveV1(
+  connection: AttendanceW4TransactionClientV1,
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+): Promise<void> {
+  const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
+  // `SET lock_timeout = $1` is not valid SQL (SET does not accept a bind parameter);
+  // `set_config(..., false)` is a normal function call and does, and `false` (not the
+  // transaction-local `true` used everywhere else in this file) is required here because there
+  // is no open transaction yet for a local setting to attach to.
+  await connection.query("SELECT set_config('lock_timeout', $1, false)", [
+    `${W4_ADVISORY_HELPER_WAIT_MS}ms`,
+  ])
+  try {
+    await connection.query('SELECT pg_advisory_lock($1::bigint)', [key.toString()])
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw busyError('rollout')
+    throw error
+  } finally {
+    await connection.query("SELECT set_config('lock_timeout', '0', false)").catch(() => undefined)
+  }
+}
+
+/**
+ * Releases the session-level exclusive rollout lock acquired by
+ * `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`. The caller MUST call this in a
+ * `finally` around every acquisition on a normal return path — see that function's crash-safety
+ * paragraph for why a crash does not need this to still be correct, only a live pooled
+ * connection reused afterward does.
+ */
+export async function releaseAttendanceCalculationRolloutLockSessionExclusiveV1(
+  connection: AttendanceW4TransactionClientV1,
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+): Promise<void> {
+  const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
+  await connection.query('SELECT pg_advisory_unlock($1::bigint)', [key.toString()])
 }
 
 function toSortedUniqueSignedKeys(keys: readonly bigint[]): bigint[] {
