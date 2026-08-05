@@ -27,6 +27,15 @@
  *     wrong-org run id (404 `ATTENDANCE_SCHEDULED_RUN_NOT_FOUND`-shaped, zero DML on the real
  *     row — the org-scoped SQL lookup, not a body-supplied org match, is what actually refuses
  *     it).
+ *  4. **production tick-observability wiring (#4774 P2-1 closure)** — `index.ts:2249`'s
+ *     `logger: this.logger` is the ONLY line that makes the #4770 tick/backlog/error
+ *     observability actually emit in production; the pre-existing gate-3 tests all inject their
+ *     OWN fake logger, which stays green even if that one production line is deleted (proven by
+ *     mutation during review — 13/13 + 3/3 + 102/102 all green with the line removed). This leg
+ *     spies on the REAL `Logger` instance the booted `MetaSheetServer` constructed (never a
+ *     test-supplied logger) and calls `hostPort.sweepScheduledRuns()` (door 1's real port) —
+ *     deleting `logger: this.logger` makes the sweep fall back to its silent no-op logger, and
+ *     this spy would never observe the tick line.
  *
  * Mutation self-checks for all three legs (removing the port property / the scheduler
  * registration block / the route registration block) were run by hand during review — see the
@@ -45,7 +54,7 @@
  * (full migration set, not a hand-picked subset) so its `attendance_scheduled_runs` table is
  * empty except for what THIS file itself seeds.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import http from 'node:http'
@@ -486,6 +495,56 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
       const row = await runRow(victimRun.runId)
       expect(row.state).toBe('running')
       expect(row.abandon_reason_code).toBeNull()
+    })
+  })
+
+  // ===============================================================================================
+  // Leg 4 — production tick-observability wiring (#4774 P2-1 closure).
+  // ===============================================================================================
+  describe('leg 4 — production Logger call-through (#4774 P2-1)', () => {
+    it('port.sweepScheduledRuns emits the tick-summary line through the SAME production Logger instance index.ts wires in (`logger: this.logger`)', async () => {
+      expect(hostPort).not.toBeNull()
+      const orgId = randomUUID()
+      await seedRolloutOrg(orgId)
+      await createStuckRun(orgId, '2026-04-08')
+
+      // Door 4: the REAL `MetaSheetServer` instance's own `Logger` (`private logger: Logger`,
+      // constructed once at server boot as `new Logger('MetaSheetServer')`) — never a
+      // test-supplied stand-in. `index.ts`'s port object passes THIS SAME reference through as
+      // `logger: this.logger`; spying on it (rather than substituting a fake) is what makes this
+      // leg discriminate on the wiring LINE itself, not on the sweep's own logger-shaped
+      // contract (already covered by the fairness file's gate-3 tests).
+      const productionLogger = (
+        server as unknown as {
+          logger: { info: (event: string, meta?: Record<string, unknown>) => void }
+        }
+      ).logger
+      const infoCalls: Array<{ event: string; meta: Record<string, unknown> | undefined }> = []
+      const infoSpy = vi
+        .spyOn(productionLogger, 'info')
+        .mockImplementation((event: string, meta?: Record<string, unknown>) => {
+          infoCalls.push({ event, meta })
+        })
+      try {
+        const result = await withAllowlist([orgId], () =>
+          hostPort!.sweepScheduledRuns({ limit: 25, async recoverCandidate() {} }),
+        )
+        expect(result.scanned).toBeGreaterThanOrEqual(1)
+
+        const tickCall = infoCalls.find((c) => c.event === 'attendance.w4_scheduled_run_sweep.tick')
+        expect(
+          tickCall,
+          'the production Logger must have received the tick-summary line — proves index.ts:2249 `logger: this.logger` is actually wired into the booted server, not just declared in source',
+        ).toBeDefined()
+        expect(Object.keys(tickCall!.meta ?? {}).sort()).toEqual(
+          ['backlogRemaining', 'errored', 'finalized', 'notReady', 'scanned', 'skipped'].sort(),
+        )
+        for (const value of Object.values(tickCall!.meta ?? {})) {
+          expect(typeof value, 'production-emitted meta must stay values-free: numbers only').toBe('number')
+        }
+      } finally {
+        infoSpy.mockRestore()
+      }
     })
   })
 })
