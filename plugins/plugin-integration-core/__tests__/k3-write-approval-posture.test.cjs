@@ -150,7 +150,22 @@ test('K3 capability gate: all guards true -> pass; each one false -> refuse', ()
 })
 
 test('K3 capability gate: malformed state is refused, never coerced', () => {
-  for (const malformed of [undefined, null, {}, { capabilityState: {} }, { capabilityState: { customerProfileSelected: true, saveOnlyLocked: true, applyRowCapped: true } }]) {
+  // REVIEW P2-C2: I had downgraded the type-confusion probe ('yes' -> true) while the ledger
+  // claimed "zero downgraded". A three-way control proved the loss: with the probe restored, a
+  // type-check -> presence-check mutation is RED; without it, green. Restored, and extended to
+  // the members the first version left unwitnessed.
+  const goodState = {
+    customerProfileSelected: true, saveOnlyLocked: true, applyRowCapped: true,
+    b4BindingApproved: true, b4BindingCount: 1,
+    b4ActionProfileVersion: 'k3wise.material_list.v1', b4ApprovedConfigVersion: '3',
+    b4ConfigContentKey: 'b4-content-key-x',
+  }
+  const typeConfusions = [
+    { customerProfileSelected: 'yes' }, { saveOnlyLocked: 'true' }, { applyRowCapped: 1 },
+    { b4BindingApproved: 'yes' }, { b4BindingCount: '1' },
+    { b4ActionProfileVersion: null }, { b4ApprovedConfigVersion: 3 }, { b4ConfigContentKey: 0 },
+  ].map((patch) => ({ capabilityState: { ...goodState, ...patch } }))
+  for (const malformed of [undefined, null, {}, { capabilityState: {} }, ...typeConfusions]) {
     assert.throws(
       () => K3_WISE_C6_WRITE_PROFILE.normalizeCapabilityState(malformed),
       /capability state is unavailable/,

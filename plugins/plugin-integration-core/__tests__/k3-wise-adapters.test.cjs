@@ -513,30 +513,61 @@ async function testK3WebApiAdapter() {
     documentType: 'material',
   })
 
-  const preview = await adapter.previewUpsert({
-    object: 'material',
+  // [MIGRATED off material, review P2-D1] This case tested the OBJECT-AGNOSTIC previewUpsert
+  // mechanism: schema projection dropping client-only fields not in the schema (sourceId,
+  // revision, the idempotency key), Token redaction in the preview query, and
+  // metadata.autoSubmit/autoAudit passthrough from config. None of that is material business
+  // logic — it is the same generic code path BOM goes through. Now that material previewUpsert
+  // requires the named customer profile (guard below), a profile-less material call like this
+  // one would be refused before it could exercise the mechanism at all, so — same precedent as
+  // the write-mechanics cases already migrated off material onto BOM (see the BOM comment
+  // above) — this moved to BOM, which is not behind the profile guard. Assertions below are the
+  // actual previewUpsert output for BOM (verified by running, not guessed).
+  const bomPreview = await adapter.previewUpsert({
+    object: 'bom',
     records: [
       {
-        FNumber: 'MAT-PREVIEW-001',
-        FName: 'Preview bolt',
+        FParentItemNumber: 'BOM-PREVIEW-001',
+        FChildItemNumber: 'MAT-001',
+        FQty: 2,
+        FUnitID: 'PCS',
+        FEntryID: 1,
         sourceId: 'plm-1',
         revision: 'A',
-        _integration_idempotency_key: 'tenant:k3:MAT-PREVIEW-001',
+        _integration_idempotency_key: 'tenant:k3:BOM-PREVIEW-001',
       },
     ],
-    keyFields: ['FNumber'],
+    keyFields: ['FParentItemNumber'],
   })
-  assert.deepEqual(preview.records[0].body, {
+  assert.deepEqual(bomPreview.records[0].body, {
     Data: {
-      FNumber: 'MAT-PREVIEW-001',
-      FName: 'Preview bolt',
+      FParentItemNumber: 'BOM-PREVIEW-001',
+      FChildItemNumber: 'MAT-001',
+      FQty: 2,
+      FUnitID: 'PCS',
+      FEntryID: 1,
     },
-  })
-  assert.equal(preview.records[0].query.Token, '<redacted>')
-  assert.equal(preview.metadata.autoSubmit, true)
-  assert.equal(preview.metadata.autoAudit, true)
+  }, 'preview schema projection drops client-only fields not declared in the BOM schema')
+  assert.equal(bomPreview.records[0].query.Token, '<redacted>')
+  assert.equal(bomPreview.metadata.autoSubmit, true)
+  assert.equal(bomPreview.metadata.autoAudit, true)
 
-  const referencePreview = await adapter.previewUpsert({
+  // [KEPT on material, now PROFILED, review P2-D1] This case tests material-specific
+  // reference-field projection (k3Template `type: 'reference'` fields: an object value like
+  // {FNumber,FName} passes through verbatim; a scalar value is wrapped {[identifier]: value}) —
+  // genuine material business semantics (G3), not generic mechanism, so it stays on material.
+  // The profile guard now requires the named customer profile before material previewUpsert
+  // will even run, so this uses a DEDICATED profiled adapter — `profileSystem()` (defined below,
+  // reused here for the same customer-profile config the M1 Save suite exercises) — rather than
+  // the shared `adapter` above, which is deliberately kept profile-less to back the guard
+  // rejection case right below it. The customer profile's schema differs from the generic
+  // default template it replaces: FBaseUnitID is intentionally NOT declared in the profile (see
+  // k3-wise-document-templates.cjs) — the projected body below has no FBaseUnitID key, and
+  // metadata.k3Template is undefined (k3Template is a profile-forbidden overlay key, deleted by
+  // the same sweep that pins savePath/readPath). Both confirmed by actually running this, not
+  // assumed.
+  const profiledPreviewAdapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
+  const referencePreview = await profiledPreviewAdapter.previewUpsert({
     object: 'material',
     records: [
       {
@@ -554,10 +585,10 @@ async function testK3WebApiAdapter() {
       FNumber: 'MAT-REF-001',
       FName: 'Reference material',
       FUnitGroupID: { FNumber: 'UG-PCS', FName: 'Pieces' },
-      FBaseUnitID: { FNumber: 'PCS' },
       FAcctID: { FNumber: '1405' },
     },
-  }, 'material reference fields preserve object values and wrap scalar values')
+  }, 'material reference fields preserve object values, wrap scalar values, and the profile schema drops FBaseUnitID')
+  assert.equal(referencePreview.metadata.k3Template, undefined, 'k3Template is a profile-forbidden overlay key — deleted in preview metadata too')
 
   // RATIFIED GUARD (owner, 20260805): a material upsert with no named customer profile must
   // be refused before any network call — login itself never fires. Legacy/unprofiled configs
@@ -571,6 +602,26 @@ async function testK3WebApiAdapter() {
   assert.ok(guardRejection instanceof AdapterValidationError, 'unprofiled material upsert is refused')
   assert.equal(guardRejection.details.code, 'K3_WISE_MATERIAL_PROFILE_REQUIRED')
   assert.equal(calls.length, callsBeforeGuardRejection, 'unprofiled material upsert makes zero K3 calls (not even login)')
+
+  // NEW GUARD CASE (review P2-D1): previewUpsert must refuse an unprofiled material exactly like
+  // upsert does, and just as fast — before ANY network call, not even login. This is the
+  // preview-side twin of the RATIFIED GUARD case just above. It runs against the SAME
+  // profile-less `adapter` used for that case (the reference-projection case above deliberately
+  // used a SEPARATE, profiled adapter instance to arm the guard — it cannot stand in for this
+  // negative case, which needs the guard UNarmed).
+  const callsBeforePreviewGuardRejection = calls.length
+  const previewGuardRejection = await adapter.previewUpsert({
+    object: 'material',
+    records: [{ FNumber: 'MAT-002', FName: 'Bolt 2' }],
+    keyFields: ['FNumber'],
+  }).catch((error) => error)
+  assert.ok(previewGuardRejection instanceof AdapterValidationError, 'unprofiled material previewUpsert is refused')
+  assert.equal(previewGuardRejection.details.code, 'K3_WISE_MATERIAL_PROFILE_REQUIRED')
+  assert.equal(
+    calls.length,
+    callsBeforePreviewGuardRejection,
+    'unprofiled material previewUpsert makes zero K3 calls (refusal precedes any network activity)',
+  )
 
   // BOM is NOT behind the material profile guard, and its Save/Submit/Audit mechanism is the
   // same as material's — this exercises the write mechanics (tri-state autoSubmit/autoAudit,

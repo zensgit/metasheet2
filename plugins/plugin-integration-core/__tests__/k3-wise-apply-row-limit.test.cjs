@@ -366,3 +366,65 @@ test('an overlay cannot WIDEN the profile\'s operations (reachability is profile
   assert.deepEqual(effective.material.operations, ['upsert', 'read'],
     'the profile\'s operation set is the reachable set — an overlay must not add to it')
 })
+
+test('PREVIEW == WRITE: a save-only profile forces the preview\'s auto-flags off too', async () => {
+  // Found while adapting the adapters suite: previewUpsert resolved auto-flags freely, so with
+  // the profile armed AND config.autoSubmit true the PREVIEW said "Submit will fire" while the
+  // real write forces it false. Safe direction, wrong property: the human approves the preview.
+  const fetchPair = countingFetch()
+  const adapter = createK3WiseWebApiAdapter({
+    system: {
+      id: 'preview-lock-k3', name: 'K3', kind: 'erp:k3-wise-webapi', role: 'target',
+      credentials: { username: 'u', password: 'p', acctId: 'AIS' },
+      config: {
+        baseUrl: 'https://k3.example.test',
+        autoSubmit: true, autoAudit: true,
+        objects: { material: { profile: PROFILE_ID } },
+      },
+    },
+    fetchImpl: fetchPair.impl,
+  })
+  const preview = await adapter.previewUpsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })
+  assert.equal(preview.metadata.autoSubmit, false, 'the preview must not promise a Submit the write will refuse')
+  assert.equal(preview.metadata.autoAudit, false)
+  const written = await adapter.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })
+  assert.equal(written.metadata.autoSubmit, preview.metadata.autoSubmit, 'preview and write must agree')
+  assert.equal(written.metadata.autoAudit, preview.metadata.autoAudit)
+})
+
+test('ADVERSARIAL P1-C1: a read path may never target a write endpoint — WITHOUT any profile', () => {
+  // The third axis a reviewer found: the whole class pin lived inside `if (saveOnlyProfile)`,
+  // i.e. it was opt-in by the actor it defends against. A K3 SOURCE pipeline is legitimately
+  // profile-less (the configured LIST read owns its readPath) and, driven through the real
+  // runner, POSTed an operator-authored body to /K3API/Material/Submit — on dry-runs too.
+  // This guard is unconditional; the positive control below is what proves it discriminates
+  // rather than refusing every configured read.
+  const { __internals } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+
+  for (const [label, objects] of [
+    ['material read -> Submit', { material: { operations: ['read'], readPath: '/K3API/Material/Submit' } }],
+    ['material read -> Audit', { material: { operations: ['read'], readPath: '/K3API/Material/Audit' } }],
+    ['a custom object read -> Save', {
+      widget: {
+        operations: ['read'], readPath: '/K3API/Widget/Save', savePath: '/K3API/Widget/Save',
+        schema: [{ name: 'A', label: 'A', type: 'string', required: true }],
+      },
+    }],
+  ]) {
+    assert.throws(
+      () => __internals.normalizeObjects({ objects }),
+      (error) => error.details && error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      `${label} must be refused with NO profile selected`,
+    )
+  }
+
+  // POSITIVE CONTROL: legitimate configured reads are untouched — without this, a guard that
+  // refused every read would pass the assertions above.
+  for (const [label, objects] of [
+    ['GetList', { material: { operations: ['read'], readPath: '/K3API/Material/GetList' } }],
+    ['GetDetail', { material: { operations: ['read'], readPath: '/K3API/Material/GetDetail' } }],
+    ['profile-armed', { material: { profile: PROFILE_ID } }],
+  ]) {
+    assert.doesNotThrow(() => __internals.normalizeObjects({ objects }), `${label} is a legitimate read and must pass`)
+  }
+})

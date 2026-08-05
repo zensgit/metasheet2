@@ -164,6 +164,27 @@ function normalizeBaseUrl(value) {
   return url.toString()
 }
 
+// ADVERSARIAL P1-C1 (round 3): the whole class pin lived inside `if (saveOnlyProfile)` — it was
+// OPT-IN BY THE VERY ACTOR IT DEFENDS AGAINST. Omit `profile` and nothing is pinned; a K3
+// SOURCE pipeline (legitimately profile-less — the #1709 configured LIST read owns its own
+// readPath) then POSTed an operator-authored body to /K3API/Material/Submit, on dry-runs too.
+// The runner guard cannot catch that: it keys on the TARGET kind.
+//
+// This guard is UNCONDITIONAL. A READ path may never resolve to a lifecycle-WRITE endpoint.
+// Legitimate configured reads (GetDetail, GetList, any query endpoint) are untouched; the only
+// thing refused is a read aimed at a write verb, which no read contract has a reason to do.
+const K3_WRITE_ENDPOINT_SUFFIX = /\/(submit|audit|delete|save)$/i
+
+function assertReadPathIsNotAWriteEndpoint(value, field) {
+  if (typeof value !== 'string' || value.trim().length === 0) return
+  if (K3_WRITE_ENDPOINT_SUFFIX.test(value.trim())) {
+    throw new AdapterValidationError('a K3 read path may not target a lifecycle write endpoint', {
+      code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      field,
+    })
+  }
+}
+
 function assertRelativePath(path, field) {
   if (typeof path !== 'string' || path.trim().length === 0) {
     throw new AdapterValidationError(`${field} is required`, { field })
@@ -542,6 +563,11 @@ function normalizeObjects(config) {
         field: `config.objects.${name}`,
       })
     }
+  }
+  // UNCONDITIONAL (review P1-C1): every object, profile-selected or not, from EITHER fill loop.
+  // The class pin above is opt-in by whoever selects a profile — this is not.
+  for (const [name, objectConfig] of Object.entries(normalized)) {
+    assertReadPathIsNotAWriteEndpoint(objectConfig.readPath, `config.objects.${name}.readPath`)
   }
   return normalized
 }
@@ -1765,9 +1791,24 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       throw new AdapterValidationError(`K3 WISE object is not configured: ${request.object}`, { object: request.object })
     }
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'upsert')
+    // REVIEW P2-D1: previewUpsert had no profile guard, so the same config that upsert REFUSES
+    // rendered a sanctioned-looking plan naming an operator-substituted endpoint. No egress,
+    // but a preview is exactly what a human approves — it must refuse identically.
+    if (request.object === 'material' && objectConfig[K3_PROFILE_ARMED] !== true) {
+      throw new AdapterValidationError('K3 WISE material upsert requires the named customer profile', {
+        code: 'K3_WISE_MATERIAL_PROFILE_REQUIRED',
+        object: request.object,
+      })
+    }
     const savePath = assertRelativePath(objectConfig.savePath || objectConfig.path, 'object.savePath')
-    const autoSubmit = resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
-    const autoAudit = resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
+    // Mirror upsert's save-only HARD LOCK. Found while adapting this suite: previewUpsert
+    // resolved the auto-flags freely, so with a save-only profile armed AND config.autoSubmit
+    // true, the preview reported "Submit will fire" while the real write forces it false. The
+    // divergence is in the safe direction, but a preview that does not equal the write is
+    // exactly what the approval gate exists to prevent — the human must approve what happens.
+    const previewSaveOnly = objectConfig.lifecycle === 'save-only'
+    const autoSubmit = previewSaveOnly ? false : resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
+    const autoAudit = previewSaveOnly ? false : resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
     return {
       object: request.object,
       records: request.records.map((record, index) => ({
