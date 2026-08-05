@@ -145,15 +145,21 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     )
   }
 
-  /** Minimal valid V1 retryable job (see attendance-w4c0-durable-storage-smoke fixture shape). */
+  /**
+   * Minimal valid V1 retryable job (see attendance-w4c0-durable-storage-smoke fixture shape).
+   * `executor` defaults to the shared pool (autocommit) but accepts an open `PoolClient`
+   * transaction so RACE A/C below can insert the defect row UNCOMMITTED, inside a
+   * shared-lock-holding writer transaction, and control exactly when it becomes visible.
+   */
   async function insertRetryableJob(
     org: string,
     status: 'queued' | 'failed',
     acceptedWritePosture: 'legacy_projection_only' | 'shadow' | 'authoritative',
+    executor: Pool | PoolClient = pool,
   ): Promise<void> {
     const batchCommandId = crypto.randomUUID()
     const fp = hex64(`${org}:${batchCommandId}`)
-    await pool.query(
+    await executor.query(
       `INSERT INTO attendance_import_jobs
          (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
           w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
@@ -197,13 +203,14 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     }
   }
 
-  async function insertUnresolvedReview(org: string): Promise<void> {
+  /** `executor` defaults to the shared pool (autocommit); RACE D below passes an open writer transaction. */
+  async function insertUnresolvedReview(org: string, executor: Pool | PoolClient = pool): Promise<void> {
     const recordId = crypto.randomUUID()
-    await pool.query(
+    await executor.query(
       `INSERT INTO attendance_records (id, user_id, work_date, org_id) VALUES ($1::uuid, $2, '2026-08-01', $3)`,
       [recordId, crypto.randomUUID(), org],
     )
-    await pool.query(
+    await executor.query(
       `INSERT INTO attendance_record_calculations (
          id, org_id, attendance_record_id, version, calculation_kind, mode, entrypoint,
          engine_version, snapshot_schema_version, operation_id, semantic_input_fingerprint,
@@ -710,23 +717,26 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     })
 
     it('blocks a legitimate shared-lock job-writer for the whole duration of an in-flight transition', async () => {
-      // A genuine "job appears mid-wait, transition sees it" race is architecturally
-      // unconstructable: w4_accepted_write_posture is immutable post-insert (rules out an
-      // UPDATE-based race), and PostgreSQL's `SELECT ... FOR UPDATE` under SERIALIZABLE only
-      // re-fetches the LATEST version of rows already present in the transaction's snapshot —
-      // it does not retroactively admit a brand-new row inserted after that snapshot was taken,
-      // lock or no lock (verified empirically: pausing the transition — via the barrier hook or
-      // via genuine third-party lock contention — before a concurrent INSERT does not make that
-      // INSERT visible to the paused transaction's own read).
+      // RETRACTION (W4C-5 P1-2, PR #4773 exact-head independent gate, 20260805): this test's
+      // comment previously claimed a "job appears mid-wait, transition sees it" race was
+      // "architecturally unconstructable" and that "there is no window for such a race to
+      // occur." Both claims were false, and were refuted by four constructed real
+      // two/three-connection races (RACE A/C/D/E, see the `describe` block immediately below
+      // this one): the window is not the exclusive lock's HOLD (which this test correctly
+      // proves is exclusive and serializing) but its WAIT, up to
+      // `W4_ADVISORY_HELPER_WAIT_MS` = 5000ms — before the W4C-5 P1-2 fix, a writer that
+      // committed its INSERT while the transition was still waiting to acquire the (then
+      // transaction-scoped) exclusive lock was invisible to every §3 predicate, because
+      // PostgreSQL fixes a SERIALIZABLE snapshot at the START of the first statement in the
+      // transaction — including a statement that itself blocks — so the snapshot predated the
+      // wait's resolution, not just the transaction's own BEGIN.
       //
-      // This is not a gap in the predicate: lock section 9 requires every legitimate job-writer
-      // (P07 enqueue and friends) to acquire the class-00 rollout lock SHARED before writing a
-      // job row. Because `transitionAttendanceCalculationRolloutV1` holds that same lock
-      // EXCLUSIVE for its whole duration, a legitimate writer cannot insert a job for this org at
-      // all while a transition is in flight — there is no window for such a race to occur. What
-      // this test proves instead is that exact serialization: a shared-lock acquisition (the
-      // same primitive every job-writer calls first) genuinely blocks until the transition
-      // commits.
+      // This test still correctly proves exact serialization (a shared-lock acquisition — the
+      // same primitive every job-writer calls first, lock section 9 — genuinely blocks for the
+      // whole duration the transition holds the lock). What it does NOT prove, and what it was
+      // wrongly assumed to prove, is that the predicates re-evaluated after that hold begins
+      // see a fresh-enough snapshot. That is proven separately, and positively, by the
+      // `describe` block immediately below.
       const raceOrg = crypto.randomUUID()
       allow(raceOrg)
       const entered = deferred()
@@ -767,6 +777,226 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         await writerClient.query('ROLLBACK').catch(() => undefined)
         transitionClient.release()
         writerClient.release()
+      }
+    })
+  })
+
+  describe('W4C-5 P1-2: lock-WAIT races — a defect committed by a legitimate shared-lock writer WHILE the transition is genuinely blocked waiting for the exclusive lock is still caught', () => {
+    // PR #4773 exact-head independent gate (20260805) constructed these as RACE A/C/D/E against
+    // the pre-fix code (each false-PASSED: `RESOLVED` with the defect left uncaught in the DB)
+    // and refuted the PR body's "architecturally unconstructable / no window" claim. They are
+    // real two/three-connection races: every leg first proves genuine blocking
+    // (`settled === false` after 150ms) before letting the writer commit, exactly like the
+    // pre-existing TOCTOU staleness race and shared-lock-writer tests above. No barrier hook on
+    // any contended leg — timing is real, not simulated.
+
+    it('RACE A: a mismatched retryable job committed by a shared-lock holder DURING the exclusive wait is caught (not missed)', async () => {
+      const raceOrg = crypto.randomUUID()
+      allow(raceOrg)
+      const writerClient = await pool.connect()
+      const transitionClient = await pool.connect()
+      try {
+        await writerClient.query('BEGIN')
+        await acquireAttendanceCalculationRolloutLock(
+          transactionClient(writerClient),
+          parseCanonicalAttendanceRolloutOrgKeyV1(raceOrg),
+          'shared',
+        )
+
+        let transitionSettled = false
+        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+          orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64('race-a-transition'), evidenceReferences: baseRefs('race-a-transition'),
+          reasonCode: 'rollout_transition',
+        }).finally(() => { transitionSettled = true })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        expect(transitionSettled).toBe(false) // genuinely blocked behind the writer's shared hold
+
+        // Committed WHILE the transition is still waiting — posture 'authoritative' mismatches
+        // the legacy->shadow pair's required 'shadow'.
+        await insertRetryableJob(raceOrg, 'queued', 'authoritative', writerClient)
+        await writerClient.query('COMMIT')
+
+        await expect(transition).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_POSTURE_MISMATCH' })
+        expect(transitionSettled).toBe(true)
+        await expect(pool.query(
+          'SELECT count(*)::int AS n FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [raceOrg],
+        )).resolves.toMatchObject({ rows: [{ n: 0 }] })
+      } finally {
+        await writerClient.query('ROLLBACK').catch(() => undefined)
+        writerClient.release()
+        transitionClient.release()
+      }
+    })
+
+    it('RACE C: an incomplete V1 job committed by a shared-lock holder DURING the exclusive wait blocks promotion to eligible', async () => {
+      const raceOrg = crypto.randomUUID()
+      allow(raceOrg)
+      const setupClient = await pool.connect()
+      try {
+        await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+          orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64('race-c-setup'), evidenceReferences: baseRefs('race-c-setup'),
+          reasonCode: 'rollout_transition',
+        })
+      } finally {
+        setupClient.release()
+      }
+
+      const writerClient = await pool.connect()
+      const transitionClient = await pool.connect()
+      try {
+        await writerClient.query('BEGIN')
+        await acquireAttendanceCalculationRolloutLock(
+          transactionClient(writerClient),
+          parseCanonicalAttendanceRolloutOrgKeyV1(raceOrg),
+          'shared',
+        )
+
+        let transitionSettled = false
+        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+          orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+          evidenceManifestSha256: hex64('race-c-transition'), evidenceReferences: baseRefs('race-c-transition'),
+          reasonCode: 'rollout_transition',
+        }).finally(() => { transitionSettled = true })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        expect(transitionSettled).toBe(false)
+
+        // Committed WHILE the transition is still waiting — a fresh 'queued' V1 job is a still-open
+        // (not `completed`) org operation.
+        await insertRetryableJob(raceOrg, 'queued', 'shadow', writerClient)
+        await writerClient.query('COMMIT')
+
+        await expect(transition).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_INCOMPLETE_OPERATION' })
+        expect(transitionSettled).toBe(true)
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [raceOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 2 }] })
+      } finally {
+        await writerClient.query('ROLLBACK').catch(() => undefined)
+        writerClient.release()
+        transitionClient.release()
+      }
+    })
+
+    it('RACE D: an unresolved ingress review committed by a shared-lock holder DURING the exclusive wait blocks promotion to eligible', async () => {
+      const raceOrg = crypto.randomUUID()
+      allow(raceOrg)
+      const setupClient = await pool.connect()
+      try {
+        await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+          orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64('race-d-setup'), evidenceReferences: baseRefs('race-d-setup'),
+          reasonCode: 'rollout_transition',
+        })
+      } finally {
+        setupClient.release()
+      }
+
+      const writerClient = await pool.connect()
+      const transitionClient = await pool.connect()
+      try {
+        await writerClient.query('BEGIN')
+        await acquireAttendanceCalculationRolloutLock(
+          transactionClient(writerClient),
+          parseCanonicalAttendanceRolloutOrgKeyV1(raceOrg),
+          'shared',
+        )
+
+        let transitionSettled = false
+        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+          orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+          evidenceManifestSha256: hex64('race-d-transition'), evidenceReferences: baseRefs('race-d-transition'),
+          reasonCode: 'rollout_transition',
+        }).finally(() => { transitionSettled = true })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        expect(transitionSettled).toBe(false)
+
+        // Committed WHILE the transition is still waiting.
+        await insertUnresolvedReview(raceOrg, writerClient)
+        await writerClient.query('COMMIT')
+
+        await expect(transition).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_UNRESOLVED_REVIEW' })
+        expect(transitionSettled).toBe(true)
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [raceOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 2 }] })
+      } finally {
+        await writerClient.query('ROLLBACK').catch(() => undefined)
+        writerClient.release()
+        transitionClient.release()
+      }
+    })
+
+    it('RACE E (3-actor, zero protocol violations): a pending request committed by an actor with NO rollout-lock obligation, while a protocol-compliant shared-lock holder blocks the transition, is still caught', async () => {
+      // C1 = a protocol-compliant shared-lock holder (exactly the primitive every real job-writer
+      // calls first, lock section 9) — its only role is to create a genuine, provable wait window
+      // for T. C2 = an ordinary pending-request writer (the shape of
+      // `plugins/plugin-attendance/index.cjs`'s request-creation route): it acquires NO rollout
+      // lock and reads NO rollout state — by construction (bare `pool.query`, autocommit,
+      // `insertPendingRequest`'s existing shape) it commits independently of C1/T entirely. T is
+      // the transition itself. No actor here violates any locking obligation the current
+      // codebase defines; the fix must still catch this.
+      const raceOrg = crypto.randomUUID()
+      allow(raceOrg)
+      const setupClient = await pool.connect()
+      try {
+        await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+          orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64('race-e-setup'), evidenceReferences: baseRefs('race-e-setup'),
+          reasonCode: 'rollout_transition',
+        })
+      } finally {
+        setupClient.release()
+      }
+
+      const c1Client = await pool.connect()
+      const transitionClient = await pool.connect()
+      try {
+        await c1Client.query('BEGIN')
+        await acquireAttendanceCalculationRolloutLock(
+          transactionClient(c1Client),
+          parseCanonicalAttendanceRolloutOrgKeyV1(raceOrg),
+          'shared',
+        )
+
+        let transitionSettled = false
+        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+          orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+          evidenceManifestSha256: hex64('race-e-transition'), evidenceReferences: baseRefs('race-e-transition'),
+          reasonCode: 'rollout_transition',
+        }).finally(() => { transitionSettled = true })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        expect(transitionSettled).toBe(false) // T genuinely blocked behind C1's shared hold
+
+        // C2: commits independently, with no relationship to C1's lock or T's wait at all — a
+        // plain autocommit INSERT via the shared pool, matching insertPendingRequest's existing
+        // (lock-free) shape.
+        await insertPendingRequest(raceOrg, 'missing_snapshot')
+
+        // C1 releases; T can now proceed.
+        await c1Client.query('COMMIT')
+
+        await expect(transition).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE' })
+        expect(transitionSettled).toBe(true)
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [raceOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 2 }] })
+      } finally {
+        await c1Client.query('ROLLBACK').catch(() => undefined)
+        c1Client.release()
+        transitionClient.release()
       }
     })
   })
