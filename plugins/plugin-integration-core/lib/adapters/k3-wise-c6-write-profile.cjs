@@ -24,6 +24,10 @@
 const { AdapterValidationError } = require('../contracts.cjs')
 const { K3_WISE_MATERIAL_PROFILES } = require('./k3-wise-document-templates.cjs')
 const { resolveEffectiveK3WiseObjects } = require('./k3-wise-webapi-adapter.cjs')
+const {
+  K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION,
+  K3WISE_MATERIAL_LIST_B4_TEMPLATE,
+} = require('../read-source-k3-material-list-b4-contract.cjs')
 
 const K3_WISE_C6_WRITE_TARGET_KIND = 'erp:k3-wise-webapi'
 const CUSTOMER_PROFILE_ID = 'material-k3wise-customer-profile-v1'
@@ -36,7 +40,6 @@ if (!CUSTOMER_PROFILE) {
 }
 
 // Single source: the plan-level row bound IS the profile literal's cap (frozen by S2).
-// Reading it here instead of repeating `3` keeps exactly one record point for the number.
 const K3_WISE_C6_MAX_APPLY_ROWS = CUSTOMER_PROFILE.maxApplyRows
 
 const SCHEMA_FIELD_NAMES = new Set(
@@ -44,6 +47,55 @@ const SCHEMA_FIELD_NAMES = new Set(
     .map((field) => field && field.name)
     .filter((name) => typeof name === 'string' && name.length > 0),
 )
+
+// REVIEW P2-D2 / P2-E4: matching only actionProfileVersion made the gate SELF-CERTIFYING (that
+// field carries syntax validation and nothing else). My first answer compared the template's
+// OWN keys — a one-directional projection: keyField, headerContainerPaths, lineContainerPaths,
+// multiplicityRuleField and requiredKind all validate, PERSIST, and were invisible to it. It
+// was also JSON.stringify key-order sensitive against a JSONB column.
+//
+// The correct comparator already exists and is already carried on the row: `contentKey` is the
+// store's own sha256 over a stable stringify of the WHOLE normalized config — order-insensitive
+// and, being full-config, not a projection. The gate recomputes what the ratified content WOULD
+// key to for this row's systemId and requires equality.
+// REVIEW P2-5 (round 7): this used to destructure `__internals.contentKeyFor`. Two problems, both
+// already ruled on in this package (`read-source-config.cjs:18-22`, review B1a-1 P2): a LIVE
+// fail-closed gate must not bind to another module's private/test surface, and destructuring it
+// at require time turns an upstream rename into a module-load TypeError rather than a graceful
+// fail-closed. `contentKeyFor` is now a supported export, bound by its public name.
+const { contentKeyFor: readSourceContentKeyFor } = require('../read-source-config-store.cjs')
+const { normalizeReadSourceConfig } = require('../read-source-config.cjs')
+
+function ratifiedB4ContentKeyFor(systemId) {
+  return readSourceContentKeyFor(normalizeReadSourceConfig({
+    ...K3WISE_MATERIAL_LIST_B4_TEMPLATE,
+    systemId,
+  }))
+}
+
+function b4RowMatchesRatifiedContract(row) {
+  const config = row && row.config && typeof row.config === 'object' ? row.config : null
+  if (!config) return false
+  if (config.actionProfileVersion !== K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION) return false
+  if (typeof row.contentKey !== 'string' || row.contentKey.length === 0) return false
+  const systemId = typeof config.systemId === 'string' ? config.systemId : ''
+  if (!systemId) return false
+  // TWO comparisons, both required:
+  //   (a) the row's key is SELF-CONSISTENT with the row's own config — the same discipline the
+  //       GIP approved-binding resolution path applies (RESOLVER_CONFIG_CONTENT_KEY_MISMATCH).
+  //       Without it, a row whose key says "ratified" while its config says otherwise would
+  //       pass, and a test constructing exactly that row proved it.
+  //       (Deliberately NOT spelling that module's filename: B1a-3's latency gate greps the tree
+  //       for it as plain TEXT, so a prose mention in a non-allowlisted lib file turns the
+  //       required `integration-guard` check RED. Naming it cost one red round already.)
+  //   (b) that key equals what the RATIFIED content would key to for this systemId.
+  let selfKey
+  try { selfKey = readSourceContentKeyFor(normalizeReadSourceConfig(config)) } catch { return false }
+  if (row.contentKey !== selfKey) return false
+  let expected
+  try { expected = ratifiedB4ContentKeyFor(systemId) } catch { return false }
+  return row.contentKey === expected
+}
 
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -129,10 +181,82 @@ function deriveK3WiseC6PlannerTargetConfig({ system, object, fieldMappings = [] 
 
 // --- 2. the dataSourceWrites facade ---------------------------------------------------------
 
-function createK3WiseC6WriteSource({ system, createAdapter } = {}) {
+function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
   if (typeof createAdapter !== 'function') {
     throw new AdapterValidationError('K3 C6 write source requires a createAdapter function', {
       field: 'createAdapter',
+    })
+  }
+  // OWNER REVIEW (20260805): the C6 K3 lifecycle must CONSUME the approved B4 read binding —
+  // not merely coexist with it. `b4` carries the read-source config store plus the scope the
+  // binding is resolved in. TRUSTED server-side planner wiring only (same trust boundary as
+  // targetWriteProfile itself).
+  if (!b4 || typeof b4 !== 'object'
+    || !b4.readSourceConfigs || typeof b4.readSourceConfigs.list !== 'function'
+    || typeof b4.tenantId !== 'string' || b4.tenantId.length === 0
+    || !Array.isArray(b4.pipelineSystemIds) || b4.pipelineSystemIds.length === 0) {
+    throw new AdapterValidationError('K3 C6 write source requires the B4 binding scope (readSourceConfigs store + tenantId + pipelineSystemIds)', {
+      field: 'b4',
+    })
+  }
+  const PIPELINE_SYSTEM_IDS = new Set(b4.pipelineSystemIds.filter((id) => typeof id === 'string' && id.length > 0))
+
+  // ADVERSARIAL REVIEW P1-2 (20260805): the first version resolved by `systemId`, and which
+  // system that is turned out to be genuinely ambiguous — the B4 binding is a K3 READ contract,
+  // so an operator may mint it on the pipeline's source system OR on the K3 system that is also
+  // the write target (both are erp:k3-wise-webapi in the first-version chain). A reviewer proved
+  // the shipped choice resolved to zero rows, i.e. the feature was dead on arrival; and that the
+  // filter never checked the row IS the B4 contract, so an unrelated approved material config
+  // would have satisfied the gate.
+  //
+  // Both defects share one root: system id is the wrong key. The binding is identified by the
+  // RATIFIED CONTRACT IDENTITY it carries — actionProfileVersion, imported from the contract
+  // module (never a second copy of the literal). System id drops out of the query entirely.
+  //
+  // Scope stays EXACT (tenant + workspace, null-distinct) — fail-closed, and the mint and the
+  // pipeline live in the same scope by construction.
+  //
+  // ADVERSARIAL P2-B1 (round 3): dropping systemId entirely went too far — a reviewer proved a
+  // binding approved on an UNRELATED K3 system satisfied the gate, i.e. one system's read
+  // contract vouching for another system's write: the same defect the round-2 fix removed,
+  // rotated onto a different axis. The relation is restored, but to THIS PIPELINE rather than
+  // to a guessed role: the binding's own systemId must be one of the pipeline's endpoints.
+  // That keeps both legitimate mint placements working (the K3 system may be the pipeline's
+  // source, its target, or both) while an unrelated system's binding is invisible — which also
+  // resolves the two-K3-systems hard-block the reviewer found, since the unrelated one no
+  // longer counts toward ambiguity.
+  // A page this full cannot be proven complete; see the refusal below.
+  const B4_BINDING_PAGE_LIMIT = 500
+
+  async function resolveApprovedB4Binding() {
+    const rows = await b4.readSourceConfigs.list({
+      tenantId: b4.tenantId,
+      workspaceId: b4.workspaceId ?? null,
+      status: 'approved',
+      // list() defaults to a page (review P3): a bounded page could hide a second approved
+      // binding and defeat the ambiguity check — ask for more than the gate can ever accept.
+      limit: B4_BINDING_PAGE_LIMIT,
+    })
+    const page = Array.isArray(rows) ? rows : []
+    // REVIEW P3-2 (round 8): `list()` gives no ordering guarantee, so a FULL page means the set
+    // may be truncated — and a truncated set can hide the second approved binding that the
+    // ambiguity check exists to catch, turning a fail-closed refusal into a silent pass. A full
+    // page is therefore itself a refusal: it is indistinguishable from "there might be more".
+    if (page.length >= B4_BINDING_PAGE_LIMIT) {
+      throw new AdapterValidationError(
+        'too many approved read-source configs to establish B4 binding uniqueness',
+        { code: 'K3_C6_B4_BINDING_PAGE_EXHAUSTED', field: 'b4.readSourceConfigs' },
+      )
+    }
+    return page.filter((row) => {
+      if (!row || row.object !== 'material') return false
+      // The binding must belong to a system THIS pipeline actually uses.
+      const boundSystemId = row.config && typeof row.config === 'object' ? row.config.systemId : undefined
+      if (typeof boundSystemId !== 'string' || !PIPELINE_SYSTEM_IDS.has(boundSystemId)) return false
+      // Full-config, order-insensitive equality via the store's own content key. (The nesting
+      // note that used to sit here bound a local that nothing read — the check itself lives in
+      // b4RowMatchesRatifiedContract, which reads row.config directly.)
+      return b4RowMatchesRatifiedContract(row)
     })
   }
   let adapter = null
@@ -200,12 +324,23 @@ function createK3WiseC6WriteSource({ system, createAdapter } = {}) {
     // planning and fails the dry-run with its own transport codes — fail-closed either way.
     async test() {
       const profile = CUSTOMER_PROFILE
+      const bindings = await resolveApprovedB4Binding()
+      const binding = bindings.length === 1 ? bindings[0] : null
       return {
         success: true,
         capabilityState: {
           customerProfileSelected: selectedProfileId(system) === CUSTOMER_PROFILE_ID,
           saveOnlyLocked: profile.lifecycle === 'save-only',
           applyRowCapped: Number.isInteger(profile.maxApplyRows) && profile.maxApplyRows > 0,
+          // B4 CONSUMPTION: exactly one approved binding, and its identity triple rides the
+          // capability state — which buildRevision hashes, so the dry-run token is CONTENT-
+          // BOUND to the exact approved binding the human saw. Re-approving a changed config
+          // between dry-run and apply is a 409, not a silent swap.
+          b4BindingApproved: bindings.length === 1,
+          b4BindingCount: bindings.length,
+          b4ActionProfileVersion: binding && binding.config ? String(binding.config.actionProfileVersion || '') : '',
+          b4ApprovedConfigVersion: binding ? String(binding.version ?? '') : '',
+          b4ConfigContentKey: binding ? String(binding.contentKey || '') : '',
         },
       }
     },
@@ -262,7 +397,12 @@ const K3_WISE_C6_WRITE_PROFILE = {
       !state || typeof state !== 'object' ||
       typeof state.customerProfileSelected !== 'boolean' ||
       typeof state.saveOnlyLocked !== 'boolean' ||
-      typeof state.applyRowCapped !== 'boolean'
+      typeof state.applyRowCapped !== 'boolean' ||
+      typeof state.b4BindingApproved !== 'boolean' ||
+      !Number.isInteger(state.b4BindingCount) ||
+      typeof state.b4ActionProfileVersion !== 'string' ||
+      typeof state.b4ApprovedConfigVersion !== 'string' ||
+      typeof state.b4ConfigContentKey !== 'string'
     ) {
       throw new AdapterValidationError('K3 C6 write target capability state is unavailable', {
         field: 'capabilityState',
@@ -273,15 +413,28 @@ const K3_WISE_C6_WRITE_PROFILE = {
       customerProfileSelected: state.customerProfileSelected,
       saveOnlyLocked: state.saveOnlyLocked,
       applyRowCapped: state.applyRowCapped,
+      b4BindingApproved: state.b4BindingApproved,
+      b4BindingCount: state.b4BindingCount,
+      b4ActionProfileVersion: state.b4ActionProfileVersion,
+      b4ApprovedConfigVersion: state.b4ApprovedConfigVersion,
+      b4ConfigContentKey: state.b4ConfigContentKey,
     }
   },
   assertSafeCapabilityState(state) {
-    // Real safety property: the named customer profile is what ARMS the adapter's save-only
-    // lifecycle lock and carries the frozen row cap. Any of the three false -> the write
-    // would run without the posture this lifecycle promises -> fail closed.
+    // Real safety property: the named customer profile ARMS the save-only lock and the frozen
+    // row cap; the APPROVED B4 binding is the ratified read contract this write lifecycle is
+    // certified against. Any of the four false -> fail closed. b4BindingCount surfaces the
+    // absent-vs-ambiguous distinction in the same closed vocabulary.
     if (state.customerProfileSelected !== true || state.saveOnlyLocked !== true || state.applyRowCapped !== true) {
       throw new AdapterValidationError('K3 C6 write target is not customer-profile locked', {
         field: 'capabilityState',
+      })
+    }
+    if (state.b4BindingApproved !== true) {
+      throw new AdapterValidationError('K3 C6 write requires exactly one approved B4 read binding', {
+        field: 'capabilityState',
+        code: 'C6_WRITE_B4_BINDING_REQUIRED',
+        bindingCount: state.b4BindingCount,
       })
     }
   },

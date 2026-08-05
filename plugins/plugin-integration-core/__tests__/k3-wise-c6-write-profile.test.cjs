@@ -26,6 +26,70 @@ const {
 const { createK3WiseWebApiAdapter } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
 
 const PROFILE_ID = 'material-k3wise-customer-profile-v1'
+const {
+  K3WISE_MATERIAL_LIST_B4_TEMPLATE: RATIFIED_B4_TEMPLATE,
+} = require('../lib/read-source-k3-material-list-b4-contract.cjs')
+
+// ADVERSARIAL REVIEW P1-2 (20260805): the first version's stub IGNORED list()'s arguments and
+// baked in the scope, so mutating the resolver's scope/filters left every suite green — the
+// gate had zero real coverage. This is a mini-store that HONOURS its arguments: tenant and
+// workspace exact (null-distinct, like the real scopeWhere), status filter, and the page limit.
+// Any filter the resolver drops is now visible as a wrong row surviving.
+function b4Store(rows) {
+  return {
+    async list(input = {}) {
+      const wanted = input.workspaceId ?? null
+      let out = rows.filter((row) => {
+        if (row.tenantId !== input.tenantId) return false
+        if ((row.workspaceId ?? null) !== wanted) return false
+        if (input.status !== undefined && row.status !== input.status) return false
+        return true
+      })
+      const limit = Number.isInteger(input.limit) && input.limit > 0 ? input.limit : 100
+      return out.slice(0, limit)
+    },
+  }
+}
+function b4Of(rows, overrides = {}) {
+  return {
+    readSourceConfigs: b4Store(rows),
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    pipelineSystemIds: ['source_1', 'k3-target-1'],
+    ...overrides,
+  }
+}
+// Row shape as the STORE emits it: actionProfileVersion lives in the nested config
+// (review P2-1 — the first version read a top-level field the store never emits, so the
+// "identity triple" carried a permanently empty member).
+const { normalizeReadSourceConfig } = require('../lib/read-source-config.cjs')
+const { __internals: { contentKeyFor } } = require('../lib/read-source-config-store.cjs')
+
+function b4Row(overrides = {}) {
+  const { config: configOverride, contentKey: contentKeyOverride, ...rest } = overrides
+  const config = {
+    ...JSON.parse(JSON.stringify(RATIFIED_B4_TEMPLATE)),
+    systemId: 'source_1',
+    ...(configOverride || {}),
+  }
+  // REVIEW P2-E4: the contentKey is now the gate's comparator, so the fixture must carry the
+  // REAL one — computed by the store's own contentKeyFor over the normalized config, exactly
+  // as a genuine mint would. A hand-written string would make every gate assertion vacuous.
+  let realContentKey
+  try { realContentKey = contentKeyFor(normalizeReadSourceConfig(config)) } catch { realContentKey = 'unnormalizable' }
+  return {
+    id: 'rsc_b4_1',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    object: 'material',
+    status: 'approved',
+    version: 3,
+    contentKey: contentKeyOverride !== undefined ? contentKeyOverride : realContentKey,
+    config,
+    ...rest,
+  }
+}
+const APPROVED_B4_ROW = Object.freeze(b4Row())
 
 function memoryStore() {
   const map = new Map()
@@ -145,6 +209,7 @@ function c6Inputs({ rows, fetchPair, targetOverrides, tokenStore, maxRows }) {
   const writeSource = createK3WiseC6WriteSource({
     system: targetSystem,
     createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([APPROVED_B4_ROW]),
   })
   return {
     pipeline,
@@ -351,6 +416,7 @@ test('fail-closed capability: profile deselected between derive and plan -> unsa
       dataSourceWrites: createK3WiseC6WriteSource({
         system: disarmed,
         createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+        b4: b4Of([APPROVED_B4_ROW]),
       }),
       targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
       tokenStore,
@@ -449,6 +515,7 @@ test('REVIEW P2: an unchanged reference-shaped field converges to skip (unwrap p
     dataSourceWrites: createK3WiseC6WriteSource({
       system: targetSystem,
       createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+      b4: b4Of([APPROVED_B4_ROW]),
     }),
     targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
     tokenStore,
@@ -486,4 +553,276 @@ test('REVIEW P2: a Save failure WITH a K3 Code field still lands as the register
   })
   assert.deepEqual(apply.rowErrors.map((e) => e.errorCode), ['K3_WISE_SAVE_FAILED'],
     'the closed token must be unconditional — K3 code strings are neither SAFE-registered nor values-free')
+})
+
+
+test('B4 GATE: zero approved bindings -> refused before any row (absent is fail-closed)', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-B4', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([]),
+  })
+  await assert.rejects(
+    dryRunExternalWrite(input),
+    (error) => /approved B4 read binding/.test(String(error && error.message)),
+  )
+  assert.equal(fetchPair.calls.length, 0, 'B4 refusal precedes ALL network activity')
+})
+
+test('B4 GATE: two approved bindings -> refused (ambiguous is fail-closed, never a silent pick)', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-B4', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([APPROVED_B4_ROW, b4Row({ id: 'rsc_b4_2', version: 4, config: { systemId: 'k3-target-1' } })]),
+  })
+  await assert.rejects(
+    dryRunExternalWrite(input),
+    (error) => /approved B4 read binding/.test(String(error && error.message)),
+  )
+})
+
+test('REVIEW P3-2: a FULL page of approved configs is a refusal, not a silent pass', async () => {
+  // `list()` gives no ordering guarantee, so a full page may be truncated — and a truncated set
+  // can hide the second approved binding that the ambiguity check above exists to catch. A full
+  // page is indistinguishable from "there might be more", so it fails closed.
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-B4', name: 'N' }], fetchPair, tokenStore })
+  const fullPage = Array.from({ length: 500 }, (_, i) => b4Row({ id: `rsc_pad_${i}`, object: 'material-bom' }))
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([APPROVED_B4_ROW, ...fullPage.slice(0, 499)]),
+  })
+  await assert.rejects(
+    dryRunExternalWrite(input),
+    (error) => /uniqueness|B4_BINDING_PAGE_EXHAUSTED/.test(String((error && error.message) || ''))
+      || (error && error.details && error.details.code === 'K3_C6_B4_BINDING_PAGE_EXHAUSTED'),
+    'a page filled to the limit must refuse rather than resolve from a possibly-truncated set',
+  )
+
+  // POSITIVE CONTROL: one under the limit still resolves normally — without this, a guard that
+  // refused every page would satisfy the assertion above.
+  const okInput = c6Inputs({ rows: [{ code: 'M-B4', name: 'N' }], fetchPair: mockK3(), tokenStore: memoryStore() })
+  okInput.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([APPROVED_B4_ROW, ...fullPage.slice(0, 498)]),
+  })
+  const plan = await dryRunExternalWrite(okInput)
+  assert.ok(plan, 'a page under the limit must still produce a plan')
+})
+
+test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry-run revision', async () => {
+  // The identity triple rides the capability state, which buildRevision hashes — so swapping
+  // the approved binding between dry-run and apply is a 409, not a silent substitution. Proven
+  // at the revision level: same rows, same pipeline, different binding -> different revision.
+  const rows = [{ code: 'M-B4-REV', name: 'Rev probe', spec: 'S' }]
+  async function revisionWith(binding) {
+    const tokenStore = memoryStore()
+    const fetchPair = mockK3()
+    const input = c6Inputs({ rows, fetchPair, tokenStore })
+    input.dataSourceWrites = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+      b4: b4Of([binding]),
+    })
+    const out = await dryRunExternalWrite(input)
+    assert.equal(out.status, 'ready')
+    return out.evidence ? out.evidence.dryRunRevision : out.revision
+  }
+  const base = await revisionWith(APPROVED_B4_ROW)
+  assert.ok(base, 'base revision must be observable')
+  // PER-FIELD variation: a single identity field changing must change the revision. Varying
+  // two at once would let a mutation that de-binds ONE field hide behind the other.
+  // contentKey is now DERIVED from the config (review P2-E4), so the legitimately-varying
+  // dimensions of an otherwise-ratified binding are the store-minted version and the systemId
+  // (either pipeline endpoint is valid). Each must move the revision on its own.
+  const versionOnly = await revisionWith(b4Row({ version: 9 }))
+  const systemIdOnly = await revisionWith(b4Row({ config: { systemId: 'k3-target-1' } }))
+  assert.notEqual(base, versionOnly, 'approvedConfigVersion alone must move the revision')
+  assert.notEqual(base, systemIdOnly, 'configContentKey (via systemId) alone must move the revision')
+  // actionProfileVersion is NOT a free variable any more: it is pinned to the ratified
+  // contract, so a different one is REFUSED rather than producing another revision. That is
+  // the stronger property — asserted in its own test below.
+})
+
+test('B4 FILTER: a non-ratified actionProfileVersion is not the B4 binding — refused', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-F1', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([b4Row({ config: { actionProfileVersion: 'k3wise.material_list.v2' } })]),
+  })
+  await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)))
+})
+
+test('B4 FILTER: a DRAFT row of the ratified contract must not satisfy the gate (status is load-bearing)', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-F2', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([b4Row({ status: 'draft' })]),
+  })
+  await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)))
+})
+
+test('B4 FILTER: an approved NON-material config must not satisfy the gate (object is load-bearing)', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-F3', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([b4Row({ object: 'material-bom' })]),
+  })
+  await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)))
+})
+
+test('B4 SCOPE: a binding minted in ANOTHER tenant/workspace is invisible (scope is load-bearing)', async () => {
+  for (const foreign of [{ tenantId: 'tenant_other' }, { workspaceId: 'workspace_other' }, { workspaceId: null }]) {
+    const tokenStore = memoryStore()
+    const fetchPair = mockK3()
+    const input = c6Inputs({ rows: [{ code: 'M-F4', name: 'N' }], fetchPair, tokenStore })
+    input.dataSourceWrites = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+      b4: b4Of([b4Row(foreign)]),
+    })
+    await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)),
+      `a binding at ${JSON.stringify(foreign)} must not satisfy this pipeline's scope`)
+  }
+})
+
+test('B4 IDENTITY: the resolved binding\'s real values ride the capability state (not empty strings)', async () => {
+  // Review P2-1: the first version read a top-level actionProfileVersion the store never
+  // emits, so the member was permanently ''. Assert the REAL values arrive.
+  const source = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+  const state = (await source.test()).capabilityState
+  assert.equal(state.b4BindingApproved, true)
+  assert.equal(state.b4ActionProfileVersion, 'k3wise.material_list.v1', 'must come from row.config, not a missing top-level field')
+  assert.equal(state.b4ApprovedConfigVersion, '3')
+  assert.equal(state.b4ConfigContentKey, APPROVED_B4_ROW.contentKey,
+    'the REAL store-computed content key rides the capability state')
+  assert.ok(/^[0-9a-f]{64}$/.test(state.b4ConfigContentKey), 'and it is a real sha256, not a fixture string')
+})
+
+
+test('B4 RELATION: a binding approved on an UNRELATED K3 system must not vouch for this write', async () => {
+  // Reviewer scenario 1: dropping systemId entirely let one system's read contract back
+  // another system's write — the round-2 defect rotated onto a new axis.
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-R1', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([b4Row({ config: { systemId: 'k3-system-UNRELATED' } })]),
+  })
+  await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)))
+  assert.equal(fetchPair.calls.length, 0)
+})
+
+test('B4 RELATION: the binding may be minted on EITHER pipeline endpoint (source or target)', async () => {
+  for (const boundTo of ['source_1', 'k3-target-1']) {
+    const source = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+      b4: b4Of([b4Row({ config: { systemId: boundTo } })]),
+    })
+    const state = (await source.test()).capabilityState
+    assert.equal(state.b4BindingApproved, true, `a binding on ${boundTo} is legitimately this pipeline's`)
+    assert.equal(state.b4BindingCount, 1)
+  }
+})
+
+test('B4 RELATION: an unrelated system\'s binding does not create false ambiguity', async () => {
+  // Reviewer scenario 2: two K3 systems each approved -> the whole scope was hard-blocked.
+  // The unrelated one must simply not count.
+  const source = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([
+      b4Row({ config: { systemId: 'source_1' } }),
+      b4Row({ id: 'rsc_b4_other', contentKey: 'other', config: { systemId: 'k3-system-UNRELATED' } }),
+    ]),
+  })
+  const state = (await source.test()).capabilityState
+  assert.equal(state.b4BindingCount, 1, 'only this pipeline\'s binding counts')
+  assert.equal(state.b4BindingApproved, true)
+})
+
+
+test('REVIEW P2-D2: the B4 gate checks CONTENT, not just the profile-version string', async () => {
+  // A reviewer minted a config whose mode/readPath/containerPaths/fieldMap all differed from
+  // the ratified template and passed the gate by typing the right actionProfileVersion — the
+  // gate was self-certifying. Each divergence below must now be refused on its own.
+  const divergences = [
+    ['mode', { mode: 'single_record' }],
+    ['readPath', { readPath: '/K3API/Material/GetDetail' }],
+    ['containerPaths', { containerPaths: ['Data'] }],
+    ['fieldMap', { fieldMap: [{ source: 'FModel', target: 'erpSpec' }] }],
+    ['requiredKind', { requiredKind: 'http' }],
+    // NOT included: `operations`. Measured — validateReadSourceConfig REJECTS a non-read-only
+    // operations list outright (READ_SOURCE_WRITE_CONFIG_REJECTED) and normalizeReadSourceConfig
+    // forces it back to ['read'], so such a row cannot be minted at all. Listing it here would
+    // have asserted the gate catches something the store never lets exist — a stronger-sounding
+    // but false claim. The read-only line upstream is the real carrier.
+  ]
+  for (const [label, patch] of divergences) {
+    const source = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+      // Keep the row's contentKey as the RATIFIED one while the config diverges — that is
+      // exactly the forgery the key-projection version could not see (review P2-E4).
+      b4: b4Of([b4Row({ config: patch, contentKey: APPROVED_B4_ROW.contentKey })]),
+    })
+    const state = (await source.test()).capabilityState
+    assert.equal(state.b4BindingApproved, false, `a config diverging in ${label} must not certify`)
+  }
+
+  // POSITIVE CONTROL: the ratified content (the fixture's default) certifies — otherwise the
+  // assertions above would also hold for a gate that rejected everything.
+  const good = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+  assert.equal((await good.test()).capabilityState.b4BindingApproved, true)
+})
+
+test('B4 GATE: the two content checks are EXCLUSIVE — neither may cover for the other', async () => {
+  // Mutation record: removing the ratified-equality check alone left the suite green, because
+  // the self-consistency check was covering for it. That is the "gates covering for each other"
+  // trap. These two rows each defeat exactly ONE check, so each must fail on its own.
+  const forgeries = [
+    // (a) SELF-CONSISTENT but NOT the ratified content: a genuinely mintable row that simply
+    //     is not the B4 contract. Only the ratified-equality check can refuse it.
+    ['self-consistent, non-ratified', b4Row({ config: { keyField: 'FNumber' } })],
+    // (b) key claims the ratified content while the config diverges — impossible for a genuine
+    //     mint, but only the self-consistency check can refuse it.
+    ['key/config mismatch', b4Row({ config: { readPath: '/K3API/Material/GetDetail' }, contentKey: APPROVED_B4_ROW.contentKey })],
+  ]
+  for (const [label, row] of forgeries) {
+    const source = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+      b4: b4Of([row]),
+    })
+    assert.equal((await source.test()).capabilityState.b4BindingApproved, false, `${label} must not certify`)
+  }
 })

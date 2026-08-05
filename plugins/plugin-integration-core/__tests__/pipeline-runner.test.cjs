@@ -1211,6 +1211,26 @@ async function main() {
   // --- 6. Dead-letter status guard — already-replayed letter is rejected --
   // The first replay in scenario 5 left dl_1 in status='replayed'. A second
   // replay attempt must throw before any ERP call happens.
+  // --- OWNER REVIEW P1 (20260805): K3 live writes are C6-ONLY at the runner layer ---
+  {
+    const k3Run = createRunnerHarness({ sourceRecords: [{ code: 'c-run', revision: 'r1', qty: '1', name: 'X', updatedAt: '2026-08-05T00:00:00.000Z' }], targetSystemKind: 'erp:k3-wise-webapi' })
+    const runRefusal = await k3Run.runner.runPipeline({
+      tenantId: 'tenant_1', workspaceId: null, pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'test',
+    }).catch((error) => error)
+    assert.ok(runRefusal instanceof Error, 'K3-target live run must refuse')
+    assert.equal(runRefusal.details && runRefusal.details.code, 'K3_WISE_PIPELINE_RUN_DISABLED')
+    assert.equal(k3Run.targetRows.size, 0, 'nothing may be written')
+    // Discriminating control: with dryRun the guard must NOT fire — the next failure is the
+    // harness registry not knowing the K3 kind (adapter creation), proving the guard keys on
+    // dryRun, not on the kind alone.
+    const dryProbe = await k3Run.runner.runPipeline({
+      tenantId: 'tenant_1', workspaceId: null, pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'test', dryRun: true,
+    }).catch((error) => error)
+    assert.ok(dryProbe instanceof Error)
+    assert.notEqual(dryProbe.details && dryProbe.details.code, 'K3_WISE_PIPELINE_RUN_DISABLED',
+      'dry-run must pass the guard (its failure here is the harness registry, by design)')
+  }
+
   // --- RATIFIED (owner, 20260805): replay is DISABLED for K3 WISE targets ---
   // The guard fires in replayDeadLetter BEFORE runPipeline — before any read, any run
   // record, any adapter creation — so the unregistered K3 kind never reaches the registry.

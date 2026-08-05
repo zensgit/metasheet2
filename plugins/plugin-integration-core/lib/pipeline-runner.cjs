@@ -318,6 +318,17 @@ function createPipelineRunner(deps = {}) {
     })
     assertActiveSystem(sourceSystem, 'sourceSystem')
     assertActiveSystem(targetSystem, 'targetSystem')
+    // OWNER REVIEW P1 (20260805): the plain pipeline run was still a token-less live write to
+    // K3 — the C6 dry-run -> approval-token -> apply lifecycle is the ONLY sanctioned K3 write
+    // entry. Fail closed HERE (target resolution, before any adapter/read/write), which also
+    // covers replay (it calls runPipeline) as a second fence behind K3_WISE_REPLAY_DISABLED.
+    // dryRun stays allowed: previews are read-only and the C6 planner needs nothing from here.
+    if (targetSystem.kind === 'erp:k3-wise-webapi' && input.dryRun !== true) {
+      throw new PipelineRunnerError('K3 WISE live writes are C6-only: use external-write dry-run + apply', {
+        code: 'K3_WISE_PIPELINE_RUN_DISABLED',
+        pipelineId: pipeline.id,
+      })
+    }
     return {
       tenantId,
       workspaceId,

@@ -37,6 +37,11 @@ const require = createRequire(import.meta.url)
 const { createK3WiseWebApiAdapter } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs')
 const { createK3WiseSqlServerChannel } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs')
 const {
+  K3WISE_MATERIAL_LIST_B4_TEMPLATE,
+} = require('../../../../plugins/plugin-integration-core/lib/read-source-k3-material-list-b4-contract.cjs')
+const { normalizeReadSourceConfig } = require('../../../../plugins/plugin-integration-core/lib/read-source-config.cjs')
+const { __internals: { contentKeyFor } } = require('../../../../plugins/plugin-integration-core/lib/read-source-config-store.cjs')
+const {
   K3_WISE_C6_MAX_APPLY_ROWS,
   K3_WISE_C6_WRITE_PROFILE,
   createK3WiseC6WriteSource,
@@ -334,6 +339,34 @@ async function main() {
         dataSourceWrites: createK3WiseC6WriteSource({
           system: chainTarget,
           createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: globalThis.fetch }),
+          // The B4 binding the ops runbook MINTS on the target environment — the demo stub
+          // stands in for the store row the real mint produces (owner review 20260805:
+          // C6 must CONSUME the approved binding, not merely coexist with it).
+          b4: {
+            readSourceConfigs: {
+              // Honours its arguments (review P1-2: a stub that ignores scope hides the gate).
+              async list(input = {}) {
+                // The row a genuine mint produces: ratified content + this environment's
+                // systemId, with the contentKey computed by the STORE's own function (review
+                // P2-E4 — the gate compares content keys, so a hand-written one would make the
+                // demo prove nothing).
+                const demoConfig = { ...K3WISE_MATERIAL_LIST_B4_TEMPLATE, systemId: 'source_demo' }
+                const row = {
+                  id: 'rsc_demo_b4', tenantId: 'tenant_demo', workspaceId: null,
+                  object: 'material', status: 'approved', version: 1,
+                  contentKey: contentKeyFor(normalizeReadSourceConfig(demoConfig)),
+                  config: demoConfig,
+                }
+                if (input.tenantId !== row.tenantId) return []
+                if ((input.workspaceId ?? null) !== row.workspaceId) return []
+                if (input.status !== undefined && input.status !== row.status) return []
+                return [row]
+              },
+            },
+            tenantId: 'tenant_demo',
+            workspaceId: null,
+            pipelineSystemIds: ['source_demo', chainTarget.id],
+          },
         }),
         targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
         tokenStore,

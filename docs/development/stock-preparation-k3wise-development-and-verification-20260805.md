@@ -71,6 +71,24 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 前置:#4628 五步完成(部署、迁移前建角色、external-system 记录、B4 mint 并记三元组、授权位翻正)。
 以下路由均已在 main 的路由表核实;`<...>` 为环境占位,不含真实值。
 
+### 步 0(新增,窗口**开始前**做,不在窗口内):baseUrl 字符集预检
+
+`#4769` 起,`config.baseUrl` 的**路径部分**与其它路径字段走同一条正向白名单
+(`/^\/[A-Za-z0-9\-._~/]*$/`,并整类拒绝百分号编码)。这带来一条**此前不存在的部署约束**:
+
+| baseUrl 形状 | 结果 |
+|---|---|
+| `https://k3/K3API`、`https://k3/k3cloud/K3API`、`https://192.168.1.5/K3API` | ✅ 接受 |
+| `https://k3/金蝶API`(**非 ASCII 虚拟目录**) | ❌ 拒 `K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE` |
+| `https://k3/K3 API`(路径含空格) | ❌ 同上 |
+
+**为什么不放宽**:ASCII-only 是这道白名单挡住 Unicode 形近字(全角 Ｓubmit 等)的承重属性,
+放宽等于把前九轮关掉的一整类重新打开。**所以这是预检,不是待修缺陷。**
+
+**操作**:窗口前向客户取实际 baseUrl,确认路径段只含 ASCII 字母数字与 `-._~`。若客户 IIS
+用了中文虚拟目录,在**窗口之前**协商改用 ASCII 别名站点/虚拟目录,或升 owner 裁决。
+**窗口不可重试**,而这条会在 adapter 构造期即失败(读、写都进不去),故必须前置排除。
+
 1. **只读预检**:`POST /api/integration/external-systems/<k3SystemId>/read-smoke`
    (preset `k3wise.material-list.v1`)⇒ 期望 values-free 证据:业务成功、行数 ≤10、零泄漏键。
 2. **建/核窗口 pipeline**:`POST /api/integration/pipelines` —— target=K3 系统(config 已含
@@ -86,8 +104,36 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 6. **留证**:dry-run/apply 响应的 values-free 字段(counts、status、closed tokens)+ run 引用
    归档;三元组(B4 mint 时已记)与 `serviceRuntimeSha e1b91594e`、候选包 digest 并列。
 
-**PASS 判据**:1–6 全绿且 `0 Submit / 0 Audit`(服务端不变量,无需人工数)。
+**PASS 判据**:1–6 全绿且 `0 Submit / 0 Audit`。
+
+> **该不变量的实际载体**(复审后更正 —— 原文只写"服务端不变量"而未说由什么保证,
+> 而当时它确实**可被绕过**):① save-only profile 在运行期强制 `autoSubmit/autoAudit=false`
+> 并删除 submit/audit 端点;② profile 拥有的请求形状键 merge 后重钉、未声明的整形键删除
+> (含 `readBodyTemplate`/`bodyTemplate`/`passThroughBody` 等 body 注入通道);
+> ③ **无条件**守卫:任何 K3 读路径不得指向生命周期写端点(`K3_WISE_READ_PATH_IS_WRITE_ENDPOINT`)
+> —— 这一条不依赖是否选了 profile,因为 K3 **source** 管道合法无 profile;
+> ④ material 写与**预览**均要求命名 profile(`K3_WISE_MATERIAL_PROFILE_REQUIRED`);
+> ⑤ `/run` 对 K3 目标整体 fail-closed(`K3_WISE_PIPELINE_RUN_DISABLED`),C6 是唯一写入口;
+> ⑥ 预览的 auto-flag 镜像 save-only 锁 —— **预览等于写**。
+> 前三条各自由独立对抗复审构造的可执行利用推动;每条都有 mutation 探针。
 **异常恢复**:任何一步失败 ⇒ 修正后**从步骤 3 重走**(重新人工批准)。replay 已禁用,by design。
+
+## 6b. 对抗复审记录(2026-08-05,四轮)
+
+窗口 runbook 落地后经四轮独立 exact-head 对抗复审,累计 **3 P1 + 8 P2 CONFIRMED**,全部已修。
+P1 的三条是**同一个类的三条轴**,而我每轮只封住了刚被展示的那个实例:
+
+| 轴 | 逃逸方式 | 修法 |
+|---|---|---|
+| 字段 | 钉了 `savePath`,`readPath` 更宽(dry-run 期驱动) | 钉整个请求形状类 |
+| **跨文件** | `k3-save-body-composer.cjs` 从同一份配置读 `passThroughBody`/`bodyTemplate` | sweep 扫全部消费者,消费者清单对全仓遍历比对 |
+| **跨条件** | 整个钉在 `if (saveOnlyProfile)` 内 —— 由被防御者自愿启用 | 读路径守卫**无条件**,覆盖两个填充循环 |
+
+其余 P2 含:集合是标签而非行为(键在集合间移动全绿)、B4 绑定失去与本 pipeline 的关系、
+`previewUpsert` 缺守卫且不镜像 save-only 锁、零调用断言无正控、类型混淆探针被降级而台账称"零降级"。
+
+**方法学结论**:声称"某一类已关闭"时,**交付物必须是机械断言而非清单** ——
+本线现有 sweep 契约(遍历源码枚举读取点、要求三集合全覆盖、带匹配下限防空过)即为此。
 
 ## 7. 唯一未完成项
 

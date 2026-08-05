@@ -110,10 +110,19 @@ test('POSTURE: every wired profile REFUSES every other profile\'s kind, attribut
 // (3) The K3 profile's safety gate is load-bearing, not a rubber stamp.
 // ---------------------------------------------------------------------------
 
-test('K3 capability gate: all three booleans true -> pass; each one false -> refuse', () => {
+test('K3 capability gate: all guards true -> pass; each one false -> refuse', () => {
+  // Capability shape extended DELIBERATELY (owner review 20260805): the approved B4 binding
+  // is consumed through the capability state, whose fields buildRevision hashes — the gate
+  // and the content-binding are the same surface.
   const good = {
     success: true,
-    capabilityState: { customerProfileSelected: true, saveOnlyLocked: true, applyRowCapped: true },
+    capabilityState: {
+      customerProfileSelected: true, saveOnlyLocked: true, applyRowCapped: true,
+      b4BindingApproved: true, b4BindingCount: 1,
+      b4ActionProfileVersion: 'k3wise.material_list.v1',
+      b4ApprovedConfigVersion: '3',
+      b4ConfigContentKey: 'b4-content-key-x',
+    },
   }
   const state = K3_WISE_C6_WRITE_PROFILE.normalizeCapabilityState(good)
   assert.doesNotThrow(() => K3_WISE_C6_WRITE_PROFILE.assertSafeCapabilityState(state))
@@ -129,10 +138,34 @@ test('K3 capability gate: all three booleans true -> pass; each one false -> ref
       `${key}=false must refuse — each boolean is individually load-bearing`,
     )
   }
+  const noB4 = K3_WISE_C6_WRITE_PROFILE.normalizeCapabilityState({
+    success: true,
+    capabilityState: { ...good.capabilityState, b4BindingApproved: false, b4BindingCount: 0 },
+  })
+  assert.throws(
+    () => K3_WISE_C6_WRITE_PROFILE.assertSafeCapabilityState(noB4),
+    /approved B4 read binding/,
+    'the write lifecycle must not run without its ratified read contract',
+  )
 })
 
 test('K3 capability gate: malformed state is refused, never coerced', () => {
-  for (const malformed of [undefined, null, {}, { capabilityState: {} }, { capabilityState: { customerProfileSelected: 'yes', saveOnlyLocked: true, applyRowCapped: true } }]) {
+  // REVIEW P2-C2: I had downgraded the type-confusion probe ('yes' -> true) while the ledger
+  // claimed "zero downgraded". A three-way control proved the loss: with the probe restored, a
+  // type-check -> presence-check mutation is RED; without it, green. Restored, and extended to
+  // the members the first version left unwitnessed.
+  const goodState = {
+    customerProfileSelected: true, saveOnlyLocked: true, applyRowCapped: true,
+    b4BindingApproved: true, b4BindingCount: 1,
+    b4ActionProfileVersion: 'k3wise.material_list.v1', b4ApprovedConfigVersion: '3',
+    b4ConfigContentKey: 'b4-content-key-x',
+  }
+  const typeConfusions = [
+    { customerProfileSelected: 'yes' }, { saveOnlyLocked: 'true' }, { applyRowCapped: 1 },
+    { b4BindingApproved: 'yes' }, { b4BindingCount: '1' },
+    { b4ActionProfileVersion: null }, { b4ApprovedConfigVersion: 3 }, { b4ConfigContentKey: 0 },
+  ].map((patch) => ({ capabilityState: { ...goodState, ...patch } }))
+  for (const malformed of [undefined, null, {}, { capabilityState: {} }, ...typeConfusions]) {
     assert.throws(
       () => K3_WISE_C6_WRITE_PROFILE.normalizeCapabilityState(malformed),
       /capability state is unavailable/,
