@@ -1258,7 +1258,9 @@ export async function acquireAttendanceCalculationRolloutLock(
  *
  * This function closes that window by construction, not by narrowing it: it acquires the SAME
  * advisory key at SESSION level (`pg_advisory_lock`, not `_xact_`), as its own standalone
- * (autocommit) statement, on a connection that must not yet be inside a transaction. Advisory
+ * (autocommit) statement, on a connection that must not yet be inside a transaction — ENFORCED
+ * (not merely documented — see `assertConnectionIsIdleForSessionExclusiveRolloutLockV1` below,
+ * W4C-5 NEW-B hardening) as this function's own first statement, fail-closed. Advisory
  * locks share one lock table regardless of session-vs-transaction scope (PostgreSQL docs
  * 9.27.9 / 13.3.5), so this still correctly blocks behind every existing
  * `pg_advisory_xact_lock_shared` writer and every other exclusive holder on the same key. The
@@ -1284,6 +1286,14 @@ export async function acquireAttendanceCalculationRolloutLockSessionExclusiveV1(
   connection: AttendanceW4TransactionClientV1,
   org: CanonicalAttendanceRolloutOrgKeyV1,
 ): Promise<void> {
+  // W4C-5 NEW-B hardening (PR #4773 exact-head independent DELTA gate, 20260805): this used to be
+  // a doc-comment-only precondition ("must not yet be inside a transaction") with no enforcement
+  // or test — a caller that pre-opened a transaction on `connection` before calling this function
+  // silently ran the rest of the transition inside ITS OWN already-fixed snapshot (PostgreSQL
+  // does not error on a nested `BEGIN`, it only WARNs and no-ops), reintroducing the exact P1-2
+  // defect this function exists to close, with no red test anywhere. Enforced now, first
+  // statement, before any lock side effect.
+  await assertConnectionIsIdleForSessionExclusiveRolloutLockV1(connection)
   const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
   // `SET lock_timeout = $1` is not valid SQL (SET does not accept a bind parameter);
   // `set_config(..., false)` is a normal function call and does, and `false` (not the
@@ -1304,6 +1314,51 @@ export async function acquireAttendanceCalculationRolloutLockSessionExclusiveV1(
     // session's actual configured default was before this function overrode it.
     await connection.query('RESET lock_timeout').catch(() => undefined)
   }
+}
+
+/**
+ * W4C-5 NEW-B hardening. Proves — does not merely assume — that `connection` has no open
+ * transaction block, BEFORE `acquireAttendanceCalculationRolloutLockSessionExclusiveV1` does
+ * anything else. Detection cannot use `pg_current_xact_id_if_assigned()` (or any other xid-based
+ * probe): PostgreSQL assigns a real transaction ID lazily, on first WRITE. A caller that opened
+ * `BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT 1;` — exactly the shape that fixes a dangerous
+ * snapshot — has NO xid yet, so an xid-based probe would read "idle" for both an autocommit
+ * connection and this exact dangerous open-but-unwritten transaction: a false negative on
+ * precisely the case that matters.
+ *
+ * Instead this issues `SAVEPOINT` as the probe (verified empirically against real PostgreSQL
+ * 15, both via `psql` and via this codebase's own `pg` driver): PostgreSQL raises SQLSTATE
+ * `25P01` (`no_active_sql_transaction`, "SAVEPOINT can only be used in transaction blocks") IF
+ * AND ONLY IF there is no open transaction block on the connection — independent of whether an
+ * xid has ever been assigned. A `25P01` therefore proves idle (autocommit); the SAVEPOINT
+ * succeeding proves the opposite (an open transaction already exists) and is the only case that
+ * needs cleanup (`ROLLBACK TO SAVEPOINT`) before failing closed — the idle path never created
+ * anything to clean up. Any OTHER error (neither `25P01` nor a successful SAVEPOINT) is
+ * rethrown unchanged rather than silently treated as "idle": this function only ever certifies
+ * idleness on affirmative proof (the `25P01`), never on the absence of a different error.
+ */
+async function assertConnectionIsIdleForSessionExclusiveRolloutLockV1(
+  connection: AttendanceW4TransactionClientV1,
+): Promise<void> {
+  try {
+    await connection.query('SAVEPOINT w4c5_idle_probe')
+  } catch (error) {
+    if (isNoActiveTransactionForSavepoint(error)) return // proven idle — proceed
+    throw error // some other failure; never mask it as "idle"
+  }
+  // The SAVEPOINT succeeded: `connection` already had an open transaction block on entry. Clean
+  // up the probe savepoint (nothing else was ever written under it) and fail closed — silently
+  // proceeding here is exactly the P1-2 regression this function exists to prevent.
+  await connection.query('ROLLBACK TO SAVEPOINT w4c5_idle_probe').catch(() => undefined)
+  fail('W4C0_ROLLOUT_LOCK_CONNECTION_NOT_IDLE')
+}
+
+function isNoActiveTransactionForSavepoint(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === '25P01'
+  )
 }
 
 /**

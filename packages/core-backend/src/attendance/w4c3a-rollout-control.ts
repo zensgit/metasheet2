@@ -920,7 +920,11 @@ export async function transitionAttendanceCalculationRolloutV1(
   // transaction. See `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`'s doc comment
   // for why this — and not any transaction-scoped acquisition, no matter how early inside the
   // transaction — is what makes every section 3 predicate below actually re-evaluate a snapshot
-  // that postdates the wait.
+  // that postdates the wait. W4C-5 NEW-B hardening (PR #4773 gate, 20260805): that idle
+  // precondition is no longer a comment-only claim — `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`
+  // now proves it (a `SAVEPOINT` probe) as its own first statement and fails closed with
+  // `W4C0_ROLLOUT_LOCK_CONNECTION_NOT_IDLE` rather than silently running inside the caller's
+  // pre-fixed snapshot.
   await acquireAttendanceCalculationRolloutLockSessionExclusiveV1(connection, orgKey)
   try {
     // Inside the try (not before it): a throwing test hook must still release the lock via the

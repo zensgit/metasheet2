@@ -1154,6 +1154,66 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     })
   })
 
+  describe('W4C-5 NEW-B: the session-exclusive rollout lock requires an idle connection — enforced, not just documented', () => {
+    // PR #4773 exact-head independent DELTA gate (20260805) constructed this exact probe against
+    // the pre-fix code: a caller that pre-opens `BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT 1;`
+    // on the SAME connection before calling `transitionAttendanceCalculationRolloutV1` fixes the
+    // OUTER transaction's snapshot before the session-level rollout lock is ever requested —
+    // silently reintroducing the exact P1-2 defect (PostgreSQL only WARNs on a nested `BEGIN`,
+    // it does not error), `RESOLVED {state:'shadow'}`, no red test anywhere. Mutation-confirmed
+    // (see PR mutation ledger): neutering `assertConnectionIsIdleForSessionExclusiveRolloutLockV1`
+    // turns this leg from a `W4C0_ROLLOUT_LOCK_CONNECTION_NOT_IDLE` rejection back into a silent
+    // `RESOLVED`, reproducing the gate's finding exactly.
+    it('rejects a transition called on a connection that already has an open transaction', async () => {
+      const idleOrg = crypto.randomUUID()
+      allow(idleOrg)
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        await client.query('SELECT 1') // fixes the SERIALIZABLE snapshot; no write yet, no xid assigned
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: idleOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+            evidenceManifestSha256: hex64('new-b-not-idle'), evidenceReferences: baseRefs('new-b-not-idle'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C0_ROLLOUT_LOCK_CONNECTION_NOT_IDLE' })
+        // No rollout row was ever created — the rejection happened before any rollout DML.
+        await expect(pool.query(
+          'SELECT count(*)::int AS n FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [idleOrg],
+        )).resolves.toMatchObject({ rows: [{ n: 0 }] })
+        // The caller's own pre-opened transaction is still open and usable afterward — the
+        // probe's `ROLLBACK TO SAVEPOINT` cleanup must not have touched it.
+        await expect(client.query('SELECT 1 AS still_alive')).resolves.toMatchObject({
+          rows: [{ still_alive: 1 }],
+        })
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+
+    it('positive control: an idle connection (the normal call shape) still transitions successfully', async () => {
+      const idleOrg = crypto.randomUUID()
+      allow(idleOrg)
+      const client = await pool.connect()
+      try {
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: idleOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+            evidenceManifestSha256: hex64('new-b-idle-control'), evidenceReferences: baseRefs('new-b-idle-control'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).resolves.toMatchObject({ state: 'shadow' })
+      } finally {
+        client.release()
+      }
+    })
+  })
+
   describe('W4C-5 P1-2 hygiene: the session-level exclusive lock is actually released, not just asserted to be', () => {
     // The `finally` release in `transitionAttendanceCalculationRolloutV1` is otherwise an
     // UNTESTED guard: every test in this file uses a fresh `crypto.randomUUID()` org per case,
