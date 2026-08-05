@@ -421,6 +421,11 @@ function normalizeObjects(config) {
       normalized[name].lifecycle = 'save-only'
       delete normalized[name].submitPath
       delete normalized[name].auditPath
+      // HARD LOCK (K3WriteDecision): the profile's apply row cap is pinned AFTER the merge,
+      // from the profile literal — an operator overlay can neither raise nor remove it.
+      if (Number.isInteger(base.maxApplyRows) && base.maxApplyRows > 0) {
+        normalized[name].maxApplyRows = base.maxApplyRows
+      }
     }
   }
   for (const [name, value] of Object.entries(configured)) {
@@ -2000,6 +2005,18 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     const autoSubmit = saveOnly ? false : requestedAutoSubmit
     const autoAudit = saveOnly ? false : requestedAutoAudit
     const autoFlagsRefused = saveOnly && (requestedAutoSubmit === true || requestedAutoAudit === true)
+    // APPLY ROW CAP (K3WriteDecision): refuse an over-limit batch BEFORE login — a refused
+    // call must have ZERO external side effects (K3 never even sees a login attempt). The cap
+    // reaches here only via the named-profile pin above; counts are values-free.
+    const maxApplyRows = Number.isInteger(objectConfig.maxApplyRows) && objectConfig.maxApplyRows > 0
+      ? objectConfig.maxApplyRows
+      : null
+    if (maxApplyRows !== null && request.records.length > maxApplyRows) {
+      throw new AdapterValidationError(
+        `K3 WISE upsert refused: batch of ${request.records.length} exceeds the profile apply row limit of ${maxApplyRows}`,
+        { code: 'K3_WISE_APPLY_ROW_LIMIT_EXCEEDED', object: request.object, recordCount: request.records.length, maxApplyRows },
+      )
+    }
     const authContext = await login()
     const results = []
     const errors = []
@@ -2168,8 +2185,17 @@ const K3_WISE_WEBAPI_ADAPTER_METADATA = {
   advanced: false,
 }
 
+// C6 planner support (K3WriteDecision): the EFFECTIVE object config — profile merge + operator
+// overlay + hard-lock pins — is the single source of truth for what a Save body can carry. The
+// C6 deriver must use THIS, not the profile literal alone (review #4761 P1: an FE overlay
+// replaces the schema wholly, so literal-only allowlisting previews fields the Save drops).
+function resolveEffectiveK3WiseObjects(config) {
+  return normalizeObjects(config)
+}
+
 module.exports = {
   K3_WISE_WEBAPI_ADAPTER_METADATA,
+  resolveEffectiveK3WiseObjects,
   K3WiseWebApiAdapterError,
   createK3WiseWebApiAdapter,
   createK3WiseWebApiAdapterFactory,
