@@ -666,6 +666,39 @@ async function countRetryableJobPostureMismatches(
   return result.rows.filter((row) => row.posture !== comparisonWritePosture).length
 }
 
+/**
+ * Resume only (`suspended -> authoritative`): amendment section 3 bullet 9 — "preserved
+ * authoritative jobs remain retryable WITHOUT operation rows". A retryable V1 job
+ * (`status IN ('queued','failed')`) that already has a durable `attendance_result_operations`
+ * row for the SAME batch (`org_id` + `entrypoint` + `batch_command_id`/`w4_batch_command_id`)
+ * already went through the async result-operation path at least once for that batch — per
+ * "Correction 1" (`OPERATION_STATES = ['claimed','completed','canceled']`, deferred
+ * commit-time constraint trigger), any such PERSISTED row is necessarily `completed` or
+ * `canceled` (never `claimed`), so this is not a race with an in-flight claim; it is a durable
+ * signal that this "retryable" job is not the untouched, purely-retryable job resume's
+ * "remain retryable without operation rows" language requires. `FOR UPDATE OF j` locks only the
+ * candidate job rows (the operation rows are immutable history once persisted, per the same
+ * correction, so there is nothing on that side for a concurrent writer to race).
+ */
+async function countRetryableJobsWithOperationRows(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<number> {
+  const result = await trx.query(
+    `SELECT j.id
+       FROM attendance_import_jobs j
+       JOIN attendance_result_operations o
+         ON o.org_id = j.org_id
+        AND o.entrypoint = j.w4_entrypoint
+        AND o.batch_command_id = j.w4_batch_command_id
+      WHERE j.org_id = $1 AND j.w4_contract_version = 1 AND j.status = ANY($2::text[])
+      ORDER BY j.id
+      FOR UPDATE OF j`,
+    [orgId, RETRYABLE_JOB_STATUSES],
+  )
+  return result.rows.length
+}
+
 /** Entry into shadow|eligible|authoritative: zero nonterminal null-version legacy job. */
 async function countNonterminalNullVersionLegacyJobs(
   trx: AttendanceW4TransactionClientV1,
@@ -920,6 +953,14 @@ export async function transitionAttendanceCalculationRolloutV1(
       )
       if (retryableJobMismatches > 0) fail('W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_POSTURE_MISMATCH')
 
+      // Resume only (suspended -> authoritative), section 3 bullet 9 (P2-4, PR #4773 gate):
+      // "preserved authoritative jobs remain retryable WITHOUT operation rows."
+      let retryableJobsWithOperationRows = 0
+      if (isResumePair(currentState, input.targetState)) {
+        retryableJobsWithOperationRows = await countRetryableJobsWithOperationRows(trx, input.orgId)
+        if (retryableJobsWithOperationRows > 0) fail('W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_HAS_OPERATION_ROWS')
+      }
+
       let nonterminalLegacyJobs = 0
       if (CALCULATION_ENTRY_TARGETS.has(input.targetState)) {
         nonterminalLegacyJobs = await countNonterminalNullVersionLegacyJobs(trx, input.orgId)
@@ -961,6 +1002,7 @@ export async function transitionAttendanceCalculationRolloutV1(
             comparisonWritePosture: legal.comparisonWritePosture,
             preconditionCounts: {
               retryableJobPostureMismatches: retryableJobMismatches,
+              retryableJobsWithOperationRows,
               nonterminalLegacyJobs,
               incompleteOperations,
               unresolvedReviews,

@@ -45,6 +45,10 @@ const P25_CALL_PATH_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'countRetryableJobPostureMismatches', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'countNonterminalNullVersionLegacyJobs', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'countIncompleteOperations', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
+  // W4C-5 P2-4: resume-only predicate — a retryable V1 job joined against
+  // attendance_result_operations to detect "preserved authoritative jobs remain retryable
+  // WITHOUT operation rows" (amendment section 3 bullet 9).
+  entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'countRetryableJobsWithOperationRows', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
   entry('packages/core-backend/src/attendance/w4c3a-sync-import-host.ts', 'assertNoBlockingV1Job', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'sync_rejection_preflight'),
   entry('packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage.ts', 'down', 'attendance_import_jobs', 'read', 'select', 1, 'schema_migration', 'migration'),
   entry('packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts', 'rejectExistingV1', 'attendance_import_jobs', 'read', 'select', 1, 'schema_migration', 'migration'),

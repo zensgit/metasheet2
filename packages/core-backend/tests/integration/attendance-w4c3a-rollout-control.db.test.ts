@@ -151,12 +151,15 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
    * transaction so RACE A/C below can insert the defect row UNCOMMITTED, inside a
    * shared-lock-holding writer transaction, and control exactly when it becomes visible.
    */
+  /** Returns the generated `batchCommandId` (== `w4_batch_command_id`) so callers needing to
+   * construct a matching `attendance_result_operations` row (P2-4's "with operation rows" leg)
+   * can reference the exact same batch. */
   async function insertRetryableJob(
     org: string,
     status: 'queued' | 'failed',
     acceptedWritePosture: 'legacy_projection_only' | 'shadow' | 'authoritative',
     executor: Pool | PoolClient = pool,
-  ): Promise<void> {
+  ): Promise<string> {
     const batchCommandId = crypto.randomUUID()
     const fp = hex64(`${org}:${batchCommandId}`)
     await executor.query(
@@ -175,6 +178,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
                 'commandFingerprint', $4::text))`,
       [org, batchCommandId, status, fp, acceptedWritePosture, IMPORT_NS],
     )
+    return batchCommandId
   }
 
   async function insertNullVersionLegacyJob(org: string, status: 'queued' | 'running'): Promise<void> {
@@ -255,6 +259,82 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
            '{"posture":"unsupported","sourceSchemaVersion":null,"reason":"missing","sourceFingerprint":null}'::jsonb, $5)`,
         [org, requestId, crypto.randomUUID(), hex64(`${org}:${requestId}:payload`), actorId],
       )
+    }
+  }
+
+  /**
+   * Inserts a durable `attendance_result_operation_batches` + `attendance_result_operations`
+   * row pair for `entrypoint = 'import_batch'` at the given `batchCommandId` — the exact
+   * `w4_batch_command_id` a retryable V1 import job (`insertRetryableJob`'s return value)
+   * carries. Used by the P2-4 "resume with operation rows" negative leg below. Follows the same
+   * claimed-then-terminal-before-COMMIT shape as the pre-existing "refuses closure when an
+   * integration batch owns..." fixture above (OPERATION_STATES only ever durably persists
+   * `completed`/`canceled` — a deferred commit-time trigger forbids a persisted `claimed` row).
+   */
+  async function insertOperationRowForImportBatch(org: string, batchCommandId: string): Promise<void> {
+    const registryClient = await pool.connect()
+    try {
+      await registryClient.query('BEGIN')
+      await registryClient.query(
+        `INSERT INTO attendance_result_operation_batches (
+           org_id, entrypoint, batch_command_id, identity_source_kind, source_root_id,
+           source_ref, actor_id, actor_posture, capability,
+           subject_scope, accepted_write_posture, command_fingerprint, item_count,
+           item_sequence_fingerprint, item_set_fingerprint, state)
+         VALUES ($1, 'import_batch', $2::uuid, 'import_batch', $2::uuid,
+           'test:w4c3a-control-resume-op', $3, 'attendance_admin', 'import',
+           $4::jsonb, 'authoritative', $5, 1, $6, $7, 'claimed')`,
+        [
+          org,
+          batchCommandId,
+          actorId,
+          JSON.stringify({ kind: 'explicit_users', userIds: [] }),
+          hex64(`${org}:${batchCommandId}:cmd`),
+          hex64(`${org}:${batchCommandId}:seq`),
+          hex64(`${org}:${batchCommandId}:set`),
+        ],
+      )
+      await registryClient.query(
+        `INSERT INTO attendance_result_operations (
+           org_id, entrypoint, operation_id, batch_command_id, input_ordinal,
+           identity_source_kind, source_root_id, proof_semantic_fingerprint,
+           source_ref, actor_id, actor_posture, capability,
+           subject_scope, command_fingerprint, accepted_write_posture,
+           normalized_business_input_snapshot, state)
+         VALUES ($1, 'import_batch', attendance_w4_uuidv5(
+             $7::uuid,
+             attendance_w4_item_name_bytes($2::uuid, 0, $3)),
+           $2::uuid, 0, 'import_item', $2::uuid, $3,
+           'test:w4c3a-control-resume-op', $4, 'attendance_admin', 'import',
+           $5::jsonb, $6, 'authoritative', '{}'::jsonb, 'claimed')`,
+        [
+          org,
+          batchCommandId,
+          hex64(`${org}:${batchCommandId}:semantic`),
+          actorId,
+          JSON.stringify({ kind: 'explicit_users', userIds: [] }),
+          hex64(`${org}:${batchCommandId}:cmd`),
+          IMPORT_NS,
+        ],
+      )
+      await registryClient.query(
+        `UPDATE attendance_result_operations
+            SET state = 'canceled', updated_at = now(), version = version + 1
+          WHERE org_id = $1 AND entrypoint = 'import_batch' AND batch_command_id = $2::uuid`,
+        [org, batchCommandId],
+      )
+      await registryClient.query(
+        `UPDATE attendance_result_operation_batches
+            SET state = 'canceled', updated_at = now(), version = version + 1
+          WHERE org_id = $1 AND entrypoint = 'import_batch' AND batch_command_id = $2::uuid`,
+        [org, batchCommandId],
+      )
+      await registryClient.query('COMMIT')
+    } catch (error) {
+      await registryClient.query('ROLLBACK')
+      throw error
+    } finally {
+      registryClient.release()
     }
   }
 
@@ -1206,6 +1286,114 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     })
   })
 
+  describe('resume "preserved authoritative jobs remain retryable without operation rows" predicate (gate 5, P2-4 PR #4773 gate)', () => {
+    async function step(
+      client: PoolClient,
+      org: string,
+      target: AttendanceRolloutStateV1,
+      expectedState: AttendanceRolloutStateV1,
+      expectedVersion: number,
+      seed: string,
+      refs = baseRefs(seed),
+    ) {
+      return transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+        targetState: target, expectedState, expectedVersion,
+        evidenceManifestSha256: hex64(seed), evidenceReferences: refs,
+        reasonCode: 'rollout_transition',
+      })
+    }
+
+    /**
+     * Reaches 'authoritative' (version 3) BEFORE any retryable job exists — every earlier pair
+     * (legacy->shadow, shadow->eligible) requires comparisonWritePosture 'shadow', which a job
+     * frozen at 'authoritative' would immediately fail on
+     * (W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_POSTURE_MISMATCH, the pre-existing predicate, not the
+     * one under test here). The job is inserted by the caller between this and `suspend` below,
+     * exactly once the org is already at the posture the job will be frozen at.
+     */
+    async function advanceOrgToAuthoritative(client: PoolClient, org: string): Promise<void> {
+      await step(client, org, 'shadow', 'legacy', 1, `${org}-resume-setup-1`)
+      await step(client, org, 'eligible', 'shadow', 2, `${org}-resume-setup-2`)
+      await step(client, org, 'authoritative', 'eligible', 3, `${org}-resume-setup-3`)
+    }
+
+    async function suspend(client: PoolClient, org: string): Promise<void> {
+      await step(client, org, 'suspended', 'authoritative', 4, `${org}-resume-setup-4`)
+    }
+
+    it('rejects resume when a retryable job preserved through suspension already has a durable operation row', async () => {
+      const resumeOrg = crypto.randomUUID()
+      allow(resumeOrg)
+      const client = await pool.connect()
+      try {
+        await advanceOrgToAuthoritative(client, resumeOrg)
+        // Frozen at 'authoritative' — matches both the suspend pair's and the resume pair's
+        // required comparisonWritePosture, so this leg exercises ONLY the new predicate under
+        // test, never the pre-existing posture-mismatch one.
+        const batchCommandId = await insertRetryableJob(resumeOrg, 'queued', 'authoritative')
+        await insertOperationRowForImportBatch(resumeOrg, batchCommandId)
+        await suspend(client, resumeOrg)
+
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: resumeOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'authoritative', expectedState: 'suspended', expectedVersion: 5,
+            evidenceManifestSha256: hex64('resume-op-rows-blocked'),
+            evidenceReferences: resumeRefs('resume-op-rows-blocked'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_HAS_OPERATION_ROWS' })
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [resumeOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'suspended', version: 5 }] })
+      } finally {
+        client.release()
+      }
+    })
+
+    it('a preserved retryable job WITHOUT an operation row is rejected by the pre-existing incomplete-operation predicate, never by the new one (negative discriminator)', async () => {
+      // NOTE (found while writing this leg, not self-reported by the original PR): a resume
+      // target is ALWAYS in ELIGIBILITY_AUTHORITY_TARGETS ('eligible'/'authoritative'), so
+      // countIncompleteOperations — "any w4_contract_version=1 job not yet completed" — fires
+      // unconditionally on ANY resume attempt with ANY retryable (queued/failed) job present,
+      // gated only on the TARGET state, never on the SOURCE state or the resume/promotion
+      // distinction. That appears to make bullet 9's "preserved authoritative jobs remain
+      // retryable" language unreachable as written today: there is no live combination where a
+      // retryable job survives suspend and a resume attempt still succeeds. Whether
+      // countIncompleteOperations should be narrowed to skip the resume pair specifically (so
+      // bullet 9's own, more permissive "without operation rows" predicate is the one that
+      // actually governs resume) is a design question outside the scope of adding the missing
+      // "without operation rows" predicate itself — flagged for owner review, not silently
+      // resolved here by loosening an existing gate. This test instead proves the DISCRIMINATING
+      // property this leg was asked to prove: the new predicate is not spuriously broad — it
+      // does NOT fire for a job that has no operation row, even though this job is (for the
+      // unrelated reason above) still rejected overall.
+      const resumeOrg = crypto.randomUUID()
+      allow(resumeOrg)
+      const client = await pool.connect()
+      try {
+        await advanceOrgToAuthoritative(client, resumeOrg)
+        // Same frozen posture, same shape, deliberately WITHOUT a matching operation row.
+        await insertRetryableJob(resumeOrg, 'queued', 'authoritative')
+        await suspend(client, resumeOrg)
+
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: resumeOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'authoritative', expectedState: 'suspended', expectedVersion: 5,
+            evidenceManifestSha256: hex64('resume-op-rows-allowed'),
+            evidenceReferences: resumeRefs('resume-op-rows-allowed'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_INCOMPLETE_OPERATION' })
+      } finally {
+        client.release()
+      }
+    })
+  })
+
   describe('unresolved legacy_time_ingress_not_authoritative review predicate (gate 5)', () => {
     it('blocks entry into eligible while an unresolved review remains the latest calculation', async () => {
       const reviewOrg = crypto.randomUUID()
@@ -1395,6 +1583,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
           comparisonWritePosture: 'shadow',
           preconditionCounts: {
             retryableJobPostureMismatches: 0,
+            retryableJobsWithOperationRows: 0,
             nonterminalLegacyJobs: 0,
             incompleteOperations: 0,
             unresolvedReviews: 0,
