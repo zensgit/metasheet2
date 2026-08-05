@@ -93,7 +93,7 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
    (preset `k3wise.material-list.v1`)⇒ 期望 values-free 证据:业务成功、行数 ≤10、零泄漏键。
 2. **建/核窗口 pipeline**:`POST /api/integration/pipelines` —— target=K3 系统(config 已含
    `objects.material.profile`,由部署包 FE/记录保证)、fieldMappings 与 B4 一致。
-   ⚠️ **source 必须是非 K3 系统**(见 §7.3)。本步原文只写了 target,没写 source ——
+   ⚠️ **source 必须是非 K3 系统**(见 §7.2)。本步原文只写了 target,没写 source ——
    彩排驱动器正是在这个空白处猜了「K3 当 source」,而那**在结构上不可能成立**。窗口不可重试,
    所以 source 必须在建 pipeline 前就被指定并核实。
 3. **dry-run**:`POST /api/integration/pipelines/<id>/external-write/dry-run`
@@ -165,7 +165,7 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 | # | 项 | 状态 | 阻塞于 |
 |---|---|---|---|
 | R1 | **#4769** 前置门:C6-only 写入口(`/run` 与 replay 双拒)、Save endpoint 钉死、C6 消费 approved B4 binding | ✅ **MERGED 2026-08-05T18:01Z**(main `65edb98c6`),9/9 required 绿含 `integration-guard` | — |
-| R2 | **#4768** staging 彩排 | 已 rebase 到 main;exact-head 复审 **CHANGES-REQUESTED**:驱动器把 K3 当 pipeline **source**,而任何 K3 配置都不能充当 C6 source(`readSourceRows` 发裸 read ⇒ `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED`/`K3_WISE_READ_KEY_REQUIRED`,**零 HTTP 调用**)⇒ 步骤 3–9 不可达 | **owner 裁决:换哪个 source**(见下 7.3) |
+| R2 | **#4768** staging 彩排 | 已 rebase 到 main;exact-head 复审 **CHANGES-REQUESTED**:驱动器把 K3 当 pipeline **source**,而任何 K3 配置都不能充当 C6 source(`readSourceRows` 发裸 read ⇒ `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED`/`K3_WISE_READ_KEY_REQUIRED`,**零 HTTP 调用**)⇒ 步骤 3–9 不可达 | **owner 裁决:换哪个 source**(见下 §7.2) |
 | R3 | 彩排跑绿(dispatch-only workflow,PR checks **不**执行它) | 未开始 | R2 |
 | R4 | 本 MD 与计划按彩排实测同步(§8 前置) | 未开始 | R3 |
 | R5 | 目标环境 mint B4 并记三元组 | 未开始 | 运维授权(#4628) |
@@ -175,7 +175,7 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 **R5–R7 全部阻塞在 owner/运维侧**(部署授权、建角色、external-system 记录、翻授权位、排窗),
 **不是编码工作**。R1–R4 是代码/文档侧,其中 R1 已达合并水位。
 
-### 7.3 待 owner 裁决:窗口/彩排的 **source 系统**
+### 7.2 待 owner 裁决:窗口/彩排的 **source 系统**
 
 **结论先说**:**K3 不能充当 C6 pipeline 的 source。** 这不是配置问题,是结构问题 ——
 `external-write-dry-run.cjs:427` 的 `readSourceRows()` 发的是裸 `read({object, limit, cursor})`,
@@ -205,6 +205,6 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 **建议 = PLM**:彩排的价值与它同窗口的相似度成正比。代价是 staging 需要一个可达 PLM。
 **此项未定之前,R2/R3 不可推进,窗口 §6 步 2 也不完整。**
 
-### 7.2 窗口 PASS 后
+### 7.3 窗口 PASS 后
 
 在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。
