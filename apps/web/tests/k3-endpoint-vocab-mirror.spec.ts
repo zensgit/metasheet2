@@ -16,7 +16,11 @@ import { describe, expect, it } from 'vitest'
 // server's would just go red with no way to express "deliberately client-side-absent". The map below makes
 // every server endpoint's client fate a written decision. Adding a server endpoint without deciding that
 // fate is a RED, which is the property we actually want.
-import { createDefaultK3WiseSetupForm } from '../src/services/integration/k3WiseSetup'
+import {
+  K3_WISE_MATERIAL_CUSTOMER_PROFILE_ID,
+  buildK3WiseSetupPayloads,
+  createDefaultK3WiseSetupForm,
+} from '../src/services/integration/k3WiseSetup'
 
 const require = createRequire(import.meta.url)
 const pluginLib = path.resolve(__dirname, '../../../plugins/plugin-integration-core/lib')
@@ -96,5 +100,27 @@ describe('K3 WISE endpoint vocabulary client/server mirror (tripwire)', () => {
     expect(profile, 'customer material profile must exist').toBeTruthy()
     expect(profile.savePath, 'customer profile Save must mirror the material template')
       .toBe(templateByKey('material').savePath)
+  })
+
+
+  // K3WriteDecision (owner, 20260805): the profile selection itself is part of the mirrored
+  // vocabulary. The FE constant must equal the server's id BY REQUIRE, and the built payload
+  // must carry it UNCONDITIONALLY — a form-optional profile would put the save-only lock and
+  // the frozen maxApplyRows cap back under operator-form control.
+  it('the FE selects the customer material profile unconditionally, by the exact server id', () => {
+    expect(K3_WISE_MATERIAL_CUSTOMER_PROFILE_ID).toBe(MATERIAL_CUSTOMER_PROFILE_ID)
+
+    const payloads = buildK3WiseSetupPayloads(createDefaultK3WiseSetupForm()) as unknown as {
+      webApi: { config: { objects: { material: Record<string, unknown> } } }
+    }
+    expect(payloads.webApi.config.objects.material.profile).toBe(MATERIAL_CUSTOMER_PROFILE_ID)
+
+    // The server side of the pact: the id must resolve to a profile that actually carries the
+    // save-only lifecycle and the frozen cap — selecting it must mean something.
+    const profile = (K3_WISE_MATERIAL_PROFILES as Record<string, Record<string, unknown>>)[
+      MATERIAL_CUSTOMER_PROFILE_ID as string
+    ]
+    expect(profile.lifecycle).toBe('save-only')
+    expect(profile.maxApplyRows).toBe(3)
   })
 })
