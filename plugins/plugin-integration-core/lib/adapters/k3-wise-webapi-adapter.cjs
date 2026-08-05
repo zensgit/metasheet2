@@ -111,11 +111,24 @@ const K3_PROFILE_OBJECT_CONFIG_CONSUMERS = Object.freeze([
   'lib/adapters/k3-wise-webapi-adapter.cjs',
   'lib/adapters/k3-save-body-composer.cjs',
 ])
-// K3 modules that read an objectConfig which is NOT this profile's — declared out of scope
-// WITH a reason, so the sweep's "a new k3 module is a RED" property survives without forcing
-// a category error. Widening the family filter (review P2-D3) surfaced this file immediately,
-// which is the point: I did not know it was there.
+// Modules that read an objectConfig which is NOT this profile's — declared out of scope WITH a
+// reason, so the sweep's "a new module is a RED" property survives without forcing a category
+// error. Widening the family filter (review P2-D3) surfaced the SQL channel immediately, which
+// is the point: I did not know it was there.
+//
+// REVIEW P2-F4 (round 6): the sweep additionally post-filtered to `k3-*.cjs`, so the family was
+// a FILENAME CONVENTION. A byte-identical consumer named `kingdee-save-helper.cjs` swept GREEN —
+// the escape was re-armed for the next file that did not happen to start with `k3-`. The filter
+// is gone; the sweep is now purely content-based (does this file read objectConfig at all?), and
+// the three non-K3 adapters it consequently surfaces are declared here rather than hidden by a
+// naming coincidence. A new reader under ANY name is now a RED until it is triaged.
 const K3_NON_PROFILE_OBJECT_CONFIG_MODULES = Object.freeze([
+  // Non-K3 adapters with their own objectConfig vocabularies and their own targets. They share
+  // the identifier `objectConfig`, not this profile's field semantics, so K3 field triage does
+  // not apply to them.
+  'lib/adapters/http-adapter.cjs',
+  'lib/adapters/metasheet-multitable-target-adapter.cjs',
+  'lib/adapters/metasheet-staging-source-adapter.cjs',
   // erp:k3-wise-sqlserver is a different TRANSPORT with a disjoint vocabulary (table/columns/
   // writeMode/allowDirectTableWrite/orderBy) and no profile system at all. It issues no HTTP,
   // so the endpoint/verb/body class this file pins does not exist there; its own write safety
@@ -197,8 +210,38 @@ function normalizeBaseUrl(value) {
 // write verb), but it is no longer what holds the line.
 const K3_WRITE_ENDPOINT_SUFFIX = /\/(submit|audit|delete|save)$/i
 
+// AXIS 6 (review round 6, CONFIRMED): `/K3API/Material/Submit/.` cleared BOTH guards and still
+// POSTed to `/K3API/Material/Submit/`. The allowlist admits it (a bare `.` segment is not `..`,
+// and `.` is inside the character class); the suffix denylist missed it because the RAW string
+// ends in `/.`, not `/submit` — while `buildEndpointUrl`'s `pathname` SETTER removed the dot
+// segment on the way out. Identical in shape to axes 4 and 5: THE CHECK READ A STRING THAT WAS
+// NOT THE STRING BEING USED.
+//
+// Re-deriving the normalization would be a sixth patch to the same soft spot, and a copy can
+// drift: `new URL(p, base)` and `url.pathname = p` provably DISAGREE (given `//a/x` the
+// constructor reads `a` as an authority and yields `/x`, the setter yields `//a/x`). So this
+// helper runs the SETTER ITSELF — the checked value is the produced value by construction, not
+// by argument. The load-bearing guard now lives at the single wire choke point
+// (`assertWireEndpointIntent`, applied inside `requestJson` to the pathname `buildEndpointUrl`
+// actually produced); this config-time check is kept as an EARLY, better-located error, and the
+// two are proven independent by separately neutering each (see the exclusivity tests).
+function toWireEndpointPathname(rawPath) {
+  const url = new URL('http://k3-endpoint-normalization.invalid')
+  url.pathname = rawPath.startsWith('/') ? rawPath : `/${rawPath}`
+  return url.pathname.replace(/\/+$/, '')
+}
+
 function assertSafeK3ReadEndpoint(value, field) {
-  if (typeof value !== 'string' || value.trim().length === 0) return
+  if (value === undefined || value === null) return
+  // P2 (round 6): a non-string silently returned, so the guard was a no-op on any shape the
+  // caller had not already string-checked. Absent is fine; wrong-typed is not.
+  if (typeof value !== 'string') {
+    throw new AdapterValidationError('a K3 endpoint must be a string', {
+      code: 'K3_WISE_ENDPOINT_NOT_A_STRING',
+      field,
+    })
+  }
+  if (value.trim().length === 0) return
   const raw = value.trim()
   if (!isSafeRelativeReadPath(raw)) {
     throw new AdapterValidationError('a K3 endpoint must be a safe relative path', {
@@ -206,11 +249,37 @@ function assertSafeK3ReadEndpoint(value, field) {
       field,
     })
   }
-  const normalized = (raw.startsWith('/') ? raw : `/${raw}`).replace(/\/+$/, '')
-  if (K3_WRITE_ENDPOINT_SUFFIX.test(normalized)) {
+  if (K3_WRITE_ENDPOINT_SUFFIX.test(toWireEndpointPathname(raw))) {
     throw new AdapterValidationError('a K3 read path may not target a lifecycle write endpoint', {
       code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
       field,
+    })
+  }
+}
+
+// THE WIRE CHOKE POINT. Every K3 request — token, login, health, read, save, submit, audit —
+// goes through `requestJson`, which is the sole caller of `buildEndpointUrl`. Guarding here
+// closes both halves of the class that produced six escapes:
+//   * AGREEMENT: the gate is handed the pathname `buildEndpointUrl` produced, so there is no
+//     second string to disagree with.
+//   * COVERAGE: `intent` is REQUIRED and unrecognised values THROW, so a newly added config
+//     field (this round it was `config.healthPath`, which had no guard at all) cannot reach the
+//     wire by quietly omitting it — the omission is the failure.
+const K3_READ_INTENT = 'read'
+const K3_LIFECYCLE_WRITE_INTENT = 'lifecycle-write'
+const K3_ENDPOINT_INTENTS = new Set([K3_READ_INTENT, K3_LIFECYCLE_WRITE_INTENT])
+
+function assertWireEndpointIntent(wirePathname, intent) {
+  if (!K3_ENDPOINT_INTENTS.has(intent)) {
+    throw new AdapterValidationError('every K3 request must declare a wire endpoint intent', {
+      code: 'K3_WISE_ENDPOINT_INTENT_UNDECLARED',
+      field: 'intent',
+    })
+  }
+  if (intent === K3_READ_INTENT && K3_WRITE_ENDPOINT_SUFFIX.test(wirePathname)) {
+    throw new AdapterValidationError('a K3 read request may not reach a lifecycle write endpoint', {
+      code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      field: 'path',
     })
   }
 }
@@ -1590,8 +1659,13 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
   const timeoutMs = Number.isInteger(config.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : 30000
   // REVIEW P1-E1 sibling: loginPath had NO endpoint guard at all — `loginPath:
   // '/K3API/Material/Submit'` POSTs the credential envelope to Submit, no trick required.
+  // P1 (round 6): `config.healthPath` — the third sibling, one line below — had NO endpoint
+  // guard, and `testConnection` takes its verb from the request body, so
+  // `healthPath: '/K3API/Material/Submit'` + `{method:'POST'}` POSTed to Submit after login.
+  // Guarded here for an early, well-located error; the load-bearing stop is the wire intent gate.
   assertSafeK3ReadEndpoint(config.loginPath, 'config.loginPath')
   assertSafeK3ReadEndpoint(config.tokenPath, 'config.tokenPath')
+  assertSafeK3ReadEndpoint(config.healthPath, 'config.healthPath')
   const loginPath = assertRelativePath(config.loginPath || '/K3API/Login', 'config.loginPath')
   const tokenPath = assertRelativePath(config.tokenPath || '/K3API/Token/Create', 'config.tokenPath')
   const tokenQueryParam = typeof config.tokenQueryParam === 'string' && config.tokenQueryParam.trim()
@@ -1615,8 +1689,16 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     return url.toString()
   }
 
-  async function requestJson(path, { method = 'GET', query, headers, body } = {}) {
-    const url = buildUrl(path, query)
+  async function requestJson(path, { method = 'GET', query, headers, body, intent } = {}) {
+    // Build ONCE, then gate the pathname that was actually produced. Re-deriving it here would
+    // reintroduce exactly the check-vs-use gap that axes 4, 5 and 6 all exploited.
+    const endpointUrl = buildEndpointUrl(baseUrl, path)
+    assertWireEndpointIntent(toWireEndpointPathname(endpointUrl.pathname), intent)
+    for (const [key, value] of Object.entries(query || {})) {
+      if (value === undefined || value === null || value === '') continue
+      endpointUrl.searchParams.set(key, String(value))
+    }
+    const url = endpointUrl.toString()
     const controller = typeof AbortController === 'function' ? new AbortController() : null
     const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
     const requestHeaders = mergeHeaders(
@@ -1668,6 +1750,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
 
   async function loginWithAuthorityCode(authorityCode) {
     const { data } = await requestJson(tokenPath, {
+      intent: K3_READ_INTENT,
       method: config.tokenMethod || 'GET',
       query: { authorityCode },
     })
@@ -1733,6 +1816,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       lcid: firstDefined(config.lcid, credentials.lcid, 2052),
     }
     const { response, data } = await requestJson(loginPath, {
+      intent: K3_READ_INTENT,
       method: config.loginMethod || 'POST',
       body,
     })
@@ -1777,6 +1861,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         }
       }
       const { response } = await requestJson(healthPath, {
+        intent: K3_READ_INTENT,
         method: input.method || 'GET',
         query: authContext.query,
         headers: authContext.headers,
@@ -1887,6 +1972,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       let readResponse
       try {
         readResponse = await requestJson(readPath, {
+          intent: K3_READ_INTENT,
           method: objectConfig.readMethod || 'POST',
           query: authContext.query,
           headers: authContext.headers,
@@ -1966,6 +2052,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       let readResponse
       try {
         readResponse = await requestJson(readPath, {
+          intent: K3_READ_INTENT,
           method: objectConfig.readMethod || 'POST',
           query: authContext.query,
           headers: authContext.headers,
@@ -2043,6 +2130,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       let readResponse
       try {
         readResponse = await requestJson(readPath, {
+          intent: K3_READ_INTENT,
           method: objectConfig.readMethod || 'POST',
           query: authContext.query,
           headers: authContext.headers,
@@ -2114,6 +2202,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     let readResponse
     try {
       readResponse = await requestJson(readPath, {
+        intent: K3_READ_INTENT,
         method: objectConfig.readMethod || 'POST',
         query: authContext.query,
         headers: authContext.headers,
@@ -2214,6 +2303,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       const key = extractRecordKey(record, request, objectConfig)
       try {
         const save = await requestJson(savePath, {
+          intent: K3_LIFECYCLE_WRITE_INTENT,
           method: objectConfig.saveMethod || 'POST',
           query: authContext.query,
           headers: authContext.headers,
@@ -2245,6 +2335,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
             })
           }
           const submit = await requestJson(submitPath, {
+            intent: K3_LIFECYCLE_WRITE_INTENT,
             method: objectConfig.submitMethod || 'POST',
             query: authContext.query,
             headers: authContext.headers,
@@ -2277,6 +2368,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
             })
           }
           const audit = await requestJson(auditPath, {
+            intent: K3_LIFECYCLE_WRITE_INTENT,
             method: objectConfig.auditMethod || 'POST',
             query: authContext.query,
             headers: authContext.headers,
@@ -2392,6 +2484,9 @@ module.exports = {
   createK3WiseWebApiAdapterFactory,
   __internals: {
     DEFAULT_OBJECTS,
+    assertSafeK3ReadEndpoint,
+    assertWireEndpointIntent,
+    toWireEndpointPathname,
     businessSuccess,
     buildRowSaveDiagnostic,
     extractRecordKey,

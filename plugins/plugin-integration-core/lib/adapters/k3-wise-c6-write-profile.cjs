@@ -78,10 +78,13 @@ function b4RowMatchesRatifiedContract(row) {
   const systemId = typeof config.systemId === 'string' ? config.systemId : ''
   if (!systemId) return false
   // TWO comparisons, both required:
-  //   (a) the row's key is SELF-CONSISTENT with the row's own config — the same discipline
-  //       gip-approved-binding-resolver applies (RESOLVER_CONFIG_CONTENT_KEY_MISMATCH). Without
-  //       it, a row whose key says "ratified" while its config says otherwise would pass, and a
-  //       test constructing exactly that row proved it.
+  //   (a) the row's key is SELF-CONSISTENT with the row's own config — the same discipline the
+  //       GIP approved-binding resolution path applies (RESOLVER_CONFIG_CONTENT_KEY_MISMATCH).
+  //       Without it, a row whose key says "ratified" while its config says otherwise would
+  //       pass, and a test constructing exactly that row proved it.
+  //       (Deliberately NOT spelling that module's filename: B1a-3's latency gate greps the tree
+  //       for it as plain TEXT, so a prose mention in a non-allowlisted lib file turns the
+  //       required `integration-guard` check RED. Naming it cost one red round already.)
   //   (b) that key equals what the RATIFIED content would key to for this systemId.
   let selfKey
   try { selfKey = readSourceContentKeyFor(normalizeReadSourceConfig(config)) } catch { return false }

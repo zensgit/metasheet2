@@ -280,10 +280,15 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
   // in dot AND bracket form. Dot form takes NO whitespace: with `\s*` it spanned newlines and
   // matched prose in a comment as a field named `The`.
   const OBJECT_CONFIG_READ = /objectConfig(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\])/g
+  // REVIEW P2-F4 (round 6): a `.filter((rel) => /(^|\/)k3-[A-Za-z0-9-]+\.cjs$/.test(rel))` used
+  // to sit here, so "the K3 module family" was really A FILENAME CONVENTION. A byte-identical
+  // consumer named `kingdee-save-helper.cjs` swept GREEN. Membership is now decided ONLY by
+  // content — does this file read objectConfig? — and everything found must be triaged into one
+  // of the two declared lists. See the positive control below, which proves the removal is
+  // load-bearing under a non-`k3-` filename.
   const discovered = walk(libRoot)
     .filter((f) => { OBJECT_CONFIG_READ.lastIndex = 0; return OBJECT_CONFIG_READ.test(fs.readFileSync(f, 'utf8')) })
     .map((f) => path.relative(path.join(__dirname, '..'), f))
-    .filter((rel) => /(^|\/)k3-[A-Za-z0-9-]+\.cjs$/.test(rel))
     .sort()
   const { K3_NON_PROFILE_OBJECT_CONFIG_MODULES } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
   assert.deepEqual(discovered,
@@ -310,6 +315,27 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
   ])
   assert.deepEqual([...reads].filter((k) => !triaged.has(k)).sort(), [],
     'untriaged objectConfig field(s) — decide: profile-pinned, forbidden-overlay, or documented-safe')
+
+  // POSITIVE CONTROL for the FAMILY RULE (review P2-F4). The discovery above must be shown to
+  // catch a new consumer whose filename does NOT start with `k3-` — that exact file swept GREEN
+  // before this round. Written and removed inside the test so it cannot linger in the tree.
+  const probe = path.join(libRoot, 'adapters', 'kingdee-save-helper.cjs')
+  assert.equal(fs.existsSync(probe), false, 'probe filename must not collide with a real module')
+  fs.writeFileSync(probe, "'use strict'\nmodule.exports = (objectConfig) => objectConfig.savePath\n")
+  try {
+    const rediscovered = walk(libRoot)
+      .filter((f) => { OBJECT_CONFIG_READ.lastIndex = 0; return OBJECT_CONFIG_READ.test(fs.readFileSync(f, 'utf8')) })
+      .map((f) => path.relative(path.join(__dirname, '..'), f))
+      .sort()
+    assert.ok(rediscovered.includes('lib/adapters/kingdee-save-helper.cjs'),
+      'a non-`k3-` consumer must be DISCOVERED — otherwise the family filter is still a filename convention')
+    assert.notDeepEqual(rediscovered,
+      [...K3_PROFILE_OBJECT_CONFIG_CONSUMERS, ...K3_NON_PROFILE_OBJECT_CONFIG_MODULES].sort(),
+      'and it must make the contract assertion RED until triaged')
+  } finally {
+    fs.unlinkSync(probe)
+  }
+  assert.equal(fs.existsSync(probe), false, 'probe must be removed even if the assertions failed')
 })
 
 test('SET MEMBERSHIP IS PINNED BY NAME (a loop over the mutated array cannot catch its own move)', () => {
@@ -428,6 +454,16 @@ test('ADVERSARIAL P1-C1: a read path may never target a write endpoint — WITHO
     ['percent-encoded', { material: { operations: ['read'], readPath: '/K3API/Material/%53ubmit' } }],
     ['double slash', { material: { operations: ['read'], readPath: '/K3API/Material//Submit' } }],
     ['upper case', { material: { operations: ['read'], readPath: '/K3API/Material/SUBMIT' } }],
+    // REVIEW P1-F1 — AXIS 6, the same defect once more: a bare `.` segment is not `..` and `.`
+    // is inside the allowlist's character class, so these cleared BOTH guards; the pathname
+    // setter then dropped the dot segment and `/K3API/Material/Submit/` went out on the wire.
+    // The check now runs the SETTER itself rather than re-deriving what it does.
+    ['dot segment', { material: { operations: ['read'], readPath: '/K3API/Material/Submit/.' } }],
+    ['dot segment + slash', { material: { operations: ['read'], readPath: '/K3API/Material/Submit/./' } }],
+    ['repeated dot segments', { material: { operations: ['read'], readPath: '/K3API/Material/Submit/./.' } }],
+    ['dot segment mid-path', { material: { operations: ['read'], readPath: '/K3API/./Material/Submit/.' } }],
+    ['dot segment + case', { material: { operations: ['read'], readPath: '/K3API/Material/SUBMIT/.' } }],
+    ['dot segment -> Save', { material: { operations: ['read'], readPath: '/K3API/Material/Save/.' } }],
     ['a custom object read -> Save', {
       widget: {
         operations: ['read'], readPath: '/K3API/Widget/Save', savePath: '/K3API/Widget/Save',
@@ -456,6 +492,244 @@ test('ADVERSARIAL P1-C1: a read path may never target a write endpoint — WITHO
   }
 })
 
+
+test('REVIEW P1-F2: config.healthPath — the third sibling — may not target a write endpoint', async () => {
+  // loginPath and tokenPath were guarded one round earlier; healthPath sat on the NEXT LINE and
+  // was missed, and testConnection takes its VERB from the request body, so this POSTed an
+  // operator-authored envelope to Submit after a successful login. Enumerating siblings by hand
+  // is what failed; the wire gate below is the structural half of the fix.
+  const { __internals } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+  for (const healthPath of ['/K3API/Material/Submit', '/K3API/Material/Submit/.', '/K3API/Material/Save/']) {
+    assert.throws(
+      () => __internals.assertSafeK3ReadEndpoint(healthPath, 'config.healthPath'),
+      (error) => error.details && (error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT'
+        || error.details.code === 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE'),
+      `healthPath ${healthPath} must be refused`,
+    )
+  }
+  // MUTATION M5 CAUGHT THIS: the assertions above call the helper DIRECTLY, so deleting the
+  // call site in the factory left them all green — the guard was tested, its WIRING was not.
+  // Drive the real constructor so the delegation itself is load-bearing.
+  for (const healthPath of ['/K3API/Material/Submit', '/K3API/Material/Submit/.']) {
+    assert.throws(
+      () => createK3WiseWebApiAdapter({
+        system: {
+          kind: 'erp:k3-wise-webapi',
+          config: {
+            baseUrl: 'https://k3.invalid',
+            healthPath,
+            objects: { material: { operations: ['read'], readPath: '/K3API/Material/GetList' } },
+          },
+          credentials: { acctId: 'a', username: 'u', password: 'p' },
+        },
+        fetchImpl: async () => jsonResponse(200, { success: true }),
+      }),
+      (error) => error.details && error.details.field === 'config.healthPath'
+        && (error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT'
+          || error.details.code === 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE'),
+      `constructing with healthPath ${healthPath} must be refused AT SETUP, naming the field`,
+    )
+  }
+
+  // POSITIVE CONTROL: a real health endpoint still passes, and absent stays absent.
+  assert.doesNotThrow(() => __internals.assertSafeK3ReadEndpoint('/K3API/Health', 'config.healthPath'))
+  assert.doesNotThrow(() => __internals.assertSafeK3ReadEndpoint(undefined, 'config.healthPath'))
+  assert.doesNotThrow(() => createK3WiseWebApiAdapter({
+    system: {
+      kind: 'erp:k3-wise-webapi',
+      config: {
+        baseUrl: 'https://k3.invalid',
+        healthPath: '/K3API/Health',
+        objects: { material: { operations: ['read'], readPath: '/K3API/Material/GetList' } },
+      },
+      credentials: { acctId: 'a', username: 'u', password: 'p' },
+    },
+    fetchImpl: async () => jsonResponse(200, { success: true }),
+  }), 'a legitimate healthPath must still construct')
+  // P2-F5: a non-string used to return silently, making the guard a no-op on unchecked shapes.
+  assert.throws(() => __internals.assertSafeK3ReadEndpoint({ toString: () => '/K3API/Health' }, 'config.healthPath'),
+    (error) => error.details && error.details.code === 'K3_WISE_ENDPOINT_NOT_A_STRING')
+})
+
+test('REVIEW P1-F1: the WIRE gate is fail-closed on intent and sees the produced pathname', () => {
+  // Six escapes came from two halves of one class: COVERAGE (which fields get checked) and
+  // AGREEMENT (checked string vs used string). This gate closes both at the single choke point
+  // every K3 request passes through. Undeclared intent THROWS, so a newly added path field
+  // cannot reach the wire by omission — the omission is itself the failure.
+  const { __internals } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+  const { assertWireEndpointIntent, toWireEndpointPathname } = __internals
+
+  for (const intent of [undefined, null, '', 'write', 'READ', 'read ', 0, {}, true]) {
+    assert.throws(() => assertWireEndpointIntent('/K3API/Material/GetList', intent),
+      (error) => error.details && error.details.code === 'K3_WISE_ENDPOINT_INTENT_UNDECLARED',
+      `intent ${JSON.stringify(intent)} must be refused — fail-closed, not fail-open`)
+  }
+
+  // A read intent may not land on a lifecycle write endpoint, in ANY spelling that resolves there.
+  for (const raw of ['/K3API/Material/Submit', '/K3API/Material/Submit/.', '/K3API/Material/Submit/./',
+    '/K3API/Material/GetDetail/../Submit/', '/K3API/Material/SUBMIT/.', '/K3API/Material/Save/.']) {
+    assert.throws(() => assertWireEndpointIntent(toWireEndpointPathname(raw), 'read'),
+      (error) => error.details && error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      `${raw} must be refused for a read intent`)
+  }
+
+  // POSITIVE CONTROL: real reads pass, and lifecycle writes are still allowed to reach their
+  // own endpoints — without this, a gate that refused everything would satisfy the above.
+  for (const raw of ['/K3API/Material/GetList', '/K3API/Material/GetDetail', '/K3API/Login', '/K3API/Health']) {
+    assert.doesNotThrow(() => assertWireEndpointIntent(toWireEndpointPathname(raw), 'read'), `${raw} is a legitimate read`)
+  }
+  for (const raw of ['/K3API/Material/Save', '/K3API/Material/Submit', '/K3API/Material/Audit']) {
+    assert.doesNotThrow(() => assertWireEndpointIntent(toWireEndpointPathname(raw), 'lifecycle-write'),
+      `${raw} is a legitimate lifecycle write`)
+  }
+
+  // The normalizer must agree with the SETTER, which is what buildEndpointUrl uses. The URL
+  // CONSTRUCTOR disagrees on `//a/x` (it reads `a` as an authority) — re-deriving with the wrong
+  // one is how a seventh axis would be born.
+  const u = new URL('http://h'); u.pathname = '//a/Submit/.'
+  assert.equal(toWireEndpointPathname('//a/Submit/.'), u.pathname.replace(/\/+$/, ''),
+    'the normalizer must track the pathname SETTER, not the URL constructor')
+})
+
+test('REVIEW P1-F1 END-TO-END: the axis-6 exploit reaches NO write endpoint through the real adapter', async () => {
+  // The reviewer proved the exploit end-to-end, not in helpers — so the fix is proven the same
+  // way. A profile-less K3 SOURCE (legitimately profile-less: the configured LIST read owns its
+  // readPath) with the dot-segment spelling previously POSTed to /K3API/Material/Submit/.
+  const fetchPair = countingFetch()
+  let caught = null
+  try {
+    const adapter = createK3WiseWebApiAdapter({
+      system: {
+        kind: 'erp:k3-wise-webapi',
+        config: {
+          baseUrl: 'https://k3.invalid',
+          objects: { material: { operations: ['read'], readPath: '/K3API/Material/Submit/.' } },
+        },
+        credentials: { acctId: 'a', username: 'u', password: 'p' },
+      },
+      fetchImpl: fetchPair.impl,
+    })
+    await adapter.read({ object: 'material', filters: { FNumber: 'MAT-1' } })
+  } catch (error) {
+    caught = error
+  }
+  // Assert the CODE, not merely that something threw: an earlier draft of this test passed
+  // while failing on K3_WISE_READ_KEY_REQUIRED — a missing filter, nothing to do with the guard.
+  assert.equal(caught && caught.details && caught.details.code, 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+    `the dot-segment read must be refused BY THE ENDPOINT GUARD, got: ${caught && caught.message}`)
+  // The load-bearing assertion is not "it threw" but "nothing reached a write endpoint".
+  const writeCalls = fetchPair.calls.filter((p) => /\/(submit|audit|delete|save)\/?$/i.test(p))
+  assert.deepEqual(writeCalls, [], `no request may reach a lifecycle write endpoint: ${JSON.stringify(fetchPair.calls)}`)
+
+  // POSITIVE CONTROL for the COUNTER: this fetch mock does record calls, so the empty list above
+  // is evidence of absence rather than evidence of a mock that never fires.
+  const control = countingFetch()
+  const ok = createK3WiseWebApiAdapter({
+    system: {
+      kind: 'erp:k3-wise-webapi',
+      config: {
+        baseUrl: 'https://k3.invalid',
+        objects: { material: { operations: ['read'], readPath: '/K3API/Material/GetList' } },
+      },
+      credentials: { acctId: 'a', username: 'u', password: 'p' },
+    },
+    fetchImpl: control.impl,
+  })
+  await ok.read({ object: 'material', filters: { FNumber: 'MAT-1' } }).catch(() => {})
+  assert.ok(control.calls.length > 0,
+    'the counting fetch must actually record calls — otherwise the empty write-call list above proves nothing')
+  assert.ok(control.calls.some((p) => p.endsWith('/Material/GetList')),
+    'and the legitimate read must actually reach its own endpoint')
+})
+
+test('REVIEW P1-F1: EVERY request path declares an intent — health included, and future ones too', async () => {
+  // Mutation M2 exposed this gap: deleting `intent:` from the health call site left the whole
+  // suite GREEN, so the fail-closed COVERAGE property — the half that is supposed to stop the
+  // next unguarded field — rested on nothing. Two complementary checks close it.
+
+  // (1) BEHAVIOURAL: testConnection actually drives the health path, so a call site that stops
+  //     declaring its intent throws K3_WISE_ENDPOINT_INTENT_UNDECLARED instead of quietly working.
+  const calls = []
+  const impl = async (url) => {
+    calls.push(new URL(url).pathname)
+    return jsonResponse(200, { success: true, sessionId: 'health-session' })
+  }
+  const adapter = createK3WiseWebApiAdapter({
+    system: {
+      kind: 'erp:k3-wise-webapi',
+      config: {
+        baseUrl: 'https://k3.invalid',
+        healthPath: '/K3API/Health',
+        objects: { material: { operations: ['read'], readPath: '/K3API/Material/GetList' } },
+      },
+      credentials: { acctId: 'a', username: 'u', password: 'p' },
+    },
+    fetchImpl: impl,
+  })
+  const result = await adapter.testConnection({})
+  assert.equal(result.ok, true, 'the health probe must still work')
+  assert.deepEqual(calls, ['/K3API/Login', '/K3API/Health'],
+    'login + health must both have been driven — otherwise this test cannot detect a missing intent')
+
+  // (2) MECHANICAL: every requestJson call site in the adapter must declare an intent. A
+  //     behavioural test can only cover paths this suite happens to drive; the enumeration
+  //     covers the ones it does not, which is where the last six escapes came from.
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs'), 'utf8')
+  function callSitesMissingIntent(text) {
+    const missing = []
+    // `await` anchors this to CALL SITES: the declaration `async function requestJson(path, {`
+    // otherwise matched and reported a phantom site named `path` (the test caught it).
+    const RE = /await requestJson\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\{/g
+    for (const m of text.matchAll(RE)) {
+      // Scan the option object that opens at the matched `{` to its matching close brace.
+      let depth = 0
+      let i = m.index + m[0].length - 1
+      let end = -1
+      for (; i < text.length; i += 1) {
+        if (text[i] === '{') depth += 1
+        else if (text[i] === '}') { depth -= 1; if (depth === 0) { end = i; break } }
+      }
+      const options = end === -1 ? '' : text.slice(m.index, end)
+      if (!/\bintent\s*:/.test(options)) missing.push(m[1])
+    }
+    return missing
+  }
+  const sites = [...src.matchAll(/await requestJson\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*\{/g)]
+  assert.ok(sites.length >= 10,
+    `the enumeration must find the call sites (found ${sites.length}) — a regex matching nothing passes vacuously`)
+  assert.deepEqual(callSitesMissingIntent(src), [],
+    'a requestJson call site does not declare an intent — it would be refused at runtime, declare it')
+
+  // POSITIVE CONTROL for the enumeration: a call site without an intent must be REPORTED.
+  assert.deepEqual(
+    callSitesMissingIntent('await requestJson(sneakyPath, { method: "POST", body })'),
+    ['sneakyPath'],
+    'the enumeration must flag an intent-less call site, or it proves nothing about the real file')
+})
+
+test('REVIEW P1-F1/P1-F2 EXCLUSIVITY: the config-time check and the wire gate are independent', () => {
+  // Two fail-closed doors covering for each other has already bitten this line twice. Each door
+  // must be shown to catch something the other does not, or one of them is decoration.
+  const { __internals } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+
+  // Only the WIRE gate can catch a path that never passed through config normalization at all
+  // (this is precisely the healthPath/loginPath shape, and any future field like it).
+  assert.throws(() => __internals.assertWireEndpointIntent(
+    __internals.toWireEndpointPathname('/K3API/Material/Submit/.'), 'read'),
+    (error) => error.details && error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT')
+
+  // Only the CONFIG-time check reports the offending FIELD, which is what makes the error
+  // actionable at setup time rather than at first request.
+  try {
+    __internals.assertSafeK3ReadEndpoint('/K3API/Material/Submit/.', 'config.healthPath')
+    assert.fail('expected a config-time refusal')
+  } catch (error) {
+    assert.equal(error.details.field, 'config.healthPath',
+      'the config-time check must name the field; the wire gate cannot know it')
+  }
+})
 
 test('REVIEW P2-D4/P2-E3: the profile arm is UNFORGEABLE — a JSON config cannot claim it', async () => {
   // The Symbol's entire justification is "JSON config can never forge a Symbol key", and that
