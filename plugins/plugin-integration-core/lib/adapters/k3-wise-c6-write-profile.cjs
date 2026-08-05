@@ -26,7 +26,26 @@ const { K3_WISE_MATERIAL_PROFILES } = require('./k3-wise-document-templates.cjs'
 const { resolveEffectiveK3WiseObjects } = require('./k3-wise-webapi-adapter.cjs')
 const {
   K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION,
+  K3WISE_MATERIAL_LIST_B4_TEMPLATE,
 } = require('../read-source-k3-material-list-b4-contract.cjs')
+
+// REVIEW P2-D2: matching only actionProfileVersion made the gate SELF-CERTIFYING — that field
+// carries syntax validation and nothing else, so a config whose mode/readPath/containerPaths/
+// fieldMap all differed from the ratified template passed by typing the right string. The gate
+// now compares the CONTENT against the frozen template. systemId and version are excluded:
+// systemId is per-environment (and separately constrained to a pipeline endpoint), version is
+// minted by the store.
+const B4_CONTENT_KEYS = Object.freeze(
+  Object.keys(K3WISE_MATERIAL_LIST_B4_TEMPLATE).filter((k) => k !== 'systemId' && k !== 'version'),
+)
+
+function b4ConfigMatchesRatifiedTemplate(config) {
+  if (!config || typeof config !== 'object') return false
+  for (const key of B4_CONTENT_KEYS) {
+    if (JSON.stringify(config[key]) !== JSON.stringify(K3WISE_MATERIAL_LIST_B4_TEMPLATE[key])) return false
+  }
+  return true
+}
 
 const K3_WISE_C6_WRITE_TARGET_KIND = 'erp:k3-wise-webapi'
 const CUSTOMER_PROFILE_ID = 'material-k3wise-customer-profile-v1'
@@ -193,7 +212,9 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       // P2-1: the store nests the config; actionProfileVersion is NOT a top-level row field
       // (the first version read the top level and therefore always saw '').
       const config = row.config && typeof row.config === 'object' ? row.config : {}
-      return config.actionProfileVersion === K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION
+      if (config.actionProfileVersion !== K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION) return false
+      // Content equality with the RATIFIED template — the string alone certifies nothing.
+      return b4ConfigMatchesRatifiedTemplate(config)
     })
   }
   let adapter = null

@@ -26,6 +26,9 @@ const {
 const { createK3WiseWebApiAdapter } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
 
 const PROFILE_ID = 'material-k3wise-customer-profile-v1'
+const {
+  K3WISE_MATERIAL_LIST_B4_TEMPLATE: RATIFIED_B4_TEMPLATE,
+} = require('../lib/read-source-k3-material-list-b4-contract.cjs')
 
 // ADVERSARIAL REVIEW P1-2 (20260805): the first version's stub IGNORED list()'s arguments and
 // baked in the scope, so mutating the resolver's scope/filters left every suite green — the
@@ -70,10 +73,10 @@ function b4Row(overrides = {}) {
     version: 3,
     contentKey: 'b4-content-key-aaaaaaaaaaaaaaaa',
     config: {
-      actionProfileVersion: 'k3wise.material_list.v1',
-      // The store persists the config verbatim; systemId is part of it (review P2-B1 — the
-      // fixture could not previously EXPRESS a foreign-system binding, so the hole was
-      // unrepresentable in tests).
+      // The RATIFIED template verbatim (review P2-D2: matching only the profile-version STRING
+      // let a config that differed everywhere else pass — the fixture must therefore carry real
+      // content, or the new equality check would be untested).
+      ...JSON.parse(JSON.stringify(RATIFIED_B4_TEMPLATE)),
       systemId: 'source_1',
       ...(configOverride || {}),
     },
@@ -718,4 +721,37 @@ test('B4 RELATION: an unrelated system\'s binding does not create false ambiguit
   const state = (await source.test()).capabilityState
   assert.equal(state.b4BindingCount, 1, 'only this pipeline\'s binding counts')
   assert.equal(state.b4BindingApproved, true)
+})
+
+
+test('REVIEW P2-D2: the B4 gate checks CONTENT, not just the profile-version string', async () => {
+  // A reviewer minted a config whose mode/readPath/containerPaths/fieldMap all differed from
+  // the ratified template and passed the gate by typing the right actionProfileVersion — the
+  // gate was self-certifying. Each divergence below must now be refused on its own.
+  const divergences = [
+    ['mode', { mode: 'single_record' }],
+    ['readPath', { readPath: '/K3API/Material/GetDetail' }],
+    ['containerPaths', { containerPaths: ['Data'] }],
+    ['fieldMap', { fieldMap: [{ source: 'FModel', target: 'erpSpec' }] }],
+    ['operations', { operations: ['read', 'upsert'] }],
+    ['requiredKind', { requiredKind: 'http' }],
+  ]
+  for (const [label, patch] of divergences) {
+    const source = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+      b4: b4Of([b4Row({ config: patch })]),
+    })
+    const state = (await source.test()).capabilityState
+    assert.equal(state.b4BindingApproved, false, `a config diverging in ${label} must not certify`)
+  }
+
+  // POSITIVE CONTROL: the ratified content (the fixture's default) certifies — otherwise the
+  // assertions above would also hold for a gate that rejected everything.
+  const good = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+  assert.equal((await good.test()).capabilityState.b4BindingApproved, true)
 })

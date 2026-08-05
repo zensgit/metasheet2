@@ -404,6 +404,15 @@ test('ADVERSARIAL P1-C1: a read path may never target a write endpoint — WITHO
   for (const [label, objects] of [
     ['material read -> Submit', { material: { operations: ['read'], readPath: '/K3API/Material/Submit' } }],
     ['material read -> Audit', { material: { operations: ['read'], readPath: '/K3API/Material/Audit' } }],
+    // REVIEW P1-D1: the guard used to test the RAW string while buildEndpointUrl's WHATWG
+    // pathname setter rewrote it — `/GetDetail/../Submit/` cleared the guard and went out as
+    // `/Submit/`. Check-before-normalize. Each vector below reaches the same resolved endpoint
+    // by a different spelling; the check now runs on the RESOLVED pathname.
+    ['traversal', { material: { operations: ['read'], readPath: '/K3API/Material/GetDetail/../Submit/' } }],
+    ['trailing slash', { material: { operations: ['read'], readPath: '/K3API/Material/Submit/' } }],
+    ['percent-encoded', { material: { operations: ['read'], readPath: '/K3API/Material/%53ubmit' } }],
+    ['double slash', { material: { operations: ['read'], readPath: '/K3API/Material//Submit' } }],
+    ['upper case', { material: { operations: ['read'], readPath: '/K3API/Material/SUBMIT' } }],
     ['a custom object read -> Save', {
       widget: {
         operations: ['read'], readPath: '/K3API/Widget/Save', savePath: '/K3API/Widget/Save',

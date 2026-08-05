@@ -37,6 +37,9 @@ const require = createRequire(import.meta.url)
 const { createK3WiseWebApiAdapter } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs')
 const { createK3WiseSqlServerChannel } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs')
 const {
+  K3WISE_MATERIAL_LIST_B4_TEMPLATE,
+} = require('../../../../plugins/plugin-integration-core/lib/read-source-k3-material-list-b4-contract.cjs')
+const {
   K3_WISE_C6_MAX_APPLY_ROWS,
   K3_WISE_C6_WRITE_PROFILE,
   createK3WiseC6WriteSource,
@@ -345,7 +348,9 @@ async function main() {
                   id: 'rsc_demo_b4', tenantId: 'tenant_demo', workspaceId: null,
                   object: 'material', status: 'approved', version: 1,
                   contentKey: 'demo-b4-content-key',
-                  config: { actionProfileVersion: 'k3wise.material_list.v1', systemId: 'source_demo' },
+                  // The RATIFIED template verbatim + this environment's systemId — the gate
+                  // now checks CONTENT, not just the profile-version string (review P2-D2).
+                  config: { ...K3WISE_MATERIAL_LIST_B4_TEMPLATE, systemId: 'source_demo' },
                 }
                 if (input.tenantId !== row.tenantId) return []
                 if ((input.workspaceId ?? null) !== row.workspaceId) return []

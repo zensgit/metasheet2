@@ -111,6 +111,18 @@ const K3_PROFILE_OBJECT_CONFIG_CONSUMERS = Object.freeze([
   'lib/adapters/k3-wise-webapi-adapter.cjs',
   'lib/adapters/k3-save-body-composer.cjs',
 ])
+// K3 modules that read an objectConfig which is NOT this profile's — declared out of scope
+// WITH a reason, so the sweep's "a new k3 module is a RED" property survives without forcing
+// a category error. Widening the family filter (review P2-D3) surfaced this file immediately,
+// which is the point: I did not know it was there.
+const K3_NON_PROFILE_OBJECT_CONFIG_MODULES = Object.freeze([
+  // erp:k3-wise-sqlserver is a different TRANSPORT with a disjoint vocabulary (table/columns/
+  // writeMode/allowDirectTableWrite/orderBy) and no profile system at all. It issues no HTTP,
+  // so the endpoint/verb/body class this file pins does not exist there; its own write safety
+  // is the middle-table + core-table guards proven in k3-wise-adapters/the mock chain. Pinning
+  // WebAPI keys onto it would assert a contract it does not have.
+  'lib/adapters/k3-wise-sqlserver-channel.cjs',
+])
 // Fields the sweep found that are deliberately NOT in either list, each with its reason. The
 // contract test asserts pinned + forbidden + this set covers EVERY objectConfig read, so a new
 // field cannot enter the adapter untriaged.
@@ -164,20 +176,49 @@ function normalizeBaseUrl(value) {
   return url.toString()
 }
 
-// ADVERSARIAL P1-C1 (round 3): the whole class pin lived inside `if (saveOnlyProfile)` — it was
-// OPT-IN BY THE VERY ACTOR IT DEFENDS AGAINST. Omit `profile` and nothing is pinned; a K3
-// SOURCE pipeline (legitimately profile-less — the #1709 configured LIST read owns its own
-// readPath) then POSTed an operator-authored body to /K3API/Material/Submit, on dry-runs too.
-// The runner guard cannot catch that: it keys on the TARGET kind.
+// ADVERSARIAL P1-C1/P1-D1 (rounds 3 and 4). Round 3: the class pin lived inside
+// `if (saveOnlyProfile)` — opt-in by the actor it defends against — so a profile-less K3 SOURCE
+// pipeline POSTed an operator-authored body to /K3API/Material/Submit, dry-runs included. The
+// answer was this unconditional guard. Round 4 broke THAT: it tested the RAW string while
+// buildEndpointUrl's WHATWG `pathname` setter REWRITES it, so
+// `/K3API/Material/GetDetail/../Submit/` passed the guard and went out as
+// `/K3API/Material/Submit/` — the guard cleared a string this repo's own code then turned into
+// the endpoint the guard names as forbidden. Check-before-normalize.
 //
-// This guard is UNCONDITIONAL. A READ path may never resolve to a lifecycle-WRITE endpoint.
-// Legitimate configured reads (GetDetail, GetList, any query endpoint) are untouched; the only
-// thing refused is a read aimed at a write verb, which no read contract has a reason to do.
+// The check therefore runs on the RESOLVED pathname, produced by the SAME URL machinery the
+// request uses (one normalization, not two that can disagree), with percent-decoding and
+// trailing slashes stripped before the test. `..` traversal, `%53ubmit`, `Submit/`, case
+// variants and duplicate slashes all collapse to the same resolved form.
 const K3_WRITE_ENDPOINT_SUFFIX = /\/(submit|audit|delete|save)$/i
+
+function resolvedEndpointPathname(value) {
+  // Resolve exactly as an outbound request would. The base is irrelevant to the pathname.
+  let pathname
+  try {
+    pathname = new URL(String(value), 'https://k3.invalid/').pathname
+  } catch {
+    return null
+  }
+  let decoded = pathname
+  for (let i = 0; i < 3; i += 1) {
+    let next
+    try { next = decodeURIComponent(decoded) } catch { break }
+    if (next === decoded) break
+    decoded = next
+  }
+  return decoded.replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+}
 
 function assertReadPathIsNotAWriteEndpoint(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) return
-  if (K3_WRITE_ENDPOINT_SUFFIX.test(value.trim())) {
+  const resolved = resolvedEndpointPathname(value.trim())
+  if (resolved === null) {
+    throw new AdapterValidationError('a K3 read path must be a resolvable relative endpoint', {
+      code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      field,
+    })
+  }
+  if (K3_WRITE_ENDPOINT_SUFFIX.test(resolved)) {
     throw new AdapterValidationError('a K3 read path may not target a lifecycle write endpoint', {
       code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
       field,
@@ -2352,6 +2393,7 @@ module.exports = {
   K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
   K3_PROFILE_TRIAGED_SAFE_KEYS,
   K3_PROFILE_OBJECT_CONFIG_CONSUMERS,
+  K3_NON_PROFILE_OBJECT_CONFIG_MODULES,
   K3WiseWebApiAdapterError,
   createK3WiseWebApiAdapter,
   createK3WiseWebApiAdapterFactory,
