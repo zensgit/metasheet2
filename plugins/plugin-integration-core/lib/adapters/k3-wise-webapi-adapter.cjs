@@ -2185,8 +2185,17 @@ const K3_WISE_WEBAPI_ADAPTER_METADATA = {
   advanced: false,
 }
 
+// C6 planner support (K3WriteDecision): the EFFECTIVE object config — profile merge + operator
+// overlay + hard-lock pins — is the single source of truth for what a Save body can carry. The
+// C6 deriver must use THIS, not the profile literal alone (review #4761 P1: an FE overlay
+// replaces the schema wholly, so literal-only allowlisting previews fields the Save drops).
+function resolveEffectiveK3WiseObjects(config) {
+  return normalizeObjects(config)
+}
+
 module.exports = {
   K3_WISE_WEBAPI_ADAPTER_METADATA,
+  resolveEffectiveK3WiseObjects,
   K3WiseWebApiAdapterError,
   createK3WiseWebApiAdapter,
   createK3WiseWebApiAdapterFactory,
