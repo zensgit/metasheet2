@@ -14,6 +14,7 @@
  * the test, so a future writer cannot silently slip past a narrower allowlist.
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -43,12 +44,22 @@ const ALLOWED_RELATIVE_FILES = new Set([
 // setup (never as production DML) — they exercise the guarded boundary, they do not replace it.
 const ALLOWED_DIRECTORY_PREFIXES = ['packages/core-backend/tests/integration/']
 
-const TARGET_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs'])
+// Raw-SQL text is not the only DML surface: a Kysely query-builder call never spells the SQL
+// verb as text, and a shell script driving `psql -c "..."` or a standalone `.sql` file is common
+// operator-tooling shape (repo doctrine 写入点审计要双语法 — a writer-inventory audit that only
+// greps one syntax is a landmine the amendment's own §5 warns about: "Preparation must not add
+// direct rollout DML, a raw SQL escape hatch" — and operator tooling is exactly what ships as
+// `.sql`/`.sh`/psql).
+const TARGET_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs', '.sql', '.sh'])
 
 const ROLLOUT_DML_PATTERNS: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = [
   { label: 'UPDATE attendance_calculation_rollout_state', pattern: /UPDATE\s+attendance_calculation_rollout_state/i },
   { label: 'INSERT INTO attendance_calculation_rollout_state', pattern: /INSERT\s+INTO\s+attendance_calculation_rollout_state/i },
   { label: 'INSERT INTO attendance_calculation_rollout_events', pattern: /INSERT\s+INTO\s+attendance_calculation_rollout_events/i },
+  // Kysely query-builder syntax over the same two tables — never spells UPDATE/INSERT as text.
+  { label: 'Kysely updateTable(attendance_calculation_rollout_state)', pattern: /\.updateTable\(\s*['"`]attendance_calculation_rollout_state['"`]/i },
+  { label: 'Kysely insertInto(attendance_calculation_rollout_state)', pattern: /\.insertInto\(\s*['"`]attendance_calculation_rollout_state['"`]/i },
+  { label: 'Kysely insertInto(attendance_calculation_rollout_events)', pattern: /\.insertInto\(\s*['"`]attendance_calculation_rollout_events['"`]/i },
 ]
 
 function walk(dir: string, out: string[]): void {
@@ -64,22 +75,38 @@ function walk(dir: string, out: string[]): void {
   }
 }
 
+// Shared by the real full-repo gate and the isolated decoy tests below, so a decoy test proves
+// the exact same detection code the real gate runs — not a re-implementation that could drift.
+function findRolloutDmlOffenders(
+  rootDir: string,
+  files: readonly string[],
+  options: { allowedRelativeFiles?: ReadonlySet<string>; allowedDirectoryPrefixes?: readonly string[] } = {},
+): Array<{ file: string; label: string }> {
+  const allowedRelativeFiles = options.allowedRelativeFiles ?? new Set<string>()
+  const allowedDirectoryPrefixes = options.allowedDirectoryPrefixes ?? []
+  const offenders: Array<{ file: string; label: string }> = []
+  for (const absolute of files) {
+    const relative = path.relative(rootDir, absolute).split(path.sep).join('/')
+    if (allowedRelativeFiles.has(relative)) continue
+    if (allowedDirectoryPrefixes.some((prefix) => relative.startsWith(prefix))) continue
+    const content = fs.readFileSync(absolute, 'utf8')
+    for (const { label, pattern } of ROLLOUT_DML_PATTERNS) {
+      if (pattern.test(content)) offenders.push({ file: relative, label })
+    }
+  }
+  return offenders
+}
+
 describe('W4C-5 repository inventory: rollout-state/event DML has exactly one writer', () => {
   it('finds rollout-state/event DML only in the hardened boundary, its migration, and integration fixtures', () => {
     const files: string[] = []
     walk(ROOT, files)
     expect(files.length).toBeGreaterThan(100) // sanity: the walk actually found the repo
 
-    const offenders: Array<{ file: string; label: string }> = []
-    for (const absolute of files) {
-      const relative = path.relative(ROOT, absolute).split(path.sep).join('/')
-      if (ALLOWED_RELATIVE_FILES.has(relative)) continue
-      if (ALLOWED_DIRECTORY_PREFIXES.some((prefix) => relative.startsWith(prefix))) continue
-      const content = fs.readFileSync(absolute, 'utf8')
-      for (const { label, pattern } of ROLLOUT_DML_PATTERNS) {
-        if (pattern.test(content)) offenders.push({ file: relative, label })
-      }
-    }
+    const offenders = findRolloutDmlOffenders(ROOT, files, {
+      allowedRelativeFiles: ALLOWED_RELATIVE_FILES,
+      allowedDirectoryPrefixes: ALLOWED_DIRECTORY_PREFIXES,
+    })
     expect(offenders).toEqual([])
   })
 
@@ -88,5 +115,101 @@ describe('W4C-5 repository inventory: rollout-state/event DML has exactly one wr
     const content = fs.readFileSync(target, 'utf8')
     const matched = ROLLOUT_DML_PATTERNS.filter(({ pattern }) => pattern.test(content))
     expect(matched.length).toBeGreaterThan(0)
+  })
+})
+
+// P2-2 (PR #4773 exact-head independent gate, 20260805): the pre-fix pattern/extension set was
+// raw-SQL-text-only and .ts/.tsx/.js/.cjs/.mjs-only, so a Kysely query-builder call, a standalone
+// `.sql` file, or a `.sh` script driving `psql -c "..."` all walked straight past the gate
+// (repo landmine 写入点审计要双语法 — a writer-inventory audit that only greps one syntax).
+// These decoys run against isolated OS-tmp scratch directories (never inside the repo tree, so
+// they cannot themselves become an untracked-file false-positive against the real gate above)
+// but exercise the exact same `walk` + `findRolloutDmlOffenders` pipeline the real gate uses.
+describe('W4C-5 repository inventory gate 9: bypass-syntax decoys are caught (写入点审计要双语法)', () => {
+  function withScratchDir(fn: (dir: string) => void): void {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w4c5-gate9-decoy-'))
+    try {
+      fn(dir)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('decoy: Kysely query-builder DML (.ts) — updateTable(state) + insertInto(events)', () => {
+    withScratchDir((dir) => {
+      fs.writeFileSync(
+        path.join(dir, 'zz-decoy-tooling.ts'),
+        [
+          "export async function decoyTransition(trx: unknown, orgId: string, targetState: string) {",
+          "  await (trx as any).updateTable('attendance_calculation_rollout_state')",
+          "    .set({ state: targetState }).where('org_id', '=', orgId).execute()",
+          "  await (trx as any).insertInto('attendance_calculation_rollout_events')",
+          "    .values({ orgId, targetState }).execute()",
+          "}",
+        ].join('\n'),
+      )
+      const files: string[] = []
+      walk(dir, files)
+      const offenders = findRolloutDmlOffenders(dir, files)
+      expect(offenders.map((o) => o.label).sort()).toEqual([
+        'Kysely insertInto(attendance_calculation_rollout_events)',
+        'Kysely updateTable(attendance_calculation_rollout_state)',
+      ])
+    })
+  })
+
+  it('decoy: standalone .sql file — raw UPDATE/INSERT against both rollout tables', () => {
+    withScratchDir((dir) => {
+      const file = path.join(dir, 'zz-decoy-tooling.sql')
+      fs.writeFileSync(
+        file,
+        [
+          "UPDATE attendance_calculation_rollout_state SET state = 'shadow' WHERE org_id = 'demo';",
+          "INSERT INTO attendance_calculation_rollout_events (org_id, prior_state, new_state) VALUES ('demo', 'legacy', 'shadow');",
+        ].join('\n'),
+      )
+      const files: string[] = []
+      walk(dir, files)
+      expect(files).toEqual([file])
+      const offenders = findRolloutDmlOffenders(dir, files)
+      expect(offenders.map((o) => o.label).sort()).toEqual([
+        'INSERT INTO attendance_calculation_rollout_events',
+        'UPDATE attendance_calculation_rollout_state',
+      ])
+    })
+  })
+
+  it('decoy: .sh script driving `psql -c "UPDATE ..."`', () => {
+    withScratchDir((dir) => {
+      fs.writeFileSync(
+        path.join(dir, 'zz-decoy-tooling.sh'),
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          'psql "$DATABASE_URL" -c "UPDATE attendance_calculation_rollout_state SET state = '
+            + "'shadow' WHERE org_id = 'demo'\"",
+        ].join('\n'),
+      )
+      const files: string[] = []
+      walk(dir, files)
+      const offenders = findRolloutDmlOffenders(dir, files)
+      expect(offenders.map((o) => o.label)).toEqual(['UPDATE attendance_calculation_rollout_state'])
+    })
+  })
+
+  it('negative control: a plain SELECT in each of the three syntaxes is not flagged', () => {
+    withScratchDir((dir) => {
+      fs.writeFileSync(
+        path.join(dir, 'zz-read.ts'),
+        "export const decoyRead = (trx: any) => trx.selectFrom('attendance_calculation_rollout_state').selectAll().execute()",
+      )
+      fs.writeFileSync(path.join(dir, 'zz-read.sql'), 'SELECT * FROM attendance_calculation_rollout_state;')
+      fs.writeFileSync(path.join(dir, 'zz-read.sh'), 'psql -c "SELECT * FROM attendance_calculation_rollout_state"')
+      const files: string[] = []
+      walk(dir, files)
+      expect(files.length).toBe(3)
+      const offenders = findRolloutDmlOffenders(dir, files)
+      expect(offenders).toEqual([])
+    })
   })
 })
