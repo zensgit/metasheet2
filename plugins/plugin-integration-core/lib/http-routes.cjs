@@ -3379,9 +3379,14 @@ function createHandlers(services, options = {}) {
         tokenStore: context.storage,
         dryRunUser: requestPrincipal(req),
         dataSourceOwnerPrincipal: ownerPrincipal,
-        // K3 targets: the profile's frozen cap overrides any caller maxRows (values-free
-        // counts + `truncated` make the override observable in the dry-run response).
-        maxRows: c6.enforcedMaxRows !== undefined ? c6.enforcedMaxRows : body.maxRows,
+        // K3 targets (review #4761 P3): the profile's frozen cap is a CEILING — a caller may
+        // narrow below it, never widen above it. The token stores the effective maxRows, and
+        // the apply recompute reads it from the token, so the fence stays symmetric.
+        maxRows: c6.enforcedMaxRows !== undefined
+          ? (typeof body.maxRows === 'number' && body.maxRows >= 1 && body.maxRows < c6.enforcedMaxRows
+            ? body.maxRows
+            : c6.enforcedMaxRows)
+          : body.maxRows,
         testFailureInjection: context && context.config && context.config.c6TestFailureInjection,
       }))
     },
@@ -3474,8 +3479,6 @@ function createHandlers(services, options = {}) {
           dryRunToken: body.confirm.dryRunToken,
           applyUser: requestPrincipal(req),
           dataSourceOwnerPrincipal: ownerPrincipal,
-          // Same enforced cap as dry-run so the apply recompute reproduces the revision fence.
-          maxRows: c6.enforcedMaxRows,
           runId: run && run.id,
           testFailureInjection: context && context.config && context.config.c6TestFailureInjection,
         })

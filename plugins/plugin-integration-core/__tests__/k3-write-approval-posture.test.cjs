@@ -155,3 +155,16 @@ test('the C6 plan bound IS the customer profile literal\'s frozen maxApplyRows',
 test('reachability context: the K3 adapter still declares itself a write TARGET', () => {
   assert.ok(K3_WISE_WEBAPI_ADAPTER_METADATA.roles.includes('target'))
 })
+
+test('reachability context: material upsert stays the DEFAULT template operation (guard restored per review)', () => {
+  // Review #4761 P3: the pre-flip file asserted this and the flip dropped it with no
+  // successor. It is what makes the whole posture load-bearing — if upsert stopped being the
+  // default, the write reachability the profiles gate would be theoretical again.
+  const { K3_WISE_DOCUMENT_TEMPLATES } = require('../lib/adapters/k3-wise-document-templates.cjs')
+  const material = K3_WISE_DOCUMENT_TEMPLATES.material
+  assert.ok(material, 'the material document template must exist')
+  assert.ok(
+    Array.isArray(material.operations) && material.operations.includes('upsert'),
+    'material upsert is the DEFAULT operation set, not an opt-in',
+  )
+})

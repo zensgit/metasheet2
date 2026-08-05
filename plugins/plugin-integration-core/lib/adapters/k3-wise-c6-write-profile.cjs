@@ -23,6 +23,7 @@
 
 const { AdapterValidationError } = require('../contracts.cjs')
 const { K3_WISE_MATERIAL_PROFILES } = require('./k3-wise-document-templates.cjs')
+const { resolveEffectiveK3WiseObjects } = require('./k3-wise-webapi-adapter.cjs')
 
 const K3_WISE_C6_WRITE_TARGET_KIND = 'erp:k3-wise-webapi'
 const CUSTOMER_PROFILE_ID = 'material-k3wise-customer-profile-v1'
@@ -76,6 +77,21 @@ function deriveK3WiseC6PlannerTargetConfig({ system, object, fieldMappings = [] 
     )
   }
   const keyField = requiredString(CUSTOMER_PROFILE.keyField, 'profile.keyField')
+  // Review #4761 P1: the Save body is composed from the EFFECTIVE merged schema (profile merge
+  // + operator overlay — an FE overlay REPLACES the schema array wholly), not from the profile
+  // literal. A field allowed by the literal but absent from the effective schema would be
+  // previewed and FINGERPRINTED by the dry-run yet silently dropped from the actual Save —
+  // the human would approve content that is not what gets written. The allowlist is therefore
+  // the INTERSECTION: profile-sanctioned (literal) AND Save-composable (effective). The
+  // intersection also keeps deliberately-omitted fields out (FBaseUnitID broke the M1 dry-run;
+  // an operator overlay carrying it must not smuggle it back in).
+  const effectiveObjects = resolveEffectiveK3WiseObjects(system.config)
+  const effectiveMaterial = effectiveObjects && effectiveObjects.material
+  const effectiveNames = new Set(
+    (effectiveMaterial && Array.isArray(effectiveMaterial.schema) ? effectiveMaterial.schema : [])
+      .map((field) => field && field.name)
+      .filter((name) => typeof name === 'string' && name.length > 0),
+  )
   const keySet = new Set([keyField])
   const seen = new Set()
   const writableFields = []
@@ -83,9 +99,18 @@ function deriveK3WiseC6PlannerTargetConfig({ system, object, fieldMappings = [] 
     const target = mapping && (mapping.targetField || mapping.target)
     if (typeof target !== 'string' || target.length === 0) continue
     if (keySet.has(target) || seen.has(target)) continue
-    // Only fields the customer profile schema actually knows — an unmapped invented column
-    // must not silently ride into the Save body.
-    if (!SCHEMA_FIELD_NAMES.has(target)) continue
+    if (!SCHEMA_FIELD_NAMES.has(target) || !effectiveNames.has(target)) {
+      // Review #4761 P2: silence was the bug — an operator mapped a field this write cannot
+      // carry, and a silent drop means the pipeline LOOKS configured while quietly writing
+      // less. Fail closed with the field named (schema identifiers are structural, not
+      // business values).
+      throw new AdapterValidationError('K3 C6 write cannot carry a mapped target field', {
+        code: 'K3_C6_UNSUPPORTED_TARGET_FIELD',
+        field: target,
+        profileSanctioned: SCHEMA_FIELD_NAMES.has(target),
+        saveComposable: effectiveNames.has(target),
+      })
+    }
     seen.add(target)
     writableFields.push(target)
   }
@@ -116,11 +141,37 @@ function createK3WiseC6WriteSource({ system, createAdapter } = {}) {
     return adapter
   }
 
-  function saveFailure(result) {
-    const first = Array.isArray(result && result.errors) && result.errors.length > 0 ? result.errors[0] : null
+  // Review #4761 P2: the Save side wraps scalars into reference shapes ({FNumber: v}) while
+  // GetDetail returns the reference as an object — comparing them raw makes `skip` unreachable
+  // (an unchanged material re-plans as `update` forever). Unwrap reference-shaped values from
+  // the read record so classifyExisting compares scalar-to-scalar.
+  const referenceFieldNames = (() => {
+    const effective = resolveEffectiveK3WiseObjects(system && system.config)
+    const schema = effective && effective.material && Array.isArray(effective.material.schema)
+      ? effective.material.schema
+      : []
+    return new Set(schema.filter((f) => f && f.type === 'reference').map((f) => f.name))
+  })()
+
+  function unwrapReferenceShapes(record) {
+    if (!record || typeof record !== 'object') return record
+    const out = { ...record }
+    for (const name of referenceFieldNames) {
+      const value = out[name]
+      if (value && typeof value === 'object' && !Array.isArray(value) && value.FNumber !== undefined) {
+        out[name] = value.FNumber
+      }
+    }
+    return out
+  }
+
+  function saveFailure() {
     const error = new Error('K3 WISE Save reported row failure')
-    // valuesFreeErrorCode reads error.code first; keep it a closed-set token, never a message.
-    error.code = (first && typeof first.code === 'string' && first.code) || 'K3_WISE_SAVE_FAILED'
+    // Review #4761 P2: UNCONDITIONALLY the registered closed token. Passing through the
+    // adapter's per-row code looked more informative, but K3's Code/ErrorCode strings are
+    // arbitrary (not in SAFE_WRITE_ERROR_CODES -> they collapse to WRITE_FAILED, the opposite
+    // of diagnosable) and are values-bearing. One closed token, always.
+    error.code = 'K3_WISE_SAVE_FAILED'
     error.details = { code: error.code }
     return error
   }
@@ -137,7 +188,7 @@ function createK3WiseC6WriteSource({ system, createAdapter } = {}) {
     if (!result || result.failed > 0 || result.written !== rows.length) {
       // The adapter COLLECTS row failures (returns counts) rather than throwing; the C6 apply
       // loop needs a throw to record the row error and dead-letter it. Convert here.
-      throw saveFailure(result)
+      throw saveFailure()
     }
     return result
   }
@@ -166,7 +217,8 @@ function createK3WiseC6WriteSource({ system, createAdapter } = {}) {
           object,
           filters: { [keyField]: key[keyField] },
         })
-        return { data: Array.isArray(read && read.records) ? read.records : [] }
+        const records = Array.isArray(read && read.records) ? read.records : []
+        return { data: records.map(unwrapReferenceShapes) }
       } catch (error) {
         const code = error && error.details && error.details.code
         if (code === 'K3_WISE_READ_BUSINESS_ERROR') {
@@ -175,8 +227,13 @@ function createK3WiseC6WriteSource({ system, createAdapter } = {}) {
           // adapter from other business refusals. We treat it as "absent" so planning a NEW
           // material (the primary use case) classifies as `add`. The Save at apply remains
           // the authority: if K3 was actually unhappy, the Save fails and is dead-lettered.
-          // Transport/login failures do NOT take this branch — they rethrow and fail the
-          // dry-run closed.
+          // KNOWN BOUND (review #4761 P2): the same business-error class also covers a
+          // material that EXISTS but whose GetDetail fails for another reason (permission,
+          // wrong acctId/sub-org, locked record) — such a row previews as `add` though the
+          // Save will in fact update. The WRITE outcome is identical either way (Save is
+          // upsert, same body); only the preview label is off, and the 1-3 row human review
+          // is the compensating control. Transport/login failures do NOT take this branch —
+          // they rethrow and fail the dry-run closed.
           return { data: [] }
         }
         throw error

@@ -164,13 +164,82 @@ test('the flat planner config derives from the customer profile: key + schema-kn
   const cfg = deriveK3WiseC6PlannerTargetConfig({
     system: k3TargetSystem(),
     object: 'material',
-    fieldMappings: pipelineFixture().fieldMappings.concat([
-      { sourceField: 'ghost', targetField: 'FNotInSchema' },
-    ]),
+    fieldMappings: pipelineFixture().fieldMappings,
   })
   assert.deepEqual(cfg.keyFields, ['FNumber'])
-  assert.deepEqual(cfg.writableFields, ['FName', 'FModel'], 'key excluded; schema-unknown target dropped')
+  assert.deepEqual(cfg.writableFields, ['FName', 'FModel'])
   assert.equal(cfg.object, 'material')
+})
+
+test('REVIEW P2: a mapped target the write cannot carry is REFUSED, never silently dropped', () => {
+  assert.throws(
+    () => deriveK3WiseC6PlannerTargetConfig({
+      system: k3TargetSystem(),
+      object: 'material',
+      fieldMappings: pipelineFixture().fieldMappings.concat([
+        { sourceField: 'ghost', targetField: 'FNotInSchema' },
+      ]),
+    }),
+    (error) => error.details && error.details.code === 'K3_C6_UNSUPPORTED_TARGET_FIELD',
+    'a silent drop means the pipeline LOOKS configured while quietly writing less',
+  )
+})
+
+test('REVIEW P1: a field the FE overlay removed from the EFFECTIVE schema is refused — preview must equal write', () => {
+  // The operator overlay REPLACES the schema array wholly. FModel is in the profile literal
+  // but absent from this overlay, so the Save body cannot carry it — the old literal-only
+  // allowlist would have previewed and fingerprinted it while the Save silently dropped it.
+  const overlaySystem = k3TargetSystem({
+    config: {
+      objects: {
+        material: {
+          profile: PROFILE_ID,
+          schema: [
+            { name: 'FNumber', label: 'Code', type: 'string', required: true },
+            { name: 'FName', label: 'Name', type: 'string', required: true },
+          ],
+        },
+      },
+    },
+  })
+  assert.throws(
+    () => deriveK3WiseC6PlannerTargetConfig({
+      system: overlaySystem,
+      object: 'material',
+      fieldMappings: pipelineFixture().fieldMappings, // maps spec -> FModel
+    }),
+    (error) => error.details && error.details.code === 'K3_C6_UNSUPPORTED_TARGET_FIELD'
+      && error.details.profileSanctioned === true && error.details.saveComposable === false,
+  )
+  // And the inverse: a field the overlay ADDS but the profile deliberately omits (FBaseUnitID
+  // broke the M1 dry-run) must not smuggle back in through the effective schema.
+  const smuggleSystem = k3TargetSystem({
+    config: {
+      objects: {
+        material: {
+          profile: PROFILE_ID,
+          schema: [
+            { name: 'FNumber', label: 'Code', type: 'string', required: true },
+            { name: 'FName', label: 'Name', type: 'string', required: true },
+            { name: 'FBaseUnitID', label: 'Base unit', type: 'reference', reference: { kind: 'number' } },
+          ],
+        },
+      },
+    },
+  })
+  assert.throws(
+    () => deriveK3WiseC6PlannerTargetConfig({
+      system: smuggleSystem,
+      object: 'material',
+      fieldMappings: [
+        { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
+        { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
+        { sourceField: 'bu', targetField: 'FBaseUnitID' },
+      ],
+    }),
+    (error) => error.details && error.details.code === 'K3_C6_UNSUPPORTED_TARGET_FIELD'
+      && error.details.profileSanctioned === false && error.details.saveComposable === true,
+  )
 })
 
 test('fail-closed: a target without the named customer profile cannot even derive a plan config', () => {
@@ -351,4 +420,70 @@ test('a Save business failure lands as the registered closed token, not WRITE_FA
   // The registered token, not the WRITE_FAILED collapse — this is the positive control for
   // the SAFE_WRITE_ERROR_CODES registration; values-free by construction (a closed token).
   assert.deepEqual(apply.rowErrors.map((e) => e.errorCode), ['K3_WISE_SAVE_FAILED'])
+})
+
+test('REVIEW P2: an unchanged reference-shaped field converges to skip (unwrap parity)', async () => {
+  // GetDetail returns FUnitID as {FNumber:'PCS'}; the source maps the scalar 'PCS'. Without
+  // unwrapping, classifyExisting compares object-vs-scalar and re-plans `update` forever.
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3({
+    existing: {
+      'MAT-C6-REF': { FNumber: 'MAT-C6-REF', FItemID: 1002, FName: 'Same name', FUnitID: { FNumber: 'PCS' } },
+    },
+  })
+  const pipeline = pipelineFixture()
+  pipeline.fieldMappings = [
+    { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
+    { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
+    { sourceField: 'unit', targetField: 'FUnitID' },
+  ]
+  const targetSystem = k3TargetSystem()
+  const flatConfig = deriveK3WiseC6PlannerTargetConfig({
+    system: targetSystem, object: 'material', fieldMappings: pipeline.fieldMappings,
+  })
+  const dryRun = await dryRunExternalWrite({
+    pipeline,
+    sourceSystem: { id: 'source_1', kind: 'data-source:sql-readonly' },
+    targetSystem: { ...targetSystem, config: flatConfig },
+    sourceAdapter: sourceAdapterOf([{ code: 'MAT-C6-REF', name: 'Same name', unit: 'PCS' }]),
+    dataSourceWrites: createK3WiseC6WriteSource({
+      system: targetSystem,
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    }),
+    targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
+    tokenStore,
+    dryRunUser: 'operator-1',
+    dataSourceOwnerPrincipal: 'owner-principal-1',
+    maxRows: 3,
+  })
+  assert.equal(dryRun.counts.skip, 1, 'identical scalar-vs-reference values must converge to skip, not update forever')
+  assert.equal(dryRun.counts.update, 0)
+})
+
+test('REVIEW P2: a Save failure WITH a K3 Code field still lands as the registered token', async () => {
+  const tokenStore = memoryStore()
+  const calls = []
+  const impl = async (url) => {
+    const parsed = new URL(url)
+    calls.push(parsed.pathname)
+    if (parsed.pathname.endsWith('/Login')) return jsonResponse(200, { success: true, sessionId: 's' })
+    if (parsed.pathname.endsWith('/Material/GetDetail')) {
+      return jsonResponse(200, { StatusCode: 200, Message: 'Successful', Data: [{ FStatus: false, FItemID: 0, FMessage: 'missing' }] })
+    }
+    if (parsed.pathname.endsWith('/Material/Save')) {
+      // A realistic K3 refusal WITH an error code — passing this arbitrary string through as
+      // error.code would collapse to WRITE_FAILED at valuesFreeErrorCode (not in the SAFE set).
+      return jsonResponse(200, { StatusCode: 500, Code: 'E-K3-000123', Message: 'Faild', Data: [{ FStatus: false, FItemID: 0 }] })
+    }
+    return jsonResponse(404, { success: false })
+  }
+  const rows = [{ code: 'MAT-C6-CODED', name: 'Coded fail', spec: 'S' }]
+  const dryRun = await dryRunExternalWrite(c6Inputs({ rows, fetchPair: { impl, calls }, tokenStore }))
+  const apply = await applyExternalWrite({
+    ...c6Inputs({ rows, fetchPair: { impl, calls }, tokenStore }),
+    dryRunToken: dryRun.dryRunToken,
+    applyUser: 'operator-1',
+  })
+  assert.deepEqual(apply.rowErrors.map((e) => e.errorCode), ['K3_WISE_SAVE_FAILED'],
+    'the closed token must be unconditional — K3 code strings are neither SAFE-registered nor values-free')
 })
