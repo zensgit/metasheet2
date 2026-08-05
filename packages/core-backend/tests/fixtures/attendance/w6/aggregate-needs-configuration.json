@@ -1,0 +1,73 @@
+{
+  "ok": true,
+  "data": {
+    "groupId": "a4556006-0004-4000-8000-000000000001",
+    "groupType": "scheduled_shift",
+    "timezone": null,
+    "activeMemberCount": 5,
+    "managerPosture": { "ownerCount": 0, "subOwnerCount": 0 },
+    "calculationPosture": "legacy",
+    "domains": {
+      "membership": {
+        "label": "effective",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "people" }
+      },
+      "schedule": {
+        "label": "needs_configuration",
+        "strategy": "scheduled_shift",
+        "reasonCodes": ["SCHEDULE_STRATEGY_INCOMPLETE"],
+        "sourceRefs": [],
+        "fixedSchedule": null,
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "advanced-scheduling" }
+      },
+      "segments": {
+        "label": "needs_configuration",
+        "reasonCodes": ["SCHEDULE_STRATEGY_INCOMPLETE"],
+        "sourceRefs": [],
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "shifts" }
+      },
+      "flex": {
+        "label": "needs_configuration",
+        "reasonCodes": ["SCHEDULE_STRATEGY_INCOMPLETE"],
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "shifts" }
+      },
+      "rules": {
+        "label": "needs_configuration",
+        "source": "org_default",
+        "sourceRefs": [],
+        "reasonCodes": ["RULE_SOURCE_MISSING"],
+        "editorRef": { "kind": "group_context_route", "step": "rules", "surface": "rule-sets" }
+      },
+      "punchMethod": {
+        "label": "org_inherited",
+        "source": "org_inherited",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "policies" }
+      },
+      "requestPosture": {
+        "label": "org_inherited",
+        "overtime": "org_inherited",
+        "makeupPunch": "org_inherited",
+        "outdoor": "org_inherited",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "policies" }
+      }
+    },
+    "conflicts": [
+      {
+        "code": "SCHEDULE_STRATEGY_INCOMPLETE",
+        "domain": "schedule",
+        "label": "conflict_action_required",
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "advanced-scheduling" }
+      },
+      {
+        "code": "TIMEZONE_MISSING",
+        "domain": "basics",
+        "label": "conflict_action_required",
+        "editorRef": { "kind": "group_stage", "stage": "basics" }
+      }
+    ],
+    "evaluatedAt": "2026-08-05T00:00:00.000Z"
+  }
+}

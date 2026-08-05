@@ -1,0 +1,86 @@
+{
+  "ok": true,
+  "data": {
+    "groupId": "a4556006-0003-4000-8000-000000000001",
+    "groupType": "fixed_shift",
+    "timezone": "Asia/Shanghai",
+    "activeMemberCount": 8,
+    "managerPosture": { "ownerCount": 1, "subOwnerCount": 1 },
+    "calculationPosture": "legacy",
+    "domains": {
+      "membership": {
+        "label": "effective",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "people" }
+      },
+      "schedule": {
+        "label": "effective",
+        "strategy": "fixed_shift",
+        "reasonCodes": [],
+        "sourceRefs": [
+          { "kind": "shift", "id": "a4556006-0003-4000-8000-000000000101" },
+          { "kind": "fixed_schedule_config", "id": "a4556006-0003-4000-8000-000000000102" }
+        ],
+        "fixedSchedule": {
+          "state": "effective",
+          "reasonCodes": ["EFFECTIVE"],
+          "desired": {
+            "shiftId": "a4556006-0003-4000-8000-000000000101",
+            "startDate": "2026-08-01",
+            "endDate": "2026-08-31",
+            "revision": 1
+          },
+          "coverage": {
+            "targetMembers": 8,
+            "matchingMembers": 8,
+            "missingMembers": 0,
+            "nonMemberTargets": 0,
+            "differentKeyRows": 0
+          },
+          "drift": {
+            "unconfiguredManagedRows": 0,
+            "unpublishedManagedRows": 0,
+            "managedSets": []
+          },
+          "evaluatedAt": "2026-08-05T00:00:00.000Z"
+        },
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "assignments" }
+      },
+      "segments": {
+        "label": "preview_only",
+        "reasonCodes": ["SEGMENT_CALCULATION_NOT_AUTHORITATIVE"],
+        "sourceRefs": [{ "kind": "shift", "id": "a4556006-0003-4000-8000-000000000101" }],
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "shifts" }
+      },
+      "flex": {
+        "label": "preview_only",
+        "mode": "flex_required_duration",
+        "reasonCodes": ["SEGMENT_CALCULATION_NOT_AUTHORITATIVE"],
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "shifts" }
+      },
+      "rules": {
+        "label": "effective",
+        "source": "group_rule_set",
+        "sourceRefs": [{ "kind": "rule_set", "id": "a4556006-0003-4000-8000-000000000103" }],
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_context_route", "step": "rules", "surface": "rule-sets" }
+      },
+      "punchMethod": {
+        "label": "org_inherited",
+        "source": "org_inherited",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "policies" }
+      },
+      "requestPosture": {
+        "label": "org_inherited",
+        "overtime": "org_inherited",
+        "makeupPunch": "org_inherited",
+        "outdoor": "org_inherited",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "policies" }
+      }
+    },
+    "conflicts": [],
+    "evaluatedAt": "2026-08-05T00:00:00.000Z"
+  }
+}
