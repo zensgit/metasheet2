@@ -435,10 +435,13 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
       const b = await createStuckRun('lockguard-b', workDate)
       const c = await createStuckRun('lockguard-c', workDate)
 
-      // A separate connection durably holds a row lock on candidate `b` — modeling the sweep's
-      // OWN per-candidate `finalizeAttendanceScheduledRunV1`/`abandonAttendanceScheduledRunV1`
-      // step-3 `SELECT ... FOR UPDATE` (both reachable, default-multi-worker topology per the
-      // gate's Orientation section), or a second concurrent scan worker.
+      // A separate connection holds an open, uncommitted row lock on candidate `b` — modeling
+      // the sweep's OWN per-candidate `finalizeAttendanceScheduledRunV1`/
+      // `abandonAttendanceScheduledRunV1` step-3 `SELECT ... FOR UPDATE` (both reachable,
+      // default-multi-worker topology per the gate's Orientation section), or a second
+      // concurrent scan worker. (Deliberately NOT "durably" — an open transaction's lock is the
+      // opposite of durable; it vanishes on rollback/crash, unlike this fix's `last_attempt_at`
+      // rotation stamp.)
       const lockConn = await pool.connect()
       await lockConn.query('BEGIN')
       await lockConn.query('SELECT * FROM attendance_scheduled_runs WHERE run_id = $1::uuid FOR UPDATE', [b.runId])
