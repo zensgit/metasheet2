@@ -43,7 +43,7 @@ assert.deepEqual(LIST_PRESET.readConfigOverlay, {
       readMode: 'list',
       readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
       readListBodyKey: 'Data',
-      readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
+      readListFields: ['FItemID', 'FNumber', 'FName', 'FModel', 'FUnitID'],
       readListOrderBy: 'FNumber',
       readListFilterField: 'FNumber',
       readListFilterMode: 'contains_like',
@@ -134,7 +134,7 @@ assert.deepEqual(listOverlayedSystem.config.objects.material, {
   readMode: 'list',
   readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
   readListBodyKey: 'Data',
-  readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
+  readListFields: ['FItemID', 'FNumber', 'FName', 'FModel', 'FUnitID'],
   readListOrderBy: 'FNumber',
   readListFilterField: 'FNumber',
   readListFilterMode: 'contains_like',
@@ -515,3 +515,51 @@ for (const leak of ['SECRET-BOM-ERR-001', 'SECRET-BOM-ERR-002', 'SECRET-BOM-ERR-
 }
 
 console.log('read-smoke.test.cjs OK')
+
+// --- S4 (B4 prerequisite): the LIST projection must carry the intake's REQUIRED identity column ---
+//
+// `readListFields` is not a display preference — the adapter sends it verbatim as the GetList
+// `Fields` parameter (k3-wise-webapi-adapter.cjs buildListReadBody), so a column absent here is
+// absent from every row K3 returns. The stock-prep intake REQUIRES the internal id
+// (stock-preparation-readonly-intake.cjs normalizeErpMaterial: no FItemID alias hit -> row error
+// MISSING_MATERIAL_INTERNAL_ID). Before this section existed, the preset projected
+// ['FNumber','FName','FModel','FUnitID'] — every list-read row was constitutionally un-ingestable,
+// and nothing red said so. This section is the mechanical link between the two contracts.
+{
+  const { normalizeStockPreparationReadonlyIntake } = require('../lib/stock-preparation-readonly-intake.cjs')
+
+  // A full K3 material row, as the mock/live server would hold it. The projection below is what
+  // the Fields parameter does to it — simulate exactly that, no shortcuts.
+  const FULL_K3_ROW = { FItemID: 1001, FNumber: 'MAT-LIST-001', FName: 'List material', FModel: 'SPEC-L', FUnitID: 'PCS' }
+  const projectRow = (row, fields) => Object.fromEntries(fields.filter((f) => f in row).map((f) => [f, row[f]]))
+  const intakeOf = (row) => normalizeStockPreparationReadonlyIntake({
+    sourceSystem: 'erp_k3',
+    runId: 'read-smoke-link',
+    startedAt: '2026-08-05T00:00:00.000Z',
+    createdBy: 'system',
+    erpMaterials: [row],
+  })
+
+  const listFields = LIST_PRESET.readConfigOverlay.objects.material.readListFields
+
+  // (1) The preset's ACTUAL projection yields an intake-ingestable row.
+  const projected = projectRow(FULL_K3_ROW, listFields)
+  const accepted = intakeOf(projected)
+  assert.equal(accepted.evidence.result.rowErrors, 0,
+    'a row projected through the preset readListFields must be ingestable by the stock-prep intake')
+  assert.equal(accepted.erpMaterials[0].erpMaterialInternalId, '1001',
+    'the projected row must carry the internal id the intake requires')
+
+  // (2) POSITIVE CONTROL for (3): the discriminator is the identity column, not the intake
+  // refusing everything — dropping a NON-required column must still be ingestable.
+  const withoutSpec = projectRow(FULL_K3_ROW, listFields.filter((f) => f !== 'FModel'))
+  assert.equal(intakeOf(withoutSpec).evidence.result.rowErrors, 0,
+    'dropping a non-required column must NOT be a row error (proves (3) rejects for the right reason)')
+
+  // (3) The OLD projection (pre-S4, without FItemID) is proven un-ingestable — this is the
+  // assertion that goes red if anyone removes FItemID from the preset again.
+  const legacyProjection = projectRow(FULL_K3_ROW, listFields.filter((f) => f !== 'FItemID'))
+  const rejected = intakeOf(legacyProjection)
+  assert.ok(rejected.evidence.result.rowErrors > 0,
+    'a projection without the internal id column must be a row error, not a silent null')
+}
