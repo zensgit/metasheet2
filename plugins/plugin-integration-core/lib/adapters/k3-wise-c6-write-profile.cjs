@@ -58,9 +58,12 @@ const SCHEMA_FIELD_NAMES = new Set(
 // store's own sha256 over a stable stringify of the WHOLE normalized config — order-insensitive
 // and, being full-config, not a projection. The gate recomputes what the ratified content WOULD
 // key to for this row's systemId and requires equality.
-const {
-  __internals: { contentKeyFor: readSourceContentKeyFor },
-} = require('../read-source-config-store.cjs')
+// REVIEW P2-5 (round 7): this used to destructure `__internals.contentKeyFor`. Two problems, both
+// already ruled on in this package (`read-source-config.cjs:18-22`, review B1a-1 P2): a LIVE
+// fail-closed gate must not bind to another module's private/test surface, and destructuring it
+// at require time turns an upstream rename into a module-load TypeError rather than a graceful
+// fail-closed. `contentKeyFor` is now a supported export, bound by its public name.
+const { contentKeyFor: readSourceContentKeyFor } = require('../read-source-config-store.cjs')
 const { normalizeReadSourceConfig } = require('../read-source-config.cjs')
 
 function ratifiedB4ContentKeyFor(systemId) {

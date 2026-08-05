@@ -136,6 +136,13 @@ const K3_NON_PROFILE_OBJECT_CONFIG_MODULES = Object.freeze([
   // WebAPI keys onto it would assert a contract it does not have.
   'lib/adapters/k3-wise-sqlserver-channel.cjs',
 ])
+// Files that MENTION the identifier without reading it — prose only. Kept as a separate list from
+// the out-of-scope one on purpose (review P2-3): declaring a prose mention "out of scope" would
+// pre-authorise a future REAL read in the same file to pass unnoticed. The sweep asserts these
+// carry zero reads in any syntax, so adding one turns this list RED instead.
+const K3_OBJECT_CONFIG_PROSE_ONLY_MODULES = Object.freeze([
+  'lib/http-routes.cjs',
+])
 // Fields the sweep found that are deliberately NOT in either list, each with its reason. The
 // contract test asserts pinned + forbidden + this set covers EVERY objectConfig read, so a new
 // field cannot enter the adapter untriaged.
@@ -205,10 +212,30 @@ function normalizeBaseUrl(value) {
 // repo's existing crown-jewel guard for exactly this problem, and its own header says it is
 // "stricter than the adapter's assertRelativePath": a POSITIVE character allowlist plus blanket
 // rejection of schemes, protocol-relative, backslash, ALL percent-encoding, control chars and
-// literal `..`. A positive allowlist cannot be out-normalized — there is no spelling left to
-// find. The four-word suffix denylist is kept ON TOP (an allowlist-clean path may still spell a
-// write verb), but it is no longer what holds the line.
-const K3_WRITE_ENDPOINT_SUFFIX = /\/(submit|audit|delete|save)$/i
+// literal `..`.
+//
+// RETRACTION (review round 7). Two claims previously stated here and in the round-5/6 commit
+// messages are WITHDRAWN, not softened:
+//   * "A positive allowlist cannot be out-normalized — there is no spelling left to find."
+//   * "the class is closed at the choke point".
+// Both are false. The allowlist is not what stops write endpoints — this denylist is — and the
+// choke-point move fixed WHERE the check runs and WHAT IT IS HANDED, not WHAT IT KNOWS. Three
+// separate properties, and only two are closed:
+//   AGREEMENT  (checked string == used string) ...... CLOSED at the wire choke point
+//   COVERAGE   (every request path is checked) ...... CLOSED by the required `intent`
+//   VOCABULARY (which endpoints count as writes) .... NOT CLOSED — bounded by the list below
+// Turning readPath into a positive catalogue is the only thing that would close VOCABULARY, and
+// the design lock defers that to P2/P3. Until then this list is a bound, and saying otherwise
+// has now cost three review rounds.
+//
+// The words below cover the K3 WISE lifecycle vocabulary observed in this repo (Save, Submit,
+// Audit, Delete) plus vendor siblings a reviewer enumerated as reachable (BatchSave, UnAudit,
+// Draft, Push, GroupSave, Disable, Allocate, SetStatus). Anchored per-segment, case-insensitive.
+const K3_WRITE_ENDPOINT_WORDS = Object.freeze([
+  'submit', 'audit', 'unaudit', 'delete', 'save', 'batchsave', 'groupsave',
+  'draft', 'push', 'disable', 'allocate', 'setstatus',
+])
+const K3_WRITE_ENDPOINT_SUFFIX = new RegExp(`/(${K3_WRITE_ENDPOINT_WORDS.join('|')})$`, 'i')
 
 // AXIS 6 (review round 6, CONFIRMED): `/K3API/Material/Submit/.` cleared BOTH guards and still
 // POSTed to `/K3API/Material/Submit/`. The allowlist admits it (a bare `.` segment is not `..`,
@@ -225,11 +252,38 @@ const K3_WRITE_ENDPOINT_SUFFIX = /\/(submit|audit|delete|save)$/i
 // (`assertWireEndpointIntent`, applied inside `requestJson` to the pathname `buildEndpointUrl`
 // actually produced); this config-time check is kept as an EARLY, better-located error, and the
 // two are proven independent by separately neutering each (see the exclusivity tests).
+// AXIS 7 (review round 7): `/K3API/Material/Submit.` — the SAME denied word with a trailing dot.
+// It cleared all three layers: `.` is inside the allowlist's character class; the `pathname`
+// setter removes dot SEGMENTS (`/./`, `/../`) but not a trailing dot INSIDE a segment; and the
+// denylist requires the word at the very end. K3 WISE is IIS/Windows-hosted, and the Windows path
+// canonicalizer strips trailing dots and spaces from the final segment — the classic trailing-dot
+// bypass — so the server may well route `/Submit.` to the Submit handler.
+//
+// The lesson from axes 4-6 generalises: normalize the way the CONSUMER of the string will, then
+// check. Previously "the consumer" meant our own URL builder; it also means the SERVER. So the
+// trailing `.`/space strip below is not another denylist patch — it is the same normalize-then-
+// check rule applied to the server's canonicalization. `assertSafeK3ReadEndpoint` additionally
+// REJECTS such spellings outright (no legitimate K3 endpoint ends in `.`, `~` or a space), so the
+// two stops are independent: one canonicalizes, the other refuses.
 function toWireEndpointPathname(rawPath) {
   const url = new URL('http://k3-endpoint-normalization.invalid')
   url.pathname = rawPath.startsWith('/') ? rawPath : `/${rawPath}`
-  return url.pathname.replace(/\/+$/, '')
+  // Strip trailing dots/tildes/whitespace from EVERY segment, as the Windows canonicalizer does,
+  // before the vocabulary check sees the path. The `pathname` setter percent-encodes a literal
+  // space to `%20`, so the encoded forms are stripped alongside the literal ones — decoding the
+  // whole segment instead would risk a `%2F` inventing a new segment boundary, which is precisely
+  // the kind of normalization surprise this whole line of defects came from.
+  return url.pathname
+    .split('/')
+    .map((segment) => segment.replace(/(?:[.~\s]|%2[eE]|%7[eE]|%09|%0[aAbBcCdD]|%20)+$/g, ''))
+    .join('/')
+    .replace(/\/+$/, '')
 }
+
+// No legitimate K3 endpoint segment ends in `.`, `~`, or whitespace; a spelling that does is
+// either a Windows-canonicalizer bypass attempt or a typo. Refusing outright is narrower than
+// trying to enumerate what each such spelling would resolve to.
+const K3_SUSPICIOUS_SEGMENT_TAIL = /[.~\s]$/
 
 function assertSafeK3ReadEndpoint(value, field) {
   if (value === undefined || value === null) return
@@ -246,6 +300,18 @@ function assertSafeK3ReadEndpoint(value, field) {
   if (!isSafeRelativeReadPath(raw)) {
     throw new AdapterValidationError('a K3 endpoint must be a safe relative path', {
       code: 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE',
+      field,
+    })
+  }
+  // AXIS 7: refuse the Windows-canonicalizer spellings. Applied AFTER the allowlist and skipping
+  // pure `.`/`..` segments, so the established vectors keep refusing by their original route
+  // (a `..` path is still NOT_SAFE_RELATIVE, `/Submit/.` is still a write-endpoint refusal) and
+  // this code fires only for what genuinely needs it: an allowlist-clean segment ending in a dot,
+  // tilde or space, which no legitimate K3 endpoint spells.
+  if (raw.split('/').some((segment) => segment !== '.' && segment !== '..'
+    && segment.length > 0 && K3_SUSPICIOUS_SEGMENT_TAIL.test(segment))) {
+    throw new AdapterValidationError('a K3 endpoint segment may not end in a dot, tilde or space', {
+      code: 'K3_WISE_ENDPOINT_SUSPICIOUS_SEGMENT',
       field,
     })
   }
@@ -2479,6 +2545,7 @@ module.exports = {
   K3_PROFILE_TRIAGED_SAFE_KEYS,
   K3_PROFILE_OBJECT_CONFIG_CONSUMERS,
   K3_NON_PROFILE_OBJECT_CONFIG_MODULES,
+  K3_OBJECT_CONFIG_PROSE_ONLY_MODULES,
   K3WiseWebApiAdapterError,
   createK3WiseWebApiAdapter,
   createK3WiseWebApiAdapterFactory,

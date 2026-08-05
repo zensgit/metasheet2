@@ -279,21 +279,50 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
   // see the commit message retraction.) Filter is the module FAMILY now, and reads are matched
   // in dot AND bracket form. Dot form takes NO whitespace: with `\s*` it spanned newlines and
   // matched prose in a comment as a field named `The`.
-  const OBJECT_CONFIG_READ = /objectConfig(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\])/g
+  // P2-3: `\??\.` added — a single `?` between `objectConfig` and `.` hid a live read on the
+  // Save path from every round of this sweep. Still NO `\s*` before the dot: with it, the
+  // pattern spanned newlines and matched prose in a comment as a field named `The`.
+  const OBJECT_CONFIG_READ = /objectConfig(?:\??\.([A-Za-z_][A-Za-z0-9_]*)|\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\])/g
   // REVIEW P2-F4 (round 6): a `.filter((rel) => /(^|\/)k3-[A-Za-z0-9-]+\.cjs$/.test(rel))` used
-  // to sit here, so "the K3 module family" was really A FILENAME CONVENTION. A byte-identical
-  // consumer named `kingdee-save-helper.cjs` swept GREEN. Membership is now decided ONLY by
-  // content — does this file read objectConfig? — and everything found must be triaged into one
-  // of the two declared lists. See the positive control below, which proves the removal is
-  // load-bearing under a non-`k3-` filename.
+  // to sit here, so "the K3 module family" was really A FILENAME CONVENTION.
+  //
+  // REVIEW P2-3 (round 7) — THIRD escape of this same guard, and the pattern is now unmistakable:
+  // each round the membership predicate was NARROWER than the property claimed. Round 5 it was a
+  // two-filename whitelist; round 6 a `k3-` prefix; round 7 the READ SYNTAX — discovery keyed off
+  // `OBJECT_CONFIG_READ`, which only matches literal-dot and quoted-bracket forms, so a consumer
+  // using `objectConfig?.x`, `const { x } = objectConfig`, or `objectConfig[k]` was never
+  // discovered at all. The source comment claiming "a new reader under ANY name is now a RED" was
+  // a FALSE INVARIANT written into the tree; it is retracted in the adapter.
+  //
+  // Discovery is now the BARE IDENTIFIER: any file mentioning `objectConfig` must be triaged.
+  // That predicate cannot be narrower than the property, because the property is about this
+  // identifier. Reads are still parsed for FIELD names below, but a file whose reads the regex
+  // cannot resolve is now a RED rather than an invisible one.
+  const OBJECT_CONFIG_MENTION = /\bobjectConfig\b/
   const discovered = walk(libRoot)
-    .filter((f) => { OBJECT_CONFIG_READ.lastIndex = 0; return OBJECT_CONFIG_READ.test(fs.readFileSync(f, 'utf8')) })
+    .filter((f) => OBJECT_CONFIG_MENTION.test(fs.readFileSync(f, 'utf8')))
     .map((f) => path.relative(path.join(__dirname, '..'), f))
     .sort()
-  const { K3_NON_PROFILE_OBJECT_CONFIG_MODULES } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+  const {
+    K3_NON_PROFILE_OBJECT_CONFIG_MODULES,
+    K3_OBJECT_CONFIG_PROSE_ONLY_MODULES,
+  } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
   assert.deepEqual(discovered,
-    [...K3_PROFILE_OBJECT_CONFIG_CONSUMERS, ...K3_NON_PROFILE_OBJECT_CONFIG_MODULES].sort(),
-    'a K3 module reading objectConfig is in NEITHER list — triage it, or declare it out of scope WITH a reason')
+    [...K3_PROFILE_OBJECT_CONFIG_CONSUMERS, ...K3_NON_PROFILE_OBJECT_CONFIG_MODULES,
+      ...K3_OBJECT_CONFIG_PROSE_ONLY_MODULES].sort(),
+    'a module mentioning objectConfig is in NO list — triage it, declare it out of scope WITH a reason, or declare it prose-only')
+
+  // A prose-only declaration must stay prose-only: zero reads in ANY syntax. Without this, the
+  // third list would be a place for a future real read to hide (which is exactly why these files
+  // are not simply folded into the out-of-scope list).
+  // No whitespace after the dot, and an IDENTIFIER character required: the sentence
+  // "...so it serves as the objectConfig." ends in a full stop, which a bare `\.` matched.
+  const ANY_READ = /objectConfig\??\.[A-Za-z_$]|objectConfig\[|(?:const|let|var)\s*\{[^}]*\}\s*=\s*objectConfig/
+  for (const rel of K3_OBJECT_CONFIG_PROSE_ONLY_MODULES) {
+    const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8')
+    assert.equal(ANY_READ.test(src), false,
+      `${rel} is declared prose-only but now READS objectConfig — triage it into a real list`)
+  }
   for (const rel of K3_PROFILE_OBJECT_CONFIG_CONSUMERS) {
     assert.ok(!K3_NON_PROFILE_OBJECT_CONFIG_MODULES.includes(rel),
       `${rel} cannot be both a consumer and out of scope — that would dodge the field triage`)
@@ -303,8 +332,22 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
   for (const rel of K3_PROFILE_OBJECT_CONFIG_CONSUMERS) {
     const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8')
     for (const m of src.matchAll(OBJECT_CONFIG_READ)) reads.add(m[1] || m[2])
-    assert.equal(/const\s*\{[^}]*\}\s*=\s*objectConfig/.test(src), false,
+    // P2-3: the destructure guard covered only `const`, and nothing covered COMPUTED keys — both
+    // are reads the field sweep above cannot resolve to a name, so they smuggle untriaged fields
+    // through a DECLARED consumer. Any unresolvable read is now RED.
+    assert.equal(/(?:const|let|var)\s*\{[^}]*\}\s*=\s*objectConfig/.test(src), false,
       `${rel} destructures objectConfig — the sweep cannot see those reads; refactor or extend the sweep`)
+    assert.equal(/\(\s*\{[^}]*\}\s*=\s*objectConfig\s*\)/.test(src), false,
+      `${rel} destructures objectConfig via assignment — same blind spot`)
+    // The ONE permitted computed read is the arming Symbol — it is deliberately not a string
+    // field (a JSON config cannot forge a Symbol key, which is the guard's whole basis), so the
+    // field triage does not apply to it. Every other computed key is RED.
+    const COMPUTED_KEY_ALLOWED = new Set(['K3_PROFILE_ARMED'])
+    const computed = [...src.matchAll(/objectConfig\[\s*([^'"\]\s][^\]]*?)\s*\]/g)]
+      .map((m) => m[1])
+      .filter((key) => !COMPUTED_KEY_ALLOWED.has(key))
+    assert.deepEqual(computed, [],
+      `${rel} reads objectConfig with a COMPUTED key (${JSON.stringify(computed)}) — the sweep cannot resolve it to a field name`)
   }
   assert.ok(reads.size >= 30, `the sweep must actually find reads (found ${reads.size}) — a regex matching nothing would pass vacuously`)
 
@@ -319,23 +362,36 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
   // POSITIVE CONTROL for the FAMILY RULE (review P2-F4). The discovery above must be shown to
   // catch a new consumer whose filename does NOT start with `k3-` — that exact file swept GREEN
   // before this round. Written and removed inside the test so it cannot linger in the tree.
-  const probe = path.join(libRoot, 'adapters', 'kingdee-save-helper.cjs')
-  assert.equal(fs.existsSync(probe), false, 'probe filename must not collide with a real module')
-  fs.writeFileSync(probe, "'use strict'\nmodule.exports = (objectConfig) => objectConfig.savePath\n")
-  try {
-    const rediscovered = walk(libRoot)
-      .filter((f) => { OBJECT_CONFIG_READ.lastIndex = 0; return OBJECT_CONFIG_READ.test(fs.readFileSync(f, 'utf8')) })
-      .map((f) => path.relative(path.join(__dirname, '..'), f))
-      .sort()
-    assert.ok(rediscovered.includes('lib/adapters/kingdee-save-helper.cjs'),
-      'a non-`k3-` consumer must be DISCOVERED — otherwise the family filter is still a filename convention')
-    assert.notDeepEqual(rediscovered,
-      [...K3_PROFILE_OBJECT_CONFIG_CONSUMERS, ...K3_NON_PROFILE_OBJECT_CONFIG_MODULES].sort(),
-      'and it must make the contract assertion RED until triaged')
-  } finally {
-    fs.unlinkSync(probe)
+  // REVIEW P2-3 (round 7): the previous control used a single `objectConfig.savePath` — dot form —
+  // so it only ever proved the FILENAME filter was gone. A reviewer then walked straight past the
+  // sweep with `?.`, destructuring and a computed key. Every syntax that reads the identifier is
+  // now a probe, and each must be DISCOVERED on its own.
+  const declared = [...K3_PROFILE_OBJECT_CONFIG_CONSUMERS, ...K3_NON_PROFILE_OBJECT_CONFIG_MODULES,
+    ...K3_OBJECT_CONFIG_PROSE_ONLY_MODULES].sort()
+  const probes = [
+    ['kingdee-save-helper.cjs', "module.exports = (objectConfig) => objectConfig.savePath\n"],
+    ['kingdee-optional-helper.cjs', "module.exports = (objectConfig) => objectConfig?.savePath\n"],
+    ['kingdee-destructure-helper.cjs', "module.exports = (objectConfig) => { const { savePath } = objectConfig; return savePath }\n"],
+    ['kingdee-computed-helper.cjs', "module.exports = (objectConfig, k) => objectConfig[k]\n"],
+  ]
+  for (const [name, body] of probes) {
+    const probe = path.join(libRoot, 'adapters', name)
+    assert.equal(fs.existsSync(probe), false, `probe ${name} must not collide with a real module`)
+    fs.writeFileSync(probe, `'use strict'\n${body}`)
+    try {
+      const rediscovered = walk(libRoot)
+        .filter((f) => OBJECT_CONFIG_MENTION.test(fs.readFileSync(f, 'utf8')))
+        .map((f) => path.relative(path.join(__dirname, '..'), f))
+        .sort()
+      assert.ok(rediscovered.includes(`lib/adapters/${name}`),
+        `a consumer using this syntax must be DISCOVERED (${name}) — otherwise the predicate is narrower than the property`)
+      assert.notDeepEqual(rediscovered, declared,
+        `and ${name} must make the contract assertion RED until triaged`)
+    } finally {
+      fs.unlinkSync(probe)
+    }
+    assert.equal(fs.existsSync(probe), false, `probe ${name} must be removed even if the assertions failed`)
   }
-  assert.equal(fs.existsSync(probe), false, 'probe must be removed even if the assertions failed')
 })
 
 test('SET MEMBERSHIP IS PINNED BY NAME (a loop over the mutated array cannot catch its own move)', () => {
@@ -464,6 +520,24 @@ test('ADVERSARIAL P1-C1: a read path may never target a write endpoint — WITHO
     ['dot segment mid-path', { material: { operations: ['read'], readPath: '/K3API/./Material/Submit/.' } }],
     ['dot segment + case', { material: { operations: ['read'], readPath: '/K3API/Material/SUBMIT/.' } }],
     ['dot segment -> Save', { material: { operations: ['read'], readPath: '/K3API/Material/Save/.' } }],
+    // REVIEW P2-1 — AXIS 7: the same denied word with a TRAILING DOT inside the segment. The
+    // allowlist admits `.`, the pathname setter removes dot SEGMENTS but not a segment-internal
+    // trailing dot, and the denylist wants the word at the end. K3 WISE is IIS-hosted and Windows
+    // strips trailing dots/spaces from the final segment, so this plausibly routes to Submit.
+    ['trailing dot', { material: { operations: ['read'], readPath: '/K3API/Material/Submit.' } }],
+    ['trailing dots', { material: { operations: ['read'], readPath: '/K3API/Material/Submit..' } }],
+    ['trailing tilde', { material: { operations: ['read'], readPath: '/K3API/Material/Submit~' } }],
+    ['trailing dot -> Save', { material: { operations: ['read'], readPath: '/K3API/Material/Save.' } }],
+    // REVIEW P2-2: vendor lifecycle siblings the four-word denylist did not know. This widens the
+    // BOUND; it does not close the class — see the retraction in the adapter.
+    ['BatchSave', { material: { operations: ['read'], readPath: '/K3API/Material/BatchSave' } }],
+    ['UnAudit', { material: { operations: ['read'], readPath: '/K3API/Material/UnAudit' } }],
+    ['Draft', { material: { operations: ['read'], readPath: '/K3API/Material/Draft' } }],
+    ['Push', { material: { operations: ['read'], readPath: '/K3API/Material/Push' } }],
+    ['GroupSave', { material: { operations: ['read'], readPath: '/K3API/Material/GroupSave' } }],
+    ['Disable', { material: { operations: ['read'], readPath: '/K3API/Material/Disable' } }],
+    ['Allocate', { material: { operations: ['read'], readPath: '/K3API/Material/Allocate' } }],
+    ['SetStatus', { material: { operations: ['read'], readPath: '/K3API/Material/SetStatus' } }],
     ['a custom object read -> Save', {
       widget: {
         operations: ['read'], readPath: '/K3API/Widget/Save', savePath: '/K3API/Widget/Save',
@@ -476,7 +550,8 @@ test('ADVERSARIAL P1-C1: a read path may never target a write endpoint — WITHO
       // The positive allowlist (axis 5) now fires FIRST for the encoded/traversal spellings,
       // so accept either endpoint refusal — what matters is that none of them reaches the wire.
       (error) => error.details && (error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT'
-        || error.details.code === 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE'),
+        || error.details.code === 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE'
+        || error.details.code === 'K3_WISE_ENDPOINT_SUSPICIOUS_SEGMENT'),
       `${label} must be refused with NO profile selected`,
     )
   }
@@ -582,6 +657,28 @@ test('REVIEW P1-F1: the WIRE gate is fail-closed on intent and sees the produced
     assert.doesNotThrow(() => assertWireEndpointIntent(toWireEndpointPathname(raw), 'lifecycle-write'),
       `${raw} is a legitimate lifecycle write`)
   }
+
+  // AXIS 7 AT THE WIRE (mutation N1 caught this). The axis-7 vectors above all enter through
+  // config normalization, where K3_WISE_ENDPOINT_SUSPICIOUS_SEGMENT refuses them — so deleting
+  // the trailing-tail strip from `toWireEndpointPathname` left the suite GREEN. Two doors
+  // covering for each other. Fed straight to the wire gate, the strip is the ONLY thing that
+  // makes the vocabulary check fire.
+  for (const raw of ['/K3API/Material/Submit.', '/K3API/Material/Submit..', '/K3API/Material/Submit~',
+    '/K3API/Material/Submit%20', '/K3API/Material/Submit%2e', '/K3API/Material/Save.']) {
+    assert.throws(() => assertWireEndpointIntent(toWireEndpointPathname(raw), 'read'),
+      (error) => error.details && error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      `${raw} must be refused AT THE WIRE, without relying on the config-time check`)
+  }
+
+  // And the converse witness (mutation N3): a suspicious tail that is NOT a write word. The
+  // normalizer strips it, the vocabulary check then sees an innocuous path — so only the
+  // config-time SUSPICIOUS_SEGMENT refusal catches it. Neither door is decoration.
+  assert.equal(toWireEndpointPathname('/K3API/Material/GetList.'), '/K3API/Material/GetList')
+  assert.doesNotThrow(() => assertWireEndpointIntent(toWireEndpointPathname('/K3API/Material/GetList.'), 'read'),
+    'precondition: the wire gate lets this through, which is what makes it a config-check-only witness')
+  assert.throws(() => __internals.assertSafeK3ReadEndpoint('/K3API/Material/GetList.', 'object.readPath'),
+    (error) => error.details && error.details.code === 'K3_WISE_ENDPOINT_SUSPICIOUS_SEGMENT',
+    'a dot-tailed segment must be refused even when it is not a write verb')
 
   // The normalizer must agree with the SETTER, which is what buildEndpointUrl uses. The URL
   // CONSTRUCTOR disagrees on `//a/x` (it reads `a` as an authority) — re-deriving with the wrong
@@ -714,21 +811,39 @@ test('REVIEW P1-F1/P1-F2 EXCLUSIVITY: the config-time check and the wire gate ar
   // must be shown to catch something the other does not, or one of them is decoration.
   const { __internals } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
 
-  // Only the WIRE gate can catch a path that never passed through config normalization at all
-  // (this is precisely the healthPath/loginPath shape, and any future field like it).
-  assert.throws(() => __internals.assertWireEndpointIntent(
-    __internals.toWireEndpointPathname('/K3API/Material/Submit/.'), 'read'),
-    (error) => error.details && error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT')
+  // REVIEW P2-4 (round 7): the previous body fed BOTH halves the same vector and asserted only
+  // that `error.details.field` was populated — an error-message property, not an escape the other
+  // door misses. That is not an exclusivity proof, and the round-6 commit's "proven independent
+  // by separately neutering each" was not supported by it. Each half below is a witness the OTHER
+  // door provably lets through.
 
-  // Only the CONFIG-time check reports the offending FIELD, which is what makes the error
-  // actionable at setup time rather than at first request.
-  try {
-    __internals.assertSafeK3ReadEndpoint('/K3API/Material/Submit/.', 'config.healthPath')
-    assert.fail('expected a config-time refusal')
-  } catch (error) {
-    assert.equal(error.details.field, 'config.healthPath',
-      'the config-time check must name the field; the wire gate cannot know it')
-  }
+  // WITNESS 1 — only the WIRE gate catches it. The write path rides on `baseUrl`, so the
+  // configured readPath is the innocuous '/'; the config-time check sees nothing wrong because
+  // toWireEndpointPathname('/') is ''. The produced pathname is what carries the write verb.
+  assert.equal(__internals.toWireEndpointPathname('/'), '',
+    'precondition: a bare slash normalizes to empty, so the config-time check has nothing to test')
+  assert.doesNotThrow(() => __internals.assertSafeK3ReadEndpoint('/', 'object.readPath'),
+    'the config-time check must PASS this one — that is what makes it a wire-gate-only witness')
+  assert.throws(
+    () => __internals.assertWireEndpointIntent(
+      __internals.toWireEndpointPathname('/K3API/Material/Submit/'), 'read'),
+    (error) => error.details && error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+    'the wire gate must catch a write verb that arrived via baseUrl',
+  )
+
+  // WITNESS 2 — only the CONFIG-time check catches it. The vocabulary regex is encoding-blind, so
+  // a percent-encoded verb sails through the wire gate; the allowlist's blanket `%` rejection is
+  // the only stop. This also documents, in the suite, that the wire gate is NOT independently
+  // sufficient — a claim the source comment previously implied.
+  assert.doesNotThrow(
+    () => __internals.assertWireEndpointIntent(__internals.toWireEndpointPathname('/K3API/Material/Submi%74'), 'read'),
+    'precondition: the wire gate is encoding-blind, so this is a config-check-only witness',
+  )
+  assert.throws(
+    () => __internals.assertSafeK3ReadEndpoint('/K3API/Material/Submi%74', 'object.readPath'),
+    (error) => error.details && error.details.code === 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE',
+    'the config-time check must catch the percent-encoded verb',
+  )
 })
 
 test('REVIEW P2-D4/P2-E3: the profile arm is UNFORGEABLE — a JSON config cannot claim it', async () => {

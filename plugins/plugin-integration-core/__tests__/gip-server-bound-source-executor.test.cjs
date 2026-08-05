@@ -2635,12 +2635,19 @@ function exportSurfacesArePinned() {
     'assertReadOnlySql', 'quoteIdentifier', 'stableStringify',
   ])
   // The store gained a CHECKER, never a granter.
+  // DELIBERATE PIN UPDATE (review round 7, P2-5 on PR #4769): `contentKeyFor` was promoted from
+  // `__internals` to the public surface. The C6 B4-binding gate needs it on a LIVE path that runs
+  // on both dry-run and apply, and this package already ruled (`read-source-config.cjs:18-22`,
+  // review B1a-1 P2) that a live save path must not bind to another module's private/test
+  // surface. It is a PURE FUNCTION of its argument — a key derivation, not a granter — so the
+  // "checker, never a granter" property above is unchanged. `__internals` keeps its alias.
   assert.deepEqual(keySet(storeModule), [
     'ReadSourceConfigConflictError',
     'ReadSourceConfigNotApprovedError',
     'ReadSourceConfigNotFoundError',
     'ReadSourceConfigValidationError',
     '__internals',
+    'contentKeyFor',
     'createReadSourceConfigStore',
     'isFirstPartyReadSourceConfigStore',
   ])
