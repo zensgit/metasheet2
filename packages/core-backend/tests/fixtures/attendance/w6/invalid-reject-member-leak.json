@@ -1,0 +1,34 @@
+{
+  "__fixtureKind": "invalid-reject",
+  "__violates": "W6-R2 values-free: member lists and user IDs must never appear in the aggregate",
+  "payload": {
+    "ok": true,
+    "data": {
+      "groupId": "a4556006-0007-4000-8000-000000000001",
+      "groupType": "fixed_shift",
+      "timezone": "Asia/Shanghai",
+      "activeMemberCount": 2,
+      "memberIds": [
+        "a4556006-0007-4000-8000-0000000000aa",
+        "a4556006-0007-4000-8000-0000000000ab"
+      ],
+      "managerPosture": {
+        "ownerCount": 1,
+        "subOwnerCount": 0,
+        "ownerUserId": "a4556006-0007-4000-8000-0000000000ac"
+      },
+      "calculationPosture": "legacy",
+      "domains": {},
+      "conflicts": [
+        {
+          "code": "CALCULATION_GROUP_MEMBERSHIP_OVERLAP",
+          "domain": "membership",
+          "label": "conflict_action_required",
+          "affectedUserIds": ["a4556006-0007-4000-8000-0000000000aa"],
+          "editorRef": { "kind": "group_stage", "stage": "people" }
+        }
+      ],
+      "evaluatedAt": "2026-08-05T00:00:00.000Z"
+    }
+  }
+}

@@ -23,6 +23,10 @@ const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c3a-import-rollback-boundary.ts', 'legacyDeleteEligible', 'attendance_record_calculations', 1, 'history', 'rollback_precondition'),
   entry('packages/core-backend/src/attendance/w4c3a-import-rollback.ts', 'buildAuthorizationInput', 'attendance_record_calculations', 1, 'history', 'rollback_history'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'loadBatchReferenceState', 'attendance_record_calculations', 3, 'history', 'rollout_precondition'),
+  // W4C-5: the ingress-review predicate reads the calculation history twice — once to test the
+  // record's latest-appended calculation for the review outcome code, once (MAX(version)) to
+  // determine which calculation is latest. Neither is the "current" projection.
+  entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'countUnresolvedIngressReviews', 'attendance_record_calculations', 2, 'history', 'rollout_precondition'),
   entry('packages/core-backend/src/attendance/w4c3b-approved-leave-cancellation.ts', 'appendApprovedLeaveCancellationCalculationV1', 'attendance_record_calculations', 2, 'history', 'approval_reversal_precondition'),
   entry('packages/core-backend/src/attendance/w4c3b-approved-leave-cancellation.ts', 'appendApprovedLeaveCancellationCalculationV1', 'attendance_record_segments', 1, 'history', 'approval_reversal_precondition'),
   entry('packages/core-backend/src/attendance/w4c3c-active-current.ts', '(module-scope)', 'attendance_record_calculations', 2, 'current', 'active_current_projection', 'current_relation=attendance_current_records'),

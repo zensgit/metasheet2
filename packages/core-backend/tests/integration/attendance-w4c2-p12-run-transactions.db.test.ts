@@ -23,6 +23,7 @@ import { Pool, type PoolClient } from 'pg'
 import ts from 'typescript'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c2Up } from '../../src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union'
+import { up as w4c2SweepFairnessUp } from '../../src/db/migrations/zzzz20260805120000_w4c2_scheduled_run_sweep_fairness'
 import {
   createOrResumeAttendanceScheduledRunV1,
   finalizeAttendanceScheduledRunV1,
@@ -132,6 +133,10 @@ describeIfDatabase('W4C-2 P1-2 — run-creation/resume/finalization/abandoned tr
 
     await w4c0Up(scratchDb)
     await w4c2Up(scratchDb)
+    // #4770: the fairness-fix migration adds `last_attempt_at` (required by
+    // `scanAttendanceScheduledRunSweepCandidatesV1`'s durable-rotation write-back) and widens
+    // the run update-guard's mutable-key allowlist to match.
+    await w4c2SweepFairnessUp(scratchDb)
     await pool.query(`
       CREATE OR REPLACE FUNCTION attendance_w4c2_option_a_source_dml_sentinel()
       RETURNS trigger

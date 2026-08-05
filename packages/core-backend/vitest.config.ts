@@ -589,6 +589,25 @@ export default defineConfig({
       // gated; excluded here so the no-DB job cannot skip-green it; wired whole-file into
       // the attendance real-DB step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
+      // #4770 (W4C-2 recovery-sweep fairness/observability; owner ruling 2026-08-05) — the
+      // durable-rotation scan fix (gate 1: >25 persistently-blocked candidates + a healthy
+      // candidate finalizes within a bounded number of ticks; the mutation-red control is the
+      // same test reverted by hand, not automated here), a steady-state parity check, and the
+      // values-free tick/backlog/error observability shape (gate 3). Self-provisioned scratch
+      // DB per test (the scan predicate is deliberately GLOBAL, not org-scoped — a shared DB
+      // would corrupt this file's exact-count assertions). DATABASE_URL-gated; excluded here
+      // so the no-DB job cannot skip-green it; wired whole-file into the attendance real-DB
+      // step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-sweep-fairness.db.test.ts',
+      // #4770 — the three named call-through legs (core host sweep/abandon port wiring, the
+      // `attendance-w4-scheduled-run-sweep` scheduled job's real registration + real
+      // execution, and the abandon HTTP route's auth/org/host chain), each proven against a
+      // REAL booted MetaSheetServer + REAL plugin-attendance + REAL PostgreSQL (own freshly-
+      // migrated scratch DB, for the same global-scan isolation reason as the fairness-fix
+      // file above). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point
+      // wiring).
+      'tests/integration/attendance-w4c2-sweep-call-through.db.test.ts',
       // W4C-3a durable legacy-plan migration: exact manifest/chunk/terminal
       // constraints, V1 frozen idempotency, direct-corruption congruence, and
       // guarded down. DATABASE_URL-gated; excluded here so the no-DB lane
@@ -651,6 +670,12 @@ export default defineConfig({
       // #4709 FSER-3 first-config atomicity and true two-connection convergence require
       // real PostgreSQL; the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts',
+      // #4709 FSER-4 prerequisite (member-safe self projection, contract amendment §2):
+      // real-DB authorization matrix (liveness/activation/org-membership/group-membership,
+      // cross-org isolation) and admin/self parity require real PostgreSQL; excluded here
+      // so the no-DB job cannot skip-green it, and the whole file is explicitly run in
+      // plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
