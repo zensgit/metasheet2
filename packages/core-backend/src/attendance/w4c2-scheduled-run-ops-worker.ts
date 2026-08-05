@@ -59,9 +59,18 @@ export interface AttendanceScheduledRunSweepTickResultV1 {
 /**
  * #4770: values-free observability for the sweep tick — counts and closed-set outcome codes
  * ONLY, never an org id / user id / work date / run id (audit-surface values-free discipline).
- * `meta`'s type (`Record<string, number>`) makes this values-free BY CONSTRUCTION, not by
- * caller discipline: TypeScript refuses to compile a caller that slips a string business value
- * into `meta`.
+ * `meta`'s type (`Record<string, number>`) makes this values-free BY CONSTRUCTION for STRING
+ * values — TypeScript refuses to compile a caller that slips a string business value (an org id,
+ * a user id) into `meta`. The type alone does NOT block a numeric business value (an epoch
+ * timestamp, a numeric id) — a caller could type-check while doing that. What actually closes
+ * that gap is this file's own PRODUCER (`sweepAttendanceScheduledRunsOnceV1` below emits ONLY
+ * the six named counters below, never a caller-supplied field) together with the RUNTIME checks
+ * `attendance-w4c2-sweep-fairness.db.test.ts`'s "gate 3" describe block asserts against that
+ * producer's actual output: a closed key set (`Object.keys(...).sort()` deep-equal against the
+ * six named keys, not a subset check — an extra key fails it) and a `typeof === 'number'` check
+ * on every value (a smuggled string fails it). Those two RUNTIME assertions, not the `meta` type
+ * alone, are what is actually load-bearing; the type is a compile-time deterrent for the obvious
+ * mistake, not a proof.
  */
 export interface AttendanceScheduledRunSweepTickLoggerV1 {
   info(event: string, meta: Record<string, number>): void
