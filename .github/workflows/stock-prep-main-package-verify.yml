@@ -1,0 +1,866 @@
+name: Stock-prep main package verify (built-from-main, same-run)
+
+# EVIDENCE ONLY. Implements the owner decision recorded as
+# P4VerificationDecision=OPEN_MAIN_BUILD_VERIFY_MATRIX_V1 — i.e. option (a) of
+# docs/development/stock-preparation-k3wise-first-profile-delivery-plan-20260804.md
+# 附录 D.4: "新建一条与 pg17 同形但 pin 新包的工作流".
+#
+# WHAT THIS LANE IS.
+#   It BUILDS an on-prem package from the commit it is dispatched on and
+#   VERIFIES THAT SAME PACKAGE INSIDE THE SAME RUN. There is no cross-run pin:
+#   the only "pin" is the build job's own outputs, which the downstream jobs
+#   re-derive from the downloaded artifact and compare against. That is why this
+#   lane can validate a package that does not exist yet, which the frozen lane
+#   structurally cannot.
+#
+# WHAT THIS LANE IS NOT, AND WHAT IT DOES NOT TOUCH.
+#   * It does NOT modify, replace, retire, or re-pin
+#     .github/workflows/stock-prep-s6a-postgres17-validation.yml. That workflow
+#     keeps validating the frozen S6-A package against its frozen pins ("LAW —
+#     never recomputed, only verified against"). Two lanes, two subjects.
+#   * It NEVER publishes. No GitHub Release is created or uploaded to, no
+#     package registry is touched. `permissions: contents: read` below is the
+#     structural proof — this workflow has no write scope to publish with, so
+#     "artifact only" is not a promise about a skipped conditional.
+#   * It sets, reads, exports, and passes NO MULTITABLE_* flag: no `env:` key,
+#     no `run:` line, and no step input in this file carries one. The single
+#     occurrence of MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED in
+#     this file is this sentence, which is prose and is wired to nothing; that
+#     flag's default is unchanged by this lane. (Stated this way on purpose —
+#     "the name does not appear here" would be false the moment you name it.)
+#   * It connects no customer source, provisions no SQL Server, creates no
+#     customer-facing role, and touches no entity machine.
+#
+# EVIDENCE CLASS. A green run here is CONTROLLED SYNTHETIC FUNCTIONAL evidence
+# that the package built from this commit (a) passes the existing five-check
+# package verifier in both shipped archive formats, (b) contains and actually
+# applies migrations 074 and 075, and (c) applies its migrations cleanly and
+# idempotently on ephemeral PostgreSQL 15/16/17. It establishes nothing about
+# real-customer production, sealed-snapshot semantics, scale, external write,
+# rollout, or PLM/ERP/CRM/SRM generalization.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_path:
+        description: 'Web base path → Vite VITE_BASE_PATH (e.g. /metasheet/ for a sub-path deploy). Path-only; default / (root). Same meaning as in multitable-onprem-package-build.yml.'
+        required: false
+        default: '/'
+      expected_sha:
+        description: 'Expected git commit SHA. If set, the build FAILS unless the checked-out HEAD matches it — prevents verifying a package whose main state is uncertain.'
+        required: false
+        default: ''
+
+# READ ONLY. This is the structural "never publishes" guarantee (see header).
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel an in-flight verification: a half-run produces evidence that
+  # looks green-adjacent in the UI but proves nothing.
+  cancel-in-progress: false
+
+env:
+  # PIN-1/PIN-2 subjects. Exact file basenames live in
+  # packages/core-backend/migrations/; the migration runner's ledger name is the
+  # basename minus the extension (migration-provider.ts:243).
+  MIGRATION_074_FILE: 074_repair_sealed_export_runtime_authority_privileges.sql
+  MIGRATION_075_FILE: 075_grant_sealed_export_runtime_authority_row_lock.sql
+  MIGRATION_074_ID: 074_repair_sealed_export_runtime_authority_privileges
+  MIGRATION_075_ID: 075_grant_sealed_export_runtime_authority_row_lock
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Job 0: exclusion-list drift guard.
+  #
+  # Runs first and depends on nothing so a drifted list fails in seconds
+  # instead of after a full package build. See the long note on the
+  # migrate-postgres job's MIGRATION_EXCLUDE for WHY this lane carries an
+  # exclusion list at all and what it narrows the claim to.
+  #
+  # This step is a FILE-to-FILE comparison, deliberately: it reads the literal
+  # bytes of both workflow files, so it fails if EITHER side is edited without
+  # the other. It is not an env-to-env comparison, which would only prove this
+  # file agrees with itself.
+  # ---------------------------------------------------------------------
+  exclusion-list-drift-guard:
+    name: MIGRATION_EXCLUDE must equal migration-replay.yml's list verbatim
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: This lane's list and migration-replay.yml's list must be byte-identical
+        run: |
+          set -euo pipefail
+          self_file=".github/workflows/stock-prep-main-package-verify.yml"
+          replay_file=".github/workflows/migration-replay.yml"
+
+          # An empty grep must mean "drift", never "I read the wrong path".
+          if [[ ! -f "$self_file" ]]; then
+            echo "FATAL: this workflow's own path moved (${self_file} not found); the drift guard would read empty and pass vacuously." >&2
+            exit 1
+          fi
+          if [[ ! -f "$replay_file" ]]; then
+            echo "FATAL: ${replay_file} not found; the drift guard would read empty and pass vacuously." >&2
+            exit 1
+          fi
+
+          # Anchor on the YAML key position and reject comment lines, because
+          # the prose in BOTH files legitimately mentions the token.
+          extract_lists() {
+            grep -E '^[[:space:]]*MIGRATION_EXCLUDE:[[:space:]]' "$1" \
+              | grep -vE '^[[:space:]]*#' \
+              | sed -E 's/^[[:space:]]*MIGRATION_EXCLUDE:[[:space:]]*//' \
+              | sed -E 's/[[:space:]]+$//'
+          }
+
+          self_list="${RUNNER_TEMP}/self-exclude.list"
+          replay_list="${RUNNER_TEMP}/replay-exclude.list"
+          # `|| true` ONLY so that a zero-match grep (exit 1 under `bash -e`)
+          # reaches the explicit count assertions below with a diagnosable
+          # message instead of killing the step silently. The count assertions,
+          # not the pipeline's exit status, are the gate.
+          extract_lists "$self_file" > "$self_list" || true
+          extract_lists "$replay_file" > "$replay_list" || true
+
+          self_n="$(wc -l < "$self_list" | tr -d ' ')"
+          replay_n="$(wc -l < "$replay_list" | tr -d ' ')"
+          echo "selfOccurrences=${self_n}"
+          echo "replayOccurrences=${replay_n}"
+
+          if [[ "$self_n" -lt 1 ]]; then
+            echo "FATAL: no MIGRATION_EXCLUDE assignment found in ${self_file}. Either the key was removed (this lane would then run an unexcluded set and its narrowing comment would be a lie) or the extraction pattern no longer matches." >&2
+            exit 1
+          fi
+          if [[ "$replay_n" -lt 1 ]]; then
+            echo "FATAL: no MIGRATION_EXCLUDE assignment found in ${replay_file}. Either migration-replay.yml changed shape or the extraction pattern no longer matches — in both cases this guard cannot prove agreement." >&2
+            exit 1
+          fi
+
+          echo "--- occurrences found (repo content, values-free) ---"
+          cat "$self_list" "$replay_list"
+
+          # Every occurrence on BOTH sides must collapse to exactly one distinct
+          # value. This catches drift between the two files AND drift between
+          # the two occurrences inside migration-replay.yml itself.
+          distinct="$(cat "$self_list" "$replay_list" | sort -u | wc -l | tr -d ' ')"
+          echo "distinctListValues=${distinct}"
+          if [[ "$distinct" != "1" ]]; then
+            echo "FATAL: MIGRATION_EXCLUDE has drifted. This lane's list must stay byte-identical to migration-replay.yml's." >&2
+            echo "REMEDY IS NEVER 'add the newly failing migration here'. If a migration fails on a fresh database, that is a finding about the migration, not a reason to widen an exclusion set. Changing the set requires changing migration-replay.yml in the same change, deliberately." >&2
+            exit 1
+          fi
+
+          {
+            echo "migrationExcludeDriftCheck=PASS"
+            echo "selfOccurrences=${self_n}"
+            echo "replayOccurrences=${replay_n}"
+            echo "distinctListValues=1"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Job 1: build the package FROM THIS COMMIT.
+  #
+  # The steps are inlined from multitable-onprem-package-build.yml rather than
+  # reused via `workflow_call` for two reasons, both structural: (1) that
+  # workflow declares only `on: workflow_dispatch` (:3-4), so it is not callable
+  # at all; (2) it declares `permissions: contents: write` (:31-32) and contains
+  # a `Publish GitHub Release` step (:134). Calling it would give this lane write
+  # scope and a publish path, even a skipped one. Inlining keeps the read-only
+  # guarantee above structural.
+  #
+  # Build-time behaviour is otherwise kept identical to that lane: same pnpm pin,
+  # same INSTALL_DEPS/BUILD_WEB/BUILD_BACKEND flags, both archive formats
+  # verified, same extracted-package dependency preflight.
+  # ---------------------------------------------------------------------
+  build-main-package:
+    name: Build on-prem package from this commit
+    needs: exclusion-list-drift-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      artifact_name: ${{ steps.pkg.outputs.artifact_name }}
+      tgz_name: ${{ steps.pkg.outputs.tgz_name }}
+      zip_name: ${{ steps.pkg.outputs.zip_name }}
+      tgz_sha256: ${{ steps.pkg.outputs.tgz_sha256 }}
+      zip_sha256: ${{ steps.pkg.outputs.zip_sha256 }}
+      build_sha: ${{ steps.sha.outputs.build_sha }}
+      provenance_git_commit: ${{ steps.pkg.outputs.provenance_git_commit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Record the build SHA (and prove the two SHA sources agree)
+        id: sha
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          build_sha="$(git rev-parse HEAD)"
+          if [[ -n "${EXPECTED_SHA}" && "${EXPECTED_SHA}" != "${build_sha}" ]]; then
+            echo "FATAL: expected_sha mismatch — refusing to build a package whose source state is uncertain." >&2
+            exit 1
+          fi
+          # PIN-3 (part 1 of 3). scripts/ops/multitable-onprem-package-build.sh:473
+          # prefers ${GITHUB_SHA} over `git rev-parse HEAD` when stamping
+          # BUILD_PROVENANCE.json. On workflow_dispatch the two agree; asserting it
+          # here means a later `ref:`/`fetch-depth` change to the checkout step is
+          # caught as a hard failure instead of silently splitting provenance
+          # between "what we built" and "what the package claims".
+          if [[ "${build_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "FATAL: git rev-parse HEAD (${build_sha}) != GITHUB_SHA (${GITHUB_SHA}). The package would be stamped with a commit this job did not build." >&2
+            exit 1
+          fi
+          echo "build_sha=${build_sha}" >> "$GITHUB_OUTPUT"
+          echo "BUILD_SHA=${build_sha}" >> "$GITHUB_ENV"
+          echo "buildShaSourcesAgree=PASS"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # 9.15.9 — the version multitable-onprem-package-build.yml:61 and the
+          # package's own packageManager field pin. NOT migration-replay.yml's
+          # 10.16.1: this lane borrows that workflow's exclusion list, not its
+          # toolchain, and the packaged lockfile is verified against 9.15.9.
+          version: 9.15.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web/backend dist
+        env:
+          VITE_BASE_PATH: ${{ inputs.base_path }}
+        run: |
+          pnpm --filter @metasheet/web build
+          pnpm --filter @metasheet/core-backend build
+
+      - name: Build on-prem package + verify both archive formats + dependency preflight
+        id: pkg
+        env:
+          PACKAGE_TAG: mainverify${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+          INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/multitable-onprem-package-build.sh
+
+          out_dir="output/releases/multitable-onprem"
+          pkg_tgz="$(ls -1 ${out_dir}/*.tgz | sort | tail -n 1)"
+          pkg_zip="$(ls -1 ${out_dir}/*.zip | sort | tail -n 1)"
+          pkg_name="$(basename "${pkg_tgz%.tgz}")"
+          verify_dir="${out_dir}/verify"
+          mkdir -p "$verify_dir"
+
+          VERIFY_REPORT_JSON="${verify_dir}/${pkg_name}.tgz.verify.json" \
+          VERIFY_REPORT_MD="${verify_dir}/${pkg_name}.tgz.verify.md" \
+            scripts/ops/multitable-onprem-package-verify.sh "$pkg_tgz"
+          VERIFY_REPORT_JSON="${verify_dir}/${pkg_name}.zip.verify.json" \
+          VERIFY_REPORT_MD="${verify_dir}/${pkg_name}.zip.verify.md" \
+            scripts/ops/multitable-onprem-package-verify.sh "$pkg_zip"
+
+          # Same extracted-package dependency preflight the build lane runs
+          # (multitable-onprem-package-build.yml:106-114).
+          preflight_root="$(mktemp -d)"
+          tar -xzf "$pkg_tgz" -C "$preflight_root"
+          preflight_pkg="$(find "$preflight_root" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$preflight_pkg"
+          (
+            cd "$preflight_pkg"
+            pnpm install --frozen-lockfile --reporter=append-only
+          )
+
+          # PIN-3 (part 2 of 3): the commit the package CLAIMS, read out of the
+          # checksummed archive itself, must equal the commit this job built.
+          provenance_git_commit="$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).gitCommit)" "${preflight_pkg}/BUILD_PROVENANCE.json")"
+          if [[ "$provenance_git_commit" != "$BUILD_SHA" ]]; then
+            echo "FATAL: in-archive BUILD_PROVENANCE.json gitCommit (${provenance_git_commit}) != this job's build SHA (${BUILD_SHA})." >&2
+            exit 1
+          fi
+          rm -rf "$preflight_root"
+
+          tgz_sha="$(sha256sum "$pkg_tgz" | awk '{print $1}')"
+          zip_sha="$(sha256sum "$pkg_zip" | awk '{print $1}')"
+
+          # Stage exactly what the downstream jobs need, in ONE directory, so the
+          # artifact's least-common-ancestor is unambiguous and SHA256SUMS lands
+          # as a SIBLING of the archives — multitable-onprem-package-verify.sh:827-828
+          # requires it adjacent to the package it is verifying.
+          stage="output/main-package-verify-artifact"
+          mkdir -p "$stage"
+          cp "$pkg_tgz" "$pkg_zip" "${pkg_tgz}.sha256" "${pkg_zip}.sha256" "$stage/"
+          cp "${out_dir}/SHA256SUMS" "$stage/"
+          cp "${verify_dir}/${pkg_name}.tgz.verify.json" "${verify_dir}/${pkg_name}.tgz.verify.md" "$stage/"
+          cp "${verify_dir}/${pkg_name}.zip.verify.json" "${verify_dir}/${pkg_name}.zip.verify.md" "$stage/"
+
+          {
+            echo "artifact_name=main-package-${{ github.run_id }}-${{ github.run_attempt }}"
+            echo "tgz_name=$(basename "$pkg_tgz")"
+            echo "zip_name=$(basename "$pkg_zip")"
+            echo "tgz_sha256=${tgz_sha}"
+            echo "zip_sha256=${zip_sha}"
+            echo "provenance_git_commit=${provenance_git_commit}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "buildProvenanceGitCommitMatchesBuildSha=PASS"
+          echo "computedTgzSha256=${tgz_sha}"
+          echo "computedZipSha256=${zip_sha}"
+
+      - name: Upload package artifact (artifact only — no release, no publish)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.artifact_name }}
+          path: output/main-package-verify-artifact
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "packageSource=BUILT_FROM_DISPATCHED_COMMIT"
+            echo "serviceRuntimeSha=${{ steps.sha.outputs.build_sha }}"
+            echo "buildShaSourcesAgree=PASS"
+            echo "packageTgzSha256=${{ steps.pkg.outputs.tgz_sha256 }}"
+            echo "packageZipSha256=${{ steps.pkg.outputs.zip_sha256 }}"
+            echo "buildProvenanceGitCommitMatchesBuildSha=PASS"
+            echo "packageVerificationTgz=PASS"
+            echo "packageVerificationZip=PASS"
+            echo "dependencyPreflight=PASS"
+            echo "releasePublished=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Job 2: verify the artifact that job 1 produced.
+  #
+  # This job deliberately re-derives everything from the DOWNLOADED bytes. It
+  # never trusts that "the build job already checked it": an artifact that
+  # changed between upload and download would otherwise be invisible.
+  # ---------------------------------------------------------------------
+  verify-built-package:
+    name: Verify built package (same-run provenance) + one-byte negative control
+    needs: build-main-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      ARTIFACT_NAME: ${{ needs.build-main-package.outputs.artifact_name }}
+      TGZ_NAME: ${{ needs.build-main-package.outputs.tgz_name }}
+      ZIP_NAME: ${{ needs.build-main-package.outputs.zip_name }}
+      TGZ_SHA256_FROM_BUILD: ${{ needs.build-main-package.outputs.tgz_sha256 }}
+      ZIP_SHA256_FROM_BUILD: ${{ needs.build-main-package.outputs.zip_sha256 }}
+      BUILD_SHA_FROM_BUILD: ${{ needs.build-main-package.outputs.build_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Environment guard (pwsh required by the packaged zip verifier)
+        run: |
+          set -euo pipefail
+          command -v pwsh >/dev/null 2>&1 || {
+            echo "ENVIRONMENT GAP: pwsh not found on this runner; the packaged verifier's Windows ZipFile extraction smoke cannot run." >&2
+            exit 1
+          }
+
+      - name: Download the package artifact built in this run
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-main-package.outputs.artifact_name }}
+          path: pkg
+
+      - name: PIN-3 — recomputed artifact SHA-256 must equal the build job's recorded value
+        run: |
+          set -euo pipefail
+          tgz_actual="$(sha256sum "pkg/${TGZ_NAME}" | awk '{print $1}')"
+          zip_actual="$(sha256sum "pkg/${ZIP_NAME}" | awk '{print $1}')"
+          echo "recomputedTgzSha256=${tgz_actual}"
+          echo "recomputedZipSha256=${zip_actual}"
+          if [[ "$tgz_actual" != "$TGZ_SHA256_FROM_BUILD" ]]; then
+            echo "FATAL: downloaded .tgz is not the artifact this run built (SHA-256 differs from the build job's recorded value)." >&2
+            exit 1
+          fi
+          if [[ "$zip_actual" != "$ZIP_SHA256_FROM_BUILD" ]]; then
+            echo "FATAL: downloaded .zip is not the artifact this run built (SHA-256 differs from the build job's recorded value)." >&2
+            exit 1
+          fi
+          echo "sameArtifactAsBuildJob=PASS"
+
+      - name: Run the existing five-check verifier against the downloaded .tgz
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/multitable-onprem-package-verify.sh
+          mkdir -p "${RUNNER_TEMP}/pkgroot-tgz"
+          EXTRACT_ROOT="${RUNNER_TEMP}/pkgroot-tgz" \
+          VERIFY_REPORT_JSON="${RUNNER_TEMP}/verify-tgz.json" \
+          VERIFY_REPORT_MD="${RUNNER_TEMP}/verify-tgz.md" \
+            scripts/ops/multitable-onprem-package-verify.sh "pkg/${TGZ_NAME}"
+          echo "PKG_ROOT=${RUNNER_TEMP}/pkgroot-tgz/${TGZ_NAME%.tgz}" >> "$GITHUB_ENV"
+
+      - name: Run the existing five-check verifier against the downloaded .zip
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/pkgroot-zip"
+          EXTRACT_ROOT="${RUNNER_TEMP}/pkgroot-zip" \
+          VERIFY_REPORT_JSON="${RUNNER_TEMP}/verify-zip.json" \
+          VERIFY_REPORT_MD="${RUNNER_TEMP}/verify-zip.md" \
+            scripts/ops/multitable-onprem-package-verify.sh "pkg/${ZIP_NAME}"
+
+      - name: PIN-1 — migrations 074 and 075 must be present in the package by exact filename
+        run: |
+          set -euo pipefail
+          mig_dir="${PKG_ROOT}/packages/core-backend/migrations"
+          if [[ ! -d "$mig_dir" ]]; then
+            echo "FATAL: ${mig_dir#${RUNNER_TEMP}/} missing from the extracted package; an absence assertion below would read empty and pass vacuously." >&2
+            exit 1
+          fi
+          missing=0
+          for f in "$MIGRATION_074_FILE" "$MIGRATION_075_FILE"; do
+            if [[ -f "${mig_dir}/${f}" ]]; then
+              echo "packagedMigrationPresent=${f}"
+            else
+              echo "FATAL: packaged migration MISSING by exact filename: ${f}. This is exactly the defect that made the frozen S6-A package undeployable." >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" != "0" ]]; then
+            exit 1
+          fi
+          echo "packagedMigration074Present=PASS"
+          echo "packagedMigration075Present=PASS"
+
+      - name: PIN-3 — in-archive provenance commit must equal the build job's SHA
+        run: |
+          set -euo pipefail
+          actual="$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).gitCommit)" "${PKG_ROOT}/BUILD_PROVENANCE.json")"
+          echo "downloadedProvenanceGitCommit=${actual}"
+          if [[ "$actual" != "$BUILD_SHA_FROM_BUILD" ]]; then
+            echo "FATAL: the downloaded package claims a different source commit than the job that built it." >&2
+            exit 1
+          fi
+          echo "downloadedProvenanceGitCommitMatch=PASS"
+
+      - name: PIN-4 — one-byte tamper negative control (mandatory, exclusive, hard-fails if it does not fire)
+        run: |
+          set -euo pipefail
+          mkdir -p neg-control/positive neg-control/negative
+          cp "pkg/${TGZ_NAME}" "neg-control/positive/${TGZ_NAME}"
+          cp pkg/SHA256SUMS "neg-control/positive/SHA256SUMS"
+          cp "pkg/${TGZ_NAME}" "neg-control/negative/${TGZ_NAME}"
+          cp pkg/SHA256SUMS "neg-control/negative/SHA256SUMS"
+
+          # Append exactly one byte to the negative copy only. Pure printf/dd —
+          # no heredoc, so YAML block-scalar indentation cannot corrupt a nested
+          # script.
+          printf '\000' >> "neg-control/negative/${TGZ_NAME}"
+
+          pos_bytes="$(wc -c < "neg-control/positive/${TGZ_NAME}" | tr -d ' ')"
+          neg_bytes="$(wc -c < "neg-control/negative/${TGZ_NAME}" | tr -d ' ')"
+          echo "negativeArmAppendedBytes=$(( neg_bytes - pos_bytes ))"
+          if [[ "$(( neg_bytes - pos_bytes ))" != "1" ]]; then
+            echo "FATAL: the negative arm is not a one-byte mutation; the control would not be the control it claims to be." >&2
+            exit 1
+          fi
+
+          pos_sha="$(sha256sum "neg-control/positive/${TGZ_NAME}" | awk '{print $1}')"
+          neg_sha="$(sha256sum "neg-control/negative/${TGZ_NAME}" | awk '{print $1}')"
+          if [[ "$pos_sha" != "$TGZ_SHA256_FROM_BUILD" ]]; then
+            echo "FATAL: positive arm (unmutated copy) no longer matches the build job's value — the control setup is broken." >&2
+            exit 1
+          fi
+          if [[ "$neg_sha" == "$TGZ_SHA256_FROM_BUILD" ]]; then
+            echo "FATAL: the one-byte append did not change the SHA-256 (should be impossible)." >&2
+            exit 1
+          fi
+
+          # GitHub runs `run:` steps under `bash -e`. Both verifier invocations
+          # below are EXPECTED to be non-zero on one arm, so -e must be lifted
+          # across them or the step dies before a single assertion executes.
+          set +e
+          scripts/ops/multitable-onprem-package-verify.sh "neg-control/positive/${TGZ_NAME}" >pos.log 2>&1
+          pos_rc=$?
+          scripts/ops/multitable-onprem-package-verify.sh "neg-control/negative/${TGZ_NAME}" >neg.log 2>&1
+          neg_rc=$?
+          set -e
+
+          echo "positiveArmExitCode=${pos_rc}"
+          echo "negativeArmExitCode=${neg_rc}"
+          echo "--- positive arm output ---"
+          cat pos.log
+          echo "--- negative arm output ---"
+          cat neg.log
+
+          if [[ "$pos_rc" -ne 0 ]]; then
+            echo "FATAL: positive arm (identical layout, unmutated bytes) unexpectedly failed verification — a failing negative arm would then prove nothing." >&2
+            exit 1
+          fi
+          if [[ "$neg_rc" -eq 0 ]]; then
+            echo "FATAL P0: the one-byte mutation did NOT cause verification to fail. 'Verification passed' would be indistinguishable from 'verification did not run'." >&2
+            exit 1
+          fi
+          # Exclusivity: the negative arm must fail FOR THE CHECKSUM, not for any
+          # other reason. verify_sha() runs at
+          # scripts/ops/multitable-onprem-package-verify.sh:917, before the
+          # tar/unzip at :939/:945 and before every structural check, so on a
+          # genuine byte change only these checksum-specific strings can appear
+          # ("did NOT match" from sha256sum -c at :832, "Checksum mismatch for"
+          # from the shasum fallback at :838). A bare "FAILED"/non-zero test
+          # would also match unrelated environment breakage.
+          if ! grep -qE "did NOT match|Checksum mismatch for" neg.log; then
+            echo "FATAL: the negative arm failed for a reason other than the checksum — the failure cannot be attributed to the one-byte mutation." >&2
+            exit 1
+          fi
+          echo "oneByteNegativeCheck=PASS"
+
+      - name: Upload verify evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-package-verify-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/verify-tgz.json
+            ${{ runner.temp }}/verify-tgz.md
+            ${{ runner.temp }}/verify-zip.json
+            ${{ runner.temp }}/verify-zip.md
+            pos.log
+            neg.log
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "sameArtifactAsBuildJob=PASS"
+            echo "packageVerificationTgz=PASS"
+            echo "packageVerificationZip=PASS"
+            echo "packagedMigration074Present=PASS"
+            echo "packagedMigration075Present=PASS"
+            echo "downloadedProvenanceGitCommitMatch=PASS"
+            echo "oneByteNegativeCheck=PASS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Job 3: run the BUILT package's own migration runner against ephemeral
+  # PostgreSQL 15/16/17 so a reader sees the matrix, not a single green cell.
+  #
+  # `needs` includes verify-built-package on purpose: there is no reason to
+  # migrate an artifact that has not passed the five-check verifier, PIN-1 and
+  # the tamper control first.
+  # ---------------------------------------------------------------------
+  migrate-postgres:
+    name: Migrate on PostgreSQL ${{ matrix.pg }}
+    needs: [build-main-package, verify-built-package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['15', '16', '17']
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_main_pkg_verify
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_main_pkg_verify"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      ARTIFACT_NAME: ${{ needs.build-main-package.outputs.artifact_name }}
+      TGZ_NAME: ${{ needs.build-main-package.outputs.tgz_name }}
+      TGZ_SHA256_FROM_BUILD: ${{ needs.build-main-package.outputs.tgz_sha256 }}
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_main_pkg_verify
+      JWT_SECRET: ci-synthetic-not-a-secret
+      PGPASSWORD: postgres
+      # WHY THIS LANE CARRIES AN EXCLUSION LIST AT ALL, and why it is
+      # migration-replay.yml's list.
+      #
+      # Without it this job cannot go green for reasons that have nothing to do
+      # with the package built here. The repository's migration set contains
+      # migrations that EVERY fresh-database lane already excludes for
+      # documented, still-open defects (008's idempotency on the scope column;
+      # the gantt FK pointing at pre-fix text view ids; the legacy user_orgs
+      # is_active incompatibility; 042a's missing last_accessed column). They are
+      # NOT neutralised by SUPERSEDED_LEGACY_SQL_MIGRATIONS, which only no-ops
+      # 042a/048/049 among these.
+      #
+      # The repository keeps TWO deliberately different lists, documented as
+      # solving different problems and as not required to converge — see
+      # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md. This job's shape
+      # (fresh database, apply latest, assert Pending 0, re-run latest and assert
+      # idempotency) is migration-replay.yml's shape, so it takes
+      # migration-replay.yml's list VERBATIM. The exclusion-list-drift-guard job
+      # above asserts that mechanically, byte for byte, in both directions.
+      #
+      # WHAT THIS NARROWS THE CLAIM TO. Evidence from this job means: the built
+      # package's migrations, MINUS THE SIX EXCLUDED BELOW, apply cleanly and
+      # idempotently on the matrix PostgreSQL major version. It does NOT mean the
+      # full unexcluded migration set applies on any version — that has never had
+      # a green run on any version in this repository (see #4162), and it is not
+      # a PostgreSQL-version question.
+      #
+      # Per-item reasons, carried from migration-replay.yml:104 and
+      # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md:
+      #   008_plugin_infrastructure.sql        — idempotency issue with the scope column.
+      #   048_create_event_bus_tables.sql      — Phase 2 event-bus SQL syntax issues.
+      #   049_create_bpmn_workflow_tables.sql  — Phase 2 BPMN SQL syntax issues.
+      #   042a_core_model_views.sql            — references a non-existent last_accessed column.
+      #   20250924140000_create_gantt_tables.ts— FK points at pre-fix text view ids.
+      #   zzzz20260114110000_create_user_orgs_table.ts — replay paths hit the legacy
+      #                                          user_orgs is_active incompatibility.
+      MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,zzzz20260114110000_create_user_orgs_table.ts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the package artifact built in this run
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-main-package.outputs.artifact_name }}
+          path: pkg
+
+      - name: PIN-3 — this leg must be exercising the same artifact the build job produced
+        run: |
+          set -euo pipefail
+          actual="$(sha256sum "pkg/${TGZ_NAME}" | awk '{print $1}')"
+          if [[ "$actual" != "$TGZ_SHA256_FROM_BUILD" ]]; then
+            echo "FATAL: this leg's package bytes differ from the build job's recorded value; the matrix would not be testing one subject." >&2
+            exit 1
+          fi
+          echo "sameArtifactAsBuildJob=PASS"
+
+      - name: Run the existing five-check verifier (and pin the extracted package root)
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/multitable-onprem-package-verify.sh
+          mkdir -p "${RUNNER_TEMP}/pkgroot"
+          EXTRACT_ROOT="${RUNNER_TEMP}/pkgroot" \
+            scripts/ops/multitable-onprem-package-verify.sh "pkg/${TGZ_NAME}"
+          echo "PKG_ROOT=${RUNNER_TEMP}/pkgroot/${TGZ_NAME%.tgz}" >> "$GITHUB_ENV"
+
+      - name: PIN-1 — 074/075 must be present in the package this leg will migrate from
+        run: |
+          set -euo pipefail
+          mig_dir="${PKG_ROOT}/packages/core-backend/migrations"
+          test -d "$mig_dir" || { echo "FATAL: packaged migrations directory missing." >&2; exit 1; }
+          test -f "${mig_dir}/${MIGRATION_074_FILE}" || { echo "FATAL: ${MIGRATION_074_FILE} missing from the package." >&2; exit 1; }
+          test -f "${mig_dir}/${MIGRATION_075_FILE}" || { echo "FATAL: ${MIGRATION_075_FILE} missing from the package." >&2; exit 1; }
+          echo "packagedMigration074Present=PASS"
+          echo "packagedMigration075Present=PASS"
+
+      - name: Confirm the live server actually is PostgreSQL ${{ matrix.pg }}
+        run: |
+          set -euo pipefail
+          command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
+          server_version_num="$(psql -h 127.0.0.1 -U postgres -d metasheet_main_pkg_verify -tAc 'SHOW server_version_num')"
+          server_major=$(( server_version_num / 10000 ))
+          echo "postgresServerVersionMajor=${server_major}"
+          if [[ "${server_major}" != "${{ matrix.pg }}" ]]; then
+            echo "FATAL: live server major version (${server_major}) does not match the matrix leg (${{ matrix.pg }}) — the evidence would not actually distinguish PostgreSQL versions." >&2
+            exit 1
+          fi
+          echo "postgresServerVersionPinMatch=PASS"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Matches the package's own package.json packageManager pin (verified by
+          # multitable-onprem-package-verify.sh) and the build/apply contract.
+          version: 9.15.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the package's own pinned dependencies (frozen lockfile — never relaxed)
+        working-directory: ${{ env.PKG_ROOT }}
+        run: pnpm install --frozen-lockfile --reporter=append-only
+
+      - name: Migration status before apply (expect a fresh, unmigrated database)
+        working-directory: ${{ env.PKG_ROOT }}
+        run: |
+          set -euo pipefail
+          node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/migrate-list-pre.log"
+          applied_pre="$(grep -oE '^Applied: [0-9]+' "${RUNNER_TEMP}/migrate-list-pre.log" | awk '{print $2}')"
+          echo "migrationsAppliedPre=${applied_pre}"
+          if [[ "${applied_pre}" != "0" ]]; then
+            echo "FATAL: the database was not fresh before apply (Applied != 0) — a positive result afterward would not prove real work happened." >&2
+            exit 1
+          fi
+          # PIN-2 precondition: 074/075 must be VISIBLE TO THE RUNNER and pending.
+          # File presence (PIN-1) is not the same as ledger visibility — an
+          # exclusion entry or a provider folder change would drop them silently.
+          grep -qF -- "- ${MIGRATION_074_ID}" "${RUNNER_TEMP}/migrate-list-pre.log" || {
+            echo "FATAL: ${MIGRATION_074_ID} is not pending before apply — the runner cannot see it, so 'it applied' could never be proven." >&2
+            exit 1
+          }
+          grep -qF -- "- ${MIGRATION_075_ID}" "${RUNNER_TEMP}/migrate-list-pre.log" || {
+            echo "FATAL: ${MIGRATION_075_ID} is not pending before apply — the runner cannot see it, so 'it applied' could never be proven." >&2
+            exit 1
+          }
+          echo "migration074PendingPreApply=PASS"
+          echo "migration075PendingPreApply=PASS"
+
+      - name: Apply all migrations (the package's own runner, default latest)
+        working-directory: ${{ env.PKG_ROOT }}
+        run: |
+          set -euo pipefail
+          # Distinct filename: the idempotent-replay step below re-runs the same
+          # command and must not be able to overwrite the log PIN-2 reads.
+          node packages/core-backend/dist/src/db/migrate.js | tee "${RUNNER_TEMP}/migrate-apply-first.log"
+
+      - name: PIN-2 — 074 and 075 must appear VERBATIM in this run's apply output
+        working-directory: ${{ env.PKG_ROOT }}
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/migrate-apply-first.log"
+          # packages/core-backend/src/db/migrate.ts:44 prints this string, and
+          # ONLY for migrations executed by THAT invocation. A replay run prints
+          # nothing for already-applied migrations, so matching here means the
+          # migration really executed on this PostgreSQL major version — not that
+          # a counter happened to read zero.
+          needle_074="migration \"${MIGRATION_074_ID}\" was executed successfully"
+          needle_075="migration \"${MIGRATION_075_ID}\" was executed successfully"
+          if ! grep -qF -- "$needle_074" "$log"; then
+            echo "FATAL: migration ${MIGRATION_074_ID} did NOT execute in this run. 'Pending: 0' alone would have hidden this (an excluded or absent migration also yields zero pending)." >&2
+            exit 1
+          fi
+          if ! grep -qF -- "$needle_075" "$log"; then
+            echo "FATAL: migration ${MIGRATION_075_ID} did NOT execute in this run." >&2
+            exit 1
+          fi
+          echo "migration074ExecutedInThisRun=PASS"
+          echo "migration075ExecutedInThisRun=PASS"
+          # Ledger-level cross-check via the runner's own name-level command
+          # (migrate.ts:89-103; exit 0 applied / 1 pending / 2 unknown name).
+          node packages/core-backend/dist/src/db/migrate.js --confirm "${MIGRATION_074_ID}"
+          node packages/core-backend/dist/src/db/migrate.js --confirm "${MIGRATION_075_ID}"
+          echo "migration074Confirmed=PASS"
+          echo "migration075Confirmed=PASS"
+
+      - name: Migration status after apply (expect zero pending)
+        working-directory: ${{ env.PKG_ROOT }}
+        run: |
+          set -euo pipefail
+          node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/migrate-list-post.log"
+          pending_post="$(grep -oE '^Pending: [0-9]+' "${RUNNER_TEMP}/migrate-list-post.log" | awk '{print $2}')"
+          applied_post="$(grep -oE '^Applied: [0-9]+' "${RUNNER_TEMP}/migrate-list-post.log" | awk '{print $2}')"
+          echo "migrationsAppliedPost=${applied_post}"
+          echo "migrationsPendingPost=${pending_post}"
+          if [[ "${pending_post}" != "0" ]]; then
+            echo "FATAL: migrations did not apply cleanly end to end (Pending != 0 after latest)." >&2
+            exit 1
+          fi
+
+      - name: Idempotent replay — re-run latest against an already-migrated database
+        working-directory: ${{ env.PKG_ROOT }}
+        run: node packages/core-backend/dist/src/db/migrate.js | tee "${RUNNER_TEMP}/migrate-apply-replay.log"
+
+      - name: Upload per-version evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-package-migrate-postgres-${{ matrix.pg }}-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/migrate-list-pre.log
+            ${{ runner.temp }}/migrate-list-post.log
+            ${{ runner.temp }}/migrate-apply-first.log
+            ${{ runner.temp }}/migrate-apply-replay.log
+
+      - name: Values-free evidence (this leg)
+        run: |
+          {
+            echo "postgresMajorVersion=${{ matrix.pg }}"
+            echo "postgresServerVersionPinMatch=PASS"
+            echo "sameArtifactAsBuildJob=PASS"
+            echo "packagedMigration074Present=PASS"
+            echo "packagedMigration075Present=PASS"
+            echo "dependencyInstall=PASS"
+            echo "migrationsAppliedPre=0"
+            echo "migration074PendingPreApply=PASS"
+            echo "migration075PendingPreApply=PASS"
+            echo "migrationApply=PASS"
+            echo "migration074ExecutedInThisRun=PASS"
+            echo "migration075ExecutedInThisRun=PASS"
+            echo "migration074Confirmed=PASS"
+            echo "migration075Confirmed=PASS"
+            echo "migrationsPendingPost=0"
+            echo "migrationReplayIdempotent=PASS"
+            echo "migrationClaimScope=PACKAGE_MIGRATIONS_MINUS_EXCLUSION_SET"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Job 4: gate on every upstream job and publish one combined, values-free
+  # evidence block. `needs` alone is not the gate — the explicit result check
+  # below is, so a skipped or cancelled upstream job cannot read as green.
+  # ---------------------------------------------------------------------
+  evidence-summary:
+    name: Main-package verification evidence summary
+    needs: [exclusion-list-drift-guard, build-main-package, verify-built-package, migrate-postgres]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every upstream job to have fully succeeded
+        env:
+          DRIFT_RESULT: ${{ needs.exclusion-list-drift-guard.result }}
+          BUILD_RESULT: ${{ needs.build-main-package.result }}
+          VERIFY_RESULT: ${{ needs.verify-built-package.result }}
+          MIGRATE_RESULT: ${{ needs.migrate-postgres.result }}
+        run: |
+          set -euo pipefail
+          echo "exclusion-list-drift-guard result: ${DRIFT_RESULT}"
+          echo "build-main-package result: ${BUILD_RESULT}"
+          echo "verify-built-package result: ${VERIFY_RESULT}"
+          echo "migrate-postgres (all of 15/16/17) result: ${MIGRATE_RESULT}"
+          if [[ "${DRIFT_RESULT}" != "success" || "${BUILD_RESULT}" != "success" || "${VERIFY_RESULT}" != "success" || "${MIGRATE_RESULT}" != "success" ]]; then
+            echo "One or more gates did not pass; overall FAIL." >&2
+            exit 1
+          fi
+
+      - name: Values-free combined evidence block
+        env:
+          SERVICE_RUNTIME_SHA: ${{ needs.build-main-package.outputs.build_sha }}
+          PACKAGE_TGZ_SHA256: ${{ needs.build-main-package.outputs.tgz_sha256 }}
+          PACKAGE_ZIP_SHA256: ${{ needs.build-main-package.outputs.zip_sha256 }}
+        run: |
+          {
+            echo "verificationDecision=OPEN_MAIN_BUILD_VERIFY_MATRIX_V1"
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "packageSource=BUILT_FROM_DISPATCHED_COMMIT"
+            echo "serviceRuntimeSha=${SERVICE_RUNTIME_SHA}"
+            echo "packageTgzSha256=${PACKAGE_TGZ_SHA256}"
+            echo "packageZipSha256=${PACKAGE_ZIP_SHA256}"
+            echo "migrationExcludeDriftCheck=PASS"
+            echo "packageVerificationTgz=PASS"
+            echo "packageVerificationZip=PASS"
+            echo "sameArtifactAcrossAllJobs=PASS"
+            echo "packagedMigration074Present=PASS"
+            echo "packagedMigration075Present=PASS"
+            echo "migration074ExecutedAllVersions=PASS"
+            echo "migration075ExecutedAllVersions=PASS"
+            echo "oneByteNegativeCheck=PASS"
+            echo "postgresMajorVersionsExercised=15,16,17"
+            echo "migrationApplyAllVersions=PASS"
+            echo "migrationReplayIdempotentAllVersions=PASS"
+            echo "migrationClaimScope=PACKAGE_MIGRATIONS_MINUS_EXCLUSION_SET"
+            echo "frozenLaneTouched=false"
+            echo "releasePublished=false"
+            echo "flagChanged=false"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "entityMachineInvolved=false"
+            echo "externalWrite=false"
+            echo "overallResult=PASS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
