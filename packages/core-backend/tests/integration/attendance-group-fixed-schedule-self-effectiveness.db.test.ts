@@ -260,6 +260,52 @@ describeDb('attendance group fixed-schedule self effectiveness (real DB, #4709 F
     expect(queryLog).toHaveLength(1)
   })
 
+  // -------------------------------------------------------------------
+  // #4709 FSER-4 prerequisite — P2-2 gate fix from the exact-head independent
+  // review of PR #4772 (`pr4772-gate-20260805-opus5-mutationlane.md`): the
+  // proof query joins BOTH `uo.org_id = $1` and `agm.org_id = $1`. Deleting
+  // either predicate alone left all 17 existing db tests green — every prior
+  // negative leg either has no user_orgs row at all for this user (so
+  // removing `uo.org_id = $1` still finds no row), or no
+  // attendance_group_members row at all (so removing `agm.org_id = $1` still
+  // finds no row). None of them isolates ONE org column while leaving a
+  // matching row on the OTHER table under a DIFFERENT org — exactly the shape
+  // an org-transfer/deprovision-by-delete-not-deactivate bug would produce.
+  // These two legs are per-predicate exclusive: EXCL-uo.org_id only reds when
+  // `uo.org_id = $1` is removed (not when `agm.org_id = $1` is removed), and
+  // EXCL-agm.org_id only reds the other way — proving the two org predicates
+  // no longer cover for each other (this line's "门级排他 ≠ 词级排他"
+  // discipline).
+  // -------------------------------------------------------------------
+
+  it('EXCL-uo.org_id: an orphan attendance_group_members row scoped to THIS org, but the subject\'s only active org membership is in ANOTHER org, still 404s (isolates the uo.org_id predicate)', async () => {
+    await user('member-a')
+    await orgMembership('member-a', otherOrgId) // active membership, but NOT in orgId
+    await groupMembership('member-a', orgId, groupId) // orphan agm row scoped to orgId despite no orgId membership
+    queryLog = []
+    await expect(service.getSelfEffectiveness(db(), { orgId, groupId, userId: 'member-a' }))
+      .rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(queryLog).toHaveLength(1)
+  })
+
+  it('EXCL-agm.org_id: an active org membership in THIS org, but the group-membership row is scoped to ANOTHER org, still 404s (isolates the agm.org_id predicate)', async () => {
+    await user('member-a')
+    await orgMembership('member-a', orgId) // active membership in this org
+    await groupMembership('member-a', otherOrgId, groupId) // agm row scoped to a DIFFERENT org, same group/user id
+    queryLog = []
+    await expect(service.getSelfEffectiveness(db(), { orgId, groupId, userId: 'member-a' }))
+      .rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(queryLog).toHaveLength(1)
+  })
+
+  it('POS-CONTROL (org-predicate legs): a fully legitimate member of this org and group reads the desired config, unaffected by the org-predicate exclusion legs above', async () => {
+    await liveMember('member-a')
+    await configure({ revision: 7 })
+    await assignment({ userId: 'member-a' })
+    const self = await readSelf('member-a')
+    expect(self.desired).toMatchObject({ revision: 7 })
+  })
+
   it('AUTHZ-10: the 404 message never discloses which predicate failed (values-free, byte-identical across all failure reasons)', async () => {
     await liveMember('m1', { isActive: false })
     await liveMember('m2', { activationStatus: 'pending_activation' })
