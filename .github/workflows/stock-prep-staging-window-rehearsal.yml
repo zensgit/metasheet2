@@ -1,0 +1,242 @@
+name: Stock-prep staging window rehearsal (ephemeral substrate)
+
+# OWNER AUTHORIZATION (2026-08-05, verbatim 「授权 staging 部署」). Substrate: the ephemeral-CI
+# variant, per the discretion the proposal reserved (「临时全新库是更干净的预演底座」) — a REAL
+# deployed package, REAL HTTP, REAL PostgreSQL 17 (the customer's major version), with the
+# in-repo mock K3 at the far end of the wire. This rehearses the entity-machine window runbook
+# end to end so first-run failures burn HERE, not in the one-shot customer window.
+#
+# mock pass != rehearsal pass != customer live pass — three layers, each honest.
+#
+# What this workflow NEVER does: publish a release (permissions: contents: read — structural),
+# touch the frozen S6-A lane, reference any MULTITABLE_* flag, reach any customer host, or
+# reach the shared long-lived staging host. Everything lives and dies inside this run.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stock-prep-staging-window-rehearsal
+  cancel-in-progress: false
+
+env:
+  # Single source for every probe URL (three defaults exist in the wild: code 7778, template
+  # 8900, healthcheck 8900 — deriving everything from ONE variable avoids the triad footgun).
+  REHEARSAL_PORT: '8931'
+  MOCK_K3_PORT: '8977'
+  TENANT_ID: tenant_rehearsal
+  ADMIN_EMAIL: rehearsal-admin@ci.invalid
+  # CI-synthetic secrets for an ephemeral, run-scoped environment. Not real credentials.
+  ADMIN_PASSWORD: rehearsal-admin-pass-1
+  JWT_SECRET: rehearsal-ci-synthetic-jwt-secret-0123456789abcdef
+  # Verbatim the verified lane's exclusion list (stock-prep-main-package-verify.yml — its
+  # standalone drift-guard job pins this list against migration-replay.yml, so the ONE source
+  # of truth is guarded there; this workflow borrows the value, not the guard).
+  MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,zzzz20260114110000_create_user_orgs_table.ts
+
+jobs:
+  rehearse:
+    name: Build package, boot it, run the window runbook over HTTP
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rehearsal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d rehearsal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Ensure psql (admin bootstrap hard-requires it; runners do not guarantee it)
+        run: command -v psql >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client)
+
+      - name: Install repo deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web/backend dist
+        run: |
+          pnpm --filter @metasheet/web build
+          pnpm --filter @metasheet/core-backend build
+
+      - name: Build the on-prem package (artifact of THIS commit)
+        id: pkg
+        env:
+          PACKAGE_TAG: rehearsal${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+          INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/multitable-onprem-package-build.sh
+          out_dir="output/releases/multitable-onprem"
+          pkg_tgz="$(ls -1 ${out_dir}/*.tgz | sort | tail -n 1)"
+          scripts/ops/multitable-onprem-package-verify.sh "$pkg_tgz"
+          echo "pkg_tgz=${pkg_tgz}" >> "$GITHUB_OUTPUT"
+          echo "packageVerify=PASS"
+
+      - name: Unpack the package (recipe step 1)
+        id: unpack
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/pkgroot"
+          tar -xzf "${{ steps.pkg.outputs.pkg_tgz }}" -C "${RUNNER_TEMP}/pkgroot"
+          PKG_ROOT="$(find "${RUNNER_TEMP}/pkgroot" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$PKG_ROOT"
+          chmod +x "$PKG_ROOT/scripts/ops/"*.sh
+          echo "pkg_root=${PKG_ROOT}" >> "$GITHUB_OUTPUT"
+
+      - name: In-package dependency install (recipe step 2 — nodeModulesBundled=false by design)
+        working-directory: ${{ steps.unpack.outputs.pkg_root }}
+        run: pnpm install --frozen-lockfile --reporter=append-only
+
+      - name: Compose the env file (recipe step 3; overrides appended LAST so they win on source)
+        run: |
+          set -euo pipefail
+          PKG_ROOT="${{ steps.unpack.outputs.pkg_root }}"
+          cp "$PKG_ROOT/docker/app.env.multitable-onprem.template" "$PKG_ROOT/docker/app.env"
+          {
+            echo ""
+            echo "# --- rehearsal overrides (run-scoped, synthetic) ---"
+            echo "PORT=${REHEARSAL_PORT}"
+            echo "HOST=127.0.0.1"
+            echo "JWT_SECRET=${JWT_SECRET}"
+            echo "POSTGRES_PASSWORD=postgres"
+            echo "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/rehearsal"
+            echo "BCRYPT_SALT_ROUNDS=12"
+            echo "ATTENDANCE_IMPORT_REQUIRE_TOKEN=1"
+            echo "UPLOAD_DIR=${RUNNER_TEMP}/uploads"
+          } >> "$PKG_ROOT/docker/app.env"
+          mkdir -p "${RUNNER_TEMP}/uploads"
+
+      - name: Migrations on the fresh PG 17 (recipe step 4 — Applied:0 before, Pending:0 after)
+        working-directory: ${{ steps.unpack.outputs.pkg_root }}
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/rehearsal
+        run: |
+          set -euo pipefail
+          node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/mig-before.txt"
+          grep -q "Applied: 0" "${RUNNER_TEMP}/mig-before.txt"
+          node packages/core-backend/dist/src/db/migrate.js
+          node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/mig-after.txt"
+          grep -q "Pending: 0" "${RUNNER_TEMP}/mig-after.txt"
+
+      - name: Bootstrap the admin principal (recipe step 5 — login is proven later, not here)
+        working-directory: ${{ steps.unpack.outputs.pkg_root }}
+        run: |
+          set -euo pipefail
+          env ENV_FILE="${{ steps.unpack.outputs.pkg_root }}/docker/app.env" \
+              ADMIN_EMAIL="${ADMIN_EMAIL}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+              ADMIN_NAME="CI Rehearsal Admin" VERIFY_LOGIN=0 \
+              scripts/ops/attendance-onprem-bootstrap-admin.sh
+
+      - name: Start the backend FROM THE PACKAGE ROOT (recipe step 6 — plugin discovery is cwd-relative)
+        working-directory: ${{ steps.unpack.outputs.pkg_root }}
+        run: |
+          set -euo pipefail
+          set -a; . ./docker/app.env; set +a
+          nohup node packages/core-backend/dist/src/index.js > "${RUNNER_TEMP}/backend.log" 2>&1 &
+          echo $! > "${RUNNER_TEMP}/backend.pid"
+
+      - name: Readiness — health AND plugin-integration-core ACTIVE (recipe step 7; activation failure is silent at the HTTP layer)
+        run: |
+          set -euo pipefail
+          BASE="http://127.0.0.1:${REHEARSAL_PORT}"
+          for i in $(seq 1 60); do
+            curl -fsS "$BASE/health" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS "$BASE/health" >/dev/null
+          curl -fsS "$BASE/api/plugins" | node -e '
+            const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const p = (d.list || []).find((x) => x.name === "plugin-integration-core");
+            if (!p) { console.error("plugin-integration-core NOT LOADED"); process.exit(1); }
+            console.log("integrationPluginStatus=" + p.status);
+            if (p.status !== "active") { console.error(p.error || "not active"); process.exit(1); }'
+
+      - name: Start the mock K3 far end (from the repo checkout, seeded source catalogue)
+        run: |
+          set -euo pipefail
+          MOCK_K3_PORT="${MOCK_K3_PORT}" nohup node scripts/ops/fixtures/integration-k3wise/run-mock-k3-server.mjs \
+            > "${RUNNER_TEMP}/mock-k3.log" 2>&1 &
+          echo $! > "${RUNNER_TEMP}/mock-k3.pid"
+          for i in $(seq 1 20); do
+            grep -q "MOCK_K3_BASE_URL=" "${RUNNER_TEMP}/mock-k3.log" && break
+            sleep 1
+          done
+          grep "MOCK_K3_BASE_URL=" "${RUNNER_TEMP}/mock-k3.log"
+
+      - name: Login for the write principal's token (recipe step 8 — token via login, never minted)
+        id: login
+        run: |
+          set -euo pipefail
+          BASE="http://127.0.0.1:${REHEARSAL_PORT}"
+          LOGIN_JSON="$(curl -fsS -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+            --data "{\"email\":\"${ADMIN_EMAIL}\",\"password\":\"${ADMIN_PASSWORD}\"}")"
+          TOKEN="$(printf '%s' "$LOGIN_JSON" | node -e '
+            const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const t = (d && d.data && d.data.token) || d.token || "";
+            if (!t) { console.error("no token in login response"); process.exit(1); }
+            process.stdout.write(t);')"
+          echo "::add-mask::$TOKEN"
+          echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
+          echo "loginTokenObtained=PASS"
+
+      - name: RUN THE WINDOW RUNBOOK over HTTP (the rehearsal proper)
+        env:
+          BASE_URL: http://127.0.0.1:${{ env.REHEARSAL_PORT }}
+          TOKEN: ${{ steps.login.outputs.token }}
+          MOCK_K3_URL: http://127.0.0.1:${{ env.MOCK_K3_PORT }}
+          TENANT_ID: ${{ env.TENANT_ID }}
+        run: node scripts/ops/stock-prep-window-rehearsal-driver.mjs
+
+      - name: Save-only invariant seen from the WIRE (mock call log — synthetic keys only)
+        if: always()
+        run: |
+          set -euo pipefail
+          if grep -qE "/K3API/Material/(Submit|Audit)" "${RUNNER_TEMP}/mock-k3.log"; then
+            echo "FATAL: the wire saw a Submit/Audit call — save-only was violated end to end" >&2
+            exit 1
+          fi
+          echo "wireSaveOnly=PASS"
+
+      - name: Upload boot/backend logs (synthetic environment only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal-logs-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/backend.log
+            ${{ runner.temp }}/mock-k3.log
+            ${{ runner.temp }}/mig-before.txt
+            ${{ runner.temp }}/mig-after.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Teardown
+        if: always()
+        run: |
+          [ -f "${RUNNER_TEMP}/backend.pid" ] && kill "$(cat "${RUNNER_TEMP}/backend.pid")" 2>/dev/null || true
+          [ -f "${RUNNER_TEMP}/mock-k3.pid" ] && kill "$(cat "${RUNNER_TEMP}/mock-k3.pid")" 2>/dev/null || true
+          true

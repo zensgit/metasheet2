@@ -43,6 +43,7 @@ function sanitizeMockBody(value) {
 
 export function createMockK3WebApiServer({
   logger = () => {},
+  seedListRows: seedListRowsOption = [],
   knownBadFNumbers = new Set(['BAD']),
   // Envelope-200-but-row-level-fail: K3 returns StatusCode 200 / "Successful" yet the
   // row did not save. Lets the live PoC demo exercise the M1 row-level diagnostic path
@@ -53,6 +54,11 @@ export function createMockK3WebApiServer({
 } = {}) {
   const calls = []
   const savedMaterials = new Map()
+  // Rehearsal support: rows the LIST read serves as the "source catalogue". Deliberately
+  // SEPARATE from savedMaterials (Save/GetDetail's store) so a rehearsal's dry-run classifies
+  // seeded source rows as `add` deterministically (GetDetail miss), then finds them via
+  // GetDetail only AFTER the Save actually wrote them.
+  const seedListRows = Array.isArray(seedListRowsOption) ? seedListRowsOption.map((r) => ({ ...r })) : []
 
   async function readBody(req) {
     return new Promise((resolve, reject) => {
@@ -130,6 +136,26 @@ export function createMockK3WebApiServer({
       // could prove Save happened but never that the write is READABLE afterwards.
       savedMaterials.set(fNumber, { ...(body?.Model || body?.Data), FItemID: savedMaterials.get(fNumber)?.FItemID ?? 9000 + savedMaterials.size + 1 })
       jsonResponse(res, 200, { success: true, externalId: `mock-${fNumber}`, billNo: fNumber })
+      return
+    }
+    if (pathname === '/K3API/Material/GetList') {
+      if (!requireMethod(req, res, 'POST')) return
+      const data = body?.Data || {}
+      const top = Number(data.Top) > 0 ? Number(data.Top) : 10
+      const pageIndex = Number(data.PageIndex) > 0 ? Number(data.PageIndex) : 1
+      const fields = typeof data.Fields === 'string' && data.Fields.trim()
+        ? data.Fields.split(',').map((f) => f.trim())
+        : null
+      const start = (pageIndex - 1) * top
+      const page = seedListRows.slice(start, start + top).map((row) => {
+        if (!fields) return { ...row }
+        return Object.fromEntries(fields.filter((f) => f in row).map((f) => [f, row[f]]))
+      })
+      jsonResponse(res, 200, {
+        StatusCode: 200,
+        Message: 'Successful',
+        Data: { ROWCOUNT: seedListRows.length, PAGESIZE: top, PAGEINDEX: pageIndex, DATA: page },
+      })
       return
     }
     if (pathname === '/K3API/Material/GetDetail') {
