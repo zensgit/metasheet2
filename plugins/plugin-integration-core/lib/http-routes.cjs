@@ -1071,6 +1071,9 @@ function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegi
           readSourceConfigs,
           tenantId: pipeline.tenantId,
           workspaceId: pipeline.workspaceId ?? null,
+          // The binding must belong to one of THIS pipeline's endpoints (review P2-B1): the K3
+          // system may legitimately be the source, the target, or both.
+          pipelineSystemIds: [pipeline.sourceSystemId, pipeline.targetSystemId].filter(Boolean),
         },
       }),
       targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,

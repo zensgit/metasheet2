@@ -247,32 +247,115 @@ test('ADVERSARIAL P1-1b: an overlay cannot author the read BODY either (endpoint
     'an overlay-authored body template must never reach the wire')
 })
 
-test('SWEEP CONTRACT: every objectConfig field the adapter reads is TRIAGED', () => {
-  // The round-2 fix claimed the request-shape hole was closed "class-wide". A mechanical sweep
-  // of this very file falsified that claim: 35 objectConfig reads, 15 outside the lists —
-  // including saveMethod (the Save VERB) and the readBom* body channel. Claims like "the class
-  // is closed" cannot rest on my memory, so the sweep IS the assertion: a new objectConfig
-  // field entering the adapter without triage fails HERE.
+test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is TRIAGED', () => {
+  // Round 2 claimed the request-shape hole was closed "class-wide" and backed it with a sweep
+  // of ONE file. A reviewer found the class still open: k3-save-body-composer.cjs reads
+  // passThroughBody and bodyTemplate from the same merged config, and both reached the live
+  // Save body. So the sweep now scans EVERY consumer, and the consumer list itself is checked
+  // against a repo-wide grep — forgetting to add a new module is a RED, not a silent hole.
   const fs = require('node:fs')
   const path = require('node:path')
-  const adapterPath = path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs')
-  const src = fs.readFileSync(adapterPath, 'utf8')
-  const reads = new Set([...src.matchAll(/objectConfig\.([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]))
-  assert.ok(reads.size >= 30, `the sweep must actually find reads (found ${reads.size}) — a regex that matches nothing would pass vacuously`)
-
+  const libRoot = path.join(__dirname, '..', 'lib')
   const {
     K3_PROFILE_PINNED_REQUEST_KEYS,
     K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
     K3_PROFILE_TRIAGED_SAFE_KEYS,
+    K3_PROFILE_OBJECT_CONFIG_CONSUMERS,
   } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+
+  function walk(dir) {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) return walk(full)
+      return entry.isFile() && full.endsWith('.cjs') ? [full] : []
+    })
+  }
+  // K3-specific consumers only: other adapters have their own objectConfig vocabularies and
+  // their own targets. The filter is by K3 module identity, not by whether the file is
+  // convenient to include.
+  const discovered = walk(libRoot)
+    .filter((f) => /objectConfig\./.test(fs.readFileSync(f, 'utf8')))
+    .map((f) => path.relative(path.join(__dirname, '..'), f))
+    .filter((rel) => /k3-(wise-webapi-adapter|save-body-composer)\.cjs$/.test(rel))
+    .sort()
+  assert.deepEqual(discovered, [...K3_PROFILE_OBJECT_CONFIG_CONSUMERS].sort(),
+    'a K3 module reading objectConfig is missing from K3_PROFILE_OBJECT_CONFIG_CONSUMERS')
+
+  const reads = new Set()
+  for (const rel of K3_PROFILE_OBJECT_CONFIG_CONSUMERS) {
+    const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8')
+    for (const m of src.matchAll(/objectConfig\.([A-Za-z_][A-Za-z0-9_]*)/g)) reads.add(m[1])
+  }
+  assert.ok(reads.size >= 30, `the sweep must actually find reads (found ${reads.size}) — a regex matching nothing would pass vacuously`)
+
   const triaged = new Set([
     ...K3_PROFILE_PINNED_REQUEST_KEYS,
     ...K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
     ...K3_PROFILE_TRIAGED_SAFE_KEYS,
   ])
-  const untriaged = [...reads].filter((k) => !triaged.has(k)).sort()
-  assert.deepEqual(untriaged, [],
+  assert.deepEqual([...reads].filter((k) => !triaged.has(k)).sort(), [],
     'untriaged objectConfig field(s) — decide: profile-pinned, forbidden-overlay, or documented-safe')
+})
+
+test('SET MEMBERSHIP IS PINNED BY NAME (a loop over the mutated array cannot catch its own move)', () => {
+  // The disposition test below iterates the sets themselves — so moving a key OUT of PINNED
+  // into TRIAGED_SAFE simply stops it being iterated and everything stays green (a reviewer
+  // proved exactly that). Same shape as a count guard fooled by its own source. The security-
+  // relevant keys are therefore anchored BY NAME here; TRIAGED_SAFE is pinned exactly, so a
+  // key can only land there by editing this list deliberately.
+  const {
+    K3_PROFILE_PINNED_REQUEST_KEYS,
+    K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
+    K3_PROFILE_TRIAGED_SAFE_KEYS,
+  } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+
+  for (const key of ['savePath', 'saveMethod', 'readPath', 'readMethod', 'bodyKey', 'keyParam', 'keyField', 'path', 'endpointPath']) {
+    assert.ok(K3_PROFILE_PINNED_REQUEST_KEYS.includes(key), `${key} must stay PINNED — it chooses an endpoint, a verb or the key`)
+  }
+  for (const key of [
+    'submitPath', 'auditPath', 'deletePath', 'writePath',
+    'readBodyTemplate', 'bodyTemplate', 'passThroughBody',
+    'readBomBodyTemplate', 'readBomBodyKey', 'readBomParentKeyField',
+    'buildBody', 'buildLifecycleBody', 'k3Template',
+    'submitMethod', 'auditMethod',
+  ]) {
+    assert.ok(K3_PROFILE_FORBIDDEN_OVERLAY_KEYS.includes(key), `${key} must stay FORBIDDEN — it authors a body or an unsanctioned endpoint`)
+  }
+  assert.deepEqual([...K3_PROFILE_TRIAGED_SAFE_KEYS].sort(),
+    ['label', 'lifecycle', 'maxApplyRows', 'operations', 'schema'],
+    'TRIAGED_SAFE is pinned exactly — a key may only arrive here by a deliberate edit here')
+})
+
+test('DISPOSITION CONTRACT: each key is BEHAVIOURALLY what its set says (membership is not enough)', () => {
+  // A reviewer showed the sweep only asserted MEMBERSHIP: moving saveMethod/keyField from
+  // PINNED to TRIAGED_SAFE, or the readBom* keys from FORBIDDEN to SAFE, left the whole chain
+  // green. Membership is a label; this asserts the BEHAVIOUR each label promises, per key.
+  const { __internals } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+  const {
+    K3_PROFILE_PINNED_REQUEST_KEYS,
+    K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
+  } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+  const { K3_WISE_MATERIAL_PROFILES } = require('../lib/adapters/k3-wise-document-templates.cjs')
+  const profile = K3_WISE_MATERIAL_PROFILES[PROFILE_ID]
+  const SENTINEL = '__OPERATOR_SENTINEL__'
+
+  for (const key of K3_PROFILE_PINNED_REQUEST_KEYS) {
+    const effective = __internals.normalizeObjects({
+      objects: { material: { profile: PROFILE_ID, [key]: SENTINEL } },
+    }).material
+    if (profile[key] === undefined) {
+      assert.equal(effective[key], undefined, `${key}: profile declares none -> the overlay value must not survive`)
+    } else {
+      assert.deepEqual(effective[key], profile[key], `${key}: PINNED means the PROFILE's value wins over the overlay`)
+    }
+  }
+
+  for (const key of K3_PROFILE_FORBIDDEN_OVERLAY_KEYS) {
+    const effective = __internals.normalizeObjects({
+      objects: { material: { profile: PROFILE_ID, [key]: SENTINEL } },
+    }).material
+    assert.equal(effective[key], undefined, `${key}: FORBIDDEN means an overlay value is DELETED, not merged`)
+  }
 })
 
 test('an overlay cannot WIDEN the profile\'s operations (reachability is profile-owned)', () => {

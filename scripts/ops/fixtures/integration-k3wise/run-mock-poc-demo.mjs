@@ -345,7 +345,7 @@ async function main() {
                   id: 'rsc_demo_b4', tenantId: 'tenant_demo', workspaceId: null,
                   object: 'material', status: 'approved', version: 1,
                   contentKey: 'demo-b4-content-key',
-                  config: { actionProfileVersion: 'k3wise.material_list.v1' },
+                  config: { actionProfileVersion: 'k3wise.material_list.v1', systemId: 'source_demo' },
                 }
                 if (input.tenantId !== row.tenantId) return []
                 if ((input.workspaceId ?? null) !== row.workspaceId) return []
@@ -355,6 +355,7 @@ async function main() {
             },
             tenantId: 'tenant_demo',
             workspaceId: null,
+            pipelineSystemIds: ['source_demo', chainTarget.id],
           },
         }),
         targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,

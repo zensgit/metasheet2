@@ -144,11 +144,13 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
   // targetWriteProfile itself).
   if (!b4 || typeof b4 !== 'object'
     || !b4.readSourceConfigs || typeof b4.readSourceConfigs.list !== 'function'
-    || typeof b4.tenantId !== 'string' || b4.tenantId.length === 0) {
-    throw new AdapterValidationError('K3 C6 write source requires the B4 binding scope (readSourceConfigs store + tenantId)', {
+    || typeof b4.tenantId !== 'string' || b4.tenantId.length === 0
+    || !Array.isArray(b4.pipelineSystemIds) || b4.pipelineSystemIds.length === 0) {
+    throw new AdapterValidationError('K3 C6 write source requires the B4 binding scope (readSourceConfigs store + tenantId + pipelineSystemIds)', {
       field: 'b4',
     })
   }
+  const PIPELINE_SYSTEM_IDS = new Set(b4.pipelineSystemIds.filter((id) => typeof id === 'string' && id.length > 0))
 
   // ADVERSARIAL REVIEW P1-2 (20260805): the first version resolved by `systemId`, and which
   // system that is turned out to be genuinely ambiguous — the B4 binding is a K3 READ contract,
@@ -162,9 +164,18 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
   // RATIFIED CONTRACT IDENTITY it carries — actionProfileVersion, imported from the contract
   // module (never a second copy of the literal). System id drops out of the query entirely.
   //
-  // Scope stays EXACT (tenant + workspace, null-distinct) — that is fail-closed, and the mint
-  // and the pipeline live in the same scope by construction. A mismatch is refused with the
-  // scope in the details, so it is diagnosable rather than silent.
+  // Scope stays EXACT (tenant + workspace, null-distinct) — fail-closed, and the mint and the
+  // pipeline live in the same scope by construction.
+  //
+  // ADVERSARIAL P2-B1 (round 3): dropping systemId entirely went too far — a reviewer proved a
+  // binding approved on an UNRELATED K3 system satisfied the gate, i.e. one system's read
+  // contract vouching for another system's write: the same defect the round-2 fix removed,
+  // rotated onto a different axis. The relation is restored, but to THIS PIPELINE rather than
+  // to a guessed role: the binding's own systemId must be one of the pipeline's endpoints.
+  // That keeps both legitimate mint placements working (the K3 system may be the pipeline's
+  // source, its target, or both) while an unrelated system's binding is invisible — which also
+  // resolves the two-K3-systems hard-block the reviewer found, since the unrelated one no
+  // longer counts toward ambiguity.
   async function resolveApprovedB4Binding() {
     const rows = await b4.readSourceConfigs.list({
       tenantId: b4.tenantId,
@@ -176,6 +187,9 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
     })
     return (Array.isArray(rows) ? rows : []).filter((row) => {
       if (!row || row.object !== 'material') return false
+      // The binding must belong to a system THIS pipeline actually uses.
+      const boundSystemId = row.config && typeof row.config === 'object' ? row.config.systemId : undefined
+      if (typeof boundSystemId !== 'string' || !PIPELINE_SYSTEM_IDS.has(boundSystemId)) return false
       // P2-1: the store nests the config; actionProfileVersion is NOT a top-level row field
       // (the first version read the top level and therefore always saw '').
       const config = row.config && typeof row.config === 'object' ? row.config : {}

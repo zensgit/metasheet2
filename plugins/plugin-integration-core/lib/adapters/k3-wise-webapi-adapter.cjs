@@ -92,6 +92,24 @@ const K3_PROFILE_FORBIDDEN_OVERLAY_KEYS = Object.freeze([
   // function, so these are not reachable from an operator payload today — deleted anyway so
   // the guarantee does not depend on that remaining true.
   'buildBody', 'buildLifecycleBody', 'k3Template',
+  // ADVERSARIAL P1-A1 (round 3): the first sweep scanned ONE FILE and therefore missed these.
+  // k3-save-body-composer.cjs reads them from the SAME merged objectConfig:
+  //   passThroughBody:true  — disables the schema projection entirely (the very bound the
+  //                           "schema is operator-safe" triage rested on)
+  //   bodyTemplate          — merges operator-authored keys into the real Save body
+  // A reviewer ran it on the live C6 chain: clean dry-run -> token -> mutate the stored config
+  // -> apply with the ORIGINAL token. The revision was byte-identical (config is not part of
+  // it), so the content-binding did NOT fire and K3 received an operator-authored body.
+  'passThroughBody', 'bodyTemplate',
+])
+
+// Files that consume the merged objectConfig. The sweep contract scans ALL of them — the
+// round-2 sweep scanned only this file, which is exactly how the two composer keys above
+// escaped. Any new module that reads objectConfig must be added here, and the contract test
+// asserts this list against a repo-wide grep so forgetting is a RED, not a silent hole.
+const K3_PROFILE_OBJECT_CONFIG_CONSUMERS = Object.freeze([
+  'lib/adapters/k3-wise-webapi-adapter.cjs',
+  'lib/adapters/k3-save-body-composer.cjs',
 ])
 // Fields the sweep found that are deliberately NOT in either list, each with its reason. The
 // contract test asserts pinned + forbidden + this set covers EVERY objectConfig read, so a new
@@ -2292,6 +2310,7 @@ module.exports = {
   K3_PROFILE_PINNED_REQUEST_KEYS,
   K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
   K3_PROFILE_TRIAGED_SAFE_KEYS,
+  K3_PROFILE_OBJECT_CONFIG_CONSUMERS,
   K3WiseWebApiAdapterError,
   createK3WiseWebApiAdapter,
   createK3WiseWebApiAdapterFactory,

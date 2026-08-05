@@ -52,6 +52,7 @@ function b4Of(rows, overrides = {}) {
     readSourceConfigs: b4Store(rows),
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
+    pipelineSystemIds: ['source_1', 'k3-target-1'],
     ...overrides,
   }
 }
@@ -70,6 +71,10 @@ function b4Row(overrides = {}) {
     contentKey: 'b4-content-key-aaaaaaaaaaaaaaaa',
     config: {
       actionProfileVersion: 'k3wise.material_list.v1',
+      // The store persists the config verbatim; systemId is part of it (review P2-B1 — the
+      // fixture could not previously EXPRESS a foreign-system binding, so the hole was
+      // unrepresentable in tests).
+      systemId: 'source_1',
       ...(configOverride || {}),
     },
     ...rest,
@@ -668,4 +673,49 @@ test('B4 IDENTITY: the resolved binding\'s real values ride the capability state
   assert.equal(state.b4ActionProfileVersion, 'k3wise.material_list.v1', 'must come from row.config, not a missing top-level field')
   assert.equal(state.b4ApprovedConfigVersion, '3')
   assert.equal(state.b4ConfigContentKey, 'b4-content-key-aaaaaaaaaaaaaaaa')
+})
+
+
+test('B4 RELATION: a binding approved on an UNRELATED K3 system must not vouch for this write', async () => {
+  // Reviewer scenario 1: dropping systemId entirely let one system's read contract back
+  // another system's write — the round-2 defect rotated onto a new axis.
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-R1', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([b4Row({ config: { systemId: 'k3-system-UNRELATED' } })]),
+  })
+  await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)))
+  assert.equal(fetchPair.calls.length, 0)
+})
+
+test('B4 RELATION: the binding may be minted on EITHER pipeline endpoint (source or target)', async () => {
+  for (const boundTo of ['source_1', 'k3-target-1']) {
+    const source = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+      b4: b4Of([b4Row({ config: { systemId: boundTo } })]),
+    })
+    const state = (await source.test()).capabilityState
+    assert.equal(state.b4BindingApproved, true, `a binding on ${boundTo} is legitimately this pipeline's`)
+    assert.equal(state.b4BindingCount, 1)
+  }
+})
+
+test('B4 RELATION: an unrelated system\'s binding does not create false ambiguity', async () => {
+  // Reviewer scenario 2: two K3 systems each approved -> the whole scope was hard-blocked.
+  // The unrelated one must simply not count.
+  const source = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([
+      b4Row({ config: { systemId: 'source_1' } }),
+      b4Row({ id: 'rsc_b4_other', contentKey: 'other', config: { systemId: 'k3-system-UNRELATED' } }),
+    ]),
+  })
+  const state = (await source.test()).capabilityState
+  assert.equal(state.b4BindingCount, 1, 'only this pipeline\'s binding counts')
+  assert.equal(state.b4BindingApproved, true)
 })
