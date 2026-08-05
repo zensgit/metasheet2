@@ -87,6 +87,15 @@ const FILES = Object.freeze([
   // durable delivery / lock-order / atomicity gates (section 2 gates 2-8, 15, 17, 19,
   // 22-23 controls) — same two-point discipline as the nine above.
   'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
+  // #4770 (recovery-sweep fairness/observability, owner ruling 2026-08-05) — the durable-
+  // rotation scan fix, steady-state parity, and values-free tick/backlog/error observability.
+  // Same two-point discipline as the suites above.
+  'tests/integration/attendance-w4c2-sweep-fairness.db.test.ts',
+  // #4770 — the three named call-through legs (core host port wiring, the scheduled job's
+  // real registration/execution, and the abandon HTTP route's auth/org/host chain) against a
+  // real booted server + real plugin + real PostgreSQL. Same two-point discipline as the
+  // suites above.
+  'tests/integration/attendance-w4c2-sweep-call-through.db.test.ts',
   // W4C-3a durable enqueue and record-target preconditions: SERIALIZABLE
   // reservation/freeze plus present/missing commit-order and lock-hold proofs.
   // Keep the same two-point wiring and file-exists contract as the suites above.
