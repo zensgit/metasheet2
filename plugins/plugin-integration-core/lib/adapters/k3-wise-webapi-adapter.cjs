@@ -140,6 +140,8 @@ const K3_PROFILE_TRIAGED_SAFE_KEYS = Object.freeze([
   'operations',
 ])
 
+const { isSafeRelativeReadPath } = require('../read-source-config.cjs')
+
 const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
 const DEFAULT_MATERIAL_LIST_MAX_LIMIT = 10
 // Bounded LIST page selection (#3703, owner-approved 2026-07-06): mirrors READ_SMOKE_LIST_MAX_PAGE_INDEX
@@ -176,49 +178,36 @@ function normalizeBaseUrl(value) {
   return url.toString()
 }
 
-// ADVERSARIAL P1-C1/P1-D1 (rounds 3 and 4). Round 3: the class pin lived inside
-// `if (saveOnlyProfile)` — opt-in by the actor it defends against — so a profile-less K3 SOURCE
-// pipeline POSTed an operator-authored body to /K3API/Material/Submit, dry-runs included. The
-// answer was this unconditional guard. Round 4 broke THAT: it tested the RAW string while
-// buildEndpointUrl's WHATWG `pathname` setter REWRITES it, so
-// `/K3API/Material/GetDetail/../Submit/` passed the guard and went out as
-// `/K3API/Material/Submit/` — the guard cleared a string this repo's own code then turned into
-// the endpoint the guard names as forbidden. Check-before-normalize.
+// ADVERSARIAL P1-C1 / P1-D1 / P1-E1 (rounds 3, 4, 5). One class, five axes:
+//   3) the pin lived inside `if (saveOnlyProfile)` — opt-in by the actor it defends against
+//   4) the check read the RAW string while buildEndpointUrl's `pathname` SETTER rewrote it
+//      (`/GetDetail/../Submit/` cleared the guard and went out as `/Submit/`)
+//   5) my round-4 answer normalized via `new URL(v, base)`, which SPLITS `?`/`#` off the
+//      pathname — but the setter does NOT treat them as terminators: it percent-encodes them
+//      into the path and keeps removing dot-segments. `/GetDetail?/../Submit` was therefore
+//      invisible to the guard and load-bearing on the wire. Two normalizations that disagree,
+//      for the third time.
 //
-// The check therefore runs on the RESOLVED pathname, produced by the SAME URL machinery the
-// request uses (one normalization, not two that can disagree), with percent-decoding and
-// trailing slashes stripped before the test. `..` traversal, `%53ubmit`, `Submit/`, case
-// variants and duplicate slashes all collapse to the same resolved form.
+// I stopped writing my own normalizer. `isSafeRelativeReadPath` (read-source-config.cjs) is the
+// repo's existing crown-jewel guard for exactly this problem, and its own header says it is
+// "stricter than the adapter's assertRelativePath": a POSITIVE character allowlist plus blanket
+// rejection of schemes, protocol-relative, backslash, ALL percent-encoding, control chars and
+// literal `..`. A positive allowlist cannot be out-normalized — there is no spelling left to
+// find. The four-word suffix denylist is kept ON TOP (an allowlist-clean path may still spell a
+// write verb), but it is no longer what holds the line.
 const K3_WRITE_ENDPOINT_SUFFIX = /\/(submit|audit|delete|save)$/i
 
-function resolvedEndpointPathname(value) {
-  // Resolve exactly as an outbound request would. The base is irrelevant to the pathname.
-  let pathname
-  try {
-    pathname = new URL(String(value), 'https://k3.invalid/').pathname
-  } catch {
-    return null
-  }
-  let decoded = pathname
-  for (let i = 0; i < 3; i += 1) {
-    let next
-    try { next = decodeURIComponent(decoded) } catch { break }
-    if (next === decoded) break
-    decoded = next
-  }
-  return decoded.replace(/\/{2,}/g, '/').replace(/\/+$/, '')
-}
-
-function assertReadPathIsNotAWriteEndpoint(value, field) {
+function assertSafeK3ReadEndpoint(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) return
-  const resolved = resolvedEndpointPathname(value.trim())
-  if (resolved === null) {
-    throw new AdapterValidationError('a K3 read path must be a resolvable relative endpoint', {
-      code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+  const raw = value.trim()
+  if (!isSafeRelativeReadPath(raw)) {
+    throw new AdapterValidationError('a K3 endpoint must be a safe relative path', {
+      code: 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE',
       field,
     })
   }
-  if (K3_WRITE_ENDPOINT_SUFFIX.test(resolved)) {
+  const normalized = (raw.startsWith('/') ? raw : `/${raw}`).replace(/\/+$/, '')
+  if (K3_WRITE_ENDPOINT_SUFFIX.test(normalized)) {
     throw new AdapterValidationError('a K3 read path may not target a lifecycle write endpoint', {
       code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
       field,
@@ -608,7 +597,7 @@ function normalizeObjects(config) {
   // UNCONDITIONAL (review P1-C1): every object, profile-selected or not, from EITHER fill loop.
   // The class pin above is opt-in by whoever selects a profile — this is not.
   for (const [name, objectConfig] of Object.entries(normalized)) {
-    assertReadPathIsNotAWriteEndpoint(objectConfig.readPath, `config.objects.${name}.readPath`)
+    assertSafeK3ReadEndpoint(objectConfig.readPath, `config.objects.${name}.readPath`)
   }
   return normalized
 }
@@ -1599,6 +1588,10 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
   const baseUrl = normalizeBaseUrl(config.baseUrl || config.url)
   const objects = normalizeObjects(config)
   const timeoutMs = Number.isInteger(config.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : 30000
+  // REVIEW P1-E1 sibling: loginPath had NO endpoint guard at all — `loginPath:
+  // '/K3API/Material/Submit'` POSTs the credential envelope to Submit, no trick required.
+  assertSafeK3ReadEndpoint(config.loginPath, 'config.loginPath')
+  assertSafeK3ReadEndpoint(config.tokenPath, 'config.tokenPath')
   const loginPath = assertRelativePath(config.loginPath || '/K3API/Login', 'config.loginPath')
   const tokenPath = assertRelativePath(config.tokenPath || '/K3API/Token/Create', 'config.tokenPath')
   const tokenQueryParam = typeof config.tokenQueryParam === 'string' && config.tokenQueryParam.trim()

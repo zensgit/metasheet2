@@ -62,8 +62,21 @@ function b4Of(rows, overrides = {}) {
 // Row shape as the STORE emits it: actionProfileVersion lives in the nested config
 // (review P2-1 — the first version read a top-level field the store never emits, so the
 // "identity triple" carried a permanently empty member).
+const { normalizeReadSourceConfig } = require('../lib/read-source-config.cjs')
+const { __internals: { contentKeyFor } } = require('../lib/read-source-config-store.cjs')
+
 function b4Row(overrides = {}) {
-  const { config: configOverride, ...rest } = overrides
+  const { config: configOverride, contentKey: contentKeyOverride, ...rest } = overrides
+  const config = {
+    ...JSON.parse(JSON.stringify(RATIFIED_B4_TEMPLATE)),
+    systemId: 'source_1',
+    ...(configOverride || {}),
+  }
+  // REVIEW P2-E4: the contentKey is now the gate's comparator, so the fixture must carry the
+  // REAL one — computed by the store's own contentKeyFor over the normalized config, exactly
+  // as a genuine mint would. A hand-written string would make every gate assertion vacuous.
+  let realContentKey
+  try { realContentKey = contentKeyFor(normalizeReadSourceConfig(config)) } catch { realContentKey = 'unnormalizable' }
   return {
     id: 'rsc_b4_1',
     tenantId: 'tenant_1',
@@ -71,15 +84,8 @@ function b4Row(overrides = {}) {
     object: 'material',
     status: 'approved',
     version: 3,
-    contentKey: 'b4-content-key-aaaaaaaaaaaaaaaa',
-    config: {
-      // The RATIFIED template verbatim (review P2-D2: matching only the profile-version STRING
-      // let a config that differed everywhere else pass — the fixture must therefore carry real
-      // content, or the new equality check would be untested).
-      ...JSON.parse(JSON.stringify(RATIFIED_B4_TEMPLATE)),
-      systemId: 'source_1',
-      ...(configOverride || {}),
-    },
+    contentKey: contentKeyOverride !== undefined ? contentKeyOverride : realContentKey,
+    config,
     ...rest,
   }
 }
@@ -573,7 +579,7 @@ test('B4 GATE: two approved bindings -> refused (ambiguous is fail-closed, never
   input.dataSourceWrites = createK3WiseC6WriteSource({
     system: k3TargetSystem(),
     createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
-    b4: b4Of([APPROVED_B4_ROW, b4Row({ id: 'rsc_b4_2', version: 4, contentKey: 'b4-content-key-bbbbbbbbbbbbbbbb' })]),
+    b4: b4Of([APPROVED_B4_ROW, b4Row({ id: 'rsc_b4_2', version: 4, config: { systemId: 'k3-target-1' } })]),
   })
   await assert.rejects(
     dryRunExternalWrite(input),
@@ -603,10 +609,13 @@ test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry
   assert.ok(base, 'base revision must be observable')
   // PER-FIELD variation: a single identity field changing must change the revision. Varying
   // two at once would let a mutation that de-binds ONE field hide behind the other.
+  // contentKey is now DERIVED from the config (review P2-E4), so the legitimately-varying
+  // dimensions of an otherwise-ratified binding are the store-minted version and the systemId
+  // (either pipeline endpoint is valid). Each must move the revision on its own.
   const versionOnly = await revisionWith(b4Row({ version: 9 }))
-  const contentKeyOnly = await revisionWith(b4Row({ contentKey: 'b4-content-key-cccccccccccccccc' }))
+  const systemIdOnly = await revisionWith(b4Row({ config: { systemId: 'k3-target-1' } }))
   assert.notEqual(base, versionOnly, 'approvedConfigVersion alone must move the revision')
-  assert.notEqual(base, contentKeyOnly, 'configContentKey alone must move the revision')
+  assert.notEqual(base, systemIdOnly, 'configContentKey (via systemId) alone must move the revision')
   // actionProfileVersion is NOT a free variable any more: it is pinned to the ratified
   // contract, so a different one is REFUSED rather than producing another revision. That is
   // the stronger property — asserted in its own test below.
@@ -675,7 +684,9 @@ test('B4 IDENTITY: the resolved binding\'s real values ride the capability state
   assert.equal(state.b4BindingApproved, true)
   assert.equal(state.b4ActionProfileVersion, 'k3wise.material_list.v1', 'must come from row.config, not a missing top-level field')
   assert.equal(state.b4ApprovedConfigVersion, '3')
-  assert.equal(state.b4ConfigContentKey, 'b4-content-key-aaaaaaaaaaaaaaaa')
+  assert.equal(state.b4ConfigContentKey, APPROVED_B4_ROW.contentKey,
+    'the REAL store-computed content key rides the capability state')
+  assert.ok(/^[0-9a-f]{64}$/.test(state.b4ConfigContentKey), 'and it is a real sha256, not a fixture string')
 })
 
 
@@ -733,14 +744,20 @@ test('REVIEW P2-D2: the B4 gate checks CONTENT, not just the profile-version str
     ['readPath', { readPath: '/K3API/Material/GetDetail' }],
     ['containerPaths', { containerPaths: ['Data'] }],
     ['fieldMap', { fieldMap: [{ source: 'FModel', target: 'erpSpec' }] }],
-    ['operations', { operations: ['read', 'upsert'] }],
     ['requiredKind', { requiredKind: 'http' }],
+    // NOT included: `operations`. Measured — validateReadSourceConfig REJECTS a non-read-only
+    // operations list outright (READ_SOURCE_WRITE_CONFIG_REJECTED) and normalizeReadSourceConfig
+    // forces it back to ['read'], so such a row cannot be minted at all. Listing it here would
+    // have asserted the gate catches something the store never lets exist — a stronger-sounding
+    // but false claim. The read-only line upstream is the real carrier.
   ]
   for (const [label, patch] of divergences) {
     const source = createK3WiseC6WriteSource({
       system: k3TargetSystem(),
       createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
-      b4: b4Of([b4Row({ config: patch })]),
+      // Keep the row's contentKey as the RATIFIED one while the config diverges — that is
+      // exactly the forgery the key-projection version could not see (review P2-E4).
+      b4: b4Of([b4Row({ config: patch, contentKey: APPROVED_B4_ROW.contentKey })]),
     })
     const state = (await source.test()).capabilityState
     assert.equal(state.b4BindingApproved, false, `a config diverging in ${label} must not certify`)
@@ -754,4 +771,26 @@ test('REVIEW P2-D2: the B4 gate checks CONTENT, not just the profile-version str
     b4: b4Of([APPROVED_B4_ROW]),
   })
   assert.equal((await good.test()).capabilityState.b4BindingApproved, true)
+})
+
+test('B4 GATE: the two content checks are EXCLUSIVE — neither may cover for the other', async () => {
+  // Mutation record: removing the ratified-equality check alone left the suite green, because
+  // the self-consistency check was covering for it. That is the "gates covering for each other"
+  // trap. These two rows each defeat exactly ONE check, so each must fail on its own.
+  const forgeries = [
+    // (a) SELF-CONSISTENT but NOT the ratified content: a genuinely mintable row that simply
+    //     is not the B4 contract. Only the ratified-equality check can refuse it.
+    ['self-consistent, non-ratified', b4Row({ config: { keyField: 'FNumber' } })],
+    // (b) key claims the ratified content while the config diverges — impossible for a genuine
+    //     mint, but only the self-consistency check can refuse it.
+    ['key/config mismatch', b4Row({ config: { readPath: '/K3API/Material/GetDetail' }, contentKey: APPROVED_B4_ROW.contentKey })],
+  ]
+  for (const [label, row] of forgeries) {
+    const source = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+      b4: b4Of([row]),
+    })
+    assert.equal((await source.test()).capabilityState.b4BindingApproved, false, `${label} must not certify`)
+  }
 })

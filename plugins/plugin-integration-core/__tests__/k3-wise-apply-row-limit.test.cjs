@@ -273,18 +273,33 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
   // K3-specific consumers only: other adapters have their own objectConfig vocabularies and
   // their own targets. The filter is by K3 module identity, not by whether the file is
   // convenient to include.
+  // REVIEW P2-D3/P2-E2: the walk was post-filtered by a TWO-FILENAME whitelist, so a brand-new
+  // k3 consumer reading untriaged fields stayed green — the escape re-armed for the next file.
+  // (And I claimed this fixed once before while a `git checkout --` had silently reverted it;
+  // see the commit message retraction.) Filter is the module FAMILY now, and reads are matched
+  // in dot AND bracket form. Dot form takes NO whitespace: with `\s*` it spanned newlines and
+  // matched prose in a comment as a field named `The`.
+  const OBJECT_CONFIG_READ = /objectConfig(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\])/g
   const discovered = walk(libRoot)
-    .filter((f) => /objectConfig\./.test(fs.readFileSync(f, 'utf8')))
+    .filter((f) => { OBJECT_CONFIG_READ.lastIndex = 0; return OBJECT_CONFIG_READ.test(fs.readFileSync(f, 'utf8')) })
     .map((f) => path.relative(path.join(__dirname, '..'), f))
-    .filter((rel) => /k3-(wise-webapi-adapter|save-body-composer)\.cjs$/.test(rel))
+    .filter((rel) => /(^|\/)k3-[A-Za-z0-9-]+\.cjs$/.test(rel))
     .sort()
-  assert.deepEqual(discovered, [...K3_PROFILE_OBJECT_CONFIG_CONSUMERS].sort(),
-    'a K3 module reading objectConfig is missing from K3_PROFILE_OBJECT_CONFIG_CONSUMERS')
+  const { K3_NON_PROFILE_OBJECT_CONFIG_MODULES } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+  assert.deepEqual(discovered,
+    [...K3_PROFILE_OBJECT_CONFIG_CONSUMERS, ...K3_NON_PROFILE_OBJECT_CONFIG_MODULES].sort(),
+    'a K3 module reading objectConfig is in NEITHER list — triage it, or declare it out of scope WITH a reason')
+  for (const rel of K3_PROFILE_OBJECT_CONFIG_CONSUMERS) {
+    assert.ok(!K3_NON_PROFILE_OBJECT_CONFIG_MODULES.includes(rel),
+      `${rel} cannot be both a consumer and out of scope — that would dodge the field triage`)
+  }
 
   const reads = new Set()
   for (const rel of K3_PROFILE_OBJECT_CONFIG_CONSUMERS) {
     const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8')
-    for (const m of src.matchAll(/objectConfig\.([A-Za-z_][A-Za-z0-9_]*)/g)) reads.add(m[1])
+    for (const m of src.matchAll(OBJECT_CONFIG_READ)) reads.add(m[1] || m[2])
+    assert.equal(/const\s*\{[^}]*\}\s*=\s*objectConfig/.test(src), false,
+      `${rel} destructures objectConfig — the sweep cannot see those reads; refactor or extend the sweep`)
   }
   assert.ok(reads.size >= 30, `the sweep must actually find reads (found ${reads.size}) — a regex matching nothing would pass vacuously`)
 
@@ -422,7 +437,10 @@ test('ADVERSARIAL P1-C1: a read path may never target a write endpoint — WITHO
   ]) {
     assert.throws(
       () => __internals.normalizeObjects({ objects }),
-      (error) => error.details && error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      // The positive allowlist (axis 5) now fires FIRST for the encoded/traversal spellings,
+      // so accept either endpoint refusal — what matters is that none of them reaches the wire.
+      (error) => error.details && (error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT'
+        || error.details.code === 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE'),
       `${label} must be refused with NO profile selected`,
     )
   }
@@ -436,4 +454,95 @@ test('ADVERSARIAL P1-C1: a read path may never target a write endpoint — WITHO
   ]) {
     assert.doesNotThrow(() => __internals.normalizeObjects({ objects }), `${label} is a legitimate read and must pass`)
   }
+})
+
+
+test('REVIEW P2-D4/P2-E3: the profile arm is UNFORGEABLE — a JSON config cannot claim it', async () => {
+  // The Symbol's entire justification is "JSON config can never forge a Symbol key", and that
+  // property had ZERO coverage repo-wide: mutating the Symbol to a plain string left every
+  // suite green while making the guard bypassable with {profileArmed:true}. (I claimed this
+  // test once before while a `git checkout --` had reverted it — see the retraction.)
+  const fetchPair = countingFetch()
+  for (const forged of [{ profileArmed: true }, { k3CustomerProfileArmed: true }, { 'Symbol(k3CustomerProfileArmed)': true }]) {
+    const adapter = adapterWith({
+      savePath: '/K3API/Material/Save',
+      keyField: 'FNumber',
+      schema: [
+        { name: 'FNumber', label: 'Code', type: 'string', required: true },
+        { name: 'FName', label: 'Name', type: 'string', required: true },
+      ],
+      ...forged,
+    }, fetchPair)
+    await assert.rejects(
+      adapter.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] }),
+      (error) => error.details && error.details.code === 'K3_WISE_MATERIAL_PROFILE_REQUIRED',
+      `a config claiming ${JSON.stringify(forged)} must not arm the profile`,
+    )
+  }
+  assert.deepEqual(fetchPair.calls, [], 'no forgery may reach the network')
+
+  // POSITIVE CONTROL: the genuine selection still arms — otherwise a guard refusing everything
+  // would satisfy the assertions above.
+  const armed = adapterWith({ profile: PROFILE_ID }, fetchPair)
+  assert.equal((await armed.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })).written, 1)
+})
+
+test('REVIEW P1-E1: query/fragment spellings of a write endpoint are refused (axis 5)', () => {
+  const { __internals } = require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+  // `new URL(v, base)` splits ?/# off the pathname, but the `pathname` SETTER percent-encodes
+  // them into the path and keeps removing dot-segments — so these reached Submit on the wire
+  // while the guard saw a clean GetDetail. A positive character allowlist has no such gap.
+  for (const [label, readPath] of [
+    ['query-hidden traversal', '/K3API/Material/GetDetail?/../Submit'],
+    ['fragment-hidden traversal', '/K3API/Material/GetDetail#/../Submit'],
+    ['absolute url', 'https://evil.test/x/Submit'],
+    ['protocol relative', '//evil.test/Submit'],
+    ['backslash', '/K3API\\Material\\Submit'],
+    ['percent encoded', '/K3API/Material/%53ubmit'],
+  ]) {
+    assert.throws(
+      () => __internals.normalizeObjects({ objects: { material: { operations: ['read'], readPath } } }),
+      // Refused by SOME endpoint guard, and by the module's own error type — an incidental
+      // TypeError would not count. Which guard fires is an implementation detail (the absolute
+      // URL is caught by the pre-existing relative-endpoint check, before mine).
+      (error) => error instanceof Error && /relative|write endpoint|must be relative/i.test(String(error.message)),
+      `${label} must be refused`,
+    )
+  }
+  for (const readPath of ['/K3API/Material/GetList', '/K3API/Material/GetDetail']) {
+    assert.doesNotThrow(() => __internals.normalizeObjects({ objects: { material: { operations: ['read'], readPath } } }))
+  }
+})
+
+test('REVIEW P1-E1 sibling: loginPath/tokenPath cannot be pointed at a write endpoint either', () => {
+  // Found alongside axis 5: loginPath had NO endpoint guard at all, so `loginPath:
+  // '/K3API/Material/Submit'` POSTed the credential envelope to Submit with no trick required.
+  for (const [field, value] of [
+    ['loginPath', '/K3API/Material/Submit'],
+    ['loginPath', '/K3API/Material/GetDetail?/../Submit'],
+    ['tokenPath', '/K3API/Material/Audit'],
+  ]) {
+    assert.throws(
+      () => createK3WiseWebApiAdapter({
+        system: {
+          id: 'login-guard-k3', name: 'K3', kind: 'erp:k3-wise-webapi', role: 'target',
+          credentials: { username: 'u', password: 'p', acctId: 'AIS' },
+          config: { baseUrl: 'https://k3.example.test', [field]: value, objects: { material: { profile: PROFILE_ID } } },
+        },
+        fetchImpl: countingFetch().impl,
+      }),
+      (error) => error.details && (error.details.code === 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE'
+        || error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT'),
+      `${field}=${value} must be refused`,
+    )
+  }
+  // POSITIVE CONTROL: the default/legitimate paths still construct.
+  assert.doesNotThrow(() => createK3WiseWebApiAdapter({
+    system: {
+      id: 'login-guard-ok', name: 'K3', kind: 'erp:k3-wise-webapi', role: 'target',
+      credentials: { username: 'u', password: 'p', acctId: 'AIS' },
+      config: { baseUrl: 'https://k3.example.test', loginPath: '/K3API/Login', objects: { material: { profile: PROFILE_ID } } },
+    },
+    fetchImpl: countingFetch().impl,
+  }))
 })

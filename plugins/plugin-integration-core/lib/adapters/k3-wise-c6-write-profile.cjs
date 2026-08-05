@@ -29,24 +29,6 @@ const {
   K3WISE_MATERIAL_LIST_B4_TEMPLATE,
 } = require('../read-source-k3-material-list-b4-contract.cjs')
 
-// REVIEW P2-D2: matching only actionProfileVersion made the gate SELF-CERTIFYING — that field
-// carries syntax validation and nothing else, so a config whose mode/readPath/containerPaths/
-// fieldMap all differed from the ratified template passed by typing the right string. The gate
-// now compares the CONTENT against the frozen template. systemId and version are excluded:
-// systemId is per-environment (and separately constrained to a pipeline endpoint), version is
-// minted by the store.
-const B4_CONTENT_KEYS = Object.freeze(
-  Object.keys(K3WISE_MATERIAL_LIST_B4_TEMPLATE).filter((k) => k !== 'systemId' && k !== 'version'),
-)
-
-function b4ConfigMatchesRatifiedTemplate(config) {
-  if (!config || typeof config !== 'object') return false
-  for (const key of B4_CONTENT_KEYS) {
-    if (JSON.stringify(config[key]) !== JSON.stringify(K3WISE_MATERIAL_LIST_B4_TEMPLATE[key])) return false
-  }
-  return true
-}
-
 const K3_WISE_C6_WRITE_TARGET_KIND = 'erp:k3-wise-webapi'
 const CUSTOMER_PROFILE_ID = 'material-k3wise-customer-profile-v1'
 
@@ -58,7 +40,6 @@ if (!CUSTOMER_PROFILE) {
 }
 
 // Single source: the plan-level row bound IS the profile literal's cap (frozen by S2).
-// Reading it here instead of repeating `3` keeps exactly one record point for the number.
 const K3_WISE_C6_MAX_APPLY_ROWS = CUSTOMER_PROFILE.maxApplyRows
 
 const SCHEMA_FIELD_NAMES = new Set(
@@ -66,6 +47,49 @@ const SCHEMA_FIELD_NAMES = new Set(
     .map((field) => field && field.name)
     .filter((name) => typeof name === 'string' && name.length > 0),
 )
+
+// REVIEW P2-D2 / P2-E4: matching only actionProfileVersion made the gate SELF-CERTIFYING (that
+// field carries syntax validation and nothing else). My first answer compared the template's
+// OWN keys — a one-directional projection: keyField, headerContainerPaths, lineContainerPaths,
+// multiplicityRuleField and requiredKind all validate, PERSIST, and were invisible to it. It
+// was also JSON.stringify key-order sensitive against a JSONB column.
+//
+// The correct comparator already exists and is already carried on the row: `contentKey` is the
+// store's own sha256 over a stable stringify of the WHOLE normalized config — order-insensitive
+// and, being full-config, not a projection. The gate recomputes what the ratified content WOULD
+// key to for this row's systemId and requires equality.
+const {
+  __internals: { contentKeyFor: readSourceContentKeyFor },
+} = require('../read-source-config-store.cjs')
+const { normalizeReadSourceConfig } = require('../read-source-config.cjs')
+
+function ratifiedB4ContentKeyFor(systemId) {
+  return readSourceContentKeyFor(normalizeReadSourceConfig({
+    ...K3WISE_MATERIAL_LIST_B4_TEMPLATE,
+    systemId,
+  }))
+}
+
+function b4RowMatchesRatifiedContract(row) {
+  const config = row && row.config && typeof row.config === 'object' ? row.config : null
+  if (!config) return false
+  if (config.actionProfileVersion !== K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION) return false
+  if (typeof row.contentKey !== 'string' || row.contentKey.length === 0) return false
+  const systemId = typeof config.systemId === 'string' ? config.systemId : ''
+  if (!systemId) return false
+  // TWO comparisons, both required:
+  //   (a) the row's key is SELF-CONSISTENT with the row's own config — the same discipline
+  //       gip-approved-binding-resolver applies (RESOLVER_CONFIG_CONTENT_KEY_MISMATCH). Without
+  //       it, a row whose key says "ratified" while its config says otherwise would pass, and a
+  //       test constructing exactly that row proved it.
+  //   (b) that key equals what the RATIFIED content would key to for this systemId.
+  let selfKey
+  try { selfKey = readSourceContentKeyFor(normalizeReadSourceConfig(config)) } catch { return false }
+  if (row.contentKey !== selfKey) return false
+  let expected
+  try { expected = ratifiedB4ContentKeyFor(systemId) } catch { return false }
+  return row.contentKey === expected
+}
 
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -212,9 +236,8 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       // P2-1: the store nests the config; actionProfileVersion is NOT a top-level row field
       // (the first version read the top level and therefore always saw '').
       const config = row.config && typeof row.config === 'object' ? row.config : {}
-      if (config.actionProfileVersion !== K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION) return false
-      // Content equality with the RATIFIED template — the string alone certifies nothing.
-      return b4ConfigMatchesRatifiedTemplate(config)
+      // Full-config, order-insensitive equality via the store's own content key.
+      return b4RowMatchesRatifiedContract(row)
     })
   }
   let adapter = null

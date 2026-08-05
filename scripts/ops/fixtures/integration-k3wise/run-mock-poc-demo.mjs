@@ -39,6 +39,8 @@ const { createK3WiseSqlServerChannel } = require('../../../../plugins/plugin-int
 const {
   K3WISE_MATERIAL_LIST_B4_TEMPLATE,
 } = require('../../../../plugins/plugin-integration-core/lib/read-source-k3-material-list-b4-contract.cjs')
+const { normalizeReadSourceConfig } = require('../../../../plugins/plugin-integration-core/lib/read-source-config.cjs')
+const { __internals: { contentKeyFor } } = require('../../../../plugins/plugin-integration-core/lib/read-source-config-store.cjs')
 const {
   K3_WISE_C6_MAX_APPLY_ROWS,
   K3_WISE_C6_WRITE_PROFILE,
@@ -344,13 +346,16 @@ async function main() {
             readSourceConfigs: {
               // Honours its arguments (review P1-2: a stub that ignores scope hides the gate).
               async list(input = {}) {
+                // The row a genuine mint produces: ratified content + this environment's
+                // systemId, with the contentKey computed by the STORE's own function (review
+                // P2-E4 — the gate compares content keys, so a hand-written one would make the
+                // demo prove nothing).
+                const demoConfig = { ...K3WISE_MATERIAL_LIST_B4_TEMPLATE, systemId: 'source_demo' }
                 const row = {
                   id: 'rsc_demo_b4', tenantId: 'tenant_demo', workspaceId: null,
                   object: 'material', status: 'approved', version: 1,
-                  contentKey: 'demo-b4-content-key',
-                  // The RATIFIED template verbatim + this environment's systemId — the gate
-                  // now checks CONTENT, not just the profile-version string (review P2-D2).
-                  config: { ...K3WISE_MATERIAL_LIST_B4_TEMPLATE, systemId: 'source_demo' },
+                  contentKey: contentKeyFor(normalizeReadSourceConfig(demoConfig)),
+                  config: demoConfig,
                 }
                 if (input.tenantId !== row.tenantId) return []
                 if ((input.workspaceId ?? null) !== row.workspaceId) return []
