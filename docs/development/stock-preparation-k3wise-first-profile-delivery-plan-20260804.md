@@ -563,6 +563,7 @@ catalog 化 readPath、fixture GetDetail 三项**已重贴到 P2/P3**,不在 P1 
 | P2 清洗腿 | 已建且已门控,但治理预览面被 PLM 完整批次硬耦合 | `confirm-writes.cjs:345,:349,:354`;`resolveCompleteBatchLines:275-315` |
 | P2 物料 diff 预览面 | **不存在** | `sync-run-plan.cjs:18` 明确排除 K3/ERP/SQL;`erp_material_master` 是 upsert 缓存(`erp-material-sync-persist.cjs:41-46`) |
 | P2 K3→intake 映射 | **产品早已完整**;#4751 造的平行件已撤回 | 见附录 B.9/B.10。intake 别名表本就认 `FNumber/FItemID/FName/FModel`;撤回件 `6a38ac06e` (#4755) |
+| P2 B4 绑定物 | 不存在,待 S5 产出 | 前置=S4(#4757 FItemID 投影修复)+ 认证 K3 GetList read profile;字段按 B4ProvenanceDecision(附录 E.3)。本行系恢复被误覆盖条目,见附录 E.2 |
 | P2 canonical 命名 | **待 owner 裁** | 注册表出厂为空 `:570`;`stock_preparation.v1` 仅见设计文档 `gip-d0-…:233` |
 | P2 物料对账冻结合同 | 已存在、LATENT、默认 OFF | `material-reconciliation-templates.cjs:6-13,:19,:22-23`;测试在门控链内 |
 | P3 K3 Save | **已建、已接线、LIVE** | 适配器 `:1982/:2009/:2013`;`index.cjs:253`;e2e 套件在链内 |
@@ -930,3 +931,66 @@ rowErrors: 0
 - **没有** dispatch 任何工作流;
 - 本地出包尝试止步于 `apps/web/dist` 缺失(需完整前端构建),未继续 —— 因为在 D.4 答复前,
   出一个无处验证、且 provenance 有两项指向未定义的包,不构成交付。
+
+---
+
+## 附录 E — 计划勘误与 owner 裁决记录(2026-08-05)
+
+> 与附录 A–D 同性质:写在计划正文之后,不改正文;与正文/早前附录冲突时以本附录为准,并标注理由。
+
+### E.1 勘误 B.5:「Submit/Audit 关闭是运行期不变量」过强
+
+B.5 称「Submit/Audit 关闭是运行期不变量」——**过强**。真相:
+
+- save-only 锁是 **R-OPTIN**(`k3-wise-webapi-adapter.cjs:385-408`),**仅在 config 显式选命名 profile 时武装**;
+- FE setup(`apps/web/src/services/integration/k3WiseSetup.ts`)全文件 `profile` 出现 **0 次**,
+  且 `autoSubmit`/`autoAudit` 从表单透传;
+- ⇒ Save-only 边界实际由**操作员表单**控制,不是运行期不变量。
+
+该缺口由 S2(PR #4758)关闭:
+
+| S2 收口项 | 内容 |
+|---|---|
+| 行上限冻入 profile | `maxApplyRows=3` 冻入 `material-k3wise-customer-profile-v1`(`templates:177` 已存在的 profile) |
+| 重钉时机 | adapter merge 后重钉 |
+| 拒绝时机 | login 前拒绝(零网络副作用) |
+| FE 侧 | FE 无条件选择 + 镜像 by-require 断言 |
+
+### E.2 恢复 §5 被覆盖的 B4 行
+
+早前状态表更新时,「P2 B4 绑定物」一行被 K3→intake 撤回条目误覆盖。已在 §5 表补回一行:
+
+> P2 B4 绑定物 | 不存在,待 S5 产出 | 前置=S4(#4757 FItemID 投影修复)+ 认证 K3 GetList read profile;
+> 字段按 B4ProvenanceDecision。
+
+### E.3 owner 四项裁决(20260805,基点 `d368700536`,逐字记录)
+
+- `P4VerificationDecision=OPEN_MAIN_BUILD_VERIFY_MATRIX_V1`
+- `K3WriteDecision=REQUIRE_NAMED_PROFILE_MAX3_AND_CONTENT_BOUND_APPROVAL`
+- `EndpointMirrorDecision=KEEP_EXISTING_EXHAUSTIVE_TEST`
+- `B4ProvenanceDecision=ACTION_PROFILE_VERSION_PLUS_APPROVED_CONFIG_IDENTITY`
+
+**执行顺序**:验证 workflow 与 K3 profile/C6 并行 → 认证 K3 read profile 并产出 B4 → 冻结 provenance
+→ 构建最终包 → PG 15/16/17 验证 → 实体机先读/清洗,再 1–3 行 Save 与 GetDetail 回读。
+
+**执行切片状态表**:
+
+| 切片 | 状态 |
+|---|---|
+| S4 | #4757(in flight) |
+| S2 | #4758(in flight) |
+| S1 / S3 | 开工中 |
+| S5 / S6 | 排队 |
+
+**provenance 四元组** = `actionProfileVersion` + `approvedConfigVersion` + `configContentKey`(B4 时刻)
++ 构建时 digest 组(`serviceRuntimeSha`、`packageSha256`、三个 helper digest 分行);**两时刻分记防回填**。
+
+### E.4 两项 RECOMMENDED-AWAITING-OWNER
+
+(i) **K3 目标死信 replay 首版 fail-closed 禁用** —— replay(`http-routes.cjs:140` → `:4978` →
+`runner:846-854`)绕过 dry-run,S3 落地后将是唯一不带 token 的写通道;无幂等账本
+(`pipeline-runner.cjs:857-858`)时重放=重写;首版人工场景正确恢复是重走 dry-run。约 0.25 人天。
+
+(ii) **fieldMapDigest 首版不加** —— `contentKeyFor` 只排除 caller version
+(`read-source-config-store.cjs:98-102`),fieldMap 逐字节已在 contentKey;resolver 现场重算比对
+(`gip-approved-binding-resolver.cjs:575-577`);另立字段=同一事实两个记录点。需要时是纯增量字段。
