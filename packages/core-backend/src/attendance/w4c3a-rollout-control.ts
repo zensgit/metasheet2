@@ -184,6 +184,7 @@ type BatchReferenceState = Readonly<{
 
 let afterExclusiveRolloutLockForTests: ((kind: 'close' | 'transition') => Promise<void>) | null = null
 let beforeEventInsertForTests: (() => Promise<void>) | null = null
+let beforeStateUpdateForTests: (() => Promise<void>) | null = null
 
 /** Test-only deterministic barrier. It is not imported by production wiring. */
 export function __setW4C3aRolloutControlAfterExclusiveLockForTests(
@@ -193,14 +194,25 @@ export function __setW4C3aRolloutControlAfterExclusiveLockForTests(
 }
 
 /**
- * Test-only atomicity seam (amendment completion gate 7): fires after the
- * rollout-state UPDATE and before the rollout-event INSERT, in the same
- * transaction. It is not imported by production wiring.
+ * Test-only atomicity seam (amendment completion gate 7, clause "a failed event insert leaves
+ * state/version unchanged"): fires immediately before the rollout-event INSERT (the first DML of
+ * the pair). It is not imported by production wiring.
  */
 export function __setW4C3aRolloutControlBeforeEventInsertForTests(
   hook: (() => Promise<void>) | null,
 ): void {
   beforeEventInsertForTests = hook
+}
+
+/**
+ * Test-only atomicity seam (amendment completion gate 7, clause "a failed state update leaves no
+ * event"): fires after the rollout-event INSERT succeeds but before the rollout-state UPDATE (the
+ * second DML of the pair). It is not imported by production wiring.
+ */
+export function __setW4C3aRolloutControlBeforeStateUpdateForTests(
+  hook: (() => Promise<void>) | null,
+): void {
+  beforeStateUpdateForTests = hook
 }
 
 function requireUuid(value: unknown, code: string): string {
@@ -886,13 +898,10 @@ export async function transitionAttendanceCalculationRolloutV1(
       if (defectiveRequestSnapshots > 0) fail('W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE')
     }
 
-    await trx.query(
-      `UPDATE attendance_calculation_rollout_state
-          SET state = $2, prior_state = state, engine_version = $3, reason_code = $4,
-              actor_id = $5, changed_at = now(), version = version + 1
-        WHERE org_id = $1`,
-      [input.orgId, input.targetState, input.engineVersion, input.reasonCode, input.actorId],
-    )
+    // Section 2.8 literal order: the event insert is attempted FIRST; the rollout-state UPDATE
+    // happens only after it succeeds. Both share one transaction, so either order is atomic —
+    // a failure at any point rolls back both — but this ordering also lets a same-transaction
+    // failure-injection hook independently exercise each of gate 7's two clauses.
     await beforeEventInsertForTests?.()
     await trx.query(
       `INSERT INTO attendance_calculation_rollout_events
@@ -920,6 +929,14 @@ export async function transitionAttendanceCalculationRolloutV1(
           references: input.evidenceReferences,
         }),
       ],
+    )
+    await beforeStateUpdateForTests?.()
+    await trx.query(
+      `UPDATE attendance_calculation_rollout_state
+          SET state = $2, prior_state = state, engine_version = $3, reason_code = $4,
+              actor_id = $5, changed_at = now(), version = version + 1
+        WHERE org_id = $1`,
+      [input.orgId, input.targetState, input.engineVersion, input.reasonCode, input.actorId],
     )
     return Object.freeze({ orgId: input.orgId, state: input.targetState, batchId: null })
   })

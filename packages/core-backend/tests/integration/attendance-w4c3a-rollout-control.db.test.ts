@@ -17,6 +17,7 @@ import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_at
 import {
   __setW4C3aRolloutControlAfterExclusiveLockForTests,
   __setW4C3aRolloutControlBeforeEventInsertForTests,
+  __setW4C3aRolloutControlBeforeStateUpdateForTests,
   closeLegacyRollbackWindowV1,
   transitionAttendanceCalculationRolloutV1,
   type AttendanceW4C3aRolloutControlResultV1,
@@ -271,6 +272,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
   afterAll(async () => {
     __setW4C3aRolloutControlAfterExclusiveLockForTests(null)
     __setW4C3aRolloutControlBeforeEventInsertForTests(null)
+    __setW4C3aRolloutControlBeforeStateUpdateForTests(null)
     delete process.env[ALLOWLIST_ENV]
     await pool?.end().catch(() => undefined)
     if (adminPool) {
@@ -1054,6 +1056,36 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         )).resolves.toMatchObject({ rows: [{ n: 0 }] })
       } finally {
         __setW4C3aRolloutControlBeforeEventInsertForTests(null)
+        client.release()
+      }
+    })
+
+    it('leaves no event when the state update fails after the event insert succeeded', async () => {
+      const atomicOrg = crypto.randomUUID()
+      allow(atomicOrg)
+      __setW4C3aRolloutControlBeforeStateUpdateForTests(async () => {
+        throw new Error('W4C3A_TEST_FORCED_STATE_UPDATE_FAILURE')
+      })
+      const client = await pool.connect()
+      try {
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: atomicOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+            evidenceManifestSha256: hex64('atomic-2'), evidenceReferences: baseRefs('atomic-2'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).rejects.toThrow('W4C3A_TEST_FORCED_STATE_UPDATE_FAILURE')
+        await expect(pool.query(
+          'SELECT count(*)::int AS n FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [atomicOrg],
+        )).resolves.toMatchObject({ rows: [{ n: 0 }] })
+        await expect(pool.query(
+          'SELECT count(*)::int AS n FROM attendance_calculation_rollout_events WHERE org_id = $1',
+          [atomicOrg],
+        )).resolves.toMatchObject({ rows: [{ n: 0 }] })
+      } finally {
+        __setW4C3aRolloutControlBeforeStateUpdateForTests(null)
         client.release()
       }
     })
