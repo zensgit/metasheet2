@@ -42,6 +42,7 @@ import {
   scanAttendanceScheduledRunSweepCandidatesV1,
   type AttendanceScheduledRunMemberInputV1,
   type AttendanceScheduledRunMembershipResolverV1,
+  type AttendanceScheduledRunSweepCandidateV1,
 } from '../../src/attendance/w4c2-scheduled-run'
 import {
   sweepAttendanceScheduledRunsOnceV1,
@@ -478,9 +479,35 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
   // retry, which then re-selected the same still-`running` rows). `FOR UPDATE SKIP LOCKED` (the
   // SAME fix as P1-1) makes the claim true: a row already locked by a concurrent scan is skipped,
   // not duplicated.
+  //
+  // Construction note: a naive `Promise.all([scanA(), scanB()])` against two SEPARATE fresh
+  // connections is RACY on localhost — a whole SERIALIZABLE scan transaction (BEGIN + 2x
+  // `set_config` + the scan + COMMIT) can complete in under a millisecond, so it is possible for
+  // worker A to fully commit (releasing its row locks) before worker B's scan even attempts to
+  // lock anything; B then legitimately re-scans the SAME (only) backlog, which is correct
+  // ROTATION behavior, not a SKIP LOCKED failure, and would show up as a false "overlap" that has
+  // nothing to do with exclusivity. (Measured directly: a `Promise.all` version of this test
+  // still showed a rare 6/6 overlap AFTER the fix, purely from that race — not from SKIP LOCKED
+  // not working.)
+  //
+  // A second construction pitfall (also measured directly): manually holding worker A's
+  // transaction open with a BARE `BEGIN`/`COMMIT` (bypassing the production retry wrapper) makes
+  // `COMMIT` fail with SQLSTATE `40001` ("could not serialize access due to read/write
+  // dependencies... Canceled on identification as a pivot") — because BOTH scans' `SeqScan`
+  // (a 6-row scratch table has no index to make the plan narrower) touches the WHOLE
+  // `state='running'` predicate range even though `SKIP LOCKED` makes their WRITES disjoint, so
+  // PostgreSQL's serializable-snapshot-isolation conflict detector sees a genuine two-transaction
+  // rw-antidependency cycle and aborts the later committer. This is EXPECTED SERIALIZABLE
+  // behavior, not a defect — and exactly why `runAttendanceResultOperationTransactionV1` retries
+  // on `40001`/`40P01` in the first place. This test goes through that SAME production retry
+  // wrapper for BOTH workers (not a bare `BEGIN`/`COMMIT`), with an explicit signal so worker A's
+  // scan-claim is guaranteed to still be open when worker B's independent scan runs, modeling a
+  // worker mid-flight between its scan and its per-candidate processing — the exact window P1-1's
+  // mechanism (and a real second sweep replica) exploits. On A's `40001`, the wrapper transparently
+  // retries the WHOLE callback (rollback + rescan), matching real production behavior.
   // =============================================================================================
   describe('multi-worker exclusivity (regression guard, #4774 P2-2)', () => {
-    it('two concurrent scans against the same backlog claim disjoint candidate sets — zero overlap, full coverage', async () => {
+    it('a concurrent worker holding an uncommitted scan-claim on part of the backlog does not let a second worker durably double-claim those same rows', async () => {
       const workDate = '2026-03-08'
       const seeded: Array<{ orgId: string; runId: string }> = []
       for (let i = 0; i < 6; i += 1) {
@@ -489,30 +516,62 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
       }
       const orgIds = seeded.map((r) => r.orgId)
 
+      // Signals: `scanADone` resolves once worker A's scan-claim transaction has taken its
+      // locks (but is still open); `releaseASignal` is held until worker B has finished, so A's
+      // COMMIT (or its post-`40001`-retry rescan+COMMIT) cannot happen before B's scan runs.
+      let scanADoneResolve!: (v: readonly AttendanceScheduledRunSweepCandidateV1[]) => void
+      const scanADone = new Promise<readonly AttendanceScheduledRunSweepCandidateV1[]>((resolve) => {
+        scanADoneResolve = resolve
+      })
+      let releaseA!: () => void
+      const releaseASignal = new Promise<void>((resolve) => {
+        releaseA = resolve
+      })
+
       const clientA = await pool.connect()
       const clientB = await pool.connect()
+      const workerAPromise = withAllowlist(orgIds, () =>
+        runAttendanceResultOperationTransactionV1(
+          clientA as unknown as AttendanceW4TransactionClientV1,
+          async (trx) => {
+            const candidates = await scanAttendanceScheduledRunSweepCandidatesV1(trx, 3)
+            scanADoneResolve(candidates)
+            await releaseASignal
+            return candidates
+          },
+        ),
+      )
+
       try {
-        const [candidatesA, candidatesB] = await withAllowlist(orgIds, () =>
-          Promise.all([
-            runAttendanceResultOperationTransactionV1(clientA as unknown as AttendanceW4TransactionClientV1, (trx) =>
-              scanAttendanceScheduledRunSweepCandidatesV1(trx, 25),
-            ),
-            runAttendanceResultOperationTransactionV1(clientB as unknown as AttendanceW4TransactionClientV1, (trx) =>
-              scanAttendanceScheduledRunSweepCandidatesV1(trx, 25),
-            ),
-          ]),
+        const candidatesA = await scanADone
+        expect(candidatesA).toHaveLength(3)
+
+        // Worker B: a fully independent second scan while A's claim is STILL uncommitted.
+        const candidatesB = await withAllowlist(orgIds, () =>
+          runAttendanceResultOperationTransactionV1(clientB as unknown as AttendanceW4TransactionClientV1, (trx) =>
+            scanAttendanceScheduledRunSweepCandidatesV1(trx, 25),
+          ),
         )
-        const idsA = new Set(candidatesA.map((c) => c.runId))
+
+        releaseA()
+        const finalCandidatesA = await workerAPromise
+
+        const idsA = new Set(finalCandidatesA.map((c) => c.runId))
         const idsB = new Set(candidatesB.map((c) => c.runId))
         const overlap = [...idsA].filter((id) => idsB.has(id))
-        expect(overlap, 'FOR UPDATE SKIP LOCKED must make two concurrent scans claim disjoint rows').toEqual([])
-
-        // Nobody starved, nobody double-counted: the union of both scans' claims covers exactly
-        // the seeded backlog.
+        expect(overlap, 'FOR UPDATE SKIP LOCKED must make a concurrent scan skip rows another worker already holds').toEqual([])
+        // B's scan (limit 25, only 3 unlocked rows available) claims exactly the OTHER 3.
+        expect(idsB.size).toBe(3)
+        expect(idsA.size).toBe(3)
         const union = new Set([...idsA, ...idsB])
-        expect(union.size).toBe(seeded.length)
+        expect(union.size).toBe(6)
         for (const s of seeded) expect(union.has(s.runId)).toBe(true)
       } finally {
+        // Always unstick A even on assertion failure, so afterEach's DROP DATABASE cannot hang
+        // behind a leaked open transaction — and always AWAIT its settlement before releasing
+        // the connection back to the pool.
+        releaseA()
+        await workerAPromise.catch(() => undefined)
         clientA.release()
         clientB.release()
       }

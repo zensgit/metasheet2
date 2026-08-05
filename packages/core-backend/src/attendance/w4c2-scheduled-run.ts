@@ -1197,9 +1197,31 @@ export interface AttendanceScheduledRunSweepCandidateV1 {
  * restarts, not an in-memory cursor: every candidate this tick selects has its
  * `last_attempt_at` stamped to `now()` in the same statement, which demotes it below any
  * candidate this tick did NOT reach (`NULLS FIRST` keeps never-attempted rows — including
- * brand-new ones — ahead of anything already attempted). Steady state (backlog <= limit) is
- * byte-behaviorally the prior FIFO order: every row starts `last_attempt_at IS NULL`, so the
- * `created_at ASC` tiebreak alone decides the order, identical to the old query.
+ * brand-new ones — ahead of anything already attempted). Steady state (backlog <= limit)
+ * selects the SAME candidate SET the old fixed-prefix query did: every row starts
+ * `last_attempt_at IS NULL`, so the `created_at ASC` tiebreak alone decides which rows the
+ * inner `ORDER BY ... LIMIT` picks. It does NOT guarantee the same RETURNED order —
+ * PostgreSQL does not promise `UPDATE ... RETURNING` preserves a subquery's `ORDER BY`, so
+ * downstream processing order is not oldest-first even in steady state (each candidate is its
+ * own independent transaction below and nothing here depends on order).
+ *
+ * #4774 fix (gate P1-1/P2-2): the inner `SELECT` carries `FOR UPDATE SKIP LOCKED`. Without it,
+ * this query was a row-lock WAITER — any concurrent holder of a row lock on one selected
+ * `running` row (the sweep's OWN per-candidate `finalizeAttendanceScheduledRunV1`/
+ * `abandonAttendanceScheduledRunV1` step-3 `SELECT ... FOR UPDATE`, or a second concurrent scan
+ * worker) blocked this `UPDATE` until `lock_timeout` (5000ms) aborted it with `55P03` — a
+ * SQLSTATE `isRetryableSqlState()` does not cover — which propagated out of
+ * `sweepAttendanceScheduledRunsOnceV1` (whose scan transaction sits OUTSIDE the per-candidate
+ * try/catch) and killed the ENTIRE tick, 0 candidates processed. `FOR UPDATE SKIP LOCKED` is
+ * the standard durable-queue claim idiom: a currently-locked row is simply excluded from THIS
+ * tick's candidate set (never stamped, never counted as `errored`) and remains at the front of
+ * the rotation (`last_attempt_at IS NULL`) to be retried next tick — fully compatible with the
+ * fairness rotation above, and restores section 1.7's containment invariant for the scan phase
+ * ("one stuck candidate cannot block the others in the same scan"). It also makes two
+ * concurrent scan workers claim disjoint candidate sets instead of duplicating work (a locked
+ * row is skipped by the other worker's scan rather than raced/retried onto the same rows) — see
+ * `attendance-w4c2-sweep-fairness.db.test.ts`'s "tick-level containment under a concurrent row
+ * lock" and "multi-worker exclusivity" regression guards.
  */
 export async function scanAttendanceScheduledRunSweepCandidatesV1(
   trx: AttendanceW4TransactionClientV1,
@@ -1215,6 +1237,7 @@ export async function scanAttendanceScheduledRunSweepCandidatesV1(
          WHERE state = 'running'
          ORDER BY last_attempt_at ASC NULLS FIRST, created_at ASC
          LIMIT $1
+         FOR UPDATE SKIP LOCKED
       )
       RETURNING org_id, initiator, work_date::text AS work_date, run_id::text AS run_id`,
     [limit],
