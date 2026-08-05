@@ -56,6 +56,22 @@ class K3WiseWebApiAdapterError extends Error {
 // `profileArmed: true` in operator config is inert by construction.
 const K3_PROFILE_ARMED = Symbol('k3CustomerProfileArmed')
 
+// Request-shape keys a named profile OWNS: which endpoint is called, with which verb, and how
+// the key/body are addressed. Re-pinned from the profile literal after the operator merge; a
+// key absent from the literal is DELETED rather than left to the overlay (review P1-1: an
+// overlay-supplied readPath/readMethod is a wider hole than the savePath one that was fixed).
+const K3_PROFILE_PINNED_REQUEST_KEYS = Object.freeze([
+  'savePath', 'readPath', 'readMethod', 'bodyKey', 'keyParam', 'path', 'endpointPath',
+])
+// Body/endpoint-shaping keys the customer profile deliberately does not declare. An overlay
+// carrying one of these authors a request the profile never sanctioned.
+const K3_PROFILE_FORBIDDEN_OVERLAY_KEYS = Object.freeze([
+  'submitPath', 'auditPath', 'deletePath', 'writePath',
+  'readBodyTemplate', 'readListBodyTemplate', 'readListBodyKey', 'readMode',
+  'readListFields', 'readListOrderBy', 'readListFilterField', 'readListFilterMode',
+  'readListFilterEscape', 'topField', 'pageIndexField', 'pageSizeField', 'maxListLimit',
+])
+
 const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
 const DEFAULT_MATERIAL_LIST_MAX_LIMIT = 10
 // Bounded LIST page selection (#3703, owner-approved 2026-07-06): mirrors READ_SMOKE_LIST_MAX_PAGE_INDEX
@@ -427,13 +443,26 @@ function normalizeObjects(config) {
     if (saveOnlyProfile) {
       normalized[name].lifecycle = 'save-only'
       normalized[name][K3_PROFILE_ARMED] = true
-      // OWNER REVIEW P1 (20260805): the overlay could re-point savePath at the Submit/Audit
-      // endpoint while the lifecycle marker still claimed save-only — a save-only subversion
-      // by endpoint substitution. The Save ENDPOINT is pinned from the profile literal AFTER
-      // the merge, exactly like the lifecycle marker: non-overridable by construction.
-      normalized[name].savePath = base.savePath
-      delete normalized[name].submitPath
-      delete normalized[name].auditPath
+      // ADVERSARIAL REVIEW P1-1 (20260805): pinning savePath alone closed ONE channel, not the
+      // CLASS. `readPath` is wider than savePath ever was — lookupByKey drives it during the
+      // DRY-RUN (before any approval token exists), with `readMethod` choosing the verb and
+      // `readBodyTemplate` supplying an OPERATOR-AUTHORED body. A reviewer built the exploit:
+      // overlay readPath=/K3API/Material/Submit + a Submit-shaped readBodyTemplate, and a
+      // dry-run POSTed to Submit. That falsifies both "0 Submit/0 Audit is a runtime
+      // invariant" and "dry-run performs no write".
+      //
+      // The fix is class-shaped, not field-shaped: EVERY request-shape key the profile owns is
+      // re-pinned from the literal, and every request-shape key the profile deliberately does
+      // NOT declare is deleted. Operator overlays keep the fields that are legitimately theirs
+      // (schema, reference shapes, credentials-adjacent config) — those cannot choose an
+      // endpoint or author a body.
+      for (const key of K3_PROFILE_PINNED_REQUEST_KEYS) {
+        if (base[key] === undefined) delete normalized[name][key]
+        else normalized[name][key] = base[key]
+      }
+      for (const key of K3_PROFILE_FORBIDDEN_OVERLAY_KEYS) {
+        delete normalized[name][key]
+      }
       // HARD LOCK (K3WriteDecision): the profile's apply row cap is pinned AFTER the merge,
       // from the profile literal — an operator overlay can neither raise nor remove it.
       if (Number.isInteger(base.maxApplyRows) && base.maxApplyRows > 0) {

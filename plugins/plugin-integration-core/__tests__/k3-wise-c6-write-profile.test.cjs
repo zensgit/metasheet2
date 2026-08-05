@@ -27,11 +27,24 @@ const { createK3WiseWebApiAdapter } = require('../lib/adapters/k3-wise-webapi-ad
 
 const PROFILE_ID = 'material-k3wise-customer-profile-v1'
 
-// Approved-B4 store stub. list() is the only member the write source consumes; a test can
-// hand it 0, 1 or 2 approved rows to drive absent / bound / ambiguous.
+// ADVERSARIAL REVIEW P1-2 (20260805): the first version's stub IGNORED list()'s arguments and
+// baked in the scope, so mutating the resolver's scope/filters left every suite green — the
+// gate had zero real coverage. This is a mini-store that HONOURS its arguments: tenant and
+// workspace exact (null-distinct, like the real scopeWhere), status filter, and the page limit.
+// Any filter the resolver drops is now visible as a wrong row surviving.
 function b4Store(rows) {
   return {
-    async list() { return rows },
+    async list(input = {}) {
+      const wanted = input.workspaceId ?? null
+      let out = rows.filter((row) => {
+        if (row.tenantId !== input.tenantId) return false
+        if ((row.workspaceId ?? null) !== wanted) return false
+        if (input.status !== undefined && row.status !== input.status) return false
+        return true
+      })
+      const limit = Number.isInteger(input.limit) && input.limit > 0 ? input.limit : 100
+      return out.slice(0, limit)
+    },
   }
 }
 function b4Of(rows, overrides = {}) {
@@ -39,18 +52,30 @@ function b4Of(rows, overrides = {}) {
     readSourceConfigs: b4Store(rows),
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
-    sourceSystemId: 'source_1',
     ...overrides,
   }
 }
-const APPROVED_B4_ROW = Object.freeze({
-  id: 'rsc_b4_1',
-  object: 'material',
-  status: 'approved',
-  version: 3,
-  contentKey: 'b4-content-key-aaaaaaaaaaaaaaaa',
-  actionProfileVersion: 'k3wise.material_list.v1',
-})
+// Row shape as the STORE emits it: actionProfileVersion lives in the nested config
+// (review P2-1 — the first version read a top-level field the store never emits, so the
+// "identity triple" carried a permanently empty member).
+function b4Row(overrides = {}) {
+  const { config: configOverride, ...rest } = overrides
+  return {
+    id: 'rsc_b4_1',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    object: 'material',
+    status: 'approved',
+    version: 3,
+    contentKey: 'b4-content-key-aaaaaaaaaaaaaaaa',
+    config: {
+      actionProfileVersion: 'k3wise.material_list.v1',
+      ...(configOverride || {}),
+    },
+    ...rest,
+  }
+}
+const APPROVED_B4_ROW = Object.freeze(b4Row())
 
 function memoryStore() {
   const map = new Map()
@@ -540,7 +565,7 @@ test('B4 GATE: two approved bindings -> refused (ambiguous is fail-closed, never
   input.dataSourceWrites = createK3WiseC6WriteSource({
     system: k3TargetSystem(),
     createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
-    b4: b4Of([APPROVED_B4_ROW, { ...APPROVED_B4_ROW, id: 'rsc_b4_2', version: 4, contentKey: 'b4-content-key-bbbbbbbbbbbbbbbb' }]),
+    b4: b4Of([APPROVED_B4_ROW, b4Row({ id: 'rsc_b4_2', version: 4, contentKey: 'b4-content-key-bbbbbbbbbbbbbbbb' })]),
   })
   await assert.rejects(
     dryRunExternalWrite(input),
@@ -570,10 +595,77 @@ test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry
   assert.ok(base, 'base revision must be observable')
   // PER-FIELD variation: a single identity field changing must change the revision. Varying
   // two at once would let a mutation that de-binds ONE field hide behind the other.
-  const versionOnly = await revisionWith({ ...APPROVED_B4_ROW, version: 9 })
-  const contentKeyOnly = await revisionWith({ ...APPROVED_B4_ROW, contentKey: 'b4-content-key-cccccccccccccccc' })
-  const profileOnly = await revisionWith({ ...APPROVED_B4_ROW, actionProfileVersion: 'k3wise.material_list.v2' })
+  const versionOnly = await revisionWith(b4Row({ version: 9 }))
+  const contentKeyOnly = await revisionWith(b4Row({ contentKey: 'b4-content-key-cccccccccccccccc' }))
   assert.notEqual(base, versionOnly, 'approvedConfigVersion alone must move the revision')
   assert.notEqual(base, contentKeyOnly, 'configContentKey alone must move the revision')
-  assert.notEqual(base, profileOnly, 'actionProfileVersion alone must move the revision')
+  // actionProfileVersion is NOT a free variable any more: it is pinned to the ratified
+  // contract, so a different one is REFUSED rather than producing another revision. That is
+  // the stronger property — asserted in its own test below.
+})
+
+test('B4 FILTER: a non-ratified actionProfileVersion is not the B4 binding — refused', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-F1', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([b4Row({ config: { actionProfileVersion: 'k3wise.material_list.v2' } })]),
+  })
+  await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)))
+})
+
+test('B4 FILTER: a DRAFT row of the ratified contract must not satisfy the gate (status is load-bearing)', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-F2', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([b4Row({ status: 'draft' })]),
+  })
+  await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)))
+})
+
+test('B4 FILTER: an approved NON-material config must not satisfy the gate (object is load-bearing)', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-F3', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([b4Row({ object: 'material-bom' })]),
+  })
+  await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)))
+})
+
+test('B4 SCOPE: a binding minted in ANOTHER tenant/workspace is invisible (scope is load-bearing)', async () => {
+  for (const foreign of [{ tenantId: 'tenant_other' }, { workspaceId: 'workspace_other' }, { workspaceId: null }]) {
+    const tokenStore = memoryStore()
+    const fetchPair = mockK3()
+    const input = c6Inputs({ rows: [{ code: 'M-F4', name: 'N' }], fetchPair, tokenStore })
+    input.dataSourceWrites = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+      b4: b4Of([b4Row(foreign)]),
+    })
+    await assert.rejects(dryRunExternalWrite(input), (e) => /approved B4 read binding/.test(String(e && e.message)),
+      `a binding at ${JSON.stringify(foreign)} must not satisfy this pipeline's scope`)
+  }
+})
+
+test('B4 IDENTITY: the resolved binding\'s real values ride the capability state (not empty strings)', async () => {
+  // Review P2-1: the first version read a top-level actionProfileVersion the store never
+  // emits, so the member was permanently ''. Assert the REAL values arrive.
+  const source = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+  const state = (await source.test()).capabilityState
+  assert.equal(state.b4BindingApproved, true)
+  assert.equal(state.b4ActionProfileVersion, 'k3wise.material_list.v1', 'must come from row.config, not a missing top-level field')
+  assert.equal(state.b4ApprovedConfigVersion, '3')
+  assert.equal(state.b4ConfigContentKey, 'b4-content-key-aaaaaaaaaaaaaaaa')
 })

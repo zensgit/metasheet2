@@ -24,6 +24,9 @@
 const { AdapterValidationError } = require('../contracts.cjs')
 const { K3_WISE_MATERIAL_PROFILES } = require('./k3-wise-document-templates.cjs')
 const { resolveEffectiveK3WiseObjects } = require('./k3-wise-webapi-adapter.cjs')
+const {
+  K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION,
+} = require('../read-source-k3-material-list-b4-contract.cjs')
 
 const K3_WISE_C6_WRITE_TARGET_KIND = 'erp:k3-wise-webapi'
 const CUSTOMER_PROFILE_ID = 'material-k3wise-customer-profile-v1'
@@ -141,25 +144,43 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
   // targetWriteProfile itself).
   if (!b4 || typeof b4 !== 'object'
     || !b4.readSourceConfigs || typeof b4.readSourceConfigs.list !== 'function'
-    || typeof b4.tenantId !== 'string' || b4.tenantId.length === 0
-    || typeof b4.sourceSystemId !== 'string' || b4.sourceSystemId.length === 0) {
-    throw new AdapterValidationError('K3 C6 write source requires the B4 binding scope (readSourceConfigs store + tenantId + sourceSystemId)', {
+    || typeof b4.tenantId !== 'string' || b4.tenantId.length === 0) {
+    throw new AdapterValidationError('K3 C6 write source requires the B4 binding scope (readSourceConfigs store + tenantId)', {
       field: 'b4',
     })
   }
 
-  // Resolve THE approved B4 binding for (tenant, source system, material). Fail-closed both
-  // ways: zero approved configs means the window's read binding does not exist on this
-  // environment; more than one means the binding is ambiguous and no silent pick is allowed.
+  // ADVERSARIAL REVIEW P1-2 (20260805): the first version resolved by `systemId`, and which
+  // system that is turned out to be genuinely ambiguous — the B4 binding is a K3 READ contract,
+  // so an operator may mint it on the pipeline's source system OR on the K3 system that is also
+  // the write target (both are erp:k3-wise-webapi in the first-version chain). A reviewer proved
+  // the shipped choice resolved to zero rows, i.e. the feature was dead on arrival; and that the
+  // filter never checked the row IS the B4 contract, so an unrelated approved material config
+  // would have satisfied the gate.
+  //
+  // Both defects share one root: system id is the wrong key. The binding is identified by the
+  // RATIFIED CONTRACT IDENTITY it carries — actionProfileVersion, imported from the contract
+  // module (never a second copy of the literal). System id drops out of the query entirely.
+  //
+  // Scope stays EXACT (tenant + workspace, null-distinct) — that is fail-closed, and the mint
+  // and the pipeline live in the same scope by construction. A mismatch is refused with the
+  // scope in the details, so it is diagnosable rather than silent.
   async function resolveApprovedB4Binding() {
     const rows = await b4.readSourceConfigs.list({
       tenantId: b4.tenantId,
       workspaceId: b4.workspaceId ?? null,
-      systemId: b4.sourceSystemId,
       status: 'approved',
+      // list() defaults to a page (review P3): a bounded page could hide a second approved
+      // binding and defeat the ambiguity check — ask for more than the gate can ever accept.
+      limit: 500,
     })
-    const material = (Array.isArray(rows) ? rows : []).filter((row) => row && row.object === 'material')
-    return material
+    return (Array.isArray(rows) ? rows : []).filter((row) => {
+      if (!row || row.object !== 'material') return false
+      // P2-1: the store nests the config; actionProfileVersion is NOT a top-level row field
+      // (the first version read the top level and therefore always saw '').
+      const config = row.config && typeof row.config === 'object' ? row.config : {}
+      return config.actionProfileVersion === K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION
+    })
   }
   let adapter = null
   function targetAdapter() {
@@ -240,7 +261,7 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
           // between dry-run and apply is a 409, not a silent swap.
           b4BindingApproved: bindings.length === 1,
           b4BindingCount: bindings.length,
-          b4ActionProfileVersion: binding ? String(binding.actionProfileVersion || '') : '',
+          b4ActionProfileVersion: binding && binding.config ? String(binding.config.actionProfileVersion || '') : '',
           b4ApprovedConfigVersion: binding ? String(binding.version ?? '') : '',
           b4ConfigContentKey: binding ? String(binding.contentKey || '') : '',
         },

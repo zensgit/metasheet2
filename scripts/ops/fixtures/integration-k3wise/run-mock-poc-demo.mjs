@@ -339,16 +339,22 @@ async function main() {
           // C6 must CONSUME the approved binding, not merely coexist with it).
           b4: {
             readSourceConfigs: {
-              async list() {
-                return [{
-                  id: 'rsc_demo_b4', object: 'material', status: 'approved', version: 1,
-                  contentKey: 'demo-b4-content-key', actionProfileVersion: 'k3wise.material_list.v1',
-                }]
+              // Honours its arguments (review P1-2: a stub that ignores scope hides the gate).
+              async list(input = {}) {
+                const row = {
+                  id: 'rsc_demo_b4', tenantId: 'tenant_demo', workspaceId: null,
+                  object: 'material', status: 'approved', version: 1,
+                  contentKey: 'demo-b4-content-key',
+                  config: { actionProfileVersion: 'k3wise.material_list.v1' },
+                }
+                if (input.tenantId !== row.tenantId) return []
+                if ((input.workspaceId ?? null) !== row.workspaceId) return []
+                if (input.status !== undefined && input.status !== row.status) return []
+                return [row]
               },
             },
             tenantId: 'tenant_demo',
             workspaceId: null,
-            sourceSystemId: 'source_demo',
           },
         }),
         targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,

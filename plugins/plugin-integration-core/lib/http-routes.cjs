@@ -1071,7 +1071,6 @@ function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegi
           readSourceConfigs,
           tenantId: pipeline.tenantId,
           workspaceId: pipeline.workspaceId ?? null,
-          sourceSystemId: pipeline.sourceSystemId,
         },
       }),
       targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,

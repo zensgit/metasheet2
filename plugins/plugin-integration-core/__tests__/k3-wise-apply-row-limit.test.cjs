@@ -166,3 +166,83 @@ test('OWNER REVIEW P1: an overlay cannot re-point savePath at the Submit endpoin
   assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Submit')).length, 0,
     'the overlay-substituted endpoint must never be reached')
 })
+
+test('ADVERSARIAL P1-1: an overlay cannot author the READ request either (the wider channel)', async () => {
+  // The reviewer's exploit, verbatim as a regression: overlay readPath at the Submit endpoint
+  // plus a Submit-shaped readBodyTemplate, then read. Before the class-wide pin this POSTed to
+  // /K3API/Material/Submit during a DRY-RUN — before any approval token existed.
+  const fetchPair = countingFetch()
+  const adapter = adapterWith({
+    profile: PROFILE_ID,
+    readPath: '/K3API/Material/Submit',
+    readMethod: 'POST',
+    readBodyTemplate: { Numbers: ['M-1'] },
+  }, fetchPair)
+
+  await adapter.read({ object: 'material', filters: { FNumber: 'MAT-CAP-1' } }).catch(() => {})
+  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Submit')).length, 0,
+    'the overlay-authored read endpoint must never be reached')
+  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Material/GetDetail')).length, 1,
+    'the read must land on the PROFILE\'S own readPath')
+})
+
+test('ADVERSARIAL P2-4: the Save body is exactly the projection — no smuggled field survives', async () => {
+  // Coverage regression the reviewer caught: the byte-exact Save-body deepEqual was dropped in
+  // a flip, so an extra field smuggled into every Save body passed chain-wide. Restored here
+  // against the real adapter, at the layer that actually composes the body.
+  const fetchPair = countingFetch()
+  const adapter = adapterWith({ profile: PROFILE_ID }, fetchPair)
+  const captured = []
+  const wrapped = {
+    impl: async (url, init) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.endsWith('/Material/Save')) {
+        captured.push(init && init.body ? JSON.parse(init.body) : null)
+      }
+      return fetchPair.impl(url, init)
+    },
+    calls: fetchPair.calls,
+  }
+  const adapter2 = adapterWith({ profile: PROFILE_ID }, wrapped)
+  await adapter2.upsert({
+    object: 'material',
+    records: [{ FNumber: 'MAT-EXACT-1', FName: 'Exact body', FSmuggled: 'must-not-appear' }],
+    keyFields: ['FNumber'],
+  })
+  assert.equal(captured.length, 1, 'exactly one Save body captured')
+  assert.deepEqual(captured[0], { Data: { FNumber: 'MAT-EXACT-1', FName: 'Exact body' } },
+    'the body must be BYTE-EXACT the schema projection — a smuggled field is a failure')
+  void adapter
+})
+
+test('ADVERSARIAL P1-1b: an overlay cannot author the read BODY either (endpoint pin alone is not enough)', async () => {
+  // Discriminating control for the forbidden-overlay-key deletion: even with readPath pinned
+  // back to GetDetail, a surviving overlay readBodyTemplate would still let the operator author
+  // the body sent to it. The profile's own body shape must be what goes on the wire.
+  const bodies = []
+  const base = countingFetch()
+  const probe = {
+    impl: async (url, init) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.endsWith('/Material/GetDetail')) {
+        bodies.push(init && init.body ? JSON.parse(init.body) : null)
+        return {
+          ok: true, status: 200, headers: { get: () => null },
+          text: async () => JSON.stringify({ StatusCode: 200, Message: 'Successful', Data: [{ FStatus: true, FItemID: 7, Data: { FNumber: 'MAT-CAP-1' } }] }),
+          json: async () => ({ StatusCode: 200, Message: 'Successful', Data: [{ FStatus: true, FItemID: 7, Data: { FNumber: 'MAT-CAP-1' } }] }),
+        }
+      }
+      return base.impl(url, init)
+    },
+    calls: base.calls,
+  }
+  const adapter = adapterWith({
+    profile: PROFILE_ID,
+    readBodyTemplate: { SmuggledEnvelope: { Numbers: ['M-1'] } },
+  }, probe)
+
+  await adapter.read({ object: 'material', filters: { FNumber: 'MAT-CAP-1' } }).catch(() => {})
+  assert.equal(bodies.length, 1, 'the read must reach GetDetail exactly once')
+  assert.equal(JSON.stringify(bodies[0]).includes('SmuggledEnvelope'), false,
+    'an overlay-authored body template must never reach the wire')
+})
