@@ -25,6 +25,16 @@
 // mocking HTTP, per this line's "no fake switch tests" discipline — every
 // negative leg here has a corresponding exact-shape unit test in
 // packages/core-backend/tests/unit/attendance-fixed-schedule-self-route-identity.test.ts.
+// That file proves ONLY this resolver's own logic in isolation. It does NOT
+// prove that the route (plugins/plugin-attendance/index.cjs) actually calls
+// this function or obeys its verdict — a route that dropped the
+// `if (!identity.ok)` check, or called this resolver but ignored the result,
+// would still pass every test in that file untouched. That separate,
+// route-level claim is proven by the harness-based probes in
+// packages/core-backend/tests/unit/attendance-fixed-schedule-self-route-wiring.test.ts,
+// which invoke the real route handler end to end (not this function
+// directly) and assert both the HTTP outcome and that no SQL is reached on
+// every rejection leg.
 
 function flattenSelectorValues(value) {
   if (value === undefined || value === null) return []
