@@ -2246,6 +2246,10 @@ export class MetaSheetServer {
                     recoverCandidate: options.recoverCandidate,
                     // #4770: values-free tick-summary observability (counts/backlog only —
                     // `Logger` never receives an org id / user id / work date / run id here).
+                    // #4774 P2-1: this line is the ONLY thing that makes the tick line actually
+                    // emit in production — covered by leg 4 in
+                    // attendance-w4c2-sweep-call-through.db.test.ts (deleting it turns that leg
+                    // red while every other test in both new files stays green).
                     logger: this.logger,
                   }),
                 // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the
