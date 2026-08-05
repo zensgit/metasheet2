@@ -11,6 +11,13 @@
  * competing implementation exists. Preparation/tooling (a separate,
  * independently gated PR) may only call this boundary — it must never touch
  * rollout DML directly.
+ *
+ * NIT-4 (PR #4773 exact-head independent gate, 20260805): "ONLY transition DML path" is exact
+ * for `attendance_calculation_rollout_state` (`transitionAttendanceCalculationRolloutV1` is its
+ * one writer). `closeLegacyRollbackWindowV1` in this same module is a SECOND writer of
+ * `attendance_calculation_rollout_events` (never of rollout STATE) — a distinct, pre-existing,
+ * unchanged-by-this-amendment operation. Precisely: this module is the only rollout-state DML
+ * path, and the only place either rollout table may ever be written from.
  */
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -751,6 +758,14 @@ async function countIncompleteOperations(
  * calculation (any outcome) appended for the same record resolves it by definition — the
  * legacy-resolved instant itself is still never promoted (lock section 9 bullet 8), only
  * strictly zoned replacement evidence produces that later calculation.
+ *
+ * P3-1 (PR #4773 exact-head independent gate, 20260805): "resolves it by definition" is
+ * deliberately outcome-agnostic — a later `review_required` calculation appended for a
+ * DIFFERENT reason (e.g. `duplicate_check_in`, not `legacy_time_ingress_not_authoritative`)
+ * still clears THIS predicate, because that later row is now the MAX(version) row and the
+ * original `legacy_time_ingress_not_authoritative` row is no longer it. The record remains
+ * unadjudicated in that case; this predicate is not the sole gate on record-level
+ * adjudication, only on the specific legacy-ingress review this bullet names.
  */
 async function countUnresolvedIngressReviews(
   trx: AttendanceW4TransactionClientV1,
@@ -913,7 +928,17 @@ export async function transitionAttendanceCalculationRolloutV1(
     await afterExclusiveRolloutLockForTests?.('transition')
     return await runControlTransaction(connection, async (trx) => {
       // Section 3 predicate 1: exact named org (`scope='synthetic_staging'` is enforced by the
-      // durable CHECK constraint on every row this boundary can ever write).
+      // durable CHECK constraint on every row this boundary can ever write). P3-2 (PR #4773
+      // exact-head independent gate, 20260805): this boundary itself only ever writes the
+      // hardcoded literal 'synthetic_staging' (see `lockRolloutStateForBootstrapOrRead`'s
+      // bootstrap INSERT below) — it never reads or application-validates `scope` the way the
+      // canonical posture resolver does (`w4c0-identity.ts`, `fail('W4C0_ROLLOUT_SCOPE_INVALID')`).
+      // That is asymmetric, not currently unsafe: a future widening of the DDL CHECK constraint
+      // (`chk_acrs_scope`) would silently remove the ONLY thing standing between this write path
+      // and a non-synthetic-staging row, since there is no independent application-level check
+      // here to catch it. Flagged, not fixed here — adding a check against the current hardcoded
+      // literal would be tautological; a real fix needs `scope` to become a live input this
+      // boundary actually validates, which is a larger change than this amendment's scope.
       const orgAllowlisted = isAttendanceCalculationOrgAllowlistedV1(input.orgId)
       if (!orgAllowlisted) fail('W4C3A_ROLLOUT_CONTROL_ORG_NOT_ALLOWLISTED')
 
@@ -934,8 +959,15 @@ export async function transitionAttendanceCalculationRolloutV1(
         fail('W4C3A_ROLLOUT_CONTROL_STALE_EXPECTED_STATE')
       }
       const currentState = persisted.state
-      // Re-derive from the authoritative post-lock state (identical to the input-time check by
-      // construction once staleness has been ruled out, but never trusts the caller's claim alone).
+      // Re-derive from the authoritative post-lock state. NIT-1 (PR #4773 exact-head independent
+      // gate, 20260805): once the staleness check above has passed, `currentState` is provably
+      // identical to `input.expectedState` (the pair already matrix-validated at input time in
+      // `normalizeTransitionInput`), so this second `findLegalTransition` call is unreachable
+      // dead code on any live path today — mutating it away leaves every test green. It is kept
+      // deliberately as defense-in-depth against a future refactor that decouples `currentState`
+      // from the staleness check above (e.g. reordering, or a new code path that reaches here
+      // without going through `lockRolloutStateForBootstrapOrRead`'s exact-match guard) — never
+      // trusts the caller's claim alone, only currently redundant with it.
       const legal = findLegalTransition(currentState, input.targetState)
       if (!legal) fail('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
 

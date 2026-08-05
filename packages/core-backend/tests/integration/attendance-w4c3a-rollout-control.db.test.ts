@@ -25,6 +25,7 @@ import {
 } from '../../src/attendance/w4c3a-rollout-control'
 import {
   acquireAttendanceCalculationRolloutLock,
+  ATTENDANCE_ROLLOUT_STATES_V1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   type AttendanceRolloutStateV1,
   type AttendanceW4TransactionClientV1,
@@ -37,7 +38,10 @@ const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 const ALLOWLIST_ENV = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
 const IMPORT_NS = '6f67fdaa-e2aa-48b3-b76c-c4aab9723173'
 
-const ALL_STATES: readonly AttendanceRolloutStateV1[] = ['legacy', 'shadow', 'eligible', 'authoritative', 'suspended']
+// NIT-2 (PR #4773 exact-head independent gate, 20260805): mechanical over the exported table,
+// not a second hardcoded literal — a sixth rollout state would silently escape this test's
+// 25-combo exhaustive sweep otherwise.
+const ALL_STATES: readonly AttendanceRolloutStateV1[] = ATTENDANCE_ROLLOUT_STATES_V1
 // The amendment section 1 table, hardcoded independently of the production LEGAL_TRANSITIONS
 // constant so a bug in that constant cannot hide from this test.
 const LEGAL_PAIRS: ReadonlyArray<readonly [AttendanceRolloutStateV1, AttendanceRolloutStateV1]> = [

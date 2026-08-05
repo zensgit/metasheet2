@@ -13,6 +13,7 @@
  * its own coverage). It is a single inert gate: any match anywhere else fails
  * the test, so a future writer cannot silently slip past a narrower allowlist.
  */
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -62,6 +63,26 @@ const ROLLOUT_DML_PATTERNS: ReadonlyArray<{ readonly label: string; readonly pat
   { label: 'Kysely insertInto(attendance_calculation_rollout_events)', pattern: /\.insertInto\(\s*['"`]attendance_calculation_rollout_events['"`]/i },
 ]
 
+/**
+ * NIT-3 (PR #4773 exact-head independent gate, 20260805): the real full-repo gate below walks
+ * `git ls-files` (git-TRACKED files only), not the raw working tree, so an untracked developer
+ * scratch file matching one of the patterns cannot red a required check it was never meant to
+ * gate — this test's job is repository inventory, not working-directory hygiene. `git ls-files
+ * -z --cached --others --exclude-standard` includes tracked files AND untracked-but-not-ignored
+ * files would normally slip in via `--others`; deliberately using `--cached` ONLY (tracked files
+ * as of the index/HEAD) is the fix, not an oversight — see the sanity assertion below.
+ */
+function listGitTrackedFiles(rootDir: string): string[] {
+  const raw = execFileSync('git', ['ls-files', '-z', '--cached'], { cwd: rootDir, maxBuffer: 64 * 1024 * 1024 })
+  return raw
+    .toString('utf8')
+    .split('\0')
+    .filter((relative) => relative.length > 0)
+    .filter((relative) => TARGET_EXTENSIONS.has(path.extname(relative)))
+    .filter((relative) => !relative.split('/').some((segment) => EXCLUDED_DIR_SEGMENTS.has(segment)))
+    .map((relative) => path.join(rootDir, relative))
+}
+
 function walk(dir: string, out: string[]): void {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
@@ -99,15 +120,30 @@ function findRolloutDmlOffenders(
 
 describe('W4C-5 repository inventory: rollout-state/event DML has exactly one writer', () => {
   it('finds rollout-state/event DML only in the hardened boundary, its migration, and integration fixtures', () => {
-    const files: string[] = []
-    walk(ROOT, files)
-    expect(files.length).toBeGreaterThan(100) // sanity: the walk actually found the repo
+    const files = listGitTrackedFiles(ROOT)
+    expect(files.length).toBeGreaterThan(100) // sanity: git ls-files actually found the repo
 
     const offenders = findRolloutDmlOffenders(ROOT, files, {
       allowedRelativeFiles: ALLOWED_RELATIVE_FILES,
       allowedDirectoryPrefixes: ALLOWED_DIRECTORY_PREFIXES,
     })
     expect(offenders).toEqual([])
+  })
+
+  it('NIT-3: an untracked scratch file matching the pattern is NOT walked by the real gate (git-tracked only)', () => {
+    // Positive proof the fix actually changed behavior: write a real untracked file INSIDE the
+    // repo tree (not an isolated os.tmpdir() decoy) containing an offending pattern, confirm the
+    // real gate's file list does not include it, then clean up. If this ever regresses back to
+    // a raw filesystem walk, this file WOULD appear in `files` and the assertion below reds.
+    const scratchPath = path.join(ROOT, 'packages/core-backend/src/attendance/zz-nit3-untracked-scratch.ts')
+    fs.writeFileSync(scratchPath, "export const x = 'UPDATE attendance_calculation_rollout_state SET state = 1'\n")
+    try {
+      const files = listGitTrackedFiles(ROOT)
+      const relatives = files.map((absolute) => path.relative(ROOT, absolute).split(path.sep).join('/'))
+      expect(relatives).not.toContain('packages/core-backend/src/attendance/zz-nit3-untracked-scratch.ts')
+    } finally {
+      fs.rmSync(scratchPath, { force: true })
+    }
   })
 
   it('positive control: the pattern set actually matches the hardened boundary file itself', () => {
