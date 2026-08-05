@@ -86,8 +86,36 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 6. **留证**:dry-run/apply 响应的 values-free 字段(counts、status、closed tokens)+ run 引用
    归档;三元组(B4 mint 时已记)与 `serviceRuntimeSha e1b91594e`、候选包 digest 并列。
 
-**PASS 判据**:1–6 全绿且 `0 Submit / 0 Audit`(服务端不变量,无需人工数)。
+**PASS 判据**:1–6 全绿且 `0 Submit / 0 Audit`。
+
+> **该不变量的实际载体**(复审后更正 —— 原文只写"服务端不变量"而未说由什么保证,
+> 而当时它确实**可被绕过**):① save-only profile 在运行期强制 `autoSubmit/autoAudit=false`
+> 并删除 submit/audit 端点;② profile 拥有的请求形状键 merge 后重钉、未声明的整形键删除
+> (含 `readBodyTemplate`/`bodyTemplate`/`passThroughBody` 等 body 注入通道);
+> ③ **无条件**守卫:任何 K3 读路径不得指向生命周期写端点(`K3_WISE_READ_PATH_IS_WRITE_ENDPOINT`)
+> —— 这一条不依赖是否选了 profile,因为 K3 **source** 管道合法无 profile;
+> ④ material 写与**预览**均要求命名 profile(`K3_WISE_MATERIAL_PROFILE_REQUIRED`);
+> ⑤ `/run` 对 K3 目标整体 fail-closed(`K3_WISE_PIPELINE_RUN_DISABLED`),C6 是唯一写入口;
+> ⑥ 预览的 auto-flag 镜像 save-only 锁 —— **预览等于写**。
+> 前三条各自由独立对抗复审构造的可执行利用推动;每条都有 mutation 探针。
 **异常恢复**:任何一步失败 ⇒ 修正后**从步骤 3 重走**(重新人工批准)。replay 已禁用,by design。
+
+## 6b. 对抗复审记录(2026-08-05,四轮)
+
+窗口 runbook 落地后经四轮独立 exact-head 对抗复审,累计 **3 P1 + 8 P2 CONFIRMED**,全部已修。
+P1 的三条是**同一个类的三条轴**,而我每轮只封住了刚被展示的那个实例:
+
+| 轴 | 逃逸方式 | 修法 |
+|---|---|---|
+| 字段 | 钉了 `savePath`,`readPath` 更宽(dry-run 期驱动) | 钉整个请求形状类 |
+| **跨文件** | `k3-save-body-composer.cjs` 从同一份配置读 `passThroughBody`/`bodyTemplate` | sweep 扫全部消费者,消费者清单对全仓遍历比对 |
+| **跨条件** | 整个钉在 `if (saveOnlyProfile)` 内 —— 由被防御者自愿启用 | 读路径守卫**无条件**,覆盖两个填充循环 |
+
+其余 P2 含:集合是标签而非行为(键在集合间移动全绿)、B4 绑定失去与本 pipeline 的关系、
+`previewUpsert` 缺守卫且不镜像 save-only 锁、零调用断言无正控、类型混淆探针被降级而台账称"零降级"。
+
+**方法学结论**:声称"某一类已关闭"时,**交付物必须是机械断言而非清单** ——
+本线现有 sweep 契约(遍历源码枚举读取点、要求三集合全覆盖、带匹配下限防空过)即为此。
 
 ## 7. 唯一未完成项
 

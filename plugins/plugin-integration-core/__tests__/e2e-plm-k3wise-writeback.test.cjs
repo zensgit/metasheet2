@@ -359,6 +359,19 @@ async function main() {
   assert.ok(liveRefusal instanceof Error, 'K3-target live run must refuse')
   assert.equal(liveRefusal.name, 'PipelineRunnerError', 'refusal is a PipelineRunnerError')
   assert.equal(liveRefusal.details && liveRefusal.details.code, 'K3_WISE_PIPELINE_RUN_DISABLED')
+  // POSITIVE CONTROL (review P2-C3): this suite makes ZERO K3 HTTP calls end to end, so the
+  // zero-call assertion below would hold even if the recorder were broken or unwired — an
+  // absence check against an instrument nobody proved works. Drive one deliberate call through
+  // the SAME mock first: it must be recorded, and it must then be visible to the same counter.
+  {
+    const before = harness.k3FetchMock.calls.length
+    await harness.k3FetchMock.fetchImpl('https://k3.example.test/K3API/Login', {
+      method: 'POST', body: JSON.stringify({ probe: true }),
+    })
+    assert.equal(harness.k3FetchMock.calls.length, before + 1,
+      'the K3 call recorder must actually record — otherwise the zero-call assertion is vacuous')
+    harness.k3FetchMock.calls.length = 0 // reset so the real assertion measures the guard only
+  }
   assert.equal(harness.k3FetchMock.calls.length, 0, 'guard fires before any adapter is created — zero K3 HTTP calls, save/submit/audit included')
   assert.equal(harness.db.tables.get('integration_runs').length, 0, 'guard fires in loadPipelineContext, before runLogger.startRun — no run record is written')
   assert.equal(await harness.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_plm_k3' }), null, 'a refused run never touches the watermark')

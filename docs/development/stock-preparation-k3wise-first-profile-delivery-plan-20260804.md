@@ -393,11 +393,19 @@ catalog 化 readPath、fixture GetDetail 三项**已重贴到 P2/P3**,不在 P1 
 
 #### 验收判据(机械)
 
-1. **行上限**:对一个含 4 条 clean 记录的 pipeline `POST /run` ⇒ HTTP 4xx + 具名错误码,`rowsWritten === 0`,
-   且 harness 记录到 `savePath` 的 fetch 调用数 **=== 0**。**变异探针**:把上限常量从 3 改成 4 ⇒ 该断言必须变红。
-2. **dry-run→apply 绑定**:不带 token 的 `POST /run` ⇒ 拒绝;用过一次的 token 再 POST ⇒ 409;
-   dry-run 之后修改源行再 apply ⇒ 409(revision 漂移)。三条分别 neuter(分别去掉 token 校验 / 单次消费 /
-   revision 重算)必须各自单独变红 —— 不允许三道门互相掩护。
+1. **行上限**(判据已重写 —— 见 E.6:原判据现已空转)。原文用 `POST /run` 作为触发路径,但
+   `K3_WISE_PIPELINE_RUN_DISABLED` 会在上限被查询**之前**拒绝该请求 —— 上限被另一道门掩护,
+   其变异探针(3→4)**再也不可能变红**。这正是本节第 2 条明令禁止的「多道门互相掩护」,
+   出现在第 1 条自己身上。**重写后的判据**:在 **adapter 层**直接 `upsert` 4 条 ⇒
+   `K3_WISE_APPLY_ROW_LIMIT_EXCEEDED` 且 **fetch 调用数 === 0**(拒绝先于 login);
+   3 条 ⇒ 放行且 `1 login + 3 Save + 0 Submit/Audit`(正控)。**变异探针**:profile 字面量的
+   上限常量 3→4 ⇒ 拒绝断言变红;merge 后重钉移除 ⇒ overlay 提升上限的断言变红。
+   （承载:`__tests__/k3-wise-apply-row-limit.test.cjs`。）
+2. **dry-run→apply 绑定**:C6 路径上 —— 不带 token 的 apply ⇒ 400;用过一次的 token 再 apply ⇒ 409
+   `C6_WRITE_DRY_RUN_TOKEN_INVALID`;dry-run 之后修改源行再 apply ⇒ 409(revision 漂移)。
+   三条分别 neuter(去掉 token 校验 / 单次消费 / revision 重算)必须各自单独变红 —— 不允许三道门互相掩护。
+   **注**:`POST /run` 现已对 K3 目标整体 fail-closed(`K3_WISE_PIPELINE_RUN_DISABLED`),它不再是
+   本判据的触发路径;C6 的 `external-write/dry-run` + `external-write/apply` 才是。
 3. **幂等(本轮范围)**:run 级重放由单次消费 409 挡住(判据 2)。**残留必须写进验收记录**:行级账本本轮不做,
    循环中途失败(3 行写到第 2 行)不会被去重,依据 `pipeline-runner.cjs:857-858` 的自述;
    **中途失败的恢复动作是 GetDetail 读回 + 人工对账,不是重试**。
@@ -1019,3 +1027,19 @@ owner 原文「**同意 + RATIFY**」,批准对象与随附裁项:
 - `pipeline-runner` 新增 K3 replay 拒绝用例,以既有 mock-target replay 成功为**正控**。
 
 双守卫 mutation 双向承重(武装移除⇒正控红;判定短路⇒拒绝红)。
+
+
+### E.6 判据勘误:行上限验收被另一道门掩护(2026-08-05,复审发现)
+
+对抗复审指出:§ 验收判据第 1 条以 `POST /run` 为触发路径,而 `K3WriteDecision` 落地后
+`K3_WISE_PIPELINE_RUN_DISABLED` 会在上限被查询**之前**拒绝该请求。结果是——
+
+- 该判据**恒真**(拒绝确实发生,但不是因为上限);
+- 它自己点名的变异探针(上限 3→4)**再也无法变红**;
+- 而这正是同一节第 2 条明令禁止的「多道门互相掩护」形态,**发生在第 1 条自己身上**。
+
+判据已重写为 **adapter 层**触发(见上),并明确正控与两个变异探针的落点。
+
+**一般化的教训**:每加一道更靠前的 fail-closed 门,都要**回头检查已有判据的触发路径是否被它吞掉**。
+门越多,判据越容易在无人察觉时变成恒真句。本仓已有的纪律是「门级排他≠词级排他」,
+这里补一条:**新门落地后,既有判据必须重跑其变异探针,证明仍能变红**。
