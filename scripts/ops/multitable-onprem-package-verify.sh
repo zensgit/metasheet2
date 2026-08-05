@@ -401,7 +401,16 @@ function verify_stock_preparation_mvp_contract() {
   search_fixed_string 'ExpectedPackageSha256' "$sealed_acceptance" || die "S6-A acceptance must bind evidence to the package SHA256"
   search_fixed_string 'BUILD_PROVENANCE.json' "$sealed_acceptance" || die "S6-A acceptance must verify in-package build provenance"
   search_fixed_string 'Get-S6FileSha256' "$sealed_acceptance" || die "S6-A acceptance must hash the original package archive"
-  search_fixed_string 'Create PostgreSQL Roles Before Migration 073' "$sealed_runbook" || die "S6-A runbook must require role creation before migration 073"
+  # CLOSED SET OF TWO exact headings, each bound to a known package generation — NOT a loosened
+  # match. The frozen S6-A package ships the pre-R12 runbook ('... Before Migration 073'); any
+  # package built from main >= R12/#4742 ships the corrected heading ('... Before Migrations
+  # 073, 074 And 075' — 074/075 need the same roles). The first main-built verification run
+  # (stock-prep-main-package-verify shakedown, run 30972892447) caught the single-string pin
+  # failing every main-built package while the frozen lane stayed green — verifier-vs-runbook
+  # drift, two record points. A third heading variant is still a hard failure.
+  if ! search_fixed_string 'Create PostgreSQL Roles Before Migrations 073, 074 And 075' "$sealed_runbook"; then
+    search_fixed_string 'Create PostgreSQL Roles Before Migration 073' "$sealed_runbook" || die "S6-A runbook must require role creation before migration 073 (074/075 wording for main-built packages)"
+  fi
   search_fixed_string 'Unconditional Flag-Off Restoration' "$sealed_runbook" || die "S6-A runbook must require flag-off restoration"
   search_fixed_string 'nextTestMachineAction=STOP_AND_WAIT' "$sealed_runbook" || die "S6-A runbook must retain the separate S6-B execution gate"
   search_fixed_string 'metasheet-backend' "$pm2_sample" || die "stock-preparation PM2 safe projection helper must be packaged"
