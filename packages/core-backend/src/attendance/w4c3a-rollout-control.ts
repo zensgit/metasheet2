@@ -3,20 +3,31 @@
  *
  * These commands deliberately have no PluginServices, route, flag, or index
  * surface. They are the control-side half of the §7.9/§8.2 protocol only.
+ *
+ * W4C-5 transition-safety amendment (docs/development/attendance-issue-4556-
+ * w4c5-transition-safety-amendment-20260804.md, OD-W4C-61=(a)): this module is
+ * the hardened canonical transition boundary sections 1-6 describe. It is the
+ * ONLY transition DML path; no route, generic plugin service, or second
+ * competing implementation exists. Preparation/tooling (a separate,
+ * independently gated PR) may only call this boundary — it must never touch
+ * rollout DML directly.
  */
 import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceResultOperationLocks,
   createVerifiedAttendanceCalculationTargetIdentityV1,
+  isAttendanceCalculationOrgAllowlistedV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   rehydrateVerifiedAttendanceOperationIdentityV1,
   rehydrateVerifiedAttendanceOrgIdentityV1,
+  type AttendanceAcceptedWritePostureV1,
   type AttendanceRolloutStateV1,
   type AttendanceW4TransactionClientV1,
   type VerifiedAttendanceOperationIdentityV1,
 } from './w4c0-identity'
 import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
+import { ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1 } from './w4c3b-request-snapshots'
 
 export class AttendanceW4C3aRolloutControlError extends Error {
   readonly code: string
@@ -33,6 +44,8 @@ function fail(code: string): never {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const HEX64 = /^[0-9a-f]{64}$/
+const REF_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const TRANSITION_STATES = new Set<AttendanceRolloutStateV1>([
   'legacy',
   'shadow',
@@ -40,6 +53,99 @@ const TRANSITION_STATES = new Set<AttendanceRolloutStateV1>([
   'authoritative',
   'suspended',
 ])
+
+// ---------------------------------------------------------------------------
+// Amendment section 1: the closed legal transition matrix. This is the SOLE
+// source of pair legality and comparison write posture; the DB trigger
+// (attendance_w4_rollout_state_guard) enforces the identical set as a
+// defense-in-depth backstop, never as the primary gate. Every other pair
+// fails here, before any lock beyond the rollout advisory lock itself.
+// ---------------------------------------------------------------------------
+type LegalTransitionRow = Readonly<{
+  from: AttendanceRolloutStateV1
+  to: AttendanceRolloutStateV1
+  comparisonWritePosture: AttendanceAcceptedWritePostureV1
+}>
+
+const LEGAL_TRANSITIONS: readonly LegalTransitionRow[] = Object.freeze([
+  { from: 'legacy', to: 'shadow', comparisonWritePosture: 'shadow' },
+  { from: 'shadow', to: 'eligible', comparisonWritePosture: 'shadow' },
+  { from: 'eligible', to: 'shadow', comparisonWritePosture: 'shadow' },
+  { from: 'eligible', to: 'authoritative', comparisonWritePosture: 'authoritative' },
+  { from: 'shadow', to: 'legacy', comparisonWritePosture: 'legacy_projection_only' },
+  { from: 'authoritative', to: 'suspended', comparisonWritePosture: 'authoritative' },
+  { from: 'suspended', to: 'authoritative', comparisonWritePosture: 'authoritative' },
+])
+
+function findLegalTransition(
+  from: AttendanceRolloutStateV1,
+  to: AttendanceRolloutStateV1,
+): LegalTransitionRow | undefined {
+  return LEGAL_TRANSITIONS.find((row) => row.from === from && row.to === to)
+}
+
+const ELIGIBILITY_AUTHORITY_TARGETS = new Set<AttendanceRolloutStateV1>(['eligible', 'authoritative'])
+const CALCULATION_ENTRY_TARGETS = new Set<AttendanceRolloutStateV1>(['shadow', 'eligible', 'authoritative'])
+
+const RETRYABLE_JOB_STATUSES = ['queued', 'failed']
+const NONTERMINAL_LEGACY_JOB_STATUSES = ['queued', 'running']
+
+// ---------------------------------------------------------------------------
+// Evidence references (amendment section 4): the command NEVER collects or
+// validates the manifest itself — that is a separately authorized tooling
+// concern. It accepts only the exact manifest hash plus a closed set of
+// opaque, values-free reference strings and stores them verbatim.
+// ---------------------------------------------------------------------------
+const BASE_EVIDENCE_REFERENCE_KEYS = ['imageSha', 'ownerAuthorizationRef', 'syntheticOrgRef'] as const
+const RESUME_EVIDENCE_REFERENCE_KEYS = ['ownerIncidentReviewRef', 'offlineReplayArtifactRef'] as const
+
+export type BaseEvidenceReferenceKeyV1 = (typeof BASE_EVIDENCE_REFERENCE_KEYS)[number]
+export type ResumeEvidenceReferenceKeyV1 = (typeof RESUME_EVIDENCE_REFERENCE_KEYS)[number]
+export type EvidenceReferenceKeyV1 = BaseEvidenceReferenceKeyV1 | ResumeEvidenceReferenceKeyV1
+
+export type EvidenceReferencesV1 = Readonly<Record<EvidenceReferenceKeyV1, string>>
+
+function isResumePair(from: AttendanceRolloutStateV1, to: AttendanceRolloutStateV1): boolean {
+  return from === 'suspended' && to === 'authoritative'
+}
+
+function requireEvidenceReferences(
+  value: unknown,
+  from: AttendanceRolloutStateV1,
+  to: AttendanceRolloutStateV1,
+): EvidenceReferencesV1 {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    fail('W4C3A_ROLLOUT_CONTROL_EVIDENCE_REFERENCE_INVALID')
+  }
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) {
+    fail('W4C3A_ROLLOUT_CONTROL_EVIDENCE_REFERENCE_INVALID')
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    fail('W4C3A_ROLLOUT_CONTROL_EVIDENCE_REFERENCE_INVALID')
+  }
+  const expectedKeys: readonly string[] = isResumePair(from, to)
+    ? [...BASE_EVIDENCE_REFERENCE_KEYS, ...RESUME_EVIDENCE_REFERENCE_KEYS]
+    : BASE_EVIDENCE_REFERENCE_KEYS
+  const own = Object.getOwnPropertyNames(value)
+  if (own.length !== expectedKeys.length) fail('W4C3A_ROLLOUT_CONTROL_EVIDENCE_REFERENCE_INVALID')
+  const out: Record<string, string> = {}
+  for (const key of expectedKeys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) {
+      fail('W4C3A_ROLLOUT_CONTROL_EVIDENCE_REFERENCE_INVALID')
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor || descriptor.get || descriptor.set) {
+      fail('W4C3A_ROLLOUT_CONTROL_EVIDENCE_REFERENCE_INVALID')
+    }
+    const raw = (value as Record<string, unknown>)[key]
+    if (typeof raw !== 'string' || !REF_VALUE.test(raw)) {
+      fail('W4C3A_ROLLOUT_CONTROL_EVIDENCE_REFERENCE_INVALID')
+    }
+    out[key] = raw
+  }
+  return Object.freeze(out) as EvidenceReferencesV1
+}
 
 type ControlInput = Readonly<{
   orgId: string
@@ -55,6 +161,10 @@ export type CloseLegacyRollbackWindowInputV1 = ControlInput & Readonly<{
 
 export type TransitionAttendanceCalculationRolloutInputV1 = Omit<ControlInput, 'batchId'> & Readonly<{
   targetState: AttendanceRolloutStateV1
+  expectedState: AttendanceRolloutStateV1
+  expectedVersion: number
+  evidenceManifestSha256: string
+  evidenceReferences: EvidenceReferencesV1
   reasonCode: 'rollout_transition'
 }>
 
@@ -73,12 +183,24 @@ type BatchReferenceState = Readonly<{
 }>
 
 let afterExclusiveRolloutLockForTests: ((kind: 'close' | 'transition') => Promise<void>) | null = null
+let beforeEventInsertForTests: (() => Promise<void>) | null = null
 
 /** Test-only deterministic barrier. It is not imported by production wiring. */
 export function __setW4C3aRolloutControlAfterExclusiveLockForTests(
   hook: ((kind: 'close' | 'transition') => Promise<void>) | null,
 ): void {
   afterExclusiveRolloutLockForTests = hook
+}
+
+/**
+ * Test-only atomicity seam (amendment completion gate 7): fires after the
+ * rollout-state UPDATE and before the rollout-event INSERT, in the same
+ * transaction. It is not imported by production wiring.
+ */
+export function __setW4C3aRolloutControlBeforeEventInsertForTests(
+  hook: (() => Promise<void>) | null,
+): void {
+  beforeEventInsertForTests = hook
 }
 
 function requireUuid(value: unknown, code: string): string {
@@ -89,6 +211,35 @@ function requireUuid(value: unknown, code: string): string {
 function requireText(value: unknown, code: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 256) fail(code)
   return value
+}
+
+function requireRolloutState(value: unknown, code: string): AttendanceRolloutStateV1 {
+  if (typeof value !== 'string' || !TRANSITION_STATES.has(value as AttendanceRolloutStateV1)) fail(code)
+  return value as AttendanceRolloutStateV1
+}
+
+function requireManifestSha256(value: unknown): string {
+  if (typeof value !== 'string' || !HEX64.test(value)) fail('W4C3A_ROLLOUT_CONTROL_MANIFEST_INVALID')
+  return value
+}
+
+function requireExpectedVersion(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    fail('W4C3A_ROLLOUT_CONTROL_EXPECTED_VERSION_INVALID')
+  }
+  return value
+}
+
+function requireExactInputKeys(input: unknown, keys: readonly string[], code: string): Record<string, unknown> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) fail(code)
+  const prototype = Object.getPrototypeOf(input)
+  if (prototype !== Object.prototype && prototype !== null) fail(code)
+  const own = Object.getOwnPropertyNames(input)
+  if (own.length !== keys.length) fail(code)
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(input, key)) fail(code)
+  }
+  return input as Record<string, unknown>
 }
 
 function normalizeCloseInput(input: CloseLegacyRollbackWindowInputV1): CloseLegacyRollbackWindowInputV1 {
@@ -103,19 +254,57 @@ function normalizeCloseInput(input: CloseLegacyRollbackWindowInputV1): CloseLega
   })
 }
 
+const TRANSITION_INPUT_KEYS = [
+  'orgId',
+  'actorId',
+  'correlationId',
+  'engineVersion',
+  'targetState',
+  'expectedState',
+  'expectedVersion',
+  'evidenceManifestSha256',
+  'evidenceReferences',
+  'reasonCode',
+] as const
+
+type NormalizedTransitionInput = TransitionAttendanceCalculationRolloutInputV1 & Readonly<{
+  comparisonWritePosture: AttendanceAcceptedWritePostureV1
+}>
+
 function normalizeTransitionInput(
-  input: TransitionAttendanceCalculationRolloutInputV1,
-): TransitionAttendanceCalculationRolloutInputV1 {
-  if (!input || input.reasonCode !== 'rollout_transition' || !TRANSITION_STATES.has(input.targetState)) {
-    fail('W4C3A_ROLLOUT_CONTROL_INPUT_INVALID')
-  }
+  rawInput: TransitionAttendanceCalculationRolloutInputV1,
+): NormalizedTransitionInput {
+  const input = requireExactInputKeys(
+    rawInput,
+    TRANSITION_INPUT_KEYS,
+    'W4C3A_ROLLOUT_CONTROL_INPUT_INVALID',
+  )
+  if (input.reasonCode !== 'rollout_transition') fail('W4C3A_ROLLOUT_CONTROL_INPUT_INVALID')
+  const orgId = String(parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId))
+  const actorId = requireText(input.actorId, 'W4C3A_ROLLOUT_CONTROL_ACTOR_INVALID')
+  const correlationId = requireUuid(input.correlationId, 'W4C3A_ROLLOUT_CONTROL_CORRELATION_INVALID')
+  const engineVersion = requireText(input.engineVersion, 'W4C3A_ROLLOUT_CONTROL_ENGINE_INVALID')
+  const targetState = requireRolloutState(input.targetState, 'W4C3A_ROLLOUT_CONTROL_INPUT_INVALID')
+  const expectedState = requireRolloutState(input.expectedState, 'W4C3A_ROLLOUT_CONTROL_EXPECTED_STATE_INVALID')
+  const expectedVersion = requireExpectedVersion(input.expectedVersion)
+  const evidenceManifestSha256 = requireManifestSha256(input.evidenceManifestSha256)
+  // The claimed pair is validated against the closed matrix BEFORE any lock or DB access — a
+  // caller-asserted illegal pair can never proceed regardless of true persisted state.
+  const legal = findLegalTransition(expectedState, targetState)
+  if (!legal) fail('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
+  const evidenceReferences = requireEvidenceReferences(input.evidenceReferences, expectedState, targetState)
   return Object.freeze({
-    orgId: String(parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)),
-    actorId: requireText(input.actorId, 'W4C3A_ROLLOUT_CONTROL_ACTOR_INVALID'),
-    correlationId: requireUuid(input.correlationId, 'W4C3A_ROLLOUT_CONTROL_CORRELATION_INVALID'),
-    engineVersion: requireText(input.engineVersion, 'W4C3A_ROLLOUT_CONTROL_ENGINE_INVALID'),
-    targetState: input.targetState,
-    reasonCode: input.reasonCode,
+    orgId,
+    actorId,
+    correlationId,
+    engineVersion,
+    targetState,
+    expectedState,
+    expectedVersion,
+    evidenceManifestSha256,
+    evidenceReferences,
+    reasonCode: 'rollout_transition' as const,
+    comparisonWritePosture: legal.comparisonWritePosture,
   })
 }
 
@@ -258,33 +447,46 @@ async function lockTargetsAndParents(
   )
 }
 
-async function lockRolloutStateForTransition(
+/**
+ * Amendment section 2.3: missing state may be created ONLY for the exact
+ * allowlisted synthetic org and ONLY as part of `legacy -> shadow`. Every
+ * other missing-row case fails closed with zero DML — no row is ever
+ * materialized for an org this boundary was never authorized to touch.
+ */
+async function lockRolloutStateForBootstrapOrRead(
   trx: AttendanceW4TransactionClientV1,
   orgId: string,
   actorId: string,
   engineVersion: string,
-): Promise<AttendanceRolloutStateV1> {
-  let row = await trx.query(
-    `SELECT state FROM attendance_calculation_rollout_state WHERE org_id = $1 FOR UPDATE`,
+  expectedState: AttendanceRolloutStateV1,
+  targetState: AttendanceRolloutStateV1,
+  orgAllowlisted: boolean,
+): Promise<Readonly<{ state: AttendanceRolloutStateV1; version: number }>> {
+  const row = await trx.query(
+    `SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1 FOR UPDATE`,
     [orgId],
   )
-  if (row.rows.length === 0) {
-    await trx.query(
-      `INSERT INTO attendance_calculation_rollout_state
-       (org_id, state, engine_version, reason_code, actor_id, version, prior_state, scope)
-       VALUES ($1, 'legacy', $2, 'rollout_transition', $3, 1, NULL, 'synthetic_staging')
-       ON CONFLICT (org_id) DO NOTHING`,
-      [orgId, engineVersion, actorId],
-    )
-    row = await trx.query(
-      `SELECT state FROM attendance_calculation_rollout_state WHERE org_id = $1 FOR UPDATE`,
-      [orgId],
-    )
+  if (row.rows.length === 1) {
+    const state = row.rows[0].state
+    const version = row.rows[0].version
+    if (typeof state !== 'string' || !TRANSITION_STATES.has(state as AttendanceRolloutStateV1)) {
+      fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
+    }
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+      fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
+    }
+    return { state: state as AttendanceRolloutStateV1, version }
   }
-  if (row.rows.length !== 1 || !TRANSITION_STATES.has(row.rows[0].state as AttendanceRolloutStateV1)) {
-    fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
-  }
-  return row.rows[0].state as AttendanceRolloutStateV1
+  if (row.rows.length !== 0) fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
+  const canBootstrap = orgAllowlisted && expectedState === 'legacy' && targetState === 'shadow'
+  if (!canBootstrap) fail('W4C3A_ROLLOUT_CONTROL_STATE_MISSING')
+  await trx.query(
+    `INSERT INTO attendance_calculation_rollout_state
+     (org_id, state, engine_version, reason_code, actor_id, version, prior_state, scope)
+     VALUES ($1, 'legacy', $2, 'rollout_transition', $3, 1, NULL, 'synthetic_staging')`,
+    [orgId, engineVersion, actorId],
+  )
+  return { state: 'legacy', version: 1 }
 }
 
 async function loadBatchReferenceState(
@@ -394,7 +596,7 @@ async function batchFingerprint(
       WHERE b.org_id = $1 AND b.id = $2::uuid`,
     [orgId, batchId],
   )
-  if (result.rows.length !== 1 || typeof result.rows[0].fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(result.rows[0].fingerprint)) {
+  if (result.rows.length !== 1 || typeof result.rows[0].fingerprint !== 'string' || !HEX64.test(result.rows[0].fingerprint)) {
     fail('W4C3A_ROLLOUT_CONTROL_BATCH_NOT_FOUND')
   }
   return result.rows[0].fingerprint
@@ -406,6 +608,150 @@ async function allOrgBatchIds(trx: AttendanceW4TransactionClientV1, orgId: strin
     [orgId],
   )
   return result.rows.map((row) => requireUuid(row.id, 'W4C3A_ROLLOUT_CONTROL_BATCH_INVALID'))
+}
+
+// ---------------------------------------------------------------------------
+// Amendment section 3: additional database-backed transition predicates.
+// Each locks (`FOR UPDATE`) the exact rows it inspects so a concurrent writer
+// targeting the same rows blocks behind this transaction rather than racing
+// its read. Every helper returns a values-free count; the caller decides
+// applicability per the requested pair and fails closed with zero rollout DML
+// before any predicate short-circuits.
+// ---------------------------------------------------------------------------
+
+/** Every rollout transition: every retryable V1 job's frozen posture must equal the pair's. */
+async function countRetryableJobPostureMismatches(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+  comparisonWritePosture: AttendanceAcceptedWritePostureV1,
+): Promise<number> {
+  const result = await trx.query(
+    `SELECT id, w4_accepted_write_posture AS posture
+       FROM attendance_import_jobs
+      WHERE org_id = $1 AND w4_contract_version = 1 AND status = ANY($2::text[])
+      ORDER BY id
+      FOR UPDATE`,
+    [orgId, RETRYABLE_JOB_STATUSES],
+  )
+  return result.rows.filter((row) => row.posture !== comparisonWritePosture).length
+}
+
+/** Entry into shadow|eligible|authoritative: zero nonterminal null-version legacy job. */
+async function countNonterminalNullVersionLegacyJobs(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<number> {
+  const result = await trx.query(
+    `SELECT id
+       FROM attendance_import_jobs
+      WHERE org_id = $1 AND w4_contract_version IS NULL AND status = ANY($2::text[])
+      ORDER BY id
+      FOR UPDATE`,
+    [orgId, NONTERMINAL_LEGACY_JOB_STATUSES],
+  )
+  return result.rows.length
+}
+
+/**
+ * Entry into eligible|authoritative: lock section 9 — "Promotion drains or cancels every
+ * incomplete org operation before changing posture." `attendance_result_operations`/
+ * `attendance_result_operation_batches` `claimed` rows are NOT the target here: a deferred
+ * commit-time constraint trigger (`attendance_w4_*_claimed_commit_guard`) makes a persisted
+ * `claimed` row provably impossible — no transaction can ever commit while a row it touched is
+ * still `claimed`, so that state is same-transaction-transient only and never durably visible to
+ * this boundary. The durable incompleteness this bullet targets is the async V1 job layer: any
+ * `attendance_import_jobs` row with `w4_contract_version = 1` not yet `completed` (queued,
+ * running, or failed-pending-retry) is an incomplete org operation for promotion purposes.
+ */
+async function countIncompleteOperations(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<number> {
+  const result = await trx.query(
+    `SELECT id
+       FROM attendance_import_jobs
+      WHERE org_id = $1 AND w4_contract_version = 1 AND status <> 'completed'
+      ORDER BY id
+      FOR UPDATE`,
+    [orgId],
+  )
+  return result.rows.length
+}
+
+/**
+ * Entry into eligible|authoritative: zero unresolved `legacy_time_ingress_not_authoritative`
+ * review. A `review_required` calculation is immutable and, by the durable pointer-guard
+ * trigger, can never become a record's `current_calculation_id` (the pointer target must be
+ * `authoritative` + `completed|reversed`), so "unresolved" cannot be defined against the
+ * current pointer. It is instead exact against the append-only calculation history: the review
+ * is unresolved while it remains the LATEST calculation appended for its record. A subsequent
+ * calculation (any outcome) appended for the same record resolves it by definition — the
+ * legacy-resolved instant itself is still never promoted (lock section 9 bullet 8), only
+ * strictly zoned replacement evidence produces that later calculation.
+ */
+async function countUnresolvedIngressReviews(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<number> {
+  const result = await trx.query(
+    `SELECT r.id
+       FROM attendance_records r
+      WHERE r.org_id = $1
+        AND EXISTS (
+          SELECT 1
+            FROM attendance_record_calculations c
+           WHERE c.org_id = $1 AND c.attendance_record_id = r.id
+             AND c.outcome_reason_code = 'legacy_time_ingress_not_authoritative'
+             AND c.version = (
+               SELECT MAX(c2.version)
+                 FROM attendance_record_calculations c2
+                WHERE c2.org_id = $1 AND c2.attendance_record_id = r.id
+             )
+        )
+      ORDER BY r.id
+      FOR UPDATE`,
+    [orgId],
+  )
+  return result.rows.length
+}
+
+/**
+ * Entry into eligible|authoritative: zero pending calculation-affecting request whose latest
+ * snapshot is missing or `unsupported`. This is a narrower, mechanically-verifiable slice of
+ * lock section 9 bullet 5 — it does NOT evaluate the "reversible" (approved-but-cancellable) half
+ * or payload-staleness against live per-type request fields; see the amendment tracking note.
+ */
+async function countDefectivePendingRequestSnapshots(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<number> {
+  const requests = await trx.query(
+    `SELECT id::text AS id
+       FROM attendance_requests
+      WHERE org_id = $1 AND status = 'pending' AND request_type = ANY($2::text[])
+      ORDER BY id
+      FOR UPDATE`,
+    [orgId, ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1 as unknown as string[]],
+  )
+  if (requests.rows.length === 0) return 0
+  let defective = 0
+  for (const request of requests.rows) {
+    const snapshot = await trx.query(
+      `SELECT attribution_snapshot AS "attributionSnapshot"
+         FROM attendance_request_calculation_snapshots
+        WHERE org_id = $1 AND request_id = $2::uuid
+        ORDER BY version DESC
+        LIMIT 1`,
+      [orgId, request.id],
+    )
+    if (snapshot.rows.length === 0) {
+      defective += 1
+      continue
+    }
+    const posture = (snapshot.rows[0].attributionSnapshot as { posture?: unknown } | null)?.posture
+    if (posture !== 'resolved_v2') defective += 1
+  }
+  return defective
 }
 
 function isRetryableControlPrecondition(error: unknown): boolean {
@@ -477,16 +823,69 @@ export async function transitionAttendanceCalculationRolloutV1(
 ): Promise<AttendanceW4C3aRolloutControlResultV1> {
   const input = normalizeTransitionInput(rawInput)
   return runControlTransaction(connection, async (trx) => {
-    await acquireAttendanceCalculationRolloutLock(trx, parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId), 'exclusive')
+    const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
+    await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'exclusive')
     await afterExclusiveRolloutLockForTests?.('transition')
-    const currentState = await lockRolloutStateForTransition(trx, input.orgId, input.actorId, input.engineVersion)
+
+    // Section 3 predicate 1: exact named org (`scope='synthetic_staging'` is enforced by the
+    // durable CHECK constraint on every row this boundary can ever write).
+    const orgAllowlisted = isAttendanceCalculationOrgAllowlistedV1(input.orgId)
+    if (!orgAllowlisted) fail('W4C3A_ROLLOUT_CONTROL_ORG_NOT_ALLOWLISTED')
+
+    const persisted = await lockRolloutStateForBootstrapOrRead(
+      trx,
+      input.orgId,
+      input.actorId,
+      input.engineVersion,
+      input.expectedState,
+      input.targetState,
+      orgAllowlisted,
+    )
+
+    // Section 2.4 / completion gate 4: a stale caller belief about current state/version is
+    // rejected under lock, with zero rollout DML, even though the input-time matrix check
+    // already passed against the CLAIMED pair.
+    if (persisted.state !== input.expectedState || persisted.version !== input.expectedVersion) {
+      fail('W4C3A_ROLLOUT_CONTROL_STALE_EXPECTED_STATE')
+    }
+    const currentState = persisted.state
+    // Re-derive from the authoritative post-lock state (identical to the input-time check by
+    // construction once staleness has been ruled out, but never trusts the caller's claim alone).
+    const legal = findLegalTransition(currentState, input.targetState)
+    if (!legal) fail('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
+
     const batchIds = await allOrgBatchIds(trx, input.orgId)
     await lockControlDomain(trx, input.orgId, batchIds)
     for (const batchId of batchIds) {
       const state = await loadBatchReferenceState(trx, input.orgId, batchId)
       if (!state.closed && !state.hasFrozenPreimage) fail('W4C3A_ROLLOUT_CONTROL_UNCLOSED_BATCH')
     }
-    if (currentState === input.targetState) fail('W4C3A_ROLLOUT_CONTROL_TRANSITION_CONFLICT')
+
+    const retryableJobMismatches = await countRetryableJobPostureMismatches(
+      trx,
+      input.orgId,
+      legal.comparisonWritePosture,
+    )
+    if (retryableJobMismatches > 0) fail('W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_POSTURE_MISMATCH')
+
+    let nonterminalLegacyJobs = 0
+    if (CALCULATION_ENTRY_TARGETS.has(input.targetState)) {
+      nonterminalLegacyJobs = await countNonterminalNullVersionLegacyJobs(trx, input.orgId)
+      if (nonterminalLegacyJobs > 0) fail('W4C3A_ROLLOUT_CONTROL_LEGACY_JOB_ACTIVE')
+    }
+
+    let incompleteOperations = 0
+    let unresolvedReviews = 0
+    let defectiveRequestSnapshots = 0
+    if (ELIGIBILITY_AUTHORITY_TARGETS.has(input.targetState)) {
+      incompleteOperations = await countIncompleteOperations(trx, input.orgId)
+      if (incompleteOperations > 0) fail('W4C3A_ROLLOUT_CONTROL_INCOMPLETE_OPERATION')
+      unresolvedReviews = await countUnresolvedIngressReviews(trx, input.orgId)
+      if (unresolvedReviews > 0) fail('W4C3A_ROLLOUT_CONTROL_UNRESOLVED_REVIEW')
+      defectiveRequestSnapshots = await countDefectivePendingRequestSnapshots(trx, input.orgId)
+      if (defectiveRequestSnapshots > 0) fail('W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE')
+    }
+
     await trx.query(
       `UPDATE attendance_calculation_rollout_state
           SET state = $2, prior_state = state, engine_version = $3, reason_code = $4,
@@ -494,11 +893,33 @@ export async function transitionAttendanceCalculationRolloutV1(
         WHERE org_id = $1`,
       [input.orgId, input.targetState, input.engineVersion, input.reasonCode, input.actorId],
     )
+    await beforeEventInsertForTests?.()
     await trx.query(
       `INSERT INTO attendance_calculation_rollout_events
        (org_id, prior_state, new_state, reason_code, engine_version, actor_id, evidence)
-       VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb)`,
-      [input.orgId, currentState, input.targetState, input.reasonCode, input.engineVersion, input.actorId],
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+      [
+        input.orgId,
+        currentState,
+        input.targetState,
+        input.reasonCode,
+        input.engineVersion,
+        input.actorId,
+        JSON.stringify({
+          schemaVersion: 1,
+          manifestSha256: input.evidenceManifestSha256,
+          correlationId: input.correlationId,
+          comparisonWritePosture: legal.comparisonWritePosture,
+          preconditionCounts: {
+            retryableJobPostureMismatches: retryableJobMismatches,
+            nonterminalLegacyJobs,
+            incompleteOperations,
+            unresolvedReviews,
+            defectiveRequestSnapshots,
+          },
+          references: input.evidenceReferences,
+        }),
+      ],
     )
     return Object.freeze({ orgId: input.orgId, state: input.targetState, batchId: null })
   })

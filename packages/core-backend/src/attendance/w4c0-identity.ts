@@ -371,6 +371,17 @@ function isOrgExactlyAllowlisted(orgKey: string): boolean {
   return entries.includes(orgKey)
 }
 
+/**
+ * W4C-5 transition-safety amendment section 2.3 / 3: the rollout-control boundary must gate
+ * missing-row creation and every transition attempt on the SAME exact org-only outer allowlist
+ * `resolveSegmentCalculationPosture` uses, rather than a second copied allowlist mechanism. This
+ * is a thin named export of the existing private predicate; it reads no additional env var and
+ * changes no existing caller's behavior.
+ */
+export function isAttendanceCalculationOrgAllowlistedV1(orgKey: string): boolean {
+  return isOrgExactlyAllowlisted(orgKey)
+}
+
 interface PostureRowShape {
   readonly writePosture: AttendanceSegmentWritePostureV1
   readonly authorSegments: 'preview' | 'full' | 'none'
