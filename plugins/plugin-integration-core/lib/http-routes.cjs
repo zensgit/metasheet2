@@ -1064,9 +1064,16 @@ function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegi
       dataSourceWrites: createK3WiseC6WriteSource({
         system: targetSystem,
         createAdapter: (system) => adapterRegistry.createAdapter(system, { role: 'target', principal: ownerPrincipal }),
-        // B4 consumption scope (owner review 20260805): the approved read binding is resolved
-        // for the PIPELINE's source system — the read contract this write lifecycle is
-        // certified against. Server-side wiring only, never request-sourced.
+        // B4 consumption scope (owner review 20260805): the approved read binding must belong to
+        // one of THIS pipeline's endpoints — source OR target, since the K3 system may
+        // legitimately be either or both. (This comment said "source system" through round 9;
+        // the code has accepted both since the round-3 relation fix. Corrected — a comment that
+        // disagrees with its code is how three earlier defects on this PR hid.)
+        //
+        // Server-side wiring only, never request-sourced: the values come from the PIPELINE
+        // record, and the pipeline itself is resolved by an exact scope match upstream, so a
+        // request claiming a different tenant/workspace never reaches this branch. That property
+        // is asserted in http-routes-plm-k3wise-poc.test.cjs, not merely stated here.
         b4: {
           readSourceConfigs,
           tenantId: pipeline.tenantId,

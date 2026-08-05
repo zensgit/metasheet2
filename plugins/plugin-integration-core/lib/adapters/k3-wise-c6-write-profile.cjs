@@ -253,10 +253,9 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       // The binding must belong to a system THIS pipeline actually uses.
       const boundSystemId = row.config && typeof row.config === 'object' ? row.config.systemId : undefined
       if (typeof boundSystemId !== 'string' || !PIPELINE_SYSTEM_IDS.has(boundSystemId)) return false
-      // P2-1: the store nests the config; actionProfileVersion is NOT a top-level row field
-      // (the first version read the top level and therefore always saw '').
-      const config = row.config && typeof row.config === 'object' ? row.config : {}
-      // Full-config, order-insensitive equality via the store's own content key.
+      // Full-config, order-insensitive equality via the store's own content key. (The nesting
+      // note that used to sit here bound a local that nothing read — the check itself lives in
+      // b4RowMatchesRatifiedContract, which reads row.config directly.)
       return b4RowMatchesRatifiedContract(row)
     })
   }

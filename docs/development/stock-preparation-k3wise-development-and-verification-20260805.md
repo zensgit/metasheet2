@@ -71,6 +71,24 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 前置:#4628 五步完成(部署、迁移前建角色、external-system 记录、B4 mint 并记三元组、授权位翻正)。
 以下路由均已在 main 的路由表核实;`<...>` 为环境占位,不含真实值。
 
+### 步 0(新增,窗口**开始前**做,不在窗口内):baseUrl 字符集预检
+
+`#4769` 起,`config.baseUrl` 的**路径部分**与其它路径字段走同一条正向白名单
+(`/^\/[A-Za-z0-9\-._~/]*$/`,并整类拒绝百分号编码)。这带来一条**此前不存在的部署约束**:
+
+| baseUrl 形状 | 结果 |
+|---|---|
+| `https://k3/K3API`、`https://k3/k3cloud/K3API`、`https://192.168.1.5/K3API` | ✅ 接受 |
+| `https://k3/金蝶API`(**非 ASCII 虚拟目录**) | ❌ 拒 `K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE` |
+| `https://k3/K3 API`(路径含空格) | ❌ 同上 |
+
+**为什么不放宽**:ASCII-only 是这道白名单挡住 Unicode 形近字(全角 Ｓubmit 等)的承重属性,
+放宽等于把前九轮关掉的一整类重新打开。**所以这是预检,不是待修缺陷。**
+
+**操作**:窗口前向客户取实际 baseUrl,确认路径段只含 ASCII 字母数字与 `-._~`。若客户 IIS
+用了中文虚拟目录,在**窗口之前**协商改用 ASCII 别名站点/虚拟目录,或升 owner 裁决。
+**窗口不可重试**,而这条会在 adapter 构造期即失败(读、写都进不去),故必须前置排除。
+
 1. **只读预检**:`POST /api/integration/external-systems/<k3SystemId>/read-smoke`
    (preset `k3wise.material-list.v1`)⇒ 期望 values-free 证据:业务成功、行数 ≤10、零泄漏键。
 2. **建/核窗口 pipeline**:`POST /api/integration/pipelines` —— target=K3 系统(config 已含

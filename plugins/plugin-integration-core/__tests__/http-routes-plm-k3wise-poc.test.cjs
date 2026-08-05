@@ -706,7 +706,7 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   }
 
   // `rows` is what the store returns; `listArgs` records what the ROUTE asked for.
-  async function dryRunWith(rows) {
+  async function dryRunWith(rows, { requestWorkspaceId } = {}) {
     const listArgs = []
     const harness = createHarness({
       readSourceConfigStore: {
@@ -766,7 +766,7 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
     const res = await invoke(harness.routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
       user: WRITE_USER,
       params: { id: mkPipeline.body.data.id },
-      body: { tenantId: TENANT_ID, workspaceId: PROBE_WORKSPACE_ID },
+      body: { tenantId: TENANT_ID, workspaceId: requestWorkspaceId || PROBE_WORKSPACE_ID },
     })
     return { res, listArgs, scenario: harnessScenario }
   }
@@ -820,6 +820,17 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   // POSITIVE CONTROL for the structural check itself.
   assert.equal(/\breadSourceConfigs\b/.test('{ targetSystem, pipeline, context }'), false,
     'the structural check must be able to FAIL — otherwise it asserts nothing')
+
+  // (5) REVIEW P3-3 (round 10): `http-routes.cjs` states the B4 scope is "never request-sourced",
+  // and nothing tested it — the probe body carried the SAME values as the pipeline, so it could
+  // not discriminate. The protective mechanism is upstream: the pipeline is resolved by an EXACT
+  // scope match, so a request claiming a different workspace never reaches the B4 branch at all.
+  // Assert that, rather than the comment's wording.
+  const spoofed = await dryRunWith(() => [], { requestWorkspaceId: 'ws_attacker_supplied' })
+  assert.equal(spoofed.listArgs.length, 0,
+    'a request claiming a different workspace must not even reach the B4 lookup')
+  assert.notEqual(spoofed.res.statusCode, 200,
+    'and it must not succeed')
 
   const related = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
   const relatedDetails = ((related.res.body && related.res.body.error) || {}).details || {}
