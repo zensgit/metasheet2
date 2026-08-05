@@ -690,6 +690,75 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         staleClient.release()
       }
     })
+
+    it('rejects a same-state-name preflight whose version went stale by round-tripping through another state (P2-1, PR #4773 gate)', async () => {
+      // PR #4773's exact-head independent gate (P2-1) found the version half of
+      // `persisted.state !== input.expectedState || persisted.version !== input.expectedVersion`
+      // (w4c3a-rollout-control.ts) was untested: every existing staleness test changes the state
+      // NAME, so deleting `|| persisted.version !== input.expectedVersion` still passed all 23
+      // tests. It guards a real case this test constructs directly: shadow (v2) -> eligible (v3)
+      // -> shadow (v4). An operator preflight taken at shadow/v2 must NOT be accepted at
+      // shadow/v4 just because the STATE NAME happens to match again — the org visibly
+      // round-tripped through eligible in between, and the preflight's belief about section 3
+      // predicates at that moment is stale.
+      const roundTripOrg = crypto.randomUUID()
+      allow(roundTripOrg)
+      const client = await pool.connect()
+      try {
+        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          orgId: roundTripOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64('round-trip-1'), evidenceReferences: baseRefs('round-trip-1'),
+          reasonCode: 'rollout_transition',
+        })
+        // Preflight taken here believes shadow/version=2 — true at this instant.
+        const preflight = await pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [roundTripOrg],
+        )
+        expect(preflight.rows[0]).toMatchObject({ state: 'shadow', version: 2 })
+
+        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          orgId: roundTripOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+          evidenceManifestSha256: hex64('round-trip-2'), evidenceReferences: baseRefs('round-trip-2'),
+          reasonCode: 'rollout_transition',
+        })
+        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          orgId: roundTripOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'eligible', expectedVersion: 3,
+          evidenceManifestSha256: hex64('round-trip-3'), evidenceReferences: baseRefs('round-trip-3'),
+          reasonCode: 'rollout_transition',
+        })
+        // Current state is now shadow/version=4 — the NAME matches the stale preflight, the
+        // VERSION does not.
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [roundTripOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 4 }] })
+
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: roundTripOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'legacy', expectedState: preflight.rows[0].state, expectedVersion: preflight.rows[0].version,
+            evidenceManifestSha256: hex64('round-trip-stale'), evidenceReferences: baseRefs('round-trip-stale'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_STALE_EXPECTED_STATE' })
+        // Zero DML from the rejected attempt: state/version unchanged, event count unchanged (3:
+        // the three sequential setup transitions above).
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [roundTripOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 4 }] })
+        await expect(pool.query(
+          'SELECT count(*)::int AS n FROM attendance_calculation_rollout_events WHERE org_id = $1',
+          [roundTripOrg],
+        )).resolves.toMatchObject({ rows: [{ n: 3 }] })
+      } finally {
+        client.release()
+      }
+    })
   })
 
   describe('retryable job posture predicate — real two-connection race (gate 5, gate 6)', () => {
