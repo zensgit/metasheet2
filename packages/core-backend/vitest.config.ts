@@ -651,6 +651,12 @@ export default defineConfig({
       // #4709 FSER-3 first-config atomicity and true two-connection convergence require
       // real PostgreSQL; the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts',
+      // #4709 FSER-4 prerequisite (member-safe self projection, contract amendment §2):
+      // real-DB authorization matrix (liveness/activation/org-membership/group-membership,
+      // cross-org isolation) and admin/self parity require real PostgreSQL; excluded here
+      // so the no-DB job cannot skip-green it, and the whole file is explicitly run in
+      // plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',

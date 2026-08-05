@@ -5,8 +5,10 @@ import { describe, expect, it } from 'vitest'
 const require = createRequire(import.meta.url)
 const {
   deriveAttendanceGroupFixedScheduleEffectiveness,
+  deriveAttendanceGroupFixedScheduleSelfApplicability,
 } = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs') as {
   deriveAttendanceGroupFixedScheduleEffectiveness: (input: Record<string, unknown>) => Record<string, unknown>
+  deriveAttendanceGroupFixedScheduleSelfApplicability: (input: Record<string, unknown>) => string
 }
 
 const desired = { shiftId: 'shift-current', startDate: '2026-08-01', endDate: '2026-08-31', revision: 2 }
@@ -65,5 +67,60 @@ describe('attendance group fixed-schedule effectiveness derivation', () => {
   it('never includes member identifiers in its projection', () => {
     const result = JSON.stringify(derive({ managedRows: [assignment()] }))
     expect(result).not.toContain('member-a')
+  })
+})
+
+// #4709 FSER-4 prerequisite (contract amendment §2): self-projection applicability.
+// Mutation proofs: dropping the `producer_key === producerKey` filter would let a
+// stale/different-key row count as "matching"; dropping `=== 1` (using `>= 1` instead)
+// would let a duplicate-matching-row member read as "matching" though the group-level
+// derivation reports DUPLICATE_MATCHING_ASSIGNMENT for that same member; dropping
+// `isPublished` would let an unpublished row count.
+describe('attendance group fixed-schedule self applicability derivation (#4709 FSER-4 prerequisite §2)', () => {
+  function applicability(overrides: Record<string, unknown> = {}) {
+    return deriveAttendanceGroupFixedScheduleSelfApplicability({
+      desired,
+      producerKey,
+      managedRows: [],
+      userId: 'member-a',
+      ...overrides,
+    })
+  }
+
+  it('is not_configured when no desired config exists, regardless of managed rows', () => {
+    expect(applicability({ desired: null, managedRows: [assignment()] })).toBe('not_configured')
+  })
+
+  it('is non_matching when the subject has zero managed rows', () => {
+    expect(applicability({ managedRows: [] })).toBe('non_matching')
+  })
+
+  it('is matching when the subject has exactly one eligible row matching the desired key and values', () => {
+    expect(applicability({ managedRows: [assignment()] })).toBe('matching')
+  })
+
+  it('is non_matching for a duplicate matching row (exactly-one, not at-least-one)', () => {
+    expect(applicability({ managedRows: [assignment(), assignment()] })).toBe('non_matching')
+  })
+
+  it('is non_matching when the subject only has a different-producer-key (stale) row', () => {
+    expect(applicability({ managedRows: [assignment({ producer_key: oldProducerKey })] })).toBe('non_matching')
+  })
+
+  it('is non_matching when the subject only has an unpublished row', () => {
+    expect(applicability({ managedRows: [assignment({ publish_status: 'pending' })] })).toBe('non_matching')
+  })
+
+  it('is non_matching when the subject only has a value-corrupt row on the desired key', () => {
+    expect(applicability({ managedRows: [assignment({ shift_id: 'shift-corrupt' })] })).toBe('non_matching')
+  })
+
+  it('ignores another member\'s matching row entirely', () => {
+    expect(applicability({ userId: 'member-b', managedRows: [assignment({ user_id: 'member-a' })] })).toBe('non_matching')
+  })
+
+  it('never includes a raw user identifier in its return value (it is a bare enum string)', () => {
+    const result = applicability({ managedRows: [assignment()] })
+    expect(['not_configured', 'matching', 'non_matching']).toContain(result)
   })
 })

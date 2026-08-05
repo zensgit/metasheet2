@@ -15,6 +15,7 @@ const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapte
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
+const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
 const {
   DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   MAX_ATTRIBUTION_TAIL_MINUTES,
@@ -44395,6 +44396,62 @@ module.exports = {
               return
             }
             logger.error('Attendance group fixed schedule effectiveness read failed', error)
+            permissionRes.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read fixed schedule effectiveness' } })
+          }
+        })(req, res, next)
+      }
+    )
+
+    // #4709 FSER-4 prerequisite (contract amendment §2, RATIFIED
+    // `45d71c4209af35a63768ce7ce9f576377f6b8ce4`, OD-4709-2=(a)): a member-safe
+    // self projection beside the admin aggregate above. Uses `attendance:read`
+    // (not `attendance:admin`) and never accepts a caller-supplied subject/org
+    // selector — `resolveAttendanceFixedScheduleSelfRouteIdentity` rejects a
+    // body/query `userId`/`orgId` with 400 and a mismatched `x-user-id`/
+    // `x-org-id` header with 403, both before any scoped SQL; only the
+    // authenticated principal names the subject and org. The service itself
+    // (`getSelfEffectiveness`) then proves group membership + subject/org
+    // liveness in one query before loading any config or assignment fact, and
+    // returns a distinct exact-key projection — never the admin response's
+    // `coverage`/`drift`/`managedSets` or any raw user id.
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups/:groupId/fixed-schedule/effectiveness/me',
+      async (req, res, next) => {
+        const identity = resolveAttendanceFixedScheduleSelfRouteIdentity({
+          authenticatedUserId: getAuthenticatedUserId(req),
+          authenticatedOrgId: getAuthenticatedOrgId(req),
+          body: req.body,
+          query: req.query,
+          headers: req.headers,
+        })
+        if (!identity.ok) {
+          res.status(identity.status).json({ ok: false, error: { code: identity.code, message: identity.message } })
+          return
+        }
+        return withPermission('attendance:read', async (permissionReq, permissionRes) => {
+          const groupId = normalizeUuidString(permissionReq.params.groupId)
+          if (!groupId) {
+            respondInvalidUuid(permissionRes, 'groupId')
+            return
+          }
+          try {
+            const effectiveness = await getAttendanceGroupFixedScheduleEffectivenessService().getSelfEffectiveness(db, {
+              orgId: identity.orgId,
+              groupId,
+              userId: identity.userId,
+            })
+            permissionRes.json({ ok: true, data: effectiveness })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              permissionRes.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            if (isDatabaseSchemaError(error)) {
+              permissionRes.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance fixed schedule tables missing' } })
+              return
+            }
+            logger.error('Attendance group fixed schedule self effectiveness read failed', error)
             permissionRes.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read fixed schedule effectiveness' } })
           }
         })(req, res, next)
