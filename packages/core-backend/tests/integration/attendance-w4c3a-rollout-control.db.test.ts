@@ -1070,6 +1070,86 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     })
   })
 
+  describe('W4C-5 P1-2 hygiene: the session-level exclusive lock is actually released, not just asserted to be', () => {
+    // The `finally` release in `transitionAttendanceCalculationRolloutV1` is otherwise an
+    // UNTESTED guard: every test in this file uses a fresh `crypto.randomUUID()` org per case,
+    // so a leaked session-level lock on org A's advisory key never blocks org B's key, and every
+    // existing test would stay green even if the release call were deleted entirely (the same
+    // "guard neuterable with all tests green" shape the P1-2 gate already flagged for the
+    // staleness version half, P2-1). These legs check the actual server-visible lock state on
+    // `pg_locks` for this connection's own backend PID — a stronger, more direct signal than
+    // trusting `pg_advisory_unlock`'s boolean return value, which production code does not (and,
+    // per the P1-2 fix's own doc comment, must not let a release-failure override the real
+    // transition outcome) inspect.
+    it('leaves zero session-level advisory locks held after a successful transition', async () => {
+      const hygieneOrg = crypto.randomUUID()
+      allow(hygieneOrg)
+      const client = await pool.connect()
+      try {
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: hygieneOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+            evidenceManifestSha256: hex64('hygiene-success'), evidenceReferences: baseRefs('hygiene-success'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).resolves.toMatchObject({ state: 'shadow' })
+        await expect(
+          client.query('SELECT count(*)::int AS n FROM pg_locks WHERE locktype = $1 AND pid = pg_backend_pid()', ['advisory']),
+        ).resolves.toMatchObject({ rows: [{ n: 0 }] })
+      } finally {
+        client.release()
+      }
+    })
+
+    it('leaves zero session-level advisory locks held after a rejected transition (predicate failure)', async () => {
+      const hygieneOrg = crypto.randomUUID()
+      allow(hygieneOrg)
+      await insertRetryableJob(hygieneOrg, 'queued', 'authoritative') // pair requires "shadow"
+      const client = await pool.connect()
+      try {
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: hygieneOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+            evidenceManifestSha256: hex64('hygiene-reject'), evidenceReferences: baseRefs('hygiene-reject'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_POSTURE_MISMATCH' })
+        await expect(
+          client.query('SELECT count(*)::int AS n FROM pg_locks WHERE locktype = $1 AND pid = pg_backend_pid()', ['advisory']),
+        ).resolves.toMatchObject({ rows: [{ n: 0 }] })
+      } finally {
+        client.release()
+      }
+    })
+
+    it('leaves zero session-level advisory locks held after an input-validation rejection (before any lock acquisition attempt at all)', async () => {
+      // Sanity companion leg: an input-time rejection (illegal pair) fails BEFORE
+      // `acquireAttendanceCalculationRolloutLockSessionExclusiveV1` is ever called, so there is
+      // no lock to release in the first place — this proves the two success/rejection legs above
+      // are not vacuously green because pg_locks happens to always read zero for this org.
+      const hygieneOrg = crypto.randomUUID()
+      allow(hygieneOrg)
+      const client = await pool.connect()
+      try {
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: hygieneOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'authoritative', expectedState: 'legacy', expectedVersion: 1, // not in LEGAL_TRANSITIONS
+            evidenceManifestSha256: hex64('hygiene-illegal'), evidenceReferences: baseRefs('hygiene-illegal'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION' })
+        await expect(
+          client.query('SELECT count(*)::int AS n FROM pg_locks WHERE locktype = $1 AND pid = pg_backend_pid()', ['advisory']),
+        ).resolves.toMatchObject({ rows: [{ n: 0 }] })
+      } finally {
+        client.release()
+      }
+    })
+  })
+
   describe('nonterminal null-version legacy job predicate (gate 5)', () => {
     it('blocks entry into shadow while a nonterminal legacy job is active', async () => {
       const legacyJobOrg = crypto.randomUUID()

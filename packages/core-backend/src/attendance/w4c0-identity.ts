@@ -1263,20 +1263,22 @@ export async function acquireAttendanceCalculationRolloutLock(
  * 9.27.9 / 13.3.5), so this still correctly blocks behind every existing
  * `pg_advisory_xact_lock_shared` writer and every other exclusive holder on the same key. The
  * caller then issues `BEGIN ISOLATION LEVEL SERIALIZABLE` as a SEPARATE, LATER statement on the
- * same connection — over the standard synchronous (non-pipelined) `pg`/`PoolClient` protocol,
- * that statement is not even dispatched until this function's blocking call has already
- * returned. The new transaction's snapshot can therefore only be established strictly AFTER
- * this acquisition succeeded, which is strictly AFTER every previous holder released (committed
- * or rolled back) — there is no statement, blocking or not, that straddles the "waiting" and
- * "snapshot fixed" instants.
+ * same connection. This relies on one named premise: the `pg`/`PoolClient` driver this codebase
+ * uses serializes queries per connection (no pipelining) — it does not dispatch the next query
+ * until the previous one's response has been received — so `BEGIN` is not sent until this
+ * function's blocking acquisition has already returned. Given that premise, the new
+ * transaction's snapshot can only be established strictly AFTER this acquisition succeeded,
+ * which is strictly AFTER every previous holder released (committed or rolled back).
  *
- * Crash safety: PostgreSQL releases every session-level advisory lock automatically when the
- * backend session ends (docs 9.27.9 / 13.3.5) — an unhandled process crash necessarily drops
- * the TCP connection to that backend, which the server treats identically to a session end, so
- * no lock survives a crash. The caller's own `finally` release
- * (`releaseAttendanceCalculationRolloutLockSessionExclusiveV1`) exists for the NORMAL
- * (non-crash) return path, so a pooled connection is never returned to the pool still holding
- * this lock for an unrelated future checkout.
+ * Crash safety: PostgreSQL releases every session-level advisory lock when the backend session
+ * ends (docs 9.27.9 / 13.3.5). A crashed client does not end that session instantly — the
+ * server only observes the dropped TCP connection (and releases the session's locks) once it
+ * notices, bounded by TCP keepalive or `idle_session_timeout` if configured, not by the crash
+ * itself. So a crash does not leak this lock forever, but it is not the same instant as the
+ * crash either. The caller's own `finally` release
+ * (`releaseAttendanceCalculationRolloutLockSessionExclusiveV1`) is what makes the NORMAL
+ * (non-crash) return path immediate, so a pooled connection is never returned to the pool still
+ * holding this lock for an unrelated future checkout.
  */
 export async function acquireAttendanceCalculationRolloutLockSessionExclusiveV1(
   connection: AttendanceW4TransactionClientV1,
@@ -1296,7 +1298,11 @@ export async function acquireAttendanceCalculationRolloutLockSessionExclusiveV1(
     if (isLockNotAvailable(error)) throw busyError('rollout')
     throw error
   } finally {
-    await connection.query("SELECT set_config('lock_timeout', '0', false)").catch(() => undefined)
+    // `RESET lock_timeout` (not `set_config('lock_timeout', '0', false)`): hardcoding '0' would
+    // permanently stomp any non-default `postgresql.conf`/`ALTER ROLE ... SET lock_timeout` value
+    // for the rest of this pooled connection's session, whereas RESET restores whatever the
+    // session's actual configured default was before this function overrode it.
+    await connection.query('RESET lock_timeout').catch(() => undefined)
   }
 }
 

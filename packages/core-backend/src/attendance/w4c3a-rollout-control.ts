@@ -874,8 +874,10 @@ export async function transitionAttendanceCalculationRolloutV1(
   // transaction — is what makes every section 3 predicate below actually re-evaluate a snapshot
   // that postdates the wait.
   await acquireAttendanceCalculationRolloutLockSessionExclusiveV1(connection, orgKey)
-  await afterExclusiveRolloutLockForTests?.('transition')
   try {
+    // Inside the try (not before it): a throwing test hook must still release the lock via the
+    // `finally` below, not leak it.
+    await afterExclusiveRolloutLockForTests?.('transition')
     return await runControlTransaction(connection, async (trx) => {
       // Section 3 predicate 1: exact named org (`scope='synthetic_staging'` is enforced by the
       // durable CHECK constraint on every row this boundary can ever write).
@@ -980,9 +982,18 @@ export async function transitionAttendanceCalculationRolloutV1(
     })
   } finally {
     // Released unconditionally, including on the input-validation/staleness/predicate-failure
-    // paths above (all of which throw): a busy-error 503 is the correct outward-facing outcome
-    // for lock-timeout expiry, but a normal success or precondition rejection must never leave
-    // the session holding this lock for the next checkout of this pooled connection.
-    await releaseAttendanceCalculationRolloutLockSessionExclusiveV1(connection, orgKey)
+    // paths above (all of which throw): a normal success or precondition rejection must never
+    // leave the session holding this lock for the next checkout of this pooled connection.
+    //
+    // The `.catch(() => undefined)` is deliberate, not sloppy: a `finally` block that itself
+    // throws REPLACES whatever the `try` block returned or threw — so an unguarded release
+    // failure here (e.g. a dropped connection) would turn an already-COMMITTED transition into
+    // a thrown exception, or replace a typed `W4C3A_ROLLOUT_CONTROL_*` predicate rejection with
+    // an opaque connection error. Both are strictly worse than a lock outliving this call by one
+    // dropped-connection's remaining lifetime — and PostgreSQL still releases every session-level
+    // advisory lock automatically once the server observes that connection close (see
+    // `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`'s doc comment), so nothing here
+    // is a permanent leak even when the release call itself fails.
+    await releaseAttendanceCalculationRolloutLockSessionExclusiveV1(connection, orgKey).catch(() => undefined)
   }
 }
