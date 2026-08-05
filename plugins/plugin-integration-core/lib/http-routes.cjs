@@ -233,6 +233,13 @@ const {
   deriveMultitablePlannerTargetConfig,
 } = require('./adapters/metasheet-multitable-target-adapter.cjs')
 const {
+  K3_WISE_C6_WRITE_TARGET_KIND,
+  K3_WISE_C6_MAX_APPLY_ROWS,
+  K3_WISE_C6_WRITE_PROFILE,
+  createK3WiseC6WriteSource,
+  deriveK3WiseC6PlannerTargetConfig,
+} = require('./adapters/k3-wise-c6-write-profile.cjs')
+const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
   __internals: tableActionInternals,
@@ -1041,7 +1048,27 @@ function normalizeC6WriteApplyBody(body = {}) {
 // write-source (zero external write); any other (default) target uses the host SQL write
 // facade unchanged. Used by BOTH the dry-run and apply handlers with identical inputs so the
 // apply recompute reproduces the same dry-run revision (the revision fence).
-function resolveC6WritePlanInputs({ targetSystem, pipeline, context }) {
+function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal }) {
+  // K3WriteDecision (owner, 20260805): the K3 connector rides the same C6 dry-run->apply
+  // lifecycle via its own profile + adapter-backed write source. `enforcedMaxRows` pins the
+  // plan-level source read to the profile's frozen cap — a caller-supplied maxRows is
+  // OVERRIDDEN for K3 targets (a >cap source read would only ever produce not_applyable).
+  if (targetSystem && targetSystem.kind === K3_WISE_C6_WRITE_TARGET_KIND) {
+    const flatConfig = deriveK3WiseC6PlannerTargetConfig({
+      system: targetSystem,
+      object: pipeline.targetObject,
+      fieldMappings: pipeline.fieldMappings,
+    })
+    return {
+      planTargetSystem: { ...targetSystem, config: flatConfig },
+      dataSourceWrites: createK3WiseC6WriteSource({
+        system: targetSystem,
+        createAdapter: (system) => adapterRegistry.createAdapter(system, { role: 'target', principal: ownerPrincipal }),
+      }),
+      targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
+      enforcedMaxRows: K3_WISE_C6_MAX_APPLY_ROWS,
+    }
+  }
   if (targetSystem && targetSystem.kind === MULTITABLE_WRITE_TARGET_KIND) {
     const flatConfig = deriveMultitablePlannerTargetConfig({
       system: targetSystem,
@@ -3341,7 +3368,7 @@ function createHandlers(services, options = {}) {
         role: 'source',
         principal: ownerPrincipal,
       })
-      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context })
+      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal })
       return sendOk(res, await dryRunExternalWrite({
         pipeline,
         sourceSystem,
@@ -3352,7 +3379,9 @@ function createHandlers(services, options = {}) {
         tokenStore: context.storage,
         dryRunUser: requestPrincipal(req),
         dataSourceOwnerPrincipal: ownerPrincipal,
-        maxRows: body.maxRows,
+        // K3 targets: the profile's frozen cap overrides any caller maxRows (values-free
+        // counts + `truncated` make the override observable in the dry-run response).
+        maxRows: c6.enforcedMaxRows !== undefined ? c6.enforcedMaxRows : body.maxRows,
         testFailureInjection: context && context.config && context.config.c6TestFailureInjection,
       }))
     },
@@ -3432,7 +3461,7 @@ function createHandlers(services, options = {}) {
       try {
         // SAME resolution as dry-run (server-side, by target kind) so the apply recompute
         // reproduces the dry-run revision; the multitable write-source writes own sheets only.
-        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context })
+        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal })
         const result = await applyExternalWrite({
           pipeline,
           sourceSystem,
@@ -3445,6 +3474,8 @@ function createHandlers(services, options = {}) {
           dryRunToken: body.confirm.dryRunToken,
           applyUser: requestPrincipal(req),
           dataSourceOwnerPrincipal: ownerPrincipal,
+          // Same enforced cap as dry-run so the apply recompute reproduces the revision fence.
+          maxRows: c6.enforcedMaxRows,
           runId: run && run.id,
           testFailureInjection: context && context.config && context.config.c6TestFailureInjection,
         })

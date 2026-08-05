@@ -67,10 +67,10 @@
     "pg": "^8.11.3"
   },
   "runtimeFiles": {
-    "pluginPackageJson": "65af0dc5668f1778061914799dd0dae725b74d718d4d92f0dbc03f8e968890f6",
+    "pluginPackageJson": "dc73cda910a4d178cec9918ce222d658d6ce0e914311812e730087ffa8fa12c2",
     "pnpmLock": "8ca98ceef0c84b821c4b20a0f0cf0b50b87dfb51a26b6a2d21a9912a1733680f",
     "pluginIndex": "c2a800452d175e2b00a476b3e0d3fab6f65e16031789b91a0304dd1dc45a0cee",
-    "pluginHttpRoutes": "b288d7dc4e51362bdd3f74c578510ce46378c83116ae0e34723e81519baf62eb",
+    "pluginHttpRoutes": "be39b126750e9b8bc7882ac5870e435c5f5923206bbdbfaf12c432fe87128a6a",
     "s6aProvisioningCli": "d3320b27da7ab358ca068a3766a375e669fb6922f24ba0186ba0828c3e1d9da8",
     "s6aAcceptanceRunner": "eb58824cba1ab03361a6a4fba409f3f7a120dcda61d4c3d6cad2b82311d62624",
     "s6aOnpremRunbook": "1f4ba2b7fadbad0acb97e18d13f2be7ad6071fa372ac44e0aa4e17995e94c410",
