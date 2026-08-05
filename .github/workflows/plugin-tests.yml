@@ -75,6 +75,15 @@ jobs:
         run: |
           pnpm run verify:integration-k3wise:poc
 
+      # REVIEW P2-1: the rehearsal harness asserts the two guards the owner's HOLD points 3 and 4
+      # depend on (the mock's session gate, and the call logger the workflow's Submit/Audit
+      # absence-check reads). It shipped in ZERO workflows, so those guards' only behavioural
+      # evidence was ungated — a coverage regression, not a coverage gap. Gated here alongside
+      # its sibling mock-server test.
+      - name: Run K3 WISE rehearsal harness contract tests
+        run: |
+          node --test scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs
+
       - name: Run on-prem package apply and archive contract tests
         run: |
           node --test \
