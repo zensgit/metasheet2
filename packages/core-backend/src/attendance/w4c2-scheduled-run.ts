@@ -1186,6 +1186,20 @@ export interface AttendanceScheduledRunSweepCandidateV1 {
  * Section 1.7's scan predicate — `state = 'running'`, deliberately NOT scoped to today's
  * `work_date` (a run stranded on a prior calendar day must still be visible), bounded by
  * `limit`.
+ *
+ * #4770 fairness fix: the prior fixed-prefix form (`ORDER BY created_at ASC LIMIT $1`, no
+ * write-back) let the oldest N candidates occupy the scan window on EVERY tick forever if they
+ * never reach a terminal state — candidate N+1 could starve indefinitely. This is a durable
+ * ROTATION, not an `OFFSET` (owner constraint: `OFFSET` is unstable once rows leave `running`
+ * concurrently — an offset computed against one tick's row count is meaningless against the
+ * next tick's shrunken/grown set). The scan and the write-back happen in the SAME statement
+ * (`UPDATE ... WHERE run_id IN (SELECT ...)`), so the rotation is durable across ticks/process
+ * restarts, not an in-memory cursor: every candidate this tick selects has its
+ * `last_attempt_at` stamped to `now()` in the same statement, which demotes it below any
+ * candidate this tick did NOT reach (`NULLS FIRST` keeps never-attempted rows — including
+ * brand-new ones — ahead of anything already attempted). Steady state (backlog <= limit) is
+ * byte-behaviorally the prior FIFO order: every row starts `last_attempt_at IS NULL`, so the
+ * `created_at ASC` tiebreak alone decides the order, identical to the old query.
  */
 export async function scanAttendanceScheduledRunSweepCandidatesV1(
   trx: AttendanceW4TransactionClientV1,
@@ -1193,11 +1207,16 @@ export async function scanAttendanceScheduledRunSweepCandidatesV1(
 ): Promise<readonly AttendanceScheduledRunSweepCandidateV1[]> {
   if (!Number.isInteger(limit) || limit < 1) fail('W4C2_SCHEDULED_RUN_SWEEP_LIMIT_INVALID')
   const result = await trx.query(
-    `SELECT org_id, initiator, work_date::text AS work_date, run_id::text AS run_id
-       FROM attendance_scheduled_runs
-      WHERE state = 'running'
-      ORDER BY created_at ASC
-      LIMIT $1`,
+    `UPDATE attendance_scheduled_runs
+        SET last_attempt_at = now()
+      WHERE run_id IN (
+        SELECT run_id
+          FROM attendance_scheduled_runs
+         WHERE state = 'running'
+         ORDER BY last_attempt_at ASC NULLS FIRST, created_at ASC
+         LIMIT $1
+      )
+      RETURNING org_id, initiator, work_date::text AS work_date, run_id::text AS run_id`,
     [limit],
   )
   return result.rows.map((row) => {

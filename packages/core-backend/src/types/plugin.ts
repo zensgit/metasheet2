@@ -1257,6 +1257,8 @@ export interface PluginServices {
       notReady: number
       skipped: number
       errored: number
+      /** #4770: total `state='running'` rows at scan time — the starvation signal. */
+      backlogRemaining: number
     }>
     /**
      * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the `abandoned`

@@ -50,6 +50,27 @@ export interface AttendanceScheduledRunSweepTickResultV1 {
   readonly notReady: number
   readonly skipped: number
   readonly errored: number
+  /** Total `state='running'` rows at scan time (includes the `scanned` candidates themselves)
+   *  — the operator-facing starvation signal the fixed-prefix scan never exposed: a
+   *  `backlogRemaining` that stays >= `limit` tick after tick means the sweep is not draining. */
+  readonly backlogRemaining: number
+}
+
+/**
+ * #4770: values-free observability for the sweep tick — counts and closed-set outcome codes
+ * ONLY, never an org id / user id / work date / run id (audit-surface values-free discipline).
+ * `meta`'s type (`Record<string, number>`) makes this values-free BY CONSTRUCTION, not by
+ * caller discipline: TypeScript refuses to compile a caller that slips a string business value
+ * into `meta`.
+ */
+export interface AttendanceScheduledRunSweepTickLoggerV1 {
+  info(event: string, meta: Record<string, number>): void
+  warn(event: string, meta: Record<string, number>): void
+}
+
+const noopSweepTickLogger: AttendanceScheduledRunSweepTickLoggerV1 = {
+  info: () => undefined,
+  warn: () => undefined,
 }
 
 const SWEEP_DEFAULT_LIMIT = 25
@@ -57,10 +78,14 @@ const SWEEP_DEFAULT_LIMIT = 25
 export interface AttendanceScheduledRunSweepOptionsV1 {
   readonly limit?: number
   readonly recoverCandidate: (candidate: AttendanceScheduledRunSweepCandidateV1) => Promise<void>
+  /** Default: a no-op logger (byte-identical to the pre-#4770 silent tick for any caller that
+   *  does not opt in). */
+  readonly logger?: AttendanceScheduledRunSweepTickLoggerV1
 }
 
 /**
- * One sweep tick: the scan runs in its OWN transaction, then EACH candidate gets its OWN fresh
+ * One sweep tick: the scan runs in its OWN transaction (alongside a `backlogRemaining` read of
+ * the SAME `state='running'` snapshot the scan used), then EACH candidate gets its OWN fresh
  * connection and its OWN transaction — never batched (section 1.7's own comment on
  * `sweepAttendanceScheduledRunCandidateV1`: "Intended to run as ONE candidate per its OWN
  * `runAttendanceResultOperationTransactionV1` call, never batched, so one stuck candidate
@@ -68,6 +93,11 @@ export interface AttendanceScheduledRunSweepOptionsV1 {
  * never rethrown — values-free containment, independent of (and in addition to) the cron
  * caller's own per-(org, workDate) isolation one level up
  * (`plugins/plugin-attendance/index.cjs`'s `scheduleAutoAbsence`).
+ *
+ * #4770: emits exactly one values-free tick-summary log line per call (via `options.logger`,
+ * default no-op) — the prior silence meant "the scheduler ignores the tick's return counts...
+ * only a whole-job throw is logged", so a starving backlog produced zero signal short of a
+ * hard failure. `errored > 0` additionally logs at `warn`.
  */
 export async function sweepAttendanceScheduledRunsOnceV1(
   pool: Pick<Pool, 'connect'>,
@@ -75,14 +105,23 @@ export async function sweepAttendanceScheduledRunsOnceV1(
 ): Promise<AttendanceScheduledRunSweepTickResultV1> {
   const limit =
     Number.isInteger(options.limit) && (options.limit as number) > 0 ? (options.limit as number) : SWEEP_DEFAULT_LIMIT
+  const logger = options.logger ?? noopSweepTickLogger
 
   const scanClient = (await pool.connect()) as unknown as PoolClient
   let candidates: readonly { orgId: string; initiator: string; workDate: string; runId: string }[]
+  let backlogRemaining: number
   try {
-    candidates = await runAttendanceResultOperationTransactionV1(
+    ;({ candidates, backlogRemaining } = await runAttendanceResultOperationTransactionV1(
       scanClient as unknown as AttendanceW4TransactionClientV1,
-      (trx) => scanAttendanceScheduledRunSweepCandidatesV1(trx, limit),
-    )
+      async (trx) => {
+        const scanned = await scanAttendanceScheduledRunSweepCandidatesV1(trx, limit)
+        const backlog = await trx.query(
+          `SELECT count(*)::int AS n FROM attendance_scheduled_runs WHERE state = 'running'`,
+        )
+        const backlogRow = backlog.rows[0] as { n?: number | string } | undefined
+        return { candidates: scanned, backlogRemaining: Number(backlogRow?.n ?? 0) }
+      },
+    ))
   } finally {
     scanClient.release()
   }
@@ -121,7 +160,12 @@ export async function sweepAttendanceScheduledRunsOnceV1(
     skipped += 1
   }
 
-  return { scanned: candidates.length, finalized, notReady, skipped, errored }
+  const result = { scanned: candidates.length, finalized, notReady, skipped, errored, backlogRemaining }
+  logger.info('attendance.w4_scheduled_run_sweep.tick', result)
+  if (errored > 0) {
+    logger.warn('attendance.w4_scheduled_run_sweep.tick_errors', result)
+  }
+  return result
 }
 
 // ---------------------------------------------------------------------------

@@ -2244,6 +2244,9 @@ export class MetaSheetServer {
                   sweepAttendanceScheduledRunsOnceV1(poolManager.get().getInternalPool(), {
                     limit: options.limit,
                     recoverCandidate: options.recoverCandidate,
+                    // #4770: values-free tick-summary observability (counts/backlog only —
+                    // `Logger` never receives an org id / user id / work date / run id here).
+                    logger: this.logger,
                   }),
                 // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the
                 // `abandoned` transition). `adminActorId` is the route's OWN authenticated actor
