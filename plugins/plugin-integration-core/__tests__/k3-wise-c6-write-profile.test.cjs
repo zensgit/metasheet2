@@ -27,6 +27,31 @@ const { createK3WiseWebApiAdapter } = require('../lib/adapters/k3-wise-webapi-ad
 
 const PROFILE_ID = 'material-k3wise-customer-profile-v1'
 
+// Approved-B4 store stub. list() is the only member the write source consumes; a test can
+// hand it 0, 1 or 2 approved rows to drive absent / bound / ambiguous.
+function b4Store(rows) {
+  return {
+    async list() { return rows },
+  }
+}
+function b4Of(rows, overrides = {}) {
+  return {
+    readSourceConfigs: b4Store(rows),
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    sourceSystemId: 'source_1',
+    ...overrides,
+  }
+}
+const APPROVED_B4_ROW = Object.freeze({
+  id: 'rsc_b4_1',
+  object: 'material',
+  status: 'approved',
+  version: 3,
+  contentKey: 'b4-content-key-aaaaaaaaaaaaaaaa',
+  actionProfileVersion: 'k3wise.material_list.v1',
+})
+
 function memoryStore() {
   const map = new Map()
   return {
@@ -145,6 +170,7 @@ function c6Inputs({ rows, fetchPair, targetOverrides, tokenStore, maxRows }) {
   const writeSource = createK3WiseC6WriteSource({
     system: targetSystem,
     createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([APPROVED_B4_ROW]),
   })
   return {
     pipeline,
@@ -351,6 +377,7 @@ test('fail-closed capability: profile deselected between derive and plan -> unsa
       dataSourceWrites: createK3WiseC6WriteSource({
         system: disarmed,
         createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+        b4: b4Of([APPROVED_B4_ROW]),
       }),
       targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
       tokenStore,
@@ -449,6 +476,7 @@ test('REVIEW P2: an unchanged reference-shaped field converges to skip (unwrap p
     dataSourceWrites: createK3WiseC6WriteSource({
       system: targetSystem,
       createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+      b4: b4Of([APPROVED_B4_ROW]),
     }),
     targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
     tokenStore,
@@ -486,4 +514,66 @@ test('REVIEW P2: a Save failure WITH a K3 Code field still lands as the register
   })
   assert.deepEqual(apply.rowErrors.map((e) => e.errorCode), ['K3_WISE_SAVE_FAILED'],
     'the closed token must be unconditional — K3 code strings are neither SAFE-registered nor values-free')
+})
+
+
+test('B4 GATE: zero approved bindings -> refused before any row (absent is fail-closed)', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-B4', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([]),
+  })
+  await assert.rejects(
+    dryRunExternalWrite(input),
+    (error) => /approved B4 read binding/.test(String(error && error.message)),
+  )
+  assert.equal(fetchPair.calls.length, 0, 'B4 refusal precedes ALL network activity')
+})
+
+test('B4 GATE: two approved bindings -> refused (ambiguous is fail-closed, never a silent pick)', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-B4', name: 'N' }], fetchPair, tokenStore })
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([APPROVED_B4_ROW, { ...APPROVED_B4_ROW, id: 'rsc_b4_2', version: 4, contentKey: 'b4-content-key-bbbbbbbbbbbbbbbb' }]),
+  })
+  await assert.rejects(
+    dryRunExternalWrite(input),
+    (error) => /approved B4 read binding/.test(String(error && error.message)),
+  )
+})
+
+test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry-run revision', async () => {
+  // The identity triple rides the capability state, which buildRevision hashes — so swapping
+  // the approved binding between dry-run and apply is a 409, not a silent substitution. Proven
+  // at the revision level: same rows, same pipeline, different binding -> different revision.
+  const rows = [{ code: 'M-B4-REV', name: 'Rev probe', spec: 'S' }]
+  async function revisionWith(binding) {
+    const tokenStore = memoryStore()
+    const fetchPair = mockK3()
+    const input = c6Inputs({ rows, fetchPair, tokenStore })
+    input.dataSourceWrites = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+      b4: b4Of([binding]),
+    })
+    const out = await dryRunExternalWrite(input)
+    assert.equal(out.status, 'ready')
+    return out.evidence ? out.evidence.dryRunRevision : out.revision
+  }
+  const base = await revisionWith(APPROVED_B4_ROW)
+  assert.ok(base, 'base revision must be observable')
+  // PER-FIELD variation: a single identity field changing must change the revision. Varying
+  // two at once would let a mutation that de-binds ONE field hide behind the other.
+  const versionOnly = await revisionWith({ ...APPROVED_B4_ROW, version: 9 })
+  const contentKeyOnly = await revisionWith({ ...APPROVED_B4_ROW, contentKey: 'b4-content-key-cccccccccccccccc' })
+  const profileOnly = await revisionWith({ ...APPROVED_B4_ROW, actionProfileVersion: 'k3wise.material_list.v2' })
+  assert.notEqual(base, versionOnly, 'approvedConfigVersion alone must move the revision')
+  assert.notEqual(base, contentKeyOnly, 'configContentKey alone must move the revision')
+  assert.notEqual(base, profileOnly, 'actionProfileVersion alone must move the revision')
 })

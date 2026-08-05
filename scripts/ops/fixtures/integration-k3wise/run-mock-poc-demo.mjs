@@ -334,6 +334,22 @@ async function main() {
         dataSourceWrites: createK3WiseC6WriteSource({
           system: chainTarget,
           createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: globalThis.fetch }),
+          // The B4 binding the ops runbook MINTS on the target environment — the demo stub
+          // stands in for the store row the real mint produces (owner review 20260805:
+          // C6 must CONSUME the approved binding, not merely coexist with it).
+          b4: {
+            readSourceConfigs: {
+              async list() {
+                return [{
+                  id: 'rsc_demo_b4', object: 'material', status: 'approved', version: 1,
+                  contentKey: 'demo-b4-content-key', actionProfileVersion: 'k3wise.material_list.v1',
+                }]
+              },
+            },
+            tenantId: 'tenant_demo',
+            workspaceId: null,
+            sourceSystemId: 'source_demo',
+          },
         }),
         targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
         tokenStore,

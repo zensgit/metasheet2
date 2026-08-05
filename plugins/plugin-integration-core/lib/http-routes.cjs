@@ -1048,7 +1048,7 @@ function normalizeC6WriteApplyBody(body = {}) {
 // write-source (zero external write); any other (default) target uses the host SQL write
 // facade unchanged. Used by BOTH the dry-run and apply handlers with identical inputs so the
 // apply recompute reproduces the same dry-run revision (the revision fence).
-function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal }) {
+function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs }) {
   // K3WriteDecision (owner, 20260805): the K3 connector rides the same C6 dry-run->apply
   // lifecycle via its own profile + adapter-backed write source. `enforcedMaxRows` pins the
   // plan-level source read to the profile's frozen cap — a caller-supplied maxRows is
@@ -1064,6 +1064,15 @@ function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegi
       dataSourceWrites: createK3WiseC6WriteSource({
         system: targetSystem,
         createAdapter: (system) => adapterRegistry.createAdapter(system, { role: 'target', principal: ownerPrincipal }),
+        // B4 consumption scope (owner review 20260805): the approved read binding is resolved
+        // for the PIPELINE's source system — the read contract this write lifecycle is
+        // certified against. Server-side wiring only, never request-sourced.
+        b4: {
+          readSourceConfigs,
+          tenantId: pipeline.tenantId,
+          workspaceId: pipeline.workspaceId ?? null,
+          sourceSystemId: pipeline.sourceSystemId,
+        },
       }),
       targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
       enforcedMaxRows: K3_WISE_C6_MAX_APPLY_ROWS,
@@ -3368,7 +3377,7 @@ function createHandlers(services, options = {}) {
         role: 'source',
         principal: ownerPrincipal,
       })
-      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal })
+      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs })
       return sendOk(res, await dryRunExternalWrite({
         pipeline,
         sourceSystem,
@@ -3466,7 +3475,7 @@ function createHandlers(services, options = {}) {
       try {
         // SAME resolution as dry-run (server-side, by target kind) so the apply recompute
         // reproduces the dry-run revision; the multitable write-source writes own sheets only.
-        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal })
+        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs })
         const result = await applyExternalWrite({
           pipeline,
           sourceSystem,

@@ -320,40 +320,127 @@ function createHarness() {
     })(),
   })
 
-  return { db, feedbackUpdates, k3FetchMock, pipeline, runner }
+  // feedbackWriter is exposed alongside the runner so the OWNER REVIEW P1 (20260805) flip below
+  // can drive it directly — see the [FLIP 20260625->] comment in main().
+  return { db, feedbackUpdates, k3FetchMock, pipeline, runner, feedbackWriter }
 }
 
 async function main() {
   const harness = createHarness()
-  const result = await harness.runner.runPipeline({
+
+  // --- OWNER REVIEW P1 (20260805) DELIBERATE FLIP -----------------------------------------
+  // pipeline-runner.cjs's loadPipelineContext now fails closed on ANY non-dryRun runPipeline
+  // against a K3 WISE target (details.code === 'K3_WISE_PIPELINE_RUN_DISABLED', thrown before
+  // any read/adapter-creation/write) — the C6 dry-run -> approval-token -> apply lifecycle is
+  // the ONLY sanctioned K3 write entry point now. This suite's old live-run body (below,
+  // through the original erpFeedback deepEqual) drove that now-refused path and cannot be
+  // produced through runner.runPipeline() for a K3 target anymore. Disposition:
+  //   1. Prove the refusal itself, with zero side effects — the new canonical behavior.
+  //   2. [FLIP 20260625->] dead-letter generation and ERP-feedback rows: directly construct
+  //      the state those two mechanisms consume (mirrors pipeline-runner.test.cjs's
+  //      createDeadLetterStore direct-insert pattern), shaped exactly as the real K3 adapter
+  //      emits it — see the comments at each block below.
+  //   3. NOT reconstructed here: the aggregate run-record semantics (status='partial',
+  //      rowsRead/rowsCleaned/rowsWritten/rowsFailed, run.details.erpFeedback) and the
+  //      byte-exact Material/Save request body. Both are generic, non-K3-specific mechanisms
+  //      that are already exercised end-to-end elsewhere with real assertions: run-record
+  //      aggregation via a mock-target in pipeline-runner.test.cjs (its own 'partial' status +
+  //      erpFeedback deepEqual checks), and the K3 Save body / values-free projection via
+  //      direct adapter.upsert() calls in k3-wise-c6-write-profile.test.cjs and
+  //      k3-wise-apply-row-limit.test.cjs. Re-deriving either here would just re-test those
+  //      other harnesses, not additional product code, so they are not duplicated in this file.
+  const liveRefusal = await harness.runner.runPipeline({
     tenantId: 'tenant_1',
     workspaceId: null,
     pipelineId: 'pipe_plm_k3',
     mode: 'incremental',
     triggeredBy: 'manual',
-  })
+  }).catch((error) => error)
+  assert.ok(liveRefusal instanceof Error, 'K3-target live run must refuse')
+  assert.equal(liveRefusal.name, 'PipelineRunnerError', 'refusal is a PipelineRunnerError')
+  assert.equal(liveRefusal.details && liveRefusal.details.code, 'K3_WISE_PIPELINE_RUN_DISABLED')
+  assert.equal(harness.k3FetchMock.calls.length, 0, 'guard fires before any adapter is created — zero K3 HTTP calls, save/submit/audit included')
+  assert.equal(harness.db.tables.get('integration_runs').length, 0, 'guard fires in loadPipelineContext, before runLogger.startRun — no run record is written')
+  assert.equal(await harness.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_plm_k3' }), null, 'a refused run never touches the watermark')
 
-  assert.equal(result.run.status, 'partial')
-  assert.equal(result.metrics.rowsRead, 2)
-  assert.equal(result.metrics.rowsCleaned, 2)
-  assert.equal(result.metrics.rowsWritten, 1)
-  assert.equal(result.metrics.rowsFailed, 1)
-  assert.equal(harness.k3FetchMock.calls.filter((call) => call.pathname === '/K3API/Material/Save').length, 2)
-  const firstSaveBody = harness.k3FetchMock.calls.find((call) => call.pathname === '/K3API/Material/Save').body
-  assert.deepEqual(firstSaveBody, {
-    Data: {
-      FNumber: 'GOOD-01',
-      FName: 'Good material',
-    },
+  // [FLIP 20260625->] dead-letter generation. ORIGINAL SEMANTICS: a live runPipeline hit K3
+  // Material/Save with the BAD-02 record and got back { success: false, code:
+  // 'K3_MATERIAL_INVALID', message: 'material code rejected' } from createK3FetchMock above;
+  // pipeline-runner's writeDeadLetter() then persisted that failure. NEW CARRIER: that live
+  // path is refused now, so insert the identically-shaped dead letter directly through the
+  // same store class the runner itself uses (createDeadLetterStore — same technique as
+  // pipeline-runner.test.cjs's k3Letters.createDeadLetter() direct-insert), and prove it
+  // round-trips through the mock db correctly.
+  const directDeadLetters = createDeadLetterStore({
+    db: harness.db,
+    idGenerator: () => `dl_direct_${harness.db.tables.get('integration_dead_letters').length + 1}`,
   })
-  assert.equal(harness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Submit'), false)
-  assert.equal(harness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Audit'), false)
-
+  await directDeadLetters.createDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    runId: 'run_e2e_direct',
+    pipelineId: 'pipe_plm_k3',
+    sourcePayload: { id: 'plm_bad', itemCode: ' bad-02 ', itemName: ' Bad material ', revision: 'A' },
+    transformedPayload: { FNumber: 'BAD-02', FName: 'Bad material' },
+    errorCode: 'K3_MATERIAL_INVALID',
+    errorMessage: 'material code rejected',
+  })
   const deadLetters = harness.db.tables.get('integration_dead_letters')
   assert.equal(deadLetters.length, 1)
   assert.equal(deadLetters[0].error_code, 'K3_MATERIAL_INVALID')
   assert.equal(deadLetters[0].transformed_payload.FNumber, 'BAD-02')
-  assert.equal(await harness.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_plm_k3' }), null, 'partial run does not advance watermark')
+
+  // [FLIP 20260625->] ERP feedback rows. ORIGINAL SEMANTICS: writeErpFeedback() ran after a
+  // live write batch of one synced + one failed record, driven by the real K3 adapter's
+  // upsert() result. NEW CARRIER: feed harness.feedbackWriter.writeBack() directly with a
+  // writeResult shaped exactly as that adapter emits it — verified against
+  // k3-wise-webapi-adapter.cjs's upsert(): the success branch pushes
+  // { key, status:'written', externalId, billNo, responseCode, responseMessage } and the
+  // failure branch pushes { key, code, message } (see results.push()/errors.push() there) —
+  // and cleanRecords shaped as pipeline-runner's processRecord() builds them
+  // ({ sourceRecord, targetRecord: { ...transformed, _integration_idempotency_key } }).
+  // This proves the synced/failed field-mapping mechanism the pipeline depends on is intact,
+  // independent of the now-refused live wiring.
+  const directCleanRecords = [
+    {
+      sourceRecord: { id: 'plm_good', itemCode: ' good-01 ', itemName: ' Good material ', revision: 'A' },
+      targetRecord: { FNumber: 'GOOD-01', FName: 'Good material', _integration_idempotency_key: 'GOOD-01|A' },
+    },
+    {
+      sourceRecord: { id: 'plm_bad', itemCode: ' bad-02 ', itemName: ' Bad material ', revision: 'A' },
+      targetRecord: { FNumber: 'BAD-02', FName: 'Bad material', _integration_idempotency_key: 'BAD-02|A' },
+    },
+  ]
+  const directWriteResult = {
+    results: [{
+      key: 'GOOD-01|A',
+      status: 'written',
+      externalId: 'k3_GOOD-01',
+      billNo: 'BILL-GOOD-01',
+      responseCode: 'OK',
+      responseMessage: 'saved',
+    }],
+    errors: [{
+      key: 'BAD-02|A',
+      code: 'K3_MATERIAL_INVALID',
+      message: 'material code rejected',
+    }],
+  }
+  const directFeedback = await harness.feedbackWriter.writeBack({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    runId: 'run_e2e_direct',
+    pipeline: harness.pipeline,
+    cleanRecords: directCleanRecords,
+    writeResult: directWriteResult,
+  })
+  assert.equal(directFeedback.ok, true)
+  assert.equal(directFeedback.skipped, false)
+  assert.equal(directFeedback.projectId, 'project_1')
+  assert.equal(directFeedback.objectId, 'standard_materials')
+  assert.equal(directFeedback.keyField, '_integration_idempotency_key')
+  assert.equal(directFeedback.items.length, 2)
+  assert.equal(directFeedback.result.written, 2)
 
   assert.equal(harness.feedbackUpdates.length, 1)
   assert.equal(harness.feedbackUpdates[0].projectId, 'project_1')
@@ -370,19 +457,9 @@ async function main() {
   assert.equal(failed.fields.erpResponseCode, 'K3_MATERIAL_INVALID')
   assert.equal(failed.fields.erpResponseMessage, 'material code rejected')
 
-  assert.deepEqual(result.run.details.erpFeedback, [
-    {
-      ok: true,
-      skipped: false,
-      reason: null,
-      projectId: 'project_1',
-      objectId: 'standard_materials',
-      keyField: '_integration_idempotency_key',
-      items: 2,
-      written: 2,
-    },
-  ])
-
+  // --- dry-run preview: UNCHANGED. The guard in loadPipelineContext explicitly allows
+  // dryRun !== true to pass through — previews are read-only and the C6 planner needs
+  // nothing from here (see the OWNER REVIEW P1 comment in pipeline-runner.cjs). ---------
   const dryHarness = createHarness()
   const dryRun = await dryHarness.runner.runPipeline({
     tenantId: 'tenant_1',

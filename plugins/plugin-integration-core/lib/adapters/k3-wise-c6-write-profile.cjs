@@ -129,11 +129,37 @@ function deriveK3WiseC6PlannerTargetConfig({ system, object, fieldMappings = [] 
 
 // --- 2. the dataSourceWrites facade ---------------------------------------------------------
 
-function createK3WiseC6WriteSource({ system, createAdapter } = {}) {
+function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
   if (typeof createAdapter !== 'function') {
     throw new AdapterValidationError('K3 C6 write source requires a createAdapter function', {
       field: 'createAdapter',
     })
+  }
+  // OWNER REVIEW (20260805): the C6 K3 lifecycle must CONSUME the approved B4 read binding —
+  // not merely coexist with it. `b4` carries the read-source config store plus the scope the
+  // binding is resolved in. TRUSTED server-side planner wiring only (same trust boundary as
+  // targetWriteProfile itself).
+  if (!b4 || typeof b4 !== 'object'
+    || !b4.readSourceConfigs || typeof b4.readSourceConfigs.list !== 'function'
+    || typeof b4.tenantId !== 'string' || b4.tenantId.length === 0
+    || typeof b4.sourceSystemId !== 'string' || b4.sourceSystemId.length === 0) {
+    throw new AdapterValidationError('K3 C6 write source requires the B4 binding scope (readSourceConfigs store + tenantId + sourceSystemId)', {
+      field: 'b4',
+    })
+  }
+
+  // Resolve THE approved B4 binding for (tenant, source system, material). Fail-closed both
+  // ways: zero approved configs means the window's read binding does not exist on this
+  // environment; more than one means the binding is ambiguous and no silent pick is allowed.
+  async function resolveApprovedB4Binding() {
+    const rows = await b4.readSourceConfigs.list({
+      tenantId: b4.tenantId,
+      workspaceId: b4.workspaceId ?? null,
+      systemId: b4.sourceSystemId,
+      status: 'approved',
+    })
+    const material = (Array.isArray(rows) ? rows : []).filter((row) => row && row.object === 'material')
+    return material
   }
   let adapter = null
   function targetAdapter() {
@@ -200,12 +226,23 @@ function createK3WiseC6WriteSource({ system, createAdapter } = {}) {
     // planning and fails the dry-run with its own transport codes — fail-closed either way.
     async test() {
       const profile = CUSTOMER_PROFILE
+      const bindings = await resolveApprovedB4Binding()
+      const binding = bindings.length === 1 ? bindings[0] : null
       return {
         success: true,
         capabilityState: {
           customerProfileSelected: selectedProfileId(system) === CUSTOMER_PROFILE_ID,
           saveOnlyLocked: profile.lifecycle === 'save-only',
           applyRowCapped: Number.isInteger(profile.maxApplyRows) && profile.maxApplyRows > 0,
+          // B4 CONSUMPTION: exactly one approved binding, and its identity triple rides the
+          // capability state — which buildRevision hashes, so the dry-run token is CONTENT-
+          // BOUND to the exact approved binding the human saw. Re-approving a changed config
+          // between dry-run and apply is a 409, not a silent swap.
+          b4BindingApproved: bindings.length === 1,
+          b4BindingCount: bindings.length,
+          b4ActionProfileVersion: binding ? String(binding.actionProfileVersion || '') : '',
+          b4ApprovedConfigVersion: binding ? String(binding.version ?? '') : '',
+          b4ConfigContentKey: binding ? String(binding.contentKey || '') : '',
         },
       }
     },
@@ -262,7 +299,12 @@ const K3_WISE_C6_WRITE_PROFILE = {
       !state || typeof state !== 'object' ||
       typeof state.customerProfileSelected !== 'boolean' ||
       typeof state.saveOnlyLocked !== 'boolean' ||
-      typeof state.applyRowCapped !== 'boolean'
+      typeof state.applyRowCapped !== 'boolean' ||
+      typeof state.b4BindingApproved !== 'boolean' ||
+      !Number.isInteger(state.b4BindingCount) ||
+      typeof state.b4ActionProfileVersion !== 'string' ||
+      typeof state.b4ApprovedConfigVersion !== 'string' ||
+      typeof state.b4ConfigContentKey !== 'string'
     ) {
       throw new AdapterValidationError('K3 C6 write target capability state is unavailable', {
         field: 'capabilityState',
@@ -273,15 +315,28 @@ const K3_WISE_C6_WRITE_PROFILE = {
       customerProfileSelected: state.customerProfileSelected,
       saveOnlyLocked: state.saveOnlyLocked,
       applyRowCapped: state.applyRowCapped,
+      b4BindingApproved: state.b4BindingApproved,
+      b4BindingCount: state.b4BindingCount,
+      b4ActionProfileVersion: state.b4ActionProfileVersion,
+      b4ApprovedConfigVersion: state.b4ApprovedConfigVersion,
+      b4ConfigContentKey: state.b4ConfigContentKey,
     }
   },
   assertSafeCapabilityState(state) {
-    // Real safety property: the named customer profile is what ARMS the adapter's save-only
-    // lifecycle lock and carries the frozen row cap. Any of the three false -> the write
-    // would run without the posture this lifecycle promises -> fail closed.
+    // Real safety property: the named customer profile ARMS the save-only lock and the frozen
+    // row cap; the APPROVED B4 binding is the ratified read contract this write lifecycle is
+    // certified against. Any of the four false -> fail closed. b4BindingCount surfaces the
+    // absent-vs-ambiguous distinction in the same closed vocabulary.
     if (state.customerProfileSelected !== true || state.saveOnlyLocked !== true || state.applyRowCapped !== true) {
       throw new AdapterValidationError('K3 C6 write target is not customer-profile locked', {
         field: 'capabilityState',
+      })
+    }
+    if (state.b4BindingApproved !== true) {
+      throw new AdapterValidationError('K3 C6 write requires exactly one approved B4 read binding', {
+        field: 'capabilityState',
+        code: 'C6_WRITE_B4_BINDING_REQUIRED',
+        bindingCount: state.b4BindingCount,
       })
     }
   },

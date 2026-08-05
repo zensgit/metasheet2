@@ -150,3 +150,19 @@ test('RATIFIED FLIP: a profile-less material object cannot write AT ALL — zero
   )
   assert.deepEqual(fetchPair.calls, [], 'refusal precedes login — K3 never sees the attempt')
 })
+
+
+test('OWNER REVIEW P1: an overlay cannot re-point savePath at the Submit endpoint', async () => {
+  // Before the pin, config {profile, savePath: '/K3API/Material/Submit'} produced an
+  // effective object whose "Save" call POSTed to Submit while lifecycle still said
+  // save-only — save-only subverted by endpoint substitution. The Save ENDPOINT is now
+  // pinned from the profile literal post-merge, like the lifecycle marker.
+  const fetchPair = countingFetch()
+  const adapter = adapterWith({ profile: PROFILE_ID, savePath: '/K3API/Material/Submit' }, fetchPair)
+  const result = await adapter.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })
+  assert.equal(result.written, 1)
+  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Material/Save')).length, 1,
+    'the write must land on the PROFILE\'S Save endpoint')
+  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Submit')).length, 0,
+    'the overlay-substituted endpoint must never be reached')
+})

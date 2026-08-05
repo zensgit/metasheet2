@@ -427,6 +427,11 @@ function normalizeObjects(config) {
     if (saveOnlyProfile) {
       normalized[name].lifecycle = 'save-only'
       normalized[name][K3_PROFILE_ARMED] = true
+      // OWNER REVIEW P1 (20260805): the overlay could re-point savePath at the Submit/Audit
+      // endpoint while the lifecycle marker still claimed save-only — a save-only subversion
+      // by endpoint substitution. The Save ENDPOINT is pinned from the profile literal AFTER
+      // the merge, exactly like the lifecycle marker: non-overridable by construction.
+      normalized[name].savePath = base.savePath
       delete normalized[name].submitPath
       delete normalized[name].auditPath
       // HARD LOCK (K3WriteDecision): the profile's apply row cap is pinned AFTER the merge,
