@@ -49,6 +49,13 @@ class K3WiseWebApiAdapterError extends Error {
   }
 }
 
+// RATIFIED (owner, 20260805): K3 material upsert REQUIRES the named customer profile —
+// one guard closing every unarmed write entry at once (legacy stored configs with no
+// profile, replay, any future route). A Symbol marker set only by the post-merge profile
+// pin: a JSON-carried config can never forge a Symbol key, so a smuggled
+// `profileArmed: true` in operator config is inert by construction.
+const K3_PROFILE_ARMED = Symbol('k3CustomerProfileArmed')
+
 const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
 const DEFAULT_MATERIAL_LIST_MAX_LIMIT = 10
 // Bounded LIST page selection (#3703, owner-approved 2026-07-06): mirrors READ_SMOKE_LIST_MAX_PAGE_INDEX
@@ -419,6 +426,7 @@ function normalizeObjects(config) {
     // `lifecycle === 'save-only'` to force autoSubmit/autoAudit off regardless of request/config.
     if (saveOnlyProfile) {
       normalized[name].lifecycle = 'save-only'
+      normalized[name][K3_PROFILE_ARMED] = true
       delete normalized[name].submitPath
       delete normalized[name].auditPath
       // HARD LOCK (K3WriteDecision): the profile's apply row cap is pinned AFTER the merge,
@@ -1991,6 +1999,17 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       throw new AdapterValidationError(`K3 WISE object is not configured: ${request.object}`, { object: request.object })
     }
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'upsert')
+
+    // RATIFIED GUARD (owner, 20260805): a material write with NO named profile means the
+    // save-only lifecycle lock and the frozen row cap are simply not armed — refuse before
+    // anything else (before login: zero external side effects). Legacy stored configs
+    // provisioned before the profile era hit this the first time they try to write.
+    if (request.object === 'material' && objectConfig[K3_PROFILE_ARMED] !== true) {
+      throw new AdapterValidationError('K3 WISE material upsert requires the named customer profile', {
+        code: 'K3_WISE_MATERIAL_PROFILE_REQUIRED',
+        object: request.object,
+      })
+    }
 
     // HARD LOCK (M1): a save-only profile forces autoSubmit/autoAudit OFF and drops any
     // submit/audit endpoint, regardless of what request or config set. This is the lock the

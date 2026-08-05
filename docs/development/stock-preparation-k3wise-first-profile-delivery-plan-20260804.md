@@ -994,3 +994,28 @@ B.5 称「Submit/Audit 关闭是运行期不变量」——**过强**。真相:
 (ii) **fieldMapDigest 首版不加** —— `contentKeyFor` 只排除 caller version
 (`read-source-config-store.cjs:98-102`),fieldMap 逐字节已在 contentKey;resolver 现场重算比对
 (`gip-approved-binding-resolver.cjs:575-577`);另立字段=同一事实两个记录点。需要时是纯增量字段。
+
+
+### E.5 RATIFY 记录与两守卫落地(2026-08-05)
+
+owner 原文「**同意 + RATIFY**」,批准对象与随附裁项:
+
+1. **B4 绑定物**(`k3wise-material-list-b4-binding-draft-20260805.md` 五项清单)——
+   含 profileId 勘误:actionProfileVersion = `k3wise.material_list.v1`(下划线;连字符形不合
+   `PROFILE_ID_PATTERN`,预设 id 保持连字符,两语法域由合同测试双向钉死)。
+2. **Guard A(存量关死)**:K3 material upsert 一律要求命名 profile ——
+   adapter 内 Symbol 武装标记(JSON config 无法伪造),login 前拒绝
+   (`K3_WISE_MATERIAL_PROFILE_REQUIRED`,零网络副作用)。一个守卫同时关掉:
+   存量无 profile config、replay、任何未来入口的未武装写。
+3. **Guard B(replay 禁用)**:K3 目标死信 replay 在 `replayDeadLetter` 内、`runPipeline` 之前
+   fail-closed(`K3_WISE_REPLAY_DISABLED`)—— 先于任何读、任何 run 记录、任何 adapter 创建;
+   拒绝不消费死信(letter 保持 open)。首版恢复路径 = 重走 dry-run 重新人工批准。
+4. **`fieldMapDigest` 首版不加**(contentKey 已逐字节含 fieldMap;需要时纯增量)。
+
+**测试语义变换记录**(deliberate,非删除):
+- `k3-wise-apply-row-limit` 的"profile-less 无 cap"边界测试翻转为守卫拒绝断言(零网络);
+- `k3-wise-adapters` 中对象无关的写机制测试(tri-state/Submit-after-Save)迁至 BOM 对象
+  (机制逐条保留),material 专属写测试武装 profile;
+- `pipeline-runner` 新增 K3 replay 拒绝用例,以既有 mock-target replay 成功为**正控**。
+
+双守卫 mutation 双向承重(武装移除⇒正控红;判定短路⇒拒绝红)。

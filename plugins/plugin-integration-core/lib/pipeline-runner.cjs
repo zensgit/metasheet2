@@ -843,6 +843,30 @@ function createPipelineRunner(deps = {}) {
         reason: 'INVALID_PAYLOAD_TYPE',
       })
     }
+    // RATIFIED (owner, 20260805): dead-letter replay is DISABLED for K3 WISE targets.
+    // After the C6 content-bound approval landed, replay was the only K3 write entry that
+    // carried no approval token, and with no row-level idempotency ledger a replay is a
+    // re-write. The first-version recovery for a failed K3 row is to re-run the chain from
+    // dry-run with fresh human approval. Fail-closed HERE (before any read, any run record,
+    // any K3 session) rather than at the route, so a future second route cannot bypass it.
+    {
+      const replayPipeline = await pipelineRegistry.getPipeline({
+        tenantId: deadLetter.tenantId,
+        workspaceId: deadLetter.workspaceId,
+        id: deadLetter.pipelineId,
+      })
+      const replayTarget = replayPipeline && await loadExternalSystemForAdapter({
+        tenantId: deadLetter.tenantId,
+        workspaceId: deadLetter.workspaceId,
+        id: replayPipeline.targetSystemId,
+      })
+      if (replayTarget && replayTarget.kind === 'erp:k3-wise-webapi') {
+        throw new PipelineRunnerError('dead-letter replay is disabled for K3 WISE targets', {
+          code: 'K3_WISE_REPLAY_DISABLED',
+          id: deadLetter.id,
+        })
+      }
+    }
     const result = await runPipeline({
       tenantId: deadLetter.tenantId,
       workspaceId: deadLetter.workspaceId,
