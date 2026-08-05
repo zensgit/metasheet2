@@ -587,6 +587,38 @@ test('B4 GATE: two approved bindings -> refused (ambiguous is fail-closed, never
   )
 })
 
+test('REVIEW P3-2: a FULL page of approved configs is a refusal, not a silent pass', async () => {
+  // `list()` gives no ordering guarantee, so a full page may be truncated — and a truncated set
+  // can hide the second approved binding that the ambiguity check above exists to catch. A full
+  // page is indistinguishable from "there might be more", so it fails closed.
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const input = c6Inputs({ rows: [{ code: 'M-B4', name: 'N' }], fetchPair, tokenStore })
+  const fullPage = Array.from({ length: 500 }, (_, i) => b4Row({ id: `rsc_pad_${i}`, object: 'material-bom' }))
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([APPROVED_B4_ROW, ...fullPage.slice(0, 499)]),
+  })
+  await assert.rejects(
+    dryRunExternalWrite(input),
+    (error) => /uniqueness|B4_BINDING_PAGE_EXHAUSTED/.test(String((error && error.message) || ''))
+      || (error && error.details && error.details.code === 'K3_C6_B4_BINDING_PAGE_EXHAUSTED'),
+    'a page filled to the limit must refuse rather than resolve from a possibly-truncated set',
+  )
+
+  // POSITIVE CONTROL: one under the limit still resolves normally — without this, a guard that
+  // refused every page would satisfy the assertion above.
+  const okInput = c6Inputs({ rows: [{ code: 'M-B4', name: 'N' }], fetchPair: mockK3(), tokenStore: memoryStore() })
+  okInput.dataSourceWrites = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+    b4: b4Of([APPROVED_B4_ROW, ...fullPage.slice(0, 498)]),
+  })
+  const plan = await dryRunExternalWrite(okInput)
+  assert.ok(plan, 'a page under the limit must still produce a plan')
+})
+
 test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry-run revision', async () => {
   // The identity triple rides the capability state, which buildRevision hashes — so swapping
   // the approved binding between dry-run and apply is a 409, not a silent substitution. Proven

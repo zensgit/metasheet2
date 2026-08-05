@@ -121,7 +121,21 @@ const K3_PROFILE_OBJECT_CONFIG_CONSUMERS = Object.freeze([
 // the escape was re-armed for the next file that did not happen to start with `k3-`. The filter
 // is gone; the sweep is now purely content-based (does this file read objectConfig at all?), and
 // the three non-K3 adapters it consequently surfaces are declared here rather than hidden by a
-// naming coincidence. A new reader under ANY name is now a RED until it is triaged.
+// naming coincidence.
+//
+// RETRACTED (round 8). This comment used to end: "A new reader under ANY name is now a RED until
+// it is triaged." That is FALSE and is withdrawn here, in the adapter, where it was asserted —
+// round 7 retracted it only in the commit message and in the test file's prose, so at that SHA
+// two files in this package asserted opposite things and the false one was the live invariant.
+// Third round of claim-vs-code drift on this one guard; a retraction that is not in the tree is
+// not a retraction.
+//
+// What is actually true: DISCOVERY is now the bare identifier, which cannot be narrower than a
+// property about that identifier. But discovery is only half of it — the FIELD extraction is a
+// regex, and a read it cannot resolve to a literal name (destructuring, computed key, or an
+// ALIAS hop such as `const c = objectConfig; c.x`) smuggles an untriaged field through a file
+// that is itself correctly discovered. Those forms are asserted RED individually in the sweep
+// contract; they are enumerated, so treat the list as a bound, not a closure.
 const K3_NON_PROFILE_OBJECT_CONFIG_MODULES = Object.freeze([
   // Non-K3 adapters with their own objectConfig vocabularies and their own targets. They share
   // the identifier `objectConfig`, not this profile's field semantics, so K3 field triage does
@@ -235,7 +249,27 @@ const K3_WRITE_ENDPOINT_WORDS = Object.freeze([
   'submit', 'audit', 'unaudit', 'delete', 'save', 'batchsave', 'groupsave',
   'draft', 'push', 'disable', 'allocate', 'setstatus',
 ])
-const K3_WRITE_ENDPOINT_SUFFIX = new RegExp(`/(${K3_WRITE_ENDPOINT_WORDS.join('|')})$`, 'i')
+const K3_WRITE_ENDPOINT_WORD_SET = new Set(K3_WRITE_ENDPOINT_WORDS)
+
+// AXIS 8 (review round 8): the previous matcher was `/(word)$/` — the word had to be the ENTIRE
+// FINAL segment. Everything below therefore reached the wire on a read, with `submit`/`save`
+// already in the list: the anchor was the defect, not the vocabulary.
+//   /K3API/Material/Submit.aspx      (extension)
+//   /K3API/Material/Save.ashx
+//   /K3API/Material/Submit/x         (verb no longer last)
+//   /K3API/Material/Submit/GetDetail (verb carried by baseUrl, then a read path appended)
+// Now EVERY segment is tested, on its pre-first-dot portion, so an extension, a trailing
+// segment, or a verb sitting in baseUrl's path all match. `buildEndpointUrl` merges baseUrl's
+// path into the produced pathname, so checking every segment covers baseUrl without a second
+// code path — the thing this line has repeatedly got wrong is having two.
+//
+// This widens the MATCH SHAPE. It does not close VOCABULARY: an unlisted verb still passes, and
+// only a positive readPath catalogue (deferred by the lock) would change that.
+function pathnameTargetsWriteEndpoint(wirePathname) {
+  return wirePathname
+    .split('/')
+    .some((segment) => K3_WRITE_ENDPOINT_WORD_SET.has(segment.split('.')[0].toLowerCase()))
+}
 
 // AXIS 6 (review round 6, CONFIRMED): `/K3API/Material/Submit/.` cleared BOTH guards and still
 // POSTed to `/K3API/Material/Submit/`. The allowlist admits it (a bare `.` segment is not `..`,
@@ -315,7 +349,7 @@ function assertSafeK3ReadEndpoint(value, field) {
       field,
     })
   }
-  if (K3_WRITE_ENDPOINT_SUFFIX.test(toWireEndpointPathname(raw))) {
+  if (pathnameTargetsWriteEndpoint(toWireEndpointPathname(raw))) {
     throw new AdapterValidationError('a K3 read path may not target a lifecycle write endpoint', {
       code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
       field,
@@ -342,7 +376,7 @@ function assertWireEndpointIntent(wirePathname, intent) {
       field: 'intent',
     })
   }
-  if (intent === K3_READ_INTENT && K3_WRITE_ENDPOINT_SUFFIX.test(wirePathname)) {
+  if (intent === K3_READ_INTENT && pathnameTargetsWriteEndpoint(wirePathname)) {
     throw new AdapterValidationError('a K3 read request may not reach a lifecycle write endpoint', {
       code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
       field: 'path',

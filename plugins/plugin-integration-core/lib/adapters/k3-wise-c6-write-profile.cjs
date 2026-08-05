@@ -225,6 +225,9 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
   // source, its target, or both) while an unrelated system's binding is invisible — which also
   // resolves the two-K3-systems hard-block the reviewer found, since the unrelated one no
   // longer counts toward ambiguity.
+  // A page this full cannot be proven complete; see the refusal below.
+  const B4_BINDING_PAGE_LIMIT = 500
+
   async function resolveApprovedB4Binding() {
     const rows = await b4.readSourceConfigs.list({
       tenantId: b4.tenantId,
@@ -232,9 +235,20 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       status: 'approved',
       // list() defaults to a page (review P3): a bounded page could hide a second approved
       // binding and defeat the ambiguity check — ask for more than the gate can ever accept.
-      limit: 500,
+      limit: B4_BINDING_PAGE_LIMIT,
     })
-    return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const page = Array.isArray(rows) ? rows : []
+    // REVIEW P3-2 (round 8): `list()` gives no ordering guarantee, so a FULL page means the set
+    // may be truncated — and a truncated set can hide the second approved binding that the
+    // ambiguity check exists to catch, turning a fail-closed refusal into a silent pass. A full
+    // page is therefore itself a refusal: it is indistinguishable from "there might be more".
+    if (page.length >= B4_BINDING_PAGE_LIMIT) {
+      throw new AdapterValidationError(
+        'too many approved read-source configs to establish B4 binding uniqueness',
+        { code: 'K3_C6_B4_BINDING_PAGE_EXHAUSTED', field: 'b4.readSourceConfigs' },
+      )
+    }
+    return page.filter((row) => {
       if (!row || row.object !== 'material') return false
       // The binding must belong to a system THIS pipeline actually uses.
       const boundSystemId = row.config && typeof row.config === 'object' ? row.config.systemId : undefined

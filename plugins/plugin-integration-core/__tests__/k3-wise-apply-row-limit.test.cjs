@@ -328,9 +328,31 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
       `${rel} cannot be both a consumer and out of scope — that would dodge the field triage`)
   }
 
+  // Prose has tripped these CODE-SHAPE assertions twice now (a sentence ending "...the
+  // objectConfig." matched a property read; a comment showing `const c = objectConfig; c.x` as an
+  // EXAMPLE matched the alias check). Discovery above deliberately stays comment-inclusive — it
+  // must never under-match — but the shape assertions below are about CODE, so they read a
+  // comment-stripped copy. The control at the end proves the stripper did not eat the code.
+  // ONE detector, used by both the real assertion and its control. An earlier version had the
+  // control re-declare the regex, so neutering the real call site left the control green — the
+  // control was judging a COPY of the logic rather than the logic.
+  function objectConfigAliases(text) {
+    return [...text.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*objectConfig\s*[;\n]/g)]
+      .map((m) => m[1])
+  }
+
+  function stripComments(text) {
+    return text
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .split('\n')
+      .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
+      .join('\n')
+  }
+
   const reads = new Set()
   for (const rel of K3_PROFILE_OBJECT_CONFIG_CONSUMERS) {
-    const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8')
+    const rawSrc = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8')
+    const src = stripComments(rawSrc)
     for (const m of src.matchAll(OBJECT_CONFIG_READ)) reads.add(m[1] || m[2])
     // P2-3: the destructure guard covered only `const`, and nothing covered COMPUTED keys — both
     // are reads the field sweep above cannot resolve to a name, so they smuggle untriaged fields
@@ -342,6 +364,21 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
     // The ONE permitted computed read is the arming Symbol — it is deliberately not a string
     // field (a JSON config cannot forge a Symbol key, which is the guard's whole basis), so the
     // field triage does not apply to it. Every other computed key is RED.
+    // REVIEW P2-3 (round 8) — sweep escape #4, ALIAS ONE HOP. `const cfg = objectConfig` inside a
+    // correctly-DISCOVERED consumer rebinds the object under a name the field regex never looks
+    // for, so `cfg.untriagedField` is an unresolvable read exactly like destructuring and computed
+    // keys. Same rationale, same verdict: RED. Enumerated, so this is a bound, not a closure —
+    // an alias created by any other construct is still invisible, which is why the sweep is
+    // described as a bound in the adapter.
+    // HONEST STATUS: this assertion is VACUOUS TODAY — no declared consumer aliases objectConfig,
+    // so neutering the call site does not turn the suite red. It is a FORWARD guard, and its
+    // mechanism is what carries the evidence: `objectConfigAliases` is proven to flag an alias and
+    // to ignore an ordinary property read by the positive control below, and that control calls
+    // THIS function (an earlier version re-declared the regex, so the control judged a copy of the
+    // logic and stayed green when the real call site was neutered).
+    const aliases = objectConfigAliases(src)
+    assert.deepEqual(aliases, [],
+      `${rel} ALIASES objectConfig (${JSON.stringify(aliases)}) — reads through the alias are invisible to the field sweep`)
     const COMPUTED_KEY_ALLOWED = new Set(['K3_PROFILE_ARMED'])
     const computed = [...src.matchAll(/objectConfig\[\s*([^'"\]\s][^\]]*?)\s*\]/g)]
       .map((m) => m[1])
@@ -350,6 +387,20 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
       `${rel} reads objectConfig with a COMPUTED key (${JSON.stringify(computed)}) — the sweep cannot resolve it to a field name`)
   }
   assert.ok(reads.size >= 30, `the sweep must actually find reads (found ${reads.size}) — a regex matching nothing would pass vacuously`)
+
+  // POSITIVE CONTROLS for the two mechanisms just relied on.
+  // (a) the stripper must remove COMMENTS and keep CODE:
+  assert.equal(stripComments('const a = 1 // const c = objectConfig;\nconst b = objectConfig.x').includes('const c'), false,
+    'stripComments must remove a line comment')
+  assert.equal(stripComments('const b = objectConfig.x').includes('objectConfig.x'), true,
+    'stripComments must NOT remove code')
+  assert.equal(stripComments('const u = "https://x/y" // note\n').includes('https://x/y'), true,
+    'stripComments must not eat a URL inside a string literal')
+  // (b) the alias check must FLAG an alias — otherwise it proves nothing about the real files:
+  assert.deepEqual(objectConfigAliases('const cfg = objectConfig;\nreturn cfg.smuggled'), ['cfg'],
+    'the alias detector must flag `const cfg = objectConfig`')
+  assert.deepEqual(objectConfigAliases('const x = objectConfig.savePath'), [],
+    'and must NOT flag an ordinary property read')
 
   const triaged = new Set([
     ...K3_PROFILE_PINNED_REQUEST_KEYS,
@@ -658,6 +709,25 @@ test('REVIEW P1-F1: the WIRE gate is fail-closed on intent and sees the produced
       `${raw} is a legitimate lifecycle write`)
   }
 
+  // AXIS 8 (review round 8): the matcher was `/(word)$/`, so the verb had to be the ENTIRE final
+  // segment. `submit` and `save` were already in the vocabulary — the ANCHOR was the defect. An
+  // extension, a trailing segment, or a verb carried by baseUrl all walked through. Every segment
+  // is now tested on its pre-first-dot portion.
+  for (const raw of ['/K3API/Material/Submit.aspx', '/K3API/Material/Save.ashx',
+    '/K3API/Material/Submit.do', '/K3API/Material/Submit/x', '/K3API/Material/Submit/GetDetail',
+    '/K3API/Audit/GetList']) {
+    assert.throws(() => assertWireEndpointIntent(toWireEndpointPathname(raw), 'read'),
+      (error) => error.details && error.details.code === 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      `${raw} must be refused — the verb need not be the whole final segment`)
+  }
+  // POSITIVE CONTROL: words that merely START with a verb are NOT write endpoints. Without this,
+  // a matcher that flagged any prefix would satisfy the loop above and break real reads.
+  for (const raw of ['/K3API/Material/SaveQuery', '/K3API/Saved/GetList', '/K3API/v1.0/Material/GetList',
+    '/K3API/Submitted/GetList']) {
+    assert.doesNotThrow(() => assertWireEndpointIntent(toWireEndpointPathname(raw), 'read'),
+      `${raw} is a legitimate read and must pass`)
+  }
+
   // AXIS 7 AT THE WIRE (mutation N1 caught this). The axis-7 vectors above all enter through
   // config normalization, where K3_WISE_ENDPOINT_SUSPICIOUS_SEGMENT refuses them — so deleting
   // the trailing-tail strip from `toWireEndpointPathname` left the suite GREEN. Two doors
@@ -804,6 +874,62 @@ test('REVIEW P1-F1: EVERY request path declares an intent — health included, a
     callSitesMissingIntent('await requestJson(sneakyPath, { method: "POST", body })'),
     ['sneakyPath'],
     'the enumeration must flag an intent-less call site, or it proves nothing about the real file')
+})
+
+test('REVIEW P2-1 (round 8): the wire gate is WIRED INTO requestJson, not merely present', async () => {
+  // Deleting the single `assertWireEndpointIntent(...)` line from `requestJson` left the ENTIRE
+  // chain green — the guard had zero wiring coverage, because every test drove it through
+  // `__internals`. That is the exact defect this file already documents and fixes for healthPath
+  // ("the guard was tested, its WIRING was not"), skipped at the one place it matters most.
+  //
+  // The witness must not be reachable by the config-time check, or it proves nothing about the
+  // wire: the write verb rides on baseUrl, and the configured readPath is the innocuous '/'.
+  const calls = []
+  const impl = async (url) => {
+    calls.push(new URL(url).pathname)
+    return jsonResponse(200, { success: true, sessionId: 's' })
+  }
+  const adapter = createK3WiseWebApiAdapter({
+    system: {
+      kind: 'erp:k3-wise-webapi',
+      config: {
+        baseUrl: 'https://k3.invalid/K3API/Material/Submit',
+        objects: { material: { operations: ['read'], readPath: '/' } },
+      },
+      credentials: { acctId: 'a', username: 'u', password: 'p' },
+    },
+    fetchImpl: impl,
+  })
+  let caught = null
+  try {
+    await adapter.read({ object: 'material', filters: { FNumber: 'MAT-1' } })
+  } catch (error) {
+    caught = error
+  }
+  assert.equal(caught && caught.details && caught.details.code, 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+    `a read whose write verb arrives via baseUrl must be refused AT THE WIRE, got: ${caught && caught.message}`)
+  const writeCalls = calls.filter((p) => /\/(submit|audit|delete|save)\b/i.test(p))
+  assert.deepEqual(writeCalls, [], `nothing may reach a write endpoint: ${JSON.stringify(calls)}`)
+
+  // POSITIVE CONTROL for the counter: the same shape with an innocuous baseUrl DOES drive fetch,
+  // so the empty list above is evidence of absence rather than of a mock that never fired.
+  const okCalls = []
+  const okAdapter = createK3WiseWebApiAdapter({
+    system: {
+      kind: 'erp:k3-wise-webapi',
+      config: {
+        baseUrl: 'https://k3.invalid/K3API',
+        objects: { material: { operations: ['read'], readPath: '/Material/GetList' } },
+      },
+      credentials: { acctId: 'a', username: 'u', password: 'p' },
+    },
+    fetchImpl: async (url) => {
+      okCalls.push(new URL(url).pathname)
+      return jsonResponse(200, { success: true, sessionId: 's', StatusCode: 200, Data: [] })
+    },
+  })
+  await okAdapter.read({ object: 'material', filters: { FNumber: 'MAT-1' } }).catch(() => {})
+  assert.ok(okCalls.length > 0, 'the control adapter must actually reach the network')
 })
 
 test('REVIEW P1-F1/P1-F2 EXCLUSIVITY: the config-time check and the wire gate are independent', () => {
