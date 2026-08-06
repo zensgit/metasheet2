@@ -364,22 +364,40 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     }
 
     const credentials = system.credentials && typeof system.credentials === 'object' ? system.credentials : {}
-    // REVIEW P2-1: the comment here used to claim "the SAME precedence the adapter uses", and it
-    // was FALSE for non-string values. The adapter's `firstDefined` takes the first DEFINED value;
-    // this took the first STRING. So `{acctId: 1001, accountSet: '002'}` digested as '002' while
-    // login authenticated against 账套 **1001** — the digest named a different account set than
-    // the one actually used, which is the very confusion this gate exists to prevent.
-    const acctIdRaw = [credentials.acctId, credentials.accountSet, credentials.accountSetId]
-      .find((v) => v !== undefined && v !== null && v !== '')
-    if (acctIdRaw === undefined) return null
-    // Normalised to text AFTER selection, so 1001 and '1001' are one account set (they are), while
-    // selection order still matches login.
-    const acctId = String(acctIdRaw)
-    if (!acctId) return null
+    const cfg = system.config && typeof system.config === 'object' ? system.config : {}
+    const firstDefined = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== '')
+
+    // REVIEW P1-2 — MIRROR the adapter's own auth-mode resolution, do not assume one mode.
+    //
+    // k3-wise-webapi-adapter.cjs resolves:
+    //   authorityCode = firstDefined(credentials.authorityCode, credentials.authCode, config.authorityCode)
+    //   authMode      = firstDefined(config.authMode, authorityCode ? 'authority-code' : null, 'login')
+    // and in authority-code / token mode it authenticates with authorityCode and NEVER sends
+    // acctId. Digesting acctId unconditionally therefore had two failures: a clean authority-code
+    // record has no acctId at all, so the digest was null and the C6 write gate became
+    // UNSATISFIABLE (a block main did not have); and two records with different authority codes but
+    // the same stale acctId digested EQUAL — the owner's defect, still open, in that mode.
+    //
+    // The identity is whatever the record would AUTHENTICATE with. Same resolution, same answer.
+    const authorityCode = firstDefined(credentials.authorityCode, credentials.authCode, cfg.authorityCode)
+    const authMode = firstDefined(cfg.authMode, authorityCode ? 'authority-code' : null, 'login')
+    let authIdentity
+    if (authMode === 'authority-code' || authMode === 'authorityCode' || authMode === 'token') {
+      if (authorityCode === undefined) return null
+      authIdentity = `authorityCode=${String(authorityCode)}`
+    } else {
+      // REVIEW P2-1: this once took the first STRING while the adapter takes the first DEFINED,
+      // so `{acctId: 1001, accountSet: '002'}` digested as '002' while login authenticated against
+      // 账套 1001 — the digest named a different account set than the one actually used.
+      const acctIdRaw = firstDefined(credentials.acctId, credentials.accountSet, credentials.accountSetId)
+      if (acctIdRaw === undefined) return null
+      authIdentity = `acctId=${String(acctIdRaw)}`
+    }
+    if (!authIdentity) return null
 
     // Length-prefixed parts: without this, ('ab','c') and ('a','bc') digest identically and a
     // collision could be constructed across the origin/acctId boundary.
-    const material = [system.kind, origin, acctId].map((part) => `${part.length}:${part}`).join('|')
+    const material = [system.kind, origin, authIdentity].map((part) => `${part.length}:${part}`).join('|')
     // REVIEW P2-3 — RETRACTION. The first version routed this through
     // `credentialStore.fingerprint`, with a comment claiming "deployment-scoped HMAC, not
     // reversible outside it". That is FALSE on the production path: there are TWO fingerprint

@@ -660,5 +660,28 @@ async function testInstanceDigestIsProductionBehaviour() {
   assert.notEqual(await digest('g'), await digest('h'),
     'a numeric acctId must select as 1001 (what login uses), not fall through to accountSet 002')
 
+  // REVIEW P1-2 — AUTHORITY-CODE MODE. The adapter authenticates with authorityCode and NEVER
+  // sends acctId in that mode. Digesting acctId unconditionally had two failures, both pinned here.
+  const AC = 'erp:k3-wise-webapi'
+  await put('ac1', AC, 'https://k3.example.test', { authorityCode: 'AC-ONE' })
+  await put('ac2', AC, 'https://k3.example.test', { authorityCode: 'AC-TWO' })
+  // (a) the owner's defect, in this mode: different authority codes, SAME stale acctId.
+  await put('ac3', AC, 'https://k3.example.test', { authorityCode: 'AC-ONE', acctId: 'STALE' })
+  await put('ac4', AC, 'https://k3.example.test', { authorityCode: 'AC-TWO', acctId: 'STALE' })
+  const [dAc1, dAc2, dAc3, dAc4] = await Promise.all(['ac1', 'ac2', 'ac3', 'ac4'].map(digest))
+
+  // (b) a clean authority-code record must be DIGESTIBLE. It used to be null, which made the C6
+  // write gate UNSATISFIABLE — a block main did not have, and one that would have surfaced inside
+  // the non-retryable customer window.
+  assert.ok(dAc1, 'an authority-code record must yield a digest, not null')
+  assert.notEqual(dAc1, dAc2, 'different authority codes are different instances')
+  assert.notEqual(dAc3, dAc4,
+    'different authority codes must differ even when a STALE acctId is identical — digesting acctId '
+    + 'in this mode named a field login never sends')
+  // The mode determines which identity is digested, so acctId must not leak into it.
+  assert.equal(dAc1, dAc3, 'a stale acctId must not change the identity in authority-code mode')
+  // An explicit config.authMode wins, exactly as in the adapter.
+  await put('ac5', AC, 'https://k3.example.test', { authorityCode: 'AC-ONE', acctId: '001' })
+
   console.log('  external-systems: instance digest (production function) OK')
 }
