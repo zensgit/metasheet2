@@ -105,23 +105,35 @@ required 用 `isEmpty()`(undefined/null/纯空白),失败即 `counts.failed += 1
 (行到不了 `counts[decision]`),而 `canApply` 要求 `failed===0 && held===0`
 ⇒ **code/name 为空不可能跑出绿 dry-run**。缺的只是归因,已补 `counts.failed`/`counts.held` 进证据。
 
-### 2.3 B4 同实例门——已闭合(owner 20260806 复审后本轮修掉)
+### 2.3 B4 同实例门——D1 已关,**D2 未关且不声称关**
 
-**此前确实是 target 与自身比较**:驱动器另建了 K3 读记录,却用 `targetSystemId` 铸 B4;
-路由再从同一个 target 取 `targetBaseUrl`,profile 按同一 id 重载后比较。**真实读记录从未进入
-比较**,两台不同的 K3 也能通过 —— 这个检查在结构上就不可能发现读写错配,换任何比较函数都没用。
+分两个可以分开裁决的缺陷,混为一谈就会得出过强结论。
 
-根因是关系检查的可达范围:非 K3 源时读记录两端都不是,绑 target 是**唯一**能满足 #4769 的选择。
-现在写目标显式声明配对读记录(`config.pairedReadSystemId`),该 id 加入关系集合,于是 B4 绑
-**真实读记录**、守卫比较**两条确实不同的记录**。刻意收窄:只认 target 自己点名的那一条,
-且仍须过 ratified 合同匹配、kind 门与同实例门。
+**D1(自比仍是被接受的配置)—— 已关。** 此前确实是 target 与自身比较:驱动器另建了 K3 读记录,
+却用 `targetSystemId` 铸 B4;路由再从同一 target 取 `targetBaseUrl`,profile 按同一 id 重载后比较,
+真实读记录从未进入比较。**这个检查在结构上就不可能发现读写错配,换任何比较函数都没用。**
 
-**这一改动把 #4769 的关系检查放宽了一个 target 声明的 id** —— 属于动已 ratify 的闸,
-依 owner 明确指示执行,在此标注以便复核。
+第一轮修复(让写目标声明 `config.pairedReadSystemId`、驱动器改绑真实读记录)**只改了惯例,
+没改不变量** —— `pipelineSystemIds` 是并集且仍含 `targetSystemId`,filter 只问"是否集合成员",
+全树没有任何 distinctness 断言,所以在 target 上铸的 binding 照样通过。**这是我上一轮的过强声明,
+已撤回。** 现在 `boundSystemId === system.id` 直接拒(`K3_C6_B4_BINDING_SELF_REFERENTIAL`),
+这才把"驱动器碰巧绑了读记录"变成"这道门无法靠自己跟自己比来满足"。
 
-控制(走真实路由):A→A 同一台 K3(同源不同路径,即步 0-b 拓扑)**必须接受**;
-A→B 读记录在另一台 K3 **必须拒绝**。变异:`sameK3Instance → true` 令 A→B 变红;
-从关系集合去掉 `pairedReadSystemId` 令 A→A 变红。
+**D2(即便真比了两行,证明力仍弱)—— 未关,四个候选方案没有一个能关。**
+比较两条记录只证明**两个操作员敲进去的 baseUrl 共享 origin**。全仓扫过 K3 的自报身份端点
+(帐套/实例/数据库/版本)**零命中**,所以"问两边你是谁"没有可站立的面。
+更根本的天花板:**被认证的读记录根本不在 C6 的数据路径上** —— 真正被 Save 进 K3 的行来自
+staging 替身源,所以即便有完美的"读记录 ≡ 写记录"证明,也不能说明被写入的那些行的来源。
+
+⇒ **origin 相等是配置交叉检查,不是同一台物理机的证明。** 这句必须留在验收结论里。
+
+**这一改动放宽了 #4769 已 ratify 的关系检查一个 target 声明的 id** —— 独立复审核实过
+不授予新能力:`readSourceConfigsApprove` 与 `externalSystemsUpsert` 同为 `requireAccess(req,'write')`,
+能设 `pairedReadSystemId` 的人本来就能直接在 target 上铸并批准 B4;跨租户由 `loadSystemById`
+从 pipeline 记录取作用域堵住。
+
+控制(走真实路由):A→A 同一台 K3 接受;A→B 另一台 K3 拒绝;绑 target 自身拒绝。
+四道门(kind / 同实例 / 关系集合 / 自引用)逐个 neuter **各自独立见红**,无互相掩护。
 
 ---
 
