@@ -1,0 +1,11 @@
+# Attendance Windows-native QA v2 — runtime / evidence artifacts. NEVER commit these.
+#
+# Owner security boundary: the runtime identity map (qa-identities.json) and the host evidence
+# directory may hold synthetic-but-sensitive material (the operator-set synthetic password read
+# from env, any session/refresh token the harness obtains, per-run minted UUIDs). None of it may
+# enter Git. Keep all of it under this gitignored runtime dir (or entirely outside the repo).
+.runtime/
+evidence/
+qa-identities.json
+summary.json
+*.evidence.json
