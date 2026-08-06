@@ -89,11 +89,38 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 用了中文虚拟目录,在**窗口之前**协商改用 ASCII 别名站点/虚拟目录,或升 owner 裁决。
 **窗口不可重试**,而这条会在 adapter 构造期即失败(读、写都进不去),故必须前置排除。
 
+### 步 0-b(新增,窗口**开始前**做):客户侧必须建**两条** K3 external-system 记录
+
+**结论**:一条 K3 记录**不能**同时承担「list 读」与「armed 写」。窗口需要两条,指向**同一台**
+物理 K3(相同 baseUrl):
+
+| 记录 | config | 用途 |
+|---|---|---|
+| K3-read(**不选 profile**) | 带 list 读配置(`readMode:'list'`、`readList*` 一族) | 步骤 1 的 read-smoke;B4 契约描述的就是它 |
+| K3-write(**选 `material-k3wise-customer-profile-v1`**) | profile 武装,save-only + maxApplyRows=3 | C6 dry-run→apply 的写目标 |
+
+**为什么不能合并成一条**(实测,非推断):`#4769` 把 `readMode`、`readListBodyKey`、
+`readListFields`、`readListOrderBy`、`topField`、`pageIndexField`、`pageSizeField`、
+`maxListLimit`、`readListBodyTemplate` 全部列为 profile 的 forbidden overlay key。在一条
+armed 记录上,这些键在 adapter 归一化时被**静默剥除**(实测全部变 `undefined`,且 `readPath`
+被钉成 `/K3API/Material/GetDetail`)。
+
+**连首方冻结预设也被剥**:`read-smoke` 的 `k3wise.material-list.v1` 自带 `readConfigOverlay`
+(含完整 list 形状),`applyReadSmokePresetOverlay` 会把它并上去 —— 但随后的 adapter 归一化
+仍然剥掉。也就是说这道加固**不区分「操作员覆盖」与「首方预设覆盖」**。方向是 fail-closed
+(安全的那一侧),但后果是:**armed 记录做不了 list read-smoke**。
+
+**操作**:窗口前确认客户环境里这两条记录都已建、baseUrl 相同、且 K3-read 那条**没有**选
+profile。窗口不可重试,而这条会在步骤 1(read-smoke)当场失败。
+
+> 关联未决项:B4 绑定的 systemId 只能是 pipeline 的 source/target 之一(`#4769` 关系检查),
+> 而 K3-read 记录在「非 K3 source」的管道里两者都不是 —— 该冲突的处置见 §7.2。
+
 1. **只读预检**:`POST /api/integration/external-systems/<k3SystemId>/read-smoke`
    (preset `k3wise.material-list.v1`)⇒ 期望 values-free 证据:业务成功、行数 ≤10、零泄漏键。
 2. **建/核窗口 pipeline**:`POST /api/integration/pipelines` —— target=K3 系统(config 已含
    `objects.material.profile`,由部署包 FE/记录保证)、fieldMappings 与 B4 一致。
-   ⚠️ **source 必须是非 K3 系统**(见 §7.3)。本步原文只写了 target,没写 source ——
+   ⚠️ **source 必须是非 K3 系统**(见 §7.2)。本步原文只写了 target,没写 source ——
    彩排驱动器正是在这个空白处猜了「K3 当 source」,而那**在结构上不可能成立**。窗口不可重试,
    所以 source 必须在建 pipeline 前就被指定并核实。
 3. **dry-run**:`POST /api/integration/pipelines/<id>/external-write/dry-run`
@@ -170,7 +197,7 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 | # | 项 | 状态 | 阻塞于 |
 |---|---|---|---|
 | R1 | **#4769** 前置门:C6-only 写入口(`/run` 与 replay 双拒)、Save endpoint 钉死、C6 消费 approved B4 binding | ✅ **MERGED 2026-08-05T18:01Z**(main `65edb98c6`),9/9 required 绿含 `integration-guard` | — |
-| R2 | **#4768** staging 彩排 | 已 rebase 到 main;exact-head 复审 **CHANGES-REQUESTED**:驱动器把 K3 当 pipeline **source**,而任何 K3 配置都不能充当 C6 source(`readSourceRows` 发裸 read ⇒ `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED`/`K3_WISE_READ_KEY_REQUIRED`,**零 HTTP 调用**)⇒ 步骤 3–9 不可达 | **owner 裁决:换哪个 source**(见下 7.3) |
+| R2 | **#4768** staging 彩排 | 已 rebase 到 main;exact-head 复审 **CHANGES-REQUESTED**:驱动器把 K3 当 pipeline **source**,而任何 K3 配置都不能充当 C6 source(`readSourceRows` 发裸 read ⇒ `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED`/`K3_WISE_READ_KEY_REQUIRED`,**零 HTTP 调用**)⇒ 步骤 3–9 不可达 | **owner 裁决:换哪个 source**(见下 §7.2) |
 | R3 | 彩排跑绿(dispatch-only workflow,PR checks **不**执行它) | 未开始 | R2 |
 | R4 | 本 MD 与计划按彩排实测同步(§8 前置) | 未开始 | R3 |
 | R5 | 目标环境 mint B4 并记三元组 | 未开始 | 运维授权(#4628) |
@@ -180,7 +207,7 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 **R5–R7 全部阻塞在 owner/运维侧**(部署授权、建角色、external-system 记录、翻授权位、排窗),
 **不是编码工作**。R1–R4 是代码/文档侧,其中 R1 已达合并水位。
 
-### 7.3 待 owner 裁决:窗口/彩排的 **source 系统**
+### 7.2 待 owner 裁决:窗口/彩排的 **source 系统**
 
 **结论先说**:**K3 不能充当 C6 pipeline 的 source。** 这不是配置问题,是结构问题 ——
 `external-write-dry-run.cjs:427` 的 `readSourceRows()` 发的是裸 `read({object, limit, cursor})`,
@@ -210,6 +237,6 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 **建议 = PLM**:彩排的价值与它同窗口的相似度成正比。代价是 staging 需要一个可达 PLM。
 **此项未定之前,R2/R3 不可推进,窗口 §6 步 2 也不完整。**
 
-### 7.2 窗口 PASS 后
+### 7.3 窗口 PASS 后
 
 在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。
