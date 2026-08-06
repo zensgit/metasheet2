@@ -54,6 +54,20 @@ const designer = new WorkflowDesigner()
 const workflowEngine = new BPMNWorkflowEngine(buildBpmnWorkflowEngineOptionsFromServerConfig())
 let workflowEngineReady: Promise<void> | null = null
 
+/**
+ * Stops this module's OWN `workflowEngine` singleton (P3-a, #4783 review). This is a
+ * SEPARATE `BPMNWorkflowEngine` instance from `routes/workflow.ts`'s — each module
+ * constructs its own (this one lazily, on first designer-route call via
+ * `ensureWorkflowEngineReady`) — so `routes/workflow.ts`'s `shutdownWorkflowEngine()`
+ * does not reach this instance's minute poller (only started when
+ * `ENABLE_BPMN_TIMER_POLLER=true`; see `bpmnTimerPollerConfig.ts`) or in-flight tick.
+ * Safe to call even when this instance was never initialized — `shutdown()` only touches
+ * its own already-populated maps.
+ */
+export async function shutdownWorkflowDesignerEngine(): Promise<void> {
+  await workflowEngine.shutdown()
+}
+
 interface WorkflowHubTeamViewConflictBuilder {
   columns(columns: string[]): {
     doUpdateSet(values: Record<string, unknown>): unknown
