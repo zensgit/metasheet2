@@ -354,11 +354,30 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
         const boundSystemId = binding.config && binding.config.systemId
         const targetBaseUrl = typeof b4.targetBaseUrl === 'string' ? b4.targetBaseUrl : ''
         let boundBaseUrl = null
+        let boundKind = null
         try {
           const boundSystem = await b4.loadSystemById(boundSystemId)
           boundBaseUrl = boundSystem && boundSystem.config ? boundSystem.config.baseUrl : null
+          boundKind = boundSystem ? boundSystem.kind : null
         } catch {
           boundBaseUrl = null
+          boundKind = null
+        }
+        // REVIEW P2-2 (exact-head round): origin equality was the SOLE discriminator, and origin
+        // says nothing about WHAT is at that origin. The reviewer proved it by construction --
+        // giving the poc harness's PLM source a baseUrl sharing the K3 target's origin let a PLM
+        // read contract certify a K3 write; the run only failed later, at the read, with a
+        // misleading K3_WISE_READ_FAILED/404. On-prem this is reachable whenever PLM and K3 sit
+        // behind one host, which is the normal deployment.
+        //
+        // The comment below already SAID this guard was about one K3 versus another K3 -- it just
+        // never checked that the bound record was a K3 at all. Asserting the kind is what makes
+        // the stated invariant true. Fail-closed: an unknown/unloadable kind is a mismatch.
+        if (boundKind !== K3_WISE_C6_WRITE_TARGET_KIND) {
+          throw new AdapterValidationError(
+            'the approved B4 binding names a system that is not a K3 WISE record',
+            { code: 'K3_C6_B4_BINDING_KIND_MISMATCH', field: 'capabilityState' },
+          )
         }
         if (!sameK3Instance(boundBaseUrl, targetBaseUrl)) {
           throw new AdapterValidationError(

@@ -284,44 +284,121 @@ test('the mock arms its session gate and its call logger — both are load-beari
     'the logger assertion must reject a runner whose logger emits nothing')
 })
 
-test('no record() step asserts a CONSTANT — every predicate reads real evidence', () => {
-  // Review P2-1/W7: the read-back negative control could be neutered to unconditionally true and
-  // the whole suite stayed green, because NO driver predicate has coverage. Rather than pin that
-  // one step, pin the class: a step whose pass-predicate is a literal cannot fail, and a step that
-  // cannot fail is worse than no step — it manufactures evidence.
-  //
-  // record() is `record(step, pass, evidence)`, and it process.exit(1)s on a false predicate, so
-  // `summary.pass = true` at the end IS conditional. What was unguarded is the predicates.
-  const calls = [...driver.matchAll(/record\(\s*'([a-z0-9-]+)'\s*,\s*([^,]+(?:,(?![\s\n]*\{)[^,]+)*),/g)]
-  // EQUALITY, not a floor. A floor cannot distinguish "scanned every step" from "the regex
-  // silently dropped the steps whose predicate contains a comma" — and the dropped ones would
-  // then carry ZERO constant-checking while the assertion still passed.
-  const declared = [...driver.matchAll(/^\s*record\('/gm)].length
-  assert.equal(calls.length, declared,
-    `the predicate scan parsed ${calls.length} of ${declared} record() steps — the unparsed ones `
-    + 'are exactly the steps this check would silently exempt')
+// Extract a record() step's pass-predicate by BALANCED SCAN, not by splitting on commas.
+// A comma-split reads the wrong span for any predicate containing a call or an index expression --
+// the first attempt at this parsed only 8 of the 17 steps and silently exempted the other 9.
+function predicateOf(src, step) {
+  const key = `record('${step}'`
+  const at = src.indexOf(key)
+  assert.ok(at >= 0, `step '${step}' is not in the driver`)
+  let i = src.indexOf(',', at + key.length) + 1
+  const start = i
+  let depth = 0
+  let quote = null
+  for (; i < src.length; i++) {
+    const c = src[i]
+    if (quote) {
+      if (c === '\\') { i++; continue }
+      if (c === quote) quote = null
+      continue
+    }
+    if (c === "'" || c === '"' || c === '`') { quote = c; continue }
+    if (c === '(' || c === '[' || c === '{') { depth++; continue }
+    if (c === ')' || c === ']' || c === '}') { depth--; continue }
+    if (c === ',' && depth === 0) break
+  }
+  return src.slice(start, i).replace(/\s+/g, ' ').trim()
+}
 
-  const constant = calls
-    .map(([, step, predicate]) => [step, predicate.trim()])
-    .filter(([, predicate]) => /^(true|1|!!1|Boolean\(true\))$/.test(predicate))
-  assert.deepEqual(constant, [],
-    `these steps assert a CONSTANT and can never fail: ${JSON.stringify(constant)}`)
+// POSITIVE MANIFEST: what each step's predicate MUST assert.
+//
+// The previous version of this guard was a DENYLIST of four literals
+// (/^(true|1|!!1|Boolean\(true\))$/). Independent review broke it in one line: the review
+// substituted `dryRunOut !== undefined` for the dry-run predicate and this suite stayed 10/10
+// GREEN -- degrading the ONE step that carries the owner's entire P1 (empty code/name would print
+// a tick). `1 === 1` passed too. That is the documented failure of trap enumeration: every round
+// of blocking known-bad forms leaves a fresh channel, because the complement of a denylist is
+// unbounded. The converging form is a positive allowlist, so this is now one.
+//
+// Weakening any predicate below now requires EDITING THIS TABLE -- a visible, reviewable act --
+// rather than quietly satisfying a pattern nobody re-reads.
+const REQUIRED_DISCRIMINATORS = {
+  'create-source-system': ['ok(sourceSystem)', 'payload(sourceSystem)?.id'],
+  'create-target-system': ['ok(targetSystem)', 'payload(targetSystem)?.id'],
+  'staging-install': ['ok(stagingInstall)', 'stagingSheetId', 'stagingProjectId'],
+  'create-staging-source': ['ok(sourceStagingSystem)', 'payload(sourceStagingSystem)?.id'],
+  'mint-seed-token': ['ok(tokenMint)', 'mintedTokenUsable'],
+  'resolve-staging-field-map': ['ok(fieldsRes)', 'Object.keys(physicalByName).length > 0'],
+  'seed-staging-rows': ['seeded.length === seedRows.length', 'seeded.every(Boolean)'],
+  'b4-mint': ['ok(b4Mint)', 'b4Row?.id'],
+  'b4-approve': ['ok(b4Approve)', "=== 'approved'"],
+  'preflight-list-shape-probe': ['listProbeEvidence.ok === true', "typeof listRowCountKey === 'string'"],
+  'preflight-list-read-smoke': [
+    'listSmoke.status === 200',
+    'listEvidence?.ok === true',
+    'listEvidence?.[listRowCountKey] === SOURCE_KEYS.length',
+  ],
+  'create-pipeline': ['ok(pipeline)', 'payload(pipeline)?.id'],
+  // The load-bearing one. This step is the PR's substitute for the owner's discrete "bare read"
+  // step AND the sole runtime discriminator for empty code/name, so every conjunct is pinned.
+  'dry-run': [
+    'ok(dryRun)',
+    "dryRunOut?.status === 'ready'",
+    "typeof dryRunOut?.dryRunToken === 'string'",
+    'dryRunOut?.counts?.sourceRows === SOURCE_KEYS.length',
+    'dryRunOut?.counts?.add === SOURCE_KEYS.length',
+  ],
+  'apply': [
+    'ok(apply)',
+    'applyOut?.counts?.written === SOURCE_KEYS.length',
+    '(applyOut?.counts?.failed ?? 0) === 0',
+  ],
+  'token-single-use': ['replayToken.status === 409', "'C6_WRITE_DRY_RUN_TOKEN_INVALID'"],
+  'read-back-written-key': [
+    'readBack.status === 200',
+    'readBackEvidence?.ok === true',
+    'readBackEvidence?.recordPresent === true',
+    'readBackEvidence?.recordCount === 1',
+  ],
+  'read-back-negative-control': [
+    'readBackMiss.status === 200',
+    'missEvidence?.ok === false',
+    "missEvidence?.errorCode === 'K3_WISE_READ_BUSINESS_ERROR'",
+  ],
+}
 
-  // The negative control specifically must read the evidence it claims to check — it is the one
-  // step whose whole purpose is proving the read-back found a WRITE and not a permissive endpoint.
-  const negIdx = driver.indexOf("record('read-back-negative-control'")
-  assert.ok(negIdx > 0, 'the read-back negative control must exist')
-  const negBlock = driver.slice(negIdx, negIdx + 400)
-  for (const needle of ['missEvidence?.ok === false', 'K3_WISE_READ_BUSINESS_ERROR']) {
-    assert.ok(negBlock.includes(needle),
-      `the negative control must assert ${needle}; a looser predicate cannot distinguish "not found" `
-      + 'from "endpoint accepted anything"')
+test('every record() step asserts its NAMED discriminators — positive manifest, not a denylist', () => {
+  const declared = [...driver.matchAll(/record\('([a-z0-9-]+)'/g)].map((m) => m[1])
+  assert.ok(declared.length >= 15, `only ${declared.length} steps found — scan is broken`)
+
+  // The manifest must cover EVERY step, in both directions. A step missing from the table would
+  // be silently unguarded; a table entry with no step means the table is describing a driver that
+  // no longer exists.
+  assert.deepEqual(
+    declared.filter((s) => !(s in REQUIRED_DISCRIMINATORS)), [],
+    'these driver steps have no manifest entry and are therefore unguarded')
+  assert.deepEqual(
+    Object.keys(REQUIRED_DISCRIMINATORS).filter((s) => !declared.includes(s)), [],
+    'these manifest entries name steps the driver no longer has')
+
+  for (const step of declared) {
+    const predicate = predicateOf(driver, step)
+    assert.ok(predicate.length > 0, `step '${step}' has an empty predicate`)
+    for (const needle of REQUIRED_DISCRIMINATORS[step]) {
+      assert.ok(predicate.includes(needle),
+        `step '${step}' no longer asserts ${JSON.stringify(needle)}\n    predicate is: ${predicate}`)
+    }
   }
 
-  // POSITIVE CONTROL — the constant-detector must flag a literal predicate.
-  const probe = [..."record('fake-step', true, { a: 1 })".matchAll(/record\(\s*'([a-z0-9-]+)'\s*,\s*([^,]+),/g)]
-  assert.equal(probe.length, 1, 'probe must parse')
-  assert.ok(/^true$/.test(probe[0][2].trim()), 'the detector must recognise a literal true predicate')
+  // NEGATIVE CONTROL on the checker itself: the exact degradations that defeated the denylist
+  // must now be caught. If these ever stop being rejected, this guard has regressed to a denylist.
+  const fakeDriver = "record('dry-run',\n  dryRunOut !== undefined,\n  { a: 1 })"
+  assert.equal(predicateOf(fakeDriver, 'dry-run'), 'dryRunOut !== undefined',
+    'the balanced scanner must read the whole predicate span')
+  for (const needle of REQUIRED_DISCRIMINATORS['dry-run']) {
+    assert.equal(predicateOf(fakeDriver, 'dry-run').includes(needle), false,
+      `the review's neutering mutation must FAIL the manifest (needle ${needle})`)
+  }
 })
 
 test('BEHAVIOURAL: a bare read yields LOGICAL keys only when projectId + objectId are right', async () => {

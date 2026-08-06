@@ -149,13 +149,74 @@ jobs:
           # Keep the exclusion (deliberate, separately tracked) but make it VISIBLE, so the evidence
           # reads "6 excluded by name" rather than "nothing pending", and so the list cannot grow
           # silently under a green check.
-          EXPECTED_EXCLUDES=6
-          ACTUAL_EXCLUDES="$(printf '%s' "${MIGRATION_EXCLUDE}" | tr ',' '\n' | grep -c . || true)"
-          echo "migrationExcludeCount=${ACTUAL_EXCLUDES} expected=${EXPECTED_EXCLUDES}"
-          if [ "${ACTUAL_EXCLUDES}" -ne "${EXPECTED_EXCLUDES}" ]; then
-            echo "MIGRATION_EXCLUDE changed size; Pending:0 is scoped to whatever remains, so this needs re-review rather than auto-accept" >&2
+          # REVIEW P1 (owner round 20260806): a COUNT is not a SET. This asserted only
+          # "six names", so swapping 048 for 074 kept the count at 6 and every check green --
+          # while 074 was removed from the very map that feeds Pending, making `Pending: 0` true
+          # WITHOUT 074 ever running. Equal-size substitution was the hole; exact set equality
+          # against the authoritative list is the close.
+          #
+          # The list's ONE source of truth is migration-replay.yml (the main-package-verify lane
+          # pins itself against it byte-for-byte in its own drift-guard job). This lane previously
+          # "borrowed the value, not the guard" -- it now borrows the guard too.
+          #
+          # NOTE the path: this step's working-directory is the UNPACKED PACKAGE, not the repo, so
+          # the authoritative file must be addressed through github.workspace. A relative path
+          # would silently read nothing and this check would pass vacuously -- the exact failure
+          # mode it exists to prevent.
+          REPLAY_FILE="${{ github.workspace }}/.github/workflows/migration-replay.yml"
+          if [ ! -f "${REPLAY_FILE}" ]; then
+            echo "FATAL: ${REPLAY_FILE} not found; the exclusion check would read empty and pass vacuously" >&2
             exit 1
           fi
+          AUTHORITATIVE="$(grep -E '^[[:space:]]*MIGRATION_EXCLUDE:[[:space:]]' "${REPLAY_FILE}" \
+            | grep -vE '^[[:space:]]*#' \
+            | sed -E 's/^[[:space:]]*MIGRATION_EXCLUDE:[[:space:]]*//' \
+            | sed -E 's/[[:space:]]+$//' | sort -u)"
+          if [ -z "${AUTHORITATIVE}" ]; then
+            echo "FATAL: extracted an EMPTY authoritative list; an empty read is not agreement" >&2
+            exit 1
+          fi
+          # migration-replay.yml carries the identical value on two lines; `sort -u` collapses
+          # them, so anything but exactly one distinct value means the source itself disagrees.
+          DISTINCT="$(printf '%s\n' "${AUTHORITATIVE}" | grep -c .)"
+          if [ "${DISTINCT}" -ne 1 ]; then
+            echo "FATAL: migration-replay.yml holds ${DISTINCT} DIFFERENT MIGRATION_EXCLUDE values; no single authority to compare against" >&2
+            exit 1
+          fi
+          if [ "${AUTHORITATIVE}" != "${MIGRATION_EXCLUDE}" ]; then
+            echo "MIGRATION_EXCLUDE drifted from migration-replay.yml (exact set equality required)" >&2
+            echo "  authoritative: ${AUTHORITATIVE}" >&2
+            echo "  this lane:     ${MIGRATION_EXCLUDE}" >&2
+            exit 1
+          fi
+          echo "migrationExcludeMatchesAuthority=true"
+
+          # And prove the two migrations this lane's evidence depends on were CONSIDERED and RAN.
+          # `--list` names only PENDING migrations, so "applied" is established by construction:
+          #   (a) the file is present in the package under test  => it is in getMigrations()
+          #   (b) its name is absent from MIGRATION_EXCLUDE      => the provider did not drop it
+          #   (c) Pending: 0                                     => every member has executedAt
+          # All three together mean 074/075 executed. Remove any one and the conclusion fails --
+          # which is precisely why (b) is asserted per-name rather than inferred from a count.
+          MIG_DIR="$(find . -type d -name migrations -path '*core-backend*' | head -1)"
+          if [ -z "${MIG_DIR}" ]; then
+            echo "FATAL: no core-backend migrations directory inside the package; (a) is unprovable" >&2
+            exit 1
+          fi
+          for m in 074_repair_sealed_export_runtime_authority_privileges.sql \
+                   075_grant_sealed_export_runtime_authority_row_lock.sql; do
+            if [ ! -f "${MIG_DIR}/${m}" ]; then
+              echo "FATAL: ${m} is not in the package under test" >&2
+              exit 1
+            fi
+            case ",${MIGRATION_EXCLUDE}," in
+              *",${m},"*)
+                echo "FATAL: ${m} is EXCLUDED, so Pending:0 would NOT prove it ran" >&2
+                exit 1
+                ;;
+            esac
+            echo "migrationProvenApplied=${m}"
+          done
           # POSITIVE CONTROL for the grep itself: the capture must actually contain a Pending line,
           # so an empty or truncated file cannot read as "0 pending".
           grep -qE "^Pending: [0-9]+" "${RUNNER_TEMP}/mig-after.txt"

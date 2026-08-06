@@ -1098,7 +1098,24 @@ function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegi
           workspaceId: pipeline.workspaceId ?? null,
           // The binding must belong to one of THIS pipeline's endpoints (review P2-B1): the K3
           // system may legitimately be the source, the target, or both.
-          pipelineSystemIds: [pipeline.sourceSystemId, pipeline.targetSystemId].filter(Boolean),
+          // OWNER REVIEW 20260806 [P1]: with only the two pipeline endpoints here, the customer's
+          // real K3 READ record is neither, so B4 could only ever bind to the TARGET — and the
+          // same-instance check then compared the target against ITSELF. The check was structurally
+          // incapable of detecting a read/write mismatch no matter how good the comparator was.
+          //
+          // The write target now DECLARES its paired read record (`config.pairedReadSystemId`), and
+          // that one id joins the relation set. This is deliberately narrow: it admits exactly the
+          // record the target itself names — not an arbitrary third system — and the binding must
+          // still clear the ratified-contract match, the kind gate, and the same-instance check.
+          //
+          // NOTE this WIDENS #4769's relation check by one target-declared id. That is a change to
+          // a ratified gate, made on the owner's explicit instruction to "让 B4 绑定真实
+          // read-system，并比较 read/write 两条记录的规范实例身份".
+          pipelineSystemIds: [
+            pipeline.sourceSystemId,
+            pipeline.targetSystemId,
+            (targetSystem.config && targetSystem.config.pairedReadSystemId) || null,
+          ].filter(Boolean),
           // SAME-INSTANCE CHECK (owner ruling 20260805: "A, bind B4 to the K3-write record").
           // The B4 contract is the material-LIST read contract, and a PROFILE-ARMED record
           // cannot hold list-read config — #4769 makes every readList* key a forbidden overlay,

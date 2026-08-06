@@ -706,7 +706,7 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   }
 
   // `rows` is what the store returns; `listArgs` records what the ROUTE asked for.
-  async function dryRunWith(rows, { requestWorkspaceId } = {}) {
+  async function dryRunWith(rows, { requestWorkspaceId, pairedReadBaseUrl } = {}) {
     const listArgs = []
     const harness = createHarness({
       readSourceConfigStore: {
@@ -734,6 +734,15 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
     const plm = await mkSystem({
       name: 'PLM probe', kind: 'plm:yuantus-wrapper', role: 'source', status: 'active', config: {},
     })
+    // OWNER REVIEW 20260806 [P1]: the real customer topology is THREE records — a staging/PLM
+    // source, a K3 READ record, and a K3 WRITE target. Without the read record in this harness the
+    // same-instance check could only ever be handed the target twice, which is exactly how it came
+    // to compare the target with itself and pass.
+    const k3Read = pairedReadBaseUrl === undefined ? null : await mkSystem({
+      name: 'K3 read probe', kind: 'erp:k3-wise-webapi', role: 'source', status: 'active',
+      config: { baseUrl: pairedReadBaseUrl },
+      credentials: { username: 'demo', password: 'secret', acctId: '001' },
+    })
     const k3 = await mkSystem({
       name: 'K3 probe', kind: 'erp:k3-wise-webapi', role: 'target', status: 'active',
       config: {
@@ -741,6 +750,7 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
         autoSubmit: false,
         autoAudit: false,
         objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
+        ...(k3Read ? { pairedReadSystemId: k3Read.id } : {}),
       },
       credentials: { username: 'demo', password: 'secret', acctId: '001' },
     })
@@ -762,7 +772,7 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
     assertOkResponse(mkPipeline, 201)
     assert.equal(mkPipeline.body.data.workspaceId, PROBE_WORKSPACE_ID,
       'the probe pipeline must be workspace-scoped, or the workspaceId assertion cannot discriminate')
-    const harnessScenario = { plm, k3, pipeline: mkPipeline.body.data }
+    const harnessScenario = { plm, k3, k3Read, pipeline: mkPipeline.body.data }
     const res = await invoke(harness.routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
       user: WRITE_USER,
       params: { id: mkPipeline.body.data.id },
@@ -844,10 +854,53 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   // source IS a pipeline endpoint), so only the same-instance check can stop it — and it must,
   // because PLM is not the K3 being written. This is the round-3 defect in its newest disguise:
   // one system's read contract certifying another system's write.
+  //
+  // EXACT-HEAD REVIEW P2-2 — why this now expects KIND, not INSTANCE. The reviewer showed this
+  // assertion was passing for the WRONG REASON: the PLM fixture carries `config: {}`, so
+  // `boundBaseUrl` was null and the gate took its "cannot tell" branch. It never exercised the
+  // "different instance" branch its own message named. Worse, the reviewer gave the PLM source a
+  // baseUrl SHARING the K3 target's origin and the binding was ACCEPTED — a PLM read contract
+  // certified the K3 write, failing only later at the read with a misleading 404. Origin equality
+  // says nothing about WHAT is at that origin, and on-prem PLM and K3 routinely share a host.
+  //
+  // The guard now checks the bound record's `kind` first, so a PLM binding is refused for being
+  // PLM — which is both the true reason and the one that still holds when the origins match.
   const crossInstance = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
   const crossErr = ((crossInstance.res.body && crossInstance.res.body.error) || {})
-  assert.equal(crossErr.details && crossErr.details.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
-    `a binding on the PLM source must be refused as a different K3 instance, got: ${JSON.stringify(crossErr)}`)
+  assert.equal(crossErr.details && crossErr.details.code, 'K3_C6_B4_BINDING_KIND_MISMATCH',
+    `a binding on the PLM source must be refused because it is not a K3 record, got: ${JSON.stringify(crossErr)}`)
+
+  // (6b) OWNER REVIEW 20260806 [P1] — THE READ/WRITE COMPARISON ITSELF.
+  //
+  // Everything above binds B4 to the TARGET, which is how the check came to compare the target
+  // with itself: the driver made a separate K3 read record, minted B4 on the target, and the route
+  // loaded targetBaseUrl from that same target — so no read record ever entered the comparison and
+  // two different K3 instances would have passed. These two cases bind B4 to the REAL READ RECORD
+  // (admitted by the relation check because the target declares it as pairedReadSystemId) so the
+  // guard compares two GENUINELY DIFFERENT records.
+  //
+  // A -> A: read and write on the same physical K3 (same origin, different path — the step 0-b
+  // topology). MUST BE ACCEPTED. Without this control the negative case below could be satisfied
+  // by a guard that simply refuses everything.
+  const pairedSameInstance = await dryRunWith(
+    (sc) => [ratifiedRow({ systemId: sc.k3Read.id })],
+    { pairedReadBaseUrl: 'https://k3.example.test/K3API-READ' },
+  )
+  const pairedSameErr = ((pairedSameInstance.res.body && pairedSameInstance.res.body.error) || {}).details || {}
+  assert.notEqual(pairedSameErr.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    `a binding on the paired read record of the SAME K3 must be accepted, got: ${JSON.stringify(pairedSameErr)}`)
+  assert.notEqual(pairedSameErr.code, 'C6_WRITE_B4_BINDING_REQUIRED',
+    'the paired read record must COUNT toward the relation check, or B4 can never bind the real reader')
+
+  // A -> B: read record on a DIFFERENT K3 host. MUST BE REFUSED. This is the case the old
+  // arrangement was structurally incapable of producing at all.
+  const crossK3 = await dryRunWith(
+    (sc) => [ratifiedRow({ systemId: sc.k3Read.id })],
+    { pairedReadBaseUrl: 'https://k3-OTHER.example.test/K3API' },
+  )
+  const crossK3Err = ((crossK3.res.body && crossK3.res.body.error) || {}).details || {}
+  assert.equal(crossK3Err.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    `a read record on ANOTHER K3 must not certify this write, got: ${JSON.stringify(crossK3Err)}`)
 
   // (7) THE DISCRIMINATING HALF. (6) alone does not prove the wiring: with `targetBaseUrl`
   // missing, sameK3Instance('') is false, so the gate throws MORE and (6) still passes. What

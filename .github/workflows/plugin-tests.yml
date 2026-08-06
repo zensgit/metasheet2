@@ -173,6 +173,21 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
 
+      # REVIEW NIT-2 (exact-head round): these two suites already ran in `k3wise-offline-poc`, but
+      # that job's check is "K3 WISE offline PoC", which is NOT one of main's required contexts --
+      # so a red there did not block a merge. The suites carry the ONLY mechanical guard on the
+      # rehearsal driver's step predicates, including the one that discriminates the owner's
+      # reported P1. A guard that cannot block is documentation, not a gate.
+      #
+      # Invoked here as well, in the REQUIRED `test` job (test (20.x) is a required context), so
+      # the guard actually gates. The duplicate run costs ~1s and is deliberate: leaving the
+      # original in place keeps the offline-PoC job self-contained.
+      - name: K3 WISE rehearsal driver contract (required lane)
+        run: |
+          node --test \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-driver-contract.test.mjs
+
       # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
       # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
       # header for the corrected rationale). Mixed YAML-shape + BEHAVIOURAL contract that makes

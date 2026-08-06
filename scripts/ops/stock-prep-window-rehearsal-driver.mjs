@@ -160,6 +160,12 @@ const targetSystem = await call('POST', '/api/integration/external-systems', {
     autoSubmit: false,
     autoAudit: false,
     objects: { material: { profile: PROFILE_ID } },
+    // OWNER REVIEW 20260806 [P1]: the write target DECLARES its paired K3 read record. Without
+    // this the read record is neither pipeline endpoint, so B4 could only bind to the target and
+    // the same-instance check degenerated into target-vs-itself — it could never have caught a
+    // read/write mismatch. Naming the peer here is what lets B4 bind the REAL read record while
+    // still clearing #4769's relation check.
+    pairedReadSystemId: sourceSystemId,
   },
   credentials: { username: 'rehearsal', password: 'rehearsal', acctId: 'RH' },
 })
@@ -322,12 +328,16 @@ record('seed-staging-rows', seeded.length === seedRows.length && seeded.every(Bo
 // ---------------------------------------------------------------------------------------------
 
 const b4Mint = await call('POST', '/api/integration/read-source-configs', {
-  // OWNER RULING 20260805 (「A, bind B4 to the K3-write record」): the binding names the K3
-  // TARGET, not the K3 read record. Once the pipeline source is no longer K3, #4769's relation
-  // check (systemId must be a pipeline endpoint) can only be satisfied by the target — and the
-  // same-instance check added alongside it keeps that honest, since both K3 records address one
-  // physical K3.
-  config: buildK3WiseMaterialListB4Config({ systemId: targetSystemId }),
+  // OWNER REVIEW 20260806 [P1] — SUPERSEDES the 20260805 「bind B4 to the K3-write record」
+  // arrangement. Binding to the target made the same-instance check compare the target against
+  // ITSELF: the driver created a separate K3 READ record, minted B4 on the TARGET, and the route
+  // then loaded targetBaseUrl from that same target — so sourceSystemId never entered the
+  // comparison and two different K3 instances would have passed.
+  //
+  // B4 now names the REAL K3 read record. The relation check accepts it because the target
+  // declares it as its paired read record (config.pairedReadSystemId above), so the guard
+  // compares two GENUINELY DIFFERENT records: the K3 read record against the K3 write target.
+  config: buildK3WiseMaterialListB4Config({ systemId: sourceSystemId }),
 })
 const b4Row = payload(b4Mint)
 record('b4-mint', ok(b4Mint) && Boolean(b4Row?.id), {
