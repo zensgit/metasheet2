@@ -24,6 +24,21 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 const driverPath = path.join(repoRoot, 'scripts/ops/stock-prep-window-rehearsal-driver.mjs')
 const driver = fs.readFileSync(driverPath, 'utf8')
 
+// The plm_raw_items descriptor's field ids, bounded at the END OF ITS fields[] ARRAY.
+// A fixed-width slice (the previous `slice(0, 1200)`) runs past the descriptor and swallows
+// standard_materials' columns, so `uom`/`category`/`status` scored as valid plm_raw_items fields —
+// the scan was wider than the object it claimed to describe, and would have accepted a field id
+// that hashes to a phantom on THIS object.
+function rawItemsFieldIds(installerSrc) {
+  const start = installerSrc.indexOf("id: 'plm_raw_items'")
+  if (start < 0) throw new Error('plm_raw_items descriptor not found')
+  const fieldsAt = installerSrc.indexOf('fields: [', start)
+  const end = installerSrc.indexOf('\n    ],', fieldsAt)
+  if (fieldsAt < 0 || end < 0) throw new Error('plm_raw_items fields[] not delimited as expected')
+  const block = installerSrc.slice(fieldsAt, end)
+  return new Set([...block.matchAll(/\{ id: '([A-Za-z_][\w]*)'/g)].map((m) => m[1]))
+}
+
 test('every adapter kind the driver registers is actually registered by the plugin', () => {
   const pluginIndex = fs.readFileSync(
     path.join(repoRoot, 'plugins/plugin-integration-core/index.cjs'), 'utf8')
@@ -79,9 +94,7 @@ test('every API path the driver calls is mounted somewhere in the repo', () => {
 test('pipeline fieldMappings name STAGING columns as source, not the K3 target columns', () => {
   const installer = fs.readFileSync(
     path.join(repoRoot, 'plugins/plugin-integration-core/lib/staging-installer.cjs'), 'utf8')
-  const stagingBlock = installer.slice(installer.indexOf("id: 'plm_raw_items'"))
-  const stagingFields = new Set(
-    [...stagingBlock.slice(0, 1200).matchAll(/\{ id: '([A-Za-z_][\w]*)'/g)].map((m) => m[1]))
+  const stagingFields = rawItemsFieldIds(installer)
   assert.ok(stagingFields.has('code') && stagingFields.has('name'),
     'staging field scan failed — the check below would be vacuous')
 
@@ -129,6 +142,16 @@ test("the driver's OWN staging config carries projectId and a provisioned object
   assert.ok(provisioned.has('plm_raw_items'),
     'descriptor scan failed — every assertion below would be vacuous')
 
+  // Scoped to the plm_raw_items block: a bare repo-wide scan would accept a field id borrowed
+  // from standard_materials / bom_cleanse, which is a DIFFERENT object and hashes differently.
+  const descriptorFieldIds = rawItemsFieldIds(installerSrc)
+  assert.ok(descriptorFieldIds.has('code') && descriptorFieldIds.has('sourceSystemId'),
+    'plm_raw_items field scan failed — the config.fields check would be vacuous')
+  // NEGATIVE control on the SCAN ITSELF: `category` is a standard_materials column. If it appears
+  // here, the slice has run past the descriptor and the check below is wider than it claims.
+  assert.equal(descriptorFieldIds.has('category'), false,
+    'the field scan leaked into a neighbouring descriptor — it no longer describes plm_raw_items')
+
   const cfgBlock = driver.slice(driver.indexOf("kind: 'metasheet:staging'"))
   const head = cfgBlock.slice(0, 900)
 
@@ -152,6 +175,27 @@ test("the driver's OWN staging config carries projectId and a provisioned object
     + '(projectId, objectId), so a wrong key silently yields an EMPTY alias map.')
   assert.ok(driver.includes(`sourceObject: '${objectKey}'`),
     `the pipeline's sourceObject must match the staging objects key ('${objectKey}')`)
+
+  // The OTHER leg of the same join, and the one that fails SILENTLY. config.fields feeds
+  // logicalFieldNames() -> resolveFieldIds(), and resolveObjectFieldIds is COMPUTE-ONLY:
+  // `resolved[fieldId] = stableMetaId('fld', projectId, objectId, fieldId)` for whatever it is
+  // handed (provisioning.ts:150-160; core-backend/src/index.ts:599 says so outright — "compute-only
+  // and never omits a field"). A logical id that does not exist therefore yields a WELL-FORMED hash
+  // for a field that was never provisioned: invertFieldIdMap aliases that phantom id, the real
+  // fld_* key in the row matches nothing, and the column simply reads as absent. No error anywhere.
+  // Anchored on the object block, not `head` — the config carries long explanatory comments, so a
+  // fixed-width window from `kind:` ends before fields[] and the scan reads as absent.
+  const objectBlock = cfgBlock.slice(cfgBlock.indexOf(`${objectKey}: {`))
+  const configFieldsRaw = (objectBlock.slice(0, 600).match(/fields:\s*\[([^\]]*)\]/) || [])[1]
+  assert.ok(configFieldsRaw, "could not read the staging config's fields[] from the driver")
+  const configFields = [...configFieldsRaw.matchAll(/'([^']+)'/g)].map((m) => m[1])
+  assert.ok(configFields.length >= 2, 'staging config must declare at least two logical fields')
+  for (const f of configFields) {
+    assert.ok(descriptorFieldIds.has(f),
+      `staging config declares logical field '${f}', which plm_raw_items does not define `
+      + `(has: ${[...descriptorFieldIds].join(', ')}). resolveFieldIds would hash it anyway, so `
+      + 'this fails SILENTLY as an empty column rather than as an error.')
+  }
 
   // P2-2 cross-namespace join: the seed resolves by DISPLAY NAME, the adapter by LOGICAL id.
   // They agree only because ensureObject writes both onto one field, so pin the seed's lookup
@@ -238,6 +282,40 @@ test('the mock arms its session gate and its call logger — both are load-beari
     'the session assertion must reject a runner that omits the flag')
   assert.equal(/console\.log\([^)]*K3CALL/.test('logger: (call) => { void call }'), false,
     'the logger assertion must reject a runner whose logger emits nothing')
+})
+
+test('no record() step asserts a CONSTANT — every predicate reads real evidence', () => {
+  // Review P2-1/W7: the read-back negative control could be neutered to unconditionally true and
+  // the whole suite stayed green, because NO driver predicate has coverage. Rather than pin that
+  // one step, pin the class: a step whose pass-predicate is a literal cannot fail, and a step that
+  // cannot fail is worse than no step — it manufactures evidence.
+  //
+  // record() is `record(step, pass, evidence)`, and it process.exit(1)s on a false predicate, so
+  // `summary.pass = true` at the end IS conditional. What was unguarded is the predicates.
+  const calls = [...driver.matchAll(/record\(\s*'([a-z0-9-]+)'\s*,\s*([^,]+(?:,(?![\s\n]*\{)[^,]+)*),/g)]
+  assert.ok(calls.length >= 8, `record() scan found too little (${calls.length}) — would be vacuous`)
+
+  const constant = calls
+    .map(([, step, predicate]) => [step, predicate.trim()])
+    .filter(([, predicate]) => /^(true|1|!!1|Boolean\(true\))$/.test(predicate))
+  assert.deepEqual(constant, [],
+    `these steps assert a CONSTANT and can never fail: ${JSON.stringify(constant)}`)
+
+  // The negative control specifically must read the evidence it claims to check — it is the one
+  // step whose whole purpose is proving the read-back found a WRITE and not a permissive endpoint.
+  const negIdx = driver.indexOf("record('read-back-negative-control'")
+  assert.ok(negIdx > 0, 'the read-back negative control must exist')
+  const negBlock = driver.slice(negIdx, negIdx + 400)
+  for (const needle of ['missEvidence?.ok === false', 'K3_WISE_READ_BUSINESS_ERROR']) {
+    assert.ok(negBlock.includes(needle),
+      `the negative control must assert ${needle}; a looser predicate cannot distinguish "not found" `
+      + 'from "endpoint accepted anything"')
+  }
+
+  // POSITIVE CONTROL — the constant-detector must flag a literal predicate.
+  const probe = [..."record('fake-step', true, { a: 1 })".matchAll(/record\(\s*'([a-z0-9-]+)'\s*,\s*([^,]+),/g)]
+  assert.equal(probe.length, 1, 'probe must parse')
+  assert.ok(/^true$/.test(probe[0][2].trim()), 'the detector must recognise a literal true predicate')
 })
 
 test('BEHAVIOURAL: a bare read yields LOGICAL keys only when projectId + objectId are right', async () => {
