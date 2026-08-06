@@ -1048,6 +1048,11 @@ function normalizeC6WriteApplyBody(body = {}) {
 // write-source (zero external write); any other (default) target uses the host SQL write
 // facade unchanged. Used by BOTH the dry-run and apply handlers with identical inputs so the
 // apply recompute reproduces the same dry-run revision (the revision fence).
+// C6 targets whose write source builds a TARGET ADAPTER, and therefore need credentials on the
+// loaded system. Everything else (SQL write-gated, multitable) is served by dataSourceWrites and
+// is deliberately loaded config-only.
+const ADAPTER_BACKED_C6_TARGET_KINDS = new Set([K3_WISE_C6_WRITE_TARGET_KIND])
+
 function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs }) {
   // K3WriteDecision (owner, 20260805): the K3 connector rides the same C6 dry-run->apply
   // lifecycle via its own profile + adapter-backed write source. `enforcedMaxRows` pins the
@@ -3372,11 +3377,28 @@ function createHandlers(services, options = {}) {
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
       }))
-      const targetSystem = await externalSystems.getExternalSystem(scopedInput(req, {
+      // `getExternalSystem` is the credential-STRIPPED public accessor. The SOURCE has always used
+      // the adapter-capable one (a few lines above); the TARGET never did — so an adapter-backed
+      // target (K3) arrived with NO credentials and the C6 dry-run died with
+      // K3_WISE_CREDENTIALS_MISSING before a single wire call. Reproduced against the real
+      // registry: flipping this one accessor makes the whole lifecycle pass.
+      //
+      // Peek first, then re-load WITH credentials only for kinds that actually build a target
+      // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
+      // for, so this does not widen credential exposure for them.
+      const targetSystemScope = scopedInput(req, {
         id: pipeline.targetSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
-      }))
+      })
+      let targetSystem = await externalSystems.getExternalSystem(targetSystemScope)
+      if (
+        targetSystem
+        && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
+        && typeof externalSystems.getExternalSystemForAdapter === 'function'
+      ) {
+        targetSystem = await externalSystems.getExternalSystemForAdapter(targetSystemScope)
+      }
       if (!sourceSystem) {
         throw new HttpRouteError(404, 'SOURCE_SYSTEM_NOT_FOUND', 'source external system not found')
       }
@@ -3452,11 +3474,28 @@ function createHandlers(services, options = {}) {
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
       }))
-      const targetSystem = await externalSystems.getExternalSystem(scopedInput(req, {
+      // `getExternalSystem` is the credential-STRIPPED public accessor. The SOURCE has always used
+      // the adapter-capable one (a few lines above); the TARGET never did — so an adapter-backed
+      // target (K3) arrived with NO credentials and the C6 dry-run died with
+      // K3_WISE_CREDENTIALS_MISSING before a single wire call. Reproduced against the real
+      // registry: flipping this one accessor makes the whole lifecycle pass.
+      //
+      // Peek first, then re-load WITH credentials only for kinds that actually build a target
+      // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
+      // for, so this does not widen credential exposure for them.
+      const targetSystemScope = scopedInput(req, {
         id: pipeline.targetSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
-      }))
+      })
+      let targetSystem = await externalSystems.getExternalSystem(targetSystemScope)
+      if (
+        targetSystem
+        && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
+        && typeof externalSystems.getExternalSystemForAdapter === 'function'
+      ) {
+        targetSystem = await externalSystems.getExternalSystemForAdapter(targetSystemScope)
+      }
       if (!sourceSystem) {
         throw new HttpRouteError(404, 'SOURCE_SYSTEM_NOT_FOUND', 'source external system not found')
       }

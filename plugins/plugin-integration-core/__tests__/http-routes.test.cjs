@@ -3,6 +3,17 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 
+// MODEL THE PRODUCT, NOT A CONVENIENCE. The real `getExternalSystem` is the PUBLIC accessor and
+// STRIPS credentials; only `getExternalSystemForAdapter` returns them. These fixtures used to hand
+// back the whole object, so every C6 test was green while the product loaded an adapter-backed
+// target with NO credentials — the dry-run died with K3_WISE_CREDENTIALS_MISSING before any wire
+// call, and five review rounds never saw it because the mock was more permissive than production.
+function publicTargetView(system) {
+  if (!system) return null
+  const { credentials, credentialsEncrypted, ...publicView } = system
+  return { ...publicView, hasCredentials: Boolean(credentials || credentialsEncrypted) }
+}
+
 const HTTP_ROUTES_PATH = path.join(__dirname, '..', 'lib', 'http-routes.cjs')
 const httpRoutes = require(HTTP_ROUTES_PATH)
 const { MAX_LIST_LIMIT } = httpRoutes
@@ -1645,7 +1656,7 @@ async function testPipelineExternalWriteDryRunRoute() {
       },
       async getExternalSystem(input) {
         calls.push(['getExternalSystem', input])
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -1816,7 +1827,7 @@ async function testPipelineExternalWriteApplyRoute() {
       },
       async getExternalSystem(input) {
         calls.push(['getExternalSystem', input])
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -2033,7 +2044,7 @@ async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
         return null
       },
       async getExternalSystem(input) {
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -2259,7 +2270,7 @@ async function testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance() {
       },
       async getExternalSystem(input) {
         calls.push(['getExternalSystem', input])
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -2450,7 +2461,7 @@ async function testPipelineExternalWriteApplyDoesNotOverstateProvenancePersisten
         return null
       },
       async getExternalSystem(input) {
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -5598,7 +5609,7 @@ async function testPipelineExternalWriteMultitableRoute() {
   const { services } = createMockServices({
     externalSystemRegistry: {
       async getExternalSystemForAdapter(input) { calls.push(['getExternalSystemForAdapter', input]); return input.id === sourceSystem.id ? { ...sourceSystem } : null },
-      async getExternalSystem(input) { calls.push(['getExternalSystem', input]); return input.id === targetSystem.id ? { ...targetSystem } : null },
+      async getExternalSystem(input) { calls.push(['getExternalSystem', input]); return input.id === targetSystem.id ? publicTargetView(targetSystem) : null },
     },
     adapterRegistry: {
       createAdapter(system, deps) {
@@ -8449,7 +8460,65 @@ async function testStockPreparationSqlServerSealedSnapshotInternalRoute() {
   assert.equal(calls.length, 1)
 }
 
+async function testC6AdapterBackedTargetLoadsWithCredentials() {
+  // The C6 route loaded the SOURCE via getExternalSystemForAdapter but the TARGET via
+  // getExternalSystem — the PUBLIC accessor, which STRIPS credentials. For targets served by
+  // dataSourceWrites (SQL write-gated, multitable) that is correct and deliberate. For an
+  // ADAPTER-BACKED target it is fatal: the K3 write source builds a real adapter, which then
+  // throws K3_WISE_CREDENTIALS_MISSING before a single wire call.
+  //
+  // No existing test caught it: none used an adapter-backed target, AND the fixtures returned the
+  // whole system from getExternalSystem — a mock more permissive than production. This asserts the
+  // ACCESSOR CHOICE, which is the property, rather than a downstream symptom.
+  const routesSrc = require('node:fs').readFileSync(HTTP_ROUTES_PATH, 'utf8')
+  assert.ok(
+    /ADAPTER_BACKED_C6_TARGET_KINDS\s*=\s*new Set\(\[K3_WISE_C6_WRITE_TARGET_KIND\]\)/.test(routesSrc),
+    'the route must declare which C6 target kinds build an adapter',
+  )
+  assert.ok(
+    /getExternalSystemForAdapter\(targetSystemScope\)/.test(routesSrc),
+    'an adapter-backed C6 target must be re-loaded through the adapter-capable accessor',
+  )
+  // Both C6 handlers (dry-run and apply) must do it — one alone leaves apply broken.
+  const reloads = (routesSrc.match(/getExternalSystemForAdapter\(targetSystemScope\)/g) || []).length
+  assert.equal(reloads, 2, `both C6 handlers must re-load the target (found ${reloads})`)
+
+  // Behavioural half: the selection logic the route performs, against a registry that strips
+  // credentials exactly like production.
+  const targetSystem = {
+    id: 'k3_target', tenantId: 'tenant_1', kind: 'erp:k3-wise-webapi', role: 'target',
+    status: 'active', config: { baseUrl: 'https://k3.example.test' },
+    credentials: { username: 'u', password: 'p', acctId: 'A' },
+  }
+  const seen = []
+  const registry = {
+    async getExternalSystemForAdapter(input) { seen.push(['forAdapter', input.id]); return { ...targetSystem } },
+    async getExternalSystem(input) { seen.push(['public', input.id]); return publicTargetView(targetSystem) },
+  }
+  const ADAPTER_BACKED = new Set(['erp:k3-wise-webapi'])
+  const scope = { id: targetSystem.id, tenantId: 'tenant_1', workspaceId: null }
+  let loaded = await registry.getExternalSystem(scope)
+  assert.equal(loaded.credentials, undefined, 'precondition: the public accessor strips credentials')
+  if (loaded && ADAPTER_BACKED.has(loaded.kind)) loaded = await registry.getExternalSystemForAdapter(scope)
+  assert.ok(loaded.credentials, 'an adapter-backed C6 target MUST end up with credentials')
+
+  // POSITIVE CONTROL — a dataSourceWrites target must NOT reach the credentialed accessor.
+  const sqlTarget = { ...targetSystem, id: 'sql_target', kind: 'data-source:sql-write-gated' }
+  const seen2 = []
+  const registry2 = {
+    async getExternalSystemForAdapter(input) { seen2.push(['forAdapter', input.id]); return { ...sqlTarget } },
+    async getExternalSystem(input) { seen2.push(['public', input.id]); return publicTargetView(sqlTarget) },
+  }
+  let loaded2 = await registry2.getExternalSystem({ id: sqlTarget.id })
+  if (loaded2 && ADAPTER_BACKED.has(loaded2.kind)) loaded2 = await registry2.getExternalSystemForAdapter({ id: sqlTarget.id })
+  assert.equal(loaded2.credentials, undefined, 'a dataSourceWrites target stays config-only')
+  assert.equal(seen2.some(([fn]) => fn === 'forAdapter'), false,
+    'the credentialed accessor must NOT be reached for a non-adapter-backed target')
+  console.log('  PASS  C6 adapter-backed target loads with credentials')
+}
+
 async function main() {
+  await testC6AdapterBackedTargetLoadsWithCredentials()
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
   await testStockPreparationTargetProvisioningRoutes()
