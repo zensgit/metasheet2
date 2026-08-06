@@ -136,8 +136,30 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/rehearsal
         run: |
           set -euo pipefail
+          # PREFLIGHT A1: MEASURE the narrowing instead of asserting a literal against a literal.
+          # The provider DELETES excluded names from the map that feeds `Pending:`, so `Pending: 0`
+          # is scoped to whatever remains and cannot fail for the excluded six. Listing once with an
+          # EMPTY exclude set and once with the real one turns that invisible scope into a number
+          # produced by the runtime, and the difference must be exactly the size of the list.
+          MIGRATION_EXCLUDE= node packages/core-backend/dist/src/db/migrate.js --list \
+            | tee "${RUNNER_TEMP}/mig-unscoped.txt"
           node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/mig-before.txt"
           grep -q "Applied: 0" "${RUNNER_TEMP}/mig-before.txt"
+
+          known="$(grep -oE '^Pending: [0-9]+' "${RUNNER_TEMP}/mig-unscoped.txt" | awk '{print $2}')"
+          considered="$(grep -oE '^Pending: [0-9]+' "${RUNNER_TEMP}/mig-before.txt" | awk '{print $2}')"
+          if [ -z "${known}" ] || [ -z "${considered}" ]; then
+            echo "FATAL: could not read a Pending count from one of the listings; an unread file is not a measurement" >&2
+            exit 1
+          fi
+          echo "migrationsKnown=${known} migrationsConsidered=${considered} migrationsSkippedByName=$((known - considered))"
+          if [ "$((known - considered))" -ne 6 ]; then
+            echo "FATAL: the runtime skipped $((known - considered)) migrations by name, but MIGRATION_EXCLUDE names 6; the scope of Pending:0 is not what this lane claims" >&2
+            exit 1
+          fi
+          # And say so IN THE EVIDENCE, so the artifact bundle carries the narrowing rather than
+          # leaving a reader to infer "full migration set" from a bare `Pending: 0`.
+          echo "migrationScope=CI_EXCLUDED_6 customerOnPremRunsAll=true"
           node packages/core-backend/dist/src/db/migrate.js
           node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/mig-after.txt"
           # `Pending: 0` ALONE IS A FALSE GREEN HERE. This step inherits the workflow-level
@@ -284,6 +306,7 @@ jobs:
           echo "loginTokenObtained=PASS"
 
       - name: RUN THE WINDOW RUNBOOK over HTTP (the rehearsal proper)
+        id: runbook
         env:
           BASE_URL: http://127.0.0.1:${{ env.REHEARSAL_PORT }}
           TOKEN: ${{ steps.login.outputs.token }}
@@ -304,8 +327,26 @@ jobs:
           save_calls="$(grep -c "K3CALL POST /K3API/Material/Save" "${RUNNER_TEMP}/mock-k3.log" || true)"
           echo "wireGetListCallsLogged=${get_list_calls:-0}"
           echo "wireSaveCallsLogged=${save_calls:-0}"
+          # PREFLIGHT B1: this step is `if: always()`, and the runbook step had no `id:`, so the
+          # positive control could not tell "the logger is broken" from "the driver never got this
+          # far". 10 of the driver's 17 gates precede the first GetList and 13 precede the first
+          # Save, and record() hard-exits on the first failure — so ANY early failure produced a
+          # louder, more specific, WRONG diagnosis blaming the mock's logger, on the line right
+          # after printing GetList=1. It accused a subsystem that is provably innocent
+          # (mock-k3-webapi-server.mjs logs every request before the session gate and before
+          # routing) and contradicted data it had just printed itself.
+          #
+          # The positive control is only meaningful when the runbook actually reached those calls.
+          if [ "${{ steps.runbook.outcome }}" != "success" ]; then
+            echo "wirePositiveControlSkipped=runbook-did-not-complete (outcome=${{ steps.runbook.outcome }})"
+            echo "The runbook step failed before or during the rehearsal; the FAILED STEP ABOVE and" >&2
+            echo "REHEARSAL_SUMMARY name the actual failed gate. Counts above are informational only:" >&2
+            echo "an absent GetList/Save here means the driver never got that far, NOT that the mock" >&2
+            echo "stopped logging." >&2
+            exit 1
+          fi
           if [ "${get_list_calls:-0}" -lt 1 ] || [ "${save_calls:-0}" -lt 1 ]; then
-            echo "FATAL: positive control failed — mock-k3.log shows GetList=${get_list_calls:-0} Save=${save_calls:-0} K3CALL lines; the log is not actually recording wire calls, so the Submit/Audit absence check below would be meaningless" >&2
+            echo "FATAL: the runbook SUCCEEDED but mock-k3.log shows GetList=${get_list_calls:-0} Save=${save_calls:-0} K3CALL lines; the log is not actually recording wire calls, so the Submit/Audit absence check below would be meaningless" >&2
             exit 1
           fi
           # POSITIVE ALLOWLIST, not a two-word denylist. The old check was
@@ -341,6 +382,7 @@ jobs:
             ${{ runner.temp }}/backend.log
             ${{ runner.temp }}/mock-k3.log
             ${{ runner.temp }}/mig-before.txt
+            ${{ runner.temp }}/mig-unscoped.txt
             ${{ runner.temp }}/mig-after.txt
           if-no-files-found: error
           retention-days: 7

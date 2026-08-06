@@ -887,10 +887,28 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
     { pairedReadBaseUrl: 'https://k3.example.test/K3API-READ' },
   )
   const pairedSameErr = ((pairedSameInstance.res.body && pairedSameInstance.res.body.error) || {}).details || {}
-  assert.notEqual(pairedSameErr.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
-    `a binding on the paired read record of the SAME K3 must be accepted, got: ${JSON.stringify(pairedSameErr)}`)
-  assert.notEqual(pairedSameErr.code, 'C6_WRITE_B4_BINDING_REQUIRED',
-    'the paired read record must COUNT toward the relation check, or B4 can never bind the real reader')
+  // POSITIVE EQUALITY, not a list of `notEqual`s. "It is not error X" cannot distinguish
+  // "succeeded" from "failed for some other reason", and that is precisely how the #4784
+  // regression survived: the owner's review flipped `targetSystem.kind` to `targetSystem.role` at
+  // BOTH real C6 handlers and every suite stayed green, because every assertion here was of the
+  // not-this-particular-error family.
+  //
+  // K3_WISE_READ_FAILED is the RIGHT answer for this fixture: the plan cleared the B4 gate, the
+  // kind gate, the same-instance gate AND credential resolution, then made a real wire call to the
+  // paired read record's baseUrl, which the K3 fetch mock does not serve. Reaching a wire error is
+  // therefore proof that credentials were resolved.
+  //
+  // THIS IS ALSO THE REAL-ROUTE COVERAGE FOR #4784. Measured, not asserted:
+  //     baseline          -> K3_WISE_READ_FAILED        (adapter accessor, credentials present)
+  //     .kind -> .role    -> K3_WISE_CREDENTIALS_MISSING (public accessor strips them)
+  // The merged #4784 fix previously had only source-text regex plus a test-local reimplementation
+  // of the selection logic, so it protected nothing.
+  assert.equal(pairedSameErr.code, 'K3_WISE_READ_FAILED',
+    'the same-K3 paired read binding must clear every gate AND resolve credentials, reaching the '
+    + `wire; got: ${JSON.stringify(pairedSameErr)}`)
+  assert.notEqual(pairedSameErr.code, 'K3_WISE_CREDENTIALS_MISSING',
+    'an adapter-backed C6 target must be re-loaded through getExternalSystemForAdapter (#4784) — '
+    + 'the public accessor strips credentials and the adapter dies before any wire call')
 
   // A -> B: read record on a DIFFERENT K3 host. MUST BE REFUSED. This is the case the old
   // arrangement was structurally incapable of producing at all.
