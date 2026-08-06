@@ -1259,6 +1259,30 @@ export interface PluginServices {
       errored: number
       /** #4770: total `state='running'` rows at scan time — the starvation signal. */
       backlogRemaining: number
+      /** #4770 follow-up: `state='running'` rows never yet claimed by a scan
+       *  (`last_attempt_at IS NULL`) — a stuck-vs-churn signal, see
+       *  `AttendanceScheduledRunSweepTickResultV1`'s doc comment in
+       *  `w4c2-scheduled-run-ops-worker.ts` for the full trend semantics. */
+      neverAttemptedRunning: number
+      /** Owner-review P2 on #4779: age (seconds) of the STALEST `last_attempt_at` among
+       *  `state='running'` rows — closes `neverAttemptedRunning`'s own blind spot for a row
+       *  scanned once then PERMANENTLY EXCLUDED from later scans (non-NULL, so invisible to
+       *  `MIN()`-ignores-NULL above). Read as BOUNDED-PLATEAU (healthy, even a congested backlog)
+       *  vs. UNBOUNDED-GROWTH — never merely "zero vs. nonzero": a congested-but-healthy backlog
+       *  legitimately reads nonzero on most ticks without anything being stuck.
+       *  UNBOUNDED-GROWTH does NOT mean "locked" specifically: a held row lock is one known
+       *  mechanism, sustained `NULLS FIRST` arrival starvation (a stream of brand-new `running`
+       *  rows preempting an already-stamped one for every scan slot, indefinitely — NO LOCK AT
+       *  ALL) is another, empirically reproduced at the production default `limit=25`; this field
+       *  cannot tell them apart, and the mechanism list is not claimed closed. (A prior version of
+       *  this comment attributed UNBOUNDED-GROWTH solely to "a row permanently locked after its
+       *  first scan" — RETRACTED, fresh-gate pass 2026-08-05: false, and it was the SAME
+       *  overclaim as the worker-doc mirror this field's own doc comment already corrects; see
+       *  below.) See `AttendanceScheduledRunSweepTickResultV1`'s doc comment in
+       *  `w4c2-scheduled-run-ops-worker.ts` for the full three-regime breakdown, the
+       *  arrival-starvation mechanism and its owner-deferred #4770 follow-up, and the two
+       *  counters' actual (narrower-than-"permanently stuck") coverage. */
+      oldestRunningAttemptAgeSeconds: number
     }>
     /**
      * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the `abandoned`

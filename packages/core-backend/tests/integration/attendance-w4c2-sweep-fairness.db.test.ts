@@ -275,13 +275,50 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
         )
 
       const tick1 = await tick()
-      expect(tick1).toEqual({ scanned: 25, finalized: 0, notReady: 25, skipped: 0, errored: 0, backlogRemaining: 27 })
+      // #4770 follow-up: 27 running rows, 25 scanned/stamped this tick — the 26th stuck run and
+      // the healthy run are the 2 rows still `last_attempt_at IS NULL` after this tick's scan.
+      // `oldestRunningAttemptAgeSeconds` is asserted separately below (not inlined into this
+      // `toEqual`): all 25 stamped rows share the SAME `now()` this tick's transaction saw
+      // (PostgreSQL's `now()` is transaction-stable), so it is deterministically exactly `0` —
+      // an exact assertion, not a bound.
+      const { oldestRunningAttemptAgeSeconds: tick1Age, ...tick1Rest } = tick1
+      expect(tick1Rest).toEqual({
+        scanned: 25,
+        finalized: 0,
+        notReady: 25,
+        skipped: 0,
+        errored: 0,
+        backlogRemaining: 27,
+        neverAttemptedRunning: 2,
+      })
+      expect(tick1Age).toBe(0)
       // The healthy run and the 26th stuck run were NOT reached by tick 1 (still un-stamped).
       expect(await lastAttemptAt(healthyCreated.runId)).toBeNull()
       expect(await runState(healthyCreated.runId)).toBe('running')
 
       const tick2 = await tick()
-      expect(tick2).toEqual({ scanned: 25, finalized: 1, notReady: 24, skipped: 0, errored: 0, backlogRemaining: 27 })
+      // Tick 2's scan durably prioritizes `last_attempt_at IS NULL` rows FIRST (`NULLS FIRST`),
+      // so both previously-unstamped rows are claimed this tick — `neverAttemptedRunning` drops
+      // to 0 even though 2 of the 26 stuck rows from tick 1 are not re-scanned this tick (they
+      // already carry a non-null `last_attempt_at` from tick 1, so they do not count here; this
+      // is the read-AFTER-scan ordering `AttendanceScheduledRunSweepTickResultV1`'s doc comment
+      // pins — computing this BEFORE the scan would read 2, not 0). The SAME 2 leftover rows are
+      // now the `MIN(last_attempt_at)` (still at tick 1's stamp), so `oldestRunningAttemptAgeSeconds`
+      // is positive here — real wall-clock elapsed time between tick 1's and tick 2's OWN
+      // transactions, not a value this test can predict exactly (see the dedicated discriminating-
+      // leg describe block below for the tight, deterministic monotonic-growth proof this field
+      // exists for).
+      const { oldestRunningAttemptAgeSeconds: tick2Age, ...tick2Rest } = tick2
+      expect(tick2Rest).toEqual({
+        scanned: 25,
+        finalized: 1,
+        notReady: 24,
+        skipped: 0,
+        errored: 0,
+        backlogRemaining: 27,
+        neverAttemptedRunning: 0,
+      })
+      expect(tick2Age).toBeGreaterThan(0)
 
       // The healthy run finalized on tick 2 — durable rotation reached it despite 26
       // persistently-blocked candidates having occupied every earlier scan window.
@@ -312,7 +349,19 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
       const result = await withAllowlist([solo.orgId], () =>
         sweepAttendanceScheduledRunsOnceV1(pool, { limit: 25, async recoverCandidate() {} }),
       )
-      expect(result).toEqual({ scanned: 1, finalized: 0, notReady: 1, skipped: 0, errored: 0, backlogRemaining: 1 })
+      expect(result).toEqual({
+        scanned: 1,
+        finalized: 0,
+        notReady: 1,
+        skipped: 0,
+        errored: 0,
+        backlogRemaining: 1,
+        // Steady state: the lone row is scanned (and stamped) THIS tick, so it no longer counts
+        // as never-attempted by the time the post-scan read happens — 0, not 1.
+        neverAttemptedRunning: 0,
+        // Freshly stamped THIS tick — `now()` is transaction-stable, so this is exactly `0`.
+        oldestRunningAttemptAgeSeconds: 0,
+      })
       expect(await lastAttemptAt(solo.runId)).not.toBeNull()
       expect(await runState(solo.runId)).toBe('running')
     }, 60000)
@@ -336,7 +385,16 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
       }
     }
 
-    const EXPECTED_META_KEYS = ['scanned', 'finalized', 'notReady', 'skipped', 'errored', 'backlogRemaining'].sort()
+    const EXPECTED_META_KEYS = [
+      'scanned',
+      'finalized',
+      'notReady',
+      'skipped',
+      'errored',
+      'backlogRemaining',
+      'neverAttemptedRunning',
+      'oldestRunningAttemptAgeSeconds',
+    ].sort()
 
     it('logs exactly one info tick-summary with a closed, all-numeric, values-free key set — and no warn when nothing errors', async () => {
       const workDate = '2026-03-03'
@@ -459,8 +517,25 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
         expect(elapsedMs).toBeLessThan(4000)
 
         // `b` (locked) is excluded from THIS tick's candidate set entirely; `a` and `c` are
-        // unaffected and processed normally — values-free containment restored.
-        expect(result).toEqual({ scanned: 2, finalized: 0, notReady: 2, skipped: 0, errored: 0, backlogRemaining: 3 })
+        // unaffected and processed normally — values-free containment restored. `b` is also the
+        // #4770-follow-up `neverAttemptedRunning` signal in miniature: it is `state='running'`
+        // and was never stamped (excluded by SKIP LOCKED, not merely deferred to later in the
+        // scan window), so it reads 1 — a single-tick preview of the multi-tick "stably >0"
+        // starvation signature exercised in full below.
+        expect(result).toEqual({
+          scanned: 2,
+          finalized: 0,
+          notReady: 2,
+          skipped: 0,
+          errored: 0,
+          backlogRemaining: 3,
+          neverAttemptedRunning: 1,
+          // `b`'s `last_attempt_at` is NULL (locked BEFORE ever being scanned) — `MIN()` ignores
+          // NULL, so only `a`/`c`'s fresh THIS-tick stamps count, giving an exact `0`. `b` is
+          // invisible to this field by construction (that is `neverAttemptedRunning`'s case, not
+          // this field's — see the disjoint-coverage note on `AttendanceScheduledRunSweepTickResultV1`).
+          oldestRunningAttemptAgeSeconds: 0,
+        })
         expect(await lastAttemptAt(a.runId)).not.toBeNull()
         expect(await lastAttemptAt(c.runId)).not.toBeNull()
         // `b` was never reached by this tick — still un-stamped, still running, NOT counted as
@@ -578,6 +653,286 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
         clientA.release()
         clientB.release()
       }
+    }, 30000)
+  })
+
+  // =============================================================================================
+  // #4770 follow-up (issue #4770; second-opinion NIT-refine, 2026-08-05) — `neverAttemptedRunning`
+  // is meant to separate "permanently stuck" from "ordinary large-backlog churn", something
+  // `backlogRemaining` alone cannot do once `backlogRemaining > limit` (`scanned < backlogRemaining`
+  // holds every tick either way — see the second opinion's Probe C). These two tests are the SAME
+  // 30-row/limit-25 backlog, differing in EXACTLY one variable — whether a connection holds an
+  // open, never-released `FOR UPDATE` lock on one row — so the observed `neverAttemptedRunning`
+  // sequences are the discriminating signal itself, not an artifact of different fixtures.
+  // =============================================================================================
+  describe('#4770 follow-up — neverAttemptedRunning discriminates permanent-lock starvation from ordinary churn', () => {
+    it('a row held under a never-released lock floors neverAttemptedRunning at 1 across ticks; every other row still drains', async () => {
+      const workDate = '2026-03-09'
+      const ROWS = 30
+      const rows: Array<{ orgId: string; runId: string }> = []
+      for (let i = 0; i < ROWS; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- sequential seeding: created_at must be
+        // strictly increasing, same rationale as gate 1's and the overlap test's seeding loops.
+        rows.push(await createStuckRun(`starve-${i}`, workDate))
+      }
+      const orgIds = rows.map((r) => r.orgId)
+
+      // Row 0 (oldest — sorts first in the rotation) is held under an open, uncommitted `FOR
+      // UPDATE` lock for the ENTIRE test — modeling a genuinely hung/leaked transaction, not a
+      // timing artifact (same construction as the "tick-level containment" regression guard
+      // above, held across THREE ticks here instead of one). `FOR UPDATE SKIP LOCKED` excludes
+      // it from every tick's scan, so it is NEVER stamped — this is the second opinion's Probe C
+      // scenario (120 rows/8 ticks, manual), pinned here as an automated multi-tick regression
+      // at a smaller scale (30 rows/3 ticks, limit 25).
+      const lockConn = await pool.connect()
+      await lockConn.query('BEGIN')
+      await lockConn.query('SELECT * FROM attendance_scheduled_runs WHERE run_id = $1::uuid FOR UPDATE', [
+        rows[0].runId,
+      ])
+
+      try {
+        const tick = () =>
+          withAllowlist(orgIds, () =>
+            sweepAttendanceScheduledRunsOnceV1(pool, { limit: 25, async recoverCandidate() {} }),
+          )
+        const observed: Array<Awaited<ReturnType<typeof tick>>> = []
+        for (let t = 0; t < 3; t += 1) {
+          // eslint-disable-next-line no-await-in-loop -- ticks are inherently sequential: each
+          // reads the durable write-back the previous tick left behind.
+          observed.push(await tick())
+        }
+
+        // 30 rows, limit 25, none ever finalize (targets never sealed — every candidate reports
+        // `not_ready`, so `scanned`/`notReady`/`backlogRemaining` are flat across all 3 ticks).
+        // Tick 1 scans the 25 oldest UNLOCKED rows (row 0 is skip-locked, invisible to the
+        // selection entirely), leaving 4 unlocked rows + the locked row un-stamped (5). Tick 2's
+        // `last_attempt_at ASC NULLS FIRST` ordering claims those 4 remaining unlocked rows
+        // FIRST, so only the permanently-locked row is left (1) — and it STAYS at 1 on tick 3,
+        // because it is never claimable. This is the stuck-vs-churn signature: FLOORS nonzero
+        // instead of draining to 0 (contrast the positive-control test immediately below, whose
+        // sequence is [5, 0, 0] off the identical fixture minus the held lock).
+        const restObserved = observed.map(({ oldestRunningAttemptAgeSeconds, ...rest }) => rest)
+        expect(restObserved).toEqual([
+          { scanned: 25, finalized: 0, notReady: 25, skipped: 0, errored: 0, backlogRemaining: 30, neverAttemptedRunning: 5 },
+          { scanned: 25, finalized: 0, notReady: 25, skipped: 0, errored: 0, backlogRemaining: 30, neverAttemptedRunning: 1 },
+          { scanned: 25, finalized: 0, notReady: 25, skipped: 0, errored: 0, backlogRemaining: 30, neverAttemptedRunning: 1 },
+        ])
+
+        // `oldestRunningAttemptAgeSeconds` is NOT this test's discriminator: row 0's
+        // `last_attempt_at` is NULL forever (locked BEFORE its first scan) — `MIN()` ignores
+        // NULL, so this field structurally cannot see row 0 (that is `neverAttemptedRunning`'s
+        // exclusive coverage, already proven above). At this 30-row/limit-25 SCALE, the 29 other
+        // (unlocked, genuinely churning) rows themselves leave a handful of rows one tick
+        // "behind" every tick (rotation can only touch `limit` rows per tick — same dynamic the
+        // positive-control test below also shows), so no exact or monotonic claim holds for
+        // ticks 2-3 here. Tick 1 is the one exception: every stamped row shares that tick's OWN
+        // transaction-stable `now()`, so it is deterministically `0`. The tight, deterministic
+        // monotonic-growth proof this field exists for uses a STEADY-STATE (backlog <= limit)
+        // fixture instead, where every unlocked row genuinely IS re-touched every tick — see the
+        // "owner-review P2" describe block below.
+        expect(observed[0].oldestRunningAttemptAgeSeconds).toBe(0)
+        for (const o of observed) {
+          expect(o.oldestRunningAttemptAgeSeconds).toBeGreaterThanOrEqual(0)
+        }
+
+        expect(await lastAttemptAt(rows[0].runId)).toBeNull()
+        expect(await runState(rows[0].runId)).toBe('running')
+      } finally {
+        await lockConn.query('ROLLBACK').catch(() => undefined)
+        lockConn.release()
+      }
+    }, 90000)
+
+    it('positive control — the SAME 30-row backlog with NO held lock drains neverAttemptedRunning to 0 and stays there', async () => {
+      const workDate = '2026-03-10'
+      const ROWS = 30
+      const rows: Array<{ orgId: string; runId: string }> = []
+      for (let i = 0; i < ROWS; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- sequential seeding, same rationale as the
+        // sibling (locked) test above.
+        rows.push(await createStuckRun(`churn-${i}`, workDate))
+      }
+      const orgIds = rows.map((r) => r.orgId)
+
+      // No lock held anywhere — every row is genuinely claimable. `createStuckRun`'s targets are
+      // deliberately never sealed (see its own doc comment), so every row reports `not_ready` on
+      // every scan forever and STAYS `state='running'` — a real positive control (an ongoing,
+      // never-terminal backlog under legitimate rotation churn), not "an empty queue reads 0".
+      const tick = () =>
+        withAllowlist(orgIds, () =>
+          sweepAttendanceScheduledRunsOnceV1(pool, { limit: 25, async recoverCandidate() {} }),
+        )
+      const observed: Array<Awaited<ReturnType<typeof tick>>> = []
+      for (let t = 0; t < 3; t += 1) {
+        // eslint-disable-next-line no-await-in-loop -- ticks are inherently sequential.
+        observed.push(await tick())
+      }
+
+      // Identical 30/25 split to the locked sibling test's tick 1 (5 un-stamped after tick 1),
+      // but with nothing permanently un-claimable, tick 2 claims the remaining 5 rows and it
+      // stays 0 on tick 3 — the discriminating counter-signature to the sibling test's
+      // [5, 1, 1] above.
+      const restObserved = observed.map(({ oldestRunningAttemptAgeSeconds, ...rest }) => rest)
+      expect(restObserved).toEqual([
+        { scanned: 25, finalized: 0, notReady: 25, skipped: 0, errored: 0, backlogRemaining: 30, neverAttemptedRunning: 5 },
+        { scanned: 25, finalized: 0, notReady: 25, skipped: 0, errored: 0, backlogRemaining: 30, neverAttemptedRunning: 0 },
+        { scanned: 25, finalized: 0, notReady: 25, skipped: 0, errored: 0, backlogRemaining: 30, neverAttemptedRunning: 0 },
+      ])
+
+      // Same caveat as the locked sibling test above: at this congested (backlog > limit) scale,
+      // even this fully-healthy churn leaves a handful of rows one tick "behind" every tick
+      // (rotation can only touch `limit` rows per tick), so `oldestRunningAttemptAgeSeconds` is
+      // NOT pinned to `0` on ticks 2-3 here despite there being no lock anywhere — only tick 1
+      // (every row fresh-stamped in its OWN transaction) is exactly `0`. The clean "stays at `0`,
+      // every tick" signature this field gives for genuinely healthy churn needs a STEADY-STATE
+      // (backlog <= limit) fixture, where literally every row is re-touched every tick — see the
+      // "owner-review P2" describe block below.
+      expect(observed[0].oldestRunningAttemptAgeSeconds).toBe(0)
+      for (const o of observed) {
+        expect(o.oldestRunningAttemptAgeSeconds).toBeGreaterThanOrEqual(0)
+      }
+    }, 90000)
+  })
+
+  // =============================================================================================
+  // Owner-review P2 on #4779 (2026-08-05) — `neverAttemptedRunning`'s OWN blind spot: it counts
+  // `last_attempt_at IS NULL`, so a row locked BEFORE its first-ever scan is caught (the describe
+  // block above), but a row that WAS scanned/stamped once and is THEN locked forever is NOT — its
+  // `last_attempt_at` is non-NULL, so it never re-enters the never-attempted bucket, and `FOR
+  // UPDATE SKIP LOCKED` means it is never re-selected either. `neverAttemptedRunning` reads `0`
+  // for it on every subsequent tick, silently.
+  //
+  // Fixture is deliberately STEADY STATE (backlog <= limit, 4 rows vs. limit 25) rather than the
+  // 30-row congested scale above — that is what makes the positive control's signature exactly
+  // `[0, 0, 0]` (every row, including the one under test before it is locked, is genuinely
+  // re-touched every tick) rather than merely bounded, and makes the locked leg's damning form
+  // sharpest: from tick 2 to tick 3, NOT ONE of the seven pre-existing counters moves at all
+  // (`scanned`/`notReady`/`backlogRemaining`/`neverAttemptedRunning` are byte-identical) — a
+  // dashboard watching only those seven would see a perfectly ordinary, unchanging 3-row backlog,
+  // tick after tick, forever. Only `oldestRunningAttemptAgeSeconds` reveals the row that's been
+  // frozen since tick 1.
+  // =============================================================================================
+  describe('owner-review P2 on #4779 — oldestRunningAttemptAgeSeconds discriminates a row scanned once then permanently locked', () => {
+    const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+    it('a row locked AFTER its first successful scan freezes there — neverAttemptedRunning reads 0 (the blind spot) while oldestRunningAttemptAgeSeconds climbs, tick after tick, with the other seven counters unchanged', async () => {
+      const workDate = '2026-03-11'
+      const ROWS = 4
+      const rows: Array<{ orgId: string; runId: string }> = []
+      for (let i = 0; i < ROWS; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- sequential seeding, same rationale as the
+        // sibling 30-row tests above.
+        rows.push(await createStuckRun(`p2starve-${i}`, workDate))
+      }
+      const orgIds = rows.map((r) => r.orgId)
+      const tick = () =>
+        withAllowlist(orgIds, () => sweepAttendanceScheduledRunsOnceV1(pool, { limit: 25, async recoverCandidate() {} }))
+
+      // Tick 1: steady state (4 rows <= limit 25) — every row is scanned and stamped THIS tick,
+      // including the row about to be locked. `oldestRunningAttemptAgeSeconds` is exactly `0`
+      // (transaction-stable `now()`, same as the steady-state and gate-1-tick-1 tests above).
+      const tick1 = await tick()
+      expect(tick1).toEqual({
+        scanned: 4,
+        finalized: 0,
+        notReady: 4,
+        skipped: 0,
+        errored: 0,
+        backlogRemaining: 4,
+        neverAttemptedRunning: 0,
+        oldestRunningAttemptAgeSeconds: 0,
+      })
+      const frozenStamp = await lastAttemptAt(rows[0].runId)
+      expect(frozenStamp).not.toBeNull()
+
+      // NOW — only AFTER rows[0] already carries a non-NULL `last_attempt_at` from tick 1 — a
+      // separate connection takes an open, never-released `FOR UPDATE` lock on it. This is the
+      // exact ordering the sibling `neverAttemptedRunning`-discriminating leg above does NOT
+      // cover (there, the lock is acquired BEFORE tick 1 ever runs).
+      const lockConn = await pool.connect()
+      await lockConn.query('BEGIN')
+      await lockConn.query('SELECT * FROM attendance_scheduled_runs WHERE run_id = $1::uuid FOR UPDATE', [
+        rows[0].runId,
+      ])
+
+      try {
+        await sleep(300)
+        const tick2 = await tick()
+        const { oldestRunningAttemptAgeSeconds: age2, ...rest2 } = tick2
+        // `rows[0]` is excluded by SKIP LOCKED; the other 3 are re-scanned/re-stamped normally.
+        expect(rest2).toEqual({
+          scanned: 3,
+          finalized: 0,
+          notReady: 3,
+          skipped: 0,
+          errored: 0,
+          backlogRemaining: 4,
+          // THE BLIND SPOT, reproduced: `rows[0]` has been permanently unclaimable since tick 1,
+          // yet this reads `0` — its `last_attempt_at` is non-NULL (stamped once, at tick 1), so
+          // it never counts as "never attempted".
+          neverAttemptedRunning: 0,
+        })
+        // THE FIX, observable: `rows[0]`'s frozen tick-1 stamp is now the STALEST — age is
+        // strictly positive (real wall-clock time elapsed since tick 1), where the blind-spot
+        // counter above read a flat `0`.
+        expect(age2).toBeGreaterThanOrEqual(0.2)
+
+        await sleep(300)
+        const tick3 = await tick()
+        const { oldestRunningAttemptAgeSeconds: age3, ...rest3 } = tick3
+        // Identical to tick 2's seven-counter shape — NOT ONE of them moved. A dashboard reading
+        // only the pre-#4779-P2 fields would see nothing wrong, tick after tick, forever.
+        expect(rest3).toEqual(rest2)
+        // Monotonic growth: strictly larger than tick 2's reading, because `rows[0]`'s stamp is
+        // STILL frozen at tick 1 while real time keeps advancing.
+        expect(age3).toBeGreaterThan(age2)
+
+        // Mechanism pin: rows[0]'s `last_attempt_at` genuinely never moved across either tick —
+        // this is not a coincidence of the aggregate reading.
+        expect(await lastAttemptAt(rows[0].runId)).toEqual(frozenStamp)
+        expect(await runState(rows[0].runId)).toBe('running')
+      } finally {
+        await lockConn.query('ROLLBACK').catch(() => undefined)
+        lockConn.release()
+      }
+    }, 30000)
+
+    it('positive control — the SAME 4-row steady-state backlog with NO held lock reads oldestRunningAttemptAgeSeconds as exactly 0 on every tick (never grows)', async () => {
+      const workDate = '2026-03-12'
+      const ROWS = 4
+      const rows: Array<{ orgId: string; runId: string }> = []
+      for (let i = 0; i < ROWS; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- sequential seeding, same rationale as the
+        // sibling (locked) test above.
+        rows.push(await createStuckRun(`p2churn-${i}`, workDate))
+      }
+      const orgIds = rows.map((r) => r.orgId)
+      const tick = () =>
+        withAllowlist(orgIds, () => sweepAttendanceScheduledRunsOnceV1(pool, { limit: 25, async recoverCandidate() {} }))
+
+      // Nothing locked anywhere — every row is genuinely re-claimable every tick (steady state,
+      // 4 <= limit 25), so EVERY tick restamps EVERY row: `oldestRunningAttemptAgeSeconds` is
+      // exactly `0`, every single time — the discriminating counter-signature to the locked
+      // sibling test's strictly-growing `age2 < age3` above ("normal progress ⇒ never grows").
+      const tick1 = await tick()
+      expect(tick1).toEqual({
+        scanned: 4,
+        finalized: 0,
+        notReady: 4,
+        skipped: 0,
+        errored: 0,
+        backlogRemaining: 4,
+        neverAttemptedRunning: 0,
+        oldestRunningAttemptAgeSeconds: 0,
+      })
+
+      await sleep(300)
+      const tick2 = await tick()
+      expect(tick2).toEqual(tick1)
+
+      await sleep(300)
+      const tick3 = await tick()
+      expect(tick3).toEqual(tick1)
     }, 30000)
   })
 })
