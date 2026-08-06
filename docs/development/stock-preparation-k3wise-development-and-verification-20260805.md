@@ -245,7 +245,7 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 | R1 | **#4769** 前置门:C6-only 写入口(`/run` 与 replay 双拒)、Save endpoint 钉死、C6 消费 approved B4 binding | ✅ **MERGED 2026-08-05T18:01Z**(main `65edb98c6`),9/9 required 绿含 `integration-guard` | — |
 | R2 | **#4768** staging 彩排 | 已 rebase 到 main;exact-head 复审 **CHANGES-REQUESTED**:驱动器把 K3 当 pipeline **source**,而任何 K3 配置都不能充当 C6 source(`readSourceRows` 发裸 read ⇒ `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED`/`K3_WISE_READ_KEY_REQUIRED`,**零 HTTP 调用**)⇒ 步骤 3–9 不可达 | **owner 裁决:换哪个 source**(见下 §7.2) |
 | R3 | 彩排跑绿(dispatch-only workflow,PR checks **不**执行它) | 未开始 | R2 |
-| R4 | 本 MD 与计划按彩排实测同步(§8 前置) | 未开始 | R3 |
+| R4 | 本 MD 与计划按彩排实测同步(§8' 前置) | **已完成(2026-08-06)**:见 §8' | R3 |
 | R5 | 目标环境 mint B4 并记三元组 | 未开始 | 运维授权(#4628) |
 | R6 | 出最终包(从 main,走 P4 lane) | 未开始 | R5 |
 | R7 | 实体机窗口执行 + 本文 §8 验收记录 | 未开始 | R6 + 三项授权位 |
@@ -280,6 +280,18 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 | `metasheet:staging-source` | 先经 API 建并灌一张表 | 完全自足、无外部依赖;离客户形态最远 |
 | `plm:yuantus-wrapper` | 可达的 PLM 端点 | **最接近真实形态**(`PLM material → K3 WISE` 是本线的规范管道) |
 
+**实际落地的不是上表任一项 —— 结论补记(2026-08-06)。** 彩排跑的是
+`metasheet:staging`(证据里记作 `sourceLeg=stand-in`),它与上表的
+`metasheet:staging-source` **名称相近但不是同一条**,更不是被推荐的 `plm:yuantus-wrapper`。
+
+原因不是取舍偏好,而是**硬约束**:C6 的 `readSourceRows` 发的是裸 `read({object,limit,cursor})`,
+K3 以 `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` 回绝且**零 fetch**;而 `plm:yuantus-wrapper` 的适配器
+要求 `context.api.plm` 宿主绑定,不是能 mock 的 HTTP 端点。两条推荐路径在彩排底座上都不可达。
+
+⚠️ **因此上表的推荐项至今未被验证过。** 彩排证明的是 C6 写生命周期,**不是**
+`PLM material → K3 WISE` 这条规范管道 —— 后者仍无任何端到端证据。
+这一栏保留在此,是为了防止有人读到「彩排全绿」就以为推荐路径已经跑通。
+
 **建议 = PLM**:彩排的价值与它同窗口的相似度成正比。代价是 staging 需要一个可达 PLM。
 **此项未定之前,R2/R3 不可推进,窗口 §6 步 2 也不完整。**
 
@@ -287,7 +299,11 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 
 在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。
 
-## 8. staging 彩排首跑实测(2026-08-06)
+## 8'. staging 彩排首跑实测(2026-08-06)
+
+> **编号说明**:本文 §7.3 与 R7 早已把「§8」预留给**实体机验收记录**,那一节尚未产生。
+> 本节是 staging 彩排(第二层),与实体机验收(第三层)是不同的东西,**不得互相顶替**,
+> 故编为 §8' 而不占用预留号。实体机窗口执行后,验收记录仍落在 §8。
 
 ### 8.1 运行标识
 
