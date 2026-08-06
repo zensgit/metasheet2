@@ -352,6 +352,23 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       // construction — it can only reject bindings the relation check already accepted.
       if (binding && typeof b4.loadSystemById === 'function') {
         const boundSystemId = binding.config && binding.config.systemId
+        // D1 — THE INVARIANT, not just the convention. Making it POSSIBLE to bind the real read
+        // record (targetSystem.config.pairedReadSystemId joining the relation set) and switching
+        // the driver to do so changed what we DO; it did not change what is ACCEPTED.
+        // `pipelineSystemIds` is a UNION and still contains targetSystemId, the filter only asks
+        // "is it a member", and nothing anywhere asserted the bound id differs from the target.
+        // So a binding minted on the TARGET still passed, loadSystemById returned the very row
+        // that produced targetBaseUrl, and sameK3Instance(x, x) was tautologically true —
+        // the owner's original defect, still a green path.
+        //
+        // Refusing self-reference is what turns "the driver happens to bind the reader" into
+        // "the gate cannot be satisfied by comparing a record with itself".
+        if (typeof boundSystemId === 'string' && boundSystemId === system.id) {
+          throw new AdapterValidationError(
+            'the approved B4 binding names the write target itself; a record cannot certify its own instance',
+            { code: 'K3_C6_B4_BINDING_SELF_REFERENTIAL', field: 'capabilityState' },
+          )
+        }
         const targetBaseUrl = typeof b4.targetBaseUrl === 'string' ? b4.targetBaseUrl : ''
         let boundBaseUrl = null
         let boundKind = null

@@ -925,10 +925,21 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   // breaks when the wiring is gone is the LEGITIMATE case — a binding on the K3 TARGET, the
   // same physical instance, must be ACCEPTED. Mutation N3 (http-routes stops passing
   // targetBaseUrl) is RED on this assertion and only this one.
+  //
+  // D1 (20260806): this case's INTENT is now inverted, and the inversion is the point. Binding on
+  // the TARGET used to be the only arrangement that satisfied the relation check, so it had to be
+  // accepted — which is exactly why the gate degenerated into comparing the target with itself.
+  // Now that the real read record can be bound (via targetSystem.config.pairedReadSystemId), a
+  // self-referential binding is REFUSED, and that refusal is the invariant.
+  //
+  // Asserted as a POSITIVE equality: the old `notEqual(…, INSTANCE_MISMATCH)` still passes against
+  // the new behaviour (SELF_REFERENTIAL is also "not INSTANCE_MISMATCH"), so it would have recorded
+  // a silent semantic inversion as a pass. Same defect family as #4784.
   const sameInstance = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.targetSystemId })])
   const sameErr = ((sameInstance.res.body && sameInstance.res.body.error) || {})
-  assert.notEqual(sameErr.details && sameErr.details.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
-    'a binding on the K3 TARGET is the same physical K3 and must NOT be refused as cross-instance')
+  assert.equal(sameErr.details && sameErr.details.code, 'K3_C6_B4_BINDING_SELF_REFERENTIAL',
+    'a binding on the write target ITSELF must be refused — a record cannot certify its own '
+    + `instance; got: ${JSON.stringify(sameErr)}`)
 
   const related = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
   const relatedDetails = ((related.res.body && related.res.body.error) || {}).details || {}
