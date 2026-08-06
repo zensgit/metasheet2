@@ -214,6 +214,32 @@ test('no silent credential fallback, and no silent field-map degradation', () =>
     'an unmapped field must produce a loud, unmistakable key rather than a plausible one')
 })
 
+test('the mock arms its session gate and its call logger — both are load-bearing', () => {
+  // Review P2-6: `requireSession: true` in run-mock-k3-server.mjs is the ONLY thing arming owner
+  // HOLD point F, and nothing pinned it. Deleting one word would let the whole lane pass "clean"
+  // against a permissive mock — a green that means nothing. Same for the logger: the workflow's
+  // save-only allowlist reads mock-k3.log, so a mock that logs nothing makes that check vacuous
+  // (which is exactly what owner point E caught the first time).
+  const runner = fs.readFileSync(
+    path.join(repoRoot, 'scripts/ops/fixtures/integration-k3wise/run-mock-k3-server.mjs'), 'utf8')
+
+  assert.ok(/requireSession:\s*true/.test(runner),
+    'the rehearsal mock MUST require a session; without it the lane rehearses against a mock that '
+    + 'accepts anything, and owner HOLD point F is unarmed')
+  // Must match the EMITTING CALL, not the word anywhere: the file's own header comment says
+  // "K3CALL", so a bare /K3CALL/ passed while the logger body had been replaced with `void call`.
+  // Third prose-matched-instead-of-code slip in this session.
+  assert.ok(/console\.log\([^)]*K3CALL/.test(runner),
+    'the mock MUST actually EMIT K3CALL <METHOD> <pathname>; the workflow save-only allowlist greps '
+    + 'that stream, and an empty stream passes an absence check vacuously')
+
+  // POSITIVE CONTROL — the assertions must be able to fail.
+  assert.equal(/requireSession:\s*true/.test('const server = createMockK3WebApiServer({ seedListRows })'), false,
+    'the session assertion must reject a runner that omits the flag')
+  assert.equal(/console\.log\([^)]*K3CALL/.test('logger: (call) => { void call }'), false,
+    'the logger assertion must reject a runner whose logger emits nothing')
+})
+
 test('BEHAVIOURAL: a bare read yields LOGICAL keys only when projectId + objectId are right', async () => {
   // The source-regex assertions above are necessary but NOT sufficient: they were 4/4 green while
   // a bare read returned raw `fld_*` keys with code/name EMPTY. `ensureObject` rewrites every

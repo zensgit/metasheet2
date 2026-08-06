@@ -140,6 +140,25 @@ jobs:
           grep -q "Applied: 0" "${RUNNER_TEMP}/mig-before.txt"
           node packages/core-backend/dist/src/db/migrate.js
           node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/mig-after.txt"
+          # `Pending: 0` ALONE IS A FALSE GREEN HERE. This step inherits the workflow-level
+          # MIGRATION_EXCLUDE, and the provider REMOVES excluded names from the very map that feeds
+          # the Pending count — so for those six migrations the assertion CANNOT fail, whatever
+          # happened. Measured 311 known vs 305 considered; three of the six have real bodies that
+          # this repo's own S6A lane still lists as open defects.
+          #
+          # Keep the exclusion (deliberate, separately tracked) but make it VISIBLE, so the evidence
+          # reads "6 excluded by name" rather than "nothing pending", and so the list cannot grow
+          # silently under a green check.
+          EXPECTED_EXCLUDES=6
+          ACTUAL_EXCLUDES="$(printf '%s' "${MIGRATION_EXCLUDE}" | tr ',' '\n' | grep -c . || true)"
+          echo "migrationExcludeCount=${ACTUAL_EXCLUDES} expected=${EXPECTED_EXCLUDES}"
+          if [ "${ACTUAL_EXCLUDES}" -ne "${EXPECTED_EXCLUDES}" ]; then
+            echo "MIGRATION_EXCLUDE changed size; Pending:0 is scoped to whatever remains, so this needs re-review rather than auto-accept" >&2
+            exit 1
+          fi
+          # POSITIVE CONTROL for the grep itself: the capture must actually contain a Pending line,
+          # so an empty or truncated file cannot read as "0 pending".
+          grep -qE "^Pending: [0-9]+" "${RUNNER_TEMP}/mig-after.txt"
           grep -q "Pending: 0" "${RUNNER_TEMP}/mig-after.txt"
 
       - name: Bootstrap the admin principal (recipe step 5 — login is proven later, not here)
@@ -228,10 +247,28 @@ jobs:
             echo "FATAL: positive control failed — mock-k3.log shows GetList=${get_list_calls:-0} Save=${save_calls:-0} K3CALL lines; the log is not actually recording wire calls, so the Submit/Audit absence check below would be meaningless" >&2
             exit 1
           fi
-          if grep -qE "K3CALL POST /K3API/Material/(Submit|Audit)" "${RUNNER_TEMP}/mock-k3.log"; then
-            echo "FATAL: the wire saw a Submit/Audit call — save-only was violated end to end" >&2
+          # POSITIVE ALLOWLIST, not a two-word denylist. The old check was
+          # `/K3API/Material/(Submit|Audit)` — pinned to ONE object and TWO verbs, so
+          # `/K3API/BOM/Submit` and `/K3API/BOM/Audit` sailed past while it printed PASS. Six
+          # lifecycle calls escaped it in one measured run. Denylists have unbounded complements;
+          # this lane makes a SMALL, KNOWN set of calls, so enumerate what is allowed and treat
+          # everything else as a violation. Same lesson the endpoint guard learned over eight
+          # escape axes.
+          allowed='^K3CALL (POST|GET) /K3API/(Login|Token/Create|Health|Material/(GetList|GetDetail|Save))/?$'
+          unexpected="$(grep -E "^K3CALL " "${RUNNER_TEMP}/mock-k3.log" | grep -vE "${allowed}" || true)"
+          if [ -n "${unexpected}" ]; then
+            echo "FATAL: the wire saw a call outside the save-only allowlist:" >&2
+            printf '%s\n' "${unexpected}" >&2
             exit 1
           fi
+          # POSITIVE CONTROL for the allowlist itself: it must REJECT a lifecycle write on any
+          # object, not just Material. Without this, a typo in the pattern silently allows all.
+          for probe in "K3CALL POST /K3API/Material/Submit" "K3CALL POST /K3API/BOM/Submit" "K3CALL POST /K3API/BOM/Audit"; do
+            if printf '%s\n' "${probe}" | grep -qE "${allowed}"; then
+              echo "FATAL: the allowlist accepts '${probe}' — it cannot detect a save-only violation" >&2
+              exit 1
+            fi
+          done
           echo "wireSaveOnly=PASS"
 
       - name: Upload boot/backend logs (synthetic environment only)
