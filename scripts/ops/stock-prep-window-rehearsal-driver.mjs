@@ -34,6 +34,13 @@ const BASE_URL = required('BASE_URL')
 const TOKEN = required('TOKEN')
 const MOCK_K3_URL = required('MOCK_K3_URL')
 const TENANT_ID = required('TENANT_ID')
+// A DIFFERENT credential from TOKEN: seeding the stand-in source sheet goes through the OAPI
+// surface (`POST /records`, requireScope('records:write')), which the integration token cannot
+// reach. `staging/install` creates sheets but ZERO rows, so without this there is nothing to
+// read and the dry-run would report `sourceRows: 0` — a vacuous green in a lane whose only
+// purpose is buying information. Required UP FRONT so an operator learns it before creating any
+// systems, not halfway through a window that cannot be retried.
+const MULTITABLE_TOKEN = required('MULTITABLE_RECORDS_TOKEN')
 
 const PROFILE_ID = 'material-k3wise-customer-profile-v1'
 const LIST_PRESET = 'k3wise.material-list.v1'
@@ -69,14 +76,17 @@ function record(step, pass, evidence) {
 // downstream assertion below is a POSITIVE check on real field values (never a bare `!ok(...)`),
 // so a timeout's null data fails those checks the same way a bad response would — no separate
 // early-exit branch needed to make a timeout register as FAIL.
-async function call(method, path, body) {
+async function call(method, path, body, opts = {}) {
   let res
   try {
     res = await fetch(`${BASE_URL}${path}`, {
       method,
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${TOKEN}`,
+        // `opts.token` exists for ONE caller: seeding the stand-in source sheet needs an OAPI
+        // token with records:write, a different credential from the integration token every
+        // other step uses. Defaulting to TOKEN keeps all existing call sites unchanged.
+        Authorization: `Bearer ${opts.token || TOKEN}`,
         // The login token carries no tenant claim; jwt-middleware copies this header into
         // user.tenantId, which is what resolveAuthUserTenantId (write paths) exclusively trusts.
         'x-tenant-id': TENANT_ID,
@@ -164,6 +174,66 @@ record('create-target-system', ok(targetSystem) && Boolean(payload(targetSystem)
 const targetSystemId = payload(targetSystem).id
 
 // ---------------------------------------------------------------------------------------------
+// Step 0-c — THE PIPELINE SOURCE. Not K3: no K3 configuration can serve as a C6 source, because
+// external-write-dry-run's readSourceRows issues a bare read({object, limit, cursor}) and K3
+// answers K3_WISE_READ_LIST_ROUTE_UNSUPPORTED / K3_WISE_READ_KEY_REQUIRED with ZERO fetch calls
+// (all three readMode variants, reproduced offline). Every ruled precedent uses a non-K3 source.
+//
+// HONEST LIMIT, stated in the evidence itself: this source leg is a STAND-IN. The rehearsal
+// proves the C6 write lifecycle against a real deployed package; it does NOT exercise the
+// customer's real source connector. The K3 READ leg is covered separately by step 1's
+// read-smoke, which runs against the real K3 read record.
+// ---------------------------------------------------------------------------------------------
+
+const stagingInstall = await call('POST', '/api/integration/staging/install', {})
+const stagingSheets = payload(stagingInstall)?.sheetIds || {}
+const stagingSheetId = stagingSheets.plm_raw_items || null
+record('staging-install', ok(stagingInstall) && Boolean(stagingSheetId), {
+  status: stagingInstall.status,
+  sheetCount: Object.keys(stagingSheets).length,
+})
+
+const sourceStagingSystem = await call('POST', '/api/integration/external-systems', {
+  tenantId: TENANT_ID,
+  name: 'Rehearsal staging source (stand-in)',
+  kind: 'metasheet:staging-source',
+  role: 'source',
+  status: 'active',
+  config: { objects: { material: { sheetId: stagingSheetId, name: 'material' } } },
+})
+record('create-staging-source', ok(sourceStagingSystem) && Boolean(payload(sourceStagingSystem)?.id), {
+  status: sourceStagingSystem.status,
+})
+const pipelineSourceSystemId = payload(sourceStagingSystem)?.id || null
+
+// Seed the stand-in source with a bounded synthetic row set. This is the ONE step that needs a
+// credential the integration token cannot supply: `staging/install` creates STRUCTURE only
+// (sheets/fields/views, zero rows), and the only record-write path is the OAPI surface
+// (`POST /records`, apiTokenAuth + requireScope('records:write')). Minting such a token is
+// forbidden here (prod tokens come from login, never minted), so it is an INPUT.
+//
+// Fail loudly and specifically rather than proceeding to a dry-run that would report
+// `sourceRows: 0` and look like a clean pass over an empty source — a vacuous green is worse
+// than a red in a lane whose entire purpose is buying information.
+const seedRows = [
+  { code: 'MAT-RH-001', name: 'Rehearsal material A' },
+  { code: 'MAT-RH-002', name: 'Rehearsal material B' },
+]
+const seeded = []
+for (const row of seedRows) {
+  const r = await call('POST', '/records', {
+    sheetId: stagingSheetId,
+    fields: { code: row.code, name: row.name },
+  }, { token: MULTITABLE_TOKEN })
+  seeded.push(ok(r))
+}
+record('seed-staging-rows', seeded.length === seedRows.length && seeded.every(Boolean), {
+  requested: seedRows.length,
+  accepted: seeded.filter(Boolean).length,
+})
+
+
+// ---------------------------------------------------------------------------------------------
 // Step B4 — MINT + APPROVE the read binding via the real routes (the ops runbook's mint step,
 // rehearsed end to end; owner review 20260805: the binding must be minted, approved AND
 // consumed — the C6 dry-run below now runs with its capability gate fed by THIS approval).
@@ -172,7 +242,12 @@ const targetSystemId = payload(targetSystem).id
 // ---------------------------------------------------------------------------------------------
 
 const b4Mint = await call('POST', '/api/integration/read-source-configs', {
-  config: buildK3WiseMaterialListB4Config({ systemId: sourceSystemId }),
+  // OWNER RULING 20260805 (「A, bind B4 to the K3-write record」): the binding names the K3
+  // TARGET, not the K3 read record. Once the pipeline source is no longer K3, #4769's relation
+  // check (systemId must be a pipeline endpoint) can only be satisfied by the target — and the
+  // same-instance check added alongside it keeps that honest, since both K3 records address one
+  // physical K3.
+  config: buildK3WiseMaterialListB4Config({ systemId: targetSystemId }),
 })
 const b4Row = payload(b4Mint)
 record('b4-mint', ok(b4Mint) && Boolean(b4Row?.id), {
@@ -236,7 +311,7 @@ record('preflight-list-read-smoke',
 const pipeline = await call('POST', '/api/integration/pipelines', {
   tenantId: TENANT_ID,
   name: 'Rehearsal window pipeline',
-  sourceSystemId,
+  sourceSystemId: pipelineSourceSystemId,
   sourceObject: 'material',
   targetSystemId,
   targetObject: 'material',
