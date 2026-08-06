@@ -97,6 +97,20 @@ function b4RowMatchesRatifiedContract(row) {
   return row.contentKey === expected
 }
 
+// Two K3 external-system records are the SAME PHYSICAL K3 when their baseUrls share an origin.
+// Compared at ORIGIN level on purpose: the read record and the write record legitimately differ
+// in PATH (the armed one is pinned to its own endpoints), so a raw string compare would reject
+// the very topology step 0-b requires. An unparseable or absent baseUrl is NOT a match —
+// fail-closed, because "cannot tell" must never read as "same".
+function sameK3Instance(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false
+  try {
+    return new URL(a).origin === new URL(b).origin
+  } catch {
+    return false
+  }
+}
+
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new AdapterValidationError(`${field} is required`, { field })
@@ -326,6 +340,33 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       const profile = CUSTOMER_PROFILE
       const bindings = await resolveApprovedB4Binding()
       const binding = bindings.length === 1 ? bindings[0] : null
+      // SAME-INSTANCE CHECK. `binding` may legitimately name a DIFFERENT external-system record
+      // than the write target: the B4 contract is the material-LIST read contract, and a
+      // profile-armed record cannot hold list-read config (#4769 strips every readList* key,
+      // even from the frozen first-party preset), so the customer runs two K3 records. Binding
+      // to the target record is what satisfies the relation check — but that is only TRUE while
+      // both records address the same physical K3.
+      //
+      // Without this, "bind to the target" silently permits one K3's read contract to certify a
+      // DIFFERENT K3's write: the round-3 defect, reopened one level down. Fail-closed by
+      // construction — it can only reject bindings the relation check already accepted.
+      if (binding && typeof b4.loadSystemById === 'function') {
+        const boundSystemId = binding.config && binding.config.systemId
+        const targetBaseUrl = typeof b4.targetBaseUrl === 'string' ? b4.targetBaseUrl : ''
+        let boundBaseUrl = null
+        try {
+          const boundSystem = await b4.loadSystemById(boundSystemId)
+          boundBaseUrl = boundSystem && boundSystem.config ? boundSystem.config.baseUrl : null
+        } catch {
+          boundBaseUrl = null
+        }
+        if (!sameK3Instance(boundBaseUrl, targetBaseUrl)) {
+          throw new AdapterValidationError(
+            'the approved B4 binding names a different K3 instance than the write target',
+            { code: 'K3_C6_B4_BINDING_INSTANCE_MISMATCH', field: 'capabilityState' },
+          )
+        }
+      }
       return {
         success: true,
         capabilityState: {

@@ -587,6 +587,48 @@ test('B4 GATE: two approved bindings -> refused (ambiguous is fail-closed, never
   )
 })
 
+test('SAME-INSTANCE: a B4 binding naming a DIFFERENT K3 instance is refused', async () => {
+  // Owner ruling 20260805 (「A, bind B4 to the K3-write record」). Binding to the target is what
+  // satisfies #4769's relation check once the pipeline source is no longer K3 — but it is only
+  // TRUE while both K3 records address the same physical K3. Without this check, one K3's read
+  // contract could certify a DIFFERENT K3's write: the round-3 defect, one level down.
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+
+  async function planWith(boundBaseUrl) {
+    const input = c6Inputs({ rows: [{ code: 'M-INST', name: 'N' }], fetchPair, tokenStore: memoryStore() })
+    input.dataSourceWrites = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+      b4: b4Of([APPROVED_B4_ROW], {
+        targetBaseUrl: 'https://k3.example.test/K3API',
+        loadSystemById: async () => ({ id: 'k3-read-1', config: { baseUrl: boundBaseUrl } }),
+      }),
+    })
+    return dryRunExternalWrite(input)
+  }
+
+  // DIFFERENT host — must be refused.
+  await assert.rejects(
+    planWith('https://OTHER-k3.example.test/K3API'),
+    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'a binding on another K3 instance must not certify this write',
+  )
+
+  // POSITIVE CONTROL — same origin, DIFFERENT PATH. This is exactly the step 0-b topology (the
+  // armed record is pinned to its own endpoints), so a raw string compare would have rejected
+  // the only arrangement that actually works. Origin-level comparison is deliberate.
+  const plan = await planWith('https://k3.example.test/K3API-READ')
+  assert.ok(plan, 'same physical K3 on a different path must still be accepted')
+
+  // FAIL-CLOSED on unknowable: an unresolvable system is not a match.
+  await assert.rejects(
+    planWith(null),
+    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    '"cannot tell" must never read as "same instance"',
+  )
+})
+
 test('REVIEW P3-2: a FULL page of approved configs is a refusal, not a silent pass', async () => {
   // `list()` gives no ordering guarantee, so a full page may be truncated — and a truncated set
   // can hide the second approved binding that the ambiguity check above exists to catch. A full

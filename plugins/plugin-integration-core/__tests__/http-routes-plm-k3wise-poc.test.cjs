@@ -836,6 +836,29 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   // only as a shape guard; the line above is what carries the property.
   assert.notEqual(spoofed.res.statusCode, 200, 'and it must not succeed (vacuous here — see above)')
 
+  // (6) SAME-INSTANCE, THROUGH THE ROUTE. Mutation N3 exposed this gap: http-routes stopped
+  // passing `targetBaseUrl` and BOTH suites stayed green — the check was tested, its WIRING was
+  // not. Fifth occurrence of that pattern on this line.
+  //
+  // The witness is exact: a B4 row bound to the PLM SOURCE passes #4769's relation check (the
+  // source IS a pipeline endpoint), so only the same-instance check can stop it — and it must,
+  // because PLM is not the K3 being written. This is the round-3 defect in its newest disguise:
+  // one system's read contract certifying another system's write.
+  const crossInstance = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
+  const crossErr = ((crossInstance.res.body && crossInstance.res.body.error) || {})
+  assert.equal(crossErr.details && crossErr.details.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    `a binding on the PLM source must be refused as a different K3 instance, got: ${JSON.stringify(crossErr)}`)
+
+  // (7) THE DISCRIMINATING HALF. (6) alone does not prove the wiring: with `targetBaseUrl`
+  // missing, sameK3Instance('') is false, so the gate throws MORE and (6) still passes. What
+  // breaks when the wiring is gone is the LEGITIMATE case — a binding on the K3 TARGET, the
+  // same physical instance, must be ACCEPTED. Mutation N3 (http-routes stops passing
+  // targetBaseUrl) is RED on this assertion and only this one.
+  const sameInstance = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.targetSystemId })])
+  const sameErr = ((sameInstance.res.body && sameInstance.res.body.error) || {})
+  assert.notEqual(sameErr.details && sameErr.details.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'a binding on the K3 TARGET is the same physical K3 and must NOT be refused as cross-instance')
+
   const related = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
   const relatedDetails = ((related.res.body && related.res.body.error) || {}).details || {}
   assert.notEqual(relatedDetails.bindingCount, 0,
