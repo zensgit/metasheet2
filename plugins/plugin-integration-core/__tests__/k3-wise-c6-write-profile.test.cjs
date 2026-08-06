@@ -56,6 +56,16 @@ function b4Of(rows, overrides = {}) {
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
     pipelineSystemIds: ['source_1', 'k3-target-1'],
+    // REVIEW P2-2: the instance gate is now FAIL-CLOSED — a binding with no way to check its
+    // identity is refused rather than waved through. Cases in this file that are NOT about
+    // instance identity (page exhaustion, ratified-contract matching, …) therefore need a digest
+    // source, or they fail on a property they are not testing.
+    //
+    // This default is DELIBERATELY PERMISSIVE — one constant, so every record reads as the same
+    // instance. That is stated rather than hidden: the cases that actually exercise identity
+    // OVERRIDE it with per-record digests, and a fixture this permissive would be a defect if it
+    // were the only thing standing behind the gate.
+    instanceDigestOf: async () => 'fixture-single-instance',
     ...overrides,
   }
 }
@@ -727,7 +737,10 @@ test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry
     input.dataSourceWrites = createK3WiseC6WriteSource({
       system: k3TargetSystem(),
       createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
-      b4: b4Of([binding]),
+      // D1 refuses a binding on the write target itself, so the systemId dimension varies over a
+      // third VALID endpoint (a paired read record). The property under test is unchanged —
+      // systemId alone must move the revision — only the sample value moved off the one D1 forbids.
+      b4: b4Of([binding], { pipelineSystemIds: ['source_1', 'k3-target-1', 'k3-read-2'] }),
     })
     const out = await dryRunExternalWrite(input)
     assert.equal(out.status, 'ready')
@@ -741,7 +754,7 @@ test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry
   // dimensions of an otherwise-ratified binding are the store-minted version and the systemId
   // (either pipeline endpoint is valid). Each must move the revision on its own.
   const versionOnly = await revisionWith(b4Row({ version: 9 }))
-  const systemIdOnly = await revisionWith(b4Row({ config: { systemId: 'k3-target-1' } }))
+  const systemIdOnly = await revisionWith(b4Row({ config: { systemId: 'k3-read-2' } }))
   assert.notEqual(base, versionOnly, 'approvedConfigVersion alone must move the revision')
   assert.notEqual(base, systemIdOnly, 'configContentKey (via systemId) alone must move the revision')
   // actionProfileVersion is NOT a free variable any more: it is pinned to the ratified
@@ -833,17 +846,53 @@ test('B4 RELATION: a binding approved on an UNRELATED K3 system must not vouch f
   assert.equal(fetchPair.calls.length, 0)
 })
 
-test('B4 RELATION: the binding may be minted on EITHER pipeline endpoint (source or target)', async () => {
-  for (const boundTo of ['source_1', 'k3-target-1']) {
-    const source = createK3WiseC6WriteSource({
-      system: k3TargetSystem(),
-      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
-      b4: b4Of([b4Row({ config: { systemId: boundTo } })]),
-    })
-    const state = (await source.test()).capabilityState
-    assert.equal(state.b4BindingApproved, true, `a binding on ${boundTo} is legitimately this pipeline's`)
-    assert.equal(state.b4BindingCount, 1)
-  }
+test('P2-2: a binding with NO way to check its instance is REFUSED, not waved through', async () => {
+  // The gate used to be OPT-IN: no digest function meant no gate, silently. Combined with two
+  // upstream ternaries and the requireService list, it failed OPEN at three hops — and the shipped
+  // offline PoC demo ran the whole C6 lifecycle with the check structurally absent.
+  //
+  // The demo alone cannot prove this: once the demo is wired, reverting the hop leaves it green.
+  // Only an explicitly UNWIRED scope discriminates, which is why this case exists separately.
+  const unwired = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([b4Row({ config: { systemId: 'source_1' } })], { instanceDigestOf: undefined }),
+  })
+  await assert.rejects(
+    unwired.test(),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_INSTANCE_CHECK_UNWIRED',
+    'a gate that disappears when its wiring is missing is not a gate',
+  )
+})
+
+test('B4 RELATION: minted on a pipeline endpoint — but NOT on the write target itself (D1 narrowing)', async () => {
+  // ⚠️ DELIBERATE NARROWING OF A RATIFIED PROPERTY, recorded here rather than silently absorbed.
+  //
+  // #4769 ratified "the binding may be minted on EITHER pipeline endpoint (source or target)", and
+  // this test asserted exactly that for both. The owner's D1 ruling supersedes the target half:
+  // binding to the write target made the instance check compare the target with ITSELF, which is
+  // structurally incapable of detecting a read/write mismatch. Self-reference is now refused.
+  //
+  // The SOURCE half of the ratified property is unchanged.
+  const onSource = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([b4Row({ config: { systemId: 'source_1' } })]),
+  })
+  const state = (await onSource.test()).capabilityState
+  assert.equal(state.b4BindingApproved, true, "a binding on the SOURCE endpoint is still legitimately this pipeline's")
+  assert.equal(state.b4BindingCount, 1)
+
+  const onTargetItself = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([b4Row({ config: { systemId: 'k3-target-1' } })]),
+  })
+  await assert.rejects(
+    onTargetItself.test(),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_SELF_REFERENTIAL',
+    'binding on the write target itself is now REFUSED — it can only ever compare a record with itself',
+  )
 })
 
 test('B4 RELATION: an unrelated system\'s binding does not create false ambiguity', async () => {

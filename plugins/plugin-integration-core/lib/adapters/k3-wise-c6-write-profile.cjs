@@ -360,7 +360,19 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       // The digest is (kind, origin, acctId), HMAC'd inside the credential boundary; this module
       // receives only opaque digests. Password rotation does not change it — the account set is
       // the identity, not the secret.
-      if (binding && typeof b4.instanceDigestOf === 'function') {
+      // REVIEW P2-2: this used to be OPT-IN — no digest function meant no gate, silently. Combined
+      // with the two ternaries upstream and the requireService list, the gate failed OPEN at three
+      // hops, and the shipped offline PoC demo ran the entire C6 lifecycle with it structurally
+      // absent. A gate that disappears when its wiring is missing is not a gate.
+      //
+      // Fail-closed: if there is a binding to check, the means to check it is REQUIRED.
+      if (binding && typeof b4.instanceDigestOf !== 'function') {
+        throw new AdapterValidationError(
+          'the K3 instance-identity check is not wired; refusing to certify a write without it',
+          { code: 'K3_C6_B4_INSTANCE_CHECK_UNWIRED', field: 'capabilityState' },
+        )
+      }
+      if (binding) {
         const boundSystemId = binding.config && binding.config.systemId
         // D1 (unchanged): a record cannot certify its own instance. Kept ahead of the digest
         // compare because self-reference would otherwise produce two EQUAL digests and pass.
@@ -371,9 +383,14 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
           )
         }
         const targetSystemId = typeof b4.targetSystemId === 'string' ? b4.targetSystemId : system.id
+        // The `.catch(() => null)` that used to sit here turned ANY throw into "cannot tell".
+        // That is safe (null fails closed) but it MISDIAGNOSES: while wiring this into the offline
+        // PoC demo, a missing import made the digest throw, and the operator-facing message said
+        // the identity "could not be established" — pointing at configuration when the real cause
+        // was a broken call. Fail closed on a genuine null; let a THROW surface as a throw.
         const [boundDigest, targetDigest] = await Promise.all([
-          b4.instanceDigestOf(boundSystemId).catch(() => null),
-          b4.instanceDigestOf(targetSystemId).catch(() => null),
+          b4.instanceDigestOf(boundSystemId),
+          b4.instanceDigestOf(targetSystemId),
         ])
         // FAIL-CLOSED on unknowable. A null digest means the record could not be resolved, its
         // baseUrl did not parse, or it carries no authenticatable acctId — none of which is
