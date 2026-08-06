@@ -16,8 +16,11 @@ records it in `<evidence-dir>/summary.json` (copied from
 `scripts/ops/windows-qa/summary.template.json`).
 
 Execution order is owner-specified by risk (README §"Execution order"):
-**PQA-07 → 03 → 01 → 02 → 05 → 06 → 08 → 09 → 10 → 04**. The sections below are in
-that order; each is self-contained.
+**PQA-07 → 03 → 01 → 02 → 05 → 06 → 08 → 09 → 10 → 04** — follow that order when
+executing. Each `## PQA-NN` section below is self-contained; sections are grouped
+by product subsystem (authorization, shift authoring, calculation/shadow,
+durability/scheduling) rather than strictly re-sorted, so use the section headings
+to navigate and the order above to execute.
 
 ---
 
@@ -408,3 +411,744 @@ synthetic shift's segments, the shift, the membership, and the admin user.
 
 Set `cases[] where id="PQA-01"`: `status`, `syntheticDataOnly=true`, `reason` =
 observed segment ordering/times/timezone from A2 and the residue count.
+
+---
+
+## PQA-02 — Overnight attribution
+
+**Objective (matrix).** Assign an overnight multi-segment shift and verify next-day
+punch evidence stays on the intended business workDate.
+
+### Product surface
+
+- Punch route: `plugins/plugin-attendance/index.cjs:29196-29198` —
+  `context.api.http.addRoute('POST', '/api/attendance/punch', withPermission('attendance:write', …))`
+  (method literal `'POST'` at `:29197`, path `'/api/attendance/punch'` at `:29198`);
+  body `punchSchema` (`index.cjs:29200` parse; schema `:25914`) — `eventType`
+  (`'check_in'|'check_out'`) required, `occurredAt`/`timezone`/`source`/`orgId`
+  optional, self-scoped (no `userId` in body).
+- Shift authoring (overnight, two segments): `POST /api/attendance/shifts`
+  (`index.cjs:46030-46032`) with a segment carrying `endDayOffset: 1`
+  (`shiftSegmentInputSchema`, `index.cjs:25938`, `endDayOffset ∈ {0,1}`).
+- Assignment: `plugins/plugin-attendance/index.cjs:46883-46885` —
+  `context.api.http.addRoute('POST', '/api/attendance/assignments', …)`; body
+  `assignmentCreateSchema` (`index.cjs:25971`) — `userId`, `shiftId`, `startDate`
+  required.
+- Work-date resolver (the overnight attribution logic):
+  `plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs` —
+  `createAttendanceWorkDateResolver` (`:576`), `resolve` (`:700`),
+  `selectAmongMatchingCandidates` (`:371`). Overnight branches: open previous-night
+  record → `REASON.OPEN_PREVIOUS_NIGHT_RECORD` (`:397-422`); post-midnight
+  containing shift → `REASON.PREVIOUS_NIGHT_CONTAINING_SHIFT` (`:463-485`);
+  irreducible overlap fails closed to ambiguity (`:514-518`).
+- Punch handler → resolver wiring: `index.cjs:29274`
+  (`resolvePunchWorkDateByShiftWindow`, def `:15624`, resolver built `:15640-15648`)
+  → adapter `plugins/plugin-attendance/lib/attendance-work-date-adapters.cjs:32-35`.
+  On ambiguity the route returns HTTP 422 `WORK_DATE_ATTRIBUTION_AMBIGUOUS`
+  (`index.cjs:29285-29296`); on `resolved` it adopts the resolver's (possibly
+  previous-day) workDate (`index.cjs:29297`).
+
+### Tables / columns (with creation sites)
+
+- `attendance_events.work_date date NOT NULL` —
+  `packages/core-backend/src/db/migrations/zzzz20260114090000_create_attendance_tables.ts:35`.
+- `attendance_records.work_date date NOT NULL` — same file `:58` (unique
+  `(user_id, work_date, org_id)` re-created by
+  `zzzz20260114100000_add_attendance_org_id.ts:45-48`).
+- `attendance_shift_assignments` —
+  `zzzz20260114120000_add_attendance_scheduling_tables.ts:35` (`user_id` `:39`,
+  `shift_id` `:40`, `start_date` `:43`, `is_active` `:45`, `org_id` `:38`).
+
+### Synthetic fixtures — create
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-02.sql` (create section): admin
+`qa_synth_admin` (`attendance:admin`) and punching user `qa_synth_u1`
+(`attendance:write`), both active members of `qa_synth_org_a`. The overnight shift,
+assignment, and punches are produced by the product in the steps.
+
+### Steps (exact API calls)
+
+Sessions for `qa_synth_admin` / `qa_synth_u1`: `UNVERIFIED — operator to confirm`.
+
+- **O1 (overnight two-segment shift).** As admin: `POST /api/attendance/shifts`
+  `{ "name": "qa_synth_shift_overnight", "timezone": "Asia/Shanghai", "isOvernight": true, "segments": [ { "startTime": "20:00", "endTime": "23:59" }, { "startTime": "00:00", "endTime": "04:00", "endDayOffset": 1 } ], "orgId": "qa_synth_org_a" }`
+  — capture `{shift_id}`. (Segment shapes marked overnight so `endDayOffset=1`; the
+  exact two-segment envelope the canonical service accepts is
+  `UNVERIFIED — operator to confirm`.)
+- **O2 (assign).** As admin: `POST /api/attendance/assignments`
+  `{ "userId": "qa_synth_u1", "shiftId": "{shift_id}", "startDate": "2026-01-05", "orgId": "qa_synth_org_a" }`.
+- **O3 (evening check-in, business day 2026-01-05).** As `qa_synth_u1`:
+  `POST /api/attendance/punch`
+  `{ "eventType": "check_in", "occurredAt": "2026-01-05T20:05:00+08:00", "timezone": "Asia/Shanghai" }`.
+- **O4 (next-morning check-out, calendar day 2026-01-06).** As `qa_synth_u1`:
+  `POST /api/attendance/punch`
+  `{ "eventType": "check_out", "occurredAt": "2026-01-06T03:30:00+08:00", "timezone": "Asia/Shanghai" }`.
+
+### Expected (observable values to compare)
+
+- **O3/O4** → HTTP 2xx, `resolved`. The **key assertion**: the check-out punch,
+  though it occurs on calendar day 2026-01-06, is attributed to business
+  **`work_date = 2026-01-05`** — both the `attendance_events` row for O4 and the
+  consolidated `attendance_records` row carry `work_date = 2026-01-05` (the
+  previous-night containing shift, `attendance-work-date-resolver.cjs:463-485`).
+  Verify via SQL:
+  `SELECT event_type, work_date FROM attendance_events WHERE org_id='qa_synth_org_a' AND user_id='qa_synth_u1' ORDER BY occurred_at;`
+  and `SELECT work_date FROM attendance_records WHERE org_id='qa_synth_org_a' AND user_id='qa_synth_u1';`
+- A next-day punch must **not** create a second `attendance_records` row on
+  2026-01-06 for this shift.
+
+### Residue SQL (rows this case created)
+
+```sql
+SELECT
+    (SELECT count(*) FROM attendance_events            WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_records           WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_shift_assignments WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_shift_segments    WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_shifts            WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM user_orgs                    WHERE user_id LIKE 'qa_synth_%' OR org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM users                        WHERE id LIKE 'qa_synth_%')
+  AS pqa_02_residue;
+```
+
+### Cleanup
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-02.sql` (cleanup section).
+
+### Evidence (summary.json fields)
+
+Set `cases[] where id="PQA-02"`: `status`, `syntheticDataOnly=true`, `reason` =
+the observed `work_date` of the O4 event/record (must be 2026-01-05) and the
+residue count.
+
+---
+
+## PQA-05 — Shadow posture
+
+**Objective (matrix).** Exact synthetic-org shadow keeps the legacy projection and
+appends W4 shadow evidence.
+
+### Product surface
+
+W4 posture is controlled by TWO gates — **there is no HTTP route to flip it**:
+
+1. Env allowlist (exact-org match, wildcard never counts):
+   `packages/core-backend/src/attendance/w4c0-identity.ts:363`
+   (`const SEGMENT_CALCULATION_ALLOWLIST_ENV = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'`),
+   predicate `isOrgExactlyAllowlisted` (`:366`), exported
+   `isAttendanceCalculationOrgAllowlistedV1` (`:381`).
+2. Persisted rollout state, resolved by `resolveSegmentCalculationPosture`
+   (`w4c0-identity.ts:454`, decision core `:475-487`). Closed states
+   `ATTENDANCE_ROLLOUT_STATES_V1 = ['legacy','shadow','eligible','authoritative','suspended']`
+   (`:78-85`); write postures
+   `ATTENDANCE_ACCEPTED_WRITE_POSTURES_V1 = ['legacy_projection_only','shadow','authoritative']`
+   (`:71-76`).
+
+The state is mutated only by the internal command
+`transitionAttendanceCalculationRolloutV1`
+(`packages/core-backend/src/attendance/w4c3a-rollout-control.ts:1125`; module
+header `:3-4` states it "deliberately have no PluginServices, route, flag, or index
+surface" — only test callers today), gated by the allowlist at `:1162-1163`
+(`W4C3A_ROLLOUT_CONTROL_ORG_NOT_ALLOWLISTED`).
+
+Shadow evidence is appended without changing the legacy projection: a
+`mode='shadow'` calculation row is DB-forced to `projection_effect='none'`
+(`chk_arc_shadow_effect`,
+`zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage.ts:749`),
+so the legacy `attendance_records` projection is untouched while a shadow
+`attendance_record_calculations` row is appended. The shadow write literal
+`'none'`/`'shadow'` is at
+`packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts:758`.
+
+### Tables / columns (with creation sites)
+
+- `attendance_calculation_rollout_state` —
+  `zzzz20260725120000_...durable_storage.ts:993`; `org_id text PRIMARY KEY` (`:994`),
+  posture column **`state`** (`:995`, values = the `ROLLOUT_STATES` closed set,
+  migration `:201`), `scope text` (`:1002`) pinned to `'synthetic_staging'` by
+  `chk_acrs_scope` (`:1005`),
+  `engine_version`/`reason_code`/`actor_id`/`version`/`prior_state`
+  (`:996-1001`); the INSERT-guard trigger admits only `state='legacy'`/
+  `prior_state NULL`/`version=1` as a bootstrap and `legacy→shadow` thereafter
+  (`:1040-1050`, `:1055-1063`). Companion
+  `attendance_calculation_rollout_events` (`:1011`, `org_id` `:1013`).
+- `attendance_record_calculations` (the shadow evidence) — `:655`; `org_id`
+  (`:657`), `attendance_record_id` (`:658`), `mode` (`:661`, `CHECK mode IN ('shadow','authoritative')` `:711`),
+  `entrypoint` (`:662`), `outcome` (`:681`), `projection_effect` (`:683`),
+  `shadow_diff_code` (`:693`).
+
+### Synthetic fixtures — create
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-05.sql` (create section): admin + user
+in **`qa_synth_org_shadow`**, plus a bootstrap `attendance_calculation_rollout_state`
+row `state='legacy'` (`prior_state` NULL, `scope='synthetic_staging'`) — the only
+INSERT shape the state-guard trigger admits.
+
+### Steps
+
+1. **Env + posture (UNVERIFIED — operator to confirm).** Set
+   `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED=qa_synth_org_shadow` on the host,
+   then move the rollout state `legacy → shadow` for `qa_synth_org_shadow` via the
+   internal command `transitionAttendanceCalculationRolloutV1`
+   (`w4c3a-rollout-control.ts:1125`) — **no HTTP route exists**, so this is a
+   node/test-harness invocation; the exact runner is operator-confirmed.
+2. **Drive one calculation** for a synthetic record in `qa_synth_org_shadow`
+   (e.g. a punch via `POST /api/attendance/punch`, then the W4 boundary evaluates
+   in shadow). The in-process boundary path is
+   `w4c2-live-scheduled-boundary.ts` — `UNVERIFIED — operator to confirm` the
+   host wiring that reaches it.
+
+### Expected
+
+- The legacy `attendance_records` projection for the subject is **present and
+  unchanged** (no W4 mutation of `status`/`work_minutes`).
+- Exactly one appended `attendance_record_calculations` row with `mode='shadow'`
+  and, by `chk_arc_shadow_effect`, `projection_effect='none'`:
+  `SELECT mode, projection_effect, outcome FROM attendance_record_calculations WHERE org_id='qa_synth_org_shadow';`
+- `attendance_calculation_rollout_state.state = 'shadow'` for `qa_synth_org_shadow`.
+
+### Residue SQL (rows this case created)
+
+```sql
+SELECT
+    (SELECT count(*) FROM attendance_record_calculations         WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_record_segments             WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_calculation_rollout_state   WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_calculation_rollout_events  WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_records                     WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_events                      WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM user_orgs                              WHERE user_id LIKE 'qa_synth_%' OR org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM users                                  WHERE id LIKE 'qa_synth_%')
+  AS pqa_05_residue;
+```
+
+### Cleanup
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-05.sql` (cleanup section). Also unset
+`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` (operator).
+
+### Evidence (summary.json fields)
+
+Set `cases[] where id="PQA-05"`: `status`, `syntheticDataOnly=true`, `reason` =
+the legacy-projection-unchanged observation, the appended `mode='shadow'`/
+`projection_effect='none'` row, and residue. If env/posture activation could not be
+performed, record BLOCKED with the UNVERIFIED note rather than inventing PASS.
+
+---
+
+## PQA-06 — Ambiguous evidence
+
+**Objective (matrix).** Duplicate/ambiguous candidates produce review-required,
+never a fabricated authoritative projection.
+
+### Product surface
+
+Two distinct ambiguity boundaries, both fail-closed:
+
+1. **Work-date attribution ambiguity (punch route).** When the resolver cannot pick
+   one business workDate, `selectAmongMatchingCandidates` returns ambiguity
+   (`attendance-work-date-resolver.cjs:514-518`) and the punch route returns HTTP
+   422 `WORK_DATE_ATTRIBUTION_AMBIGUOUS` (`plugins/plugin-attendance/index.cjs:29285-29296`)
+   — no calculation/record projection is fabricated.
+2. **Segment duplicate/ambiguous match (calculator).** Duplicate check-in/out or an
+   ambiguous segment match selects the review outcome:
+   `packages/core-backend/src/attendance/w4c1-segment-calculator.ts:913-919`
+   (`return review('duplicate_check_in' | 'duplicate_check_out' | 'ambiguous_segment_match')`);
+   `review()` helper `:179-183` emits `{ outcome: 'review_required', … }` (result
+   union `:172-177` has only `'completed' | 'review_required'`).
+
+The persisted guarantee ("never a fabricated authoritative projection"): a
+`review_required` calculation is DB-forced to carry no projection —
+`chk_arc_review_shape`
+(`zzzz20260725120000_...durable_storage.ts:750-756`: `projection_effect='none'`,
+`expected_segment_count=0`, all `projected_*` NULL). At the record level a review
+retires a placeholder instead of publishing —
+`attendance_records.visibility_state='retired'` / `visibility_reason='review_placeholder'`
+(`w4c3a-canonical-import-kernel.ts:859-860`; column/constraint
+`zzzz20260725120000_...:1092`, `:1107-1108`, `:1121-1122`).
+
+### Tables / columns (with creation sites)
+
+- `attendance_record_calculations.outcome text NOT NULL` (`:681`), allowed values
+  `OUTCOMES = ['baseline','completed','review_required','reversed']` (migration
+  `:117`), `CHECK chk_arc_outcome` (`:718`), review-reason pairing
+  `chk_arc_outcome_reason_pair` (`:721-726`), review shape `chk_arc_review_shape`
+  (`:750-756`); `projection_effect` (`:683`, values
+  `['none','set_active','set_retired']` `:155`).
+- `attendance_records.visibility_state` (`:1092`, `'active'|'retired'`),
+  `visibility_reason` (`:1096`).
+
+### Synthetic fixtures — create
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-06.sql` (create section): admin + user in
+`qa_synth_org_a` (for the route-422 flavor) / `qa_synth_org_shadow` (for the
+calculator review flavor, which needs W4 enabled — see PQA-05). Duplicate
+punches/overlapping shifts are produced in the steps.
+
+### Steps
+
+- **R1 (attribution ambiguity → 422, no fabrication).** Construct overlapping shift
+  windows for `qa_synth_u1` (two assignments whose windows both contain the punch
+  instant) — `UNVERIFIED — operator to confirm` the exact overlapping-window
+  construction — then `POST /api/attendance/punch` at the overlapping instant.
+- **R2 (segment duplicate → review_required).** With W4 enabled for the org (per
+  PQA-05), punch **two** `check_in` events into the same segment/workDate so the
+  calculator sees `duplicateIn` (`w4c1-segment-calculator.ts:915`), then let the
+  boundary evaluate. `UNVERIFIED — operator to confirm` the calculation trigger.
+
+### Expected
+
+- **R1** → HTTP 422 `WORK_DATE_ATTRIBUTION_AMBIGUOUS`; **no**
+  `attendance_records`/`attendance_record_calculations` row fabricated for that
+  instant.
+- **R2** → a `attendance_record_calculations` row with `outcome='review_required'`
+  and (enforced) `projection_effect='none'`, `expected_segment_count=0`, all
+  `projected_*` NULL; the record's `visibility_state='retired'`,
+  `visibility_reason='review_placeholder'`. No authoritative projection is written:
+  `SELECT outcome, projection_effect, expected_segment_count, projected_status FROM attendance_record_calculations WHERE org_id LIKE 'qa_synth_%' AND outcome='review_required';`
+
+### Residue SQL (rows this case created)
+
+```sql
+SELECT
+    (SELECT count(*) FROM attendance_record_calculations WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_record_segments     WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_records             WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_events              WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_shift_assignments   WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_shift_segments      WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_shifts              WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM user_orgs                      WHERE user_id LIKE 'qa_synth_%' OR org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM users                          WHERE id LIKE 'qa_synth_%')
+  AS pqa_06_residue;
+```
+
+### Cleanup
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-06.sql` (cleanup section).
+
+### Evidence (summary.json fields)
+
+Set `cases[] where id="PQA-06"`: `status`, `syntheticDataOnly=true`, `reason` = the
+422 for R1 and the `review_required`/`projection_effect='none'` row for R2 (or
+BLOCKED with the UNVERIFIED note if W4 could not be enabled).
+
+---
+
+## PQA-08 — Fingerprint freeze
+
+**Objective (matrix).** Changing a shift definition does not mutate an old
+snapshot; a new mismatch becomes review-required.
+
+### Product surface
+
+- Payload fingerprint:
+  `packages/core-backend/src/attendance/w4c3b-request-snapshots.ts:430` —
+  `export function computeAttendanceRequestPayloadFingerprintV1(payload): string`
+  (SHA-256 over the normalized canonical payload, `:430-444`).
+- **Snapshots are append-only / immutable** (the "old snapshot is not mutated"
+  half): the fingerprint index is deliberately **non-unique** so an A→B→A edit
+  appends version 3 rather than overwriting
+  (`zzzz20260725120000_...durable_storage.ts:645-649`); the business-edit path
+  "append exactly one / next version" (`w4c3b-request-snapshots.ts:1093-1094`);
+  and there is **no UPDATE/DELETE path** for the table in
+  `packages/core-backend/src` (only SELECT/INSERT/CREATE).
+- **Mismatch → review-required** (finding — the review-required mapping is NOT in
+  the two files the risk matrix hint named; those only append snapshots /
+  classify rollout defects). The actual "changed shift definition → live
+  source-definition fingerprint no longer equals the frozen one → review" is in the
+  calculation boundary:
+  `packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts:1630-1635`
+  (`fingerprintMismatch` → `outcome = 'review_required'`,
+  `outcomeReasonCode = 'context_mismatch'`), backed by the lower-level frozen
+  context/attribution identity guard
+  `packages/core-backend/src/attendance/w4c1-segment-calculator.ts:853-862`
+  (`return review('context_mismatch')`). For completeness, the read-only rollout
+  gate that instead counts a payload-stale **defect** (not a review outcome) is
+  `w4c3a-rollout-control.ts:1008-1013` inside
+  `classifyAttendanceRequestSnapshotDefectsV1` (`:931`) — cite it as the defect
+  path, never as the review-required source.
+
+### Tables / columns (with creation sites)
+
+- `attendance_request_calculation_snapshots` —
+  `zzzz20260725120000_...durable_storage.ts:625`; `org_id` (`:626`), `request_id`
+  (`:627`), `version` (`:628`), `payload jsonb` (`:631`), `payload_fingerprint text`
+  (`:632`), `attribution_snapshot jsonb` (`:633`); PK
+  `(org_id, request_id, version)` (`:637`); non-unique fingerprint index
+  (`:645-649`); fingerprint format `CHECK payload_fingerprint ~ '^[0-9a-f]{64}$'`.
+- `attendance_record_calculations.outcome` / `.source_definition_fingerprint`
+  (`:681` / `:668`) — the review outcome persists here (see PQA-06 for the
+  `review_required` shape constraint).
+
+### Synthetic fixtures — create
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-08.sql` (create section): admin + user in
+`qa_synth_org_shadow` (W4 enabled, per PQA-05). The request, snapshot, shift, and
+re-evaluation are produced by the product/boundary in the steps.
+
+### Steps (all W4-boundary/runtime — UNVERIFIED — operator to confirm)
+
+1. Create an attendance request against a shift for `qa_synth_u1` and let the W4
+   boundary freeze its `attendance_request_calculation_snapshots` version 1 (record
+   its `payload_fingerprint`).
+2. Change the shift definition (`PUT /api/attendance/shifts/{shift_id}` — e.g. move
+   a segment time), producing a new live source-definition fingerprint.
+3. Re-evaluate the request/record via the boundary.
+
+The exact host wiring that mints the snapshot and re-evaluates is
+`UNVERIFIED — operator to confirm`; the code paths are cited above.
+
+### Expected
+
+- The version-1 snapshot row is **byte-for-byte unchanged** after step 2 (same
+  `payload_fingerprint`, same `created_at`); any re-append is a **new** version row,
+  never a mutation:
+  `SELECT version, payload_fingerprint, created_at FROM attendance_request_calculation_snapshots WHERE org_id='qa_synth_org_shadow' ORDER BY version;`
+- The re-evaluation after the shift change yields
+  `attendance_record_calculations.outcome='review_required'` with
+  `outcome_reason_code='context_mismatch'` (and the enforced `projection_effect='none'`).
+
+### Residue SQL (rows this case created)
+
+```sql
+SELECT
+    (SELECT count(*) FROM attendance_request_calculation_snapshots WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_record_calculations           WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_record_segments               WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_requests                      WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_records                       WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_shift_segments                WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_shifts                        WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM user_orgs                                WHERE user_id LIKE 'qa_synth_%' OR org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM users                                    WHERE id LIKE 'qa_synth_%')
+  AS pqa_08_residue;
+```
+
+### Cleanup
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-08.sql` (cleanup section). Note the
+snapshot table FK to `attendance_requests` is `ON DELETE RESTRICT` — delete
+snapshots before requests (the cleanup does).
+
+### Evidence (summary.json fields)
+
+Set `cases[] where id="PQA-08"`: `status`, `syntheticDataOnly=true`, `reason` = the
+unchanged v1 snapshot + the `review_required`/`context_mismatch` outcome (or BLOCKED
+with the UNVERIFIED note).
+
+---
+
+## PQA-09 — Outbox retry
+
+**Objective (matrix).** One synthetic dispatch failure followed by retry produces
+one source/result effect and no duplicate DML.
+
+### Product surface
+
+- Dispatcher (the entry function):
+  `packages/core-backend/src/attendance/w4c2-outbox-dispatcher.ts:84` —
+  `export async function dispatchAttendanceResultEventOutboxV1(connection, options)`.
+  It claims one row (`SELECT … FOR UPDATE SKIP LOCKED WHERE delivery_state='pending' AND (next_attempt_at IS NULL OR next_attempt_at <= now())`, `:110-114`),
+  dispatches via `options.emit` (`:123`), marks `delivered` on success (`:136-140`)
+  or increments `attempts` + sets `next_attempt_at` on failure (`:145-151`); returns
+  `{ claimed, delivered, failed }` (`:161`).
+- **No duplicate DML** guarantee: the dispatcher performs DML on the outbox table
+  ONLY (module header `:15-16`); both UPDATEs are gated on
+  `AND delivery_state='pending'` (`:140`, `:149`) so a redelivery matches zero
+  rows; a DB trigger makes a delivered row immutable and forbids attempt-count
+  regression (`zzzz20260725120000_...durable_storage.ts:1510-1537`, rewritten to
+  an allowlist form at `zzzz20260727100000_...:583-585`).
+- **No HTTP route** — worker/scheduler-only. Host port wrapper
+  `drainResultEventOutbox` (`packages/core-backend/src/index.ts:2212`, calls the
+  dispatcher `:2222`); registered only as a background job
+  `attendance-w4-result-outbox-drain` (`plugins/plugin-attendance/index.cjs:49618-49622`),
+  env-gated on `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`. To drive a retry in
+  QA, call `drainResultEventOutbox({ emit })` (or
+  `dispatchAttendanceResultEventOutboxV1(client, { emit })`) directly —
+  `UNVERIFIED — operator to confirm` the node/test-harness invocation.
+
+### Tables / columns (with creation sites)
+
+- `attendance_result_event_outbox` —
+  `zzzz20260725120000_...durable_storage.ts:590`; `org_id text NOT NULL` (`:592`),
+  `entrypoint` (`:593`), `event_kind` (`:595`), `payload jsonb` (`:596`),
+  `payload_schema_version` (`:597`), `business_key_fingerprint` (`:598`),
+  `delivery_state text DEFAULT 'pending'` (`:599`, `CHECK IN ('pending','delivered')`
+  `:609`), `attempts integer DEFAULT 0` (`:600`, `CHECK >= 0` `:610`),
+  `next_attempt_at timestamptz` (`:601`), `delivered_at` (`:603`); `identity_kind`
+  (added `zzzz20260727100000_...:487`, `SET NOT NULL :509`), `scheduled_run_id`
+  (added `:488`), `operation_id` made nullable (`:490`).
+- No new business DML on retry ⇒ counts unchanged in `attendance_result_operations`
+  (`:470`) and `attendance_records` (`:54`).
+
+### Synthetic fixtures — create
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-09.sql` (create section): admin + user in
+`qa_synth_org_shadow`. **The outbox row is produced by the product** (a W4
+calculation or scheduled run for the synthetic org enqueues one — see PQA-10) — a
+hand-seeded outbox row is intentionally avoided because `identity_kind`/the partial
+unique identity indexes/the update-guard trigger make a hand INSERT fragile.
+`UNVERIFIED — operator to confirm` the production path.
+
+### Steps (worker/runtime — UNVERIFIED — operator to confirm)
+
+1. Produce exactly one `pending` outbox row for `qa_synth_org_shadow` (via PQA-10's
+   `POST /api/attendance/auto-absence/run`, which enqueues via
+   `enqueueAttendanceScheduledRunEventOutboxV1`,
+   `packages/core-backend/src/attendance/w4c2-scheduled-run.ts:328/347`).
+2. Record baseline counts: `attendance_result_operations` and `attendance_records`
+   for the org.
+3. **Failure pass:** call `drainResultEventOutbox({ emit })` with an `emit` that
+   throws.
+4. **Retry pass:** call it again with an `emit` that resolves (pass
+   `retryBackoffMs: 0` or clear `next_attempt_at`, since a failure sets
+   `next_attempt_at = now()+30s`, `w4c2-outbox-dispatcher.ts:148/150`).
+
+### Expected
+
+- After the failure pass: the row stays `delivery_state='pending'`, `attempts=1`,
+  `next_attempt_at` set.
+- After the retry pass: `delivery_state='delivered'`, `attempts=2`, `delivered_at`
+  set — **exactly one** delivered transition.
+- Baseline counts in `attendance_result_operations` and `attendance_records` are
+  **unchanged** across both passes (no duplicate business DML):
+  `SELECT delivery_state, attempts FROM attendance_result_event_outbox WHERE org_id='qa_synth_org_shadow';`
+
+### Residue SQL (rows this case created)
+
+```sql
+SELECT
+    (SELECT count(*) FROM attendance_result_event_outbox       WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_result_operations         WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_result_operation_batches  WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_scheduled_runs            WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_scheduled_run_targets     WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_scheduled_run_target_outcomes WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_records                   WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM user_orgs                            WHERE user_id LIKE 'qa_synth_%' OR org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM users                                WHERE id LIKE 'qa_synth_%')
+  AS pqa_09_residue;
+```
+
+### Cleanup
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-09.sql` (cleanup section).
+
+### Evidence (summary.json fields)
+
+Set `cases[] where id="PQA-09"`: `status`, `syntheticDataOnly=true`, `reason` = the
+pending→delivered transition with `attempts=2` and the unchanged business-row counts
+(or BLOCKED with the UNVERIFIED note).
+
+---
+
+## PQA-10 — Scheduled identity/outcome/outbox
+
+**Objective (matrix).** Re-evaluate scheduled (b2) identity, target outcome, and
+outbox durability on the current exact source SHA without inventing PASS.
+
+### Product surface
+
+- Admin trigger route (EXISTS):
+  `plugins/plugin-attendance/index.cjs:48153-48155` —
+  `context.api.http.addRoute('POST', '/api/attendance/auto-absence/run', withPermission('attendance:admin', …))`;
+  handler calls `runAutoAbsenceForOrgDate(db, { … initiator: 'admin_run' })`
+  (`index.cjs:48208/48215`) → `w4Boundary.executeScheduledRun` (`index.cjs:22968`)
+  → `createOrResumeAttendanceScheduledRunV1`.
+  (Note: the risk-matrix hint "~L43739" is inaccurate — that line is a payroll-CSV
+  export; the real route is 48152-48155.)
+- Identity / idempotence:
+  `packages/core-backend/src/attendance/w4c2-scheduled-run.ts:593` —
+  `createOrResumeAttendanceScheduledRunV1`. Identity key = `(orgId, initiator,
+  workDate)` (advisory lock `w4c0-identity.ts:1111`; resume-existing-running
+  `w4c2-scheduled-run.ts:558/621-622`; monotonic generation `:634`).
+- Target outcomes (idempotent, one per target):
+  `recordAttendanceScheduledRunTargetOutcomeV1` (`w4c2-scheduled-run.ts:857`, INSERT
+  `:901`), enforced by `uq_asrto_target UNIQUE (org_id, target_id)`.
+- Outbox durability: `enqueueAttendanceScheduledRunEventOutboxV1`
+  (`w4c2-scheduled-run.ts:328`, INSERT into `attendance_result_event_outbox`
+  `delivery_state='pending'` `:347/350`); finalize
+  `finalizeAttendanceScheduledRunV1` (`:1056`).
+- Sweep worker (NO route — worker only):
+  `packages/core-backend/src/attendance/w4c2-scheduled-run-ops-worker.ts:228` —
+  `export async function sweepAttendanceScheduledRunsOnceV1(pool, options)`; claims
+  due runs via `UPDATE … SET last_attempt_at=now() … WHERE state='running' … FOR UPDATE SKIP LOCKED`
+  (`w4c2-scheduled-run.ts:1232-1240`). Host port `sweepScheduledRuns`
+  (`packages/core-backend/src/index.ts:2235`), background job
+  `attendance-w4-scheduled-run-sweep` (`plugins/plugin-attendance/index.cjs:49643/49655`).
+
+### Tables / columns (all in zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union.ts)
+
+- `attendance_scheduled_runs` — CREATE `:120`; `run_id uuid PK` (`:121`), `org_id`
+  (`:122`), `entrypoint` (`:123`), `initiator` (`:124`), `work_date` (`:125`),
+  `generation` (`:126`), `state text DEFAULT 'running'` (`:131`, `CHECK IN ('running','completed','abandoned')` `:144`);
+  identity uniqueness `uq_asr_generation (org_id, initiator, work_date, generation)`
+  (`:140`) and partial `uq_asr_one_running (org_id, initiator, work_date) WHERE state='running'`
+  (`:179-181`); `last_attempt_at` added by
+  `zzzz20260805120000_w4c2_scheduled_run_sweep_fairness.ts:35`.
+- `attendance_scheduled_run_targets` — CREATE `:237`; `org_id` (`:239`), `run_id`
+  (`:240`), `ordinal` (`:242`), `user_id uuid` (`:243`), `target_kind` (`:244`).
+- `attendance_scheduled_run_target_outcomes` — CREATE `:348`; `org_id` (`:350`),
+  `run_id` (`:351`), `target_id` (`:352`), `terminal_outcome text` (`:353`,
+  `CHECK IN ('completed','failed')`); `uq_asrto_target UNIQUE (org_id, target_id)`
+  (`:356`).
+
+### Synthetic fixtures — create
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-10.sql` (create section): admin +
+absence-eligible user in `qa_synth_org_shadow` (W4 enabled). Scheduled-run rows are
+produced by the route/worker in the steps.
+
+### Steps
+
+Session for `qa_synth_admin` + env `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`:
+`UNVERIFIED — operator to confirm`.
+
+- **S1 (trigger).** As admin: `POST /api/attendance/auto-absence/run`
+  `{ "orgId": "qa_synth_org_shadow", "workDate": "2026-01-05" }` (exact body fields
+  `UNVERIFIED — operator to confirm`).
+- **S2 (re-trigger — identity idempotence).** Repeat S1 with the same
+  `orgId`/`workDate`.
+- **S3 (sweep).** Invoke `sweepAttendanceScheduledRunsOnceV1(pool, { … })` (or the
+  `sweepScheduledRuns` port) — `UNVERIFIED — operator to confirm` the invocation.
+
+### Expected
+
+- After S1+S2: **at most one** `attendance_scheduled_runs` row with `state='running'`
+  for `(qa_synth_org_shadow, 'admin_run', 2026-01-05)` (enforced by
+  `uq_asr_one_running`); a re-trigger resumes rather than duplicating (`generation`
+  does not fork a second running row):
+  `SELECT generation, state FROM attendance_scheduled_runs WHERE org_id='qa_synth_org_shadow' ORDER BY generation;`
+- Each target has exactly one `attendance_scheduled_run_target_outcomes` row
+  (`uq_asrto_target`); `terminal_outcome ∈ ('completed','failed')`.
+- Outbox rows for the run are durable (`delivery_state='pending'` until drained):
+  `SELECT count(*) FROM attendance_result_event_outbox WHERE org_id='qa_synth_org_shadow';`
+
+### Residue SQL (rows this case created)
+
+```sql
+SELECT
+    (SELECT count(*) FROM attendance_scheduled_run_target_outcomes WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_scheduled_run_targets         WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_scheduled_runs                WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_result_event_outbox           WHERE org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_records                       WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM user_orgs                                WHERE user_id LIKE 'qa_synth_%' OR org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM users                                    WHERE id LIKE 'qa_synth_%')
+  AS pqa_10_residue;
+```
+
+### Cleanup
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-10.sql` (cleanup section) — deletes
+target_outcomes → targets → runs → outbox (FK order) → records/memberships/users.
+
+### Evidence (summary.json fields)
+
+Set `cases[] where id="PQA-10"`: `status`, `syntheticDataOnly=true`, `reason` = the
+single-running-run-per-identity observation, one-outcome-per-target, outbox
+durability, and residue (or BLOCKED with the UNVERIFIED note — do not invent PASS
+from unit/integration suites or the stale W4C-2 package).
+
+---
+
+## PQA-04 — Legacy compatibility
+
+**Objective (matrix).** A synthetic org outside the test allowlist retains existing
+response/projection shape and writes no W4 rows.
+
+### Product surface
+
+For an org **not** in `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`
+(`w4c0-identity.ts:363/381`), `resolveSegmentCalculationPosture` resolves to
+`legacy_projection_only` (`w4c0-identity.ts:475-487`), and:
+
+- the write preflight returns `legacy_no_operation` — **no operation row, hence no
+  calculation/segment rows**:
+  `packages/core-backend/src/attendance/w4c0-operation-registry.ts:604-608`;
+- the outbox is refused for a legacy org (`W4C0_OUTBOX_LEGACY_FORBIDDEN`):
+  `w4c0-operation-registry.ts:827-831`;
+- the control-side transition also fails closed for a non-allowlisted org
+  (`W4C3A_ROLLOUT_CONTROL_ORG_NOT_ALLOWLISTED`,
+  `w4c3a-rollout-control.ts:1162-1163`; bootstrap guard `:508-509`).
+
+The legacy `attendance_records` projection (its existing `status`/`work_minutes`/…
+shape) is written by the pre-W4 path and is untouched by W4.
+
+### Tables / columns — the "NO W4 rows" assertion set
+
+For `qa_synth_org_legacy` these W4 tables must contain **zero** rows
+(`org_id = 'qa_synth_org_legacy'`):
+`attendance_record_calculations` (`zzzz20260725120000_...:655`),
+`attendance_record_segments` (`:860`), `attendance_result_operations` (`:470`),
+`attendance_result_operation_batches` (`:428`), `attendance_result_event_outbox`
+(`:590`), `attendance_calculation_rollout_state` (`:993`),
+`attendance_calculation_rollout_events` (`:1011`). The legacy
+`attendance_records` (`zzzz20260114090000_...:54`) row **is** present (unchanged
+shape).
+
+### Synthetic fixtures — create
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-04.sql` (create section): admin + user in
+**`qa_synth_org_legacy`**. Critically, `qa_synth_org_legacy` MUST NOT appear in
+`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` — verify the env
+(`UNVERIFIED — operator to confirm`).
+
+### Steps
+
+- **L1.** As `qa_synth_u1`: `POST /api/attendance/punch`
+  `{ "eventType": "check_in", "occurredAt": "2026-01-05T09:00:00+08:00", "timezone": "Asia/Shanghai", "orgId": "qa_synth_org_legacy" }`
+  (and a `check_out` later the same day) — the legacy path writes an
+  `attendance_records` projection; the W4 path is a no-op.
+
+### Expected
+
+- The `POST /api/attendance/punch` responses have the **existing** legacy shape
+  (HTTP 2xx, legacy record projection) — no W4-specific fields forced.
+- A legacy `attendance_records` row exists for `qa_synth_org_legacy` with the usual
+  `status`/`work_minutes`.
+- **Zero** rows in every W4 table listed above for `org_id='qa_synth_org_legacy'`:
+  ```sql
+  SELECT
+      (SELECT count(*) FROM attendance_record_calculations           WHERE org_id='qa_synth_org_legacy')
+    + (SELECT count(*) FROM attendance_record_segments               WHERE org_id='qa_synth_org_legacy')
+    + (SELECT count(*) FROM attendance_result_operations             WHERE org_id='qa_synth_org_legacy')
+    + (SELECT count(*) FROM attendance_result_operation_batches      WHERE org_id='qa_synth_org_legacy')
+    + (SELECT count(*) FROM attendance_result_event_outbox           WHERE org_id='qa_synth_org_legacy')
+    + (SELECT count(*) FROM attendance_calculation_rollout_state     WHERE org_id='qa_synth_org_legacy')
+    + (SELECT count(*) FROM attendance_calculation_rollout_events    WHERE org_id='qa_synth_org_legacy')
+    AS w4_rows;   -- must be 0
+  ```
+
+### Residue SQL (rows this case created)
+
+```sql
+SELECT
+    (SELECT count(*) FROM attendance_records  WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM attendance_events   WHERE org_id LIKE 'qa_synth_%' OR user_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM user_orgs           WHERE user_id LIKE 'qa_synth_%' OR org_id LIKE 'qa_synth_%')
+  + (SELECT count(*) FROM users               WHERE id LIKE 'qa_synth_%')
+  AS pqa_04_residue;
+```
+
+### Cleanup
+
+Apply `scripts/ops/windows-qa/fixtures/pqa-04.sql` (cleanup section).
+
+### Evidence (summary.json fields)
+
+Set `cases[] where id="PQA-04"`: `status`, `syntheticDataOnly=true`, `reason` = the
+legacy projection present + the `w4_rows = 0` observation and residue count.
+
+---
+
+## After all ten cases
+
+1. Run every case's cleanup. 2. Run `scripts/ops/windows-qa/residue-check.sql`; put
+the single integer in `summary.json.residue` (must be 0). 3. Affirm the shared
+safety fields (`isolatedDatabase`, `databaseName=metasheet_windows_qa`,
+`hostPlatform=windows`, `windowsPowerShellVersion=5.1.x`,
+`customerOrExternalDestination=false`, `externalNotificationsSent=false`). 4. Run
+the qa-runner (README §Flow). Do not invent PASS; the stale package SHAs listed in
+the pin are not current evidence.
