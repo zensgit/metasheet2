@@ -149,7 +149,12 @@ required 用 `isEmpty()`(undefined/null/纯空白),失败即 `counts.failed += 1
 已撤回。** 现在 `boundSystemId === system.id` 直接拒(`K3_C6_B4_BINDING_SELF_REFERENTIAL`),
 这才把"驱动器碰巧绑了读记录"变成"这道门无法靠自己跟自己比来满足"。
 
-**D2(即便真比了两行,证明力仍弱)—— 未关,四个候选方案没有一个能关。**
+~~**D2(即便真比了两行,证明力仍弱)—— 未关,四个候选方案没有一个能关。**~~
+
+**已作废(owner 裁决 2026-08-06,`ACCEPT_SEPARATION_NO_DISSOLVE`)。** 两处都错:
+判据早已不是 origin(#4790 升级为**认证身份**,已合 `aa48c3f18`);更根本的是**归类错了** ——
+「读记录不在 C6 数据路径上」不是 D2 的缺口,而是另一条由 pipeline/source binding、
+dry-run token 与实体机证据负责的责任线。**D2 只负责证明同一认证身份。**
 ~~比较两条记录只证明**两个操作员敲进去的 baseUrl 共享 origin**。~~ **已过时,两处都过时。**
 
 **(1) 判据早已不是 origin。** #4790(已合 `aa48c3f18`,五轮门审末轮无 P1)把身份升级为
@@ -239,8 +244,8 @@ F.1 曾把 R1 估成 0.5–2.0 人天,实耗 ~1.5,但**轮次是估计的 2 倍�
 | 候选包 serviceRuntimeSha | `e1b91594e` —— ⚠️ **该钉已作废**,早于 #4769 的安全门;出包下界见 §7.1(#4787 已上移到 `e6523c949`) |
 | `rehearsal-driver-contract.test.mjs` | ✅ 10/10。**勘误**:此前写「plugin-tests.yml 门控」是错的——它跑在 `k3wise-offline-poc` job,而该 check **不在 9 条 required 里**,红了不挡合。现已同时挂进 required 的 `test` job |
 | `rehearsal-harness.test.mjs` | ✅ 5/5,同一 CI step |
-| 彩排端到端(真实部署包) | ⏳ 待 #4768 合并后 dispatch |
-| 实体机先读后写 | ⏳ 待 owner 排窗口 |
+| 彩排端到端(真实部署包) | ✅ **已跑两次**:最终跑 `31103021849` @ `aa48c3f18`,17/17 |
+| 实体机先读后写 | ⏳ **已授权排期**(`AUTHORIZED_TO_SCHEDULE_WITH_FROZEN_AA48_PACKAGE`),未执行 |
 
 **诚实项**:契约测试是**源码文本断言**,按 owner 的原话「不能证明真实记录成功写入」。
 真正证明写入的是 dry-run/apply 的行为断言(§2.2),以及彩排 dispatch。
@@ -260,7 +265,9 @@ F.1 曾把 R1 估成 0.5–2.0 人天,实耗 ~1.5,但**轮次是估计的 2 倍�
 | 彩排首跑 | run `31084631813`,17/17 |
 | **彩排二跑(D2 门活着)** | **run `31103021849`,17/17,数字与首跑逐项一致** |
 | **批准包身份(已冻结)** | `serviceRuntimeSha=aa48c3f187685b6f37aceed8cec1c5bcccc8b9a7`<br>`tgz=93aa75c9…`  `zip=d66392d9…`  出包 run `31103351286` |
-| #4787 / #4788 / #4789 | 已推,待 owner 拍板 |
+| #4787 | **已合** `8247cbf55` |
+| #4788 | 已推,**owner HOLD 中**(P1 已修:runbook 缺 `pairedReadSystemId` 与 D2 认证身份要求) |
+| #4789 | **已记录裁决后关闭为 superseded** |
 
 **二跑的增量不在数字,在前提。** 首跑时 D2 那道门还是「origin 相等」,且在 offline PoC 里
 **结构性缺席**;二跑时它 fail-closed、覆盖三种认证模式、且门缺失本身即拒。**同样的绿,证明力不同。**
