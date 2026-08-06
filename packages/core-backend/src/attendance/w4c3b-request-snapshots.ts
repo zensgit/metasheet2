@@ -354,6 +354,79 @@ export function buildAttendanceRequestCalculationPayloadFromRequestRowV1(input: 
   })
 }
 
+function coerceAttendanceRequestMetadataObjectV1(value: unknown): Record<string, unknown> {
+  if (!value) return {}
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+    } catch {
+      return {}
+    }
+  }
+  return typeof value === 'object' ? (value as Record<string, unknown>) : {}
+}
+
+/**
+ * W4C-5 §3 payload-stale predicate support (issue #4775): reconstructs the type-specific
+ * `minutes`/`leaveTypeCode`/`outdoorPunch` payload fields from a live `attendance_requests.metadata`
+ * value, exactly mirroring `buildRequestSnapshotPayloadFieldsFromDraft`'s field extraction in
+ * `plugins/plugin-attendance/index.cjs:24414-24445` (called by both `buildRequestSnapshotPayloadFromDraft`
+ * and the request-creation/edit routes — the plugin's request-creation/edit payload builders).
+ * This is a DELIBERATE field-for-field port, not a re-derivation: the plugin call site
+ * builds these fields from the same `metadata` JSONB column this function reads, so the two must
+ * stay behaviorally identical or the payload-stale predicate below would compare against a payload
+ * the plugin could never actually have produced.
+ *
+ * KNOWN WEAK SPOT (self-reported, not owner-resolved): this is a second copy of that exact logic,
+ * not a shared call through the host port — refactoring the plugin's existing (already-shipped,
+ * heavily-exercised) creation/edit paths to call through the port instead was judged out of this
+ * predicate-completion issue's scope (higher blast radius than the control-boundary predicate it
+ * was asked to close). A future edit to either copy without the other is a real, mechanically
+ * undetected drift risk; `__tests__/w4c3b-request-snapshot-metadata-fields.test.ts` pins this
+ * function's own behavior against a fixture table but cannot reach into the CJS plugin closure to
+ * cross-check it directly.
+ */
+export function extractAttendanceRequestPayloadMetadataFieldsV1(metadataInput: unknown): Readonly<{
+  minutes: number | null
+  leaveTypeCode: string | null
+  outdoorPunch: AttendanceRequestCalculationPayloadV1['outdoorPunch']
+}> {
+  const meta = coerceAttendanceRequestMetadataObjectV1(metadataInput)
+  const minutesRaw = meta.minutes
+  const minutes =
+    typeof minutesRaw === 'number' && Number.isFinite(minutesRaw) && minutesRaw >= 0
+      ? Math.trunc(minutesRaw)
+      : null
+  const leaveTypeContainer = meta.leaveType
+  const leaveTypeCodeFromNested =
+    leaveTypeContainer && typeof leaveTypeContainer === 'object' && !Array.isArray(leaveTypeContainer)
+      ? (leaveTypeContainer as Record<string, unknown>).code
+      : undefined
+  const leaveTypeCodeFromFlat = meta.leaveTypeCode
+  const leaveTypeCode =
+    typeof leaveTypeCodeFromNested === 'string' && leaveTypeCodeFromNested.trim()
+      ? leaveTypeCodeFromNested.trim()
+      : typeof leaveTypeCodeFromFlat === 'string' && leaveTypeCodeFromFlat.trim()
+        ? leaveTypeCodeFromFlat.trim()
+        : null
+  const outdoor = coerceAttendanceRequestMetadataObjectV1(meta.outdoorPunch)
+  let outdoorPunch: AttendanceRequestCalculationPayloadV1['outdoorPunch'] = null
+  if (
+    (outdoor.eventType === 'check_in' || outdoor.eventType === 'check_out') &&
+    typeof outdoor.occurredAt === 'string' && outdoor.occurredAt &&
+    typeof outdoor.timezone === 'string' && outdoor.timezone
+  ) {
+    outdoorPunch = Object.freeze({
+      eventType: outdoor.eventType,
+      occurredAt: outdoor.occurredAt,
+      timezone: outdoor.timezone,
+      source: typeof outdoor.source === 'string' && outdoor.source ? outdoor.source : 'mobile',
+    })
+  }
+  return Object.freeze({ minutes, leaveTypeCode, outdoorPunch })
+}
+
 export function computeAttendanceRequestPayloadFingerprintV1(
   payload: AttendanceRequestCalculationPayloadV1,
 ): string {
