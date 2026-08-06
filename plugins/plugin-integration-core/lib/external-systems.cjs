@@ -9,6 +9,12 @@
 // ---------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
+
+// Per-process key for the K3 instance-identity digest (see getExternalSystemInstanceDigest).
+// Deliberately NOT derived from any persisted secret: the digest is only ever compared between two
+// records within one request, so a fresh random key per process gives unlinkability across
+// restarts and removes the account set from anything that might leak.
+const INSTANCE_DIGEST_KEY = crypto.randomBytes(32)
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
 
 const TABLE = 'integration_external_systems'
@@ -326,6 +332,112 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     return rowToAdapterExternalSystem(row, credentials)
   }
 
+  // OWNER RULING 20260806 [P1] — K3 instance identity is (kind, origin, acctId), NOT origin alone.
+  //
+  // `sameK3Instance` compared only `new URL(baseUrl).origin`, but K3 WISE login REQUIRES acctId:
+  // k3-wise-webapi-adapter.cjs throws without it and sends it in the login body. Two records on
+  // ONE server pointing at DIFFERENT account sets therefore compared EQUAL — a read binding on
+  // account set A could certify a write target on account set B, i.e. writing into the wrong
+  // 账套. Origin equality is necessary, not sufficient.
+  //
+  // Computed HERE, inside the credential boundary: this module is the only one holding decrypted
+  // credentials, and ONLY the digest leaves it. Callers compare digests and never see acctId, so
+  // the raw account set never reaches an evidence surface.
+  //
+  // FAIL-CLOSED: any missing part (unknown system, unparseable baseUrl, absent acctId) yields
+  // null, and null must never compare equal to null at the call site.
+  async function getExternalSystemInstanceDigest(input) {
+    let system
+    try {
+      system = await getExternalSystemForAdapter(input)
+    } catch {
+      return null
+    }
+    if (!system || typeof system.kind !== 'string' || !system.kind) return null
+
+    const baseUrl = system.config && typeof system.config.baseUrl === 'string' ? system.config.baseUrl : ''
+    let origin
+    try {
+      origin = new URL(baseUrl).origin
+    } catch {
+      return null
+    }
+
+    const credentials = system.credentials && typeof system.credentials === 'object' ? system.credentials : {}
+    const cfg = system.config && typeof system.config === 'object' ? system.config : {}
+    const firstDefined = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== '')
+
+    // REVIEW P1-2 — MIRROR the adapter's own auth-mode resolution, do not assume one mode.
+    //
+    // k3-wise-webapi-adapter.cjs resolves:
+    //   authorityCode = firstDefined(credentials.authorityCode, credentials.authCode, config.authorityCode)
+    //   authMode      = firstDefined(config.authMode, authorityCode ? 'authority-code' : null, 'login')
+    // and in authority-code / token mode it authenticates with authorityCode and NEVER sends
+    // acctId. Digesting acctId unconditionally therefore had two failures: a clean authority-code
+    // record has no acctId at all, so the digest was null and the C6 write gate became
+    // UNSATISFIABLE (a block main did not have); and two records with different authority codes but
+    // the same stale acctId digested EQUAL — the owner's defect, still open, in that mode.
+    //
+    // The identity is whatever the record would AUTHENTICATE with.
+    //
+    // REVIEW P2-1 (third round) — the previous version claimed "Same resolution, same answer" and
+    // was WRONG A THIRD TIME: it started at the adapter's SECOND branch. `login()` checks
+    // `credentials.sessionId` FIRST (adapter :1902-1906) and short-circuits with a session header,
+    // never reaching the authorityCode/acctId resolution below. Proven against this very function:
+    // two records with different sessionId but the same stale acctId digested EQUAL — the owner's
+    // wrong-账套 defect, alive one mode over — and a clean session-only record digested null,
+    // making the write gate unsatisfiable. Both of P1-2's failure directions, one branch earlier.
+    //
+    // Reachable, not hypothetical: credentials are free-form JSON, and the on-prem preflight
+    // treats K3_SESSION_ID as a first-class auth mode.
+    //
+    // I have now mis-stated this mirror three times. The lesson is not "read more carefully" — it
+    // is that a claim of equivalence to another function's control flow must be checked branch by
+    // branch against that function, from its FIRST statement.
+    // The adapter's guard is a bare truthiness test (`if (credentials.sessionId)`), and mirroring it
+    // means mirroring it EXACTLY — my "safer-looking" !==undefined/null/'' form was a strict
+    // SUPERSET, so for `0`, `false`, `NaN`, `-0` the digest short-circuited on session identity
+    // while login() fell through to acctId. That was a REGRESSION: at the previous head those
+    // inputs digested correctly, and this delta broke them.
+    if (credentials.sessionId) {
+      const sessionMaterial = [system.kind, origin, `sessionId=${String(credentials.sessionId)}`]
+        .map((part) => `${part.length}:${part}`).join('|')
+      return crypto.createHmac('sha256', INSTANCE_DIGEST_KEY).update(sessionMaterial).digest('hex')
+    }
+
+    const authorityCode = firstDefined(credentials.authorityCode, credentials.authCode, cfg.authorityCode)
+    const authMode = firstDefined(cfg.authMode, authorityCode ? 'authority-code' : null, 'login')
+    let authIdentity
+    if (authMode === 'authority-code' || authMode === 'authorityCode' || authMode === 'token') {
+      if (authorityCode === undefined) return null
+      authIdentity = `authorityCode=${String(authorityCode)}`
+    } else {
+      // REVIEW P2-1: this once took the first STRING while the adapter takes the first DEFINED,
+      // so `{acctId: 1001, accountSet: '002'}` digested as '002' while login authenticated against
+      // 账套 1001 — the digest named a different account set than the one actually used.
+      const acctIdRaw = firstDefined(credentials.acctId, credentials.accountSet, credentials.accountSetId)
+      if (acctIdRaw === undefined) return null
+      authIdentity = `acctId=${String(acctIdRaw)}`
+    }
+    if (!authIdentity) return null
+
+    // Length-prefixed parts: without this, ('ab','c') and ('a','bc') digest identically and a
+    // collision could be constructed across the origin/acctId boundary.
+    const material = [system.kind, origin, authIdentity].map((part) => `${part.length}:${part}`).join('|')
+    // REVIEW P2-3 — RETRACTION. The first version routed this through
+    // `credentialStore.fingerprint`, with a comment claiming "deployment-scoped HMAC, not
+    // reversible outside it". That is FALSE on the production path: there are TWO fingerprint
+    // implementations, and the host-security one calls `hashWithSecurity`, whose only primitive
+    // is unkeyed `security.hash` (falling back to bare sha256). The reviewer recovered the raw
+    // account set "001" from a digest in milliseconds — the search space is tiny.
+    //
+    // Keyed with a PER-PROCESS random key instead. Both digests in any comparison are computed in
+    // the same request, in this process, and are never persisted, logged, or compared across
+    // processes — so a per-process key is not a limitation, it is strictly stronger: the digest is
+    // unlinkable across restarts and carries no recoverable account set even if it did leak.
+    return crypto.createHmac('sha256', INSTANCE_DIGEST_KEY).update(material).digest('hex')
+  }
+
   async function countPipelineReferences({ tenantId, workspaceId, id }) {
     const where = scopeWhere({ tenantId, workspaceId })
     const [sourcePipelineCount, targetPipelineCount] = await Promise.all([
@@ -412,6 +524,7 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     upsertExternalSystem,
     getExternalSystem,
     getExternalSystemForAdapter,
+    getExternalSystemInstanceDigest,
     deleteExternalSystem,
     listExternalSystems,
   }

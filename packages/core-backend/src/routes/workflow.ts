@@ -35,6 +35,21 @@ if (process.env.DISABLE_WORKFLOW === 'true') {
   })
 }
 
+/**
+ * Stops this module's `workflowEngine` singleton (including its `node-cron` minute
+ * poller, when `ENABLE_BPMN_TIMER_POLLER=true` — see `BPMNWorkflowEngine.shutdown()`).
+ * Safe to call even when the engine was never initialized (e.g. `DISABLE_WORKFLOW=true`,
+ * or `initialize()` is still in flight — `shutdown()` only touches its own
+ * already-populated maps).
+ *
+ * Previously this only ran via the `process.on('SIGTERM', ...)` listener below, which
+ * fires on a REAL OS signal — `MetaSheetServer.stop()` (used directly in tests, with no
+ * signal involved) never reached it. `index.ts`'s `stop()` now calls this explicitly.
+ */
+export async function shutdownWorkflowEngine(): Promise<void> {
+  await workflowEngine.shutdown()
+}
+
 // Type definitions for database rows
 interface ProcessDefinition {
   id: string;
@@ -776,7 +791,7 @@ router.get(
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down workflow engine...')
-  await workflowEngine.shutdown()
+  await shutdownWorkflowEngine()
 })
 
 export default router

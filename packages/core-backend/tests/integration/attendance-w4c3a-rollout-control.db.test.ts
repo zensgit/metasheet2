@@ -18,8 +18,12 @@ import {
   __setW4C3aRolloutControlAfterExclusiveLockForTests,
   __setW4C3aRolloutControlBeforeEventInsertForTests,
   __setW4C3aRolloutControlBeforeStateUpdateForTests,
+  ATTENDANCE_REQUEST_SNAPSHOT_DEFECT_CELLS_V1,
   closeLegacyRollbackWindowV1,
+  readAttendanceRequestSnapshotDefectReportV1,
   transitionAttendanceCalculationRolloutV1,
+  type AttendanceRequestSnapshotDefectCellV1,
+  type AttendanceRequestSnapshotDefectCountsV1,
   type AttendanceW4C3aRolloutControlResultV1,
   type EvidenceReferencesV1,
 } from '../../src/attendance/w4c3a-rollout-control'
@@ -30,6 +34,10 @@ import {
   type AttendanceRolloutStateV1,
   type AttendanceW4TransactionClientV1,
 } from '../../src/attendance/w4c0-identity'
+import {
+  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+  computeAttendanceRequestPayloadFingerprintV1,
+} from '../../src/attendance/w4c3b-request-snapshots'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -99,7 +107,17 @@ async function createBase(pool: Pool): Promise<void> {
   await pool.query(`
     CREATE TABLE attendance_requests (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id text NOT NULL, work_date date NOT NULL,
-      request_type varchar(30) NOT NULL, status varchar(20) NOT NULL DEFAULT 'pending', org_id text NOT NULL
+      request_type varchar(30) NOT NULL, status varchar(20) NOT NULL DEFAULT 'pending', org_id text NOT NULL,
+      requested_in_at timestamptz, requested_out_at timestamptz, reason text,
+      metadata jsonb NOT NULL DEFAULT '{}'::jsonb, approval_instance_id text
+    )`)
+  // W4C-5 §3 (issue #4775): the reversal-incomplete cell reads the request's linked approval
+  // instance. Minimal shape matching `20250924105000_create_approval_tables.ts` (`id text PRIMARY
+  // KEY, status text NOT NULL, version integer`) — the rollout-control predicate reads only `id`
+  // and `status`.
+  await pool.query(`
+    CREATE TABLE approval_instances (
+      id text PRIMARY KEY, status text NOT NULL, version integer NOT NULL DEFAULT 0
     )`)
   await pool.query(`
     CREATE TABLE attendance_import_jobs (
@@ -244,26 +262,137 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     )
   }
 
-  async function insertPendingRequest(
-    org: string,
-    kind: 'missing_snapshot' | 'unsupported_snapshot',
-  ): Promise<void> {
+  /**
+   * `'unsupported_snapshot'` was retired (W4C-5 §3, issue #4775): its arbitrary `hex64(...)`
+   * fingerprint isn't congruent with the live row, so under the new payload-stale check it would
+   * ALSO trip `pendingPayloadStale`, defeating the exclusivity a mutation test needs (see the
+   * "unsupported" describe block below, now built on `insertRequestSnapshotFixture` instead). Only
+   * `'missing_snapshot'` remains — no live-row/snapshot payload comparison ever runs when the
+   * snapshot itself is absent, so that kind was never affected.
+   */
+  async function insertPendingRequest(org: string, kind: 'missing_snapshot'): Promise<void> {
+    void kind
     const requestId = crypto.randomUUID()
     await pool.query(
       `INSERT INTO attendance_requests (id, user_id, work_date, request_type, status, org_id)
        VALUES ($1::uuid, $2, '2026-08-01', 'time_correction', 'pending', $3)`,
       [requestId, crypto.randomUUID(), org],
     )
-    if (kind === 'unsupported_snapshot') {
-      await pool.query(
+  }
+
+  /**
+   * W4C-5 §3 (issue #4775): fixture builder for the full 2x4 = 8-cell closed request-snapshot
+   * defect set. `bucket` selects `status='pending'` (any calc-affecting type) or `status='approved'
+   * AND request_type='leave'` — the only combination the plugin's shared cancel adapter treats as
+   * reversible (`plugins/plugin-attendance/index.cjs:34091`/`:34174`).
+   *
+   * Each `kind` is built to be EXCLUSIVE — it trips exactly the one cell it names and none of the
+   * other three defect kinds for the same request — so a mutation that deletes one classification
+   * branch in production code can be told apart from another by which cell's counter moves.
+   */
+  const LIVE_ROW_REASON = 'fixture-reason'
+  const STALE_SNAPSHOT_REASON = 'fixture-reason-mismatch'
+
+  function fixtureLivePayloadFingerprint(): string {
+    const payload = buildAttendanceRequestCalculationPayloadFromRequestRowV1({
+      workDate: '2026-08-01',
+      requestedInAt: null,
+      requestedOutAt: null,
+      reason: LIVE_ROW_REASON,
+    })
+    return computeAttendanceRequestPayloadFingerprintV1(payload)
+  }
+
+  function fixtureStaleSnapshotFingerprint(): string {
+    const payload = buildAttendanceRequestCalculationPayloadFromRequestRowV1({
+      workDate: '2026-08-01',
+      requestedInAt: null,
+      requestedOutAt: null,
+      reason: STALE_SNAPSHOT_REASON,
+    })
+    return computeAttendanceRequestPayloadFingerprintV1(payload)
+  }
+
+  type RequestSnapshotFixtureBucket = 'pending' | 'reversible'
+  type RequestSnapshotFixtureKind =
+    | 'missing'
+    | 'unsupported'
+    | 'payload_stale'
+    | 'reversal_incomplete'
+
+  async function insertRequestSnapshotFixture(
+    org: string,
+    bucket: RequestSnapshotFixtureBucket,
+    kind: RequestSnapshotFixtureKind,
+    executor: Pool | PoolClient = pool,
+  ): Promise<{ requestId: string; approvalInstanceId: string }> {
+    const requestId = crypto.randomUUID()
+    const requestType = bucket === 'reversible' ? 'leave' : 'time_correction'
+    const status = bucket === 'reversible' ? 'approved' : 'pending'
+    const approvalInstanceId = `appr-${requestId}`
+    const approvalStatus = kind === 'reversal_incomplete' ? 'cancelled' : 'pending'
+    await executor.query(
+      `INSERT INTO attendance_requests
+         (id, user_id, work_date, request_type, status, org_id, requested_in_at, requested_out_at,
+          reason, metadata, approval_instance_id)
+       VALUES ($1::uuid, $2, '2026-08-01', $3, $4, $5, NULL, NULL, $6, '{}'::jsonb, $7)`,
+      [requestId, crypto.randomUUID(), requestType, status, org, LIVE_ROW_REASON, approvalInstanceId],
+    )
+    await executor.query(
+      `INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, 1)`,
+      [approvalInstanceId, approvalStatus],
+    )
+    if (kind !== 'missing') {
+      const posture = kind === 'unsupported' ? 'unsupported' : 'resolved_v2'
+      const attributionSnapshot =
+        posture === 'unsupported'
+          ? '{"posture":"unsupported","sourceSchemaVersion":null,"reason":"missing","sourceFingerprint":null}'
+          : '{"posture":"resolved_v2"}'
+      const payloadFingerprint =
+        kind === 'payload_stale' ? fixtureStaleSnapshotFingerprint() : fixtureLivePayloadFingerprint()
+      const payloadReason = kind === 'payload_stale' ? STALE_SNAPSHOT_REASON : LIVE_ROW_REASON
+      await executor.query(
         `INSERT INTO attendance_request_calculation_snapshots (
            org_id, request_id, version, request_type, subject_user_id, payload, payload_fingerprint,
            attribution_snapshot, created_by)
-         VALUES ($1, $2::uuid, 1, 'time_correction', $3, '{"schemaVersion":1}'::jsonb, $4,
-           '{"posture":"unsupported","sourceSchemaVersion":null,"reason":"missing","sourceFingerprint":null}'::jsonb, $5)`,
-        [org, requestId, crypto.randomUUID(), hex64(`${org}:${requestId}:payload`), actorId],
+         VALUES ($1, $2::uuid, 1, $3, $4, $5::jsonb, $6, $7::jsonb, $8)`,
+        [
+          org,
+          requestId,
+          requestType,
+          crypto.randomUUID(),
+          JSON.stringify({
+            schemaVersion: 1,
+            workDate: '2026-08-01',
+            requestedInAt: null,
+            requestedOutAt: null,
+            reason: payloadReason,
+            minutes: null,
+            leaveTypeCode: null,
+            outdoorPunch: null,
+          }),
+          payloadFingerprint,
+          attributionSnapshot,
+          actorId,
+        ],
       )
     }
+    return { requestId, approvalInstanceId }
+  }
+
+  function emptyDefectCounts(): Record<AttendanceRequestSnapshotDefectCellV1, number> {
+    const out = {} as Record<AttendanceRequestSnapshotDefectCellV1, number>
+    for (const cell of ATTENDANCE_REQUEST_SNAPSHOT_DEFECT_CELLS_V1) out[cell] = 0
+    return out
+  }
+
+  function expectSingleCellDefect(
+    report: AttendanceRequestSnapshotDefectCountsV1,
+    cell: AttendanceRequestSnapshotDefectCellV1,
+  ): void {
+    const expected = emptyDefectCounts()
+    expected[cell] = 1
+    expect(report).toEqual(expected)
   }
 
   /**
@@ -1518,9 +1647,17 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     it('blocks entry into eligible when the latest snapshot is unsupported', async () => {
       const reqOrg = crypto.randomUUID()
       allow(reqOrg)
-      await insertPendingRequest(reqOrg, 'unsupported_snapshot')
+      // W4C-5 §3 (issue #4775): uses the shared fixture builder (not the legacy `insertPendingRequest`
+      // helper's arbitrary `hex64(...)` fingerprint) so this fixture's stored `payload_fingerprint`
+      // EXACTLY matches what the live row would recompute — i.e. it trips ONLY `pendingUnsupported`,
+      // not `pendingPayloadStale` too. A mutation-test pass (self-reported in the PR body) found the
+      // legacy fixture's arbitrary fingerprint accidentally also tripped the new payload-stale check,
+      // masking an `unsupported`-only mutation behind a still-red `payload-stale` leg on the same row.
+      await insertRequestSnapshotFixture(reqOrg, 'pending', 'unsupported')
       const client = await pool.connect()
       try {
+        const report = await readAttendanceRequestSnapshotDefectReportV1(transactionClient(client), reqOrg)
+        expectSingleCellDefect(report.byCell, 'pendingUnsupported')
         await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
           orgId: reqOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
@@ -1535,6 +1672,413 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
             reasonCode: 'rollout_transition',
           }),
         ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE' })
+      } finally {
+        client.release()
+      }
+    })
+  })
+
+  describe('W4C-5 §3 (issue #4775): the remaining 6 request-snapshot defect cells', () => {
+    const CASES: ReadonlyArray<{
+      readonly label: string
+      readonly bucket: RequestSnapshotFixtureBucket
+      readonly kind: RequestSnapshotFixtureKind
+      readonly cell: AttendanceRequestSnapshotDefectCellV1
+    }> = [
+      { label: 'pending x payload-stale', bucket: 'pending', kind: 'payload_stale', cell: 'pendingPayloadStale' },
+      { label: 'pending x reversal-incomplete', bucket: 'pending', kind: 'reversal_incomplete', cell: 'pendingReversalIncomplete' },
+      { label: 'reversible x missing', bucket: 'reversible', kind: 'missing', cell: 'reversibleMissing' },
+      { label: 'reversible x unsupported', bucket: 'reversible', kind: 'unsupported', cell: 'reversibleUnsupported' },
+      { label: 'reversible x payload-stale', bucket: 'reversible', kind: 'payload_stale', cell: 'reversiblePayloadStale' },
+      { label: 'reversible x reversal-incomplete', bucket: 'reversible', kind: 'reversal_incomplete', cell: 'reversibleReversalIncomplete' },
+    ]
+
+    for (const testCase of CASES) {
+      it(`${testCase.label}: the read-only reporter flags exactly this cell and no other`, async () => {
+        const org = crypto.randomUUID()
+        allow(org)
+        await insertRequestSnapshotFixture(org, testCase.bucket, testCase.kind)
+        const client = await pool.connect()
+        try {
+          const report = await readAttendanceRequestSnapshotDefectReportV1(transactionClient(client), org)
+          expect(report.totalDefectiveRequests).toBe(1)
+          expectSingleCellDefect(report.byCell, testCase.cell)
+        } finally {
+          client.release()
+        }
+      })
+
+      it(`${testCase.label}: blocks entry into eligible with zero rollout DML`, async () => {
+        const org = crypto.randomUUID()
+        allow(org)
+        await insertRequestSnapshotFixture(org, testCase.bucket, testCase.kind)
+        const client = await pool.connect()
+        try {
+          await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+            evidenceManifestSha256: hex64(`${testCase.cell}-setup`), evidenceReferences: baseRefs(`${testCase.cell}-setup`),
+            reasonCode: 'rollout_transition',
+          })
+          await expect(
+            transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+              orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+              targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+              evidenceManifestSha256: hex64(`${testCase.cell}-blocked`), evidenceReferences: baseRefs(`${testCase.cell}-blocked`),
+              reasonCode: 'rollout_transition',
+            }),
+          ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE' })
+          await expect(pool.query(
+            'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+            [org],
+          )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 2 }] })
+        } finally {
+          client.release()
+        }
+      })
+    }
+
+    it('POSITIVE CONTROL: a reversible (approved leave) request with a healthy, fresh, non-stale snapshot does not block promotion', async () => {
+      const org = crypto.randomUUID()
+      allow(org)
+      const requestId = crypto.randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, requested_in_at, requested_out_at, reason, metadata, approval_instance_id)
+         VALUES ($1::uuid, $2, '2026-08-01', 'leave', 'approved', $3, NULL, NULL, $4, '{}'::jsonb, NULL)`,
+        [requestId, crypto.randomUUID(), org, LIVE_ROW_REASON],
+      )
+      await pool.query(
+        `INSERT INTO attendance_request_calculation_snapshots (
+           org_id, request_id, version, request_type, subject_user_id, payload, payload_fingerprint,
+           attribution_snapshot, created_by)
+         VALUES ($1, $2::uuid, 1, 'leave', $3, $4::jsonb, $5, '{"posture":"resolved_v2"}'::jsonb, $6)`,
+        [
+          org,
+          requestId,
+          crypto.randomUUID(),
+          JSON.stringify({
+            schemaVersion: 1, workDate: '2026-08-01', requestedInAt: null, requestedOutAt: null,
+            reason: LIVE_ROW_REASON, minutes: null, leaveTypeCode: null, outdoorPunch: null,
+          }),
+          fixtureLivePayloadFingerprint(),
+          actorId,
+        ],
+      )
+      const client = await pool.connect()
+      try {
+        const report = await readAttendanceRequestSnapshotDefectReportV1(transactionClient(client), org)
+        expect(report).toEqual({ totalDefectiveRequests: 0, byCell: emptyDefectCounts() })
+        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64('healthy-reversible-setup'), evidenceReferences: baseRefs('healthy-reversible-setup'),
+          reasonCode: 'rollout_transition',
+        })
+        await expect(transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+          evidenceManifestSha256: hex64('healthy-reversible-ok'), evidenceReferences: baseRefs('healthy-reversible-ok'),
+          reasonCode: 'rollout_transition',
+        })).resolves.toEqual<AttendanceW4C3aRolloutControlResultV1>({ orgId: org, state: 'eligible', batchId: null })
+      } finally {
+        client.release()
+      }
+    })
+
+    it('bucket-exclusion control: an approved NON-leave request with a missing snapshot is NOT flagged (reversible is closed to leave)', async () => {
+      const org = crypto.randomUUID()
+      allow(org)
+      const requestId = crypto.randomUUID()
+      // Approved 'overtime' — never reversible (index.cjs:34174 hard-blocks cancelling any
+      // already-resolved non-leave request) — and has no snapshot at all. A predicate that
+      // mistakenly widened `reversible` to "any approved type" would flag this row.
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, requested_in_at, requested_out_at, reason, metadata, approval_instance_id)
+         VALUES ($1::uuid, $2, '2026-08-01', 'overtime', 'approved', $3, NULL, NULL, $4, '{}'::jsonb, NULL)`,
+        [requestId, crypto.randomUUID(), org, LIVE_ROW_REASON],
+      )
+      const client = await pool.connect()
+      try {
+        const report = await readAttendanceRequestSnapshotDefectReportV1(transactionClient(client), org)
+        expect(report).toEqual({ totalDefectiveRequests: 0, byCell: emptyDefectCounts() })
+      } finally {
+        client.release()
+      }
+    })
+  })
+
+  describe('W4C-5 §3 (issue #4775): real two-connection races extended to the 6 new snapshot cells (gate 6)', () => {
+    const RACE_CASES: ReadonlyArray<{
+      readonly label: string
+      readonly bucket: RequestSnapshotFixtureBucket
+      readonly kind: RequestSnapshotFixtureKind
+      readonly cell: AttendanceRequestSnapshotDefectCellV1
+    }> = [
+      { label: 'RACE F (pending x payload-stale)', bucket: 'pending', kind: 'payload_stale', cell: 'pendingPayloadStale' },
+      { label: 'RACE G (pending x reversal-incomplete)', bucket: 'pending', kind: 'reversal_incomplete', cell: 'pendingReversalIncomplete' },
+      { label: 'RACE H (reversible x missing)', bucket: 'reversible', kind: 'missing', cell: 'reversibleMissing' },
+      { label: 'RACE I (reversible x unsupported)', bucket: 'reversible', kind: 'unsupported', cell: 'reversibleUnsupported' },
+      { label: 'RACE J (reversible x payload-stale)', bucket: 'reversible', kind: 'payload_stale', cell: 'reversiblePayloadStale' },
+      { label: 'RACE K (reversible x reversal-incomplete)', bucket: 'reversible', kind: 'reversal_incomplete', cell: 'reversibleReversalIncomplete' },
+    ]
+
+    for (const raceCase of RACE_CASES) {
+      it(`${raceCase.label}, 3-actor: a defect committed by an actor with NO rollout-lock obligation, while a protocol-compliant shared-lock holder blocks the transition, is still caught`, async () => {
+        const raceOrg = crypto.randomUUID()
+        allow(raceOrg)
+        const setupClient = await pool.connect()
+        try {
+          await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+            orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+            evidenceManifestSha256: hex64(`${raceCase.cell}-race-setup`), evidenceReferences: baseRefs(`${raceCase.cell}-race-setup`),
+            reasonCode: 'rollout_transition',
+          })
+        } finally {
+          setupClient.release()
+        }
+
+        const c1Client = await pool.connect()
+        const transitionClient = await pool.connect()
+        try {
+          await c1Client.query('BEGIN')
+          await acquireAttendanceCalculationRolloutLock(
+            transactionClient(c1Client),
+            parseCanonicalAttendanceRolloutOrgKeyV1(raceOrg),
+            'shared',
+          )
+
+          let transitionSettled = false
+          const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+            orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+            evidenceManifestSha256: hex64(`${raceCase.cell}-race-transition`), evidenceReferences: baseRefs(`${raceCase.cell}-race-transition`),
+            reasonCode: 'rollout_transition',
+          }).finally(() => { transitionSettled = true })
+          await new Promise((resolve) => setTimeout(resolve, 150))
+          expect(transitionSettled).toBe(false) // T genuinely blocked behind C1's shared hold
+
+          // C2: commits independently, lock-free, plain autocommit — matching
+          // `insertRequestSnapshotFixture`'s default (shared pool) executor.
+          await insertRequestSnapshotFixture(raceOrg, raceCase.bucket, raceCase.kind)
+
+          // C1 releases; T can now proceed.
+          await c1Client.query('COMMIT')
+
+          await expect(transition).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE' })
+          expect(transitionSettled).toBe(true)
+          await expect(pool.query(
+            'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+            [raceOrg],
+          )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 2 }] })
+        } finally {
+          await c1Client.query('ROLLBACK').catch(() => undefined)
+          c1Client.release()
+          transitionClient.release()
+        }
+      })
+    }
+  })
+
+  describe('W4C-5 §3 owner-review P2 (PR #4780): forged payload_fingerprint cannot bypass payload-stale', () => {
+    /**
+     * Constructs the exact adversarial row the pre-#4780 one-sided
+     * `liveFingerprint === storedFingerprint` compare could not see: the stored `payload` column
+     * is genuinely stale (independently re-hashes to `fixtureStaleSnapshotFingerprint()`, NOT
+     * `fixtureLivePayloadFingerprint()`), but the stored `payload_fingerprint` column is FORGED
+     * to equal the LIVE row's fingerprint instead of a hash of the payload actually stored beside
+     * it. No writer in this codebase ever produces this shape —
+     * `appendAttendanceRequestEditSnapshotV1` always hashes the exact payload object it is about
+     * to store (`w4c3b-request-snapshots.ts` `payloadFingerprint:
+     * computeAttendanceRequestPayloadFingerprintV1(payload)`, same `payload` value written to the
+     * `payload` column two lines above) — this simulates a write outside that append boundary, or
+     * a forged/corrupted field: exactly the class of defect a payload/fingerprint PAIR exists to
+     * catch, and exactly what a one-sided fingerprint-only compare cannot.
+     */
+    async function insertForgedPayloadStaleFixture(
+      org: string,
+      bucket: RequestSnapshotFixtureBucket,
+    ): Promise<{ requestId: string }> {
+      const requestId = crypto.randomUUID()
+      const requestType = bucket === 'reversible' ? 'leave' : 'time_correction'
+      const status = bucket === 'reversible' ? 'approved' : 'pending'
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, requested_in_at, requested_out_at,
+            reason, metadata, approval_instance_id)
+         VALUES ($1::uuid, $2, '2026-08-01', $3, $4, $5, NULL, NULL, $6, '{}'::jsonb, NULL)`,
+        [requestId, crypto.randomUUID(), requestType, status, org, LIVE_ROW_REASON],
+      )
+      await pool.query(
+        `INSERT INTO attendance_request_calculation_snapshots (
+           org_id, request_id, version, request_type, subject_user_id, payload, payload_fingerprint,
+           attribution_snapshot, created_by)
+         VALUES ($1, $2::uuid, 1, $3, $4, $5::jsonb, $6, '{"posture":"resolved_v2"}'::jsonb, $7)`,
+        [
+          org,
+          requestId,
+          requestType,
+          crypto.randomUUID(),
+          // STORED PAYLOAD: genuinely stale (mismatched `reason`).
+          JSON.stringify({
+            schemaVersion: 1, workDate: '2026-08-01', requestedInAt: null, requestedOutAt: null,
+            reason: STALE_SNAPSHOT_REASON, minutes: null, leaveTypeCode: null, outdoorPunch: null,
+          }),
+          // FORGED STORED FINGERPRINT: hash of the LIVE payload, not of the stale payload two
+          // lines above. The pre-#4780 predicate trusted this field as ground truth.
+          fixtureLivePayloadFingerprint(),
+          actorId,
+        ],
+      )
+      return { requestId }
+    }
+
+    it('pending x payload-stale, FORGED fingerprint: the read-only reporter still flags pendingPayloadStale', async () => {
+      const org = crypto.randomUUID()
+      allow(org)
+      await insertForgedPayloadStaleFixture(org, 'pending')
+      const client = await pool.connect()
+      try {
+        const report = await readAttendanceRequestSnapshotDefectReportV1(transactionClient(client), org)
+        expect(report.totalDefectiveRequests).toBe(1)
+        expectSingleCellDefect(report.byCell, 'pendingPayloadStale')
+      } finally {
+        client.release()
+      }
+    })
+
+    it('reversible x payload-stale, FORGED fingerprint: the read-only reporter still flags reversiblePayloadStale', async () => {
+      const org = crypto.randomUUID()
+      allow(org)
+      await insertForgedPayloadStaleFixture(org, 'reversible')
+      const client = await pool.connect()
+      try {
+        const report = await readAttendanceRequestSnapshotDefectReportV1(transactionClient(client), org)
+        expect(report.totalDefectiveRequests).toBe(1)
+        expectSingleCellDefect(report.byCell, 'reversiblePayloadStale')
+      } finally {
+        client.release()
+      }
+    })
+
+    it('pending x payload-stale, FORGED fingerprint: blocks entry into eligible with zero rollout DML', async () => {
+      const org = crypto.randomUUID()
+      allow(org)
+      await insertForgedPayloadStaleFixture(org, 'pending')
+      const client = await pool.connect()
+      try {
+        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64('forged-fingerprint-setup'), evidenceReferences: baseRefs('forged-fingerprint-setup'),
+          reasonCode: 'rollout_transition',
+        })
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+            evidenceManifestSha256: hex64('forged-fingerprint-blocked'), evidenceReferences: baseRefs('forged-fingerprint-blocked'),
+            reasonCode: 'rollout_transition',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE' })
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [org],
+        )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 2 }] })
+      } finally {
+        client.release()
+      }
+    })
+
+    it('RACE L (pending x payload-stale, FORGED fingerprint), 3-actor: a forged-consistent defect committed by an actor with NO rollout-lock obligation, while a protocol-compliant shared-lock holder blocks the transition, is still caught', async () => {
+      const raceOrg = crypto.randomUUID()
+      allow(raceOrg)
+      const setupClient = await pool.connect()
+      try {
+        await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+          orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64('forged-race-setup'), evidenceReferences: baseRefs('forged-race-setup'),
+          reasonCode: 'rollout_transition',
+        })
+      } finally {
+        setupClient.release()
+      }
+
+      const c1Client = await pool.connect()
+      const transitionClient = await pool.connect()
+      try {
+        await c1Client.query('BEGIN')
+        await acquireAttendanceCalculationRolloutLock(
+          transactionClient(c1Client),
+          parseCanonicalAttendanceRolloutOrgKeyV1(raceOrg),
+          'shared',
+        )
+
+        let transitionSettled = false
+        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+          orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+          evidenceManifestSha256: hex64('forged-race-transition'), evidenceReferences: baseRefs('forged-race-transition'),
+          reasonCode: 'rollout_transition',
+        }).finally(() => { transitionSettled = true })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        expect(transitionSettled).toBe(false) // T genuinely blocked behind C1's shared hold
+
+        // C2: commits the forged-consistent defect independently, lock-free, plain autocommit.
+        await insertForgedPayloadStaleFixture(raceOrg, 'pending')
+
+        // C1 releases; T can now proceed.
+        await c1Client.query('COMMIT')
+
+        await expect(transition).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE' })
+        expect(transitionSettled).toBe(true)
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [raceOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 2 }] })
+      } finally {
+        await c1Client.query('ROLLBACK').catch(() => undefined)
+        c1Client.release()
+        transitionClient.release()
+      }
+    })
+
+    it("DEFENSIVE: a stored payload that does not decode under the writers' own closed-shape validator is treated as inconsistent (payload-stale), not silently skipped", async () => {
+      const org = crypto.randomUUID()
+      allow(org)
+      const requestId = crypto.randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, requested_in_at, requested_out_at,
+            reason, metadata, approval_instance_id)
+         VALUES ($1::uuid, $2, '2026-08-01', 'time_correction', 'pending', $3, NULL, NULL, $4, '{}'::jsonb, NULL)`,
+        [requestId, crypto.randomUUID(), org, LIVE_ROW_REASON],
+      )
+      await pool.query(
+        `INSERT INTO attendance_request_calculation_snapshots (
+           org_id, request_id, version, request_type, subject_user_id, payload, payload_fingerprint,
+           attribution_snapshot, created_by)
+         VALUES ($1, $2::uuid, 1, 'time_correction', $3, $4::jsonb, $5, '{"posture":"resolved_v2"}'::jsonb, $6)`,
+        [
+          org,
+          requestId,
+          crypto.randomUUID(),
+          // Malformed: does not carry the writers' exact PAYLOAD_KEYS shape, so
+          // normalizeAttendanceRequestCalculationPayloadV1 (reached through
+          // computeAttendanceRequestPayloadFingerprintV1) throws when re-hashing it.
+          JSON.stringify({ schemaVersion: 1, note: 'not a real payload' }),
+          fixtureLivePayloadFingerprint(),
+          actorId,
+        ],
+      )
+      const client = await pool.connect()
+      try {
+        const report = await readAttendanceRequestSnapshotDefectReportV1(transactionClient(client), org)
+        expect(report.totalDefectiveRequests).toBe(1)
+        expectSingleCellDefect(report.byCell, 'pendingPayloadStale')
       } finally {
         client.release()
       }
@@ -1652,6 +2196,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
             incompleteOperations: 0,
             unresolvedReviews: 0,
             defectiveRequestSnapshots: 0,
+            defectiveRequestSnapshotsByCell: emptyDefectCounts(),
           },
           references: baseRefs('event-shape'),
         })

@@ -56,6 +56,16 @@ function b4Of(rows, overrides = {}) {
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
     pipelineSystemIds: ['source_1', 'k3-target-1'],
+    // REVIEW P2-2: the instance gate is now FAIL-CLOSED — a binding with no way to check its
+    // identity is refused rather than waved through. Cases in this file that are NOT about
+    // instance identity (page exhaustion, ratified-contract matching, …) therefore need a digest
+    // source, or they fail on a property they are not testing.
+    //
+    // This default is DELIBERATELY PERMISSIVE — one constant, so every record reads as the same
+    // instance. That is stated rather than hidden: the cases that actually exercise identity
+    // OVERRIDE it with per-record digests, and a fixture this permissive would be a defect if it
+    // were the only thing standing behind the gate.
+    instanceDigestOf: async () => 'fixture-single-instance',
     ...overrides,
   }
 }
@@ -587,6 +597,102 @@ test('B4 GATE: two approved bindings -> refused (ambiguous is fail-closed, never
   )
 })
 
+test('SAME-INSTANCE: the fail-closed branch is load-bearing (review P2-1)', () => {
+  // The `catch { return false }` in sameK3Instance had NO coverage: flipping it to `return true`
+  // left 27/27 green. "Cannot tell" silently became "same instance" — the exact inversion a
+  // fail-closed comparator exists to prevent.
+  const { __internals } = require('../lib/adapters/k3-wise-c6-write-profile.cjs')
+  const same = __internals && __internals.sameK3Instance
+  assert.equal(typeof same, 'function', 'sameK3Instance must be reachable to be tested')
+
+  // Unparseable / absent / wrong-typed must all be NON-matches.
+  for (const [a, b, why] of [
+    ['not a url', 'https://k3.example.test', 'unparseable left'],
+    ['https://k3.example.test', 'not a url', 'unparseable right'],
+    [null, 'https://k3.example.test', 'null left'],
+    ['https://k3.example.test', undefined, 'undefined right'],
+    ['', 'https://k3.example.test', 'empty left'],
+    [42, 'https://k3.example.test', 'non-string left'],
+  ]) {
+    assert.equal(same(a, b), false, `${why} must NOT read as the same instance`)
+  }
+
+  // POSITIVE CONTROL — real same/different origins still classify correctly, so the above is
+  // not just "returns false for everything".
+  assert.equal(same('https://k3.example.test/K3API', 'https://k3.example.test/OTHER'), true,
+    'same origin, different path — the step 0-b topology — must match')
+  assert.equal(same('https://k3-a.example.test', 'https://k3-b.example.test'), false,
+    'different hosts must not match')
+})
+
+test('INSTANCE DIGEST: identity is (kind, origin, acctId) — the account set, not just the host', async () => {
+  // OWNER RULING 20260806 [P1]. The previous gate compared origins only, but K3 WISE login
+  // REQUIRES acctId, so ONE server hosts many account sets. A read binding on account set A
+  // compared EQUAL to a write target on account set B, and the write would have landed in the
+  // wrong 账套. These three cases are the owner's pinned set.
+  //
+  // The fixture derives digests the SAME way production does — length-prefixed (kind, origin,
+  // acctId) — rather than inventing its own scheme. A fixture more permissive than production is
+  // exactly how the origin-only gap stayed invisible.
+  const crypto = require('node:crypto')
+  const digestOf = ({ kind, origin, acctId }) => {
+    if (!kind || !origin || !acctId) return null
+    const material = [kind, origin, acctId].map((part) => `${part.length}:${part}`).join('|')
+    return crypto.createHmac('sha256', 'test-key').update(material).digest('hex').slice(0, 16)
+  }
+  const K3 = 'erp:k3-wise-webapi'
+  const TARGET = { kind: K3, origin: 'https://k3.example.test', acctId: 'ACCT-A' }
+
+  async function planWith(boundIdentity) {
+    const fetchPair = mockK3()
+    const input = c6Inputs({ rows: [{ code: 'M-INST', name: 'N' }], fetchPair, tokenStore: memoryStore() })
+    input.dataSourceWrites = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+      b4: b4Of([APPROVED_B4_ROW], {
+        targetSystemId: 'k3-write-target',
+        instanceDigestOf: async (id) => digestOf(id === 'k3-write-target' ? TARGET : boundIdentity),
+      }),
+    })
+    return dryRunExternalWrite(input)
+  }
+
+  // (1) SAME origin, DIFFERENT acctId — the defect this ruling names. MUST BE REFUSED.
+  await assert.rejects(
+    planWith({ kind: K3, origin: 'https://k3.example.test', acctId: 'ACCT-B' }),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'one server, two account sets: a binding on 账套 B must not certify a write to 账套 A',
+  )
+
+  // (2) SAME origin, SAME acctId, PASSWORD ROTATED — MUST BE ACCEPTED. The account set is the
+  // identity, not the secret; a digest over credentials would break on every rotation.
+  const rotated = await planWith({ ...TARGET })
+  assert.ok(rotated, 'the same account set on the same host must be accepted across a password rotation')
+
+  // (3) DIFFERENT origin — MUST BE REFUSED.
+  await assert.rejects(
+    planWith({ kind: K3, origin: 'https://k3-other.example.test', acctId: 'ACCT-A' }),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'a different host must not certify this write',
+  )
+
+  // (4) NON-K3 at the same origin and account set — the kind is IN the digest material, so it is
+  // refused without a separate kind gate. Pinned so that stays true.
+  await assert.rejects(
+    planWith({ kind: 'plm:yuantus-wrapper', origin: 'https://k3.example.test', acctId: 'ACCT-A' }),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'kind participates in the digest, so a same-origin non-K3 record cannot match',
+  )
+
+  // (5) FAIL-CLOSED on unknowable: a record with no authenticatable acctId digests to null, and
+  // two nulls must NOT compare equal.
+  await assert.rejects(
+    planWith({ kind: K3, origin: 'https://k3.example.test', acctId: '' }),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_INSTANCE_UNVERIFIABLE',
+    '"cannot establish identity" must never read as "same instance"',
+  )
+})
+
 test('REVIEW P3-2: a FULL page of approved configs is a refusal, not a silent pass', async () => {
   // `list()` gives no ordering guarantee, so a full page may be truncated — and a truncated set
   // can hide the second approved binding that the ambiguity check above exists to catch. A full
@@ -631,7 +737,10 @@ test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry
     input.dataSourceWrites = createK3WiseC6WriteSource({
       system: k3TargetSystem(),
       createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
-      b4: b4Of([binding]),
+      // D1 refuses a binding on the write target itself, so the systemId dimension varies over a
+      // third VALID endpoint (a paired read record). The property under test is unchanged —
+      // systemId alone must move the revision — only the sample value moved off the one D1 forbids.
+      b4: b4Of([binding], { pipelineSystemIds: ['source_1', 'k3-target-1', 'k3-read-2'] }),
     })
     const out = await dryRunExternalWrite(input)
     assert.equal(out.status, 'ready')
@@ -645,7 +754,7 @@ test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry
   // dimensions of an otherwise-ratified binding are the store-minted version and the systemId
   // (either pipeline endpoint is valid). Each must move the revision on its own.
   const versionOnly = await revisionWith(b4Row({ version: 9 }))
-  const systemIdOnly = await revisionWith(b4Row({ config: { systemId: 'k3-target-1' } }))
+  const systemIdOnly = await revisionWith(b4Row({ config: { systemId: 'k3-read-2' } }))
   assert.notEqual(base, versionOnly, 'approvedConfigVersion alone must move the revision')
   assert.notEqual(base, systemIdOnly, 'configContentKey (via systemId) alone must move the revision')
   // actionProfileVersion is NOT a free variable any more: it is pinned to the ratified
@@ -737,17 +846,53 @@ test('B4 RELATION: a binding approved on an UNRELATED K3 system must not vouch f
   assert.equal(fetchPair.calls.length, 0)
 })
 
-test('B4 RELATION: the binding may be minted on EITHER pipeline endpoint (source or target)', async () => {
-  for (const boundTo of ['source_1', 'k3-target-1']) {
-    const source = createK3WiseC6WriteSource({
-      system: k3TargetSystem(),
-      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
-      b4: b4Of([b4Row({ config: { systemId: boundTo } })]),
-    })
-    const state = (await source.test()).capabilityState
-    assert.equal(state.b4BindingApproved, true, `a binding on ${boundTo} is legitimately this pipeline's`)
-    assert.equal(state.b4BindingCount, 1)
-  }
+test('P2-2: a binding with NO way to check its instance is REFUSED, not waved through', async () => {
+  // The gate used to be OPT-IN: no digest function meant no gate, silently. Combined with two
+  // upstream ternaries and the requireService list, it failed OPEN at three hops — and the shipped
+  // offline PoC demo ran the whole C6 lifecycle with the check structurally absent.
+  //
+  // The demo alone cannot prove this: once the demo is wired, reverting the hop leaves it green.
+  // Only an explicitly UNWIRED scope discriminates, which is why this case exists separately.
+  const unwired = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([b4Row({ config: { systemId: 'source_1' } })], { instanceDigestOf: undefined }),
+  })
+  await assert.rejects(
+    unwired.test(),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_INSTANCE_CHECK_UNWIRED',
+    'a gate that disappears when its wiring is missing is not a gate',
+  )
+})
+
+test('B4 RELATION: minted on a pipeline endpoint — but NOT on the write target itself (D1 narrowing)', async () => {
+  // ⚠️ DELIBERATE NARROWING OF A RATIFIED PROPERTY, recorded here rather than silently absorbed.
+  //
+  // #4769 ratified "the binding may be minted on EITHER pipeline endpoint (source or target)", and
+  // this test asserted exactly that for both. The owner's D1 ruling supersedes the target half:
+  // binding to the write target made the instance check compare the target with ITSELF, which is
+  // structurally incapable of detecting a read/write mismatch. Self-reference is now refused.
+  //
+  // The SOURCE half of the ratified property is unchanged.
+  const onSource = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([b4Row({ config: { systemId: 'source_1' } })]),
+  })
+  const state = (await onSource.test()).capabilityState
+  assert.equal(state.b4BindingApproved, true, "a binding on the SOURCE endpoint is still legitimately this pipeline's")
+  assert.equal(state.b4BindingCount, 1)
+
+  const onTargetItself = createK3WiseC6WriteSource({
+    system: k3TargetSystem(),
+    createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: mockK3().impl }),
+    b4: b4Of([b4Row({ config: { systemId: 'k3-target-1' } })]),
+  })
+  await assert.rejects(
+    onTargetItself.test(),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_SELF_REFERENTIAL',
+    'binding on the write target itself is now REFUSED — it can only ever compare a record with itself',
+  )
 })
 
 test('B4 RELATION: an unrelated system\'s binding does not create false ambiguity', async () => {

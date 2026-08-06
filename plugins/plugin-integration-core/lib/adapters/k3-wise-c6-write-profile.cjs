@@ -97,6 +97,20 @@ function b4RowMatchesRatifiedContract(row) {
   return row.contentKey === expected
 }
 
+// Two K3 external-system records are the SAME PHYSICAL K3 when their baseUrls share an origin.
+// Compared at ORIGIN level on purpose: the read record and the write record legitimately differ
+// in PATH (the armed one is pinned to its own endpoints), so a raw string compare would reject
+// the very topology step 0-b requires. An unparseable or absent baseUrl is NOT a match —
+// fail-closed, because "cannot tell" must never read as "same".
+function sameK3Instance(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false
+  try {
+    return new URL(a).origin === new URL(b).origin
+  } catch {
+    return false
+  }
+}
+
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new AdapterValidationError(`${field} is required`, { field })
@@ -326,6 +340,75 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       const profile = CUSTOMER_PROFILE
       const bindings = await resolveApprovedB4Binding()
       const binding = bindings.length === 1 ? bindings[0] : null
+      // SAME-INSTANCE CHECK. `binding` may legitimately name a DIFFERENT external-system record
+      // than the write target: the B4 contract is the material-LIST read contract, and a
+      // profile-armed record cannot hold list-read config (#4769 strips every readList* key,
+      // even from the frozen first-party preset), so the customer runs two K3 records. Binding
+      // to the target record is what satisfies the relation check — but that is only TRUE while
+      // both records address the same physical K3.
+      //
+      // Without this, "bind to the target" silently permits one K3's read contract to certify a
+      // DIFFERENT K3's write: the round-3 defect, reopened one level down. Fail-closed by
+      // construction — it can only reject bindings the relation check already accepted.
+      // OWNER RULING 20260806 [P1] — INSTANCE DIGEST, not origin comparison.
+      //
+      // The previous gate compared `new URL(baseUrl).origin` of the bound record against the
+      // target's. But K3 WISE login requires acctId, so ONE server hosts many account sets: a read
+      // binding on account set A compared EQUAL to a write target on account set B, and the write
+      // would have gone into the wrong 账套. Origin equality is necessary, not sufficient.
+      //
+      // The digest is (kind, origin, acctId), HMAC'd inside the credential boundary; this module
+      // receives only opaque digests. Password rotation does not change it — the account set is
+      // the identity, not the secret.
+      // REVIEW P2-2: this used to be OPT-IN — no digest function meant no gate, silently. Combined
+      // with the two ternaries upstream and the requireService list, the gate failed OPEN at three
+      // hops, and the shipped offline PoC demo ran the entire C6 lifecycle with it structurally
+      // absent. A gate that disappears when its wiring is missing is not a gate.
+      //
+      // Fail-closed: if there is a binding to check, the means to check it is REQUIRED.
+      if (binding && typeof b4.instanceDigestOf !== 'function') {
+        throw new AdapterValidationError(
+          'the K3 instance-identity check is not wired; refusing to certify a write without it',
+          { code: 'K3_C6_B4_INSTANCE_CHECK_UNWIRED', field: 'capabilityState' },
+        )
+      }
+      if (binding) {
+        const boundSystemId = binding.config && binding.config.systemId
+        // D1 (unchanged): a record cannot certify its own instance. Kept ahead of the digest
+        // compare because self-reference would otherwise produce two EQUAL digests and pass.
+        if (typeof boundSystemId === 'string' && boundSystemId === system.id) {
+          throw new AdapterValidationError(
+            'the approved B4 binding names the write target itself; a record cannot certify its own instance',
+            { code: 'K3_C6_B4_BINDING_SELF_REFERENTIAL', field: 'capabilityState' },
+          )
+        }
+        const targetSystemId = typeof b4.targetSystemId === 'string' ? b4.targetSystemId : system.id
+        // The `.catch(() => null)` that used to sit here turned ANY throw into "cannot tell".
+        // That is safe (null fails closed) but it MISDIAGNOSES: while wiring this into the offline
+        // PoC demo, a missing import made the digest throw, and the operator-facing message said
+        // the identity "could not be established" — pointing at configuration when the real cause
+        // was a broken call. Fail closed on a genuine null; let a THROW surface as a throw.
+        const [boundDigest, targetDigest] = await Promise.all([
+          b4.instanceDigestOf(boundSystemId),
+          b4.instanceDigestOf(targetSystemId),
+        ])
+        // FAIL-CLOSED on unknowable. A null digest means the record could not be resolved, its
+        // baseUrl did not parse, or it carries no authenticatable acctId — none of which is
+        // evidence of sameness. Two nulls must NOT compare equal.
+        if (typeof boundDigest !== 'string' || !boundDigest
+          || typeof targetDigest !== 'string' || !targetDigest) {
+          throw new AdapterValidationError(
+            'the K3 instance identity of the B4 binding or the write target could not be established',
+            { code: 'K3_C6_B4_BINDING_INSTANCE_UNVERIFIABLE', field: 'capabilityState' },
+          )
+        }
+        if (boundDigest !== targetDigest) {
+          throw new AdapterValidationError(
+            'the approved B4 binding names a different K3 instance or account set than the write target',
+            { code: 'K3_C6_B4_BINDING_INSTANCE_MISMATCH', field: 'capabilityState' },
+          )
+        }
+      }
       return {
         success: true,
         capabilityState: {
@@ -446,4 +529,8 @@ module.exports = {
   K3_WISE_C6_WRITE_PROFILE,
   createK3WiseC6WriteSource,
   deriveK3WiseC6PlannerTargetConfig,
+  // Test surface only. `sameK3Instance`'s fail-closed catch branch had no coverage — flipping it
+  // to `return true` left the whole suite green, i.e. "cannot tell" silently became "same
+  // instance". A guard whose failure mode is invisible is not a guard.
+  __internals: { sameK3Instance },
 }
