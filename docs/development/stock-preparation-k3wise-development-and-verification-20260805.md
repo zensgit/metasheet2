@@ -37,7 +37,7 @@ Submit/Audit、BOM 写、定时任务、批量自动写、MES、全面通用化 
 
 | 验证物 | 方式 | 证据 |
 |---|---|---|
-| 从 main 出包可验证 | lane **两次**运行时证据 | run 30975655789(首绿)、**run 30979764981(候选包,7/7)**;074/075 于 PG 15/16/17 逐字 `executed successfully`;一字节篡改负控排他失败;排除集与 migration-replay 逐字对齐 |
+| 从 main 出包可验证 | lane **两次**运行时证据 | run 30975655789(首绿)、**run 30979764981(7/7)** —— 二者证明的是**通道可用**;30979764981 当时被指认为候选包,现已因 #4769 合入而**过期**(见 §6 步 6 的自检);074/075 于 PG 15/16/17 逐字 `executed successfully`;一字节篡改负控排他失败;排除集与 migration-replay 逐字对齐 |
 | 首跑失败的价值 | shakedown 抓真缺陷 | 五检器代际钉漂移(冻结代 vs R12 措辞)⇒ #4764 闭集双值修复;**全类机械横扫恰一处失配** |
 | 写路径三重锁 | 套件 + mutation | profile 字面量删/merge 钉删/守卫短路/FE 常量差一位/payload 去 profile ⇒ 各自红;3 行正控放行 `1 login+3 Save+0 Submit/Audit` |
 | C6 内容绑定 | 真 planner×真 adapter×mock 线 | 批准后改行 ⇒ 409 `C6_WRITE_DRY_RUN_TOKEN_MISMATCH` 且零 Save;第 4 源行 ⇒ `not_applyable` 不发 token |
@@ -89,6 +89,33 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 用了中文虚拟目录,在**窗口之前**协商改用 ASCII 别名站点/虚拟目录,或升 owner 裁决。
 **窗口不可重试**,而这条会在 adapter 构造期即失败(读、写都进不去),故必须前置排除。
 
+### 步 0-b(新增,窗口**开始前**做):客户侧必须建**两条** K3 external-system 记录
+
+**结论**:一条 K3 记录**不能**同时承担「list 读」与「armed 写」。窗口需要两条,指向**同一台**
+物理 K3(相同 baseUrl):
+
+| 记录 | config | 用途 |
+|---|---|---|
+| K3-read(**不选 profile**) | 带 list 读配置(`readMode:'list'`、`readList*` 一族) | 步骤 1 的 read-smoke;B4 契约描述的就是它 |
+| K3-write(**选 `material-k3wise-customer-profile-v1`**) | profile 武装,save-only + maxApplyRows=3 | C6 dry-run→apply 的写目标 |
+
+**为什么不能合并成一条**(实测,非推断):`#4769` 把 `readMode`、`readListBodyKey`、
+`readListFields`、`readListOrderBy`、`topField`、`pageIndexField`、`pageSizeField`、
+`maxListLimit`、`readListBodyTemplate` 全部列为 profile 的 forbidden overlay key。在一条
+armed 记录上,这些键在 adapter 归一化时被**静默剥除**(实测全部变 `undefined`,且 `readPath`
+被钉成 `/K3API/Material/GetDetail`)。
+
+**连首方冻结预设也被剥**:`read-smoke` 的 `k3wise.material-list.v1` 自带 `readConfigOverlay`
+(含完整 list 形状),`applyReadSmokePresetOverlay` 会把它并上去 —— 但随后的 adapter 归一化
+仍然剥掉。也就是说这道加固**不区分「操作员覆盖」与「首方预设覆盖」**。方向是 fail-closed
+(安全的那一侧),但后果是:**armed 记录做不了 list read-smoke**。
+
+**操作**:窗口前确认客户环境里这两条记录都已建、baseUrl 相同、且 K3-read 那条**没有**选
+profile。窗口不可重试,而这条会在步骤 1(read-smoke)当场失败。
+
+> 关联未决项:B4 绑定的 systemId 只能是 pipeline 的 source/target 之一(`#4769` 关系检查),
+> 而 K3-read 记录在「非 K3 source」的管道里两者都不是 —— 该冲突的处置见 §7.2。
+
 1. **只读预检**:`POST /api/integration/external-systems/<k3SystemId>/read-smoke`
    (preset `k3wise.material-list.v1`)⇒ 期望 values-free 证据:业务成功、行数 ≤10、零泄漏键。
 2. **建/核窗口 pipeline**:`POST /api/integration/pipelines` —— target=K3 系统(config 已含
@@ -105,7 +132,12 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 5. **回读**:重复步骤 1 的 read-smoke(single-record preset,按写入行键)⇒ 业务成功 + 记录存在;
    **值级确认**:操作员在客户 K3 客户端打开该物料核对名称/规格。
 6. **留证**:dry-run/apply 响应的 values-free 字段(counts、status、closed tokens)+ run 引用
-   归档;三元组(B4 mint 时已记)与 `serviceRuntimeSha e1b91594e`、候选包 digest 并列。
+   归档;三元组(B4 mint 时已记)与**实际部署的** `serviceRuntimeSha`、包 digest 并列。
+   ⚠️ **不要照抄任何历史 SHA。** 本步原文钉的是 `e1b91594e`,那是 #4769 门**合入之前**的
+   候选包 —— 其树中不含 `K3_WISE_PIPELINE_RUN_DISABLED` 与 `assertWireEndpointIntent`
+   (各 0 文件,已核)。装它等于把 owner 在 #4768 复审中点名的两个敞口原样带进不可重试的窗口。
+   **部署前自检**:所选包的 `serviceRuntimeSha` 必须是 `65edb98c6`(#4769 合入点)**之后**的
+   提交;`git merge-base --is-ancestor <sha> 65edb98c6` 成立即为**过期包**,不得使用。
 
 **PASS 判据**:1–6 全绿且 `0 Submit / 0 Audit`。
 
