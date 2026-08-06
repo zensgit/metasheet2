@@ -209,14 +209,6 @@ jobs:
           TOKEN: ${{ steps.login.outputs.token }}
           MOCK_K3_URL: http://127.0.0.1:${{ env.MOCK_K3_PORT }}
           TENANT_ID: ${{ env.TENANT_ID }}
-          # THE ONE CREDENTIAL THIS LANE CANNOT MINT FOR ITSELF. Seeding the stand-in source
-          # sheet goes through the OAPI surface (requireScope('records:write')); the integration
-          # TOKEN above cannot reach it, and `staging/install` creates sheets with ZERO rows.
-          # Until this secret exists the driver exits at env validation with a named cause —
-          # deliberately, because a run that proceeded would dry-run an empty source and report
-          # a clean `sourceRows: 0`, which is a vacuous green in the one lane that exists to buy
-          # information. See the PR thread: minting it is an owner action, not this lane's.
-          MULTITABLE_RECORDS_TOKEN: ${{ secrets.REHEARSAL_MULTITABLE_RECORDS_TOKEN }}
         run: node scripts/ops/stock-prep-window-rehearsal-driver.mjs
 
       - name: Save-only invariant seen from the WIRE (mock call log — synthetic keys only)

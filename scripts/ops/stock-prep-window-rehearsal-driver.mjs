@@ -34,13 +34,6 @@ const BASE_URL = required('BASE_URL')
 const TOKEN = required('TOKEN')
 const MOCK_K3_URL = required('MOCK_K3_URL')
 const TENANT_ID = required('TENANT_ID')
-// A DIFFERENT credential from TOKEN: seeding the stand-in source sheet goes through the OAPI
-// surface (`POST /records`, requireScope('records:write')), which the integration token cannot
-// reach. `staging/install` creates sheets but ZERO rows, so without this there is nothing to
-// read and the dry-run would report `sourceRows: 0` — a vacuous green in a lane whose only
-// purpose is buying information. Required UP FRONT so an operator learns it before creating any
-// systems, not halfway through a window that cannot be retried.
-const MULTITABLE_TOKEN = required('MULTITABLE_RECORDS_TOKEN')
 
 const PROFILE_ID = 'material-k3wise-customer-profile-v1'
 const LIST_PRESET = 'k3wise.material-list.v1'
@@ -187,6 +180,7 @@ const targetSystemId = payload(targetSystem).id
 
 const stagingInstall = await call('POST', '/api/integration/staging/install', {})
 const stagingSheets = payload(stagingInstall)?.sheetIds || {}
+const stagingProjectId = payload(stagingInstall)?.projectId || null
 const stagingSheetId = stagingSheets.plm_raw_items || null
 record('staging-install', ok(stagingInstall) && Boolean(stagingSheetId), {
   status: stagingInstall.status,
@@ -199,7 +193,25 @@ const sourceStagingSystem = await call('POST', '/api/integration/external-system
   kind: 'metasheet:staging',
   role: 'source',
   status: 'active',
-  config: { objects: { material: { sheetId: stagingSheetId, name: 'material' } } },
+  // OWNER REVIEW 20260805: a bare read SUCCEEDED but returned raw `fld_*` physical keys with
+  // code/name EMPTY, so the pipeline got rows it could not map. `resolveProvisionedFieldIdMap`
+  // returns {} unless BOTH projectId and logical field names are present — without them the
+  // adapter has nothing to alias physical ids back to. Supplying both is what makes the rows
+  // readable as code/name.
+  config: {
+    projectId: stagingProjectId,
+    objects: {
+      // KEY = the PROVISIONED descriptor id. `resolveProvisionedFieldIdMap` looks up
+      // (projectId, objectConfig.objectId, fieldIds); keying this 'material' asked provisioning
+      // about an object that was never provisioned, so the alias map came back {} and read()
+      // returned raw fld_* keys.
+      plm_raw_items: {
+        sheetId: stagingSheetId,
+        name: 'plm_raw_items',
+        fields: ['sourceSystemId', 'objectType', 'sourceId', 'code', 'name'],
+      },
+    },
+  },
 })
 record('create-staging-source', ok(sourceStagingSystem) && Boolean(payload(sourceStagingSystem)?.id), {
   status: sourceStagingSystem.status,
@@ -220,6 +232,44 @@ const pipelineSourceSystemId = payload(sourceStagingSystem)?.id || null
 // Fail loudly and specifically rather than proceeding to a dry-run that would report
 // `sourceRows: 0` and look like a clean pass over an empty source — a vacuous green is worse
 // than a red in a lane whose entire purpose is buying information.
+// OWNER REVIEW 20260805: an external `REHEARSAL_MULTITABLE_RECORDS_TOKEN` secret CANNOT work.
+// Every run provisions a FRESH database, so a static token has no corresponding row and is 401
+// by construction — I had built an input that could never be satisfied. The scoped token is
+// minted IN-RUN from the admin JWT this lane already holds, via the session-authenticated
+// token route. No secret, nothing for an operator to pre-place, and the credential dies with
+// the database that issued it.
+const tokenMint = await call('POST', '/api/multitable/api-tokens', {
+  name: 'rehearsal-seed (ephemeral)',
+  scopes: ['records:write', 'fields:read'],
+})
+const MULTITABLE_TOKEN = payload(tokenMint)?.token || ''
+record('mint-seed-token', ok(tokenMint) && Boolean(MULTITABLE_TOKEN), {
+  status: tokenMint.status,
+  scopes: 1,
+})
+if (!MULTITABLE_TOKEN) {
+  console.error('rehearsal driver: could not mint a records:write token from the admin session')
+  console.log(`REHEARSAL_SUMMARY=${JSON.stringify({ steps, pass: false })}`)
+  process.exit(1)
+}
+
+// The seed and the adapter must agree on ONE mapping. Fetch the physical ids from the server
+// rather than assuming logical names round-trip — that assumption is exactly what produced empty
+// code/name.
+const fieldsRes = await call('GET', `/api/multitable/fields?sheetId=${encodeURIComponent(stagingSheetId)}`,
+  undefined, { token: MULTITABLE_TOKEN })
+const fieldList = payload(fieldsRes)?.fields || payload(fieldsRes) || []
+const physicalByName = {}
+for (const f of Array.isArray(fieldList) ? fieldList : []) {
+  const logical = f && (f.name || f.title)
+  const physical = f && (f.id || f.fieldId)
+  if (logical && physical) physicalByName[logical] = physical
+}
+record('resolve-staging-field-map', ok(fieldsRes) && Object.keys(physicalByName).length > 0, {
+  status: fieldsRes.status,
+  mappedFields: Object.keys(physicalByName).length,
+})
+
 const seedRows = [
   { code: 'MAT-RH-001', name: 'Rehearsal material A' },
   { code: 'MAT-RH-002', name: 'Rehearsal material B' },
@@ -230,14 +280,15 @@ for (const row of seedRows) {
     sheetId: stagingSheetId,
     // `data`, not `fields` — the route's zod schema (univer-meta.ts) names it `data` and STRIPS
     // unknown keys, so `fields` would have written empty rows and looked like a clean pass.
-    data: {
+    // Keyed by PHYSICAL field id — what the records route stores and what read() returns.
+    data: Object.fromEntries(Object.entries({
       // These three are `required: true` on plm_raw_items; omitting them fails the row.
-      sourceSystemId: 'rehearsal-stand-in',
-      objectType: 'material',
-      sourceId: row.code,
-      code: row.code,
-      name: row.name,
-    },
+      'Source System': 'rehearsal-stand-in',
+      'Object Type': 'material',
+      'Source ID': row.code,
+      Code: row.code,
+      Name: row.name,
+    }).map(([label, value]) => [physicalByName[label] || label, value])),
   }, { token: MULTITABLE_TOKEN })
   seeded.push(ok(r))
 }
@@ -326,7 +377,7 @@ const pipeline = await call('POST', '/api/integration/pipelines', {
   tenantId: TENANT_ID,
   name: 'Rehearsal window pipeline',
   sourceSystemId: pipelineSourceSystemId,
-  sourceObject: 'material',
+  sourceObject: 'plm_raw_items',
   targetSystemId,
   targetObject: 'material',
   status: 'active',
