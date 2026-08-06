@@ -673,6 +673,44 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for after-sales integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/after-sales-plugin.install.test.ts --reporter=dot
 
+      # #4783 owner review P1-1/P1-2: real-Postgres proof that (a) the timer poller's
+      # write gate leaves ZERO bpmn_timer_jobs rows when disabled (not just "the mock
+      # wasn't called") and a positive control that it still writes when enabled, and
+      # (b) the WAITING -> LOCKED claim is race-safe across two independent
+      # `BPMNWorkflowEngine` instances (the real `routes/workflow.ts` +
+      # `routes/workflow-designer.ts` topology) via a CONSTRUCTED concurrent claim, not
+      # sequential reasoning. Excluded from the no-DB default job (vitest.config.ts) so
+      # describeIfDatabase cannot skip-green it, and wired here as a WHOLE FILE.
+      - name: Run BPMN timer job write-and-claim safety
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for BPMN timer job write-and-claim safety}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/bpmn-timer-job-write-and-claim-safety.db.test.ts \
+            --reporter=verbose
+
+      # #4783 owner review batch 2: batch 1's write gate (createTimerJob throwing before its
+      # own INSERT) was too late — startProcess() had already persisted the
+      # bpmn_process_instances (ACTIVE) + activity rows by the time that throw fired, leaving
+      # permanent ACTIVE residue with an OPEN incident (owner-reproduced at 243db11f1). This
+      # proves startProcess()'s entry gate leaves FOUR real zeros (process/activity/incident/
+      # timer rows) via the REAL HTTP surface (POST /api/workflow/deploy + POST
+      # /api/workflow/start/:key) against a real booted MetaSheetServer, plus a positive
+      # control that a timer-free process still starts normally with the poller off.
+      # Excluded from the no-DB default job (vitest.config.ts) so describeIfDatabase cannot
+      # skip-green it, and wired here as a WHOLE FILE.
+      - name: Run BPMN startProcess poller-disabled zero-residue
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for BPMN startProcess poller-disabled zero-residue}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/bpmn-poller-disabled-startprocess-zero-residue.db.test.ts \
+            --reporter=verbose
+
       # Real-APP-ASSEMBLY guard. Route-level unit tests mount ONE router in isolation, so every path they
       # exercise belongs to that router — mount order and the SCOPE of middleware added inside a router are
       # structurally invisible to them. This boots the real MetaSheetServer and asserts that no router
