@@ -45,6 +45,10 @@ export const QA_SYNTH_ORGS = Object.freeze({
 
 // Per-user deterministic INPUTS. `key` is the logical role used by fixtures/harnesses; the actual
 // users.id is minted by the product and captured into qa-identities.json under this key.
+// LOAD-BEARING: the `qa-synth-…@qa.invalid` email namespace is how residue-check.sql detects
+// leftover synthetic USERS (their minted ids are random v4 UUIDs with no prefix). If you rename the
+// email pattern here, update residue-check.sql's `email LIKE 'qa-synth-%@qa.invalid'` too, or it
+// goes blind to synthetic users.
 // `permissionsForOperator` are the strings the operator must grant via the product admin UI for the
 // operator-verified HTTP/UI cases — QA tooling does NOT write RBAC state (it is read only by
 // `withPermission` at the HTTP layer, the operator-verified surface).

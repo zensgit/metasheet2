@@ -52,13 +52,20 @@ product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` →
 1. `node reset-isolated-db.mjs` — fresh DB at the pinned migration SET + deny triggers.
 2. `QA_SYNTH_PASSWORD=... node --import tsx/esm harness/provision-synth-directory.mjs` — mint synthetic
    users + org anchors; write `.runtime/qa-identities.json`.
-3. Run each harness (`harness/pqa-*.mjs`) — they write per-case status + evidence into
-   `<evidence-dir>/summary.json`. Operator affirms the Windows host facts + runs the HTTP/UI cases.
-4. **EXPORT evidence FIRST** (the per-case SELECT(s) named in the runbook), then run
-   `residue-check.sql` as a negative control (> 0), then `node reset-isolated-db.mjs` (teardown), then
-   `residue-check.sql` again (must be 0). Put that 0 in `summary.json.residue`.
-5. `node scripts/ops/attendance-windows-native-qa-runner.mjs --root . --evidence-dir <evidence-dir> --json`
+3. `node --import tsx/esm harness/summary-tool.mjs --init --evidence-dir <evidence-dir>` — seed
+   `<evidence-dir>/summary.json` as the closed 10-case set (all BLOCKED) from `summary.template.json`.
+   Do this BEFORE the harnesses so the runner is runnable at every point (it enforces exactly 10 ids).
+4. Run each harness (`harness/pqa-*.mjs --evidence-dir <evidence-dir>`) — they UPSERT their per-case
+   status + evidence into `summary.json`. Operator affirms the Windows host facts + runs the HTTP/UI
+   cases (PQA-01/02/03/04, and the PQA-07 authorization probes).
+5. **EXPORT evidence FIRST** (the per-case SELECT(s) named in the runbook), then
+   `summary-tool.mjs --record-residue` as a negative control (must be **> 0**), then
+   `node reset-isolated-db.mjs` (teardown), then `summary-tool.mjs --record-residue` again (must be
+   **0** — it writes that into `summary.json.residue`).
+6. `node scripts/ops/attendance-windows-native-qa-runner.mjs --root <package-root> --evidence-dir <evidence-dir> --json`
    — all ten must report PASS with residue=0 before any W4C-5 staging soak is *separately* authorized.
+   (On a non-Windows host the runner honestly BLOCKS 05/09/10 on `hostPlatform=windows` etc.; the
+   Windows operator affirming the host facts is what turns those to PASS.)
 
 ## Proven-by-execution vs operator-verified
 - **Proven by execution (macOS + local PG15, this rework):** the drop/recreate + migration-SET/trigger
