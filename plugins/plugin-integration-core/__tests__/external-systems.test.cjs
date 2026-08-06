@@ -700,6 +700,10 @@ async function testInstanceDigestIsProductionBehaviour() {
   await put('sf2', AC, 'https://k3.example.test', { sessionId: 0, acctId: '002' })
   await put('sf3', AC, 'https://k3.example.test', { sessionId: false })
   const [dSf1, dSf2, dSf3] = await Promise.all(['sf1', 'sf2', 'sf3'].map(digest))
+  // Shape first: notEqual alone passes when one side is null and the other is not, which would be
+  // a different failure wearing this assertion's clothes.
+  assert.match(String(dSf1), /^[0-9a-f]{64}$/, 'falsy sessionId + acctId must still digest')
+  assert.match(String(dSf2), /^[0-9a-f]{64}$/, 'falsy sessionId + acctId must still digest')
   assert.notEqual(dSf1, dSf2,
     'a FALSY sessionId is not a session: the adapter falls through to acctId, so 001 and 002 are '
     + 'different instances — a superset guard made them EQUAL, reinstating the wrong-账套 defect')
@@ -714,6 +718,29 @@ async function testInstanceDigestIsProductionBehaviour() {
   assert.notEqual(await digest('am1'), await digest('am2'),
     'an explicit config.authMode=login must select acctId even when an authorityCode is present — '
     + 'dropping cfg.authMode from the resolution digests the wrong identity')
+
+  // P2-1 (review r4): the adapter accepts THREE mode strings — 'authority-code', 'authorityCode'
+  // and 'token'. Only the first was exercised, and narrowing the guard to just it left the suite
+  // green. The untested branch carries THIS PR's own defect: under authMode:'token' both records
+  // fall to the else branch and digest acctId=001, so two different authority codes certify as the
+  // same instance — the wrong-账套 defect, one authMode value over.
+  for (const mode of ['authorityCode', 'token']) {
+    await put(`tk1_${mode}`, AC, 'https://k3.example.test', { authorityCode: 'AC-1', acctId: '001' }, { authMode: mode })
+    await put(`tk2_${mode}`, AC, 'https://k3.example.test', { authorityCode: 'AC-2', acctId: '001' }, { authMode: mode })
+    const [t1, t2] = await Promise.all([digest(`tk1_${mode}`), digest(`tk2_${mode}`)])
+    assert.match(String(t1), /^[0-9a-f]{64}$/, `authMode '${mode}' must digest, not fail closed`)
+    assert.notEqual(t1, t2,
+      `authMode '${mode}' authenticates with authorityCode, so different codes are different `
+      + 'instances even when acctId is identical')
+  }
+
+  // P3-1: every session case above is FALSY, so narrowing the guard to `typeof === 'string'` left
+  // the suite green. A truthy NON-STRING sessionId must still be a session (the adapter's guard is
+  // bare truthiness), which means acctId must NOT decide.
+  await put('sn1', AC, 'https://k3.example.test', { sessionId: 12345, acctId: '001' })
+  await put('sn2', AC, 'https://k3.example.test', { sessionId: 12345, acctId: '002' })
+  assert.equal(await digest('sn1'), await digest('sn2'),
+    'a truthy non-string sessionId is still a session: acctId must not change the identity')
 
   // NIT (review r2): the per-process key had NO coverage — replacing randomBytes with a constant
   // left the suite green. Two registries in one process must agree; a digest must not be
