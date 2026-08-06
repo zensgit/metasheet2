@@ -112,7 +112,30 @@ required 用 `isEmpty()`(undefined/null/纯空白),失败即 `counts.failed += 1
 在 `074` **从未执行**的情况下成立。现改为对 `migration-replay.yml` 逐字集合相等,并对 074/075
 逐名证明其被考虑且被执行。等量替换现在必红,而旧的数量判据对它照样放行。
 
-### 2.3 B4 同实例门——D1 已关,**D2 未关且不声称关**
+
+> ## ⚖️ OWNER 裁决落账(2026-08-06,先于本节其余内容)
+>
+> 本节以下若干处写于裁决之前。**以本框为准。** 逐字 token:
+> `ownerD2CeilingDecision=ACCEPT_SEPARATION_NO_DISSOLVE`
+> `ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`
+> `ownerYuantusDecision=DEFERRED_FUTURE_PROFILE_NOT_CURRENT_BLOCKER`
+> `ownerEntityWindowDecision=AUTHORIZED_TO_SCHEDULE_WITH_FROZEN_AA48_PACKAGE`
+>
+> **D2 天花板:接受职责分离,不做 DISSOLVE。** 最终定义:
+> - **D2 只负责**证明 K3 读回绑定与 K3 写目标属于**同一认证身份**;
+> - **SQL Server 来源与数据血缘**由 pipeline/source binding、dry-run token 与实体机运行证据负责;
+> - 两者**本来就是不同责任**,**不要求** K3 read 记录成为 C6 的数据来源;
+> - DISSOLVE 会**混淆职责**、牺牲读写账号最小权限、并导致 binding 全量重铸,**当前不授权**。
+>
+> ⇒ 因此本文原先把「读记录不在数据路径上」写成 **D2 的天花板/未闭合项**是**错误的归类**:
+> 那不是 D2 的缺口,是**另一条责任线**,且该线有它自己的证据(source binding + token + 实体机)。
+>
+> **当前客户源 = 已批准的 SQL Server source。** `plm:yuantus-wrapper` 留作**未来 profile**,
+> 尚无 E2E 证据,**不是当前阻塞项**。
+>
+> **实体机窗口:已授权排期**,使用下方冻结包身份。
+
+### 2.3 B4 同实例门——D1 已关;D2 已按 owner 裁决定形(见上框)
 
 分两个可以分开裁决的缺陷,混为一谈就会得出过强结论。
 
@@ -244,10 +267,12 @@ D2 一刀经**五轮门审、十七条 P1/P2、零条自测发现**;其中一条
 ### 仍未闭合(不因上述进展而改变)
 
 - **实体机「先读后写」未执行** —— 三层是 `mock ≠ rehearsal ≠ customer live`,今天到第二层。
-- **被推荐的源选型零端到端证据** —— §7.2 推荐 `plm:yuantus-wrapper`,而彩排跑的是替身源;
-  两条推荐路径在彩排底座上都不可达(K3 裸 read 被拒零 fetch;PLM 适配器要宿主绑定非 HTTP 端点)。
-- **D2 天花板** —— 被认证的读记录不在 C6 的数据路径上,故读写身份完美相等也说明不了
-  被写入那些行的来源。需架构变更,不是加门。
+- **源选型已裁**:当前客户源 = **已批准的 SQL Server source**;`plm:yuantus-wrapper` 留作
+  未来 profile、尚无 E2E 证据,**不是当前阻塞**(`ownerYuantusDecision=DEFERRED_FUTURE_PROFILE_NOT_CURRENT_BLOCKER`)。
+  彩排跑的是 staging 替身,只证明**写生命周期**。
+- **~~D2 天花板~~ 归类错误,已更正**:「读记录不在 C6 数据路径上」**不是 D2 的缺口**,
+  而是另一条责任线 —— 数据血缘由 pipeline/source binding、dry-run token 与实体机运行证据负责。
+  owner 裁:接受职责分离,不做 DISSOLVE。
 
 ---
 
@@ -264,7 +289,7 @@ D2 一刀经**五轮门审、十七条 P1/P2、零条自测发现**;其中一条
 | 彩排 dispatch | #4768 合并 | 我方触发 | 未跑(`workflow_dispatch` 要求 workflow 在默认分支) |
 | 验收 MD 实测值回填 | 彩排跑绿 | 我方 | 阻塞于上一项,无实测值 |
 | 实体机窗口「先读后写」 | 彩排跑绿 + owner 排期 | **owner** | 未排期 |
-| B4 D2 判据(是否再做一刀) | owner 裁决 | **owner** | 未裁 |
+| B4 D2 判据 | — | — | **已裁(20260806)**:`ACCEPT_SEPARATION_NO_DISSOLVE`;窄修复已合 `aa48c3f18` |
 | GIP `sealed_snapshot` / runtime 接线 | owner 放行 | **owner** | 在 HOLD 名单上 |
 
 依赖只有一条主干:#4784(已合)→ #4768 → 合并 → 彩排 dispatch → 彩排跑绿。
@@ -314,7 +339,7 @@ D2 一刀经**五轮门审、十七条 P1/P2、零条自测发现**;其中一条
 **已做的对应**:每一次都撤回并收窄声明;并且把「未覆盖面」写进注释本身,
 而不是留给读者推断。
 
-### 7.4 B4 D2 未关,且不可用现有材料关
+### 7.4 B4 D2 —— 已按 owner 裁决定形为「职责分离」(本节以下为裁决前的分析,保留作历史)
 
 **现象**:D2(即便真比了两行,证明力仍弱)没有关,手头材料也关不掉它。
 
