@@ -280,7 +280,10 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 | `metasheet:staging-source` | 先经 API 建并灌一张表 | 完全自足、无外部依赖;离客户形态最远 |
 | `plm:yuantus-wrapper` | 可达的 PLM 端点 | **最接近真实形态**(`PLM material → K3 WISE` 是本线的规范管道) |
 
-**实际落地的不是上表任一项 —— 结论补记(2026-08-06)。** 彩排跑的是
+**owner 已裁(2026-08-06)**:当前客户源 = **已批准的 SQL Server source**;
+`plm:yuantus-wrapper` 为未来 profile、无 E2E 证据、非当前阻塞。上表的「推荐」一栏就此作废。
+
+**彩排落地的不是上表任一项 —— 结论补记(2026-08-06)。** 彩排跑的是
 `metasheet:staging`(证据里记作 `sourceLeg=stand-in`),它与上表的
 `metasheet:staging-source` **名称相近但不是同一条**,更不是被推荐的 `plm:yuantus-wrapper`。
 
@@ -299,6 +302,27 @@ K3 以 `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` 回绝且**零 fetch**;而 `plm:yua
 
 在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。
 
+## 7.5 实体机窗口(已授权排期,2026-08-06)
+
+`ownerEntityWindowDecision=AUTHORIZED_TO_SCHEDULE_WITH_FROZEN_AA48_PACKAGE`
+
+冻结证据:
+
+```
+runtime  aa48c3f187685b6f37aceed8cec1c5bcccc8b9a7
+tgz      93aa75c9ea88ef8e52a6ebd96378ddb049e5c3bed785a40bdb4f7f2e8659d90f
+zip      d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
+彩排     31103021849      出包验证  31103351286
+```
+
+**现场必须**:真实 SQL Server approved source、真实 K3;且**两条 K3 配置都写 `config.baseUrl`**。
+
+⚠️ **不要用 `config.url` 别名。** adapter 认 `config.baseUrl || config.url`,而 D2 的实例摘要
+只读 `config.baseUrl` —— 用别名会让摘要为 null ⇒ `INSTANCE_UNVERIFIABLE` ⇒ **写门不可满足**。
+方向是 fail-closed(不会写错账套),故登记为**窗口后 P2**(issue #4793),不阻塞本次 baseUrl 场景。
+
+---
+
 ## 8'. staging 彩排首跑实测(2026-08-06)
 
 > **编号说明**:本文 §7.3 与 R7 早已把「§8」预留给**实体机验收记录**,那一节尚未产生。
@@ -308,7 +332,9 @@ K3 以 `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` 回绝且**零 fetch**;而 `plm:yua
 ### 8.1 运行标识
 
 - workflow:`Stock-prep staging window rehearsal (ephemeral substrate)`
-- run id `31084631813`,head `9a061909c`(即 #4768 的合并点)
+- **run id `31103021849`,head `aa48c3f18`(#4790 D2 窄修复的合并点)—— 这是最终跑**
+- 首跑 `31084631813` @ `9a061909c` 保留作历史:彼时 D2 门还是 origin 相等,
+  且在 offline PoC 里**结构性缺席**。**同样的 17/17,证明力不同**
 - 结论 success,28 个 step 全过,0 失败
 - 起止 `2026-08-06T08:22:31Z → 2026-08-06T08:25:17Z`
 - 这是该 lane 建成以来的**首次运行**(此前为 dispatch-only,零运行时证据)
@@ -352,10 +378,18 @@ undefined / null / 纯空白;校验失败即 `counts.failed += 1; continue`,该�
 
 ### 8.4 这次绿的边界(必须与 8.2 同等醒目)
 
+0. **当前客户源 = 已批准的 SQL Server source**(`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`)。
+   `plm:yuantus-wrapper` 留作**未来 profile**、尚无 E2E 证据、**不是当前阻塞**
+   (`ownerYuantusDecision=DEFERRED_FUTURE_PROFILE_NOT_CURRENT_BLOCKER`)。
+   **staging 只证明写生命周期**,不证明任何客户源连接器。
 1. **源腿是替身。** 证据自己携带了这句(`sourceLeg=stand-in`,`customer source connector
    NOT exercised`)。**C6 写生命周期被证明了,客户真实源连接器没有。**
 2. **对端是仓内 mock K3,不是实体机。** 三层是 `mock pass ≠ rehearsal pass ≠ customer live pass`,
    本次跑通的是第二层。
-3. **B4 的 D2 未关。** 比较两条记录只证明两个操作员敲进去的 baseUrl 共享 origin。
+3. **B4 的 D2 已按 owner 裁决定形为「职责分离」**(`ownerD2CeilingDecision=ACCEPT_SEPARATION_NO_DISSOLVE`):
+   **D2 只负责**证明 K3 读回绑定与 K3 写目标属于**同一认证身份**(判据已由 #4790 升级为
+   逐字镜像 adapter 的认证解析:session / authority-code|token / login-acctId);
+   **SQL Server 来源与数据血缘**由 pipeline/source binding、dry-run token 与实体机运行证据负责。
+   两者本来就是不同责任,**不要求** K3 read 记录成为 C6 数据来源。DISSOLVE 当前不授权。
 
 准确表述是「窗口 runbook 已对着真实部署包整条跑通」,而不是「备料功能已完整验证」。
