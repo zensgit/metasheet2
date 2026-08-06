@@ -136,8 +136,20 @@ profile。窗口不可重试,而这条会在步骤 1(read-smoke)当场失败。
    ⚠️ **不要照抄任何历史 SHA。** 本步原文钉的是 `e1b91594e`,那是 #4769 门**合入之前**的
    候选包 —— 其树中不含 `K3_WISE_PIPELINE_RUN_DISABLED` 与 `assertWireEndpointIntent`
    (各 0 文件,已核)。装它等于把 owner 在 #4768 复审中点名的两个敞口原样带进不可重试的窗口。
-   **部署前自检**:所选包的 `serviceRuntimeSha` 必须是 `65edb98c6`(#4769 合入点)**之后**的
-   提交;`git merge-base --is-ancestor <sha> 65edb98c6` 成立即为**过期包**,不得使用。
+   **部署前自检(勘误 2026-08-06:下界已上移)**:所选包的 `serviceRuntimeSha` 必须是
+   **`e6523c949`(#4784 合入点)之后**的提交;`git merge-base --is-ancestor <sha> e6523c949`
+   成立即为**过期包**,不得使用。
+
+   ⚠️ **为什么下界从 `65edb98c6` 上移**——这是本步记录过的**同一类失效,一个 merge 之后重演**。
+   原钉 `e1b91594e` 失效是因为它早于 #4769 的安全门;现在 `65edb98c6` 同样失效,因为它早于
+   **#4784**(`e6523c949`,"C6 loaded the TARGET with the credential-stripped accessor")。
+   在这两点之间构建的包**满足旧自检、却在窗口要跑的那一步必死**:C6 用去凭据的公开访问器
+   载入 adapter-backed 的写 target,适配器在**发出任何 wire 调用之前**抛
+   `K3_WISE_CREDENTIALS_MISSING`。**窗口不可重试**,所以这不是"跑一次看看"能兜住的。
+
+   ⚠️ **下界会继续上移。** 每次有影响 K3 写路径的修复合入 main,本行的 SHA 就过期一次。
+   照抄本行的历史 SHA 与照抄 `e1b91594e` 是同一个错误 —— 出包前请核对 main 上最后一个
+   影响该路径的合入点。
 
 **PASS 判据**:1–6 全绿且 `0 Submit / 0 Audit`。
 
