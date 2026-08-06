@@ -559,7 +559,7 @@ catalog 化 readPath、fixture GetDetail 三项**已重贴到 P2/P3**,不在 P1 
 | 基线 | 有效 | 勘察基线 `7da5d9e55b0f`;复核 main `2a2a5eee4f`;六个被勘察根目录 diff 为空 |
 | P0 同步/评审 #4744 | 完成 | 业务补丁逐字节相同、pin 一致、CI 已跑 |
 | P0 合并 #4744 | **MERGED** | `94d03fab5` @ origin/main(2026-08-04 复核) |
-| P0 #4736 标记 superseded | 标题已标,**状态仍 OPEN** | `gh pr view 4736` → OPEN,title 带 `[SUPERSEDED]` |
+| P0 #4736 标记 superseded | 标题已标,~~状态仍 OPEN~~ **勘误(2026-08-06):已 MERGED** | `gh pr view 4736` → OPEN,title 带 `[SUPERSEDED]`(2026-08-04 时点记录;2026-08-06 复核:已 MERGED) |
 | #4739 规模腿 | MERGED | `431d25699`;24999 双侧、斜率 3.457 ms/行、全量 POST 86.8s |
 | #4723 duplicate-key 422 | MERGED | `4784d8fb8` |
 | #4741 operator preflight | MERGED,**未进包** | `d76f6993a`;build/verify/pins 三处 grep 0 命中;runbook `:191` 引用 |
