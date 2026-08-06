@@ -587,6 +587,102 @@ test('B4 GATE: two approved bindings -> refused (ambiguous is fail-closed, never
   )
 })
 
+test('SAME-INSTANCE: the fail-closed branch is load-bearing (review P2-1)', () => {
+  // The `catch { return false }` in sameK3Instance had NO coverage: flipping it to `return true`
+  // left 27/27 green. "Cannot tell" silently became "same instance" — the exact inversion a
+  // fail-closed comparator exists to prevent.
+  const { __internals } = require('../lib/adapters/k3-wise-c6-write-profile.cjs')
+  const same = __internals && __internals.sameK3Instance
+  assert.equal(typeof same, 'function', 'sameK3Instance must be reachable to be tested')
+
+  // Unparseable / absent / wrong-typed must all be NON-matches.
+  for (const [a, b, why] of [
+    ['not a url', 'https://k3.example.test', 'unparseable left'],
+    ['https://k3.example.test', 'not a url', 'unparseable right'],
+    [null, 'https://k3.example.test', 'null left'],
+    ['https://k3.example.test', undefined, 'undefined right'],
+    ['', 'https://k3.example.test', 'empty left'],
+    [42, 'https://k3.example.test', 'non-string left'],
+  ]) {
+    assert.equal(same(a, b), false, `${why} must NOT read as the same instance`)
+  }
+
+  // POSITIVE CONTROL — real same/different origins still classify correctly, so the above is
+  // not just "returns false for everything".
+  assert.equal(same('https://k3.example.test/K3API', 'https://k3.example.test/OTHER'), true,
+    'same origin, different path — the step 0-b topology — must match')
+  assert.equal(same('https://k3-a.example.test', 'https://k3-b.example.test'), false,
+    'different hosts must not match')
+})
+
+test('SAME-INSTANCE: a B4 binding naming a DIFFERENT K3 instance is refused', async () => {
+  // Owner ruling 20260805 (「A, bind B4 to the K3-write record」). Binding to the target is what
+  // satisfies #4769's relation check once the pipeline source is no longer K3 — but it is only
+  // TRUE while both K3 records address the same physical K3. Without this check, one K3's read
+  // contract could certify a DIFFERENT K3's write: the round-3 defect, one level down.
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+
+  // `boundKind` defaults to the real K3 kind so the ORIGIN cases below still exercise the origin
+  // comparison. Review P2-2: this fixture previously returned no `kind` at all, which is exactly
+  // why the gap was invisible from here — the fixture was more permissive than production.
+  async function planWith(boundBaseUrl, boundKind = 'erp:k3-wise-webapi') {
+    const input = c6Inputs({ rows: [{ code: 'M-INST', name: 'N' }], fetchPair, tokenStore: memoryStore() })
+    input.dataSourceWrites = createK3WiseC6WriteSource({
+      system: k3TargetSystem(),
+      createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
+      b4: b4Of([APPROVED_B4_ROW], {
+        targetBaseUrl: 'https://k3.example.test/K3API',
+        loadSystemById: async () => ({ id: 'k3-read-1', kind: boundKind, config: { baseUrl: boundBaseUrl } }),
+      }),
+    })
+    return dryRunExternalWrite(input)
+  }
+
+  // DIFFERENT host — must be refused.
+  await assert.rejects(
+    planWith('https://OTHER-k3.example.test/K3API'),
+    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'a binding on another K3 instance must not certify this write',
+  )
+
+  // POSITIVE CONTROL — same origin, DIFFERENT PATH. This is exactly the step 0-b topology (the
+  // armed record is pinned to its own endpoints), so a raw string compare would have rejected
+  // the only arrangement that actually works. Origin-level comparison is deliberate.
+  const plan = await planWith('https://k3.example.test/K3API-READ')
+  assert.ok(plan, 'same physical K3 on a different path must still be accepted')
+
+  // FAIL-CLOSED on unknowable: an unresolvable system is not a match.
+  await assert.rejects(
+    planWith(null),
+    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    '"cannot tell" must never read as "same instance"',
+  )
+
+  // REVIEW P2-2 — the defect this test NAMED but did not detect. Origin equality says nothing
+  // about WHAT is at that origin, and the guard never looked at the bound record's kind. An
+  // independent reviewer proved it by giving the poc harness's PLM source a baseUrl sharing the
+  // K3 target's origin: a PLM read contract certified the K3 write, and the run failed only
+  // later at the read with a misleading K3_WISE_READ_FAILED/404. Reachable on-prem whenever PLM
+  // and K3 sit behind one host — the normal deployment.
+  //
+  // Note this case is SAME-ORIGIN on purpose: it must be refused for its KIND, which means the
+  // origin comparison cannot be what rejects it. That is what makes this a discriminating case
+  // rather than a second spelling of the host-mismatch case above.
+  await assert.rejects(
+    planWith('https://k3.example.test/plm-api', 'plm:yuantus-wrapper'),
+    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_KIND_MISMATCH',
+    'a same-origin NON-K3 record must not certify a K3 write',
+  )
+
+  // FAIL-CLOSED on a missing kind (an older record, or a projection that omits it).
+  await assert.rejects(
+    planWith('https://k3.example.test/K3API', null),
+    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_KIND_MISMATCH',
+    'an absent kind must never read as "it is a K3"',
+  )
+})
+
 test('REVIEW P3-2: a FULL page of approved configs is a refusal, not a silent pass', async () => {
   // `list()` gives no ordering guarantee, so a full page may be truncated — and a truncated set
   // can hide the second approved binding that the ambiguity check above exists to catch. A full

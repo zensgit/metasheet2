@@ -706,7 +706,7 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   }
 
   // `rows` is what the store returns; `listArgs` records what the ROUTE asked for.
-  async function dryRunWith(rows, { requestWorkspaceId } = {}) {
+  async function dryRunWith(rows, { requestWorkspaceId, pairedReadBaseUrl } = {}) {
     const listArgs = []
     const harness = createHarness({
       readSourceConfigStore: {
@@ -734,6 +734,15 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
     const plm = await mkSystem({
       name: 'PLM probe', kind: 'plm:yuantus-wrapper', role: 'source', status: 'active', config: {},
     })
+    // OWNER REVIEW 20260806 [P1]: the real customer topology is THREE records — a staging/PLM
+    // source, a K3 READ record, and a K3 WRITE target. Without the read record in this harness the
+    // same-instance check could only ever be handed the target twice, which is exactly how it came
+    // to compare the target with itself and pass.
+    const k3Read = pairedReadBaseUrl === undefined ? null : await mkSystem({
+      name: 'K3 read probe', kind: 'erp:k3-wise-webapi', role: 'source', status: 'active',
+      config: { baseUrl: pairedReadBaseUrl },
+      credentials: { username: 'demo', password: 'secret', acctId: '001' },
+    })
     const k3 = await mkSystem({
       name: 'K3 probe', kind: 'erp:k3-wise-webapi', role: 'target', status: 'active',
       config: {
@@ -741,6 +750,7 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
         autoSubmit: false,
         autoAudit: false,
         objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
+        ...(k3Read ? { pairedReadSystemId: k3Read.id } : {}),
       },
       credentials: { username: 'demo', password: 'secret', acctId: '001' },
     })
@@ -762,7 +772,7 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
     assertOkResponse(mkPipeline, 201)
     assert.equal(mkPipeline.body.data.workspaceId, PROBE_WORKSPACE_ID,
       'the probe pipeline must be workspace-scoped, or the workspaceId assertion cannot discriminate')
-    const harnessScenario = { plm, k3, pipeline: mkPipeline.body.data }
+    const harnessScenario = { plm, k3, k3Read, pipeline: mkPipeline.body.data }
     const res = await invoke(harness.routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
       user: WRITE_USER,
       params: { id: mkPipeline.body.data.id },
@@ -836,10 +846,116 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   // only as a shape guard; the line above is what carries the property.
   assert.notEqual(spoofed.res.statusCode, 200, 'and it must not succeed (vacuous here — see above)')
 
+  // (6) SAME-INSTANCE, THROUGH THE ROUTE. Mutation N3 exposed this gap: http-routes stopped
+  // passing `targetBaseUrl` and BOTH suites stayed green — the check was tested, its WIRING was
+  // not. Fifth occurrence of that pattern on this line.
+  //
+  // The witness is exact: a B4 row bound to the PLM SOURCE passes #4769's relation check (the
+  // source IS a pipeline endpoint), so only the same-instance check can stop it — and it must,
+  // because PLM is not the K3 being written. This is the round-3 defect in its newest disguise:
+  // one system's read contract certifying another system's write.
+  //
+  // EXACT-HEAD REVIEW P2-2 — why this now expects KIND, not INSTANCE. The reviewer showed this
+  // assertion was passing for the WRONG REASON: the PLM fixture carries `config: {}`, so
+  // `boundBaseUrl` was null and the gate took its "cannot tell" branch. It never exercised the
+  // "different instance" branch its own message named. Worse, the reviewer gave the PLM source a
+  // baseUrl SHARING the K3 target's origin and the binding was ACCEPTED — a PLM read contract
+  // certified the K3 write, failing only later at the read with a misleading 404. Origin equality
+  // says nothing about WHAT is at that origin, and on-prem PLM and K3 routinely share a host.
+  //
+  // The guard now checks the bound record's `kind` first, so a PLM binding is refused for being
+  // PLM — which is both the true reason and the one that still holds when the origins match.
+  const crossInstance = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
+  const crossErr = ((crossInstance.res.body && crossInstance.res.body.error) || {})
+  assert.equal(crossErr.details && crossErr.details.code, 'K3_C6_B4_BINDING_KIND_MISMATCH',
+    `a binding on the PLM source must be refused because it is not a K3 record, got: ${JSON.stringify(crossErr)}`)
+
+  // (6b) OWNER REVIEW 20260806 [P1] — THE READ/WRITE COMPARISON ITSELF.
+  //
+  // Everything above binds B4 to the TARGET, which is how the check came to compare the target
+  // with itself: the driver made a separate K3 read record, minted B4 on the target, and the route
+  // loaded targetBaseUrl from that same target — so no read record ever entered the comparison and
+  // two different K3 instances would have passed. These two cases bind B4 to the REAL READ RECORD
+  // (admitted by the relation check because the target declares it as pairedReadSystemId) so the
+  // guard compares two GENUINELY DIFFERENT records.
+  //
+  // A -> A: read and write on the same physical K3 (same origin, different path — the step 0-b
+  // topology). MUST BE ACCEPTED. Without this control the negative case below could be satisfied
+  // by a guard that simply refuses everything.
+  const pairedSameInstance = await dryRunWith(
+    (sc) => [ratifiedRow({ systemId: sc.k3Read.id })],
+    { pairedReadBaseUrl: 'https://k3.example.test/K3API-READ' },
+  )
+  const pairedSameErr = ((pairedSameInstance.res.body && pairedSameInstance.res.body.error) || {}).details || {}
+  // POSITIVE EQUALITY, not a list of `notEqual`s. "It is not error X" cannot distinguish
+  // "succeeded" from "failed for some other reason", and that is precisely how the #4784
+  // regression survived: the owner's review flipped `targetSystem.kind` to `targetSystem.role` at
+  // BOTH real C6 handlers and every suite stayed green, because every assertion here was of the
+  // not-this-particular-error family.
+  //
+  // K3_WISE_READ_FAILED is the RIGHT answer for this fixture: the plan cleared the B4 gate, the
+  // kind gate, the same-instance gate AND credential resolution, then made a real wire call to the
+  // paired read record's baseUrl, which the K3 fetch mock does not serve. Reaching a wire error is
+  // therefore proof that credentials were resolved.
+  //
+  // THIS IS ALSO THE REAL-ROUTE COVERAGE FOR #4784. Measured, not asserted:
+  //     baseline          -> K3_WISE_READ_FAILED        (adapter accessor, credentials present)
+  //     .kind -> .role    -> K3_WISE_CREDENTIALS_MISSING (public accessor strips them)
+  // The merged #4784 fix previously had only source-text regex plus a test-local reimplementation
+  // of the selection logic, so it protected nothing.
+  assert.equal(pairedSameErr.code, 'K3_WISE_READ_FAILED',
+    'the same-K3 paired read binding must clear every gate AND resolve credentials, reaching the '
+    + `wire; got: ${JSON.stringify(pairedSameErr)}`)
+  // (the equality above already pins this value; a following notEqual on the same value adds
+  // nothing and reads as if it were an independent check — #4784's guarantee rides the equality)
+
+  // A -> B: read record on a DIFFERENT K3 host. MUST BE REFUSED. This is the case the old
+  // arrangement was structurally incapable of producing at all.
+  const crossK3 = await dryRunWith(
+    (sc) => [ratifiedRow({ systemId: sc.k3Read.id })],
+    { pairedReadBaseUrl: 'https://k3-OTHER.example.test/K3API' },
+  )
+  const crossK3Err = ((crossK3.res.body && crossK3.res.body.error) || {}).details || {}
+  assert.equal(crossK3Err.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    `a read record on ANOTHER K3 must not certify this write, got: ${JSON.stringify(crossK3Err)}`)
+
+  // (7) SELF-REFERENCE IS REFUSED.
+  //
+  // NIT (review r3): the attribution that used to sit here was stale. It said "mutation N3 is RED
+  // on this assertion and only this one", but SELF_REFERENTIAL now throws BEFORE `targetBaseUrl`
+  // is ever read, so N3 cannot reach it. Measured: N3 is RED on case 6b
+  // (INSTANCE_MISMATCH where K3_WISE_READ_FAILED was expected). Coverage is intact; the comment
+  // was pointing at the wrong case.
+  //
+  // D1 (20260806): this case's INTENT is now inverted, and the inversion is the point. Binding on
+  // the TARGET used to be the only arrangement that satisfied the relation check, so it had to be
+  // accepted — which is exactly why the gate degenerated into comparing the target with itself.
+  // Now that the real read record can be bound (via targetSystem.config.pairedReadSystemId), a
+  // self-referential binding is REFUSED, and that refusal is the invariant.
+  //
+  // Asserted as a POSITIVE equality: the old `notEqual(…, INSTANCE_MISMATCH)` still passes against
+  // the new behaviour (SELF_REFERENTIAL is also "not INSTANCE_MISMATCH"), so it would have recorded
+  // a silent semantic inversion as a pass. Same defect family as #4784.
+  const sameInstance = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.targetSystemId })])
+  const sameErr = ((sameInstance.res.body && sameInstance.res.body.error) || {})
+  assert.equal(sameErr.details && sameErr.details.code, 'K3_C6_B4_BINDING_SELF_REFERENTIAL',
+    'a binding on the write target ITSELF must be refused — a record cannot certify its own '
+    + `instance; got: ${JSON.stringify(sameErr)}`)
+
   const related = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
   const relatedDetails = ((related.res.body && related.res.body.error) || {}).details || {}
-  assert.notEqual(relatedDetails.bindingCount, 0,
-    'a binding on a real pipeline endpoint MUST be counted — otherwise the check above passes vacuously')
+  // NIT (review r4): the replacement assertion I put here was a VERBATIM DUPLICATE of case (6) —
+  // same helper, same argument, same expected code — so neutering the kind gate fails at case (6)
+  // and never reaches this line: zero marginal coverage. Removed rather than left as decoration.
+  //
+  // The property it was meant to carry (a binding on a real pipeline endpoint is COUNTED by the
+  // relation check rather than filtered out earlier) is already carried by the PAIR that exists:
+  // case (2) asserts bindingCount === 0 for an unrelated system, case (6) shows a real endpoint's
+  // binding reaching the kind gate. Both intact.
+  //
+  // The assertion this replaced was itself vacuous — `notEqual(relatedDetails.bindingCount, 0)`
+  // where the measured object has no bindingCount at all, i.e. notEqual(undefined, 0), true by
+  // absence. The notEqual family again.
 }
 
 async function main() {

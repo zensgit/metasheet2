@@ -1053,7 +1053,7 @@ function normalizeC6WriteApplyBody(body = {}) {
 // is deliberately loaded config-only.
 const ADAPTER_BACKED_C6_TARGET_KINDS = new Set([K3_WISE_C6_WRITE_TARGET_KIND])
 
-function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs }) {
+function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem }) {
   // K3WriteDecision (owner, 20260805): the K3 connector rides the same C6 dry-run->apply
   // lifecycle via its own profile + adapter-backed write source. `enforcedMaxRows` pins the
   // plan-level source read to the profile's frozen cap — a caller-supplied maxRows is
@@ -1098,7 +1098,45 @@ function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegi
           workspaceId: pipeline.workspaceId ?? null,
           // The binding must belong to one of THIS pipeline's endpoints (review P2-B1): the K3
           // system may legitimately be the source, the target, or both.
-          pipelineSystemIds: [pipeline.sourceSystemId, pipeline.targetSystemId].filter(Boolean),
+          // OWNER REVIEW 20260806 [P1]: with only the two pipeline endpoints here, the customer's
+          // real K3 READ record is neither, so B4 could only ever bind to the TARGET — and the
+          // same-instance check then compared the target against ITSELF. The check was structurally
+          // incapable of detecting a read/write mismatch no matter how good the comparator was.
+          //
+          // The write target now DECLARES its paired read record (`config.pairedReadSystemId`), and
+          // that one id joins the relation set. This is deliberately narrow: it admits exactly the
+          // record the target itself names — not an arbitrary third system — and the binding must
+          // still clear the ratified-contract match, the kind gate, and the same-instance check.
+          //
+          // NOTE this WIDENS #4769's relation check by one target-declared id. That is a change to
+          // a ratified gate, made on the owner's explicit instruction to "让 B4 绑定真实
+          // read-system，并比较 read/write 两条记录的规范实例身份".
+          pipelineSystemIds: [
+            pipeline.sourceSystemId,
+            pipeline.targetSystemId,
+            (targetSystem.config && targetSystem.config.pairedReadSystemId) || null,
+          ].filter(Boolean),
+          // SAME-INSTANCE CHECK (owner ruling 20260805: "A, bind B4 to the K3-write record").
+          // The B4 contract is the material-LIST read contract, and a PROFILE-ARMED record
+          // cannot hold list-read config — #4769 makes every readList* key a forbidden overlay,
+          // and strips it even when it arrives from the frozen first-party read-smoke preset.
+          // So the customer needs TWO K3 records (see delivery MD step 0-b), and with a non-K3
+          // pipeline source the read record is neither endpoint. Binding to the TARGET record is
+          // therefore the only option that satisfies the relation check.
+          //
+          // That is only honest while both records address the SAME physical K3. Without this
+          // check, "bind to the target" would let one K3's read contract vouch for a DIFFERENT
+          // K3's write — exactly the round-3 defect the relation check exists to stop, reopened
+          // one level down. The check is fail-closed: it can only refuse bindings the relation
+          // check already accepted, never admit new ones.
+          targetBaseUrl: (targetSystem.config && targetSystem.config.baseUrl) || '',
+          // Scope derived from the PIPELINE record, same as tenantId/workspaceId above — NOT
+          // from the request. `scopedInput(req, …)` reads workspaceId from query/params but not
+          // the body, so a workspace-scoped pipeline fell out of scope and the lookup returned
+          // null, which the fail-closed comparator then read as "different instance".
+          loadSystemById: typeof getExternalSystem === 'function'
+            ? (id) => getExternalSystem({ id, tenantId: pipeline.tenantId, workspaceId: pipeline.workspaceId ?? null })
+            : undefined,
         },
       }),
       targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
@@ -3421,7 +3459,8 @@ function createHandlers(services, options = {}) {
         role: 'source',
         principal: ownerPrincipal,
       })
-      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs })
+      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs,
+        getExternalSystem: (input) => externalSystems.getExternalSystem(input) })
       return sendOk(res, await dryRunExternalWrite({
         pipeline,
         sourceSystem,
@@ -3536,7 +3575,8 @@ function createHandlers(services, options = {}) {
       try {
         // SAME resolution as dry-run (server-side, by target kind) so the apply recompute
         // reproduces the dry-run revision; the multitable write-source writes own sheets only.
-        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs })
+        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs,
+        getExternalSystem: (input) => externalSystems.getExternalSystem(input) })
         const result = await applyExternalWrite({
           pipeline,
           sourceSystem,
