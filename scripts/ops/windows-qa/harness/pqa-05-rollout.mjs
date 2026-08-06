@@ -12,7 +12,7 @@
  *
  * Run under tsx against source (macOS) or node against dist (Windows):
  *   QA_SYNTH_PASSWORD=... DATABASE_URL=postgresql://<local>/metasheet_windows_qa \
- *     node --import tsx/esm scripts/ops/windows-qa/harness/pqa-05-rollout.mjs
+ *     node --import tsx scripts/ops/windows-qa/harness/pqa-05-rollout.mjs
  */
 import crypto from 'node:crypto'
 import {

@@ -56,7 +56,7 @@ export function resolveProductModule(subpath) {
     if (!runningUnderTsx()) {
       throw new Error(
         `Only the TypeScript source of "${subpath}" is present (no dist build). Run this harness ` +
-          `under tsx, e.g.:\n  node --import tsx/esm <harness>.mjs\n` +
+          `under tsx, e.g.:\n  node --import tsx <harness>.mjs\n` +
           `or build the package first (pnpm --filter @metasheet/core-backend build) to ship dist.`,
       )
     }

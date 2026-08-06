@@ -22,7 +22,7 @@
  *
  * Run under tsx against source (macOS proof) or plain node against dist (Windows package):
  *   QA_SYNTH_PASSWORD=... DATABASE_URL=postgresql://<local>/metasheet_windows_qa \
- *     node --import tsx/esm scripts/ops/windows-qa/harness/provision-synth-directory.mjs
+ *     node --import tsx scripts/ops/windows-qa/harness/provision-synth-directory.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'

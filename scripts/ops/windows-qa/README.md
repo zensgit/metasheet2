@@ -50,9 +50,9 @@ product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` →
 
 ## Flow (each step against the isolated DB `metasheet_windows_qa`, never a shared/customer DB)
 1. `node reset-isolated-db.mjs` — fresh DB at the pinned migration SET + deny triggers.
-2. `QA_SYNTH_PASSWORD=... node --import tsx/esm harness/provision-synth-directory.mjs` — mint synthetic
+2. `QA_SYNTH_PASSWORD=... node --import tsx harness/provision-synth-directory.mjs` — mint synthetic
    users + org anchors; write `.runtime/qa-identities.json`.
-3. `node --import tsx/esm harness/summary-tool.mjs --init --evidence-dir <evidence-dir>` — seed
+3. `node --import tsx harness/summary-tool.mjs --init --evidence-dir <evidence-dir>` — seed
    `<evidence-dir>/summary.json` as the closed 10-case set (all BLOCKED) from `summary.template.json`.
    Do this BEFORE the harnesses so the runner is runnable at every point (it enforces exactly 10 ids).
 4. Run each harness (`harness/pqa-*.mjs --evidence-dir <evidence-dir>`) — they UPSERT their per-case
