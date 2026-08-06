@@ -7,7 +7,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-const FROZEN_RUNTIME_SHA = 'd87e086fd1218b4cfb150177d43f2c52904b1d6d'
+const FROZEN_RUNTIME_SHA = 'fbb54db3c4e6661759c5d8d63ab377b3879ca0e7'
 // R5 (route-coverage 22/33 -> 33/33) re-pinned the extended smoke's digest below; the other two
 // frozen helpers are untouched by R5 and keep their prior digests.
 const FROZEN_HELPERS = Object.freeze({

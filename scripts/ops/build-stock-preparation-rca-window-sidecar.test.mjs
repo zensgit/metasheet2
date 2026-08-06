@@ -33,7 +33,7 @@ test('builder emits the exact no-Git C-stage sidecar contract with complete chec
 
     const provenance = JSON.parse(fs.readFileSync(path.join(packageDir, 'BUILD_PROVENANCE.json'), 'utf8'))
     assert.equal(provenance.sourceGitCommit, SOURCE_SHA)
-    assert.equal(provenance.frozenRuntimeGitCommit, 'd87e086fd1218b4cfb150177d43f2c52904b1d6d')
+    assert.equal(provenance.frozenRuntimeGitCommit, 'fbb54db3c4e6661759c5d8d63ab377b3879ca0e7')
     assert.equal(provenance.externalWrite, false)
     assert.equal(
       provenance.frozenHelperSha256['stock-preparation-rca-window-pm2-sample.mjs'],
