@@ -196,13 +196,18 @@ record('staging-install', ok(stagingInstall) && Boolean(stagingSheetId), {
 const sourceStagingSystem = await call('POST', '/api/integration/external-systems', {
   tenantId: TENANT_ID,
   name: 'Rehearsal staging source (stand-in)',
-  kind: 'metasheet:staging-source',
+  kind: 'metasheet:staging',
   role: 'source',
   status: 'active',
   config: { objects: { material: { sheetId: stagingSheetId, name: 'material' } } },
 })
 record('create-staging-source', ok(sourceStagingSystem) && Boolean(payload(sourceStagingSystem)?.id), {
   status: sourceStagingSystem.status,
+  // REVIEW P2-2: the "source leg is a stand-in" caveat lived only in comments and a system NAME,
+  // so REHEARSAL_SUMMARY carried no trace of it. A limitation a reader has to find in a PR thread
+  // is not a limitation the evidence states. It now rides the summary itself.
+  sourceLeg: 'stand-in',
+  sourceLegNote: 'C6 write lifecycle proven; customer source connector NOT exercised',
 })
 const pipelineSourceSystemId = payload(sourceStagingSystem)?.id || null
 
@@ -221,9 +226,18 @@ const seedRows = [
 ]
 const seeded = []
 for (const row of seedRows) {
-  const r = await call('POST', '/records', {
+  const r = await call('POST', '/api/multitable/records', {
     sheetId: stagingSheetId,
-    fields: { code: row.code, name: row.name },
+    // `data`, not `fields` — the route's zod schema (univer-meta.ts) names it `data` and STRIPS
+    // unknown keys, so `fields` would have written empty rows and looked like a clean pass.
+    data: {
+      // These three are `required: true` on plm_raw_items; omitting them fails the row.
+      sourceSystemId: 'rehearsal-stand-in',
+      objectType: 'material',
+      sourceId: row.code,
+      code: row.code,
+      name: row.name,
+    },
   }, { token: MULTITABLE_TOKEN })
   seeded.push(ok(r))
 }
@@ -317,9 +331,12 @@ const pipeline = await call('POST', '/api/integration/pipelines', {
   targetObject: 'material',
   status: 'active',
   fieldMappings: [
-    { sourceField: 'FNumber', targetField: 'FNumber', validation: [{ type: 'required' }] },
-    { sourceField: 'FName', targetField: 'FName', validation: [{ type: 'required' }] },
-    { sourceField: 'FModel', targetField: 'FModel' },
+    // sourceField names STAGING columns (plm_raw_items: code/name/…), targetField names K3's.
+    // These were both K3 names while the source was K3; after the swap that produced
+    // status=not_applyable with sourceRows:2 / add:0 / failed:2 — the source rows exist but no
+    // mapping resolves.
+    { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
+    { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
   ],
 })
 record('create-pipeline', ok(pipeline) && Boolean(payload(pipeline)?.id), {

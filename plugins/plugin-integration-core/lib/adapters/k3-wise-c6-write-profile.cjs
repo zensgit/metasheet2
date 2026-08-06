@@ -487,4 +487,8 @@ module.exports = {
   K3_WISE_C6_WRITE_PROFILE,
   createK3WiseC6WriteSource,
   deriveK3WiseC6PlannerTargetConfig,
+  // Test surface only. `sameK3Instance`'s fail-closed catch branch had no coverage — flipping it
+  // to `return true` left the whole suite green, i.e. "cannot tell" silently became "same
+  // instance". A guard whose failure mode is invisible is not a guard.
+  __internals: { sameK3Instance },
 }

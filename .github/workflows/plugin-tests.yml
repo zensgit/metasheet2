@@ -82,7 +82,9 @@ jobs:
       # its sibling mock-server test.
       - name: Run K3 WISE rehearsal harness contract tests
         run: |
-          node --test scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs
+          node --test \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-driver-contract.test.mjs
 
       - name: Run on-prem package apply and archive contract tests
         run: |

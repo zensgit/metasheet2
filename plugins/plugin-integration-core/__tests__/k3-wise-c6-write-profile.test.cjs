@@ -587,6 +587,34 @@ test('B4 GATE: two approved bindings -> refused (ambiguous is fail-closed, never
   )
 })
 
+test('SAME-INSTANCE: the fail-closed branch is load-bearing (review P2-1)', () => {
+  // The `catch { return false }` in sameK3Instance had NO coverage: flipping it to `return true`
+  // left 27/27 green. "Cannot tell" silently became "same instance" — the exact inversion a
+  // fail-closed comparator exists to prevent.
+  const { __internals } = require('../lib/adapters/k3-wise-c6-write-profile.cjs')
+  const same = __internals && __internals.sameK3Instance
+  assert.equal(typeof same, 'function', 'sameK3Instance must be reachable to be tested')
+
+  // Unparseable / absent / wrong-typed must all be NON-matches.
+  for (const [a, b, why] of [
+    ['not a url', 'https://k3.example.test', 'unparseable left'],
+    ['https://k3.example.test', 'not a url', 'unparseable right'],
+    [null, 'https://k3.example.test', 'null left'],
+    ['https://k3.example.test', undefined, 'undefined right'],
+    ['', 'https://k3.example.test', 'empty left'],
+    [42, 'https://k3.example.test', 'non-string left'],
+  ]) {
+    assert.equal(same(a, b), false, `${why} must NOT read as the same instance`)
+  }
+
+  // POSITIVE CONTROL — real same/different origins still classify correctly, so the above is
+  // not just "returns false for everything".
+  assert.equal(same('https://k3.example.test/K3API', 'https://k3.example.test/OTHER'), true,
+    'same origin, different path — the step 0-b topology — must match')
+  assert.equal(same('https://k3-a.example.test', 'https://k3-b.example.test'), false,
+    'different hosts must not match')
+})
+
 test('SAME-INSTANCE: a B4 binding naming a DIFFERENT K3 instance is refused', async () => {
   // Owner ruling 20260805 (「A, bind B4 to the K3-write record」). Binding to the target is what
   // satisfies #4769's relation check once the pipeline source is no longer K3 — but it is only
