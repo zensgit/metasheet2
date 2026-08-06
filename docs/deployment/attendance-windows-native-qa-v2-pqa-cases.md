@@ -6,6 +6,45 @@ enablement, external notification, or issue-closure authorization.**
 Pinned exact product source SHA (`SOURCE_SHA`, unchanged by this QA-tooling
 revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 
+> ## ⚠️ REWORK — read this first (supersedes the per-case *fixtures* + *cleanup* below)
+>
+> The provisioning + fixtures + cleanup mechanics in the per-case sections below are **superseded**
+> by the reworked Node flow in `scripts/ops/windows-qa/` (see that directory's `README.md`). The
+> per-case **objectives, product-surface citations, steps, and expected values** below remain the
+> authoritative operator reference; only the *how you create/clean* changed. Specifically:
+>
+> - **Identities are product-minted UUIDs, captured to `.runtime/qa-identities.json`.** The old
+>   text ids (`qa_synth_admin`, `qa_synth_org_shadow`, …) THREW on the W4/rollout/scheduled paths.
+>   `harness/provision-synth-directory.mjs` creates users via the product path
+>   (`AuthService.register` → `crypto.randomUUID`) and org anchors via `getOrCreateLocalIntegration`;
+>   every reference below now resolves through `qa-identities.json` — no hardcoded ids.
+> - **Cleanup = DROP + recreate the isolated DB** (`node reset-isolated-db.mjs`), NEVER per-row
+>   DELETE — the append-only / deny-delete triggers reject deletes (proven: a DELETE on
+>   `attendance_calculation_rollout_state` raises `W4C0_IMMUTABLE`). The reset also verifies the DB
+>   reached the pinned migration SET (311 names) + that the deny triggers exist and are enabled — the
+>   false-zero guard (a partial re-migrate that leaves tables missing would ALSO show zero QA rows).
+> - **Export evidence FIRST, then tear down.** For every case, run its named evidence SELECT(s)
+>   (the `SELECT …` blocks in each section) and capture the output BEFORE the drop/recreate. Then
+>   run `residue-check.sql` as a negative control (must be **> 0** while synthetic rows exist), then
+>   `reset-isolated-db.mjs`, then `residue-check.sql` again (must be **0** — that 0 is
+>   `summary.json.residue`).
+> - **The harnesses write the verdict.** `harness/pqa-05|06|08|09|10-*.mjs` invoke the real
+>   route-less product code and emit each case's status + evidence into `<evidence-dir>/summary.json`;
+>   the operator affirms the Windows host facts and runs the HTTP/UI cases. 05/09/10 are PASS-eligible
+>   (real product fn end-to-end); 06/08 are BLOCKED-with-evidence (real decision primitive, not the
+>   full boundary composition, which needs the plugin-internal legacyAdapters).
+> - **No auth material in Git.** The synthetic login password is operator-set via env
+>   `QA_SYNTH_PASSWORD`; `qa-identities.json` holds ids/emails/orgs only.
+> - **Operator prerequisite (UNVERIFIED — Windows host):** grant each synthetic user its attendance
+>   permission via the product admin UI (QA tooling never writes RBAC): admin→`attendance:admin`,
+>   u1→`attendance:write`, u2/u3→`attendance:read`.
+>
+> **Proven-by-execution (macOS + local PG15) vs operator-verified (Windows-only):** the drop/recreate
+> + migration-SET/trigger integrity, the residue negative-control → 0, and harnesses 05/09/10 +
+> 06/08 + 07 create-fixture are proven by execution. The `.bat`/PowerShell wrappers, browser-UI +
+> authenticated-HTTP product execution (PQA-01/02/03/04/07), the login round-trip, the Windows host
+> safety facts, and the end-to-end boundary composition for 06/08 stay `UNVERIFIED — operator to confirm`.
+
 Isolated database (the only accepted name): `metasheet_windows_qa`.
 
 This runbook is the *product-matrix* half of the package. The qa-runner

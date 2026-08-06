@@ -1,30 +1,72 @@
-# Attendance Windows-native QA v2 — PQA-01..10 execution tooling
+# Attendance Windows-native QA v2 — PQA-01..10 execution tooling (reworked)
 
 **Draft/HOLD. Synthetic data only. No deployment/staging authorization.**
 Pinned exact source SHA: `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b` (product `SOURCE_SHA`, unchanged by this QA-tooling revision).
 
-This directory completes the *product matrix* side of the package: the qa-runner validates safety + SHA binding only; **you** determine per-case PASS/FAIL by executing each scenario against synthetic data and comparing observed vs expected.
+This directory makes the PQA matrix **independently executable** and reach **residue=0**, with the SQL/Node
+layer **proven by actually running it** against a fresh migrated local PostgreSQL. The qa-runner still
+validates SAFETY + SHA binding + a non-forgeable evidence contract; the harnesses produce the per-case
+verdict + evidence from real execution.
+
+## Why the rework (owner CHANGES-REQUESTED, all behavioral)
+- **Cleanup can't be per-row DELETE.** The append-only / deny-delete triggers REJECT deletes on rollout
+  state/events, calculations, snapshots, segments, the operation registries, the outbox, and the
+  scheduled-run tables. Cleanup is **DROP + recreate** the isolated DB (`reset-isolated-db.mjs`).
+- **Identities must be product-minted UUIDs.** The W4 / rollout / scheduled paths parse org keys + user
+  ids through the canonical identity layer; text ids throw. Users are created through the product path
+  (`AuthService.register` mints `crypto.randomUUID()`); orgs are explicit-by-design synthetic UUIDs
+  supplied to `getOrCreateLocalIntegration`. Ids are captured to `.runtime/qa-identities.json` and every
+  fixture/harness reads them from there — no hardcoded ids.
+- **Route-less internals now have harnesses** (rollout transition, boundary decision primitives, outbox
+  dispatcher, scheduled sweep) — see `harness/`.
+- **The runner rejects forged PASS**: per-case non-empty reason + evidence, per-case safety fields (no
+  top-level fallback), and an exact closed set of the 10 matrix ids (no missing/extra/duplicate).
 
 ## Files
-- `summary.template.json` — copy to `<evidence-dir>/summary.json`, fill from real execution. Ships every case `status=BLOCKED` and safety fields unaffirmed, so a straight copy reports BLOCKED, never PASS.
-- `../../../docs/deployment/attendance-windows-native-qa-v2-pqa-cases.md` — per-case runbook: objective, product surface (with `file:line` citations to the pinned tree), synthetic fixtures (create + cleanup), exact steps, expected values, residue SQL.
-- `fixtures/` — per-case synthetic fixture + cleanup SQL referenced by the runbook.
-- `residue-check.sql` — global residue query; run after all cleanups; the returned count is `summary.json.residue` (PASS requires 0).
+- `harness/qa-identities.mjs` — static synthetic INPUTS (org UUIDs, per-user email/username, needed
+  permissions). **No secrets, no minted ids.**
+- `harness/expected-migration-set.json` — the pinned 311-name applied-migration golden set (gate-2 guard).
+- `harness/provision-synth-directory.mjs` — creates org anchors + users via the product path; writes the
+  identity-only `.runtime/qa-identities.json`.
+- `harness/pqa-05|06|08|09|10-*.mjs` — route-less internal harnesses (invoke real product code).
+- `harness/pqa-07-authorization-setup.mjs` — the CRUD case's create-fixture setup.
+- `reset-isolated-db.mjs` — DROP+recreate the isolated DB + verify the migration SET + deny triggers
+  (gate 2), behind a local/isolated/no-other-session safety guard (gate 4).
+- `residue-check.sql` — global residue SENTINEL. Cleanup is drop/recreate; this proves the recreated DB is
+  empty of synthetic rows. Run it BEFORE teardown too (negative control: it must be > 0).
+- `summary.template.json` — BLOCKED-by-default, non-forgeable evidence template (usually the harnesses
+  write `<evidence-dir>/summary.json` for you).
+- `../../../docs/deployment/attendance-windows-native-qa-v2-pqa-cases.md` — the per-case runbook.
 
-## Verification asymmetry (read before trusting any step)
-Authored and validated **from macOS**: the `summary.template.json` shape, the qa-runner PASS/BLOCKED logic, and every SQL table/column and API route path is grepped against the pinned tree `0dc3596dd`.
-**NOT** validated here (requires the Windows host / live server): the `.bat`/PowerShell invocations, the browser UI steps, and any assertion needing a running instance — those are marked `UNVERIFIED — operator to confirm` in the runbook. Treat them as instructions to verify, not facts.
+## No auth material in Git (owner security boundary)
+`qa-identities.json` holds ids/emails/orgs ONLY. The synthetic login password is operator-set and read at
+runtime from env `QA_SYNTH_PASSWORD` (a value like `qa_synth_pw_<...>`) — never committed. The runtime /
+evidence dir is gitignored.
 
-## Execution order (owner-specified, by risk)
-PQA-07 → 03 → 01 → 02 → 05 → 06 → 08 → 09 → 10 → 04.
+## Operator prerequisite (UNVERIFIED — Windows host)
+For the operator-verified HTTP/UI cases, grant each synthetic user its attendance permissions via the
+product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` → `attendance:admin`;
+`qa-synth-u1@qa.invalid` → `attendance:write`; `qa-synth-u2`/`qa-synth-u3` → `attendance:read`.
 
-## Flow
-1. Start the packaged runtime against the isolated DB `metasheet_windows_qa` (see the package runbook §4–6). Never a shared/customer DB.
-2. For each case in the order above: apply its create fixtures → run its steps → compare observed vs expected → run its cleanup → set that case's `status`/`syntheticDataOnly`/`reason` in `summary.json`.
-3. After all cleanups, run `residue-check.sql`; put the count in `summary.json.residue` (must be 0).
-4. Affirm the shared safety fields (`isolatedDatabase`, `databaseName=metasheet_windows_qa`, `hostPlatform=windows`, `windowsPowerShellVersion=5.1.x`, `customerOrExternalDestination=false`, `externalNotificationsSent=false`).
-5. Run the runner:
-   `node scripts/ops/attendance-windows-native-qa-runner.mjs --root . --evidence-dir <evidence-dir> --json`
-   All ten must report `PASS` with `residue=0` before W4C-5 staging soak is *separately* authorized.
+## Flow (each step against the isolated DB `metasheet_windows_qa`, never a shared/customer DB)
+1. `node reset-isolated-db.mjs` — fresh DB at the pinned migration SET + deny triggers.
+2. `QA_SYNTH_PASSWORD=... node --import tsx/esm harness/provision-synth-directory.mjs` — mint synthetic
+   users + org anchors; write `.runtime/qa-identities.json`.
+3. Run each harness (`harness/pqa-*.mjs`) — they write per-case status + evidence into
+   `<evidence-dir>/summary.json`. Operator affirms the Windows host facts + runs the HTTP/UI cases.
+4. **EXPORT evidence FIRST** (the per-case SELECT(s) named in the runbook), then run
+   `residue-check.sql` as a negative control (> 0), then `node reset-isolated-db.mjs` (teardown), then
+   `residue-check.sql` again (must be 0). Put that 0 in `summary.json.residue`.
+5. `node scripts/ops/attendance-windows-native-qa-runner.mjs --root . --evidence-dir <evidence-dir> --json`
+   — all ten must report PASS with residue=0 before any W4C-5 staging soak is *separately* authorized.
 
-Do not invent PASS. Old package (`676ed243…`) results are not current evidence.
+## Proven-by-execution vs operator-verified
+- **Proven by execution (macOS + local PG15, this rework):** the drop/recreate + migration-SET/trigger
+  integrity, the residue negative control → 0, and the route-less harnesses 05/09/10 (real product fns,
+  PASS) + 06/08 (real decision primitives, BLOCKED-with-evidence) + 07 create-fixture.
+- **Operator-verified (Windows-only, UNVERIFIED here):** the `.bat`/PowerShell wrappers, the browser-UI +
+  authenticated-HTTP steps (PQA-01/02/03/04/07 product execution), the login round-trip, the Windows host
+  safety facts (`hostPlatform=windows`, `windowsPowerShellVersion=5.1.x`), and the end-to-end boundary
+  composition for 06/08. These stay `UNVERIFIED — operator to confirm`.
+
+Do not invent PASS. Old package results are not current evidence.
