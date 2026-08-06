@@ -919,11 +919,13 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   assert.equal(crossK3Err.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
     `a read record on ANOTHER K3 must not certify this write, got: ${JSON.stringify(crossK3Err)}`)
 
-  // (7) THE DISCRIMINATING HALF. (6) alone does not prove the wiring: with `targetBaseUrl`
-  // missing, sameK3Instance('') is false, so the gate throws MORE and (6) still passes. What
-  // breaks when the wiring is gone is the LEGITIMATE case — a binding on the K3 TARGET, the
-  // same physical instance, must be ACCEPTED. Mutation N3 (http-routes stops passing
-  // targetBaseUrl) is RED on this assertion and only this one.
+  // (7) SELF-REFERENCE IS REFUSED.
+  //
+  // NIT (review r3): the attribution that used to sit here was stale. It said "mutation N3 is RED
+  // on this assertion and only this one", but SELF_REFERENTIAL now throws BEFORE `targetBaseUrl`
+  // is ever read, so N3 cannot reach it. Measured: N3 is RED on case 6b
+  // (INSTANCE_MISMATCH where K3_WISE_READ_FAILED was expected). Coverage is intact; the comment
+  // was pointing at the wrong case.
   //
   // D1 (20260806): this case's INTENT is now inverted, and the inversion is the point. Binding on
   // the TARGET used to be the only arrangement that satisfied the relation check, so it had to be
@@ -942,8 +944,14 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
 
   const related = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
   const relatedDetails = ((related.res.body && related.res.body.error) || {}).details || {}
-  assert.notEqual(relatedDetails.bindingCount, 0,
-    'a binding on a real pipeline endpoint MUST be counted — otherwise the check above passes vacuously')
+  // REVIEW P3-1: this anti-vacuity assertion was ITSELF vacuous. `bindingCount` is attached at
+  // exactly one site (k3-wise-c6-write-profile.cjs, on C6_WRITE_B4_BINDING_REQUIRED only), and the
+  // measured object here is `{code:'K3_C6_B4_BINDING_KIND_MISMATCH', field:'capabilityState'}` —
+  // so it was `notEqual(undefined, 0)`, true by absence. The notEqual family again: it cannot tell
+  // "counted" from "this shape has no such field". Assert the code that is actually produced.
+  assert.equal(relatedDetails.code, 'K3_C6_B4_BINDING_KIND_MISMATCH',
+    'a binding on the PLM source must reach the kind gate — which proves it was COUNTED by the '
+    + `relation check rather than filtered out earlier; got: ${JSON.stringify(relatedDetails)}`)
 }
 
 async function main() {

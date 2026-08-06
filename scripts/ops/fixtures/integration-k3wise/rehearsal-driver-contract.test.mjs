@@ -335,28 +335,60 @@ function predicateOf(src, step) {
 // i.e. "HTTP 200 is enough". Needles pin WHAT is asserted; conjuncts pin that they are all
 // REQUIRED TOGETHER.
 const REQUIRED_DISCRIMINATORS = {
-  'create-source-system': ['ok(sourceSystem)', 'payload(sourceSystem)?.id'],
-  'create-target-system': ['ok(targetSystem)', 'payload(targetSystem)?.id'],
-  'staging-install': ['ok(stagingInstall)', 'stagingSheetId', 'stagingProjectId'],
-  'create-staging-source': ['ok(sourceStagingSystem)', 'payload(sourceStagingSystem)?.id'],
-  'mint-seed-token': ['ok(tokenMint)', 'mintedTokenUsable'],
-  'resolve-staging-field-map': ['ok(fieldsRes)', 'Object.keys(physicalByName).length > 0'],
-  'seed-staging-rows': ['seeded.length === seedRows.length', 'seeded.every(Boolean)'],
-  'b4-mint': ['ok(b4Mint)', 'b4Row?.id'],
-  'b4-approve': ['ok(b4Approve)', "=== 'approved'"],
-  'preflight-list-shape-probe': ['listProbeEvidence.ok === true', "typeof listRowCountKey === 'string'"],
+  'create-source-system': [
+    'ok(sourceSystem)',
+    'Boolean(payload(sourceSystem)?.id)',
+  ],
+  'create-target-system': [
+    'ok(targetSystem)',
+    'Boolean(payload(targetSystem)?.id)',
+  ],
+  'staging-install': [
+    'ok(stagingInstall)',
+    'Boolean(stagingSheetId)',
+    'Boolean(stagingProjectId)',
+  ],
+  'create-staging-source': [
+    'ok(sourceStagingSystem)',
+    'Boolean(payload(sourceStagingSystem)?.id)',
+  ],
+  'mint-seed-token': [
+    'ok(tokenMint)',
+    'mintedTokenUsable',
+  ],
+  'resolve-staging-field-map': [
+    'ok(fieldsRes)',
+    'Object.keys(physicalByName).length > 0',
+  ],
+  'seed-staging-rows': [
+    'seeded.length === seedRows.length',
+    'seeded.every(Boolean)',
+  ],
+  'b4-mint': [
+    'ok(b4Mint)',
+    'Boolean(b4Row?.id)',
+  ],
+  'b4-approve': [
+    'ok(b4Approve)',
+    'b4Approved?.status === \'approved\'',
+  ],
+  'preflight-list-shape-probe': [
+    'listProbeEvidence.ok === true',
+    'typeof listRowCountKey === \'string\'',
+  ],
   'preflight-list-read-smoke': [
     'listSmoke.status === 200',
     'listEvidence?.ok === true',
     'listEvidence?.[listRowCountKey] === SOURCE_KEYS.length',
   ],
-  'create-pipeline': ['ok(pipeline)', 'payload(pipeline)?.id'],
-  // The load-bearing one. This step is the PR's substitute for the owner's discrete "bare read"
-  // step AND the sole runtime discriminator for empty code/name, so every conjunct is pinned.
+  'create-pipeline': [
+    'ok(pipeline)',
+    'Boolean(payload(pipeline)?.id)',
+  ],
   'dry-run': [
     'ok(dryRun)',
-    "dryRunOut?.status === 'ready'",
-    "typeof dryRunOut?.dryRunToken === 'string'",
+    'dryRunOut?.status === \'ready\'',
+    'typeof dryRunOut?.dryRunToken === \'string\'',
     'dryRunOut?.counts?.sourceRows === SOURCE_KEYS.length',
     'dryRunOut?.counts?.add === SOURCE_KEYS.length',
   ],
@@ -365,7 +397,10 @@ const REQUIRED_DISCRIMINATORS = {
     'applyOut?.counts?.written === SOURCE_KEYS.length',
     '(applyOut?.counts?.failed ?? 0) === 0',
   ],
-  'token-single-use': ['replayToken.status === 409', "'C6_WRITE_DRY_RUN_TOKEN_INVALID'"],
+  'token-single-use': [
+    'replayToken.status === 409',
+    'replayBody?.error?.code === \'C6_WRITE_DRY_RUN_TOKEN_INVALID\'',
+  ],
   'read-back-written-key': [
     'readBack.status === 200',
     'readBackEvidence?.ok === true',
@@ -375,7 +410,7 @@ const REQUIRED_DISCRIMINATORS = {
   'read-back-negative-control': [
     'readBackMiss.status === 200',
     'missEvidence?.ok === false',
-    "missEvidence?.errorCode === 'K3_WISE_READ_BUSINESS_ERROR'",
+    'missEvidence?.errorCode === \'K3_WISE_READ_BUSINESS_ERROR\'',
   ],
 }
 
@@ -396,25 +431,28 @@ test('every record() step asserts its NAMED discriminators — positive manifest
   for (const step of declared) {
     const predicate = predicateOf(driver, step)
     assert.ok(predicate.length > 0, `step '${step}' has an empty predicate`)
-    const needles = REQUIRED_DISCRIMINATORS[step]
-    for (const needle of needles) {
-      assert.ok(predicate.includes(needle),
-        `step '${step}' no longer asserts ${JSON.stringify(needle)}\n    predicate is: ${predicate}`)
-    }
-    // REVIEW P2-B: substring presence is INVARIANT under `&&` -> `||`, and that swap turns a
-    // five-way AND into "any one of these is enough" — i.e. the dry-run discriminator collapses to
-    // "HTTP 200" while every needle survives verbatim. Needles pin WHAT is asserted; these two pin
-    // that the assertions are required TOGETHER.
+    const conjuncts = REQUIRED_DISCRIMINATORS[step]
+
+    // EXACT CANONICAL EQUALITY — the THIRD criterion for this guard, and the first that converges.
     //
-    // All 17 predicates are pure conjunctions (verified mechanically before this was written; the
-    // check below is what keeps that true). `??` is deliberately not `||`.
-    assert.ok(!predicate.includes('||'),
-      `step '${step}' introduced a disjunction; a predicate that passes on ANY conjunct is not the `
-      + `gate this manifest describes\n    predicate is: ${predicate}`)
-    const conjunctions = (predicate.match(/&&/g) || []).length
-    assert.ok(conjunctions >= needles.length - 1,
-      `step '${step}' has ${conjunctions} '&&' for ${needles.length} required discriminators — some `
-      + `are no longer joined as a conjunction\n    predicate is: ${predicate}`)
+    // v1 was a denylist of four literals; `dryRunOut !== undefined` walked through it.
+    // v2 was needle-substring + no-`||` + an `&&` count. Review broke that too, twice, and the
+    // second break was IN THE FIX ITSELF: the comment stripper was not quote-aware, so a `//`
+    // inside a string literal deleted the rest of the line from the SCANNED text while it still
+    // EXECUTED (`… && String('a//b') === 'a//b' || true`). And a wrapper needs no comment at all:
+    // `[ok(dryRun) && …].length > 0` keeps every needle, keeps four `&&`, and is always true.
+    //
+    // Those are CHANNELS, and patching channels does not converge — substring presence plus an
+    // operator count cannot establish that the predicate's TRUTH REQUIRES the conjuncts. So the
+    // CRITERION changed rather than gaining a fourth patch: the predicate must be EXACTLY the
+    // declared conjuncts joined by `&&`. Any wrapper, appended term, disjunction, or comment trick
+    // changes the string and fails here, without this guard needing to anticipate it.
+    const canonical = conjuncts.join(' && ')
+    assert.equal(predicate, canonical,
+      `step '${step}' is no longer exactly its declared conjunction.\n`
+      + `    expected: ${canonical}\n`
+      + `    actual:   ${predicate}\n`
+      + '    Weakening a predicate must be done by EDITING THE TABLE ABOVE — a reviewable act.')
   }
 
   // NEGATIVE CONTROL on the checker itself: the exact degradations that defeated the denylist
