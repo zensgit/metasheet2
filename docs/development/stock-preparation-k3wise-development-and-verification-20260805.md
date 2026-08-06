@@ -145,10 +145,14 @@ armed 记录上,这些键在 adapter 归一化时被**静默剥除**(实测全�
 **操作**:窗口前确认客户环境里这两条记录都已建、baseUrl 相同、且 K3-read 那条**没有**选
 profile。窗口不可重试,而这条会在步骤 1(read-smoke)当场失败。
 
-> 关联未决项:B4 绑定的 systemId 只能是 pipeline 的 source/target 之一(`#4769` 关系检查),
-> 而 K3-read 记录在「非 K3 source」的管道里两者都不是 —— 该冲突的处置见 §7.2。
+> ~~关联未决项:B4 绑定的 systemId 只能是 pipeline 的 source/target 之一(`#4769` 关系检查),
+> 而 K3-read 记录在「非 K3 source」的管道里两者都不是。~~
+> **已闭合(2026-08-06)**:关系集合现为 `[source, target, target.config.pairedReadSystemId]`,
+> 所以 B4 **必须**绑 `<K3-read.id>` —— 见步 0-b 的四值表。绑 target 会被
+> `K3_C6_B4_BINDING_SELF_REFERENTIAL` 拒。**此处不再有未决冲突。**
 
-1. **只读预检**:`POST /api/integration/external-systems/<k3SystemId>/read-smoke`
+1. **只读预检**:`POST /api/integration/external-systems/<K3-read.id>/read-smoke`
+   (**用 K3-read 记录**,不是 K3-write —— armed 记录的 readList* 已被 #4769 剥离)
    (preset `k3wise.material-list.v1`)⇒ 期望 values-free 证据:业务成功、行数 ≤10、零泄漏键。
 2. **建/核窗口 pipeline**:`POST /api/integration/pipelines` —— target=K3 系统(config 已含
    `objects.material.profile`,由部署包 FE/记录保证)、fieldMappings 与 B4 一致。
