@@ -1053,7 +1053,7 @@ function normalizeC6WriteApplyBody(body = {}) {
 // is deliberately loaded config-only.
 const ADAPTER_BACKED_C6_TARGET_KINDS = new Set([K3_WISE_C6_WRITE_TARGET_KIND])
 
-function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem }) {
+function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf }) {
   // K3WriteDecision (owner, 20260805): the K3 connector rides the same C6 dry-run->apply
   // lifecycle via its own profile + adapter-backed write source. `enforcedMaxRows` pins the
   // plan-level source read to the profile's frozen cap — a caller-supplied maxRows is
@@ -1134,9 +1134,24 @@ function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegi
           // from the request. `scopedInput(req, …)` reads workspaceId from query/params but not
           // the body, so a workspace-scoped pipeline fell out of scope and the lookup returned
           // null, which the fail-closed comparator then read as "different instance".
-          loadSystemById: typeof getExternalSystem === 'function'
-            ? (id) => getExternalSystem({ id, tenantId: pipeline.tenantId, workspaceId: pipeline.workspaceId ?? null })
+          // OWNER RULING 20260806 [P1]: identity is (kind, origin, acctId), not origin alone.
+          // The digest is computed inside external-systems — the only module holding decrypted
+          // credentials — and ONLY the digest crosses this boundary, so the profile never sees
+          // acctId. Both legs go through the SAME function, so a digest difference is a difference
+          // in (kind, origin, account set) and nothing else.
+          //
+          // This REPLACES loadSystemById + targetBaseUrl: comparing baseUrls could not see the
+          // account set at all, which is what made same-server/different-账套 compare equal.
+          // `externalSystems` is NOT in this function's scope — only what the call sites inject is.
+          // The first version referenced it here and every C6 dry-run died with a ReferenceError
+          // that surfaced as "the route never consulted the read-source store", i.e. the gate
+          // vanished rather than failing loudly. Injected like getExternalSystem is.
+          instanceDigestOf: typeof instanceDigestOf === 'function'
+            ? (id) => instanceDigestOf({
+              id, tenantId: pipeline.tenantId, workspaceId: pipeline.workspaceId ?? null,
+            })
             : undefined,
+          targetSystemId: pipeline.targetSystemId,
         },
       }),
       targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
@@ -3460,7 +3475,10 @@ function createHandlers(services, options = {}) {
         principal: ownerPrincipal,
       })
       const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs,
-        getExternalSystem: (input) => externalSystems.getExternalSystem(input) })
+        getExternalSystem: (input) => externalSystems.getExternalSystem(input),
+        instanceDigestOf: typeof externalSystems.getExternalSystemInstanceDigest === 'function'
+          ? (input) => externalSystems.getExternalSystemInstanceDigest(input)
+          : undefined })
       return sendOk(res, await dryRunExternalWrite({
         pipeline,
         sourceSystem,
@@ -3576,7 +3594,10 @@ function createHandlers(services, options = {}) {
         // SAME resolution as dry-run (server-side, by target kind) so the apply recompute
         // reproduces the dry-run revision; the multitable write-source writes own sheets only.
         const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs,
-        getExternalSystem: (input) => externalSystems.getExternalSystem(input) })
+        getExternalSystem: (input) => externalSystems.getExternalSystem(input),
+        instanceDigestOf: typeof externalSystems.getExternalSystemInstanceDigest === 'function'
+          ? (input) => externalSystems.getExternalSystemInstanceDigest(input)
+          : undefined })
         const result = await applyExternalWrite({
           pipeline,
           sourceSystem,

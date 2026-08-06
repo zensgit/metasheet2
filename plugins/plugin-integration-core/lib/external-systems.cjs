@@ -326,6 +326,54 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     return rowToAdapterExternalSystem(row, credentials)
   }
 
+  // OWNER RULING 20260806 [P1] — K3 instance identity is (kind, origin, acctId), NOT origin alone.
+  //
+  // `sameK3Instance` compared only `new URL(baseUrl).origin`, but K3 WISE login REQUIRES acctId:
+  // k3-wise-webapi-adapter.cjs throws without it and sends it in the login body. Two records on
+  // ONE server pointing at DIFFERENT account sets therefore compared EQUAL — a read binding on
+  // account set A could certify a write target on account set B, i.e. writing into the wrong
+  // 账套. Origin equality is necessary, not sufficient.
+  //
+  // Computed HERE, inside the credential boundary: this module is the only one holding decrypted
+  // credentials, and ONLY the digest leaves it. Callers compare digests and never see acctId, so
+  // the raw account set never reaches an evidence surface.
+  //
+  // FAIL-CLOSED: any missing part (unknown system, unparseable baseUrl, absent acctId) yields
+  // null, and null must never compare equal to null at the call site.
+  async function getExternalSystemInstanceDigest(input) {
+    let system
+    try {
+      system = await getExternalSystemForAdapter(input)
+    } catch {
+      return null
+    }
+    if (!system || typeof system.kind !== 'string' || !system.kind) return null
+
+    const baseUrl = system.config && typeof system.config.baseUrl === 'string' ? system.config.baseUrl : ''
+    let origin
+    try {
+      origin = new URL(baseUrl).origin
+    } catch {
+      return null
+    }
+
+    const credentials = system.credentials && typeof system.credentials === 'object' ? system.credentials : {}
+    // The SAME precedence the adapter uses at login, so the digest names the account set that
+    // would actually be authenticated rather than a look-alike field.
+    const acctId = [credentials.acctId, credentials.accountSet, credentials.accountSetId]
+      .find((v) => typeof v === 'string' && v.length > 0)
+    if (!acctId) return null
+
+    // Length-prefixed parts: without this, ('ab','c') and ('a','bc') digest identically and a
+    // collision could be constructed across the origin/acctId boundary.
+    const material = [system.kind, origin, acctId].map((part) => `${part.length}:${part}`).join('|')
+    // Reuse the credential store's deployment-scoped HMAC rather than standing up a second key
+    // path — it already resolves INTEGRATION_ENCRYPTION_KEY with the production/dev-fallback
+    // rules, and duplicated key management is how two paths drift apart.
+    if (!credentialStore || typeof credentialStore.fingerprint !== 'function') return null
+    return credentialStore.fingerprint(material)
+  }
+
   async function countPipelineReferences({ tenantId, workspaceId, id }) {
     const where = scopeWhere({ tenantId, workspaceId })
     const [sourcePipelineCount, targetPipelineCount] = await Promise.all([
@@ -412,6 +460,7 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     upsertExternalSystem,
     getExternalSystem,
     getExternalSystemForAdapter,
+    getExternalSystemInstanceDigest,
     deleteExternalSystem,
     listExternalSystems,
   }

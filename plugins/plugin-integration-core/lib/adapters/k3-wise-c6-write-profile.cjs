@@ -350,55 +350,44 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       // Without this, "bind to the target" silently permits one K3's read contract to certify a
       // DIFFERENT K3's write: the round-3 defect, reopened one level down. Fail-closed by
       // construction — it can only reject bindings the relation check already accepted.
-      if (binding && typeof b4.loadSystemById === 'function') {
+      // OWNER RULING 20260806 [P1] — INSTANCE DIGEST, not origin comparison.
+      //
+      // The previous gate compared `new URL(baseUrl).origin` of the bound record against the
+      // target's. But K3 WISE login requires acctId, so ONE server hosts many account sets: a read
+      // binding on account set A compared EQUAL to a write target on account set B, and the write
+      // would have gone into the wrong 账套. Origin equality is necessary, not sufficient.
+      //
+      // The digest is (kind, origin, acctId), HMAC'd inside the credential boundary; this module
+      // receives only opaque digests. Password rotation does not change it — the account set is
+      // the identity, not the secret.
+      if (binding && typeof b4.instanceDigestOf === 'function') {
         const boundSystemId = binding.config && binding.config.systemId
-        // D1 — THE INVARIANT, not just the convention. Making it POSSIBLE to bind the real read
-        // record (targetSystem.config.pairedReadSystemId joining the relation set) and switching
-        // the driver to do so changed what we DO; it did not change what is ACCEPTED.
-        // `pipelineSystemIds` is a UNION and still contains targetSystemId, the filter only asks
-        // "is it a member", and nothing anywhere asserted the bound id differs from the target.
-        // So a binding minted on the TARGET still passed, loadSystemById returned the very row
-        // that produced targetBaseUrl, and sameK3Instance(x, x) was tautologically true —
-        // the owner's original defect, still a green path.
-        //
-        // Refusing self-reference is what turns "the driver happens to bind the reader" into
-        // "the gate cannot be satisfied by comparing a record with itself".
+        // D1 (unchanged): a record cannot certify its own instance. Kept ahead of the digest
+        // compare because self-reference would otherwise produce two EQUAL digests and pass.
         if (typeof boundSystemId === 'string' && boundSystemId === system.id) {
           throw new AdapterValidationError(
             'the approved B4 binding names the write target itself; a record cannot certify its own instance',
             { code: 'K3_C6_B4_BINDING_SELF_REFERENTIAL', field: 'capabilityState' },
           )
         }
-        const targetBaseUrl = typeof b4.targetBaseUrl === 'string' ? b4.targetBaseUrl : ''
-        let boundBaseUrl = null
-        let boundKind = null
-        try {
-          const boundSystem = await b4.loadSystemById(boundSystemId)
-          boundBaseUrl = boundSystem && boundSystem.config ? boundSystem.config.baseUrl : null
-          boundKind = boundSystem ? boundSystem.kind : null
-        } catch {
-          boundBaseUrl = null
-          boundKind = null
-        }
-        // REVIEW P2-2 (exact-head round): origin equality was the SOLE discriminator, and origin
-        // says nothing about WHAT is at that origin. The reviewer proved it by construction --
-        // giving the poc harness's PLM source a baseUrl sharing the K3 target's origin let a PLM
-        // read contract certify a K3 write; the run only failed later, at the read, with a
-        // misleading K3_WISE_READ_FAILED/404. On-prem this is reachable whenever PLM and K3 sit
-        // behind one host, which is the normal deployment.
-        //
-        // The comment below already SAID this guard was about one K3 versus another K3 -- it just
-        // never checked that the bound record was a K3 at all. Asserting the kind is what makes
-        // the stated invariant true. Fail-closed: an unknown/unloadable kind is a mismatch.
-        if (boundKind !== K3_WISE_C6_WRITE_TARGET_KIND) {
+        const targetSystemId = typeof b4.targetSystemId === 'string' ? b4.targetSystemId : system.id
+        const [boundDigest, targetDigest] = await Promise.all([
+          b4.instanceDigestOf(boundSystemId).catch(() => null),
+          b4.instanceDigestOf(targetSystemId).catch(() => null),
+        ])
+        // FAIL-CLOSED on unknowable. A null digest means the record could not be resolved, its
+        // baseUrl did not parse, or it carries no authenticatable acctId — none of which is
+        // evidence of sameness. Two nulls must NOT compare equal.
+        if (typeof boundDigest !== 'string' || !boundDigest
+          || typeof targetDigest !== 'string' || !targetDigest) {
           throw new AdapterValidationError(
-            'the approved B4 binding names a system that is not a K3 WISE record',
-            { code: 'K3_C6_B4_BINDING_KIND_MISMATCH', field: 'capabilityState' },
+            'the K3 instance identity of the B4 binding or the write target could not be established',
+            { code: 'K3_C6_B4_BINDING_INSTANCE_UNVERIFIABLE', field: 'capabilityState' },
           )
         }
-        if (!sameK3Instance(boundBaseUrl, targetBaseUrl)) {
+        if (boundDigest !== targetDigest) {
           throw new AdapterValidationError(
-            'the approved B4 binding names a different K3 instance than the write target',
+            'the approved B4 binding names a different K3 instance or account set than the write target',
             { code: 'K3_C6_B4_BINDING_INSTANCE_MISMATCH', field: 'capabilityState' },
           )
         }

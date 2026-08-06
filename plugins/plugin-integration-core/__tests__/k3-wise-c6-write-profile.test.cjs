@@ -615,71 +615,71 @@ test('SAME-INSTANCE: the fail-closed branch is load-bearing (review P2-1)', () =
     'different hosts must not match')
 })
 
-test('SAME-INSTANCE: a B4 binding naming a DIFFERENT K3 instance is refused', async () => {
-  // Owner ruling 20260805 (「A, bind B4 to the K3-write record」). Binding to the target is what
-  // satisfies #4769's relation check once the pipeline source is no longer K3 — but it is only
-  // TRUE while both K3 records address the same physical K3. Without this check, one K3's read
-  // contract could certify a DIFFERENT K3's write: the round-3 defect, one level down.
-  const tokenStore = memoryStore()
-  const fetchPair = mockK3()
+test('INSTANCE DIGEST: identity is (kind, origin, acctId) — the account set, not just the host', async () => {
+  // OWNER RULING 20260806 [P1]. The previous gate compared origins only, but K3 WISE login
+  // REQUIRES acctId, so ONE server hosts many account sets. A read binding on account set A
+  // compared EQUAL to a write target on account set B, and the write would have landed in the
+  // wrong 账套. These three cases are the owner's pinned set.
+  //
+  // The fixture derives digests the SAME way production does — length-prefixed (kind, origin,
+  // acctId) — rather than inventing its own scheme. A fixture more permissive than production is
+  // exactly how the origin-only gap stayed invisible.
+  const crypto = require('node:crypto')
+  const digestOf = ({ kind, origin, acctId }) => {
+    if (!kind || !origin || !acctId) return null
+    const material = [kind, origin, acctId].map((part) => `${part.length}:${part}`).join('|')
+    return crypto.createHmac('sha256', 'test-key').update(material).digest('hex').slice(0, 16)
+  }
+  const K3 = 'erp:k3-wise-webapi'
+  const TARGET = { kind: K3, origin: 'https://k3.example.test', acctId: 'ACCT-A' }
 
-  // `boundKind` defaults to the real K3 kind so the ORIGIN cases below still exercise the origin
-  // comparison. Review P2-2: this fixture previously returned no `kind` at all, which is exactly
-  // why the gap was invisible from here — the fixture was more permissive than production.
-  async function planWith(boundBaseUrl, boundKind = 'erp:k3-wise-webapi') {
+  async function planWith(boundIdentity) {
+    const fetchPair = mockK3()
     const input = c6Inputs({ rows: [{ code: 'M-INST', name: 'N' }], fetchPair, tokenStore: memoryStore() })
     input.dataSourceWrites = createK3WiseC6WriteSource({
       system: k3TargetSystem(),
       createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: fetchPair.impl }),
       b4: b4Of([APPROVED_B4_ROW], {
-        targetBaseUrl: 'https://k3.example.test/K3API',
-        loadSystemById: async () => ({ id: 'k3-read-1', kind: boundKind, config: { baseUrl: boundBaseUrl } }),
+        targetSystemId: 'k3-write-target',
+        instanceDigestOf: async (id) => digestOf(id === 'k3-write-target' ? TARGET : boundIdentity),
       }),
     })
     return dryRunExternalWrite(input)
   }
 
-  // DIFFERENT host — must be refused.
+  // (1) SAME origin, DIFFERENT acctId — the defect this ruling names. MUST BE REFUSED.
   await assert.rejects(
-    planWith('https://OTHER-k3.example.test/K3API'),
-    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
-    'a binding on another K3 instance must not certify this write',
+    planWith({ kind: K3, origin: 'https://k3.example.test', acctId: 'ACCT-B' }),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'one server, two account sets: a binding on 账套 B must not certify a write to 账套 A',
   )
 
-  // POSITIVE CONTROL — same origin, DIFFERENT PATH. This is exactly the step 0-b topology (the
-  // armed record is pinned to its own endpoints), so a raw string compare would have rejected
-  // the only arrangement that actually works. Origin-level comparison is deliberate.
-  const plan = await planWith('https://k3.example.test/K3API-READ')
-  assert.ok(plan, 'same physical K3 on a different path must still be accepted')
+  // (2) SAME origin, SAME acctId, PASSWORD ROTATED — MUST BE ACCEPTED. The account set is the
+  // identity, not the secret; a digest over credentials would break on every rotation.
+  const rotated = await planWith({ ...TARGET })
+  assert.ok(rotated, 'the same account set on the same host must be accepted across a password rotation')
 
-  // FAIL-CLOSED on unknowable: an unresolvable system is not a match.
+  // (3) DIFFERENT origin — MUST BE REFUSED.
   await assert.rejects(
-    planWith(null),
-    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
-    '"cannot tell" must never read as "same instance"',
+    planWith({ kind: K3, origin: 'https://k3-other.example.test', acctId: 'ACCT-A' }),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'a different host must not certify this write',
   )
 
-  // REVIEW P2-2 — the defect this test NAMED but did not detect. Origin equality says nothing
-  // about WHAT is at that origin, and the guard never looked at the bound record's kind. An
-  // independent reviewer proved it by giving the poc harness's PLM source a baseUrl sharing the
-  // K3 target's origin: a PLM read contract certified the K3 write, and the run failed only
-  // later at the read with a misleading K3_WISE_READ_FAILED/404. Reachable on-prem whenever PLM
-  // and K3 sit behind one host — the normal deployment.
-  //
-  // Note this case is SAME-ORIGIN on purpose: it must be refused for its KIND, which means the
-  // origin comparison cannot be what rejects it. That is what makes this a discriminating case
-  // rather than a second spelling of the host-mismatch case above.
+  // (4) NON-K3 at the same origin and account set — the kind is IN the digest material, so it is
+  // refused without a separate kind gate. Pinned so that stays true.
   await assert.rejects(
-    planWith('https://k3.example.test/plm-api', 'plm:yuantus-wrapper'),
-    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_KIND_MISMATCH',
-    'a same-origin NON-K3 record must not certify a K3 write',
+    planWith({ kind: 'plm:yuantus-wrapper', origin: 'https://k3.example.test', acctId: 'ACCT-A' }),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'kind participates in the digest, so a same-origin non-K3 record cannot match',
   )
 
-  // FAIL-CLOSED on a missing kind (an older record, or a projection that omits it).
+  // (5) FAIL-CLOSED on unknowable: a record with no authenticatable acctId digests to null, and
+  // two nulls must NOT compare equal.
   await assert.rejects(
-    planWith('https://k3.example.test/K3API', null),
-    (error) => (error && error.details && error.details.code) === 'K3_C6_B4_BINDING_KIND_MISMATCH',
-    'an absent kind must never read as "it is a K3"',
+    planWith({ kind: K3, origin: 'https://k3.example.test', acctId: '' }),
+    (e) => (e && e.details && e.details.code) === 'K3_C6_B4_BINDING_INSTANCE_UNVERIFIABLE',
+    '"cannot establish identity" must never read as "same instance"',
   )
 })
 
