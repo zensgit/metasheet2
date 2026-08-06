@@ -143,9 +143,23 @@ profile。窗口不可重试,而这条会在步骤 1(read-smoke)当场失败。
    正确的做法是钉**最终批准包的精确身份**:
 
    ```
-   批准包 serviceRuntimeSha:  <彩排跑绿并冻结出包的那个 exact head>
-   包 digest / manifest:      <出包时记录>
+   批准包 serviceRuntimeSha:  aa48c3f187685b6f37aceed8cec1c5bcccc8b9a7
+   packageTgzSha256:         93aa75c9ea88ef8e52a6ebd96378ddb049e5c3bed785a40bdb4f7f2e8659d90f
+   packageZipSha256:         d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
+   出包 run:                 31103351286   (Stock-prep main package verify)
+   彩排 run:                 31103021849   (同一 head,17/17)
    ```
+
+   **这三个值的取得方式**:出包 lane 以 `expected_sha` 钉死 —— checkout 的 HEAD 与它不符即失败,
+   所以不需要事后核对包出自哪个 commit。该 run 自报 `buildShaSourcesAgree=PASS`、
+   `buildProvenanceGitCommitMatchesBuildSha=PASS`、`packageSource=BUILT_FROM_DISPATCHED_COMMIT`,
+   且 074/075 在 PostgreSQL 15/16/17 三个版本上均 `executed successfully`。
+
+   ⚠️ **这是一个可复现的身份,不是「客户可用」的背书。** 出包 lane 自己写明其证据类是
+   **受控合成功能证据**:它证明包过五检、含并真的应用 074/075、在临时 PG 15/16/17 上干净幂等;
+   它**不建立**关于真实客户生产、sealed-snapshot 语义、规模、外部写、rollout 或
+   PLM/ERP/CRM/SRM 泛化的任何结论。三层仍是三层:
+   `mock pass ≠ rehearsal pass ≠ customer live pass`。
 
    现场只接受**逐字等于**上面那个 SHA 的包。相等判定不会过期,也不需要有人判断
    「哪些修复算数」。
