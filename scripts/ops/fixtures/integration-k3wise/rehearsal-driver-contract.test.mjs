@@ -119,26 +119,30 @@ test('the seeding body is keyed through the RESOLVED PHYSICAL map, not logical n
 })
 
 test("the driver's OWN staging config carries projectId and a provisioned objectId", () => {
-  // Mutations M1/M2 exposed this: the behavioural test builds its own config, so the DRIVER's
-  // config was unguarded — dropping projectId or renaming the object key left the suite green
-  // while reproducing the exact reported failure. Wire-vs-fixture drift, inside the guard added
-  // to stop wire-vs-fixture drift.
+  // Mutations M1/M2/T5 exposed this: the behavioural test builds its own config, so the DRIVER's
+  // config was unguarded — dropping projectId, renaming the object key, or dropping the install
+  // assertion all stayed green while reproducing the exact reported failure.
+  const installerSrc = fs.readFileSync(
+    path.join(repoRoot, 'plugins/plugin-integration-core/lib/staging-installer.cjs'), 'utf8')
+  const provisioned = new Set(
+    [...installerSrc.matchAll(/^\s*id: '([a-z_]+)',\s*$/gm)].map((m) => m[1]))
+  assert.ok(provisioned.has('plm_raw_items'),
+    'descriptor scan failed — every assertion below would be vacuous')
+
   const cfgBlock = driver.slice(driver.indexOf("kind: 'metasheet:staging'"))
   const head = cfgBlock.slice(0, 900)
 
   assert.ok(/projectId:\s*stagingProjectId/.test(head),
-    'the staging source config must pass projectId — resolveProvisionedFieldIdMap returns {} '
-    + 'without it, and read() then yields raw fld_* keys with code/name empty')
+    'the staging config must pass projectId — resolveProvisionedFieldIdMap returns {} without it, '
+    + 'and read() then yields raw fld_* keys with code/name empty')
   assert.ok(/stagingProjectId\s*=\s*payload\(stagingInstall\)/.test(driver),
     'projectId must come from the staging/install response, not be hardcoded')
 
-  // The objects KEY must be a descriptor the installer actually provisions.
-  const installer = fs.readFileSync(
-    path.join(repoRoot, 'plugins/plugin-integration-core/lib/staging-installer.cjs'), 'utf8')
-  const provisioned = new Set(
-    [...installer.matchAll(/^\s*id: '([a-z_]+)',\s*$/gm)].map((m) => m[1]))
-  assert.ok(provisioned.has('plm_raw_items'),
-    'descriptor scan failed — the assertion below would be vacuous')
+  // T5: a null projectId is INVISIBLE downstream (key present, alias map empty, dry-run add:0),
+  // so it has to fail at the step that obtains it.
+  const installIdx = driver.indexOf("record('staging-install'")
+  assert.ok(/Boolean\(stagingProjectId\)/.test(driver.slice(installIdx, installIdx + 400)),
+    'staging-install must FAIL when projectId is absent, not merely record sheetId')
 
   const objectKey = (head.match(/objects:\s*\{[^]*?([a-z_]+):\s*\{/) || [])[1]
   assert.ok(objectKey, 'could not read the objects key from the driver')
@@ -146,10 +150,68 @@ test("the driver's OWN staging config carries projectId and a provisioned object
     `driver keys its staging object '${objectKey}', which the installer never provisions `
     + `(provisioned: ${[...provisioned].join(', ')}). resolveProvisionedFieldIdMap looks up `
     + '(projectId, objectId), so a wrong key silently yields an EMPTY alias map.')
-
-  // and the pipeline must select that same object
   assert.ok(driver.includes(`sourceObject: '${objectKey}'`),
     `the pipeline's sourceObject must match the staging objects key ('${objectKey}')`)
+
+  // P2-2 cross-namespace join: the seed resolves by DISPLAY NAME, the adapter by LOGICAL id.
+  // They agree only because ensureObject writes both onto one field, so pin the seed's lookup
+  // keys to the installer's display names — an i18n/rename then breaks HERE, loudly.
+  const seedHead = driver.slice(driver.indexOf('/api/multitable/records'), driver.indexOf('/api/multitable/records') + 900)
+  for (const displayName of ['Source System', 'Object Type', 'Source ID', 'Code', 'Name']) {
+    assert.ok(installerSrc.includes(`name: '${displayName}'`),
+      `installer no longer declares display name '${displayName}' — the seed's lookup key is stale`)
+    assert.ok(seedHead.includes(displayName),
+      `seed must key on the installer's display name '${displayName}'`)
+  }
+})
+
+test('credentials are read from the field the route RETURNS, and shape-checked', () => {
+  // THE META-FINDING of review r4: switching the driver to the CORRECT `.plaintext` left this
+  // suite 6/6 green. The guards caught the previous round's bug and were blind to this one — a
+  // test battery that only pins yesterday's defect.
+  //
+  // `POST /api/multitable/api-tokens` returns `{data:{token:<METADATA OBJECT>, plaintext:'mst_…'}}`.
+  // Reading `.token` yields a truthy OBJECT: the mint step reports PASS, then every later request
+  // sends `Bearer [object Object]` and 401s. False green, then deterministic failure.
+  const routeSrc = fs.readFileSync(
+    path.join(repoRoot, 'packages/core-backend/src/routes/api-tokens.ts'), 'utf8')
+  assert.ok(/plaintext:\s*result\.plainTextToken/.test(routeSrc),
+    'route scan failed — the assertions below would be vacuous')
+
+  const mintBlock = driver.slice(driver.indexOf('/api/multitable/api-tokens'))
+  const head = mintBlock.slice(0, 800)
+  assert.ok(/payload\(tokenMint\)\?\.plaintext/.test(head),
+    'the credential must be read from `.plaintext` — `.token` is the metadata object')
+  assert.equal(/payload\(tokenMint\)\?\.token\b/.test(head), false,
+    '`.token` is the ApiToken record, not a usable bearer credential')
+
+  // Truthiness is not enough: an object is truthy. Assert the SHAPE the auth layer routes on.
+  assert.ok(/startsWith\('mst_'\)/.test(head),
+    "apiTokenAuth routes on the `mst_` prefix; anything else falls through to the JWT path, so "
+    + 'the mint step must verify the prefix rather than mere truthiness')
+
+  // POSITIVE CONTROL — the old broken read must fail this test.
+  const brokenMint = "const T = payload(tokenMint)?.token || ''"
+  assert.equal(/\?\.plaintext/.test(brokenMint), false,
+    'the previous broken shape must not satisfy this assertion — otherwise it pins nothing')
+})
+
+test('no silent credential fallback, and no silent field-map degradation', () => {
+  // Review P2-1: `opts.token || TOKEN` fell back to the admin JWT whenever the minted token was
+  // empty — and `requireScope` PASSES a request carrying no apiTokenScopes, so the lane could not
+  // distinguish "the minted token works" from "the fallback rescued it". A rehearsal that cannot
+  // tell those apart is not evidence about the minted token at all.
+  assert.equal(/opts\.token \|\| TOKEN/.test(driver), false,
+    'the `||` fallback silently swaps identity to admin; use an explicit presence check')
+  assert.ok(/hasOwnProperty\.call\(opts, 'token'\)/.test(driver),
+    'an explicitly-passed token must be used as-is, even if empty, so failures surface')
+
+  // Same shape one level down: an unmapped field silently became its own label, which the route
+  // then rejects as an unknown fieldId — or worse, accepts into the wrong column.
+  assert.equal(/physicalByName\[label\] \|\| label/.test(driver), false,
+    'a missing physical mapping must not degrade to the literal label')
+  assert.ok(/__UNMAPPED__/.test(driver),
+    'an unmapped field must produce a loud, unmistakable key rather than a plausible one')
 })
 
 test('BEHAVIOURAL: a bare read yields LOGICAL keys only when projectId + objectId are right', async () => {

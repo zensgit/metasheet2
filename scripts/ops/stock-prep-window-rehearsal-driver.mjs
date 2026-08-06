@@ -79,7 +79,10 @@ async function call(method, path, body, opts = {}) {
         // `opts.token` exists for ONE caller: seeding the stand-in source sheet needs an OAPI
         // token with records:write, a different credential from the integration token every
         // other step uses. Defaulting to TOKEN keeps all existing call sites unchanged.
-        Authorization: `Bearer ${opts.token || TOKEN}`,
+        // NO `|| TOKEN` fallback: `requireScope` PASSES when a request carries no apiTokenScopes,
+        // so falling back would silently re-run the call as admin and the lane could not tell
+        // "the minted token works" from "the fallback saved us".
+        Authorization: `Bearer ${Object.prototype.hasOwnProperty.call(opts, 'token') ? opts.token : TOKEN}`,
         // The login token carries no tenant claim; jwt-middleware copies this header into
         // user.tenantId, which is what resolveAuthUserTenantId (write paths) exclusively trusts.
         'x-tenant-id': TENANT_ID,
@@ -182,9 +185,13 @@ const stagingInstall = await call('POST', '/api/integration/staging/install', {}
 const stagingSheets = payload(stagingInstall)?.sheetIds || {}
 const stagingProjectId = payload(stagingInstall)?.projectId || null
 const stagingSheetId = stagingSheets.plm_raw_items || null
-record('staging-install', ok(stagingInstall) && Boolean(stagingSheetId), {
+record('staging-install', ok(stagingInstall) && Boolean(stagingSheetId) && Boolean(stagingProjectId), {
   status: stagingInstall.status,
   sheetCount: Object.keys(stagingSheets).length,
+  // projectId is asserted HERE because a null one is invisible downstream: the config still
+  // *has* the key, the adapter's alias map comes back empty, and the dry-run reports add:0 —
+  // the exact symptom owner review caught by hand.
+  projectIdPresent: Boolean(stagingProjectId),
 })
 
 const sourceStagingSystem = await call('POST', '/api/integration/external-systems', {
@@ -242,13 +249,21 @@ const tokenMint = await call('POST', '/api/multitable/api-tokens', {
   name: 'rehearsal-seed (ephemeral)',
   scopes: ['records:write', 'fields:read'],
 })
-const MULTITABLE_TOKEN = payload(tokenMint)?.token || ''
-record('mint-seed-token', ok(tokenMint) && Boolean(MULTITABLE_TOKEN), {
+// `data.token` is the ApiToken METADATA object; the credential is `data.plaintext` ('mst_…').
+// Reading `.token` produced a truthy OBJECT, so the mint step reported PASS while every
+// subsequent request sent `Bearer [object Object]` and 401'd — a FALSE GREEN followed by a
+// deterministic failure four steps later.
+const MULTITABLE_TOKEN = payload(tokenMint)?.plaintext || ''
+const mintedTokenUsable = typeof MULTITABLE_TOKEN === 'string' && MULTITABLE_TOKEN.startsWith('mst_')
+record('mint-seed-token', ok(tokenMint) && mintedTokenUsable, {
   status: tokenMint.status,
-  scopes: 1,
+  // Assert the SHAPE that makes the credential work, not mere truthiness: `apiTokenAuth` routes
+  // on the `mst_` prefix, so anything else silently falls through to the JWT path.
+  usableShape: mintedTokenUsable,
 })
-if (!MULTITABLE_TOKEN) {
-  console.error('rehearsal driver: could not mint a records:write token from the admin session')
+if (!mintedTokenUsable) {
+  console.error('rehearsal driver: minted token is not a usable mst_ credential '
+    + '(data.plaintext missing or wrong shape)')
   console.log(`REHEARSAL_SUMMARY=${JSON.stringify({ steps, pass: false })}`)
   process.exit(1)
 }
@@ -288,7 +303,7 @@ for (const row of seedRows) {
       'Source ID': row.code,
       Code: row.code,
       Name: row.name,
-    }).map(([label, value]) => [physicalByName[label] || label, value])),
+    }).map(([label, value]) => [physicalByName[label] || `__UNMAPPED__${label}`, value])),
   }, { token: MULTITABLE_TOKEN })
   seeded.push(ok(r))
 }
