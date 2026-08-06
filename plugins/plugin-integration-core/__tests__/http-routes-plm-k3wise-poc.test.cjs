@@ -292,6 +292,29 @@ function createExternalSystemRegistry() {
       const system = systems.get(input.id)
       return system && inScope(system, input) ? clone(system) : null
     },
+    // OWNER RULING 20260806 [P1]. This LOCAL fixture stands in for the production registry and did
+    // NOT implement the new digest accessor — so the entire instance gate silently did not run
+    // here, and a PLM binding sailed through to the wire. "Mock is not the contract" again: a
+    // fixture missing a method is indistinguishable from a gate that decided to allow.
+    //
+    // Derived the SAME way production does (external-systems.cjs): length-prefixed
+    // (kind, origin, acctId), fail-closed to null on any missing part.
+    async getExternalSystemInstanceDigest(input = {}) {
+      const system = systems.get(input.id)
+      if (!system || !inScope(system, input)) return null
+      if (typeof system.kind !== 'string' || !system.kind) return null
+      let origin
+      try {
+        origin = new URL((system.config && system.config.baseUrl) || '').origin
+      } catch {
+        return null
+      }
+      const c = system.credentials && typeof system.credentials === 'object' ? system.credentials : {}
+      const acctId = [c.acctId, c.accountSet, c.accountSetId].find((v) => typeof v === 'string' && v.length > 0)
+      if (!acctId) return null
+      const material = [system.kind, origin, acctId].map((part) => `${part.length}:${part}`).join('|')
+      return require('node:crypto').createHmac('sha256', 'poc-fixture-key').update(material).digest('hex').slice(0, 16)
+    },
     async deleteExternalSystem(input = {}) {
       const system = systems.get(input.id)
       if (!system || !inScope(system, input)) return null
@@ -731,8 +754,14 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
       assertOkResponse(r, 201)
       return r.body.data
     }
+    // OWNER RULING 20260806 [P1] + earlier review: with `config: {}` this record's digest is null,
+    // so case (6) below refused it for "cannot tell" rather than for being a different instance —
+    // passing for the wrong reason. Given a SAME-ORIGIN, SAME-acctId identity, its digest is
+    // computable and differs ONLY by kind, which is what makes the case discriminating.
     const plm = await mkSystem({
-      name: 'PLM probe', kind: 'plm:yuantus-wrapper', role: 'source', status: 'active', config: {},
+      name: 'PLM probe', kind: 'plm:yuantus-wrapper', role: 'source', status: 'active',
+      config: { baseUrl: 'https://k3.example.test/plm-api' },
+      credentials: { username: 'demo', password: 'secret', acctId: '001' },
     })
     // OWNER REVIEW 20260806 [P1]: the real customer topology is THREE records — a staging/PLM
     // source, a K3 READ record, and a K3 WRITE target. Without the read record in this harness the
@@ -867,8 +896,9 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   // PLM — which is both the true reason and the one that still holds when the origins match.
   const crossInstance = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
   const crossErr = ((crossInstance.res.body && crossInstance.res.body.error) || {})
-  assert.equal(crossErr.details && crossErr.details.code, 'K3_C6_B4_BINDING_KIND_MISMATCH',
-    `a binding on the PLM source must be refused because it is not a K3 record, got: ${JSON.stringify(crossErr)}`)
+  assert.equal(crossErr.details && crossErr.details.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'a SAME-ORIGIN, SAME-account-set NON-K3 record must not certify this write — kind participates '
+    + `in the instance digest, so its digest differs; got: ${JSON.stringify(crossErr)}`)
 
   // (6b) OWNER REVIEW 20260806 [P1] — THE READ/WRITE COMPARISON ITSELF.
   //
