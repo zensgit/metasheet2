@@ -13,6 +13,41 @@ import { pathToFileURL } from 'node:url'
 
 const ALLOWED_STATUSES = new Set(['PASS', 'BLOCKED', 'FAIL'])
 
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+/**
+ * Owner P2 hardening: when an evidence summary is present, its cases[] must be EXACTLY the closed set
+ * of matrix ids — reject id-less entries, DUPLICATE ids (which the id->entry map would silently
+ * overwrite), EXTRA ids, and MISSING ids. Validated on the RAW array, BEFORE any map collapse.
+ */
+function validateEvidenceCaseSet(rawCases, matrixIds) {
+  if (!Array.isArray(rawCases)) {
+    throw new Error('Evidence summary.cases must be an array of per-case entries.')
+  }
+  const seen = new Set()
+  for (const entry of rawCases) {
+    if (!entry || typeof entry.id !== 'string' || entry.id.trim() === '') {
+      throw new Error('Evidence summary.cases contains an entry with no id.')
+    }
+    if (seen.has(entry.id)) {
+      throw new Error(`Evidence summary.cases contains a DUPLICATE id: ${entry.id}`)
+    }
+    seen.add(entry.id)
+  }
+  const expected = new Set(matrixIds)
+  const missing = matrixIds.filter((id) => !seen.has(id))
+  const extra = [...seen].filter((id) => !expected.has(id))
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `Evidence summary.cases must be exactly the ${matrixIds.length} matrix ids. ` +
+        `missing: ${missing.length ? missing.join(', ') : '(none)'}; ` +
+        `extra: ${extra.length ? extra.join(', ') : '(none)'}`,
+    )
+  }
+}
+
 function parseArgs(argv) {
   const result = {
     root: process.cwd(),
@@ -107,13 +142,16 @@ function loadEvidence(evidenceDir) {
     return { cases: {}, residue: null, sourceSha: null, filePath: summaryPath }
   }
   const summary = readJson(summaryPath)
+  const rawCases = summary.cases
   const cases = {}
-  for (const entry of summary.cases || []) {
+  for (const entry of Array.isArray(rawCases) ? rawCases : []) {
     if (!entry || !entry.id) continue
     cases[entry.id] = entry
   }
   return {
     cases,
+    rawCases,
+    hasSummary: true,
     residue: summary.residue ?? null,
     sourceSha: summary.sourceSha || summary.source_sha || null,
     filePath: summaryPath,
@@ -121,9 +159,13 @@ function loadEvidence(evidenceDir) {
   }
 }
 
-function evidenceValue(evidenceCase, evidence, key) {
+// Owner P2 hardening: the shared SAFETY fields are read PER-CASE ONLY — no top-level (`raw`)
+// fallback. Otherwise one shared top-level affirmation would cover all ten cases (the exact
+// "fill status + shared safety fields" forge the owner flagged). residue/sourceSha keep their
+// legitimate top-level fallback (residue is a single global measurement; both handled elsewhere).
+function evidenceValue(evidenceCase, _evidence, key) {
   if (Object.prototype.hasOwnProperty.call(evidenceCase, key)) return evidenceCase[key]
-  return evidence.raw?.[key]
+  return undefined
 }
 
 function evaluateCase(matrixCase, evidence, packageSha, staleEvidenceShas, isolatedDatabaseName) {
@@ -173,6 +215,29 @@ function evaluateCase(matrixCase, evidence, packageSha, staleEvidenceShas, isola
   }
 
   if (status === 'PASS') {
+    // Owner P2 hardening: PASS requires a non-empty per-case reason AND a non-empty per-case
+    // evidence field (step output / SQL result / file reference) — no top-level fallback, no
+    // whitespace-only. Status + safety fields alone can no longer forge a PASS.
+    if (!nonEmptyString(evidenceCase.reason)) {
+      return {
+        id: matrixCase.id,
+        title: matrixCase.title,
+        status: 'BLOCKED',
+        reason: 'PASS requires a non-empty per-case reason.',
+        requiresHostEvidence: Boolean(matrixCase.requiresHostEvidence),
+      }
+    }
+    const evidenceField =
+      evidenceCase.evidence ?? evidenceCase.stepOutput ?? evidenceCase.sqlResult ?? evidenceCase.fileReference
+    if (!nonEmptyString(evidenceField)) {
+      return {
+        id: matrixCase.id,
+        title: matrixCase.title,
+        status: 'BLOCKED',
+        reason: 'PASS requires a non-empty per-case evidence field (step output / SQL result / file reference).',
+        requiresHostEvidence: Boolean(matrixCase.requiresHostEvidence),
+      }
+    }
     if (evidenceCase.syntheticDataOnly !== true) {
       return {
         id: matrixCase.id,
@@ -324,6 +389,11 @@ export function runWindowsNativeQaMatrix(options = {}) {
   }
 
   const evidence = loadEvidence(options.evidenceDir || '')
+  // Owner P2 hardening: when a summary is present, its cases[] must be exactly the closed matrix set
+  // (reject id-less, DUPLICATE, extra, or missing ids). No summary at all stays valid -> all BLOCKED.
+  if (evidence.hasSummary) {
+    validateEvidenceCaseSet(evidence.rawCases, (matrix.cases || []).map((c) => c.id))
+  }
   if (evidence.sourceSha) {
     const evidenceSha = normalizeSha(evidence.sourceSha, 'evidence summary sourceSha')
     if ((matrix.staleEvidenceShas || []).includes(evidenceSha)) {
