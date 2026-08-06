@@ -34,6 +34,26 @@ test('builder emits the exact no-Git C-stage sidecar contract with complete chec
     const provenance = JSON.parse(fs.readFileSync(path.join(packageDir, 'BUILD_PROVENANCE.json'), 'utf8'))
     assert.equal(provenance.sourceGitCommit, SOURCE_SHA)
     assert.equal(provenance.frozenRuntimeGitCommit, 'd87e086fd1218b4cfb150177d43f2c52904b1d6d')
+
+    // REVIEW P2-2 + a real incident: the rule "editing a frozen helper requires cutting a new
+    // pinned release" lived ONLY in a comment, and nothing checked that FROZEN_RUNTIME_SHA names
+    // a real released runtime. I proved the gap by falling in it — I bumped this constant to a
+    // DOCS commit (`fbb54db3c`, a section-order fix) with no tag, no release and no on-prem
+    // acceptance, and every suite stayed green. The tell was available offline the whole time:
+    // `stock-preparation-rca-window.ps1` ships in this SAME archive and names the runtime in
+    // prose, so the two disagreed. That disagreement is now a test.
+    const windowScript = fs.readFileSync(
+      path.join(repoRoot, 'scripts/ops/stock-preparation-rca-window.ps1'), 'utf8')
+    const shortSha = provenance.frozenRuntimeGitCommit.slice(0, 9)
+    assert.ok(
+      windowScript.includes(shortSha),
+      `in-package incoherence: BUILD_PROVENANCE.json says frozenRuntimeGitCommit=${shortSha}, `
+      + 'but stock-preparation-rca-window.ps1 — shipped in the SAME archive — names a different '
+      + 'runtime. Bumping the pin without cutting a real release is what this catches.',
+    )
+    // POSITIVE CONTROL: the check must be able to FAIL, or it asserts nothing.
+    assert.equal(windowScript.includes('deadbeef0'), false,
+      'the coherence check must not pass for an arbitrary sha')
     assert.equal(provenance.externalWrite, false)
     assert.equal(
       provenance.frozenHelperSha256['stock-preparation-rca-window-pm2-sample.mjs'],
