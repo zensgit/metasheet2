@@ -431,6 +431,16 @@ record('dry-run',
     planStatus: dryRunOut?.status ?? null,
     sourceRows: dryRunOut?.counts?.sourceRows ?? null,
     add: dryRunOut?.counts?.add ?? null,
+    // ATTRIBUTION. This step is also the discriminator for the owner's reported P1 (staging read
+    // returning fld_* with code/name empty): both fieldMappings carry `required`, validateRecord's
+    // `required` uses isEmpty() (undefined/null/whitespace), and a validation failure does
+    // `counts.failed += 1; continue` — so the row never reaches counts[decision] and canApply
+    // requires failed===0 && held===0. An empty column therefore CANNOT produce a green dry-run.
+    // But `add` alone says only THAT it failed; these say WHY — validation vs missing target key —
+    // which is the attribution a separate bare-read step would have bought. statusCounts()
+    // (external-write-dry-run.cjs:369) always emits both, so a null here means the shape changed.
+    failed: dryRunOut?.counts?.failed ?? null,
+    held: dryRunOut?.counts?.held ?? null,
     tokenPresent: typeof dryRunOut?.dryRunToken === 'string',
   })
 
