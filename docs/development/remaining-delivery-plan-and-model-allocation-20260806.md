@@ -2,8 +2,8 @@
 
 回答一个问题:**这两条线还剩多少开发,什么时候可交付测试。**
 
-本文的每条状态都对 `origin/main` 与 GitHub API 复核过,不引用记忆。易变事实(PR 是否已合、
-某 check 是否 required)按 [[feedback_verify_against_current_main_not_stale_base]] 的要求逐条打过 API。
+本文的每条状态都对 `origin/main` 与 GitHub API 复核过,不引用记忆。易变事实(PR 是否已合、某 check 是否 required)一律现打 API 复核,
+数字的取数命令写在正文里以便复算。
 
 ---
 
@@ -15,7 +15,7 @@
 | 备料 / K3 首 profile | **功能已落尽** | 2 个 PR,均非新功能 | 我方(今日可清) |
 | 实体机窗口(先读后写) | — | 排期 + 现场执行 | **owner** |
 
-**"还有多少开发"的答案是:功能开发为零。** 剩下的两个 PR 一个是修真 bug,
+**"还有多少开发"的答案:新功能为零,但不等于「无剩余开发」。** 剩下的两个 PR 一个是修真 bug,
 一个是让 runbook 对着真实部署包跑一遍。之后的关键路径不在代码,在客户窗口排期。
 
 ---
@@ -73,11 +73,11 @@ B1a 各票已于 2026-07-26 MERGED —— **逐个核实**:#4601 / #4603 / #4604
 
 ### 2.2 剩余两项
 
-**#4784 — C6 用剥凭据的 accessor 载入写 target**(READY,已 arm,checks 跑中)。
+**#4784 — C6 用剥凭据的 accessor 载入写 target**(**已 MERGED** `e6523c949`)。
 是真 bug:两处 C6 handler 用 `getExternalSystem` 拿到的是**去凭据**的公开响应,
 adapter-backed 的 target kind 必须改用 `getExternalSystemForAdapter` 重载。
 
-**#4768 — staging 窗口彩排**(Draft,依赖 #4784)。让 runbook 对着真实部署包整条跑一遍。
+**#4768 — staging 窗口彩排**(Draft;#4784 已合,本分支已 rebase 其上)。让 runbook 对着真实部署包整条跑一遍。
 本轮已解 owner 报的 source P1,机制如下(不是绕过,是找到真正的接合点):
 
 `ensureObject` 把**一行字段**同时写成两个身份(`provisioning.ts:696`):
@@ -105,19 +105,31 @@ required 用 `isEmpty()`(undefined/null/纯空白),失败即 `counts.failed += 1
 (行到不了 `counts[decision]`),而 `canApply` 要求 `failed===0 && held===0`
 ⇒ **code/name 为空不可能跑出绿 dry-run**。缺的只是归因,已补 `counts.failed`/`counts.held` 进证据。
 
-### 2.3 未解、标为 deferred(不装作已处理)
+### 2.3 B4 同实例门——已闭合(owner 20260806 复审后本轮修掉)
 
-**B4 同实例门仍是 target 与自身比较**,没有验证真实 K3 *read* record 与 *write* record 的关系。
-不阻塞彩排(彩排把 B4 绑到 target,是因为源不再是 K3 后 #4769 的关系检查只能这样满足),
-但它是 owner 点名的敞口,闭合动作属于驱动器,单独立项。
+**此前确实是 target 与自身比较**:驱动器另建了 K3 读记录,却用 `targetSystemId` 铸 B4;
+路由再从同一个 target 取 `targetBaseUrl`,profile 按同一 id 重载后比较。**真实读记录从未进入
+比较**,两台不同的 K3 也能通过 —— 这个检查在结构上就不可能发现读写错配,换任何比较函数都没用。
+
+根因是关系检查的可达范围:非 K3 源时读记录两端都不是,绑 target 是**唯一**能满足 #4769 的选择。
+现在写目标显式声明配对读记录(`config.pairedReadSystemId`),该 id 加入关系集合,于是 B4 绑
+**真实读记录**、守卫比较**两条确实不同的记录**。刻意收窄:只认 target 自己点名的那一条,
+且仍须过 ratified 合同匹配、kind 门与同实例门。
+
+**这一改动把 #4769 的关系检查放宽了一个 target 声明的 id** —— 属于动已 ratify 的闸,
+依 owner 明确指示执行,在此标注以便复核。
+
+控制(走真实路由):A→A 同一台 K3(同源不同路径,即步 0-b 拓扑)**必须接受**;
+A→B 读记录在另一台 K3 **必须拒绝**。变异:`sameK3Instance → true` 令 A→B 变红;
+从关系集合去掉 `pairedReadSystemId` 令 A→A 变红。
 
 ---
 
 ## 3. 时间线与关键路径
 
 ```
-#4784 落地  ──►  #4768 rebase  ──►  exact-head 对抗审  ──►  Ready/arm  ──►  合并  ──►  dispatch 彩排
-  (今日)                                                                              │
+#4784 已合 ──►  #4768 已 rebase ──►  短复审(新 head) ──►  Ready/arm ──►  合并 ──►  dispatch 彩排
+   ✅            ✅                                                                                      │
                                                                                       ▼
                                                         ┌───────────────────────────────────┐
                                                         │ 实体机窗口:先读后写(owner 排期) │
@@ -151,7 +163,7 @@ required 用 `isEmpty()`(undefined/null/纯空白),失败即 `counts.failed += 1
 |---|---|---|
 | #4768 exact-head 对抗审 | **opus 5** | 闸门;且本 PR 已四次出现「守卫被测但接线未被测」 |
 | #4784 合并后的 rebase 与冲突处理 | **sonnet 5** | 形状确定的机械操作 |
-| B4 同实例门闭合(deferred) | **opus 5** | 判据开放:要定义"同一台物理 K3"的可证判据,而非再加一条比较 |
+| ~~B4 同实例门闭合~~ | **opus 5** | 已完成(§2.3)。判据确实开放,最终解不是换比较函数,而是让关系检查够得着真实读记录 |
 | 彩排跑绿后的验收 MD 回填 | **fable 5** | 形状固定,填实测值 |
 | GIP sealed_snapshot(若 owner 放行) | **opus 5** | 新认证刀,判据全开放 |
 
@@ -169,7 +181,7 @@ F.1 曾把 R1 估成 0.5–2.0 人天,实耗 ~1.5,但**轮次是估计的 2 倍�
 |---|---|
 | main 出包验证矩阵(build→五检→同源→一字节负控→PG 15/16/17) | ✅ 实跑全绿 run 30979764981(7/7) |
 | 候选包 serviceRuntimeSha | `e1b91594e` |
-| `rehearsal-driver-contract.test.mjs` | ✅ 10/10,`plugin-tests.yml` 门控(PR 触发无路径过滤) |
+| `rehearsal-driver-contract.test.mjs` | ✅ 10/10。**勘误**:此前写「plugin-tests.yml 门控」是错的——它跑在 `k3wise-offline-poc` job,而该 check **不在 9 条 required 里**,红了不挡合。现已同时挂进 required 的 `test` job |
 | `rehearsal-harness.test.mjs` | ✅ 5/5,同一 CI step |
 | 彩排端到端(真实部署包) | ⏳ 待 #4768 合并后 dispatch |
 | 实体机先读后写 | ⏳ 待 owner 排窗口 |
