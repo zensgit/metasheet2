@@ -258,8 +258,8 @@ import { canaryRoutes } from './routes/canary-routes'
 import { CanaryRouter } from './canary/CanaryRouter'
 import { createCanaryInterceptor } from './canary/CanaryInterceptor'
 import { PluginRuntimeSecurityService } from './security/plugin-runtime-security-service'
-import workflowRouter from './routes/workflow'
-import workflowDesignerRouter from './routes/workflow-designer'
+import workflowRouter, { shutdownWorkflowEngine } from './routes/workflow'
+import workflowDesignerRouter, { shutdownWorkflowDesignerEngine } from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import plmEmbedRouter from './routes/plm-embed'
 import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
@@ -2694,6 +2694,34 @@ export class MetaSheetServer {
         stopAttendanceScheduler()
       } catch (err) {
         this.logger.warn(`Attendance scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    // BPMN workflow engine's `node-cron` minute poller (see `routes/workflow.ts` /
+    // `BPMNWorkflowEngine.shutdown()`; env-gated OFF by default via
+    // `ENABLE_BPMN_TIMER_POLLER`, see `bpmnTimerPollerConfig.ts`): previously only stopped
+    // on a real OS SIGTERM, never reached from a direct `.stop()` call (the common path in
+    // tests) — leaving it to keep querying the DB pool this same `stop()` closes just
+    // above. `BPMNWorkflowEngine.shutdown()` itself awaits any in-flight poller tick,
+    // which is the actual race-closing guarantee this needs.
+    shutdownTasks.push((async () => {
+      try {
+        await shutdownWorkflowEngine()
+      } catch (err) {
+        this.logger.warn(`Workflow engine shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    // Symmetric to the above (P3-a, #4783 review): `routes/workflow-designer.ts`
+    // constructs its OWN independent `BPMNWorkflowEngine` instance (lazily, on first
+    // designer-route call), which the shutdown call above does not reach. Same
+    // env-gated poller, same in-flight-tick drain guarantee via
+    // `BPMNWorkflowEngine.shutdown()`, and equally safe to call when never initialized.
+    shutdownTasks.push((async () => {
+      try {
+        await shutdownWorkflowDesignerEngine()
+      } catch (err) {
+        this.logger.warn(`Workflow designer engine shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     })())
 

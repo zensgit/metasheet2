@@ -36,7 +36,13 @@ import {
   type VerifiedAttendanceOperationIdentityV1,
 } from './w4c0-identity'
 import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
-import { ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1 } from './w4c3b-request-snapshots'
+import {
+  ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1,
+  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+  computeAttendanceRequestPayloadFingerprintV1,
+  extractAttendanceRequestPayloadMetadataFieldsV1,
+  type AttendanceRequestCalculationPayloadV1,
+} from './w4c3b-request-snapshots'
 
 export class AttendanceW4C3aRolloutControlError extends Error {
   readonly code: string
@@ -793,29 +799,166 @@ async function countUnresolvedIngressReviews(
   return result.rows.length
 }
 
+// ---------------------------------------------------------------------------
+// W4C-5 §3 request-snapshot precondition — closed 8-cell set (issue #4775).
+//
+// The amendment (`docs/development/attendance-issue-4556-w4c5-transition-safety-amendment-
+// 20260804.md:96-98`) requires: "eligibility/authority has zero pending or reversible
+// calculation-affecting request whose latest snapshot is missing, unsupported, payload-stale, or
+// reversal-incomplete" = (pending | reversible) x (missing | unsupported | payload-stale |
+// reversal-incomplete). PR #4773 implemented 2 of 8 cells (pending x {missing, unsupported}) and
+// self-reported the remaining 6 as a verified, not-guessed, blocking gap (see that PR's "Weak
+// spots" §1). This section closes all 8.
+// ---------------------------------------------------------------------------
+
+export const ATTENDANCE_REQUEST_SNAPSHOT_DEFECT_CELLS_V1 = Object.freeze([
+  'pendingMissing',
+  'pendingUnsupported',
+  'pendingPayloadStale',
+  'pendingReversalIncomplete',
+  'reversibleMissing',
+  'reversibleUnsupported',
+  'reversiblePayloadStale',
+  'reversibleReversalIncomplete',
+] as const)
+
+export type AttendanceRequestSnapshotDefectCellV1 =
+  (typeof ATTENDANCE_REQUEST_SNAPSHOT_DEFECT_CELLS_V1)[number]
+
+export type AttendanceRequestSnapshotDefectCountsV1 =
+  Readonly<Record<AttendanceRequestSnapshotDefectCellV1, number>>
+
 /**
- * Entry into eligible|authoritative: zero pending calculation-affecting request whose latest
- * snapshot is missing or `unsupported`. This is a narrower, mechanically-verifiable slice of
- * lock section 9 bullet 5 — it does NOT evaluate the "reversible" (approved-but-cancellable) half
- * or payload-staleness against live per-type request fields; see the amendment tracking note.
+ * `byCell` counts (request, defect-kind) PAIRS — a single request row can independently land in
+ * more than one cell (e.g. `unsupported` and `reversal-incomplete` at once), since the four defect
+ * checks are evaluated independently, not as a priority chain (see
+ * `classifyAttendanceRequestSnapshotDefectsV1` below). `totalDefectiveRequests` counts DISTINCT
+ * defective requests (0 or 1 per row) — the pre-existing `defectiveRequestSnapshots` evidence
+ * field's semantic, preserved unchanged so the exact-shape evidence test's meaning does not shift
+ * under an unrelated rename.
  */
-async function countDefectivePendingRequestSnapshots(
+export type AttendanceRequestSnapshotDefectReportV1 = Readonly<{
+  totalDefectiveRequests: number
+  byCell: AttendanceRequestSnapshotDefectCountsV1
+}>
+
+function emptyAttendanceRequestSnapshotDefectCounts(): Record<AttendanceRequestSnapshotDefectCellV1, number> {
+  const out = {} as Record<AttendanceRequestSnapshotDefectCellV1, number>
+  for (const cell of ATTENDANCE_REQUEST_SNAPSHOT_DEFECT_CELLS_V1) out[cell] = 0
+  return out
+}
+
+/**
+ * Recomputes the fingerprint the STORED snapshot `payload` column would produce under the exact
+ * same domain-separated canonical-JSON hash the writers use
+ * (`computeAttendanceRequestPayloadFingerprintV1`), rather than trusting the stored
+ * `payload_fingerprint` column as a truthful proxy for the stored payload's own content (W4C-5 §3
+ * owner-review P2, PR #4780). Returns `null` when the stored payload does not decode under the
+ * writers' own closed-shape validator (`normalizeAttendanceRequestCalculationPayloadV1`, reached
+ * through `computeAttendanceRequestPayloadFingerprintV1`) — a payload that cannot even be
+ * re-hashed is itself proof the row is inconsistent, not something the caller should treat as a
+ * pass. Every writer-produced row (append-boundary create/edit) always re-hashes successfully;
+ * only a payload written or altered outside that boundary can fail here.
+ */
+function computeStoredRequestSnapshotPayloadFingerprintV1(rawPayload: unknown): string | null {
+  try {
+    return computeAttendanceRequestPayloadFingerprintV1(
+      rawPayload as AttendanceRequestCalculationPayloadV1,
+    )
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Entry into eligible|authoritative: zero pending or reversible calculation-affecting request
+ * whose latest snapshot is missing, unsupported, payload-stale, or reversal-incomplete.
+ *
+ * Bucket definitions (mechanically verified against the plugin, not assumed):
+ *  - pending: `status = 'pending'`. Every calculation-affecting type can reach this state and can
+ *    be cancelled from it through the shared cancel adapter.
+ *  - reversible: `status = 'approved' AND request_type = 'leave'` — the ONLY combination the
+ *    plugin's shared cancel adapter (`plugins/plugin-attendance/index.cjs`, `requestCancelAdapter`)
+ *    permits to cancel an ALREADY-terminal (already-decided) request. `:34091` sets
+ *    `approvedLeave = requestRow.status === 'approved' && requestRow.request_type === 'leave'`;
+ *    `:34174` hard-blocks every other already-resolved request from reaching cancellation
+ *    (`if (requestRow.status !== 'pending' && !approvedLeave) throw HttpError(400, ...)`). No
+ *    other writer in `plugins/` or `packages/` sets `attendance_requests.status = 'cancelled'`
+ *    (swept both raw-SQL and Kysely-builder syntax against current `origin/main`) — a request
+ *    reaching `status = 'approved'` for a non-`leave` type is, today, terminal and never
+ *    reversible. A future request type gaining a post-approval cancel path would need this bucket
+ *    definition revisited explicitly, not silently inherited.
+ *
+ * Defect kinds:
+ *  - missing: no snapshot row exists for the request.
+ *  - unsupported: the latest snapshot's attribution posture is not `resolved_v2`.
+ *  - payload-stale: a THREE-WAY hash join, not a one-sided fingerprint compare (W4C-5 §3
+ *    owner-review P2, PR #4780). The pre-#4780 check only compared the recomputed live
+ *    fingerprint against the STORED `payload_fingerprint` column — it never re-hashed the stored
+ *    `payload` column itself. `chk_arcs_payload_fp` only shape-checks that column (`^[0-9a-f]
+ *    {64}$`); nothing in the database binds it to the stored payload's actual content. A stored
+ *    row whose `payload` is genuinely stale but whose `payload_fingerprint` field was written (by
+ *    a bug, a direct write outside the append boundary, or tampering) to equal the LIVE row's
+ *    fingerprint instead of a hash of the stale payload actually stored would satisfy that
+ *    one-sided compare and pass through undetected — the whole point of a payload/fingerprint
+ *    PAIR is defeated if only one side of the pair is ever independently verified. The fixed
+ *    predicate instead requires `hash(storedPayload) == storedFingerprint == hash(livePayload)`;
+ *    any of the three being unequal (including the stored payload failing to decode under the
+ *    writers' own closed-shape validator at all) is `payload-stale`. Both hashes are computed via
+ *    the same closed-payload/fingerprint functions the create/edit snapshot writers use
+ *    (`buildAttendanceRequestCalculationPayloadFromRequestRowV1` +
+ *    `computeAttendanceRequestPayloadFingerprintV1`) fed by
+ *    `extractAttendanceRequestPayloadMetadataFieldsV1` for the type-specific
+ *    `minutes`/`leaveTypeCode`/`outdoorPunch` fields (that function's own doc comment records why
+ *    this is a full, not narrowed, live-payload reconstruction, and its one known weak spot: a
+ *    second, non-shared copy of the plugin's identical field-extraction logic). A break anywhere
+ *    in the three-way join means some writer mutated the request's calculation-affecting fields
+ *    without appending a new snapshot version, or the stored pair itself is internally
+ *    inconsistent — either way the OCC contract `appendAttendanceRequestEditSnapshotV1` requires
+ *    of every in-boundary edit has been violated.
+ *  - reversal-incomplete: the request's linked `approval_instances` row has been revoked
+ *    (`status = 'cancelled'`) while the request itself is still `pending`/`approved` (bucket
+ *    membership already guarantees "not yet cancelled/rejected"). This is the exact torn state a
+ *    crash between the approval-revoke UPDATE and the request-status UPDATE inside the shared
+ *    cancel adapter's single transaction (`index.cjs` `executeRequestCancel`, `:34208`-`:34250`)
+ *    would leave, if that transaction's atomicity were ever violated by something outside normal
+ *    PostgreSQL commit/rollback semantics (e.g. a legacy direct write). It is a data-consistency
+ *    detector over the two tables, not a claim that the shared adapter itself is non-atomic — see
+ *    this predicate-completion PR's body for the mechanical atomicity proof of that one adapter,
+ *    and the closed-bucket note above for why no OTHER calculation-affecting type has a reversal
+ *    path to prove atomic in the first place.
+ */
+async function classifyAttendanceRequestSnapshotDefectsV1(
   trx: AttendanceW4TransactionClientV1,
   orgId: string,
-): Promise<number> {
+): Promise<AttendanceRequestSnapshotDefectReportV1> {
+  const byCell = emptyAttendanceRequestSnapshotDefectCounts()
   const requests = await trx.query(
-    `SELECT id::text AS id
+    `SELECT id::text AS id,
+            status::text AS status,
+            work_date::text AS work_date,
+            requested_in_at,
+            requested_out_at,
+            reason,
+            metadata,
+            approval_instance_id::text AS approval_instance_id
        FROM attendance_requests
-      WHERE org_id = $1 AND status = 'pending' AND request_type = ANY($2::text[])
+      WHERE org_id = $1
+        AND request_type = ANY($2::text[])
+        AND (status = 'pending' OR (status = 'approved' AND request_type = 'leave'))
       ORDER BY id
       FOR UPDATE`,
     [orgId, ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1 as unknown as string[]],
   )
-  if (requests.rows.length === 0) return 0
-  let defective = 0
+  let totalDefectiveRequests = 0
   for (const request of requests.rows) {
+    const bucket: 'pending' | 'reversible' = request.status === 'pending' ? 'pending' : 'reversible'
+    let requestDefective = false
+
     const snapshot = await trx.query(
-      `SELECT attribution_snapshot AS "attributionSnapshot"
+      `SELECT attribution_snapshot AS "attributionSnapshot",
+              payload AS "payload",
+              payload_fingerprint AS "payloadFingerprint"
          FROM attendance_request_calculation_snapshots
         WHERE org_id = $1 AND request_id = $2::uuid
         ORDER BY version DESC
@@ -823,13 +966,86 @@ async function countDefectivePendingRequestSnapshots(
       [orgId, request.id],
     )
     if (snapshot.rows.length === 0) {
-      defective += 1
-      continue
+      byCell[`${bucket}Missing`] += 1
+      requestDefective = true
+    } else {
+      const snapshotRow = snapshot.rows[0]
+      const posture = (snapshotRow.attributionSnapshot as { posture?: unknown } | null)?.posture
+      if (posture !== 'resolved_v2') {
+        byCell[`${bucket}Unsupported`] += 1
+        requestDefective = true
+      }
+      const liveMetadataFields = extractAttendanceRequestPayloadMetadataFieldsV1(request.metadata)
+      const livePayload = buildAttendanceRequestCalculationPayloadFromRequestRowV1({
+        workDate: request.work_date,
+        requestedInAt: request.requested_in_at,
+        requestedOutAt: request.requested_out_at,
+        reason: request.reason,
+        minutes: liveMetadataFields.minutes,
+        leaveTypeCode: liveMetadataFields.leaveTypeCode,
+        outdoorPunch: liveMetadataFields.outdoorPunch,
+      })
+      const liveFingerprint = computeAttendanceRequestPayloadFingerprintV1(livePayload)
+      const storedFingerprint = String(snapshotRow.payloadFingerprint ?? '')
+      const recomputedStoredFingerprint = computeStoredRequestSnapshotPayloadFingerprintV1(
+        snapshotRow.payload,
+      )
+      // Three-way join (W4C-5 §3 owner-review P2, PR #4780): hash(storedPayload) ==
+      // storedFingerprint == hash(livePayload). The pre-#4780 predicate compared only
+      // `liveFingerprint === storedFingerprint` — a stored `payload_fingerprint` forged (or
+      // corrupted) to equal the live value, while the stored `payload` itself stayed stale,
+      // passed that one-sided compare undetected. Recomputing the stored side closes that gap:
+      // it can no longer differ from what the row's OWN payload actually hashes to.
+      //
+      // Two conjuncts, not three: `recomputedStoredFingerprint !== null` is NOT a separate
+      // discriminating check — `storedFingerprint` is always a string (`String(x ?? '')` below
+      // never produces `null`), so `null === storedFingerprint` is already `false` without an
+      // explicit guard. A stored payload that fails to decode (the `computeStoredRequest
+      // SnapshotPayloadFingerprintV1` catch path) is caught by the FIRST conjunct failing to
+      // match, not by a dedicated null branch — self-review round 2 (owner-review P2, PR #4780)
+      // removed the redundant guard after a mutation leg showed no test could tell it apart from
+      // simply deleting it.
+      const storedPayloadSelfConsistent = recomputedStoredFingerprint === storedFingerprint
+      const storedMatchesLive = storedFingerprint === liveFingerprint
+      if (!storedPayloadSelfConsistent || !storedMatchesLive) {
+        byCell[`${bucket}PayloadStale`] += 1
+        requestDefective = true
+      }
     }
-    const posture = (snapshot.rows[0].attributionSnapshot as { posture?: unknown } | null)?.posture
-    if (posture !== 'resolved_v2') defective += 1
+
+    const approvalInstanceId =
+      typeof request.approval_instance_id === 'string' && request.approval_instance_id.length > 0
+        ? request.approval_instance_id
+        : null
+    if (approvalInstanceId) {
+      const approval = await trx.query(
+        `SELECT status::text AS status FROM approval_instances WHERE id = $1 FOR UPDATE`,
+        [approvalInstanceId],
+      )
+      if (approval.rows.length === 1 && approval.rows[0].status === 'cancelled') {
+        byCell[`${bucket}ReversalIncomplete`] += 1
+        requestDefective = true
+      }
+    }
+
+    if (requestDefective) totalDefectiveRequests += 1
   }
-  return defective
+  return Object.freeze({ totalDefectiveRequests, byCell: Object.freeze(byCell) })
+}
+
+/**
+ * §5-sanctioned read-only reporter shape ("a read-only `status`/`plan` command that emits
+ * `PASS|BLOCKED` per predicate"): exposes the exact same classification the transition boundary
+ * enforces, for direct per-cell assertion without needing to observe it indirectly through a
+ * blocked-transition error. Performs zero DML. Callers own the transaction/locking; a caller that
+ * wants a point-in-time read without contending the row locks below may run it in its own
+ * short-lived transaction and roll back.
+ */
+export async function readAttendanceRequestSnapshotDefectReportV1(
+  connection: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<AttendanceRequestSnapshotDefectReportV1> {
+  return classifyAttendanceRequestSnapshotDefectsV1(connection, orgId)
 }
 
 function isRetryableControlPrecondition(error: unknown): boolean {
@@ -1006,12 +1222,16 @@ export async function transitionAttendanceCalculationRolloutV1(
       let incompleteOperations = 0
       let unresolvedReviews = 0
       let defectiveRequestSnapshots = 0
+      let defectiveRequestSnapshotsByCell: AttendanceRequestSnapshotDefectCountsV1 =
+        emptyAttendanceRequestSnapshotDefectCounts()
       if (ELIGIBILITY_AUTHORITY_TARGETS.has(input.targetState)) {
         incompleteOperations = await countIncompleteOperations(trx, input.orgId)
         if (incompleteOperations > 0) fail('W4C3A_ROLLOUT_CONTROL_INCOMPLETE_OPERATION')
         unresolvedReviews = await countUnresolvedIngressReviews(trx, input.orgId)
         if (unresolvedReviews > 0) fail('W4C3A_ROLLOUT_CONTROL_UNRESOLVED_REVIEW')
-        defectiveRequestSnapshots = await countDefectivePendingRequestSnapshots(trx, input.orgId)
+        const snapshotDefects = await classifyAttendanceRequestSnapshotDefectsV1(trx, input.orgId)
+        defectiveRequestSnapshots = snapshotDefects.totalDefectiveRequests
+        defectiveRequestSnapshotsByCell = snapshotDefects.byCell
         if (defectiveRequestSnapshots > 0) fail('W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE')
       }
 
@@ -1043,6 +1263,7 @@ export async function transitionAttendanceCalculationRolloutV1(
               incompleteOperations,
               unresolvedReviews,
               defectiveRequestSnapshots,
+              defectiveRequestSnapshotsByCell,
             },
             references: input.evidenceReferences,
           }),

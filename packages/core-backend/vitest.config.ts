@@ -960,6 +960,23 @@ export default defineConfig({
       // until then this is DECLARED debt, not invisible debt. Run it locally against a fully-migrated DB.
       'tests/integration/snapshot-protection.test.ts',
       'tests/integration/spreadsheet-integration.test.ts',
+      // #4783 owner review P1-1/P1-2: proves the BPMN timer poller write-gate (real
+      // bpmn_timer_jobs outcome, not a mocked db) and the WAITING -> LOCKED atomic-claim
+      // fix with a CONSTRUCTED real-Postgres race across two independent
+      // `BPMNWorkflowEngine` instances. DATABASE_URL-gated; excluded here so the no-DB
+      // default job cannot skip-green it, and wired as a WHOLE FILE into the
+      // `Run BPMN timer job write-and-claim safety` step in plugin-tests.yml.
+      'tests/integration/bpmn-timer-job-write-and-claim-safety.db.test.ts',
+      // #4783 owner review batch 2: proves startProcess()'s entry gate leaves FOUR real
+      // zeros (process/activity/incident/timer rows) — not "written then terminated" —
+      // when a timer-bearing process is started with the poller disabled, driven through
+      // the REAL HTTP surface (POST /api/workflow/deploy + POST /api/workflow/start/:key)
+      // against a real booted MetaSheetServer + fresh-migrated scratch PostgreSQL, plus a
+      // positive control that a timer-free process still starts normally. DATABASE_URL-
+      // gated; excluded here so the no-DB default job cannot skip-green it, and wired as a
+      // WHOLE FILE into the `Run BPMN startProcess poller-disabled zero-residue` step in
+      // plugin-tests.yml.
+      'tests/integration/bpmn-poller-disabled-startprocess-zero-residue.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

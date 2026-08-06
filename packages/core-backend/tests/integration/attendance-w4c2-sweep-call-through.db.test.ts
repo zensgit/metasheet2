@@ -128,7 +128,16 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
     sweepScheduledRuns: (options: {
       limit?: number
       recoverCandidate(candidate: { orgId: string; initiator: string; workDate: string; runId: string }): Promise<void>
-    }) => Promise<{ scanned: number; finalized: number; notReady: number; skipped: number; errored: number; backlogRemaining: number }>
+    }) => Promise<{
+      scanned: number
+      finalized: number
+      notReady: number
+      skipped: number
+      errored: number
+      backlogRemaining: number
+      neverAttemptedRunning: number
+      oldestRunningAttemptAgeSeconds: number
+    }>
     abandonScheduledRun: (input: {
       orgId: string
       runId: string
@@ -537,7 +546,16 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
           'the production Logger must have received the tick-summary line — proves index.ts:2249 `logger: this.logger` is actually wired into the booted server, not just declared in source',
         ).toBeDefined()
         expect(Object.keys(tickCall!.meta ?? {}).sort()).toEqual(
-          ['backlogRemaining', 'errored', 'finalized', 'notReady', 'scanned', 'skipped'].sort(),
+          [
+            'backlogRemaining',
+            'errored',
+            'finalized',
+            'neverAttemptedRunning',
+            'notReady',
+            'oldestRunningAttemptAgeSeconds',
+            'scanned',
+            'skipped',
+          ].sort(),
         )
         for (const value of Object.values(tickCall!.meta ?? {})) {
           expect(typeof value, 'production-emitted meta must stay values-free: numbers only').toBe('number')
