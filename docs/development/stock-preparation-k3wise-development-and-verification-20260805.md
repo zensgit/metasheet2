@@ -89,6 +89,33 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 用了中文虚拟目录,在**窗口之前**协商改用 ASCII 别名站点/虚拟目录,或升 owner 裁决。
 **窗口不可重试**,而这条会在 adapter 构造期即失败(读、写都进不去),故必须前置排除。
 
+### 步 0-b(新增,窗口**开始前**做):客户侧必须建**两条** K3 external-system 记录
+
+**结论**:一条 K3 记录**不能**同时承担「list 读」与「armed 写」。窗口需要两条,指向**同一台**
+物理 K3(相同 baseUrl):
+
+| 记录 | config | 用途 |
+|---|---|---|
+| K3-read(**不选 profile**) | 带 list 读配置(`readMode:'list'`、`readList*` 一族) | 步骤 1 的 read-smoke;B4 契约描述的就是它 |
+| K3-write(**选 `material-k3wise-customer-profile-v1`**) | profile 武装,save-only + maxApplyRows=3 | C6 dry-run→apply 的写目标 |
+
+**为什么不能合并成一条**(实测,非推断):`#4769` 把 `readMode`、`readListBodyKey`、
+`readListFields`、`readListOrderBy`、`topField`、`pageIndexField`、`pageSizeField`、
+`maxListLimit`、`readListBodyTemplate` 全部列为 profile 的 forbidden overlay key。在一条
+armed 记录上,这些键在 adapter 归一化时被**静默剥除**(实测全部变 `undefined`,且 `readPath`
+被钉成 `/K3API/Material/GetDetail`)。
+
+**连首方冻结预设也被剥**:`read-smoke` 的 `k3wise.material-list.v1` 自带 `readConfigOverlay`
+(含完整 list 形状),`applyReadSmokePresetOverlay` 会把它并上去 —— 但随后的 adapter 归一化
+仍然剥掉。也就是说这道加固**不区分「操作员覆盖」与「首方预设覆盖」**。方向是 fail-closed
+(安全的那一侧),但后果是:**armed 记录做不了 list read-smoke**。
+
+**操作**:窗口前确认客户环境里这两条记录都已建、baseUrl 相同、且 K3-read 那条**没有**选
+profile。窗口不可重试,而这条会在步骤 1(read-smoke)当场失败。
+
+> 关联未决项:B4 绑定的 systemId 只能是 pipeline 的 source/target 之一(`#4769` 关系检查),
+> 而 K3-read 记录在「非 K3 source」的管道里两者都不是 —— 该冲突的处置见 §7.2。
+
 1. **只读预检**:`POST /api/integration/external-systems/<k3SystemId>/read-smoke`
    (preset `k3wise.material-list.v1`)⇒ 期望 values-free 证据:业务成功、行数 ≤10、零泄漏键。
 2. **建/核窗口 pipeline**:`POST /api/integration/pipelines` —— target=K3 系统(config 已含
