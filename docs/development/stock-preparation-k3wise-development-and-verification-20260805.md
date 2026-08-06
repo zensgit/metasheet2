@@ -136,8 +136,54 @@ profile。窗口不可重试,而这条会在步骤 1(read-smoke)当场失败。
    ⚠️ **不要照抄任何历史 SHA。** 本步原文钉的是 `e1b91594e`,那是 #4769 门**合入之前**的
    候选包 —— 其树中不含 `K3_WISE_PIPELINE_RUN_DISABLED` 与 `assertWireEndpointIntent`
    (各 0 文件,已核)。装它等于把 owner 在 #4768 复审中点名的两个敞口原样带进不可重试的窗口。
-   **部署前自检**:所选包的 `serviceRuntimeSha` 必须是 `65edb98c6`(#4769 合入点)**之后**的
-   提交;`git merge-base --is-ancestor <sha> 65edb98c6` 成立即为**过期包**,不得使用。
+   **部署前自检(勘误 2026-08-06:改为钉「批准包身份」,并修正判定方向)**
+
+   ⚠️ **不要再追「最新 K3 合入点」。** 那个做法每次有影响 K3 写路径的修复合入就过期一次
+   (已发生两次:`e1b91594e` 早于 #4769 的安全门,`65edb98c6` 早于 #4784),而窗口不可重试。
+   正确的做法是钉**最终批准包的精确身份**:
+
+   ```
+   批准包 serviceRuntimeSha:  aa48c3f187685b6f37aceed8cec1c5bcccc8b9a7
+   packageTgzSha256:         93aa75c9ea88ef8e52a6ebd96378ddb049e5c3bed785a40bdb4f7f2e8659d90f
+   packageZipSha256:         d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
+   出包 run:                 31103351286   (Stock-prep main package verify)
+   彩排 run:                 31103021849   (同一 head,17/17)
+   ```
+
+   **这三个值的取得方式**:出包 lane 以 `expected_sha` 钉死 —— checkout 的 HEAD 与它不符即失败,
+   所以不需要事后核对包出自哪个 commit。该 run 自报 `buildShaSourcesAgree=PASS`、
+   `buildProvenanceGitCommitMatchesBuildSha=PASS`、`packageSource=BUILT_FROM_DISPATCHED_COMMIT`,
+   且 074/075 在 PostgreSQL 15/16/17 三个版本上均 `executed successfully`。
+
+   ⚠️ **这是一个可复现的身份,不是「客户可用」的背书。** 出包 lane 自己写明其证据类是
+   **受控合成功能证据**:它证明包过五检、含并真的应用 074/075、在临时 PG 15/16/17 上干净幂等;
+   它**不建立**关于真实客户生产、sealed-snapshot 语义、规模、外部写、rollout 或
+   PLM/ERP/CRM/SRM 泛化的任何结论。三层仍是三层:
+   `mock pass ≠ rehearsal pass ≠ customer live pass`。
+
+   现场只接受**逐字等于**上面那个 SHA 的包。相等判定不会过期,也不需要有人判断
+   「哪些修复算数」。
+
+   **辅助安全检查(方向修正)** —— 若需确认某候选包**含有**某个必需修复:
+
+   ```bash
+   git merge-base --is-ancestor <必需修复的 SHA> "$serviceRuntimeSha"   # 非零 ⇒ 不含 ⇒ 拒绝
+   ```
+
+   ⚠️ **此前写反了**:原文是 `is-ancestor <候选> e6523c949`。那个方向问的是「候选是不是修复的
+   祖先」——对**恰好等于修复提交**的包也成立,于是把**正确的包判成过期包误拒**;而一个不含该
+   修复的**分叉**提交并不是修复的祖先,反而被放行。**方向反了会同时产生误拒与漏放。**
+
+   ⚠️ **为什么下界从 `65edb98c6` 上移**——这是本步记录过的**同一类失效,一个 merge 之后重演**。
+   原钉 `e1b91594e` 失效是因为它早于 #4769 的安全门;现在 `65edb98c6` 同样失效,因为它早于
+   **#4784**(`e6523c949`,"C6 loaded the TARGET with the credential-stripped accessor")。
+   在这两点之间构建的包**满足旧自检、却在窗口要跑的那一步必死**:C6 用去凭据的公开访问器
+   载入 adapter-backed 的写 target,适配器在**发出任何 wire 调用之前**抛
+   `K3_WISE_CREDENTIALS_MISSING`。**窗口不可重试**,所以这不是"跑一次看看"能兜住的。
+
+   ⚠️ **下界会继续上移。** 每次有影响 K3 写路径的修复合入 main,本行的 SHA 就过期一次。
+   照抄本行的历史 SHA 与照抄 `e1b91594e` 是同一个错误 —— 出包前请核对 main 上最后一个
+   影响该路径的合入点。
 
 **PASS 判据**:1–6 全绿且 `0 Submit / 0 Audit`。
 
