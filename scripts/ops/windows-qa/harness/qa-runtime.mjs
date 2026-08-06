@@ -13,12 +13,20 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 // harness dir is <root>/scripts/ops/windows-qa/harness — repo/package root is 4 levels up.
 export const REPO_ROOT = path.resolve(HERE, '../../../..')
 export const CORE_BACKEND = path.join(REPO_ROOT, 'packages/core-backend')
+
+// `pg` ships in the core-backend package (and in the Windows on-prem package alongside dist).
+// Resolve it from there explicitly so these scripts work regardless of cwd / NODE_PATH.
+const requireFromCore = createRequire(path.join(CORE_BACKEND, 'package.json'))
+export function loadPg() {
+  return requireFromCore('pg')
+}
 
 function runningUnderTsx() {
   // tsx registers a loader; its presence is what lets `import('*.ts')` resolve.
