@@ -30,6 +30,10 @@ import { buildEvidenceReport } from '../../integration-k3wise-live-poc-evidence.
 
 import { createMockK3WebApiServer } from './mock-k3-webapi-server.mjs'
 import { createMockSqlServerExecutor } from './mock-sqlserver-executor.mjs'
+import { createHmac, randomBytes } from 'node:crypto'
+
+// Per-run key, mirroring production's per-process key for the instance digest.
+const DEMO_INSTANCE_KEY = randomBytes(32)
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -366,6 +370,34 @@ async function main() {
             tenantId: 'tenant_demo',
             workspaceId: null,
             pipelineSystemIds: ['source_demo', chainTarget.id],
+            targetSystemId: chainTarget.id,
+            // REVIEW P2-2 (owner ruling 20260806): this demo ran the ENTIRE C6 write lifecycle with the
+            // instance-identity gate STRUCTURALLY ABSENT — the b4 scope had no digest function and the
+            // gate was opt-in, so it silently did not run. The shipped offline PoC therefore "proved" a
+            // write path whose identity check was not there.
+            //
+            // Here the read record and the write target are the SAME physical K3 (one mock server, one
+            // account set), so their digests must be EQUAL — which is what the gate should conclude,
+            // rather than being skipped. Derived as production does: length-prefixed (kind, origin,
+            // acctId), fail-closed to null on any missing part.
+            async instanceDigestOf(input = {}) {
+              const id = typeof input === 'string' ? input : input.id
+              const system = id === chainTarget.id
+                ? chainTarget
+                : { kind: chainTarget.kind, config: { baseUrl: chainTarget.config.baseUrl }, credentials: chainTarget.credentials }
+              if (!system || typeof system.kind !== 'string' || !system.kind) return null
+              let origin
+              try {
+                origin = new URL((system.config && system.config.baseUrl) || '').origin
+              } catch {
+                return null
+              }
+              const c = (system.credentials && typeof system.credentials === 'object') ? system.credentials : {}
+              const acct = [c.acctId, c.accountSet, c.accountSetId].find((v) => v !== undefined && v !== null && v !== '')
+              if (acct === undefined) return null
+              const material = [system.kind, origin, String(acct)].map((part) => `${part.length}:${part}`).join('|')
+              return createHmac('sha256', DEMO_INSTANCE_KEY).update(material).digest('hex')
+            },
           },
         }),
         targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
