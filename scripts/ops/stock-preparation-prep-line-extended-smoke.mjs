@@ -291,9 +291,13 @@ export function normalizePrepLineRouteTemplate(pathname) {
 
 // R5: the FULL roster of prep-line route templates this smoke is designed to exercise, as DATA — one
 // entry per real registered route in plugins/plugin-integration-core/lib/http-routes.cjs ROUTES (32
-// '/stock-preparation/*' entries + the 1 auth round-trip = 33 total). 31 are unconditional (every
-// self-contained run); the 2 approved-source preludes are OPTIONAL (external operator-supplied config
-// required — see the header). The two prepLineRoutes* summary fields below are ALWAYS `.length`/`.size`
+// '/stock-preparation/*' entries + the 1 auth round-trip = 33 total). 30 are unconditional (every
+// self-contained run); 3 are OPTIONAL (the 2 approved-source preludes, plus `options/sync` which
+// R5's own P1 fix moved to opt-in because it is a destructive canonical overwrite — see 94dda0bfa).
+// (THIRD fabrication caught on this very line: the split still read 31/2 after that move. The
+// mechanical values are ALWAYS_PREP_LINE_ROUTES.length = 30 and OPTIONAL_PREP_LINE_ROUTES.length = 3;
+// the total 33 was right, which is exactly why a wrong SPLIT survived — the number that changed was
+// not the one being sanity-checked.) The two prepLineRoutes* summary fields below are ALWAYS `.length`/`.size`
 // derived from this roster and from the SET of routes the run actually issued a request against — never
 // a hand-written count (this line has twice been caught fabricating one; see the R5 acceptance battery).
 export const ALWAYS_PREP_LINE_ROUTES = Object.freeze([
