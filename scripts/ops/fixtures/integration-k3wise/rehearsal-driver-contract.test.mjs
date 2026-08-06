@@ -307,7 +307,15 @@ function predicateOf(src, step) {
     if (c === ')' || c === ']' || c === '}') { depth--; continue }
     if (c === ',' && depth === 0) break
   }
-  return src.slice(start, i).replace(/\s+/g, ' ').trim()
+  // REVIEW P2-B: strip comments from the SPAN. Without this, moving the other conjuncts into
+  // `//` comments inside the predicate leaves every manifest needle present verbatim while the
+  // live expression is just `ok(dryRun)` — the guard reads its own documentation as evidence.
+  // Third occurrence of "prose satisfies a code-shaped assertion" on this line.
+  return src.slice(start, i)
+    .replace(/\/\*[^]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 // POSITIVE MANIFEST: what each step's predicate MUST assert.
@@ -322,6 +330,10 @@ function predicateOf(src, step) {
 //
 // Weakening any predicate below now requires EDITING THIS TABLE -- a visible, reviewable act --
 // rather than quietly satisfying a pattern nobody re-reads.
+// Each entry is { needles, conjuncts }. `conjuncts` is what makes `&&` -> `||` visible: substring
+// presence is invariant under that swap, and the swap turns a five-way AND into a five-way OR,
+// i.e. "HTTP 200 is enough". Needles pin WHAT is asserted; conjuncts pin that they are all
+// REQUIRED TOGETHER.
 const REQUIRED_DISCRIMINATORS = {
   'create-source-system': ['ok(sourceSystem)', 'payload(sourceSystem)?.id'],
   'create-target-system': ['ok(targetSystem)', 'payload(targetSystem)?.id'],
@@ -384,10 +396,25 @@ test('every record() step asserts its NAMED discriminators — positive manifest
   for (const step of declared) {
     const predicate = predicateOf(driver, step)
     assert.ok(predicate.length > 0, `step '${step}' has an empty predicate`)
-    for (const needle of REQUIRED_DISCRIMINATORS[step]) {
+    const needles = REQUIRED_DISCRIMINATORS[step]
+    for (const needle of needles) {
       assert.ok(predicate.includes(needle),
         `step '${step}' no longer asserts ${JSON.stringify(needle)}\n    predicate is: ${predicate}`)
     }
+    // REVIEW P2-B: substring presence is INVARIANT under `&&` -> `||`, and that swap turns a
+    // five-way AND into "any one of these is enough" — i.e. the dry-run discriminator collapses to
+    // "HTTP 200" while every needle survives verbatim. Needles pin WHAT is asserted; these two pin
+    // that the assertions are required TOGETHER.
+    //
+    // All 17 predicates are pure conjunctions (verified mechanically before this was written; the
+    // check below is what keeps that true). `??` is deliberately not `||`.
+    assert.ok(!predicate.includes('||'),
+      `step '${step}' introduced a disjunction; a predicate that passes on ANY conjunct is not the `
+      + `gate this manifest describes\n    predicate is: ${predicate}`)
+    const conjunctions = (predicate.match(/&&/g) || []).length
+    assert.ok(conjunctions >= needles.length - 1,
+      `step '${step}' has ${conjunctions} '&&' for ${needles.length} required discriminators — some `
+      + `are no longer joined as a conjunction\n    predicate is: ${predicate}`)
   }
 
   // NEGATIVE CONTROL on the checker itself: the exact degradations that defeated the denylist

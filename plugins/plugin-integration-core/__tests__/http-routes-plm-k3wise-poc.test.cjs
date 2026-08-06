@@ -906,9 +906,8 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
   assert.equal(pairedSameErr.code, 'K3_WISE_READ_FAILED',
     'the same-K3 paired read binding must clear every gate AND resolve credentials, reaching the '
     + `wire; got: ${JSON.stringify(pairedSameErr)}`)
-  assert.notEqual(pairedSameErr.code, 'K3_WISE_CREDENTIALS_MISSING',
-    'an adapter-backed C6 target must be re-loaded through getExternalSystemForAdapter (#4784) — '
-    + 'the public accessor strips credentials and the adapter dies before any wire call')
+  // (the equality above already pins this value; a following notEqual on the same value adds
+  // nothing and reads as if it were an independent check — #4784's guarantee rides the equality)
 
   // A -> B: read record on a DIFFERENT K3 host. MUST BE REFUSED. This is the case the old
   // arrangement was structurally incapable of producing at all.

@@ -218,11 +218,23 @@ jobs:
           #   (a) the file is present in the package under test  => it is in getMigrations()
           #   (b) its name is absent from MIGRATION_EXCLUDE      => the provider did not drop it
           #   (c) Pending: 0                                     => every member has executedAt
+          # REVIEW P3-B: there is a FOURTH skip path this chain does not name —
+          # SUPERSEDED_LEGACY_SQL_MIGRATIONS, whose members run as no-op history markers and cancel
+          # out of the known-vs-considered measurement. The conclusion still holds for 074/075
+          # specifically (verified: neither is in that list), but the chain as stated was
+          # incomplete, so it is stated completely here rather than left to read as exhaustive.
           # All three together mean 074/075 executed. Remove any one and the conclusion fails --
           # which is precisely why (b) is asserted per-name rather than inferred from a count.
-          MIG_DIR="$(find . -type d -name migrations -path '*core-backend*' | head -1)"
-          if [ -z "${MIG_DIR}" ]; then
-            echo "FATAL: no core-backend migrations directory inside the package; (a) is unprovable" >&2
+          # REVIEW P2-A: `find … | head -1` picks by readdir order, and the unpacked package has TWO
+          # matching directories — packages/core-backend/migrations (the only home of 074/075) and
+          # packages/core-backend/dist/src/db/migrations (zero 07* files). Depth-first descent emits
+          # the dist one first whenever `dist` precedes `migrations` in readdir, which on the runner
+          # is an ext4 hash order — i.e. undetermined. False-red only (it can never green-light an
+          # unapplied migration), but a lane that hard-fails on a coin flip buys nothing. Address
+          # the directory that actually holds the SQL.
+          MIG_DIR="packages/core-backend/migrations"
+          if [ ! -d "${MIG_DIR}" ]; then
+            echo "FATAL: ${MIG_DIR} is not in the package; (a) is unprovable" >&2
             exit 1
           fi
           for m in 074_repair_sealed_export_runtime_authority_privileges.sql \
