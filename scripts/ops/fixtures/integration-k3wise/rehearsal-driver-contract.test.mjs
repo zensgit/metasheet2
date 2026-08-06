@@ -287,10 +287,20 @@ test('the mock arms its session gate and its call logger — both are load-beari
 // Extract a record() step's pass-predicate by BALANCED SCAN, not by splitting on commas.
 // A comma-split reads the wrong span for any predicate containing a call or an index expression --
 // the first attempt at this parsed only 8 of the 17 steps and silently exempted the other 9.
-function predicateOf(src, step) {
+function predicateOf(rawSrc, step) {
+  // Strip comments BEFORE locating anything, so every index below refers to one consistent string.
+  // (First attempt stripped after computing the offset and shifted it — the suite went red on
+  // step 1, which is the good failure mode for this class of slip.)
+  const src = rawSrc.replace(/\/\*[^]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
   const key = `record('${step}'`
   const at = src.indexOf(key)
   assert.ok(at >= 0, `step '${step}' is not in the driver`)
+  // NIT (review r4): the balanced scan reads RAW source, so a comma or apostrophe inside an
+  // IN-SPAN comment truncates the span — an innocuous `// status, token and both counts` yields
+  // `actual: 'ok(dryRun)'` and a message blaming a manifest weakening that never happened. Fails
+  // closed, but the diagnostic points at the wrong thing. Comments are removed BEFORE scanning so
+  // their punctuation cannot terminate it; the equality compare is unaffected because stripping
+  // only ever removed non-executing text.
   let i = src.indexOf(',', at + key.length) + 1
   const start = i
   let depth = 0
@@ -311,11 +321,7 @@ function predicateOf(src, step) {
   // `//` comments inside the predicate leaves every manifest needle present verbatim while the
   // live expression is just `ok(dryRun)` — the guard reads its own documentation as evidence.
   // Third occurrence of "prose satisfies a code-shaped assertion" on this line.
-  return src.slice(start, i)
-    .replace(/\/\*[^]*?\*\//g, ' ')
-    .replace(/\/\/[^\n]*/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
+  return src.slice(start, i).replace(/\s+/g, ' ').trim()
 }
 
 // POSITIVE MANIFEST: what each step's predicate MUST assert.
@@ -433,7 +439,15 @@ test('every record() step asserts its NAMED discriminators — positive manifest
     assert.ok(predicate.length > 0, `step '${step}' has an empty predicate`)
     const conjuncts = REQUIRED_DISCRIMINATORS[step]
 
-    // EXACT CANONICAL EQUALITY — the THIRD criterion for this guard, and the first that converges.
+    // EXACT CANONICAL EQUALITY — the THIRD criterion for this guard. It converges FOR THE SPAN,
+    // and that scope is the whole of the claim.
+    //
+    // What it does NOT constrain (review r4, measured with the text byte-identical and the suite
+    // GREEN): the MEANING of what the text names. `ok()` can be changed to `return true`; and
+    // `dryRunOut` can be forged so `counts.add` reads SOURCE_KEYS.length — fabricating precisely
+    // the owner's P1 discriminator. The weakening channel did not close, it moved one level out,
+    // to the helpers and to how the response object is obtained. Saying "the first that converges"
+    // without that scope was an overclaim; this guard pins predicate TEXT, not predicate TRUTH.
     //
     // v1 was a denylist of four literals; `dryRunOut !== undefined` walked through it.
     // v2 was needle-substring + no-`||` + an `&&` count. Review broke that too, twice, and the

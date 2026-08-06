@@ -944,14 +944,18 @@ async function assertB4ScopeIsWiredThroughTheRoute() {
 
   const related = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
   const relatedDetails = ((related.res.body && related.res.body.error) || {}).details || {}
-  // REVIEW P3-1: this anti-vacuity assertion was ITSELF vacuous. `bindingCount` is attached at
-  // exactly one site (k3-wise-c6-write-profile.cjs, on C6_WRITE_B4_BINDING_REQUIRED only), and the
-  // measured object here is `{code:'K3_C6_B4_BINDING_KIND_MISMATCH', field:'capabilityState'}` —
-  // so it was `notEqual(undefined, 0)`, true by absence. The notEqual family again: it cannot tell
-  // "counted" from "this shape has no such field". Assert the code that is actually produced.
-  assert.equal(relatedDetails.code, 'K3_C6_B4_BINDING_KIND_MISMATCH',
-    'a binding on the PLM source must reach the kind gate — which proves it was COUNTED by the '
-    + `relation check rather than filtered out earlier; got: ${JSON.stringify(relatedDetails)}`)
+  // NIT (review r4): the replacement assertion I put here was a VERBATIM DUPLICATE of case (6) —
+  // same helper, same argument, same expected code — so neutering the kind gate fails at case (6)
+  // and never reaches this line: zero marginal coverage. Removed rather than left as decoration.
+  //
+  // The property it was meant to carry (a binding on a real pipeline endpoint is COUNTED by the
+  // relation check rather than filtered out earlier) is already carried by the PAIR that exists:
+  // case (2) asserts bindingCount === 0 for an unrelated system, case (6) shows a real endpoint's
+  // binding reaching the kind gate. Both intact.
+  //
+  // The assertion this replaced was itself vacuous — `notEqual(relatedDetails.bindingCount, 0)`
+  // where the measured object has no bindingCount at all, i.e. notEqual(undefined, 0), true by
+  // absence. The notEqual family again.
 }
 
 async function main() {
