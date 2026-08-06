@@ -286,3 +286,60 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 ### 7.3 窗口 PASS 后
 
 在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。
+
+## 8. staging 彩排首跑实测(2026-08-06)
+
+### 8.1 运行标识
+
+- workflow:`Stock-prep staging window rehearsal (ephemeral substrate)`
+- run id `31084631813`,head `9a061909c`(即 #4768 的合并点)
+- 结论 success,28 个 step 全过,0 失败
+- 起止 `2026-08-06T08:22:31Z → 2026-08-06T08:25:17Z`
+- 这是该 lane 建成以来的**首次运行**(此前为 dispatch-only,零运行时证据)
+
+### 8.2 逐步实测值
+
+| 步 | 实测 |
+|---|---|
+| create-source-system | 201 |
+| create-target-system | 201 |
+| staging-install | 201,`sheetCount=5`,`projectIdPresent=true` |
+| create-staging-source | 201,`sourceLeg=stand-in` |
+| mint-seed-token | 201,`usableShape=true` |
+| resolve-staging-field-map | 200,`mappedFields=9` |
+| seed-staging-rows | `requested=2 accepted=2` |
+| b4-mint | 201,`mintedVersion=1`,`contentKeyPresent=true` |
+| b4-approve | 200,`bindingStatus=approved` |
+| preflight-list-shape-probe | `listRowCountKey=recordCount` |
+| preflight-list-read-smoke | 200,`evidenceOk=true`,`rowCount=2`,`errorCode=null` |
+| create-pipeline | 201 |
+| **dry-run** | 200,`planStatus=ready`,**`sourceRows=2 add=2 failed=0 held=0`**,`tokenPresent=true` |
+| **apply** | 200,**`written=2 failed=0`** |
+| token-single-use | **409 `C6_WRITE_DRY_RUN_TOKEN_INVALID`** |
+| read-back-written-key | 200,`evidenceOk=true`,`recordPresent=true`,`recordCount=1` |
+| read-back-negative-control | 200,`evidenceOk=false`,`errorCode=K3_WISE_READ_BUSINESS_ERROR` |
+
+lane 级实测:
+
+- 迁移:`migrationsKnown=309 migrationsConsidered=303 migrationsSkippedByName=6` —— 差值恰为排除集大小
+- `migrationProvenApplied=074_repair_sealed_export_runtime_authority_privileges.sql`
+- `migrationProvenApplied=075_grant_sealed_export_runtime_authority_row_lock.sql`
+- `integrationPluginStatus=active`,`loginTokenObtained=PASS`
+- wire:`wireGetListCallsLogged=1`,`wireSaveCallsLogged=2`,Submit/Audit 为 0
+
+### 8.3 `add=2` 为什么是那条 P1 的判别器
+
+两条 fieldMapping 都带 `required`;`validateRecord` 的 required 用 `isEmpty()`,覆盖
+undefined / null / 纯空白;校验失败即 `counts.failed += 1; continue`,该行到不了
+`counts[decision]`;而 `canApply` 要求 `failed===0 && held===0`。所以 `code`/`name` 为空
+**在结构上无法**产出 `add=2`。这不是「没看见错误」,是空值产不出这个数。
+
+### 8.4 这次绿的边界(必须与 8.2 同等醒目)
+
+1. **源腿是替身。** 证据自己携带了这句(`sourceLeg=stand-in`,`customer source connector
+   NOT exercised`)。**C6 写生命周期被证明了,客户真实源连接器没有。**
+2. **对端是仓内 mock K3,不是实体机。** 三层是 `mock pass ≠ rehearsal pass ≠ customer live pass`,
+   本次跑通的是第二层。
+3. **B4 的 D2 未关。** 比较两条记录只证明两个操作员敲进去的 baseUrl 共享 origin。
+
+准确表述是「窗口 runbook 已对着真实部署包整条跑通」,而不是「备料功能已完整验证」。
