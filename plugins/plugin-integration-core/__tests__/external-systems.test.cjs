@@ -617,10 +617,10 @@ async function testInstanceDigestIsProductionBehaviour() {
   const credentialStore = createMockCredentialStore()
   const registry = createExternalSystemRegistry({ db, credentialStore, idGenerator: () => 'unused' })
 
-  const put = async (id, kind, baseUrl, credentials) => {
+  const put = async (id, kind, baseUrl, credentials, extraConfig = {}) => {
     await registry.upsertExternalSystem({
       tenantId: 't1', workspaceId: null, id, kind, name: id, role: 'target', status: 'active',
-      config: { baseUrl }, credentials,
+      config: { baseUrl, ...extraConfig }, credentials,
     })
   }
   const digest = (id) => registry.getExternalSystemInstanceDigest({ id, tenantId: 't1', workspaceId: null })
@@ -693,6 +693,28 @@ async function testInstanceDigestIsProductionBehaviour() {
   assert.ok(dS3, 'a session-only record must be digestible, not null — null makes the write gate unsatisfiable')
   assert.equal(dS1, dS3, 'a stale acctId must not change the identity in session mode')
 
+  // P1-2 (review r3): the three cases above all use a STRING sessionId, so they prove the branch
+  // EXISTS but constrain its boundary in neither direction — replacing the guard with the correct
+  // one left them green. These pin the boundary, which is where the regression lived.
+  await put('sf1', AC, 'https://k3.example.test', { sessionId: 0, acctId: '001' })
+  await put('sf2', AC, 'https://k3.example.test', { sessionId: 0, acctId: '002' })
+  await put('sf3', AC, 'https://k3.example.test', { sessionId: false })
+  const [dSf1, dSf2, dSf3] = await Promise.all(['sf1', 'sf2', 'sf3'].map(digest))
+  assert.notEqual(dSf1, dSf2,
+    'a FALSY sessionId is not a session: the adapter falls through to acctId, so 001 and 002 are '
+    + 'different instances — a superset guard made them EQUAL, reinstating the wrong-账套 defect')
+  assert.equal(dSf3, null,
+    'falsy sessionId with no acctId must be UNVERIFIABLE — the adapter throws CREDENTIALS_MISSING, '
+    + 'so a satisfiable gate here would certify a write that cannot authenticate')
+
+  // P3-1: config.authMode is load-bearing (same wrong-账套 class) and had zero coverage — the
+  // assertion-less case removed earlier should have been REPLACED, not just deleted.
+  await put('am1', AC, 'https://k3.example.test', { authorityCode: 'AC-X', acctId: '111' }, { authMode: 'login' })
+  await put('am2', AC, 'https://k3.example.test', { authorityCode: 'AC-X', acctId: '222' }, { authMode: 'login' })
+  assert.notEqual(await digest('am1'), await digest('am2'),
+    'an explicit config.authMode=login must select acctId even when an authorityCode is present — '
+    + 'dropping cfg.authMode from the resolution digests the wrong identity')
+
   // NIT (review r2): the per-process key had NO coverage — replacing randomBytes with a constant
   // left the suite green. Two registries in one process must agree; a digest must not be
   // reproducible from the material alone by anyone who knows the scheme.
@@ -719,7 +741,10 @@ async function testInstanceDigestIsProductionBehaviour() {
       .then((d) => process.stdout.write(String(d)))
   `], { encoding: 'utf8' })
   assert.equal(child.status, 0, `child probe must run: ${child.stderr}`)
-  assert.ok(child.stdout && child.stdout.length > 0, 'child probe must produce a digest')
+  // NIT: a drifted stub makes the child print "null" and exit 0 — status===0, length>0 and
+  // notEqual("null", dA) would ALL pass, and the probe would prove nothing.
+  assert.match(child.stdout, /^[0-9a-f]{64}$/,
+    `child probe must emit a real digest, got: ${JSON.stringify(child.stdout)}`)
   assert.notEqual(child.stdout, dA,
     'a DIFFERENT PROCESS must produce a different digest — otherwise the key is a constant in '
     + 'source and the digest is reproducible by anyone who reads the repo')

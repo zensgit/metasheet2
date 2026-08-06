@@ -394,7 +394,12 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     // I have now mis-stated this mirror three times. The lesson is not "read more carefully" — it
     // is that a claim of equivalence to another function's control flow must be checked branch by
     // branch against that function, from its FIRST statement.
-    if (credentials.sessionId !== undefined && credentials.sessionId !== null && credentials.sessionId !== '') {
+    // The adapter's guard is a bare truthiness test (`if (credentials.sessionId)`), and mirroring it
+    // means mirroring it EXACTLY — my "safer-looking" !==undefined/null/'' form was a strict
+    // SUPERSET, so for `0`, `false`, `NaN`, `-0` the digest short-circuited on session identity
+    // while login() fell through to acctId. That was a REGRESSION: at the previous head those
+    // inputs digested correctly, and this delta broke them.
+    if (credentials.sessionId) {
       const sessionMaterial = [system.kind, origin, `sessionId=${String(credentials.sessionId)}`]
         .map((part) => `${part.length}:${part}`).join('|')
       return crypto.createHmac('sha256', INSTANCE_DIGEST_KEY).update(sessionMaterial).digest('hex')
