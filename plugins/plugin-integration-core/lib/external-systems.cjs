@@ -9,6 +9,12 @@
 // ---------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
+
+// Per-process key for the K3 instance-identity digest (see getExternalSystemInstanceDigest).
+// Deliberately NOT derived from any persisted secret: the digest is only ever compared between two
+// records within one request, so a fresh random key per process gives unlinkability across
+// restarts and removes the account set from anything that might leak.
+const INSTANCE_DIGEST_KEY = crypto.randomBytes(32)
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
 
 const TABLE = 'integration_external_systems'
@@ -358,20 +364,34 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     }
 
     const credentials = system.credentials && typeof system.credentials === 'object' ? system.credentials : {}
-    // The SAME precedence the adapter uses at login, so the digest names the account set that
-    // would actually be authenticated rather than a look-alike field.
-    const acctId = [credentials.acctId, credentials.accountSet, credentials.accountSetId]
-      .find((v) => typeof v === 'string' && v.length > 0)
+    // REVIEW P2-1: the comment here used to claim "the SAME precedence the adapter uses", and it
+    // was FALSE for non-string values. The adapter's `firstDefined` takes the first DEFINED value;
+    // this took the first STRING. So `{acctId: 1001, accountSet: '002'}` digested as '002' while
+    // login authenticated against 账套 **1001** — the digest named a different account set than
+    // the one actually used, which is the very confusion this gate exists to prevent.
+    const acctIdRaw = [credentials.acctId, credentials.accountSet, credentials.accountSetId]
+      .find((v) => v !== undefined && v !== null && v !== '')
+    if (acctIdRaw === undefined) return null
+    // Normalised to text AFTER selection, so 1001 and '1001' are one account set (they are), while
+    // selection order still matches login.
+    const acctId = String(acctIdRaw)
     if (!acctId) return null
 
     // Length-prefixed parts: without this, ('ab','c') and ('a','bc') digest identically and a
     // collision could be constructed across the origin/acctId boundary.
     const material = [system.kind, origin, acctId].map((part) => `${part.length}:${part}`).join('|')
-    // Reuse the credential store's deployment-scoped HMAC rather than standing up a second key
-    // path — it already resolves INTEGRATION_ENCRYPTION_KEY with the production/dev-fallback
-    // rules, and duplicated key management is how two paths drift apart.
-    if (!credentialStore || typeof credentialStore.fingerprint !== 'function') return null
-    return credentialStore.fingerprint(material)
+    // REVIEW P2-3 — RETRACTION. The first version routed this through
+    // `credentialStore.fingerprint`, with a comment claiming "deployment-scoped HMAC, not
+    // reversible outside it". That is FALSE on the production path: there are TWO fingerprint
+    // implementations, and the host-security one calls `hashWithSecurity`, whose only primitive
+    // is unkeyed `security.hash` (falling back to bare sha256). The reviewer recovered the raw
+    // account set "001" from a digest in milliseconds — the search space is tiny.
+    //
+    // Keyed with a PER-PROCESS random key instead. Both digests in any comparison are computed in
+    // the same request, in this process, and are never persisted, logged, or compared across
+    // processes — so a per-process key is not a limitation, it is strictly stronger: the digest is
+    // unlinkable across restarts and carries no recoverable account set even if it did leak.
+    return crypto.createHmac('sha256', INSTANCE_DIGEST_KEY).update(material).digest('hex')
   }
 
   async function countPipelineReferences({ tenantId, workspaceId, id }) {

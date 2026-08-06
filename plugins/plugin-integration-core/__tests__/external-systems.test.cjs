@@ -586,6 +586,8 @@ async function main() {
   }
   assert.ok(deleteMissing instanceof ExternalSystemNotFoundError, 'deleting missing external system reports not found')
 
+  await testInstanceDigestIsProductionBehaviour()
+
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
 
@@ -594,3 +596,69 @@ main().catch((err) => {
   console.error(err)
   process.exit(1)
 })
+
+// ---------------------------------------------------------------------------------------------
+// REVIEW P1-1 — the PRODUCTION digest function had ZERO executing coverage.
+//
+// Replacing getExternalSystemInstanceDigest with a constant — which reinstates the owner's exact
+// defect, every record certifying every other — left the full 157-file chain at exit 0. So did
+// deleting acctId from the material, i.e. reverting to origin-only identity. Both "covering"
+// suites re-implement the digest in their own fixtures with their own keys: the very
+// fixture-vs-production divergence this fix's comments blame for the original defect.
+//
+// These tests call the REAL function through a REAL registry.
+// ---------------------------------------------------------------------------------------------
+async function testInstanceDigestIsProductionBehaviour() {
+  const { createExternalSystemRegistry } = require('../lib/external-systems.cjs')
+
+  // The SAME fixtures the rest of this file uses, so the registry is constructed exactly as the
+  // other tests construct it — a bespoke stub here would be one more fixture that diverges.
+  const db = createMockDb()
+  const credentialStore = createMockCredentialStore()
+  const registry = createExternalSystemRegistry({ db, credentialStore, idGenerator: () => 'unused' })
+
+  const put = async (id, kind, baseUrl, credentials) => {
+    await registry.upsertExternalSystem({
+      tenantId: 't1', workspaceId: null, id, kind, name: id, role: 'target', status: 'active',
+      config: { baseUrl }, credentials,
+    })
+  }
+  const digest = (id) => registry.getExternalSystemInstanceDigest({ id, tenantId: 't1', workspaceId: null })
+
+  const K3 = 'erp:k3-wise-webapi'
+  await put('a', K3, 'https://k3.example.test', { username: 'u', password: 'p', acctId: '001' })
+  await put('b', K3, 'https://k3.example.test', { username: 'u', password: 'p', acctId: '002' })
+  await put('a2', K3, 'https://k3.example.test/OTHER-PATH', { username: 'u', password: 'ROTATED', acctId: '001' })
+  await put('c', K3, 'https://k3-other.example.test', { username: 'u', password: 'p', acctId: '001' })
+  await put('d', 'plm:yuantus-wrapper', 'https://k3.example.test', { username: 'u', password: 'p', acctId: '001' })
+  await put('e', K3, 'https://k3.example.test', { username: 'u', password: 'p' })
+  await put('f', K3, 'not-a-url', { username: 'u', password: 'p', acctId: '001' })
+
+  const [dA, dB, dA2, dC, dD, dE, dF] = await Promise.all(
+    ['a', 'b', 'a2', 'c', 'd', 'e', 'f'].map(digest))
+
+  // THE OWNER'S DEFECT: same host, different account set.
+  assert.notEqual(dA, dB, 'same origin + DIFFERENT acctId must NOT digest equal — this is the ruling')
+  // Same account set, different path, PASSWORD ROTATED — a real rotation, not a reused object.
+  assert.equal(dA, dA2, 'same host + same account set must survive a password rotation and a path change')
+  assert.notEqual(dA, dC, 'different origin must not digest equal')
+  assert.notEqual(dA, dD, 'kind participates: a non-K3 record must not digest equal')
+  // FAIL-CLOSED.
+  assert.equal(dE, null, 'no authenticatable acctId must yield null, not a digest')
+  assert.equal(dF, null, 'an unparseable baseUrl must yield null, not a digest')
+  assert.equal(await digest('missing'), null, 'an unknown system must yield null')
+
+  // The digest must not carry the account set in recoverable form: an unkeyed hash of the
+  // material would be trivially brute-forced (the review recovered "001" in milliseconds).
+  const naive = require('node:crypto').createHash('sha256')
+    .update([K3, 'https://k3.example.test', '001'].map((p) => `${p.length}:${p}`).join('|')).digest('hex')
+  assert.notEqual(dA, naive, 'the digest must be KEYED — an unkeyed hash of the material is reversible')
+
+  // P2-1: selection order must match the adapter's firstDefined (first DEFINED, not first STRING).
+  await put('g', K3, 'https://k3.example.test', { username: 'u', password: 'p', acctId: 1001, accountSet: '002' })
+  await put('h', K3, 'https://k3.example.test', { username: 'u', password: 'p', acctId: '002' })
+  assert.notEqual(await digest('g'), await digest('h'),
+    'a numeric acctId must select as 1001 (what login uses), not fall through to accountSet 002')
+
+  console.log('  external-systems: instance digest (production function) OK')
+}
