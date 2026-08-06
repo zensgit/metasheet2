@@ -293,7 +293,13 @@ test('no record() step asserts a CONSTANT — every predicate reads real evidenc
   // record() is `record(step, pass, evidence)`, and it process.exit(1)s on a false predicate, so
   // `summary.pass = true` at the end IS conditional. What was unguarded is the predicates.
   const calls = [...driver.matchAll(/record\(\s*'([a-z0-9-]+)'\s*,\s*([^,]+(?:,(?![\s\n]*\{)[^,]+)*),/g)]
-  assert.ok(calls.length >= 8, `record() scan found too little (${calls.length}) — would be vacuous`)
+  // EQUALITY, not a floor. A floor cannot distinguish "scanned every step" from "the regex
+  // silently dropped the steps whose predicate contains a comma" — and the dropped ones would
+  // then carry ZERO constant-checking while the assertion still passed.
+  const declared = [...driver.matchAll(/^\s*record\('/gm)].length
+  assert.equal(calls.length, declared,
+    `the predicate scan parsed ${calls.length} of ${declared} record() steps — the unparsed ones `
+    + 'are exactly the steps this check would silently exempt')
 
   const constant = calls
     .map(([, step, predicate]) => [step, predicate.trim()])
