@@ -91,8 +91,40 @@ replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
 
 ### 步 0-b(新增,窗口**开始前**做):客户侧必须建**两条** K3 external-system 记录
 
-**结论**:一条 K3 记录**不能**同时承担「list 读」与「armed 写」。窗口需要两条,指向**同一台**
-物理 K3(相同 baseUrl):
+**结论**:一条 K3 记录**不能**同时承担「list 读」与「armed 写」。窗口需要两条。
+
+> ## ⚠️ 相同 baseUrl **不够** —— 必须同时满足下面四条,否则写门不可满足(owner 复审 P1)
+>
+> 本节原先只要求「相同 baseUrl」。**那会让窗口卡死**:生产路由只有在 **K3-write 的 config 带
+> `pairedReadSystemId`** 时,才把 K3-read 纳入 B4 的关系集合
+> (`http-routes.cjs`:`pipelineSystemIds: [source, target, targetSystem.config.pairedReadSystemId]`)。
+> 彩排驱动器**设了**这个字段,runbook 却漏写 —— 照 runbook 配出来的环境跑不通。
+>
+> | # | 值 | 必须是 |
+> |---|---|---|
+> | 1 | pipeline **source** | **已批准的 SQL Server source**(`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`) |
+> | 2 | pipeline **target** | **K3-write** 记录 |
+> | 3 | K3-write 的 `config.pairedReadSystemId` | **`<K3-read 的 id>`** ← 漏了它,B4 绑不上真实 K3-read |
+> | 4 | B4 binding 的 `config.systemId` | **`<K3-read 的 id>`**(**不是** target —— 绑 target 会被 `K3_C6_B4_BINDING_SELF_REFERENTIAL` 拒) |
+>
+> ### 而且两条记录必须落在**同一个 D2 认证身份分支**上
+>
+> D2 摘要 = `HMAC(kind | origin | 该记录实际会用来认证的身份)`,**逐字镜像 adapter 的解析**。
+> 所以「相同 baseUrl」只满足 `origin` 那一项,**认证身份也必须相同**:
+>
+> | adapter 分支(按此顺序) | 两条记录必须 |
+> |---|---|
+> | `credentials.sessionId` 为真 | **相同 `sessionId`** |
+> | `authMode` ∈ {`authority-code`,`authorityCode`,`token`} | **相同 authority code**(`authorityCode`/`authCode`/`config.authorityCode`) |
+> | 否则(login) | **相同 `acctId`**(取第一个**已定义**值:`acctId`→`accountSet`→`accountSetId`) |
+>
+> 不一致的后果是 `K3_C6_B4_BINDING_INSTANCE_MISMATCH`;任一侧无法确立身份则是
+> `K3_C6_B4_BINDING_INSTANCE_UNVERIFIABLE`。两者都是 fail-closed —— **不会写错账套,但窗口会卡死**。
+>
+> ⚠️ 并且两条都必须用 **`config.baseUrl`**,不要用 `config.url` 别名 ——
+> adapter 认 `baseUrl || url`,而 D2 摘要只读 `baseUrl`,用别名会令摘要为 null(#4793,窗口后 P2)。
+
+两条记录指向**同一台**物理 K3(相同 baseUrl):
 
 | 记录 | config | 用途 |
 |---|---|---|
