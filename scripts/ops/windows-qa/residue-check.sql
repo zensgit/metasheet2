@@ -19,7 +19,7 @@
 --   attendance_shift_segments                 zzzz20260724120000_create_attendance_shift_segments.ts:109  (org_id :112)
 --   attendance_shift_assignments              zzzz20260114120000_add_attendance_scheduling_tables.ts:35   (org_id :38)
 --   attendance_records                        zzzz20260114090000_create_attendance_tables.ts:54 ; org_id  zzzz20260114100000_add_attendance_org_id.ts:39
---   attendance_events                         zzzz20260114090000_create_attendance_tables.ts:31 ; org_id  zzzz20260114100000_add_attendance_org_id.ts (attendance_events org_id/index :30-34)
+--   attendance_events                         zzzz20260114090000_create_attendance_tables.ts:31 ; org_id  zzzz20260114100000_add_attendance_org_id.ts:25 (addColumnIfNotExists 'attendance_events','org_id')
 --   attendance_requests                       zzzz20260114090000_create_attendance_tables.ts:80 ; org_id  zzzz20260114100000_add_attendance_org_id.ts:53
 --   attendance_record_calculations            zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage.ts:655 (org_id :657)
 --   attendance_record_segments                zzzz20260725120000_...durable_storage.ts:860 (org_id :862)

@@ -471,10 +471,14 @@ assignment, and punches are produced by the product in the steps.
 Sessions for `qa_synth_admin` / `qa_synth_u1`: `UNVERIFIED — operator to confirm`.
 
 - **O1 (overnight two-segment shift).** As admin: `POST /api/attendance/shifts`
-  `{ "name": "qa_synth_shift_overnight", "timezone": "Asia/Shanghai", "isOvernight": true, "segments": [ { "startTime": "20:00", "endTime": "23:59" }, { "startTime": "00:00", "endTime": "04:00", "endDayOffset": 1 } ], "orgId": "qa_synth_org_a" }`
-  — capture `{shift_id}`. (Segment shapes marked overnight so `endDayOffset=1`; the
-  exact two-segment envelope the canonical service accepts is
-  `UNVERIFIED — operator to confirm`.)
+  `{ "name": "qa_synth_shift_overnight", "timezone": "Asia/Shanghai", "isOvernight": true, "segments": [ { "startTime": "08:00", "endTime": "12:00" }, { "startTime": "20:00", "endTime": "04:00", "endDayOffset": 1 } ], "orgId": "qa_synth_org_a" }`
+  — capture `{shift_id}`. This envelope satisfies the canonical service's segment
+  contract (`attendance-shift-service.cjs:379-444`): each `startDayOffset=0`
+  (`:404-405`), one segment crosses midnight via `endDayOffset=1` (`:407-409`,
+  `:439-441`), segments are ordered/non-overlapping after offsets (`:433`), and the
+  total planned minutes = 720 ∈ (0, 24h] (`:442-444`). (The example
+  `20:00→23:59` + `00:00→04:00(+1)` would be rejected — total > 24h — so this shape
+  is used instead.)
 - **O2 (assign).** As admin: `POST /api/attendance/assignments`
   `{ "userId": "qa_synth_u1", "shiftId": "{shift_id}", "startDate": "2026-01-05", "orgId": "qa_synth_org_a" }`.
 - **O3 (evening check-in, business day 2026-01-05).** As `qa_synth_u1`:
