@@ -12,9 +12,12 @@
  * present it throws a clear instruction rather than a cryptic ESM error.
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+
+export const PINNED_SHA = '0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 // harness dir is <root>/scripts/ops/windows-qa/harness — repo/package root is 4 levels up.
@@ -128,3 +131,80 @@ export function assertLocalIsolatedTarget(connectionString) {
   }
   return { host, dbName }
 }
+
+/** Open a single pg Client on the isolated DB, asserting the live database is metasheet_windows_qa. */
+export async function openIsolatedClient() {
+  assertLocalIsolatedTarget()
+  const pg = loadPg()
+  const client = new pg.Client({ connectionString: process.env.DATABASE_URL })
+  await client.connect()
+  const r = await client.query('SELECT current_database() AS db')
+  if (r.rows[0]?.db !== 'metasheet_windows_qa') {
+    await client.end()
+    throw new Error(`Refusing: connected database is "${r.rows[0]?.db}", not metasheet_windows_qa.`)
+  }
+  return client
+}
+
+/** Open a pg Pool on the isolated DB (for product fns that take a Pool with .connect()). */
+export async function openIsolatedPool() {
+  assertLocalIsolatedTarget()
+  const pg = loadPg()
+  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
+  const c = await pool.connect()
+  try {
+    const r = await c.query('SELECT current_database() AS db')
+    if (r.rows[0]?.db !== 'metasheet_windows_qa') {
+      throw new Error(`Refusing: connected database is "${r.rows[0]?.db}", not metasheet_windows_qa.`)
+    }
+  } finally {
+    c.release()
+  }
+  return pool
+}
+
+/**
+ * Shared safety fields the harness can LEGITIMATELY attest (it touched only synthetic ids on the
+ * isolated DB and made no external call). `windowsPowerShellVersion` is a host fact the harness
+ * cannot know off-Windows — the operator affirms it; `hostPlatform` is auto-detected. On macOS this
+ * yields hostPlatform!='windows' + empty PS version, so the (hardened) runner still BLOCKS even a
+ * PASS-status case until the Windows operator re-runs it and affirms the host facts. That is the
+ * honest split: the harness proves product logic; the final PASS needs the Windows host.
+ */
+export function baseSafetyFields() {
+  return {
+    syntheticDataOnly: true,
+    sourceSha: PINNED_SHA,
+    isolatedDatabase: true,
+    databaseName: 'metasheet_windows_qa',
+    hostPlatform: os.platform() === 'win32' ? 'windows' : os.platform(),
+    windowsPowerShellVersion: '',
+    customerOrExternalDestination: false,
+    externalNotificationsSent: false,
+  }
+}
+
+/** Read-modify-write the evidence-dir summary.json, upserting this case (harness-produced verdict). */
+export function emitCaseEvidence(evidenceDir, caseObj) {
+  if (!caseObj || !caseObj.id) throw new Error('emitCaseEvidence requires a case with an id')
+  fs.mkdirSync(evidenceDir, { recursive: true })
+  const summaryPath = path.join(evidenceDir, 'summary.json')
+  let summary = { campaign: 'attendance-windows-native-qa-v2-20260804', sourceSha: PINNED_SHA, residue: null, cases: [] }
+  if (fs.existsSync(summaryPath)) {
+    try {
+      summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'))
+    } catch {
+      /* start fresh on a corrupt file */
+    }
+  }
+  if (!Array.isArray(summary.cases)) summary.cases = []
+  const merged = { ...baseSafetyFields(), ...caseObj }
+  const idx = summary.cases.findIndex((c) => c && c.id === caseObj.id)
+  if (idx >= 0) summary.cases[idx] = merged
+  else summary.cases.push(merged)
+  summary.sourceSha = PINNED_SHA
+  fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`)
+  return summaryPath
+}
+
+export const DEFAULT_EVIDENCE_DIR = path.join(HERE, '.runtime', 'evidence')
