@@ -265,11 +265,27 @@ jobs:
         run: |
           set -euo pipefail
           BASE="http://127.0.0.1:${REHEARSAL_PORT}"
+          # PREFLIGHT B3: nothing checked that the child SURVIVED. On an instant boot crash
+          # (missing dist entry, a throw before listen) connection-refused returns in ~0 ms, so the
+          # loop burned all 60 iterations x sleep 2 = two minutes before failing — and the stack
+          # trace sat in backend.log, which this workflow never printed (grep showed exactly two
+          # references: the redirect and the upload path). Root-causing a boot crash meant waiting
+          # out the timeout and then downloading an artifact.
+          BACKEND_PID="$(cat "${RUNNER_TEMP}/backend.pid")"
           for i in $(seq 1 60); do
             curl -fsS "$BASE/health" >/dev/null 2>&1 && break
+            if ! kill -0 "${BACKEND_PID}" 2>/dev/null; then
+              echo "the backend process exited during boot (pid ${BACKEND_PID} is gone) — not waiting out the timeout" >&2
+              break
+            fi
             sleep 2
           done
-          curl -fsS "$BASE/health" >/dev/null
+          if ! curl -fsS "$BASE/health" >/dev/null 2>&1; then
+            echo "--- backend.log (last 200 lines) ---" >&2
+            tail -n 200 "${RUNNER_TEMP}/backend.log" >&2 || echo "(no backend.log was produced)" >&2
+            echo "------------------------------------" >&2
+            exit 1
+          fi
           curl -fsS "$BASE/api/plugins" | node -e '
             const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
             const p = (d.list || []).find((x) => x.name === "plugin-integration-core");
@@ -312,7 +328,32 @@ jobs:
           TOKEN: ${{ steps.login.outputs.token }}
           MOCK_K3_URL: http://127.0.0.1:${{ env.MOCK_K3_PORT }}
           TENANT_ID: ${{ env.TENANT_ID }}
-        run: node scripts/ops/stock-prep-window-rehearsal-driver.mjs
+        run: |
+          # PREFLIGHT B2: `run: node driver.mjs | tee log` WITHOUT pipefail is FAIL-OPEN — tee's
+          # exit code wins and the driver's process.exit(1) is masked, turning every failed gate
+          # into a green step. The block form with `set -o pipefail` is what makes the capture safe.
+          set -euo pipefail
+          node scripts/ops/stock-prep-window-rehearsal-driver.mjs \
+            | tee "${RUNNER_TEMP}/rehearsal.log"
+
+      - name: Surface REHEARSAL_SUMMARY (the lane's primary evidence)
+        if: always()
+        run: |
+          set -euo pipefail
+          # This one line carries every per-step count (sourceRows/add/written/failed/held/errorCode)
+          # AND the `sourceLeg: stand-in` caveat. It previously lived only in job scrollback, so the
+          # curated bundle a reviewer archives did not contain the lane's own verdict.
+          if [ -f "${RUNNER_TEMP}/rehearsal.log" ]; then
+            {
+              echo '## Rehearsal summary'
+              echo '```json'
+              grep '^REHEARSAL_SUMMARY=' "${RUNNER_TEMP}/rehearsal.log" | sed 's/^REHEARSAL_SUMMARY=//' || \
+                echo '{"note":"the driver produced no REHEARSAL_SUMMARY — it died before its own summary line"}'
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "the runbook step produced no log at all (it did not start)" >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Save-only invariant seen from the WIRE (mock call log — synthetic keys only)
         if: always()
@@ -383,6 +424,7 @@ jobs:
             ${{ runner.temp }}/mock-k3.log
             ${{ runner.temp }}/mig-before.txt
             ${{ runner.temp }}/mig-unscoped.txt
+            ${{ runner.temp }}/rehearsal.log
             ${{ runner.temp }}/mig-after.txt
           if-no-files-found: error
           retention-days: 7

@@ -390,6 +390,12 @@ record('preflight-list-read-smoke',
     status: listSmoke.status,
     timeout: timedOut(listSmoke),
     evidenceOk: listEvidence?.ok ?? null,
+    // PREFLIGHT B4: read-smoke answers HTTP 200 on BUSINESS failure, so status alone cannot say
+    // why. readSmokeErrorEvidence always sets errorCode and bounds it to /^[A-Z0-9_:-]+$/ (<=80
+    // chars) — values-free by construction, so recording it is safe under this lane's discipline.
+    // read-back-negative-control already reads this exact field off the identical shape; omitting
+    // it here was inconsistent within one file.
+    errorCode: listEvidence?.errorCode ?? null,
     rowCountField: listRowCountKey ?? null,
     rowCount: listRowCountKey ? (listEvidence?.[listRowCountKey] ?? null) : null,
   })
@@ -525,6 +531,7 @@ record('read-back-written-key',
     status: readBack.status,
     timeout: timedOut(readBack),
     evidenceOk: readBackEvidence?.ok ?? null,
+    errorCode: readBackEvidence?.errorCode ?? null,
     recordPresent: readBackEvidence?.recordPresent ?? null,
     recordCount: readBackEvidence?.recordCount ?? null,
   })
