@@ -378,7 +378,28 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     // UNSATISFIABLE (a block main did not have); and two records with different authority codes but
     // the same stale acctId digested EQUAL — the owner's defect, still open, in that mode.
     //
-    // The identity is whatever the record would AUTHENTICATE with. Same resolution, same answer.
+    // The identity is whatever the record would AUTHENTICATE with.
+    //
+    // REVIEW P2-1 (third round) — the previous version claimed "Same resolution, same answer" and
+    // was WRONG A THIRD TIME: it started at the adapter's SECOND branch. `login()` checks
+    // `credentials.sessionId` FIRST (adapter :1902-1906) and short-circuits with a session header,
+    // never reaching the authorityCode/acctId resolution below. Proven against this very function:
+    // two records with different sessionId but the same stale acctId digested EQUAL — the owner's
+    // wrong-账套 defect, alive one mode over — and a clean session-only record digested null,
+    // making the write gate unsatisfiable. Both of P1-2's failure directions, one branch earlier.
+    //
+    // Reachable, not hypothetical: credentials are free-form JSON, and the on-prem preflight
+    // treats K3_SESSION_ID as a first-class auth mode.
+    //
+    // I have now mis-stated this mirror three times. The lesson is not "read more carefully" — it
+    // is that a claim of equivalence to another function's control flow must be checked branch by
+    // branch against that function, from its FIRST statement.
+    if (credentials.sessionId !== undefined && credentials.sessionId !== null && credentials.sessionId !== '') {
+      const sessionMaterial = [system.kind, origin, `sessionId=${String(credentials.sessionId)}`]
+        .map((part) => `${part.length}:${part}`).join('|')
+      return crypto.createHmac('sha256', INSTANCE_DIGEST_KEY).update(sessionMaterial).digest('hex')
+    }
+
     const authorityCode = firstDefined(credentials.authorityCode, credentials.authCode, cfg.authorityCode)
     const authMode = firstDefined(cfg.authMode, authorityCode ? 'authority-code' : null, 'login')
     let authIdentity

@@ -680,8 +680,49 @@ async function testInstanceDigestIsProductionBehaviour() {
     + 'in this mode named a field login never sends')
   // The mode determines which identity is digested, so acctId must not leak into it.
   assert.equal(dAc1, dAc3, 'a stale acctId must not change the identity in authority-code mode')
-  // An explicit config.authMode wins, exactly as in the adapter.
-  await put('ac5', AC, 'https://k3.example.test', { authorityCode: 'AC-ONE', acctId: '001' })
+
+  // REVIEW P2-1 (third round) — sessionId is the adapter's FIRST auth branch and the digest
+  // started at its second, so both of P1-2's failure directions were alive one mode over.
+  await put('s1', AC, 'https://k3.example.test', { sessionId: 'SESS-ONE', acctId: 'STALE' })
+  await put('s2', AC, 'https://k3.example.test', { sessionId: 'SESS-TWO', acctId: 'STALE' })
+  await put('s3', AC, 'https://k3.example.test', { sessionId: 'SESS-ONE' })
+  const [dS1, dS2, dS3] = await Promise.all(['s1', 's2', 's3'].map(digest))
+  assert.notEqual(dS1, dS2,
+    'different sessionId must differ EVEN WITH an identical stale acctId — session auth never '
+    + 'sends acctId, so digesting it named a field login does not use')
+  assert.ok(dS3, 'a session-only record must be digestible, not null — null makes the write gate unsatisfiable')
+  assert.equal(dS1, dS3, 'a stale acctId must not change the identity in session mode')
+
+  // NIT (review r2): the per-process key had NO coverage — replacing randomBytes with a constant
+  // left the suite green. Two registries in one process must agree; a digest must not be
+  // reproducible from the material alone by anyone who knows the scheme.
+  const otherRegistry = createExternalSystemRegistry({ db, credentialStore, idGenerator: () => 'unused2' })
+  assert.equal(
+    await otherRegistry.getExternalSystemInstanceDigest({ id: 'a', tenantId: 't1', workspaceId: null }),
+    dA, 'two registries in ONE process must produce the same digest (the key is per-process)')
+
+  // ...but same-process agreement does NOT discriminate: a HARDCODED key satisfies it too, and the
+  // first version of this check passed against exactly that mutation. The property that separates
+  // "per-process random" from "constant in source" is that a DIFFERENT PROCESS must disagree.
+  // Measured, not argued.
+  const child = require('node:child_process').spawnSync(process.execPath, ['-e', `
+    const { createExternalSystemRegistry } = require(${JSON.stringify(require.resolve('../lib/external-systems.cjs'))})
+    const row = { id: 'a', tenant_id: 't1', workspace_id: null, kind: 'erp:k3-wise-webapi', name: 'a',
+      role: 'target', status: 'active', config: { baseUrl: 'https://k3.example.test' },
+      credentials_encrypted: JSON.stringify({ username: 'u', password: 'p', acctId: '001' }) }
+    const db = { async selectOne() { return row }, async insertRow() {}, async updateRow() {},
+      async insertOne() {}, async select() { return [] },
+      async deleteRows() {}, async countRows() { return 0 } }
+    const cs = { async encrypt(v) { return v }, async decrypt(v) { return v }, async fingerprint() { return 'x' } }
+    createExternalSystemRegistry({ db, credentialStore: cs })
+      .getExternalSystemInstanceDigest({ id: 'a', tenantId: 't1', workspaceId: null })
+      .then((d) => process.stdout.write(String(d)))
+  `], { encoding: 'utf8' })
+  assert.equal(child.status, 0, `child probe must run: ${child.stderr}`)
+  assert.ok(child.stdout && child.stdout.length > 0, 'child probe must produce a digest')
+  assert.notEqual(child.stdout, dA,
+    'a DIFFERENT PROCESS must produce a different digest — otherwise the key is a constant in '
+    + 'source and the digest is reproducible by anyone who reads the repo')
 
   console.log('  external-systems: instance digest (production function) OK')
 }
