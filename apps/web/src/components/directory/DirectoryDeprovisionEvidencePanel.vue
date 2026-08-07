@@ -282,7 +282,8 @@ async function runPreview() {
   loadingPreview.value = true
   preview.value = null
   try {
-    const params = new URLSearchParams({ integrationId: props.integrationId })
+    const params = new URLSearchParams()
+    if (props.integrationId) params.set('integrationId', props.integrationId)
     const response = await apiFetch(
       `/api/admin/directory/deprovision/preview/${encodeURIComponent(userId)}?${params.toString()}`,
     )

@@ -50,6 +50,8 @@ Prospective planner、三 effect 意图、event 恢复、全写者锁意图、ma
 |---|------|--------------|
 | **P1** | `globally_clear` 被误读为「清全部组织 membership」，与主写者的 org/global 双候选语义及 `UNIQUE(event_id,effect_type)` 冲突 | 每 event 只记源 integration 所属 org 的一条 `membership_changed`；`globally_clear` 只门控 `grant_changed` / `user_changed` |
 
+**Ratification 记录（2026-08-07）**：owner 于会话「钉钉同步业务功能开发-260721」下达收尾指令（「请排序并完成所有这条线剩余的开发」），采纳的收尾意见以「显式批准 Rev 4.3 的来源组织单 membership effect 语义」为第 1 步 —— 本勘误据此落账执行。该勘误使锁文与已落 main 的主写者语义（W4-PRE-1d owner P2 裁决，#4530 review issuecomment-5043752399：org 候选与 global 候选分立，global 守卫只门控 grant/`users.is_active`）一致，并非新语义。终版随验证 MD 提请 owner 会签。
+
 产品方向见 companion — **已赞成**。  
 **Implementation design lock 已于 2026-07-23 批准。**  
 序：lock → T1→T2→T3 → D1…D7 → canary。  
