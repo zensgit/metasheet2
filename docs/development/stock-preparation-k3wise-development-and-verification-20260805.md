@@ -299,6 +299,10 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 
 ### 7.1 当前真实剩余(2026-08-05)
 
+> **状态时点提示(2026-08-07 追加)**:本表是 **2026-08-05 的时点记录**,不改写。
+> R2/R3/R4 此后已完成(#4768 已 MERGED,彩排最终跑 17/17 见 §8')。
+> **当前状态以 §7.6 为准** —— 链条现在卡在配置面修复,而不是本表列出的那些项。
+
 | # | 项 | 状态 | 阻塞于 |
 |---|---|---|---|
 | R1 | **#4769** 前置门:C6-only 写入口(`/run` 与 replay 双拒)、Save endpoint 钉死、C6 消费 approved B4 binding | ✅ **MERGED 2026-08-05T18:01Z**(main `65edb98c6`),9/9 required 绿含 `integration-guard` | — |
@@ -383,6 +387,94 @@ zip      d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
 ⚠️ **不要用 `config.url` 别名。** adapter 认 `config.baseUrl || config.url`,而 D2 的实例摘要
 只读 `config.baseUrl` —— 用别名会让摘要为 null ⇒ `INSTANCE_UNVERIFIABLE` ⇒ **写门不可满足**。
 方向是 fail-closed(不会写错账套),故登记为**窗口后 P2**(issue #4793),不阻塞本次 baseUrl 场景。
+
+---
+
+## 7.6 配置修复阻塞与其两道门(2026-08-07,实测)
+
+窗口未能开始。链条卡在**配置面修复**这一步,`readyForControlledWindow=NO`。
+
+### 7.6.1 现场报告
+
+配置负责人在 [#4628](https://github.com/zensgit/metasheet2/issues/4628) 报
+`CONFIGURATION_REPAIR_NOT_SAVED`:**已部署**的 K3 WebAPI adapter 被声明为 target-only,
+把既有 K3 target 的草稿改成 `role=source` 后**保存按钮立即被禁用**;V1 只读核验因此
+`independentVerification=FAIL`、`blockerReason=K3_CONFIG_MISMATCH`。
+
+### 7.6.2 两道门,顺序触发(与构建无关)
+
+在 `7bf2bd7a1`(0725 release)、`aa48c3f18`(冻结窗口包)、`3c9160d09`(#4798 head)三个候选构建上
+**逐一核验,结论一致**:
+
+| # | 门 | 位置 | 三构建 |
+|---|---|---|---|
+| 1 | 前端按 adapter 声明拦下 `role=source` | `IntegrationWorkbenchView.vue:1265` → `adapterSupportsSide` | ✓✓✓ |
+| 2 | 服务端对**已存在**记录抛 `kind and role cannot be changed after creation` | `external-systems.cjs` `upsertExternalSystem` | ✓✓✓ |
+
+服务端 role 是固定三值枚举(`VALID_ROLES`),**不与 adapter 声明的 roles 交叉校验**
+(`upsertExternalSystem` 全文无 adapter registry / adapter metadata 引用)。
+
+⇒ 现场看到的"保存被禁用"是**门 1 先触发**,服务端并未应答。**门 2 是下一步才会撞上的**:
+若绕过前端但仍在**现有 target 记录**上改 role,服务端不可变性会拒绝。
+
+> **因此:修复必须新建一条 K3-read 记录,而不是把现有 target 改成 source。
+> 这条要求在 #4798 合并并重部署之后依然成立。** 它是任何分支下都不变的动作项。
+
+不受此阻塞的一半:approved SQL Server source adapter 本就声明 source 侧
+(`data-source-sql-readonly-source-adapter.cjs`),`approvedSqlServerSourceRefPresent=NO`
+那一项现在就能按既有授权补齐。
+
+### 7.6.3 #4798 与"合并即解除"的撤回
+
+PR #4798 把 K3 WebAPI adapter 的 `roles` 由 target-only 改为双侧(required 9/9 绿)。
+其原标题声称**合并即解除 #4628 阻塞** —— **该声明过强,已撤回**。
+
+`roles` 是 adapter 模块常量,**随构建烘焙**:
+
+- 配置面若是**跟随 main 的部署**:`docker-build.yml` 于 push main 时 build+deploy,
+  `paths-ignore` 只排除 `docs/**`/`output/**`,而 #4798 改 `plugins/**` ⇒ 合并会触发一次
+  **自动重部署**,UI 授权路径随之解除;
+- 配置面若是**私有 on-prem 包**:合并不改变它,需要一次部署,而
+  `packageDeployment=NOT_AUTHORIZED`,且重部署可能牵动冻结窗口包的重出与重跑彩排。
+
+配置面跑哪个构建在私域,本侧判不了 —— 已升 owner。
+
+### 7.6.4 待 owner 裁的三个分支
+
+```text
+(a) 授权在既有配置面上以受控 API 新建 K3-read 记录(不需要部署)
+(b) 放行 #4798 + 授权配置面重部署(当前 NOT_AUTHORIZED;可能牵动冻结包重出)
+(c) 都不做 ⇒ 候选窗口顺延
+```
+
+本侧**不自行选 (a)**:以 API 达成的正是为 #4798 保留的那一项能力变更,绕开评审与放行;
+由实现方提议等于把"技术上算"当作授权。
+
+### 7.6.5 时限
+
+`operationId=stockprep_aa48_readiness_verify_20260807_02`、
+`authorizationEnd=2026-08-08T08:00:00+08:00`,前置 `CONFIGURATION_REPAIR_SAVED` 未满足。
+owner 曾指示"修复保存后可直接执行 V2,无需再等 owner 回复" ⇒ 若不选定分支,该授权将**静默失效**,
+链条停在此处。是否随裁定一并重发 V2,待 owner 决定。
+
+---
+
+## 7.7 CI 侧阻碍:#4791 flake 的机制已确定性复现(2026-08-07)
+
+与窗口并行、**不需要任何授权**的一项:#4791 的 57P01 teardown flake 会红**必需**的 `test` 检查,
+拖住任何 PR。issue 原文把根因记为"in-flight query 的 rejection",**偏了一步**:
+
+> `DROP DATABASE … WITH (FORCE)` 调 `pg_terminate_backend` 后,`pg` 把终止以 **`'error'` 事件**
+> 交给拥有连接的 Client/Pool,**不是**在途 query 的 rejection —— query 上的 `.catch()` **拿不到它**。
+> 无监听器 ⇒ node uncaught ⇒ vitest `Errors: N` ⇒ **全绿但退出码 1**。
+
+复现来自 PR #4799 新套件的第一版(未给持有 client 挂 `'error'` 监听器):
+本地 `5 passed / Errors 2 / exit 1`,与 CI 签名逐字一致。**机制自此可按需复现**(时序仍不可)。
+
+修法(#4799):`ALLOW_CONNECTIONS false` → 轮询 `pg_stat_activity` 排空 → 普通 `DROP`;
+仅超时才 force 并**点名**持有者。判据是两个调用点无条件打的
+`scratchDrain=CLEAN|FORCED` —— 强制 drop 就是修复前行为,所以"CI 变绿"分不出排空生效与运气好。
+**#4791 不随 #4799 关闭**,等 CI 实报 `CLEAN`。
 
 ---
 
