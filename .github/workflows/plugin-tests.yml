@@ -92,15 +92,19 @@ jobs:
             scripts/ops/onprem-windows-system-hardening.test.mjs \
             scripts/ops/multitable-onprem-package-no-node-modules.test.mjs
 
-      # Attendance Windows-native QA v2 tooling — P1 structured machine-evidence + P2 QA_TOOLING_SHA
-      # binding (runner test) and the P2 reset "service stopped" fail-open (reset test; its pm2 stubs
-      # are POSIX sh, so it is gated HERE on ubuntu, not in the Windows-only package-build QA step).
-      # Neither test needs `pnpm install` (node builtins + dependency-free contract module).
+      # Attendance Windows-native QA v2 tooling — P1 case→harness-whitelisted machine-evidence +
+      # operatorEvidence@1 (runner test), the P2 reset "service stopped" fail-open (reset test; its pm2
+      # stubs are POSIX sh, so it is gated HERE on ubuntu, not in the Windows-only package-build QA
+      # step), and the on-prem package-verifier contract (it requires the machine-evidence-contract
+      # module + pqa-cases runbook; its fixture must ship them). None need `pnpm install` (node builtins
+      # + tar/bash). NOTE: this job's check ("K3 WISE offline PoC") is NOT one of main's required
+      # contexts, so these are ALSO run in the required `test` job below — see that step's header.
       - name: Run attendance Windows-native QA v2 tooling tests
         run: |
           node --test \
             scripts/ops/attendance-windows-native-qa-runner.test.mjs \
-            scripts/ops/windows-qa/reset-isolated-db.test.mjs
+            scripts/ops/windows-qa/reset-isolated-db.test.mjs \
+            scripts/ops/attendance-onprem-package-verify-migrations.test.mjs
 
       - name: Run DingTalk OAuth-stability metrics-auth contract test (DT-CLOSE-01)
         run: |
@@ -197,6 +201,22 @@ jobs:
           node --test \
             scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs \
             scripts/ops/fixtures/integration-k3wise/rehearsal-driver-contract.test.mjs
+
+      # Attendance Windows-native QA v2 tooling — REQUIRED lane. These three suites also run in
+      # `k3wise-offline-poc` above, but that job's check ("K3 WISE offline PoC") is NOT a required
+      # context, so a red there does not block a merge (the same reasoning the K3 step above records).
+      # The runner test is the ONLY guard on the owner P1 fix — the machineEvidence case→harness
+      # whitelist + facts schema and operatorEvidence@1 that reject a hand-typed PASS — and the
+      # package-verify suite is the ONLY guard on the P2 fix (its fixture must ship the now-required
+      # machine-evidence-contract module + pqa-cases runbook, or the verifier reds). A guard that cannot
+      # block is documentation, not a gate; invoked here in the REQUIRED `test` job (test (20.x) is a
+      # required context) so they actually gate. No DB / no pnpm install (node builtins + tar/bash).
+      - name: Attendance Windows-native QA v2 tooling tests (required lane)
+        run: |
+          node --test \
+            scripts/ops/attendance-windows-native-qa-runner.test.mjs \
+            scripts/ops/windows-qa/reset-isolated-db.test.mjs \
+            scripts/ops/attendance-onprem-package-verify-migrations.test.mjs
 
       # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
       # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
