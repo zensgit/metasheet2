@@ -46,6 +46,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { dropScratchDatabase, formatScratchDropFailure, formatScratchDropOutcome } from '../helpers/scratch-database'
 import type { MetaSheetServer } from '../../src/index'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -250,7 +251,24 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
   afterAll(async () => {
     await pool?.end().catch(() => undefined)
     if (server) await server.stop()
-    await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
+    // #4791: drain the scratch DB's backends before dropping it. A forced drop terminates any
+    // still-attached backend, and `pg` reports that to its owner as an unowned 'error' EVENT —
+    // which vitest counts as an unhandled error and the step exits 1 with every test passing.
+    // The outcome line is emitted UNCONDITIONALLY: `CLEAN` is the claim, `FORCED` names the
+    // component still holding a connection and keeps #4791 open, `FAILED` means a teardown
+    // statement errored. The helper fails CLOSED, so the failure is logged and then RE-THROWN —
+    // but only after the admin pool is closed and the env is restored, because leaking either
+    // would itself show up as a new flake on the very check #4791 is about.
+    let dropError: unknown
+    if (adminPool) {
+      try {
+        const dropOutcome = await dropScratchDatabase(adminPool, scratchName)
+        console.log(formatScratchDropOutcome('bpmn-poller-disabled', dropOutcome))
+      } catch (err) {
+        dropError = err
+        console.log(formatScratchDropFailure('bpmn-poller-disabled', err))
+      }
+    }
     await adminPool?.end().catch(() => undefined)
     for (const [key, value] of Object.entries({
       DATABASE_URL: priorEnv.databaseUrl,
@@ -260,6 +278,7 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
+    if (dropError) throw dropError
   }, 60000)
 
   it('poller disabled + a timer-bearing process: /start rejects with BPMN_TIMER_POLLER_DISABLED and FOUR real zeros — process, activity, incident, timer rows all 0', async () => {
