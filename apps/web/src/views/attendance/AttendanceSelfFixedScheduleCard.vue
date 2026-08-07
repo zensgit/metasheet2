@@ -187,4 +187,24 @@ const unavailableHint = computed(() => {
   color: var(--ms-text-2);
   font-size: 12px;
 }
+
+/* Vue `scoped` styles do not cross component boundaries -- re-declared here rather than relying
+   on AttendanceView.vue's scoped `.attendance__*` rules, matching this codebase's established
+   sub-component convention (e.g. AttendanceRequestCenterSection.vue). */
+.attendance__btn {
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #d0d0d0;
+  background: #fff;
+  cursor: pointer;
+}
+
+.attendance__btn--compact {
+  padding: 4px 8px;
+}
+
+.attendance__field-hint {
+  color: #777;
+  font-size: 11px;
+}
 </style>

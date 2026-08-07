@@ -248,4 +248,43 @@ const unavailableHint = computed(() => {
 .attendance-fs-panel__drift h6 {
   margin: 0 0 var(--ms-space-1);
 }
+
+/* Vue `scoped` styles do not cross component boundaries -- re-declared here rather than relying
+   on AttendanceView.vue's scoped `.attendance__*` rules, matching this codebase's established
+   sub-component convention (e.g. AttendanceRequestCenterSection.vue). */
+.attendance__btn {
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #d0d0d0;
+  background: #fff;
+  cursor: pointer;
+}
+
+.attendance__btn--compact {
+  padding: 4px 8px;
+}
+
+.attendance__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.attendance__field-hint {
+  color: #777;
+  font-size: 11px;
+}
+
+.attendance__table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+}
+
+.attendance__table th,
+.attendance__table td {
+  border-bottom: 1px solid #e0e0e0;
+  padding: 8px;
+  text-align: left;
+  font-size: 13px;
+}
 </style>

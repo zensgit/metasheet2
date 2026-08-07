@@ -132,4 +132,90 @@ const unavailableTitle = computed(() => {
   font-size: 12px;
   color: var(--ms-text-2);
 }
+
+/* Vue `scoped` styles do not cross component boundaries -- AttendanceView.vue's own `.attendance__*`
+   utility rules do not reach this child component's template. Re-declared here (same values as
+   AttendanceRequestCenterSection.vue / AttendanceHolidayRuleSection.vue) rather than relying on
+   the parent's scoped CSS, matching this codebase's established sub-component convention. */
+.attendance__card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+}
+
+.attendance__requests-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.attendance__field-hint {
+  color: #777;
+  font-size: 11px;
+}
+
+.attendance__admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.attendance__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #555;
+}
+
+.attendance__field input {
+  padding: 6px 10px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  min-width: 180px;
+}
+
+.attendance__admin-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.attendance__btn {
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #d0d0d0;
+  background: #fff;
+  cursor: pointer;
+}
+
+.attendance__btn--primary {
+  background: #1976d2;
+  border-color: #1976d2;
+  color: #fff;
+}
+
+.attendance__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.attendance__table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+}
+
+.attendance__table th,
+.attendance__table td {
+  border-bottom: 1px solid #e0e0e0;
+  padding: 8px;
+  text-align: left;
+  font-size: 13px;
+}
 </style>

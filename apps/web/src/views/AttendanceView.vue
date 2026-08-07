@@ -14967,48 +14967,14 @@ function loadSelfDecisionTrace(): void {
 // `useAttendanceFixedScheduleEffectiveness()` composable instance (mirrors the adminTrace/
 // selfTrace split above) -- no shared mutable status between surfaces, and no re-derivation of
 // the four-state contract anywhere below (that lives ONLY in `attendanceFixedScheduleEffectiveness.ts`).
+// NOTE: the group-drawer instance/watcher is declared further below, right after
+// `attendanceGroupForm` (its `attendanceType` source) is declared -- `<script setup>` runs
+// top-to-bottom and `watch(...)` evaluates its getters immediately, so referencing
+// `attendanceGroupForm` here (before its own `const` line) would be a TDZ crash.
 
-// --- group drawer (existing admin aggregate route; loads whenever the group editor's "schedule"
-// stage shows a saved fixed_shift group -- same gate the existing preview panel above uses) ---
-const attendanceGroupFixedScheduleEffectiveness = useAttendanceFixedScheduleEffectiveness()
-watch(
-  [attendanceGroupEditingId, attendanceGroupActiveStage, () => attendanceGroupForm.attendanceType],
-  ([groupId, stage, attendanceType]) => {
-    if (groupId && stage === 'schedule' && attendanceType === 'fixed_shift') {
-      void attendanceGroupFixedScheduleEffectiveness.loadGroupEffectiveness(groupId)
-    } else {
-      attendanceGroupFixedScheduleEffectiveness.reset()
-    }
-  },
-)
-function reloadAttendanceGroupFixedScheduleEffectiveness(): void {
-  if (attendanceGroupEditingId.value) void attendanceGroupFixedScheduleEffectiveness.loadGroupEffectiveness(attendanceGroupEditingId.value)
-}
-
-// --- employee schedule (new member-safe /me route). Group id source: the employee's own
-// attendance-group assignment already loaded by loadSelfAttendanceRules() (`/api/attendance/rules/me`)
-// -- no new membership discovery mechanism. Shows the FIRST attendance group only; multi-group
-// fixed-schedule effectiveness is non-scope for this slice (flagged in the PR body). ---
-const selfFixedScheduleGroupId = computed(() => selfRulesData.value?.assignment?.attendanceGroups?.[0]?.id ?? null)
-const selfFixedSchedule = useAttendanceFixedScheduleEffectiveness()
-watch(selfFixedScheduleGroupId, (groupId) => {
-  if (groupId) void selfFixedSchedule.loadSelfEffectiveness(groupId)
-  else selfFixedSchedule.reset()
-})
-function reloadSelfFixedSchedule(): void {
-  if (selfFixedScheduleGroupId.value) void selfFixedSchedule.loadSelfEffectiveness(selfFixedScheduleGroupId.value)
-}
-
-// --- self decision trace (same member-safe /me route + target group as the employee card above,
-// separate composable instance/mount so each surface's browser leg can be proven independently). ---
-const selfFixedScheduleTrace = useAttendanceFixedScheduleEffectiveness()
-watch(selfFixedScheduleGroupId, (groupId) => {
-  if (groupId) void selfFixedScheduleTrace.loadSelfEffectiveness(groupId)
-  else selfFixedScheduleTrace.reset()
-})
-function reloadSelfFixedScheduleTrace(): void {
-  if (selfFixedScheduleGroupId.value) void selfFixedScheduleTrace.loadSelfEffectiveness(selfFixedScheduleGroupId.value)
-}
+// (employee schedule + self decision trace composables are declared further below, right after
+// `selfRulesData` -- their group-id source -- is declared; `<script setup>` runs top-to-bottom
+// and referencing it here would be a TDZ crash, same reason as the group-drawer note above.)
 
 // --- admin decision trace (existing admin aggregate route; admin-typed group id -- mirrors the
 // existing adminTraceUserId free-text pattern above; reports/admin-trace mode does not preload a
@@ -16426,6 +16392,25 @@ const attendanceGroupForm = reactive({
   attendanceType: 'fixed_shift' as AttendanceGroupType,
   description: '',
 })
+
+// #4709 FSER-4 §3: group drawer (existing admin aggregate route; loads whenever the group
+// editor's "schedule" stage shows a saved fixed_shift group -- same gate the existing preview
+// panel uses). Declared here (not with the other FSER-4 composables above) because its watcher
+// reads `attendanceGroupForm.attendanceType`, which must already be initialized.
+const attendanceGroupFixedScheduleEffectiveness = useAttendanceFixedScheduleEffectiveness()
+watch(
+  [attendanceGroupEditingId, attendanceGroupActiveStage, () => attendanceGroupForm.attendanceType],
+  ([groupId, stage, attendanceType]) => {
+    if (groupId && stage === 'schedule' && attendanceType === 'fixed_shift') {
+      void attendanceGroupFixedScheduleEffectiveness.loadGroupEffectiveness(groupId)
+    } else {
+      attendanceGroupFixedScheduleEffectiveness.reset()
+    }
+  },
+)
+function reloadAttendanceGroupFixedScheduleEffectiveness(): void {
+  if (attendanceGroupEditingId.value) void attendanceGroupFixedScheduleEffectiveness.loadGroupEffectiveness(attendanceGroupEditingId.value)
+}
 
 const scheduleGroupForm = reactive({
   name: '',
@@ -24536,6 +24521,31 @@ const selfRulesData = ref<AttendanceSelfRulesData | null>(null)
 const selfRulesLoading = ref(false)
 const selfRulesError = ref<string | null>(null)
 const selfRulesHasData = computed(() => selfRulesData.value !== null)
+
+// #4709 FSER-4 §3: employee schedule (new member-safe /me route). Group id source: the
+// employee's own attendance-group assignment already loaded by loadSelfAttendanceRules() above
+// -- no new membership discovery mechanism. Shows the FIRST attendance group only; multi-group
+// fixed-schedule effectiveness is non-scope for this slice (flagged in the PR body).
+const selfFixedScheduleGroupId = computed(() => selfRulesData.value?.assignment?.attendanceGroups?.[0]?.id ?? null)
+const selfFixedSchedule = useAttendanceFixedScheduleEffectiveness()
+watch(selfFixedScheduleGroupId, (groupId) => {
+  if (groupId) void selfFixedSchedule.loadSelfEffectiveness(groupId)
+  else selfFixedSchedule.reset()
+})
+function reloadSelfFixedSchedule(): void {
+  if (selfFixedScheduleGroupId.value) void selfFixedSchedule.loadSelfEffectiveness(selfFixedScheduleGroupId.value)
+}
+
+// --- self decision trace (same member-safe /me route + target group as the employee card above,
+// separate composable instance/mount so each surface's browser leg can be proven independently). ---
+const selfFixedScheduleTrace = useAttendanceFixedScheduleEffectiveness()
+watch(selfFixedScheduleGroupId, (groupId) => {
+  if (groupId) void selfFixedScheduleTrace.loadSelfEffectiveness(groupId)
+  else selfFixedScheduleTrace.reset()
+})
+function reloadSelfFixedScheduleTrace(): void {
+  if (selfFixedScheduleGroupId.value) void selfFixedScheduleTrace.loadSelfEffectiveness(selfFixedScheduleGroupId.value)
+}
 
 function summarizeSelfRulesGroups(groups: AttendanceSelfRulesGroupSummary[] | undefined, emptyLabel: string): string {
   if (!Array.isArray(groups) || groups.length === 0) return emptyLabel
