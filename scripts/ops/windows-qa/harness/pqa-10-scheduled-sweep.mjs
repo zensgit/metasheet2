@@ -93,14 +93,18 @@ async function main() {
     `createOrResumeAttendanceScheduledRunV1 -> kind=created_running run_id=${created.runId} ` +
     `identity=(${orgShadow},cron,${WORK_DATE}); sweepAttendanceScheduledRunsOnceV1 tick observed the ` +
     `run and called recoverCandidate ${recovered}x (backlogRemaining=${tick?.backlogRemaining ?? '?'}).`
+  // Owner FIX 0 (honesty downgrade): this asserts only that the sweep OBSERVES a running run as a
+  // candidate — not PQA-10's full matrix objective ("re-evaluate scheduled identity, target OUTCOME,
+  // and OUTBOX durability": generate + verify the target outcome AND the outbox). Emit BLOCKED with
+  // the real-execution evidence until FIX 4 completes it.
   emitCaseEvidence(evidenceDir, {
     id: CASE_ID,
     title: TITLE,
-    status: 'PASS',
-    reason: 'Real scheduled-run identity creation + real recovery-sweep tick executed end-to-end on the isolated DB.',
+    status: 'BLOCKED',
+    reason: 'scenario does not yet assert its full matrix objective',
     evidence,
   })
-  console.log(`[${CASE_ID}] PASS: ${evidence}`)
+  console.log(`[${CASE_ID}] BLOCKED (honesty downgrade — assertions reached): ${evidence}`)
 }
 
 main()

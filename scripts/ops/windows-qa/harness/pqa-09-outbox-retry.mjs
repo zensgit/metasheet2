@@ -113,14 +113,18 @@ async function main() {
       `dispatchAttendanceResultEventOutboxV1 pass1=${JSON.stringify(pass1)} (row -> pending, attempts=1); ` +
       `pass2=${JSON.stringify(pass2)} (SAME row -> delivered, attempts=2, delivered_at set); ` +
       `rows=1 (no duplicate DML); sink called 1x with attendance.absence.generated.`
+    // Owner FIX 0 (honesty downgrade): the outbox row is hand-INSERTed (the runbook forbids that) and
+    // no business-DML baseline is compared, so this does not yet assert PQA-09's full matrix objective
+    // ("one synthetic dispatch failure + retry ⇒ one source/result effect, no duplicate DML" on a
+    // PRODUCT-PRODUCED row). Emit BLOCKED with the real-execution evidence until FIX 4 completes it.
     emitCaseEvidence(evidenceDir, {
       id: CASE_ID,
       title: TITLE,
-      status: 'PASS',
-      reason: 'Real outbox dispatcher: one injected failure then retry produced one delivered effect and no duplicate DML.',
+      status: 'BLOCKED',
+      reason: 'scenario does not yet assert its full matrix objective',
       evidence,
     })
-    console.log(`[${CASE_ID}] PASS: ${evidence}`)
+    console.log(`[${CASE_ID}] BLOCKED (honesty downgrade — assertions reached): ${evidence}`)
   } finally {
     await client.end()
   }

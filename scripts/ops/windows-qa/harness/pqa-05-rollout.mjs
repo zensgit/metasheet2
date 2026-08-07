@@ -84,14 +84,18 @@ async function main() {
       `transitionAttendanceCalculationRolloutV1(org=${orgShadow}) -> state=shadow; ` +
       `persisted state=${stateRow.state} version=${stateRow.version} prior_state=${stateRow.prior_state} ` +
       `scope=${stateRow.scope}; rollout_events appended=${eventCount}.`
+    // Owner FIX 0 (honesty downgrade): the assertions above only cover the rollout STATE transition,
+    // not PQA-05's full matrix objective ("keeps the legacy projection AND appends W4 shadow
+    // evidence"). Emit BLOCKED — with the real-execution evidence, so this is distinguishable from an
+    // error BLOCKED — until FIX 4 genuinely completes the objective.
     emitCaseEvidence(evidenceDir, {
       id: CASE_ID,
       title: TITLE,
-      status: 'PASS',
-      reason: 'Real transitionAttendanceCalculationRolloutV1 moved legacy(v1)->shadow(v2) on the isolated DB; append-only event recorded.',
+      status: 'BLOCKED',
+      reason: 'scenario does not yet assert its full matrix objective',
       evidence,
     })
-    console.log(`[${CASE_ID}] PASS: ${evidence}`)
+    console.log(`[${CASE_ID}] BLOCKED (honesty downgrade — assertions reached): ${evidence}`)
   } finally {
     await client.end()
   }
