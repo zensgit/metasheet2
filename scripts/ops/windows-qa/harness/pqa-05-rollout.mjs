@@ -7,8 +7,12 @@
  * the isolated metasheet_windows_qa, moving the synthetic shadow org legacy(v1) -> shadow(v2). The
  * command bootstraps the legacy row itself (lockRolloutStateForBootstrapOrRead:483), so no pre-seed.
  *
- * PASS-eligible: the real product function runs end-to-end on the real DB and the persisted state
- * machine is asserted. (The runner still requires the Windows host safety facts before final PASS.)
+ * VERDICT: BLOCKED (owner Fix 4). The rollout STATE transition below is real and route-less, but it is
+ * only a fragment of PQA-05's objective. The objective's other two halves — "keeps the legacy
+ * projection" and "appends W4 shadow calculation rows" — are produced only by
+ * createAttendanceLiveScheduledBoundaryV1, which needs five plugin-owned legacyAdapters compiled in
+ * plugins/plugin-attendance/index.cjs (not TS-importable). So this case stays BLOCKED with that honest
+ * reason rather than flipping to PASS on the narrower transition-only predicate.
  *
  * Run under tsx against source (macOS) or node against dist (Windows):
  *   QA_SYNTH_PASSWORD=... DATABASE_URL=postgresql://<local>/metasheet_windows_qa \
@@ -84,18 +88,29 @@ async function main() {
       `transitionAttendanceCalculationRolloutV1(org=${orgShadow}) -> state=shadow; ` +
       `persisted state=${stateRow.state} version=${stateRow.version} prior_state=${stateRow.prior_state} ` +
       `scope=${stateRow.scope}; rollout_events appended=${eventCount}.`
-    // Owner FIX 0 (honesty downgrade): the assertions above only cover the rollout STATE transition,
-    // not PQA-05's full matrix objective ("keeps the legacy projection AND appends W4 shadow
-    // evidence"). Emit BLOCKED — with the real-execution evidence, so this is distinguishable from an
-    // error BLOCKED — until FIX 4 genuinely completes the objective.
+    // Owner FIX 4 verdict — BLOCKED (honest reason): the FULL matrix objective ("keeps the legacy
+    // projection AND appends W4 shadow calculation rows") is NOT assertable route-lessly from Node.
+    // The shadow-calculation append (attendance_record_calculations mode='shadow' via the
+    // module-private insertShadowCalculation, w4c2-live-scheduled-boundary.ts:742) is produced ONLY by
+    // createAttendanceLiveScheduledBoundaryV1 (:1066), whose constructor throws
+    // W4C2_LEGACY_ADAPTERS_INVALID unless supplied the five plugin-owned legacyAdapters; and the
+    // "legacy projection" is assembled by those same adapters (applyLivePunchProjectionLegacyV1),
+    // compiled in plugins/plugin-attendance/index.cjs (no .ts — not importable). Only the rollout-state
+    // transition (asserted above, carried as evidence) is reachable from core-backend; that alone is
+    // NOT the objective, so we do NOT flip to PASS on the narrower predicate.
     emitCaseEvidence(evidenceDir, {
       id: CASE_ID,
       title: TITLE,
       status: 'BLOCKED',
-      reason: 'scenario does not yet assert its full matrix objective',
+      reason:
+        'full objective (legacy projection unchanged + appended W4 shadow calculation rows) is not ' +
+        'assertable route-lessly: the shadow-calculation append and the legacy projection are produced ' +
+        'only by createAttendanceLiveScheduledBoundaryV1, which requires the five plugin-owned ' +
+        'legacyAdapters compiled in plugins/plugin-attendance/index.cjs (not TS-importable). Only the ' +
+        'rollout-state transition (evidence below) is reachable from core-backend.',
       evidence,
     })
-    console.log(`[${CASE_ID}] BLOCKED (honesty downgrade — assertions reached): ${evidence}`)
+    console.log(`[${CASE_ID}] BLOCKED (full objective needs plugin legacyAdapters — see reason): ${evidence}`)
   } finally {
     await client.end()
   }

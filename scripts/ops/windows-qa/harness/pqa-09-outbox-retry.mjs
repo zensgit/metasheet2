@@ -2,21 +2,26 @@
 /**
  * PQA-09 — Outbox retry — harness (owner Fix 4). Route-less internal (dispatcher is worker-only).
  *
- * Drives the REAL product dispatcher `dispatchAttendanceResultEventOutboxV1`
- * (w4c2-outbox-dispatcher.ts:84) in-process against the isolated metasheet_windows_qa:
- *   pass 1: emit() throws -> the row stays pending, attempts=1, next_attempt_at scheduled;
- *   pass 2: emit() succeeds -> the SAME row -> delivered, attempts=2, delivered_at set.
- * Proves: one synthetic dispatch failure + retry yields ONE delivered effect and NO duplicate DML
- * (uq_areo_identity), driven by the real claim/deliver/retry predicate.
+ * Full matrix objective: "one synthetic dispatch failure + retry ⇒ one source/result effect, no
+ * duplicate DML" — on a PRODUCT-PRODUCED outbox row (the runbook forbids a manual INSERT).
  *
- * The pending row is hand-seeded (INSERT is unguarded; the outbox rejects only DELETE via
- * trg_areo_deny_delete), but SHAPE-FAITHFUL: it uses the scheduled_run identity union — a REAL
- * scheduled run (created through createOrResumeAttendanceScheduledRunV1) satisfies the FK
- * fk_areo_scheduled_run, event_kind 'attendance.absence.generated' maps to
- * identity_kind='scheduled_run' (chk_areo_kind_identity_map), entrypoint='scheduled'
- * (chk_areo_run_entrypoint), and business_key_fingerprint ~ ^[0-9a-f]{64}$. The row hits the
- * dispatcher's exact claim predicate (delivery_state='pending' AND next_attempt_at<=now()).
- * retryBackoffMs=0 so the pass-1 reschedule is immediately due for pass 2 in one run.
+ * The outbox row is produced by a REAL scheduled-run lifecycle, entirely through exported product
+ * functions against the isolated metasheet_windows_qa (no hand INSERT into the outbox):
+ *   1. createOrResumeAttendanceScheduledRunV1 — a run with one `generate` target.
+ *   2. seal that target (claim the per-user operation + recordAttendanceScheduledRunTargetOutcomeV1).
+ *   3. finalizeAttendanceScheduledRunV1 — the product enqueues the run-level
+ *      `attendance.absence.generated` outbox row as a side effect (w4c2-scheduled-run.ts:1020).
+ * Then the REAL dispatcher `dispatchAttendanceResultEventOutboxV1` (w4c2-outbox-dispatcher.ts:84):
+ *   pass 1: emit() throws -> the SAME row stays pending, attempts=1, rescheduled;
+ *   pass 2: emit() succeeds -> the SAME row -> delivered, attempts=2, delivered_at set, sink 1x.
+ *
+ * "no duplicate DML" is proven by a business-DML BASELINE (row counts of every scheduled-run /
+ * operation / calculation / outbox table) captured BEFORE the two dispatch passes and required to be
+ * byte-identical AFTER — the dispatch may only flip the one claimed row's delivery_state, never
+ * create or duplicate a business row. retryBackoffMs=0 makes the pass-1 reschedule immediately due.
+ *
+ * PASS-eligible: real product fns end-to-end on the real DB. (The runner still requires the Windows
+ * host safety facts before the final PASS.)
  */
 import {
   DEFAULT_EVIDENCE_DIR,
@@ -27,7 +32,12 @@ import {
   openIsolatedClient,
   parseArg,
 } from './qa-runtime.mjs'
-import { ensureShadowPosture, synthFingerprint } from './w4-common.mjs'
+import {
+  businessDmlCounts,
+  createScheduledRunWithOneGenerateTarget,
+  finalizeScheduledRunViaProduct,
+  sealScheduledGenerateTargetOutcome,
+} from './w4-common.mjs'
 
 const CASE_ID = 'PQA-09'
 const TITLE = 'Outbox retry'
@@ -41,30 +51,30 @@ async function main() {
   const u1Id = ids.users.u1.id
 
   const { dispatchAttendanceResultEventOutboxV1 } = await importProduct('attendance/w4c2-outbox-dispatcher')
-  const { createOrResumeAttendanceScheduledRunV1 } = await importProduct('attendance/w4c2-scheduled-run')
-  const { runAttendanceResultOperationTransactionV1 } = await importProduct('attendance/w4c0-operation-registry')
   const client = await openIsolatedClient()
   try {
-    await ensureShadowPosture(client, orgShadow, adminId)
+    // Product-produce ONE outbox row via a real scheduled-run finalize (no manual outbox INSERT).
+    const { runId } = await createScheduledRunWithOneGenerateTarget(client, {
+      orgId: orgShadow,
+      adminId,
+      userId: u1Id,
+      workDate: WORK_DATE,
+    })
+    await sealScheduledGenerateTargetOutcome(client, { orgId: orgShadow, runId, userId: u1Id, workDate: WORK_DATE })
+    const finalize = await finalizeScheduledRunViaProduct(client, { orgId: orgShadow, runId, workDate: WORK_DATE })
+    if (finalize.kind !== 'finalized') throw new Error(`expected finalized run, got ${finalize.kind}`)
 
-    // A REAL scheduled run gives the outbox row a valid fk_areo_scheduled_run target.
-    const run = await runAttendanceResultOperationTransactionV1(client, (trx) =>
-      createOrResumeAttendanceScheduledRunV1(
-        trx,
-        { orgId: orgShadow, initiator: 'cron', workDate: WORK_DATE },
-        async () => [{ userId: u1Id, targetKind: 'generate', reviewReasonCode: null }],
-      ),
-    )
-    if (run.kind !== 'created_running') throw new Error(`expected created_running run, got ${run.kind}`)
-    const scheduledRunId = run.runId
+    const seeded = (await client.query(
+      `SELECT delivery_state, attempts, event_kind, identity_kind FROM attendance_result_event_outbox WHERE scheduled_run_id = $1::uuid`,
+      [runId],
+    )).rows
+    if (seeded.length !== 1) throw new Error(`expected exactly 1 product-produced outbox row, got ${seeded.length}`)
+    if (seeded[0].delivery_state !== 'pending' || seeded[0].identity_kind !== 'scheduled_run') {
+      throw new Error(`product-produced outbox row is not pending/scheduled_run: ${JSON.stringify(seeded[0])}`)
+    }
 
-    // Seed ONE shape-faithful pending outbox row on the scheduled_run identity union.
-    await client.query(
-      `INSERT INTO attendance_result_event_outbox
-         (org_id, entrypoint, identity_kind, scheduled_run_id, event_kind, payload, payload_schema_version, business_key_fingerprint)
-       VALUES ($1, 'scheduled', 'scheduled_run', $2::uuid, 'attendance.absence.generated', $3::jsonb, 1, $4)`,
-      [orgShadow, scheduledRunId, JSON.stringify({ synthetic: true }), synthFingerprint('pqa09-outbox')],
-    )
+    // Business-DML BASELINE before the dispatch passes.
+    const before = await businessDmlCounts(client)
 
     // Pass 1: sink throws -> contained per row, scheduled for retry.
     const pass1 = await dispatchAttendanceResultEventOutboxV1(client, {
@@ -73,10 +83,9 @@ async function main() {
       },
       retryBackoffMs: 0,
     })
-
     const afterFail = (await client.query(
       `SELECT delivery_state, attempts, delivered_at FROM attendance_result_event_outbox WHERE scheduled_run_id = $1::uuid`,
-      [scheduledRunId],
+      [runId],
     )).rows[0]
     if (afterFail.delivery_state !== 'pending' || Number(afterFail.attempts) !== 1 || afterFail.delivered_at !== null) {
       throw new Error(`after failure expected pending/attempts=1/no delivered_at, got ${JSON.stringify(afterFail)}`)
@@ -90,14 +99,13 @@ async function main() {
       },
       retryBackoffMs: 0,
     })
-
     const afterOk = (await client.query(
       `SELECT delivery_state, attempts, delivered_at FROM attendance_result_event_outbox WHERE scheduled_run_id = $1::uuid`,
-      [scheduledRunId],
+      [runId],
     )).rows[0]
     const rowCount = Number((await client.query(
       `SELECT count(*)::int AS n FROM attendance_result_event_outbox WHERE scheduled_run_id = $1::uuid`,
-      [scheduledRunId],
+      [runId],
     )).rows[0].n)
 
     if (afterOk.delivery_state !== 'delivered' || Number(afterOk.attempts) !== 2 || afterOk.delivered_at === null) {
@@ -108,23 +116,32 @@ async function main() {
       throw new Error(`expected sink called once with attendance.absence.generated, got ${JSON.stringify(delivered)}`)
     }
 
+    // No duplicate DML: the two dispatch passes must not create/duplicate ANY business row.
+    const after = await businessDmlCounts(client)
+    const changed = Object.keys(before).filter((t) => before[t] !== after[t])
+    if (changed.length > 0) {
+      throw new Error(
+        `dispatch produced duplicate/extra business DML in: ${changed
+          .map((t) => `${t} ${before[t]}->${after[t]}`)
+          .join(', ')}`,
+      )
+    }
+
     const evidence =
-      `real scheduled run ${scheduledRunId} -> outbox row; ` +
-      `dispatchAttendanceResultEventOutboxV1 pass1=${JSON.stringify(pass1)} (row -> pending, attempts=1); ` +
+      `PRODUCT-PRODUCED outbox row via scheduled run ${runId} (create+seal+finalize=${JSON.stringify(finalize.kind)}); ` +
+      `dispatch pass1=${JSON.stringify(pass1)} (row -> pending, attempts=1); ` +
       `pass2=${JSON.stringify(pass2)} (SAME row -> delivered, attempts=2, delivered_at set); ` +
-      `rows=1 (no duplicate DML); sink called 1x with attendance.absence.generated.`
-    // Owner FIX 0 (honesty downgrade): the outbox row is hand-INSERTed (the runbook forbids that) and
-    // no business-DML baseline is compared, so this does not yet assert PQA-09's full matrix objective
-    // ("one synthetic dispatch failure + retry ⇒ one source/result effect, no duplicate DML" on a
-    // PRODUCT-PRODUCED row). Emit BLOCKED with the real-execution evidence until FIX 4 completes it.
+      `sink called 1x with attendance.absence.generated; outbox rows=1 (no duplicate row); ` +
+      `business-DML baseline unchanged across both passes (0 tables changed of ${Object.keys(before).length}).`
     emitCaseEvidence(evidenceDir, {
       id: CASE_ID,
       title: TITLE,
-      status: 'BLOCKED',
-      reason: 'scenario does not yet assert its full matrix objective',
+      status: 'PASS',
+      reason:
+        'Real outbox dispatcher on a PRODUCT-PRODUCED row: one injected failure then retry produced one delivered effect, no duplicate DML (business-DML baseline unchanged).',
       evidence,
     })
-    console.log(`[${CASE_ID}] BLOCKED (honesty downgrade — assertions reached): ${evidence}`)
+    console.log(`[${CASE_ID}] PASS: ${evidence}`)
   } finally {
     await client.end()
   }
