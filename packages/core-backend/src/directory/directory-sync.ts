@@ -1379,6 +1379,12 @@ export type DirectoryDeprovisionOutcome = {
    * helper's `UPDATE` has no `RETURNING`); this is attempt-visibility, not flip-visibility.
    */
   membershipDeactivationAttemptedCount: number
+  /**
+   * Delta-review NIT-D3: per-candidate races (vanished user / concurrently-unbound source) are
+   * SKIPPED rather than aborting the run — counted here so a run that silently skipped people is
+   * distinguishable from one that considered them, without digging through logs.
+   */
+  skippedCandidateCount: number
   /** Set when the circuit breaker refused to act; `applied` is forced false. */
   abortedReason: DirectoryDeprovisionAbortReason | null
   affected: Array<{
@@ -1501,6 +1507,7 @@ export async function applyDirectoryDeprovisionPolicies(
     grantsDisabledCount: 0,
     usersDeactivatedCount: 0,
     membershipDeactivationAttemptedCount: 0,
+    skippedCandidateCount: 0,
     abortedReason: null,
     affected: [],
     manualReviewPending: [],
@@ -1615,7 +1622,9 @@ export async function applyDirectoryDeprovisionPolicies(
     if (result.skipReason) {
       // Per-candidate race (user vanished / source unbound mid-run): skip THIS person, never
       // abort the whole sync run — with the flag off this path must be indistinguishable from
-      // a no-op preview.
+      // a no-op preview. Counted on the outcome so skips are visible in run stats, not only in
+      // logs (delta-review NIT-D3).
+      outcome.skippedCandidateCount += 1
       logger.warn(
         `Directory deprovision skipped ${localUserId} for ${options.integrationId}: ${result.skipReason}`,
       )

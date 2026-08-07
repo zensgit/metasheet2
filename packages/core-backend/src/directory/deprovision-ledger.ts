@@ -40,7 +40,8 @@ export type ApplyDeprovisionCandidateResult = {
   /**
    * Set when this candidate was skipped for a per-candidate race (user row vanished, or the
    * source account was unbound between candidate selection and the lock). A skip never aborts
-   * the surrounding sync run; `plan.effects` is empty so counters stay untouched.
+   * the surrounding sync run; `plan.effects` is empty so counters stay untouched. When set,
+   * `accessGeneration` is a meaningless 0 — discriminate on THIS field, never on the number.
    */
   skipReason: 'candidate_vanished' | null
   plan: DirectoryDeprovisionPlan

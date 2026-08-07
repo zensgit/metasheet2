@@ -112,7 +112,12 @@ describeIfDatabase('D4 writer two-connection goldens (race + supersede, real DB)
       await holder.query('BEGIN')
       await holder.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [seeded.userId])
 
-      // Connection 2 starts the real writer; it must BLOCK on that lock.
+      // Connection 2 starts the real writer; it must BLOCK on that lock. Its backend pid is
+      // captured BEFORE the writer starts (a blocked connection cannot answer), so the barrier
+      // below waits on THIS writer specifically, not on any waiter in the cluster.
+      const writerPid = Number(
+        (await writer.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid,
+      )
       await writer.query('BEGIN')
       const writerRun = (async () => {
         const result = await applyDirectoryDeprovisionCandidate(
@@ -130,8 +135,9 @@ describeIfDatabase('D4 writer two-connection goldens (race + supersede, real DB)
         const waiting = await holder.query(
           `SELECT count(*)::int AS n
              FROM pg_locks blocked
-             JOIN pg_stat_activity blocked_activity ON blocked_activity.pid = blocked.pid
-            WHERE NOT blocked.granted`,
+            WHERE NOT blocked.granted
+              AND blocked.pid = $1`,
+          [writerPid],
         )
         waiters = Number(waiting.rows[0]?.n ?? 0)
         if (waiters === 0) await new Promise((resolve) => setTimeout(resolve, 50))
