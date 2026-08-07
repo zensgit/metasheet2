@@ -48,15 +48,19 @@ Completion-claim discipline applies verbatim: W8 claims stop at "code landed,
 gates green, evidence recorded". Enablement, acceptance, and closure wording
 belongs to the owner alone.
 
+Precedence: where this document and an owner-ratified lock disagree — by
+omission, paraphrase, or otherwise — the ratified lock wins and this document
+must be amended. This clause binds every section below, §4 in particular.
+
 ## 1. Verified current-state spine (what already exists at this baseline)
 
 | Area | Current fact | Evidence |
 | --- | --- | --- |
 | Golden definition gates | Fingerprint-definition golden tests pin fixed input → fixed 64-hex literals (a domain-separator or canonical-JSON change goes red on a literal, not a relational, comparison); an identity golden-parity real-DB suite pins advisory-key/identity derivations; a shared golden-response util pins legacy response bytes. | `packages/core-backend/src/attendance/__tests__/w4c1-fingerprint-golden.test.ts:1-13`; `packages/core-backend/tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts`; `packages/core-backend/tests/utils/attendance-w4c2-golden-response.ts` |
-| Real-DB gate corpus | The attendance real-DB integration step runs the w4c0/w4c2/w4c3a/w4c3b/w4c3c/w4c4 `.db.test.ts` corpus (40 files matching `attendance-w4c*.db.test.ts` under `packages/core-backend/tests/integration/` at this baseline), incl. rollout-control, request-snapshots, record/request operation routes, calculation detail, sweep fairness/call-through. | `packages/core-backend/tests/integration/attendance-w4c*.db.test.ts` (inventory in W7 lock §10); CI mapping per `docs/development/attendance-w4c2-qa-handoff-20260726.md` §1.2 |
+| Real-DB gate corpus | 40 files match `attendance-w4c*.db.test.ts` under `packages/core-backend/tests/integration/` at this baseline, but the attendance real-DB integration step (`.github/workflows/plugin-tests.yml:1147`, an explicit whole-file run-list, not a glob) carries only **38 of the 40**. `attendance-w4c3b-request-snapshots.db.test.ts` and `attendance-w4c3b-central-approval.db.test.ts` are in neither the run-list nor `vitest.config.ts` `test.exclude`, so the no-DB step (`plugin-tests.yml:553`, no `DATABASE_URL`) collects them and their `describeIfDatabase` guards `describe.skip` — the two suites' DB-gated blocks execute **nowhere in CI** at this baseline (the exact skip-green shape W4 lock §12.9 calls a failed gate). The existing wiring guard cannot catch this: its `FILES` constant is a hardcoded allowlist, not a completeness assertion. A companion CI-wiring fix PR (in flight; wires both files two-point and converts the guard to a directory-glob completeness assertion) is a named precondition — see ledger row L8 and §3.3. | `packages/core-backend/tests/integration/attendance-w4c*.db.test.ts` (inventory in §10 below); run-list `.github/workflows/plugin-tests.yml:1147`; CI mapping per `docs/development/attendance-w4c2-qa-handoff-20260726.md` §1.2 |
 | Zero-bypass hard gate | Current-tree open-debt set asserted exactly empty with a live side-door mutation leg; exact P16 allowlist. | `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs:1033, 1074, 1386`; `scripts/attendance/w4c0-dml-inventory/curated-debt-entries.cjs:74` |
 | QA handoff tooling | The W4C-2 QA handoff manual (gate matrix G1-G24 mapped to suites and CI steps) plus isolated-DB scripts (reset / run-suites / residue check) exist and are values-safe (localhost-forced). | `docs/development/attendance-w4c2-qa-handoff-20260726.md` (§1.2, §2.3); `scripts/attendance/w4c2-qa/qa-db-reset.sh`, `qa-run-suites.sh`, `qa-residue-check.sql` |
-| Manual preview QA matrix | Issue #4629 carries the ten-case manual feedback matrix `PQA-01..PQA-10` (multi-segment authoring, overnight attribution, timezone, legacy compatibility, shadow posture, ambiguous evidence, authorization isolation, fingerprint freeze, outbox retry, scheduled identity) against a frozen candidate SHA; all ten checkboxes are unchecked and PQA-10 is marked BLOCKED there. This is the only place the token "PQA" exists — it is an issue-side case-ID prefix, **not** a repo artifact. | issue #4629 (OPEN), body read 2026-08-07 |
+| Manual preview QA matrix | Issue #4629 carries the ten-case manual feedback matrix `PQA-01..PQA-10` (multi-segment authoring, overnight attribution, timezone, legacy compatibility, shadow posture, ambiguous evidence, authorization isolation, fingerprint freeze, outbox retry, scheduled identity) against a frozen candidate SHA; all ten checkboxes are unchecked and PQA-10 is marked BLOCKED there. This is the only place "PQA" exists as a case-ID concept (the raw three-letter token also occurs as base64/binary noise in unrelated assets) — it is an issue-side case-ID prefix, **not** a repo artifact. | issue #4629 (OPEN), body read 2026-08-07 |
 | Soak preconditions landed | The W4C-5 transition-safety arc is on main: hardened single transition boundary with the closed 7-pair matrix and evidence-manifest discipline (PR #4773, OD-W4C-61=(a) per module header); recovery-sweep fairness + values-free observability counters (#4770 arc, PRs #4774/#4779, incl. `last_attempt_at` durable rotation and the `neverAttemptedRunning`/`oldestRunningAttemptAgeSeconds` counters); the complete 8-cell request-snapshot precondition (#4775 arc, PR #4780, with stored-payload re-hash). | `packages/core-backend/src/attendance/w4c3a-rollout-control.ts:1-21, 85-93, 802-823, 863, 1044, 1125`; `w4c2-scheduled-run-ops-worker.ts:44, 176-182`; `zzzz20260805120000_w4c2_scheduled_run_sweep_fairness.ts:1-28` |
 | Expected-differences roster | A closed, fail-closed-probed roster of anticipated legacy-vs-W4 divergences exists with exactly one ratified entry (`correction_applied_daily_adjusted`); the remaining-slice plan requires this roster to enter soak so known divergence is not misread as regression. | `packages/core-backend/src/attendance/w4c2-shadow-expected-differences.ts:39-53, 75-83, 135`; `attendance-issue-4556-w4-remaining-slice-plan-20260726.md:117-119` |
 | Dual-host read matrices | Calculation-detail is dual-hosted (admin + self; self rejects `userId` input with a typed 400); decision-trace is dual-hosted the same way. | `packages/core-backend/src/routes/attendance-admin.ts:1479, 1512-1515, 1376, 1416` |
@@ -101,9 +105,11 @@ Expected-but-absent, verified honestly:
 
 Matrix discipline, before any row: the verdict is head-scoped — every run is
 recorded with the full `git rev-parse` SHA it ran on; a row is green only via
-an executed run URL / local log with non-zero test counts (skip-green is a
-failed gate, W4 lock §12.9); CI-step rows are reproduced with the step's exact
-shell flags and file arguments.
+an executed run URL / local log with non-zero **per-file** test counts for
+each named suite (a step-level total over a multi-file run-list proves nothing
+about any single file — see W8-R4; skip-green is a failed gate, W4 lock
+§12.9); CI-step rows are reproduced with the step's exact shell flags and file
+arguments.
 
 ### 3.1 Golden parity, legacy vs. new
 
@@ -135,19 +141,31 @@ formally retired in favor of `PQA-W8-*`.
 
 ### 3.3 Real-DB and CI gates
 
+Named precondition (ledger L8): before any §3 row is executed, the two
+currently-unwired w4c3b suites (`attendance-w4c3b-request-snapshots.db.test.ts`,
+`attendance-w4c3b-central-approval.db.test.ts`) must be two-point wired
+(run-list + no-DB exclude) and green — the companion CI-wiring fix PR
+(in flight) carries this.
+
 | Leg | Predicate |
 | --- | --- |
-| Full attendance real-DB corpus green on the named head, on a **fresh** database (shared-DB residue is a known false-red source). |
-| Zero-bypass collector: `unclaimed=0` on the named head, with the side-door mutation leg red-capable (run the mutation, verify red, restore from file backup — never via `git checkout -- <file>`). |
-| Fresh-migration + upgrade + replay pass (W4 lock §11); pending migrations zero against the deploy image. |
-| CI wiring contract green (`attendance-w4c2-ci-wiring.test.mjs` pattern extended to every W6/W7 suite added since — run-list + path-filter wiring is itself asserted, not assumed). |
-| Mutation ledger: every red line of the W6/W7 locks has its named mutation leg re-run on the named head; each leg's anchor-hit is verified (mutation actually landed in executed code) before its red is counted. |
+| Real-DB corpus | Full attendance real-DB corpus green on the named head, on a **fresh** database (shared-DB residue is a known false-red source). "Full" is defined by the directory glob over `attendance-w4c*.db.test.ts`, not by the historical run-list — see the L8 precondition above. |
+| Zero-bypass | Collector `unclaimed=0` on the named head, with the side-door mutation leg red-capable (run the mutation, verify red, restore from file backup — never via `git checkout -- <file>`). |
+| Migrations | Fresh-migration + upgrade + replay pass (W4 lock §11); pending migrations zero against the deploy image. |
+| CI wiring contract | Green with the guard converted to a **directory-glob completeness assertion** (an `attendance-w4c*.db.test.ts` file missing from run-list or exclude is red by construction — the hardcoded-allowlist form is the mechanism that let L8 stay invisible), extended to every W6/W7 suite added since; run-list + path-filter wiring is itself asserted, not assumed. |
+| Mutation ledger | Every red line of the W6/W7 locks has its named mutation leg re-run on the named head; each leg's anchor-hit is verified (mutation actually landed in executed code) before its red is counted. |
 
 ## 4. Soak entry and exit criteria
 
-Single source for W7/W8; the W7 lock §4.3 defers here. All numbers below are
-the ratified W4C-5 contract restated — this plan adds no new authority and
-relaxes nothing.
+The W7 lock §4.3 defers here for the operational summary. **§4 is a
+non-exhaustive operational summary, not a restatement**: the governing texts
+are the ratified W4 lock §12.8 (`:3000-3031`, 15 gate bullets) and the W4C-5
+amendment §3 (`:84-108`, database-backed predicates) + §4 (`:110-128`,
+evidence-manifest fields) **verbatim, in full**. Where this summary and a
+ratified lock differ — by omission, paraphrase, or otherwise — the ratified
+lock wins and this plan must be amended (§0 precedence clause). The colon
+lists below are pointers with examples, never enumerations; an item absent
+from this summary binds exactly as if it were listed.
 
 **Entry (all required, per W4 lock §12.8 + transition-safety amendment §3-§4):**
 
@@ -158,14 +176,36 @@ relaxes nothing.
 4. every entrypoint represented (live punch, scheduled, all three import
    transports, approval/correction/outdoor/cancellation, manual, recompute
    both policies);
-5. the database-backed predicate set returns all-clear **inside the
-   transition transaction** (no read-only preflight reuse): 8-cell request
-   snapshot report zero (`readAttendanceRequestSnapshotDefectReportV1`),
-   zero unresolved `legacy_time_ingress_not_authoritative` reviews, legacy
-   batch closure/preimage complete, retryable-job posture matrix clean;
+5. the database-backed predicate set — **all of W4C-5 §3, verbatim** —
+   returns all-clear **inside the transition transaction** (no read-only
+   preflight reuse). Examples, not an enumeration: 8-cell request snapshot
+   report zero (`readAttendanceRequestSnapshotDefectReportV1`), zero
+   unresolved `legacy_time_ingress_not_authoritative` reviews, legacy batch
+   closure/preimage complete, retryable-job posture matrix clean. The §3
+   predicates not named here — no nonterminal null-version legacy async job
+   for entry into `shadow|eligible|authoritative`; no incomplete operation,
+   operation batch, import batch, or source-bearing mismatch required by the
+   pair; suspend has serialized every source writer; the resume proof — bind
+   identically. CI-proof precondition (ledger L8): the real-DB suite proving
+   the 8-cell report end-to-end
+   (`attendance-w4c3b-request-snapshots.db.test.ts`) executes nowhere in CI
+   at this baseline; it must be two-point wired and green on the W8 head
+   before this item's report may be cited as CI-proven;
 6. the expected-differences roster (§3.1) is finalized and carried in;
 7. sweep observability counters healthy at entry (backlog draining,
-   `neverAttemptedRunning` at floor).
+   `neverAttemptedRunning` at floor);
+8. P16 staging execution bodies and cleanup are inventoried explicitly;
+   dynamic SQL or direct DML against W4-backed rows fails the tooling debt
+   guard (W4 lock §12.8);
+9. the zero-unresolved-review gate carries its **negative transition test**
+   (W4 lock §12.8 — the test half, not only the zero count);
+10. the evidence manifest carries the owner authorization reference **and**
+    the authorized target state, and the every-entrypoint inventory **and**
+    its observation dates (W4C-5 §4 — both halves of each field, plus every
+    other §4 field verbatim);
+11. standing gate, entry through exit: **no production deploy/flag action**
+    (W4 lock §12.8) — restated here as a soak gate, not only as this
+    document's header authorization text.
 
 **Exit (all required):**
 
@@ -173,9 +213,12 @@ relaxes nothing.
 2. zero critical diffs (work-date/context/input/review classes) and zero
    unresolved reviews over the whole window;
 3. reversal drill and suspend/resume drill executed: suspend preserves
-   owner/pointer with zero synchronous source/result writes; offline replay
-   clean; resume returns to authoritative; first changed punch supersedes the
-   preserved pointer;
+   owner/pointer with zero synchronous source/result writes **and** an
+   already-durable job remains retryable without a projection; a
+   shadow/unknown accepted write posture blocks transition, and
+   source-bearing mismatches require explicit incident remediation (W4 lock
+   §12.8, both halves of each); offline replay clean; resume returns to
+   authoritative; first changed punch supersedes the preserved pointer;
 4. valid pointers and unchanged historical hashes across the window;
 5. PASS marker recorded and residue zero (`qa-residue-check.sql` style sweep);
 6. off-roster diffs each dispositioned (defect filed or roster amended by its
@@ -200,6 +243,8 @@ pre-accept anything.
 | L5 | Soak itself: zero rollout transitions executed outside tests; no soak evidence exists. | W4 lock §12.8; §4 above | Confirmed absent | §4 executed in full, evidence in the verification MD |
 | L6 | W6/W7 conditional debts: whatever OD-W6-*/OD-W7-* choices leave deliberately out (e.g. employee self-projection of the aggregate, OD-W6-5; per-group punch enforcement, OD-4556-9). | respective locks | OPEN by construction | Listed in the ledger with their owning lock — not silently absorbed into #4556 |
 | L7 | Wave-5 explanation-surface posture-ceiling revision once W4 evidence is authoritative anywhere (named cross-lane follow-up; must not be done unilaterally by this lane). | W4 lock §10.3 (`:2386-2403`) | Not started | Ledger row naming the owning lane; not a #4556 closure blocker unless the owner rules otherwise |
+| L8 | CI wiring gap: two of the 40 `attendance-w4c*.db.test.ts` suites (`attendance-w4c3b-request-snapshots.db.test.ts`, `attendance-w4c3b-central-approval.db.test.ts`) are in neither the plugin-tests real-DB run-list (`plugin-tests.yml:1147`) nor the vitest no-DB exclude — their DB-gated blocks skip-green and execute nowhere in CI. The request-snapshots suite is the real-DB proof of the 8-cell soak-entry precondition (#4775 arc, PR #4780). The wiring guard (`attendance-w4c2-ci-wiring.test.mjs`) cannot catch this: its `FILES` constant is a hardcoded allowlist, not a completeness assertion. | This document (§1 spine row; found by the #4804 adversarial gate); companion CI-wiring fix PR (in flight) | Verified at this baseline: run-list carries 38/40; both files absent from `vitest.config.ts` `test.exclude`; both gate on `describeIfDatabase` | **Fix before W8 execution**: two-point wire both files and convert the wiring guard to a directory-glob completeness assertion — a W8 head-scoped verdict cannot rest on a corpus two of whose files never ran |
+| L9 | Parent §10 item 8 has **no landed implementation** at this baseline: the four-label group workflow (effective / inherited / preview-only / conflicting) is W6's scope, and `conflict_action_required` exists only in the types-only contract module, the W6 JSON fixtures, and the out-of-build OpenAPI draft — no runtime, no route, and the panel shell is imported nowhere. W6 is item 8's only planned vehicle. | Parent lock §10 (`:764-777`, item 8 `:776-777`); W6 lock (PROPOSED, OD-W6-0 OPEN) | Verified at this baseline (grep: label in types/fixtures/draft only; panel referenced nowhere) | Owner must see the coupling when deciding OD-W6-0: **if OD-W6-0 is declined, item 8 cannot be satisfied and #4556 cannot close under §10 as ratified** — closure would then require an owner amendment to parent §10, routed through OD-W8-1(b); see §6 item 8 |
 
 Any debt discovered between this baseline and W8 execution joins the ledger;
 an empty-looking ledger at W8 time triggers a re-scan against the then-current
@@ -219,7 +264,7 @@ item by item, to evidence slots. W8 fills slots; **the owner rules**.
 | 5. All work-date entry points use the shared resolver | Resolver call-through inventory (W2 line) re-verified on the W8 head |
 | 6. OpenAPI, runtime, frontend, migrations, tests agree | OpenAPI lint/build/diff + contract-equality mechanical tests |
 | 7. Staging migration, rollback, synthetic accounting evidence durable | §4 soak evidence + drills |
-| 8. Group workflow shows effective / inherited / preview-only / conflicting | Conditional on W6 runtime (§3.2 group-workspace family) |
+| 8. Group workflow shows effective / inherited / preview-only / conflicting | Conditional on W6 runtime (§3.2 group-workspace family). Disclosure (ledger L9): item 8 has no landed implementation at this baseline and W6 is its only planned vehicle — if the owner declines OD-W6-0, this item cannot be satisfied and #4556 **cannot close under §10 as ratified**; closure would then require an owner amendment to parent §10 (routed through OD-W8-1(b)). Declining OD-W6-0 is therefore a closure-blocking decision, not only a W6/W7 scoping one. |
 
 Plus the W4 lock §15 completion definition, re-verified as a block, and the
 honest-residuals section (misclassified gaps are not "ceilings"; every
@@ -233,12 +278,12 @@ owner's separate final decision under W4 lock §14 item 10."
 
 | ID | Rule | MECHANICAL check |
 | --- | --- | --- |
-| W8-R1 | No automation closes issue #4556: no PR body, commit message, or doc merged by this line may carry a GitHub closing keyword targeting #4556 (or any issue) unintentionally. | Pre-merge sweep on every W8-line PR: `grep -inE '\b(close[sd]?|fix(e[sd])?|resolv(e[sd])?)\b[[:space:]]*:?[[:space:]]*#[0-9]+'` over body + changed docs returns only intended, reviewed hits — for this line, zero. Issue #4556 state re-checked OPEN after every merge. |
-| W8-R2 | Completion-claim ceiling: W8 wording stops at "landed / gates green / evidence recorded"; no "accepted", "production-ready", "acceptance passed" absent owner/customer evidence. | Mechanical absolute-claim sweep before delivery: grep the MD set for the banned-claim list (maintained in the MD itself); each hit either quoted-with-evidence or removed; the sweep command + output pasted into the verification MD. |
-| W8-R3 | Head-scoped verdicts only: every matrix row records the full 40-hex SHA it ran on; no row inherits green from an older head. | Verification MD table has a SHA column; `git rev-parse` output pasted verbatim; a checker greps for any abbreviated (<40 hex) SHA in evidence rows — zero allowed. |
-| W8-R4 | Executed-run evidence only: a row is green via run URL / log with non-zero counts; skip/absent runs are red. | For each CI-mapped row, the workflow run ID + step name + test count is recorded; a `0 passed` or skipped step in evidence fails the row by definition. |
+| W8-R1 | No automation closes issue #4556: no PR body, commit message, or doc merged by this line may carry a GitHub closing keyword targeting #4556 (or any issue) unintentionally. | Pre-merge sweep on every W8-line PR: `grep -inE '\b(close[sd]?\|closing\|fix(e[sd])?\|fixing\|resolv(e\|es\|ed)?)\b[[:space:]]*:?[[:space:]]*(#[0-9]+\|https?://github\.com/[^ ]+/issues/[0-9]+)'` (pipes backslash-escaped here for table rendering only — the executable form uses plain pipe alternation, as in the fixture-proved run recorded for this PR) over body + changed docs returns only intended, reviewed hits — for this line, zero. The sweep is proved live before its empty output counts: run it against a positive-control fixture carrying each keyword in both `#N` and issue-URL spellings — including the bare imperative `resolve` + `#N` form and the URL forms, the exact holes a narrower earlier regex missed — and confirm every fixture line matches. Issue #4556 state re-checked OPEN after every merge. |
+| W8-R2 | Completion-claim ceiling: W8 wording stops at "landed / gates green / evidence recorded"; no "accepted", "production-ready", "acceptance passed" absent owner/customer evidence. | Mechanical absolute-claim sweep before delivery: grep the MD set for the banned-claim list maintained in a versioned file **outside the artifact under review** (e.g. `scripts/ops/attendance-completion-claim-banned-terms.txt`, added via an owner-authorized tooling PR per W8-R6) that the W8 deliverable PR itself does not modify — a list living inside the checked MD lets its author pass the sweep by omission; run as a CI step where the tooling exists, and until then executed by the independent gate reviewer, not the author; each hit either quoted-with-evidence or removed; the sweep command + output recorded in the verification MD. |
+| W8-R3 | Head-scoped verdicts only: every matrix row records the full 40-hex SHA it ran on; no row inherits green from an older head. | Verification MD table has a SHA column; the W8 head is pinned **once** (`git rev-parse` output pasted verbatim, full 40 hex); a checker asserts every evidence row's SHA is byte-**equal** to that single pinned value — not merely 40-hex-shaped, because a full-length but *stale* SHA satisfies a shape check while violating the no-inheritance half of the rule; abbreviated SHAs fail the same equality check by construction. |
+| W8-R4 | Executed-run evidence only: a row is green via run URL / log with non-zero counts; skip/absent runs are red. | For each CI-mapped row, the workflow run ID + step name + **per-file** test counts are recorded (`vitest --reporter=json`, recording `numPassingTests` for the specific named file): a step-level total over a 38-file run-list cannot show whether one file contributed anything — a `describe.skip` inside one suite leaves the step's totals healthy, the exact mechanism by which the L8 gap stayed invisible. A `0 passed`, skipped, or absent per-file entry fails the row by definition; each DB-gated suite additionally carries a fail-closed guard that reds (not skips) when its DB URL is absent in a step claiming real-DB execution; run-list completeness itself is asserted by the glob-driven wiring guard (L8 companion CI PR). |
 | W8-R5 | Values-free evidence surfaces: soak/matrix evidence carries counts, closed codes, hashes, dates — never member lists, punch values, or secrets. | Exact-key review of every evidence artifact checked into docs; a leak probe (fixture with `userId`/`memberIds` keys) fails the artifact linter/review checklist. |
-| W8-R6 | W8 adds zero runtime: the W8 deliverable PRs touch `docs/` (and, if the owner authorizes tooling, explicitly inventoried scripts) only. | `git diff <base> HEAD -- packages plugins apps .github` empty for each W8 docs PR; any tooling PR carries its own inventory + deletion-green proof. |
+| W8-R6 | W8 adds zero runtime: the W8 deliverable PRs touch `docs/` (and, if the owner authorizes tooling, explicitly inventoried scripts) only. | `git diff <base> HEAD -- packages plugins apps scripts .github` empty for each W8 docs PR — the path list includes `scripts` (W7-R9's list) precisely because the rule conditions on scripts tooling; a list without `scripts` is structurally blind to the one directory the rule carves out. An owner-authorized tooling PR instead lists each `scripts/` path it adds against the owner's authorization reference and carries its own inventory + deletion-green proof. |
 | W8-R7 | Ledger completeness is re-derived, not remembered: the §5 ledger is regenerated against the then-current main before execution. | The regeneration commands (issue queries + doc/grep sweeps) are recorded in the MD with their outputs; a spot-check that a known-open item (e.g. #4791 if still open) appears in the regenerated ledger. |
 
 ## 8. Decision points (owner menu, all OPEN)
@@ -255,8 +300,10 @@ owner's separate final decision under W4 lock §14 item 10."
 
 ## 9. Landing sequence
 
-1. Merge this document (with the W7 draft lock, one docs-only Draft/HOLD PR)
-   — merging records the plan; it authorizes nothing.
+1. Owner instructs merge of the docs-only Draft/HOLD PR carrying this
+   document and the W7 draft lock (the PR stays Draft + HOLD until that
+   explicit instruction; nothing here self-authorizes it) — merging records
+   the plan; it authorizes nothing.
 2. Owner answers OD-W8-1..7 (any time; W8 execution cannot start before W7
    completes regardless).
 3. After W7's own gates: execute §3 on a named head; run §4; regenerate and
@@ -292,6 +339,19 @@ Code:
 - `packages/core-backend/src/services/AttendanceW4CalculationDetail.ts:8-23, 252, 505, 593, 781`
 - `packages/core-backend/src/db/migrations/zzzz20260805120000_w4c2_scheduled_run_sweep_fairness.ts:1-28`
 - `packages/core-backend/src/attendance/w5-flex-policy.ts:27-47, 143, 222`
+- L8 wiring evidence (verified at the pinned baseline by the #4804
+  adversarial gate; re-verified in this amendment round after rebase onto
+  `origin/main@51c3d8720789476efa15f6b99b6dc5f51df4743b`):
+  `.github/workflows/plugin-tests.yml:553` (no-DB core-backend test step, no
+  `DATABASE_URL`), `:594` (Start Postgres, after it), `:1147` (attendance
+  real-DB run-list step, 38 `attendance-w4c*` entries);
+  `packages/core-backend/vitest.config.ts` `test.exclude` (neither L8 file
+  present);
+  `packages/core-backend/tests/integration/attendance-w4c3b-request-snapshots.db.test.ts:14-15`
+  and `attendance-w4c3b-central-approval.db.test.ts:54-55`
+  (`describeIfDatabase` skip gates);
+  `scripts/ops/attendance-w4c2-ci-wiring.test.mjs:71` (`FILES` hardcoded
+  allowlist)
 
 Documents:
 

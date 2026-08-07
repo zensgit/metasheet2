@@ -11,10 +11,10 @@
 > group-effective-policy source).
 >
 > Authorization: on 2026-08-07 the owner authorized **W7/W8 design-lock DRAFT
-> preparation only** (docs-only). This document authorizes **no** runtime, no
-> merge beyond the Draft/HOLD docs PR that carries it, no staging, no soak, no
-> flag change, no deployment, no production/customer data use, and no closure
-> of issue #4556. The runtime order remains
+> preparation only** (docs-only). This document authorizes **no** runtime and
+> no merge — including the Draft/HOLD docs PR that carries it, which merges
+> only on explicit owner instruction — no staging, no soak, no flag change, no
+> deployment, no production/customer data use, and no closure of issue #4556. The runtime order remains
 > **W6 owner sign-off → W6 runtime → W7 → W8**; every W7 statement below that
 > touches a W6 outcome is written as *conditional on the named OD-W6-x choice*
 > and presupposes nothing about how the owner will decide W6.
@@ -70,7 +70,7 @@ provenance is in §10.
 | The frozen calculation context is hard-typed to the legacy selector: `FrozenAttendanceContextV1` declares `selector: 'legacy'` and `calculationGroupId: null` as literal types. | `packages/core-backend/src/attendance/w4c0-write-boundary-types.ts:124-152` (`:126`, `:134`) |
 | The pure calculator fail-closes on anything else: `validateFrozenContextShape` requires `schemaVersion === 1`, `selector === 'legacy'`, `calculationGroupId === null`; unknown keys fail closed. | `packages/core-backend/src/attendance/w4c1-segment-calculator.ts:335-363` (`:350`, `:351`, `:358`) |
 | The canonical import kernel enforces the same closed shape on import-carried contexts. | `packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts:162-173` |
-| There is exactly one production frozen-context builder, `buildW4ShadowFrozenContextV1`, and it writes the literal `selector: 'legacy'`, `calculationGroupId: null`. It takes `shiftId` as an input — policy resolution happens upstream. | `plugins/plugin-attendance/index.cjs:22625` (literal at `:22740-22750`); call sites `:24510`, `:24721`, `:28775`, `:29365`, `:35286` |
+| There is exactly one production frozen-context builder, `buildW4ShadowFrozenContextV1`, and it writes the literal `selector: 'legacy'`, `calculationGroupId: null`. It takes `shiftId` as an input — policy resolution happens upstream. | `plugins/plugin-attendance/index.cjs:22625` (literal at `:22740-22750`); call sites `:24510`, `:24721`, `:28775`, `:29365`, `:35338` (an earlier draft cited `:35286`, which is the comment above that call) |
 | Upstream resolution is the legacy per-user path: `resolveW4LiveCandidateInTransactionV1` / `resolveW4ScheduledCandidateInTransactionV1` resolve the winning shift per user/date through `createPluginAttendanceWorkDateResolver` with schedule-fact locking. No calculation-group membership or group-effective policy is consulted. | `plugins/plugin-attendance/index.cjs:22593-22620` |
 | Segment calculation is not authoritative anywhere: `SEGMENT_CALCULATION_IMPLEMENTED = false` in the canonical shift service. | `plugins/plugin-attendance/lib/attendance-shift-service.cjs:60`, guard `:495`, export `:1208` |
 
@@ -155,8 +155,10 @@ derivation.
 - historical restatement (parent R3): cutover affects work dates at/after an
   org's flip; it never recalculates existing results silently;
 - FSER-4 (`/effectiveness/me`) — its own gated line (#4709);
-- changes to the W6 read-aggregate contract — any needed change is a W6
-  amendment decided by the owner, not a W7 side effect.
+- changes to the W6 read-aggregate contract — any needed change is an
+  owner-level W6 decision (made at W6 ratification while the W6 lock is still
+  PROPOSED, or as a W6 amendment if W6 is already ratified), not a W7 side
+  effect.
 
 ## 3. Non-negotiable red lines
 
@@ -165,16 +167,16 @@ not prose.
 
 | ID | Rule | MECHANICAL check |
 | --- | --- | --- |
-| W7-R1 | The frozen-context builder stays singular: no second production builder and no selector spelling outside the closed union. | Repo inventory test (extend the `w4c3a-rollout-control-inventory` pattern) pins every construction site of a frozen-context `selector` field; `grep -rn "selector: '" plugins packages --include='*.cjs' --include='*.ts'` (test/fixture paths excluded) must resolve to the pinned set; adding a second builder or a novel selector string turns the inventory test red. |
+| W7-R1 | The frozen-context builder stays singular: no second production builder and no selector spelling outside the closed union. | Structural inventory, not text matching: a repo inventory test (extend the `w4c3a-rollout-control-inventory` pattern) pins every module that *produces* a `FrozenAttendanceContextV*` value as an exported-symbol/import-graph inventory, and the write boundary asserts at persist time that the context carries a builder-minted marker (a domain-separated fingerprint only the single builder computes) — so a second builder evades no gate by spelling (double quotes, `selector: sel` via variable, spread/`Object.assign`, computed key): its rows fail the persist-time assertion. The text grep `grep -rn "selector: '" plugins packages --include='*.cjs' --include='*.ts'` (test/fixture paths excluded, resolving to the pinned set) remains a secondary tripwire only, not the gate. Adding a second builder or a novel selector string turns the inventory test or the persist-time assertion red; a mutation that mints a context outside the builder must redden the persist-time leg. |
 | W7-R2 | No silent group winner (parent R2): >1 effective membership for one `org+user+work_date` at calculation time fail-closes with the typed conflict; never latest-updated/first-row/array-order. | Real-DB leg seeds two effective memberships on one date, asserts the typed conflict outcome and **zero** new rows in `attendance_record_calculations` for that target; a choose-first and a choose-latest mutation each make the leg red independently. |
-| W7-R3 | Legacy byte preservation until flip: for any org not group-authoritative, every response/projection byte and every v1 frozen-context byte is unchanged. | Golden response/fingerprint literals (extend `w4c1-fingerprint-golden.test.ts` and `tests/utils/attendance-w4c2-golden-response.ts`): fixed input → fixed hash/bytes for v1 contexts, run in an org with no W7 posture; any drift is a red literal mismatch, not a relational comparison. |
-| W7-R4 | Cutover state moves only through the hardened transition boundary: one writer, closed legal matrix, evidence manifest, no env/flag side channel that flips policy sourcing per org. | DML sweep (both query syntaxes) over the W7 diff shows zero writes to any rollout/posture table outside `w4c3a-rollout-control.ts` (or its OD-W7-3 analog); the zero-bypass collector run stays `unclaimed=0`; a probe that flips sourcing via env alone must be provably inert (posture requires state-row ∧ allowlist, `w4c0-identity.ts:363-381` pattern). |
+| W7-R3 | Legacy byte preservation until flip: for any org not group-authoritative, every response/projection byte and every v1 frozen-context byte is unchanged. | Golden response/fingerprint literals (extend `w4c1-fingerprint-golden.test.ts` and `tests/utils/attendance-w4c2-golden-response.ts`): fixed input → fixed hash/bytes for v1 contexts, run in **each of three org postures — no W7 posture, `group_shadow`, and `group_eligible`** (the latter two are not group-authoritative yet are exactly where the new resolver runs alongside the legacy producer, i.e. where drift is most likely), asserting byte-identity in all three; any drift is a red literal mismatch, not a relational comparison. A mutation that lets the shadow path touch the served projection must redden the `group_shadow` leg specifically. |
+| W7-R4 | Cutover state moves only through the hardened transition boundary: one writer, closed legal matrix, evidence manifest, no env/flag side channel that flips policy sourcing per org. | DML sweep (both query syntaxes) over the W7 diff shows zero writes to any rollout/posture table outside `w4c3a-rollout-control.ts` (or its OD-W7-3 analog); the zero-bypass collector run stays `unclaimed=0`; a probe that flips sourcing via env alone must be provably inert (posture requires state-row ∧ allowlist, `w4c0-identity.ts:363-381` pattern) — paired with a named positive control: the same probe with the state row present **must** flip sourcing, proving the probe is live rather than a no-op (an "inert" verdict without that control is indistinguishable from a probe that does nothing). |
 | W7-R5 | Frozen-context evolution is versioned and closed: v2 (or the OD-W7-2 choice) validates exact-key fail-closed; v1 rows remain valid and immutable; unknown selector/schemaVersion fails closed, never maps to a default. | Calculator validator negatives: unknown selector, unknown schemaVersion, v2 shape with v1 version tag, `calculationGroupId` null/non-null mismatched with selector — each an individually red leg; a silent-fallback mutation (unknown → legacy) turns a test red. |
-| W7-R6 | Policy is consumed only as frozen snapshot: after freeze, recomputation of the same calculation must not re-read live group/membership/shift config; group policy enters through the frozen context (and the OD-W7-6 snapshot choice) with a fingerprint. | Mutation leg: after freezing a calculation, UPDATE the group's policy rows, then re-read via detail/trace — stored evidence bytes unchanged (byte-exact re-read, W4C-2 QA G4 pattern); a builder mutation that re-reads live config post-freeze makes the byte-parity leg red. |
+| W7-R6 | Policy is consumed only as frozen snapshot: after freeze, recomputation of the same calculation must not re-read live group/membership/shift config; group policy enters through the frozen context (and the OD-W7-6 snapshot choice) with a fingerprint. | Mutation legs, one per §4.1 fact family: after freezing a calculation, UPDATE (i) the W1 membership rows, (ii) the group's policy rows, and (iii) the FSER-composed schedule facts — each in its own leg — then re-read via detail/trace: stored evidence bytes unchanged in all three legs (byte-exact re-read, W4C-2 QA G4 pattern); a builder mutation that re-reads live config post-freeze makes the corresponding byte-parity leg red. |
 | W7-R7 | W7 makes no writes outside the canonical W4 write boundary and adds no DML side door: every new writer is claimed in the generated DML inventory. | `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs` hard zero-bypass legs (`:1033`, `:1386`) stay green on the W7 head with the W7 writers claimed by exact `relPath::enclosingSymbol::table::verb` entries — no prefix claims. |
 | W7-R8 | Shadow is never presented as authoritative: group-derived shadow calculations are labeled as such in the ledger/trace; the legacy projection remains the served result until the org's flip. | Exact-key assertions on detail/trace responses for a group-shadow org: posture/label fields assert the shadow labeling; a mutation that serves the W7 shadow projection to the read path in a non-authoritative org turns the golden response leg red. |
 | W7-R9 | This document authorizes no runtime. The W7-0 preparation PR (if the owner later authorizes one) is byte-inert: deleting its contract/fixture files leaves every existing test green. | Deletion-green run recorded in that PR; `git diff <base> HEAD -- packages plugins apps scripts .github` for THIS docs PR is empty. |
-| W7-R10 | W6's own red line W6-R5 ("no calculation writer consumes the W6 aggregate") survives W7 unless the owner explicitly amends it: W7's resolver reads persisted facts under locks, not the W6 HTTP aggregate. | Import-graph assertion: zero imports of the W6 aggregate service/route modules from any calculation-path module; adding such an import fails the graph test. (Conditional on OD-W7-1; if the owner chooses (b) there, this row is replaced by an owner-signed W6 amendment.) |
+| W7-R10 | W6's own red line W6-R5 ("no calculation writer consumes the W6 aggregate") survives W7 unless the owner explicitly overrides it: W7's resolver reads persisted facts under locks, not the W6 HTTP aggregate. | Two legs over a pinned `CALCULATION_PATH_MODULES` inventory (an explicit module list fixed in the W7-0 contract, same exact-allowlist shape as the P16 inventory — the assertion's domain is a closed list, not an undefined "any calculation-path module"): (i) import-graph — zero imports of the W6 aggregate service/route modules from any inventoried module; (ii) outbound-HTTP — zero `fetch`/`axios`/`request`/internal-HTTP-client calls targeting any attendance route path from any inventoried module, because a resolver that does `await fetch('/api/attendance/groups/:groupId/effective-policy')` imports nothing yet violates the rule. Each leg carries a positive control: a probe adding such an import / such a call must turn that leg red. (Conditional on OD-W7-1; if the owner chooses (b) there, this row is replaced by an owner-signed W6 decision — at W6 ratification, or an amendment if W6 is already ratified.) |
 
 ## 4. Cutover mechanics (draft, all OPEN)
 
@@ -219,10 +221,14 @@ Conditional on OD-W7-3 for the exact state carrier; semantics are fixed here:
 
 ### 4.3 Soak
 
-Per parent §9.8, W7 cutover has its own synthetic staging soak. Entry/exit
-criteria live in the W8 plan §4 (single source; this document does not
-duplicate numbers). W7's contribution is the expected-differences roster
-(§4.2) and per-stage residue definitions.
+Per parent §9.8, W7 cutover has its own synthetic staging soak. The W8 plan
+§4 carries the operational summary of entry/exit criteria (this document does
+not duplicate numbers), but that summary does not govern: the governing texts
+are the ratified W4 lock §12.8 (`:3000-3031`) and the W4C-5 amendment §3-§4
+(`:84-128`) verbatim, and where the W8 §4 summary and a ratified lock differ
+the ratified lock wins (see the W8 plan §4's own precedence clause). W7's
+contribution is the expected-differences roster (§4.2) and per-stage residue
+definitions.
 
 ### 4.4 Read-side labeling
 
@@ -231,7 +237,12 @@ The w4c4 detail/trace surfaces already carry posture/provenance concepts
 codes). W7 extends the *values* of existing closed enums (a contract
 amendment, not a silent extension) so that group-derived evidence is
 distinguishable from legacy-derived evidence in the same immutable chain.
-Exact spellings are OD-W7-5.
+Two distinct enum families are involved, with different owners — stated here
+to avoid a spelling-ownership ambiguity: (i) the W6-owned source-label union
+(OD-W6-3): W7 adopts whatever spellings W6 ratifies and mints none of its
+own (§6 row 6); (ii) the W7-owned provenance values on the existing W4 enums
+(detail `projectionOwner`, trace source-kind): their exact strings are
+OD-W7-5, fixed at W7-0.
 
 ## 5. Failure and rollback semantics
 
@@ -272,22 +283,22 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 | `preview_only` labeling vs. calculability of segments/flex | OD-W6-6 (preview_only derivation) | W7's eligibility predicate must be consistent with the W6 derivation the owner picks; conflicting definitions require a W6 amendment first. |
 | Conflict surfacing of membership overlap in the workspace | OD-W6-4 / W6 §4.4 | W7 only *emits* the fail-closed runtime conflict (W7-R2); the display inventory is W6's. |
 | Whether W7's resolver may share code with the W6 aggregate's readers | OD-W6-2 (FSER composition) and W6-R4 (single FSER derivation) | W7 must compose the same FSER service rather than re-derive, whatever W6 decides about embedding. |
-| The aggregate as calculation input | W6-R5 | Preserved by default (W7-R10); overriding it is an owner-level W6 amendment, not a W7 choice. |
-| Label spellings reused in read-side labeling | OD-W6-3 | W7 §4.4 adopts the ratified spellings; it mints none of its own. |
-| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If the owner does not adopt/complete W6, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. |
+| The aggregate as calculation input | W6-R5 | Preserved by default (W7-R10); overriding it is an owner-level W6 decision (at W6 ratification, or a W6 amendment if W6 is already ratified), not a W7 choice. |
+| Label spellings reused in read-side labeling | OD-W6-3 | For the W6-owned source-label union, W7 §4.4 adopts the ratified spellings and mints none of its own. The W7-owned provenance values on the W4 detail/trace enums are a different enum family, owned by OD-W7-5 (strings fixed at W7-0) — see §4.4. |
+| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If the owner does not adopt/complete W6, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. Declining OD-W6-0 also has a consequence beyond W7: parent lock §10 item 8 (the effective/inherited/preview-only/conflicting group workflow) has no landed implementation at this baseline and W6 is its only planned vehicle, so issue #4556 could not close under §10 as ratified without an owner amendment to parent §10 — see the W8 plan §5-§6. |
 
 ## 7. Decision points (owner menu, all OPEN)
 
 | ID | Question | Options (recommended first) and consequences |
 | --- | --- | --- |
 | OD-W7-1 | Source of group policy for calculation | **(a)** A dedicated in-transaction resolver reading persisted facts (W1 membership, group row, FSER-composed schedule facts) under the existing lock order; W6-R5 stays intact; the W6 aggregate remains display-only. (b) Consume the W6 aggregate service in-process — rejected by default: violates W6-R5, couples display labeling to accounting, and makes the aggregate's values-free posture a calculation constraint. |
-| OD-W7-2 | Frozen-context evolution | **(a)** `schemaVersion: 2` with a discriminated selector (`'legacy' \| 'group_effective'`); `calculationGroupId` non-null iff `group_effective`; v1 stays valid/immutable with untouched golden bytes; the calculator accepts exactly {v1-legacy, v2-either} and fail-closes on all else. (b) Widen v1 in place — rejected: silently moves v1 golden fingerprints (W7-R3/R5 would both trip). |
+| OD-W7-2 | Frozen-context evolution | **(a)** `schemaVersion: 2` with a discriminated selector (`'legacy' \| 'group_effective'`); `calculationGroupId` non-null iff `group_effective`; v1 stays valid/immutable with untouched golden bytes; the calculator accepts exactly {v1-legacy, v2-either} and fail-closes on all else. (b) Widen v1 in place — rejected, for the value-domain reason: W7 must widen the value domain of two existing **mandatory** keys (`selector` beyond `'legacy'`, `calculationGroupId` beyond `null`), which destroys `schemaVersion` as a discriminator and silently invalidates every existing v1 consumer's `selector === 'legacy'` assumption. Honesty note: the fingerprint argument does **not** carry — this repo's W5 precedent already widened v1 in place with an *optional* key (`flexPolicy?`, `w4c0-write-boundary-types.ts:147-151`; validator accepts the legacy exact key set or the same set plus optional `flexPolicy`, `w4c1-segment-calculator.ts:331-345`) and the v1 golden literals did not move (`w4c1-fingerprint-golden.test.ts` still pins the no-`flexPolicy` context to the unchanged `GOLDEN_STORAGE_FINGERPRINT`). An optional-key widening leaves old bytes alone; a mandatory-value-domain widening is a different operation, and that — not fingerprint movement — is why (b) is rejected. |
 | OD-W7-3 | Cutover state carrier | **(a)** A second org-keyed state machine for context-source (`off <-> group_shadow <-> group_eligible -> group_authoritative <-> suspended`) in its own table, cloning the hardened-boundary pattern (single writer, closed matrix, trigger backstop, evidence manifest); keeps the W4 machine's meaning ("is segment calculation authoritative") untouched. (b) Extend the existing five-state machine with combined states — rejected: breaks the ratified closed matrix, its DB trigger, and every landed test that pins the 7 legal pairs. Consequence of (a): an org has two postures; the legal combinations table is part of the W7-0 contract. |
 | OD-W7-4 | Suspended-from-group fallback direction | **(a)** No legacy fallback from `group_authoritative`; suspend/resume only, mirroring W4's `authoritative <-> suspended` asymmetry — history stays explainable with one producer per work date. (b) Allow an explicit owner-driven fall-back-to-legacy transition with its own evidence manifest — larger matrix, more drills, only justified if soak shows group-authoritative is not operationally recoverable. |
 | OD-W7-5 | Read-side provenance spellings | **(a)** Extend the existing closed enums by amendment (detail `projectionOwner`/trace source-kind gain group-provenance values; exact strings fixed at W7-0). (b) A parallel provenance field — rejected: second spelling of the same fact. |
 | OD-W7-6 | Group-policy snapshot form | **(a)** Freeze group policy INTO the frozen context (plus its fingerprint), no second snapshot table; the context is already the immutable policy carrier (`w4c0-write-boundary-types.ts:124`). (b) A separate group-policy snapshot table keyed by group/date — needed only if per-group dedup matters for storage; adds a join to every immutability proof. |
 | OD-W7-7 | Which entrypoints cut over together | **(a)** All source entrypoints (live punch, scheduled, import, approval-driven, recompute `current_policy`) flip atomically with the org's posture — one producer per org per work date. (b) Phased per-entrypoint cutover — rejected by default: two producers in one org/date makes evidence and parity claims ambiguous (the W4C-3a lesson: same canonical row, separately snapshotted projections, was already the maximum tolerable split). |
-| OD-W7-8 | First-org scope | **(a)** The named synthetic staging org only, reusing the W4C-5 allowlist discipline (exact org, `scope='synthetic_staging'`, no wildcard); real named-org opt-in is a separate later owner decision per parent §9.8. (b) Any broader first scope — rejected. |
+| OD-W7-8 | First-org scope | **(a)** The named synthetic staging org only, reusing the W4C-5 allowlist discipline (exact org, `scope='synthetic_staging'`, no wildcard); real named-org opt-in is a separate later owner decision per parent §9.8. (b) Two synthetic staging orgs — the named one plus a second synthetic org with a deliberately different group topology (multi-group, overlapping effective dates at the boundary), both under the same exact-allowlist discipline, zero customer data — buys cross-org isolation evidence before any real named-org decision, at the cost of a second full evidence chain and soak window. Real named-org opt-in remains a separate later owner decision per parent §9.8 under either option. |
 
 ## 8. Landing sequence (conditional skeleton)
 
@@ -309,7 +320,7 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 
 `OD-W7-0` (adopt this lock) and `OD-W7-1..8` are **OPEN**. This document
 carries no default: absent owner sign-off — and absent the W6 preconditions
-in §8.1 — W7 remains a paper plan and no W7 runtime work is authorized.
+in §8 item 1 — W7 remains a paper plan and no W7 runtime work is authorized.
 
 ## 10. Provenance
 
@@ -322,7 +333,7 @@ Code:
 - `packages/core-backend/src/attendance/w4c0-write-boundary-types.ts:113-122, 124-152` (flex shape; frozen context; `:126` selector literal; `:134` calculationGroupId)
 - `packages/core-backend/src/attendance/w4c1-segment-calculator.ts:304-319, 335-363` (closed keys; validator; `:350/:351/:358`)
 - `packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts:162-173`
-- `plugins/plugin-attendance/index.cjs:22593-22620` (per-user resolvers), `:22625` (builder), `:22740-22750` (context literal), `:24510, :24721, :28775, :29365, :35286` (call sites)
+- `plugins/plugin-attendance/index.cjs:22593-22620` (per-user resolvers), `:22625` (builder), `:22740-22750` (context literal), `:24510, :24721, :28775, :29365, :35338` (call sites; `:35338` corrects the earlier `:35286`, a comment anchor)
 - `plugins/plugin-attendance/lib/attendance-shift-service.cjs:60, :495, :1208` (`SEGMENT_CALCULATION_IMPLEMENTED`)
 - `plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs:71, :180`
 - `packages/core-backend/src/attendance/w4c3a-rollout-control.ts:1-21, 85-93, 114-163, 802-823, 863, 1044, 1089, 1125`
