@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, readdirSync, chmodSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, readdirSync, chmodSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -363,6 +363,26 @@ const RELEVANT_FALSE_IF = "steps.changes.outputs.relevant == 'false'"
 const PLUGIN_TESTS_JOB_ID = 'test'
 const PLUGIN_TESTS_CONTRACT_STEP_ID = 'integration-guard-contract'
 
+// #4801 P1 (owner review, 2026-08-07): the plugin-integration-core chain-completeness guard's
+// INDEPENDENT call site, inside this workflow's own job. See Pins 16/17 below.
+const CHAIN_COMPLETENESS_STEP_ID = 'chain-completeness'
+const CHAIN_COMPLETENESS_GUARD_PATH =
+  'plugins/plugin-integration-core/__tests__/test-chain-completeness.test.cjs'
+
+// #4802: the seven K3-line scripts/ops suites' step, inside plugin-tests.yml's required `test` job.
+// See Pin 18 below.
+const K3_OPS_SUITES_STEP_ID = 'k3-line-ops-suites'
+const K3_OPS_SUITES_IF_EXACT = "matrix.node-version == '20.x'"
+const K3_OPS_SUITE_PATHS = Object.freeze([
+  'scripts/ops/integration-erp-plm-deploy-readiness.test.mjs',
+  'scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs',
+  'scripts/ops/integration-k3wise-postdeploy-summary.test.mjs',
+  'scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs',
+  'scripts/ops/integration-k3wise-signoff-gate.test.mjs',
+  'scripts/ops/multitable-onprem-package-verify-k3-helper-contract.test.mjs',
+  'scripts/ops/resolve-k3wise-smoke-token.test.mjs',
+])
+
 // ---------------------------------------------------------------------------
 // EXACT-SHAPE pins (P1 correction, 2026-07-26): each literal below was captured by dumping
 // `JSON.stringify(step.run)` / `JSON.stringify(step.env.X)` straight out of a parsed copy of the
@@ -427,11 +447,11 @@ const TERMINAL_RUN_EXACT = "node scripts/ops/integration-guard-assert-branch.mjs
 // its own constant, so mutating one workflow reds that workflow's own pin only (门级排他).
 // Captured the house way: `JSON.stringify(step.run)` dumped from a python3+PyYAML parse of the
 // current workflow files and pasted verbatim, never hand-typed.
-const CONTRACT_RUN_EXACT = "set -euo pipefail\nMIN_CONTRACT_TESTS=59\nif ! contract_out=\"$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)\"; then\n  printf '%s\\n' \"$contract_out\"\n  echo \"integration-guard contract: node --test exited non-zero (output above)\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$contract_out\"\ncontract_tests=\"$(printf '%s\\n' \"$contract_out\" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)\"\nif [ -z \"$contract_tests\" ]; then\n  echo \"integration-guard contract: no 'tests <N>' summary line found — refusing to report green\" >&2\n  exit 1\nfi\nif [ \"$contract_tests\" -lt \"$MIN_CONTRACT_TESTS\" ]; then\n  echo \"integration-guard contract: only $contract_tests subtests ran, expected at least $MIN_CONTRACT_TESTS — an import-time abort in one of the extracted .mjs modules collapses this contract into a passing 1-subtest file\" >&2\n  exit 1\nfi\necho \"integration-guard contract: $contract_tests subtests ran (floor $MIN_CONTRACT_TESTS).\"\n"
+const CONTRACT_RUN_EXACT = "set -euo pipefail\nMIN_CONTRACT_TESTS=62\nif ! contract_out=\"$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)\"; then\n  printf '%s\\n' \"$contract_out\"\n  echo \"integration-guard contract: node --test exited non-zero (output above)\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$contract_out\"\ncontract_tests=\"$(printf '%s\\n' \"$contract_out\" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)\"\nif [ -z \"$contract_tests\" ]; then\n  echo \"integration-guard contract: no 'tests <N>' summary line found — refusing to report green\" >&2\n  exit 1\nfi\nif [ \"$contract_tests\" -lt \"$MIN_CONTRACT_TESTS\" ]; then\n  echo \"integration-guard contract: only $contract_tests subtests ran, expected at least $MIN_CONTRACT_TESTS — an import-time abort in one of the extracted .mjs modules collapses this contract into a passing 1-subtest file\" >&2\n  exit 1\nfi\necho \"integration-guard contract: $contract_tests subtests ran (floor $MIN_CONTRACT_TESTS).\"\n"
 
 // The floor value the pinned block above declares. Pin 15 asserts this is the number both workflow
 // copies actually carry AND that it still tracks the tests this file really declares.
-const CONTRACT_MIN_TESTS = 59
+const CONTRACT_MIN_TESTS = 62
 
 // How far the floor may lag the declared test count before it must be bumped in BOTH workflows.
 // A floor left far below the real count would let a large deletion of tests pass unnoticed; a floor
@@ -447,6 +467,15 @@ const CONTRACT_SELF_CHECK_RUN_EXACT = CONTRACT_RUN_EXACT
 // `test` job — captured the same way (JSON.stringify(step.run) dumped from a parsed copy of the
 // current file, pasted verbatim).
 const PLUGIN_TESTS_CONTRACT_RUN_EXACT = CONTRACT_RUN_EXACT
+
+// #4801 P1 (owner review, 2026-08-07) — the chain-completeness guard's INDEPENDENT call site.
+// Captured the house way: `json.dumps(step['run'])` dumped from a python3+PyYAML parse of the
+// current .github/workflows/integration-guard.yml and pasted verbatim, never hand-typed.
+const CHAIN_COMPLETENESS_RUN_EXACT = "set -euo pipefail\nMIN_CHAINED_SUITES=150\nGUARD=plugins/plugin-integration-core/__tests__/test-chain-completeness.test.cjs\nif ! guard_out=\"$(node \"$GUARD\" 2>&1)\"; then\n  printf '%s\\n' \"$guard_out\"\n  echo \"chain-completeness: node exited non-zero (output above)\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$guard_out\"\nchained=\"$(printf '%s\\n' \"$guard_out\" | grep -Eo 'test-chain-completeness: [0-9]+ suites' | tail -n 1 | grep -Eo '[0-9]+' || true)\"\nif [ -z \"$chained\" ]; then\n  echo \"chain-completeness: no 'test-chain-completeness: <N> suites' summary line found — refusing to report green\" >&2\n  exit 1\nfi\nif [ \"$chained\" -lt \"$MIN_CHAINED_SUITES\" ]; then\n  echo \"chain-completeness: only $chained suites were walked, expected at least $MIN_CHAINED_SUITES — a deleted main() call or an early process.exit(0) collapses this guard into a silent success\" >&2\n  exit 1\nfi\necho \"chain-completeness: $chained suites, all executed by the package test chain (floor $MIN_CHAINED_SUITES).\"\n"
+
+// #4802 — the seven K3-line scripts/ops suites' step inside plugin-tests.yml's required `test` job.
+// Captured the same way, from a python3+PyYAML parse of the current .github/workflows/plugin-tests.yml.
+const K3_OPS_SUITES_RUN_EXACT = "node --test \\\n  scripts/ops/integration-erp-plm-deploy-readiness.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-summary.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs \\\n  scripts/ops/integration-k3wise-signoff-gate.test.mjs \\\n  scripts/ops/multitable-onprem-package-verify-k3-helper-contract.test.mjs \\\n  scripts/ops/resolve-k3wise-smoke-token.test.mjs\n"
 
 const RELEVANT_ENV_EXACT = '${{ steps.changes.outputs.relevant }}'
 const NOOP_OUTCOME_ENV_EXACT = '${{ steps.noop.outcome }}'
@@ -1958,4 +1987,208 @@ test('web-specs.sh: every spec filter resolves to at least one real spec file (k
     [],
     'these web-guard spec filters match NO real file under apps/web/tests — each one runs nothing at all',
   )
+})
+
+// ---------------------------------------------------------------------------
+// Pin 16 (#4801 P1, owner review 2026-08-07) — THE CHAIN-COMPLETENESS GUARD'S INDEPENDENT CALL SITE.
+//
+// `plugins/plugin-integration-core/__tests__/test-chain-completeness.test.cjs` walks that directory
+// and requires every `*.test.{cjs,mjs}` in it to appear in the package's `scripts.test` `&&` chain.
+// As it landed in #4801 its ONLY caller WAS that chain — the guard's own execution depended on the
+// very list it exists to police. The owner demonstrated the consequence: delete the one
+// `node __tests__/test-chain-completeness.test.cjs` link from package.json, re-pin the same-tree
+// provenance manifest (`runtimeFiles.pluginPackageJson` — what a developer does when
+// `sealed-export-package-provenance` reds), and every required check stays GREEN with the guard
+// gone. Self-referential, therefore not load-bearing.
+//
+// Closed by invoking the guard from OUTSIDE the package's test list, as its own step in
+// integration-guard.yml — which produces the REQUIRED `integration-guard` context. This pin is the
+// other half: without it, that step could be deleted as silently as the package.json link was. The
+// two mutations red DIFFERENT things (deleting the package.json link reds the STEP at runtime;
+// deleting the step reds THIS pin), which is the 门级排他 evidence that neither is covering for the
+// other.
+//
+// PINNED HERE: the step exists by exact `id:`; it carries NO `if` (it must run on every event this
+// workflow triggers on, including the out-of-scope no-op path — unconditional execution removes the
+// scope classifier from the guard's trust chain entirely); no `continue-on-error`; `shell: bash`
+// (the `run:` block is bash-specific — under `sh` the pinned text could behave differently while
+// every text pin stayed green); and the `run:` text BYTE-IDENTICAL to CHAIN_COMPLETENESS_RUN_EXACT,
+// which is what carries the output floor.
+//
+// ORDER IS LOAD-BEARING, not cosmetic: every un-`if`'d step still inherits GitHub's implicit
+// `if: success()`. Placed BELOW `resolve-diff` (which fails closed on a missing/zero/malformed
+// BASE_SHA) this step would be SKIPPED, not run, on exactly the fail-closed path. Nothing upstream
+// of `resolve-diff` can fail, so the guard must sit above it — pinned by index comparison.
+// ---------------------------------------------------------------------------
+
+test('integration-guard.yml runs the chain-completeness guard as its own step, id: chain-completeness, ungated, above resolve-diff', () => {
+  const job = requireJob()
+  const step = stepById(job, CHAIN_COMPLETENESS_STEP_ID)
+  assert.ok(
+    step,
+    `job.${JOB_ID} must have a step with id: ${CHAIN_COMPLETENESS_STEP_ID} — without it the ` +
+      `chain-completeness guard's only caller is the package's own scripts.test chain, i.e. the ` +
+      `list it exists to police, and deleting that one link (plus the usual provenance re-pin) ` +
+      `removes the guard with every required check still green (#4801 P1)`,
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(step, 'if'),
+    false,
+    `the ${CHAIN_COMPLETENESS_STEP_ID} step must carry NO \`if\` key at all — gating it on the ` +
+      `scope classifier would put the classifier back into the guard's trust chain, and gating it ` +
+      `on anything else risks the skip-shaped green this contract exists to forbid`,
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(step, 'continue-on-error'),
+    false,
+    `the ${CHAIN_COMPLETENESS_STEP_ID} step must not carry continue-on-error — it is the step this ` +
+      `half of the wiring relies on actually failing the job when the chain is incomplete`,
+  )
+  assert.equal(
+    step.shell,
+    'bash',
+    `the ${CHAIN_COMPLETENESS_STEP_ID} step must declare \`shell: bash\` — the pinned run: text is ` +
+      `bash-specific (\`set -o pipefail\`, a command substitution inside an \`if !\` compound), and ` +
+      `running it under another shell could change its behaviour with every text pin still green`,
+  )
+  assert.equal(
+    step.run,
+    CHAIN_COMPLETENESS_RUN_EXACT,
+    `the ${CHAIN_COMPLETENESS_STEP_ID} step's run: text must be byte-identical to the pinned ` +
+      `literal — the output floor inside it (MIN_CHAINED_SUITES) is what stops a guard whose ` +
+      `\`main()\` call was deleted, or which gained an early process.exit(0), reporting green`,
+  )
+
+  const steps = stepsOf(job)
+  const guardIndex = steps.findIndex((s) => isPlainObject(s) && s.id === CHAIN_COMPLETENESS_STEP_ID)
+  const resolveDiffIndex = steps.findIndex((s) => isPlainObject(s) && s.id === RESOLVE_DIFF_STEP_ID)
+  assert.ok(resolveDiffIndex >= 0, `the ${RESOLVE_DIFF_STEP_ID} step must exist to compare against`)
+  assert.ok(
+    guardIndex < resolveDiffIndex,
+    `the ${CHAIN_COMPLETENESS_STEP_ID} step (index ${guardIndex}) must run BEFORE ` +
+      `${RESOLVE_DIFF_STEP_ID} (index ${resolveDiffIndex}) — every un-\`if\`'d step still carries ` +
+      `GitHub's implicit \`if: success()\`, so a position after the fail-closed resolve-diff step ` +
+      `means the guard is SKIPPED (not run) on exactly the path where resolve-diff fails`,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Pin 17 (#4801 P1) — the pinned step must invoke the guard FILE DIRECTLY, and that file must exist.
+//
+// Pin 16 proves the step's text has not changed. It cannot, on its own, prove the text still names a
+// real file, nor that the invocation is genuinely INDEPENDENT of the package's own test list — a
+// `run:` block rewritten to `pnpm --filter plugin-integration-core test` would be byte-identical to a
+// freshly re-captured literal and would reintroduce exactly the self-reference #4801 P1 is about.
+// So: parse the guard path back out of the pinned literal (never re-typed — read from the pin, so a
+// hand edit that changes one and not the other reds here), require it to be executed as a real
+// `node` argument, require the pin NOT to route through the package's test script, and require the
+// file to exist on disk.
+// ---------------------------------------------------------------------------
+
+test('the pinned chain-completeness step executes the guard file directly, not via the package test chain, and the file exists', () => {
+  assert.ok(
+    CHAIN_COMPLETENESS_RUN_EXACT.includes(`GUARD=${CHAIN_COMPLETENESS_GUARD_PATH}\n`),
+    `the pinned run: text must assign GUARD to ${CHAIN_COMPLETENESS_GUARD_PATH} — the path is read ` +
+      `back out of the pin rather than re-typed, so the two cannot drift apart unnoticed`,
+  )
+  assert.ok(
+    /\bnode "\$GUARD"/.test(CHAIN_COMPLETENESS_RUN_EXACT),
+    'the pinned run: text must EXECUTE the guard with node — a block that merely mentions the path ' +
+      '(echo, a comment, a grep) would satisfy a containment check while running nothing',
+  )
+  assert.equal(
+    CHAIN_COMPLETENESS_RUN_EXACT.includes(PLUGIN_CORE_RUN_EXACT),
+    false,
+    `the pinned run: text must NOT route through \`${PLUGIN_CORE_RUN_EXACT}\` — invoking the guard ` +
+      `through the package's own scripts.test chain is precisely the self-reference #4801 P1 ` +
+      `reported: the guard would again only run when the list it polices already names it`,
+  )
+  assert.ok(
+    existsSync(join(repoRoot, CHAIN_COMPLETENESS_GUARD_PATH)),
+    `${CHAIN_COMPLETENESS_GUARD_PATH} must exist on disk — a pinned step naming a deleted file ` +
+      `reds the workflow, but this contract should say WHY rather than leave it to MODULE_NOT_FOUND`,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Pin 18 (#4802) — THE SEVEN K3-LINE `scripts/ops` SUITES' EXECUTION ENTRY.
+//
+// A repo-wide sweep found seven `scripts/ops/*.test.mjs` files on the K3/stock-prep line executed by
+// NOTHING: no workflow, no package.json script, no shell script. The single non-docs textual hit
+// (scripts/ops/multitable-onprem-package-verify.sh:532) is a `search_fixed_string` assertion that a
+// COMMAND STRING appears inside a document — it does not run the suite. All seven pass; inert, not
+// broken, which is worse, because the directory listing reads like coverage.
+//
+// One of them, multitable-onprem-package-verify-k3-helper-contract.test.mjs, is the CONTENT CONTRACT
+// of the on-prem deployment package: measured on #4802, dropping `packages/mssql-readonly-utils` from
+// multitable-onprem-package-build.sh's payload list and re-pinning the provenance manifest as usual
+// REDS that suite and nothing else. An on-prem package missing the K3 SQL Server executor seam's
+// shared helper shipped green through every executed check.
+//
+// They are now wired into plugin-tests.yml's `test` job, i.e. the REQUIRED `test (20.x)` context —
+// the owner's standard being "写进 workflow 但未进入 required context 不算完成". This pin is what
+// stops that step being deleted again in silence, and it lives in a file that already executes in
+// BOTH required contexts.
+//
+// `if` IS PINNED BYTE-EXACTLY, and that is the load-bearing part rather than belt-and-braces:
+// flipping `matrix.node-version == '20.x'` to `'18.x'` (or `false`) is mutation class #1 in
+// scripts/ops/ci-realdb-step-contract.mjs's own header — the step vanishes from the required leg
+// while every membership assertion stays green.
+//
+// Each suite is additionally required to be a WHOLE-FILE argument of the pinned invocation AND to
+// exist on disk: a renamed-away path would otherwise sit in the list running nothing.
+// ---------------------------------------------------------------------------
+
+test('plugin-tests.yml required test job runs all seven K3-line ops suites, id: k3-line-ops-suites, on the required 20.x leg', () => {
+  const job = requirePluginTestsJob()
+  const step = stepById(job, K3_OPS_SUITES_STEP_ID)
+  assert.ok(
+    step,
+    `plugin-tests.yml: jobs.${PLUGIN_TESTS_JOB_ID} must have a step with id: ` +
+      `${K3_OPS_SUITES_STEP_ID} — deleting it returns all seven suites to the state #4802 reported, ` +
+      `executed by nothing at all`,
+  )
+  assert.equal(
+    step.if,
+    K3_OPS_SUITES_IF_EXACT,
+    `the ${K3_OPS_SUITES_STEP_ID} step's \`if\` must be byte-exactly "${K3_OPS_SUITES_IF_EXACT}" — ` +
+      `flipping it to '18.x' (or false) removes the suites from the REQUIRED "test (20.x)" leg ` +
+      `while the job as a whole stays green and every membership assertion below still passes`,
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(step, 'continue-on-error'),
+    false,
+    `the ${K3_OPS_SUITES_STEP_ID} step must not carry continue-on-error — a red on-prem package ` +
+      `content contract must fail the required context, not be logged and swallowed`,
+  )
+  assert.equal(
+    step.run,
+    K3_OPS_SUITES_RUN_EXACT,
+    `the ${K3_OPS_SUITES_STEP_ID} step's run: text must be byte-identical to the pinned literal — ` +
+      `exact equality catches a suite quietly dropped from the list, a \`|| true\` appended, or an ` +
+      `extra line that neuters the invocation, none of which substring containment would notice`,
+  )
+
+  // The pin is a literal; prove the literal really is a `node --test` invocation carrying all seven
+  // paths as whole-file arguments, rather than seven names that merely appear somewhere in it.
+  const invocation = K3_OPS_SUITES_RUN_EXACT.replace(/\\\n\s*/g, ' ')
+  assert.ok(
+    invocation.startsWith('node --test '),
+    `the pinned run: text must be a real \`node --test\` invocation, got: ` +
+      `${JSON.stringify(invocation.slice(0, 40))}`,
+  )
+  const args = invocation.slice('node --test '.length).trim().split(/\s+/)
+  assert.deepEqual(
+    args.slice().sort(),
+    [...K3_OPS_SUITE_PATHS].sort(),
+    'the pinned invocation must carry EXACTLY the seven #4802 suites as whole-file arguments — ' +
+      'no more (an unrelated file smuggled into this step), no fewer (a suite dropped back into ' +
+      'inertness)',
+  )
+  for (const suite of K3_OPS_SUITE_PATHS) {
+    assert.ok(
+      existsSync(join(repoRoot, suite)),
+      `${suite} must exist on disk — a wired path that no longer resolves runs nothing`,
+    )
+  }
 })
