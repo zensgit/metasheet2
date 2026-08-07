@@ -6,6 +6,7 @@ import {
   canUndoAuthoring,
   createAuthoringSessionHistory,
   draftFromSessionGraph,
+  mergeLiveNodeConfigsOntoTopology,
   promoteLinearDraftToGraphAuthoring,
   redoAuthoringSession,
   reseedAuthoringSessionHistory,
@@ -350,5 +351,105 @@ describe('approvalAuthoringHistory — inspector map edits survive move/undo', (
       (a1Undone.config as { assigneeSources?: Array<{ kind: string }> }).assigneeSources?.[0]?.kind,
     ).toBe('direct_manager')
     expect(edgeBetween(buildApprovalGraph(draft), 'a1', 'a2')).toBeTruthy()
+  })
+
+  it('topology insert → map-edit → undo/redo retains surviving-node inspector configs', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'a1',
+          type: 'approval',
+          name: '审批1',
+          config: {
+            assigneeSources: [{ kind: 'requester' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-a1', source: 'start', target: 'a1' },
+        { key: 'e-a1-end', source: 'a1', target: 'end' },
+      ],
+    }
+    let draft = draftWithGraph(graph)
+    let history = reseedAuthoringSessionHistory(draft)
+
+    // Topology snapshot path: append approval after a1.
+    const inserted = applyTopologyOpToSession(
+      history,
+      draft,
+      (g) => appendApprovalNode(g, 'a1'),
+      { kind: 'node', nodeKey: 'a1' },
+    )
+    expect(inserted.ok).toBe(true)
+    draft = inserted.draft
+    history = inserted.history
+    const afterInsert = buildApprovalGraph(draft)
+    expect(afterInsert.nodes.filter((n) => n.type === 'approval').length).toBe(2)
+
+    // Inspector-only edit on surviving a1 (session tip not reseeded from maps).
+    draft = {
+      ...draft,
+      approvalNodeEdits: {
+        ...(draft.approvalNodeEdits ?? {}),
+        a1: {
+          nodeKey: 'a1',
+          assigneeSources: [{ kind: 'direct_manager' }],
+          approvalMode: 'all',
+          emptyAssigneePolicy: 'auto-approve',
+        },
+      },
+    }
+    const liveAfterEdit = buildApprovalGraph(draft)
+    expect(
+      (liveAfterEdit.nodes.find((n) => n.key === 'a1')!.config as { approvalMode?: string })
+        .approvalMode,
+    ).toBe('all')
+
+    // Negative control: pure snapshot before (no live merge) would wipe — merge helper is the fix.
+    const bareBefore = history.undoStack[history.undoStack.length - 1]
+    expect(bareBefore?.kind).toBe('topology-snapshot')
+    if (bareBefore?.kind !== 'topology-snapshot') return
+    const wipedIfBare = draftFromSessionGraph(draft, bareBefore.before)
+    expect(
+      (buildApprovalGraph(wipedIfBare).nodes.find((n) => n.key === 'a1')!.config as {
+        approvalMode?: string
+      }).approvalMode,
+    ).toBe('single')
+    // mergeLiveNodeConfigsOntoTopology keeps live configs for surviving keys.
+    const merged = mergeLiveNodeConfigsOntoTopology(bareBefore.before, liveAfterEdit)
+    expect(
+      (merged.nodes.find((n) => n.key === 'a1')!.config as { approvalMode?: string }).approvalMode,
+    ).toBe('all')
+
+    // Product path: undo topology with live graph → a1 keeps inspector config; new node gone.
+    const undone = undoAuthoringSession(history, liveAfterEdit)
+    expect(undone.ok).toBe(true)
+    if (!undone.ok) return
+    draft = draftFromSessionGraph(draft, undone.history.graph)
+    history = undone.history
+    const afterUndo = buildApprovalGraph(draft)
+    expect(afterUndo.nodes.filter((n) => n.type === 'approval').length).toBe(1)
+    const a1Undo = afterUndo.nodes.find((n) => n.key === 'a1')!
+    expect((a1Undo.config as { approvalMode?: string }).approvalMode).toBe('all')
+    expect(
+      (a1Undo.config as { assigneeSources?: Array<{ kind: string }> }).assigneeSources?.[0]?.kind,
+    ).toBe('direct_manager')
+
+    // Redo topology with live graph → structure restored; a1 still keeps inspector config.
+    const redone = redoAuthoringSession(history, buildApprovalGraph(draft))
+    expect(redone.ok).toBe(true)
+    if (!redone.ok) return
+    draft = draftFromSessionGraph(draft, redone.history.graph)
+    const afterRedo = buildApprovalGraph(draft)
+    expect(afterRedo.nodes.filter((n) => n.type === 'approval').length).toBe(2)
+    const a1Redo = afterRedo.nodes.find((n) => n.key === 'a1')!
+    expect((a1Redo.config as { approvalMode?: string }).approvalMode).toBe('all')
+    expect(
+      (a1Redo.config as { assigneeSources?: Array<{ kind: string }> }).assigneeSources?.[0]?.kind,
+    ).toBe('direct_manager')
   })
 })

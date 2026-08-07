@@ -24,16 +24,51 @@ import {
   type TemplateAuthoringDraft,
 } from './templateAuthoring'
 
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
 function cloneGraph(graph: ApprovalGraph): ApprovalGraph {
-  return JSON.parse(JSON.stringify(graph)) as ApprovalGraph
+  return cloneJson(graph)
 }
 
 function cloneSelection(selection: ApprovalCanvasSelection): ApprovalCanvasSelection {
-  return JSON.parse(JSON.stringify(selection)) as ApprovalCanvasSelection
+  return cloneJson(selection)
 }
 
 function graphsEqual(left: ApprovalGraph, right: ApprovalGraph): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/**
+ * Topology (node key set + edges + node types) comes from `base`. For every node key that
+ * still exists in `live`, copy that node's config and display name from the live effective
+ * graph so inspector-only map edits (approvalMode, assigneeSources, condition rules, joinMode,
+ * cc targets, …) survive topology undo/redo. Nodes present only in `base` keep `base` config
+ * (e.g. a just-reintroduced node from redo of an insert).
+ */
+export function mergeLiveNodeConfigsOntoTopology(
+  base: ApprovalGraph,
+  live: ApprovalGraph,
+): ApprovalGraph {
+  const liveByKey = new Map(live.nodes.map((node) => [node.key, node]))
+  return {
+    nodes: base.nodes.map((node) => {
+      const liveNode = liveByKey.get(node.key)
+      if (!liveNode) return cloneJson(node)
+      return {
+        key: node.key,
+        type: node.type,
+        ...(liveNode.name !== undefined
+          ? { name: liveNode.name }
+          : node.name !== undefined
+            ? { name: node.name }
+            : {}),
+        config: cloneJson(liveNode.config),
+      }
+    }),
+    edges: cloneJson(base.edges),
+  }
 }
 
 export interface CanvasCommandHistoryEntry {
@@ -219,8 +254,8 @@ export function canRedoAuthoring(history: AuthoringSessionHistory): boolean {
 
 /**
  * Undo one session entry. Canvas-command units restore via algebraic inverse on the
- * **live** effective graph (so in-progress inspector config is not wiped); topology
- * snapshots restore the before graph captured at mutation time.
+ * **live** effective graph. Topology snapshots restore the before topology while merging
+ * configs from `liveGraph` for surviving node keys (inspector map edits retained).
  */
 export function undoAuthoringSession(
   history: AuthoringSessionHistory,
@@ -238,7 +273,7 @@ export function undoAuthoringSession(
     return {
       ok: true,
       history: {
-        graph: cloneGraph(entry.before),
+        graph: mergeLiveNodeConfigsOntoTopology(entry.before, liveGraph),
         selection: cloneSelection(entry.selectionBefore),
         undoStack: history.undoStack.slice(0, -1),
         redoStack: [entry, ...history.redoStack],
@@ -280,7 +315,7 @@ export function redoAuthoringSession(
     return {
       ok: true,
       history: {
-        graph: cloneGraph(entry.after),
+        graph: mergeLiveNodeConfigsOntoTopology(entry.after, liveGraph),
         selection: cloneSelection(entry.selectionAfter),
         undoStack: [...history.undoStack, entry],
         redoStack: history.redoStack.slice(1),
