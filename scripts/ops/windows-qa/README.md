@@ -6,12 +6,28 @@ Pinned exact source SHA: `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b` (product `SO
 This directory makes the PQA matrix **independently executable** and reach **residue=0**, with the SQL/Node
 layer **proven by actually running it** against a fresh migrated local PostgreSQL. The qa-runner
 validates SAFETY + SHA binding + an evidence contract that **fails closed on missing/malformed evidence
-and on a wrong/stale SHA**. For a PASS it requires a **structured, harness-produced machine-evidence
-record** (row counts / entity UUIDs / the harness's own determination / harness module / QA tooling SHA)
-bound to the package `QA_TOOLING_SHA` — raising the bar from "any long string an operator can type" to
-"a structured record a harness emits". This is **not** forgery-proof (a JSON file is copyable, and the
-runner reads an operator-writable file); it raises the floor. The harnesses produce the per-case verdict
-+ evidence from real execution.
+and on a wrong/stale SHA**. For a PASS it requires a **case-shaped, tooling-SHA-bound structured evidence
+record** — one of two kinds:
+- **machineEvidence@1** for the route-less harness cases **PQA-09/10**: `caseId` (= the case slot) +
+  the campaign `runId` + the ONE whitelisted harness module FOR THAT CASE + that case's EXACT facts
+  schema (row counts / entity UUIDs / delivery states). An envelope with the wrong `caseId`, a
+  non-whitelisted `harnessModule`, or a missing/invented/wrong-typed fact is REJECTED.
+- **operatorEvidence@1** for the operator-run HTTP/UI cases **PQA-01..08**: `caseId` + campaign `runId` +
+  `tester` + UTC `timestamp` + `command`/`route` + `expected`/`observed` + an artifact manifest
+  `{ path, sha256, runId }` (the runner **recomputes** the sha over the real file in the evidence dir —
+  a missing/tampered file, a symlink, or a path escaping the dir is REJECTED) + the product `sourceSha` +
+  the `qaToolingSha`, all bound to the package SHAs. **PQA-05/06/08** additionally require a per-case
+  `boundaryAttestation` that the FULL matrix objective was truly executed (else BLOCKED).
+
+The two kinds are **strictly partitioned** (no fallback): a machineEvidence on an operator case, or an
+operatorEvidence on a machine case, is REJECTED. A **campaign `runId`** binds the summary + every
+per-case record + each artifact manifest to ONE run, so a same-product-SHA record from a DIFFERENT run
+cannot be spliced/replayed in.
+
+This is **not** forgery-proof (a JSON file is copyable, and the runner reads an operator-writable file);
+it raises the bar from "any long string an operator can type" to "a case-shaped record bound to a real
+harness/artifact and the package tooling SHA". The 09/10 harnesses produce their verdict + machine
+evidence from real execution; the operator collects operatorEvidence@1 from genuine HTTP/UI runs.
 
 ## Why the rework (owner CHANGES-REQUESTED, all behavioral)
 - **Cleanup can't be per-row DELETE.** The append-only / deny-delete triggers REJECT deletes on rollout
@@ -26,9 +42,10 @@ runner reads an operator-writable file); it raises the floor. The harnesses prod
   dispatcher, scheduled sweep) — see `harness/`.
 - **The runner raises the PASS floor** (it does NOT make evidence unforgeable — a JSON file is
   copyable): per-case non-empty reason + evidence, per-case safety fields (no top-level fallback), an
-  exact closed set of the 10 matrix ids (no missing/extra/duplicate), a **structured machine-evidence
-  record produced by a harness**, and that record's **`qaToolingSha` bound to the package
-  `QA_TOOLING_SHA`** (evidence from a different tooling SHA does not PASS).
+  exact closed set of the 10 matrix ids (no missing/extra/duplicate), a **case-shaped structured
+  evidence record** (machineEvidence@1 for 09/10 — whitelisted harness + facts schema; operatorEvidence@1
+  for 01..08 — artifact digest + SHA binding, full-boundary attestation for 05/06/08), with the tooling
+  SHA **bound to the package `QA_TOOLING_SHA`** (evidence from a different tooling SHA does not PASS).
 
 ## Files
 - `harness/qa-identities.mjs` — static synthetic INPUTS (org UUIDs, per-user email/username, needed
@@ -73,8 +90,8 @@ product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` →
    the next case). Operator affirms the Windows host facts + runs the HTTP/UI cases (PQA-01/02/03/04, and
    the PQA-07 authorization probes — the cross-org probe target `$orgB` (`orgs.orgB`) is a dedicated
    synthetic org with a directory anchor but NO membership, so `u1` is not a member of it out-of-the-box:
-   turnkey, no operator org hand-creation). Running those HTTP/UI cases is **observation only** — the
-   runner keeps 01/02/03/04/07 BLOCKED (no harness emits their machine-evidence; see step 6).
+   turnkey, no operator org hand-creation). Running those HTTP/UI cases is where the operator collects
+   the **operatorEvidence@1** (expected/observed + artifact sha256) those cases PASS on; see step 6.
 5. **EXPORT evidence FIRST** (the per-case SELECT(s) named in the runbook), then
    `summary-tool.mjs --record-residue` as a negative control (must be **> 0**), then
    `node reset-isolated-db.mjs` (teardown), then `summary-tool.mjs --record-residue` again (must be
@@ -82,20 +99,29 @@ product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` →
 6. `node scripts/ops/attendance-windows-native-qa-runner.mjs --root <package-root> --evidence-dir <evidence-dir> --json`
    before any W4C-5 staging soak is *separately* authorized.
 
-   **Reachable ceiling with THIS tooling (important — the matrix cannot reach 10/10 here):**
-   - **09/10** are the ONLY PASS-eligible cases — real product fns end-to-end, emitting the structured
-     machine-evidence the runner requires. On a non-Windows host the runner holds them at BLOCKED on
-     `hostPlatform=windows` etc.; the Windows operator affirming the host facts is what lets them PASS.
-   - **05/06/08** stay **BLOCKED**: their full boundary objective is not route-reachable from Node (needs
-     the plugin-owned legacyAdapters). **PQA-05 does NOT become PASS by affirming host facts** — its
-     harness emits BLOCKED regardless.
-   - **01/02/03/04 and 07** stay **BLOCKED**: they are HTTP/UI (and 07's authorization-probe) cases with
-     NO harness that emits the required structured machine-evidence. The runner will not accept a
-     hand-typed PASS for them (owner P1). Running the browser/HTTP steps is for observation; recording a
-     PASS needs a machine-evidence recorder for that surface, which this tooling does not provide.
+   **Reachable states (what the tooling ALONE proves vs what a genuine Windows operator run adds):**
+   - **09/10** reach PASS via **machineEvidence@1** — real product fns end-to-end, emitting the
+     whitelisted-harness machine evidence (correct `harnessModule` + exact facts schema) the runner
+     requires. On a non-Windows host the runner holds them at BLOCKED on `hostPlatform=windows` etc.; the
+     Windows operator affirming the host facts is what lets them PASS.
+   - **01/02/03/04/07** reach PASS via **operatorEvidence@1** — a well-formed operator record
+     (tester/timestamp/command|route/expected/observed + artifact sha256, bound to the source/tooling
+     SHAs) from a genuine HTTP/UI run. The runner will NOT accept a hand-typed machineEvidence with a
+     non-whitelisted `harnessModule` or an invented facts key (owner P1), and it will NOT accept a
+     status + long reason with no operatorEvidence — but a well-formed operatorEvidence DOES PASS them.
+   - **05/06/08** stay **BLOCKED** unless the FULL boundary was truly executed AND attested: their
+     operatorEvidence must carry the per-case `boundaryAttestation` (legacy projection unchanged +
+     shadow rows appended / review-required + no fabricated projection / old-snapshot-unmutated + mismatch
+     review-required). A thin operatorEvidence does NOT pass them, and affirming host facts alone never
+     flips them; their route-less harnesses emit BLOCKED (the full objective needs the plugin-owned
+     legacyAdapters), so any PASS comes only from a genuine operator run of the end-to-end boundary.
 
-   Therefore `--strict` (all-ten-PASS) is NOT reachable with this tooling as shipped; it stays a
-   fail-closed gate until such a recorder exists. That is intentional, not a regression.
+   Therefore a green `--strict` (all ten PASS) **IS reachable — but only via GENUINE evidence**:
+   whitelisted-harness machineEvidence (09/10) + well-formed operatorEvidence (01..08, with a truthful
+   full-boundary attestation for 05/06/08), with the Windows host safety facts affirmed. A hand-typed
+   envelope with a non-whitelisted `harnessModule` or invented facts is REJECTED, and off-Windows the
+   host-safety gates hold everything BLOCKED. The tooling ALONE (no Windows operator, no artifacts)
+   reaches at most **09/10** — 10/10 is an operator-earned state, not a hand-typeable one.
 
 ## Proven-by-execution vs operator-verified
 - **Proven by execution (macOS + local PG15, this rework):** the drop/recreate + migration-SET/trigger
@@ -104,8 +130,9 @@ product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` →
   eligible" = the harness asserts its full matrix objective on the real DB; on a non-Windows host the
   runner still holds all 10 at BLOCKED until the Windows operator affirms the host facts below.
 - **Operator-verified (Windows-only, UNVERIFIED here):** the `.bat`/PowerShell wrappers, the browser-UI +
-  authenticated-HTTP steps (PQA-01/02/03/04/07 product execution), the login round-trip, the Windows host
-  safety facts (`hostPlatform=windows`, `windowsPowerShellVersion=5.1.x`), and the end-to-end boundary
-  composition for 06/08. These stay `UNVERIFIED — operator to confirm`.
+  authenticated-HTTP steps (PQA-01/02/03/04/07 product execution, recorded as **operatorEvidence@1**),
+  the login round-trip, the Windows host safety facts (`hostPlatform=windows`,
+  `windowsPowerShellVersion=5.1.x`), and the end-to-end boundary composition for **05/06/08** (PASS only
+  with a truthful `boundaryAttestation`). These stay `UNVERIFIED — operator to confirm`.
 
 Do not invent PASS. Old package results are not current evidence.

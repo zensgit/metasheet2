@@ -28,17 +28,33 @@ revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 >   run `residue-check.sql` as a negative control (must be **> 0** while synthetic rows exist), then
 >   `reset-isolated-db.mjs`, then `residue-check.sql` again (must be **0** — that 0 is
 >   `summary.json.residue`).
-> - **The harnesses write the verdict.** `harness/pqa-05|06|08|09|10-*.mjs` invoke the real
->   route-less product code and emit each case's status + evidence into `<evidence-dir>/summary.json`;
->   the operator affirms the Windows host facts and runs the HTTP/UI cases. Only **09/10** are
->   PASS-eligible (real product fn end-to-end); **05/06/08** are BLOCKED-with-evidence (real decision
->   primitive, not the full boundary composition, which needs the plugin-internal legacyAdapters).
->   PQA-05 stays BLOCKED regardless of the Windows host facts — its harness always emits BLOCKED.
->   **01/02/03/04 and 07 also stay BLOCKED**: they are HTTP/UI (07 = authorization-probe) cases with NO
->   harness emitting the structured machine-evidence the runner now requires for PASS (owner P1), so an
->   operator cannot hand-type their PASS. **Consequence: with this tooling the matrix cannot reach 10/10
->   and a green `--strict` is unreachable** until a machine-evidence recorder exists for the HTTP/UI
->   surface — that is intentional, fail-closed, not a regression.
+> - **Two evidence kinds; the harnesses write 09/10, the operator records 01..08.**
+>   `harness/pqa-05|06|08|09|10-*.mjs` invoke the real route-less product code and emit each case's status
+>   + evidence into `<evidence-dir>/summary.json`. A PASS requires the RIGHT structured evidence kind for
+>   the case:
+>   - **09/10 — machineEvidence@1:** the ONE whitelisted `harnessModule` for that case
+>     (PQA-09 ⇒ `pqa-09-outbox-retry.mjs`, PQA-10 ⇒ `pqa-10-scheduled-sweep.mjs`) + that case's EXACT
+>     facts schema. A non-whitelisted `harnessModule` or an invented/missing/wrong-typed fact is REJECTED
+>     (owner P1). Real product fn end-to-end.
+>   - **01/02/03/04/07 — operatorEvidence@1:** a well-formed operator record (`caseId` = the case slot +
+>     campaign `runId` + `tester` + UTC `timestamp` + `command`/`route` + `expected`/`observed` + an
+>     artifact manifest `{ path, sha256, runId }` + bound `sourceSha`/`qaToolingSha`) from a genuine
+>     HTTP/UI run. The runner **RECOMPUTES** the artifact sha over the real file in the evidence dir — a
+>     missing/tampered file, a symlink, or a path escaping the dir is REJECTED. A status + long reason
+>     with no operatorEvidence, a swapped `caseId`, or a `runId` != `summary.runId` (old-run replay) is
+>     REJECTED — but a well-formed operatorEvidence DOES PASS them. (Kinds are strictly partitioned: a
+>     machineEvidence on these cases is rejected.)
+>   - **05/06/08 — operatorEvidence@1 with a full-boundary attestation:** they stay BLOCKED unless the
+>     FULL objective (legacy projection unchanged + shadow rows / review-required + no fabricated
+>     projection / old-snapshot-unmutated + mismatch review-required) was truly executed AND attested via
+>     `boundaryAttestation`. Their route-less harnesses emit BLOCKED (the full boundary needs the
+>     plugin-internal legacyAdapters), and affirming host facts alone never flips them; a thin
+>     operatorEvidence does NOT pass them.
+>   **Consequence:** a green `--strict` (10/10) **IS reachable — but ONLY via genuine evidence**:
+>   whitelisted-harness machineEvidence (09/10) + well-formed operatorEvidence (01..08, with a truthful
+>   full-boundary attestation for 05/06/08), with the Windows host safety facts affirmed. Off-Windows the
+>   host-safety facts hold everything BLOCKED, and no envelope can be hand-typed to a PASS. The tooling
+>   ALONE (no Windows operator, no artifacts) reaches at most **09/10**.
 > - **No auth material in Git.** The synthetic login password is operator-set via env
 >   `QA_SYNTH_PASSWORD`; `qa-identities.json` holds ids/emails/orgs only.
 > - **Operator prerequisite (UNVERIFIED — Windows host):** grant each synthetic user its attendance
@@ -47,9 +63,11 @@ revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 >
 > **Proven-by-execution (macOS + local PG15) vs operator-verified (Windows-only):** the drop/recreate
 > + migration-SET/trigger integrity, the residue negative-control → 0, and harnesses 09/10
-> (PASS-eligible) + 05/06/08 (BLOCKED-with-evidence) + 07 create-fixture are proven by execution. The `.bat`/PowerShell wrappers, browser-UI +
-> authenticated-HTTP product execution (PQA-01/02/03/04/07), the login round-trip, the Windows host
-> safety facts, and the end-to-end boundary composition for 06/08 stay `UNVERIFIED — operator to confirm`.
+> (PASS-eligible via machineEvidence@1) + 05/06/08 (BLOCKED-with-evidence) + 07 create-fixture are proven
+> by execution. The `.bat`/PowerShell wrappers, browser-UI + authenticated-HTTP product execution
+> (PQA-01/02/03/04/07, recorded as operatorEvidence@1), the login round-trip, the Windows host safety
+> facts, and the end-to-end boundary composition for 05/06/08 (PASS only with a truthful
+> `boundaryAttestation`) stay `UNVERIFIED — operator to confirm`.
 
 > ## Identity, fixture & residue resolution (READ FIRST — the tokens below are placeholders)
 >
