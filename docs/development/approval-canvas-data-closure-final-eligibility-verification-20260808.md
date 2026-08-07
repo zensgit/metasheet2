@@ -12,7 +12,7 @@ This verification MD maps acceptance criteria to exact commands and counts. It d
 
 | # | Criterion | Evidence | Result |
 |---|---|---|---|
-| 1 | Ordinary-user authoring (flag default OFF) builds form + linear/condition/parallel without JSON/raw IDs; topology via typed commands; invalid fail-closed; undo/redo restores graph + selection | `approval-authoring-history.test.ts` + `approval-g5c-authoring-scenarios.test.ts` + mounted inspector + `TemplateAuthoringView` undo/redo wiring | **PASS** |
+| 1 | Ordinary-user authoring (flag default OFF) builds form + linear/condition/parallel without JSON/raw IDs; topology via typed commands; invalid fail-closed; undo/redo restores graph + selection; edge `+` + inspector topology (no canvas node clusters); form palette | `approval-authoring-history` + G5-C S12 structural + mounted inspector + live history | **PASS** |
 | 2 | G5-C S1–S12 automated product-path tests | `approval-g5c-authoring-scenarios.test.ts` (10 tests covering S1–S12 + fail-closed) | **PASS** |
 | 3 | G5-R engineering holds: FWB gates, attachment flag-OFF, number fail-closed, flags default OFF | Backend unit suites below; featureDefaults in `featureFlags.ts` | **PASS** |
 | 4 | Development + verification MD with SHAs, commands, honest FINAL eligibility | This file + development MD | **PASS** |

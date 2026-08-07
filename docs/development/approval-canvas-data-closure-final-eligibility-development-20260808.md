@@ -67,10 +67,10 @@ Data-closure (already on main from the 20260722 stack) remains:
 
 ### Residual product gaps (honest)
 
-1. Node button clusters not fully retired to inspector + edge-`+` only (D0 §4).  
-2. Form palette drag-from-library (D6-f2 visual) not a new surface.  
-3. Version side-by-side canvas overlay UX not fully productized in the editor.  
-4. G0 / O3 owner decisions still open.  
+1. ~~Node button clusters~~ — **closed on this branch**: canvas uses edge `+` + inspector topology; list keeps full topology (S12).  
+2. ~~Form palette~~ — **closed**: field-type palette (`approval-field-palette`) without ID entry.  
+3. Version side-by-side dual-canvas shell (full D8-b) still thin (helpers + TemplateDetailView; no editor dual-canvas).  
+4. G0 / O3 owner decisions still open (D3 Vue Flow not started).  
 5. Real-tenant UAT and staged flag ON not executed.
 
 These residuals do **not** block the engineering claim “G5-C product-path algebra + mounted undo/history + canvas-first under flag + G5-R invariants hold.” They **do** block an honest **product FINAL** label until owner gates close.

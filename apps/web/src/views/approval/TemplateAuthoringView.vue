@@ -234,6 +234,25 @@
           </div>
         </template>
 
+        <!-- D6-f2 palette: ordinary users pick a field kind; no field-id entry. -->
+        <div
+          v-if="!readOnly"
+          class="template-authoring__field-palette"
+          data-testid="approval-field-palette"
+          role="group"
+          aria-label="添加表单字段类型"
+        >
+          <el-button
+            v-for="entry in fieldPaletteEntries"
+            :key="entry.type"
+            size="small"
+            :data-testid="`approval-field-palette-${entry.type}`"
+            @click="addFieldOfType(entry.type)"
+          >
+            {{ entry.label }}
+          </el-button>
+        </div>
+
         <div
           v-for="(field, index) in draft.fields"
           :key="field.localId"
@@ -641,6 +660,54 @@
                   <el-icon><Rank /></el-icon>
                   <span>移到这里</span>
                 </button>
+                <!-- D0: edge + insert (no node button clusters). Keyboard Alt+Arrow still moves. -->
+                <div
+                  v-for="line in canvasEdgeLines"
+                  v-show="!readOnly && !movingCanvasNode"
+                  :key="`edge-insert-${line.key}`"
+                  class="template-authoring__canvas-edge-insert"
+                  :class="{ 'is-open': edgeInsertMenuEdgeKey === line.key }"
+                  :style="{ left: `${line.dropX}px`, top: `${line.dropY}px` }"
+                  data-testid="approval-canvas-edge-insert"
+                  :data-edge-key="line.key"
+                >
+                  <button
+                    type="button"
+                    class="template-authoring__canvas-edge-insert-btn"
+                    :aria-label="`在连线后插入节点`"
+                    :aria-expanded="edgeInsertMenuEdgeKey === line.key"
+                    :data-testid="`approval-canvas-edge-insert-${line.key}`"
+                    @click.stop="toggleEdgeInsertMenu(line.key)"
+                  >
+                    +
+                  </button>
+                  <div
+                    v-if="edgeInsertMenuEdgeKey === line.key"
+                    class="template-authoring__canvas-edge-insert-menu"
+                    role="menu"
+                    data-testid="approval-canvas-edge-insert-menu"
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-testid="approval-canvas-edge-insert-approval"
+                      @click.stop="onEdgeInsertApproval(line.key)"
+                    >审批</button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-testid="approval-canvas-edge-insert-condition"
+                      @click.stop="onEdgeInsertCondition(line.key)"
+                    >条件</button>
+                    <button
+                      v-if="canInsertParallelOnEdge(line.key)"
+                      type="button"
+                      role="menuitem"
+                      data-testid="approval-canvas-edge-insert-parallel"
+                      @click.stop="onEdgeInsertParallel(line.key)"
+                    >并行</button>
+                  </div>
+                </div>
                 <div
                   v-for="pos in canvasLayout.nodes"
                   :key="pos.key"
@@ -671,46 +738,7 @@
                       {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
                     </span>
                   </div>
-                  <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
-                    <template v-if="canMoveCanvasNode(pos.key)">
-                      <el-button
-                        :icon="Top"
-                        size="small"
-                        title="上移节点"
-                        :aria-label="`上移${graphNodeLabel(pos.key)}`"
-                        :disabled="!canvasStepMoveTarget(pos.key, 'up')"
-                        :data-testid="`approval-canvas-move-up-${pos.key}`"
-                        @click.stop="moveCanvasNodeStep(pos.key, 'up')"
-                      />
-                      <el-button
-                        :icon="Bottom"
-                        size="small"
-                        title="下移节点"
-                        :aria-label="`下移${graphNodeLabel(pos.key)}`"
-                        :disabled="!canvasStepMoveTarget(pos.key, 'down')"
-                        :data-testid="`approval-canvas-move-down-${pos.key}`"
-                        @click.stop="moveCanvasNodeStep(pos.key, 'down')"
-                      />
-                      <el-button
-                        :icon="Rank"
-                        size="small"
-                        title="移动节点"
-                        :aria-label="`选择${graphNodeLabel(pos.key)}的移动位置`"
-                        :type="movingCanvasNode === pos.key ? 'primary' : undefined"
-                        :data-testid="`approval-canvas-move-${pos.key}`"
-                        @click.stop="beginCanvasNodeMove(pos.key)"
-                      />
-                    </template>
-                    <el-button v-if="canvasNodeByKey(pos.key)?.type === 'condition'" size="small" :data-testid="`approval-canvas-add-condition-${pos.key}`" @click.stop="onAddConditionBranch(pos.key)">+条件分支</el-button>
-                    <el-button v-if="canvasNodeByKey(pos.key)?.type === 'parallel'" size="small" :data-testid="`approval-canvas-add-parallel-${pos.key}`" @click.stop="onAddParallelBranch(pos.key)">+并行分支</el-button>
-                    <template v-if="canInsertAfter(canvasNodeByKey(pos.key)!)">
-                      <el-button size="small" :data-testid="`approval-canvas-insert-${pos.key}`" @click.stop="onInsertApprovalAfter(pos.key)">+审批</el-button>
-                      <el-button size="small" :data-testid="`approval-canvas-insert-condition-${pos.key}`" @click.stop="onInsertConditionAfter(pos.key)">+条件</el-button>
-                      <!-- F4: no +并行 inside a parallel branch — the backend rejects nested parallel. -->
-                      <el-button v-if="canInsertParallelAfter(canvasNodeByKey(pos.key)!)" size="small" :data-testid="`approval-canvas-insert-parallel-${pos.key}`" @click.stop="onInsertParallelAfter(pos.key)">+并行</el-button>
-                    </template>
-                    <el-button v-if="canRemoveNode(canvasNodeByKey(pos.key)!)" size="small" type="danger" :data-testid="`approval-canvas-remove-${pos.key}`" @click.stop="onRemoveNode(pos.key)">删除</el-button>
-                  </div>
+                  <!-- D0: no button clusters on canvas nodes — topology lives in inspector + edge +. -->
                 </div>
                   </div>
                 </div>
@@ -752,7 +780,7 @@
                 />
               </svg>
             </div>
-            <p class="template-authoring__hint">画布用于编排结构（增删节点 / 分支、拖动布局）。点击节点在右侧检查器编辑配置；也可切换「结构列表」。</p>
+            <p class="template-authoring__hint">在连线上点「+」插入节点；选中节点后在右侧检查器配置与结构调整。Alt+↑/↓ 语义重排。辅助编辑模式保留完整结构列表。</p>
           </div>
           <aside
             v-if="selectedCanvasInspectorNode"
@@ -777,6 +805,69 @@
               >关闭</el-button>
             </div>
             <div class="template-authoring__canvas-inspector-body">
+              <div
+                v-if="!readOnly"
+                class="template-authoring__inspector-topology"
+                data-testid="approval-canvas-inspector-topology"
+              >
+                <template v-if="canMoveCanvasNode(selectedCanvasInspectorNode.key)">
+                  <el-button
+                    size="small"
+                    :disabled="!canvasStepMoveTarget(selectedCanvasInspectorNode.key, 'up')"
+                    :data-testid="`approval-canvas-move-up-${selectedCanvasInspectorNode.key}`"
+                    @click="moveCanvasNodeStep(selectedCanvasInspectorNode.key, 'up')"
+                  >上移</el-button>
+                  <el-button
+                    size="small"
+                    :disabled="!canvasStepMoveTarget(selectedCanvasInspectorNode.key, 'down')"
+                    :data-testid="`approval-canvas-move-down-${selectedCanvasInspectorNode.key}`"
+                    @click="moveCanvasNodeStep(selectedCanvasInspectorNode.key, 'down')"
+                  >下移</el-button>
+                  <el-button
+                    size="small"
+                    :type="movingCanvasNode === selectedCanvasInspectorNode.key ? 'primary' : undefined"
+                    :data-testid="`approval-canvas-move-${selectedCanvasInspectorNode.key}`"
+                    @click="beginCanvasNodeMove(selectedCanvasInspectorNode.key)"
+                  >移动</el-button>
+                </template>
+                <el-button
+                  v-if="selectedCanvasInspectorNode.type === 'condition'"
+                  size="small"
+                  :data-testid="`approval-canvas-add-condition-${selectedCanvasInspectorNode.key}`"
+                  @click="onAddConditionBranch(selectedCanvasInspectorNode.key)"
+                >+条件分支</el-button>
+                <el-button
+                  v-if="selectedCanvasInspectorNode.type === 'parallel'"
+                  size="small"
+                  :data-testid="`approval-canvas-add-parallel-${selectedCanvasInspectorNode.key}`"
+                  @click="onAddParallelBranch(selectedCanvasInspectorNode.key)"
+                >+并行分支</el-button>
+                <template v-if="canInsertAfter(selectedCanvasInspectorNode)">
+                  <el-button
+                    size="small"
+                    :data-testid="`approval-canvas-insert-${selectedCanvasInspectorNode.key}`"
+                    @click="onInsertApprovalAfter(selectedCanvasInspectorNode.key)"
+                  >+审批</el-button>
+                  <el-button
+                    size="small"
+                    :data-testid="`approval-canvas-insert-condition-${selectedCanvasInspectorNode.key}`"
+                    @click="onInsertConditionAfter(selectedCanvasInspectorNode.key)"
+                  >+条件</el-button>
+                  <el-button
+                    v-if="canInsertParallelAfter(selectedCanvasInspectorNode)"
+                    size="small"
+                    :data-testid="`approval-canvas-insert-parallel-${selectedCanvasInspectorNode.key}`"
+                    @click="onInsertParallelAfter(selectedCanvasInspectorNode.key)"
+                  >+并行</el-button>
+                </template>
+                <el-button
+                  v-if="canRemoveNode(selectedCanvasInspectorNode)"
+                  size="small"
+                  type="danger"
+                  :data-testid="`approval-canvas-remove-${selectedCanvasInspectorNode.key}`"
+                  @click="onRemoveNode(selectedCanvasInspectorNode.key)"
+                >删除</el-button>
+              </div>
               <ApprovalGraphNodeConfigEditor :node="selectedCanvasInspectorNode" />
             </div>
           </aside>
@@ -1399,7 +1490,9 @@ import {
   buildSlaHours,
   buildUpdateTemplatePayload,
   createEmptyDetailColumnDraft,
+  AUTHORABLE_FIELD_TYPES,
   createEmptyFieldDraft,
+  type AuthorableFieldType,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
   DETAIL_LEAF_FIELD_TYPES,
@@ -2435,6 +2528,41 @@ function applyCanvasNodeMove(targetEdgeKey: string): void {
   selectedCanvasNode.value = nodeKey
   cancelCanvasNodeMove()
 }
+
+const edgeInsertMenuEdgeKey = ref<string | null>(null)
+function toggleEdgeInsertMenu(edgeKey: string): void {
+  edgeInsertMenuEdgeKey.value = edgeInsertMenuEdgeKey.value === edgeKey ? null : edgeKey
+}
+function closeEdgeInsertMenu(): void {
+  edgeInsertMenuEdgeKey.value = null
+}
+function edgeSourceNode(edgeKey: string): ApprovalNode | undefined {
+  const edge = canvasEffectiveGraph.value.edges.find((candidate) => candidate.key === edgeKey)
+  if (!edge) return undefined
+  return canvasNodeByKey(edge.source)
+}
+function canInsertParallelOnEdge(edgeKey: string): boolean {
+  const source = edgeSourceNode(edgeKey)
+  return Boolean(source && canInsertParallelAfter(source))
+}
+function onEdgeInsertApproval(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertAfter(source)) return
+  onInsertApprovalAfter(source.key)
+  closeEdgeInsertMenu()
+}
+function onEdgeInsertCondition(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertAfter(source)) return
+  onInsertConditionAfter(source.key)
+  closeEdgeInsertMenu()
+}
+function onEdgeInsertParallel(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertParallelAfter(source)) return
+  onInsertParallelAfter(source.key)
+  closeEdgeInsertMenu()
+}
 function moveCanvasNodeStep(nodeKey: string, direction: 'up' | 'down'): void {
   const target = canvasStepMoveTarget(nodeKey, direction)
   if (!target) return
@@ -2677,8 +2805,44 @@ function swap<T>(items: T[], index: number, delta: -1 | 1) {
   return copy
 }
 
+const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
+  text: '文本',
+  textarea: '多行文本',
+  number: '数字',
+  date: '日期',
+  datetime: '日期时间',
+  select: '单选',
+  'multi-select': '多选',
+  user: '人员',
+  detail: '明细',
+  'record-link': '关联记录',
+}
+const fieldPaletteEntries = AUTHORABLE_FIELD_TYPES.map((type) => ({
+  type,
+  label: FIELD_PALETTE_LABELS[type],
+}))
+
 function addField() {
   draft.value.fields = [...draft.value.fields, createEmptyFieldDraft(draft.value.fields.length + 1)]
+}
+
+/** D6-f2 palette: add a field of the chosen kind without ordinary-user ID entry. */
+function addFieldOfType(type: AuthorableFieldType) {
+  if (readOnly.value) return
+  const next = createEmptyFieldDraft(draft.value.fields.length + 1)
+  next.type = type
+  next.label = FIELD_PALETTE_LABELS[type]
+  if (type === 'detail') {
+    next.detailColumns = [{
+      localId: `col_${next.localId}`,
+      id: `${next.id}_col1`,
+      type: 'text',
+      label: '子字段 1',
+      required: false,
+      optionsText: '',
+    }]
+  }
+  draft.value.fields = [...draft.value.fields, next]
 }
 
 function removeField(index: number) {
@@ -3663,6 +3827,69 @@ pre {
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
+}
+.template-authoring__field-palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.template-authoring__inspector-topology {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.template-authoring__canvas-edge-insert {
+  position: absolute;
+  z-index: 4;
+  transform: translate(-50%, -50%);
+}
+.template-authoring__canvas-edge-insert-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--el-color-primary);
+  background: var(--ms-bg-card, #fff);
+  color: var(--el-color-primary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.template-authoring__canvas-edge-insert-btn:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+}
+.template-authoring__canvas-edge-insert-menu {
+  position: absolute;
+  top: 26px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 72px;
+  padding: 4px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  background: var(--ms-bg-card, #fff);
+  box-shadow: var(--el-box-shadow-lighter);
+}
+.template-authoring__canvas-edge-insert-menu button {
+  border: 0;
+  background: transparent;
+  padding: 4px 8px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12px;
+  border-radius: 4px;
+}
+.template-authoring__canvas-edge-insert-menu button:hover,
+.template-authoring__canvas-edge-insert-menu button:focus-visible {
+  background: var(--el-fill-color-light);
 }
 .template-authoring__canvas-move-target {
   position: absolute;

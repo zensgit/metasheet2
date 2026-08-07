@@ -312,7 +312,7 @@ describe('G5-C S11 100-node operable layout', () => {
 })
 
 describe('G5-C S12 accessible alternative retained on authoring surface', () => {
-  it('TemplateAuthoringView keeps list alternative, undo/redo controls, and canvas-first default', () => {
+  it('TemplateAuthoringView keeps list alternative, undo/redo, canvas-first, edge insert, palette; no node clusters', () => {
     const src = readFileSync(VIEW_PATH, 'utf8')
     expect(src).toMatch(/data-testid="approval-view-list"/)
     expect(src).toMatch(/辅助编辑模式/)
@@ -321,6 +321,13 @@ describe('G5-C S12 accessible alternative retained on authoring surface', () => 
     expect(src).toMatch(/const canvasViewMode = ref<'list' \| 'canvas'>\('canvas'\)/)
     expect(src).toMatch(/applyCanvasCommandToSession|undoAuthoringSession/)
     expect(src).toMatch(/promoteLinearDraftToGraphAuthoring/)
+    // D0: edge + insert surface, not primary node button clusters on canvas.
+    expect(src).toMatch(/data-testid="approval-canvas-edge-insert"/)
+    expect(src).toMatch(/data-testid="approval-canvas-inspector-topology"/)
+    expect(src).not.toMatch(/class="template-authoring__canvas-node-actions"/)
+    // D6-f2 palette.
+    expect(src).toMatch(/data-testid="approval-field-palette"/)
+    expect(src).toMatch(/addFieldOfType/)
   })
 })
 
