@@ -4,19 +4,33 @@
  * Draft/HOLD. Synthetic data only. No deployment/staging authorization.
  * Pinned product SOURCE_SHA: 0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b (unchanged by QA tooling).
  *
- * PACKAGED-RUNTIME RESOLUTION (owner Fix 4): the Windows on-prem package ships the COMPILED
- * runtime `packages/core-backend/dist` (scripts/ops/attendance-onprem-package-build.sh:45 +
- * `pnpm --filter @metasheet/core-backend build`). So on the Windows host the harness imports the
- * built `dist/**.js`. On macOS the proof runs against SOURCE via tsx (allowed by Fix 4). This
- * resolver prefers dist and falls back to the .ts source; under a non-tsx `node` with only source
- * present it throws a clear instruction rather than a cryptic ESM error.
+ * PACKAGED-RUNTIME RESOLUTION (owner Fix 4 + scope ruling B): the Windows on-prem package ships
+ * the COMPILED runtime `packages/core-backend/dist` (scripts/ops/attendance-onprem-package-build.sh
+ * + `pnpm --filter @metasheet/core-backend build`). core-backend's tsconfig has `rootDir: "."` and
+ * `outDir: "dist"`, so tsc emits `dist/src/<subpath>.js` — NOT `dist/<subpath>.js`. The runtime
+ * MODE therefore determines the ONE path (no cross-mode fallback, no symlinks):
+ *   - tsx-src   (macOS proof, `node --import tsx` / the tsx CLI): `src/<subpath>.ts`
+ *   - node-dist (Windows host / plain node):                      `dist/src/<subpath>.js`
+ * If the mode's path is missing the resolver FAILS with a mode-specific instruction — it never
+ * silently falls through to the other mode's path, and it REJECTS any resolution that traverses a
+ * symlink (the historical `ln -sfn` dist workaround is both unnecessary and forbidden).
+ *
+ * SINGLE-INSTANCE LOADING (scope ruling B): importProduct loads product modules through ONE
+ * pipeline — a CJS `require` rooted at the core-backend package — in BOTH modes. Product modules
+ * compile to CommonJS and guard their witness objects with module-PRIVATE WeakSets
+ * (w4c0-identity.ts). On Node 20, tsx's ESM loader materialises an ESM-`import()`ed CJS-package
+ * `.ts` as an inline `data:text/javascript` CommonJS translation, which does NOT share the plain
+ * require cache — so the harness's dynamically imported `w4c0-identity` was a SECOND instance:
+ * witnesses minted by it were rejected by the product-internal instance with
+ * W4C0_OPERATION_WITNESS_REQUIRED. Requiring through the one CJS cache (path-keyed, symlink-
+ * resolving) collapses harness and product-internal edges onto the same module instances.
  */
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import {
   MACHINE_EVIDENCE_PRODUCER,
   MACHINE_EVIDENCE_SCHEMA,
@@ -39,38 +53,90 @@ export function loadPg() {
   return requireFromCore('pg')
 }
 
-function runningUnderTsx() {
-  // tsx registers a loader; its presence is what lets `import('*.ts')` resolve.
+export function runningUnderTsx() {
+  // tsx registers its loaders via `--import tsx` / NODE_OPTIONS / its own CLI (which re-execs node
+  // with the loader on execArgv). These are the REAL registration channels; scanning process.argv
+  // (script arguments) was a false-positive hazard (any argument containing "tsx" flipped the mode)
+  // and is deliberately NOT consulted. QA_FORCE_TSX=1 remains an explicit test override.
   return (
     process.env.QA_FORCE_TSX === '1' ||
     (typeof process.env.NODE_OPTIONS === 'string' && /tsx/.test(process.env.NODE_OPTIONS)) ||
     // tsx sets this in child processes it spawns.
     Boolean(process.env.TSX) ||
-    // Heuristic: tsx injects itself into module resolution; check for its loader on argv/execArgv.
-    process.execArgv.some((a) => /tsx/.test(a)) ||
-    (Array.isArray(process.argv) && process.argv.some((a) => /tsx/.test(a)))
+    process.execArgv.some((a) => /tsx/.test(a))
   )
 }
 
+/** The ONE runtime mode: 'tsx-src' (macOS tsx proof) or 'node-dist' (Windows / plain node). */
+export function productModuleMode() {
+  return runningUnderTsx() ? 'tsx-src' : 'node-dist'
+}
+
 /**
- * Resolve a core-backend module subpath (e.g. 'attendance/w4c3a-rollout-control') to a file URL:
- * dist .js first (Windows package), then src .ts (macOS/tsx proof).
+ * Reject a resolution that traverses a symlink: every path component from `root` (inclusive) down
+ * to the resolved file (inclusive) must be a real directory/file, not a symlink. This makes the
+ * historical `ln -sfn` out-of-repo dist workaround impossible — a symlinked dist/, dist/src/, a
+ * symlinked module file, or a wholesale-symlinked core-backend all REFUSE. Components ABOVE `root`
+ * are deliberately not checked (macOS /tmp is itself a symlink; a worktree may live under one).
  */
-export function resolveProductModule(subpath) {
-  const distJs = path.join(CORE_BACKEND, 'dist', `${subpath}.js`)
-  if (fs.existsSync(distJs)) return pathToFileURL(distJs).href
-  const srcTs = path.join(CORE_BACKEND, 'src', `${subpath}.ts`)
-  if (fs.existsSync(srcTs)) {
-    if (!runningUnderTsx()) {
+function assertNoSymlinkedResolution(root, absPath) {
+  const rel = path.relative(root, absPath)
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`Refusing: resolved product path ${absPath} escapes the package root ${root}.`)
+  }
+  const steps = [root]
+  let cur = root
+  for (const part of rel.split(path.sep)) {
+    cur = path.join(cur, part)
+    steps.push(cur)
+  }
+  for (const step of steps) {
+    const st = fs.lstatSync(step)
+    if (st.isSymbolicLink()) {
       throw new Error(
-        `Only the TypeScript source of "${subpath}" is present (no dist build). Run this harness ` +
-          `under tsx, e.g.:\n  node --import tsx <harness>.mjs\n` +
-          `or build the package first (pnpm --filter @metasheet/core-backend build) to ship dist.`,
+        `Refusing: product-module resolution traverses a SYMLINK at ${step}. The harness forbids ` +
+          `symlinked product paths (the old \`ln -sfn\` dist workaround is obsolete — the resolver ` +
+          `now uses the real tsc layout dist/src/<subpath>.js). Remove the symlink.`,
       )
     }
-    return pathToFileURL(srcTs).href
   }
-  throw new Error(`Cannot resolve product module "${subpath}" (looked in dist/ and src/).`)
+}
+
+/**
+ * Resolve a core-backend module subpath (e.g. 'attendance/w4c3a-rollout-control') to the ONE
+ * absolute file path for the current runtime mode (owner scope ruling B):
+ *   tsx-src   -> <core-backend>/src/<subpath>.ts
+ *   node-dist -> <core-backend>/dist/src/<subpath>.js   (the real tsc rootDir:"." layout)
+ * Missing path => mode-specific error; NEVER falls through to the other mode's path. Any symlink
+ * on the resolution path => refuse. `opts` ({ mode, coreBackendRoot }) is injectable for tests.
+ */
+export function resolveProductModule(subpath, opts = {}) {
+  const mode = opts.mode ?? productModuleMode()
+  const root = opts.coreBackendRoot ?? CORE_BACKEND
+  if (mode !== 'tsx-src' && mode !== 'node-dist') {
+    throw new Error(`Unknown product-module mode "${mode}" (expected tsx-src or node-dist).`)
+  }
+  const rel = mode === 'tsx-src'
+    ? path.join('src', `${subpath}.ts`)
+    : path.join('dist', 'src', `${subpath}.js`)
+  const abs = path.join(root, rel)
+  if (!fs.existsSync(abs)) {
+    if (mode === 'tsx-src') {
+      throw new Error(
+        `tsx-src mode: product source ${abs} is missing. This mode runs the harness under tsx ` +
+          `against the TypeScript source (node --import tsx <harness>.mjs) — it does NOT fall back ` +
+          `to dist. If you meant to run the packaged runtime, run under plain node instead.`,
+      )
+    }
+    throw new Error(
+      `node-dist mode: compiled module ${abs} is missing. This mode runs against the built ` +
+        `package (tsc emits dist/src/<subpath>.js) — it does NOT fall back to the .ts source. ` +
+        `Build it first (pnpm --filter @metasheet/core-backend build), or run the macOS source ` +
+        `proof under tsx (node --import tsx <harness>.mjs).`,
+    )
+  }
+  assertNoSymlinkedResolution(root, abs)
+  return abs
 }
 
 /**
@@ -97,7 +163,13 @@ export function assertHarnessBoundToPackageSha(root = REPO_ROOT) {
 export async function importProduct(subpath) {
   // Fail closed on a harness/package SHA drift before touching any product code.
   assertHarnessBoundToPackageSha()
-  return import(resolveProductModule(subpath))
+  // ONE loading pipeline in BOTH modes: CJS require rooted at the core-backend package. Product
+  // modules are CommonJS (compiled and source alike); requiring them keeps every edge — harness
+  // AND product-internal — in the single path-keyed require cache, so module-private witness
+  // WeakSets (w4c0-identity.ts) exist exactly once. Dynamically `import()`ing the same file gave
+  // tsx's ESM pipeline on Node 20 a SECOND instance (inline data:-URL CommonJS translation) and
+  // produced W4C0_OPERATION_WITNESS_REQUIRED at the product's witness checks.
+  return requireFromCore(resolveProductModule(subpath))
 }
 
 /** The operator-set synthetic login password (owner security boundary: env only, never committed). */

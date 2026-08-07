@@ -40,11 +40,28 @@ async function main() {
 
   const client = await openIsolatedClient()
   try {
+    // FAIL-CLOSED on pre-existing records (owner scope ruling A): if ANY attendance_records rows
+    // already exist for this fixture's synthetic identities (u1/u2 — any work_date, any org),
+    // REFUSE (throw) rather than proceed or duplicate. Stale rows mean the isolated DB was NOT
+    // drop/recreated since the last run, and this fixture's assertions would attest a mixed state.
+    // Cleanup is reset-isolated-db.mjs (DROP+recreate), never per-row DELETE.
+    const preExisting = Number((await client.query(
+      `SELECT count(*)::int AS n FROM attendance_records WHERE user_id IN ($1, $2)`,
+      [u1, u2],
+    )).rows[0].n)
+    if (preExisting !== 0) {
+      throw new Error(
+        `REFUSING (fail-closed): ${preExisting} attendance_records row(s) already exist for the ` +
+          `synthetic identities u1/u2 — the isolated DB was not reset since the last run. ` +
+          `Run \`node reset-isolated-db.mjs\` (DROP+recreate) and re-provision, then re-run PQA-07.`,
+      )
+    }
     // One self-owned record per active user (no calculation seeded -> self read = 200 {null}).
+    // No ON CONFLICT clause: the fail-closed precheck above guarantees a clean slate, so a
+    // conflicting concurrent write must ERROR here, never silently no-op into a duplicate-free lie.
     await client.query(
       `INSERT INTO attendance_records (user_id, work_date, org_id)
-       VALUES ($1, $3::date, $4), ($2, $3::date, $4)
-       ON CONFLICT (user_id, work_date, org_id) DO NOTHING`,
+       VALUES ($1, $3::date, $4), ($2, $3::date, $4)`,
       [u1, u2, WORK_DATE, orgA],
     )
     // u3: INACTIVE membership in org_a (the inactive-membership probe subject).

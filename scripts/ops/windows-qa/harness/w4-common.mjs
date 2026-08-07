@@ -128,20 +128,24 @@ export async function sweepScheduledRunsOnceViaProduct(pool) {
 }
 
 /**
- * Seal a scheduled run's single `generate` target through the REAL product path: claim the per-user
- * operation row and record the terminal outcome inside ONE canonical SERIALIZABLE transaction. The
- * claimed-commit guard (attendance_w4_operations_claimed_commit_guard) rejects a `claimed` row
- * committed alone, so the claim + seal MUST share a transaction — this mirrors production's
- * preflight-claims-then-caller-seals shape (attendance-w4c2-p12-run-transactions.db.test.ts). The
- * operation witness is minted with the SAME derived scheduled operation id the run-creation
- * transaction assigned the target, so recordAttendanceScheduledRunTargetOutcomeV1's operation_id
- * lookup matches. Returns the sealed operation id.
+ * Seal a scheduled run's single `generate` target through the REAL product path: the CANONICAL
+ * registry claims the per-user operation row (attendanceResultOperationPreflightV1 — the harness
+ * writes NO raw DML on the w4_canonical operation registry), the canonical seal completes it
+ * (sealAttendanceResultOperationV1), and the terminal outcome is recorded — all inside ONE
+ * canonical SERIALIZABLE transaction (the claimed-commit guard rejects a `claimed` row committed
+ * alone). The authorization is the product's OWN internal-scheduler context (posture `scheduler`
+ * + the registered ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1 + org_scheduler scope — exactly the
+ * actor production's scheduled entrypoint runs as). The preflight derives the operation identity
+ * from the SAME closed scheduled source tuple the run-creation transaction assigned the target,
+ * asserted below, so recordAttendanceScheduledRunTargetOutcomeV1's operation_id lookup matches.
+ * Returns the sealed operation id.
  */
 export async function sealScheduledGenerateTargetOutcome(client, { orgId, runId, userId, workDate }) {
-  const { runAttendanceResultOperationTransactionV1 } = await importProduct('attendance/w4c0-operation-registry')
+  const { attendanceResultOperationPreflightV1, runAttendanceResultOperationTransactionV1, sealAttendanceResultOperationV1 } =
+    await importProduct('attendance/w4c0-operation-registry')
   const { recordAttendanceScheduledRunTargetOutcomeV1 } = await importProduct('attendance/w4c2-scheduled-run')
-  const { createVerifiedAttendanceOperationIdentityV1, createVerifiedAttendanceOrgIdentityV1, resolveSegmentCalculationPosture } =
-    await importProduct('attendance/w4c0-identity')
+  const { ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1, createAuthorizedAttendanceWriteContextV1 } =
+    await importProduct('attendance/w4c0-authorization')
 
   const opRow = (await client.query(
     `SELECT operation_id::text AS id FROM attendance_scheduled_run_targets
@@ -151,32 +155,34 @@ export async function sealScheduledGenerateTargetOutcome(client, { orgId, runId,
   if (!opRow || !opRow.id) throw new Error('generate target operation_id not found for seal')
   const operationId = opRow.id
 
+  const authorization = createAuthorizedAttendanceWriteContextV1({
+    actorId: ATTENDANCE_INTERNAL_SCHEDULER_ACTOR_ID_V1,
+    actorPosture: 'scheduler',
+    tokenSubjectUserId: null,
+    orgId,
+    subjectScope: { kind: 'org_scheduler' },
+    capability: 'scheduled',
+    sourceRef: 'ref:qa_synth_scheduled',
+  })
+  const source = { sourceKind: 'scheduled', scheduledRunId: runId, userId, workDate }
+
   await runAttendanceResultOperationTransactionV1(client, async (trx) => {
-    await trx.query(
-      `INSERT INTO attendance_result_operations (
-          org_id, entrypoint, operation_id, identity_source_kind, source_root_id, proof_user_id,
-          proof_work_date, source_ref, actor_id, actor_posture, capability, subject_scope,
-          command_fingerprint, accepted_write_posture, state
-        ) VALUES ($1,'scheduled',$2,'scheduled',$3,$4,$5,'ref:qa_synth_scheduled',
-                  'qa_synth_scheduler','scheduler','scheduled','{}'::jsonb,$6,'shadow','claimed')`,
-      [orgId, operationId, runId, userId, workDate, synthFingerprint(`op::${operationId}`)],
-    )
-    const org = createVerifiedAttendanceOrgIdentityV1({
-      orgKey: orgId,
-      posture: await resolveSegmentCalculationPosture(trx, orgId),
-    })
-    const witness = createVerifiedAttendanceOperationIdentityV1({
-      org,
-      kind: 'item',
+    const preflight = await attendanceResultOperationPreflightV1(trx, authorization, {
+      orgId,
       entrypoint: 'scheduled',
-      source: { sourceKind: 'scheduled', scheduledRunId: runId, userId, workDate },
+      batch: null,
+      commands: [{ source, commandFingerprint: synthFingerprint(`scheduled::${runId}::${userId}::${workDate}`) }],
     })
-    await trx.query(
-      `UPDATE attendance_result_operations
-          SET state = 'completed', response_snapshot = $3::jsonb, version = version + 1, updated_at = now()
-        WHERE org_id = $1 AND entrypoint = 'scheduled' AND operation_id = $2::uuid AND state = 'claimed'`,
-      [orgId, operationId, JSON.stringify({ inserted: true })],
-    )
+    if (preflight.kind !== 'claimed' || preflight.itemIdentities.length !== 1) {
+      throw new Error(`expected canonical preflight to claim 1 scheduled item, got ${JSON.stringify(preflight.kind)}`)
+    }
+    const witness = preflight.itemIdentities[0]
+    if (witness.id !== operationId) {
+      throw new Error(
+        `derived scheduled operation id mismatch: preflight=${witness.id} target row=${operationId}`,
+      )
+    }
+    await sealAttendanceResultOperationV1(trx, witness, { responseSnapshot: { inserted: true } })
     await recordAttendanceScheduledRunTargetOutcomeV1(trx, witness, { terminalOutcome: 'completed' })
   })
   return operationId

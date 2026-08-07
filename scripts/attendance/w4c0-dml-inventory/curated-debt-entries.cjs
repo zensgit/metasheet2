@@ -133,6 +133,11 @@ const P16_EXACT_ALLOWLIST = new Set([
   "scripts/ops/staging-attendance-temporary-shift-t6-smoke.mjs::cleanup::attendance_requests::delete",
   "scripts/ops/staging-attendance-temporary-shift-t6-smoke.mjs::cleanup::attendance_shift_assignments::delete",
   "scripts/ops/staging-attendance-tooling-teardown.mjs::runStagingAttendanceRecordTeardown::attendance_records::delete",
+  // Windows-native QA v2 (owner scope ruling A, PRECISE classification): the PQA-07 CREATE-fixture
+  // seed INSERT on the isolated metasheet_windows_qa DB only. The fixture FAIL-CLOSES on
+  // pre-existing rows for its synthetic identities (refuses instead of proceeding/duplicating);
+  // cleanup is reset-isolated-db.mjs DROP+recreate. Exact tuple — never a glob/prefix.
+  "scripts/ops/windows-qa/harness/pqa-07-authorization-setup.mjs::main::attendance_records::insert",
 ])
 
 const CURATED_DEBT_ENTRIES = [

@@ -305,6 +305,26 @@ const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   'packages/core-backend/src/db/migrations/zzzz20260731120000_w4c3a_import_rollback_foundation.ts',
 ])
 
+// Exact-tuple NEGATIVE-PROBE allowlist for w4_canonical tables (relPath::enclosingSymbol::table::
+// verb — same hard zero-bypass shape as the P16 exact allowlist, NEVER a path/prefix exemption).
+// Admits only DELIBERATE deny-trigger negative controls in QA tooling: a statement whose ONLY
+// acceptable outcome is the deny trigger RAISING (it can never mutate a row — the probe asserts
+// W4C0_IMMUTABLE is raised and FAILS if the DML succeeds). A new/renamed/retargeted probe, or any
+// other w4_canonical DML outside the canonical path prefixes, remains a hard outsideBoundary fail.
+const W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST = Object.freeze(
+  new Set([
+    // reset-isolated-db --prove-deny-delete: proves the append-only deny trigger FIRES (the row
+    // is seeded via the product rollout-transition boundary; only the forbidden DELETE is raw).
+    'scripts/ops/windows-qa/reset-isolated-db.mjs::proveDenyDeleteFires::attendance_calculation_rollout_state::delete',
+  ]),
+)
+
+function isW4CanonicalNegativeProbeSite(site) {
+  return W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST.has(
+    `${site.relPath}::${site.enclosingSymbol}::${site.table}::${site.verb}`,
+  )
+}
+
 function classifyTable(tableName) {
   return TABLE_BUCKETS[tableName] || null
 }
@@ -317,6 +337,8 @@ module.exports = {
   TRACKED_BUCKETS,
   BUCKET_ALLOWLISTED_BUCKETS,
   W4_CANONICAL_PATH_PREFIXES,
+  W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST,
+  isW4CanonicalNegativeProbeSite,
   classifyTable,
   classifyP25Use,
   assertP25Use,

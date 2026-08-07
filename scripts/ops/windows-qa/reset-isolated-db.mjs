@@ -27,10 +27,10 @@
  * running-but-idle app would pass the instantaneous session check and reconnect after the drop), and
  * that NO other session is connected. Refuse (throw, no drop) otherwise. DROP is issued from `postgres`.
  *
- * Usage:
- *   node reset-isolated-db.mjs                 # gate-4 safe DROP+CREATE, re-migrate, verify (a-d)
- *   node reset-isolated-db.mjs --verify-only   # verify (a-d) against the current DB, no drop
- *   node reset-isolated-db.mjs --prove-deny-delete  # prove a deny-delete trigger actually RAISES
+ * Usage (the runtime MODE picks the migrate CLI — tsx => src, plain node => built dist/src):
+ *   macOS source proof:  node --import tsx reset-isolated-db.mjs        # migrations via tsx+src
+ *   Windows package:     node reset-isolated-db.mjs                     # migrations via dist/src
+ *   flags: --verify-only (verify a-d, no drop) | --prove-deny-delete (deny trigger RAISES probe)
  */
 import fs from 'node:fs'
 import net from 'node:net'
@@ -40,7 +40,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   CORE_BACKEND,
   assertLocalIsolatedTarget,
+  importProduct,
   loadPg,
+  productModuleMode,
+  resolveProductModule,
 } from './harness/qa-runtime.mjs'
 import {
   EXPECTED_MIGRATION_CONFIRM_NAMES,
@@ -166,14 +169,21 @@ export async function assertAppServiceStopped() {
   )
 }
 
-/** Resolve how to run the product migrate CLI: dist (Windows package) or tsx+source (macOS proof). */
+/**
+ * Resolve how to run the product migrate CLI. Owner scope ruling B applies here too: the runtime
+ * MODE determines the ONE path (resolveProductModule enforces missing-path failure + symlink
+ * rejection; the real tsc layout is dist/src/db/migrate.js — the old dist/db/migrate.js probe
+ * never existed, so the dist branch silently never ran):
+ *   tsx-src   -> the package's own tsx binary against src/db/migrate.ts (macOS source proof),
+ *   node-dist -> plain node against the compiled dist/src/db/migrate.js (Windows package).
+ */
 function migrateRunner() {
-  const distJs = path.join(CORE_BACKEND, 'dist', 'db', 'migrate.js')
-  if (fs.existsSync(distJs)) {
-    return { cmd: process.execPath, baseArgs: [distJs] }
+  const abs = resolveProductModule('db/migrate')
+  if (productModuleMode() === 'tsx-src') {
+    // Run via the workspace tsx binary (what the package's own migrate npm script does).
+    return { cmd: 'pnpm', baseArgs: ['exec', 'tsx', abs] }
   }
-  // Source: run the package's own tsx binary against src (what the migrate npm script does).
-  return { cmd: 'pnpm', baseArgs: ['exec', 'tsx', 'src/db/migrate.ts'] }
+  return { cmd: process.execPath, baseArgs: [abs] }
 }
 
 function runMigrate(args, env) {
@@ -321,22 +331,57 @@ async function verifyMigrationHead(connectionString, env) {
  * Optional live negative control: prove a deny-delete trigger actually RAISES W4C0_IMMUTABLE (a
  * catalog probe alone only proves the trigger exists, not that it fires). Runs on the CURRENT DB;
  * intended for the pre-teardown negative-control phase since the seeded row cannot be deleted.
+ *
+ * The probe row is seeded through the PRODUCT rollout-transition boundary (canonical writer of
+ * attendance_calculation_rollout_state — this script writes no raw INSERT on a w4_canonical
+ * table). The DELETE below is the probe ITSELF: a deliberately forbidden statement whose ONLY
+ * acceptable outcome is the deny trigger raising — it is classified as an exact-tuple negative
+ * probe in the W4C-0 DML inventory (W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST), never a
+ * path/prefix exemption.
  */
+async function seedDenyProbeRolloutRow(client, synthOrg) {
+  // Seed one rollout-state row for the dedicated probe org if absent — via the REAL transition
+  // boundary (bootstraps legacy(v1) -> shadow), exactly like the harnesses' ensureShadowPosture.
+  // No raw INSERT: the product rollout-control module is the canonical writer.
+  const existing = (await client.query(
+    `SELECT state FROM attendance_calculation_rollout_state WHERE org_id = $1`,
+    [synthOrg],
+  )).rows[0]
+  if (existing) return
+  process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = synthOrg
+  const crypto = await import('node:crypto')
+  const { transitionAttendanceCalculationRolloutV1 } = await importProduct('attendance/w4c3a-rollout-control')
+  const result = await transitionAttendanceCalculationRolloutV1(client, {
+    orgId: synthOrg,
+    actorId: 'qa_synth_probe_actor',
+    correlationId: crypto.randomUUID(),
+    engineVersion: 'qa_synth_engine_v1',
+    targetState: 'shadow',
+    expectedState: 'legacy',
+    expectedVersion: 1,
+    evidenceManifestSha256: crypto.createHash('sha256').update('qa_synth_deny_delete_probe').digest('hex'),
+    evidenceReferences: {
+      imageSha: 'qa_synth_image_sha_probe',
+      ownerAuthorizationRef: 'qa_synth_owner_auth_probe',
+      syntheticOrgRef: 'qa_synth_org_ref_probe',
+    },
+    reasonCode: 'rollout_transition',
+  })
+  if (result.state !== 'shadow') {
+    throw new Error(`probe seed transition returned state=${result.state} (expected shadow)`)
+  }
+}
+
 async function proveDenyDeleteFires(connectionString) {
   const targetCfg = pgConfigFrom(connectionString, TARGET_DB)
   const SYNTH_ORG = '00000000-0000-4000-8000-0000000000de'
   await withClient(targetCfg, async (client) => {
-    // Seed one bootstrap rollout-state row if the deny target has none (INSERT guard admits this
-    // exact shape: state='legacy', prior_state NULL, version=1, scope='synthetic_staging').
-    await client.query(
-      `INSERT INTO attendance_calculation_rollout_state
-         (org_id, state, engine_version, reason_code, actor_id, version, prior_state, scope)
-       VALUES ($1, 'legacy', 'qa_synth_engine', 'qa_synth_bootstrap', 'qa_synth_actor', 1, NULL, 'synthetic_staging')
-       ON CONFLICT (org_id) DO NOTHING`,
-      [SYNTH_ORG],
-    )
+    await seedDenyProbeRolloutRow(client, SYNTH_ORG)
     let raised = null
     try {
+      // NEGATIVE PROBE (exact-tuple classified, see W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST):
+      // this DELETE must NEVER succeed — the deny trigger raising W4C0_IMMUTABLE is the asserted
+      // outcome.
       await client.query(`DELETE FROM attendance_calculation_rollout_state WHERE org_id = $1`, [SYNTH_ORG])
     } catch (error) {
       raised = error?.message || String(error)

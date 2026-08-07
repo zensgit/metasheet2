@@ -19,6 +19,7 @@ const path = require('path')
 
 const {
   classifyTable,
+  isW4CanonicalNegativeProbeSite,
   P25_OPERATIONAL_TABLE_SPECS,
   TRACKED_BUCKETS,
   W4_CANONICAL_PATH_PREFIXES,
@@ -917,12 +918,17 @@ function debtKey(site) {
 //   - trackedSites: business/schedule_fact/shared_hook bucket sites (require curated P0x match)
 //   - bucketAllowlistedSites: operational/reference bucket sites (allowlisted, no P0x needed)
 //   - canonicalSites: w4_canonical-bucket sites inside the canonical path prefix (allowlisted)
-//   - outsideBoundarySites: w4_canonical-bucket sites OUTSIDE the canonical path prefix (hard fail)
+//   - negativeProbeSites: w4_canonical-bucket sites matching the EXACT-tuple deny-trigger
+//     negative-probe allowlist (W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST) — reported
+//     separately, never silently folded into canonicalSites, so tests can pin the exact set
+//   - outsideBoundarySites: w4_canonical-bucket sites OUTSIDE the canonical path prefix and NOT
+//     an exact-tuple negative probe (hard fail)
 //   - unclassifiedTableSites: table not present in table-classification.cjs at all (hard fail)
 function classifyCensus(rawSites) {
   const trackedSites = []
   const bucketAllowlistedSites = []
   const canonicalSites = []
+  const negativeProbeSites = []
   const outsideBoundarySites = []
   const unclassifiedTableSites = []
 
@@ -938,6 +944,8 @@ function classifyCensus(rawSites) {
     if (bucket === 'w4_canonical') {
       if (isCanonicalBoundaryPath(site.relPath)) {
         canonicalSites.push(classified)
+      } else if (isW4CanonicalNegativeProbeSite(site)) {
+        negativeProbeSites.push(classified)
       } else {
         outsideBoundarySites.push(classified)
       }
@@ -950,7 +958,7 @@ function classifyCensus(rawSites) {
     bucketAllowlistedSites.push(classified)
   }
 
-  return { trackedSites, bucketAllowlistedSites, canonicalSites, outsideBoundarySites, unclassifiedTableSites }
+  return { trackedSites, bucketAllowlistedSites, canonicalSites, negativeProbeSites, outsideBoundarySites, unclassifiedTableSites }
 }
 
 function sha256Hex(text) {
