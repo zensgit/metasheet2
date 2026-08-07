@@ -57,9 +57,16 @@ product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` →
 3. `node --import tsx harness/summary-tool.mjs --init --evidence-dir <evidence-dir>` — seed
    `<evidence-dir>/summary.json` as the closed 10-case set (all BLOCKED) from `summary.template.json`.
    Do this BEFORE the harnesses so the runner is runnable at every point (it enforces exactly 10 ids).
-4. Run each harness (`harness/pqa-*.mjs --evidence-dir <evidence-dir>`) — they UPSERT their per-case
-   status + evidence into `summary.json`. Operator affirms the Windows host facts + runs the HTTP/UI
-   cases (PQA-01/02/03/04, and the PQA-07 authorization probes).
+4. Run the harnesses in the owner's risk order **PQA-07 → 03 → 01 → 02 → 05 → 06 → 08 → 09 → 10 → 04**
+   (`harness/pqa-*.mjs --evidence-dir <evidence-dir>`) — they UPSERT their per-case status + evidence
+   into `summary.json`. Two ordering constraints (neither can cause a false PASS, only a false BLOCK):
+   run **05 before 09/10** (09/10 advance the shared shadow org to shadow-v2; 05 run afterwards hits a
+   rollout CAS mismatch and BLOCKs with a generic error, not its legacyAdapters reason); and because the
+   result-event outbox dispatcher is **global**, if any harness errors mid-dispatch, `node
+   reset-isolated-db.mjs` + re-provision before the next case (a stray pending outbox row false-BLOCKs
+   the next case). Operator affirms the Windows host facts + runs the HTTP/UI cases (PQA-01/02/03/04, and
+   the PQA-07 authorization probes — provision/point `$orgB` at an org OUTSIDE the probed user's
+   membership first, since provisioning grants `u1` membership in all three synthetic orgs).
 5. **EXPORT evidence FIRST** (the per-case SELECT(s) named in the runbook), then
    `summary-tool.mjs --record-residue` as a negative control (must be **> 0**), then
    `node reset-isolated-db.mjs` (teardown), then `summary-tool.mjs --record-residue` again (must be
@@ -71,8 +78,10 @@ product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` →
 
 ## Proven-by-execution vs operator-verified
 - **Proven by execution (macOS + local PG15, this rework):** the drop/recreate + migration-SET/trigger
-  integrity, the residue negative control → 0, and the route-less harnesses 05/09/10 (real product fns,
-  PASS) + 06/08 (real decision primitives, BLOCKED-with-evidence) + 07 create-fixture.
+  integrity, the residue negative control → 0, and the route-less harnesses **09/10 (real product fns,
+  PASS-eligible)** + **05/06/08 (real primitives, BLOCKED-with-evidence)** + 07 create-fixture. "PASS-
+  eligible" = the harness asserts its full matrix objective on the real DB; on a non-Windows host the
+  runner still holds all 10 at BLOCKED until the Windows operator affirms the host facts below.
 - **Operator-verified (Windows-only, UNVERIFIED here):** the `.bat`/PowerShell wrappers, the browser-UI +
   authenticated-HTTP steps (PQA-01/02/03/04/07 product execution), the login round-trip, the Windows host
   safety facts (`hostPlatform=windows`, `windowsPowerShellVersion=5.1.x`), and the end-to-end boundary

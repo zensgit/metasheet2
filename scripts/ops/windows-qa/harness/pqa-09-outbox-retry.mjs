@@ -15,10 +15,11 @@
  *   pass 1: emit() throws -> the SAME row stays pending, attempts=1, rescheduled;
  *   pass 2: emit() succeeds -> the SAME row -> delivered, attempts=2, delivered_at set, sink 1x.
  *
- * "no duplicate DML" is proven by a business-DML BASELINE (row counts of every scheduled-run /
- * operation / calculation / outbox table) captured BEFORE the two dispatch passes and required to be
- * byte-identical AFTER — the dispatch may only flip the one claimed row's delivery_state, never
- * create or duplicate a business row. retryBackoffMs=0 makes the pass-1 reschedule immediately due.
+ * "no duplicate DML" is proven by a business-DML BASELINE — the row COUNT (count(*)) of every
+ * scheduled-run / operation / calculation / outbox table — captured BEFORE the two dispatch passes and
+ * required to be row-count-identical AFTER (a count baseline, not a byte/content compare): the dispatch
+ * may only flip the one claimed row's delivery_state, never create or duplicate a business row.
+ * retryBackoffMs=0 makes the pass-1 reschedule immediately due.
  *
  * PASS-eligible: real product fns end-to-end on the real DB. (The runner still requires the Windows
  * host safety facts before the final PASS.)
