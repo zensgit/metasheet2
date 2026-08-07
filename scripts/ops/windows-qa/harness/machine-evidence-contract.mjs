@@ -54,39 +54,46 @@ export const MACHINE_EVIDENCE_CASE_HARNESS = Object.freeze({
 })
 
 /**
- * Owner P1 — per-case EXACT `facts` schema: the required fact keys (and value types) the real harness
- * actually asserts. An envelope missing a required fact, carrying an unknown/invented key, or with a
- * wrong type is rejected. Types: 'number' (finite), 'string' (non-empty), 'boolean', 'uuid'. Derived
- * key-for-key from the harnesses (pqa-09-outbox-retry.mjs / pqa-10-scheduled-sweep.mjs) — the harnesses
- * self-validate against this shape at emit time so any drift fails loudly there, not silently here.
+ * Owner P1 — per-case EXACT `facts` schema: the required fact keys, their value TYPES, AND — for every
+ * load-bearing fact — a VALUE PREDICATE. Types ALONE let a well-typed-but-WRONG record forge a PASS: the
+ * owner forged PQA-09 with the correct case + whitelisted harness + runId + SHA + the full key set, but
+ * values that denote a FAILED scenario (pass2DeliveryState='definitely-not-delivered', sinkDeliveries=999,
+ * businessDmlTablesChanged=999, businessDmlTablesTracked=0, negative attempts) — and it PASSED. Each
+ * predicate below (`equals` exact / `min` floor / `integer` whole-number) EQUALS the value the REAL
+ * harness (pqa-09-outbox-retry.mjs / pqa-10-scheduled-sweep.mjs) emits on a genuine PASS — derived from
+ * the value the harness THROWS on if it differs (the cited `Lnn` is that assertion) and CONFIRMED against
+ * the real emitted summary.json — so the genuine harness output still PASSes while any wrong-but-well-
+ * typed value is REJECTED. Types: 'number' (finite), 'string' (non-empty), 'boolean', 'uuid'; constraints:
+ * `equals`, `min`, `integer`. The harnesses self-validate against this shape at emit time (buildMachine-
+ * Evidence) so any drift between what a harness asserts and this contract fails LOUDLY there, not here.
  */
 export const MACHINE_EVIDENCE_FACTS_SCHEMA = Object.freeze({
   'PQA-09': Object.freeze({
-    scheduledRunId: { type: 'uuid' },
-    outboxRowCount: { type: 'number' },
-    pass1AttemptsAfterFailure: { type: 'number' },
-    pass2AttemptsAfterRetry: { type: 'number' },
-    pass2DeliveryState: { type: 'string' },
-    sinkDeliveries: { type: 'number' },
-    deliveredEventKind: { type: 'string' },
-    businessDmlTablesChanged: { type: 'number' },
-    businessDmlTablesTracked: { type: 'number' },
+    scheduledRunId: { type: 'uuid' }, // a fresh product-minted run UUID — no fixed value
+    outboxRowCount: { type: 'number', integer: true, equals: 1 }, // pqa-09 L117: `rowCount !== 1` throws (no duplicate DML)
+    pass1AttemptsAfterFailure: { type: 'number', integer: true, min: 0, equals: 1 }, // L93: attempts=1 after the injected failure
+    pass2AttemptsAfterRetry: { type: 'number', integer: true, min: 0, equals: 2 }, // L114: attempts=2 after the retry
+    pass2DeliveryState: { type: 'string', equals: 'delivered' }, // L114: `!== 'delivered'` throws
+    sinkDeliveries: { type: 'number', integer: true, equals: 1 }, // L118: `delivered.length !== 1` throws
+    deliveredEventKind: { type: 'string', equals: 'attendance.absence.generated' }, // L118: the one delivered event kind
+    businessDmlTablesChanged: { type: 'number', integer: true, equals: 0 }, // L125: `changed.length > 0` throws (no duplicate DML)
+    businessDmlTablesTracked: { type: 'number', integer: true, min: 1 }, // Object.keys(before).length over the 8 baseline tables; harness asserts no absolute count, only a >0 denominator is meaningful
   }),
   'PQA-10': Object.freeze({
     scheduledRunId: { type: 'uuid' },
-    createdKind: { type: 'string' },
-    reTriggerKind: { type: 'string' },
-    generation: { type: 'number' },
-    runningRowsForIdentity: { type: 'number' },
-    sweepScanned: { type: 'number' },
-    sweepNotReady: { type: 'number' },
-    sweepFinalized: { type: 'number' },
-    targetTerminalOutcome: { type: 'string' },
-    outboxEventKind: { type: 'string' },
-    outboxIdentityKind: { type: 'string' },
-    outboxDeliveredState: { type: 'string' },
-    sinkDeliveries: { type: 'number' },
-    runStateAfterFinalize: { type: 'string' },
+    createdKind: { type: 'string', equals: 'created_running' }, // w4-common L93: `!== 'created_running'` throws
+    reTriggerKind: { type: 'string', equals: 'resumed' }, // pqa-10 L88: `resumed.kind !== 'resumed'` throws (idempotent re-trigger)
+    generation: { type: 'number', integer: true, equals: 1 }, // L88 pins it to runRow.generation; fresh (org,'cron',work_date) partition => MAX(gen)+1 = 1 (w4c2-scheduled-run.ts L634-638)
+    runningRowsForIdentity: { type: 'number', integer: true, equals: 1 }, // L96: `runningCount !== 1` throws (one running row, no fork)
+    sweepScanned: { type: 'number', integer: true, equals: 1 }, // L107: `sweep.scanned < 1` throws; the isolated single-run flow sweeps exactly the one running run => 1
+    sweepNotReady: { type: 'number', integer: true, equals: 1 }, // L107: `sweep.notReady < 1` throws; the one running run is not_ready => 1
+    sweepFinalized: { type: 'number', integer: true, equals: 0 }, // L107: `sweep.finalized !== 0` throws
+    targetTerminalOutcome: { type: 'string', equals: 'completed' }, // L130: `!== 'completed'` throws
+    outboxEventKind: { type: 'string', equals: 'attendance.absence.generated' }, // L148: `!== 'attendance.absence.generated'` throws
+    outboxIdentityKind: { type: 'string', equals: 'scheduled_run' }, // L149: `!== 'scheduled_run'` throws
+    outboxDeliveredState: { type: 'string', equals: 'delivered' }, // L164: `!== 'delivered'` throws
+    sinkDeliveries: { type: 'number', integer: true, equals: 1 }, // L164: `delivered.length !== 1` throws
+    runStateAfterFinalize: { type: 'string', equals: 'completed' }, // L141: `runAfter.state !== 'completed'` throws (terminal state)
   }),
 })
 
@@ -114,6 +121,60 @@ export const OPERATOR_BOUNDARY_ATTESTATION_SCHEMA = Object.freeze({
   }),
 })
 
+/**
+ * Owner P3 — EXACT top-level envelope allowlists. `facts` / `boundaryAttestation` already reject unknown
+ * keys; the machineEvidence / operatorEvidence / artifact-manifest TOP-LEVEL objects must too, so a
+ * hand-authored envelope cannot smuggle an extra top-level field past the shape check. Each list is the
+ * EXACT set the real emitters produce:
+ *   - machineEvidence: the ten keys buildMachineEvidence() emits (qa-runtime.mjs) — the eight enforced
+ *     fields plus the legit metadata `qaToolingShaSource` (the tooling-SHA provenance) + `producedAt`.
+ *   - operatorEvidence: the fields the operator records per the runbook — schema/caseId/runId/tester/
+ *     timestamp/command/route/expected/observed/artifact/sourceSha/qaToolingSha, plus the per-case
+ *     `boundaryAttestation` (present only for PQA-05/06/08).
+ *   - artifact manifest: exactly `{ path, sha256, runId }`.
+ * A key outside its list fails the envelope closed (not silently ignored — an ignored unknown field is
+ * exactly how a stale/forged attribute would slip through).
+ */
+export const MACHINE_EVIDENCE_TOP_LEVEL_KEYS = Object.freeze([
+  'schema',
+  'producedBy',
+  'caseId',
+  'runId',
+  'harnessModule',
+  'determination',
+  'qaToolingSha',
+  'qaToolingShaSource',
+  'facts',
+  'producedAt',
+])
+
+export const OPERATOR_EVIDENCE_TOP_LEVEL_KEYS = Object.freeze([
+  'schema',
+  'caseId',
+  'runId',
+  'tester',
+  'timestamp',
+  'command',
+  'route',
+  'expected',
+  'observed',
+  'artifact',
+  'sourceSha',
+  'qaToolingSha',
+  'boundaryAttestation',
+])
+
+export const ARTIFACT_MANIFEST_KEYS = Object.freeze(['path', 'sha256', 'runId'])
+
+/** Reject any top-level key not in `allowed`. Returns an error string or null. */
+function checkTopLevelAllowlist(obj, allowed, label) {
+  const extra = Object.keys(obj).filter((k) => !allowed.includes(k))
+  if (extra.length > 0) {
+    return `${label} carries unknown top-level key(s): ${extra.join(', ')} (only ${allowed.join(', ')} are allowed).`
+  }
+  return null
+}
+
 /** True when `caseId` is one of the machine-evidence (route-less harness) cases. */
 export function isMachineEvidenceCase(caseId) {
   return Object.prototype.hasOwnProperty.call(MACHINE_EVIDENCE_CASE_HARNESS, caseId)
@@ -135,6 +196,13 @@ function checkTypedField(value, spec) {
       break
     default:
       return `has an unknown schema type "${spec.type}"`
+  }
+  // Owner P1 (well-typed-but-WRONG guard) — an `integer: true` spec additionally requires a WHOLE
+  // number. Row counts / attempts / delivery tallies are integers; a fractional 1.5 is well-typed as a
+  // finite number but is not a value the real harness can emit, so it must be rejected too. (Runs after
+  // the type switch so a non-number still reports the plainer "must be a finite number" first.)
+  if (spec.integer === true && !Number.isInteger(value)) {
+    return 'must be an integer'
   }
   if (Object.prototype.hasOwnProperty.call(spec, 'equals') && value !== spec.equals) {
     return `must equal ${JSON.stringify(spec.equals)}`
@@ -195,6 +263,9 @@ function validateArtifactManifestEntry(artifact, expectedRunId) {
   if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
     return 'operatorEvidence.artifact must be a manifest object { path, sha256, runId }.'
   }
+  // Owner P3 — exact manifest shape: reject any key beyond { path, sha256, runId }.
+  const artifactTopLevelError = checkTopLevelAllowlist(artifact, ARTIFACT_MANIFEST_KEYS, 'operatorEvidence.artifact')
+  if (artifactTopLevelError) return artifactTopLevelError
   const rel = artifact.path
   if (typeof rel !== 'string' || rel.trim().length === 0) {
     return 'operatorEvidence.artifact.path must be a non-empty path (relative to the evidence dir).'
@@ -239,6 +310,9 @@ export function validateMachineEvidence(machineEvidence, { expectedQaToolingSha,
         'reason/evidence string is no longer accepted as proof of a PASS).',
     }
   }
+  // Owner P3 — exact top-level envelope: reject any key the real emitter does not produce.
+  const topLevelError = checkTopLevelAllowlist(me, MACHINE_EVIDENCE_TOP_LEVEL_KEYS, 'machineEvidence')
+  if (topLevelError) return { ok: false, error: topLevelError }
   if (me.schema !== MACHINE_EVIDENCE_SCHEMA) {
     return { ok: false, error: `machineEvidence.schema must be "${MACHINE_EVIDENCE_SCHEMA}"; got: ${me.schema ?? 'undefined'}.` }
   }
@@ -308,6 +382,9 @@ export function validateOperatorEvidence(
         'command/route + expected/observed + artifact manifest + bound source/tooling SHAs). A status + long reason is not enough.',
     }
   }
+  // Owner P3 — exact top-level envelope: reject any key the runbook does not have the operator record.
+  const oeTopLevelError = checkTopLevelAllowlist(oe, OPERATOR_EVIDENCE_TOP_LEVEL_KEYS, 'operatorEvidence')
+  if (oeTopLevelError) return { ok: false, error: oeTopLevelError }
   if (oe.schema !== OPERATOR_EVIDENCE_SCHEMA) {
     return { ok: false, error: `operatorEvidence.schema must be "${OPERATOR_EVIDENCE_SCHEMA}"; got: ${oe.schema ?? 'undefined'}.` }
   }

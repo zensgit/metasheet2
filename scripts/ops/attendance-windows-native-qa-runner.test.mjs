@@ -86,7 +86,7 @@ function machineFacts(caseId) {
       sinkDeliveries: 1,
       deliveredEventKind: 'attendance.absence.generated',
       businessDmlTablesChanged: 0,
-      businessDmlTablesTracked: 12,
+      businessDmlTablesTracked: 8, // ATTENDANCE_BUSINESS_DML_TABLES has 8 entries (w4-common.mjs); the real harness emits 8
     }
   }
   return {
@@ -758,6 +758,145 @@ test('buildMachineEvidence self-check: emits valid envelopes for 09/10 and THROW
     () => buildMachineEvidence({ caseId: 'PQA-09', harnessModule: 'pqa-09-outbox-retry.mjs', determination: 'PASS', facts: drifted }),
     /the contract rejects for PQA-09/,
   )
+})
+
+// --------------------------------------------------------------------------
+// Owner P1 (5th review) — well-typed-but-WRONG facts must BLOCK, not forge a PASS. Types alone were
+// not enough: the owner forged a PQA-09 PASS with the correct case + whitelisted harness + runId + SHA
+// + the full key set, but values that denote a FAILED scenario. Table-driven: for BOTH machine cases,
+// each load-bearing fact set to a well-typed but WRONG value (incl. the owner's exact set, a negative
+// attempts, a wrong string enum, a non-integer) must NOT PASS and must block for THAT field's predicate.
+// A baseline (unmutated real facts) PASSes, proving the mutation — not some other gate — caused the block.
+// --------------------------------------------------------------------------
+
+const WELL_TYPED_WRONG_MUTATIONS = {
+  'PQA-09': [
+    { field: 'pass2DeliveryState', value: 'definitely-not-delivered', reason: /facts\.pass2DeliveryState must equal "delivered"/ },
+    { field: 'sinkDeliveries', value: 999, reason: /facts\.sinkDeliveries must equal 1/ },
+    { field: 'businessDmlTablesChanged', value: 999, reason: /facts\.businessDmlTablesChanged must equal 0/ },
+    { field: 'businessDmlTablesTracked', value: 0, reason: /facts\.businessDmlTablesTracked must be >= 1/ },
+    { field: 'pass1AttemptsAfterFailure', value: -3, reason: /facts\.pass1AttemptsAfterFailure must equal 1/, label: 'negative attempts' },
+    { field: 'pass2AttemptsAfterRetry', value: -7, reason: /facts\.pass2AttemptsAfterRetry must equal 2/, label: 'negative attempts' },
+    { field: 'outboxRowCount', value: 2, reason: /facts\.outboxRowCount must equal 1/ },
+    { field: 'deliveredEventKind', value: 'attendance.some.other.kind', reason: /facts\.deliveredEventKind must equal "attendance\.absence\.generated"/, label: 'wrong string enum' },
+    { field: 'outboxRowCount', value: 1.5, reason: /facts\.outboxRowCount must be an integer/, label: 'non-integer' },
+  ],
+  'PQA-10': [
+    { field: 'reTriggerKind', value: 'definitely-not-resumed', reason: /facts\.reTriggerKind must equal "resumed"/, label: 'wrong string enum' },
+    { field: 'createdKind', value: 'resumed', reason: /facts\.createdKind must equal "created_running"/, label: 'wrong string enum' },
+    { field: 'generation', value: 5, reason: /facts\.generation must equal 1/ },
+    { field: 'runningRowsForIdentity', value: 2, reason: /facts\.runningRowsForIdentity must equal 1/ },
+    { field: 'sweepScanned', value: 999, reason: /facts\.sweepScanned must equal 1/ },
+    { field: 'sweepNotReady', value: 0, reason: /facts\.sweepNotReady must equal 1/ },
+    { field: 'sweepFinalized', value: 3, reason: /facts\.sweepFinalized must equal 0/ },
+    { field: 'targetTerminalOutcome', value: 'failed', reason: /facts\.targetTerminalOutcome must equal "completed"/, label: 'wrong string enum' },
+    { field: 'outboxEventKind', value: 'attendance.some.other', reason: /facts\.outboxEventKind must equal "attendance\.absence\.generated"/, label: 'wrong string enum' },
+    { field: 'outboxIdentityKind', value: 'item', reason: /facts\.outboxIdentityKind must equal "scheduled_run"/, label: 'wrong string enum' },
+    { field: 'outboxDeliveredState', value: 'pending', reason: /facts\.outboxDeliveredState must equal "delivered"/ },
+    { field: 'sinkDeliveries', value: 999, reason: /facts\.sinkDeliveries must equal 1/ },
+    { field: 'runStateAfterFinalize', value: 'running', reason: /facts\.runStateAfterFinalize must equal "completed"/ },
+    { field: 'generation', value: 2.5, reason: /facts\.generation must be an integer/, label: 'non-integer' },
+  ],
+}
+
+for (const caseId of ['PQA-09', 'PQA-10']) {
+  test(`P1 well-typed-wrong baseline (${caseId}): the unmutated real harness facts PASS`, () => {
+    withRoots((root, evidenceDir) => {
+      writeSummary(evidenceDir, { cases: full10({ [caseId]: passCase(caseId) }) })
+      const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+      assert.equal(report.cases.find((c) => c.id === caseId).status, 'PASS')
+    })
+  })
+
+  for (const m of WELL_TYPED_WRONG_MUTATIONS[caseId]) {
+    const tag = m.label ? ` (${m.label})` : ''
+    test(`P1 well-typed-wrong (${caseId}): ${m.field}=${JSON.stringify(m.value)}${tag} does NOT PASS`, () => {
+      withRoots((root, evidenceDir) => {
+        // Everything else is a genuine PASS shape (whitelisted harness, runId, SHA, all keys/types,
+        // host facts affirmed) — only THIS one fact carries a wrong-but-well-typed value.
+        const facts = { ...machineFacts(caseId), [m.field]: m.value }
+        writeSummary(evidenceDir, {
+          cases: full10({ [caseId]: passCase(caseId, { machineEvidence: machineEvidence(caseId, { facts }) }) }),
+        })
+        const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+        const item = report.cases.find((c) => c.id === caseId)
+        assert.notEqual(item.status, 'PASS')
+        assert.match(item.reason, m.reason)
+      })
+    })
+  }
+}
+
+test("P1 owner exact semantic forge (PQA-09): right case/harness/runId/SHA/keys/types, WRONG values → NOT PASS", () => {
+  withRoots((root, evidenceDir) => {
+    // The owner's exact forge set — the record that previously PASSed on types alone.
+    const facts = {
+      ...machineFacts('PQA-09'),
+      pass2DeliveryState: 'definitely-not-delivered',
+      sinkDeliveries: 999,
+      businessDmlTablesChanged: 999,
+      businessDmlTablesTracked: 0,
+      pass1AttemptsAfterFailure: -3,
+      pass2AttemptsAfterRetry: -7,
+    }
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-09': passCase('PQA-09', { machineEvidence: machineEvidence('PQA-09', { facts }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const item = report.cases.find((c) => c.id === 'PQA-09')
+    assert.notEqual(item.status, 'PASS')
+    assert.match(
+      item.reason,
+      /facts\.(outboxRowCount|pass1AttemptsAfterFailure|pass2AttemptsAfterRetry|pass2DeliveryState|sinkDeliveries|businessDmlTablesChanged|businessDmlTablesTracked) must (equal|be)/,
+    )
+  })
+})
+
+// --------------------------------------------------------------------------
+// Owner P3 (5th review) — EXACT top-level envelope. `facts`/`boundaryAttestation` already reject unknown
+// keys; the machineEvidence / operatorEvidence / artifact TOP-LEVEL objects must too, so a stray/forged
+// top-level attribute cannot be silently ignored into a PASS.
+// --------------------------------------------------------------------------
+
+test('P3 exact-envelope: an unknown top-level key on machineEvidence is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-09': passCase('PQA-09', { machineEvidence: machineEvidence('PQA-09', { sneaky: 'extra' }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    const item = report.cases.find((c) => c.id === 'PQA-09')
+    assert.notEqual(item.status, 'PASS')
+    assert.match(item.reason, /machineEvidence carries unknown top-level key\(s\): sneaky/)
+  })
+})
+
+test('P3 exact-envelope: an unknown top-level key on operatorEvidence is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { sneaky: 'extra' }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    const item = report.cases.find((c) => c.id === 'PQA-01')
+    assert.notEqual(item.status, 'PASS')
+    assert.match(item.reason, /operatorEvidence carries unknown top-level key\(s\): sneaky/)
+  })
+})
+
+test('P3 exact-envelope: an unknown key on the artifact manifest is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({
+        'PQA-01': passCase('PQA-01', {
+          operatorEvidence: operatorEvidence('PQA-01', { artifact: artifactManifest('PQA-01', { sneaky: 'extra' }) }),
+        }),
+      }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    const item = report.cases.find((c) => c.id === 'PQA-01')
+    assert.notEqual(item.status, 'PASS')
+    assert.match(item.reason, /operatorEvidence\.artifact carries unknown top-level key\(s\): sneaky/)
+  })
 })
 
 // --------------------------------------------------------------------------
