@@ -808,7 +808,11 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await mountView()
     await flushUi()
 
-    // List surface (default): condition branch must receive child-owned dashed border + wrap head.
+    // Canvas is the ordinary-user default; switch to the retained accessible list surface.
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // List surface: condition branch must receive child-owned dashed border + wrap head.
     const listBranch = container!.querySelector(
       '[data-testid="approval-graph-readonly-list"] .template-authoring__condition-branch',
     ) as HTMLElement | null

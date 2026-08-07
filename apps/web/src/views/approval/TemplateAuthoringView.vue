@@ -537,8 +537,8 @@
         <!-- Complex graphs use a canvas for topology and a structured list for node configuration. -->
         <!-- D-6 view toggle: structured list ⇄ visual canvas (complex graphs only) -->
         <div v-if="graphReadOnly && canvasV2Enabled" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
-          <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">结构列表</el-button>
           <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
+          <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">辅助编辑模式</el-button>
         </div>
 
         <!-- D-1/D-5 visual canvas + Canvas V2 Slice A right-side inspector.
@@ -560,6 +560,26 @@
               <ul class="template-authoring__error-list"><li v-for="issue in canvasValidity" :key="issue">{{ issue }}</li></ul>
             </el-alert>
             <div class="template-authoring__canvas-toolbar" data-testid="approval-canvas-toolbar">
+              <el-button-group>
+                <el-button
+                  :disabled="readOnly || !canUndoCanvasHistory"
+                  title="撤销"
+                  aria-label="撤销"
+                  data-testid="approval-canvas-undo"
+                  @click="onCanvasUndo"
+                >
+                  撤销
+                </el-button>
+                <el-button
+                  :disabled="readOnly || !canRedoCanvasHistory"
+                  title="重做"
+                  aria-label="重做"
+                  data-testid="approval-canvas-redo"
+                  @click="onCanvasRedo"
+                >
+                  重做
+                </el-button>
+              </el-button-group>
               <el-button-group>
                 <el-button :icon="ZoomOut" title="缩小画布" aria-label="缩小画布" data-testid="approval-canvas-zoom-out" @click="changeCanvasZoom('out')" />
                 <el-button
@@ -1408,7 +1428,6 @@ import {
   type CcNodeEdit,
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
-  applyTopologyToDraft,
   moveItemToIndex,
 } from '../../approvals/templateAuthoring'
 import {
@@ -1420,9 +1439,22 @@ import {
   insertConditionGateway,
   insertParallelGateway,
   linearNodeMoveTargets,
-  moveLinearNode,
   removeLinearNode,
 } from '../../approvals/graphTopologyEdit'
+import {
+  applyCanvasCommandToSession,
+  applyTopologyOpToSession,
+  canRedoAuthoring,
+  canUndoAuthoring,
+  createAuthoringSessionHistory,
+  draftFromSessionGraph,
+  promoteLinearDraftToGraphAuthoring,
+  redoAuthoringSession,
+  reseedAuthoringSessionHistory,
+  undoAuthoringSession,
+  type AuthoringSessionHistory,
+} from '../../approvals/approvalAuthoringHistory'
+import type { ApprovalCanvasSelection } from '../../approvals/approvalCanvasCommands'
 import {
   computeLayout,
   graphValidityIssues,
@@ -1627,6 +1659,14 @@ function scrollAuthoringTarget(target: HTMLElement | null, focus = false) {
 
 async function selectAuthoringSection(section: AuthoringSectionId) {
   activeAuthoringSection.value = section
+  // Canvas V2: ordinary-user flow authoring uses one preservedGraph rail. Promote linear steps
+  // when entering the flow step so linear + branch share the canvas surface; list remains the
+  // retained accessible alternative (辅助编辑模式).
+  if (section === 'flow' && canvasV2Enabled.value && !readOnly.value && !draft.value.preservedGraph) {
+    draft.value = promoteLinearDraftToGraphAuthoring(draft.value)
+    reseedCanvasHistoryFromDraft()
+    canvasViewMode.value = 'canvas'
+  }
   await nextTick()
   scrollAuthoringTarget(authoringContentRef.value)
 }
@@ -2067,38 +2107,93 @@ function approvalSourceIsPlaceholder(nodeKey: string): boolean {
   return publishPlaceholderRoleKeys.value.includes(nodeKey)
 }
 
-// ── Topology authoring (structural graph edits via graphTopologyEdit + applyTopologyToDraft) ──
+// ── Topology authoring (graphTopologyEdit + authoring session history) ──
 // Each op runs on the EFFECTIVE graph (configs applied) and re-seeds the draft, so the structured
-// editors stay in sync. Guards mirror the engine preconditions so a shown button never throws; a
-// (defensive) throw surfaces as loadError. The interactive free-drag canvas is the gated next slice.
-function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): void {
-  try {
-    draft.value = applyTopologyToDraft(draft.value, op)
-  } catch {
-    // Topology helpers include internal node/edge keys in diagnostics. Those identifiers are useful
-    // to developers but are not an author-facing vocabulary and must not leak into the editor banner.
-    loadError.value = '该拓扑操作不适用于当前流程结构'
+// editors stay in sync. Typed move/reorder use approvalCanvasCommands; other topology helpers
+// record snapshot inverses. Invalid ops fail closed with no partial draft apply.
+const canvasAuthoringHistory = ref<AuthoringSessionHistory>(
+  createAuthoringSessionHistory({ nodes: [], edges: [] }),
+)
+const canUndoCanvasHistory = computed(() => canUndoAuthoring(canvasAuthoringHistory.value))
+const canRedoCanvasHistory = computed(() => canRedoAuthoring(canvasAuthoringHistory.value))
+
+function currentCanvasSelection(): ApprovalCanvasSelection {
+  return selectedCanvasNode.value
+    ? { kind: 'node', nodeKey: selectedCanvasNode.value }
+    : { kind: 'none' }
+}
+
+function reseedCanvasHistoryFromDraft(): void {
+  canvasAuthoringHistory.value = reseedAuthoringSessionHistory(
+    draft.value,
+    currentCanvasSelection(),
+  )
+}
+
+function applySessionHistoryToDraft(next: AuthoringSessionHistory): void {
+  canvasAuthoringHistory.value = next
+  draft.value = draftFromSessionGraph(draft.value, next.graph)
+  if (next.selection.kind === 'node') {
+    selectedCanvasNode.value = next.selection.nodeKey
+  } else {
+    selectedCanvasNode.value = null
   }
 }
+
+function runTopologyOp(
+  op: (graph: ApprovalGraph) => ApprovalGraph,
+  selectionAfter?: ApprovalCanvasSelection,
+): void {
+  const result = applyTopologyOpToSession(
+    canvasAuthoringHistory.value,
+    draft.value,
+    op,
+    selectionAfter ?? currentCanvasSelection(),
+  )
+  if (!result.ok) {
+    loadError.value = result.errorMessage ?? '该拓扑操作不适用于当前流程结构'
+    return
+  }
+  draft.value = result.draft
+  canvasAuthoringHistory.value = result.history
+  if (result.history.selection.kind === 'node') {
+    selectedCanvasNode.value = result.history.selection.nodeKey
+  }
+}
+
+function onCanvasUndo(): void {
+  if (readOnly.value) return
+  const result = undoAuthoringSession(canvasAuthoringHistory.value)
+  if (!result.ok) return
+  applySessionHistoryToDraft(result.history)
+}
+
+function onCanvasRedo(): void {
+  if (readOnly.value) return
+  const result = redoAuthoringSession(canvasAuthoringHistory.value)
+  if (!result.ok) return
+  applySessionHistoryToDraft(result.history)
+}
+
 function onAddConditionBranch(nodeKey: string): void {
-  runTopologyOp((graph) => addConditionBranch(graph, nodeKey))
+  runTopologyOp((graph) => addConditionBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
 function onAddParallelBranch(nodeKey: string): void {
-  runTopologyOp((graph) => addParallelBranch(graph, nodeKey))
+  runTopologyOp((graph) => addParallelBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
 function onInsertApprovalAfter(nodeKey: string): void {
-  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey))
+  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey), { kind: 'node', nodeKey })
 }
 function onInsertConditionAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertConditionGateway(graph, nodeKey))
+  runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
   canvasViewMode.value = 'canvas'
 }
 function onInsertParallelAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertParallelGateway(graph, nodeKey))
+  runTopologyOp((graph) => insertParallelGateway(graph, nodeKey), { kind: 'node', nodeKey })
   canvasViewMode.value = 'canvas'
 }
 function onRemoveNode(nodeKey: string): void {
-  runTopologyOp((graph) => removeLinearNode(graph, nodeKey))
+  runTopologyOp((graph) => removeLinearNode(graph, nodeKey), { kind: 'none' })
   // Canvas V2 Slice A: deleting the selected node clears selection and closes the inspector.
   if (selectedCanvasNode.value === nodeKey) clearCanvasSelection()
 }
@@ -2131,9 +2226,10 @@ function canRemoveNode(node: ApprovalNode): boolean {
 }
 
 // ── D-1/D-5/D-6 visual canvas. Layout and semantic move targets are pure data; drag/drop and
-// Alt+Arrow both invoke the same topology edit, so visual position never diverges from the saved graph.
-// Reuses the same topology handlers as the list and the same draft-backed right-side inspector. ──
-const canvasViewMode = ref<'list' | 'canvas'>('list')
+// Alt+Arrow both invoke the same typed canvas command, so visual position never diverges from the
+// saved graph. Canvas is the ordinary-user default when Canvas V2 is on; list is the retained
+// accessible alternative until S12 equivalence is proven. ──
+const canvasViewMode = ref<'list' | 'canvas'>('canvas')
 const selectedCanvasNode = ref<string | null>(null)
 const canvasInspectorRef = ref<HTMLElement | null>(null)
 const canvasViewportRef = ref<HTMLElement | null>(null)
@@ -2313,7 +2409,19 @@ function cancelCanvasNodeMove(): void {
 function applyCanvasNodeMove(targetEdgeKey: string): void {
   const nodeKey = movingCanvasNode.value
   if (!nodeKey || !canvasMoveTargets.value.has(targetEdgeKey)) return
-  runTopologyOp((graph) => moveLinearNode(graph, nodeKey, targetEdgeKey))
+  const selectionBefore: ApprovalCanvasSelection = { kind: 'node', nodeKey }
+  const applied = applyCanvasCommandToSession(
+    canvasAuthoringHistory.value,
+    { type: 'move-node-into-edge', nodeKey, intoEdgeKey: targetEdgeKey },
+    selectionBefore,
+  )
+  if (!applied.ok) {
+    // Fail closed: no draft mutation. Business-facing copy only (no edge/node keys).
+    loadError.value = '该位置不能放置此节点'
+    cancelCanvasNodeMove()
+    return
+  }
+  applySessionHistoryToDraft(applied.history)
   selectedCanvasNode.value = nodeKey
   cancelCanvasNodeMove()
 }
@@ -2685,6 +2793,7 @@ async function loadTemplateForEdit() {
     draft.value = createEmptyTemplateDraft()
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
+    reseedCanvasHistoryFromDraft()
     snapshotDraft()
     return
   }
@@ -2698,6 +2807,7 @@ async function loadTemplateForEdit() {
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
+    reseedCanvasHistoryFromDraft()
     snapshotDraft()
   } catch (error: unknown) {
     loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
@@ -2748,6 +2858,7 @@ async function persistDraft() {
       draft.value = draftFromTemplate(updated)
       unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
       graphReadOnlyMessage.value = graphReadOnlyReason(updated)
+      reseedCanvasHistoryFromDraft()
       snapshotDraft()
       return updated
     }
@@ -2755,6 +2866,7 @@ async function persistDraft() {
     draft.value = draftFromTemplate(created)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
+    reseedCanvasHistoryFromDraft()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
