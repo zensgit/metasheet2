@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { runWindowsNativeQaMatrix } from './attendance-windows-native-qa-runner.mjs'
+import { runWindowsNativeQaMatrix, strictExitViolation } from './attendance-windows-native-qa-runner.mjs'
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+const testDir = path.dirname(fileURLToPath(import.meta.url))
+const runnerPath = path.join(testDir, 'attendance-windows-native-qa-runner.mjs')
+const repoRoot = path.resolve(testDir, '../..')
 const PINNED_SHA = '0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b'
 const STALE_SHA = '66a980357078f9d243fd4b025b080ac9aca9fa21'
 const MATRIX_IDS = [
@@ -156,13 +159,14 @@ test('runner accepts PASS only when host evidence matches exact SHA and residue=
 
 test('runner blocks PASS when host safety facts are omitted', () => {
   withRoots((root, evidenceDir) => {
-    // A PASS-status case with reason+evidence but NO per-case safety fields.
+    // A PASS-status case with floor-satisfying reason+evidence but NO per-case safety fields.
+    // (reason/evidence clear the FIX 2(c) floor so evaluation reaches the safety-field gate.)
     writeSummary(evidenceDir, {
       cases: full10({
         'PQA-01': {
           id: 'PQA-01', title: 'PQA-01', status: 'PASS',
           syntheticDataOnly: true, residue: 0, sourceSha: PINNED_SHA,
-          reason: 'r', evidence: 'e',
+          reason: 'synthetic verified on isolated QA DB', evidence: 'observed==expected; residue=0',
         },
       }),
     })
@@ -265,7 +269,8 @@ test('P2: a single shared top-level safety affirmation cannot cover any case (no
       cases: full10({
         'PQA-01': {
           id: 'PQA-01', title: 'PQA-01', status: 'PASS',
-          syntheticDataOnly: true, residue: 0, sourceSha: PINNED_SHA, reason: 'r', evidence: 'e',
+          syntheticDataOnly: true, residue: 0, sourceSha: PINNED_SHA,
+          reason: 'synthetic verified on isolated QA DB', evidence: 'observed==expected; residue=0',
         },
       }),
     })
@@ -273,6 +278,73 @@ test('P2: a single shared top-level safety affirmation cannot cover any case (no
     assert.equal(report.counts.PASS, 0)
     assert.match(report.cases[0].reason, /isolatedDatabase=true/)
   })
+})
+
+// --------------------------------------------------------------------------
+// Owner FIX 2(c) — evidence FLOOR: a trivial token can no longer PASS.
+// --------------------------------------------------------------------------
+
+test("FIX 2(c): the owner's reason:'x' evidence:'x' forgery no longer PASSes", () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { reason: 'x', evidence: 'x' }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /per-case reason of at least 12 chars/)
+  })
+})
+
+test('FIX 2(c): a per-case evidence field below the length floor never PASSes', () => {
+  withRoots((root, evidenceDir) => {
+    // reason is fine; evidence "short" (5 chars) is below the 16-char floor.
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { evidence: 'short' }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /per-case evidence field.*at least 16 chars/)
+  })
+})
+
+// --------------------------------------------------------------------------
+// Owner FIX 2(b) — --strict exit code. Three paths, proven via the real CLI.
+// --------------------------------------------------------------------------
+
+function runCli(args) {
+  return spawnSync(process.execPath, [runnerPath, ...args], { encoding: 'utf8' })
+}
+
+test('--strict exits NON-ZERO when not every case PASSes (all BLOCKED / residue not measured)', () => {
+  withRoots((root) => {
+    const res = runCli(['--root', root, '--strict'])
+    assert.notEqual(res.status, 0)
+    assert.match(res.stderr, /--strict: NOT every one of the 10 cases is PASS/)
+  })
+})
+
+test('--strict exits ZERO only when every case PASSes and residue=0', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, { residue: 0, cases: MATRIX_IDS.map((id) => passCase(id)) })
+    const res = runCli(['--root', root, '--evidence-dir', evidenceDir, '--strict'])
+    assert.equal(res.status, 0)
+    assert.match(res.stdout, /--strict OK: all 10 cases PASS with residue=0/)
+  })
+})
+
+test('without --strict an all-BLOCKED run still exits ZERO (unchanged behaviour)', () => {
+  withRoots((root) => {
+    const res = runCli(['--root', root])
+    assert.equal(res.status, 0)
+  })
+})
+
+test('strictExitViolation: null only when all PASS with residue exactly 0', () => {
+  const mk = (counts, residue, total = 10) => ({ counts, residue, cases: new Array(total).fill(null) })
+  assert.equal(strictExitViolation(mk({ PASS: 10, BLOCKED: 0, FAIL: 0 }, 0)), null)
+  assert.equal(strictExitViolation(mk({ PASS: 0, BLOCKED: 10, FAIL: 0 }, null)).exitCode, 3)
+  assert.equal(strictExitViolation(mk({ PASS: 10, BLOCKED: 0, FAIL: 0 }, 2)).exitCode, 3)
+  assert.equal(strictExitViolation(mk({ PASS: 9, BLOCKED: 0, FAIL: 1 }, 0)).exitCode, 3)
 })
 
 // --------------------------------------------------------------------------

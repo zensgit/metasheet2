@@ -13,8 +13,19 @@ import { pathToFileURL } from 'node:url'
 
 const ALLOWED_STATUSES = new Set(['PASS', 'BLOCKED', 'FAIL'])
 
+// Owner FIX 2(c): raise the evidence floor above a trivial token (the owner forged a PASS with
+// reason:"x", evidence:"x"). These are minimum trimmed lengths, applied ONLY to a PASS case's own
+// reason + evidence. This raises the floor; it is NOT a proof of authenticity (the runner reads an
+// operator-written JSON) — do not claim it makes the evidence unforgeable.
+const MIN_REASON_LEN = 12
+const MIN_EVIDENCE_LEN = 16
+
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function meetsFloor(value, minLen) {
+  return typeof value === 'string' && value.trim().length >= minLen
 }
 
 /**
@@ -57,6 +68,7 @@ function parseArgs(argv) {
     expectedSourceSha: process.env.ATTENDANCE_WINDOWS_NATIVE_EXPECTED_SOURCE_SHA || '',
     output: '',
     json: false,
+    strict: false,
   }
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
@@ -81,6 +93,8 @@ function parseArgs(argv) {
       i += 1
     } else if (token === '--json') {
       result.json = true
+    } else if (token === '--strict') {
+      result.strict = true
     } else if (token === '--help' || token === '-h') {
       result.help = true
     } else {
@@ -218,23 +232,23 @@ function evaluateCase(matrixCase, evidence, packageSha, staleEvidenceShas, isola
     // Owner P2 hardening: PASS requires a non-empty per-case reason AND a non-empty per-case
     // evidence field (step output / SQL result / file reference) — no top-level fallback, no
     // whitespace-only. Status + safety fields alone can no longer forge a PASS.
-    if (!nonEmptyString(evidenceCase.reason)) {
+    if (!meetsFloor(evidenceCase.reason, MIN_REASON_LEN)) {
       return {
         id: matrixCase.id,
         title: matrixCase.title,
         status: 'BLOCKED',
-        reason: 'PASS requires a non-empty per-case reason.',
+        reason: `PASS requires a non-empty per-case reason of at least ${MIN_REASON_LEN} chars (raises the floor above a trivial token; not a proof of authenticity).`,
         requiresHostEvidence: Boolean(matrixCase.requiresHostEvidence),
       }
     }
     const evidenceField =
       evidenceCase.evidence ?? evidenceCase.stepOutput ?? evidenceCase.sqlResult ?? evidenceCase.fileReference
-    if (!nonEmptyString(evidenceField)) {
+    if (!meetsFloor(evidenceField, MIN_EVIDENCE_LEN)) {
       return {
         id: matrixCase.id,
         title: matrixCase.title,
         status: 'BLOCKED',
-        reason: 'PASS requires a non-empty per-case evidence field (step output / SQL result / file reference).',
+        reason: `PASS requires a non-empty per-case evidence field (step output / SQL result / file reference) of at least ${MIN_EVIDENCE_LEN} chars (raises the floor above a trivial token; not a proof of authenticity).`,
         requiresHostEvidence: Boolean(matrixCase.requiresHostEvidence),
       }
     }
@@ -451,6 +465,24 @@ export function runWindowsNativeQaMatrix(options = {}) {
   return report
 }
 
+// Owner FIX 2(b): --strict. The non-strict runner only exits non-zero on FAIL>0, so an all-BLOCKED /
+// 0-PASS run (residue never measured) exited 0 — a "green" that authorizes nothing. Under --strict the
+// gate exits NON-ZERO unless EVERY case is PASS and residue is exactly 0. Returns null when the strict
+// gate is satisfied, otherwise { exitCode, message }.
+export function strictExitViolation(report) {
+  const total = report.cases.length
+  const allPass = report.counts.PASS === total && report.counts.FAIL === 0 && report.counts.BLOCKED === 0
+  const residueZero = report.residue === 0
+  if (allPass && residueZero) return null
+  return {
+    exitCode: 3,
+    message:
+      `--strict: NOT every one of the ${total} cases is PASS with residue=0 ` +
+      `(PASS=${report.counts.PASS} BLOCKED=${report.counts.BLOCKED} FAIL=${report.counts.FAIL} ` +
+      `residue=${report.residue ?? 'not measured'}).`,
+  }
+}
+
 function printReport(report, asJson) {
   if (asJson) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
@@ -482,6 +514,7 @@ Options:
   --expected-source-sha <sha>  Override expected exact source SHA
   --output <file>              Write JSON report to file
   --json                       Print JSON report to stdout
+  --strict                     Exit NON-ZERO unless every case is PASS and residue=0
 `)
     return
   }
@@ -496,6 +529,17 @@ Options:
     printReport(report, args.json)
     if (report.counts.FAIL > 0) {
       process.exitCode = 2
+    }
+    if (args.strict) {
+      const violation = strictExitViolation(report)
+      if (violation) {
+        if (!process.exitCode) process.exitCode = violation.exitCode
+        console.error(`[attendance-windows-native-qa-runner] ${violation.message}`)
+      } else {
+        console.log(
+          `[attendance-windows-native-qa-runner] --strict OK: all ${report.cases.length} cases PASS with residue=0.`,
+        )
+      }
     }
   } finally {
     for (const dir of tempDirs) {

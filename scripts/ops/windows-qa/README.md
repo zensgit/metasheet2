@@ -4,9 +4,11 @@
 Pinned exact source SHA: `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b` (product `SOURCE_SHA`, unchanged by this QA-tooling revision).
 
 This directory makes the PQA matrix **independently executable** and reach **residue=0**, with the SQL/Node
-layer **proven by actually running it** against a fresh migrated local PostgreSQL. The qa-runner still
-validates SAFETY + SHA binding + a non-forgeable evidence contract; the harnesses produce the per-case
-verdict + evidence from real execution.
+layer **proven by actually running it** against a fresh migrated local PostgreSQL. The qa-runner
+validates SAFETY + SHA binding + an evidence contract that **fails closed on missing/malformed evidence
+and on a wrong/stale SHA** (it raises the evidence floor — a per-case reason + evidence above a trivial
+token — but does NOT prove authenticity, since the runner reads an operator-written JSON); the harnesses
+produce the per-case verdict + evidence from real execution.
 
 ## Why the rework (owner CHANGES-REQUESTED, all behavioral)
 - **Cleanup can't be per-row DELETE.** The append-only / deny-delete triggers REJECT deletes on rollout
@@ -34,8 +36,8 @@ verdict + evidence from real execution.
   (gate 2), behind a local/isolated/no-other-session safety guard (gate 4).
 - `residue-check.sql` — global residue SENTINEL. Cleanup is drop/recreate; this proves the recreated DB is
   empty of synthetic rows. Run it BEFORE teardown too (negative control: it must be > 0).
-- `summary.template.json` — BLOCKED-by-default, non-forgeable evidence template (usually the harnesses
-  write `<evidence-dir>/summary.json` for you).
+- `summary.template.json` — BLOCKED-by-default evidence template that **fails closed on missing/malformed
+  evidence and on a wrong/stale SHA** (usually the harnesses write `<evidence-dir>/summary.json` for you).
 - `../../../docs/deployment/attendance-windows-native-qa-v2-pqa-cases.md` — the per-case runbook.
 
 ## No auth material in Git (owner security boundary)
