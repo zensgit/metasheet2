@@ -14,7 +14,7 @@ revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 > authoritative operator reference; only the *how you create/clean* changed. Specifically:
 >
 > - **Identities are product-minted UUIDs, captured to `.runtime/qa-identities.json`.** The old
->   text ids (`qa_synth_admin`, `qa_synth_org_shadow`, …) THREW on the W4/rollout/scheduled paths.
+>   text ids (`$admin`, `$orgShadow`, …) THREW on the W4/rollout/scheduled paths.
 >   `harness/provision-synth-directory.mjs` creates users via the product path
 >   (`AuthService.register` → `crypto.randomUUID`) and org anchors via `getOrCreateLocalIntegration`;
 >   every reference below now resolves through `qa-identities.json` — no hardcoded ids.
@@ -44,6 +44,37 @@ revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 > 06/08 + 07 create-fixture are proven by execution. The `.bat`/PowerShell wrappers, browser-UI +
 > authenticated-HTTP product execution (PQA-01/02/03/04/07), the login round-trip, the Windows host
 > safety facts, and the end-to-end boundary composition for 06/08 stay `UNVERIFIED — operator to confirm`.
+
+> ## Identity, fixture & residue resolution (READ FIRST — the tokens below are placeholders)
+>
+> The `$name` tokens throughout this runbook are **placeholders resolved at runtime from
+> `.runtime/qa-identities.json`** (written by `harness/provision-synth-directory.mjs`). They are NOT
+> literal ids: every org/user id is a UUID at runtime (orgs = the reserved `00000000-0000-4000-8000-…`
+> namespace; users = product-minted `crypto.randomUUID()`), which is why the old `qa_synth_*` text ids
+> threw on the W4/rollout/scheduled paths. Resolve each placeholder before running:
+>
+> | placeholder | qa-identities.json path | what it is |
+> |---|---|---|
+> | `$orgA` | `orgs.orgA` | primary synthetic org |
+> | `$orgShadow` | `orgs.orgShadow` | shadow-posture synthetic org (W4 enabled) |
+> | `$orgLegacy` | `orgs.orgLegacy` | legacy / outside-allowlist synthetic org |
+> | `$orgB` | `orgs.orgLegacy` | the "other org" for PQA-07's cross-org probe — an org the probed user is NOT a member of. ⚠️ Caveat: `provision-synth-directory.mjs` currently grants `u1` membership in ALL three synthetic orgs (orgA/orgShadow/orgLegacy), so none is a valid cross-org target as-provisioned; the operator must provision (or point `$orgB` at) an org outside the probed user's membership before running P3. |
+> | `$admin` | `users.admin.id` | `qa-synth-admin@qa.invalid` (attendance:admin) |
+> | `$u1` | `users.u1.id` | `qa-synth-u1@qa.invalid` (attendance:write) |
+> | `$u2` | `users.u2.id` | `qa-synth-u2@qa.invalid` (attendance:read) |
+> | `$u3` | `users.u3.id` | `qa-synth-u3@qa.invalid` (attendance:read) |
+>
+> **There are no per-case `fixtures/pqa-NN.sql` files — that path never existed.** Creation is
+> `provision-synth-directory.mjs` (identities) + this case's harness
+> (`harness/pqa-05|06|07|08|09|10-*.mjs`) or, for 01/02/03/04, the operator HTTP/UI steps in the
+> section. **Cleanup is drop/recreate (`reset-isolated-db.mjs`), never per-row DELETE** (the append-only
+> / deny-delete triggers reject per-row cleanup).
+>
+> **Residue is measured only by `scripts/ops/windows-qa/residue-check.sql`**, which keys on the REAL
+> synthetic markers — the org UUID prefix `00000000-0000-4000-8000-…` and the
+> `qa-synth-…@qa.invalid` email namespace — NOT a `… LIKE 'qa_synth_%'` text prefix on
+> `id`/`org_id`/`user_id` (those are UUIDs). The per-case `LIKE 'qa_synth_%'` residue snippets below
+> are **superseded illustrations**; run `residue-check.sql` instead.
 
 Isolated database (the only accepted name): `metasheet_windows_qa`.
 
@@ -91,10 +122,14 @@ to navigate and the order above to execute.
    `UNVERIFIED — operator to confirm`. Those are instructions to verify, not
    asserted facts. An honestly-marked gap is correct; a confident invention is a
    defect.
-5. **Synthetic marking.** Every synthetic identifier is prefixed `qa_synth_`.
-   Because `*.id` columns are `uuid` (cannot carry a text prefix), synthetic
-   marking and all residue/cleanup keying use **text** columns only — `org_id`,
-   `user_id`, and shift `name` — never `id`.
+5. **Synthetic marking (UUIDs, not a text prefix).** Org and user ids are UUIDs
+   at runtime — orgs are the reserved `00000000-0000-4000-8000-…` namespace and
+   users are product-minted `crypto.randomUUID()`, captured to
+   `.runtime/qa-identities.json` (resolve the `$name` placeholders from there; see
+   the resolution table above). Synthetic USERS are detected by the
+   `qa-synth-…@qa.invalid` **email** namespace and orgs by the UUID prefix — that is
+   how `residue-check.sql` keys; shift `name` stays a free-text synthetic marker.
+   There is no `… LIKE 'qa_synth_%'` keying on `id`/`org_id`/`user_id`.
 
 ---
 
@@ -174,40 +209,40 @@ accepted from request JSON:
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-07.sql` (create section). It seeds:
+Apply the reworked Node flow (no `fixtures/pqa-07.sql` exists — create = this case’s setup `harness/pqa-07-authorization-setup.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section). It seeds:
 
 - orgs (text ids only; no `orgs` table row is required — `org_id` is free-text on
-  `user_orgs`/`attendance_records`): `qa_synth_org_a`, `qa_synth_org_b`.
-- users: `qa_synth_u1` (active), `qa_synth_u2` (active, same-org other user),
-  `qa_synth_u3` (active user row, but INACTIVE org membership). All carry
+  `user_orgs`/`attendance_records`): `$orgA`, `$orgB`.
+- users: `$u1` (active), `$u2` (active, same-org other user),
+  `$u3` (active user row, but INACTIVE org membership). All carry
   `permissions '["attendance:read"]'::jsonb`.
-- `user_orgs`: `(qa_synth_u1, qa_synth_org_a, true)`,
-  `(qa_synth_u2, qa_synth_org_a, true)`, `(qa_synth_u3, qa_synth_org_a, false)`.
-- `attendance_records`: one row for `qa_synth_u1` and one for `qa_synth_u2`, both
-  in `qa_synth_org_a`, `current_calculation_id` left NULL (a record with no
+- `user_orgs`: `($u1, $orgA, true)`,
+  `($u2, $orgA, true)`, `($u3, $orgA, false)`.
+- `attendance_records`: one row for `$u1` and one for `$u2`, both
+  in `$orgA`, `current_calculation_id` left NULL (a record with no
   calculation returns HTTP 200 with `calculation: null` — see
   `AttendanceW4CalculationDetail.ts:528-531` — a clean positive control needing no
   hand-crafted calculation row).
 
 ### Steps (exact API calls)
 
-Session acquisition (obtaining a logged-in session/token for `qa_synth_u1` and
-`qa_synth_u3` that carries `attendance:read`) requires the running server's login
+Session acquisition (obtaining a logged-in session/token for `$u1` and
+`$u3` that carries `attendance:read`) requires the running server's login
 flow: `UNVERIFIED — operator to confirm`. The RBAC evaluation of
 `rbacGuard('attendance', 'read')` against the seeded `users.permissions` is also
 operator-observed at runtime. Capture the two seeded record ids as
 `{u1_record_id}` / `{u2_record_id}` from the fixture output.
 
-- **P1 (positive control).** As `qa_synth_u1`:
+- **P1 (positive control).** As `$u1`:
   `GET /api/attendance/records/{u1_record_id}/calculation-detail`
-- **P2 (same-org other-user via param).** As `qa_synth_u1`:
-  `GET /api/attendance/records/{u1_record_id}/calculation-detail?userId=qa_synth_u2`
+- **P2 (same-org other-user via param).** As `$u1`:
+  `GET /api/attendance/records/{u1_record_id}/calculation-detail?userId=$u2`
 - **P2b (same-org other-user via foreign recordId — subject-scoped SQL).** As
-  `qa_synth_u1`:
+  `$u1`:
   `GET /api/attendance/records/{u2_record_id}/calculation-detail`
-- **P3 (cross-org).** As `qa_synth_u1`:
-  `GET /api/attendance/records/{u1_record_id}/calculation-detail?orgId=qa_synth_org_b`
-- **P4 (inactive membership).** As `qa_synth_u3`:
+- **P3 (cross-org).** As `$u1`:
+  `GET /api/attendance/records/{u1_record_id}/calculation-detail?orgId=$orgB`
+- **P4 (inactive membership).** As `$u3`:
   `GET /api/attendance/records/{u1_record_id}/calculation-detail`
 - **P5 (forged witness — in-process, WRITE path).** There is no HTTP surface that
   accepts a witness; run the in-process unit probe:
@@ -248,7 +283,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-07.sql` (cleanup section) — deletes the
+Apply the reworked Node flow (no `fixtures/pqa-07.sql` exists — create = this case’s setup `harness/pqa-07-authorization-setup.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section) — deletes the
 `attendance_records`, `user_orgs`, and `users` rows this case created (synthetic
 `qa_synth_*` keys only).
 
@@ -310,20 +345,20 @@ string (`index.cjs:25957`).
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-03.sql` (create section): one admin
-user `qa_synth_admin` (`permissions '["attendance:admin"]'`) and its active
-membership in `qa_synth_org_a`. No shift is pre-seeded — the valid step T1 creates
+Apply the reworked Node flow (no `fixtures/pqa-03.sql` exists — create = the operator HTTP/UI steps in this section + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section): one admin
+user `$admin` (`permissions '["attendance:admin"]'`) and its active
+membership in `$orgA`. No shift is pre-seeded — the valid step T1 creates
 one.
 
 ### Steps (exact API calls)
 
-Session/RBAC for `qa_synth_admin` carrying `attendance:admin`:
+Session/RBAC for `$admin` carrying `attendance:admin`:
 `UNVERIFIED — operator to confirm`. All bodies below are the request JSON.
 
 - **T1 (valid IANA).** `POST /api/attendance/shifts`
-  `{ "name": "qa_synth_shift_tz", "timezone": "Asia/Shanghai", "segments": [{ "startTime": "09:00", "endTime": "18:00" }], "orgId": "qa_synth_org_a" }`
+  `{ "name": "qa_synth_shift_tz", "timezone": "Asia/Shanghai", "segments": [{ "startTime": "09:00", "endTime": "18:00" }], "orgId": "$orgA" }`
 - **T2 (invalid identifier).** `POST /api/attendance/shifts`
-  `{ "name": "qa_synth_shift_tz_bad", "timezone": "Not/AZone", "segments": [{ "startTime": "09:00", "endTime": "18:00" }], "orgId": "qa_synth_org_a" }`
+  `{ "name": "qa_synth_shift_tz_bad", "timezone": "Not/AZone", "segments": [{ "startTime": "09:00", "endTime": "18:00" }], "orgId": "$orgA" }`
 - **T3 (offset masquerade).** same body, `"timezone": "+08:00"`.
 - **T4 (whitespace).** same body, `"timezone": " "`.
 
@@ -349,7 +384,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-03.sql` (cleanup section) — deletes the
+Apply the reworked Node flow (no `fixtures/pqa-03.sql` exists — create = the operator HTTP/UI steps in this section + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section) — deletes the
 synthetic shift(s) (segments first, then shift), the membership, and the admin
 user.
 
@@ -407,16 +442,16 @@ ordering/times/timezone are retained.
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-01.sql` (create section): admin user
-`qa_synth_admin` + active membership in `qa_synth_org_a`. The shift itself is
+Apply the reworked Node flow (no `fixtures/pqa-01.sql` exists — create = the operator HTTP/UI steps in this section + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section): admin user
+`$admin` + active membership in `$orgA`. The shift itself is
 created by step A1 (this case is authoring).
 
 ### Steps (exact API calls)
 
-Session/RBAC for `qa_synth_admin`: `UNVERIFIED — operator to confirm`.
+Session/RBAC for `$admin`: `UNVERIFIED — operator to confirm`.
 
 - **A1 (create two-segment shift).** `POST /api/attendance/shifts`
-  `{ "name": "qa_synth_shift_2seg", "timezone": "Asia/Shanghai", "segments": [ { "startTime": "09:00", "endTime": "12:00" }, { "startTime": "13:00", "endTime": "18:00" } ], "orgId": "qa_synth_org_a" }`
+  `{ "name": "qa_synth_shift_2seg", "timezone": "Asia/Shanghai", "segments": [ { "startTime": "09:00", "endTime": "12:00" }, { "startTime": "13:00", "endTime": "18:00" } ], "orgId": "$orgA" }`
   — capture `data.id` as `{shift_id}`.
 - **A2 (reopen).** `GET /api/attendance/shifts/{shift_id}`.
 
@@ -443,7 +478,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-01.sql` (cleanup section) — deletes the
+Apply the reworked Node flow (no `fixtures/pqa-01.sql` exists — create = the operator HTTP/UI steps in this section + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section) — deletes the
 synthetic shift's segments, the shift, the membership, and the admin user.
 
 ### Evidence (summary.json fields)
@@ -500,17 +535,17 @@ punch evidence stays on the intended business workDate.
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-02.sql` (create section): admin
-`qa_synth_admin` (`attendance:admin`) and punching user `qa_synth_u1`
-(`attendance:write`), both active members of `qa_synth_org_a`. The overnight shift,
+Apply the reworked Node flow (no `fixtures/pqa-02.sql` exists — create = the operator HTTP/UI steps in this section + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section): admin
+`$admin` (`attendance:admin`) and punching user `$u1`
+(`attendance:write`), both active members of `$orgA`. The overnight shift,
 assignment, and punches are produced by the product in the steps.
 
 ### Steps (exact API calls)
 
-Sessions for `qa_synth_admin` / `qa_synth_u1`: `UNVERIFIED — operator to confirm`.
+Sessions for `$admin` / `$u1`: `UNVERIFIED — operator to confirm`.
 
 - **O1 (overnight two-segment shift).** As admin: `POST /api/attendance/shifts`
-  `{ "name": "qa_synth_shift_overnight", "timezone": "Asia/Shanghai", "isOvernight": true, "segments": [ { "startTime": "08:00", "endTime": "12:00" }, { "startTime": "20:00", "endTime": "04:00", "endDayOffset": 1 } ], "orgId": "qa_synth_org_a" }`
+  `{ "name": "qa_synth_shift_overnight", "timezone": "Asia/Shanghai", "isOvernight": true, "segments": [ { "startTime": "08:00", "endTime": "12:00" }, { "startTime": "20:00", "endTime": "04:00", "endDayOffset": 1 } ], "orgId": "$orgA" }`
   — capture `{shift_id}`. This envelope satisfies the canonical service's segment
   contract (`attendance-shift-service.cjs:379-444`): each `startDayOffset=0`
   (`:404-405`), one segment crosses midnight via `endDayOffset=1` (`:407-409`,
@@ -519,11 +554,11 @@ Sessions for `qa_synth_admin` / `qa_synth_u1`: `UNVERIFIED — operator to confi
   `20:00→23:59` + `00:00→04:00(+1)` would be rejected — total > 24h — so this shape
   is used instead.)
 - **O2 (assign).** As admin: `POST /api/attendance/assignments`
-  `{ "userId": "qa_synth_u1", "shiftId": "{shift_id}", "startDate": "2026-01-05", "orgId": "qa_synth_org_a" }`.
-- **O3 (evening check-in, business day 2026-01-05).** As `qa_synth_u1`:
+  `{ "userId": "$u1", "shiftId": "{shift_id}", "startDate": "2026-01-05", "orgId": "$orgA" }`.
+- **O3 (evening check-in, business day 2026-01-05).** As `$u1`:
   `POST /api/attendance/punch`
   `{ "eventType": "check_in", "occurredAt": "2026-01-05T20:05:00+08:00", "timezone": "Asia/Shanghai" }`.
-- **O4 (next-morning check-out, calendar day 2026-01-06).** As `qa_synth_u1`:
+- **O4 (next-morning check-out, calendar day 2026-01-06).** As `$u1`:
   `POST /api/attendance/punch`
   `{ "eventType": "check_out", "occurredAt": "2026-01-06T03:30:00+08:00", "timezone": "Asia/Shanghai" }`.
 
@@ -535,8 +570,8 @@ Sessions for `qa_synth_admin` / `qa_synth_u1`: `UNVERIFIED — operator to confi
   consolidated `attendance_records` row carry `work_date = 2026-01-05` (the
   previous-night containing shift, `attendance-work-date-resolver.cjs:463-485`).
   Verify via SQL:
-  `SELECT event_type, work_date FROM attendance_events WHERE org_id='qa_synth_org_a' AND user_id='qa_synth_u1' ORDER BY occurred_at;`
-  and `SELECT work_date FROM attendance_records WHERE org_id='qa_synth_org_a' AND user_id='qa_synth_u1';`
+  `SELECT event_type, work_date FROM attendance_events WHERE org_id='$orgA' AND user_id='$u1' ORDER BY occurred_at;`
+  and `SELECT work_date FROM attendance_records WHERE org_id='$orgA' AND user_id='$u1';`
 - A next-day punch must **not** create a second `attendance_records` row on
   2026-01-06 for this shift.
 
@@ -556,7 +591,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-02.sql` (cleanup section).
+Apply the reworked Node flow (no `fixtures/pqa-02.sql` exists — create = the operator HTTP/UI steps in this section + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section).
 
 ### Evidence (summary.json fields)
 
@@ -622,20 +657,20 @@ so the legacy `attendance_records` projection is untouched while a shadow
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-05.sql` (create section): admin + user
-in **`qa_synth_org_shadow`**, plus a bootstrap `attendance_calculation_rollout_state`
+Apply the reworked Node flow (no `fixtures/pqa-05.sql` exists — create = this case’s harness `harness/pqa-05-rollout.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section): admin + user
+in **`$orgShadow`**, plus a bootstrap `attendance_calculation_rollout_state`
 row `state='legacy'` (`prior_state` NULL, `scope='synthetic_staging'`) — the only
 INSERT shape the state-guard trigger admits.
 
 ### Steps
 
 1. **Env + posture (UNVERIFIED — operator to confirm).** Set
-   `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED=qa_synth_org_shadow` on the host,
-   then move the rollout state `legacy → shadow` for `qa_synth_org_shadow` via the
+   `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED=$orgShadow` on the host,
+   then move the rollout state `legacy → shadow` for `$orgShadow` via the
    internal command `transitionAttendanceCalculationRolloutV1`
    (`w4c3a-rollout-control.ts:1125`) — **no HTTP route exists**, so this is a
    node/test-harness invocation; the exact runner is operator-confirmed.
-2. **Drive one calculation** for a synthetic record in `qa_synth_org_shadow`
+2. **Drive one calculation** for a synthetic record in `$orgShadow`
    (e.g. a punch via `POST /api/attendance/punch`, then the W4 boundary evaluates
    in shadow). The in-process boundary path is
    `w4c2-live-scheduled-boundary.ts` — `UNVERIFIED — operator to confirm` the
@@ -647,8 +682,8 @@ INSERT shape the state-guard trigger admits.
   unchanged** (no W4 mutation of `status`/`work_minutes`).
 - Exactly one appended `attendance_record_calculations` row with `mode='shadow'`
   and, by `chk_arc_shadow_effect`, `projection_effect='none'`:
-  `SELECT mode, projection_effect, outcome FROM attendance_record_calculations WHERE org_id='qa_synth_org_shadow';`
-- `attendance_calculation_rollout_state.state = 'shadow'` for `qa_synth_org_shadow`.
+  `SELECT mode, projection_effect, outcome FROM attendance_record_calculations WHERE org_id='$orgShadow';`
+- `attendance_calculation_rollout_state.state = 'shadow'` for `$orgShadow`.
 
 ### Residue SQL (rows this case created)
 
@@ -667,7 +702,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-05.sql` (cleanup section). Also unset
+Apply the reworked Node flow (no `fixtures/pqa-05.sql` exists — create = this case’s harness `harness/pqa-05-rollout.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section). Also unset
 `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` (operator).
 
 ### Evidence (summary.json fields)
@@ -723,15 +758,15 @@ retires a placeholder instead of publishing —
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-06.sql` (create section): admin + user in
-`qa_synth_org_a` (for the route-422 flavor) / `qa_synth_org_shadow` (for the
+Apply the reworked Node flow (no `fixtures/pqa-06.sql` exists — create = this case’s harness `harness/pqa-06-ambiguous.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section): admin + user in
+`$orgA` (for the route-422 flavor) / `$orgShadow` (for the
 calculator review flavor, which needs W4 enabled — see PQA-05). Duplicate
 punches/overlapping shifts are produced in the steps.
 
 ### Steps
 
 - **R1 (attribution ambiguity → 422, no fabrication).** Construct overlapping shift
-  windows for `qa_synth_u1` (two assignments whose windows both contain the punch
+  windows for `$u1` (two assignments whose windows both contain the punch
   instant) — `UNVERIFIED — operator to confirm` the exact overlapping-window
   construction — then `POST /api/attendance/punch` at the overlapping instant.
 - **R2 (segment duplicate → review_required).** With W4 enabled for the org (per
@@ -768,7 +803,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-06.sql` (cleanup section).
+Apply the reworked Node flow (no `fixtures/pqa-06.sql` exists — create = this case’s harness `harness/pqa-06-ambiguous.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section).
 
 ### Evidence (summary.json fields)
 
@@ -826,13 +861,13 @@ snapshot; a new mismatch becomes review-required.
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-08.sql` (create section): admin + user in
-`qa_synth_org_shadow` (W4 enabled, per PQA-05). The request, snapshot, shift, and
+Apply the reworked Node flow (no `fixtures/pqa-08.sql` exists — create = this case’s harness `harness/pqa-08-fingerprint-freeze.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section): admin + user in
+`$orgShadow` (W4 enabled, per PQA-05). The request, snapshot, shift, and
 re-evaluation are produced by the product/boundary in the steps.
 
 ### Steps (all W4-boundary/runtime — UNVERIFIED — operator to confirm)
 
-1. Create an attendance request against a shift for `qa_synth_u1` and let the W4
+1. Create an attendance request against a shift for `$u1` and let the W4
    boundary freeze its `attendance_request_calculation_snapshots` version 1 (record
    its `payload_fingerprint`).
 2. Change the shift definition (`PUT /api/attendance/shifts/{shift_id}` — e.g. move
@@ -847,7 +882,7 @@ The exact host wiring that mints the snapshot and re-evaluates is
 - The version-1 snapshot row is **byte-for-byte unchanged** after step 2 (same
   `payload_fingerprint`, same `created_at`); any re-append is a **new** version row,
   never a mutation:
-  `SELECT version, payload_fingerprint, created_at FROM attendance_request_calculation_snapshots WHERE org_id='qa_synth_org_shadow' ORDER BY version;`
+  `SELECT version, payload_fingerprint, created_at FROM attendance_request_calculation_snapshots WHERE org_id='$orgShadow' ORDER BY version;`
 - The re-evaluation after the shift change yields
   `attendance_record_calculations.outcome='review_required'` with
   `outcome_reason_code='context_mismatch'` (and the enforced `projection_effect='none'`).
@@ -870,7 +905,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-08.sql` (cleanup section). Note the
+Apply the reworked Node flow (no `fixtures/pqa-08.sql` exists — create = this case’s harness `harness/pqa-08-fingerprint-freeze.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section). Note the
 snapshot table FK to `attendance_requests` is `ON DELETE RESTRICT` — delete
 snapshots before requests (the cleanup does).
 
@@ -927,8 +962,8 @@ one source/result effect and no duplicate DML.
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-09.sql` (create section): admin + user in
-`qa_synth_org_shadow`. **The outbox row is produced by the product** (a W4
+Apply the reworked Node flow (no `fixtures/pqa-09.sql` exists — create = this case’s harness `harness/pqa-09-outbox-retry.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section): admin + user in
+`$orgShadow`. **The outbox row is produced by the product** (a W4
 calculation or scheduled run for the synthetic org enqueues one — see PQA-10) — a
 hand-seeded outbox row is intentionally avoided because `identity_kind`/the partial
 unique identity indexes/the update-guard trigger make a hand INSERT fragile.
@@ -936,7 +971,7 @@ unique identity indexes/the update-guard trigger make a hand INSERT fragile.
 
 ### Steps (worker/runtime — UNVERIFIED — operator to confirm)
 
-1. Produce exactly one `pending` outbox row for `qa_synth_org_shadow` (via PQA-10's
+1. Produce exactly one `pending` outbox row for `$orgShadow` (via PQA-10's
    `POST /api/attendance/auto-absence/run`, which enqueues via
    `enqueueAttendanceScheduledRunEventOutboxV1`,
    `packages/core-backend/src/attendance/w4c2-scheduled-run.ts:328/347`).
@@ -956,7 +991,7 @@ unique identity indexes/the update-guard trigger make a hand INSERT fragile.
   set — **exactly one** delivered transition.
 - Baseline counts in `attendance_result_operations` and `attendance_records` are
   **unchanged** across both passes (no duplicate business DML):
-  `SELECT delivery_state, attempts FROM attendance_result_event_outbox WHERE org_id='qa_synth_org_shadow';`
+  `SELECT delivery_state, attempts FROM attendance_result_event_outbox WHERE org_id='$orgShadow';`
 
 ### Residue SQL (rows this case created)
 
@@ -976,7 +1011,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-09.sql` (cleanup section).
+Apply the reworked Node flow (no `fixtures/pqa-09.sql` exists — create = this case’s harness `harness/pqa-09-outbox-retry.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section).
 
 ### Evidence (summary.json fields)
 
@@ -1039,17 +1074,17 @@ outbox durability on the current exact source SHA without inventing PASS.
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-10.sql` (create section): admin +
-absence-eligible user in `qa_synth_org_shadow` (W4 enabled). Scheduled-run rows are
+Apply the reworked Node flow (no `fixtures/pqa-10.sql` exists — create = this case’s harness `harness/pqa-10-scheduled-sweep.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section): admin +
+absence-eligible user in `$orgShadow` (W4 enabled). Scheduled-run rows are
 produced by the route/worker in the steps.
 
 ### Steps
 
-Session for `qa_synth_admin` + env `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`:
+Session for `$admin` + env `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`:
 `UNVERIFIED — operator to confirm`.
 
 - **S1 (trigger).** As admin: `POST /api/attendance/auto-absence/run`
-  `{ "orgId": "qa_synth_org_shadow", "workDate": "2026-01-05" }` (exact body fields
+  `{ "orgId": "$orgShadow", "workDate": "2026-01-05" }` (exact body fields
   `UNVERIFIED — operator to confirm`).
 - **S2 (re-trigger — identity idempotence).** Repeat S1 with the same
   `orgId`/`workDate`.
@@ -1059,14 +1094,14 @@ Session for `qa_synth_admin` + env `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
 ### Expected
 
 - After S1+S2: **at most one** `attendance_scheduled_runs` row with `state='running'`
-  for `(qa_synth_org_shadow, 'admin_run', 2026-01-05)` (enforced by
+  for `($orgShadow, 'admin_run', 2026-01-05)` (enforced by
   `uq_asr_one_running`); a re-trigger resumes rather than duplicating (`generation`
   does not fork a second running row):
-  `SELECT generation, state FROM attendance_scheduled_runs WHERE org_id='qa_synth_org_shadow' ORDER BY generation;`
+  `SELECT generation, state FROM attendance_scheduled_runs WHERE org_id='$orgShadow' ORDER BY generation;`
 - Each target has exactly one `attendance_scheduled_run_target_outcomes` row
   (`uq_asrto_target`); `terminal_outcome ∈ ('completed','failed')`.
 - Outbox rows for the run are durable (`delivery_state='pending'` until drained):
-  `SELECT count(*) FROM attendance_result_event_outbox WHERE org_id='qa_synth_org_shadow';`
+  `SELECT count(*) FROM attendance_result_event_outbox WHERE org_id='$orgShadow';`
 
 ### Residue SQL (rows this case created)
 
@@ -1084,7 +1119,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-10.sql` (cleanup section) — deletes
+Apply the reworked Node flow (no `fixtures/pqa-10.sql` exists — create = this case’s harness `harness/pqa-10-scheduled-sweep.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section) — deletes
 target_outcomes → targets → runs → outbox (FK order) → records/memberships/users.
 
 ### Evidence (summary.json fields)
@@ -1121,8 +1156,8 @@ shape) is written by the pre-W4 path and is untouched by W4.
 
 ### Tables / columns — the "NO W4 rows" assertion set
 
-For `qa_synth_org_legacy` these W4 tables must contain **zero** rows
-(`org_id = 'qa_synth_org_legacy'`):
+For `$orgLegacy` these W4 tables must contain **zero** rows
+(`org_id = '$orgLegacy'`):
 `attendance_record_calculations` (`zzzz20260725120000_...:655`),
 `attendance_record_segments` (`:860`), `attendance_result_operations` (`:470`),
 `attendance_result_operation_batches` (`:428`), `attendance_result_event_outbox`
@@ -1133,15 +1168,15 @@ shape).
 
 ### Synthetic fixtures — create
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-04.sql` (create section): admin + user in
-**`qa_synth_org_legacy`**. Critically, `qa_synth_org_legacy` MUST NOT appear in
+Apply the reworked Node flow (no `fixtures/pqa-04.sql` exists — create = the operator HTTP/UI steps in this section + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section): admin + user in
+**`$orgLegacy`**. Critically, `$orgLegacy` MUST NOT appear in
 `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` — verify the env
 (`UNVERIFIED — operator to confirm`).
 
 ### Steps
 
-- **L1.** As `qa_synth_u1`: `POST /api/attendance/punch`
-  `{ "eventType": "check_in", "occurredAt": "2026-01-05T09:00:00+08:00", "timezone": "Asia/Shanghai", "orgId": "qa_synth_org_legacy" }`
+- **L1.** As `$u1`: `POST /api/attendance/punch`
+  `{ "eventType": "check_in", "occurredAt": "2026-01-05T09:00:00+08:00", "timezone": "Asia/Shanghai", "orgId": "$orgLegacy" }`
   (and a `check_out` later the same day) — the legacy path writes an
   `attendance_records` projection; the W4 path is a no-op.
 
@@ -1149,18 +1184,18 @@ Apply `scripts/ops/windows-qa/fixtures/pqa-04.sql` (create section): admin + use
 
 - The `POST /api/attendance/punch` responses have the **existing** legacy shape
   (HTTP 2xx, legacy record projection) — no W4-specific fields forced.
-- A legacy `attendance_records` row exists for `qa_synth_org_legacy` with the usual
+- A legacy `attendance_records` row exists for `$orgLegacy` with the usual
   `status`/`work_minutes`.
-- **Zero** rows in every W4 table listed above for `org_id='qa_synth_org_legacy'`:
+- **Zero** rows in every W4 table listed above for `org_id='$orgLegacy'`:
   ```sql
   SELECT
-      (SELECT count(*) FROM attendance_record_calculations           WHERE org_id='qa_synth_org_legacy')
-    + (SELECT count(*) FROM attendance_record_segments               WHERE org_id='qa_synth_org_legacy')
-    + (SELECT count(*) FROM attendance_result_operations             WHERE org_id='qa_synth_org_legacy')
-    + (SELECT count(*) FROM attendance_result_operation_batches      WHERE org_id='qa_synth_org_legacy')
-    + (SELECT count(*) FROM attendance_result_event_outbox           WHERE org_id='qa_synth_org_legacy')
-    + (SELECT count(*) FROM attendance_calculation_rollout_state     WHERE org_id='qa_synth_org_legacy')
-    + (SELECT count(*) FROM attendance_calculation_rollout_events    WHERE org_id='qa_synth_org_legacy')
+      (SELECT count(*) FROM attendance_record_calculations           WHERE org_id='$orgLegacy')
+    + (SELECT count(*) FROM attendance_record_segments               WHERE org_id='$orgLegacy')
+    + (SELECT count(*) FROM attendance_result_operations             WHERE org_id='$orgLegacy')
+    + (SELECT count(*) FROM attendance_result_operation_batches      WHERE org_id='$orgLegacy')
+    + (SELECT count(*) FROM attendance_result_event_outbox           WHERE org_id='$orgLegacy')
+    + (SELECT count(*) FROM attendance_calculation_rollout_state     WHERE org_id='$orgLegacy')
+    + (SELECT count(*) FROM attendance_calculation_rollout_events    WHERE org_id='$orgLegacy')
     AS w4_rows;   -- must be 0
   ```
 
@@ -1177,7 +1212,7 @@ SELECT
 
 ### Cleanup
 
-Apply `scripts/ops/windows-qa/fixtures/pqa-04.sql` (cleanup section).
+Apply the reworked Node flow (no `fixtures/pqa-04.sql` exists — create = the operator HTTP/UI steps in this section + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (cleanup section).
 
 ### Evidence (summary.json fields)
 

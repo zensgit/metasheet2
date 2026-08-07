@@ -100,6 +100,10 @@ if [[ "${WINDOWS_NATIVE_QA_V2}" == "1" ]]; then
     "scripts/ops/attendance-windows-native-qa-v2.pin.json"
     "scripts/ops/attendance-windows-native-qa-risk-matrix.json"
     "scripts/ops/attendance-windows-native-qa-runner.mjs"
+    # Fix 5 (version-binding): ship the executable QA harnesses IN the ZIP, bound to this package SHA.
+    # The runtime artifacts (.runtime/, evidence/, qa-identities.json, summary.json) are stripped after
+    # copy so no minted synthetic identities or evidence ever enter the package.
+    "scripts/ops/windows-qa"
     "docker/app.env.attendance-windows-native.qa.example"
     "ecosystem.windows-native.config.cjs"
     "docs/deployment/attendance-windows-native-qa-v2-20260804.md"
@@ -270,6 +274,21 @@ command -v zip >/dev/null 2>&1 || die "zip command is required to build Windows 
 for rel in "${REQUIRED_PATHS[@]}"; do
   copy_path "$rel"
 done
+
+if [[ "${WINDOWS_NATIVE_QA_V2}" == "1" ]]; then
+  # Fix 5 (security): the windows-qa tree is copied with `cp -R`, which would also copy any local
+  # gitignored runtime artifacts (minted synthetic identities / host evidence). Strip them from the
+  # packaged copy so the ZIP ships only the harness code, never runtime secrets.
+  qa_pkg_dir="${PACKAGE_ROOT}/scripts/ops/windows-qa"
+  # The gitignored runtime dir lives at harness/.runtime (see qa-runtime.mjs DEFAULT_* paths, which
+  # write the evidence dir INSIDE .runtime). Remove any `.runtime` dir at any depth (covers it), plus
+  # the top-level `evidence/` the .gitignore anchors — but NOT a name match on `evidence` at arbitrary
+  # depth, which could silently drop an unrelated tracked directory. Then strip stray identity/evidence
+  # files by exact name.
+  rm -rf "${qa_pkg_dir}/evidence"
+  find "${qa_pkg_dir}" -depth -type d -name '.runtime' -exec rm -rf {} + 2>/dev/null || true
+  find "${qa_pkg_dir}" \( -name 'qa-identities.json' -o -name 'summary.json' -o -name '*.evidence.json' \) -delete 2>/dev/null || true
+fi
 
 write_onprem_workspace_manifest
 write_windows_entrypoints

@@ -65,7 +65,30 @@ export function resolveProductModule(subpath) {
   throw new Error(`Cannot resolve product module "${subpath}" (looked in dist/ and src/).`)
 }
 
+/**
+ * Owner Fix 5 (version-binding). The harnesses ship IN the on-prem ZIP (see
+ * attendance-onprem-package-build.sh), so a packaged copy carries a `SOURCE_SHA` file at the package
+ * root next to this tree. If that file is present, the harness's PINNED_SHA MUST equal it — otherwise
+ * the shipped harnesses drifted from the packaged product and any evidence they write would attest the
+ * wrong SHA. In a source checkout there is no SOURCE_SHA file, so this is a no-op (the runner still
+ * binds the package SHA independently). `root` is injectable for tests.
+ */
+export function assertHarnessBoundToPackageSha(root = REPO_ROOT) {
+  const sourceShaFile = path.join(root, 'SOURCE_SHA')
+  if (!fs.existsSync(sourceShaFile)) return { checked: false }
+  const packageSha = fs.readFileSync(sourceShaFile, 'utf8').trim().toLowerCase()
+  if (packageSha !== PINNED_SHA) {
+    throw new Error(
+      `Harness/package SHA drift: this harness is pinned to ${PINNED_SHA} but the package SOURCE_SHA is ` +
+        `${packageSha}. Re-ship the QA harnesses bound to the packaged product SHA before running.`,
+    )
+  }
+  return { checked: true, packageSha }
+}
+
 export async function importProduct(subpath) {
+  // Fail closed on a harness/package SHA drift before touching any product code.
+  assertHarnessBoundToPackageSha()
   return import(resolveProductModule(subpath))
 }
 
