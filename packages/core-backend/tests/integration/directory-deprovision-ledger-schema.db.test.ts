@@ -318,6 +318,32 @@ describeDb('directory deprovision ledger hardening (real DB, isolated schema)', 
       sql`UPDATE directory_deprovision_effects SET access_generation_at_apply = 99 WHERE event_id = ${eventId}`.execute(db),
     ).rejects.toThrow(/identity fields are immutable/)
 
+    // Delta re-review (P3-D1): the six columns below were individually neuterable with the suite
+    // still green — the net had holes even though the trigger was correct. The property under
+    // test is "the DB refuses the tamper", whichever mechanism answers (immutability trigger, or
+    // a CHECK that independently rejects the same write), so the assertions accept either
+    // refusal message. `effects.after_active` (what the drift gate compares against) and
+    // `effects.effect_type` (which selects the reversal branch) are the two that most invited
+    // silent tampering.
+    await expect(
+      sql`UPDATE directory_deprovision_events SET access_generation_at_apply = 41 WHERE id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/immutable|violates/)
+    await expect(
+      sql`UPDATE directory_deprovision_events SET event_origin = 'admin_manual' WHERE id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/immutable|violates/)
+    await expect(
+      sql`UPDATE directory_deprovision_events SET run_id = NULL WHERE id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/immutable|violates/)
+    await expect(
+      sql`UPDATE directory_deprovision_effects SET after_active = TRUE WHERE event_id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/immutable|violates/)
+    await expect(
+      sql`UPDATE directory_deprovision_effects SET effect_type = 'grant_changed' WHERE event_id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/immutable|violates/)
+    await expect(
+      sql`UPDATE directory_deprovision_effects SET org_id = NULL WHERE event_id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/immutable|violates/)
+
     // Positive control for the family above: a resolve-column UPDATE on the same rows must
     // SUCCEED — proving the rejections come from the guarded columns, not from a trigger that
     // rejects every UPDATE (which would also freeze supersede/restore forever).
