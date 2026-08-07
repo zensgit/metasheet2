@@ -390,7 +390,7 @@ zip      d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
 
 ---
 
-## 7.6 配置修复阻塞与其两道门(2026-08-07,实测)
+## 7.6 配置修复阻塞:两道门与正确的修复前提(2026-08-07,实测)
 
 窗口未能开始。链条卡在**配置面修复**这一步,`readyForControlledWindow=NO`。
 
@@ -422,9 +422,9 @@ roles 交叉校验**(`upsertExternalSystem` 全文无 adapter registry / adapter
 > 与 adapter 怎么声明 roles 无关,任何构建下都成立。
 > 而**新建的那条记录也不需要 `source` 角色** —— 见 §7.6.3。
 
-不受此阻塞的一半:approved SQL Server source adapter 本就声明 source 侧
-(`data-source-sql-readonly-source-adapter.cjs`),`approvedSqlServerSourceRefPresent=NO`
-那一项现在就能按既有授权补齐。
+**与本阻塞无关的一项独立就绪项**:`approvedSqlServerSourceRefPresent=NO` 现在就能按既有授权补齐 ——
+pipeline 的 source 一直是**已批准的 SQL Server source**,其 adapter 本就声明 source 侧
+(`data-source-sql-readonly-source-adapter.cjs:433`),从不经过上面两道门。
 
 ### 7.6.3 正确的修复前提:K3 保持 target-only,K3-read 不需要 `source` 角色
 
@@ -440,9 +440,10 @@ roles 交叉校验**(`upsertExternalSystem` 全文无 adapter registry / adapter
 | ⇒ 记录配 `readMode:'list'` 时,两个调用点的读都因缺该 Symbol 被 `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` 回绝 | `k3-wise-webapi-adapter.cjs:975-980` |
 | ⇒ 未写 `readMode` 时默认 `single_record_detail`,改由 `K3_WISE_READ_KEY_REQUIRED` 回绝(§7.2 三变体表) | `k3-wise-webapi-adapter.cjs:972` |
 
-这比 §7.2 记的"发裸读"**强一层**:runner 那条并非漏传参数,而是**结构上传不进去** ——
-私有 Symbol 不可能出现在 JSON 配置里。adapter 在 main 上仍是 `roles: ['target']`
-(`k3-wise-webapi-adapter.cjs:2579`),**保持不变**。
+**provenance**:§7.2 记的是 dry-run 那一条(`readSourceRows` 确为**字面**裸读),它只讲了那条路径;
+runner 这一条是**本节新增**的相邻发现,不是对 §7.2 的更正。两条的判据也不同 ——
+runner 那条并非"漏传参数",而是**结构上传不进去**:私有 Symbol 不可能出现在 JSON 配置里。
+adapter 在 main 上仍是 `roles: ['target']`(`k3-wise-webapi-adapter.cjs:2579`),**保持不变**。
 
 **而 runbook 本来就不需要 K3 持有 `source` 角色。** pipeline 的 source 仍是**已批准的 SQL Server
 source**(`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`,§7.2);K3-read **不进 pipeline 的
