@@ -47,6 +47,7 @@ Discriminating negatives included:
 - Topology throw surfaces business copy only (no internal keys).  
 - Empty undo/redo fail closed.  
 - Canvas command algebra suite 18/18 (prior D2-b).  
+- **Inspector map retention:** reseed → mutate `approvalNodeEdits` → move on **live** graph retains `approvalMode`/`assigneeSources`; same move on stale `history.graph` wipe is the negative control (`approval-authoring-history` product-path case).  
 
 Log capture (implementer scratch): `web-authoring-full.log`.
 

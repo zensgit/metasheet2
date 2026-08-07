@@ -2163,14 +2163,21 @@ function runTopologyOp(
 
 function onCanvasUndo(): void {
   if (readOnly.value) return
-  const result = undoAuthoringSession(canvasAuthoringHistory.value)
+  // Live effective graph carries inspector map edits; never undo against a stale session tip.
+  const result = undoAuthoringSession(
+    canvasAuthoringHistory.value,
+    buildApprovalGraph(draft.value),
+  )
   if (!result.ok) return
   applySessionHistoryToDraft(result.history)
 }
 
 function onCanvasRedo(): void {
   if (readOnly.value) return
-  const result = redoAuthoringSession(canvasAuthoringHistory.value)
+  const result = redoAuthoringSession(
+    canvasAuthoringHistory.value,
+    buildApprovalGraph(draft.value),
+  )
   if (!result.ok) return
   applySessionHistoryToDraft(result.history)
 }
@@ -2410,10 +2417,13 @@ function applyCanvasNodeMove(targetEdgeKey: string): void {
   const nodeKey = movingCanvasNode.value
   if (!nodeKey || !canvasMoveTargets.value.has(targetEdgeKey)) return
   const selectionBefore: ApprovalCanvasSelection = { kind: 'node', nodeKey }
+  // Always command against the live effective graph so inspector-only map edits
+  // (approvalMode / assigneeSources / condition rules / …) are not wiped on project.
   const applied = applyCanvasCommandToSession(
     canvasAuthoringHistory.value,
     { type: 'move-node-into-edge', nodeKey, intoEdgeKey: targetEdgeKey },
     selectionBefore,
+    buildApprovalGraph(draft.value),
   )
   if (!applied.ok) {
     // Fail closed: no draft mutation. Business-facing copy only (no edge/node keys).

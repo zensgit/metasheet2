@@ -33,7 +33,7 @@ Data-closure (already on main from the 20260722 stack) remains:
 
 | Area | Change |
 |---|---|
-| Session history | New pure module `apps/web/src/approvals/approvalAuthoringHistory.ts` — typed canvas-command path + topology snapshot path; promote linear → graph |
+| Session history | New pure module `apps/web/src/approvals/approvalAuthoringHistory.ts` — typed canvas-command path + topology snapshot path; promote linear → graph. **Canvas move/undo/redo always take the live `buildApprovalGraph(draft)` tip** so inspector-only map edits are not wiped when projecting after a stale session graph. |
 | Authoring surface | `TemplateAuthoringView.vue` — default `canvasViewMode = 'canvas'`; undo/redo toolbar; moves via `applyCanvasCommandToSession`; topology via session history; linear promote on flow section when Canvas V2 on |
 | Accessible alternative | Toggle label **辅助编辑模式** (`approval-view-list`); not removed |
 | Tests | `approval-authoring-history.test.ts`, `approval-g5c-authoring-scenarios.test.ts` (S1–S12 product-path), canvas-inspector list-default fix |

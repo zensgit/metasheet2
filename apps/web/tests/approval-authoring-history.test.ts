@@ -212,11 +212,12 @@ describe('approvalAuthoringHistory — mixed stack', () => {
       history,
       { type: 'move-node-into-edge', nodeKey: 'a1', intoEdgeKey: into },
       { kind: 'node', nodeKey: 'a1' },
+      buildApprovalGraph(draft),
     )
     // Move may fail closed if algebra rejects this slot — either path is valid.
     if (moved.ok) {
       history = moved.history
-      const u1 = undoAuthoringSession(history)
+      const u1 = undoAuthoringSession(history, buildApprovalGraph(draftFromSessionGraph(draft, history.graph)))
       expect(u1.ok).toBe(true)
       if (!u1.ok) return
       history = u1.history
@@ -227,5 +228,127 @@ describe('approvalAuthoringHistory — mixed stack', () => {
     expect(u2.ok).toBe(true)
     if (!u2.ok) return
     expect(u2.history.graph).toEqual(linearThree())
+  })
+})
+
+describe('approvalAuthoringHistory — inspector map edits survive move/undo', () => {
+  it('reseed → mutate approvalNodeEdits → move on live graph retains config; stale tip would wipe', () => {
+    // Seed graph with "default" approval config (single + requester).
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'a1',
+          type: 'approval',
+          name: '审批1',
+          config: {
+            assigneeSources: [{ kind: 'requester' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        {
+          key: 'a2',
+          type: 'approval',
+          name: '审批2',
+          config: {
+            assigneeSources: [{ kind: 'requester' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-a1', source: 'start', target: 'a1' },
+        { key: 'e-a1-a2', source: 'a1', target: 'a2' },
+        { key: 'e-a2-end', source: 'a2', target: 'end' },
+      ],
+    }
+    let draft = draftWithGraph(graph)
+    // Reseed once from the seed graph — session tip does NOT include later map edits.
+    let history = reseedAuthoringSessionHistory(draft, { kind: 'node', nodeKey: 'a1' })
+    expect(
+      (history.graph.nodes.find((n) => n.key === 'a1')?.config as { approvalMode?: string })
+        ?.approvalMode,
+    ).toBe('single')
+
+    // Inspector-only edit: change a1 without reseeding history.
+    draft = {
+      ...draft,
+      approvalNodeEdits: {
+        ...(draft.approvalNodeEdits ?? {}),
+        a1: {
+          nodeKey: 'a1',
+          assigneeSources: [{ kind: 'direct_manager' }],
+          approvalMode: 'all',
+          emptyAssigneePolicy: 'auto-approve',
+        },
+        a2: draft.approvalNodeEdits?.a2 ?? {
+          nodeKey: 'a2',
+          assigneeSources: [{ kind: 'requester' }],
+          approvalMode: 'single',
+          emptyAssigneePolicy: 'error',
+        },
+      },
+    }
+    const live = buildApprovalGraph(draft)
+    const liveA1 = live.nodes.find((n) => n.key === 'a1')!
+    expect((liveA1.config as { approvalMode?: string }).approvalMode).toBe('all')
+    expect(
+      (liveA1.config as { assigneeSources?: Array<{ kind: string }> }).assigneeSources?.[0]?.kind,
+    ).toBe('direct_manager')
+    // Session tip is still the pre-inspector graph (stale).
+    expect(
+      (history.graph.nodes.find((n) => n.key === 'a1')?.config as { approvalMode?: string })
+        ?.approvalMode,
+    ).toBe('single')
+
+    // Discriminating control: applying against the STALE tip then projecting wipes the edit.
+    const wiped = applyCanvasCommandToSession(
+      history,
+      { type: 'move-node-into-edge', nodeKey: 'a1', intoEdgeKey: 'e-a2-end' },
+      { kind: 'node', nodeKey: 'a1' },
+      history.graph, // intentionally stale
+    )
+    expect(wiped.ok).toBe(true)
+    if (!wiped.ok) return
+    const wipedDraft = draftFromSessionGraph(draft, wiped.history.graph)
+    const wipedA1 = buildApprovalGraph(wipedDraft).nodes.find((n) => n.key === 'a1')!
+    expect((wipedA1.config as { approvalMode?: string }).approvalMode).toBe('single')
+    expect(
+      (wipedA1.config as { assigneeSources?: Array<{ kind: string }> }).assigneeSources?.[0]?.kind,
+    ).toBe('requester')
+
+    // Product path: pass live effective graph — configs survive move + project.
+    const moved = applyCanvasCommandToSession(
+      history,
+      { type: 'move-node-into-edge', nodeKey: 'a1', intoEdgeKey: 'e-a2-end' },
+      { kind: 'node', nodeKey: 'a1' },
+      live,
+    )
+    expect(moved.ok).toBe(true)
+    if (!moved.ok) return
+    draft = draftFromSessionGraph(draft, moved.history.graph)
+    history = moved.history
+    const afterMove = buildApprovalGraph(draft)
+    const a1After = afterMove.nodes.find((n) => n.key === 'a1')!
+    expect((a1After.config as { approvalMode?: string }).approvalMode).toBe('all')
+    expect(
+      (a1After.config as { assigneeSources?: Array<{ kind: string }> }).assigneeSources?.[0]?.kind,
+    ).toBe('direct_manager')
+    expect(edgeBetween(afterMove, 'a2', 'a1')).toBeTruthy()
+
+    // Undo move on live graph also keeps the inspector config that was present at move time.
+    const undone = undoAuthoringSession(history, buildApprovalGraph(draft))
+    expect(undone.ok).toBe(true)
+    if (!undone.ok) return
+    draft = draftFromSessionGraph(draft, undone.history.graph)
+    const a1Undone = buildApprovalGraph(draft).nodes.find((n) => n.key === 'a1')!
+    expect((a1Undone.config as { approvalMode?: string }).approvalMode).toBe('all')
+    expect(
+      (a1Undone.config as { assigneeSources?: Array<{ kind: string }> }).assigneeSources?.[0]?.kind,
+    ).toBe('direct_manager')
+    expect(edgeBetween(buildApprovalGraph(draft), 'a1', 'a2')).toBeTruthy()
   })
 })

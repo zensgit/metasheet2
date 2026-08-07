@@ -94,13 +94,20 @@ export function promoteLinearDraftToGraphAuthoring(
 /**
  * Apply a typed canvas command (move/reorder). Failures leave history byte-identical
  * and never mutate the draft (caller only writes on ok).
+ *
+ * `liveGraph` MUST be the current effective graph (`buildApprovalGraph(draft)`), not a
+ * stale session tip. Inspector edits (approvalNodeEdits / conditionEdits / …) live only on
+ * the draft until the next topology projection; applying a command against `history.graph`
+ * after those edits and then projecting would wipe the configs.
  */
 export function applyCanvasCommandToSession(
   history: AuthoringSessionHistory,
   command: ApprovalCanvasCommand,
   selectionBefore: ApprovalCanvasSelection = history.selection,
+  liveGraph: ApprovalGraph = history.graph,
 ): AuthoringHistoryResult {
-  const canvasHistory = createApprovalCanvasHistory(history.graph, selectionBefore)
+  const baseGraph = cloneGraph(liveGraph)
+  const canvasHistory = createApprovalCanvasHistory(baseGraph, selectionBefore)
   const applied = applyApprovalCanvasCommand(canvasHistory, command, selectionBefore)
   if (!applied.ok) {
     return { ok: false, error: applied.error, history }
@@ -212,10 +219,12 @@ export function canRedoAuthoring(history: AuthoringSessionHistory): boolean {
 
 /**
  * Undo one session entry. Canvas-command units restore via algebraic inverse on the
- * current graph; topology snapshots restore the before graph.
+ * **live** effective graph (so in-progress inspector config is not wiped); topology
+ * snapshots restore the before graph captured at mutation time.
  */
 export function undoAuthoringSession(
   history: AuthoringSessionHistory,
+  liveGraph: ApprovalGraph = history.graph,
 ): AuthoringHistoryResult {
   if (history.undoStack.length === 0) {
     return {
@@ -237,7 +246,7 @@ export function undoAuthoringSession(
     }
   }
   const result = executeApprovalCanvasCommand(
-    history.graph,
+    cloneGraph(liveGraph),
     entry.inverse,
     history.selection,
   )
@@ -257,6 +266,7 @@ export function undoAuthoringSession(
 
 export function redoAuthoringSession(
   history: AuthoringSessionHistory,
+  liveGraph: ApprovalGraph = history.graph,
 ): AuthoringHistoryResult {
   if (history.redoStack.length === 0) {
     return {
@@ -278,7 +288,7 @@ export function redoAuthoringSession(
     }
   }
   const result = executeApprovalCanvasCommand(
-    history.graph,
+    cloneGraph(liveGraph),
     entry.command,
     entry.selectionBefore,
   )
