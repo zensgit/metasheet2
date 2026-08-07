@@ -36,14 +36,12 @@ import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   CORE_BACKEND,
   assertLocalIsolatedTarget,
   loadPg,
 } from './harness/qa-runtime.mjs'
-
-const pg = loadPg()
 import {
   EXPECTED_MIGRATION_CONFIRM_NAMES,
   EXPECTED_DENY_TRIGGERS,
@@ -64,10 +62,18 @@ function log(msg) {
 // app process is stopped. The packaged app runs under PM2 (ecosystem.windows-native.config.cjs), so the
 // primary check is PM2; a listening app port is the belt-and-suspenders that also covers a host without
 // PM2 (so pm2-absence is NOT a silent fail-open — a live app still LISTENS even when idle).
-const DEFAULT_APP_PORTS = () => {
+// Owner P2 (fail-open): QA_APP_PORT SUPPLEMENTS the defaults, it does not REPLACE them. The old code
+// returned ONLY [QA_APP_PORT] when it was set, so pointing QA_APP_PORT at a free port let a service
+// still listening on a default port (8900/8080) slip past the liveness check. UNION QA_APP_PORT with
+// the defaults; dedupe; keep only finite positive ports.
+export const DEFAULT_APP_PORTS = () => {
+  const ports = new Set([
+    Number(process.env.PORT || 8900),
+    Number(process.env.WINDOWS_NATIVE_GATEWAY_PORT || 8080),
+  ])
   const single = process.env.QA_APP_PORT
-  if (single && single.trim() !== '') return [Number(single)]
-  return [Number(process.env.PORT || 8900), Number(process.env.WINDOWS_NATIVE_GATEWAY_PORT || 8080)]
+  if (single && single.trim() !== '') ports.add(Number(single))
+  return [...ports].filter((p) => Number.isFinite(p) && p > 0)
 }
 
 function isTcpPortListening(host, port) {
@@ -92,7 +98,7 @@ function isTcpPortListening(host, port) {
  * running-but-idle app cannot slip past the instantaneous DB-session check and reconnect post-drop.
  * Throws (no drop) if the service looks up.
  */
-async function assertAppServiceStopped() {
+export async function assertAppServiceStopped() {
   // (i) PM2 — refuse if any PM2-managed process is 'online'. QA_PM2_BIN lets a test point at a stub.
   const pm2Bin = process.env.QA_PM2_BIN || 'pm2'
   let pm2Available = false
@@ -100,19 +106,41 @@ async function assertAppServiceStopped() {
   try {
     pm2Out = execFileSync(pm2Bin, ['jlist'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
     pm2Available = true
-  } catch {
-    /* pm2 not installed / not on PATH — the port check below is then the service-stopped proof */
+  } catch (error) {
+    // Owner P2 (fail-open): distinguish "pm2 not installed" from "pm2 present but failing". ENOENT is
+    // spawn-not-found -> pm2 is genuinely absent, so the port check below is the service-stopped proof.
+    // ANY OTHER failure (non-zero exit, EACCES, ...) means pm2 IS present but we could not obtain a
+    // trustworthy process list -> fail CLOSED (refuse, no drop), never treat as "no processes".
+    if (error && error.code === 'ENOENT') {
+      pm2Available = false
+    } else {
+      throw new Error(
+        `Refusing to DROP ${TARGET_DB}: '${pm2Bin} jlist' failed (${error?.code ?? error?.message ?? 'unknown error'}). ` +
+          `pm2 appears present but its process list is unreadable — the app-stopped state cannot be proven. ` +
+          `Fix pm2 or stop the app, then retry.`,
+      )
+    }
   }
   if (pm2Available) {
-    let procs = []
+    // Owner P2 (fail-open): a garbled / non-array jlist previously fell back to an EMPTY process list
+    // (treated as "0 online" -> drop). That is fail-OPEN. A pm2 that IS present but returns unparseable
+    // or non-array output cannot prove zero online processes -> fail CLOSED (refuse).
+    let procs
     try {
       procs = JSON.parse(pm2Out || '[]')
     } catch {
-      procs = []
+      throw new Error(
+        `Refusing to DROP ${TARGET_DB}: '${pm2Bin} jlist' returned unparseable output — cannot prove the ` +
+          `app is stopped. Fix pm2 or stop the app, then retry.`,
+      )
     }
-    const online = (Array.isArray(procs) ? procs : []).filter(
-      (p) => p && p.pm2_env && p.pm2_env.status === 'online',
-    )
+    if (!Array.isArray(procs)) {
+      throw new Error(
+        `Refusing to DROP ${TARGET_DB}: '${pm2Bin} jlist' did not return a JSON array — cannot prove the ` +
+          `app is stopped. Fix pm2 or stop the app, then retry.`,
+      )
+    }
+    const online = procs.filter((p) => p && p.pm2_env && p.pm2_env.status === 'online')
     if (online.length > 0) {
       const names = online.map((p) => p.name ?? p.pm_id).join(', ')
       throw new Error(
@@ -182,6 +210,9 @@ function pgConfigFrom(connectionString, database) {
 }
 
 async function withClient(config, body) {
+  // Load pg lazily (not at module top level) so this module is importable — for the reset test's
+  // service-stopped checks — without `pg` present. It is only needed when a DB connection is opened.
+  const pg = loadPg()
   const client = new pg.Client(config)
   await client.connect()
   try {
@@ -347,7 +378,14 @@ async function main() {
   log('RESET OK: recreated DB reached the pinned migration SET; deny triggers present.')
 }
 
-main().catch((error) => {
-  console.error(`[reset-isolated-db] ERROR: ${error?.message ?? error}`)
-  process.exit(1)
-})
+// Run only as a CLI (guarded like the runner) so the module can be imported by tests without firing
+// main(). Use the exact pathToFileURL idiom to survive macOS /tmp -> /private/tmp symlink differences.
+if (
+  process.argv[1] &&
+  pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
+) {
+  main().catch((error) => {
+    console.error(`[reset-isolated-db] ERROR: ${error?.message ?? error}`)
+    process.exit(1)
+  })
+}
