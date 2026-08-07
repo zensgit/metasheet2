@@ -22,8 +22,10 @@
  * plus an optional live deny-trigger FIRES negative control (--prove-deny-delete).
  *
  * SAFETY (owner gate 4): before any DROP, hard-verify the target is EXACTLY metasheet_windows_qa on
- * a LOCAL host, and that NO other session is connected (which is also the "service stopped" proof).
- * Refuse (throw, no drop) otherwise. The DROP is issued from a connection to the `postgres` DB.
+ * a LOCAL host (parsed, not substring-matched — see qa-runtime.assertLocalIsolatedTarget), that the
+ * app SERVICE is stopped (PM2 has no online process AND the app ports are not listening — a
+ * running-but-idle app would pass the instantaneous session check and reconnect after the drop), and
+ * that NO other session is connected. Refuse (throw, no drop) otherwise. DROP is issued from `postgres`.
  *
  * Usage:
  *   node reset-isolated-db.mjs                 # gate-4 safe DROP+CREATE, re-migrate, verify (a-d)
@@ -31,6 +33,7 @@
  *   node reset-isolated-db.mjs --prove-deny-delete  # prove a deny-delete trigger actually RAISES
  */
 import fs from 'node:fs'
+import net from 'node:net'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -54,6 +57,85 @@ const TARGET_DB = 'metasheet_windows_qa'
 
 function log(msg) {
   console.log(`[reset-isolated-db] ${msg}`)
+}
+
+// Owner FIX 3 — service-stopped proof. pg_stat_activity=0 is a single instant: a running-but-IDLE app
+// (0 open sessions right now) passes it and reconnects immediately after the drop. So we ALSO prove the
+// app process is stopped. The packaged app runs under PM2 (ecosystem.windows-native.config.cjs), so the
+// primary check is PM2; a listening app port is the belt-and-suspenders that also covers a host without
+// PM2 (so pm2-absence is NOT a silent fail-open — a live app still LISTENS even when idle).
+const DEFAULT_APP_PORTS = () => {
+  const single = process.env.QA_APP_PORT
+  if (single && single.trim() !== '') return [Number(single)]
+  return [Number(process.env.PORT || 8900), Number(process.env.WINDOWS_NATIVE_GATEWAY_PORT || 8080)]
+}
+
+function isTcpPortListening(host, port) {
+  return new Promise((resolve) => {
+    const sock = net.createConnection({ host, port })
+    let settled = false
+    const finish = (v) => {
+      if (settled) return
+      settled = true
+      sock.destroy()
+      resolve(v)
+    }
+    sock.setTimeout(500)
+    sock.once('connect', () => finish(true)) // something is accepting connections on this port
+    sock.once('timeout', () => finish(false))
+    sock.once('error', () => finish(false)) // ECONNREFUSED etc. => nothing listening
+  })
+}
+
+/**
+ * Prove the packaged app service is STOPPED (both a PM2 check and an app-port liveness check), so a
+ * running-but-idle app cannot slip past the instantaneous DB-session check and reconnect post-drop.
+ * Throws (no drop) if the service looks up.
+ */
+async function assertAppServiceStopped() {
+  // (i) PM2 — refuse if any PM2-managed process is 'online'. QA_PM2_BIN lets a test point at a stub.
+  const pm2Bin = process.env.QA_PM2_BIN || 'pm2'
+  let pm2Available = false
+  let pm2Out = ''
+  try {
+    pm2Out = execFileSync(pm2Bin, ['jlist'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    pm2Available = true
+  } catch {
+    /* pm2 not installed / not on PATH — the port check below is then the service-stopped proof */
+  }
+  if (pm2Available) {
+    let procs = []
+    try {
+      procs = JSON.parse(pm2Out || '[]')
+    } catch {
+      procs = []
+    }
+    const online = (Array.isArray(procs) ? procs : []).filter(
+      (p) => p && p.pm2_env && p.pm2_env.status === 'online',
+    )
+    if (online.length > 0) {
+      const names = online.map((p) => p.name ?? p.pm_id).join(', ')
+      throw new Error(
+        `Refusing to DROP ${TARGET_DB}: PM2 reports ${online.length} process(es) still online (${names}). ` +
+          `Stop the app first (pm2 stop <name> / pm2 delete <name>).`,
+      )
+    }
+    log(`gate 4 service-stopped (PM2): ${Array.isArray(procs) ? procs.length : 0} process(es) registered, 0 online.`)
+  }
+  // (ii) App-port liveness — a running (even idle) app still accepts connections on its port.
+  const ports = DEFAULT_APP_PORTS().filter((p) => Number.isFinite(p) && p > 0)
+  for (const port of ports) {
+    if (await isTcpPortListening('127.0.0.1', port)) {
+      throw new Error(
+        `Refusing to DROP ${TARGET_DB}: app port ${port} on 127.0.0.1 is still accepting connections — ` +
+          `the service is running. Stop it first.`,
+      )
+    }
+  }
+  log(
+    `gate 4 service-stopped (port): ${ports.join(', ')} not listening` +
+      (pm2Available ? '.' : ' (pm2 not installed — the port check is the service-stopped proof).'),
+  )
 }
 
 /** Resolve how to run the product migrate CLI: dist (Windows package) or tsx+source (macOS proof). */
@@ -110,8 +192,11 @@ async function withClient(config, body) {
 }
 
 async function dropAndRecreate(connectionString) {
-  // Gate 4: verify no other session is connected to the target (also the "service stopped" proof),
-  // from a connection to the `postgres` maintenance DB (never the target).
+  // Gate 4 (owner FIX 3): BOTH must hold before any DROP — (1) the app service is stopped (PM2 +
+  // app-port liveness) AND (2) no other session is connected to the target. (2) alone is a single
+  // instant that a running-but-idle app would pass and then reconnect through.
+  await assertAppServiceStopped()
+  // (2) no other session on the target, checked from the `postgres` maintenance DB (never the target).
   const adminCfg = pgConfigFrom(connectionString, 'postgres')
   await withClient(adminCfg, async (admin) => {
     const others = await admin.query(
