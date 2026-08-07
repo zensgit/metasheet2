@@ -20,6 +20,7 @@ import {
   DEFAULT_EVIDENCE_DIR,
   openIsolatedClient,
   parseArg,
+  resolveRunId,
 } from './qa-runtime.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -32,8 +33,16 @@ async function main() {
 
   if (process.argv.includes('--init')) {
     fs.mkdirSync(evidenceDir, { recursive: true })
-    fs.copyFileSync(TEMPLATE, summaryPath)
-    console.log(`[summary-tool] seeded ${summaryPath} from summary.template.json (10 BLOCKED, closed set)`)
+    // Copy the closed-set template, then STAMP the campaign runId (the template ships runId:null as a
+    // placeholder). This is the SAME runId resolveRunId() gives the harnesses + emitCaseEvidence, so the
+    // whole run — machine + operator evidence + artifacts — is bound to one runId from the very start.
+    // Without this, a run that records ONLY operator (HTTP/UI) cases would keep runId:null and the runner
+    // would block every PASS on "requires a campaign runId".
+    const seeded = JSON.parse(fs.readFileSync(TEMPLATE, 'utf8'))
+    const runId = resolveRunId()
+    seeded.runId = runId
+    fs.writeFileSync(summaryPath, `${JSON.stringify(seeded, null, 2)}\n`)
+    console.log(`[summary-tool] seeded ${summaryPath} from summary.template.json (10 BLOCKED, closed set, runId=${runId})`)
     return
   }
 
@@ -47,10 +56,13 @@ async function main() {
     } finally {
       await client.end()
     }
+    // Read-modify-write: preserve every existing top-level key (crucially summary.runId, which the
+    // harnesses stamped). Only populate runId if it is somehow missing — never drop it.
     const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'))
     summary.residue = residue
+    if (!summary.runId) summary.runId = resolveRunId()
     fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`)
-    console.log(`[summary-tool] recorded residue=${residue} into ${summaryPath}`)
+    console.log(`[summary-tool] recorded residue=${residue} into ${summaryPath} (runId=${summary.runId})`)
     if (residue !== 0) console.log('[summary-tool] NOTE: residue != 0 — this is the pre-teardown negative control, not a clean result.')
     return
   }

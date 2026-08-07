@@ -13,7 +13,7 @@ import {
   OPERATOR_EVIDENCE_SCHEMA,
   isMachineEvidenceCase,
 } from './windows-qa/harness/machine-evidence-contract.mjs'
-import { buildMachineEvidence } from './windows-qa/harness/qa-runtime.mjs'
+import { buildMachineEvidence, emitCaseEvidence } from './windows-qa/harness/qa-runtime.mjs'
 
 const testDir = path.dirname(fileURLToPath(import.meta.url))
 const runnerPath = path.join(testDir, 'attendance-windows-native-qa-runner.mjs')
@@ -1060,6 +1060,69 @@ test('strictExitViolation: null only when all PASS with residue exactly 0', () =
   assert.equal(strictExitViolation(mk({ PASS: 0, BLOCKED: 10, FAIL: 0 }, null)).exitCode, 3)
   assert.equal(strictExitViolation(mk({ PASS: 10, BLOCKED: 0, FAIL: 0 }, 2)).exitCode, 3)
   assert.equal(strictExitViolation(mk({ PASS: 9, BLOCKED: 0, FAIL: 1 }, 0)).exitCode, 3)
+})
+
+// --------------------------------------------------------------------------
+// Integration spine — the REAL harness emit path (buildMachineEvidence + emitCaseEvidence) through the
+// REAL runner. This is the only guard on emitCaseEvidence stamping summary.runId + buildMachineEvidence
+// stamping caseId/runId; deleting either line makes real harness runs silently un-PASS-able. (The
+// product-DB is not exercised here — only the tooling emit->runner chain.)
+// --------------------------------------------------------------------------
+
+test('spine: real buildMachineEvidence + emitCaseEvidence for 09/10 PASS via the runner; forge does not', () => {
+  const savedRunId = process.env.QA_RUN_ID
+  const savedTooling = process.env.QA_TOOLING_SHA
+  process.env.QA_RUN_ID = 'run-spine-test-0001' // hermetic: resolveRunId returns this, writes no file
+  delete process.env.QA_TOOLING_SHA // let buildMachineEvidence default qaToolingSha to the product SHA
+  withRoots((root, evidenceDir) => {
+    try {
+      const winFacts = { hostPlatform: 'windows', windowsPowerShellVersion: '5.1.26100.1', residue: 0 }
+      // Pre-seed a runId-LESS summary (an old --init shape) so emitCaseEvidence's runId STAMP is
+      // load-bearing: without it, summary.runId stays absent through the upserts and every PASS blocks.
+      writeJson(path.join(evidenceDir, 'summary.json'), { campaign: 'attendance-windows-native-qa-v2-20260804', sourceSha: PINNED_SHA, residue: null, cases: full10() })
+      // 09/10 — REAL harness emit (buildMachineEvidence stamps caseId+runId & self-validates the shape).
+      const me09 = buildMachineEvidence({ caseId: 'PQA-09', harnessModule: 'pqa-09-outbox-retry.mjs', determination: 'PASS', facts: machineFacts('PQA-09') })
+      const me10 = buildMachineEvidence({ caseId: 'PQA-10', harnessModule: 'pqa-10-scheduled-sweep.mjs', determination: 'PASS', facts: machineFacts('PQA-10') })
+      assert.equal(me09.runId, 'run-spine-test-0001')
+      assert.equal(me09.caseId, 'PQA-09')
+      emitCaseEvidence(evidenceDir, { id: 'PQA-09', title: 'Outbox retry', status: 'PASS', reason: 'real outbox dispatcher one-failure-then-retry', evidence: 'pass1 pending attempts=1; pass2 delivered attempts=2', machineEvidence: me09, ...winFacts })
+      emitCaseEvidence(evidenceDir, { id: 'PQA-10', title: 'Scheduled', status: 'PASS', reason: 'real scheduled-run identity+sweep+outbox', evidence: 'created_running; resumed; sweep scanned=1; outbox delivered', machineEvidence: me10, ...winFacts })
+      for (const id of ['PQA-01', 'PQA-02', 'PQA-03', 'PQA-04', 'PQA-05', 'PQA-06', 'PQA-07', 'PQA-08']) {
+        emitCaseEvidence(evidenceDir, { id, title: id, status: 'BLOCKED', reason: 'operator/full-boundary case not executed here', evidence: 'n/a' })
+      }
+      // residue=0 (post-teardown) at the summary top-level.
+      const sp = path.join(evidenceDir, 'summary.json')
+      const summary = JSON.parse(fs.readFileSync(sp, 'utf8'))
+      assert.equal(summary.runId, 'run-spine-test-0001') // emitCaseEvidence stamped it
+      summary.residue = 0
+      fs.writeFileSync(sp, `${JSON.stringify(summary, null, 2)}\n`)
+
+      const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+      assert.equal(report.runId, 'run-spine-test-0001')
+      assert.equal(report.residue, 0)
+      assert.equal(report.cases.find((c) => c.id === 'PQA-09').status, 'PASS')
+      assert.equal(report.cases.find((c) => c.id === 'PQA-10').status, 'PASS')
+      for (const id of ['PQA-05', 'PQA-06', 'PQA-08']) {
+        assert.equal(report.cases.find((c) => c.id === id).status, 'BLOCKED')
+      }
+
+      // Forge PQA-09: swap in a non-whitelisted harness + invented facts -> BLOCKED (owner P1).
+      summary.cases = summary.cases.map((c) =>
+        c.id === 'PQA-09'
+          ? { ...c, machineEvidence: { ...me09, harnessModule: 'totally-manual-not-a-real-harness.mjs', facts: { invented: true } } }
+          : c,
+      )
+      fs.writeFileSync(sp, `${JSON.stringify(summary, null, 2)}\n`)
+      const forged = runWindowsNativeQaMatrix({ root, evidenceDir })
+      assert.equal(forged.cases.find((c) => c.id === 'PQA-09').status, 'BLOCKED')
+      assert.match(forged.cases.find((c) => c.id === 'PQA-09').reason, /harnessModule for PQA-09 must be the whitelisted/)
+    } finally {
+      if (savedRunId === undefined) delete process.env.QA_RUN_ID
+      else process.env.QA_RUN_ID = savedRunId
+      if (savedTooling === undefined) delete process.env.QA_TOOLING_SHA
+      else process.env.QA_TOOLING_SHA = savedTooling
+    }
+  })
 })
 
 // --------------------------------------------------------------------------
