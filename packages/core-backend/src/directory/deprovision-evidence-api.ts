@@ -252,11 +252,16 @@ export async function restoreDeprovisionEvent(options: {
       // after_active false means user should still be inactive for restore eligibility
       currentMatchesAfter[e.id] = user.rows[0].is_active === false
     } else if (e.effect_type === 'membership_changed') {
+      // DRIFT GATE — must fail closed. Swallowing this read turned a failed query into
+      // "0 active memberships", which reads as "current state matches after_active=false":
+      // the gate was satisfied BY ITS OWN FAILURE and could never fire on this leg. Same
+      // defect class as the phantom grant column fixed in #4587; a gate read that cannot
+      // complete must abort the restore, not wave it through.
       const org = await query<{ n: number }>(
         `SELECT count(*)::int AS n FROM user_orgs
           WHERE user_id = $1 AND org_id = $2 AND COALESCE(is_active, TRUE) = TRUE`,
         [event.local_user_id, e.org_id],
-      ).catch(() => ({ rows: [{ n: 0 }] }))
+      )
       // after false → no active membership
       currentMatchesAfter[e.id] = (org.rows[0]?.n ?? 0) === 0
     } else if (e.effect_type === 'grant_changed') {

@@ -298,6 +298,39 @@ describeDb('directory deprovision ledger hardening (real DB, isolated schema)', 
        WHERE id = ${eventId}
     `.execute(db),
     ).rejects.toThrow(/identity fields are immutable/)
+
+    // Adversarial review of #4646 (P2): the witness probe above was the ONLY immutability
+    // assertion — the provenance columns and the entire effects branch of the trigger could be
+    // neutered with every test green. One probe per trigger arm, so each arm is load-bearing.
+    await expect(
+      sql`UPDATE directory_deprovision_events SET policy = 'manual_review' WHERE id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/identity fields are immutable/)
+    await expect(
+      sql`UPDATE directory_deprovision_events SET globally_clear = FALSE WHERE id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/identity fields are immutable/)
+    await expect(
+      sql`UPDATE directory_deprovision_events SET triggered_by = 'tampered' WHERE id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/identity fields are immutable/)
+    await expect(
+      sql`UPDATE directory_deprovision_effects SET before_active = FALSE WHERE event_id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/identity fields are immutable/)
+    await expect(
+      sql`UPDATE directory_deprovision_effects SET access_generation_at_apply = 99 WHERE event_id = ${eventId}`.execute(db),
+    ).rejects.toThrow(/identity fields are immutable/)
+
+    // Positive control for the family above: a resolve-column UPDATE on the same rows must
+    // SUCCEED — proving the rejections come from the guarded columns, not from a trigger that
+    // rejects every UPDATE (which would also freeze supersede/restore forever).
+    await sql`
+      UPDATE directory_deprovision_events
+         SET status = 'superseded', resolved_by = 'test', updated_at = NOW()
+       WHERE id = ${eventId}
+    `.execute(db)
+    await sql`
+      UPDATE directory_deprovision_effects
+         SET status = 'superseded', updated_at = NOW()
+       WHERE event_id = ${eventId}
+    `.execute(db)
   })
 
   it('keeps historical witness stable while the live link is unbound and rebound', async () => {

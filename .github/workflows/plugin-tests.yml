@@ -233,6 +233,14 @@ jobs:
             scripts/ops/multitable-onprem-package-verify-k3-helper-contract.test.mjs \
             scripts/ops/resolve-k3wise-smoke-token.test.mjs
 
+      # Same promotion, same reason (adversarial review of #4646, P3): the D3 deprovision-ledger
+      # CI-wiring contract is the ONLY mechanical guard proving the ledger real-DB suites stay in
+      # the required run-list and excluded from the no-DB job. Its original home is the
+      # k3wise-offline-poc job, whose check cannot block a merge — invoked here as well so it
+      # actually gates. Duplicate run costs <1s; the original stays for job self-containment.
+      - name: Directory deprovision ledger CI-wiring contract (required lane)
+        run: node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
+
       # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
       # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
       # header for the corrected rationale). Mixed YAML-shape + BEHAVIOURAL contract that makes
