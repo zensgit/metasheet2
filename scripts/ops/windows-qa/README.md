@@ -54,7 +54,11 @@ evidence from real execution; the operator collects operatorEvidence@1 from genu
 - `harness/provision-synth-directory.mjs` — creates org anchors + users via the product path; writes the
   identity-only `.runtime/qa-identities.json`.
 - `harness/pqa-05|06|08|09|10-*.mjs` — route-less internal harnesses (invoke real product code).
-- `harness/pqa-07-authorization-setup.mjs` — the CRUD case's create-fixture setup.
+- `harness/pqa-07-authorization-setup.mjs` — the CRUD case's create-fixture setup. FAIL-CLOSED on
+  pre-existing rows for its synthetic identities (REFUSES instead of proceeding/duplicating; no ON
+  CONFLICT — cleanup is only ever the drop/recreate reset). Its seed INSERT is classified in the
+  W4C-0 DML inventory by ONE exact P16 tuple (file+symbol+table+verb), never a path prefix.
+- `harness/singleton-probe.mjs` — DB-free module-identity probe (see Runtime modes above).
 - `reset-isolated-db.mjs` — DROP+recreate the isolated DB + verify the migration SET + deny triggers
   (gate 2), behind a local/isolated/no-other-session safety guard (gate 4).
 - `residue-check.sql` — global residue SENTINEL. Cleanup is drop/recreate; this proves the recreated DB is
@@ -73,8 +77,24 @@ For the operator-verified HTTP/UI cases, grant each synthetic user its attendanc
 product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` → `attendance:admin`;
 `qa-synth-u1@qa.invalid` → `attendance:write`; `qa-synth-u2`/`qa-synth-u3` → `attendance:read`.
 
+## Runtime modes (owner scope ruling B — the mode determines the ONE product path; no fallback)
+The tooling loads product modules via `resolveProductModule` with exactly TWO modes:
+- **tsx-src** (macOS source proof — `node --import tsx <script>.mjs`): `src/<subpath>.ts`.
+- **node-dist** (Windows package — plain `node <script>.mjs`): `dist/src/<subpath>.js` — the REAL
+  tsc layout (`rootDir: "."` emits `dist/src/**`; there is no `dist/<subpath>.js`). Build first:
+  `pnpm --filter @metasheet/core-backend build` (the on-prem package ships this dist).
+A missing path FAILS with a mode-specific error (never a silent fall-through to the other mode's
+path), and any resolution through a SYMLINK is refused (the historical `ln -sfn` dist workaround
+is obsolete and rejected). Modules load through ONE CJS require pipeline in both modes so
+module-private witness WeakSets (w4c0-identity) exist exactly once — the tsx ESM-import route
+produced a dual instance (W4C0_OPERATION_WITNESS_REQUIRED) on Node 20 and is no longer used.
+Guards: `qa-runtime-resolution.test.mjs` (resolution table / no-fallback / symlink refusal) and
+`product-dist-shape-and-singleton.test.mjs` (built dist shape + single-instance probes).
+
 ## Flow (each step against the isolated DB `metasheet_windows_qa`, never a shared/customer DB)
-1. `node reset-isolated-db.mjs` — fresh DB at the pinned migration SET + deny triggers.
+1. `node --import tsx reset-isolated-db.mjs` (macOS source proof; on the Windows package run it
+   under plain `node` against the shipped dist) — fresh DB at the pinned migration SET + deny
+   triggers.
 2. `QA_SYNTH_PASSWORD=... node --import tsx harness/provision-synth-directory.mjs` — mint synthetic
    users + org anchors; write `.runtime/qa-identities.json`.
 3. `node --import tsx harness/summary-tool.mjs --init --evidence-dir <evidence-dir>` — seed

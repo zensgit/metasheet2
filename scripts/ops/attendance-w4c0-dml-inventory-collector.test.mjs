@@ -1229,6 +1229,119 @@ test('W4C-3c P16 exact allowlist: new DELETE under allowed file/symbol or differ
   assert.equal(unclaimedSymbol.length, 1, 'new symbol DELETE must not inherit P16 by path prefix')
 })
 
+// Owner scope ruling A (Windows-native QA v2): the pqa-07 CREATE-fixture seed INSERT is classified
+// by ONE exact P16 tuple — file+symbol+table+verb. This test proves the tuple is (a) LIVE (the
+// worktree census contains exactly this one site in that file, so deleting the tuple reds the
+// zero-bypass gates) and (b) PRECISE (changing the symbol, the table, or the verb of the site is
+// NOT claimed — no path/prefix inheritance).
+test('W4C-3c P16 exact allowlist: pqa-07 windows-qa fixture tuple is precise and load-bearing', () => {
+  const p16 = CURATED_DEBT_ENTRIES.find((entry) => entry.id === 'P16')
+  assert.ok(p16)
+  const PQA07_RELPATH = 'scripts/ops/windows-qa/harness/pqa-07-authorization-setup.mjs'
+  const tuple = {
+    relPath: PQA07_RELPATH,
+    enclosingSymbol: 'main',
+    table: 'attendance_records',
+    verb: 'insert',
+    line: 1,
+  }
+
+  // (a) LIVE: the real worktree census attributes EXACTLY this one tracked site to the file, with
+  // exactly the allowlisted tuple's fields (fixture-shape guard: the tuple is not dead weight).
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const { trackedSites } = classifyCensus(sites)
+  const pqa07Sites = trackedSites.filter((site) => site.relPath === PQA07_RELPATH)
+  assert.equal(pqa07Sites.length, 1, 'pqa-07 must contribute exactly ONE tracked DML site')
+  assert.equal(pqa07Sites[0].enclosingSymbol, 'main')
+  assert.equal(pqa07Sites[0].table, 'attendance_records')
+  assert.equal(pqa07Sites[0].verb, 'insert')
+  assert.equal(p16.claims(pqa07Sites[0]), true, 'the live pqa-07 site must be claimed by P16')
+  assert.equal(p16.claims(tuple), true)
+
+  // (b) PRECISE: single-field mutations are unclaimed (would red the zero-bypass gates).
+  const mutations = [
+    { ...tuple, enclosingSymbol: 'seedFixtureRows' },
+    { ...tuple, table: 'attendance_events' },
+    { ...tuple, verb: 'update' },
+  ]
+  for (const mutated of mutations) {
+    assert.equal(p16.claims(mutated), false, JSON.stringify(mutated))
+    const { unclaimed } = classifyTrackedSites([mutated])
+    assert.equal(unclaimed.length, 1, `mutated tuple must be unclaimed: ${JSON.stringify(mutated)}`)
+  }
+
+  // FAIL-CLOSED fixture shape (ruling A): the classified INSERT must be preceded by the
+  // pre-existing-records REFUSE (throw) and must NOT carry ON CONFLICT DO NOTHING (a conflicting
+  // concurrent write must error, never silently no-op). Comment text is masked first so only
+  // LIVE statement text can match (the file legitimately documents the removed clause in prose).
+  const fixtureSource = fs.readFileSync(path.join(rootDir, PQA07_RELPATH), 'utf8')
+  assert.match(fixtureSource, /REFUSING \(fail-closed\)/)
+  assert.doesNotMatch(
+    maskCommentsForDmlScan(fixtureSource),
+    /ON CONFLICT/i,
+    'pqa-07 INSERT must not carry a live ON CONFLICT clause',
+  )
+})
+
+// W4C-0 negative-probe allowlist: the deny-trigger DELETE probe in reset-isolated-db.mjs is
+// admitted by ONE exact tuple (W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST), never a path/prefix.
+// The live census's negativeProbeSites must equal EXACTLY that allowlist (no dead entries, no
+// extra sites), and single-field mutations of the probe site must fall back into the hard-fail
+// outsideBoundarySites list.
+test('W4C-0 negative-probe exact allowlist: deny-delete probe tuple is precise and load-bearing', () => {
+  const {
+    W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST,
+    isW4CanonicalNegativeProbeSite,
+  } = require(path.join(toolDir, 'table-classification.cjs'))
+
+  // (a) LIVE + EXACT: the worktree census's negativeProbeSites correspond 1:1 to the allowlist.
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  const liveTuples = classified.negativeProbeSites.map(
+    (site) => `${site.relPath}::${site.enclosingSymbol}::${site.table}::${site.verb}`,
+  ).sort()
+  assert.deepEqual(
+    liveTuples,
+    [...W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST].sort(),
+    'live negative-probe sites must equal the exact allowlist (no dead entries, no extras)',
+  )
+  assert.equal(liveTuples.length, 1, 'exactly one negative probe is admitted')
+  assert.deepEqual(classified.outsideBoundarySites, [], 'no other w4_canonical DML outside the boundary')
+
+  // (b) PRECISE: single-field mutations are NOT probe-classified and become hard fails.
+  const probe = {
+    relPath: 'scripts/ops/windows-qa/reset-isolated-db.mjs',
+    enclosingSymbol: 'proveDenyDeleteFires',
+    table: 'attendance_calculation_rollout_state',
+    verb: 'delete',
+    line: 1,
+  }
+  assert.equal(isW4CanonicalNegativeProbeSite(probe), true)
+  const mutations = [
+    { ...probe, relPath: 'scripts/ops/windows-qa/other-tool.mjs' },
+    { ...probe, enclosingSymbol: 'operatorShortcut' },
+    { ...probe, table: 'attendance_record_calculations' },
+    { ...probe, verb: 'update' },
+  ]
+  for (const mutated of mutations) {
+    assert.equal(isW4CanonicalNegativeProbeSite(mutated), false, JSON.stringify(mutated))
+    const result = classifyCensus([mutated])
+    assert.equal(
+      result.outsideBoundarySites.length,
+      1,
+      `mutated probe must be a hard outsideBoundary fail: ${JSON.stringify(mutated)}`,
+    )
+    assert.equal(result.negativeProbeSites.length, 0)
+  }
+
+  // (c) The probe file's DELETE is genuinely assert-negative: the probe REQUIRES W4C0_IMMUTABLE
+  // to be raised and fails otherwise (the allowlist admits a can-never-succeed statement only).
+  const probeSource = fs.readFileSync(path.join(rootDir, 'scripts/ops/windows-qa/reset-isolated-db.mjs'), 'utf8')
+  assert.match(probeSource, /if \(!raised \|\| !\/W4C0_IMMUTABLE\/\.test\(raised\)\)/)
+})
+
 test('W4C-3c P15: generate-cleanup-sql never emits live DELETE on attendance_records', () => {
   const genPath = path.join(rootDir, 'scripts/attendance/generate-cleanup-sql.cjs')
   const gen = require(genPath)
