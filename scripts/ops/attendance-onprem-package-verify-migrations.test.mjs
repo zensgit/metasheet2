@@ -53,6 +53,11 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     'scripts/ops/attendance-windows-native-healthcheck.ps1',
     'scripts/ops/attendance-windows-native-bootstrap-admin.ps1',
     'scripts/ops/attendance-windows-native-qa-runner.mjs',
+    // Load-bearing: the runner imports this evidence-contract module at startup — the verifier requires
+    // it by name (machineEvidence + operatorEvidence contract), so the fixture must ship it.
+    'scripts/ops/windows-qa/harness/machine-evidence-contract.mjs',
+    // The per-case PQA-01..10 runbook the verifier requires for a ZIP-only tester.
+    'docs/deployment/attendance-windows-native-qa-v2-pqa-cases.md',
     'scripts/ops/multitable-onprem-bootstrap-admin.ps1',
     'scripts/ops/attendance-onprem-package-install.sh',
     'scripts/ops/attendance-onprem-package-upgrade.sh',

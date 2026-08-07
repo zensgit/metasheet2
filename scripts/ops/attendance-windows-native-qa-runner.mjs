@@ -10,7 +10,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { validateMachineEvidence } from './windows-qa/harness/machine-evidence-contract.mjs'
+import {
+  isMachineEvidenceCase,
+  validateMachineEvidence,
+  validateOperatorEvidence,
+} from './windows-qa/harness/machine-evidence-contract.mjs'
 
 const ALLOWED_STATUSES = new Set(['PASS', 'BLOCKED', 'FAIL'])
 
@@ -378,14 +382,32 @@ function evaluateCase(matrixCase, evidence, packageSha, staleEvidenceShas, isola
         )
       }
     }
-    // Owner P1 — the PASS floor is a STRUCTURED, harness-produced machine-evidence record (row counts,
-    // entity UUIDs, the harness's own determination, the harness module + tooling SHA), not just a long
-    // string. This also carries + binds the QA tooling SHA above.
-    const machineCheck = validateMachineEvidence(evidenceCase.machineEvidence, {
-      expectedQaToolingSha: packageToolingSha,
-    })
-    if (!machineCheck.ok) {
-      return blocked(machineCheck.error)
+    // Owner direction a+ — the PASS floor is a case-shaped, tooling-SHA-bound STRUCTURED evidence
+    // record, not just a long string. Two kinds, one per surface:
+    //   - PQA-09/10 (route-less harness cases): a machineEvidence envelope whose harnessModule is the
+    //     ONE whitelisted module for that case and whose facts match that case's exact schema.
+    //   - PQA-01..08 (operator-run HTTP/UI cases): an operatorEvidence envelope (tester + UTC timestamp
+    //     + command/route + expected/observed + artifact sha256 + bound source/tooling SHAs), with a
+    //     full-boundary attestation for PQA-05/06/08.
+    // A machineEvidence hand-typed with a non-whitelisted harnessModule / invented facts, or attached to
+    // an operator case, is REJECTED (the owner's forge); likewise a thin operatorEvidence.
+    if (isMachineEvidenceCase(matrixCase.id)) {
+      const machineCheck = validateMachineEvidence(evidenceCase.machineEvidence, {
+        expectedQaToolingSha: packageToolingSha,
+        caseId: matrixCase.id,
+      })
+      if (!machineCheck.ok) {
+        return blocked(machineCheck.error)
+      }
+    } else {
+      const operatorCheck = validateOperatorEvidence(evidenceCase.operatorEvidence, {
+        expectedSourceSha: packageSha,
+        expectedQaToolingSha: packageToolingSha,
+        caseId: matrixCase.id,
+      })
+      if (!operatorCheck.ok) {
+        return blocked(operatorCheck.error)
+      }
     }
   }
 

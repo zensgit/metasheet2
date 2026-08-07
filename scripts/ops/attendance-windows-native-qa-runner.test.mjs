@@ -9,7 +9,10 @@ import { runWindowsNativeQaMatrix, strictExitViolation } from './attendance-wind
 import {
   MACHINE_EVIDENCE_PRODUCER,
   MACHINE_EVIDENCE_SCHEMA,
+  OPERATOR_EVIDENCE_SCHEMA,
+  isMachineEvidenceCase,
 } from './windows-qa/harness/machine-evidence-contract.mjs'
+import { buildMachineEvidence } from './windows-qa/harness/qa-runtime.mjs'
 
 const testDir = path.dirname(fileURLToPath(import.meta.url))
 const runnerPath = path.join(testDir, 'attendance-windows-native-qa-runner.mjs')
@@ -57,24 +60,89 @@ function seedPackageRoot(root, { sourceSha = PINNED_SHA, qaToolingSha = PINNED_S
   })
 }
 
-// A STRUCTURED harness-produced machine-evidence envelope (owner P1), the shape a PASS now requires.
-function machineEvidence(overrides = {}) {
+const ARTIFACT_SHA256 = 'a'.repeat(64) // a valid 64-hex sha256 stand-in (screenshot/log digest)
+const HARNESS_MODULE = { 'PQA-09': 'pqa-09-outbox-retry.mjs', 'PQA-10': 'pqa-10-scheduled-sweep.mjs' }
+
+// The EXACT facts each real harness emits (key-for-key from pqa-09/pqa-10). A PASS machineEvidence must
+// match this shape; the harness self-validates against the same contract at emit time.
+function machineFacts(caseId) {
+  if (caseId === 'PQA-09') {
+    return {
+      scheduledRunId: '00000000-0000-4000-8000-000000000009',
+      outboxRowCount: 1,
+      pass1AttemptsAfterFailure: 1,
+      pass2AttemptsAfterRetry: 2,
+      pass2DeliveryState: 'delivered',
+      sinkDeliveries: 1,
+      deliveredEventKind: 'attendance.absence.generated',
+      businessDmlTablesChanged: 0,
+      businessDmlTablesTracked: 12,
+    }
+  }
+  return {
+    scheduledRunId: '00000000-0000-4000-8000-000000000010',
+    createdKind: 'created_running',
+    reTriggerKind: 'resumed',
+    generation: 1,
+    runningRowsForIdentity: 1,
+    sweepScanned: 1,
+    sweepNotReady: 1,
+    sweepFinalized: 0,
+    targetTerminalOutcome: 'completed',
+    outboxEventKind: 'attendance.absence.generated',
+    outboxIdentityKind: 'scheduled_run',
+    outboxDeliveredState: 'delivered',
+    sinkDeliveries: 1,
+    runStateAfterFinalize: 'completed',
+  }
+}
+
+// A STRUCTURED harness-produced machine-evidence envelope (owner P1), the shape a PASS on PQA-09/10
+// now requires: the whitelisted harnessModule FOR THAT CASE + that case's exact facts schema.
+function machineEvidence(caseId, overrides = {}) {
   return {
     schema: MACHINE_EVIDENCE_SCHEMA,
     producedBy: MACHINE_EVIDENCE_PRODUCER,
-    harnessModule: 'pqa-test-harness.mjs',
+    harnessModule: HARNESS_MODULE[caseId],
     determination: 'PASS',
     qaToolingSha: PINNED_SHA,
-    facts: { rows: 1, uuid: '00000000-0000-4000-8000-0000000000a2' },
+    facts: machineFacts(caseId),
     producedAt: '2026-08-06T00:00:00Z',
     ...overrides,
   }
 }
 
-// A fully-affirmed PASS case (non-empty per-case reason + evidence + all per-case safety fields +
-// a structured harness-produced machineEvidence envelope bound to the QA tooling SHA).
-function passCase(id, overrides = {}) {
+// The full-boundary attestation PQA-05/06/08 require (owner req-4). Empty for the other cases.
+function boundaryAttestation(caseId) {
+  if (caseId === 'PQA-05') return { legacyProjectionUnchanged: true, shadowCalculationRowsAppended: 1 }
+  if (caseId === 'PQA-06') return { outcome: 'review_required', dailyProjectionNull: true }
+  if (caseId === 'PQA-08') return { oldSnapshotUnmutated: true, mismatchReviewRequired: true }
+  return undefined
+}
+
+// A well-formed operatorEvidence@1 envelope (owner req-2), the shape a PASS on PQA-01..08 requires.
+function operatorEvidence(caseId, overrides = {}) {
+  const attestation = boundaryAttestation(caseId)
   return {
+    schema: OPERATOR_EVIDENCE_SCHEMA,
+    tester: 'qa-operator',
+    timestamp: '2026-08-06T09:00:00Z',
+    route: 'GET /api/attendance/records/self',
+    command: 'curl -sS http://127.0.0.1:PORT/api/...',
+    expected: 'HTTP 200 with the expected authoritative projection',
+    observed: 'HTTP 200 with the expected authoritative projection',
+    artifactSha256: ARTIFACT_SHA256,
+    sourceSha: PINNED_SHA,
+    qaToolingSha: PINNED_SHA,
+    ...(attestation ? { boundaryAttestation: attestation } : {}),
+    ...overrides,
+  }
+}
+
+// A fully-affirmed PASS case: per-case reason + evidence + all per-case safety fields + the RIGHT
+// structured evidence kind for the id (machineEvidence for PQA-09/10, operatorEvidence for 01..08).
+function passCase(id, overrides = {}) {
+  const base = {
     id,
     title: id,
     status: 'PASS',
@@ -89,16 +157,18 @@ function passCase(id, overrides = {}) {
     externalNotificationsSent: false,
     reason: 'synthetic verified on isolated QA DB',
     evidence: 'observed==expected; residue=0',
-    machineEvidence: machineEvidence(),
-    ...overrides,
   }
+  if (isMachineEvidenceCase(id)) base.machineEvidence = machineEvidence(id)
+  else base.operatorEvidence = operatorEvidence(id)
+  return { ...base, ...overrides }
 }
 
 // A PASS-status case with a long free-text reason/evidence AND all per-case safety fields, but NO
-// structured machineEvidence — the exact "ten long meaningless strings" forge (owner P1).
+// structured evidence envelope of EITHER kind — the exact "ten long meaningless strings" forge (owner P1).
 function freeTextForge(id, overrides = {}) {
   const c = passCase(id, overrides)
   delete c.machineEvidence
+  delete c.operatorEvidence
   c.reason = 'this is a long plausible-looking free-text reason typed by an operator who never ran it'
   c.evidence = 'observed matched expected across all steps; residue measured 0; totally legitimate text'
   return c
@@ -350,22 +420,24 @@ test('FIX 2(c): a per-case evidence field below the length floor never PASSes', 
 // (The reproduction: ten long free-text reason/evidence strings + residue=0 forged 10/10 PASS.)
 // --------------------------------------------------------------------------
 
-test('P1: a PASS-status case with long free-text but NO machineEvidence is BLOCKED', () => {
+test('P1: a machine case (PQA-09) with long free-text but NO machineEvidence is BLOCKED', () => {
   withRoots((root, evidenceDir) => {
-    writeSummary(evidenceDir, { cases: full10({ 'PQA-01': freeTextForge('PQA-01') }) })
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-09': freeTextForge('PQA-09') }) })
     const report = runWindowsNativeQaMatrix({ root, evidenceDir })
     assert.equal(report.counts.PASS, 0)
-    assert.match(report.cases[0].reason, /structured machineEvidence object produced by a harness/)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /structured machineEvidence object produced by a harness/)
   })
 })
 
-test('P1 positive control: the SAME case WITH a structured machineEvidence PASSes', () => {
+test('P1 positive control: the SAME machine case (PQA-09) WITH a structured machineEvidence PASSes', () => {
   // Same shape as the forge above, but now carrying the harness-produced machineEvidence envelope.
   withRoots((root, evidenceDir) => {
-    writeSummary(evidenceDir, { cases: full10({ 'PQA-01': passCase('PQA-01') }) })
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-09': passCase('PQA-09') }) })
     const report = runWindowsNativeQaMatrix({ root, evidenceDir })
     assert.equal(report.counts.PASS, 1)
-    assert.equal(report.cases[0].status, 'PASS')
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.equal(pqa09.status, 'PASS')
   })
 })
 
@@ -382,22 +454,24 @@ test('P1 reproduction: ten long free-text cases (no machineEvidence) do NOT stri
 test('P1: machineEvidence with determination!=PASS is rejected (cannot borrow a BLOCKED record)', () => {
   withRoots((root, evidenceDir) => {
     writeSummary(evidenceDir, {
-      cases: full10({ 'PQA-01': passCase('PQA-01', { machineEvidence: machineEvidence({ determination: 'BLOCKED' }) }) }),
+      cases: full10({ 'PQA-09': passCase('PQA-09', { machineEvidence: machineEvidence('PQA-09', { determination: 'BLOCKED' }) }) }),
     })
     const report = runWindowsNativeQaMatrix({ root, evidenceDir })
     assert.equal(report.counts.PASS, 0)
-    assert.match(report.cases[0].reason, /determination must be "PASS"/)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /determination must be "PASS"/)
   })
 })
 
-test('P1: machineEvidence with empty facts is rejected', () => {
+test('P1: machineEvidence with empty facts is rejected (missing required keys)', () => {
   withRoots((root, evidenceDir) => {
     writeSummary(evidenceDir, {
-      cases: full10({ 'PQA-01': passCase('PQA-01', { machineEvidence: machineEvidence({ facts: {} }) }) }),
+      cases: full10({ 'PQA-09': passCase('PQA-09', { machineEvidence: machineEvidence('PQA-09', { facts: {} }) }) }),
     })
     const report = runWindowsNativeQaMatrix({ root, evidenceDir })
     assert.equal(report.counts.PASS, 0)
-    assert.match(report.cases[0].reason, /facts must be a non-empty object/)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /facts is missing required key/)
   })
 })
 
@@ -409,11 +483,12 @@ test('P2: machineEvidence.qaToolingSha not matching the package QA_TOOLING_SHA i
   withRoots((root, evidenceDir) => {
     // Package QA_TOOLING_SHA is PINNED_SHA (seed default); evidence claims a different tooling SHA.
     writeSummary(evidenceDir, {
-      cases: full10({ 'PQA-01': passCase('PQA-01', { machineEvidence: machineEvidence({ qaToolingSha: TOOLING_SHA }) }) }),
+      cases: full10({ 'PQA-09': passCase('PQA-09', { machineEvidence: machineEvidence('PQA-09', { qaToolingSha: TOOLING_SHA }) }) }),
     })
     const report = runWindowsNativeQaMatrix({ root, evidenceDir })
     assert.equal(report.counts.PASS, 0)
-    assert.match(report.cases[0].reason, /qaToolingSha .* does not match the package QA_TOOLING_SHA/)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /qaToolingSha .* does not match the package QA_TOOLING_SHA/)
   })
 })
 
@@ -450,11 +525,12 @@ test('P2 positive control: a DISTINCT package QA_TOOLING_SHA matched by the evid
     (root, evidenceDir) => {
       assert.equal(runWindowsNativeQaMatrix({ root }).qaToolingSha, TOOLING_SHA)
       writeSummary(evidenceDir, {
-        cases: full10({ 'PQA-01': passCase('PQA-01', { machineEvidence: machineEvidence({ qaToolingSha: TOOLING_SHA }) }) }),
+        cases: full10({ 'PQA-09': passCase('PQA-09', { machineEvidence: machineEvidence('PQA-09', { qaToolingSha: TOOLING_SHA }) }) }),
       })
       const report = runWindowsNativeQaMatrix({ root, evidenceDir })
       assert.equal(report.counts.PASS, 1)
-      assert.equal(report.cases[0].status, 'PASS')
+      const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+      assert.equal(pqa09.status, 'PASS')
     },
     { qaToolingSha: TOOLING_SHA },
   )
@@ -471,6 +547,287 @@ test('P2: a package with NO QA_TOOLING_SHA cannot PASS (fail closed)', () => {
     },
     { qaToolingSha: null },
   )
+})
+
+// --------------------------------------------------------------------------
+// Owner direction a+ P1 — machineEvidence hardened: case→harness whitelist + per-case facts schema.
+// The owner's forge (non-whitelisted harnessModule + invented facts) must NOT PASS.
+// --------------------------------------------------------------------------
+
+test("owner forge: a machineEvidence with a NON-whitelisted harnessModule is BLOCKED", () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({
+        'PQA-09': passCase('PQA-09', {
+          machineEvidence: machineEvidence('PQA-09', { harnessModule: 'totally-manual-not-a-real-harness.mjs' }),
+        }),
+      }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /harnessModule for PQA-09 must be the whitelisted "pqa-09-outbox-retry\.mjs"/)
+  })
+})
+
+test('owner forge: a machineEvidence carrying an invented facts key is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({
+        'PQA-09': passCase('PQA-09', {
+          machineEvidence: machineEvidence('PQA-09', { facts: { ...machineFacts('PQA-09'), invented: true } }),
+        }),
+      }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /facts carries unknown key\(s\): invented/)
+  })
+})
+
+test("owner forge (exact reproduction): ten hand-typed envelopes with a bogus harness + invented facts do NOT strict-PASS", () => {
+  withRoots((root, evidenceDir) => {
+    // The exact envelope the owner used to forge 10/10: bogus harnessModule + facts:{invented:true},
+    // stamped onto ALL ten cases with all safety fields affirmed.
+    const forged = MATRIX_IDS.map((id) =>
+      passCase(id, {
+        machineEvidence: {
+          schema: MACHINE_EVIDENCE_SCHEMA,
+          producedBy: MACHINE_EVIDENCE_PRODUCER,
+          harnessModule: 'totally-manual-not-a-real-harness.mjs',
+          determination: 'PASS',
+          qaToolingSha: PINNED_SHA,
+          facts: { invented: true },
+          producedAt: '2026-08-06T00:00:00Z',
+        },
+        operatorEvidence: undefined,
+      }),
+    )
+    writeSummary(evidenceDir, { residue: 0, cases: forged })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.equal(report.counts.BLOCKED, 10)
+    assert.equal(strictExitViolation(report).exitCode, 3)
+  })
+})
+
+test('machine case: a REAL harnessModule but for the WRONG case is rejected (PQA-10 module under PQA-09)', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({
+        'PQA-09': passCase('PQA-09', {
+          machineEvidence: machineEvidence('PQA-09', { harnessModule: 'pqa-10-scheduled-sweep.mjs' }),
+        }),
+      }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /harnessModule for PQA-09 must be the whitelisted "pqa-09-outbox-retry\.mjs"/)
+  })
+})
+
+test('machine case: a valid PQA-09 envelope placed under PQA-10 is rejected (facts schema mismatch)', () => {
+  withRoots((root, evidenceDir) => {
+    // A wholesale-copied valid PQA-09 machineEvidence used for PQA-10: the PQA-10 facts schema rejects
+    // PQA-09's keys, and the harnessModule is the wrong one for PQA-10.
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-10': passCase('PQA-10', { machineEvidence: machineEvidence('PQA-09') }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const pqa10 = report.cases.find((c) => c.id === 'PQA-10')
+    assert.match(pqa10.reason, /harnessModule for PQA-10 must be the whitelisted "pqa-10-scheduled-sweep\.mjs"/)
+  })
+})
+
+test('cross-kind: a machineEvidence attached to an OPERATOR case (PQA-01) does not PASS', () => {
+  withRoots((root, evidenceDir) => {
+    // PQA-01 is an operator case; a valid-looking machineEvidence (even the owner forge) is ignored —
+    // the operator case requires operatorEvidence, which is absent here.
+    const c = passCase('PQA-01')
+    delete c.operatorEvidence
+    c.machineEvidence = machineEvidence('PQA-09')
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-01': c }) })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /requires a structured operatorEvidence object/)
+  })
+})
+
+test('machine case: a MISSING required facts key is rejected', () => {
+  withRoots((root, evidenceDir) => {
+    const facts = machineFacts('PQA-09')
+    delete facts.outboxRowCount
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-09': passCase('PQA-09', { machineEvidence: machineEvidence('PQA-09', { facts }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /facts is missing required key "outboxRowCount"/)
+  })
+})
+
+test('machine case: a WRONG-typed facts value is rejected', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({
+        'PQA-09': passCase('PQA-09', {
+          machineEvidence: machineEvidence('PQA-09', { facts: { ...machineFacts('PQA-09'), outboxRowCount: 'one' } }),
+        }),
+      }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /facts\.outboxRowCount must be a finite number/)
+  })
+})
+
+test('machine cases: the exact harness facts for BOTH PQA-09 and PQA-10 PASS (schema matches harness)', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-09': passCase('PQA-09'), 'PQA-10': passCase('PQA-10') }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 2)
+    assert.equal(report.cases.find((c) => c.id === 'PQA-09').status, 'PASS')
+    assert.equal(report.cases.find((c) => c.id === 'PQA-10').status, 'PASS')
+  })
+})
+
+test('buildMachineEvidence self-check: emits valid envelopes for 09/10 and THROWS on facts drift', () => {
+  // Positive: the real builder's output validates for both machine cases.
+  assert.ok(buildMachineEvidence({ caseId: 'PQA-09', harnessModule: 'pqa-09-outbox-retry.mjs', determination: 'PASS', facts: machineFacts('PQA-09') }))
+  assert.ok(buildMachineEvidence({ caseId: 'PQA-10', harnessModule: 'pqa-10-scheduled-sweep.mjs', determination: 'PASS', facts: machineFacts('PQA-10') }))
+  // Drift: a missing fact key throws at EMIT time (not silently rejected later by the runner).
+  const drifted = machineFacts('PQA-09')
+  delete drifted.outboxRowCount
+  assert.throws(
+    () => buildMachineEvidence({ caseId: 'PQA-09', harnessModule: 'pqa-09-outbox-retry.mjs', determination: 'PASS', facts: drifted }),
+    /the contract rejects for PQA-09/,
+  )
+})
+
+// --------------------------------------------------------------------------
+// Owner direction a+ P2 — operatorEvidence@1 for the operator-run cases PQA-01..08.
+// --------------------------------------------------------------------------
+
+test('operator case (PQA-01): a well-formed operatorEvidence PASSes', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-01': passCase('PQA-01') }) })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 1)
+    assert.equal(report.cases[0].status, 'PASS')
+  })
+})
+
+test('operator case: a status+long-reason PASS with NO operatorEvidence is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-01': freeTextForge('PQA-01') }) })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /requires a structured operatorEvidence object/)
+  })
+})
+
+test('operator case: an operatorEvidence MISSING the artifact sha256 is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    const oe = operatorEvidence('PQA-01')
+    delete oe.artifactSha256
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: oe }) }) })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /artifactSha256 must be a 64-char lowercase sha256/)
+  })
+})
+
+test('operator case: a SHORT (truncated) artifact sha256 is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { artifactSha256: 'abc123' }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /artifactSha256 must be a 64-char lowercase sha256/)
+  })
+})
+
+test('operator case: a WRONG qaToolingSha in operatorEvidence is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { qaToolingSha: TOOLING_SHA }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /operatorEvidence\.qaToolingSha .* does not match the package QA_TOOLING_SHA/)
+  })
+})
+
+test('operator case: a WRONG sourceSha in operatorEvidence is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    // sourceSha differs from the package SOURCE_SHA (but is a well-formed non-stale SHA so the earlier
+    // per-case sourceSha gate passes on the case-level sourceSha; the operatorEvidence.sourceSha is the
+    // one that disagrees).
+    const wrong = 'dddddddddddddddddddddddddddddddddddddddd'
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { sourceSha: wrong }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /operatorEvidence\.sourceSha .* does not match the package SOURCE_SHA/)
+  })
+})
+
+test('operator case: a bare-date (non-UTC) timestamp is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { timestamp: '2026-08-06' }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /timestamp must be a UTC ISO-8601 instant ending in Z/)
+  })
+})
+
+// --------------------------------------------------------------------------
+// Owner req-4 — PQA-05/06/08 stay BLOCKED unless the FULL boundary is truly executed + attested.
+// --------------------------------------------------------------------------
+
+for (const caseId of ['PQA-05', 'PQA-06', 'PQA-08']) {
+  test(`${caseId}: a THIN operatorEvidence (no boundaryAttestation) is BLOCKED`, () => {
+    withRoots((root, evidenceDir) => {
+      const oe = operatorEvidence(caseId)
+      delete oe.boundaryAttestation
+      writeSummary(evidenceDir, { cases: full10({ [caseId]: passCase(caseId, { operatorEvidence: oe }) }) })
+      const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+      assert.equal(report.counts.PASS, 0)
+      const item = report.cases.find((c) => c.id === caseId)
+      assert.match(item.reason, /boundaryAttestation.*must be an object|stays BLOCKED unless the FULL boundary/)
+    })
+  })
+
+  test(`${caseId}: a FULL boundaryAttestation (objective truly executed) PASSes`, () => {
+    withRoots((root, evidenceDir) => {
+      writeSummary(evidenceDir, { cases: full10({ [caseId]: passCase(caseId) }) })
+      const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+      assert.equal(report.counts.PASS, 1)
+      assert.equal(report.cases.find((c) => c.id === caseId).status, 'PASS')
+    })
+  })
+}
+
+test('PQA-06: a boundaryAttestation asserting the WRONG outcome (completed, not review_required) is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    const oe = operatorEvidence('PQA-06', { boundaryAttestation: { outcome: 'completed', dailyProjectionNull: false } })
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-06': passCase('PQA-06', { operatorEvidence: oe }) }) })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const item = report.cases.find((c) => c.id === 'PQA-06')
+    assert.match(item.reason, /boundaryAttestation for PQA-06\.outcome must equal "review_required"/)
+  })
 })
 
 // --------------------------------------------------------------------------

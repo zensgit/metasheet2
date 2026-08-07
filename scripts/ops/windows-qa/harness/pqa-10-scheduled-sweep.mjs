@@ -184,6 +184,7 @@ async function main() {
         'target OUTCOME + finalize-enqueued durable OUTBOX row (delivered once) — full identity/outcome/outbox objective on the isolated DB.',
       evidence,
       machineEvidence: buildMachineEvidence({
+        caseId: CASE_ID,
         harnessModule: HARNESS_MODULE,
         determination: 'PASS',
         facts: {

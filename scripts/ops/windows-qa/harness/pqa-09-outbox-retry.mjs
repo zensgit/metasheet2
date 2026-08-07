@@ -144,6 +144,7 @@ async function main() {
         'Real outbox dispatcher on a PRODUCT-PRODUCED row: one injected failure then retry produced one delivered effect, no duplicate DML (business-DML baseline unchanged).',
       evidence,
       machineEvidence: buildMachineEvidence({
+        caseId: CASE_ID,
         harnessModule: HARNESS_MODULE,
         determination: 'PASS',
         facts: {

@@ -16,7 +16,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { MACHINE_EVIDENCE_PRODUCER, MACHINE_EVIDENCE_SCHEMA } from './machine-evidence-contract.mjs'
+import {
+  MACHINE_EVIDENCE_PRODUCER,
+  MACHINE_EVIDENCE_SCHEMA,
+  validateMachineEvidence,
+} from './machine-evidence-contract.mjs'
 
 export const PINNED_SHA = '0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b'
 
@@ -257,9 +261,9 @@ export function resolveQaToolingSha(root = REPO_ROOT) {
  * package QA_TOOLING_SHA. A JSON file is copyable, so this is NOT forgery-proof — it raises the bar
  * from "any long string an operator can hand-type" to "a structured record a harness produces".
  */
-export function buildMachineEvidence({ harnessModule, determination, facts }) {
+export function buildMachineEvidence({ caseId, harnessModule, determination, facts }) {
   const tooling = resolveQaToolingSha()
-  return {
+  const envelope = {
     schema: MACHINE_EVIDENCE_SCHEMA,
     producedBy: MACHINE_EVIDENCE_PRODUCER,
     harnessModule: String(harnessModule || ''),
@@ -269,6 +273,17 @@ export function buildMachineEvidence({ harnessModule, determination, facts }) {
     facts: facts && typeof facts === 'object' ? facts : {},
     producedAt: new Date().toISOString(),
   }
+  // Owner P1 — self-validate the envelope shape (case→harness whitelist + exact facts schema) at EMIT
+  // time so any drift between what the harness asserts and the contract fails LOUDLY here, rather than
+  // silently getting REJECTED by the runner on the Windows host. The tooling binding is not enforced
+  // here (that is the runner's package<->evidence check); pass caseId so the right schema is selected.
+  if (caseId) {
+    const check = validateMachineEvidence(envelope, { caseId })
+    if (!check.ok) {
+      throw new Error(`buildMachineEvidence produced an envelope the contract rejects for ${caseId}: ${check.error}`)
+    }
+  }
+  return envelope
 }
 
 /** Read-modify-write the evidence-dir summary.json, upserting this case (harness-produced verdict). */
