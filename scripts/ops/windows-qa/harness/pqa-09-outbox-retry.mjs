@@ -27,6 +27,7 @@
 import {
   DEFAULT_EVIDENCE_DIR,
   DEFAULT_IDENTITIES_PATH,
+  buildMachineEvidence,
   emitCaseEvidence,
   importProduct,
   loadIdentities,
@@ -41,6 +42,7 @@ import {
 } from './w4-common.mjs'
 
 const CASE_ID = 'PQA-09'
+const HARNESS_MODULE = 'pqa-09-outbox-retry.mjs'
 const TITLE = 'Outbox retry'
 const WORK_DATE = '2026-01-09'
 
@@ -141,6 +143,21 @@ async function main() {
       reason:
         'Real outbox dispatcher on a PRODUCT-PRODUCED row: one injected failure then retry produced one delivered effect, no duplicate DML (business-DML baseline unchanged).',
       evidence,
+      machineEvidence: buildMachineEvidence({
+        harnessModule: HARNESS_MODULE,
+        determination: 'PASS',
+        facts: {
+          scheduledRunId: runId,
+          outboxRowCount: rowCount,
+          pass1AttemptsAfterFailure: Number(afterFail.attempts),
+          pass2AttemptsAfterRetry: Number(afterOk.attempts),
+          pass2DeliveryState: afterOk.delivery_state,
+          sinkDeliveries: delivered.length,
+          deliveredEventKind: delivered[0],
+          businessDmlTablesChanged: changed.length,
+          businessDmlTablesTracked: Object.keys(before).length,
+        },
+      }),
     })
     console.log(`[${CASE_ID}] PASS: ${evidence}`)
   } finally {

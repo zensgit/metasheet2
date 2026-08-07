@@ -16,8 +16,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { MACHINE_EVIDENCE_PRODUCER, MACHINE_EVIDENCE_SCHEMA } from './machine-evidence-contract.mjs'
 
 export const PINNED_SHA = '0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b'
+
+const SHA40 = /^[0-9a-f]{40}$/
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 // harness dir is <root>/scripts/ops/windows-qa/harness — repo/package root is 4 levels up.
@@ -223,6 +226,48 @@ export function baseSafetyFields() {
     windowsPowerShellVersion: '',
     customerOrExternalDestination: false,
     externalNotificationsSent: false,
+  }
+}
+
+/**
+ * Owner P2 — resolve the QA tooling SHA the harness stamps into machine evidence. Order:
+ *   1. env `QA_TOOLING_SHA` (explicit; the macOS source spine sets this),
+ *   2. the package-root `QA_TOOLING_SHA` file (the Windows on-prem package ships it),
+ *   3. the pinned product SHA as a LAST-RESORT default (the package build defaults QA_TOOLING_SHA to
+ *      SOURCE_SHA). The `source` is returned + recorded in the envelope so nothing silently claims a
+ *      tooling binding it merely defaulted into (the product-SHA default is transparent, not hidden).
+ * Returns `{ sha, source }`.
+ */
+export function resolveQaToolingSha(root = REPO_ROOT) {
+  const env = typeof process.env.QA_TOOLING_SHA === 'string' ? process.env.QA_TOOLING_SHA.trim().toLowerCase() : ''
+  if (SHA40.test(env)) return { sha: env, source: 'env' }
+  const file = path.join(root, 'QA_TOOLING_SHA')
+  if (fs.existsSync(file)) {
+    const v = fs.readFileSync(file, 'utf8').trim().toLowerCase()
+    if (SHA40.test(v)) return { sha: v, source: 'package-file' }
+  }
+  return { sha: PINNED_SHA, source: 'product-sha-default' }
+}
+
+/**
+ * Owner P1 — build the STRUCTURED machine-evidence envelope a harness emits for a PASS-eligible case.
+ * It carries machine facts (asserted row counts, entity UUIDs), the harness's OWN determination, the
+ * producing harness module, and the QA tooling SHA the harness ran as. The runner requires this shape
+ * for a PASS (see machine-evidence-contract.validateMachineEvidence) and binds `qaToolingSha` to the
+ * package QA_TOOLING_SHA. A JSON file is copyable, so this is NOT forgery-proof — it raises the bar
+ * from "any long string an operator can hand-type" to "a structured record a harness produces".
+ */
+export function buildMachineEvidence({ harnessModule, determination, facts }) {
+  const tooling = resolveQaToolingSha()
+  return {
+    schema: MACHINE_EVIDENCE_SCHEMA,
+    producedBy: MACHINE_EVIDENCE_PRODUCER,
+    harnessModule: String(harnessModule || ''),
+    determination: String(determination || ''),
+    qaToolingSha: tooling.sha,
+    qaToolingShaSource: tooling.source,
+    facts: facts && typeof facts === 'object' ? facts : {},
+    producedAt: new Date().toISOString(),
   }
 }
 

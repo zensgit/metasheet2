@@ -95,6 +95,39 @@ export async function createScheduledRunWithOneGenerateTarget(client, { orgId, a
 }
 
 /**
+ * Re-trigger the SAME scheduled-run identity (org, initiator:'cron', workDate) through the REAL
+ * product path. With a running row already present and the target set unchanged,
+ * createOrResumeAttendanceScheduledRunV1 RESUMES it rather than forking a second running row — the
+ * identity-idempotence the runbook's S2 re-trigger asserts. Returns the `resumed` result.
+ */
+export async function resumeScheduledRunWithOneGenerateTarget(client, { orgId, userId, workDate }) {
+  const { createOrResumeAttendanceScheduledRunV1 } = await importProduct('attendance/w4c2-scheduled-run')
+  const { runAttendanceResultOperationTransactionV1 } = await importProduct('attendance/w4c0-operation-registry')
+  return runAttendanceResultOperationTransactionV1(client, (trx) =>
+    createOrResumeAttendanceScheduledRunV1(
+      trx,
+      { orgId, initiator: 'cron', workDate },
+      async () => [{ userId, targetKind: 'generate', reviewReasonCode: null }],
+    ),
+  )
+}
+
+/**
+ * Run the REAL scheduled-run sweep worker ONCE against the isolated DB. Opens its own product Pool
+ * (the worker takes a Pool with `.connect()`), claims due running runs (stamping `last_attempt_at`),
+ * and processes each candidate. `recoverCandidate` is a no-op here (the harness only needs to prove the
+ * sweep observes/claims the running run). Returns the sweep tick result. Caller must have opened the
+ * pool via openIsolatedPool (asserts the isolated DB) and is responsible for ending it.
+ */
+export async function sweepScheduledRunsOnceViaProduct(pool) {
+  const { sweepAttendanceScheduledRunsOnceV1 } = await importProduct('attendance/w4c2-scheduled-run-ops-worker')
+  return sweepAttendanceScheduledRunsOnceV1(pool, {
+    limit: 16,
+    recoverCandidate: async () => {},
+  })
+}
+
+/**
  * Seal a scheduled run's single `generate` target through the REAL product path: claim the per-user
  * operation row and record the terminal outcome inside ONE canonical SERIALIZABLE transaction. The
  * claimed-commit guard (attendance_w4_operations_claimed_commit_guard) rejects a `claimed` row

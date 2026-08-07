@@ -10,6 +10,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { validateMachineEvidence } from './windows-qa/harness/machine-evidence-contract.mjs'
 
 const ALLOWED_STATUSES = new Set(['PASS', 'BLOCKED', 'FAIL'])
 
@@ -19,6 +20,8 @@ const ALLOWED_STATUSES = new Set(['PASS', 'BLOCKED', 'FAIL'])
 // operator-written JSON) — do not claim it makes the evidence unforgeable.
 const MIN_REASON_LEN = 12
 const MIN_EVIDENCE_LEN = 16
+
+const SHA40 = /^[0-9a-f]{40}$/
 
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0
@@ -146,6 +149,28 @@ function resolvePackageSourceSha(rootDir) {
   throw new Error('Package exact source SHA is missing (SOURCE_SHA or manifest sourceSha)')
 }
 
+// Owner P2: the package build writes a QA_TOOLING_SHA (package-root file + manifest.qaToolingSha) but
+// the runner only bound the product SOURCE_SHA — so evidence produced by a DIFFERENT tooling SHA still
+// strict-PASSed. Resolve the package QA tooling SHA (file first, then newest manifest) so a PASS can be
+// bound to it. Returns null when the package carries no QA_TOOLING_SHA at all (then PASS fails closed).
+function resolvePackageToolingSha(rootDir) {
+  const toolingFile = path.join(rootDir, 'QA_TOOLING_SHA')
+  if (fs.existsSync(toolingFile)) {
+    return normalizeSha(fs.readFileSync(toolingFile, 'utf8'), 'QA_TOOLING_SHA')
+  }
+  const manifests = fs
+    .readdirSync(rootDir)
+    .filter((name) => /^metasheet-attendance-onprem-.*\.json$/.test(name))
+    .sort()
+    .reverse()
+  for (const name of manifests) {
+    const payload = readJson(path.join(rootDir, name))
+    const candidate = payload.qaToolingSha || payload.qa_tooling_sha
+    if (candidate) return normalizeSha(candidate, `${name}.qaToolingSha`)
+  }
+  return null
+}
+
 function loadEvidence(evidenceDir) {
   if (!evidenceDir) return { cases: {}, residue: null, sourceSha: null, filePath: null }
   if (!fs.existsSync(evidenceDir)) {
@@ -168,6 +193,7 @@ function loadEvidence(evidenceDir) {
     hasSummary: true,
     residue: summary.residue ?? null,
     sourceSha: summary.sourceSha || summary.source_sha || null,
+    qaToolingSha: summary.qaToolingSha || summary.qa_tooling_sha || null,
     filePath: summaryPath,
     raw: summary,
   }
@@ -182,7 +208,14 @@ function evidenceValue(evidenceCase, _evidence, key) {
   return undefined
 }
 
-function evaluateCase(matrixCase, evidence, packageSha, staleEvidenceShas, isolatedDatabaseName) {
+function evaluateCase(matrixCase, evidence, packageSha, staleEvidenceShas, isolatedDatabaseName, packageToolingSha) {
+  const blocked = (reason, status = 'BLOCKED') => ({
+    id: matrixCase.id,
+    title: matrixCase.title,
+    status,
+    reason,
+    requiresHostEvidence: Boolean(matrixCase.requiresHostEvidence),
+  })
   const evidenceCase = evidence.cases[matrixCase.id]
   if (!evidenceCase) {
     return {
@@ -324,6 +357,36 @@ function evaluateCase(matrixCase, evidence, packageSha, staleEvidenceShas, isola
         requiresHostEvidence: Boolean(matrixCase.requiresHostEvidence),
       }
     }
+
+    // Owner P2 — QA tooling SHA binding. Evidence produced by a DIFFERENT QA tooling SHA must not
+    // PASS. Bind to the package QA_TOOLING_SHA; if the package carries none, a PASS cannot be verified.
+    if (!packageToolingSha) {
+      return blocked(
+        'PASS requires a package QA_TOOLING_SHA to bind the evidence to, but none was found at the package root ' +
+          '(QA_TOOLING_SHA file or manifest.qaToolingSha).',
+      )
+    }
+    // A present-but-wrong per-case or top-level qaToolingSha must be REJECTED, never silently ignored
+    // (that "unexpected field ignored" shape is exactly how stale-tooling evidence would slip through).
+    for (const [scope, raw] of [
+      ['per-case', evidenceCase.qaToolingSha],
+      ['top-level', evidence.qaToolingSha],
+    ]) {
+      if (raw != null && String(raw).trim().toLowerCase() !== packageToolingSha) {
+        return blocked(
+          `PASS requires the ${scope} qaToolingSha to equal the package QA_TOOLING_SHA ${packageToolingSha}; got: ${raw}.`,
+        )
+      }
+    }
+    // Owner P1 — the PASS floor is a STRUCTURED, harness-produced machine-evidence record (row counts,
+    // entity UUIDs, the harness's own determination, the harness module + tooling SHA), not just a long
+    // string. This also carries + binds the QA tooling SHA above.
+    const machineCheck = validateMachineEvidence(evidenceCase.machineEvidence, {
+      expectedQaToolingSha: packageToolingSha,
+    })
+    if (!machineCheck.ok) {
+      return blocked(machineCheck.error)
+    }
   }
 
   return {
@@ -357,6 +420,7 @@ export function runWindowsNativeQaMatrix(options = {}) {
   const matrix = readJson(matrixPath)
   const pin = readJson(pinPath)
   const packageSha = resolvePackageSourceSha(rootDir)
+  const packageToolingSha = resolvePackageToolingSha(rootDir)
   const pinnedSourceSha = normalizeSha(
     pin.expectedSourceSha,
     'pin.expectedSourceSha',
@@ -428,6 +492,7 @@ export function runWindowsNativeQaMatrix(options = {}) {
       packageSha,
       matrix.staleEvidenceShas || [],
       matrix.isolatedDatabaseName,
+      packageToolingSha,
     ),
   )
 
@@ -452,6 +517,7 @@ export function runWindowsNativeQaMatrix(options = {}) {
     syntheticDataOnly: true,
     sourceSha: packageSha,
     expectedSourceSha,
+    qaToolingSha: packageToolingSha,
     residue,
     counts,
     cases,
@@ -491,6 +557,7 @@ function printReport(report, asJson) {
   console.log('[attendance-windows-native-qa-runner] DRAFT/HOLD risk matrix report')
   console.log(`  campaign: ${report.campaign}`)
   console.log(`  sourceSha: ${report.sourceSha}`)
+  console.log(`  qaToolingSha: ${report.qaToolingSha ?? 'not bound'}`)
   console.log(`  residue: ${report.residue ?? 'not measured'}`)
   console.log(
     `  counts: PASS=${report.counts.PASS} BLOCKED=${report.counts.BLOCKED} FAIL=${report.counts.FAIL}`,
