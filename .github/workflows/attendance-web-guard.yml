@@ -116,7 +116,24 @@
 # posture-ceiling guard proving `confidence==='grounded'` is reachable for exactly one of the six
 # categories (⑥审批人来源) and never fabricated for the other five — see
 # docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md §9/§10 and
-# docs/development/attendance-vnext-wave5-explainability-development-verification-20260724.md).
+# docs/development/attendance-vnext-wave5-explainability-development-verification-20260724.md), and
+# attendance-fixed-schedule-effectiveness.spec.ts + attendance-fixed-schedule-effectiveness-scan.spec.ts +
+# attendance-fixed-schedule-surfaces.spec.ts (#4709 FSER-4 §3 surface wiring — amendment contract
+# `docs/development/attendance-4709-fser4-member-projection-contract-amendment-20260804.md` §3/§4,
+# RATIFIED 45d71c4209af35a63768ce7ce9f576377f6b8ce4, OD-4709-2=(a): the shared
+# parser/composable's strict-parse + enum-guard + gate-5/6 frontend-analogue matrix and the
+# composable's HTTP-folding/stale-suppression contract; the gate-7 repo scan (own positive
+# control: fixed file-count assertion + scanner unit-tested on synthetic strings before being
+# trusted against the real tree) proving every surface imports the shared module and no second
+# four-state derivation/reason-order table exists; and the mounted gate-8 render matrix for the
+# four surface components (group drawer, employee self card, shared self/admin decision trace,
+# report widget) across all four states × both self-applicability values plus every closed
+# unavailableReason posture — see
+# docs/development/attendance-4709-fixed-schedule-effectiveness-read-model-design-lock-20260801.md).
+# Real-Chromium gate-9 browser evidence for these five surfaces lives in
+# apps/web/verification/attendance-fixed-schedule-browser-evidence.spec.ts (run via
+# `playwright test`, same manual-verification lane as attendance-group-context-r2.spec.ts — not
+# wired into this vitest-only guard job).
 # The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
 # suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
@@ -184,6 +201,9 @@ on:
       - 'apps/web/tests/attendance-context-help-wiring.spec.ts'
       - 'apps/web/tests/attendance-web-guard-workflow.spec.ts'
       - 'apps/web/tests/attendance-decision-trace-metric.spec.ts'
+      - 'apps/web/tests/attendance-fixed-schedule-effectiveness.spec.ts'
+      - 'apps/web/tests/attendance-fixed-schedule-effectiveness-scan.spec.ts'
+      - 'apps/web/tests/attendance-fixed-schedule-surfaces.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -269,6 +289,9 @@ jobs:
               apps/web/tests/AttendanceContextHelp.spec.ts|\
               apps/web/tests/attendance-context-help-wiring.spec.ts|\
               apps/web/tests/attendance-web-guard-workflow.spec.ts|\
+              apps/web/tests/attendance-fixed-schedule-effectiveness.spec.ts|\
+              apps/web/tests/attendance-fixed-schedule-effectiveness-scan.spec.ts|\
+              apps/web/tests/attendance-fixed-schedule-surfaces.spec.ts|\
               .github/workflows/attendance-web-guard.yml)
                 relevant=true
                 break
@@ -330,4 +353,4 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         env:
           NODE_OPTIONS: --max-old-space-size=8192
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendance-web-guard-workflow.spec --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendance-fixed-schedule-effectiveness attendance-fixed-schedule-effectiveness-scan attendance-fixed-schedule-surfaces attendance-web-guard-workflow.spec --reporter=dot
