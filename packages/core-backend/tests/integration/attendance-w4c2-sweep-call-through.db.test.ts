@@ -55,7 +55,7 @@
  * empty except for what THIS file itself seeds.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { dropScratchDatabase, formatScratchDropOutcome } from '../helpers/scratch-database'
+import { dropScratchDatabase, formatScratchDropFailure, formatScratchDropOutcome } from '../helpers/scratch-database'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import http from 'node:http'
@@ -341,10 +341,19 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
     // still-attached backend, and `pg` reports that to its owner as an unowned 'error' EVENT —
     // which vitest counts as an unhandled error and the step exits 1 with every test passing.
     // The outcome line is emitted UNCONDITIONALLY: `CLEAN` is the claim, `FORCED` names the
-    // component still holding a connection and keeps #4791 open.
+    // component still holding a connection and keeps #4791 open, `FAILED` means a teardown
+    // statement errored. The helper fails CLOSED, so the failure is logged and then RE-THROWN —
+    // but only after the admin pool is closed and the env is restored, because leaking either
+    // would itself show up as a new flake on the very check #4791 is about.
+    let dropError: unknown
     if (adminPool) {
-      const dropOutcome = await dropScratchDatabase(adminPool, scratchName)
-      console.log(formatScratchDropOutcome('w4c2-sweep-call-through', dropOutcome))
+      try {
+        const dropOutcome = await dropScratchDatabase(adminPool, scratchName)
+        console.log(formatScratchDropOutcome('w4c2-sweep-call-through', dropOutcome))
+      } catch (err) {
+        dropError = err
+        console.log(formatScratchDropFailure('w4c2-sweep-call-through', err))
+      }
     }
     await adminPool?.end().catch(() => undefined)
     for (const [key, value] of Object.entries({
@@ -358,6 +367,7 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
+    if (dropError) throw dropError
   }, 60000)
 
   // ===============================================================================================
