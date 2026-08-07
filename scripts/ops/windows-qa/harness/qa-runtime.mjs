@@ -114,17 +114,36 @@ export function assertLocalIsolatedTarget(connectionString) {
   if (!cs) throw new Error('DATABASE_URL is not set; refusing to run against an unknown target.')
   let host = ''
   let dbName = ''
+  let hostParams = []
   try {
     const u = new URL(cs)
     host = u.hostname || ''
     dbName = decodeURIComponent((u.pathname || '').replace(/^\//, ''))
+    // libpq honours a `host=` connection param (a hostname OR a unix-socket directory). It is a
+    // real host channel, so it must be validated too — collect every occurrence.
+    hostParams = u.searchParams.getAll('host')
   } catch {
     throw new Error(`DATABASE_URL is not a parseable URL: refusing. (${cs.slice(0, 24)}...)`)
   }
-  const localHosts = new Set(['localhost', '127.0.0.1', '::1', ''])
-  const isLocal = localHosts.has(host) || cs.includes('host=/') || host.startsWith('/')
+  // Owner P1 (remote-DROP host-guard bypass): decide "local" from the PARSED host(s) ONLY — never a
+  // substring of the whole connection string. The old check was `cs.includes('host=/')`, which was
+  // defeated by putting `host=/tmp` anywhere in a REMOTE url — a query param, the password, or the
+  // dbname (e.g. postgres://user@evil.example/db?application_name=host=/tmp): the substring matched,
+  // the url was accepted as "local", and reset-isolated-db then connected to evil.example and ran
+  // DROP DATABASE. Instead, gather EVERY candidate host — the URL authority host AND each `host`
+  // query param — and require ALL of them to be local. An empty URL host with no host param is the
+  // loopback/unix-socket default and cannot denote a remote server.
+  const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
+  const hostIsLocal = (h) => localHosts.has(h) || h.startsWith('/') // a unix-socket path is local
+  const candidateHosts = []
+  if (host !== '') candidateHosts.push(host)
+  for (const hp of hostParams) candidateHosts.push(hp)
+  const isLocal = candidateHosts.length === 0 || candidateHosts.every(hostIsLocal)
   if (!isLocal) {
-    throw new Error(`Refusing: DATABASE_URL host "${host}" is not local (localhost/127.0.0.1/socket).`)
+    const bad = candidateHosts.filter((h) => !hostIsLocal(h)).join(', ')
+    throw new Error(
+      `Refusing: DATABASE_URL host(s) "${bad}" not local (only localhost/127.0.0.1/::1/unix-socket path).`,
+    )
   }
   if (dbName !== 'metasheet_windows_qa') {
     throw new Error(`Refusing: DATABASE_URL database "${dbName}" is not the isolated metasheet_windows_qa.`)
