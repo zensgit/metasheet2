@@ -79,9 +79,11 @@ CI evidence transport only and remains Draft/HOLD.
 
 ```bash
 # Node contract/unit tests (no dependency install required)
+# (reset-isolated-db.test.mjs uses POSIX /bin/sh pm2 stubs — run it on macOS/Linux.)
 node --test \
   scripts/ops/attendance-windows-native-gateway.test.mjs \
   scripts/ops/attendance-windows-native-qa-runner.test.mjs \
+  scripts/ops/windows-qa/reset-isolated-db.test.mjs \
   scripts/ops/attendance-windows-native-preflight.test.mjs \
   scripts/ops/attendance-onprem-package-verify-migrations.test.mjs \
   scripts/ops/onprem-windows-system-hardening.test.mjs

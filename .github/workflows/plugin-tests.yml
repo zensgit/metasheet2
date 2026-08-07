@@ -92,6 +92,16 @@ jobs:
             scripts/ops/onprem-windows-system-hardening.test.mjs \
             scripts/ops/multitable-onprem-package-no-node-modules.test.mjs
 
+      # Attendance Windows-native QA v2 tooling — P1 structured machine-evidence + P2 QA_TOOLING_SHA
+      # binding (runner test) and the P2 reset "service stopped" fail-open (reset test; its pm2 stubs
+      # are POSIX sh, so it is gated HERE on ubuntu, not in the Windows-only package-build QA step).
+      # Neither test needs `pnpm install` (node builtins + dependency-free contract module).
+      - name: Run attendance Windows-native QA v2 tooling tests
+        run: |
+          node --test \
+            scripts/ops/attendance-windows-native-qa-runner.test.mjs \
+            scripts/ops/windows-qa/reset-isolated-db.test.mjs
+
       - name: Run DingTalk OAuth-stability metrics-auth contract test (DT-CLOSE-01)
         run: |
           node --test scripts/ops/dingtalk-oauth-stability-metrics-auth-contract.test.mjs

@@ -73,19 +73,29 @@ product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` →
    the next case). Operator affirms the Windows host facts + runs the HTTP/UI cases (PQA-01/02/03/04, and
    the PQA-07 authorization probes — the cross-org probe target `$orgB` (`orgs.orgB`) is a dedicated
    synthetic org with a directory anchor but NO membership, so `u1` is not a member of it out-of-the-box:
-   turnkey, no operator org hand-creation).
+   turnkey, no operator org hand-creation). Running those HTTP/UI cases is **observation only** — the
+   runner keeps 01/02/03/04/07 BLOCKED (no harness emits their machine-evidence; see step 6).
 5. **EXPORT evidence FIRST** (the per-case SELECT(s) named in the runbook), then
    `summary-tool.mjs --record-residue` as a negative control (must be **> 0**), then
    `node reset-isolated-db.mjs` (teardown), then `summary-tool.mjs --record-residue` again (must be
    **0** — it writes that into `summary.json.residue`).
 6. `node scripts/ops/attendance-windows-native-qa-runner.mjs --root <package-root> --evidence-dir <evidence-dir> --json`
-   before any W4C-5 staging soak is *separately* authorized. Only **09/10** are PASS-eligible from these
-   harnesses; **05/06/08** stay **BLOCKED** (their full boundary objective is not route-reachable — see
-   below), so a full-PASS `--strict` gate is NOT expected here. On a non-Windows host the runner also
-   holds the PASS-eligible cases at BLOCKED on `hostPlatform=windows` etc.; the Windows operator
-   affirming the host facts is what lets **09/10** reach PASS. **PQA-05 does NOT become PASS by affirming
-   host facts** — its harness emits BLOCKED regardless (the legacy-projection + shadow-append halves need
-   the plugin-owned legacyAdapters, not importable from Node).
+   before any W4C-5 staging soak is *separately* authorized.
+
+   **Reachable ceiling with THIS tooling (important — the matrix cannot reach 10/10 here):**
+   - **09/10** are the ONLY PASS-eligible cases — real product fns end-to-end, emitting the structured
+     machine-evidence the runner requires. On a non-Windows host the runner holds them at BLOCKED on
+     `hostPlatform=windows` etc.; the Windows operator affirming the host facts is what lets them PASS.
+   - **05/06/08** stay **BLOCKED**: their full boundary objective is not route-reachable from Node (needs
+     the plugin-owned legacyAdapters). **PQA-05 does NOT become PASS by affirming host facts** — its
+     harness emits BLOCKED regardless.
+   - **01/02/03/04 and 07** stay **BLOCKED**: they are HTTP/UI (and 07's authorization-probe) cases with
+     NO harness that emits the required structured machine-evidence. The runner will not accept a
+     hand-typed PASS for them (owner P1). Running the browser/HTTP steps is for observation; recording a
+     PASS needs a machine-evidence recorder for that surface, which this tooling does not provide.
+
+   Therefore `--strict` (all-ten-PASS) is NOT reachable with this tooling as shipped; it stays a
+   fail-closed gate until such a recorder exists. That is intentional, not a regression.
 
 ## Proven-by-execution vs operator-verified
 - **Proven by execution (macOS + local PG15, this rework):** the drop/recreate + migration-SET/trigger

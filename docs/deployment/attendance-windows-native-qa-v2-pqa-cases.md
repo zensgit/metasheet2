@@ -34,6 +34,11 @@ revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 >   PASS-eligible (real product fn end-to-end); **05/06/08** are BLOCKED-with-evidence (real decision
 >   primitive, not the full boundary composition, which needs the plugin-internal legacyAdapters).
 >   PQA-05 stays BLOCKED regardless of the Windows host facts — its harness always emits BLOCKED.
+>   **01/02/03/04 and 07 also stay BLOCKED**: they are HTTP/UI (07 = authorization-probe) cases with NO
+>   harness emitting the structured machine-evidence the runner now requires for PASS (owner P1), so an
+>   operator cannot hand-type their PASS. **Consequence: with this tooling the matrix cannot reach 10/10
+>   and a green `--strict` is unreachable** until a machine-evidence recorder exists for the HTTP/UI
+>   surface — that is intentional, fail-closed, not a regression.
 > - **No auth material in Git.** The synthetic login password is operator-set via env
 >   `QA_SYNTH_PASSWORD`; `qa-identities.json` holds ids/emails/orgs only.
 > - **Operator prerequisite (UNVERIFIED — Windows host):** grant each synthetic user its attendance
