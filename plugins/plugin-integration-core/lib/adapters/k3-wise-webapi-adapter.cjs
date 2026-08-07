@@ -2574,9 +2574,23 @@ function createK3WiseWebApiAdapterFactory(defaults = {}) {
   return (input = {}) => createK3WiseWebApiAdapter({ ...defaults, ...input })
 }
 
+// `roles` is the ONLY thing gating which sides this adapter may be authored for:
+// IntegrationWorkbenchView's `adapterSupportsSide` reads it, and `supports` is unset here, so the
+// source-side capability branch already passes. Declaring `target` alone therefore made a K3
+// READ record unauthorable through the UI — while the backend has no such check at all and the
+// staging rehearsal has been creating `role: 'source'` K3 records (and passing 17/17) all along.
+//
+// That gap blocked the customer-window配置修复: the runbook requires TWO K3 records (one read,
+// one armed write, per #4769 which strips every readList* key from a profile-armed record), and
+// the UI refused to create the read one. The read capability was never missing — GetList /
+// GetDetail / read-smoke all run through this adapter, and #4757 specifically fixed its GetList
+// projection — only this declaration was stale.
+//
+// This does NOT loosen the write-side lock: the readList* strip is keyed on the armed PROFILE,
+// and this file contains no `role`-dependent branch, so an armed write record gains nothing.
 const K3_WISE_WEBAPI_ADAPTER_METADATA = {
   label: 'K3 WISE WebAPI',
-  roles: ['target'],
+  roles: ['source', 'target'],
   advanced: false,
 }
 

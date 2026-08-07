@@ -2277,7 +2277,41 @@ async function main() {
   testK3SqlServerExecutorKeepsK3IdentifierPolicy()
   await testK3SqlServerChannel()
   await testK3WebApiAutoFlagCoercion()
+  await testAdapterMetadataDeclaresBothSides()
+
   console.log('✓ k3-wise-adapters: WebAPI, SQL Server channel, and auto-flag coercion tests passed')
+}
+
+async function testAdapterMetadataDeclaresBothSides() {
+  const { K3_WISE_WEBAPI_ADAPTER_METADATA: meta } =
+    require('../lib/adapters/k3-wise-webapi-adapter.cjs')
+
+  // WHY THIS IS PINNED. `roles` is the ONLY gate on which sides the adapter may be AUTHORED for
+  // (IntegrationWorkbenchView's adapterSupportsSide; `supports` is unset so its capability branch
+  // already passes). Declaring `target` alone made a K3 READ record unauthorable through the UI,
+  // which blocked the customer-window configuration repair — the runbook requires TWO K3 records
+  // because #4769 strips every readList* key from a profile-armed one. The read capability was
+  // never missing; only this declaration was stale.
+  assert.ok(Array.isArray(meta.roles), 'metadata.roles must be an array')
+  for (const side of ['source', 'target']) {
+    assert.ok(meta.roles.includes(side),
+      `metadata.roles must include '${side}' — dropping it makes that side unauthorable in the UI `
+      + 'while the backend still accepts it, which is exactly how the read record became '
+      + 'impossible to create')
+  }
+
+  // And the inverse property, so this change cannot be read as loosening the write-side lock:
+  // the readList* strip is keyed on the ARMED PROFILE, not on the record's role. If a `role`
+  // branch ever appears in the adapter, that assumption needs re-checking rather than inheriting.
+  const src = require('node:fs').readFileSync(
+    require.resolve('../lib/adapters/k3-wise-webapi-adapter.cjs'), 'utf8')
+  const code = src.replace(/\/\*[^]*?\*\//g, ' ').split('\n')
+    .filter((l) => !l.trim().startsWith('//')).join('\n')
+  assert.ok(!/\brole\s*===|\brole\s*!==|system\.role\b/.test(code),
+    'the adapter must stay role-agnostic: the readList* strip is profile-keyed, and a role branch '
+    + 'here would mean adding the source role could change write-side behaviour')
+
+  console.log('  k3-wise metadata: both sides declared, adapter stays role-agnostic OK')
 }
 
 main().catch((err) => {
