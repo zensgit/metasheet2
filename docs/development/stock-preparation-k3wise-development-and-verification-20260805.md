@@ -403,63 +403,101 @@ zip      d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
 
 ### 7.6.2 两道门,顺序触发(与构建无关)
 
-在 `7bf2bd7a1`(0725 release)、`aa48c3f18`(冻结窗口包)、`3c9160d09`(#4798 head)三个候选构建上
-**逐一核验,结论一致**:
+在 `7bf2bd7a1`(0725 release)、`aa48c3f18`(冻结窗口包)、`3c9160d09`(已关闭的 #4798 head)
+三个候选构建上**逐一核验,结论一致**:
 
 | # | 门 | 位置 | 三构建 |
 |---|---|---|---|
 | 1 | 前端按 adapter 声明拦下 `role=source` | `IntegrationWorkbenchView.vue:1265` → `adapterSupportsSide` | ✓✓✓ |
-| 2 | 服务端对**已存在**记录抛 `kind and role cannot be changed after creation` | `external-systems.cjs` `upsertExternalSystem` | ✓✓✓ |
+| 2 | 服务端对**已存在**记录抛 `kind and role cannot be changed after creation` | `external-systems.cjs:257-268`(`upsertExternalSystem`) | ✓✓✓ |
 
-服务端 role 是固定三值枚举(`VALID_ROLES`),**不与 adapter 声明的 roles 交叉校验**
-(`upsertExternalSystem` 全文无 adapter registry / adapter metadata 引用)。
+服务端 role 是固定三值枚举(`VALID_ROLES`,`external-systems.cjs:21`),**不与 adapter 声明的
+roles 交叉校验**(`upsertExternalSystem` 全文无 adapter registry / adapter metadata 引用)。
 
 ⇒ 现场看到的"保存被禁用"是**门 1 先触发**,服务端并未应答。**门 2 是下一步才会撞上的**:
 若绕过前端但仍在**现有 target 记录**上改 role,服务端不可变性会拒绝。
 
-> **因此:修复必须新建一条 K3-read 记录,而不是把现有 target 改成 source。
-> 这条要求在 #4798 合并并重部署之后依然成立。** 它是任何分支下都不变的动作项。
+> **因此:修复必须新建一条 K3-read 记录,而不是把现有 target 改成 source。**
+> 这一条**不依赖任何 PR 的合并**:门 2 是记录级不可变性(`external-systems.cjs:257-268`),
+> 与 adapter 怎么声明 roles 无关,任何构建下都成立。
+> 而**新建的那条记录也不需要 `source` 角色** —— 见 §7.6.3。
 
 不受此阻塞的一半:approved SQL Server source adapter 本就声明 source 侧
 (`data-source-sql-readonly-source-adapter.cjs`),`approvedSqlServerSourceRefPresent=NO`
 那一项现在就能按既有授权补齐。
 
-### 7.6.3 #4798 与"合并即解除"的撤回
+### 7.6.3 正确的修复前提:K3 保持 target-only,K3-read 不需要 `source` 角色
 
-PR #4798 把 K3 WebAPI adapter 的 `roles` 由 target-only 改为双侧(required 9/9 绿)。
-其原标题声称**合并即解除 #4628 阻塞** —— **该声明过强,已撤回**。
+**#4798 已 CLOSED(2026-08-07T14:27:43Z),不是修复路径。** 它给 K3 adapter 加 `source` 角色,
+而那会对外宣告一项**运行期不成立**的通用 pipeline source 能力 —— UI 会允许操作员建出一条
+**首跑必失败**的 source。核验于 main `4e6a35d99`:
 
-`roles` 是 adapter 模块常量,**随构建烘焙**:
+| 事实 | 位置 |
+|---|---|
+| C6 dry-run 的 `readSourceRows` 发**字面裸读** `read({ object, limit, cursor })` | `external-write-dry-run.cjs:427` |
+| pipeline runner 的读**带** `options`,但其来源是 `pipeline.options.source` —— DB/JSON 上的普通对象 | `pipeline-runner.cjs:631` ← `resolveSourceReadOptions` `:85-103` |
+| 而 list 读的放行键是**模块私有 `Symbol`** ⇒ 任何 JSON 配置都表达不了它 | `read-smoke-marker.cjs:5` |
+| ⇒ 记录配 `readMode:'list'` 时,两个调用点的读都因缺该 Symbol 被 `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` 回绝 | `k3-wise-webapi-adapter.cjs:975-980` |
+| ⇒ 未写 `readMode` 时默认 `single_record_detail`,改由 `K3_WISE_READ_KEY_REQUIRED` 回绝(§7.2 三变体表) | `k3-wise-webapi-adapter.cjs:972` |
 
-- 配置面若是**跟随 main 的部署**:`docker-build.yml` 于 push main 时 build+deploy,
-  `paths-ignore` 只排除 `docs/**`/`output/**`,而 #4798 改 `plugins/**` ⇒ 合并会触发一次
-  **自动重部署**,UI 授权路径随之解除;
-- 配置面若是**私有 on-prem 包**:合并不改变它,需要一次部署,而
-  `packageDeployment=NOT_AUTHORIZED`,且重部署可能牵动冻结窗口包的重出与重跑彩排。
+这比 §7.2 记的"发裸读"**强一层**:runner 那条并非漏传参数,而是**结构上传不进去** ——
+私有 Symbol 不可能出现在 JSON 配置里。adapter 在 main 上仍是 `roles: ['target']`
+(`k3-wise-webapi-adapter.cjs:2579`),**保持不变**。
 
-配置面跑哪个构建在私域,本侧判不了 —— 已升 owner。
+**而 runbook 本来就不需要 K3 持有 `source` 角色。** pipeline 的 source 仍是**已批准的 SQL Server
+source**(`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`,§7.2);K3-read **不进 pipeline 的
+任何一端**,它在三条使用路径上全部**按 id 被引用**,而这三条**都不查 `role`**:
 
-### 7.6.4 待 owner 裁的三个分支
+| 用途 | 判定 | 位置 |
+|---|---|---|
+| 步 0-b / 步骤 1 的 read-smoke | 只比 `kind` 与 preset 的 `requiredKind`,**无 role 检查** | `http-routes.cjs:2810-2812` |
+| B4 关系集合 | `[source, target, target.config.pairedReadSystemId]` —— 纯 id | `http-routes.cjs:1114-1118` |
+| B4 自指守卫 | `binding.config.systemId === system.id` —— 纯 id | `k3-wise-c6-write-profile.cjs:377-384` |
 
-> **时点**:本节状态为 **2026-08-07T07:5x UTC**,此时 #4798 required 9/9 绿、`CLEAN`、未 arm。
-> 三个分支**互斥且未选**。若 #4798 先于本文合并,分支 (b) 的前半(放行)即已发生 ——
-> 但其后半(**授权配置面重部署**)仍是独立决定,不随合并自动成立,§7.6.3 的两种构建情形照旧适用。
+⇒ **K3-read = 一条无 write profile 的独立读探针记录。** 它的 `role` 由建它的路径决定
+(照工作台复制则继承 target,见 §7.6.4),**不必、也不应当是 `source`**;
+而按门 2,建成之后 role 不可再改(`external-systems.cjs:257-268`),所以这一点必须在**建记录时**就定。
 
-```text
-(a) 授权在既有配置面上以受控 API 新建 K3-read 记录(不需要部署)
-(b) 放行 #4798 + 授权配置面重部署(当前 NOT_AUTHORIZED;可能牵动冻结包重出)
-(c) 都不做 ⇒ 候选窗口顺延
-```
+### 7.6.4 未决:K3-read 的凭据从哪来(待配置负责人答一个问题)
 
-本侧**不自行选 (a)**:以 API 达成的正是为 #4798 保留的那一项能力变更,绕开评审与放行;
-由实现方提议等于把"技术上算"当作授权。
+两条**既有**创建路径各缺一半,合不成"有凭据 + 无 profile"的那条记录:
+
+| 路径 | 给得了 | 给不了 | 位置 |
+|---|---|---|---|
+| 工作台「复制为新连接」 | `kind`/`role`/`config`/`capabilities`(可在 config JSON 里去掉 profile) | **凭据** —— 草稿无凭据输入,保存也不发 `credentials` | `IntegrationWorkbenchView.vue:2092-2106`、`:2210-2219` |
+| K3 配置向导 | 凭据 | **无 profile 的记录** —— `role:'target'` 与 material profile 都**无条件**写死 | `k3WiseSetup.ts:1969`、`:1987` |
+
+复制也**不可能在浏览器侧补上凭据**:公开读取面只回 `hasCredentials`/`credentialFormat`/
+`credentialFingerprint`,**从不回明文**(`external-systems.cjs:115-136`)。而新建时不带 `credentials`
+⇒ 后端写 `null`(`external-systems.cjs:297`)⇒ 该记录读时必抛 `K3_WISE_CREDENTIALS_MISSING`。
+
+> **待配置负责人回答(本侧不预设答案,两条都未裁)**:
+> **现场能否重新录入 K3-read 的那份凭据?**
+>
+> - **能** ⇒ **零代码配置路径**。受控 API `POST /api/integration/external-systems` 的 create 分支
+>   **本来就收 `credentials`**:路由把 `requestBody(req)` 原样下传、无字段白名单
+>   (`http-routes.cjs:2748-2751`),规范化保留 `credentials`(`external-systems.cjs:100`),
+>   落库前加密(`:241`)。建一条 `kind=erp:k3-wise-webapi`、**不带 `objects.material.profile`**、
+>   带 list 读配置、带凭据的**新**记录即可,并按步 0-b 四值表回填
+>   `pairedReadSystemId` 与 B4 `config.systemId`。
+> - **不能** ⇒ 需要一条**窄口径的、服务端保凭据的复制**能力(明文只在服务端流转,浏览器侧做不到)。
+>   ⚠️ **它必须只做"带着凭据复制一条记录"这一件事,不得顺带给 K3 开 `source` 角色** ——
+>   那正是 #4798 被关闭的原因(§7.6.3)。
+>
+> 本侧不自行选:前者动的是**受控配置面上的数据**,后者是**新增能力面**,都不在本侧授权内。
+
+> **原 §7.6.4「本侧不自行选 (a)」的理由已作废(留痕)**:旧理由是"以 API 达成的正是为 #4798
+> 保留的那一项能力变更,绕开评审与放行"。在正确前提下 K3-read **不需要 `source` 角色**,
+> 该 API 路径**不再夹带任何能力变更**。不自行选的理由改为上面那条(动受控配置面的数据)。
+> 旧 §7.6.3(「#4798 与"合并即解除"的撤回」)所依赖的两种构建情形随 #4798 关闭一并作废:
+> 不再有等待部署的 adapter 声明变更,`packageDeployment=NOT_AUTHORIZED` 也不再是本阻塞的分支条件。
 
 ### 7.6.5 时限
 
 `operationId=stockprep_aa48_readiness_verify_20260807_02`、
 `authorizationEnd=2026-08-08T08:00:00+08:00`,前置 `CONFIGURATION_REPAIR_SAVED` 未满足。
-owner 曾指示"修复保存后可直接执行 V2,无需再等 owner 回复" ⇒ 若不选定分支,该授权将**静默失效**,
-链条停在此处。是否随裁定一并重发 V2,待 owner 决定。
+owner 曾指示"修复保存后可直接执行 V2,无需再等 owner 回复" ⇒ 若 §7.6.4 的凭据问题不落定,
+该授权将**静默失效**,链条停在此处。是否随裁定一并重发 V2,待 owner 决定。
 
 ---
 
