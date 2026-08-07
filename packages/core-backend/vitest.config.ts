@@ -236,6 +236,10 @@ export default defineConfig({
       // split, default-off/zero-effect no-write, and fail-last ledger rollback. DATABASE_URL-gated;
       // excluded here and whole-file wired into the approval real-DB step.
       'tests/integration/directory-deprovision-writer-ledger.db.test.ts',
+      // D4 two-connection goldens (adversarial-review absorption): the deterministic
+      // lock-wait race that proved the stale globally-clear P1, and the §5.4 supersede
+      // both-legs golden. DATABASE_URL-gated; whole-file wired into the approval real-DB step.
+      'tests/integration/directory-deprovision-race-supersede.db.test.ts',
       // DingTalk multi-corp external-key isolation: corp-scoped uniqueness, upgrade migration,
       // real-sync coexistence, and same-corp/cross-corp identity matching controls.
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a

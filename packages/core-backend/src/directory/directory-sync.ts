@@ -1596,9 +1596,12 @@ export async function applyDirectoryDeprovisionPolicies(
       continue
     }
 
-    // D4: the helper re-reads both candidacy scopes while holding the canonical users row lock
-    // (write mode), applies the access graph, generation, and ledger on this SAME transaction
-    // client, and fails the whole sync transaction if any evidence write fails.
+    // D4: in write mode the helper acquires the canonical `users` row lock FIRST (its own
+    // statement), then re-reads both candidacy scopes in a SEPARATE statement whose snapshot
+    // postdates the lock — the two must never share a statement, or the subqueries evaluate on
+    // the pre-wait snapshot (adversarial-review P1, proved with a two-connection race; see
+    // `lockCandidateUser` in deprovision-ledger.ts). Access graph, generation, event and effects
+    // then commit or roll back together on this SAME transaction client.
     const result = await applyDirectoryDeprovisionCandidate(client, {
       localUserId,
       orgId,
@@ -1609,6 +1612,15 @@ export async function applyDirectoryDeprovisionPolicies(
       policy,
       write: options.enabled,
     })
+    if (result.skipReason) {
+      // Per-candidate race (user vanished / source unbound mid-run): skip THIS person, never
+      // abort the whole sync run — with the flag off this path must be indistinguishable from
+      // a no-op preview.
+      logger.warn(
+        `Directory deprovision skipped ${localUserId} for ${options.integrationId}: ${result.skipReason}`,
+      )
+      continue
+    }
     const effectTypes = new Set(result.plan.effects.map((effect) => effect.type))
     if (effectTypes.size === 0) continue
 

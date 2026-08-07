@@ -37,6 +37,12 @@ export type ApplyDeprovisionCandidateResult = {
   eventId: string | null
   accessGeneration: number
   globallyClear: boolean
+  /**
+   * Set when this candidate was skipped for a per-candidate race (user row vanished, or the
+   * source account was unbound between candidate selection and the lock). A skip never aborts
+   * the surrounding sync run; `plan.effects` is empty so counters stay untouched.
+   */
+  skipReason: 'candidate_vanished' | null
   plan: DirectoryDeprovisionPlan
 }
 
@@ -58,11 +64,31 @@ function hasEffect(
   return effects.some((effect) => effect.type === type)
 }
 
+/**
+ * Adversarial review of #4647 (P1, two-connection proof): candidacy MUST NOT be read by the
+ * statement that acquires the lock. Under READ COMMITTED the locking statement's subqueries are
+ * evaluated against a snapshot taken BEFORE the lock wait — EPQ re-checks only the locked `users`
+ * row itself, so `globally_clear` came back stale while `access_generation` looked fresh, and a
+ * cross-org rehire committing during the wait was invisible: the user was platform-deactivated,
+ * the grant revoked, and the event recorded `globally_clear=true` — false evidence. The lock is
+ * therefore taken FIRST, in its own statement (`lockCandidateUser`), and this state read runs as
+ * a SEPARATE statement afterwards, whose snapshot postdates the lock (§5.3 step 1 / §7.4).
+ */
+async function lockCandidateUser(
+  client: DirectoryTransactionClient,
+  localUserId: string,
+): Promise<boolean> {
+  const locked = await client.query(
+    `SELECT id FROM users WHERE id = $1::text FOR UPDATE`,
+    [localUserId],
+  )
+  return locked.rows.length > 0
+}
+
 async function loadCandidateState(
   client: DirectoryTransactionClient,
   input: ApplyDeprovisionCandidateInput,
-): Promise<CandidateStateRow> {
-  const lockClause = input.write ? 'FOR UPDATE OF candidate_user' : ''
+): Promise<CandidateStateRow | null> {
   const result = await client.query(
     `SELECT
        candidate_user.activation_status,
@@ -118,8 +144,7 @@ async function loadCandidateState(
           LIMIT 1
        ), FALSE) AS dingtalk_grant_enabled
      FROM users candidate_user
-     WHERE candidate_user.id = $1::text
-     ${lockClause}`,
+     WHERE candidate_user.id = $1::text`,
     [
       input.localUserId,
       input.directoryAccountId,
@@ -127,17 +152,12 @@ async function loadCandidateState(
       input.orgId,
     ],
   )
+  // Adversarial review of #4647 (P2): a vanished user or a concurrently-unbound source account
+  // is a PER-CANDIDATE race, not a sync-level fault — throwing here aborted the entire directory
+  // sync run (and did so even with the deprovision flag OFF, a regression main's writer did not
+  // have). Both shapes now surface as null → the caller skips this candidate with a warning.
   const row = result.rows[0] as CandidateStateRow | undefined
-  if (!row) {
-    throw new Error(
-      `directory deprovision user not found: ${input.localUserId}`,
-    )
-  }
-  if (!row.linked_at_apply) {
-    throw new Error(
-      'directory deprovision source account is no longer linked to the candidate user',
-    )
-  }
+  if (!row || !row.linked_at_apply) return null
   return row
 }
 
@@ -171,7 +191,33 @@ export async function applyDirectoryDeprovisionCandidate(
   client: DirectoryTransactionClient,
   input: ApplyDeprovisionCandidateInput,
 ): Promise<ApplyDeprovisionCandidateResult> {
+  // §5.3 step 0: in write mode the mutex comes FIRST, as its own statement — see
+  // `lockCandidateUser`'s doc comment for why the lock and the state read must never share a
+  // statement. Preview takes no lock (it writes nothing, so there is nothing to serialise).
+  if (input.write) {
+    const lockHeld = await lockCandidateUser(client, input.localUserId)
+    if (!lockHeld) {
+      return {
+        applied: false,
+        eventId: null,
+        accessGeneration: 0,
+        globallyClear: false,
+        skipReason: 'candidate_vanished',
+        plan: { localUserId: input.localUserId, skipReason: 'candidate_vanished', effects: [] },
+      }
+    }
+  }
   const state = await loadCandidateState(client, input)
+  if (!state) {
+    return {
+      applied: false,
+      eventId: null,
+      accessGeneration: 0,
+      globallyClear: false,
+      skipReason: 'candidate_vanished',
+      plan: { localUserId: input.localUserId, skipReason: 'candidate_vanished', effects: [] },
+    }
+  }
   const plan = planDirectoryDeprovision({
     localUserId: input.localUserId,
     policy: input.policy,
@@ -191,6 +237,7 @@ export async function applyDirectoryDeprovisionCandidate(
       eventId: null,
       accessGeneration: currentGeneration,
       globallyClear: state.globally_clear,
+      skipReason: null,
       plan,
     }
   }
@@ -331,6 +378,7 @@ export async function applyDirectoryDeprovisionCandidate(
     eventId,
     accessGeneration: generation,
     globallyClear: state.globally_clear,
+    skipReason: null,
     plan,
   }
 }

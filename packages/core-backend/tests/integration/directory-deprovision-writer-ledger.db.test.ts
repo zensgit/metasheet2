@@ -473,37 +473,41 @@ describeIfDatabase(
       expect(evidence.rows[0].count).toBe('0')
     })
 
-    it('rejects a direct writer call when the source account is no longer inactive', async () => {
+    it('skips (without writing or aborting) a direct writer call when the source account is no longer inactive', async () => {
       const seeded = await seedDirectory({ grantEnabled: true })
       await query(
         `UPDATE directory_accounts SET is_active = TRUE WHERE id = $1::uuid`,
         [seeded.accountId],
       )
 
-      await expect(
-        transaction(async (client) =>
-          applyDirectoryDeprovisionCandidate(
-            {
-              query: async (statement, params) => {
-                const result = await client.query(statement, params)
-                return { rows: result.rows as Array<Record<string, unknown>> }
-              },
+      // Adversarial-review P2 absorption: this used to THROW, which aborted the ENTIRE directory
+      // sync transaction for a per-candidate race — and did so even with the deprovision flag
+      // OFF. The contract is now a skip: the invariant under test is unchanged (a re-activated
+      // source must never be deprovisioned — zero writes below), only the failure mode moved
+      // from run-fatal to candidate-scoped.
+      const result = await transaction(async (client) =>
+        applyDirectoryDeprovisionCandidate(
+          {
+            query: async (statement, params) => {
+              const result = await client.query(statement, params)
+              return { rows: result.rows as Array<Record<string, unknown>> }
             },
-            {
-              localUserId: seeded.userId,
-              orgId: seeded.orgId,
-              integrationId: seeded.integrationId,
-              directoryAccountId: seeded.accountId,
-              runId: seeded.runId,
-              triggeredBy: 'test:d4-direct-writer',
-              policy: 'mark_inactive',
-              write: true,
-            },
-          ),
+          },
+          {
+            localUserId: seeded.userId,
+            orgId: seeded.orgId,
+            integrationId: seeded.integrationId,
+            directoryAccountId: seeded.accountId,
+            runId: seeded.runId,
+            triggeredBy: 'test:d4-direct-writer',
+            policy: 'mark_inactive',
+            write: true,
+          },
         ),
-      ).rejects.toThrow(
-        'directory deprovision source account is no longer linked to the candidate user',
       )
+      expect(result.applied).toBe(false)
+      expect(result.skipReason).toBe('candidate_vanished')
+      expect(result.plan.effects).toEqual([])
 
       const user = await query<{
         access_generation: string
