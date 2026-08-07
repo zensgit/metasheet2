@@ -46,6 +46,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { dropScratchDatabase, formatScratchDropOutcome } from '../helpers/scratch-database'
 import type { MetaSheetServer } from '../../src/index'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -250,7 +251,15 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
   afterAll(async () => {
     await pool?.end().catch(() => undefined)
     if (server) await server.stop()
-    await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
+    // #4791: drain the scratch DB's backends before dropping it. A forced drop terminates any
+    // still-attached backend, and `pg` reports that to its owner as an unowned 'error' EVENT —
+    // which vitest counts as an unhandled error and the step exits 1 with every test passing.
+    // The outcome line is emitted UNCONDITIONALLY: `CLEAN` is the claim, `FORCED` names the
+    // component still holding a connection and keeps #4791 open.
+    if (adminPool) {
+      const dropOutcome = await dropScratchDatabase(adminPool, scratchName)
+      console.log(formatScratchDropOutcome('bpmn-poller-disabled', dropOutcome))
+    }
     await adminPool?.end().catch(() => undefined)
     for (const [key, value] of Object.entries({
       DATABASE_URL: priorEnv.databaseUrl,
