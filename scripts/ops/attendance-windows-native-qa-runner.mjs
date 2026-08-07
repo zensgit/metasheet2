@@ -7,6 +7,7 @@
  * Never reuses stale W4C-2 package claims as current evidence.
  */
 
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -182,7 +183,7 @@ function loadEvidence(evidenceDir) {
   }
   const summaryPath = path.join(evidenceDir, 'summary.json')
   if (!fs.existsSync(summaryPath)) {
-    return { cases: {}, residue: null, sourceSha: null, filePath: summaryPath }
+    return { cases: {}, residue: null, sourceSha: null, runId: null, filePath: summaryPath }
   }
   const summary = readJson(summaryPath)
   const rawCases = summary.cases
@@ -198,6 +199,7 @@ function loadEvidence(evidenceDir) {
     residue: summary.residue ?? null,
     sourceSha: summary.sourceSha || summary.source_sha || null,
     qaToolingSha: summary.qaToolingSha || summary.qa_tooling_sha || null,
+    runId: summary.runId || summary.run_id || null,
     filePath: summaryPath,
     raw: summary,
   }
@@ -212,7 +214,68 @@ function evidenceValue(evidenceCase, _evidence, key) {
   return undefined
 }
 
-function evaluateCase(matrixCase, evidence, packageSha, staleEvidenceShas, isolatedDatabaseName, packageToolingSha) {
+// Owner gate 1 — the artifactSha256 is RECOMPUTED by the runner over the real file in the evidence
+// dir; a well-formed hex that points at no real (or a tampered) file must NOT PASS. Rejects: a missing
+// evidence dir; a path escaping the evidence dir (traversal); a symlink (or a symlinked ancestor that
+// escapes); a missing file; a non-file; and a digest that does not match the claimed sha256. The
+// path/sha256 SHAPE is validated by the contract; this reads the bytes.
+function verifyArtifactFile(evidenceDir, artifact) {
+  if (!evidenceDir) {
+    return { ok: false, error: 'operatorEvidence.artifact cannot be verified: no --evidence-dir was provided.' }
+  }
+  let baseReal
+  try {
+    baseReal = fs.realpathSync(evidenceDir)
+  } catch {
+    return { ok: false, error: `Evidence dir does not exist for artifact verification: ${evidenceDir}` }
+  }
+  const target = path.resolve(baseReal, artifact.path)
+  const relToBase = path.relative(baseReal, target)
+  if (relToBase === '' || relToBase.startsWith('..') || path.isAbsolute(relToBase)) {
+    return { ok: false, error: `operatorEvidence.artifact.path resolves outside the evidence dir: ${artifact.path}` }
+  }
+  let lst
+  try {
+    lst = fs.lstatSync(target)
+  } catch {
+    return { ok: false, error: `operatorEvidence.artifact file does not exist: ${artifact.path}` }
+  }
+  if (lst.isSymbolicLink()) {
+    return { ok: false, error: `operatorEvidence.artifact.path must not be a symlink: ${artifact.path}` }
+  }
+  // Resolve any symlinked ANCESTOR and re-check containment (a symlinked parent could escape the dir).
+  let real
+  try {
+    real = fs.realpathSync(target)
+  } catch {
+    return { ok: false, error: `operatorEvidence.artifact file does not exist: ${artifact.path}` }
+  }
+  const relReal = path.relative(baseReal, real)
+  if (relReal.startsWith('..') || path.isAbsolute(relReal)) {
+    return { ok: false, error: `operatorEvidence.artifact.path escapes the evidence dir via a symlink: ${artifact.path}` }
+  }
+  if (!fs.statSync(real).isFile()) {
+    return { ok: false, error: `operatorEvidence.artifact is not a regular file: ${artifact.path}` }
+  }
+  const digest = crypto.createHash('sha256').update(fs.readFileSync(real)).digest('hex')
+  if (digest !== artifact.sha256) {
+    return {
+      ok: false,
+      error: `operatorEvidence.artifact.sha256 does not match the recomputed digest of ${artifact.path} (claimed ${artifact.sha256}, actual ${digest}).`,
+    }
+  }
+  return { ok: true }
+}
+
+function evaluateCase(
+  matrixCase,
+  evidence,
+  packageSha,
+  staleEvidenceShas,
+  isolatedDatabaseName,
+  packageToolingSha,
+  evidenceDir,
+) {
   const blocked = (reason, status = 'BLOCKED') => ({
     id: matrixCase.id,
     title: matrixCase.title,
@@ -382,31 +445,60 @@ function evaluateCase(matrixCase, evidence, packageSha, staleEvidenceShas, isola
         )
       }
     }
-    // Owner direction a+ — the PASS floor is a case-shaped, tooling-SHA-bound STRUCTURED evidence
-    // record, not just a long string. Two kinds, one per surface:
-    //   - PQA-09/10 (route-less harness cases): a machineEvidence envelope whose harnessModule is the
-    //     ONE whitelisted module for that case and whose facts match that case's exact schema.
-    //   - PQA-01..08 (operator-run HTTP/UI cases): an operatorEvidence envelope (tester + UTC timestamp
-    //     + command/route + expected/observed + artifact sha256 + bound source/tooling SHAs), with a
+    // Owner runId binding — a PASS requires the summary to carry a campaign runId, and every per-case
+    // evidence record + its artifact manifest must carry that SAME runId (stops splicing a
+    // same-product-SHA record from a DIFFERENT run into this report).
+    const expectedRunId = evidence.runId
+    if (!expectedRunId) {
+      return blocked(
+        'PASS requires a campaign runId in the evidence summary (summary.runId) that every per-case ' +
+          'evidence record + artifact must be bound to; none was found.',
+      )
+    }
+
+    // Owner direction a+ / gate 2 — STRICT evidence-kind partitioning, no fallback. Each surface has
+    // exactly ONE accepted evidence kind; the WRONG kind (even if internally valid) is REJECTED:
+    //   - PQA-09/10 (route-less harness cases): machineEvidence ONLY — whitelisted harnessModule FOR
+    //     THAT CASE + that case's exact facts schema.
+    //   - PQA-01..08 (operator-run HTTP/UI cases): operatorEvidence ONLY — tester + UTC timestamp +
+    //     command/route + expected/observed + an artifact RECOMPUTED by the runner + bound SHAs, with a
     //     full-boundary attestation for PQA-05/06/08.
-    // A machineEvidence hand-typed with a non-whitelisted harnessModule / invented facts, or attached to
-    // an operator case, is REJECTED (the owner's forge); likewise a thin operatorEvidence.
+    // A machineEvidence on an operator case (the owner's forge) or an operatorEvidence on a machine case
+    // is rejected here, not fallen back to.
     if (isMachineEvidenceCase(matrixCase.id)) {
+      if (evidenceCase.operatorEvidence !== undefined) {
+        return blocked(
+          `${matrixCase.id} is a machine-evidence case (PQA-09/10) and accepts machineEvidence ONLY; an operatorEvidence is not accepted here.`,
+        )
+      }
       const machineCheck = validateMachineEvidence(evidenceCase.machineEvidence, {
         expectedQaToolingSha: packageToolingSha,
+        expectedRunId,
         caseId: matrixCase.id,
       })
       if (!machineCheck.ok) {
         return blocked(machineCheck.error)
       }
     } else {
+      if (evidenceCase.machineEvidence !== undefined) {
+        return blocked(
+          `${matrixCase.id} is an operator-evidence case (PQA-01..08) and accepts operatorEvidence ONLY; a machineEvidence is not accepted here.`,
+        )
+      }
       const operatorCheck = validateOperatorEvidence(evidenceCase.operatorEvidence, {
         expectedSourceSha: packageSha,
         expectedQaToolingSha: packageToolingSha,
+        expectedRunId,
         caseId: matrixCase.id,
       })
       if (!operatorCheck.ok) {
         return blocked(operatorCheck.error)
+      }
+      // Owner gate 1 — recompute the artifact digest over the real file (missing/tampered/symlink/escape
+      // all fail closed here, after the shape is validated above).
+      const artifactCheck = verifyArtifactFile(evidenceDir, evidenceCase.operatorEvidence.artifact)
+      if (!artifactCheck.ok) {
+        return blocked(artifactCheck.error)
       }
     }
   }
@@ -507,6 +599,7 @@ export function runWindowsNativeQaMatrix(options = {}) {
     throw new Error('Risk matrix must pin isolatedDatabaseName=metasheet_windows_qa')
   }
 
+  const evidenceDirAbs = options.evidenceDir ? path.resolve(options.evidenceDir) : ''
   const cases = (matrix.cases || []).map((matrixCase) =>
     evaluateCase(
       matrixCase,
@@ -515,6 +608,7 @@ export function runWindowsNativeQaMatrix(options = {}) {
       matrix.staleEvidenceShas || [],
       matrix.isolatedDatabaseName,
       packageToolingSha,
+      evidenceDirAbs,
     ),
   )
 
@@ -540,6 +634,7 @@ export function runWindowsNativeQaMatrix(options = {}) {
     sourceSha: packageSha,
     expectedSourceSha,
     qaToolingSha: packageToolingSha,
+    runId: evidence.runId ?? null,
     residue,
     counts,
     cases,

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -60,8 +61,17 @@ function seedPackageRoot(root, { sourceSha = PINNED_SHA, qaToolingSha = PINNED_S
   })
 }
 
-const ARTIFACT_SHA256 = 'a'.repeat(64) // a valid 64-hex sha256 stand-in (screenshot/log digest)
+const RUN_ID = 'run-qa-20260806-0001' // the campaign runId binding the summary + every evidence record
 const HARNESS_MODULE = { 'PQA-09': 'pqa-09-outbox-retry.mjs', 'PQA-10': 'pqa-10-scheduled-sweep.mjs' }
+
+// Deterministic artifact bytes keyed by the RELATIVE path, so writeSummary can materialize a real file
+// whose recomputed sha256 matches the claimed one by construction. (The runner reads + hashes the file.)
+function artifactBytes(relPath) {
+  return `synthetic QA artifact bytes for ${relPath}\n`
+}
+function artifactSha(relPath) {
+  return createHash('sha256').update(artifactBytes(relPath)).digest('hex')
+}
 
 // The EXACT facts each real harness emits (key-for-key from pqa-09/pqa-10). A PASS machineEvidence must
 // match this shape; the harness self-validates against the same contract at emit time.
@@ -98,11 +108,13 @@ function machineFacts(caseId) {
 }
 
 // A STRUCTURED harness-produced machine-evidence envelope (owner P1), the shape a PASS on PQA-09/10
-// now requires: the whitelisted harnessModule FOR THAT CASE + that case's exact facts schema.
+// now requires: caseId + campaign runId + the whitelisted harnessModule FOR THAT CASE + facts schema.
 function machineEvidence(caseId, overrides = {}) {
   return {
     schema: MACHINE_EVIDENCE_SCHEMA,
     producedBy: MACHINE_EVIDENCE_PRODUCER,
+    caseId,
+    runId: RUN_ID,
     harnessModule: HARNESS_MODULE[caseId],
     determination: 'PASS',
     qaToolingSha: PINNED_SHA,
@@ -110,6 +122,13 @@ function machineEvidence(caseId, overrides = {}) {
     producedAt: '2026-08-06T00:00:00Z',
     ...overrides,
   }
+}
+
+// An artifact MANIFEST entry { path, sha256, runId } bound to the campaign runId. The path is relative
+// to the evidence dir; writeSummary materializes a real file whose bytes hash to `sha256`.
+function artifactManifest(caseId, overrides = {}) {
+  const relPath = `artifacts/${caseId}.txt`
+  return { path: relPath, sha256: artifactSha(relPath), runId: RUN_ID, ...overrides }
 }
 
 // The full-boundary attestation PQA-05/06/08 require (owner req-4). Empty for the other cases.
@@ -120,18 +139,22 @@ function boundaryAttestation(caseId) {
   return undefined
 }
 
-// A well-formed operatorEvidence@1 envelope (owner req-2), the shape a PASS on PQA-01..08 requires.
+// A well-formed operatorEvidence@1 envelope (owner req-2), the shape a PASS on PQA-01..08 requires:
+// caseId + campaign runId + tester/timestamp/command|route/expected/observed + an artifact MANIFEST
+// (recomputed by the runner) + bound source/tooling SHAs, with a full-boundary attestation for 05/06/08.
 function operatorEvidence(caseId, overrides = {}) {
   const attestation = boundaryAttestation(caseId)
   return {
     schema: OPERATOR_EVIDENCE_SCHEMA,
+    caseId,
+    runId: RUN_ID,
     tester: 'qa-operator',
     timestamp: '2026-08-06T09:00:00Z',
     route: 'GET /api/attendance/records/self',
     command: 'curl -sS http://127.0.0.1:PORT/api/...',
     expected: 'HTTP 200 with the expected authoritative projection',
     observed: 'HTTP 200 with the expected authoritative projection',
-    artifactSha256: ARTIFACT_SHA256,
+    artifact: artifactManifest(caseId),
     sourceSha: PINNED_SHA,
     qaToolingSha: PINNED_SHA,
     ...(attestation ? { boundaryAttestation: attestation } : {}),
@@ -183,8 +206,22 @@ function full10(map = {}) {
   return MATRIX_IDS.map((id) => map[id] || blockedCase(id))
 }
 
-function writeSummary(evidenceDir, { sourceSha = PINNED_SHA, residue = 0, cases }) {
-  writeJson(path.join(evidenceDir, 'summary.json'), { sourceSha, residue, cases })
+// Materialize the real artifact file for every operator case that carries an artifact manifest, so the
+// runner's recompute matches by construction. Tests that want a bypass (missing/tampered/symlink) pass
+// materialize:false and set up the file themselves, or mutate it after.
+function materializeArtifacts(evidenceDir, cases) {
+  for (const c of cases) {
+    const rel = c && c.operatorEvidence && c.operatorEvidence.artifact && c.operatorEvidence.artifact.path
+    if (typeof rel !== 'string' || rel.includes('..') || path.isAbsolute(rel)) continue
+    const abs = path.join(evidenceDir, rel)
+    fs.mkdirSync(path.dirname(abs), { recursive: true })
+    fs.writeFileSync(abs, artifactBytes(rel))
+  }
+}
+
+function writeSummary(evidenceDir, { sourceSha = PINNED_SHA, residue = 0, runId = RUN_ID, cases, materialize = true }) {
+  if (materialize) materializeArtifacts(evidenceDir, cases)
+  writeJson(path.join(evidenceDir, 'summary.json'), { sourceSha, runId, residue, cases })
 }
 
 function withRoots(fn, seedOpts = {}) {
@@ -628,31 +665,43 @@ test('machine case: a REAL harnessModule but for the WRONG case is rejected (PQA
   })
 })
 
-test('machine case: a valid PQA-09 envelope placed under PQA-10 is rejected (facts schema mismatch)', () => {
+test('machine case (5d): a PQA-09 envelope masquerading as PQA-10 is rejected (caseId mismatch)', () => {
   withRoots((root, evidenceDir) => {
-    // A wholesale-copied valid PQA-09 machineEvidence used for PQA-10: the PQA-10 facts schema rejects
-    // PQA-09's keys, and the harnessModule is the wrong one for PQA-10.
+    // A wholesale-copied valid PQA-09 machineEvidence used for PQA-10: its own caseId (PQA-09) does not
+    // equal the case slot (PQA-10) — rejected before the whitelist/facts even matter.
     writeSummary(evidenceDir, {
       cases: full10({ 'PQA-10': passCase('PQA-10', { machineEvidence: machineEvidence('PQA-09') }) }),
     })
     const report = runWindowsNativeQaMatrix({ root, evidenceDir })
     assert.equal(report.counts.PASS, 0)
     const pqa10 = report.cases.find((c) => c.id === 'PQA-10')
-    assert.match(pqa10.reason, /harnessModule for PQA-10 must be the whitelisted "pqa-10-scheduled-sweep\.mjs"/)
+    assert.match(pqa10.reason, /machineEvidence\.caseId must equal the case slot PQA-10.*no cross-case reuse/)
   })
 })
 
-test('cross-kind: a machineEvidence attached to an OPERATOR case (PQA-01) does not PASS', () => {
+test('cross-kind (gate 2): a machineEvidence attached to an OPERATOR case (PQA-01) does not PASS', () => {
   withRoots((root, evidenceDir) => {
-    // PQA-01 is an operator case; a valid-looking machineEvidence (even the owner forge) is ignored —
-    // the operator case requires operatorEvidence, which is absent here.
+    // PQA-01 is an operator case; strict partitioning REJECTS a machineEvidence here (no fallback).
     const c = passCase('PQA-01')
     delete c.operatorEvidence
     c.machineEvidence = machineEvidence('PQA-09')
     writeSummary(evidenceDir, { cases: full10({ 'PQA-01': c }) })
     const report = runWindowsNativeQaMatrix({ root, evidenceDir })
     assert.equal(report.counts.PASS, 0)
-    assert.match(report.cases[0].reason, /requires a structured operatorEvidence object/)
+    assert.match(report.cases[0].reason, /accepts operatorEvidence ONLY; a machineEvidence is not accepted/)
+  })
+})
+
+test('cross-kind (gate 2): an operatorEvidence attached to a MACHINE case (PQA-09) does not PASS', () => {
+  withRoots((root, evidenceDir) => {
+    // PQA-09 is a machine case; strict partitioning REJECTS an operatorEvidence here (no fallback).
+    const c = passCase('PQA-09')
+    c.operatorEvidence = operatorEvidence('PQA-09')
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-09': c }) })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const pqa09 = report.cases.find((c2) => c2.id === 'PQA-09')
+    assert.match(pqa09.reason, /accepts machineEvidence ONLY; an operatorEvidence is not accepted/)
   })
 })
 
@@ -733,25 +782,25 @@ test('operator case: a status+long-reason PASS with NO operatorEvidence is BLOCK
   })
 })
 
-test('operator case: an operatorEvidence MISSING the artifact sha256 is BLOCKED', () => {
+test('operator case: an operatorEvidence with NO artifact manifest is BLOCKED', () => {
   withRoots((root, evidenceDir) => {
     const oe = operatorEvidence('PQA-01')
-    delete oe.artifactSha256
+    delete oe.artifact
     writeSummary(evidenceDir, { cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: oe }) }) })
     const report = runWindowsNativeQaMatrix({ root, evidenceDir })
     assert.equal(report.counts.PASS, 0)
-    assert.match(report.cases[0].reason, /artifactSha256 must be a 64-char lowercase sha256/)
+    assert.match(report.cases[0].reason, /artifact must be a manifest object/)
   })
 })
 
 test('operator case: a SHORT (truncated) artifact sha256 is BLOCKED', () => {
   withRoots((root, evidenceDir) => {
     writeSummary(evidenceDir, {
-      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { artifactSha256: 'abc123' }) }) }),
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { artifact: artifactManifest('PQA-01', { sha256: 'abc123' }) }) }) }),
     })
     const report = runWindowsNativeQaMatrix({ root, evidenceDir })
     assert.equal(report.counts.PASS, 0)
-    assert.match(report.cases[0].reason, /artifactSha256 must be a 64-char lowercase sha256/)
+    assert.match(report.cases[0].reason, /artifact\.sha256 must be a 64-char lowercase sha256/)
   })
 })
 
@@ -827,6 +876,149 @@ test('PQA-06: a boundaryAttestation asserting the WRONG outcome (completed, not 
     assert.equal(report.counts.PASS, 0)
     const item = report.cases.find((c) => c.id === 'PQA-06')
     assert.match(item.reason, /boundaryAttestation for PQA-06\.outcome must equal "review_required"/)
+  })
+})
+
+// --------------------------------------------------------------------------
+// Owner gates 1 + 4 — the SIX bypass counterexamples (each must NOT PASS): artifact recompute over
+// the real file (missing / tampered / symlink escape), cross-case masquerade, swapped-case operator
+// evidence, and an old-runId replay. Plus the campaign-runId requirement + path traversal/absolute.
+// --------------------------------------------------------------------------
+
+test('5(a): a well-formed artifact whose FILE DOES NOT EXIST does not PASS', () => {
+  withRoots((root, evidenceDir) => {
+    // materialize:false — the summary claims a valid sha for a file that was never written.
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-01': passCase('PQA-01') }), materialize: false })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /artifact file does not exist/)
+  })
+})
+
+test('5(b): an artifact TAMPERED after its sha was computed does not PASS (runner recomputes)', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, { cases: full10({ 'PQA-01': passCase('PQA-01') }) })
+    // Overwrite the materialized artifact with different bytes AFTER the claimed sha was fixed.
+    fs.writeFileSync(path.join(evidenceDir, 'artifacts/PQA-01.txt'), 'TAMPERED bytes not matching the claimed sha')
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /does not match the recomputed digest/)
+  })
+})
+
+test('5(c): a SYMLINK escape for the artifact path does not PASS', () => {
+  withRoots((root, evidenceDir) => {
+    // Point the artifact path at a symlink to a file OUTSIDE the evidence dir.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'win-qa-outside-'))
+    const secret = path.join(outside, 'secret.txt')
+    fs.writeFileSync(secret, artifactBytes('artifacts/PQA-01.txt')) // even with matching bytes, a symlink is rejected
+    fs.mkdirSync(path.join(evidenceDir, 'artifacts'), { recursive: true })
+    fs.symlinkSync(secret, path.join(evidenceDir, 'artifacts/PQA-01.txt'))
+    try {
+      writeSummary(evidenceDir, { cases: full10({ 'PQA-01': passCase('PQA-01') }), materialize: false })
+      const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+      assert.equal(report.counts.PASS, 0)
+      assert.match(report.cases[0].reason, /must not be a symlink|escapes the evidence dir via a symlink/)
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true })
+    }
+  })
+})
+
+test('5(d): a PQA-09 machineEvidence envelope masquerading as PQA-10 does not PASS', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-10': passCase('PQA-10', { machineEvidence: machineEvidence('PQA-09') }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const pqa10 = report.cases.find((c) => c.id === 'PQA-10')
+    assert.match(pqa10.reason, /machineEvidence\.caseId must equal the case slot PQA-10/)
+  })
+})
+
+test('5(e): an operatorEvidence with a SWAPPED caseId does not PASS', () => {
+  withRoots((root, evidenceDir) => {
+    // A valid PQA-02 operatorEvidence placed under the PQA-01 slot.
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-02') }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /operatorEvidence\.caseId must equal the case slot PQA-01.*no swapped-case reuse/)
+  })
+})
+
+test('5(f): an OLD-runId replay (record runId != summary runId) does not PASS', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { runId: 'run-old-campaign-42' }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /operatorEvidence\.runId .* does not match the summary campaign runId/)
+  })
+})
+
+test('5(f2): an OLD-runId replay on the ARTIFACT manifest (artifact.runId != summary runId) does not PASS', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({
+        'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { artifact: artifactManifest('PQA-01', { runId: 'run-old-campaign-42' }) }) }),
+      }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /operatorEvidence\.artifact\.runId .* does not match the summary campaign runId/)
+  })
+})
+
+test('machine-case runId replay: a machineEvidence.runId != summary runId does not PASS', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-09': passCase('PQA-09', { machineEvidence: machineEvidence('PQA-09', { runId: 'run-old-campaign-42' }) }) }),
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    const pqa09 = report.cases.find((c) => c.id === 'PQA-09')
+    assert.match(pqa09.reason, /machineEvidence\.runId .* does not match the summary campaign runId/)
+  })
+})
+
+test('runId binding: a PASS with NO summary runId is BLOCKED', () => {
+  withRoots((root, evidenceDir) => {
+    // Materialize the artifact but write a summary with runId omitted (null).
+    const cases = full10({ 'PQA-01': passCase('PQA-01') })
+    materializeArtifacts(evidenceDir, cases)
+    writeJson(path.join(evidenceDir, 'summary.json'), { sourceSha: PINNED_SHA, residue: 0, cases })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.equal(report.runId, null)
+    assert.match(report.cases[0].reason, /requires a campaign runId in the evidence summary/)
+  })
+})
+
+test('artifact path traversal ("../") is rejected by shape', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { artifact: artifactManifest('PQA-01', { path: '../escape.txt' }) }) }) }),
+      materialize: false,
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /must not traverse out of the evidence dir/)
+  })
+})
+
+test('artifact absolute path is rejected by shape', () => {
+  withRoots((root, evidenceDir) => {
+    writeSummary(evidenceDir, {
+      cases: full10({ 'PQA-01': passCase('PQA-01', { operatorEvidence: operatorEvidence('PQA-01', { artifact: artifactManifest('PQA-01', { path: '/etc/hosts' }) }) }) }),
+      materialize: false,
+    })
+    const report = runWindowsNativeQaMatrix({ root, evidenceDir })
+    assert.equal(report.counts.PASS, 0)
+    assert.match(report.cases[0].reason, /must be RELATIVE to the evidence dir/)
   })
 })
 

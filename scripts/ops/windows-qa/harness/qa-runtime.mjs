@@ -11,6 +11,7 @@
  * resolver prefers dist and falls back to the .ts source; under a non-tsx `node` with only source
  * present it throws a clear instruction rather than a cryptic ESM error.
  */
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -253,6 +254,37 @@ export function resolveQaToolingSha(root = REPO_ROOT) {
   return { sha: PINNED_SHA, source: 'product-sha-default' }
 }
 
+const RUN_ID_RE = /^[0-9a-zA-Z][0-9a-zA-Z._-]{7,63}$/
+const RUN_ID_FILE = path.join(HERE, '.runtime', 'run-id')
+
+/**
+ * Owner runId binding — resolve the ONE campaign runId every evidence record (machine + operator) and
+ * artifact manifest entry in a run must carry, so the runner can reject a same-product-SHA record
+ * spliced in from a DIFFERENT run. Order: env `QA_RUN_ID` (operator/CI sets it), then the persisted
+ * `.runtime/run-id` (so the harnesses in one campaign agree without an env), else a freshly minted
+ * `run-<uuid>` written to that file. The file lives under the gitignored `.runtime` tree.
+ */
+export function resolveRunId() {
+  const env = typeof process.env.QA_RUN_ID === 'string' ? process.env.QA_RUN_ID.trim() : ''
+  if (RUN_ID_RE.test(env)) return env
+  try {
+    if (fs.existsSync(RUN_ID_FILE)) {
+      const v = fs.readFileSync(RUN_ID_FILE, 'utf8').trim()
+      if (RUN_ID_RE.test(v)) return v
+    }
+  } catch {
+    /* fall through to mint */
+  }
+  const minted = `run-${crypto.randomUUID()}`
+  try {
+    fs.mkdirSync(path.dirname(RUN_ID_FILE), { recursive: true })
+    fs.writeFileSync(RUN_ID_FILE, `${minted}\n`)
+  } catch {
+    /* best-effort persistence; the value is still returned */
+  }
+  return minted
+}
+
 /**
  * Owner P1 — build the STRUCTURED machine-evidence envelope a harness emits for a PASS-eligible case.
  * It carries machine facts (asserted row counts, entity UUIDs), the harness's OWN determination, the
@@ -266,6 +298,8 @@ export function buildMachineEvidence({ caseId, harnessModule, determination, fac
   const envelope = {
     schema: MACHINE_EVIDENCE_SCHEMA,
     producedBy: MACHINE_EVIDENCE_PRODUCER,
+    caseId: caseId ? String(caseId) : undefined,
+    runId: resolveRunId(),
     harnessModule: String(harnessModule || ''),
     determination: String(determination || ''),
     qaToolingSha: tooling.sha,
@@ -291,7 +325,14 @@ export function emitCaseEvidence(evidenceDir, caseObj) {
   if (!caseObj || !caseObj.id) throw new Error('emitCaseEvidence requires a case with an id')
   fs.mkdirSync(evidenceDir, { recursive: true })
   const summaryPath = path.join(evidenceDir, 'summary.json')
-  let summary = { campaign: 'attendance-windows-native-qa-v2-20260804', sourceSha: PINNED_SHA, residue: null, cases: [] }
+  const runId = resolveRunId()
+  let summary = {
+    campaign: 'attendance-windows-native-qa-v2-20260804',
+    sourceSha: PINNED_SHA,
+    runId,
+    residue: null,
+    cases: [],
+  }
   if (fs.existsSync(summaryPath)) {
     try {
       summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'))
@@ -305,6 +346,9 @@ export function emitCaseEvidence(evidenceDir, caseObj) {
   if (idx >= 0) summary.cases[idx] = merged
   else summary.cases.push(merged)
   summary.sourceSha = PINNED_SHA
+  // Owner runId binding — the summary carries the ONE campaign runId every evidence record + artifact
+  // in this run must match. Stamp it (the machineEvidence the 09/10 harnesses emit uses the same runId).
+  summary.runId = runId
   fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`)
   return summaryPath
 }

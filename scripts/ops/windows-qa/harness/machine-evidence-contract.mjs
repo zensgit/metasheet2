@@ -33,6 +33,9 @@ export const OPERATOR_EVIDENCE_SCHEMA = 'windows-qa/operator-evidence@1'
 const SHA40 = /^[0-9a-f]{40}$/
 const SHA256 = /^[0-9a-f]{64}$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// Campaign runId (owner gate): binds the summary, every per-case evidence record, and each artifact
+// manifest entry to ONE run so a same-product-SHA record from a DIFFERENT run cannot be spliced in.
+export const RUN_ID_RE = /^[0-9a-zA-Z][0-9a-zA-Z._-]{7,63}$/
 
 // Floors for operator-authored free text — raise the bar above a trivial token. Not proof of
 // authenticity (an operator writes this file); a missing/short field fails closed.
@@ -167,13 +170,58 @@ function validateSchemaObject(obj, schema, label) {
 }
 
 /**
+ * Owner runId binding — the record's runId must be a well-formed campaign runId AND, when an
+ * `expectedRunId` (the summary's runId) is supplied, must EQUAL it. A record carrying a stale/foreign
+ * runId (old evidence spliced into this run's summary) is rejected. Returns an error string or null.
+ */
+function checkRunId(value, expectedRunId, label) {
+  if (typeof value !== 'string' || !RUN_ID_RE.test(value)) {
+    return `${label}.runId must be a campaign runId (8-64 chars of [A-Za-z0-9._-]).`
+  }
+  if (expectedRunId && value !== expectedRunId) {
+    return `${label}.runId ${value} does not match the summary campaign runId ${expectedRunId} (stale/foreign-run evidence is rejected).`
+  }
+  return null
+}
+
+/**
+ * Validate the SHAPE of an operatorEvidence artifact manifest entry `{ path, sha256, runId }`. The
+ * actual file digest recompute (read the file, sha-256, compare) + traversal/symlink guards happen in
+ * the runner (it holds the evidence dir + fs). Here we reject a path that is absolute or contains a
+ * `..` segment, a malformed sha256, and (when `expectedRunId` is given) an artifact runId that does not
+ * equal the summary runId.
+ */
+function validateArtifactManifestEntry(artifact, expectedRunId) {
+  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
+    return 'operatorEvidence.artifact must be a manifest object { path, sha256, runId }.'
+  }
+  const rel = artifact.path
+  if (typeof rel !== 'string' || rel.trim().length === 0) {
+    return 'operatorEvidence.artifact.path must be a non-empty path (relative to the evidence dir).'
+  }
+  if (rel.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rel)) {
+    return `operatorEvidence.artifact.path must be RELATIVE to the evidence dir, not absolute: ${rel}`
+  }
+  if (rel.split(/[\\/]/).some((seg) => seg === '..')) {
+    return `operatorEvidence.artifact.path must not traverse out of the evidence dir (no ".." segment): ${rel}`
+  }
+  if (typeof artifact.sha256 !== 'string' || !SHA256.test(artifact.sha256)) {
+    return 'operatorEvidence.artifact.sha256 must be a 64-char lowercase sha256 of the artifact file.'
+  }
+  const runIdError = checkRunId(artifact.runId, expectedRunId, 'operatorEvidence.artifact')
+  if (runIdError) return runIdError
+  return null
+}
+
+/**
  * Validate the STRUCTURED machine-evidence envelope required for a PASS on PQA-09/10. Returns
  * `{ ok: true }` or `{ ok: false, error }`. `caseId` is REQUIRED — it selects the whitelisted harness
- * module and the exact facts schema. When `expectedQaToolingSha` is supplied, the envelope's
- * `qaToolingSha` must equal it (the package<->evidence tooling binding, owner P2); when omitted (the
- * harness self-check at emit time) the tooling binding is not enforced.
+ * module + the exact facts schema AND the envelope's own `caseId` must equal it (no cross-case reuse).
+ * When `expectedQaToolingSha` is supplied, `qaToolingSha` must equal it (owner P2); when
+ * `expectedRunId` is supplied, the envelope's `runId` must equal it (owner runId binding). Both are
+ * omitted for the harness self-check at emit time (only the shape is enforced there).
  */
-export function validateMachineEvidence(machineEvidence, { expectedQaToolingSha, caseId } = {}) {
+export function validateMachineEvidence(machineEvidence, { expectedQaToolingSha, expectedRunId, caseId } = {}) {
   const me = machineEvidence
   if (typeof caseId !== 'string' || !isMachineEvidenceCase(caseId)) {
     return {
@@ -200,6 +248,14 @@ export function validateMachineEvidence(machineEvidence, { expectedQaToolingSha,
       error: `machineEvidence.producedBy must be "${MACHINE_EVIDENCE_PRODUCER}" (a harness-emitted record); got: ${me.producedBy ?? 'undefined'}.`,
     }
   }
+  // Owner gate 2/5(d) — the envelope's OWN caseId must equal the case slot: a PQA-09 envelope
+  // masquerading as PQA-10 (or vice versa) is rejected, not accepted by the whitelist alone.
+  if (me.caseId !== caseId) {
+    return {
+      ok: false,
+      error: `machineEvidence.caseId must equal the case slot ${caseId}; got: ${me.caseId ?? 'undefined'} (no cross-case reuse).`,
+    }
+  }
   const expectedModule = MACHINE_EVIDENCE_CASE_HARNESS[caseId]
   if (me.harnessModule !== expectedModule) {
     return {
@@ -207,6 +263,8 @@ export function validateMachineEvidence(machineEvidence, { expectedQaToolingSha,
       error: `machineEvidence.harnessModule for ${caseId} must be the whitelisted "${expectedModule}"; got: ${me.harnessModule ?? 'undefined'}.`,
     }
   }
+  const runIdError = checkRunId(me.runId, expectedRunId, 'machineEvidence')
+  if (runIdError) return { ok: false, error: runIdError }
   if (me.determination !== 'PASS') {
     return {
       ok: false,
@@ -231,23 +289,37 @@ export function validateMachineEvidence(machineEvidence, { expectedQaToolingSha,
 
 /**
  * Validate the STRUCTURED operator-evidence envelope required for a PASS on PQA-01..08. Returns
- * `{ ok: true }` or `{ ok: false, error }`. Binds the envelope's `sourceSha`/`qaToolingSha` to the
- * package SHAs and requires a real artifact digest. For PQA-05/06/08 it additionally requires a
- * per-case `boundaryAttestation` attesting the FULL matrix objective.
+ * `{ ok: true }` or `{ ok: false, error }`. The envelope's `caseId` must equal the case slot (no
+ * swapped-case reuse) and its `runId`/`artifact.runId` must equal the summary campaign `runId`. Binds
+ * `sourceSha`/`qaToolingSha` to the package SHAs and requires an artifact MANIFEST entry
+ * `{ path, sha256, runId }`; the runner recomputes the file digest. For PQA-05/06/08 it additionally
+ * requires a per-case `boundaryAttestation` attesting the FULL matrix objective.
  */
-export function validateOperatorEvidence(operatorEvidence, { expectedSourceSha, expectedQaToolingSha, caseId } = {}) {
+export function validateOperatorEvidence(
+  operatorEvidence,
+  { expectedSourceSha, expectedQaToolingSha, expectedRunId, caseId } = {},
+) {
   const oe = operatorEvidence
   if (!oe || typeof oe !== 'object' || Array.isArray(oe)) {
     return {
       ok: false,
       error:
-        'PASS requires a structured operatorEvidence object (tester + timestamp + command/route + ' +
-        'expected/observed + artifact sha256 + bound source/tooling SHAs). A status + long reason is not enough.',
+        'PASS requires a structured operatorEvidence object (caseId + runId + tester + timestamp + ' +
+        'command/route + expected/observed + artifact manifest + bound source/tooling SHAs). A status + long reason is not enough.',
     }
   }
   if (oe.schema !== OPERATOR_EVIDENCE_SCHEMA) {
     return { ok: false, error: `operatorEvidence.schema must be "${OPERATOR_EVIDENCE_SCHEMA}"; got: ${oe.schema ?? 'undefined'}.` }
   }
+  // Owner gate 2/5(e) — the envelope's OWN caseId must equal the case slot (no swapped-case reuse).
+  if (oe.caseId !== caseId) {
+    return {
+      ok: false,
+      error: `operatorEvidence.caseId must equal the case slot ${caseId}; got: ${oe.caseId ?? 'undefined'} (no swapped-case reuse).`,
+    }
+  }
+  const recordRunIdError = checkRunId(oe.runId, expectedRunId, 'operatorEvidence')
+  if (recordRunIdError) return { ok: false, error: recordRunIdError }
   if (typeof oe.tester !== 'string' || oe.tester.trim().length < MIN_TESTER_LEN) {
     return { ok: false, error: `operatorEvidence.tester must name the tester (>= ${MIN_TESTER_LEN} chars).` }
   }
@@ -265,12 +337,8 @@ export function validateOperatorEvidence(operatorEvidence, { expectedSourceSha, 
   if (typeof oe.observed !== 'string' || oe.observed.trim().length < MIN_TEXT_LEN) {
     return { ok: false, error: `operatorEvidence.observed must describe the observed result (>= ${MIN_TEXT_LEN} chars).` }
   }
-  if (typeof oe.artifactSha256 !== 'string' || !SHA256.test(oe.artifactSha256)) {
-    return {
-      ok: false,
-      error: 'operatorEvidence.artifactSha256 must be a 64-char lowercase sha256 of the screenshot/log artifact.',
-    }
-  }
+  const artifactError = validateArtifactManifestEntry(oe.artifact, expectedRunId)
+  if (artifactError) return { ok: false, error: artifactError }
   if (typeof oe.sourceSha !== 'string' || !SHA40.test(oe.sourceSha.trim().toLowerCase())) {
     return { ok: false, error: 'operatorEvidence.sourceSha must be a 40-char lowercase git SHA.' }
   }
