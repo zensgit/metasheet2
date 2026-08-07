@@ -116,6 +116,13 @@ test('single-instance: harness pipeline shares ONE w4c0-identity instance in BOT
 
 test('single-instance negative control: the OLD ESM file-URL route IS detected as dual under tsx', () => {
   const major = Number(process.versions.node.split('.')[0])
+  // SCOPE OF THIS CONTROL — tsx-src ONLY, deliberately. In node-dist mode the probe's --dual-route
+  // returns `single-instance` too, and that is NOT evidence the dist path is probe-proven: there,
+  // import() and require() of the same compiled .js converge on the one CJS cache, so the hazard
+  // cannot exist and the control has no discriminating power. node-dist single-instance is
+  // therefore STRUCTURAL (one cache by construction, asserted positively above); tsx-src is the
+  // mode where a dual instance was real, and is the mode this control proves detectable.
+  //
   // Node >= 23 unifies require(esm)/loader pipelines, making the old route coincidentally safe —
   // the control is asserted on the Node lines CI pins (18.x / 20.x), where the dual instance is
   // real. The PRIMARY single-instance assertions above never skip on any version.

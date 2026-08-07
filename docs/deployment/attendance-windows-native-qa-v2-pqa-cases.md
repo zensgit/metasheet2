@@ -18,6 +18,12 @@ revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 >   `harness/provision-synth-directory.mjs` creates users via the product path
 >   (`AuthService.register` → `crypto.randomUUID`) and org anchors via `getOrCreateLocalIntegration`;
 >   every reference below now resolves through `qa-identities.json` — no hardcoded ids.
+> - **Runtime mode picks the ONE product path** (no fallback, no symlinks): on the Windows package
+>   run every `.mjs` below under plain `node` (modules resolve from the shipped
+>   `packages/core-backend/dist/src/<subpath>.js`); for the macOS source proof run them under
+>   `node --import tsx …` (modules resolve from `src/<subpath>.ts`). A missing path fails with a
+>   mode-specific error instead of silently using the other mode's path. See
+>   `scripts/ops/windows-qa/README.md` → "Runtime modes".
 > - **Cleanup = DROP + recreate the isolated DB** (`node reset-isolated-db.mjs`), NEVER per-row
 >   DELETE — the append-only / deny-delete triggers reject deletes (proven: a DELETE on
 >   `attendance_calculation_rollout_state` raises `W4C0_IMMUTABLE`). The reset also verifies the DB
@@ -233,7 +239,13 @@ accepted from request JSON:
 
 ### Synthetic fixtures — create
 
-Apply the reworked Node flow (no `fixtures/pqa-07.sql` exists — create = this case’s setup `harness/pqa-07-authorization-setup.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section). It seeds:
+Apply the reworked Node flow (no `fixtures/pqa-07.sql` exists — create = this case’s setup `harness/pqa-07-authorization-setup.mjs` + `provision-synth-directory.mjs`; cleanup = `reset-isolated-db.mjs` drop/recreate) (create section).
+
+The setup is **FAIL-CLOSED on pre-existing records**: if any `attendance_records` row already exists
+for `$u1`/`$u2`, it REFUSES (throws, non-zero exit) instead of proceeding or duplicating — that state
+means the isolated DB was not drop/recreated since the last run. Reset + re-provision, then re-run it.
+
+It seeds:
 
 - orgs (text ids only; no `orgs` table row is required — `org_id` is free-text on
   `user_orgs`/`attendance_records`): `$orgA`, `$orgB`.

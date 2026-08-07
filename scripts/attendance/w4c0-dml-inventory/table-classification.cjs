@@ -305,12 +305,32 @@ const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   'packages/core-backend/src/db/migrations/zzzz20260731120000_w4c3a_import_rollback_foundation.ts',
 ])
 
+// ⚠️ 呈裁点 — BEYOND the owner's scope ruling A (which authorized ONE precise P16 tuple for the
+// pqa-07 fixture and nothing else). This is a NEW classification mechanism in shared W4C-0
+// governance tooling, added by the same round; the owner may ratify or revert it independently of
+// ruling A. It is disclosed here rather than folded into ruling A because a second, narrower
+// artifact next to a named one IS a contract change, not an implementation detail.
+//
+// WHY it exists: `reset-isolated-db.mjs --prove-deny-delete` contains one statement that must stay
+// a raw, forbidden DELETE — it IS the negative control proving the append-only deny trigger fires
+// (a catalog probe only proves the trigger exists). Every alternative was worse:
+//   (a) adding `scripts/ops/windows-qa/` to W4_CANONICAL_PATH_PREFIXES — the broad path exemption
+//       the rulings explicitly forbid (it would bless ALL future DML under that tree);
+//   (b) deleting the probe — PQA-08's own evidence text cites it as the deny-firing proof;
+//   (c) rewriting the DELETE so the scanner cannot see it — the "自造归一化器 to dodge the guard"
+//       antipattern; the statement would still run.
+//
 // Exact-tuple NEGATIVE-PROBE allowlist for w4_canonical tables (relPath::enclosingSymbol::table::
-// verb — same hard zero-bypass shape as the P16 exact allowlist, NEVER a path/prefix exemption).
-// Admits only DELIBERATE deny-trigger negative controls in QA tooling: a statement whose ONLY
-// acceptable outcome is the deny trigger RAISING (it can never mutate a row — the probe asserts
-// W4C0_IMMUTABLE is raised and FAILS if the DML succeeds). A new/renamed/retargeted probe, or any
-// other w4_canonical DML outside the canonical path prefixes, remains a hard outsideBoundary fail.
+// verb — the same hard zero-bypass shape as the P16 exact allowlist, NEVER a path/prefix
+// exemption). Admits only DELIBERATE deny-trigger negative controls in QA tooling: a statement
+// whose ONLY acceptable outcome is the deny trigger RAISING (the probe asserts W4C0_IMMUTABLE is
+// raised and FAILS if the DML succeeds). A new/renamed/retargeted probe, or any other
+// w4_canonical DML outside the canonical path prefixes, remains a hard outsideBoundary fail.
+//
+// Known coverage note (no behavior change today): pinned-baseline-obligation.cjs fail-closes on
+// unclassifiedTableSites and outsideBoundarySites but does not separately inspect
+// negativeProbeSites. At the pinned ref e0defbe26 that bucket is EMPTY (verified), so the pinned
+// baseline's obligation is unchanged; a future probe added at a pinned ref would need it wired.
 const W4_CANONICAL_EXACT_NEGATIVE_PROBE_ALLOWLIST = Object.freeze(
   new Set([
     // reset-isolated-db --prove-deny-delete: proves the append-only deny trigger FIRES (the row
