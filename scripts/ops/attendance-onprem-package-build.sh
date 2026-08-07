@@ -107,6 +107,9 @@ if [[ "${WINDOWS_NATIVE_QA_V2}" == "1" ]]; then
     "docker/app.env.attendance-windows-native.qa.example"
     "ecosystem.windows-native.config.cjs"
     "docs/deployment/attendance-windows-native-qa-v2-20260804.md"
+    # The per-case PQA-01..10 runbook — a ZIP-only tester needs the steps/expected values, so it must
+    # ship IN the package (README.md references it at ../../../docs/deployment/… = this package path).
+    "docs/deployment/attendance-windows-native-qa-v2-pqa-cases.md"
     "docs/development/attendance-windows-native-qa-v2-verification-20260804.md"
   )
 fi

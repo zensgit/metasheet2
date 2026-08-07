@@ -46,6 +46,16 @@ Attendance product runtime was not edited.
 5. Risk-matrix runner fails closed on SHA mismatch, stale evidence SHAs,
    residue != 0, a missing explicit Draft/HOLD boundary, or incomplete Windows
    host/isolation/no-notification safety facts.
+6. A PASS additionally requires (owner 3rd review):
+   - a STRUCTURED, harness-produced `machineEvidence` record (schema
+     `windows-qa/machine-evidence@1`, `producedBy=windows-qa-harness`,
+     `harnessModule`, `determination=PASS`, non-empty `facts`) — a long free-text
+     reason/evidence string alone is no longer accepted; and
+   - that record's `qaToolingSha` (and any present per-case/top-level
+     `qaToolingSha`) equal to the package `QA_TOOLING_SHA` — evidence produced by a
+     different QA tooling SHA does not PASS. A package with no `QA_TOOLING_SHA`
+     cannot PASS (fail closed). This raises the PASS floor; it is not a proof of
+     authenticity (the summary JSON is copyable/operator-writable).
 
 ## Synthetic risk matrix honesty
 

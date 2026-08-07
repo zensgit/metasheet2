@@ -6,9 +6,12 @@ Pinned exact source SHA: `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b` (product `SO
 This directory makes the PQA matrix **independently executable** and reach **residue=0**, with the SQL/Node
 layer **proven by actually running it** against a fresh migrated local PostgreSQL. The qa-runner
 validates SAFETY + SHA binding + an evidence contract that **fails closed on missing/malformed evidence
-and on a wrong/stale SHA** (it raises the evidence floor — a per-case reason + evidence above a trivial
-token — but does NOT prove authenticity, since the runner reads an operator-written JSON); the harnesses
-produce the per-case verdict + evidence from real execution.
+and on a wrong/stale SHA**. For a PASS it requires a **structured, harness-produced machine-evidence
+record** (row counts / entity UUIDs / the harness's own determination / harness module / QA tooling SHA)
+bound to the package `QA_TOOLING_SHA` — raising the bar from "any long string an operator can type" to
+"a structured record a harness emits". This is **not** forgery-proof (a JSON file is copyable, and the
+runner reads an operator-writable file); it raises the floor. The harnesses produce the per-case verdict
++ evidence from real execution.
 
 ## Why the rework (owner CHANGES-REQUESTED, all behavioral)
 - **Cleanup can't be per-row DELETE.** The append-only / deny-delete triggers REJECT deletes on rollout
@@ -21,8 +24,11 @@ produce the per-case verdict + evidence from real execution.
   fixture/harness reads them from there — no hardcoded ids.
 - **Route-less internals now have harnesses** (rollout transition, boundary decision primitives, outbox
   dispatcher, scheduled sweep) — see `harness/`.
-- **The runner rejects forged PASS**: per-case non-empty reason + evidence, per-case safety fields (no
-  top-level fallback), and an exact closed set of the 10 matrix ids (no missing/extra/duplicate).
+- **The runner raises the PASS floor** (it does NOT make evidence unforgeable — a JSON file is
+  copyable): per-case non-empty reason + evidence, per-case safety fields (no top-level fallback), an
+  exact closed set of the 10 matrix ids (no missing/extra/duplicate), a **structured machine-evidence
+  record produced by a harness**, and that record's **`qaToolingSha` bound to the package
+  `QA_TOOLING_SHA`** (evidence from a different tooling SHA does not PASS).
 
 ## Files
 - `harness/qa-identities.mjs` — static synthetic INPUTS (org UUIDs, per-user email/username, needed
@@ -65,16 +71,21 @@ product admin UI (QA tooling never writes RBAC): `qa-synth-admin@qa.invalid` →
    result-event outbox dispatcher is **global**, if any harness errors mid-dispatch, `node
    reset-isolated-db.mjs` + re-provision before the next case (a stray pending outbox row false-BLOCKs
    the next case). Operator affirms the Windows host facts + runs the HTTP/UI cases (PQA-01/02/03/04, and
-   the PQA-07 authorization probes — provision/point `$orgB` at an org OUTSIDE the probed user's
-   membership first, since provisioning grants `u1` membership in all three synthetic orgs).
+   the PQA-07 authorization probes — the cross-org probe target `$orgB` (`orgs.orgB`) is a dedicated
+   synthetic org with a directory anchor but NO membership, so `u1` is not a member of it out-of-the-box:
+   turnkey, no operator org hand-creation).
 5. **EXPORT evidence FIRST** (the per-case SELECT(s) named in the runbook), then
    `summary-tool.mjs --record-residue` as a negative control (must be **> 0**), then
    `node reset-isolated-db.mjs` (teardown), then `summary-tool.mjs --record-residue` again (must be
    **0** — it writes that into `summary.json.residue`).
 6. `node scripts/ops/attendance-windows-native-qa-runner.mjs --root <package-root> --evidence-dir <evidence-dir> --json`
-   — all ten must report PASS with residue=0 before any W4C-5 staging soak is *separately* authorized.
-   (On a non-Windows host the runner honestly BLOCKS 05/09/10 on `hostPlatform=windows` etc.; the
-   Windows operator affirming the host facts is what turns those to PASS.)
+   before any W4C-5 staging soak is *separately* authorized. Only **09/10** are PASS-eligible from these
+   harnesses; **05/06/08** stay **BLOCKED** (their full boundary objective is not route-reachable — see
+   below), so a full-PASS `--strict` gate is NOT expected here. On a non-Windows host the runner also
+   holds the PASS-eligible cases at BLOCKED on `hostPlatform=windows` etc.; the Windows operator
+   affirming the host facts is what lets **09/10** reach PASS. **PQA-05 does NOT become PASS by affirming
+   host facts** — its harness emits BLOCKED regardless (the legacy-projection + shadow-append halves need
+   the plugin-owned legacyAdapters, not importable from Node).
 
 ## Proven-by-execution vs operator-verified
 - **Proven by execution (macOS + local PG15, this rework):** the drop/recreate + migration-SET/trigger

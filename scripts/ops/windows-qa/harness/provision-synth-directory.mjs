@@ -38,6 +38,9 @@ import { QA_SYNTH_ORGS, QA_SYNTH_USER_INPUTS } from './qa-identities.mjs'
 const PINNED_SHA = '0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b'
 
 // Which synthetic orgs each user is an ACTIVE member of (covers every PQA case's substrate).
+// NOTE: QA_SYNTH_ORGS.orgB is deliberately ABSENT from every list — it is PQA-07's dedicated
+// cross-org probe target, an org NO synthetic user is a member of. Its directory anchor is still
+// created (the org loop below covers all QA_SYNTH_ORGS), so the cross-org 403 target exists turnkey.
 const MEMBERSHIPS = {
   admin: [QA_SYNTH_ORGS.orgA, QA_SYNTH_ORGS.orgShadow, QA_SYNTH_ORGS.orgLegacy],
   u1: [QA_SYNTH_ORGS.orgA, QA_SYNTH_ORGS.orgShadow, QA_SYNTH_ORGS.orgLegacy],

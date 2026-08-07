@@ -30,9 +30,10 @@ revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 >   `summary.json.residue`).
 > - **The harnesses write the verdict.** `harness/pqa-05|06|08|09|10-*.mjs` invoke the real
 >   route-less product code and emit each case's status + evidence into `<evidence-dir>/summary.json`;
->   the operator affirms the Windows host facts and runs the HTTP/UI cases. 05/09/10 are PASS-eligible
->   (real product fn end-to-end); 06/08 are BLOCKED-with-evidence (real decision primitive, not the
->   full boundary composition, which needs the plugin-internal legacyAdapters).
+>   the operator affirms the Windows host facts and runs the HTTP/UI cases. Only **09/10** are
+>   PASS-eligible (real product fn end-to-end); **05/06/08** are BLOCKED-with-evidence (real decision
+>   primitive, not the full boundary composition, which needs the plugin-internal legacyAdapters).
+>   PQA-05 stays BLOCKED regardless of the Windows host facts — its harness always emits BLOCKED.
 > - **No auth material in Git.** The synthetic login password is operator-set via env
 >   `QA_SYNTH_PASSWORD`; `qa-identities.json` holds ids/emails/orgs only.
 > - **Operator prerequisite (UNVERIFIED — Windows host):** grant each synthetic user its attendance
@@ -40,8 +41,8 @@ revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 >   u1→`attendance:write`, u2/u3→`attendance:read`.
 >
 > **Proven-by-execution (macOS + local PG15) vs operator-verified (Windows-only):** the drop/recreate
-> + migration-SET/trigger integrity, the residue negative-control → 0, and harnesses 05/09/10 +
-> 06/08 + 07 create-fixture are proven by execution. The `.bat`/PowerShell wrappers, browser-UI +
+> + migration-SET/trigger integrity, the residue negative-control → 0, and harnesses 09/10
+> (PASS-eligible) + 05/06/08 (BLOCKED-with-evidence) + 07 create-fixture are proven by execution. The `.bat`/PowerShell wrappers, browser-UI +
 > authenticated-HTTP product execution (PQA-01/02/03/04/07), the login round-trip, the Windows host
 > safety facts, and the end-to-end boundary composition for 06/08 stay `UNVERIFIED — operator to confirm`.
 
@@ -58,7 +59,7 @@ revision): `0dc3596ddb59ed1d2a292bea246b3b6ea8ff1e1b`.
 > | `$orgA` | `orgs.orgA` | primary synthetic org |
 > | `$orgShadow` | `orgs.orgShadow` | shadow-posture synthetic org (W4 enabled) |
 > | `$orgLegacy` | `orgs.orgLegacy` | legacy / outside-allowlist synthetic org |
-> | `$orgB` | `orgs.orgLegacy` | the "other org" for PQA-07's cross-org probe — an org the probed user is NOT a member of. ⚠️ Caveat: `provision-synth-directory.mjs` currently grants `u1` membership in ALL three synthetic orgs (orgA/orgShadow/orgLegacy), so none is a valid cross-org target as-provisioned; the operator must provision (or point `$orgB` at) an org outside the probed user's membership before running P3. |
+> | `$orgB` | `orgs.orgB` | the DEDICATED "other org" for PQA-07's cross-org probe. `provision-synth-directory.mjs` creates its directory anchor but adds NO user membership, so `u1` is provably NOT a member — the cross-org 403 target is valid out-of-the-box (no operator hand-creation of an org). `pqa-07-authorization-setup.mjs` asserts `u1` has 0 active memberships in `orgB` before recording the fixture. |
 > | `$admin` | `users.admin.id` | `qa-synth-admin@qa.invalid` (attendance:admin) |
 > | `$u1` | `users.u1.id` | `qa-synth-u1@qa.invalid` (attendance:write) |
 > | `$u2` | `users.u2.id` | `qa-synth-u2@qa.invalid` (attendance:read) |
@@ -1080,16 +1081,33 @@ produced by the route/worker in the steps.
 
 ### Steps
 
+The reworked harness `harness/pqa-10-scheduled-sweep.mjs` performs S1–S3 route-lessly
+through the SAME exported product functions (identity via
+`createOrResumeAttendanceScheduledRunV1`, sweep via
+`sweepAttendanceScheduledRunsOnceV1`), using the `'cron'` scheduled entrypoint. The
+HTTP `POST /api/attendance/auto-absence/run` trigger below (initiator `'admin_run'`)
+is the **operator-verified equivalent** of the same identity/idempotence/sweep
+invariants — it drives `createOrResumeAttendanceScheduledRunV1` through the plugin
+boundary. Both prove the same contract; the harness is PASS-eligible from Node, the
+HTTP path stays `UNVERIFIED — operator to confirm`.
+
 Session for `$admin` + env `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`:
 `UNVERIFIED — operator to confirm`.
 
-- **S1 (trigger).** As admin: `POST /api/attendance/auto-absence/run`
+- **S1 (trigger — identity).** Harness: `createOrResumeAttendanceScheduledRunV1`
+  mints the `($orgShadow, 'cron', 2026-01-05)` running run with one `generate`
+  target. Operator equivalent: as admin `POST /api/attendance/auto-absence/run`
   `{ "orgId": "$orgShadow", "workDate": "2026-01-05" }` (exact body fields
   `UNVERIFIED — operator to confirm`).
-- **S2 (re-trigger — identity idempotence).** Repeat S1 with the same
-  `orgId`/`workDate`.
-- **S3 (sweep).** Invoke `sweepAttendanceScheduledRunsOnceV1(pool, { … })` (or the
-  `sweepScheduledRuns` port) — `UNVERIFIED — operator to confirm` the invocation.
+- **S2 (re-trigger — identity idempotence).** Harness: a second
+  `createOrResumeAttendanceScheduledRunV1` on the SAME identity returns
+  `kind='resumed'` (same generation) and leaves exactly ONE running row
+  (`uq_asr_one_running`) — asserted. Operator equivalent: repeat S1.
+- **S3 (sweep).** Harness: `sweepAttendanceScheduledRunsOnceV1(pool, { … })` claims
+  the due running run (stamps `last_attempt_at`) and — the target not yet sealed —
+  reports it `notReady` WITHOUT finalizing; asserted `scanned≥1`, `notReady≥1`,
+  `finalized=0`, and `last_attempt_at` set. Operator equivalent: the
+  `sweepScheduledRuns` port — `UNVERIFIED — operator to confirm` the invocation.
 
 ### Expected
 

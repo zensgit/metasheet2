@@ -595,6 +595,11 @@ if [[ "$windows_native_qa" == "1" ]]; then
     "scripts/ops/attendance-windows-native-qa-v2.pin.json"
     "scripts/ops/attendance-windows-native-qa-risk-matrix.json"
     "scripts/ops/attendance-windows-native-qa-runner.mjs"
+    # Load-bearing: the runner imports this contract module at startup — omission is a hard failure
+    # that `node --check` (a parse-only check) would NOT catch.
+    "scripts/ops/windows-qa/harness/machine-evidence-contract.mjs"
+    # The per-case PQA-01..10 runbook must be present so a ZIP-only tester has the steps.
+    "docs/deployment/attendance-windows-native-qa-v2-pqa-cases.md"
     "docker/app.env.attendance-windows-native.qa.example"
     "ecosystem.windows-native.config.cjs"
     "docs/deployment/attendance-windows-native-qa-v2-20260804.md"

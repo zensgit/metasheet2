@@ -37,10 +37,14 @@ export const QA_SYNTH_ORG_UUID_PREFIX = '00000000-0000-4000-8000-'
 export const QA_SYNTH_LEGACY_TEXT_PREFIX = 'qa_synth_'
 
 // Deterministic synthetic ORG keys (explicit-by-design; supplied to getOrCreateLocalIntegration).
+// `orgB` is the DEDICATED cross-org target for PQA-07's P3 probe: it gets a directory anchor but NO
+// user membership (see provision-synth-directory.MEMBERSHIPS), so `u1` is provably NOT a member and
+// the cross-org 403 has a valid, turnkey target — the earlier `$orgB = orgLegacy` had `u1` in it.
 export const QA_SYNTH_ORGS = Object.freeze({
   orgA: '00000000-0000-4000-8000-0000000000a1',
   orgShadow: '00000000-0000-4000-8000-0000000000a2',
   orgLegacy: '00000000-0000-4000-8000-0000000000a3',
+  orgB: '00000000-0000-4000-8000-0000000000a4',
 })
 
 // Per-user deterministic INPUTS. `key` is the logical role used by fixtures/harnesses; the actual

@@ -6,7 +6,9 @@
  * provision-synth-directory.mjs. This step completes the case fixture, parameterized ENTIRELY from
  * qa-identities.json (no hardcoded ids): it seeds one self-owned attendance_records row per active
  * user (current_calculation_id left NULL, so a self read returns 200 {calculation:null} — a positive
- * control), and flips u3's org_a membership INACTIVE (the inactive-membership probe subject).
+ * control), flips u3's org_a membership INACTIVE (the inactive-membership probe subject), and confirms
+ * the DEDICATED cross-org target orgB exists as an org u1 is NOT a member of (the P3 cross-org 403
+ * target — turnkey, no operator hand-creation of an org).
  *
  * WHY BLOCKED, NOT PASS (owner gate 3): the actual authorization PROBES (same-org other-user,
  * cross-org, forged witness, inactive membership -> fail before result SQL) run through the
@@ -30,9 +32,11 @@ async function main() {
   const evidenceDir = parseArg('--evidence-dir', DEFAULT_EVIDENCE_DIR)
   const ids = loadIdentities(parseArg('--identities', DEFAULT_IDENTITIES_PATH))
   const orgA = ids.orgs.orgA
+  const orgB = ids.orgs.orgB
   const u1 = ids.users.u1.id
   const u2 = ids.users.u2.id
   const u3 = ids.users.u3.id
+  if (!orgB) throw new Error('qa-identities.json has no orgs.orgB (re-run provision-synth-directory.mjs)')
 
   const client = await openIsolatedClient()
   try {
@@ -57,13 +61,22 @@ async function main() {
       `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`,
       [u3, orgA],
     )).rows[0]?.is_active
+    // P3 cross-org target check: u1 must have NO active membership in orgB, else the 403 probe is void.
+    const u1OrgBActive = Number((await client.query(
+      `SELECT count(*)::int AS n FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true`,
+      [u1, orgB],
+    )).rows[0].n)
     if (recCount !== 2) throw new Error(`expected 2 seeded records, got ${recCount}`)
     if (u3Active !== false) throw new Error(`u3 membership should be inactive, got is_active=${u3Active}`)
+    if (u1OrgBActive !== 0) {
+      throw new Error(`cross-org target orgB is INVALID: u1 has ${u1OrgBActive} active membership(s) in orgB`)
+    }
 
     const evidence =
       `seeded ${recCount} self-owned attendance_records (u1,u2 in org_a, current_calculation_id NULL); ` +
-      `u3 org_a membership set is_active=false. Authorization probes (same-org other-user / cross-org / ` +
-      `forged witness / inactive membership) run through authenticated HTTP on the running server ` +
+      `u3 org_a membership set is_active=false; cross-org target orgB=${orgB} confirmed (u1 active ` +
+      `memberships in orgB=${u1OrgBActive}). Authorization probes (same-org other-user / cross-org via ` +
+      `orgB / forged witness / inactive membership) run through authenticated HTTP on the running server ` +
       `(operator-verified on the Windows host).`
     emitCaseEvidence(evidenceDir, {
       id: CASE_ID,
