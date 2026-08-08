@@ -20,6 +20,7 @@ import {
   getDingTalkRuntimeStatus,
   generateState,
   isDingTalkConfigured,
+  unbindSelfManagedDingTalkIdentity,
   validateState,
 } from '../auth/dingtalk-oauth'
 import {
@@ -1162,11 +1163,10 @@ authRouter.post('/dingtalk/unbind', async (req: Request, res: Response) => {
       })
     }
 
-    await query(
-      `DELETE FROM user_external_identities
-       WHERE provider = $1 AND local_user_id = $2`,
-      ['dingtalk', authResult.user.id],
-    )
+    await unbindSelfManagedDingTalkIdentity({
+      localUserId: authResult.user.id,
+      actorId: authResult.user.id,
+    })
 
     const nextSnapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
     return res.json({
@@ -1174,6 +1174,13 @@ authRouter.post('/dingtalk/unbind', async (req: Request, res: Response) => {
       data: nextSnapshot,
     })
   } catch (error) {
+    if (error instanceof DingTalkLoginPolicyError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message,
+        code: error.code,
+      })
+    }
     logger.error('DingTalk self-unbind error', error instanceof Error ? error : undefined)
     return res.status(500).json({
       success: false,

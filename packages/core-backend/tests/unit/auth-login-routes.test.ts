@@ -46,6 +46,7 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
   exchangeEnterpriseAuthCodeForUser: vi.fn(),
   exchangeCodeForDingTalkProfile: vi.fn(),
   bindDingTalkIdentityToUser: vi.fn(),
+  unbindSelfManagedDingTalkIdentity: vi.fn(),
   DingTalkLoginPolicyError: class DingTalkLoginPolicyError extends Error {
     statusCode: number
     code: string
@@ -121,6 +122,7 @@ vi.mock('../../src/auth/dingtalk-oauth', () => ({
   exchangeEnterpriseAuthCodeForUser: dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser,
   exchangeCodeForDingTalkProfile: dingtalkOauthMocks.exchangeCodeForDingTalkProfile,
   bindDingTalkIdentityToUser: dingtalkOauthMocks.bindDingTalkIdentityToUser,
+  unbindSelfManagedDingTalkIdentity: dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity,
   DingTalkLoginPolicyError: dingtalkOauthMocks.DingTalkLoginPolicyError,
 }))
 
@@ -238,6 +240,8 @@ describe('auth login routes', () => {
     dingtalkOauthMocks.exchangeCodeForUser.mockReset()
     dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockReset()
     dingtalkOauthMocks.bindDingTalkIdentityToUser.mockReset()
+    dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity.mockReset()
+    dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity.mockResolvedValue(true)
     rbacMocks.listUserPermissions.mockReset()
     dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
       configured: true,
@@ -862,11 +866,10 @@ describe('auth login routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(pgMocks.query).toHaveBeenNthCalledWith(
-      4,
-      expect.stringContaining('DELETE FROM user_external_identities'),
-      ['dingtalk', 'user-1'],
-    )
+    expect(dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity).toHaveBeenCalledWith({
+      localUserId: 'user-1',
+      actorId: 'user-1',
+    })
     expect((response.body as Record<string, any>).data.identity.exists).toBe(false)
     expect((response.body as Record<string, any>).data.directory.linked).toBe(false)
   })
@@ -900,6 +903,48 @@ describe('auth login routes', () => {
     expect(response.statusCode).toBe(409)
     expect((response.body as Record<string, any>).error).toContain('directory-managed')
     expect(pgMocks.query).toHaveBeenCalledTimes(3)
+  })
+
+  it('maps the transactional directory-managed recheck to 409', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          corp_id: 'dingcorp',
+          last_login_at: '2026-04-11T12:00:00.000Z',
+          created_at: '2026-04-11T12:00:00.000Z',
+          updated_at: '2026-04-11T12:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ linked_count: 0 }] })
+    dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity.mockRejectedValue(
+      new dingtalkOauthMocks.DingTalkLoginPolicyError(
+        'Current DingTalk identity is directory-managed. Please contact an administrator.',
+        {
+          statusCode: 409,
+          code: 'directory_managed_identity',
+        },
+      ),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/unbind', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      success: false,
+      code: 'directory_managed_identity',
+    })
   })
 
   it('requires authentication before issuing a DingTalk bind auth URL', async () => {

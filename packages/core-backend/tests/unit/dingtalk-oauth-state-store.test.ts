@@ -433,14 +433,39 @@ describe('DingTalk OAuth state store', () => {
           name: 'Ding User',
           role: 'user',
           is_active: true,
+          activation_status: 'activated',
         }],
       } as any)
       .mockResolvedValueOnce({ rows: [] } as any)
 
     vi.mocked(transaction).mockImplementation(async (callback: (client: { query: typeof query }) => Promise<unknown>) => {
-      const clientQuery = vi.fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
+      const clientQuery = vi.fn(async (sql: string, params: unknown[] = []) => {
+        const statement = String(sql)
+        if (/FROM users[\s\S]*FOR UPDATE/i.test(statement)) {
+          return {
+            rows: [{
+              id: String(params[0]),
+              name: 'Ding User',
+              email: 'dingtalk_open-id-1@placeholder.local',
+              username: null,
+              mobile: null,
+              activation_status: 'activated',
+              is_active: true,
+              access_generation: 0,
+            }],
+          }
+        }
+        if (/INSERT INTO user_external_auth_grants/i.test(statement)) {
+          return { rows: [{ local_user_id: String(params[1]) }] }
+        }
+        if (/INSERT INTO user_external_identities/i.test(statement)) {
+          return { rows: [{ id: 'identity-new' }] }
+        }
+        if (/UPDATE users[\s\S]*access_generation/i.test(statement)) {
+          return { rows: [{ access_generation: 1 }] }
+        }
+        return { rows: [] }
+      })
       return callback({ query: clientQuery as unknown as typeof query })
     })
 
