@@ -173,8 +173,8 @@ describeIfDatabase('Phase C2 automation — governed cross-base DELETE + LOCK (r
   })
 
   // ── DL-1c: cross-base delete also cleans up the foreign_record_id link side ──
-  // The FK cascade only covers the record_id side; the executor (mirroring the same-base sinks) deletes
-  // BOTH sides explicitly. A link where the deleted record is the FOREIGN endpoint must be gone too.
+  // The source-side FK cascades, while the target-side FK is NO ACTION. The executor (mirroring the
+  // same-base sinks) explicitly deletes both directions before deleting the record.
   test('DL-1c: cross-base delete clears links on the foreign_record_id side (no dangling links)', async () => {
     const { executor } = makeExecutor()
     const victim = `rec_dl1c_victim_${TS}` // the record being deleted (in SHEET_B)

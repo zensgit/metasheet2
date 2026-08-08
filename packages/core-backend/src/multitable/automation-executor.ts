@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'crypto'
 import { recordRecordRevision, recordVersionMarker } from './record-history-service'
+import { mintOperation, sealOperation } from './operation-ledger'
 import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
 import { claimExecutionAction, isClassAExecutionClaimEnabled } from './automation-execution-ledger'
@@ -2588,9 +2589,10 @@ export class AutomationExecutor {
         }
 
         // Clean up links FIRST (mirrors the same-base delete sinks `records.deleteRecord` /
-        // `RecordService.deleteRecord`): the FK cascade only covers the `record_id` side, so the
-        // `foreign_record_id` side must be deleted explicitly or it dangles. (This statement touches
-        // meta_links, NOT meta_records, so the cross-base write-guard regex does not match it.)
+        // `RecordService.deleteRecord`): the source-side FK cascades, while the target-side FK is
+        // deliberately NO ACTION so capture can never be bypassed by a silent database cascade.
+        // (This statement touches meta_links, NOT meta_records, so the cross-base write-guard regex
+        // does not match it.)
         await query(
           'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
           [effectiveRecordId],
@@ -4560,6 +4562,9 @@ export class AutomationExecutor {
           if (await this.claimClassAOrSkip(query, identity, 'lock_record', config) === 'duplicate') {
             return 'duplicate' as const
           }
+          // W0-1 L6-a: withTransaction already holds the canonical fence. Mint after the Class-A claim so a
+          // duplicate remains a true no-op, then tag the marker and seal LAST in this same transaction.
+          const op = await mintOperation(query, effectiveSheetId)
           // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — cross-base lock rejected unless claim==truth + base-write.
           // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
@@ -4570,7 +4575,8 @@ export class AutomationExecutor {
             [lockedBy, effectiveRecordId, effectiveSheetId],
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'lock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'lock', actorId: typeof context.actorId === 'string' ? context.actorId : null, ledger: op })
+          await sealOperation(query, op)
           return null
         })
         if (skipped === 'duplicate') return this.alreadyAppliedResult('lock_record')
@@ -4584,6 +4590,9 @@ export class AutomationExecutor {
           if (await this.claimClassAOrSkip(query, identity, 'lock_record', config) === 'duplicate') {
             return 'duplicate' as const
           }
+          // W0-1 L6-a: withTransaction already holds the canonical fence. Mint after the Class-A claim so a
+          // duplicate remains a true no-op, then tag the marker and seal LAST in this same transaction.
+          const op = await mintOperation(query, effectiveSheetId)
           // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — cross-base unlock rejected unless claim==truth + base-write.
           // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
@@ -4594,7 +4603,8 @@ export class AutomationExecutor {
             [effectiveRecordId, effectiveSheetId],
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'unlock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'unlock', actorId: typeof context.actorId === 'string' ? context.actorId : null, ledger: op })
+          await sealOperation(query, op)
           return null
         })
         if (skipped === 'duplicate') return this.alreadyAppliedResult('lock_record')

@@ -495,8 +495,8 @@ export interface MetaCapabilities {
   pitResetEnabled?: boolean
   /** Interim revert-execute master-gate flag-visibility signal (current-risk mitigation): flag-derived
    *  (MULTITABLE_ENABLE_SHEET_REVERT ∧ sheet-admin), set by /context — SAME pattern as pitResetEnabled. Optional —
-   *  absent/false ⇒ any Revert entry the FE builds MUST be HIDDEN (fail-closed, same discipline as Reset). No
-   *  consuming component exists yet in this PR; this is the type-contract half only. */
+   *  absent/false ⇒ the Revert entry is HIDDEN (fail-closed, same discipline as Reset). Consumed by the
+   *  exact-anchor Global History picker; the client never reads an environment variable directly. */
   sheetRevertEnabled?: boolean
   /** Slice 3 personal-views "My view" toggle flag-visibility signal (design-lock
    *  multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §7 Q1): flag-derived

@@ -52,6 +52,10 @@ import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-der
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
+import {
+  isLiveLinkTargetForeignKeyViolation,
+  isRetryableLiveLinkDatabaseConflict,
+} from './live-link-projection-integrity'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled, type InboundReplayResult } from './inbound-link-replay'
 import {
   notifyRecordSubscribersBestEffort,
@@ -731,12 +735,22 @@ export class RecordService {
         // next refetch; only the push is deferred, consistent with the established realtime precedent.
         for (const [fieldId, { ids }] of linkUpdates.entries()) {
           for (const foreignId of ids) {
-            await query(
-              `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-               VALUES ($1, $2, $3, $4)
-               ON CONFLICT DO NOTHING`,
-              [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
-            )
+            try {
+              await query(
+                `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT DO NOTHING`,
+                [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
+              )
+            } catch (error) {
+              if (isLiveLinkTargetForeignKeyViolation(error)) {
+                throw new RecordValidationError(`Linked record no longer exists: ${foreignId}`)
+              }
+              if (isRetryableLiveLinkDatabaseConflict(error)) {
+                throw new RecordValidationError('Linked records changed concurrently; retry the write')
+              }
+              throw error
+            }
           }
         }
       }
@@ -1171,11 +1185,21 @@ export class RecordService {
       // Rebuild outbound meta_links from the restored snapshot (same insert shape as create/patch).
       for (const fieldId of linkFieldIds) {
         for (const foreignId of normalizeLinkIds(snapshot[fieldId])) {
-          await query(
-            `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-            [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
-          )
+          try {
+            await query(
+              `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+               VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+              [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
+            )
+          } catch (error) {
+            if (isLiveLinkTargetForeignKeyViolation(error)) {
+              throw new RecordRestoreConflictError(`Cannot restore: linked record no longer exists: ${foreignId}`)
+            }
+            if (isRetryableLiveLinkDatabaseConflict(error)) {
+              throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
+            }
+            throw error
+          }
         }
       }
       // 4c-3: inbound-edge replay — MUST run after the outbound loop above (the NOT EXISTS guard
@@ -1186,8 +1210,15 @@ export class RecordService {
       // recoverable=false — reported honestly, never reconstructed from heuristics.
       if (inboundEnabled) {
         if (deleteRevisionId) {
-          const replay = await replayInboundLinks(query, deleteRevisionId)
-          inboundOut = { ...replay, recoverable: replay.total > 0 }
+          try {
+            const replay = await replayInboundLinks(query, deleteRevisionId)
+            inboundOut = { ...replay, recoverable: replay.total > 0 }
+          } catch (error) {
+            if (isLiveLinkTargetForeignKeyViolation(error) || isRetryableLiveLinkDatabaseConflict(error)) {
+              throw new RecordRestoreConflictError('Cannot restore: an inbound linked record was deleted concurrently')
+            }
+            throw error
+          }
         } else {
           inboundOut = { replayed: 0, skipped: { neighborGone: 0, fieldGone: 0, fieldNotLink: 0, fieldMirror: 0, neighborDeclined: 0, alreadyPresent: 0 }, total: 0, recoverable: false }
         }
@@ -1529,12 +1560,22 @@ export class RecordService {
           )
         }
         for (const foreignId of toInsert) {
-          await query(
-            `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT DO NOTHING`,
-            [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
-          )
+          try {
+            await query(
+              `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT DO NOTHING`,
+              [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
+            )
+          } catch (error) {
+            if (isLiveLinkTargetForeignKeyViolation(error)) {
+              throw new RecordValidationError(`Linked record no longer exists: ${foreignId}`)
+            }
+            if (isRetryableLiveLinkDatabaseConflict(error)) {
+              throw new RecordValidationError('Linked records changed concurrently; retry the write')
+            }
+            throw error
+          }
         }
         if (ids.length === 0) {
           await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])

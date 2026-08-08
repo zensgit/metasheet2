@@ -734,6 +734,27 @@ export default defineConfig({
       // skip-green it, and whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       // Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-history-contiguity-realdb.test.ts',
+      // W0 L6-b exact-anchor authority goldens: DATABASE_URL-gated and meaningful only against real
+      // Postgres. Exclude from the no-DB default lane so it cannot skip-green, and keep the whole file
+      // wired into `Run multitable real-DB integration` in plugin-tests.yml. The no-DB wiring contract
+      // pins both points.
+      'tests/integration/multitable-exact-anchor-recovery-realdb.test.ts',
+      // W0 L7 exact-anchor recovery-plan goldens: DATABASE_URL-gated and meaningful only against real
+      // Postgres. Exclude from the no-DB default lane so it cannot skip-green; the shared exact-anchor
+      // CI wiring contract pins this entry and its whole-file multitable real-DB invocation.
+      'tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts',
+      // W0 L8 exact-anchor destructive-apply goldens: DATABASE_URL-gated and meaningful only against real
+      // Postgres (constructed lock races, trigger-injected rollback, real advisory fence). Exclude from the
+      // no-DB default lane so it cannot skip-green; the shared exact-anchor CI wiring contract pins this
+      // entry and its whole-file multitable real-DB invocation.
+      'tests/integration/multitable-exact-anchor-apply-realdb.test.ts',
+      // W2 Express route wiring goldens: all four legacy revert/reset routes on L6/L7/L8,
+      // including auth races and post-commit side effects. Real Postgres only; the shared
+      // exact-anchor CI wiring contract pins both this exclusion and the whole-file CI entry.
+      'tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+      // Time Machine closeout guard: per-subject authority leases. It is DATABASE_URL-gated and
+      // pinned by the shared exact-anchor CI wiring contract.
+      'tests/integration/multitable-recovery-authority-stability-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into

@@ -115,7 +115,6 @@ const PATCHRECORDS_ALLOWLIST: Record<string, Array<{ disposition: Disposition; r
     { disposition: 'GATED', reason: 'records/:recordId/restore-execute (single) — hasForbidden/layer3Ok pre-check (isFieldWriteForbidden)' },
     { disposition: 'GATED', reason: 'sheets/:sheetId/restore-batch-execute, all-or-nothing branch — recordIsForbidden pre-check (isFieldWriteForbidden)' },
     { disposition: 'GATED', reason: 'sheets/:sheetId/restore-batch-execute, PARTIAL per-record loop branch — same recordIsForbidden pre-check' },
-    { disposition: 'GATED', reason: 'T8-1 revert-execute — per-record hasForbidden pre-check (isFieldWriteForbidden)' },
     {
       disposition: 'GATED',
       reason:
