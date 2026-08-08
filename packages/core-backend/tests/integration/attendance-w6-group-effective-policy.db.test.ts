@@ -189,6 +189,12 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
     // attendance_shift_assignments row per target member for `effective` —
     // without these the desired config exists but nothing matches it
     // (state `pending_apply`, not `effective`).
+    // Deliberately a hand-written literal of buildFixedScheduleProducerKey's
+    // join format, NOT a call to that function — this is what gives this
+    // DB-level test independent discriminating power over a format-change
+    // mutation in that function (see the doc comment above
+    // buildFixedScheduleProducerKey in w6-group-effective-policy-aggregate.ts).
+    // Do NOT "DRY" this into a call to the imported function.
     const producerKey = ['attendance_group_fixed_schedule', groupAId, shiftId, '2026-08-01', '2026-08-31'].join(':')
     const producerRunId = randomUUID()
     for (const userId of [memberUser, adminUser]) {
