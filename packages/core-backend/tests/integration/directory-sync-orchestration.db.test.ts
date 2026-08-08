@@ -735,6 +735,58 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       })
     })
 
+    it('a retained account whose email newly matches a local user does not kill the run (D5 review P1: inventory is a superset of the loop)', async () => {
+      // Before the fix, the mutex inventory was built ONLY from the pull payload, while the link
+      // loop iterates EVERY account of the integration and resolves against match maps built
+      // from all of them. This fixture is the deterministic killer: an account already in the DB
+      // (absent from the pull) whose email matches a user created since the last sync — the loop
+      // resolved a user the inventory never locked, threw "resolved a local user after the mutex
+      // inventory; retry the run", and every retry failed identically.
+      const integration = await createDirectoryIntegration({
+        name: `dso-inv-${TS}`,
+        corpId: `dso-inv-corp-${TS}`,
+        appKey: `dso-inv-appkey-${TS}`,
+        appSecret: 'dso-secret',
+        admissionMode: 'manual_only',
+        defaultDeprovisionPolicy: 'manual_review',
+      })
+      const matchedUserId = `dso-inv-user-${TS}`
+      await query(`INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'x', TRUE)`, [
+        matchedUserId,
+        `${matchedUserId}@example.test`,
+      ])
+      // Retained DB account with the matching email — NOT in the pull below.
+      await query(
+        `INSERT INTO directory_accounts (
+           integration_id, corp_id, external_user_id, external_key, name, email, is_active, last_seen_at, created_at, updated_at
+         ) VALUES ($1, $2, $3, $3, 'Retained', $4, true, NOW(), NOW(), NOW())`,
+        [integration.id, `dso-inv-corp-${TS}`, `dso-inv-ext-${TS}`, `${matchedUserId}@example.test`],
+      )
+      const survivorExt = `dso-inv-survivor-${TS}`
+      const deptId = `55${TS % 100000}`
+      activeDirectory = {
+        departments: [{ id: deptId, parentId: '1', name: 'Dep Inv', order: 0 }],
+        usersByDept: {
+          [deptId]: [
+            { userId: survivorExt, name: 'Survivor', departmentIds: [deptId], unionId: `${survivorExt}-un` },
+          ],
+        },
+      }
+      cleanupTargets.push({ integrationId: integration.id, localUserId: matchedUserId })
+
+      const result = await syncDirectoryIntegration(integration.id, 'system:dso-inv')
+      expect(result.run.status).toBe('completed')
+      // The retained account resolved its email hint without killing the run.
+      const hint = await query<{ local_user_id: string | null; link_status: string }>(
+        `SELECT l.local_user_id, l.link_status
+           FROM directory_account_links l
+           JOIN directory_accounts a ON a.id = l.directory_account_id
+          WHERE a.integration_id = $1 AND a.external_user_id = $2`,
+        [integration.id, `dso-inv-ext-${TS}`],
+      )
+      expect(hint.rows[0]?.local_user_id).toBe(matchedUserId)
+    })
+
     it('with the flag unset (shipped default), the same departure writes NOTHING — counts are preview-only', async () => {
       const fixture = await seedDepartureFixture('off')
       cleanupTargets.push(fixture)

@@ -3294,6 +3294,36 @@ async function lockDirectorySyncAccessGraphUsers(
            FROM users candidate_user
           WHERE lower(candidate_user.email) = ANY($6::text[])
              OR regexp_replace(candidate_user.mobile, '\\s+', '', 'g') = ANY($7::text[])
+         UNION ALL
+         -- D5 review P1: the payload-built arms above under-covered the loop, which iterates
+         -- EVERY account of the integration (retained-but-departed included) and resolves
+         -- against match maps built from all of them. One retained account whose email/mobile
+         -- or identity keys newly matched a local user made the loop resolve a user the
+         -- inventory never locked -> 'resolved after the mutex inventory' -> the whole run
+         -- failed, and every subsequent run failed identically. These two DB-side arms make the
+         -- inventory a superset of anything the loop can resolve; over-locking a user is safe,
+         -- under-locking kills the run.
+         SELECT db_identity.local_user_id
+           FROM user_external_identities db_identity
+           JOIN directory_accounts db_account
+             ON db_account.integration_id = $1::uuid
+            AND (
+              db_identity.external_key = db_account.external_key
+              OR (db_account.union_id IS NOT NULL AND db_identity.provider_union_id = db_account.union_id)
+              OR (db_account.open_id IS NOT NULL AND db_identity.provider_open_id = db_account.open_id)
+            )
+          WHERE db_identity.provider = $2::text
+         UNION ALL
+         SELECT db_user.id
+           FROM users db_user
+           JOIN directory_accounts db_match
+             ON db_match.integration_id = $1::uuid
+          WHERE (db_match.email IS NOT NULL AND lower(db_user.email) = lower(db_match.email))
+             OR (
+               db_match.mobile IS NOT NULL
+               AND db_user.mobile IS NOT NULL
+               AND regexp_replace(db_user.mobile, '\\s+', '', 'g') = regexp_replace(db_match.mobile, '\\s+', '', 'g')
+             )
        ) candidate
       WHERE candidate.local_user_id IS NOT NULL`,
     [

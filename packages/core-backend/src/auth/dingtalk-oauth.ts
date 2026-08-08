@@ -425,6 +425,15 @@ async function readGrantEnabled(localUserId: string): Promise<boolean | null> {
   }
 }
 
+/**
+ * Creation-only ON PURPOSE (`DO NOTHING`, never `DO UPDATE enabled=TRUE`): an existing DISABLED
+ * row is deprovision's authoritative "this person was offboarded" mark — the OPS-01 writer
+ * leaves it precisely so a later OAuth attempt CANNOT silently re-grant (D5 review P2: the
+ * DO UPDATE variant flipped a deprovision-written enabled=false back to true on next login).
+ * Re-enabling after deprovision is exclusively the audited rehire/force-restore path. A
+ * genuinely NEW grant (row created, RETURNING non-empty) IS an access-graph write, so it takes
+ * the mutex and supersedes open deprovision evidence (§5.4 both legs) below.
+ */
 async function ensureGrant(localUserId: string): Promise<void> {
   await transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
@@ -438,11 +447,7 @@ async function ensureGrant(localUserId: string): Promise<void> {
       `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
        VALUES ($1, $2, TRUE, $3, NOW(), NOW())
        ON CONFLICT (provider, local_user_id)
-       DO UPDATE SET
-         enabled = TRUE,
-         granted_by = EXCLUDED.granted_by,
-         updated_at = NOW()
-       WHERE user_external_auth_grants.enabled IS DISTINCT FROM TRUE
+       DO NOTHING
        RETURNING local_user_id`,
       [PROVIDER, localUserId, localUserId],
     )
@@ -1311,4 +1316,5 @@ export async function unbindSelfManagedDingTalkIdentity(input: {
  */
 export const __dingtalkOAuthInternalsForTests = {
   createProvisionedUser,
+  ensureGrant,
 }

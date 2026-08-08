@@ -20,6 +20,7 @@ import {
   archiveLocalAccount,
   createLocalAccount,
 } from '../../src/directory/local-directory-org'
+import { __dingtalkOAuthInternalsForTests } from '../../src/auth/dingtalk-oauth'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const PREFIX = `d5a-mutex-${Date.now()}`
@@ -543,6 +544,8 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
     )
     expect(link.rows).toHaveLength(1)
     expect(link.rows[0]).toMatchObject({ local_user_id: targetUserId, link_status: 'linked' })
+  })
+
   it('automatic sync inventory parks on the linked user mutex before re-reading account state', async () => {
     const seeded = await seedAppliedEvidence()
     await resetSeededForAccessOverride(seeded)
@@ -672,5 +675,45 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
     )
     expect(after.event_status).toBe('superseded')
     expect(after.resolved_by).toBe(seeded.userId)
+  })
+
+  it("OAuth ensureGrant is creation-only: a deprovision-written DISABLED grant is never flipped back (D5 review P2)", async () => {
+    const orgId = `${PREFIX}-org-${randomUUID()}`
+    const offboarded = `${PREFIX}-offboarded-${randomUUID()}`
+    const newcomer = `${PREFIX}-newcomer-${randomUUID()}`
+    for (const uid of [offboarded, newcomer]) {
+      await query(
+        `INSERT INTO users (id, password_hash, is_active, activation_status, access_generation)
+         VALUES ($1, 'x', TRUE, 'activated', 3)`,
+        [uid],
+      )
+    }
+    // Deprovision's authoritative mark: an explicit disabled row.
+    await query(
+      `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by)
+       VALUES ('dingtalk', $1, FALSE, 'system:directory-deprovision')`,
+      [offboarded],
+    )
+
+    // The offboarded person attempts OAuth login: the DO UPDATE variant flipped this row back to
+    // TRUE (silently undoing deprovision); creation-only must leave it exactly as written.
+    await __dingtalkOAuthInternalsForTests.ensureGrant(offboarded)
+    const after = await query<{ enabled: boolean }>(
+      `SELECT enabled FROM user_external_auth_grants WHERE local_user_id = $1`, [offboarded])
+    expect(after.rows[0]?.enabled).toBe(false)
+    const gen = await query<{ g: number }>(
+      `SELECT access_generation::int AS g FROM users WHERE id = $1`, [offboarded])
+    expect(gen.rows[0]?.g).toBe(3) // no supersede leg fired — nothing changed
+
+    // A genuinely NEW grant (no row) IS an access-graph write: row created enabled, and the
+    // §5.4 legs fire — generation moves.
+    void orgId
+    await __dingtalkOAuthInternalsForTests.ensureGrant(newcomer)
+    const created = await query<{ enabled: boolean }>(
+      `SELECT enabled FROM user_external_auth_grants WHERE local_user_id = $1`, [newcomer])
+    expect(created.rows[0]?.enabled).toBe(true)
+    const newcomerGen = await query<{ g: number }>(
+      `SELECT access_generation::int AS g FROM users WHERE id = $1`, [newcomer])
+    expect(newcomerGen.rows[0]?.g).toBeGreaterThan(3)
   })
 })
