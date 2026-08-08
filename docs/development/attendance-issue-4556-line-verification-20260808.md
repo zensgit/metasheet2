@@ -145,7 +145,7 @@ belonging to a **superseded head**. The rollup at the new head, read at landing,
 1 `SKIPPED` (`Strict E2E with Enhanced Gates`) — but a rollup is not pinned by a SHA, and a green
 rollup does not clear a merge conflict.
 
-#### C.3 Three files cited by the body changed on `main` — and **every `plugin-tests.yml:NNN` line citation in the body is now off by +2 or +5**
+#### C.3 Three files cited by the body changed on `main` — and **six of the body's seven `plugin-tests.yml` line citations are now off by +2 or +5**
 
 Method: 55 distinct repository paths were extracted from the two documents by regex, then intersected
 with `git diff --name-only a45e1416… 60659ddc3b…`. (The regex captures paths of the common source
@@ -154,7 +154,7 @@ paths appear in that diff:
 
 | Cited path | Change between baseline and current `main` | Effect on the body |
 | --- | --- | --- |
-| `.github/workflows/plugin-tests.yml` | **+5 / −0**, inserted in two hunks (after baseline line 103 → +2 lines; after baseline line 1100 → +3 more). File grew 1476 → 1481 lines. Landed by `882c292906` and `26d4be3e04`, both **directory/D4 work, not this line**. | **All seven line-pinned citations in the body still resolve at the pinned baseline and no longer resolve at current `main`.** Verified content-identity per citation: baseline `:223`, `:224`, `:585` → current `:225`, `:226`, `:587` (**+2**); baseline `:1201`, `:1249`, `:1250`, `:1265`, `:1305` → current `:1206`, `:1254`, `:1255`, `:1270`, `:1310` (**+5**). The *content* each citation names is unchanged — only its line number moved. |
+| `.github/workflows/plugin-tests.yml` | **+5 / −0**, inserted in two hunks (after baseline line 103 → +2 lines; after baseline line 1100 → +3 more). File grew 1476 → 1481 lines. Landed by `882c292906` and `26d4be3e04`, both **directory/D4 work, not this line**. | **Six of the body's seven line-pinned citations moved; one did not.** The seven were enumerated by `grep -ohE 'plugin-tests\.yml:[0-9]+(-[0-9]+)?'` over both files (7 distinct refs, 10 occurrences), then each checked for content identity at both SHAs: **`:3-18` is unchanged (offset +0)** — it sits inside the 1–103 prefix, verified byte-identical at both SHAs, so it resolves at current `main` as well; `:223-224` and `:585` shift **+2** (→ `:225-226`, `:587`); `:1201`, `:1249-1250`, `:1265` and `:1305` shift **+5** (→ `:1206`, `:1254-1255`, `:1270`, `:1310`). The *content* every citation names is unchanged at both SHAs — only the line numbers moved. |
 | `packages/core-backend/vitest.config.ts` | **+12 / −0**: three `directory-*` real-DB exclusions added at baseline line 234. | **No effect.** The body makes no line-pinned citation to this file. |
 | `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` | Changed. | **No effect on any line citation.** The body makes no line-pinned citation to this file. |
 
@@ -179,9 +179,11 @@ any, is **not assessed** by this document — no command was run that establishe
 2. **W6 moved on paper only.** A ratification anchor (PR 4821) and the runtime slice it would unblock
    (PR 4814, Draft/HOLD) both exist and are both unmerged. `main` still reads PROPOSED / OPEN, so
    every W6 statement in the body stands.
-3. **PR 4805 needs conflict resolution, not a rebase** — the one row whose remediation shape changed.
-4. **Line numbers into `plugin-tests.yml` need +2 or +5** if you resolve them against current `main`
-   instead of the pinned baseline. Everything they name is otherwise unchanged.
+3. **PR 4805 is `CONFLICTING` against `main`** — a conflict-resolution shape, not a rebase-and-rerun
+   shape. It is the one row whose remediation shape changed.
+4. **Six of the seven `plugin-tests.yml` line citations need +2 or +5** if you resolve them against
+   current `main` instead of the pinned baseline; `:3-18` needs no adjustment. Everything they name
+   is otherwise unchanged at both SHAs.
 5. Every other pinned head in the body is byte-identical to the live head at landing.
 
 ### D. Commands run to produce §B and §C
