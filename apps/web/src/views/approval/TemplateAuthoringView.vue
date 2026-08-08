@@ -3852,7 +3852,7 @@ pre {
   height: 22px;
   border-radius: 50%;
   border: 1px solid var(--el-color-primary);
-  background: var(--ms-bg-card, #fff);
+  background: var(--ms-bg-card);
   color: var(--el-color-primary);
   font-size: 14px;
   line-height: 1;
@@ -3875,7 +3875,7 @@ pre {
   padding: 4px;
   border: 1px solid var(--el-border-color);
   border-radius: 6px;
-  background: var(--ms-bg-card, #fff);
+  background: var(--ms-bg-card);
   box-shadow: var(--el-box-shadow-lighter);
 }
 .template-authoring__canvas-edge-insert-menu button {
