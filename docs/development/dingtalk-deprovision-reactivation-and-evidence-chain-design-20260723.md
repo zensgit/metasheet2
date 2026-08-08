@@ -71,6 +71,15 @@ CHANGES REQUESTED @ main=45cf3a7c51）会签裁决「Rev 4.3 可以终签」。�
 （`directory-deprovision-writer-ledger.db.test.ts`），mutation 六连杀（restore DELETE、creation 规划、
 no-op 豁免、writer INSERT、org 校验、激活源门控）。
 
+**可逆性边界（独立对抗审 P2，2026-08-09 落账 — 措辞限定，非行为变更）**：creation effect 的
+DELETE 逆转仅在其事件仍为 `applied` 时可用。任何后续 access-graph 写（例：管理员
+`PATCH /status` 重新启用、更新的离岗事件）按 §5.4 将证据 **supersede**，此后 `rehire` 与
+`admin_force` 均被既有门拒绝（`EVENT_NOT_APPLIED`），deny 行成为**无 live 证据的残留**——且后续
+离岗 planner 见行已存在也不再补记 creation effect。该 supersede 语义为 main 既有合同（本勘误
+未触碰那两道门），故 Rev 4.4 的承诺应读作：「**在事件被 supersede 之前**，deny 行的存在性变化
+可被 restore 安全逆转」。残留行的补偿路径（人工清理 or 再证据化）列入 owner 会签清单（验证 MD
+§4 第 3 项）。另：多 active 源的 org 派生消歧为 follow-up hardening（#4833）。
+
 产品方向见 companion — **已赞成**。  
 **Implementation design lock 已于 2026-07-23 批准。**  
 序：lock → T1→T2→T3 → D1…D7 → canary。  

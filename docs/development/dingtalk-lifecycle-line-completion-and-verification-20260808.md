@@ -53,6 +53,7 @@ Sonnet 侦察（restack 预案）全部命中：唯一真冲突 #4658、#4659 �
 
 1. **Rev 4.3 勘误已按 owner 指令落账**（#4646 锁文 §0.6 含 provenance）：每 event 仅一条源组织 `membership_changed`；`globally_clear` 只门控 grant/user。与 main 既有 W4-PRE-1d owner 裁决同轴，非新语义。**请 owner 终签。**
 2. **OPS-01 行形制裁定 — 已被 Rev 4.4 取代（closeout 复审会签指令）**：复审裁定「OPS-01 暂不签——ledger 必须记录『grant 行从不存在到 disabled』的存在性变化，restore 时才能安全删除；不能仅调整 upsert 位置」。原「无条件 disabled 行、ledger 外写入」形制即复审 P1-2 的根因（从未有 grant 的人 rehire 后被孤儿 deny 行永久挡死 OAuth）。Rev 4.4（锁文 §0.7）改为**纯 effect 驱动**：creation effect（`grant_row_created=TRUE`）→ writer INSERT deny 行 → restore DELETE 恢复无行态；deny 闸本身不变（ensureGrant 仍 creation-only，被显式 disabled 行挡住）。**该项不再等 owner 会签原语义——按会签指令已重做。**
+3. **OPS-01 supersede 残留的补偿路径（新增，对抗审 P2-1）**：deny 行的 DELETE 逆转仅在事件 `applied` 期间可用；被 supersede 后行成无证据残留（rehire/admin_force 均 `EVENT_NOT_APPLIED`，后续离岗不补证据）。此为 main 既有 supersede 合同的推论。**请 owner 裁定补偿路径**：残留 deny 行是否允许人工/运维清理，或引入「再证据化」机制。三开关 OFF 期间无生产暴露。
 
 ## 4bis. Closeout 复审吸收记录（2026-08-08，CHANGES REQUESTED → 修复）
 
@@ -63,6 +64,8 @@ Sonnet 侦察（restack 预案）全部命中：唯一真冲突 #4658、#4659 �
 | **P2（零 effect 语义分叉）** | 零 effect 早退跳过 bookkeeping upsert，与有 effect 路径 deny 语义相反；:450 测试不验 OAuth loginability | 语义统一（globally-clear 无行 ⇒ 必有 creation effect），两种零 effect 形态（deny 已在场 / not-globally-clear）均新增「运行前后 OAuth loginability 不变」真库断言 |
 
 Mutation 六连杀（每条先证锚点命中、后证目标测试转红、cp 还原）：restore DELETE 分支、planner creation 规划、no-op 豁免、writer creation INSERT、`ACTIVATE_ORG_MISMATCH` 校验、激活源门控回退（原 P1 复刻）。
+
+**独立对抗审 verdict（Opus，2026-08-09，绑 head 467ae34b57）**：**APPROVE-with-hardening，0 P1** —— 三条 refute-first 目标（T3 绕过 / writer 非 1:1 / restore drift）构造攻击后均未证伪；六条 mutation 独立复现全转红；immutability 函数与 20260728 版程序化逐行比对一列未丢；迁移在全新 DB 干净跑通且不在 9 处 MIGRATION_EXCLUDE。两条 P2 已落账：①**可逆性边界**——supersede（如管理员重新启用）后 restore 按既有门拒绝（`EVENT_NOT_APPLIED`），deny 行成无证据残留：锁文 §0.7 已按此限定措辞（main 既有语义，非本 PR 引入），补偿路径列入 §4 owner 清单第 3 项；②**双 ACTIVE 源 org 派生歧义**（今日无 web 调用点可达）→ follow-up #4833。层级事实：mutation (d)（writer INSERT）只有真库 golden 能杀（6666 unit 全绿）；mutation (f)（源门控回退）只有 unit 层能杀（grant-table 真库 17/17 仍绿）——两层缺一不可。
 
 ## 5. 过程事故诚实档（含撤回）
 
