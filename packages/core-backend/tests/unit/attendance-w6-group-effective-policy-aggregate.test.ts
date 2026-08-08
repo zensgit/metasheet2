@@ -9,24 +9,25 @@
  * re-proves the same shapes against real PostgreSQL plus the red-line
  * negative/mutation evidence (R1/R3/R4/R5).
  *
- * KNOWN FIXTURE DEVIATION (flagged, not silently reproduced): the W6-0
- * `aggregate-conflict-membership-overlap.json` fixture's
- * `domains.schedule.sourceRefs` omits the `fixed_schedule_config` ref that
- * every other `fixed_shift`+FSER-effective fixture (1 and 6) includes,
- * despite an identical `fixedSchedule.desired` shape. No trigger condition
- * distinguishes it; this looks like an authoring omission in the
- * never-executed PROPOSED pack (README: "nothing here comes from
- * production"). This suite reproduces the CONSISTENT rule (always include
- * `fixed_schedule_config` once a config row is resolved) and asserts
- * against a corrected expectation for that one field only — see the test
- * named accordingly.
+ * FIXTURE DEVIATION RESOLVED FIXTURE-SIDE (W6-1 rebuild). The W6-0
+ * `aggregate-conflict-membership-overlap.json` fixture pinned
+ * `domains.schedule.sourceRefs` to a single `{kind:'shift'}` entry despite a
+ * non-null `fixedSchedule.desired` — a shape the implementation cannot
+ * produce, because a non-null `desired` implies the config row exists and the
+ * aggregate always appends its ref. The prior branch patched the EXPECTATION
+ * inside this suite and guarded it with `not.toStrictEqual`. That put the
+ * correction in the wrong place: §4.3's fixtures are the nearest thing this
+ * contract has to a machine-readable spec, so the fixture was corrected
+ * instead (flagged for owner visibility in the pack's README, because
+ * amending it is a spec edit). Every case below is now a plain exact-key
+ * `toStrictEqual` against the fixture as committed — no local patches.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
-  buildFixedScheduleProducerKey,
+  ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1,
   createAttendanceGroupEffectivePolicyAggregateService,
   type AttendanceGroupEffectivePolicyFserServiceLike,
   type AttendanceGroupEffectivePolicyQueryFn,
@@ -41,7 +42,7 @@ function makeFser(result: {
   groupId: string
   state: 'not_configured' | 'pending_apply' | 'effective' | 'configuration_changed'
   reasonCodes: string[]
-  desired: { shiftId: string; startDate: string; endDate: string; revision: number } | null
+  desired: { shiftId: string; startDate: string; endDate: string | null; revision: number } | null
   coverage: { targetMembers: number; matchingMembers: number; missingMembers: number; nonMemberTargets: number; differentKeyRows: number }
   drift: { unconfiguredManagedRows: number; unpublishedManagedRows: number; managedSets: unknown[] }
   evaluatedAt: string
@@ -171,11 +172,11 @@ describe('W6-1 group effective-policy aggregate (fake-DB, exact fixture reproduc
     expect(result).toStrictEqual(fixture.data)
   })
 
-  it('reproduces aggregate-conflict-membership-overlap.json EXCEPT the flagged sourceRefs deviation', async () => {
+  it('reproduces aggregate-conflict-membership-overlap.json', async () => {
     const fixture = readFixture('aggregate-conflict-membership-overlap')
     const groupId = 'a4556006-0005-4000-8000-000000000001'
     const shiftId = 'a4556006-0005-4000-8000-000000000101'
-    const configId = 'a4556006-0005-4000-8000-000000000199' // synthetic — fixture omits this ref (see file header)
+    const configId = 'a4556006-0005-4000-8000-000000000102'
 
     const query: AttendanceGroupEffectivePolicyQueryFn = async (sql) => {
       const s = sql.toLowerCase()
@@ -205,14 +206,7 @@ describe('W6-1 group effective-policy aggregate (fake-DB, exact fixture reproduc
     const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser, now: () => NOW })
     const result = await service.getAggregate({ orgId: 'org-1', groupId })
 
-    const expected = structuredClone(fixture.data) as Record<string, unknown>
-    const domains = expected.domains as Record<string, unknown>
-    ;(domains.schedule as Record<string, unknown>).sourceRefs = [
-      { kind: 'shift', id: shiftId },
-      { kind: 'fixed_schedule_config', id: configId },
-    ]
-    expect(result).not.toStrictEqual(fixture.data) // proves the deviation is real, not a typo
-    expect(result).toStrictEqual(expected)
+    expect(result).toStrictEqual(fixture.data)
   })
 
   it('reproduces aggregate-conflict-fixed-schedule-changed.json', async () => {
@@ -455,41 +449,272 @@ describe('OD-W6-6(a) authoritative-and-implemented branch (#4814 P3-2a — was u
   })
 })
 
-/**
- * `buildFixedScheduleProducerKey`'s own doc comment (this file's module
- * header, ~L138-141) cites "the parity test
- * (`attendance-w6-group-effective-policy-aggregate.test.ts`, 'producer key
- * parity')" as where its equivalence-to-the-canonical-builder claim is
- * proven — no such test existed (an asserted invariant with no test is a
- * hidden bug waiting to happen). This is that test: it LITERALLY PINS the
- * exact output format, so a format change (separator, field order,
- * null-handling) reds here directly, rather than only being
- * discriminated indirectly through a real-DB seed/match round-trip (as
- * confirmed separately: mutating the join separator from ':' to '|' reds
- * the real-DB happy-path fidelity test too, via FSER's own producer-key
- * row-matching — this unit test is the FAST, DB-free version of that same
- * discrimination).
- */
-describe('producer key parity — buildFixedScheduleProducerKey literal pin', () => {
-  it('joins groupId:shiftId:startDate:endDate with the canonical "attendance_group_fixed_schedule" prefix', () => {
-    expect(
-      buildFixedScheduleProducerKey({
-        groupId: 'a4556006-000b-4000-8000-000000000001',
-        shiftId: 'a4556006-000b-4000-8000-000000000101',
-        startDate: '2026-08-01',
-        endDate: '2026-08-31',
-      }),
-    ).toBe('attendance_group_fixed_schedule:a4556006-000b-4000-8000-000000000001:a4556006-000b-4000-8000-000000000101:2026-08-01:2026-08-31')
+
+describe('W6-1 rebuild — fixtures added because their branch was uncovered', () => {
+  it('reproduces aggregate-configured-scheduled-shift.json (OD-W6-6(a) on the CONFIGURED scheduled_shift path)', async () => {
+    const fixture = readFixture('aggregate-configured-scheduled-shift')
+    const groupId = 'a4556006-0007-4000-8000-000000000001'
+
+    const query: AttendanceGroupEffectivePolicyQueryFn = async (sql) => {
+      const s = sql.toLowerCase()
+      if (s.includes('from attendance_groups')) {
+        return [{ id: groupId, attendance_type: 'scheduled_shift', timezone: 'Asia/Shanghai', rule_set_id: null }]
+      }
+      if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 8 }]
+      if (s.includes('from attendance_group_managers')) return [{ role: 'owner', cnt: 1 }, { role: 'sub_owner', cnt: 1 }]
+      if (s.includes('from attendance_calculation_rollout_state')) return [{ state: 'legacy' }]
+      // CONFIGURED: an active advanced-scheduling row exists.
+      if (s.includes('from attendance_schedule_groups')) return [{ ok: 1 }]
+      if (s.includes('from attendance_calculation_group_memberships')) return []
+      if (s.includes('from attendance_rule_sets')) return [{ exists: 1 }]
+      throw new Error(`unexpected SQL: ${sql}`)
+    }
+    const fser: AttendanceGroupEffectivePolicyFserServiceLike = {
+      getEffectiveness: async () => {
+        throw new Error('FSER must not be called for a scheduled_shift group')
+      },
+    }
+    const service = createAttendanceGroupEffectivePolicyAggregateService({
+      query,
+      fser,
+      now: () => NOW,
+      segmentCalculationImplemented: false,
+    })
+    expect(await service.getAggregate({ orgId: 'org-1', groupId })).toStrictEqual(fixture.data)
   })
 
-  it('a null endDate is joined as the literal string "null"', () => {
-    expect(
-      buildFixedScheduleProducerKey({
-        groupId: 'a4556006-000b-4000-8000-000000000001',
-        shiftId: 'a4556006-000b-4000-8000-000000000101',
-        startDate: '2026-08-01',
-        endDate: null,
+  it('the SAME configured scheduled_shift group under authoritative posture + flag TRUE is effective (proves the gate is the posture, not the branch)', async () => {
+    const groupId = 'a4556006-0007-4000-8000-000000000001'
+    const query: AttendanceGroupEffectivePolicyQueryFn = async (sql) => {
+      const s = sql.toLowerCase()
+      if (s.includes('from attendance_groups')) {
+        return [{ id: groupId, attendance_type: 'scheduled_shift', timezone: 'Asia/Shanghai', rule_set_id: null }]
+      }
+      if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 8 }]
+      if (s.includes('from attendance_group_managers')) return [{ role: 'owner', cnt: 1 }, { role: 'sub_owner', cnt: 1 }]
+      if (s.includes('from attendance_calculation_rollout_state')) return [{ state: 'authoritative' }]
+      if (s.includes('from attendance_schedule_groups')) return [{ ok: 1 }]
+      if (s.includes('from attendance_calculation_group_memberships')) return []
+      if (s.includes('from attendance_rule_sets')) return [{ exists: 1 }]
+      throw new Error(`unexpected SQL: ${sql}`)
+    }
+    const fser: AttendanceGroupEffectivePolicyFserServiceLike = {
+      getEffectiveness: async () => {
+        throw new Error('FSER must not be called for a scheduled_shift group')
+      },
+    }
+    const service = createAttendanceGroupEffectivePolicyAggregateService({
+      query,
+      fser,
+      now: () => NOW,
+      segmentCalculationImplemented: true,
+    })
+    const result = await service.getAggregate({ orgId: 'org-1', groupId })
+    expect(result.domains.segments.label).toBe('effective')
+    expect(result.domains.segments.reasonCodes).toEqual([])
+    expect(result.domains.flex.label).toBe('effective')
+  })
+
+  it('reproduces aggregate-conflict-unpublished-managed-row.json (gives a RATIFIED conflict code its producer; null endDate round-trips)', async () => {
+    const fixture = readFixture('aggregate-conflict-unpublished-managed-row')
+    const groupId = 'a4556006-0008-4000-8000-000000000001'
+    const shiftId = 'a4556006-0008-4000-8000-000000000101'
+    const configId = 'a4556006-0008-4000-8000-000000000102'
+
+    const query: AttendanceGroupEffectivePolicyQueryFn = async (sql) => {
+      const s = sql.toLowerCase()
+      if (s.includes('from attendance_groups')) {
+        return [{ id: groupId, attendance_type: 'fixed_shift', timezone: 'Asia/Shanghai', rule_set_id: null }]
+      }
+      if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 12 }]
+      if (s.includes('from attendance_group_managers')) return [{ role: 'owner', cnt: 1 }]
+      if (s.includes('from attendance_calculation_rollout_state')) return []
+      if (s.includes('from attendance_group_fixed_schedule_configs')) return [{ id: configId }]
+      if (s.includes('count(*)::int as cnt from attendance_shift_segments')) return [{ cnt: 1 }]
+      if (s.includes('from attendance_shifts')) return [{ flex_mode: 'strict' }]
+      if (s.includes('from attendance_calculation_group_memberships')) return []
+      if (s.includes('from attendance_rule_sets')) return [{ exists: 1 }]
+      throw new Error(`unexpected SQL: ${sql}`)
+    }
+    const fser = makeFser({
+      groupId,
+      // FSER's own `effective` predicate deliberately EXCLUDES unpublished
+      // rows, so this shape is what FSER really returns for the scenario.
+      state: 'effective',
+      reasonCodes: ['UNPUBLISHED_MANAGED_ROW', 'EFFECTIVE'],
+      desired: { shiftId, startDate: '2026-08-01', endDate: null, revision: 1 },
+      coverage: { targetMembers: 12, matchingMembers: 12, missingMembers: 0, nonMemberTargets: 0, differentKeyRows: 0 },
+      drift: {
+        unconfiguredManagedRows: 0,
+        unpublishedManagedRows: 3,
+        managedSets: [
+          {
+            shiftId,
+            startDate: '2026-08-01',
+            endDate: null,
+            producerKey: `attendance_group_fixed_schedule:${groupId}:${shiftId}:2026-08-01:null`,
+            rowCount: 3,
+          },
+        ],
+      },
+      evaluatedAt: NOW,
+    })
+    const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser, now: () => NOW })
+    expect(await service.getAggregate({ orgId: 'org-1', groupId })).toStrictEqual(fixture.data)
+  })
+
+  it('POSITIVE CONTROL for the null-endDate P1: the byte-identical shape with a NON-null endDate also round-trips', async () => {
+    // The P1 was a validator stricter than its producer: a legal open-ended
+    // managed row (endDate null) made `getAggregate` throw a 500
+    // AGGREGATE_CONTRACT_VIOLATION. This pairs the null case above with the
+    // non-null case so a future re-narrowing cannot be mistaken for
+    // "the null case never worked".
+    const groupId = 'a4556006-0008-4000-8000-000000000001'
+    const shiftId = 'a4556006-0008-4000-8000-000000000101'
+    const query: AttendanceGroupEffectivePolicyQueryFn = async (sql) => {
+      const s = sql.toLowerCase()
+      if (s.includes('from attendance_groups')) {
+        return [{ id: groupId, attendance_type: 'fixed_shift', timezone: 'Asia/Shanghai', rule_set_id: null }]
+      }
+      if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 12 }]
+      if (s.includes('from attendance_group_managers')) return [{ role: 'owner', cnt: 1 }]
+      if (s.includes('from attendance_calculation_rollout_state')) return []
+      if (s.includes('from attendance_group_fixed_schedule_configs')) return [{ id: 'a4556006-0008-4000-8000-000000000102' }]
+      if (s.includes('count(*)::int as cnt from attendance_shift_segments')) return [{ cnt: 1 }]
+      if (s.includes('from attendance_shifts')) return [{ flex_mode: 'strict' }]
+      if (s.includes('from attendance_calculation_group_memberships')) return []
+      if (s.includes('from attendance_rule_sets')) return [{ exists: 1 }]
+      throw new Error(`unexpected SQL: ${sql}`)
+    }
+    for (const endDate of [null, '2026-08-31']) {
+      const fser = makeFser({
+        groupId,
+        state: 'effective',
+        reasonCodes: ['EFFECTIVE'],
+        desired: { shiftId, startDate: '2026-08-01', endDate, revision: 1 },
+        coverage: { targetMembers: 12, matchingMembers: 12, missingMembers: 0, nonMemberTargets: 0, differentKeyRows: 0 },
+        drift: {
+          unconfiguredManagedRows: 0,
+          unpublishedManagedRows: 0,
+          managedSets: [
+            {
+              shiftId,
+              startDate: '2026-08-01',
+              endDate,
+              producerKey: `attendance_group_fixed_schedule:${groupId}:${shiftId}:2026-08-01:${endDate ?? 'null'}`,
+              rowCount: 1,
+            },
+          ],
+        },
+        evaluatedAt: NOW,
+      })
+      const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser, now: () => NOW })
+      const result = await service.getAggregate({ orgId: 'org-1', groupId })
+      expect(result.domains.schedule.fixedSchedule?.desired?.endDate).toBe(endDate)
+      expect(result.domains.schedule.fixedSchedule?.drift.managedSets[0].endDate).toBe(endDate)
+    }
+  })
+})
+
+describe('W6-R5 — the membership-overlap SQL is pinned, so a choose-first/choose-latest rewrite reds without a DB', () => {
+  it('is the exact per-user-dedup shape: GROUP BY, no ORDER BY, no LIMIT, no DISTINCT ON', () => {
+    // Text pin FIRST so the diff names the offending rewrite...
+    expect(ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1).toBe(`SELECT COUNT(*)::int AS cnt
+         FROM (
+           SELECT m.user_id
+             FROM attendance_calculation_group_memberships m
+            WHERE m.org_id = $1
+              AND m.group_id = $2
+              AND m.effective_from <= CURRENT_DATE
+              AND (m.effective_to IS NULL OR m.effective_to >= CURRENT_DATE)
+            GROUP BY m.user_id
+         ) this_group
+        WHERE (
+          SELECT COUNT(*)
+            FROM attendance_calculation_group_memberships other
+           WHERE other.org_id = $1
+             AND other.user_id = this_group.user_id
+             AND other.effective_from <= CURRENT_DATE
+             AND (other.effective_to IS NULL OR other.effective_to >= CURRENT_DATE)
+        ) > 1`)
+    // ...and the shape properties separately, so the pin cannot be
+    // "repaired" by pasting a mutated string back in without noticing.
+    const sql = ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1.toLowerCase()
+    expect(sql).toContain('group by m.user_id')
+    expect(sql).toContain('and m.group_id = $2')
+    expect(sql).not.toContain('order by')
+    expect(sql).not.toContain('limit')
+    expect(sql).not.toContain('distinct on')
+  })
+
+  it("the service really issues THAT string (the pin is not describing a constant nobody uses)", async () => {
+    const seen: string[] = []
+    const query: AttendanceGroupEffectivePolicyQueryFn = async (sql) => {
+      seen.push(sql)
+      const s = sql.toLowerCase()
+      if (s.includes('from attendance_groups')) {
+        return [{ id: 'g', attendance_type: 'free_time', timezone: 'Asia/Shanghai', rule_set_id: null }]
+      }
+      if (s.includes('from attendance_group_managers')) return []
+      if (s.includes('from attendance_calculation_rollout_state')) return []
+      if (s.includes('from attendance_rule_sets')) return [{ exists: 1 }]
+      return []
+    }
+    const fser: AttendanceGroupEffectivePolicyFserServiceLike = {
+      getEffectiveness: async () => {
+        throw new Error('FSER must not be called for a free_time group')
+      },
+    }
+    const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser, now: () => NOW })
+    await service.getAggregate({ orgId: 'org-1', groupId: 'g' })
+    expect(seen).toContain(ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1)
+  })
+})
+
+describe('NIT-2 — one injected clock feeds both timestamps in a response', () => {
+  it('the aggregate evaluatedAt and the embedded fixedSchedule evaluatedAt come from the SAME injected now()', async () => {
+    const groupId = 'a4556006-0009-4000-8000-000000000001'
+    const shiftId = 'a4556006-0009-4000-8000-000000000101'
+    let ticks = 0
+    // A clock that ADVANCES on every read: if the two timestamps came from
+    // two different clocks (the shipped defect) this test could still pass by
+    // luck with a constant clock, so the clock is made discriminating.
+    const now = () => `2026-08-05T00:00:0${ticks++}.000Z`
+    const stamp = now()
+    ticks = 0
+    const query: AttendanceGroupEffectivePolicyQueryFn = async (sql) => {
+      const s = sql.toLowerCase()
+      if (s.includes('from attendance_groups')) {
+        return [{ id: groupId, attendance_type: 'fixed_shift', timezone: 'Asia/Shanghai', rule_set_id: null }]
+      }
+      if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 1 }]
+      if (s.includes('from attendance_group_managers')) return []
+      if (s.includes('from attendance_calculation_rollout_state')) return []
+      if (s.includes('from attendance_group_fixed_schedule_configs')) return [{ id: 'cfg' }]
+      if (s.includes('count(*)::int as cnt from attendance_shift_segments')) return [{ cnt: 1 }]
+      if (s.includes('from attendance_shifts')) return [{ flex_mode: 'strict' }]
+      if (s.includes('from attendance_calculation_group_memberships')) return []
+      if (s.includes('from attendance_rule_sets')) return [{ exists: 1 }]
+      throw new Error(`unexpected SQL: ${sql}`)
+    }
+    // The FSER stand-in reads the SAME injected clock the route now hands it.
+    const fser: AttendanceGroupEffectivePolicyFserServiceLike = {
+      getEffectiveness: async () => ({
+        groupId,
+        state: 'effective' as const,
+        reasonCodes: ['EFFECTIVE'],
+        desired: { shiftId, startDate: '2026-08-01', endDate: null, revision: 1 },
+        coverage: { targetMembers: 1, matchingMembers: 1, missingMembers: 0, nonMemberTargets: 0, differentKeyRows: 0 },
+        drift: { unconfiguredManagedRows: 0, unpublishedManagedRows: 0, managedSets: [] },
+        evaluatedAt: now(),
       }),
-    ).toBe('attendance_group_fixed_schedule:a4556006-000b-4000-8000-000000000001:a4556006-000b-4000-8000-000000000101:2026-08-01:null')
+    }
+    const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser, now })
+    const result = await service.getAggregate({ orgId: 'org-1', groupId })
+    expect(stamp).toBe('2026-08-05T00:00:00.000Z')
+    // Same clock source => the two stamps are consecutive reads of ONE
+    // sequence, never two unrelated sequences both starting at tick 0.
+    expect(result.evaluatedAt).toBe('2026-08-05T00:00:00.000Z')
+    expect(result.domains.schedule.fixedSchedule?.evaluatedAt).toBe('2026-08-05T00:00:01.000Z')
   })
 })

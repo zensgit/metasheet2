@@ -14,21 +14,36 @@
  * Authorization is NOT this module's job (W6-R3): the caller (the route)
  * must resolve and verify the org/permission/membership BEFORE calling
  * `getAggregate`. This module receives an already-authorized `orgId` and
- * only ever issues `groupId + orgId`-scoped reads.
+ * every query it issues carries an `org_id` predicate. (That sentence used
+ * to be false: `loadShiftSegmentProfile`'s two reads were keyed on
+ * `shift_id` alone. Both tables carry `org_id`, so the code was changed to
+ * match the claim rather than the claim narrowed to match the code.)
  *
- * GET-only (W6-R1): every exported query is a SELECT. There is no
- * INSERT/UPDATE/DELETE anywhere in this file — see the DML-sweep test
- * (`tests/unit/attendance-w6-group-effective-policy-aggregate-dml-sweep.test.ts`)
- * for the mechanical proof.
+ * GET-only (W6-R1): every query in this file is a SELECT. The mechanical
+ * proof is `tests/unit/attendance-w6-group-effective-policy-dml-sweep.test.ts`.
+ * Read what that test actually proves before relying on this sentence: its
+ * static leg sweeps a DERIVED call-path closure and REFUSES any `query(...)`
+ * whose SQL argument is not a single literal (a concatenated verb defeated
+ * the previous literal-text-only detector inside this very file), and its
+ * behavioural leg brackets the route round-trip with a per-table row-count +
+ * `MAX(xmin)` snapshot over a DERIVED table set. The behavioural leg's known
+ * blind spot is disclosed in that file's header, not papered over here.
  *
  * Fixed-schedule effectiveness (W6-R4, OD-W6-2(a)): this module calls the
  * EXISTING FSER service (`attendance-group-fixed-schedule-effectiveness-service.cjs`,
  * injected as `deps.fser`) and embeds its result verbatim (minus the
  * redundant `groupId` key, already present at the aggregate's own top
  * level) for `fixed_shift` groups. It introduces no second effectiveness
- * predicate and no persisted second status.
+ * predicate and no persisted second status. The FSER instance the route
+ * builds is injected with the CANONICAL producer key from
+ * `plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs`
+ * — the same function `index.cjs` delegates to — so this module holds no
+ * producer-key implementation of its own.
  */
-import { validateAttendanceGroupEffectivePolicyResponseV1 } from './w6-group-effective-policy-response-contract'
+import {
+  SCHEDULE_ROUTE_SURFACES,
+  validateAttendanceGroupEffectivePolicyResponseV1,
+} from './w6-group-effective-policy-response-contract'
 import type {
   AttendanceGroupEffectivePolicyAggregateV1,
   AttendanceGroupEffectivePolicyCalculationPostureV1,
@@ -52,7 +67,11 @@ export interface AttendanceGroupEffectivePolicyFserServiceLike {
     groupId: string
     state: 'not_configured' | 'pending_apply' | 'effective' | 'configuration_changed'
     reasonCodes: readonly string[]
-    desired: { shiftId: string; startDate: string; endDate: string; revision: number } | null
+    // `endDate: string | null` — the producer emits null for an open-ended
+    // managed row by construction. Narrowing it here made the compiler assert
+    // the lie at the injection seam, which is why the P1 class had FOUR copies
+    // rather than one.
+    desired: { shiftId: string; startDate: string; endDate: string | null; revision: number } | null
     coverage: {
       targetMembers: number
       matchingMembers: number
@@ -63,7 +82,13 @@ export interface AttendanceGroupEffectivePolicyFserServiceLike {
     drift: {
       unconfiguredManagedRows: number
       unpublishedManagedRows: number
-      managedSets: ReadonlyArray<{ shiftId: string; startDate: string; endDate: string; producerKey: string; rowCount: number }>
+      managedSets: ReadonlyArray<{
+        shiftId: string
+        startDate: string
+        endDate: string | null
+        producerKey: string
+        rowCount: number
+      }>
     }
     evaluatedAt: string
   }>
@@ -105,64 +130,71 @@ function stageRef(stage: 'basics' | 'people' | 'schedule' | 'policies'): Attenda
   return { kind: 'group_stage', stage }
 }
 
+/**
+ * Builds a `group_context_route` editorRef against the #4711 closed step/
+ * surface table.
+ *
+ * The `surface` argument is now HONOURED for every step rather than accepted
+ * and discarded for `rules` (where it used to be silently replaced by the
+ * literal `'rule-sets'` — behaviour that happened to be right only because
+ * `'rule-sets'` is the sole legal rules surface, so the signature lied). An
+ * out-of-table pair throws rather than being coerced, which keeps this
+ * builder fail-closed in the same way the response-contract parser is.
+ */
 function scheduleRouteRef(
   step: 'schedule' | 'calendar' | 'rules',
   surface?: string,
 ): AttendanceGroupEffectivePolicyEditorRefV1 {
-  if (step === 'calendar') return { kind: 'group_context_route', step: 'calendar' }
-  if (step === 'rules') {
-    return surface
-      ? ({ kind: 'group_context_route', step: 'rules', surface: 'rule-sets' } as AttendanceGroupEffectivePolicyEditorRefV1)
-      : ({ kind: 'group_context_route', step: 'rules' } as AttendanceGroupEffectivePolicyEditorRefV1)
+  const allowed = SCHEDULE_ROUTE_SURFACES[step]
+  if (surface === undefined) {
+    return { kind: 'group_context_route', step } as AttendanceGroupEffectivePolicyEditorRefV1
   }
-  return surface
-    ? ({ kind: 'group_context_route', step: 'schedule', surface } as AttendanceGroupEffectivePolicyEditorRefV1)
-    : { kind: 'group_context_route', step: 'schedule' }
+  if (allowed === null || !allowed.includes(surface)) {
+    throw new AttendanceGroupEffectivePolicyServiceError(
+      500,
+      'EDITOR_REF_SURFACE_UNRECOGNIZED',
+      'Editor reference surface is not in the closed step/surface table',
+    )
+  }
+  return { kind: 'group_context_route', step, surface } as AttendanceGroupEffectivePolicyEditorRefV1
 }
 
 /**
- * W6-R4 note on the producer key: FSER's `loadEffectivenessFacts` always
- * calls the injected `buildAttendanceGroupFixedScheduleProducerKey` with an
- * ALREADY-canonicalized `YYYY-MM-DD` `startDate`/`endDate` pair (it comes
- * from FSER's own `mapDesired`, which already ran `formatDateOnly`). For
- * that restricted input domain, the canonical builder
- * (`plugins/plugin-attendance/index.cjs` ~L10676,
- * `buildAttendanceGroupFixedScheduleProducerKey` + its
- * `normalizeAttendanceScheduleAssignmentEndDate`/`normalizeDateOnly`
- * helpers) is provably equivalent to the flat join below: `normalizeDateOnly`
- * re-parses an already-canonical `YYYY-MM-DD` string via its own
- * `(\d{2,4})-(\d{1,2})-(\d{1,2})` branch and re-emits the identical string,
- * and `null` stays `null`. This is NOT a second FSER state-machine
- * derivation (R4's actual target) — it is one input-formatting helper to
- * that single derivation, reconstructed here because the canonical
- * function is a private top-level declaration inside the (non-exporting)
- * plugin entry file and is not independently `require`-able without
- * loading that file's full activation surface. Two INDEPENDENT tests back
- * this function, deliberately not sharing an implementation with each
- * other or with it:
- *  (1) the "producer key parity" describe block in
- *      `attendance-w6-group-effective-policy-aggregate.test.ts` PINS this
- *      function's exact output format literally, so any accidental format
- *      change here reds immediately; and
- *  (2) the real-DB fidelity test (`attendance-w6-group-effective-policy.db.test.ts`,
- *      ~L192) seeds fixed-schedule rows keyed by a producer key computed
- *      from a HAND-WRITTEN literal of the same join format — NOT by calling
- *      this function — and then confirms FSER still matches them. That
- *      literal is a third, deliberately independent copy of the format;
- *      DO NOT refactor it to call `buildFixedScheduleProducerKey` (that
- *      would remove the only DB-level discrimination this function has —
- *      confirmed by mutation: changing this function's separator while
- *      leaving the DB seed's literal alone breaks FSER's row match and reds
- *      the fidelity test; the parity-pin test in (1) would still catch a
- *      format regression on its own, but only as a pinned-literal
- *      comparison, not as a real FSER-derived behavioral consequence).
- * Neither test imports the canonical `index.cjs` builder itself — see the
- * equivalence ARGUMENT above for why that is not independently re-provable
- * without loading index.cjs's full activation surface.
+ * W6-R5 / OD-W6-8(a): bounded per-group, current-date-only membership overlap
+ * detection. Counts users who (a) hold an effective-today
+ * `attendance_calculation_group_memberships` row for THIS group, and (b) hold
+ * MORE THAN ONE effective-today row org-wide (any group) — the exact
+ * "two or more effective groups" conflict parent lock §3.4 names. The output
+ * is a bare COUNT; no member list is ever read out of this query.
+ *
+ * EXPORTED AS A NAMED CONSTANT deliberately. W6-R5's own required negative
+ * proof is that a CHOOSE-FIRST / CHOOSE-LATEST rewrite fails. The fake-DB
+ * suite's router matches SQL by SUBSTRING, so appending `ORDER BY m.user_id
+ * LIMIT 1` to the inner subquery still matched every route and left the whole
+ * unit suite green — the mutation the red line names was invisible. Pinning
+ * the SQL text as a constant gives that mutation a DB-free gate: any
+ * `ORDER BY`/`LIMIT`/`DISTINCT ON` rewrite changes this string and reds the
+ * pin. The real-DB suite carries the behavioural counterpart (a fixture whose
+ * per-user-dedup count differs from a choose-first count).
  */
-export function buildFixedScheduleProducerKey(input: { groupId: string; shiftId: string; startDate: string; endDate: string | null }): string {
-  return ['attendance_group_fixed_schedule', input.groupId, input.shiftId, input.startDate, input.endDate ?? 'null'].join(':')
-}
+export const ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1 = `SELECT COUNT(*)::int AS cnt
+         FROM (
+           SELECT m.user_id
+             FROM attendance_calculation_group_memberships m
+            WHERE m.org_id = $1
+              AND m.group_id = $2
+              AND m.effective_from <= CURRENT_DATE
+              AND (m.effective_to IS NULL OR m.effective_to >= CURRENT_DATE)
+            GROUP BY m.user_id
+         ) this_group
+        WHERE (
+          SELECT COUNT(*)
+            FROM attendance_calculation_group_memberships other
+           WHERE other.org_id = $1
+             AND other.user_id = this_group.user_id
+             AND other.effective_from <= CURRENT_DATE
+             AND (other.effective_to IS NULL OR other.effective_to >= CURRENT_DATE)
+        ) > 1`
 
 export function createAttendanceGroupEffectivePolicyAggregateService(deps: AttendanceGroupEffectivePolicyServiceDeps) {
   const now = deps.now ?? (() => new Date().toISOString())
@@ -242,10 +274,27 @@ export function createAttendanceGroupEffectivePolicyAggregateService(deps: Atten
     return rows.length > 0
   }
 
-  async function loadShiftSegmentProfile(shiftId: string): Promise<{ segmentCount: number; flexMode: 'strict' | 'flex_required_duration' }> {
+  /**
+   * W6-R3: BOTH reads are org-scoped. They were not — they keyed on
+   * `shift_id`/`id` alone while every other read in this module carried
+   * `org_id`, which made the module header's absolute claim false. There was
+   * no live cross-tenant read (the `shiftId` reaches here only from
+   * `fser.desired.shiftId`, and `attendance_group_fixed_schedule_configs`
+   * carries a composite `(shift_id, org_id)` FK to `attendance_shifts`), but
+   * the fix is to make the code match the claim, not to soften the claim.
+   * The segments predicate also now matches the existing
+   * `idx_attendance_shift_segments_org_shift` index.
+   */
+  async function loadShiftSegmentProfile(
+    orgId: string,
+    shiftId: string,
+  ): Promise<{ segmentCount: number; flexMode: 'strict' | 'flex_required_duration' }> {
     const [segmentRows, shiftRows] = await Promise.all([
-      deps.query(`SELECT COUNT(*)::int AS cnt FROM attendance_shift_segments WHERE shift_id = $1`, [shiftId]),
-      deps.query(`SELECT flex_mode FROM attendance_shifts WHERE id = $1 LIMIT 1`, [shiftId]),
+      deps.query(`SELECT COUNT(*)::int AS cnt FROM attendance_shift_segments WHERE org_id = $1 AND shift_id = $2`, [
+        orgId,
+        shiftId,
+      ]),
+      deps.query(`SELECT flex_mode FROM attendance_shifts WHERE id = $1 AND org_id = $2 LIMIT 1`, [shiftId, orgId]),
     ])
     const segmentCount = Number(segmentRows[0]?.cnt ?? 0)
     const flexModeRaw = shiftRows[0]?.flex_mode
@@ -271,37 +320,10 @@ export function createAttendanceGroupEffectivePolicyAggregateService(deps: Atten
     return typeof id === 'string' && id.trim() ? id : null
   }
 
-  /**
-   * W6-R5 / OD-W6-8(a): bounded per-group, current-date-only membership
-   * overlap detection. Counts users who (a) hold an effective-today
-   * `attendance_calculation_group_memberships` row for THIS group, and (b)
-   * hold MORE THAN ONE effective-today row org-wide (any group) — i.e. the
-   * exact "two or more effective groups" conflict parent lock §3.4 names.
-   * Output is a bare COUNT; no member list is ever read out of this query
-   * or passed further.
-   */
+  /** See {@link ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1} for the semantics
+   * and for why the SQL is a module-level named constant. */
   async function countMembershipOverlap(orgId: string, groupId: string): Promise<number> {
-    const rows = await deps.query(
-      `SELECT COUNT(*)::int AS cnt
-         FROM (
-           SELECT m.user_id
-             FROM attendance_calculation_group_memberships m
-            WHERE m.org_id = $1
-              AND m.group_id = $2
-              AND m.effective_from <= CURRENT_DATE
-              AND (m.effective_to IS NULL OR m.effective_to >= CURRENT_DATE)
-            GROUP BY m.user_id
-         ) this_group
-        WHERE (
-          SELECT COUNT(*)
-            FROM attendance_calculation_group_memberships other
-           WHERE other.org_id = $1
-             AND other.user_id = this_group.user_id
-             AND other.effective_from <= CURRENT_DATE
-             AND (other.effective_to IS NULL OR other.effective_to >= CURRENT_DATE)
-        ) > 1`,
-      [orgId, groupId],
-    )
+    const rows = await deps.query(ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1, [orgId, groupId])
     return Number(rows[0]?.cnt ?? 0)
   }
 
@@ -379,10 +401,40 @@ export function createAttendanceGroupEffectivePolicyAggregateService(deps: Atten
         })
       }
 
+      /**
+       * §4.2 CLOSED-SET COMPLETENESS: `FIXED_SCHEDULE_UNPUBLISHED_MANAGED_ROW`
+       * is one of the seven RATIFIED conflict codes (OD-W6-4(a)) and had NO
+       * emission path anywhere — never pushed into `conflicts[]`, never a
+       * domain reason code, unreachable by any input. FSER explicitly detects
+       * and reports the condition (`drift.unpublishedManagedRows`, reason code
+       * `UNPUBLISHED_MANAGED_ROW`) and its `effective` predicate deliberately
+       * does NOT include unpublished rows, so a group with unpublished managed
+       * rows and everything else clean genuinely returns state `effective` —
+       * the aggregate received the fact and dropped it. §2.1 item 3 promises a
+       * CLOSED conflict inventory; an item with no producer is not an entry.
+       *
+       * This escalates the fact the aggregate already holds. Consequence,
+       * stated because it is new: `conflicts[]` can now carry TWO
+       * schedule-domain items for one group (a state conflict plus this one).
+       * The seventh fixture pins that shape.
+       */
+      if (fser.drift.unpublishedManagedRows > 0) {
+        conflicts.push({
+          code: 'FIXED_SCHEDULE_UNPUBLISHED_MANAGED_ROW',
+          domain: 'schedule',
+          label: 'conflict_action_required',
+          editorRef: scheduleEditorRef,
+        })
+        if (scheduleLabel === 'effective') scheduleLabel = 'conflict_action_required'
+        if (scheduleReasonCodes.length === 0 && fser.reasonCodes.includes('UNPUBLISHED_MANAGED_ROW')) {
+          scheduleReasonCodes = ['UNPUBLISHED_MANAGED_ROW']
+        }
+      }
+
       if (fser.desired) {
         const [configId, profile] = await Promise.all([
           loadFixedScheduleConfigId(orgId, groupId),
-          loadShiftSegmentProfile(fser.desired.shiftId),
+          loadShiftSegmentProfile(orgId, fser.desired.shiftId),
         ])
         scheduleSourceRefs = [{ kind: 'shift', id: fser.desired.shiftId }]
         if (configId) scheduleSourceRefs.push({ kind: 'fixed_schedule_config', id: configId })
@@ -400,8 +452,24 @@ export function createAttendanceGroupEffectivePolicyAggregateService(deps: Atten
           flexReasonCodes = ['SEGMENT_CALCULATION_NOT_AUTHORITATIVE']
         }
       } else {
-        segmentLabel = scheduleLabel === 'needs_configuration' ? 'needs_configuration' : 'effective'
-        flexLabel = segmentLabel
+        // `fser.desired === null` is paired UNCONDITIONALLY by FSER with
+        // `state: 'not_configured'` (its `not_configured` branch is the only
+        // one that returns a null `desired`), which
+        // `fserStateToScheduleLabel` maps to `needs_configuration`. The
+        // former `: 'effective'` arm of a ternary here was therefore dead
+        // code. Collapsed to the constant, with the FSER invariant that makes
+        // it total named above — and asserted rather than assumed, so a future
+        // FSER change that breaks the pairing fails loudly instead of silently
+        // labelling an unconfigured group `effective`.
+        if (scheduleLabel !== 'needs_configuration' && scheduleLabel !== 'conflict_action_required') {
+          throw new AttendanceGroupEffectivePolicyServiceError(
+            500,
+            'FSER_DESIRED_NULL_STATE_UNEXPECTED',
+            'Fixed-schedule desired is null but the derived schedule label is neither needs_configuration nor a conflict',
+          )
+        }
+        segmentLabel = 'needs_configuration'
+        flexLabel = 'needs_configuration'
       }
     } else if (group.groupType === 'free_time') {
       scheduleEditorRef = scheduleRouteRef('schedule')
@@ -429,13 +497,32 @@ export function createAttendanceGroupEffectivePolicyAggregateService(deps: Atten
         flexLabel = 'needs_configuration'
         flexReasonCodes = ['SCHEDULE_STRATEGY_INCOMPLETE']
       } else {
-        // Not fixture-pinned (no `scheduled_shift`-configured fixture exists
-        // in the W6-0 pack): a configured scheduled_shift group has no
-        // resolvable single shift in v1, so segments/flex default to
-        // `effective` with no sourceRefs. Flagged in the W6-1 report.
+        /**
+         * OD-W6-6(a), applied HERE too. This branch used to hard-code
+         * `effective` for segments and flex with empty reasonCodes, reading
+         * neither the posture nor `SEGMENT_CALCULATION_IMPLEMENTED` — so a
+         * `scheduled_shift` org on `legacy` posture with the flag false was
+         * told its segment/flex policy was `effective` while the calculation
+         * chain was not consuming it. That is fail-open in exactly the
+         * direction §9's OD-W6-6(a) closes, and it contradicted a §9
+         * resolution verbatim rather than merely under-covering it.
+         *
+         * The single-segment-strict exemption CANNOT apply here: v1 resolves
+         * no single shift for a `scheduled_shift` group, so there is no
+         * envelope to call authoritative. Only the posture disjunct is
+         * available, and when it is false the honest label is `preview_only`.
+         */
         scheduleLabel = 'effective'
-        segmentLabel = 'effective'
-        flexLabel = 'effective'
+        const authoritativeAndImplemented = calculationPosture === 'authoritative' && segmentCalculationImplemented
+        if (authoritativeAndImplemented) {
+          segmentLabel = 'effective'
+          flexLabel = 'effective'
+        } else {
+          segmentLabel = 'preview_only'
+          flexLabel = 'preview_only'
+          segmentReasonCodes = ['SEGMENT_CALCULATION_NOT_AUTHORITATIVE']
+          flexReasonCodes = ['SEGMENT_CALCULATION_NOT_AUTHORITATIVE']
+        }
       }
     }
 

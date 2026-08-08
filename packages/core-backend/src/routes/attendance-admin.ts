@@ -52,7 +52,6 @@ import {
 } from '../services/AttendanceW4CalculationDetail'
 import {
   AttendanceGroupEffectivePolicyServiceError,
-  buildFixedScheduleProducerKey as buildAttendanceGroupEffectivePolicyFixedScheduleProducerKey,
   createAttendanceGroupEffectivePolicyAggregateService,
   type AttendanceGroupEffectivePolicyFserServiceLike,
 } from '../attendance/w6-group-effective-policy-aggregate'
@@ -87,17 +86,47 @@ const attendanceGroupFixedScheduleEffectivenessServiceLib = requirePluginAttenda
 const attendanceShiftServiceLib = requirePluginAttendanceLib<{
   SEGMENT_CALCULATION_IMPLEMENTED: boolean
 }>(__dirname, 'attendance-shift-service.cjs')
+// W6-R4: the CANONICAL producer key, the same function
+// `plugins/plugin-attendance/index.cjs` delegates to. Injecting it here is
+// what makes the two FSER instances (this route's and the plugin's) key on
+// ONE implementation instead of on an argued equivalence between two.
+const attendanceGroupFixedScheduleProducerKeyLib = requirePluginAttendanceLib<{
+  buildAttendanceGroupFixedScheduleProducerKey: (input: {
+    groupId: string
+    shiftId: string
+    startDate: string
+    endDate: string | null
+  }) => string
+}>(__dirname, 'attendance-group-fixed-schedule-producer-key.cjs')
+
+/**
+ * ONE injected clock for both timestamps in a `/effective-policy` body
+ * (#4814 NIT-2). Previously the aggregate used its own injected `now` while
+ * the FSER instance fell back to its factory default, so `data.evaluatedAt`
+ * and `data.domains.schedule.fixedSchedule.evaluatedAt` came from two
+ * unrelated closures.
+ *
+ * Narrow, true claim: this makes ONE injection point, not one atomic read —
+ * the two `now()` CALLS still happen at slightly different moments, so in
+ * production the two timestamps may differ in the sub-millisecond digits.
+ * What it buys is testability: injecting a fixed clock makes both timestamps
+ * provably equal, which is what the unit suite asserts.
+ */
+const attendanceGroupEffectivePolicyNow = (): string => new Date().toISOString()
 
 const attendanceGroupEffectivePolicyFserService = attendanceGroupFixedScheduleEffectivenessServiceLib.createAttendanceGroupFixedScheduleEffectivenessService(
   {
     HttpError: AttendanceGroupEffectivePolicyServiceError,
-    buildAttendanceGroupFixedScheduleProducerKey: buildAttendanceGroupEffectivePolicyFixedScheduleProducerKey,
+    buildAttendanceGroupFixedScheduleProducerKey:
+      attendanceGroupFixedScheduleProducerKeyLib.buildAttendanceGroupFixedScheduleProducerKey,
+    now: attendanceGroupEffectivePolicyNow,
   },
 )
 
 const attendanceGroupEffectivePolicyAggregateService = createAttendanceGroupEffectivePolicyAggregateService({
   query: async (sql: string, params?: unknown[]) => (await query(sql, params)).rows,
   fser: attendanceGroupEffectivePolicyFserService,
+  now: attendanceGroupEffectivePolicyNow,
   segmentCalculationImplemented: attendanceShiftServiceLib.SEGMENT_CALCULATION_IMPLEMENTED,
 })
 
@@ -120,9 +149,20 @@ function getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req: Request): stri
   return null
 }
 
-/** True when a client-supplied `x-org-id` header is present and does not
+/**
+ * True when a client-supplied `x-org-id` header is present and does not
  * byte-equal the authenticated org — the request must fail BEFORE any
- * scoped SQL (W6-R3). */
+ * aggregate SQL (W6-R3).
+ *
+ * OPERATIONAL PRECONDITION, deliberately kept as-is rather than relaxed: a
+ * PRESENT-BUT-EMPTY `x-org-id` is a mismatch and 403s, because the predicate
+ * tests presence, not non-empty presence. That is fail-closed, so it is not a
+ * security defect, but a gateway or proxy that injects an empty `x-org-id` on
+ * every request would break this route for every caller. Changing it is an
+ * owner call (it changes observable behaviour in both directions), so the
+ * status quo stands and the non-empty mismatch case is separately pinned so a
+ * future relaxation cannot widen past the empty string.
+ */
 function attendanceGroupEffectivePolicyOrgSelectorMismatch(req: Request, orgId: string): boolean {
   const headerValue = req.headers['x-org-id']
   const header = Array.isArray(headerValue) ? headerValue[0] : headerValue
@@ -1666,21 +1706,30 @@ export function attendanceAdminRouter(): Router {
   // lock §3.5 final paragraph — full/platform admins bypass this SECOND
   // gate via `canReadAttendanceDirectoryReadiness`'s own bypass, but never
   // bypass org-identity derivation itself); composes the EXISTING FSER
-  // service (W6-R4); accepts no query params and no request body (W6-R7).
+  // service (W6-R4); accepts no state-selecting query parameter and no
+  // STATE-BEARING request body (W6-R7).
   r.get(
     '/api/attendance/groups/:groupId/effective-policy',
     rbacGuard('attendance', 'admin'),
     async (req: Request, res: Response) => {
       try {
-        // R7: the route accepts no body and no state-selecting query
-        // parameter. Presence alone is rejected before any SQL — this also
-        // covers a `?orgId=` "query-org" spoofing attempt, since there is no
-        // legitimate query parameter on this route at all.
+        // W6-R7, in the lock's own wording (§4.1): the route accepts no
+        // state-selecting query parameter and no STATE-BEARING body. Presence
+        // alone is rejected before AGGREGATE SQL — not "before any SQL": the
+        // `rbacGuard` above is registered first and performs its own RBAC
+        // reads (`SELECT 1 FROM user_permissions …`), which §4.1 explicitly
+        // permits. This also covers a `?orgId=` "query-org" spoofing attempt,
+        // since there is no legitimate query parameter on this route at all.
+        //
+        // An EMPTY JSON body (`{}`, or an unparsed content type) carries no
+        // state and is deliberately ALLOWED — the lock says so verbatim, and
+        // it must not be tightened into a stronger "no body bytes" guarantee.
+        // Both boundaries are pinned by tests so a future tightening reds.
         if (Object.keys(req.query).length > 0) {
           return jsonError(res, 400, 'QUERY_NOT_ACCEPTED', 'This endpoint accepts no query parameters')
         }
         if (req.body && typeof req.body === 'object' && Object.keys(req.body as Record<string, unknown>).length > 0) {
-          return jsonError(res, 400, 'BODY_NOT_ACCEPTED', 'This endpoint accepts no request body')
+          return jsonError(res, 400, 'BODY_NOT_ACCEPTED', 'This endpoint accepts no request body fields')
         }
 
         const userId = getAttendanceAdminRequestUserId(req)
