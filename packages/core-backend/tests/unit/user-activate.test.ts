@@ -44,6 +44,9 @@ describe('activatePendingUser (T3)', () => {
         }],
       }) // FOR UPDATE
       .mockResolvedValueOnce({ rows: [{ id: 'u1' }] }) // UPDATE users RETURNING
+      .mockResolvedValueOnce({ rows: [] }) // supersede effects
+      .mockResolvedValueOnce({ rows: [] }) // supersede events
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] }) // generation
 
     const result = await activatePendingUser({
       userId: 'u1',
@@ -58,6 +61,12 @@ describe('activatePendingUser (T3)', () => {
     const updateSql = String(pgMocks.query.mock.calls.find((c) => String(c[0]).includes('UPDATE users'))?.[0] || '')
     expect(updateSql).toContain("activation_status = 'activated'")
     expect(updateSql).toContain('local_password_set')
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE directory_deprovision_effects'))).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE directory_deprovision_events'))).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('access_generation = COALESCE'))).toBe(true)
     // Alias claims must run inside the transaction client
     expect(claimLoginAlias).toHaveBeenCalled()
     expect(vi.mocked(claimLoginAlias).mock.calls[0]?.[0]).toMatchObject({

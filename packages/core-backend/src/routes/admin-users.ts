@@ -36,6 +36,11 @@ import {
   backfillUserLoginAliases,
   isAuthLoginAliasCutoverEnabled,
 } from '../auth/login-alias-service'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+  type AccessGraphTransactionClient,
+} from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
@@ -669,14 +674,13 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
   }
 }
 
-async function assertUsersCanEnableDingTalkGrant(userIds: string[]): Promise<void> {
+async function assertUsersCanEnableDingTalkGrant(
+  client: AccessGraphTransactionClient,
+  userIds: string[],
+): Promise<void> {
   if (userIds.length === 0) return
 
-  const identityResult = await query<{
-    local_user_id: string
-    corp_id: string | null
-    provider_open_id: string | null
-  }>(
+  const identityResult = await client.query(
     `SELECT local_user_id, corp_id, provider_open_id
      FROM user_external_identities
      WHERE provider = $1
@@ -685,7 +689,11 @@ async function assertUsersCanEnableDingTalkGrant(userIds: string[]): Promise<voi
   )
 
   const blockedUserIds = new Set<string>()
-  for (const row of identityResult.rows) {
+  for (const row of identityResult.rows as Array<{
+    local_user_id: string
+    corp_id: string | null
+    provider_open_id: string | null
+  }>) {
     if (row.corp_id && !row.provider_open_id) {
       blockedUserIds.add(row.local_user_id)
     }
@@ -788,10 +796,31 @@ function normalizeUserIdList(value: unknown): string[] {
   return Array.from(unique)
 }
 
-async function upsertDingTalkGrants(userIds: string[], enabled: boolean, adminUserId: string): Promise<void> {
-  if (userIds.length === 0) return
+async function upsertDingTalkGrants(
+  client: AccessGraphTransactionClient,
+  userIds: string[],
+  enabled: boolean,
+  adminUserId: string,
+): Promise<string[]> {
+  if (userIds.length === 0) return []
 
-  await query(
+  const current = await client.query(
+    `SELECT local_user_id, enabled
+       FROM user_external_auth_grants
+      WHERE provider = $1
+        AND local_user_id = ANY($2::text[])`,
+    [DINGTALK_PROVIDER, userIds],
+  )
+  const currentByUserId = new Map(
+    (current.rows as Array<{ local_user_id: string; enabled: boolean }>).map(
+      (row) => [row.local_user_id, row.enabled],
+    ),
+  )
+  const changedUserIds = userIds.filter(
+    (userId) => currentByUserId.get(userId) !== enabled,
+  )
+
+  await client.query(
     `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
      SELECT $1, target_user_id, $2, $3, NOW(), NOW()
      FROM unnest($4::text[]) AS target(target_user_id)
@@ -799,6 +828,14 @@ async function upsertDingTalkGrants(userIds: string[], enabled: boolean, adminUs
      DO UPDATE SET enabled = EXCLUDED.enabled, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
     [DINGTALK_PROVIDER, enabled, adminUserId, userIds],
   )
+  if (changedUserIds.length > 0) {
+    await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+      userIds: changedUserIds,
+      actorId: adminUserId,
+      reason: 'superseded by administrator DingTalk grant update',
+    })
+  }
+  return changedUserIds
 }
 
 function deriveDelegableNamespaces(roleIds: string[]): string[] {
@@ -4002,11 +4039,14 @@ export function adminUsersRouter(): Router {
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
       if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-      if (enabled) await assertUsersCanEnableDingTalkGrant([userId])
-
-      await upsertDingTalkGrants([userId], enabled, adminUserId)
+      const found = await transaction(async (client) => {
+        const locked = await lockUsersForAccessGraphWrite(client, [userId])
+        if (!locked.has(userId)) return false
+        if (enabled) await assertUsersCanEnableDingTalkGrant(client, [userId])
+        await upsertDingTalkGrants(client, [userId], enabled, adminUserId)
+        return true
+      })
+      if (!found) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
       await auditLog({
         actorId: adminUserId,
@@ -4046,20 +4086,17 @@ export function adminUsersRouter(): Router {
       if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
       if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds array is required')
 
-      const existingResult = await query<{ id: string }>(
-        `SELECT id
-         FROM users
-         WHERE id = ANY($1::text[])`,
-        [userIds],
-      )
-      const existingIds = new Set(existingResult.rows.map((row) => row.id).filter(Boolean))
-      const missingUserIds = userIds.filter((userId) => !existingIds.has(userId))
+      const missingUserIds = await transaction(async (client) => {
+        const locked = await lockUsersForAccessGraphWrite(client, userIds)
+        const missing = userIds.filter((userId) => !locked.has(userId))
+        if (missing.length > 0) return missing
+        if (enabled) await assertUsersCanEnableDingTalkGrant(client, userIds)
+        await upsertDingTalkGrants(client, userIds, enabled, adminUserId)
+        return []
+      })
       if (missingUserIds.length > 0) {
         return jsonError(res, 404, 'USERS_NOT_FOUND', 'One or more users were not found', { missingUserIds })
       }
-      if (enabled) await assertUsersCanEnableDingTalkGrant(userIds)
-
-      await upsertDingTalkGrants(userIds, enabled, adminUserId)
 
       await Promise.all(userIds.map((userId) => auditLog({
         actorId: adminUserId,
@@ -4213,30 +4250,48 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 400, 'SELF_DISABLE_FORBIDDEN', 'Cannot disable your own account')
       }
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      const updateResult = await transaction(async (client) => {
+        const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
+        const lockedUser = lockedUsers.get(userId)
+        if (!lockedUser) return null
 
-      try {
-        assertPendingUserCannotBeActivatedViaGenericStatusApi(profile.activationStatus, isActive)
-      } catch (error) {
+        assertPendingUserCannotBeActivatedViaGenericStatusApi(
+          lockedUser.activationStatus ?? '',
+          isActive,
+        )
+
+        if (lockedUser.isActive !== isActive) {
+          await client.query(
+            `UPDATE users
+             SET is_active = $1, updated_at = NOW()
+             WHERE id = $2`,
+            [isActive, userId],
+          )
+          await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+            userIds: [userId],
+            actorId: adminUserId,
+            reason: 'superseded by administrator user-status update',
+          })
+        }
+        return { beforeIsActive: lockedUser.isActive }
+      }).catch((error) => {
         const code = (error as Error & { code?: string }).code
         if (code === PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE) {
-          return jsonError(
-            res,
-            400,
-            PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
-            (error as Error).message,
-          )
+          return {
+            pendingActivationError: error as Error,
+          }
         }
         throw error
+      })
+      if (!updateResult) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if ('pendingActivationError' in updateResult) {
+        return jsonError(
+          res,
+          400,
+          PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
+          updateResult.pendingActivationError.message,
+        )
       }
-
-      await query(
-        `UPDATE users
-         SET is_active = $1, updated_at = NOW()
-         WHERE id = $2`,
-        [isActive, userId],
-      )
 
       const revocation = !isActive
         ? await revokeUserSessions(userId, {
@@ -4253,7 +4308,7 @@ export function adminUsersRouter(): Router {
         resourceId: userId,
         meta: {
           adminUserId,
-          before: { is_active: profile.is_active },
+          before: { is_active: updateResult.beforeIsActive },
           after: { is_active: isActive },
           revokedAfter: revocation?.revokedAfter || null,
         },

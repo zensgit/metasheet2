@@ -2270,6 +2270,10 @@ describe('admin-users routes', () => {
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
       .mockResolvedValueOnce({
         rows: [{
           enabled: true,
@@ -2296,6 +2300,63 @@ describe('admin-users routes', () => {
       resourceType: 'user-auth-grant',
       resourceId: 'user-1:dingtalk',
     }))
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE directory_deprovision_effects'))).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('access_generation = COALESCE'))).toBe(true)
+  })
+
+  it('pins grant override supersede and generation with SQL-shaped responses', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockImplementation(async (statement: unknown) => {
+      const sql = String(statement)
+      if (/FROM users[\s\S]*FOR UPDATE/i.test(sql)) {
+        return {
+          rows: [{
+            id: 'user-1',
+            email: 'alpha@example.com',
+            username: null,
+            mobile: null,
+            activation_status: 'activated',
+            is_active: true,
+            access_generation: 7,
+          }],
+        }
+      }
+      if (/SELECT local_user_id, enabled[\s\S]*user_external_auth_grants/i.test(sql)) {
+        return { rows: [] }
+      }
+      if (/UPDATE users[\s\S]*RETURNING access_generation/i.test(sql)) {
+        return { rows: [{ access_generation: 8 }] }
+      }
+      if (/SELECT enabled,[\s\S]*FROM user_external_auth_grants/i.test(sql)) {
+        return {
+          rows: [{
+            enabled: true,
+            granted_by: 'admin-1',
+            created_at: '2026-03-12T00:00:00.000Z',
+            updated_at: '2026-03-12T00:05:00.000Z',
+          }],
+        }
+      }
+      if (/COUNT\(\*\)::int AS linked_count/i.test(sql)) {
+        return { rows: [{ linked_count: 0 }] }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/dingtalk-grant', {
+      params: { userId: 'user-1' },
+      body: { enabled: true },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE directory_deprovision_effects'))).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE directory_deprovision_events'))).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('access_generation = COALESCE'))).toBe(true)
   })
 
   it('rejects enabling dingtalk grant when bound identity is missing openId', async () => {
@@ -2338,12 +2399,19 @@ describe('admin-users routes', () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
       .mockResolvedValueOnce({
-        rows: [
-          { id: 'user-1' },
-          { id: 'user-2' },
-        ],
+        rows: [{ id: 'user-1', is_active: true, activation_status: 'activated', access_generation: 0 }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'user-2', is_active: true, activation_status: 'activated', access_generation: 0 }],
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
 
     const response = await invokeRoute('post', '/api/admin/users/dingtalk-grants/bulk', {
       body: {
@@ -2358,8 +2426,10 @@ describe('admin-users routes', () => {
       updatedCount: 2,
       userIds: ['user-1', 'user-2'],
     })
-    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('INSERT INTO user_external_auth_grants')
-    expect(pgMocks.query.mock.calls[1]?.[1]).toEqual(['dingtalk', false, 'admin-1', ['user-1', 'user-2']])
+    const grantWrite = pgMocks.query.mock.calls.find((call) =>
+      String(call[0]).includes('INSERT INTO user_external_auth_grants'))
+    expect(String(grantWrite?.[0] || '')).toContain('INSERT INTO user_external_auth_grants')
+    expect(grantWrite?.[1]).toEqual(['dingtalk', false, 'admin-1', ['user-1', 'user-2']])
     expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
     expect(auditMocks.auditLog).toHaveBeenNthCalledWith(1, expect.objectContaining({
       action: 'revoke',
@@ -2381,16 +2451,20 @@ describe('admin-users routes', () => {
         selectionSize: 2,
       }),
     }))
+    expect(pgMocks.query.mock.calls.filter((call) =>
+      String(call[0]).includes('UPDATE directory_deprovision_effects'))).toHaveLength(2)
+    expect(pgMocks.query.mock.calls.filter((call) =>
+      String(call[0]).includes('access_generation = COALESCE'))).toHaveLength(2)
   })
 
   it('rejects bulk enabling dingtalk grants when one identity is missing openId', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
       .mockResolvedValueOnce({
-        rows: [
-          { id: 'user-1' },
-          { id: 'user-2' },
-        ],
+        rows: [{ id: 'user-1', is_active: true, activation_status: 'activated', access_generation: 0 }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'user-2', is_active: true, activation_status: 'activated', access_generation: 0 }],
       })
       .mockResolvedValueOnce({
         rows: [
@@ -2412,7 +2486,7 @@ describe('admin-users routes', () => {
     expect(response.statusCode).toBe(400)
     expect((response.body as Record<string, any>).error.code).toBe('DINGTALK_OPEN_ID_REQUIRED')
     expect(String((response.body as Record<string, any>).error.message || '')).toContain('user-2')
-    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('provider_open_id')
+    expect(String(pgMocks.query.mock.calls[2]?.[0] || '')).toContain('provider_open_id')
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
@@ -2691,6 +2765,8 @@ describe('admin-users routes', () => {
           name: 'Alpha',
           role: 'user',
           is_active: true,
+          activation_status: 'activated',
+          access_generation: 0,
           is_admin: false,
           last_login_at: null,
           created_at: '2026-03-12T00:00:00.000Z',
@@ -2698,6 +2774,9 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
       .mockResolvedValueOnce({
         rows: [{
           revoked_after: '2026-03-12T00:01:00.000Z',
@@ -2731,6 +2810,10 @@ describe('admin-users routes', () => {
     expect(response.statusCode).toBe(200)
     expect((response.body as Record<string, any>).data.user.is_active).toBe(false)
     expect(auditMocks.auditLog).toHaveBeenCalled()
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE directory_deprovision_effects'))).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('access_generation = COALESCE'))).toBe(true)
   })
 
   it('creates a user with preset-driven onboarding metadata', async () => {

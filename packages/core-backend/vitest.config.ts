@@ -240,6 +240,10 @@ export default defineConfig({
       // lock-wait race that proved the stale globally-clear P1, and the §5.4 supersede
       // both-legs golden. DATABASE_URL-gated; whole-file wired into the approval real-DB step.
       'tests/integration/directory-deprovision-race-supersede.db.test.ts',
+      // D5 canonical per-user access-graph mutex: supersede+generation atomicity, rollback,
+      // and a pg_blocking_pids row-lock barrier. DATABASE_URL-gated; excluded here and
+      // whole-file wired into the approval real-DB step.
+      'tests/integration/directory-access-graph-mutex.db.test.ts',
       // DingTalk multi-corp external-key isolation: corp-scoped uniqueness, upgrade migration,
       // real-sync coexistence, and same-corp/cross-corp identity matching controls.
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a
