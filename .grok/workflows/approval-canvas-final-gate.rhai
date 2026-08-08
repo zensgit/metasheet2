@@ -1,6 +1,6 @@
 let meta = #{
     name: "approval-canvas-final-gate",
-    description: "Unattended gate for approval Canvas final-eligibility: residual ledger, focused tests, flag defaults, no product-FINAL overclaim (post #4806 merge on main)",
+    description: "Unattended gate for approval Canvas final-eligibility + residual parallel PLAN 6fa2fbf6 (form history / dual canvas / G5-C CI smoke): residual ledger, focused tests, flag defaults, no product-FINAL overclaim (post #4806 merge on main)",
     phases: [
         #{ title: "Scan", detail: "ledger + MD honesty + residual OPEN items" },
         #{ title: "Test", detail: "web authoring + backend flag/number canaries" },
