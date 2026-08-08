@@ -48,6 +48,7 @@ import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
 import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
+  type AccessGraphTransactionClient,
 } from './access-graph-mutex'
 
 const logger = new Logger('DirectorySync')
@@ -279,6 +280,14 @@ type DirectoryAccountLinkedUserRow = {
   local_user_email: string | null
   local_user_username: string | null
   local_user_name: string | null
+}
+
+type DirectorySyncPriorAccessRow = {
+  account_id: string
+  external_user_id: string
+  is_active: boolean
+  link_status: string | null
+  local_user_id: string | null
 }
 
 export type DirectoryIntegrationSummary = {
@@ -3229,6 +3238,157 @@ export function buildUniqueLocalUserMatchMap(
   return { uniqueMap, ambiguousKeys }
 }
 
+async function lockDirectorySyncAccessGraphUsers(
+  client: AccessGraphTransactionClient,
+  options: {
+    integrationId: string
+    users: DingTalkDirectoryUser[]
+  },
+): Promise<{
+  lockedUserIds: Set<string>
+  openRehireAccountIds: Set<string>
+  priorAccessByExternalUserId: Map<string, DirectorySyncPriorAccessRow>
+}> {
+  const externalKeys = Array.from(new Set(
+    options.users
+      .map((user) => normalizeText(user.unionId || user.openId || user.userId))
+      .filter(Boolean),
+  ))
+  const unionIds = Array.from(new Set(
+    options.users.map((user) => normalizeText(user.unionId)).filter(Boolean),
+  ))
+  const openIds = Array.from(new Set(
+    options.users.map((user) => normalizeText(user.openId)).filter(Boolean),
+  ))
+  const emails = Array.from(new Set(
+    options.users
+      .map((user) => normalizeText(user.email).toLowerCase())
+      .filter(Boolean),
+  ))
+  const mobiles = Array.from(new Set(
+    options.users
+      .map((user) => normalizeMobileIdentifier(user.mobile))
+      .filter(Boolean),
+  ))
+
+  const candidates = await client.query(
+    `SELECT DISTINCT candidate.local_user_id
+       FROM (
+         SELECT link.local_user_id
+           FROM directory_account_links link
+           JOIN directory_accounts account
+             ON account.id = link.directory_account_id
+          WHERE account.integration_id = $1::uuid
+            AND link.local_user_id IS NOT NULL
+         UNION ALL
+         SELECT identity.local_user_id
+           FROM user_external_identities identity
+          WHERE identity.provider = $2::text
+            AND (
+              identity.external_key = ANY($3::text[])
+              OR identity.provider_union_id = ANY($4::text[])
+              OR identity.provider_open_id = ANY($5::text[])
+            )
+         UNION ALL
+         SELECT candidate_user.id
+           FROM users candidate_user
+          WHERE lower(candidate_user.email) = ANY($6::text[])
+             OR regexp_replace(candidate_user.mobile, '\\s+', '', 'g') = ANY($7::text[])
+         UNION ALL
+         -- D5 review P1: the payload-built arms above under-covered the loop, which iterates
+         -- EVERY account of the integration (retained-but-departed included) and resolves
+         -- against match maps built from all of them. One retained account whose email/mobile
+         -- or identity keys newly matched a local user made the loop resolve a user the
+         -- inventory never locked -> 'resolved after the mutex inventory' -> the whole run
+         -- failed, and every subsequent run failed identically. These two DB-side arms make the
+         -- inventory a superset of anything the loop can resolve; over-locking a user is safe,
+         -- under-locking kills the run.
+         SELECT db_identity.local_user_id
+           FROM user_external_identities db_identity
+           JOIN directory_accounts db_account
+             ON db_account.integration_id = $1::uuid
+            AND (
+              db_identity.external_key = db_account.external_key
+              OR (db_account.union_id IS NOT NULL AND db_identity.provider_union_id = db_account.union_id)
+              OR (db_account.open_id IS NOT NULL AND db_identity.provider_open_id = db_account.open_id)
+            )
+          WHERE db_identity.provider = $2::text
+         UNION ALL
+         SELECT db_user.id
+           FROM users db_user
+           JOIN directory_accounts db_match
+             ON db_match.integration_id = $1::uuid
+          WHERE (db_match.email IS NOT NULL AND lower(db_user.email) = lower(db_match.email))
+             OR (
+               db_match.mobile IS NOT NULL
+               AND db_user.mobile IS NOT NULL
+               AND regexp_replace(db_user.mobile, '\\s+', '', 'g') = regexp_replace(db_match.mobile, '\\s+', '', 'g')
+             )
+       ) candidate
+      WHERE candidate.local_user_id IS NOT NULL`,
+    [
+      options.integrationId,
+      DEFAULT_PROVIDER,
+      externalKeys,
+      unionIds,
+      openIds,
+      emails,
+      mobiles,
+    ],
+  )
+  const candidateUserIds = candidates.rows
+    .map((row) => normalizeText(row.local_user_id))
+    .filter(Boolean)
+  const lockedUsers = await lockUsersForAccessGraphWrite(client, candidateUserIds)
+
+  const recheckedPrior = await client.query(
+    `SELECT account.id::text AS account_id,
+            account.external_user_id,
+            account.is_active,
+            link.local_user_id,
+            link.link_status
+       FROM directory_accounts account
+       LEFT JOIN directory_account_links link
+         ON link.directory_account_id = account.id
+      WHERE account.integration_id = $1::uuid`,
+    [options.integrationId],
+  )
+  const priorAccessByExternalUserId = new Map<string, DirectorySyncPriorAccessRow>()
+  for (const row of recheckedPrior.rows as DirectorySyncPriorAccessRow[]) {
+    if (row.local_user_id && !lockedUsers.has(row.local_user_id)) {
+      throw new Error('Directory sync account binding changed before the user mutex was acquired; retry the run')
+    }
+    priorAccessByExternalUserId.set(row.external_user_id, row)
+  }
+  const openRehireEvidence = await client.query(
+    `SELECT DISTINCT event.directory_account_id::text AS account_id
+       FROM directory_deprovision_events event
+       JOIN directory_account_links link
+         ON link.directory_account_id = event.directory_account_id
+        AND link.local_user_id = event.local_user_id
+        AND link.link_status = 'linked'
+      WHERE event.integration_id = $1::uuid
+        AND event.status = 'applied'
+        AND EXISTS (
+          SELECT 1
+            FROM directory_deprovision_effects effect
+           WHERE effect.event_id = event.id
+             AND effect.status = 'applied'
+        )`,
+    [options.integrationId],
+  )
+
+  return {
+    lockedUserIds: new Set(lockedUsers.keys()),
+    openRehireAccountIds: new Set(
+      openRehireEvidence.rows
+        .map((row) => normalizeText(row.account_id))
+        .filter(Boolean),
+    ),
+    priorAccessByExternalUserId,
+  }
+}
+
 async function loadMatchMaps(
   accounts: DirectoryAccountRow[],
   identityClient?: {
@@ -3712,6 +3872,17 @@ export async function syncDirectoryIntegration(
       // → the two-connection create/refreeze-vs-sync barrier suite reds.
       await acquireSourceSyncFreezeLock(client, integrationId)
       await assertDirectorySyncNotFrozenByTransfer(integrationId, client as FreezeCheckClient)
+      const syncAccess = await lockDirectorySyncAccessGraphUsers(client, {
+        integrationId,
+        users: Array.from(users.values()),
+      })
+      const priorAccessByAccountId = new Map(
+        Array.from(syncAccess.priorAccessByExternalUserId.values())
+          .map((row) => [row.account_id, row] as const),
+      )
+      const changedAccessGraphUserIds = new Set<string>()
+      const alreadySupersededUserIds = new Set<string>()
+      const newlyAdmittedUserIds = new Set<string>()
 
       // R5: created-vs-updated split for the run summary. `departmentsSynced`/`accountsSynced`
       // conflate "0 new" and "500 new"; the discriminator is `(xmax = 0)` on the upserted row —
@@ -3851,6 +4022,12 @@ export async function syncDirectoryIntegration(
         [integrationId, syncTimestamp],
       )
       const deactivatedAccountIds = (deactivatedAccountsResult.rows as Array<{ id: string }>).map((row) => row.id)
+      for (const accountId of deactivatedAccountIds) {
+        const priorAccess = priorAccessByAccountId.get(accountId)
+        if (priorAccess?.link_status === 'linked' && priorAccess.local_user_id) {
+          changedAccessGraphUserIds.add(priorAccess.local_user_id)
+        }
+      }
 
       const [departmentRows, accountRows] = await Promise.all([
         client.query(
@@ -4093,6 +4270,13 @@ export async function syncDirectoryIntegration(
                   }
                 }
                 localUserId = created.userId
+                newlyAdmittedUserIds.add(created.userId)
+                if (
+                  existing?.local_user_id
+                  && existing.local_user_id !== created.userId
+                ) {
+                  alreadySupersededUserIds.add(existing.local_user_id)
+                }
                 linkStatus = 'linked'
                 matchStrategy = 'auto_admit'
                 autoAdmittedCount += 1
@@ -4146,6 +4330,28 @@ export async function syncDirectoryIntegration(
           linkedUserIdByExternalUserId.set(account.external_user_id, localUserId)
         }
 
+        if (
+          localUserId
+          && !newlyAdmittedUserIds.has(localUserId)
+          && !syncAccess.lockedUserIds.has(localUserId)
+        ) {
+          throw new Error(
+            'Directory sync resolved a local user after the mutex inventory; retry the run',
+          )
+        }
+        const priorLinkedUserId =
+          existing?.link_status === 'linked' ? existing.local_user_id : null
+        const nextLinkedUserId = linkStatus === 'linked' ? localUserId : null
+        if (
+          priorLinkedUserId !== nextLinkedUserId
+          || existing?.link_status !== linkStatus
+        ) {
+          if (priorLinkedUserId) changedAccessGraphUserIds.add(priorLinkedUserId)
+          if (nextLinkedUserId && !newlyAdmittedUserIds.has(nextLinkedUserId)) {
+            changedAccessGraphUserIds.add(nextLinkedUserId)
+          }
+        }
+
         // W4-PRE-1b item A: an `external_identity` re-match confirms a PRE-EXISTING user against
         // this account without going through `applyDirectoryAccountBindInTransaction` (that
         // helper only runs for the manual-bind / admit call sites) — this is the "auto-match"
@@ -4168,8 +4374,24 @@ export async function syncDirectoryIntegration(
         // reopening the exact stale-access half of the owner's original P1 finding via this line's
         // OWN new write point (review finding, #4526). A currently-inactive account never confirms
         // membership through this writer; only a live account does.
-        if (linkStatus === 'linked' && localUserId && account.is_active) {
-          await upsertActiveUserOrgMembership(client, { userId: localUserId, orgId: integration.org_id })
+        const preservesOpenRehireEvidence =
+          syncAccess.openRehireAccountIds.has(account.id)
+          && existing?.link_status === 'linked'
+          && existing.local_user_id === localUserId
+          && linkStatus === 'linked'
+        if (
+          linkStatus === 'linked'
+          && localUserId
+          && account.is_active
+          && !preservesOpenRehireEvidence
+        ) {
+          const membershipChanged = await upsertActiveUserOrgMembership(client, {
+            userId: localUserId,
+            orgId: integration.org_id,
+          })
+          if (membershipChanged && !newlyAdmittedUserIds.has(localUserId)) {
+            changedAccessGraphUserIds.add(localUserId)
+          }
         }
 
         await client.query(
@@ -4185,6 +4407,20 @@ export async function syncDirectoryIntegration(
              updated_at = NOW()`,
           [account.id, localUserId, linkStatus, matchStrategy],
         )
+      }
+
+      for (const userId of alreadySupersededUserIds) {
+        changedAccessGraphUserIds.delete(userId)
+      }
+      for (const userId of newlyAdmittedUserIds) {
+        changedAccessGraphUserIds.delete(userId)
+      }
+      if (changedAccessGraphUserIds.size > 0) {
+        await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+          userIds: Array.from(changedAccessGraphUserIds),
+          actorId: triggeredBy,
+          reason: 'directory synchronization changed account or binding state',
+        })
       }
 
       const memberGroupPlans = buildDirectoryProjectedMemberGroupPlans({
@@ -5354,13 +5590,17 @@ async function resolveDirectoryAccountOrgId(client: MembershipWriteClient, integ
 export async function upsertActiveUserOrgMembership(
   client: MembershipWriteClient,
   options: { userId: string; orgId: string },
-): Promise<void> {
-  await client.query(
+): Promise<boolean> {
+  const result = await client.query(
     `INSERT INTO user_orgs (user_id, org_id, is_active)
      VALUES ($1::text, $2::text, TRUE)
-     ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+     ON CONFLICT (user_id, org_id)
+     DO UPDATE SET is_active = EXCLUDED.is_active
+     WHERE user_orgs.is_active IS DISTINCT FROM TRUE
+     RETURNING user_id`,
     [options.userId, options.orgId],
   )
+  return result.rows.length > 0
 }
 
 /**
@@ -5909,6 +6149,7 @@ async function createDirectoryAdmittedUserInTransaction(
 export const __directorySyncInternalsForTests = {
   createDirectoryAdmittedUserInTransaction,
   doesExternalIdentityMatchAccount,
+  lockDirectorySyncAccessGraphUsers,
 }
 
 async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
