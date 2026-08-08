@@ -275,7 +275,15 @@ export function adminDirectoryLocalRouter(): Router {
 
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
-      const account = await createLocalAccount({ orgId, localUserId, name, email, mobile, title })
+      const account = await createLocalAccount({
+        orgId,
+        localUserId,
+        name,
+        email,
+        mobile,
+        title,
+        actorId: adminUserId,
+      })
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -339,7 +347,7 @@ export function adminDirectoryLocalRouter(): Router {
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
       if (rejectNonUuidParam(res, 'accountId', req.params.accountId)) return
-      const account = await archiveLocalAccount(orgId, req.params.accountId)
+      const account = await archiveLocalAccount(orgId, req.params.accountId, adminUserId)
       if (!account) {
         jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local account not found')
         return
