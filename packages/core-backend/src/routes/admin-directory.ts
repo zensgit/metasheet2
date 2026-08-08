@@ -1338,7 +1338,11 @@ export function adminDirectoryRouter(): Router {
       const code = (error as { code?: string })?.code || 'DEPROVISION_RESTORE_FAILED'
       const status =
         code === 'EVENT_NOT_FOUND' || code === 'USER_NOT_FOUND' ? 404
-          : code === 'DRIFT_CONFLICT' || code === 'SOURCE_INACTIVE' || code === 'NO_EFFECTS' || code === 'NOT_APPLIED'
+          : code === 'DRIFT_CONFLICT'
+              || code === 'SOURCE_INACTIVE'
+              || code === 'NO_EFFECTS'
+              || code === 'NOT_APPLIED'
+              || code === 'EVENT_NOT_APPLIED'
             ? 409
             : code === 'FORCE_CONFIRM_REQUIRED' || code === 'FORCE_NOTE_REQUIRED' ? 400
               : 500
