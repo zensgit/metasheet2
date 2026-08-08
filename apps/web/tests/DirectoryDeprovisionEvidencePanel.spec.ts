@@ -88,7 +88,7 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
           user: { id: 'u1', activationStatus: 'activated', isActive: true, accessGeneration: 2 },
           plan: {
             skipReason: null,
-            effects: [{ type: 'set_user_inactive', beforeActive: true, afterActive: false }],
+            effects: [{ type: 'user_changed', beforeActive: true, afterActive: false }],
           },
         })
       }
@@ -109,8 +109,11 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
     btn.click()
     await flushUi()
 
-    expect(apiFetchMock.mock.calls.some((c) => String(c[0]).includes('/deprovision/preview/u1'))).toBe(true)
-    expect(root.querySelector('[data-testid="deprovision-preview-result"]')?.textContent).toMatch(/set_user_inactive/)
+    expect(apiFetchMock.mock.calls.some((c) => (
+      String(c[0]).includes('/deprovision/preview/u1')
+      && String(c[0]).includes('integrationId=int-1')
+    ))).toBe(true)
+    expect(root.querySelector('[data-testid="deprovision-preview-result"]')?.textContent).toMatch(/user_changed/)
   })
 
   it('surfaces DRIFT_CONFLICT on restore failure', async () => {

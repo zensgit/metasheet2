@@ -16,13 +16,14 @@ export type ApplyDeprovisionInput = {
   directoryAccountId: string
   runId: string | null
   triggeredBy: string
+  policy: 'manual_review' | 'disable_grant_only' | 'mark_inactive'
   enabled: boolean
   /** When false, planner runs but writer is no-op (preview mode). */
   write: boolean
   loadUserState: () => Promise<{
     activationStatus: string | null
     isActive: boolean
-    activeOrgIds: string[]
+    orgMembershipActive: boolean
     dingtalkGrantEnabled: boolean
     accessGeneration: number
   }>
@@ -59,7 +60,8 @@ export async function applyDirectoryDeprovisionPlan(
     localUserId: input.localUserId,
     activationStatus: state.activationStatus,
     isActive: state.isActive,
-    activeOrgIds: state.activeOrgIds,
+    orgId: input.orgId,
+    orgMembershipActive: state.orgMembershipActive,
     dingtalkGrantEnabled: state.dingtalkGrantEnabled,
     globallyClear: input.globallyClear !== false,
   })
@@ -91,6 +93,8 @@ export async function applyDirectoryDeprovisionPlan(
     directoryAccountId: input.directoryAccountId,
     runId: input.runId,
     triggeredBy: input.triggeredBy,
+    policy: input.policy,
+    globallyClear: input.globallyClear !== false,
     effects: plan.effects,
     previousGeneration: state.accessGeneration,
   })
@@ -103,6 +107,8 @@ async function writeDeprovisionLedger(options: {
   directoryAccountId: string
   runId: string | null
   triggeredBy: string
+  policy: 'manual_review' | 'disable_grant_only' | 'mark_inactive'
+  globallyClear: boolean
   effects: PlannedEffect[]
   previousGeneration: number
 }): Promise<ApplyDeprovisionResult> {
@@ -124,21 +130,21 @@ async function writeDeprovisionLedger(options: {
     )
     nextGen = Number(gen.rows[0]?.access_generation ?? options.previousGeneration + 1)
 
-    // Supersede open effects for this user
+    // Supersede applied effects for this user.
     await client.query(
       `UPDATE directory_deprovision_effects
           SET status = 'superseded', updated_at = NOW()
         WHERE local_user_id = $1 AND status = 'applied'`,
       [options.localUserId],
-    ).catch(() => {
-      /* table may not exist in unit mocks */
-    })
+    )
 
     const ev = await client.query(
       `INSERT INTO directory_deprovision_events (
          org_id, integration_id, directory_account_id, local_user_id,
-         run_id, triggered_by, event_origin, access_generation_at_apply, status
-       ) VALUES ($1,$2,$3,$4,$5,$6,'sync',$7,'open')
+         run_id, triggered_by, event_origin, link_witness_account_id,
+         link_witness_local_user_id, policy, globally_clear,
+         access_generation_at_apply, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,'sync',$3,$4,$7,$8,$9,'applied')
        RETURNING id`,
       [
         options.orgId,
@@ -147,11 +153,16 @@ async function writeDeprovisionLedger(options: {
         options.localUserId,
         options.runId,
         options.triggeredBy,
+        options.policy,
+        options.globallyClear,
         nextGen,
       ],
-    ).catch(() => ({ rows: [] as Array<{ id: string }> }))
+    )
 
     eventId = (ev.rows[0] as { id?: string } | undefined)?.id ?? null
+    if (!eventId) {
+      throw new Error('directory deprovision event INSERT returned no id')
+    }
 
     for (const effect of options.effects) {
       await client.query(
@@ -168,9 +179,7 @@ async function writeDeprovisionLedger(options: {
           effect.afterActive,
           nextGen,
         ],
-      ).catch(() => {
-        /* unit/mock */
-      })
+      )
     }
   })
 
@@ -199,7 +208,7 @@ export async function supersedeOpenDeprovisionEffects(userId: string): Promise<v
           SET status = 'superseded', updated_at = NOW()
         WHERE local_user_id = $1 AND status = 'applied'`,
       [userId],
-    ).catch(() => {})
+    )
   })
 }
 
@@ -208,6 +217,6 @@ export async function countOpenDeprovisionEffects(userId: string): Promise<numbe
     `SELECT count(*)::int AS n FROM directory_deprovision_effects
       WHERE local_user_id = $1 AND status = 'applied'`,
     [userId],
-  ).catch(() => ({ rows: [{ n: 0 }] }))
+  )
   return r.rows[0]?.n ?? 0
 }

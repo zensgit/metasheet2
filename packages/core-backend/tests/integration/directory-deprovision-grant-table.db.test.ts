@@ -80,8 +80,10 @@ async function seedEvent(
   const ev = await query<{ id: string }>(
     `INSERT INTO directory_deprovision_events
        (org_id, integration_id, directory_account_id, local_user_id, run_id, triggered_by,
-        event_origin, access_generation_at_apply, status)
-     VALUES ($1, $2, $3, $4, $5, 'test', 'sync', $6, 'open')
+        event_origin, link_witness_account_id, link_witness_local_user_id,
+        policy, globally_clear, access_generation_at_apply, status)
+     VALUES ($1, $2, $3, $4, $5, 'test', 'sync', $3, $4,
+             'mark_inactive', TRUE, $6, 'applied')
      RETURNING id::text AS id`,
     [ORG, seeded.integrationId, seeded.accountId, USER, seeded.runId, generation],
   )
@@ -149,7 +151,7 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
     )
     await query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, FALSE)`, [USER, ORG])
     const seeded = await seedDirectory({ sourceActive: true })
-    const eventId = await seedEvent(seeded, [{ type: 'clear_user_orgs', orgId: ORG }], 3)
+    const eventId = await seedEvent(seeded, [{ type: 'membership_changed', orgId: ORG }], 3)
 
     const result = await restoreDeprovisionEvent({
       eventId, mode: 'rehire', adminUserId: 'admin-test',
@@ -179,7 +181,7 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
       `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by)
        VALUES ('dingtalk', $1, FALSE, 'system:directory-deprovision')`, [USER])
     const seeded = await seedDirectory({ sourceActive: true })
-    const eventId = await seedEvent(seeded, [{ type: 'disable_dingtalk_grant', orgId: null }], 3)
+    const eventId = await seedEvent(seeded, [{ type: 'grant_changed', orgId: null }], 3)
 
     await restoreDeprovisionEvent({ eventId, mode: 'rehire', adminUserId: 'admin-test' })
 
@@ -196,7 +198,7 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
     )
     // Deliberately NO user_orgs row — effect says membership was cleared, but the row is gone.
     const seeded = await seedDirectory({ sourceActive: true })
-    const eventId = await seedEvent(seeded, [{ type: 'clear_user_orgs', orgId: ORG }], 3)
+    const eventId = await seedEvent(seeded, [{ type: 'membership_changed', orgId: ORG }], 3)
 
     await expect(
       restoreDeprovisionEvent({ eventId, mode: 'rehire', adminUserId: 'admin-test' }),
@@ -221,7 +223,7 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
       `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by)
        VALUES ('dingtalk', $1, TRUE, 'someone-re-granted-it')`, [USER])
     const seeded = await seedDirectory({ sourceActive: true })
-    const eventId = await seedEvent(seeded, [{ type: 'disable_dingtalk_grant', orgId: null }], 3)
+    const eventId = await seedEvent(seeded, [{ type: 'grant_changed', orgId: null }], 3)
 
     await expect(
       restoreDeprovisionEvent({ eventId, mode: 'rehire', adminUserId: 'admin-test' }),
