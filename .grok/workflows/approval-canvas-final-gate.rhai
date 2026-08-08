@@ -1,13 +1,13 @@
 let meta = #{
     name: "approval-canvas-final-gate",
-    description: "Unattended gate for approval Canvas final-eligibility: residual ledger, focused tests, flag defaults, no product-FINAL overclaim, PR #4806 CI awareness",
+    description: "Unattended gate for approval Canvas final-eligibility: residual ledger, focused tests, flag defaults, no product-FINAL overclaim (post #4806 merge on main)",
     phases: [
         #{ title: "Scan", detail: "ledger + MD honesty + residual OPEN items" },
         #{ title: "Test", detail: "web authoring + backend flag/number canaries" },
         #{ title: "Structure", detail: "D0 edge+/palette/list structural pins" },
         #{ title: "Verify", detail: "flags OFF + docs do not overclaim FINAL" },
     ],
-    when_to_use: "After approval canvas commits, before claiming ENGINEERING-READY, or when babysitting PR #4806",
+    when_to_use: "After approval canvas commits on main, before claiming ENGINEERING-READY, or when re-checking post-#4806 land",
 };
 
 let scan_schema = #{
@@ -57,7 +57,8 @@ let scan = agent(
         + "docs/development/approval-canvas-data-closure-final-eligibility-verification-20260808.md status lines. "
         + "Summarize DONE vs OPEN vs BLOCKED. "
         + "open_prs must list only OPEN execute-plan nodes (e.g. PR3, PR4) not DONE ones. "
-        + "blockers = owner-only items that prevent product FINAL (G0, UAT, flags) plus any OPEN engineering still required for ENGINEERING-READY if CI is red. "
+        + "blockers = owner-only items that prevent product FINAL (G0, UAT, flags) plus any OPEN engineering still required for ENGINEERING-READY if regressions appear on main. "
+        + "If #4806 is MERGED and ledger shows all engineering PRs DONE, open_prs must be empty. "
         + "Do not invent blockers.",
     #{
         label: "scan-residuals",

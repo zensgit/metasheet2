@@ -1,9 +1,9 @@
 # Approval Canvas + Data Closure — Final Eligibility Verification (2026-08-08)
 
 **Status:** ENGINEERING-READY FOR PRODUCT FINAL (owner UAT + staged flag ON **not** done)  
-**Product-code base:** `origin/main@7c7d550dbfba175a8c29afe0f59ba06b2287303d`  
-**Exact product head (this delivery):** `0bfaeddeb180f25a05ea83563d43769cb4f4369b`  
-**Branch:** `claude/approval-canvas-final-engineering-20260808`  
+**Landed:** https://github.com/zensgit/metasheet2/pull/4806 → `main` squash `323d7e1afe` (2026-08-08T04:20:48Z)  
+**Authoritative land SHA:** `323d7e1afef407f68c8ff2a6bfa940f175300f59`  
+**Pre-merge branch family:** `claude/approval-canvas-final-engineering-20260808`  
 **Development companion:** `docs/development/approval-canvas-data-closure-final-eligibility-development-20260808.md`
 
 This verification MD maps acceptance criteria to exact commands and counts. It does **not** claim product FINAL while owner gates remain open.
@@ -150,4 +150,4 @@ No product-code change in this delivery flips a default to ON.
 1. G0 ratify of `approval-canvas-v2-interaction-design-lock-20260721.md` (and O3 layout engine choice if renderer migration is desired).  
 2. Real-tenant UAT: form authoring, linear/condition/parallel publish+execute, route preview, FWB create/update, attachments, version restore.  
 3. Staged enablement: durable → Class A → Class B → FWB → attachments / Canvas V2, with observation windows.  
-4. Optional residual product polish: retire node button clusters; form palette drag; editor-embedded dual-canvas version UX.
+4. Optional residual product polish (not blocking ENGINEERING-READY): form palette drag affordances; full editor-embedded dual-canvas version UX (beyond TemplateDetailView summary). Edge `+` / no canvas node clusters / form palette / shell extract already landed in #4806.
