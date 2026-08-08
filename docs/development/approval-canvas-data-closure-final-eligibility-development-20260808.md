@@ -1,9 +1,10 @@
 # Approval Canvas + Data Closure — Final Eligibility Development (2026-08-08)
 
 **Status:** ENGINEERING-READY FOR PRODUCT FINAL (owner UAT + staged flag ON still required)  
-**Branch:** `claude/approval-canvas-final-engineering-20260808`  
-**Base:** `origin/main@7c7d550dbfba175a8c29afe0f59ba06b2287303d`  
-**Exact product head (this delivery):** `0bfaeddeb180f25a05ea83563d43769cb4f4369b`  
+**Landed:** https://github.com/zensgit/metasheet2/pull/4806 → `main` squash `323d7e1afe` (2026-08-08T04:20:48Z)  
+**Pre-merge branch family:** `claude/approval-canvas-final-engineering-20260808`  
+**Pre-merge product tip (examples):** `0bfaeddeb180f25a05ea83563d43769cb4f4369b` (and later heads on the PR)  
+**Authoritative land SHA:** `323d7e1afef407f68c8ff2a6bfa940f175300f59`  
 **Authority:**  
 - `docs/development/approval-canvas-v2-development-plan-20260720.md` (D0–D11 + G gates; status remains PROPOSED for G0 owner ratify)  
 - `docs/development/approval-canvas-v2-interaction-design-lock-20260721.md` (D0 interaction contract; still PROPOSED until G0)  
@@ -97,7 +98,7 @@ These residuals do **not** block the engineering claim “G5-C product-path alge
 
 ## 6. Verdict
 
-**ENGINEERING-READY FOR PRODUCT FINAL eligibility** — remaining engineering for G5-C path tests, mounted undo/history, canvas-first under flag, and G5-R regression is complete on this head.
+**ENGINEERING-READY FOR PRODUCT FINAL eligibility** — remaining engineering for G5-C path tests, mounted undo/history, canvas-first under flag, edge `+` / form palette / shell extract, and G5-R regression is **complete and merged to main** (`323d7e1afe` via #4806).
 
 **NOT product FINAL** until:
 
