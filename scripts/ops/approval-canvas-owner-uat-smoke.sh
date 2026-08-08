@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Approval Canvas residual G5-C owner UAT smoke harness (values-free).
 #
-# PLAN_ID=6fa2fbf6 PR3 — checklist runner for owner handoff preflight.
+# PLAN_ID=6fa2fbf6-w3 PR6 — checklist runner for owner handoff preflight.
 # Does NOT flip env flags, does NOT claim product FINAL, does NOT hit real tenants.
 #
 # Usage:
@@ -81,7 +81,7 @@ done < <(
 )
 
 # ---------------------------------------------------------------------------
-# 3) Owner handoff doc present
+# 3) Owner handoff + residual design ledgers present
 # ---------------------------------------------------------------------------
 HANDOFF="docs/development/approval-canvas-data-closure-owner-handoff-20260808.md"
 if [[ -f "$HANDOFF" ]]; then
@@ -90,7 +90,6 @@ else
   fail "missing owner handoff ${HANDOFF}"
 fi
 
-# Residual design ledger (PLAN 6fa2fbf6) present on this branch
 LEDGER="docs/development/approval-canvas-residual-parallel-design-20260808.md"
 if [[ -f "$LEDGER" ]]; then
   if grep -q '6fa2fbf6' "$LEDGER"; then
@@ -103,42 +102,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4) Optional focused vitest (history + g5c). Skippable via SKIP_TESTS=1.
+# 4) Residual modules + tests present (wave-1/2 landed; wave-3 promotes canaries)
+# ---------------------------------------------------------------------------
+require_file() {
+  local path="$1"
+  if [[ -f "$path" ]]; then
+    ok "present: ${path}"
+  else
+    fail "missing residual path: ${path}"
+  fi
+}
+
+require_file "apps/web/src/approvals/approvalFormAuthoringHistory.ts"
+require_file "apps/web/src/approvals/approvalVersionDualCanvas.ts"
+require_file "apps/web/tests/approval-form-authoring-history.test.ts"
+require_file "apps/web/tests/approval-version-dual-canvas.test.ts"
+require_file "apps/web/tests/approval-flow-canvas-a11y.test.ts"
+require_file "apps/web/tests/approval-canvas-inspector-a11y.test.ts"
+
+# ---------------------------------------------------------------------------
+# 5) Optional focused vitest. Skippable via SKIP_TESTS=1.
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_TESTS" == "1" ]]; then
-  ok "SKIP_TESTS=1 — skipping focused vitest (history + g5c)"
+  ok "SKIP_TESTS=1 — skipping focused vitest (history + g5c + residual)"
 else
   if ! command -v pnpm >/dev/null 2>&1; then
     log "WARN: pnpm not available — skipping focused vitest"
   else
-    log "Running focused vitest: approval-authoring-history + approval-g5c-authoring-scenarios"
+    log "Running focused vitest: history + g5c + residual always-on canaries"
     if pnpm --filter @metasheet/web exec vitest run --watch=false \
       tests/approval-authoring-history.test.ts \
       tests/approval-g5c-authoring-scenarios.test.ts \
+      tests/approval-form-authoring-history.test.ts \
+      tests/approval-version-dual-canvas.test.ts \
+      tests/approval-flow-canvas-a11y.test.ts \
+      tests/approval-canvas-inspector-a11y.test.ts \
       --reporter=dot; then
-      ok "focused vitest (history + g5c) passed"
+      ok "focused vitest (history + g5c + residual) passed"
     else
-      fail "focused vitest (history + g5c) failed"
-    fi
-
-    # Residual PR1/PR2 canaries when present
-    residual=()
-    if [[ -f apps/web/tests/approval-form-authoring-history.test.ts ]]; then
-      residual+=(tests/approval-form-authoring-history.test.ts)
-    fi
-    if [[ -f apps/web/tests/approval-version-dual-canvas.test.ts ]]; then
-      residual+=(tests/approval-version-dual-canvas.test.ts)
-    fi
-    if [[ ${#residual[@]} -gt 0 ]]; then
-      log "Running residual canaries: ${residual[*]}"
-      if pnpm --filter @metasheet/web exec vitest run --watch=false \
-        "${residual[@]}" --reporter=dot; then
-        ok "residual canaries passed"
-      else
-        fail "residual canaries failed"
-      fi
-    else
-      ok "residual form-history / dual-canvas tests not present yet (skipped)"
+      fail "focused vitest (history + g5c + residual) failed"
     fi
   fi
 fi

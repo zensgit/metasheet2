@@ -139,20 +139,18 @@
 # any existing token).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-npx vitest run approval-canvas-commands approval-form-commands approval-authoring-history approval-g5c-authoring-scenarios approval-version-read-summary --reporter=dot
-# Residual parallel PLAN 6fa2fbf6 optional canaries (test -f so this gate stays green before PR1/PR2 land).
-residual=()
-if [ -f tests/approval-form-authoring-history.test.ts ]; then
-  residual+=(approval-form-authoring-history)
-fi
-if [ -f tests/approval-version-dual-canvas.test.ts ]; then
-  residual+=(approval-version-dual-canvas)
-fi
-if [ "${#residual[@]}" -gt 0 ]; then
-  npx vitest run "${residual[@]}" --reporter=dot
-else
-  echo "Residual form-history / dual-canvas canaries skipped (files not present yet)"
-fi
+# Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4819).
+npx vitest run \
+  approval-canvas-commands \
+  approval-form-commands \
+  approval-authoring-history \
+  approval-g5c-authoring-scenarios \
+  approval-version-read-summary \
+  approval-form-authoring-history \
+  approval-version-dual-canvas \
+  approval-flow-canvas-a11y \
+  approval-canvas-inspector-a11y \
+  --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
 npx vitest run fwb-rule-authoring-helpers fwb-rule-authoring --reporter=dot
