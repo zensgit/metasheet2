@@ -453,4 +453,67 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
       await pool.end()
     }
   })
+
+  it("a 'pending' email-match hint never trips the bind CAS: witness and re-read share the linked-only predicate (D5 review P1)", async () => {
+    // The sync loop writes local_user_id onto 'pending' rows as a match HINT (the top-ranked
+    // bind target in the review workbench). Before the fix, the prior-holder witness read that
+    // hint (status-agnostic) while the in-transaction CAS re-read was linked-scoped: witness
+    // non-null, CAS null, and EVERY manual bind of such an account failed forever with
+    // "binding changed; retry" — a retry that could never succeed.
+    const orgId = `${PREFIX}-org-${randomUUID()}`
+    const hintUserId = `${PREFIX}-hint-${randomUUID()}`
+    const targetUserId = `${PREFIX}-target-${randomUUID()}`
+    const integration = await query<{ id: string }>(
+      `INSERT INTO directory_integrations (name, corp_id, org_id, provider, status, default_deprovision_policy)
+       VALUES ($1, $2, $3, 'dingtalk', 'active', 'manual_review') RETURNING id::text AS id`,
+      [`${PREFIX}-integration-${randomUUID()}`, `${PREFIX}-corp-${randomUUID()}`, orgId],
+    )
+    for (const [uid, email] of [
+      [hintUserId, `${PREFIX}-hint@example.com`],
+      [targetUserId, `${PREFIX}-target@example.com`],
+    ]) {
+      await query(
+        `INSERT INTO users (id, email, password_hash, is_active, activation_status, access_generation)
+         VALUES ($1, $2, 'x', TRUE, 'activated', 0)`,
+        [uid, email],
+      )
+    }
+    const account = await query<{ id: string }>(
+      `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, email, is_active)
+       SELECT integration.id, 'dingtalk', integration.corp_id, $2, $3, $4, $2, 'Pending Hint', $5, TRUE
+         FROM directory_integrations integration WHERE integration.id = $1::uuid
+       RETURNING id::text AS id`,
+      [
+        integration.rows[0].id,
+        `${PREFIX}-external-${randomUUID()}`,
+        `${PREFIX}-union-${randomUUID()}`,
+        `${PREFIX}-open-${randomUUID()}`,
+        `${PREFIX}-hint@example.com`,
+      ],
+    )
+    // The sync loop's own shape: a PENDING row carrying the match hint.
+    await query(
+      `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+       VALUES ($1::uuid, $2, 'pending', 'email')`,
+      [account.rows[0].id, hintUserId],
+    )
+
+    // Binding to a DIFFERENT user must succeed — the pending hint is not a holder.
+    const bound = await bindDirectoryAccount(account.rows[0].id, {
+      localUserRef: targetUserId,
+      adminUserId: 'admin:d5-pending-hint',
+      enableDingTalkGrant: false,
+    })
+    expect(bound.account.linkStatus).toBe('linked')
+    expect(bound.account.localUser?.id).toBe(targetUserId)
+    // And the hint user is NOT presented as a previous holder — they never held anything.
+    expect(bound.previousLocalUser).toBeNull()
+
+    const link = await query<{ local_user_id: string; link_status: string }>(
+      `SELECT local_user_id, link_status FROM directory_account_links WHERE directory_account_id = $1::uuid`,
+      [account.rows[0].id],
+    )
+    expect(link.rows).toHaveLength(1)
+    expect(link.rows[0]).toMatchObject({ local_user_id: targetUserId, link_status: 'linked' })
+  })
 })

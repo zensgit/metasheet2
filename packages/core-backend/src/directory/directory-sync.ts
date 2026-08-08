@@ -6241,6 +6241,20 @@ async function loadDirectoryBindingTargetAccount(directoryAccountId: string): Pr
   return result.rows[0] ?? null
 }
 
+/**
+ * The prior-HOLDER witness for bind/admit CAS checks — `link_status = 'linked'` on purpose, and
+ * this predicate must stay IDENTICAL to the CAS re-reads in
+ * `applyDirectoryAccountBindInTransaction` / `createDirectoryAdmittedUserInTransaction`.
+ *
+ * D5 adversarial review P1: this read used to be status-agnostic while the CAS re-read was
+ * linked-scoped. A 'pending' email/mobile match row (the sync loop itself writes
+ * `local_user_id` onto 'pending' rows as a match HINT) made the witness non-null, the
+ * linked-scoped CAS null, and every manual bind/admit of such an account failed forever with
+ * "binding changed; retry" — the retry could never succeed, on precisely the top-ranked bind
+ * targets in the review workbench. A pending hint is not a holder: it never activated
+ * membership, holds nothing to deactivate, and must neither trip the CAS nor be shown as
+ * `previousLocalUser`.
+ */
 async function loadDirectoryLinkedUser(directoryAccountId: string): Promise<DirectoryAccountLinkedUserRow | null> {
   const result = await query<DirectoryAccountLinkedUserRow>(
     `SELECT l.local_user_id,
@@ -6250,6 +6264,7 @@ async function loadDirectoryLinkedUser(directoryAccountId: string): Promise<Dire
      FROM directory_account_links l
      LEFT JOIN users u ON u.id = l.local_user_id
      WHERE l.directory_account_id = $1
+       AND l.link_status = 'linked'
      LIMIT 1`,
     [directoryAccountId],
   )

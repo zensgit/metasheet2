@@ -41,6 +41,9 @@ function fakeClient() {
 
 const ACCOUNT = {
   id: '11111111-1111-1111-1111-111111111111',
+  // #4651: the bind path now re-reads the account authoritatively under lock and refuses an
+  // inactive one — an admissible fixture account must therefore say so explicitly.
+  is_active: true,
   integration_id: '22222222-2222-2222-2222-222222222222',
   provider: 'dingtalk',
   corp_id: 'corpA',
