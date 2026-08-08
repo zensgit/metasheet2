@@ -382,7 +382,7 @@ jobs:
           echo "wireSaveCallsLogged=${save_calls:-0}"
           # PREFLIGHT B1: this step is `if: always()`, and the runbook step had no `id:`, so the
           # positive control could not tell "the logger is broken" from "the driver never got this
-          # far". 10 of the driver's 17 gates precede the first GetList and 13 precede the first
+          # far". 11 of the driver's 18 gates precede the first GetList and 14 precede the first
           # Save, and record() hard-exits on the first failure — so ANY early failure produced a
           # louder, more specific, WRONG diagnosis blaming the mock's logger, on the line right
           # after printing GetList=1. It accused a subsystem that is provably innocent
