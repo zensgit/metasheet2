@@ -1,6 +1,6 @@
 # 钉钉生命周期线 — 收尾开发与验证 MD（2026-08-08）
 
-- Status: **代码侧收尾完成**（11/11 车全 MERGED；启用/canary/U1-13/Transfer 仍 owner/ops-gated）
+- Status: **代码侧收尾完成（Rev 4.4 修复轮后恢复）** — closeout 复审（2026-08-08，对 main=45cf3a7c51）曾裁 **CHANGES REQUESTED**（2 P1 + 1 P2，见 §4bis），按其收尾顺序本状态一度改回 CHANGES_REQUIRED；修复 PR（T3 源权威 + OPS-01 可逆证据 Rev 4.4）与本状态行原子落地。启用/canary/U1-13/Transfer 仍 owner/ops-gated；三开关 OFF。
 - 授权链：owner 2026-08-07/08 会话「钉钉同步业务功能开发-260721」指令 —— 「请排序并完成所有这条线剩余的开发，然后给出设计及验证 MD」，采纳含「显式批准 Rev 4.3」为第 1 步的收尾意见；模型分配按既有 model-split（Sonnet=机械/侦察、Fable=主循环+热文件语义、Opus=对抗门审）。
 - 权威锁：`dingtalk-deprovision-reactivation-and-evidence-chain-design-20260723.md`（Rev 4.3，ratification 记录见其 §0.6，**终版随本 MD 提请 owner 会签**）+ companion admission 锁 Rev 4.2。
 - 前情：`dingtalk-lifecycle-postmerge-findings-20260724.md`（07-24 实测「离岗零证据」P1 的完整证据链）与 honest closeout（#4587 修正版）。
@@ -52,7 +52,17 @@ Sonnet 侦察（restack 预案）全部命中：唯一真冲突 #4658、#4659 �
 ## 4. 两项合同级裁定（owner 会签清单）
 
 1. **Rev 4.3 勘误已按 owner 指令落账**（#4646 锁文 §0.6 含 provenance）：每 event 仅一条源组织 `membership_changed`；`globally_clear` 只门控 grant/user。与 main 既有 W4-PRE-1d owner 裁决同轴，非新语义。**请 owner 终签。**
-2. **OPS-01 行形制裁定**（#4647 落地时，行为级非锁文级）：离岗 globally-clear 候选**无条件**留下显式 disabled grant 行（行形制与 OPS-01 以来一致）；ledger `grant_changed` effect 仍以锁内「此前确实启用」为门。**承重理由**：oauth ensureGrant 是 `INSERT...enabled=TRUE...ON CONFLICT DO NOTHING` —— 无行则离岗者下次 OAuth 尝试被静默重新授权；显式 disabled 行即闸。#4653 曾把 ensureGrant 改成 `DO UPDATE→TRUE`（会绕开该闸）已回退 creation-only；离岗后重授权唯一路径=审计的 rehire/force-restore。**请 owner 确认此语义选择。**
+2. **OPS-01 行形制裁定 — 已被 Rev 4.4 取代（closeout 复审会签指令）**：复审裁定「OPS-01 暂不签——ledger 必须记录『grant 行从不存在到 disabled』的存在性变化，restore 时才能安全删除；不能仅调整 upsert 位置」。原「无条件 disabled 行、ledger 外写入」形制即复审 P1-2 的根因（从未有 grant 的人 rehire 后被孤儿 deny 行永久挡死 OAuth）。Rev 4.4（锁文 §0.7）改为**纯 effect 驱动**：creation effect（`grant_row_created=TRUE`）→ writer INSERT deny 行 → restore DELETE 恢复无行态；deny 闸本身不变（ensureGrant 仍 creation-only，被显式 disabled 行挡住）。**该项不再等 owner 会签原语义——按会签指令已重做。**
+
+## 4bis. Closeout 复审吸收记录（2026-08-08，CHANGES REQUESTED → 修复）
+
+| 判项 | 内容 | 修复 |
+|---|---|---|
+| **P1-1（T3 激活源权威）** | 仅 `sso`/显式 `directoryAccountId` 校验目录源；`temp_password`/`admin_no_password` 丢弃 `sourceOrgId`、直接信客户端 `orgId` → 可对 inactive 源静默开通 + 跨组织写 membership；单测 :44 还把「无源激活成功」钉成正控 | **所有激活模式**无条件解析并校验 active+linked 目录源；membership org 一律由 integration 派生，客户端 `orgId` 仅匹配校验（不符 → 409 `ACTIVATE_ORG_MISMATCH`，闭集错误表/HTTP/bulk 全链）；「无源成功」钉点翻转为拒绝 + 派生组织正控/错配负控/双组织 steering 负控 + 真库 fixture 补真实源 |
+| **P1-2（OPS-01 不可逆 deny 行）** | disabled grant 行在 ledger 外无条件写入；restore 只逆转既有 effect → 无 grant 者离岗+rehire 后永久无法 OAuth | Rev 4.4 证据模型（锁文 §0.7）：`grant_row_created` 列（CHECK+immutability+拒降级 down）、planner creation effect、writer 纯 effect 驱动、restore DELETE；真库金标「无既有 grant → 离岗 → rehire → OAuth」全链 + creation-only ensureGrant 挡/放两态断言 |
+| **P2（零 effect 语义分叉）** | 零 effect 早退跳过 bookkeeping upsert，与有 effect 路径 deny 语义相反；:450 测试不验 OAuth loginability | 语义统一（globally-clear 无行 ⇒ 必有 creation effect），两种零 effect 形态（deny 已在场 / not-globally-clear）均新增「运行前后 OAuth loginability 不变」真库断言 |
+
+Mutation 六连杀（每条先证锚点命中、后证目标测试转红、cp 还原）：restore DELETE 分支、planner creation 规划、no-op 豁免、writer creation INSERT、`ACTIVATE_ORG_MISMATCH` 校验、激活源门控回退（原 P1 复刻）。
 
 ## 5. 过程事故诚实档（含撤回）
 

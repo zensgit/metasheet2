@@ -16,6 +16,10 @@ import {
   down as hardenedLedgerDown,
   up as hardenedLedgerUp,
 } from '../../src/db/migrations/zzzz20260728100000_harden_directory_deprovision_ledger'
+import {
+  down as grantRowCreatedDown,
+  up as grantRowCreatedUp,
+} from '../../src/db/migrations/zzzz20260808090000_deprovision_effect_grant_row_created'
 
 const dbUrl = process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -157,6 +161,77 @@ describeDb('directory deprovision ledger hardening (real DB, isolated schema)', 
     `.execute(db)
     return event.rows[0]!.id
   }
+
+  // Rev 4.4 (closeout review, 2026-08-08): the deny-row CREATION evidence column. Shape is
+  // pinned by a CHECK (creation only on grant_changed with before/after both FALSE), the flag
+  // itself is immutable, and down() refuses to orphan existing creation evidence.
+  it('Rev 4.4: grant_row_created is shape-checked, immutable, and down() refuses to drop evidence', async () => {
+    await hardenedLedgerUp(db)
+    await grantRowCreatedUp(db)
+
+    expect(await columnDataType('directory_deprovision_effects', 'grant_row_created')).toBe('boolean')
+    expect(
+      await constraintDefinition('directory_deprovision_effects', 'ddfx_grant_row_created_scope_check'),
+    ).toMatch(/grant_changed/)
+
+    const a = await seedAuthority()
+    const eventId = await insertValidEvent(a)
+
+    // CHECK probe 1: creation flag on a non-grant effect type is rejected.
+    await expect(
+      sql`
+      INSERT INTO directory_deprovision_effects (
+        event_id, local_user_id, org_id, effect_type, before_active,
+        after_active, grant_row_created, access_generation_at_apply, status
+      ) VALUES (
+        ${eventId}, ${a.userId}, ${a.orgId}, 'membership_changed',
+        TRUE, FALSE, TRUE, 1, 'applied'
+      )
+    `.execute(db),
+    ).rejects.toThrow(/ddfx_grant_row_created_scope_check/)
+
+    // CHECK probe 2: a creation effect claiming something was enabled is a contradiction.
+    await expect(
+      sql`
+      INSERT INTO directory_deprovision_effects (
+        event_id, local_user_id, org_id, effect_type, before_active,
+        after_active, grant_row_created, access_generation_at_apply, status
+      ) VALUES (
+        ${eventId}, ${a.userId}, NULL, 'grant_changed',
+        TRUE, FALSE, TRUE, 1, 'applied'
+      )
+    `.execute(db),
+    ).rejects.toThrow(/ddfx_grant_row_created_scope_check/)
+
+    // Positive control: the authored creation shape is accepted…
+    await sql`
+      INSERT INTO directory_deprovision_effects (
+        event_id, local_user_id, org_id, effect_type, before_active,
+        after_active, grant_row_created, access_generation_at_apply, status
+      ) VALUES (
+        ${eventId}, ${a.userId}, NULL, 'grant_changed',
+        FALSE, FALSE, TRUE, 1, 'applied'
+      )
+    `.execute(db)
+
+    // …and the flag is evidence: flipping it after the fact is refused by the trigger.
+    await expect(
+      sql`
+      UPDATE directory_deprovision_effects
+         SET grant_row_created = FALSE
+       WHERE event_id = ${eventId} AND effect_type = 'grant_changed'
+    `.execute(db),
+    ).rejects.toThrow(/identity fields are immutable/)
+
+    // down() with creation evidence on file must refuse — dropping the column would make the
+    // deny row irreversible again (the exact P1 this revision closes).
+    await expect(grantRowCreatedDown(db)).rejects.toThrow(/refusing to drop grant_row_created/)
+
+    // With the evidence gone, down() succeeds and restores the pre-4.4 shape.
+    await sql`DELETE FROM directory_deprovision_effects WHERE grant_row_created = TRUE`.execute(db)
+    await grantRowCreatedDown(db)
+    expect(await columnExists('directory_deprovision_effects', 'grant_row_created')).toBe(false)
+  })
 
   it('upgrades the weak scaffold to the exact typed FK/check vocabulary', async () => {
     await hardenedLedgerUp(db)

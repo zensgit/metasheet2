@@ -58,6 +58,7 @@ export type DirectoryDeprovisionCandidateSnapshot = {
   orgCandidacyClear: boolean
   globallyClear: boolean
   dingtalkGrantEnabled: boolean
+  dingtalkGrantRowExists: boolean
 }
 
 export type ApplyDeprovisionCandidateResult = {
@@ -84,6 +85,7 @@ type CandidateStateRow = {
   org_candidacy_clear: boolean
   globally_clear: boolean
   dingtalk_grant_enabled: boolean
+  dingtalk_grant_row_exists: boolean
 }
 
 function hasEffect(
@@ -195,7 +197,13 @@ async function loadCandidateState(
           WHERE grant_row.provider = 'dingtalk'
             AND grant_row.local_user_id = candidate_user.id
           LIMIT 1
-       ), FALSE) AS dingtalk_grant_enabled
+       ), FALSE) AS dingtalk_grant_enabled,
+       EXISTS (
+         SELECT 1
+           FROM user_external_auth_grants grant_presence
+          WHERE grant_presence.provider = 'dingtalk'
+            AND grant_presence.local_user_id = candidate_user.id
+       ) AS dingtalk_grant_row_exists
      FROM users candidate_user
      WHERE candidate_user.id = $1::text`,
     [
@@ -241,6 +249,7 @@ export async function planDirectoryDeprovisionCandidate(
     orgCandidacyClear: state.org_candidacy_clear,
     globallyClear: state.globally_clear,
     dingtalkGrantEnabled: state.dingtalk_grant_enabled,
+    dingtalkGrantRowExists: state.dingtalk_grant_row_exists,
   }
   return {
     snapshot,
@@ -253,6 +262,7 @@ export async function planDirectoryDeprovisionCandidate(
       orgMembershipActive:
         snapshot.orgMembershipActive && snapshot.orgCandidacyClear,
       dingtalkGrantEnabled: snapshot.dingtalkGrantEnabled,
+      dingtalkGrantRowExists: snapshot.dingtalkGrantRowExists,
       globallyClear: snapshot.globallyClear,
     }),
   }
@@ -269,8 +279,9 @@ async function writeEffects(
     await client.query(
       `INSERT INTO directory_deprovision_effects (
          event_id, local_user_id, org_id, effect_type,
-         before_active, after_active, access_generation_at_apply, status
-       ) VALUES ($1::uuid, $2::text, $3::text, $4::text, $5, $6, $7, 'applied')`,
+         before_active, after_active, grant_row_created,
+         access_generation_at_apply, status
+       ) VALUES ($1::uuid, $2::text, $3::text, $4::text, $5, $6, $7, $8, 'applied')`,
       [
         eventId,
         localUserId,
@@ -278,6 +289,7 @@ async function writeEffects(
         effect.type,
         effect.beforeActive,
         effect.afterActive,
+        effect.grantRowCreated === true,
         generation,
       ],
     )
@@ -324,6 +336,7 @@ export async function applyDirectoryDeprovisionCandidate(
     orgMembershipActive:
       state.org_membership_active && state.org_candidacy_clear,
     dingtalkGrantEnabled: state.dingtalk_grant_enabled,
+    dingtalkGrantRowExists: state.dingtalk_grant_row_exists,
     globallyClear: state.globally_clear,
   })
   const currentGeneration = Number(state.access_generation)
@@ -400,23 +413,42 @@ export async function applyDirectoryDeprovisionCandidate(
     }
   }
 
-  // The bookkeeping upsert is deliberately UNCONDITIONAL for a globally-clear candidate, not
-  // gated on the grant effect: since OPS-01 the departed person's row shape has been "an
-  // explicit disabled grant", whether or not a grant ever existed (the orchestration suite pins
-  // exactly this). Writing a fresh enabled=FALSE row for someone who never had a grant takes
-  // nothing away from them — so `grant_changed` (the LEDGER effect) stays gated on the
-  // pre-locked "was actually enabled" read; only the row parity is unconditional.
-  if (state.globally_clear) {
-    await client.query(
-      `INSERT INTO user_external_auth_grants (
-         provider, local_user_id, enabled, granted_by, created_at, updated_at
-       ) VALUES ('dingtalk', $1::text, FALSE, 'system:directory-deprovision', NOW(), NOW())
-       ON CONFLICT (provider, local_user_id)
-       DO UPDATE SET enabled = FALSE,
-                     granted_by = EXCLUDED.granted_by,
-                     updated_at = NOW()`,
-      [input.localUserId],
-    )
+  // Rev 4.4: grant-table writes are purely EFFECT-DRIVEN — every mutation of
+  // user_external_auth_grants corresponds 1:1 to a grant_changed effect row, so restore can
+  // reverse it. (The prior OPS-01 shape wrote an unconditional disabled row for every
+  // globally-clear candidate outside the ledger; a rehired never-granted person was then
+  // permanently blocked from OAuth with no evidence to reverse — closeout review P1. The deny
+  // mark itself is unchanged: it still blocks ensureGrant's creation-only auto-grant.)
+  const grantEffect = plan.effects.find((effect) => effect.type === 'grant_changed')
+  if (grantEffect) {
+    if (grantEffect.grantRowCreated === true) {
+      // Deny-row CREATION for a person with no existing row. Plain INSERT, no ON CONFLICT:
+      // the per-user lock plus the same-transaction EXISTS read guarantee absence, so a
+      // conflict means the invariant broke — abort rather than write unevidenced state.
+      await client.query(
+        `INSERT INTO user_external_auth_grants (
+           provider, local_user_id, enabled, granted_by, created_at, updated_at
+         ) VALUES ('dingtalk', $1::text, FALSE, 'system:directory-deprovision', NOW(), NOW())`,
+        [input.localUserId],
+      )
+    } else {
+      const flipped = await client.query(
+        `UPDATE user_external_auth_grants
+            SET enabled = FALSE,
+                granted_by = 'system:directory-deprovision',
+                updated_at = NOW()
+          WHERE provider = 'dingtalk'
+            AND local_user_id = $1::text
+            AND enabled = TRUE
+          RETURNING local_user_id`,
+        [input.localUserId],
+      )
+      if (!flipped.rows[0]) {
+        throw new Error(
+          'directory deprovision grant changed after planning; transaction aborted',
+        )
+      }
+    }
   }
 
   await client.query(

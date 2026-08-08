@@ -92,6 +92,8 @@ export type ActivateErrorCode =
   | 'ACTIVATE_LINK_MISMATCH'
   /** SSO-only: account/integration provider is not DingTalk, or corp_id is inconsistent. */
   | 'ACTIVATE_SOURCE_INELIGIBLE'
+  /** Caller-supplied orgId disagrees with the org derived from the directory-source integration. */
+  | 'ACTIVATE_ORG_MISMATCH'
 
 function throwCoded(message: string, code: ActivateErrorCode): never {
   const err = new Error(message)
@@ -140,17 +142,29 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       )
     }
 
-    if (input.mode === 'sso' || input.directoryAccountId) {
-      const sourceOrgId = await assertDirectorySourceActiveForActivate(client, {
-        userId,
-        directoryAccountId: input.directoryAccountId ?? null,
-        requireDingTalkSso: input.mode === 'sso',
-        expectedDingTalkIdentity: input.expectedDingTalkIdentity ?? null,
-      })
-      if (input.mode === 'sso') {
-        membershipOrgId = sourceOrgId
-      }
+    // Closeout review P1: EVERY activation mode resolves and validates the authoritative
+    // directory source — the gated form (`sso || directoryAccountId`) let temp_password /
+    // admin_no_password activate an offboarded or source-dead pending user by simply not
+    // mentioning the source, which the design lock forbids ("admin 激活同样不得对 inactive
+    // 目录源静默开通"). Pending users exist only via directory admission, so a pending user
+    // with no linked active source is a refusal (ACTIVATE_SOURCE_MISSING), not a pass.
+    //
+    // The membership org DERIVES from the source integration in every mode; a client-supplied
+    // orgId may only CONFIRM it. The gated form discarded the DB's org for non-SSO modes and
+    // trusted the client's — "org A 的目录账号 + org B 的 orgId" wrote a cross-org membership.
+    const sourceOrgId = await assertDirectorySourceActiveForActivate(client, {
+      userId,
+      directoryAccountId: input.directoryAccountId ?? null,
+      requireDingTalkSso: input.mode === 'sso',
+      expectedDingTalkIdentity: input.expectedDingTalkIdentity ?? null,
+    })
+    if (input.orgId && input.orgId !== sourceOrgId) {
+      throwCoded(
+        'orgId does not match the directory source integration for this user',
+        'ACTIVATE_ORG_MISMATCH',
+      )
     }
+    membershipOrgId = sourceOrgId
 
     const updated = await client.query(
       `UPDATE users

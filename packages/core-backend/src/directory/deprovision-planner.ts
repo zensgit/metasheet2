@@ -80,6 +80,13 @@ export function selectLeastDestructiveDirectoryDeprovisionPolicy(
 }
 
 export type PlannedEffect = {
+  /**
+   * Rev 4.4: TRUE when this grant_changed effect records the CREATION of an explicit disabled
+   * grant row for a person who had NO row (the OPS-01 deny mark). Reversal DELETES the row
+   * (restoring absence) instead of flipping enabled — closeout review P1: an unevidenced deny
+   * row left a rehired never-granted person permanently locked out of OAuth.
+   */
+  grantRowCreated?: boolean
   type: DeprovisionEffectType
   orgId?: string | null
   beforeActive: boolean
@@ -97,6 +104,8 @@ export type DirectoryDeprovisionPlanInput = {
   orgMembershipActive: boolean
   /** Whether DingTalk grant is currently enabled. */
   dingtalkGrantEnabled: boolean
+  /** Whether ANY grant row exists (enabled or not) — drives the Rev 4.4 creation effect. */
+  dingtalkGrantRowExists: boolean
   /**
    * No other active linked directory account exists anywhere. This gates the
    * grant/user effects only; the source-org membership is independently scoped.
@@ -155,6 +164,18 @@ export function planDirectoryDeprovision(input: DirectoryDeprovisionPlanInput): 
         beforeActive: true,
         afterActive: false,
       })
+    } else if (!input.dingtalkGrantRowExists) {
+      // Rev 4.4: the OPS-01 deny mark IS an access-graph change (it blocks ensureGrant's
+      // creation-only auto-grant on the person's next OAuth attempt) and therefore must be
+      // EVIDENCED, or restore cannot undo it. before/after both false: nothing was enabled at
+      // any point — the change is the row's existence, carried by grantRowCreated.
+      effects.push({
+        type: 'grant_changed',
+        orgId: null,
+        beforeActive: false,
+        afterActive: false,
+        grantRowCreated: true,
+      })
     }
     if (input.policy === 'mark_inactive' && input.isActive) {
       effects.push({
@@ -166,8 +187,9 @@ export function planDirectoryDeprovision(input: DirectoryDeprovisionPlanInput): 
     }
   }
 
-  // Drop no-ops (before==after) — prospective truth.
-  const meaningful = effects.filter((e) => e.beforeActive !== e.afterActive)
+  // Drop no-ops (before==after) — prospective truth. A Rev 4.4 creation effect is NOT a no-op
+  // even though both booleans are false: its change is the row's existence.
+  const meaningful = effects.filter((e) => e.beforeActive !== e.afterActive || e.grantRowCreated === true)
 
   return {
     localUserId: input.localUserId,
