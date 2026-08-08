@@ -34,6 +34,15 @@ import express from 'express'
 import { Pool } from 'pg'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+// #4814 P3-5: imported from the module under test rather than reimplemented
+// a THIRD time here — the aggregate already reimplements the canonical
+// producer-key builder from plugins/plugin-attendance/index.cjs once
+// (documented equivalence argument in that file's header); a second,
+// independent reimplementation in this fidelity test would drift silently
+// alongside the aggregate's copy if the canonical builder ever changed,
+// since toStrictEqual would just keep comparing two copies that changed
+// together.
+import { buildFixedScheduleProducerKey } from '../../src/attendance/w6-group-effective-policy-aggregate'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 if (dbUrl) process.env.DATABASE_URL = dbUrl
@@ -421,8 +430,7 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       }
       const directFser = fserLib.createAttendanceGroupFixedScheduleEffectivenessService({
         HttpError: TestHttpError,
-        buildAttendanceGroupFixedScheduleProducerKey: (input) =>
-          ['attendance_group_fixed_schedule', input.groupId, input.shiftId, input.startDate, input.endDate ?? 'null'].join(':'),
+        buildAttendanceGroupFixedScheduleProducerKey: buildFixedScheduleProducerKey,
         now: () => frozenNow,
       })
       const dbAdapter = { query: async (sql: string, params?: unknown[]) => (await pool.query(sql, params)).rows }
