@@ -58,6 +58,12 @@ describe('mapActivateError (activate endpoint error surface)', () => {
       status: 409,
       message: 'No linked active directory account for activation',
     },
+    // Closeout review P1 (2026-08-08): org derives from the source integration in EVERY mode;
+    // a client orgId only confirms. 409 like the other configuration conflicts.
+    ACTIVATE_ORG_MISMATCH: {
+      status: 409,
+      message: 'orgId does not match the directory source integration for this user',
+    },
     ACTIVATE_SOURCE_INACTIVE: {
       status: 409,
       message: 'Directory account is inactive; cannot activate',
@@ -98,7 +104,7 @@ describe('mapActivateError (activate endpoint error surface)', () => {
 
   it('asserts the RULED transcription covers exactly the policy table (no silent drift)', () => {
     expect(Object.keys(RULED).sort()).toEqual(Object.keys(ACTIVATE_ERROR_POLICY).sort())
-    expect(Object.keys(RULED)).toHaveLength(12)
+    expect(Object.keys(RULED)).toHaveLength(13)
   })
 
   it('collapses an unauthored but ACTIVATE_-shaped code — the fail-open the owner reproduced', () => {

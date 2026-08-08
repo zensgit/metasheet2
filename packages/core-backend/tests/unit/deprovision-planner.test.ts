@@ -83,7 +83,10 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
     ])
   })
 
-  it('zero-effect when already inactive with no orgs/grant', () => {
+  // Rev 4.4 (closeout review P1): a globally-clear candidate with NO grant row is no longer
+  // zero-effect — the OPS-01 deny mark is an access-graph change (it blocks ensureGrant's
+  // creation-only auto-grant) and must be EVIDENCED so restore can delete the row again.
+  it('already inactive with no orgs and NO grant row: plans the evidenced deny-row creation', () => {
     const plan = planDirectoryDeprovision({
       localUserId: 'u3',
       policy: 'mark_inactive',
@@ -92,7 +95,48 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       orgId: 'org-a',
       orgMembershipActive: false,
       dingtalkGrantEnabled: false,
+      dingtalkGrantRowExists: false,
       globallyClear: true,
+    })
+    expect(plan.effects).toEqual([
+      {
+        type: 'grant_changed',
+        orgId: null,
+        beforeActive: false,
+        afterActive: false,
+        grantRowCreated: true,
+      },
+    ])
+    expect(plan.skipReason).toBeNull()
+  })
+
+  it('zero-effect when already inactive with no orgs and the deny row already present', () => {
+    const plan = planDirectoryDeprovision({
+      localUserId: 'u3',
+      policy: 'mark_inactive',
+      activationStatus: 'activated',
+      isActive: false,
+      orgId: 'org-a',
+      orgMembershipActive: false,
+      dingtalkGrantEnabled: false,
+      dingtalkGrantRowExists: true,
+      globallyClear: true,
+    })
+    expect(plan.effects).toEqual([])
+    expect(plan.skipReason).toBe('zero_effect')
+  })
+
+  it('NOT globally clear never plans the deny-row creation (still employed elsewhere)', () => {
+    const plan = planDirectoryDeprovision({
+      localUserId: 'u3',
+      policy: 'mark_inactive',
+      activationStatus: 'activated',
+      isActive: false,
+      orgId: 'org-a',
+      orgMembershipActive: false,
+      dingtalkGrantEnabled: false,
+      dingtalkGrantRowExists: false,
+      globallyClear: false,
     })
     expect(plan.effects).toEqual([])
     expect(plan.skipReason).toBe('zero_effect')

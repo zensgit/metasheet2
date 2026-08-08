@@ -4051,6 +4051,55 @@ describe('admin-users routes', () => {
     expect(activateMocks.activatePendingUser).not.toHaveBeenCalled()
   })
 
+  // Closeout review P1: the bulk route inherits the derived-org rule through the SAME
+  // activatePendingUser + mapActivateError pair as the single route — a steered orgId fails
+  // per-item as a safe 409 while the rest of the batch proceeds.
+  it('POST bulk activate surfaces ACTIVATE_ORG_MISMATCH per-item without killing the batch', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    activateMocks.activatePendingUser
+      .mockRejectedValueOnce(Object.assign(
+        new Error('org drift detail: integration org_id org-A DETAIL: secret'),
+        { code: 'ACTIVATE_ORG_MISMATCH' },
+      ))
+      .mockResolvedValueOnce({
+        userId: 'pending-user-2',
+        activationStatus: 'activated',
+        isActive: true,
+        localPasswordSet: false,
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/activate/bulk', {
+      body: {
+        items: [
+          { userId: 'pending-user-1', mode: 'admin_no_password', orgId: 'org-B' },
+          { userId: 'pending-user-2', mode: 'admin_no_password' },
+        ],
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        successCount: 1,
+        failureCount: 1,
+        items: [
+          {
+            userId: 'pending-user-1',
+            ok: false,
+            error: {
+              status: 409,
+              code: 'ACTIVATE_ORG_MISMATCH',
+              message: 'orgId does not match the directory source integration for this user',
+            },
+          },
+          { userId: 'pending-user-2', ok: true },
+        ],
+      },
+    })
+    expect(JSON.stringify(response.body)).not.toMatch(/secret|org drift detail/i)
+  })
+
   it('POST bulk activate keeps item transactions independent and returns only safe failures', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     activateMocks.activatePendingUser

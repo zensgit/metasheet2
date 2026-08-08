@@ -1841,6 +1841,13 @@ const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; 
     status: 409,
     message: 'Directory source is not eligible for DingTalk SSO activation',
   },
+  // 409: membership org is DERIVED from the directory-source integration for every activation
+  // mode; a caller-supplied orgId is only ever match-validated, never trusted (closeout review
+  // P1 — non-SSO admin activation previously wrote the client's orgId unchecked).
+  ACTIVATE_ORG_MISMATCH: {
+    status: 409,
+    message: 'orgId does not match the directory source integration for this user',
+  },
 }
 
 type ActivatePolicyRow = Readonly<{ status: number; message: string }>

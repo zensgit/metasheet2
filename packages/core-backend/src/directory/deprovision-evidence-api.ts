@@ -194,7 +194,8 @@ export async function listDeprovisionEvents(options: {
 export async function listDeprovisionEffects(eventId: string) {
   const result = await query(
     `SELECT id, event_id, local_user_id, org_id, effect_type,
-            before_active, after_active, access_generation_at_apply,
+            before_active, after_active, grant_row_created,
+            access_generation_at_apply,
             status, reversed_at, created_at, updated_at
        FROM directory_deprovision_effects
       WHERE event_id = $1
@@ -218,6 +219,7 @@ type RestoreEffectRow = {
   after_active: boolean
   before_active: boolean
   effect_type: string
+  grant_row_created: boolean
   id: string
   org_id: string | null
   status: string
@@ -328,6 +330,7 @@ export async function restoreDeprovisionEvent(options: {
               org_id,
               before_active,
               after_active,
+              grant_row_created,
               access_generation_at_apply,
               status
          FROM directory_deprovision_effects
@@ -399,6 +402,22 @@ export async function restoreDeprovisionEvent(options: {
         )
         currentMatchesAfter[effect.id] =
           (membership.rows[0]?.is_active === true) === effect.after_active
+      } else if (
+        effect.effect_type === 'grant_changed'
+        && effect.grant_row_created === true
+      ) {
+        // Rev 4.4 creation effect: after-state is "row EXISTS and is disabled" — presence is
+        // the change, so a missing row is drift, not a match.
+        const grant = await client.query(
+          `SELECT enabled
+             FROM user_external_auth_grants
+            WHERE local_user_id = $1::text
+              AND provider = 'dingtalk'
+            LIMIT 1`,
+          [event.local_user_id],
+        )
+        currentMatchesAfter[effect.id] =
+          grant.rows[0] !== undefined && grant.rows[0].enabled !== true
       } else if (effect.effect_type === 'grant_changed') {
         const grant = await client.query(
           `SELECT enabled
@@ -478,6 +497,27 @@ export async function restoreDeprovisionEvent(options: {
           throw restoreError(
             'DRIFT_CONFLICT',
             `membership row missing or changed for org ${effect.org_id}`,
+          )
+        }
+      } else if (
+        effect.effect_type === 'grant_changed'
+        && effect.grant_row_created === true
+      ) {
+        // Rev 4.4 reversal of a deny-row CREATION: restore ABSENCE by deleting the row. The
+        // enabled = FALSE predicate is the drift gate — if the row was re-enabled or replaced
+        // since apply, deleting it would destroy state this ledger never created.
+        const removed = await client.query(
+          `DELETE FROM user_external_auth_grants
+            WHERE provider = 'dingtalk'
+              AND local_user_id = $1::text
+              AND enabled = FALSE
+            RETURNING local_user_id`,
+          [event.local_user_id],
+        )
+        if (!removed.rows[0]) {
+          throw restoreError(
+            'DRIFT_CONFLICT',
+            'DingTalk deny grant row missing or changed before restore',
           )
         }
       } else if (effect.effect_type === 'grant_changed') {

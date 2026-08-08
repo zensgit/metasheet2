@@ -18,6 +18,26 @@ vi.mock('../../src/auth/login-alias-service', () => ({
 
 import { activatePendingUser, isActivateMode } from '../../src/auth/user-activate'
 
+/**
+ * Closeout review P1 (2026-08-08): EVERY activation mode now resolves the authoritative
+ * directory source, so the ordinary positive controls carry a linked active source row and the
+ * membership org DERIVES from `integration_org_id` — never from the caller.
+ */
+const LINKED_ACTIVE_SOURCE = {
+  id: 'da-1',
+  account_active: true,
+  integration_status: 'active',
+  local_user_id: 'u1',
+  link_status: 'linked',
+  account_provider: 'dingtalk',
+  integration_provider: 'dingtalk',
+  account_corp_id: 'corp-1',
+  integration_corp_id: 'corp-1',
+  account_open_id: null,
+  account_union_id: null,
+  integration_org_id: 'org-src',
+}
+
 describe('activatePendingUser (T3)', () => {
   beforeEach(async () => {
     pgMocks.query.mockReset()
@@ -54,7 +74,9 @@ describe('activatePendingUser (T3)', () => {
           is_active: false,
         }],
       }) // FOR UPDATE
+      .mockResolvedValueOnce({ rows: [LINKED_ACTIVE_SOURCE] }) // directory source resolution
       .mockResolvedValueOnce({ rows: [{ id: 'u1' }] }) // UPDATE users RETURNING
+      .mockResolvedValueOnce({ rows: [] }) // user_orgs membership (derived org)
       .mockResolvedValueOnce({ rows: [] }) // supersede effects
       .mockResolvedValueOnce({ rows: [] }) // supersede events
       .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] }) // generation
@@ -78,6 +100,10 @@ describe('activatePendingUser (T3)', () => {
       String(call[0]).includes('UPDATE directory_deprovision_events'))).toBe(true)
     expect(pgMocks.query.mock.calls.some((call) =>
       String(call[0]).includes('access_generation = COALESCE'))).toBe(true)
+    // Membership org comes from the SOURCE INTEGRATION (no orgId was supplied at all).
+    const membershipWrite = pgMocks.query.mock.calls.find((call) =>
+      String(call[0]).includes('INSERT INTO user_orgs'))
+    expect(membershipWrite?.[1]).toEqual(['u1', 'org-src'])
     // Alias claims must run inside the transaction client
     expect(claimLoginAlias).toHaveBeenCalled()
     expect(vi.mocked(claimLoginAlias).mock.calls[0]?.[0]).toMatchObject({
@@ -103,7 +129,10 @@ describe('activatePendingUser (T3)', () => {
         activation_status: 'pending_activation',
         is_active: false,
       }],
-    }).mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+    })
+      .mockResolvedValueOnce({ rows: [LINKED_ACTIVE_SOURCE] })
+      .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
 
     let thrown: unknown
     try {
@@ -134,7 +163,10 @@ describe('activatePendingUser (T3)', () => {
         activation_status: 'pending_activation',
         is_active: false,
       }],
-    }).mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+    })
+      .mockResolvedValueOnce({ rows: [LINKED_ACTIVE_SOURCE] })
+      .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
 
     await expect(
       activatePendingUser({ userId: 'u1', mode: 'temp_password', temporaryPassword: 'TempPass9A!' }),
@@ -379,10 +411,145 @@ describe('activatePendingUser (T3)', () => {
           is_active: false,
         }],
       })
+      .mockResolvedValueOnce({ rows: [LINKED_ACTIVE_SOURCE] })
       .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
 
     await expect(
       activatePendingUser({ userId: 'u1', mode: 'admin_no_password' }),
     ).rejects.toMatchObject({ code: 'ACTIVATE_ALIAS_REQUIRED' })
+  })
+
+  // Closeout review P1 pin-flips: the suite previously pinned "sourceless temp activation
+  // succeeds" as its positive control. Pending users exist only via directory admission, and
+  // the admission lock forbids activating against a dead or missing source in ANY mode — so
+  // sourceless is now a REFUSAL, before any user write.
+  it('refuses sourceless temp_password activation (ACTIVATE_SOURCE_MISSING), writing nothing', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: 'alice',
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] }) // no linked source at all
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'temp_password', temporaryPassword: 'TempPass9A!' }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_MISSING' })
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE users'))).toBe(false)
+  })
+
+  it('refuses admin_no_password activation when the only source is inactive', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ ...LINKED_ACTIVE_SOURCE, account_active: false }],
+      })
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password' }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INACTIVE' })
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE users'))).toBe(false)
+  })
+
+  it('rejects a client orgId that disagrees with the derived source org (ACTIVATE_ORG_MISMATCH)', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [LINKED_ACTIVE_SOURCE] }) // integration_org_id: 'org-src'
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password', orgId: 'org-other' }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_ORG_MISMATCH' })
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE users'))).toBe(false)
+  })
+
+  it('accepts a client orgId that CONFIRMS the derived org, and derives the membership write', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [LINKED_ACTIVE_SOURCE] })
+      .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password', orgId: 'org-src' }),
+    ).resolves.toMatchObject({ activationStatus: 'activated' })
+    const membershipWrite = pgMocks.query.mock.calls.find((call) =>
+      String(call[0]).includes('INSERT INTO user_orgs'))
+    expect(membershipWrite?.[1]).toEqual(['u1', 'org-src'])
+  })
+
+  // Dual-org: the person's ACTIVE source lives in org-2; a caller pointing at org-1 (their
+  // other, inactive badge's org — or any org at all) must not be able to steer the membership.
+  it('dual-org: derives the ACTIVE source org and refuses a caller steering to the other org', async () => {
+    const dualRows = [
+      {
+        ...LINKED_ACTIVE_SOURCE,
+        id: 'da-1',
+        account_active: false,
+        integration_org_id: 'org-1',
+      },
+      {
+        ...LINKED_ACTIVE_SOURCE,
+        id: 'da-2',
+        account_active: true,
+        integration_org_id: 'org-2',
+      },
+    ]
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: dualRows })
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password', orgId: 'org-1' }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_ORG_MISMATCH' })
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE users'))).toBe(false)
   })
 })

@@ -267,6 +267,10 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
       [USER],
     )
 
+    // Closeout review P1: every activation mode now requires the authoritative linked active
+    // source, and the membership org DERIVES from it (ORG here — the caller's orgId confirms).
+    await seedActivationSource({ linkedUserId: USER })
+
     // Positive control: nothing has granted anything yet.
     expect(await grantEnabled()).toBeUndefined()
 
@@ -975,6 +979,9 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
        VALUES ($1, 'pending-b@example.com', 'Pending B', 'Shared_Login', 'hash-b', FALSE, 'pending_activation', FALSE)`,
       [USER_B],
     )
+
+    // Closeout review P1: activation requires the linked active source in every mode.
+    await seedActivationSource({ linkedUserId: USER_B })
 
     await expect(
       activatePendingUser({
