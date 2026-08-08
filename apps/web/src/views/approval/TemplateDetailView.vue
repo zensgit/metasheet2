@@ -475,10 +475,25 @@
                 />
               </div>
               <template v-if="versionDiff">
-                <div class="template-detail__version-diff-summary">
+                <div class="template-detail__version-diff-summary" data-testid="template-version-read-summary">
                   <span>表单字段 {{ versionDiff.fieldChanges }}</span>
                   <span>流程节点 {{ versionDiff.nodeChanges }}</span>
                   <span>连线 {{ versionDiff.edgeChanges }}</span>
+                  <p
+                    v-if="versionReadSummary"
+                    class="template-detail__version-read-summary-line"
+                    data-testid="template-version-read-summary-line"
+                  >
+                    {{ versionReadSummary.lines[0] }}
+                  </p>
+                  <p
+                    v-if="versionReadSummary?.overlay"
+                    class="template-detail__version-read-summary-overlay"
+                    data-testid="template-version-read-summary-overlay"
+                  >
+                    画布叠加：节点 +{{ versionReadSummary.overlay.addedNodes }}/−{{ versionReadSummary.overlay.removedNodes }}/~{{ versionReadSummary.overlay.changedNodes }}
+                    · 连线 +{{ versionReadSummary.overlay.addedEdges }}/−{{ versionReadSummary.overlay.removedEdges }}/~{{ versionReadSummary.overlay.changedEdges }}
+                  </p>
                 </div>
                 <el-segmented
                   v-if="versionDiff.totalChanges > 0"
@@ -632,6 +647,7 @@ import {
   type TemplateVersionDiff,
 } from '../../approvals/templateVersionDiff'
 import { buildVersionGraphOverlay } from '../../approvals/versionGraphOverlay'
+import { buildApprovalVersionReadSummary } from '../../approvals/approvalVersionReadSummary'
 import {
   computeLayout,
   GRAPH_LAYOUT_NODE_HEIGHT,
@@ -1001,6 +1017,11 @@ const versionOverlay = computed(() => {
     versionDiff.value,
   )
 })
+/** D8-b thin: business-facing summary over the same diff + overlay already on this page. */
+const versionReadSummary = computed(() => {
+  if (!versionDiff.value) return null
+  return buildApprovalVersionReadSummary(versionDiff.value, versionOverlay.value)
+})
 const versionOverlayLayout = computed(() => versionOverlay.value ? computeLayout(versionOverlay.value.graph) : null)
 const VERSION_OVERLAY_NODE_W = GRAPH_LAYOUT_NODE_WIDTH
 const VERSION_OVERLAY_NODE_H = GRAPH_LAYOUT_NODE_HEIGHT
@@ -1331,10 +1352,20 @@ onBeforeUnmount(() => {
 }
 
 .template-detail__version-diff-summary {
-  gap: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px 20px;
   margin: 12px 0;
   color: var(--el-text-color-regular);
   font-size: 13px;
+}
+.template-detail__version-read-summary-line,
+.template-detail__version-read-summary-overlay {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 
 .template-detail__version-change-list {

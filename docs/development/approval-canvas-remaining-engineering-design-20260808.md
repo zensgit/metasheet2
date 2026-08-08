@@ -41,7 +41,7 @@ Agents may implement, test, commit, push to the tracking branch, and update the 
 | Final-eligibility MD + gate workflow | **DONE** | docs + `.grok/workflows/approval-canvas-final-gate.rhai` |
 | G5-C S1–S12 product-path suite | **DONE** | `approval-g5c-authoring-scenarios.test.ts` (CI-wired) |
 | CI: approval-web-guard / web-tests green | **GREEN on a25e65b** (fix push); re-running on head after D8-b thin | required canaries include history/G5-C/version-read-summary |
-| Version dual-canvas shell (full D8-b) | **PARTIAL** | pure `approvalVersionReadSummary` + overlay/diff helpers; no editor dual-canvas chrome |
+| Version dual-canvas shell (full D8-b) | **PARTIAL→UI wired** | pure summary + TemplateDetailView read summary lines/overlay tallies; full dual-canvas product shell not claimed |
 | Extract `ApprovalFlowCanvas` / inspector modules | **DONE** | `ApprovalFlowCanvas.vue` + `ApprovalCanvasNodeInspector.vue`; draft/history remain in parent |
 | D3 Vue Flow/ELK | **BLOCKED (O3)** | do not start |
 
