@@ -1,8 +1,8 @@
 # Approval Canvas Remaining Engineering — Design + PR Plan (2026-08-08)
 
-**Status:** AUTHORITATIVE FOR AUTONOMOUS EXECUTION  
-**Tracking PR:** https://github.com/zensgit/metasheet2/pull/4806 (draft)  
-**Head family:** `claude/approval-canvas-final-engineering-20260808`  
+**Status:** ENGINEERING CLOSED ON MAIN (owner product FINAL gates remain)  
+**Tracking PR:** https://github.com/zensgit/metasheet2/pull/4806 (**MERGED** squash `323d7e1afe`, 2026-08-08T04:20:48Z)  
+**Landed head family:** `claude/approval-canvas-final-engineering-20260808` → `main`  
 **Authority locks:** D0 interaction lock (written contract; G0 owner ratify still open), canvas V2 plan D-items, final-eligibility MDs  
 **Flags:** remain default OFF. No production enablement. No real-tenant UAT in this plan.
 
@@ -23,26 +23,26 @@ Close residual **product engineering** against the written D0 lock without mid-s
 - Number FWB unlock  
 - Optional D7 runtimes  
 - Production flag ON / real-tenant UAT execution  
-- Merge of #4806 without green required checks  
+- Product FINAL claim without G0 + real-tenant UAT + staged flags  
 
 ## Autonomy policy
 
-Agents may implement, test, commit, push to the tracking branch, and update the draft PR. Agents **must not** merge to main, flip env flags, or claim product FINAL. Owner gates are recorded as blockers only.
+Engineering stack for this line is **landed on main** via #4806. Further agent work is limited to honest doc/gate maintenance, regressions, and **new** OPEN design nodes only. Agents **must not** flip env flags or claim product FINAL. Owner gates (G0 / UAT / staged flags) remain blockers only.
 
-## Ledger vs #4806
+## Ledger vs #4806 (merged)
 
-| Item | Status on #4806 | Notes |
+| Item | Status | Notes |
 |---|---|---|
-| Session history + undo/redo + live graph + topology merge | **DONE** | `approvalAuthoringHistory.ts` + view wiring + tests |
-| Canvas-first default under flag | **DONE** | `canvasViewMode = 'canvas'` |
-| Linear promote into preservedGraph | **DONE** | flow section entry |
-| Edge `+` insert + retire node clusters | **DONE** | inspector topology keeps load-bearing testids |
-| Form field palette (D6-f2 slice) | **DONE** | `approval-field-palette` |
-| Final-eligibility MD + gate workflow | **DONE** | docs + `.grok/workflows/approval-canvas-final-gate.rhai` |
-| G5-C S1–S12 product-path suite | **DONE** | `approval-g5c-authoring-scenarios.test.ts` (CI-wired) |
-| CI: approval-web-guard / web-tests green | **GREEN** (a25e65 + 0bfaed head re-runs) | canaries: history/G5-C/version-read-summary; PR4 shells in path filter |
+| Session history + undo/redo + live graph + topology merge | **DONE on main** | `approvalAuthoringHistory.ts` + view wiring + tests |
+| Canvas-first default under flag | **DONE on main** | `canvasViewMode = 'canvas'` |
+| Linear promote into preservedGraph | **DONE on main** | flow section entry |
+| Edge `+` insert + retire node clusters | **DONE on main** | inspector topology keeps load-bearing testids |
+| Form field palette (D6-f2 slice) | **DONE on main** | `approval-field-palette` |
+| Final-eligibility MD + gate workflow | **DONE on main** | docs + `.grok/workflows/approval-canvas-final-gate.rhai` |
+| G5-C S1–S12 product-path suite | **DONE on main** | `approval-g5c-authoring-scenarios.test.ts` (CI-wired) |
+| CI: approval-web-guard / web-tests green | **GREEN then MERGED** | squash `323d7e1afe` after required checks (incl. plugin `test` 18.x/20.x) |
 | Version dual-canvas shell (full D8-b) | **PARTIAL→UI wired** | pure summary + TemplateDetailView read summary lines/overlay tallies; full dual-canvas product shell not claimed |
-| Extract `ApprovalFlowCanvas` / inspector modules | **DONE** | `ApprovalFlowCanvas.vue` + `ApprovalCanvasNodeInspector.vue`; draft/history remain in parent |
+| Extract `ApprovalFlowCanvas` / inspector modules | **DONE on main** | `ApprovalFlowCanvas.vue` + `ApprovalCanvasNodeInspector.vue`; draft/history remain in parent |
 | D3 Vue Flow/ELK | **BLOCKED (O3)** | do not start |
 
 ## PR Plan (execute-plan ready)
@@ -93,20 +93,19 @@ Linearized remaining stack:
 (all engineering PRs 0–4 DONE on #4806)
 ```
 
-Optional follow-ups (not blocking ENGINEERING-READY):
+Optional follow-ups (not blocking ENGINEERING-READY; **not** product FINAL):
 
-- Wire `buildApprovalVersionReadSummary` into TemplateDetailView UI (display-only).  
+- Full dual-canvas version UX (editor-embedded) if product wants beyond TemplateDetailView summary.  
 - D3 Vue Flow/ELK after O3.  
-- Owner: G0 / UAT / staged flags / merge.  
+- Owner: G0 ratify, real-tenant UAT, staged flag enablement with observation.  
 
 - Suggested gate: `/workflow approval-canvas-final-gate`  
-- Suggested dry-run after new OPEN items only.  
+- Suggested dry-run only after new OPEN engineering items.  
 
 ## Verification
 
 - Web focused suites green (history, G5-C, inspector, form/canvas commands, approvalTemplateAuthoring, ui-foundation-style-guard).  
-- `approval-web-guard` + `web-tests` green on #4806.  
-- `vue-tsc --noEmit` pass.  
-- Flags default OFF unchanged.  
+- #4806 required checks green; squash-merged to `main` as `323d7e1afe`.  
+- Flags default OFF unchanged (`approvalCanvasV2: false`).  
 - Structural: edge insert testids; no `template-authoring__canvas-node-actions` on canvas; palette present; list topology retained.  
-- Workflow `approval-canvas-final-gate` reports `product_final: false` always; `engineering_ready` only when tests + flags + honest docs hold.
+- Workflow `approval-canvas-final-gate` reports `product_final: false` always; `engineering_ready` when tests + flags + honest docs hold.
