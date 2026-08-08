@@ -1,7 +1,7 @@
 # Attendance #4709 FSER-4 Member Projection Contract Amendment
 
 Date: 2026-08-04
-Status: **RATIFIED** (section 7 prerequisite slice only)
+Status: **RATIFIED / runtime HOLD** (section 7 prerequisite slice only)
 Issue: `#4709`
 Baseline: `origin/main` at
 `783eb72fe038083e21d896bc220c7afcaffaf88d`
@@ -26,9 +26,12 @@ authorize any earlier runtime action. Each of those remains a separate,
 un-granted owner act.
 
 **Status reconciliation note (2026-08-09):** this header previously read
-`PROPOSED / runtime HOLD`. That was in-repo status drift, not a pending
-decision — the owner record cited above predates this correction and is
-unchanged by it. This edit transcribes that existing record and confers no new
+`PROPOSED / runtime HOLD`. Only the `PROPOSED` half was in-repo status drift —
+the owner record cited above resolved `OD-4709-2=(a)` on 2026-08-05, before this
+correction, and is unchanged by it. **The runtime HOLD is not drift and is not
+lifted:** the only runtime this ratification authorizes is the section 7
+prerequisite in one Draft/HOLD PR, and FSER-4 runtime beyond that prerequisite
+stays held. This edit transcribes an existing record and confers no new
 authority; the linked owner comment is the authority, not this document and not
 the pull request carrying this edit. If any line here misstates that record, it
 must not merge.
