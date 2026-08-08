@@ -222,15 +222,33 @@
         <template #header>
           <div class="template-authoring__panel-header">
             <strong>表单字段</strong>
-            <el-button
-              size="small"
-              :disabled="readOnly"
-              data-testid="approval-template-add-field"
-              @click="addField"
-            >
-              <el-icon><Plus /></el-icon>
-              添加字段
-            </el-button>
+            <div class="template-authoring__form-toolbar">
+              <el-button
+                size="small"
+                :disabled="readOnly || !canUndoFormFieldHistory"
+                data-testid="approval-form-undo"
+                @click="onFormFieldUndo"
+              >
+                撤销
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="readOnly || !canRedoFormFieldHistory"
+                data-testid="approval-form-redo"
+                @click="onFormFieldRedo"
+              >
+                重做
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="readOnly"
+                data-testid="approval-template-add-field"
+                @click="addField"
+              >
+                <el-icon><Plus /></el-icon>
+                添加字段
+              </el-button>
+            </div>
           </div>
         </template>
 
@@ -1314,6 +1332,15 @@ import {
   undoAuthoringSession,
   type AuthoringSessionHistory,
 } from '../../approvals/approvalAuthoringHistory'
+import {
+  canRedoFormHistory,
+  canUndoFormHistory,
+  createFormAuthoringHistory,
+  pushFormSnapshot,
+  redoFormHistory,
+  undoFormHistory,
+  type FormAuthoringHistory,
+} from '../../approvals/approvalFormAuthoringHistory'
 import type { ApprovalCanvasSelection } from '../../approvals/approvalCanvasCommands'
 import {
   computeLayout,
@@ -1977,6 +2004,70 @@ const canvasAuthoringHistory = ref<AuthoringSessionHistory>(
 const canUndoCanvasHistory = computed(() => canUndoAuthoring(canvasAuthoringHistory.value))
 const canRedoCanvasHistory = computed(() => canRedoAuthoring(canvasAuthoringHistory.value))
 
+// ── Form field list session history (separate from canvas) ──
+// Structural mutations only (add/remove/reorder). Label/type in-place edits are not snapshotted.
+// Tip is aligned from live draft before each structural push so those edits ride on the "before"
+// of the next structural op without polluting canvas history.
+const formAuthoringHistory = ref<FormAuthoringHistory>(
+  createFormAuthoringHistory([]),
+)
+const formFieldFocusLocalId = ref<string | null>(null)
+const canUndoFormFieldHistory = computed(() => canUndoFormHistory(formAuthoringHistory.value))
+const canRedoFormFieldHistory = computed(() => canRedoFormHistory(formAuthoringHistory.value))
+
+function reseedFormHistoryFromDraft(): void {
+  formAuthoringHistory.value = createFormAuthoringHistory(
+    draft.value.fields,
+    formFieldFocusLocalId.value,
+  )
+}
+
+function applyFormFieldsStructural(
+  nextFields: FieldAuthoringDraft[],
+  nextFocus: string | null = formFieldFocusLocalId.value,
+): void {
+  // Align tip with live draft so label/type edits since the last structural op survive as the
+  // undo "before" of this mutation (still one stack entry for the structural change).
+  const aligned: FormAuthoringHistory = {
+    ...formAuthoringHistory.value,
+    fields: draft.value.fields,
+    focusLocalId: formFieldFocusLocalId.value,
+  }
+  const next = pushFormSnapshot(aligned, nextFields, nextFocus)
+  formAuthoringHistory.value = next
+  draft.value.fields = next.fields
+  formFieldFocusLocalId.value = next.focusLocalId
+}
+
+function onFormFieldUndo(): void {
+  if (readOnly.value) return
+  // Align tip with live draft so in-place edits since last structural op redo correctly.
+  const aligned: FormAuthoringHistory = {
+    ...formAuthoringHistory.value,
+    fields: draft.value.fields,
+    focusLocalId: formFieldFocusLocalId.value,
+  }
+  const result = undoFormHistory(aligned)
+  if (!result.ok) return
+  formAuthoringHistory.value = result.history
+  draft.value.fields = result.fields
+  formFieldFocusLocalId.value = result.focusLocalId
+}
+
+function onFormFieldRedo(): void {
+  if (readOnly.value) return
+  const aligned: FormAuthoringHistory = {
+    ...formAuthoringHistory.value,
+    fields: draft.value.fields,
+    focusLocalId: formFieldFocusLocalId.value,
+  }
+  const result = redoFormHistory(aligned)
+  if (!result.ok) return
+  formAuthoringHistory.value = result.history
+  draft.value.fields = result.fields
+  formFieldFocusLocalId.value = result.focusLocalId
+}
+
 function currentCanvasSelection(): ApprovalCanvasSelection {
   return selectedCanvasNode.value
     ? { kind: 'node', nodeKey: selectedCanvasNode.value }
@@ -2593,7 +2684,9 @@ const fieldPaletteEntries = AUTHORABLE_FIELD_TYPES.map((type) => ({
 }))
 
 function addField() {
-  draft.value.fields = [...draft.value.fields, createEmptyFieldDraft(draft.value.fields.length + 1)]
+  if (readOnly.value) return
+  const added = createEmptyFieldDraft(draft.value.fields.length + 1)
+  applyFormFieldsStructural([...draft.value.fields, added], added.localId)
 }
 
 /** D6-f2 palette: add a field of the chosen kind without ordinary-user ID entry. */
@@ -2612,16 +2705,24 @@ function addFieldOfType(type: AuthorableFieldType) {
       optionsText: '',
     }]
   }
-  draft.value.fields = [...draft.value.fields, next]
+  applyFormFieldsStructural([...draft.value.fields, next], next.localId)
 }
 
 function removeField(index: number) {
-  if (draft.value.fields.length === 1) return
-  draft.value.fields = draft.value.fields.filter((_, i) => i !== index)
+  if (readOnly.value || draft.value.fields.length === 1) return
+  const removed = draft.value.fields[index]
+  const nextFields = draft.value.fields.filter((_, i) => i !== index)
+  const nextFocus = removed && formFieldFocusLocalId.value === removed.localId
+    ? (nextFields[Math.min(index, nextFields.length - 1)]?.localId ?? null)
+    : formFieldFocusLocalId.value
+  applyFormFieldsStructural(nextFields, nextFocus)
 }
 
 function moveField(index: number, delta: -1 | 1) {
-  draft.value.fields = swap(draft.value.fields, index, delta) ?? draft.value.fields
+  if (readOnly.value) return
+  const next = swap(draft.value.fields, index, delta)
+  if (!next) return
+  applyFormFieldsStructural(next, draft.value.fields[index]?.localId ?? formFieldFocusLocalId.value)
 }
 // D-4 drag-reorder: native HTML5 drag wires to the pure `moveItemToIndex` logic. (The drag GESTURE is
 // manual/E2E QA — jsdom DragEvent is unreliable; the reorder LOGIC is unit-covered in templateAuthoring.)
@@ -2631,8 +2732,11 @@ function onFieldDragStart(index: number) {
 }
 function onFieldDrop(index: number) {
   if (readOnly.value || draggedFieldIndex.value === null) return
-  draft.value.fields = moveItemToIndex(draft.value.fields, draggedFieldIndex.value, index)
+  const from = draggedFieldIndex.value
   draggedFieldIndex.value = null
+  if (from === index) return
+  const next = moveItemToIndex(draft.value.fields, from, index)
+  applyFormFieldsStructural(next, next[index]?.localId ?? formFieldFocusLocalId.value)
 }
 
 // detail / sub-form (明细) sub-field authoring. Sub-fields are LEAF types only (no nested
@@ -2737,7 +2841,9 @@ async function loadTemplateForEdit() {
     draft.value = createEmptyTemplateDraft()
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
+    formFieldFocusLocalId.value = null
     reseedCanvasHistoryFromDraft()
+    reseedFormHistoryFromDraft()
     snapshotDraft()
     return
   }
@@ -2748,10 +2854,12 @@ async function loadTemplateForEdit() {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
+    formFieldFocusLocalId.value = null
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
     reseedCanvasHistoryFromDraft()
+    reseedFormHistoryFromDraft()
     snapshotDraft()
   } catch (error: unknown) {
     loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
@@ -2802,7 +2910,9 @@ async function persistDraft() {
       draft.value = draftFromTemplate(updated)
       unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
       graphReadOnlyMessage.value = graphReadOnlyReason(updated)
+      formFieldFocusLocalId.value = null
       reseedCanvasHistoryFromDraft()
+      reseedFormHistoryFromDraft()
       snapshotDraft()
       return updated
     }
@@ -2810,7 +2920,9 @@ async function persistDraft() {
     draft.value = draftFromTemplate(created)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
+    formFieldFocusLocalId.value = null
     reseedCanvasHistoryFromDraft()
+    reseedFormHistoryFromDraft()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
@@ -2831,9 +2943,12 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     draft.value = draftFromTemplate(created)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
+    formFieldFocusLocalId.value = null
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
+    reseedCanvasHistoryFromDraft()
+    reseedFormHistoryFromDraft()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
@@ -3022,7 +3137,8 @@ onUnmounted(() => {
 .template-authoring__actions,
 .template-authoring__inline,
 .template-authoring__panel-header,
-.template-authoring__item-toolbar {
+.template-authoring__item-toolbar,
+.template-authoring__form-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
