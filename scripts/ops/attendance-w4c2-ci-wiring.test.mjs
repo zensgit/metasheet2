@@ -27,7 +27,7 @@ import {
 // guard stayed green. The corpus is now enumerated from reality instead of from a list:
 //
 //   corpus part 1 (disk → wiring): every on-disk file matching the DB-suite naming convention
-//     packages/core-backend/tests/integration/attendance-*.db.test.ts (73 at conversion time)
+//     packages/core-backend/tests/integration/attendance-*.db.test.ts (74 at conversion time)
 //     must be BOTH (a) a whole-file vitest arg of an EXECUTABLE real-DB step in
 //     plugin-tests.yml AND (b) an exact quoted entry of vitest.config.ts test.exclude, so it
 //     runs exactly once, with a database. A future attendance-*.db.test.ts added without both
@@ -40,7 +40,7 @@ import {
 //     no-DB exclude too. The non-.db corpus is run-list-derived because the run-list is the
 //     only machine-readable statement that such a file is a real-DB suite.
 //
-// PLACEMENT REALITY the union below encodes: 71 of the 73 on-disk attendance .db suites are
+// PLACEMENT REALITY the union below encodes: 72 of the 74 on-disk attendance .db suites are
 // carried by the attendance step (id `attendance-real-db-integration`); the 2
 // attendance-notification-redelivery* suites are carried by the approval step (§7.6 delivery
 // closure, wired there long before the attendance step existed); the multitable step carries 0
@@ -49,11 +49,18 @@ import {
 // job membership is pinned structurally below; the approval/multitable steps' full four-pin
 // contract is asserted by t2gate-collision-mechanism-ci-wiring.test.mjs).
 //
-// DELIBERATELY OUTSIDE BOTH CORPORA: tests/integration/attendance-settlement-table-v1-5a.test.ts
-// — a dormant schema lock whose every test body starts `if (!dbUrl) return` (self-soft-skip, not
-// describeIfDatabase) and which is wired into no run-list. It is outside the .db naming
-// convention AND outside every run-list, so neither corpus claims it; renaming it to
-// *.db.test.ts would pull it into corpus part 1 and force real wiring.
+// NOTHING IS EXCLUDED FROM THE CORPORA. The first draft of this conversion carved out one file —
+// tests/integration/attendance-settlement-table-v1-5a.test.ts, the dormant 加班银行 v1-5a settlement
+// schema lock — on the grounds that it was outside the .db naming convention AND outside every
+// run-list, so neither corpus claimed it. Owner ruling (2026-08-08, P1): that carve-out reproduced
+// the exact defect this file exists to eliminate. The suite self-soft-skipped (`if (!dbUrl) return`,
+// not describeIfDatabase) AND soft-passed on a MISSING TABLE (`if (cols.length === 0) return`), and
+// the only job that collected it had no database — required CI went green over a schema lock that
+// asserted nothing, with this guard endorsing the arrangement in prose. The suite has been renamed
+// to attendance-settlement-table-v1-5a.db.test.ts, two-point wired, and its table-missing soft-pass
+// deleted; it is now an ordinary corpus-part-1 member. A future file in that shape must be wired,
+// not documented here: adding an exclusion to this guard is a contract change requiring an owner
+// ruling, never a reviewer-local convenience.
 //
 // Located by the step's EXACT stable `id:` (`attendance-real-db-integration`) — never by its
 // `- name:` title, for the same title-prefix-decoy reason as every sibling guard.
@@ -234,7 +241,7 @@ const INTEGRATION_DIR = join(repoRoot, 'packages/core-backend/tests/integration'
  * The DB-suite naming convention the attendance family actually uses on disk: anchored prefix +
  * anchored `.db.test.ts` suffix. Derived from the real file set, not invented — every attendance
  * suite that requires PostgreSQL and was written since the convention landed is named this way
- * (73 files at conversion time); the handful of legacy DB-gated suites with plain `.test.ts`
+ * (74 files at conversion time); the handful of legacy DB-gated suites with plain `.test.ts`
  * names are covered by corpus part 2 below instead.
  */
 const ATTENDANCE_DB_SUITE_RE = /^attendance-.*\.db\.test\.ts$/
@@ -268,7 +275,7 @@ function realDbWholeFileArgUnion() {
 // Negative controls on the SCAN ITSELF (an empty/broken enumeration must red, never pass
 // vacuously): the naming-convention predicate is self-tested on synthetic names, and the
 // corpus size gets a floor. The floor is NOT a growth pin — it exists so a scan that reads
-// the wrong directory or a predicate typo that matches (almost) nothing goes red; 73 files
+// the wrong directory or a predicate typo that matches (almost) nothing goes red; 74 files
 // match at conversion time, and legitimately deleting a handful keeps it green.
 test('OBS-1 corpus scan self-test: predicate matches the convention and only the convention; scan is non-vacuous', () => {
   assert.ok(ATTENDANCE_DB_SUITE_RE.test('attendance-w4c0-db-gates-e1.db.test.ts'))
@@ -279,7 +286,7 @@ test('OBS-1 corpus scan self-test: predicate matches the convention and only the
   const corpus = onDiskAttendanceDbSuites()
   assert.ok(
     corpus.length >= 60,
-    `on-disk attendance-*.db.test.ts scan found only ${corpus.length} files (73 at conversion `
+    `on-disk attendance-*.db.test.ts scan found only ${corpus.length} files (74 at conversion `
       + `time) — a near-empty scan means the directory path or the predicate broke, not that `
       + `the corpus shrank by that much`,
   )
@@ -327,7 +334,7 @@ for (const file of onDiskAttendanceDbSuites()) {
   test('OBS-1 corpus part 2 is non-vacuous (real-DB run-lists carry attendance files)', () => {
     assert.ok(
       carried.length >= 60,
-      `real-DB run-lists carry only ${carried.length} attendance files (86 at conversion time) — `
+      `real-DB run-lists carry only ${carried.length} attendance files (87 at conversion time) — `
         + `a near-empty result means the run-list parsing broke, not that the wiring shrank by `
         + `that much`,
     )

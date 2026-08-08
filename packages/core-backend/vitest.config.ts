@@ -713,6 +713,14 @@ export default defineConfig({
       // real run. Both points now present.
       'tests/integration/attendance-shift-segments-migration.db.test.ts',
       'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
+      // OBS-1 owner P1 (2026-08-08): the 加班银行 v1-5a settlement schema lock was the LAST file the
+      // derived corpus still could not see — it was named `attendance-settlement-table-v1-5a.test.ts`
+      // (outside the .db convention), carried by no run-list, and absent from this exclude, so the
+      // no-DB job was the only job that ever collected it and its `if (!dbUrl) return` self-skip
+      // green-passed there. Renamed to the .db convention, added to the attendance real-DB step's
+      // run-list, and excluded here (two-point wiring); the guard's exclusion entry for it is gone,
+      // so the completeness assertion now covers it like every other member.
+      'tests/integration/attendance-settlement-table-v1-5a.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
