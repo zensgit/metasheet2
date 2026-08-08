@@ -426,9 +426,15 @@ export function createAttendanceGroupEffectivePolicyAggregateService(deps: Atten
           editorRef: scheduleEditorRef,
         })
         if (scheduleLabel === 'effective') scheduleLabel = 'conflict_action_required'
-        if (scheduleReasonCodes.length === 0 && fser.reasonCodes.includes('UNPUBLISHED_MANAGED_ROW')) {
-          scheduleReasonCodes = ['UNPUBLISHED_MANAGED_ROW']
-        }
+        // No reason-code assignment here on purpose. FSER adds
+        // `UNPUBLISHED_MANAGED_ROW` to its own reason set whenever
+        // `drift.unpublishedManagedRows > 0`, and `scheduleReasonCodes` is
+        // FSER's list minus `EFFECTIVE`, sliced to its primary cause — so it
+        // is NECESSARILY non-empty in this branch and already carries the
+        // right code when nothing more urgent outranks it in FSER's own
+        // REASON_ORDER. A guard like `if (scheduleReasonCodes.length === 0)`
+        // here would be unsatisfiable: exactly the dead-branch shape this
+        // rebuild collapsed elsewhere.
       }
 
       if (fser.desired) {
