@@ -888,6 +888,13 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       state: 'approved',
       note: 'Looks good',
     })
+    expect(reviewPost!.response.status).toBe(409)
+    expect(reviewPost!.response.body).toEqual({
+      detail: 'cad_review_evidence_id_required',
+    })
+    expect(reviewPost!.providerStates?.[0]?.name).toBe(
+      'CAD file 01H000000000000000000000F7 requires sealed approval evidence',
+    )
     expect((historyGet!.response.body as Record<string, unknown>).entries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ action: 'cad_properties_update' }),
