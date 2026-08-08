@@ -3,6 +3,10 @@ import express from 'express'
 import request from 'supertest'
 import { query } from '../../src/db/pg'
 import { applyDirectoryDeprovisionPolicies } from '../../src/directory/directory-sync'
+import {
+  createDirectoryDeprovisionRun,
+  deleteDirectoryDeprovisionEvidence,
+} from '../utils/directory-deprovision-fixtures'
 import { db } from '../../src/db/db'
 import { DingTalkGroupDestinationService } from '../../src/multitable/dingtalk-group-destination-service'
 
@@ -56,6 +60,7 @@ describeIfDatabase('W4-PRE-1c case ⑤ leg 1 — readiness gate 403 after a poli
   const activeUser = `${NS}-active`
   let integrationId = ''
   let orgId = ''
+  let runId = ''
 
   const depClient = {
     query: (sql: string, params?: unknown[]) =>
@@ -85,6 +90,7 @@ describeIfDatabase('W4-PRE-1c case ⑤ leg 1 — readiness gate 403 after a poli
     )).rows[0]
     integrationId = row.id
     orgId = row.org_id
+    runId = await createDirectoryDeprovisionRun(integrationId)
 
     for (const userId of [departedUser, activeUser]) {
       await query(
@@ -109,6 +115,8 @@ describeIfDatabase('W4-PRE-1c case ⑤ leg 1 — readiness gate 403 after a poli
     )
     const outcome = await applyDirectoryDeprovisionPolicies(depClient, {
       integrationId,
+      runId,
+      triggeredBy: 'test:w4pre1c-permission-negative',
       deactivatedAccountIds: [account.rows[0].id],
       syncedAccountCount: 50,
       integrationDefaultPolicy: 'mark_inactive',
@@ -118,6 +126,7 @@ describeIfDatabase('W4-PRE-1c case ⑤ leg 1 — readiness gate 403 after a poli
   })
 
   afterAll(async () => {
+    await deleteDirectoryDeprovisionEvidence([integrationId])
     await query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [[departedUser, activeUser]])
     await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = $1`, [departedUser])
     await query(`DELETE FROM directory_accounts WHERE integration_id = $1`, [integrationId]) // links cascade

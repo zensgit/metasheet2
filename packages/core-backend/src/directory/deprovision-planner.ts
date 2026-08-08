@@ -6,6 +6,10 @@
  */
 
 export type DeprovisionEffectType = 'membership_changed' | 'grant_changed' | 'user_changed'
+export type DirectoryDeprovisionPolicy =
+  | 'manual_review'
+  | 'disable_grant_only'
+  | 'mark_inactive'
 
 export type PlannedEffect = {
   type: DeprovisionEffectType
@@ -16,6 +20,7 @@ export type PlannedEffect = {
 
 export type DirectoryDeprovisionPlanInput = {
   localUserId: string
+  policy: DirectoryDeprovisionPolicy
   activationStatus: string | null | undefined
   isActive: boolean
   /** Source integration org for this event. */
@@ -41,6 +46,14 @@ export type DirectoryDeprovisionPlan = {
  * Prospective planner: pending users never invent offboarding effects.
  */
 export function planDirectoryDeprovision(input: DirectoryDeprovisionPlanInput): DirectoryDeprovisionPlan {
+  if (input.policy === 'manual_review') {
+    return {
+      localUserId: input.localUserId,
+      skipReason: 'manual_review',
+      effects: [],
+    }
+  }
+
   if (input.activationStatus === 'pending_activation') {
     return {
       localUserId: input.localUserId,
@@ -69,7 +82,7 @@ export function planDirectoryDeprovision(input: DirectoryDeprovisionPlanInput): 
         afterActive: false,
       })
     }
-    if (input.isActive) {
+    if (input.policy === 'mark_inactive' && input.isActive) {
       effects.push({
         type: 'user_changed',
         orgId: null,
