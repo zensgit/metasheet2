@@ -1,9 +1,21 @@
 /**
  * W6 (#4556) — group effective-policy aggregate read model: CONTRACT DRAFT.
  *
- * Status: PROPOSED / runtime HOLD. Types and closed enum constants only.
- * Nothing at runtime imports this module in W6-0; deleting it must leave
- * every existing test green (design lock red line W6-R9).
+ * Status update (W6-1, #4814): this file's TYPES and closed enum
+ * constants ARE imported and used at runtime by W6-1's aggregate service
+ * and response-contract validator — the "nothing at runtime imports this
+ * module" statement was accurate for W6-0 (#4771, when this file was
+ * prep-only and PROPOSED) and is superseded now that W6-1 wires the
+ * aggregate up. This does NOT authorize any new runtime BEHAVIOR beyond
+ * what W6-1's own red lines (W6-R1..R9) already govern — W6-R9 itself
+ * remains N/A to this file's PROPOSED contents (the OpenAPI-facing
+ * pieces, still unused).
+ *
+ * `ATTENDANCE_GROUP_EFFECTIVE_POLICY_REASON_CODES_V1` (added in #4814
+ * P2-2) is a module-scope `require()` of FSER's `.cjs` lib via
+ * `requirePluginAttendanceLib` — a real filesystem-touching call at
+ * import time, placed here alongside the other closed enum constants the
+ * validator already imports at runtime, not new "prep drift."
  *
  * Governing document:
  *   docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md
