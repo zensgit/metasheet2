@@ -40,7 +40,7 @@ Agents may implement, test, commit, push to the tracking branch, and update the 
 | Form field palette (D6-f2 slice) | **DONE** | `approval-field-palette` |
 | Final-eligibility MD + gate workflow | **DONE** | docs + `.grok/workflows/approval-canvas-final-gate.rhai` |
 | G5-C S1–S12 product-path suite | **DONE** | `approval-g5c-authoring-scenarios.test.ts` (CI-wired) |
-| CI: approval-web-guard / web-tests green | **IN PROGRESS** | fix regressions; required canaries include new specs |
+| CI: approval-web-guard / web-tests green | **GREEN on a25e65b** (fix push); re-running on head after D8-b thin | required canaries include history/G5-C/version-read-summary |
 | Version dual-canvas shell (full D8-b) | **PARTIAL** | pure `approvalVersionReadSummary` + overlay/diff helpers; no editor dual-canvas chrome |
 | Extract `ApprovalFlowCanvas` / inspector modules | **OPEN** | reduce `TemplateAuthoringView` heat |
 | D3 Vue Flow/ELK | **BLOCKED (O3)** | do not start |
