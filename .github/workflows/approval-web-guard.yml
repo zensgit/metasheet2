@@ -105,9 +105,11 @@ on:
       - 'apps/web/src/approvals/components/ApprovalCanvasNodeInspector.vue'
       - 'apps/web/tests/approval-authoring-history.test.ts'
       - 'apps/web/tests/approval-g5c-authoring-scenarios.test.ts'
-      # Residual parallel PLAN 6fa2fbf6: form history (PR1) + dual-canvas (PR2) — canaries no-op until present.
+      # Residual parallel PLAN 6fa2fbf6 / wave-3: always-on residual canaries + path filters.
       - 'apps/web/tests/approval-form-authoring-history.test.ts'
       - 'apps/web/tests/approval-version-dual-canvas.test.ts'
+      - 'apps/web/tests/approval-flow-canvas-a11y.test.ts'
+      - 'apps/web/tests/approval-canvas-inspector-a11y.test.ts'
       - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
       - 'apps/web/src/approvals/approvalVersionDualCanvas.ts'
       - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
@@ -296,9 +298,11 @@ on:
       - 'apps/web/src/approvals/components/ApprovalCanvasNodeInspector.vue'
       - 'apps/web/tests/approval-authoring-history.test.ts'
       - 'apps/web/tests/approval-g5c-authoring-scenarios.test.ts'
-      # Residual parallel PLAN 6fa2fbf6: form history (PR1) + dual-canvas (PR2) — canaries no-op until present.
+      # Residual parallel PLAN 6fa2fbf6 / wave-3: always-on residual canaries + path filters.
       - 'apps/web/tests/approval-form-authoring-history.test.ts'
       - 'apps/web/tests/approval-version-dual-canvas.test.ts'
+      - 'apps/web/tests/approval-flow-canvas-a11y.test.ts'
+      - 'apps/web/tests/approval-canvas-inspector-a11y.test.ts'
       - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
       - 'apps/web/src/approvals/approvalVersionDualCanvas.ts'
       - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
@@ -453,7 +457,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run Canvas V2 command canaries
-        # Always-on canaries + residual PLAN 6fa2fbf6 optional files (test -f so PR3 lands green alone).
+        # Always-on canaries (Canvas V2 core + residual PLAN 6fa2fbf6 / wave-3 after files landed on main).
         run: |
           set -euo pipefail
           pnpm --filter @metasheet/web exec vitest run \
@@ -462,19 +466,11 @@ jobs:
             approval-authoring-history \
             approval-g5c-authoring-scenarios \
             approval-version-read-summary \
+            approval-form-authoring-history \
+            approval-version-dual-canvas \
+            approval-flow-canvas-a11y \
+            approval-canvas-inspector-a11y \
             --reporter=dot
-          residual=()
-          if [ -f apps/web/tests/approval-form-authoring-history.test.ts ]; then
-            residual+=(approval-form-authoring-history)
-          fi
-          if [ -f apps/web/tests/approval-version-dual-canvas.test.ts ]; then
-            residual+=(approval-version-dual-canvas)
-          fi
-          if [ "${#residual[@]}" -gt 0 ]; then
-            pnpm --filter @metasheet/web exec vitest run "${residual[@]}" --reporter=dot
-          else
-            echo "Residual form-history / dual-canvas canaries skipped (files not present yet)"
-          fi
 
       - name: Run FWB mapping authoring contract
         run: pnpm --filter @metasheet/web exec vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
