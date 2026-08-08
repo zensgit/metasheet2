@@ -48,4 +48,24 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
     expect(CANVAS_SRC).toMatch(/@keydown\.space/)
     expect(CANVAS_SRC).toMatch(/:aria-pressed="selectedCanvasNode === pos\.key"/)
   })
+
+  it('edge-insert menu items use business-language aria-labels (no edge keys)', () => {
+    expect(CANVAS_SRC).toMatch(/aria-label="插入审批节点"/)
+    expect(CANVAS_SRC).toMatch(/aria-label="插入条件分支"/)
+    expect(CANVAS_SRC).toMatch(/aria-label="插入并行分支"/)
+    // Menu item labels must not interpolate edge keys into accessible names
+    expect(CANVAS_SRC).not.toMatch(
+      /edge-insert-(approval|condition|parallel)[\s\S]{0,200}:aria-label="[^"]*\$\{line\.key\}/,
+    )
+    expect(CANVAS_SRC).not.toMatch(
+      /aria-label="[^"]*\$\{line\.key\}[^"]*"[\s\S]{0,120}edge-insert-(approval|condition|parallel)/,
+    )
+  })
+
+  it('fit-to-view toolbar control has business aria-label', () => {
+    expect(CANVAS_SRC).toMatch(/data-testid="approval-canvas-fit"/)
+    expect(CANVAS_SRC).toMatch(
+      /data-testid="approval-canvas-fit"[\s\S]{0,120}aria-label="适应画布"|aria-label="适应画布"[\s\S]{0,120}data-testid="approval-canvas-fit"/,
+    )
+  })
 })

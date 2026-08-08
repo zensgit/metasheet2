@@ -149,7 +149,12 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
           @click="emit('zoom-in')"
         />
       </el-button-group>
-      <el-button :icon="FullScreen" data-testid="approval-canvas-fit" @click="emit('fit')">
+      <el-button
+        :icon="FullScreen"
+        aria-label="适应画布"
+        data-testid="approval-canvas-fit"
+        @click="emit('fit')"
+      >
         适应画布
       </el-button>
     </div>
@@ -234,6 +239,7 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                 <button
                   type="button"
                   role="menuitem"
+                  aria-label="插入审批节点"
                   data-testid="approval-canvas-edge-insert-approval"
                   @click.stop="emit('edge-insert-approval', line.key)"
                 >
@@ -242,6 +248,7 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                 <button
                   type="button"
                   role="menuitem"
+                  aria-label="插入条件分支"
                   data-testid="approval-canvas-edge-insert-condition"
                   @click.stop="emit('edge-insert-condition', line.key)"
                 >
@@ -251,6 +258,7 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                   v-if="canInsertParallelOnEdge(line.key)"
                   type="button"
                   role="menuitem"
+                  aria-label="插入并行分支"
                   data-testid="approval-canvas-edge-insert-parallel"
                   @click.stop="emit('edge-insert-parallel', line.key)"
                 >
