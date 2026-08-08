@@ -355,7 +355,9 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     }
     if (!system || typeof system.kind !== 'string' || !system.kind) return null
 
-    const baseUrl = system.config && typeof system.config.baseUrl === 'string' ? system.config.baseUrl : ''
+    const cfg = system.config && typeof system.config === 'object' ? system.config : {}
+    const baseUrl = cfg.baseUrl || cfg.url
+    if (typeof baseUrl !== 'string' || baseUrl.trim().length === 0) return null
     let origin
     try {
       origin = new URL(baseUrl).origin
@@ -364,7 +366,6 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     }
 
     const credentials = system.credentials && typeof system.credentials === 'object' ? system.credentials : {}
-    const cfg = system.config && typeof system.config === 'object' ? system.config : {}
     const firstDefined = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== '')
 
     // REVIEW P1-2 — MIRROR the adapter's own auth-mode resolution, do not assume one mode.
