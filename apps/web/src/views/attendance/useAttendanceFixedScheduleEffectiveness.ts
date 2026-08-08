@@ -7,8 +7,9 @@
 //      (`resolveAttendanceFixedScheduleSelfRouteIdentity`, plugins/plugin-attendance/lib/
 //      attendance-fixed-schedule-self-route-identity.cjs) — this composable structurally cannot
 //      construct one, the same discipline `useAttendanceDecisionTrace.ts` uses for its self host.
-//      (This also disposes of the amendment's §2 open item for this slice: a GET with no body and
-//      no selector is unaffected by either reading of "no body".)
+//      (OD-4709-2 §2's "no body" reading remains OPEN for the owner — see PR body. This frontend
+//      slice never sends a body on a GET under either reading, so no surface decision here depends
+//      on which reading is chosen; that is a narrower claim than resolving the open item.)
 //   2. stale-response suppression (a monotonic request generation — an older in-flight response
 //      must never overwrite a newer target's state),
 //   3. folding the HTTP outcome + strict parse into a closed `unavailableReason` set — 401/403/404/
