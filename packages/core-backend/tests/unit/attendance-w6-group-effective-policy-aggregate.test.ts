@@ -718,3 +718,90 @@ describe('NIT-2 — one injected clock feeds both timestamps in a response', () 
     expect(result.domains.schedule.fixedSchedule?.evaluatedAt).toBe('2026-08-05T00:00:01.000Z')
   })
 })
+
+describe('W6-R4 — the schedule label is a PURE FUNCTION of FSER state (no parallel predicate)', () => {
+  /**
+   * The caller inventory cannot catch a hand-rolled parallel state machine
+   * that never references FSER by name, and the real-DB fidelity leg compares
+   * the EMBEDDED object — which stays verbatim even when a second predicate
+   * hijacks the LABEL. Proven by mutation: replacing the mapping with
+   * `fser.coverage.differentKeyRows > 0 ? conflict : mapping(state)` left every
+   * suite green, including the real-DB fidelity test, because no fixture drives
+   * that field on a state where the two disagree.
+   *
+   * This matrix closes it: for each FSER state, every OTHER field of the FSER
+   * result is varied across values a plausible second predicate would key on,
+   * and the label must not move. The ONE intentional second input is
+   * `drift.unpublishedManagedRows` (§4.2's orphaned conflict code, given a
+   * producer in this rebuild), so it is held at 0 here and pinned by its own
+   * fixture instead.
+   */
+  const STATE_TO_LABEL = {
+    effective: 'effective',
+    not_configured: 'needs_configuration',
+    pending_apply: 'conflict_action_required',
+    configuration_changed: 'conflict_action_required',
+  } as const
+
+  const HIJACK_VECTORS = [
+    { label: 'baseline', coverage: {}, drift: {} },
+    { label: 'differentKeyRows > 0', coverage: { differentKeyRows: 2 }, drift: {} },
+    { label: 'missingMembers > 0', coverage: { missingMembers: 3 }, drift: {} },
+    { label: 'nonMemberTargets > 0', coverage: { nonMemberTargets: 1 }, drift: {} },
+    { label: 'matchingMembers = 0', coverage: { matchingMembers: 0 }, drift: {} },
+    { label: 'unconfiguredManagedRows > 0', coverage: {}, drift: { unconfiguredManagedRows: 4 } },
+  ]
+
+  const groupId = 'a4556006-000c-4000-8000-000000000001'
+  const shiftId = 'a4556006-000c-4000-8000-000000000101'
+
+  const query: AttendanceGroupEffectivePolicyQueryFn = async (sql) => {
+    const s = sql.toLowerCase()
+    if (s.includes('from attendance_groups')) {
+      return [{ id: groupId, attendance_type: 'fixed_shift', timezone: 'Asia/Shanghai', rule_set_id: null }]
+    }
+    if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 4 }]
+    if (s.includes('from attendance_group_managers')) return []
+    if (s.includes('from attendance_calculation_rollout_state')) return []
+    if (s.includes('from attendance_group_fixed_schedule_configs')) return [{ id: 'cfg-1' }]
+    if (s.includes('count(*)::int as cnt from attendance_shift_segments')) return [{ cnt: 1 }]
+    if (s.includes('from attendance_shifts')) return [{ flex_mode: 'strict' }]
+    if (s.includes('from attendance_calculation_group_memberships')) return []
+    if (s.includes('from attendance_rule_sets')) return [{ exists: 1 }]
+    throw new Error(`unexpected SQL: ${sql}`)
+  }
+
+  for (const [state, expectedLabel] of Object.entries(STATE_TO_LABEL)) {
+    for (const vector of HIJACK_VECTORS) {
+      it(`state=${state} + ${vector.label} still labels ${expectedLabel}`, async () => {
+        const fser = makeFser({
+          groupId,
+          state: state as keyof typeof STATE_TO_LABEL,
+          reasonCodes: state === 'effective' ? ['EFFECTIVE'] : ['TARGET_MEMBER_MISSING'],
+          desired:
+            state === 'not_configured'
+              ? null
+              : { shiftId, startDate: '2026-08-01', endDate: '2026-08-31', revision: 1 },
+          coverage: {
+            targetMembers: 4,
+            matchingMembers: 4,
+            missingMembers: 0,
+            nonMemberTargets: 0,
+            differentKeyRows: 0,
+            ...vector.coverage,
+          },
+          drift: { unconfiguredManagedRows: 0, unpublishedManagedRows: 0, managedSets: [], ...vector.drift },
+          evaluatedAt: NOW,
+        })
+        const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser, now: () => NOW })
+        const result = await service.getAggregate({ orgId: 'org-1', groupId })
+        expect(result.domains.schedule.label).toBe(expectedLabel)
+      })
+    }
+  }
+
+  it('POSITIVE CONTROL: the matrix IS sensitive to the state itself (so "label never moves" is not vacuous)', async () => {
+    const labels = new Set(Object.values(STATE_TO_LABEL))
+    expect(labels.size).toBeGreaterThan(1)
+  })
+})
