@@ -1645,7 +1645,12 @@ export async function applyDirectoryDeprovisionPolicies(
     if (result.globallyClear) {
       outcome.globalCandidateCount += 1
     }
-    if (effectTypes.has('grant_changed')) {
+    // ATTEMPT semantics, matching this field's own doc-comment and the OPS-01 run-stats pinned
+    // by the orchestration suite: every globally-clear candidate gets the disabled-grant
+    // bookkeeping upsert (whether or not a grant previously existed), so the count follows the
+    // bookkeeping write. Whether a grant was ACTUALLY taken away is the ledger's job — the
+    // `grant_changed` effect stays gated on the pre-locked "was enabled" read.
+    if (result.globallyClear) {
       outcome.grantsDisabledCount += 1
     }
     if (effectTypes.has('user_changed')) {

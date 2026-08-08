@@ -244,7 +244,6 @@ export async function applyDirectoryDeprovisionCandidate(
   }
 
   const membershipChanged = hasEffect(plan.effects, 'membership_changed')
-  const grantChanged = hasEffect(plan.effects, 'grant_changed')
   const userChanged = hasEffect(plan.effects, 'user_changed')
 
   const generationResult = userChanged
@@ -305,7 +304,13 @@ export async function applyDirectoryDeprovisionCandidate(
     }
   }
 
-  if (grantChanged) {
+  // The bookkeeping upsert is deliberately UNCONDITIONAL for a globally-clear candidate, not
+  // gated on the grant effect: since OPS-01 the departed person's row shape has been "an
+  // explicit disabled grant", whether or not a grant ever existed (the orchestration suite pins
+  // exactly this). Writing a fresh enabled=FALSE row for someone who never had a grant takes
+  // nothing away from them — so `grant_changed` (the LEDGER effect) stays gated on the
+  // pre-locked "was actually enabled" read; only the row parity is unconditional.
+  if (state.globally_clear) {
     await client.query(
       `INSERT INTO user_external_auth_grants (
          provider, local_user_id, enabled, granted_by, created_at, updated_at

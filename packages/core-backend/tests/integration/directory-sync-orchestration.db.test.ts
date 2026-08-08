@@ -161,6 +161,15 @@ async function readRun(runId: string): Promise<{ status: string; error_message: 
 
 async function cleanupIntegration(integrationId: string): Promise<void> {
   await query(`DELETE FROM directory_sync_alerts WHERE integration_id = $1`, [integrationId])
+  // D4: deprovision evidence references the run via the composite FK
+  // ddev_run_integration_fk (that FK holding is the schema working, not a test bug), so the
+  // ledger rows go first or the runs DELETE is refused.
+  await query(
+    `DELETE FROM directory_deprovision_effects WHERE event_id IN
+       (SELECT id FROM directory_deprovision_events WHERE integration_id = $1::uuid)`,
+    [integrationId],
+  )
+  await query(`DELETE FROM directory_deprovision_events WHERE integration_id = $1::uuid`, [integrationId])
   await query(`DELETE FROM directory_sync_runs WHERE integration_id = $1`, [integrationId])
   await query(
     `DELETE FROM directory_account_links WHERE directory_account_id IN (SELECT id FROM directory_accounts WHERE integration_id = $1)`,

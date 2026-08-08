@@ -128,8 +128,13 @@ describeIfDatabase('DT-OPS-01 deprovision selection (real DB)', () => {
     expect(outcome.candidateCount).toBe(1)
     expect(outcome.usersDeactivatedCount).toBe(1)
     await expect(isUserActive(user)).resolves.toBe(false)
-    // No grant row existed, so there is no grant transition or grant effect to invent.
-    await expect(grantEnabled(user)).resolves.toBeUndefined()
+    // No grant row existed, so the LEDGER records no grant effect (nothing was taken away) —
+    // but the bookkeeping upsert still leaves an explicit DISABLED row. That row is load-bearing:
+    // dingtalk-oauth's ensureGrant path is INSERT ... enabled=TRUE ... ON CONFLICT DO NOTHING, so
+    // a departed person with NO row would be silently re-granted on their next OAuth attempt;
+    // the explicit disabled row is what makes that a no-op. (Also pinned by the orchestration
+    // suite's OPS-01 test — the run-effect shape has been this since DT-OPS-01.)
+    await expect(grantEnabled(user)).resolves.toBe(false)
   })
 
   // P1-1. The rehire. `directory_account_links` is unique on the ACCOUNT, not the person.
