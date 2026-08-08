@@ -1,8 +1,28 @@
 # Attendance issue #4556 W4C-3a locked-race lock-set amendment
 
-Status: **PROPOSED - owner RATIFY required**
+Status: **RATIFIED** (W4C-3a remediation and a fresh exact-head gate only)
 
 Date: 2026-07-30
+
+Ratified: 2026-07-31, merged SHA
+`315175fbdfd904ff44701d999b802be13f329baf` — the commit that landed this
+document on `main` (PR 4686) — with `OD-W4C-59=(a)`. Durable owner record
+(relayed from the owner's explicit instruction): PR 4686 comment `5137578736`,
+<https://github.com/zensgit/metasheet2/pull/4686#issuecomment-5137578736>.
+
+Scope of what the ratification authorizes: exactly what this amendment states
+— W4C-3a remediation and a fresh exact-head independent gate, and nothing
+downstream. It does **not** authorize the W4C-3a code PR merge or caller
+cutover, W4C-3b or later slices, staging or soak, flag changes, deployment,
+production/customer data, or issue closure.
+
+**Status reconciliation note (2026-08-09):** this header previously read
+`PROPOSED - owner RATIFY required`. That was in-repo status drift, not a
+pending decision — the owner record cited above predates this correction and is
+unchanged by it. This edit transcribes that existing record and confers no new
+authority; the linked owner comment is the authority, not this document and not
+the pull request carrying this edit. If any line here misstates that record, it
+must not merge.
 
 Authority proposed against:
 
