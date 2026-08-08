@@ -56,6 +56,7 @@ import {
   createAttendanceGroupEffectivePolicyAggregateService,
   type AttendanceGroupEffectivePolicyFserServiceLike,
 } from '../attendance/w6-group-effective-policy-aggregate'
+import { requirePluginAttendanceLib } from '../util/resolve-plugin-attendance-lib'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -64,10 +65,14 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // already use: `packages/core-backend/tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts`).
 // No second effectiveness derivation (W6-R4) and no plugin-activation side
 // effects: this file only defines pure functions and a factory.
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-const attendanceGroupFixedScheduleEffectivenessServiceLib = require(
-  '../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
-) as {
+//
+// Resolved via `requirePluginAttendanceLib(__dirname, …)` rather than a
+// literal relative path: `tsconfig.json`'s `rootDir: "."` makes the compiled
+// output land at `dist/src/routes/`, one level deeper than `src/routes/`, so
+// a hard-coded `../../../../` is only correct for one of the two layouts
+// this file actually runs from (#4814 P1 — see
+// `../util/resolve-plugin-attendance-lib` for the full account).
+const attendanceGroupFixedScheduleEffectivenessServiceLib = requirePluginAttendanceLib<{
   createAttendanceGroupFixedScheduleEffectivenessService: (deps: {
     HttpError: new (status: number, code: string, message: string) => Error
     buildAttendanceGroupFixedScheduleProducerKey: (input: {
@@ -78,11 +83,10 @@ const attendanceGroupFixedScheduleEffectivenessServiceLib = require(
     }) => string
     now?: () => string
   }) => AttendanceGroupEffectivePolicyFserServiceLike
-}
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-const attendanceShiftServiceLib = require('../../../../plugins/plugin-attendance/lib/attendance-shift-service.cjs') as {
+}>(__dirname, 'attendance-group-fixed-schedule-effectiveness-service.cjs')
+const attendanceShiftServiceLib = requirePluginAttendanceLib<{
   SEGMENT_CALCULATION_IMPLEMENTED: boolean
-}
+}>(__dirname, 'attendance-shift-service.cjs')
 
 const attendanceGroupEffectivePolicyFserService = attendanceGroupFixedScheduleEffectivenessServiceLib.createAttendanceGroupFixedScheduleEffectivenessService(
   {
