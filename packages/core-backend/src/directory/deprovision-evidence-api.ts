@@ -128,6 +128,7 @@ export async function listDeprovisionEvents(options: {
   integrationId?: string
   localUserId?: string
   limit?: number
+  status?: 'applied' | 'fully_resolved' | 'superseded'
 }) {
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200)
   const clauses: string[] = []
@@ -139,6 +140,10 @@ export async function listDeprovisionEvents(options: {
   if (options.localUserId) {
     params.push(options.localUserId)
     clauses.push(`e.local_user_id = $${params.length}`)
+  }
+  if (options.status) {
+    params.push(options.status)
+    clauses.push(`e.status = $${params.length}`)
   }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   params.push(limit)
