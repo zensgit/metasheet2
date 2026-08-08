@@ -1,20 +1,26 @@
 # Attendance Issue #4556 W6 Group Effective-Policy Read Aggregation Design Lock
 
-> Status: **PROPOSED / runtime HOLD**
+> Status: **RATIFIED** (W6-1 backend aggregate only) — see the ratification
+> record in §9. Every W6 slice beyond W6-1 remains **HOLD**.
 >
-> Date: 2026-08-05
+> Date: 2026-08-05 · Ratified: 2026-08-08
 >
 > Pinned baseline: `origin/main@db74bd8667df1084797c97d872fe53ef845e3803`
+>
+> Ratified SHA: `2967da018ceea41b91098e14d4c15a57236eb5f8` (the merge commit of
+> PR 4771, which is where this document landed on `main`; its content has been
+> byte-identical on `main` since that commit)
 >
 > Scope: issue #4556, W6 only (锁 §9.7 group effective-policy workspace 的
 > read-only 聚合面)
 >
 > Authorization: on 2026-08-05 the owner authorized **W6 preparation only**
-> (design-lock draft, contract draft, fixtures, UI shell). This document
-> authorizes **no** W6 runtime, no merge, no staging, no soak, no flag change,
-> no deployment, no production/customer data use, and no closure of #4556.
-> Every W6 runtime slice remains blocked until the owner RATIFYs the exact
-> merged SHA of this document.
+> (design-lock draft, contract draft, fixtures, UI shell). On 2026-08-08 the
+> owner RATIFIED the SHA above and authorized **the W6-1 backend aggregate
+> slice only**, Draft/HOLD, stopping after a fresh exact-head gate (§9).
+> This document still authorizes **no** W6-2/W6-3/W6-4 runtime, no merge, no
+> staging, no soak, no flag change, no deployment, no production/customer data
+> use, and no closure of issue 4556. Each of those remains a separate owner act.
 
 ## 0. Purpose and authority
 
@@ -303,7 +309,36 @@ winner selection stays W7 and stays fail-closed per parent R2.
 7. Stop. Staging, flags, soak, W7, and #4556 closure each require separate
    owner authorization; no gate in this document auto-triggers them.
 
-## 9. Owner decision
+## 9. Owner decision — RATIFICATION RECORD (2026-08-08)
 
-`OD-W6-0` (adopt this lock) and `OD-W6-1..9` are **OPEN**. This document
-carries no default: absent owner RATIFY, W6 remains preparation-only.
+This section exists because a PR body cannot be its own authorization source.
+Until this record landed on `main`, the only trace of the ruling below was a
+working-session transcript, which is not auditable after the fact. **Merging
+this document is the durable anchor**; if any line below misstates the ruling,
+it must not be merged.
+
+The owner's ruling, transcribed verbatim:
+
+> RATIFY 2967da018ceea41b91098e14d4c15a57236eb5f8;OD-W6-0=采纳;OD-W6-1..9 全 (a)。
+> 授权 W6-1 backend aggregate 开工(Draft/HOLD,fresh exact-head 门后停)。
+
+Resolved decisions:
+
+| ID | Resolution |
+| --- | --- |
+| OD-W6-0 | **采纳 / adopt this lock** |
+| OD-W6-1 | (a) dedicated `GET /api/attendance/groups/:groupId/effective-policy`, `attendance:admin`, org from the authenticated principal, delegated-admin active-membership check |
+| OD-W6-2 | (a) compose the existing FSER service inside the aggregate; embed verbatim for `fixed_shift`, `null` otherwise |
+| OD-W6-3 | (a) `effective / org_inherited / preview_only / needs_configuration / conflict_action_required` |
+| OD-W6-4 | (a) the §4.2 seven-code conflict list and eight-domain list |
+| OD-W6-5 | (a) employee/self projection is OUT of W6 |
+| OD-W6-6 | (a) single-segment `strict` = `effective` under any posture; multi-segment and `flex_required_duration` = `preview_only` unless posture is `authoritative` **and** `SEGMENT_CALCULATION_IMPLEMENTED` is true |
+| OD-W6-7 | (a) org opt-in setting + env gate, default OFF |
+| OD-W6-8 | (a) bounded per-group current-date-only query, count output |
+| OD-W6-9 | (a) the §4.2 two-kind `editorRef` union |
+
+**Scope of what the ratification authorizes:** the **W6-1 backend aggregate
+slice only**, Draft/HOLD, stopping after a fresh exact-head gate. W6-2 contract
+wiring, W6-3 UI, W6-4 verification, any merge, staging, soak, flag change,
+deployment, and closure of issue 4556 each remain separate, un-granted owner
+acts — §8's landing sequence is unchanged by this record.
