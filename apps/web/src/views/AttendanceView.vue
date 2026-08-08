@@ -1095,6 +1095,17 @@
         </div>
       </section>
 
+      <!-- #4709 FSER-4 §3 report surface: existing admin aggregate route, group state + coverage
+           counts only -- no actions, no raw IDs (enforced inside the widget component). -->
+      <AttendanceGroupFixedScheduleReportWidget
+        v-if="showReports"
+        :tr="tr"
+        :load-state="fixedScheduleReport.state.value"
+        :unavailable-reason="fixedScheduleReport.unavailableReason.value"
+        :result="fixedScheduleReport.admin.value"
+        @load="loadFixedScheduleReport"
+      />
+
       <section v-if="showOverview" class="attendance__card attendance__card--selfservice" data-selfservice-card="guide">
         <div class="attendance__requests-header">
           <div>
@@ -1189,6 +1200,41 @@
           :error-kind="selfTrace.errorKind.value"
           :trace="selfTrace.trace.value"
           @reload="loadSelfDecisionTrace"
+        />
+      </section>
+
+      <!-- #4709 FSER-4 §3 employee schedule surface: member-safe self projection of the
+           employee's own attendance group's fixed-schedule effectiveness. Auto-loads whenever
+           the self-rules fetch resolves the employee's own group id -- no manual load button, no
+           userId/groupId input (self only, per the amendment). -->
+      <section v-if="showOverview && selfFixedScheduleGroupId" class="attendance__card" data-attendance-self-fixed-schedule-section>
+        <AttendanceSelfFixedScheduleCard
+          :tr="tr"
+          :load-state="selfFixedSchedule.state.value"
+          :unavailable-reason="selfFixedSchedule.unavailableReason.value"
+          :result="selfFixedSchedule.self.value"
+          @reload="reloadSelfFixedSchedule"
+        />
+      </section>
+
+      <!-- #4709 FSER-4 §3 self decision trace surface: same /me route + target group as the
+           employee card above, mounted as its own removable leg (gate 8). -->
+      <section v-if="showOverview && selfFixedScheduleGroupId" class="attendance__card" data-attendance-self-fixed-schedule-trace-section>
+        <div class="attendance__requests-header">
+          <div>
+            <h3>{{ tr('Why this fixed schedule status (decision trace)', '固定排班状态解释（决策轨迹）') }}</h3>
+            <small class="attendance__field-hint">
+              {{ tr('Read-only. Explains your own fixed schedule status from the same evidence the group status uses.', '只读页面。基于与考勤组状态相同的证据解释您本人的固定排班状态。') }}
+            </small>
+          </div>
+        </div>
+        <AttendanceFixedScheduleDecisionTrace
+          :tr="tr"
+          audience="self"
+          :load-state="selfFixedScheduleTrace.state.value"
+          :unavailable-reason="selfFixedScheduleTrace.unavailableReason.value"
+          :self-result="selfFixedScheduleTrace.self.value"
+          @reload="reloadSelfFixedScheduleTrace"
         />
       </section>
 
@@ -1626,6 +1672,47 @@
                 :trace="adminTrace.trace.value"
                 @reload="loadAdminDecisionTrace"
               />
+
+              <!-- #4709 FSER-4 §3 admin decision trace surface: existing admin aggregate route,
+                   admin-typed group id (mirrors the userId input above). Nested in the same
+                   admin-rail section as the unrelated W5-1 trace above rather than a new
+                   ATTENDANCE_ADMIN_SECTION_IDS entry (nav wiring flagged, not decided, in the PR
+                   body). -->
+              <div class="attendance-fs-admin-trace" data-attendance-admin-fixed-schedule-trace-section>
+                <div class="attendance__admin-section-header">
+                  <h4>{{ tr('Fixed schedule decision trace (read-only)', '固定排班决策轨迹（只读）') }}</h4>
+                </div>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field" for="attendance-fixed-schedule-trace-admin-group">
+                    <span>{{ tr('Group ID', '考勤组 ID') }}</span>
+                    <input
+                      id="attendance-fixed-schedule-trace-admin-group"
+                      v-model.trim="adminFixedScheduleTraceGroupId"
+                      type="text"
+                      data-attendance-fixed-schedule-trace-admin-group
+                    />
+                  </label>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    type="button"
+                    :disabled="adminFixedScheduleTrace.state.value === 'loading'"
+                    data-attendance-fixed-schedule-trace-admin-load
+                    @click="loadAdminFixedScheduleTrace"
+                  >
+                    {{ adminFixedScheduleTrace.state.value === 'loading' ? tr('Loading...', '加载中...') : tr('Load trace', '查询轨迹') }}
+                  </button>
+                </div>
+                <AttendanceFixedScheduleDecisionTrace
+                  :tr="tr"
+                  audience="admin"
+                  :load-state="adminFixedScheduleTrace.state.value"
+                  :unavailable-reason="adminFixedScheduleTrace.unavailableReason.value"
+                  :admin-result="adminFixedScheduleTrace.admin.value"
+                  @reload="loadAdminFixedScheduleTrace"
+                />
+              </div>
             </div>
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes)"
@@ -5781,6 +5868,17 @@
                       </small>
                       <small class="attendance__field-hint">{{ tr('If blocking conflicts are present, apply stays disabled and writes nothing.', '如果存在阻断冲突，应用保持禁用且零写入。') }}</small>
                     </div>
+
+                    <!-- #4709 FSER-4 §3 group drawer: read-only projection of the SAME admin
+                         aggregate route the preview panel above already exists next to. Existing
+                         preview/apply/rebuild/clear actions above are unchanged. -->
+                    <AttendanceGroupFixedScheduleEffectivenessPanel
+                      :tr="tr"
+                      :load-state="attendanceGroupFixedScheduleEffectiveness.state.value"
+                      :unavailable-reason="attendanceGroupFixedScheduleEffectiveness.unavailableReason.value"
+                      :result="attendanceGroupFixedScheduleEffectiveness.admin.value"
+                      @reload="reloadAttendanceGroupFixedScheduleEffectiveness"
+                    />
                   </section>
                   <section
                     v-else-if="attendanceGroupEditingId"
@@ -9946,6 +10044,16 @@ import {
   type AttendanceDecisionTraceCategory,
 } from './attendance/attendanceDecisionTrace'
 import { useAttendanceDecisionTrace } from './attendance/useAttendanceDecisionTrace'
+// #4709 FSER-4 §3 (amendment `docs/development/
+// attendance-4709-fser4-member-projection-contract-amendment-20260804.md` §3, RATIFIED
+// `45d71c4209af35a63768ce7ce9f576377f6b8ce4`, OD-4709-2=(a)): group drawer / self-trace /
+// admin-trace fixed-schedule effectiveness surfaces. Each mount owns its own composable instance
+// (mirrors the adminTrace/selfTrace split above) — no shared mutable status, no re-derivation.
+import AttendanceGroupFixedScheduleEffectivenessPanel from './attendance/AttendanceGroupFixedScheduleEffectivenessPanel.vue'
+import AttendanceSelfFixedScheduleCard from './attendance/AttendanceSelfFixedScheduleCard.vue'
+import AttendanceFixedScheduleDecisionTrace from './attendance/AttendanceFixedScheduleDecisionTrace.vue'
+import AttendanceGroupFixedScheduleReportWidget from './attendance/AttendanceGroupFixedScheduleReportWidget.vue'
+import { useAttendanceFixedScheduleEffectiveness } from './attendance/useAttendanceFixedScheduleEffectiveness'
 // W5-2 (Wave 5 explainability design-lock, RATIFIED §6/§9 W5-2): contextual help mounted at the
 // 'import' and 'self-request-center' contexts (the 'setup-wizard' context is mounted INSIDE
 // AttendanceSetupReadiness.vue itself, not here — keeps this hot file's diff minimal, red line 10).
@@ -14853,6 +14961,39 @@ function loadSelfDecisionTrace(): void {
   )
 }
 
+// #4709 FSER-4 §3 (amendment `docs/development/
+// attendance-4709-fser4-member-projection-contract-amendment-20260804.md` §3, RATIFIED
+// `45d71c4209af35a63768ce7ce9f576377f6b8ce4`, OD-4709-2=(a)): each surface owns its own
+// `useAttendanceFixedScheduleEffectiveness()` composable instance (mirrors the adminTrace/
+// selfTrace split above) -- no shared mutable status between surfaces, and no re-derivation of
+// the four-state contract anywhere below (that lives ONLY in `attendanceFixedScheduleEffectiveness.ts`).
+// NOTE: the group-drawer instance/watcher is declared further below, right after
+// `attendanceGroupForm` (its `attendanceType` source) is declared -- `<script setup>` runs
+// top-to-bottom and `watch(...)` evaluates its getters immediately, so referencing
+// `attendanceGroupForm` here (before its own `const` line) would be a TDZ crash.
+
+// (employee schedule + self decision trace composables are declared further below, right after
+// `selfRulesData` -- their group-id source -- is declared; `<script setup>` runs top-to-bottom
+// and referencing it here would be a TDZ crash, same reason as the group-drawer note above.)
+
+// --- admin decision trace (existing admin aggregate route; admin-typed group id -- mirrors the
+// existing adminTraceUserId free-text pattern above; reports/admin-trace mode does not preload a
+// groups list, `loadAttendanceGroups()` is gated on `showAdmin`). ---
+const adminFixedScheduleTrace = useAttendanceFixedScheduleEffectiveness()
+const adminFixedScheduleTraceGroupId = ref('')
+function loadAdminFixedScheduleTrace(): void {
+  const groupId = adminFixedScheduleTraceGroupId.value.trim()
+  if (groupId) void adminFixedScheduleTrace.loadGroupEffectiveness(groupId)
+}
+
+// --- report (existing admin aggregate route; state + counts only, no actions, no raw IDs --
+// enforced in AttendanceGroupFixedScheduleReportWidget.vue's template, not here). ---
+const fixedScheduleReport = useAttendanceFixedScheduleEffectiveness()
+function loadFixedScheduleReport(groupId: string): void {
+  const trimmed = groupId.trim()
+  if (trimmed) void fixedScheduleReport.loadGroupEffectiveness(trimmed)
+}
+
 // --- OD-W5-7 / #4562 comp_time channel (UI 输入自验): the toggle's payload is validated against
 // the closed set BEFORE any fetch — an out-of-set literal never reaches the wire. The shared
 // annualSelfBalance state then correctly holds the SELECTED type's data (card title follows). ---
@@ -16251,6 +16392,25 @@ const attendanceGroupForm = reactive({
   attendanceType: 'fixed_shift' as AttendanceGroupType,
   description: '',
 })
+
+// #4709 FSER-4 §3: group drawer (existing admin aggregate route; loads whenever the group
+// editor's "schedule" stage shows a saved fixed_shift group -- same gate the existing preview
+// panel uses). Declared here (not with the other FSER-4 composables above) because its watcher
+// reads `attendanceGroupForm.attendanceType`, which must already be initialized.
+const attendanceGroupFixedScheduleEffectiveness = useAttendanceFixedScheduleEffectiveness()
+watch(
+  [attendanceGroupEditingId, attendanceGroupActiveStage, () => attendanceGroupForm.attendanceType],
+  ([groupId, stage, attendanceType]) => {
+    if (groupId && stage === 'schedule' && attendanceType === 'fixed_shift') {
+      void attendanceGroupFixedScheduleEffectiveness.loadGroupEffectiveness(groupId)
+    } else {
+      attendanceGroupFixedScheduleEffectiveness.reset()
+    }
+  },
+)
+function reloadAttendanceGroupFixedScheduleEffectiveness(): void {
+  if (attendanceGroupEditingId.value) void attendanceGroupFixedScheduleEffectiveness.loadGroupEffectiveness(attendanceGroupEditingId.value)
+}
 
 const scheduleGroupForm = reactive({
   name: '',
@@ -24361,6 +24521,31 @@ const selfRulesData = ref<AttendanceSelfRulesData | null>(null)
 const selfRulesLoading = ref(false)
 const selfRulesError = ref<string | null>(null)
 const selfRulesHasData = computed(() => selfRulesData.value !== null)
+
+// #4709 FSER-4 §3: employee schedule (new member-safe /me route). Group id source: the
+// employee's own attendance-group assignment already loaded by loadSelfAttendanceRules() above
+// -- no new membership discovery mechanism. Shows the FIRST attendance group only; multi-group
+// fixed-schedule effectiveness is non-scope for this slice (flagged in the PR body).
+const selfFixedScheduleGroupId = computed(() => selfRulesData.value?.assignment?.attendanceGroups?.[0]?.id ?? null)
+const selfFixedSchedule = useAttendanceFixedScheduleEffectiveness()
+watch(selfFixedScheduleGroupId, (groupId) => {
+  if (groupId) void selfFixedSchedule.loadSelfEffectiveness(groupId)
+  else selfFixedSchedule.reset()
+})
+function reloadSelfFixedSchedule(): void {
+  if (selfFixedScheduleGroupId.value) void selfFixedSchedule.loadSelfEffectiveness(selfFixedScheduleGroupId.value)
+}
+
+// --- self decision trace (same member-safe /me route + target group as the employee card above,
+// separate composable instance/mount so each surface's browser leg can be proven independently). ---
+const selfFixedScheduleTrace = useAttendanceFixedScheduleEffectiveness()
+watch(selfFixedScheduleGroupId, (groupId) => {
+  if (groupId) void selfFixedScheduleTrace.loadSelfEffectiveness(groupId)
+  else selfFixedScheduleTrace.reset()
+})
+function reloadSelfFixedScheduleTrace(): void {
+  if (selfFixedScheduleGroupId.value) void selfFixedScheduleTrace.loadSelfEffectiveness(selfFixedScheduleGroupId.value)
+}
 
 function summarizeSelfRulesGroups(groups: AttendanceSelfRulesGroupSummary[] | undefined, emptyLabel: string): string {
   if (!Array.isArray(groups) || groups.length === 0) return emptyLabel
