@@ -248,6 +248,34 @@ describe('W6 group effective-policy response contract validator', () => {
         reason: 'fixedSchedule.reasonCodes: not a closed-set string array',
       })
     })
+
+    // #4814 NIT-3: managedSets[] keys were checked but not value TYPES —
+    // `rowCount: {}` or `producerKey: 42` passed.
+    it('rejects a managedSets[] entry with a non-string producerKey', () => {
+      const fixture = readFixture('aggregate-conflict-fixed-schedule-changed.json') as {
+        ok: true
+        data: { domains: { schedule: { fixedSchedule: { drift: { managedSets: Array<Record<string, unknown>> } } } } }
+      }
+      expect(fixture.data.domains.schedule.fixedSchedule.drift.managedSets.length).toBeGreaterThan(0)
+      const patched = structuredClone(fixture)
+      patched.data.domains.schedule.fixedSchedule.drift.managedSets[0].producerKey = 42
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'fixedSchedule.drift.managedSets[]: field type mismatch',
+      })
+    })
+    it('rejects a managedSets[] entry with a non-numeric rowCount', () => {
+      const fixture = readFixture('aggregate-conflict-fixed-schedule-changed.json') as {
+        ok: true
+        data: { domains: { schedule: { fixedSchedule: { drift: { managedSets: Array<Record<string, unknown>> } } } } }
+      }
+      const patched = structuredClone(fixture)
+      patched.data.domains.schedule.fixedSchedule.drift.managedSets[0].rowCount = {}
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'fixedSchedule.drift.managedSets[]: rowCount not a non-negative int',
+      })
+    })
   })
 
   describe('editorRef closed-table parser (W6-R8)', () => {

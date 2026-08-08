@@ -203,6 +203,20 @@ function validateFixedSchedule(value: unknown): AttendanceGroupEffectivePolicyVa
     if (!hasClosedKeys(set, ['shiftId', 'startDate', 'endDate', 'producerKey', 'rowCount'])) {
       return fail('fixedSchedule.drift.managedSets[]: unexpected key set')
     }
+    // #4814 NIT-3: keys alone were checked, not value TYPES — `rowCount: {}`
+    // or `producerKey: 42` passed.
+    const managedSet = set as Record<string, unknown>
+    if (
+      !isNonEmptyString(managedSet.shiftId) ||
+      !isNonEmptyString(managedSet.startDate) ||
+      !isNonEmptyString(managedSet.endDate) ||
+      !isNonEmptyString(managedSet.producerKey)
+    ) {
+      return fail('fixedSchedule.drift.managedSets[]: field type mismatch')
+    }
+    if (!isNonNegativeInt(managedSet.rowCount)) {
+      return fail('fixedSchedule.drift.managedSets[]: rowCount not a non-negative int')
+    }
   }
   if (!isIsoTimestamp(v.evaluatedAt)) return fail('fixedSchedule.evaluatedAt: not an ISO timestamp')
   return { ok: true }
