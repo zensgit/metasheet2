@@ -274,6 +274,15 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
   })
 
   afterAll(async () => {
+    // DISCLOSED RESIDUE, not cleaned — and the attempt to clean it is what
+    // established that: `DELETE FROM attendance_group_effect_revisions` is
+    // refused by `attendance_w4c3a_revision_row_guard` with
+    // W4C3A_REVISION_DIRECT_MUTATION_DENIED, i.e. the table is deliberately
+    // append-only and owned by the W4C3A line. This file's probes therefore
+    // leave monotonic counter rows there. They are scoped to this run's
+    // throwaway org ids (`w6agg-a-<runstamp>` / `w6agg-b-<runstamp>`), so they
+    // are counter state rather than fixture data and cannot collide with
+    // another suite's rows.
     await pool.query('DELETE FROM attendance_shift_assignments WHERE org_id = ANY($1::text[])', [[orgA, orgB]])
     await pool.query('DELETE FROM attendance_group_fixed_schedule_configs WHERE org_id = ANY($1::text[])', [[orgA, orgB]])
     await pool.query('DELETE FROM attendance_group_managers WHERE org_id = ANY($1::text[])', [[orgA, orgB]])
@@ -437,18 +446,83 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
      * ephemeral database to avoid. Recorded as a phase-2 item rather than
      * half-built here.
      */
+    /**
+     * SCOPED to the rows this file seeded, not whole-table aggregates.
+     * Whole-table `MAX(xmin)` over the SHARED `metasheet_test` database means
+     * any concurrent writer from another suite reds this leg — a cross-suite
+     * coupling that gets a guard disabled rather than fixed. Every table in the
+     * derived set that HAS an `org_id` is scoped to this run's two orgs; the
+     * handful without one (`users`, `user_roles`, `user_permissions`,
+     * `role_permissions`, `user_namespace_admissions`) are scoped to this
+     * file's own seeded user ids where they carry an id column, and are
+     * otherwise dropped from the snapshot rather than left as a shared-table
+     * aggregate. Scoping does not weaken the in-place-UPDATE detection the
+     * `xmin` leg exists for: an UPDATE to a row this file seeded still moves
+     * that row's `xmin`, and a write to a row it did NOT seed is not this
+     * route's doing.
+     */
+    const scopedPredicates: Record<string, { where: string; params: unknown[] } | null> = {}
+    async function buildScopedPredicates(): Promise<void> {
+      const columns = await pool.query(
+        `SELECT table_name, column_name FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = ANY($1::text[])`,
+        [TOUCHED_TABLES],
+      )
+      const byTable = new Map<string, Set<string>>()
+      for (const row of columns.rows as Array<{ table_name: string; column_name: string }>) {
+        if (!byTable.has(row.table_name)) byTable.set(row.table_name, new Set())
+        byTable.get(row.table_name)?.add(row.column_name)
+      }
+      for (const table of TOUCHED_TABLES) {
+        const cols = byTable.get(table)
+        if (!cols) {
+          scopedPredicates[table] = null
+          continue
+        }
+        if (cols.has('org_id')) {
+          scopedPredicates[table] = { where: 'org_id = ANY($1::text[])', params: [[orgA, orgB]] }
+        } else if (cols.has('user_id')) {
+          scopedPredicates[table] = { where: 'user_id = ANY($1::text[])', params: [seededUserIds] }
+        } else if (table === 'users' && cols.has('id')) {
+          scopedPredicates[table] = { where: 'id = ANY($1::text[])', params: [seededUserIds] }
+        } else {
+          // No scoping column: excluded rather than snapshotted whole-table.
+          scopedPredicates[table] = null
+        }
+      }
+    }
+
     async function snapshotTables(): Promise<Array<{ table: string; count: number; maxXmin: string }>> {
+      const scoped = TOUCHED_TABLES.filter((table) => scopedPredicates[table])
       return Promise.all(
-        TOUCHED_TABLES.map(async (table) => {
+        scoped.map(async (table) => {
+          const predicate = scopedPredicates[table] as { where: string; params: unknown[] }
           const result = await pool.query(
-            `SELECT count(*)::int AS total, COALESCE(MAX(xmin::text::bigint), -1) AS max_xmin FROM ${table}`,
+            `SELECT count(*)::int AS total, COALESCE(MAX(xmin::text::bigint), -1) AS max_xmin
+               FROM ${table} WHERE ${predicate.where}`,
+            predicate.params,
           )
           return { table, count: result.rows[0].total, maxXmin: String(result.rows[0].max_xmin) }
         }),
       )
     }
 
+    it('the scoped snapshot covers a substantial, org-scoped subset (an empty snapshot would make every leg below vacuous)', async () => {
+      await buildScopedPredicates()
+      const rows = await snapshotTables()
+      expect(rows.length).toBeGreaterThanOrEqual(8)
+      // Every included table really is scoped — no whole-table aggregate slips
+      // back in over the shared database.
+      for (const row of rows) {
+        expect(scopedPredicates[row.table], `${row.table} is unscoped`).not.toBeNull()
+      }
+      // And the excluded set is NAMED, not silent.
+      const excluded = TOUCHED_TABLES.filter((table) => !scopedPredicates[table])
+      expect(excluded.every((table) => !table.startsWith('attendance_'))).toBe(true)
+    })
+
     it('row counts AND row versions (xmin) are unchanged across the FULL request matrix, not one happy-path call', async () => {
+      await buildScopedPredicates()
       // The previous leg bracketed exactly ONE request on ONE branch, so a
       // write firing only on the scheduled_shift / 404 / 400 / 403 branches sat
       // outside the snapshot window entirely. Same assertion, every branch this
@@ -482,6 +556,7 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
     })
 
     it('POSITIVE CONTROL: the snapshot DOES detect a same-row-count in-place UPDATE', async () => {
+      await buildScopedPredicates()
       // "Nothing changed" must be paired with proof the detector can fire, or
       // it is indistinguishable from a snapshot that reads nothing.
       const before = await snapshotTables()
@@ -495,6 +570,7 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
     })
 
     it('MEASURED: insert-then-delete on a TRIGGER-carrying table IS detected (via the trigger fan-out row, which does not revert)', async () => {
+      await buildScopedPredicates()
       const before = await snapshotTables()
       const probeId = randomUUID()
       await pool.query(
@@ -515,6 +591,7 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
     })
 
     it('MEASURED RESIDUAL: insert-then-delete on a table with NO trigger fan-out is NOT detected — the true boundary of this mechanism', async () => {
+      await buildScopedPredicates()
       // This is the honest limit, pinned so that a future mechanism which DOES
       // catch it reds here and forces the header to be updated rather than
       // leaving an over-claim in place.

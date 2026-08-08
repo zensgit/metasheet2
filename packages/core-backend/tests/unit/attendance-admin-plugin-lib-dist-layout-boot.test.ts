@@ -69,6 +69,39 @@ describe('attendance-admin.ts plugin-attendance require — dist-layout boot (#4
       // here instead.
       expect(fs.existsSync(realNodeModulesDir)).toBe(true)
 
+      // The hardened resolver anchors the repo root on the NAMED
+      // `packages/core-backend/package.json`. If the production image did not
+      // ship that file, the resolver would throw REPO_ROOT_NOT_FOUND at module
+      // init and crash-loop the backend — the exact #4814 P1 class it exists to
+      // prevent. The probe below writes that file into the probe tree, so it
+      // must NOT be the probe's own invention: DERIVE the fact from the real
+      // `Dockerfile.backend` RUNNER stage instead of assuming it.
+      const dockerfile = fs.readFileSync(path.join(repoRoot, 'Dockerfile.backend'), 'utf8')
+      const runnerStage = dockerfile.slice(dockerfile.search(/^FROM .* AS runner$/m))
+      expect(runnerStage.length, 'no runner stage found in Dockerfile.backend').toBeGreaterThan(100)
+      const runnerCopies = [...runnerStage.matchAll(/^COPY\s+--from=builder\s+(\S+)\s+(\S+)\s*$/gm)].map((m) => ({
+        from: m[1],
+        to: m[2],
+      }))
+      expect(runnerCopies.length, 'runner stage copies nothing').toBeGreaterThan(0)
+      // The anchor is shipped iff some runner COPY brings /app/packages (or the
+      // core-backend package dir itself) into the image.
+      const shipsAnchor = runnerCopies.some(
+        (copy) => copy.from === '/app/packages' || copy.from.startsWith('/app/packages/core-backend'),
+      )
+      expect(
+        shipsAnchor,
+        `Dockerfile.backend's runner stage does not ship packages/core-backend/package.json; ` +
+          `the resolver's repo-root anchor would be missing at runtime. Runner COPYs: ` +
+          `${JSON.stringify(runnerCopies)}`,
+      ).toBe(true)
+      // ...and the builder stage must actually put it there to be copied from.
+      expect(dockerfile).toMatch(/^COPY packages \.\/packages$/m)
+      // Layout facts the probe mirrors, likewise derived rather than assumed.
+      expect(runnerStage).toMatch(/^WORKDIR \/app$/m)
+      expect(runnerStage).toMatch(/^CMD \["node", "packages\/core-backend\/dist\/src\/index\.js"\]$/m)
+      expect(runnerCopies.some((copy) => copy.from === '/app/plugins')).toBe(true)
+
       const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'w6-dist-layout-boot-'))
       try {
         // Production layout per `Dockerfile.backend`: WORKDIR /app,
