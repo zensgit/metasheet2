@@ -29,8 +29,13 @@ import {
   assertPendingUserCannotBeActivatedViaGenericStatusApi,
   PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
 } from '../auth/user-activation'
-import { activatePendingUser } from '../auth/user-activate'
-import type { ActivateErrorCode } from '../auth/user-activate'
+import { activatePendingUser, isActivateMode } from '../auth/user-activate'
+import type {
+  ActivateErrorCode,
+  ActivateMode,
+  ActivateUserInput,
+  ActivateUserResult,
+} from '../auth/user-activate'
 import {
   applyMobileLoginAliasChangeOrThrow,
   assertAliasCutoverAllowed,
@@ -1832,6 +1837,10 @@ const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; 
   // RULED 409: an inactive integration is likewise configuration, not an outage.
   ACTIVATE_INTEGRATION_INACTIVE: { status: 409, message: 'Directory integration is not active; cannot activate' },
   ACTIVATE_LINK_MISMATCH: { status: 409, message: 'Directory link points to a different user' },
+  ACTIVATE_SOURCE_INELIGIBLE: {
+    status: 409,
+    message: 'Directory source is not eligible for DingTalk SSO activation',
+  },
 }
 
 type ActivatePolicyRow = Readonly<{ status: number; message: string }>
@@ -1916,6 +1925,132 @@ export function mapActivateError(error: unknown): { status: number; code: string
     if (policy) return { code: rawCode, ...policy }
   }
   return { ...ACTIVATE_ERROR_FALLBACK }
+}
+
+const MAX_BULK_ACTIVATE_ITEMS = 100
+
+type ParsedActivateRequest = Omit<ActivateUserInput, 'adminUserId'>
+
+type BulkActivateResult =
+  | {
+      userId: string
+      ok: true
+      result: ActivateUserResult
+    }
+  | {
+      userId: string
+      ok: false
+      error: { code: string; message: string; status: number }
+    }
+
+function parseOptionalNonEmptyString(
+  value: unknown,
+  fieldName: string,
+): string | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (typeof value !== 'string' || !value.trim()) {
+    throw Object.assign(new Error(`${fieldName} must be a non-empty string or null`), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  return value.trim()
+}
+
+function parseActivateRequest(
+  raw: unknown,
+  routeUserId?: string,
+): ParsedActivateRequest {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw Object.assign(new Error('Activation request must be an object'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  const body = raw as Record<string, unknown>
+  const rawUserId = routeUserId ?? body.userId
+  if (typeof rawUserId !== 'string' || !rawUserId.trim()) {
+    throw Object.assign(new Error('userId must be a non-empty string'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+
+  const rawMode = body.mode === undefined ? 'temp_password' : body.mode
+  if (!isActivateMode(rawMode)) {
+    throw Object.assign(new Error('mode must be temp_password, sso, or admin_no_password'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  const mode: ActivateMode = rawMode
+
+  if (body.temporaryPassword !== undefined && typeof body.temporaryPassword !== 'string') {
+    throw Object.assign(new Error('temporaryPassword must be a string'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  if (mode !== 'temp_password' && body.temporaryPassword !== undefined) {
+    throw Object.assign(new Error('temporaryPassword is only valid for temp_password mode'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  if (
+    body.enableDingTalkGrant !== undefined
+    && typeof body.enableDingTalkGrant !== 'boolean'
+  ) {
+    throw Object.assign(new Error('enableDingTalkGrant must be a boolean'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+
+  return {
+    userId: rawUserId.trim(),
+    mode,
+    temporaryPassword: typeof body.temporaryPassword === 'string'
+      ? body.temporaryPassword
+      : undefined,
+    orgId: parseOptionalNonEmptyString(body.orgId, 'orgId'),
+    directoryAccountId: parseOptionalNonEmptyString(
+      body.directoryAccountId,
+      'directoryAccountId',
+    ),
+    enableDingTalkGrant: body.enableDingTalkGrant === true,
+  }
+}
+
+function mapActivateRequestError(error: unknown): {
+  status: number
+  code: string
+  message: string
+} {
+  if ((error as { code?: unknown } | null)?.code === 'ACTIVATE_REQUEST_INVALID') {
+    return {
+      status: 400,
+      code: 'ACTIVATE_REQUEST_INVALID',
+      message: (error as Error).message,
+    }
+  }
+  return mapActivateError(error)
+}
+
+async function auditActivateSuccess(
+  adminUserId: string,
+  result: ActivateUserResult,
+  mode: ActivateMode,
+  source: 'admin_activate' | 'admin_activate_bulk',
+): Promise<void> {
+  await auditLog({
+    actorId: adminUserId,
+    actorType: 'user',
+    action: 'update',
+    resourceType: 'user',
+    resourceId: result.userId,
+    meta: {
+      source,
+      mode,
+      localPasswordSet: result.localPasswordSet,
+      // Boolean only: plaintext passwords and provider identity values are forbidden in audit.
+      temporaryPasswordIssued: Boolean(result.temporaryPassword),
+    },
+  })
 }
 
 export function adminUsersRouter(): Router {
@@ -4949,42 +5084,107 @@ export function adminUsersRouter(): Router {
   })
 
   // T3 — promote pending_activation → activated (temp password / SSO-shaped source check).
+  r.post('/api/admin/users/activate/bulk', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    const rawItems = req.body?.items
+    if (
+      !Array.isArray(rawItems)
+      || rawItems.length === 0
+      || rawItems.length > MAX_BULK_ACTIVATE_ITEMS
+    ) {
+      return jsonError(
+        res,
+        400,
+        'ACTIVATE_BULK_INVALID',
+        `items must contain between 1 and ${MAX_BULK_ACTIVATE_ITEMS} activation requests`,
+      )
+    }
+
+    let items: ParsedActivateRequest[]
+    try {
+      items = rawItems.map((item) => parseActivateRequest(item))
+      const seenUserIds = new Set<string>()
+      for (const item of items) {
+        if (seenUserIds.has(item.userId)) {
+          return jsonError(
+            res,
+            400,
+            'ACTIVATE_BULK_DUPLICATE_USER',
+            'Each userId may appear only once in a bulk activation request',
+          )
+        }
+        seenUserIds.add(item.userId)
+      }
+    } catch (error) {
+      const mapped = mapActivateRequestError(error)
+      return jsonError(res, mapped.status, mapped.code, mapped.message)
+    }
+
+    const results: BulkActivateResult[] = []
+    for (const item of items) {
+      try {
+        const result = await activatePendingUser({
+          ...item,
+          adminUserId,
+        })
+        await auditActivateSuccess(adminUserId, result, item.mode, 'admin_activate_bulk')
+        results.push({ userId: item.userId, ok: true, result })
+      } catch (error) {
+        const mapped = mapActivateError(error)
+        results.push({
+          userId: item.userId,
+          ok: false,
+          error: {
+            status: mapped.status,
+            code: mapped.code,
+            message: mapped.message,
+          },
+        })
+      }
+    }
+
+    const successCount = results.filter((item) => item.ok).length
+    const failureCount = results.length - successCount
+    await auditLog({
+      actorId: adminUserId,
+      actorType: 'user',
+      action: 'update',
+      resourceType: 'user',
+      resourceId: 'bulk-activate',
+      meta: {
+        source: 'admin_activate_bulk',
+        requestedCount: results.length,
+        successCount,
+        failureCount,
+      },
+    })
+    return jsonOk(res, {
+      items: results,
+      successCount,
+      failureCount,
+    })
+  })
+
   r.post('/api/admin/users/:id/activate', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    let input: ParsedActivateRequest
     try {
-      const modeRaw = String(req.body?.mode || 'temp_password').trim()
-      const mode =
-        modeRaw === 'sso' || modeRaw === 'admin_no_password' ? modeRaw : 'temp_password'
+      input = parseActivateRequest(req.body ?? {}, String(req.params.id || ''))
+    } catch (error) {
+      const mapped = mapActivateRequestError(error)
+      return jsonError(res, mapped.status, mapped.code, mapped.message)
+    }
+    try {
       // claimAliases is NOT client-controllable: production activate always claims
       // email/username/mobile aliases inside the activation transaction.
       const result = await activatePendingUser({
-        userId: String(req.params.id || ''),
-        mode,
+        ...input,
         adminUserId,
-        temporaryPassword: typeof req.body?.temporaryPassword === 'string'
-          ? req.body.temporaryPassword
-          : undefined,
-        orgId: typeof req.body?.orgId === 'string' ? req.body.orgId : null,
-        directoryAccountId: typeof req.body?.directoryAccountId === 'string'
-          ? req.body.directoryAccountId
-          : null,
-        enableDingTalkGrant: req.body?.enableDingTalkGrant === true,
       })
-      await auditLog({
-        actorId: adminUserId,
-        actorType: 'user',
-        action: 'update',
-        resourceType: 'user',
-        resourceId: result.userId,
-        meta: {
-          source: 'admin_activate',
-          mode,
-          localPasswordSet: result.localPasswordSet,
-          // never audit plaintext password
-          temporaryPasswordIssued: Boolean(result.temporaryPassword),
-        },
-      })
+      await auditActivateSuccess(adminUserId, result, input.mode, 'admin_activate')
       return jsonOk(res, result)
     } catch (error) {
       const mapped = mapActivateError(error)

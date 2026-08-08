@@ -74,6 +74,56 @@ async function seedDirectory(opts: { sourceActive: boolean }) {
   return { integrationId, accountId, runId: run.rows[0].id }
 }
 
+async function seedActivationSource(options: {
+  linkedUserId?: string
+  linkStatus?: string
+  accountActive?: boolean
+  accountProvider?: string
+  integrationProvider?: string
+  accountCorpId?: string
+  integrationCorpId?: string
+  integrationStatus?: string
+}) {
+  const integrationCorpId = options.integrationCorpId ?? `corp-${ORG}`
+  const integration = await query<{ id: string }>(
+    `INSERT INTO directory_integrations
+       (name, corp_id, org_id, provider, status, default_deprovision_policy)
+     VALUES ('activation-source-test', $1, $2, $3, $4, 'manual_review')
+     RETURNING id::text AS id`,
+    [
+      integrationCorpId,
+      ORG,
+      options.integrationProvider ?? 'dingtalk',
+      options.integrationStatus ?? 'active',
+    ],
+  )
+  const account = await query<{ id: string }>(
+    `INSERT INTO directory_accounts
+       (integration_id, provider, corp_id, external_user_id, external_key, name, is_active)
+     VALUES ($1::uuid, $2, $3, 'ext-activation-source',
+             'dingtalk:activation-source:ext', 'Activation Source', $4)
+     RETURNING id::text AS id`,
+    [
+      integration.rows[0].id,
+      options.accountProvider ?? 'dingtalk',
+      options.accountCorpId ?? integrationCorpId,
+      options.accountActive ?? true,
+    ],
+  )
+  if (options.linkedUserId !== undefined) {
+    await query(
+      `INSERT INTO directory_account_links
+         (directory_account_id, local_user_id, link_status)
+       VALUES ($1::uuid, $2, $3)`,
+      [account.rows[0].id, options.linkedUserId, options.linkStatus ?? 'linked'],
+    )
+  }
+  return {
+    integrationId: integration.rows[0].id,
+    accountId: account.rows[0].id,
+  }
+}
+
 async function seedEvent(
   seeded: { integrationId: string; accountId: string; runId: string },
   effects: Array<{ type: string; orgId: string | null }>,
@@ -233,6 +283,187 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
       [USER],
     )
     expect(aliases.rows.map((r) => r.normalized_value)).toContain('grant-fix@example.com')
+  })
+
+  it('T3 SSO activate commits only with an active exact DingTalk source link', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'sso-source-user', 'SSO Source', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({ linkedUserId: USER })
+
+    await activatePendingUser({
+      userId: USER,
+      mode: 'sso',
+      adminUserId: 'admin-test',
+      orgId: ORG,
+      enableDingTalkGrant: true,
+      directoryAccountId: source.accountId,
+    })
+
+    const committed = await query<{
+      activation_status: string
+      is_active: boolean
+      membership_active: boolean | null
+      grant_enabled: boolean | null
+    }>(
+      `SELECT u.activation_status,
+              u.is_active,
+              membership.is_active AS membership_active,
+              auth_grant.enabled AS grant_enabled
+         FROM users u
+         LEFT JOIN user_orgs membership
+           ON membership.user_id = u.id AND membership.org_id = $2
+         LEFT JOIN user_external_auth_grants auth_grant
+           ON auth_grant.local_user_id = u.id AND auth_grant.provider = 'dingtalk'
+        WHERE u.id = $1`,
+      [USER, ORG],
+    )
+    expect(committed.rows[0]).toMatchObject({
+      activation_status: 'activated',
+      is_active: true,
+      membership_active: true,
+      grant_enabled: true,
+    })
+  })
+
+  it('T3 SSO rejects an account with no linked witness and leaves zero activation residue', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'missing-source-user', 'Missing Source', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({})
+
+    await expect(
+      activatePendingUser({
+        userId: USER,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        orgId: ORG,
+        enableDingTalkGrant: true,
+        directoryAccountId: source.accountId,
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_MISSING' })
+
+    const residue = await query<{
+      activation_status: string
+      is_active: boolean
+      memberships: number
+      grants: number
+      aliases: number
+    }>(
+      `SELECT u.activation_status,
+              u.is_active,
+              (SELECT count(*)::int FROM user_orgs WHERE user_id = u.id) AS memberships,
+              (SELECT count(*)::int FROM user_external_auth_grants WHERE local_user_id = u.id) AS grants,
+              (SELECT count(*)::int FROM user_login_aliases WHERE user_id = u.id) AS aliases
+         FROM users u
+        WHERE u.id = $1`,
+      [USER],
+    )
+    expect(residue.rows[0]).toMatchObject({
+      activation_status: 'pending_activation',
+      is_active: false,
+      memberships: 0,
+      grants: 0,
+      aliases: 0,
+    })
+  })
+
+  it('T3 SSO requires link_status=linked even when local_user_id matches', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'unlinked-source-user', 'Unlinked Source', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({
+      linkedUserId: USER,
+      linkStatus: 'unlinked',
+    })
+
+    await expect(
+      activatePendingUser({
+        userId: USER,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        directoryAccountId: source.accountId,
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_MISSING' })
+
+    const target = await query<{ activation_status: string; is_active: boolean }>(
+      `SELECT activation_status, is_active FROM users WHERE id = $1`,
+      [USER],
+    )
+    expect(target.rows[0]).toEqual({
+      activation_status: 'pending_activation',
+      is_active: false,
+    })
+  })
+
+  it('T3 SSO rejects a linked account that belongs to another user', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES
+         ($1, 'source-owner', 'Source Owner', 'x', TRUE, 'activated', TRUE),
+         ($2, 'source-target', 'Source Target', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER_A, USER_B],
+    )
+    const source = await seedActivationSource({ linkedUserId: USER_A })
+
+    await expect(
+      activatePendingUser({
+        userId: USER_B,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        directoryAccountId: source.accountId,
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_LINK_MISMATCH' })
+
+    const target = await query<{ activation_status: string; is_active: boolean }>(
+      `SELECT activation_status, is_active FROM users WHERE id = $1`,
+      [USER_B],
+    )
+    expect(target.rows[0]).toEqual({
+      activation_status: 'pending_activation',
+      is_active: false,
+    })
+  })
+
+  it('T3 SSO rejects provider/corp-ineligible source rows without activating', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'ineligible-source', 'Ineligible Source', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({
+      linkedUserId: USER,
+      accountCorpId: `other-corp-${ORG}`,
+    })
+
+    await expect(
+      activatePendingUser({
+        userId: USER,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        directoryAccountId: source.accountId,
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INELIGIBLE' })
+
+    const target = await query<{ activation_status: string; is_active: boolean }>(
+      `SELECT activation_status, is_active FROM users WHERE id = $1`,
+      [USER],
+    )
+    expect(target.rows[0]).toEqual({
+      activation_status: 'pending_activation',
+      is_active: false,
+    })
   })
 
   it('restoring a membership effect actually re-activates the membership', async () => {
