@@ -527,3 +527,69 @@ test('BEHAVIOURAL: a bare read yields LOGICAL keys only when projectId + objectI
   assert.equal(wrongObject.records[0][PHYSICAL.code], 'MAT-RH-001',
     'and the raw physical key is what comes through instead')
 })
+
+// ---------------------------------------------------------------------------------------------
+// Review 2026-08-08 (P2): two rehearsal regressions passed the REQUIRED `test (20.x)` leg.
+// Both were injected into the driver and this file stayed 15/15 green:
+//   A. `f.name || f.title` -> `f.logicalId`      (every field resolves to undefined; the map is
+//                                                 empty and every seeded row is rejected)
+//   B. B4 `systemId: sourceSystemId` -> `targetSystemId`  (the same-instance check degenerates
+//                                                 into target-vs-itself — owner's original P1)
+// The existing assertions only said "the driver FETCHED /fields" and "it USED physicalByName",
+// which both mutants still satisfied. Neither reached CI; only a manual rehearsal would have.
+// The two tests below pin the discriminating detail instead of the surrounding shape.
+// ---------------------------------------------------------------------------------------------
+
+test('the field map is keyed on the SHAPE /fields actually returns ({id, name}), not an invented key', () => {
+  // The route selects `id, name, type, property, "order"` and answers `{data:{fields:[...]}}`
+  // (packages/core-backend/src/routes/univer-meta.ts, GET /fields). A key that route never emits
+  // yields an empty map — the failure mode this pins.
+  const route = fs.readFileSync(
+    path.join(repoRoot, 'packages/core-backend/src/routes/univer-meta.ts'), 'utf8')
+  const listBlock = route.slice(route.indexOf("router.get('/fields'"))
+  assert.ok(listBlock.length > 0, 'GET /fields not found — every assertion below would be vacuous')
+  const select = listBlock.slice(0, 1200)
+  assert.ok(/SELECT id, name,/.test(select),
+    'GET /fields must still SELECT id and name — if the route shape changed, this guard is stale '
+    + 'and the driver must be re-derived from the NEW shape rather than this test relaxed')
+
+  // The driver must read BOTH halves of that shape. Exact-token, not substring-of-a-comment:
+  // scope to the resolution loop so a mention elsewhere cannot satisfy it.
+  const loopStart = driver.indexOf('const physicalByName')
+  assert.ok(loopStart > 0, 'physicalByName resolution loop not found')
+  const loop = driver.slice(loopStart, loopStart + 400)
+  assert.ok(/\bf\.name\b/.test(loop),
+    "the logical key must come from `f.name` — the field GET /fields actually returns. "
+    + "Mutation A (`f.logicalId`) left this file 15/15 green while the map resolved empty.")
+  assert.ok(/\bf\.id\b/.test(loop),
+    "the physical key must come from `f.id` — the other half of the returned shape")
+
+  // NEGATIVE CONTROL: the mutant text must NOT satisfy the assertions above.
+  const mutantLoop = loop.replace(/f\.name \|\| f\.title/, 'f.logicalId')
+  assert.equal(/\bf\.name\b/.test(mutantLoop), false,
+    'the `f.logicalId` mutant must fail this test — otherwise it pins nothing')
+})
+
+test('B4 binds the K3-READ record, never the write target (no self-comparison)', () => {
+  // Owner P1 (#4768): binding B4 to the target made `sameK3Instance(x, x)` trivially true. The
+  // driver now binds the separate read record; nothing in CI asserted that until this test.
+  const b4Line = driver.match(/buildK3WiseMaterialListB4Config\(\{[^}]*\}\)/)
+  assert.ok(b4Line, 'the driver must mint a B4 binding via buildK3WiseMaterialListB4Config')
+  assert.match(b4Line[0], /systemId:\s*sourceSystemId\b/,
+    'B4 must bind sourceSystemId (the K3-read record). Mutation B (`targetSystemId`) restores the '
+    + 'exact defect owner reported and left this file 15/15 green.')
+  assert.doesNotMatch(b4Line[0], /systemId:\s*targetSystemId\b/,
+    'binding the write target is the self-referential shape the runtime now rejects with '
+    + 'K3_C6_B4_BINDING_SELF_REFERENTIAL')
+
+  // The two ids must be DISTINCT records, not aliases — else "bind the read record" is satisfied
+  // by a driver that points both names at one system.
+  assert.ok(/const sourceSystemId = /.test(driver) && /const targetSystemId = /.test(driver),
+    'source and target system ids must be separately resolved records')
+  assert.equal(/const targetSystemId = sourceSystemId\b/.test(driver), false,
+    'targetSystemId must not be an alias of sourceSystemId')
+
+  // And the target must DECLARE the pairing, which is what widens #4769's relation check.
+  assert.match(driver, /pairedReadSystemId:\s*sourceSystemId\b/,
+    'the write target must declare pairedReadSystemId = the K3-read record id')
+})
