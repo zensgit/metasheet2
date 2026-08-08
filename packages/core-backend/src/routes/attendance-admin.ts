@@ -50,8 +50,80 @@ import {
   readAttendanceCalculationDetail,
   readAttendanceW4ShadowBacklog,
 } from '../services/AttendanceW4CalculationDetail'
+import {
+  AttendanceGroupEffectivePolicyServiceError,
+  buildFixedScheduleProducerKey as buildAttendanceGroupEffectivePolicyFixedScheduleProducerKey,
+  createAttendanceGroupEffectivePolicyAggregateService,
+  type AttendanceGroupEffectivePolicyFserServiceLike,
+} from '../attendance/w6-group-effective-policy-aggregate'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// W6-1 (#4556): the aggregate composes the EXISTING FSER service — required
+// directly from its canonical `.cjs` module (same pattern the real-DB tests
+// already use: `packages/core-backend/tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts`).
+// No second effectiveness derivation (W6-R4) and no plugin-activation side
+// effects: this file only defines pure functions and a factory.
+// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+const attendanceGroupFixedScheduleEffectivenessServiceLib = require(
+  '../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
+) as {
+  createAttendanceGroupFixedScheduleEffectivenessService: (deps: {
+    HttpError: new (status: number, code: string, message: string) => Error
+    buildAttendanceGroupFixedScheduleProducerKey: (input: {
+      groupId: string
+      shiftId: string
+      startDate: string
+      endDate: string | null
+    }) => string
+    now?: () => string
+  }) => AttendanceGroupEffectivePolicyFserServiceLike
+}
+// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+const attendanceShiftServiceLib = require('../../../../plugins/plugin-attendance/lib/attendance-shift-service.cjs') as {
+  SEGMENT_CALCULATION_IMPLEMENTED: boolean
+}
+
+const attendanceGroupEffectivePolicyFserService = attendanceGroupFixedScheduleEffectivenessServiceLib.createAttendanceGroupFixedScheduleEffectivenessService(
+  {
+    HttpError: AttendanceGroupEffectivePolicyServiceError,
+    buildAttendanceGroupFixedScheduleProducerKey: buildAttendanceGroupEffectivePolicyFixedScheduleProducerKey,
+  },
+)
+
+const attendanceGroupEffectivePolicyAggregateService = createAttendanceGroupEffectivePolicyAggregateService({
+  query: async (sql: string, params?: unknown[]) => (await query(sql, params)).rows,
+  fser: attendanceGroupEffectivePolicyFserService,
+  segmentCalculationImplemented: attendanceShiftServiceLib.SEGMENT_CALCULATION_IMPLEMENTED,
+})
+
+/**
+ * W6-1 (#4556) §4.1: org identity for the group effective-policy route comes
+ * ONLY from the authenticated principal — the #4711 §3.2 rules applied
+ * verbatim, mirroring `resolveAttendanceFixedScheduleRouteActorContext` in
+ * `plugins/plugin-attendance/index.cjs` so the SAME JWT authenticates
+ * identically on both the CJS FSER route and this TS route. Never
+ * `req.query.orgId` (that is the different, admin-lookup pattern this route
+ * deliberately does NOT use).
+ */
+function getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req: Request): string | null {
+  const raw = req.user as Record<string, unknown> | undefined
+  const claim = raw?.orgId ?? raw?.workspaceId
+  if (typeof claim === 'string' && claim.trim()) return claim.trim()
+  if (typeof claim === 'number' && Number.isFinite(claim)) return String(claim)
+  const tenant = req.authenticatedTenantId
+  if (typeof tenant === 'string' && tenant.trim()) return tenant.trim()
+  return null
+}
+
+/** True when a client-supplied `x-org-id` header is present and does not
+ * byte-equal the authenticated org — the request must fail BEFORE any
+ * scoped SQL (W6-R3). */
+function attendanceGroupEffectivePolicyOrgSelectorMismatch(req: Request, orgId: string): boolean {
+  const headerValue = req.headers['x-org-id']
+  const header = Array.isArray(headerValue) ? headerValue[0] : headerValue
+  return header !== undefined && String(header) !== orgId
+}
 
 function readStrictString(value: unknown): string | null {
   return typeof value === 'string' ? value.trim() : null
@@ -1582,6 +1654,62 @@ export function attendanceAdminRouter(): Router {
       return jsonError(res, 500, 'CALCULATION_SHADOW_BACKLOG_FAILED', 'Failed to load shadow backlog')
     }
   })
+
+  // W6-1 (#4556): group effective-policy READ aggregate. GET-only (W6-R1);
+  // permission `attendance:admin` (aligned with the FSER v1 read route per
+  // design-lock §4.1); org identity from the authenticated principal only,
+  // with a delegated-admin active-org-membership gate on top (W6-R3, parent
+  // lock §3.5 final paragraph — full/platform admins bypass this SECOND
+  // gate via `canReadAttendanceDirectoryReadiness`'s own bypass, but never
+  // bypass org-identity derivation itself); composes the EXISTING FSER
+  // service (W6-R4); accepts no query params and no request body (W6-R7).
+  r.get(
+    '/api/attendance/groups/:groupId/effective-policy',
+    rbacGuard('attendance', 'admin'),
+    async (req: Request, res: Response) => {
+      try {
+        // R7: the route accepts no body and no state-selecting query
+        // parameter. Presence alone is rejected before any SQL — this also
+        // covers a `?orgId=` "query-org" spoofing attempt, since there is no
+        // legitimate query parameter on this route at all.
+        if (Object.keys(req.query).length > 0) {
+          return jsonError(res, 400, 'QUERY_NOT_ACCEPTED', 'This endpoint accepts no query parameters')
+        }
+        if (req.body && typeof req.body === 'object' && Object.keys(req.body as Record<string, unknown>).length > 0) {
+          return jsonError(res, 400, 'BODY_NOT_ACCEPTED', 'This endpoint accepts no request body')
+        }
+
+        const userId = getAttendanceAdminRequestUserId(req)
+        if (!userId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+
+        const orgId = getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req)
+        if (!orgId) return jsonError(res, 403, 'FORBIDDEN', 'Authenticated organization not found')
+        if (attendanceGroupEffectivePolicyOrgSelectorMismatch(req, orgId)) {
+          return jsonError(res, 403, 'FORBIDDEN', 'Insufficient permissions')
+        }
+
+        const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId)
+        if (!allowed) return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for effective-policy')
+
+        const groupId = String(req.params.groupId || '').trim()
+        if (!UUID_RE.test(groupId)) {
+          return jsonError(res, 400, 'GROUP_ID_INVALID', 'groupId must be a UUID')
+        }
+
+        const aggregate = await attendanceGroupEffectivePolicyAggregateService.getAggregate({ orgId, groupId })
+        return jsonOk(res, aggregate)
+      } catch (error) {
+        if (error instanceof AttendanceGroupEffectivePolicyServiceError) {
+          return jsonError(res, error.status, error.code, error.message)
+        }
+        if (isDatabaseSchemaError(error)) {
+          return jsonError(res, 503, 'DB_NOT_READY', 'Attendance group tables missing')
+        }
+        // Values-free seam: never leak raw DB / driver messages to the client.
+        return jsonError(res, 500, 'EFFECTIVE_POLICY_FAILED', 'Failed to load group effective policy')
+      }
+    },
+  )
 
   return r
 }
