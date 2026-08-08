@@ -51,7 +51,8 @@ function cloneJson<T>(value: T): T {
 }
 
 function cloneFields(fields: readonly FieldAuthoringDraft[]): FieldAuthoringDraft[] {
-  return cloneJson(fields)
+  // JSON clone yields a mutable array; cast input so T is not inferred as readonly[].
+  return cloneJson([...fields] as FieldAuthoringDraft[])
 }
 
 function fieldsEqual(
