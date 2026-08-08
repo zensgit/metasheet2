@@ -15,6 +15,10 @@ const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapte
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
+// W6-1 rebuild (W6-R4): the fixed-schedule producer key has exactly ONE
+// implementation, and it lives in lib/ so the backend can inject the SAME
+// function into the FSER instance the /effective-policy route builds.
+const attendanceGroupFixedScheduleProducerKeyLib = require('./lib/attendance-group-fixed-schedule-producer-key.cjs')
 const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
 const {
   DEFAULT_ATTRIBUTION_TAIL_MINUTES,
@@ -10671,17 +10675,16 @@ function mapAttendanceGroupFixedSchedulePreviewCandidate(userId, input) {
   }
 }
 
-const ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE = 'attendance_group_fixed_schedule'
+const ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE =
+  attendanceGroupFixedScheduleProducerKeyLib.ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE
 
+// W6-R4 single source: this DELEGATES to lib/attendance-group-fixed-schedule-producer-key.cjs
+// rather than joining the parts locally. The backend's /effective-policy route
+// injects that same lib function into its own FSER instance, so the two FSER
+// instances cannot key differently. Behaviour is unchanged from the previous
+// local body (same normalisation, same join order).
 function buildAttendanceGroupFixedScheduleProducerKey(input) {
-  const endDate = normalizeAttendanceScheduleAssignmentEndDate(input.endDate)
-  return [
-    ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE,
-    input.groupId,
-    input.shiftId,
-    input.startDate,
-    endDate ?? 'null',
-  ].join(':')
+  return attendanceGroupFixedScheduleProducerKeyLib.buildAttendanceGroupFixedScheduleProducerKey(input)
 }
 
 function buildAttendanceGroupFixedScheduleProducerMetadata(input, producerRunId) {
@@ -23981,6 +23984,10 @@ module.exports = {
     buildAttendanceGroupFixedScheduleProducerKey,
     runAttendanceGroupFixedScheduleTransaction,
     configServiceLib: attendanceGroupFixedScheduleConfigServiceLib,
+    // W6-1 rebuild: exposed so the producer-key single-source test can PROVE
+    // this file's general-purpose date normaliser and the lib module's agree,
+    // instead of a comment asserting it.
+    normalizeDateOnly,
   },
   __attendanceLivePunchWorkDateForTests: {
     getPunchShiftWindow,

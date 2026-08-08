@@ -36,8 +36,10 @@ describe('W6 group effective-policy response contract validator', () => {
     const names = loadFixtureNames('aggregate-')
     it('discovered the full fixture set (guards against a silently-empty directory)', () => {
       expect(names).toEqual([
+        'aggregate-configured-scheduled-shift.json',
         'aggregate-conflict-fixed-schedule-changed.json',
         'aggregate-conflict-membership-overlap.json',
+        'aggregate-conflict-unpublished-managed-row.json',
         'aggregate-effective-fixed-shift.json',
         'aggregate-needs-configuration.json',
         'aggregate-org-inherited-defaults.json',
@@ -159,16 +161,21 @@ describe('W6 group effective-policy response contract validator', () => {
         calculationPosture: 'legacy',
         domains: {
           membership: { label: 'effective', reasonCodes: [], editorRef: { kind: 'group_stage', stage: 'people' } },
+          // `sourceRefs` is REQUIRED on schedule/segments/rules and NOT
+          // PERMITTED on the other four — verified against all eight fixtures.
+          // It used to be optional everywhere, which let this very `base`
+          // object omit it on three domains the fixture pack always pins.
           schedule: {
             label: 'effective',
             strategy: 'free_time',
             reasonCodes: [],
+            sourceRefs: [],
             fixedSchedule: null,
             editorRef: { kind: 'group_context_route', step: 'schedule' },
           },
-          segments: { label: 'effective', reasonCodes: [], editorRef: { kind: 'group_context_route', step: 'schedule', surface: 'shifts' } },
+          segments: { label: 'effective', reasonCodes: [], sourceRefs: [], editorRef: { kind: 'group_context_route', step: 'schedule', surface: 'shifts' } },
           flex: { label: 'effective', reasonCodes: [], editorRef: { kind: 'group_context_route', step: 'schedule', surface: 'shifts' } },
-          rules: { label: 'org_inherited', source: 'org_default', reasonCodes: [], editorRef: { kind: 'group_context_route', step: 'rules', surface: 'rule-sets' } },
+          rules: { label: 'org_inherited', source: 'org_default', sourceRefs: [], reasonCodes: [], editorRef: { kind: 'group_context_route', step: 'rules', surface: 'rule-sets' } },
           punchMethod: { label: 'org_inherited', source: 'org_inherited', reasonCodes: [], editorRef: { kind: 'group_stage', stage: 'policies' } },
           requestPosture: { label: 'org_inherited', overtime: 'org_inherited', makeupPunch: 'org_inherited', outdoor: 'org_inherited', reasonCodes: [], editorRef: { kind: 'group_stage', stage: 'policies' } },
         },
@@ -217,15 +224,19 @@ describe('W6 group effective-policy response contract validator', () => {
       expect(validateAttendanceGroupEffectivePolicyResponseV1(patched).ok).toBe(false)
     })
 
-    // #4814 P2-2: reasonCodes was checked only with isStringArray (any
-    // array of strings), not against a closed list — §4.2 requires it
-    // closed end to end, same as every other enum field above.
+    // reasonCodes closure is POSITION-SPECIFIC (§4.2), not one flat union.
+    // The prior implementation used a single set at both positions, so a test
+    // named "must be FSER's own closed list" could only reject a wholly
+    // nonexistent code — a W6-authored code passed at the fixedSchedule
+    // position and an FSER-only code passed at a domain position. Each case
+    // below is paired with its POSITIVE CONTROL, so "rejects" cannot be
+    // satisfied by a validator that rejects everything.
     it('rejects a made-up domains.*.reasonCodes value (not FSER-sourced, not W6-authored)', () => {
       const patched = structuredClone(base)
       ;(patched.data.domains.membership as Record<string, unknown>).reasonCodes = ['NOT_A_REAL_REASON_CODE']
       expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
         ok: false,
-        reason: 'domains.membership.reasonCodes: not a closed-set string array',
+        reason: 'domains.membership.reasonCodes: not a closed-set domain reason-code array',
       })
     })
     it('rejects a raw UUID smuggled into domains.*.reasonCodes (values-free judge does not stand in for enum closure)', () => {
@@ -233,8 +244,23 @@ describe('W6 group effective-policy response contract validator', () => {
       ;(patched.data.domains.membership as Record<string, unknown>).reasonCodes = ['3f7a1c2e-0000-4000-8000-000000000001']
       expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
         ok: false,
-        reason: 'domains.membership.reasonCodes: not a closed-set string array',
+        reason: 'domains.membership.reasonCodes: not a closed-set domain reason-code array',
       })
+    })
+    it('rejects EFFECTIVE at a DOMAIN position (§4.3 shows domains carrying [] where FSER carries [EFFECTIVE])', () => {
+      const patched = structuredClone(base)
+      ;(patched.data.domains.membership as Record<string, unknown>).reasonCodes = ['EFFECTIVE']
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'domains.membership.reasonCodes: not a closed-set domain reason-code array',
+      })
+    })
+    it('POSITIVE CONTROL: a real FSER non-EFFECTIVE code and a real W6 code both PASS at a domain position', () => {
+      for (const code of ['DUPLICATE_MATCHING_ASSIGNMENT', 'CALCULATION_GROUP_MEMBERSHIP_OVERLAP']) {
+        const patched = structuredClone(base)
+        ;(patched.data.domains.membership as Record<string, unknown>).reasonCodes = [code]
+        expect(validateAttendanceGroupEffectivePolicyResponseV1(patched), code).toEqual({ ok: true })
+      }
     })
     it('rejects a made-up fixedSchedule.reasonCodes value (must be FSER\'s own closed list, §4.2)', () => {
       const fixture = readFixture('aggregate-effective-fixed-shift.json') as {
@@ -245,8 +271,116 @@ describe('W6 group effective-policy response contract validator', () => {
       patched.data.domains.schedule.fixedSchedule.reasonCodes = ['MADE_UP_FSER_REASON']
       expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
         ok: false,
-        reason: 'fixedSchedule.reasonCodes: not a closed-set string array',
+        reason: 'fixedSchedule.reasonCodes: not FSER\u2019s own closed list',
       })
+    })
+    it('rejects a W6-AUTHORED code at the fixedSchedule position (§4.2: W6 adds no FSER reason code)', () => {
+      const fixture = readFixture('aggregate-effective-fixed-shift.json') as {
+        ok: true
+        data: { domains: { schedule: { fixedSchedule: { reasonCodes: string[] } } } }
+      }
+      const patched = structuredClone(fixture)
+      // A REAL W6 domain code — legal at a domain position, illegal here.
+      patched.data.domains.schedule.fixedSchedule.reasonCodes = ['SEGMENT_CALCULATION_NOT_AUTHORITATIVE']
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'fixedSchedule.reasonCodes: not FSER\u2019s own closed list',
+      })
+    })
+    it('POSITIVE CONTROL: EFFECTIVE is legal at the fixedSchedule position (FSER embeds it verbatim)', () => {
+      const fixture = readFixture('aggregate-effective-fixed-shift.json')
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(fixture)).toEqual({ ok: true })
+    })
+
+    // W6-1 rebuild: the P1 class was "validator STRICTER than its producer"
+    // (endDate). The NIT class is the opposite polarity — predicates WEAKER
+    // than the spec. Both are fixed in this pass so the module has ONE rule:
+    // every field's predicate matches its producer's actual range.
+    it('accepts a NULL desired.endDate (open-ended managed row is legal — the P1)', () => {
+      const fixture = readFixture('aggregate-conflict-unpublished-managed-row.json')
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(fixture)).toEqual({ ok: true })
+    })
+    it('accepts a NULL managedSets[].endDate, and still rejects a non-date string there', () => {
+      const fixture = readFixture('aggregate-conflict-unpublished-managed-row.json') as {
+        ok: true
+        data: { domains: { schedule: { fixedSchedule: { drift: { managedSets: { endDate: unknown }[] } } } } }
+      }
+      expect(fixture.data.domains.schedule.fixedSchedule.drift.managedSets[0].endDate).toBe(null)
+      const patched = structuredClone(fixture)
+      patched.data.domains.schedule.fixedSchedule.drift.managedSets[0].endDate = 'not-a-date'
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'fixedSchedule.drift.managedSets[]: field type mismatch',
+      })
+    })
+    it('rejects a NULL desired.startDate (NOT NULL column — widening endDate must not widen startDate)', () => {
+      const fixture = readFixture('aggregate-effective-fixed-shift.json') as {
+        ok: true
+        data: { domains: { schedule: { fixedSchedule: { desired: { startDate: unknown } } } } }
+      }
+      const patched = structuredClone(fixture)
+      patched.data.domains.schedule.fixedSchedule.desired.startDate = null
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'fixedSchedule.desired: field type mismatch',
+      })
+    })
+    it('rejects a NaN or negative desired.revision (OpenAPI says minimum: 1; NaN serialises to JSON null)', () => {
+      const fixture = readFixture('aggregate-effective-fixed-shift.json') as {
+        ok: true
+        data: { domains: { schedule: { fixedSchedule: { desired: { revision: unknown } } } } }
+      }
+      for (const bad of [Number.NaN, -3, 0, 1.5]) {
+        const patched = structuredClone(fixture)
+        patched.data.domains.schedule.fixedSchedule.desired.revision = bad
+        expect(validateAttendanceGroupEffectivePolicyResponseV1(patched), String(bad)).toEqual({
+          ok: false,
+          reason: 'fixedSchedule.desired: field type mismatch',
+        })
+      }
+      // Positive control on the same field, so "rejects" is not vacuous.
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(readFixture('aggregate-effective-fixed-shift.json'))).toEqual({ ok: true })
+    })
+    it('rejects a non-ISO evaluatedAt that bare Date.parse would have accepted', () => {
+      for (const bad of ['March 5 2026', '2026/08/05', '2026-08-05', '2026-08-05 00:00:00']) {
+        const patched = structuredClone(base)
+        ;(patched.data as Record<string, unknown>).evaluatedAt = bad
+        expect(validateAttendanceGroupEffectivePolicyResponseV1(patched), bad).toEqual({
+          ok: false,
+          reason: 'data.evaluatedAt: not an ISO timestamp',
+        })
+      }
+      const ok = structuredClone(base)
+      ;(ok.data as Record<string, unknown>).evaluatedAt = '2026-08-05T00:00:00.000Z'
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(ok)).toEqual({ ok: true })
+    })
+    it('rejects a domain that OMITS sourceRefs where the pack always pins it, and one that ADDS it where the pack never does', () => {
+      const omitted = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
+      delete omitted.data.domains.segments.sourceRefs
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(omitted)).toEqual({
+        ok: false,
+        reason: 'domains.segments: unexpected key set',
+      })
+      const added = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
+      added.data.domains.punchMethod.sourceRefs = []
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(added)).toEqual({
+        ok: false,
+        reason: 'domains.punchMethod: unexpected key set',
+      })
+    })
+    it('rejects the removed schedule_group sourceRef kind (declared but never produced)', () => {
+      const patched = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
+      patched.data.domains.segments.sourceRefs = [{ kind: 'schedule_group', id: 'sg-1' }]
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'domains.segments.sourceRefs: invalid shape',
+      })
+      // Positive control: the three kinds that ARE produced still pass.
+      for (const kind of ['shift', 'rule_set', 'fixed_schedule_config']) {
+        const ok = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
+        ok.data.domains.segments.sourceRefs = [{ kind, id: 'x-1' }]
+        expect(validateAttendanceGroupEffectivePolicyResponseV1(ok), kind).toEqual({ ok: true })
+      }
     })
 
     // #4814 NIT-3: managedSets[] keys were checked but not value TYPES —

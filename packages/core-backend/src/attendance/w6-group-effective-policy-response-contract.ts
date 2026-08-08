@@ -30,7 +30,8 @@
 import {
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_CONFLICT_CODES_V1,
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAINS_V1,
-  ATTENDANCE_GROUP_EFFECTIVE_POLICY_REASON_CODES_V1,
+  ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAIN_REASON_CODES_V1,
+  ATTENDANCE_GROUP_EFFECTIVE_POLICY_FSER_REASON_CODES_V1,
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1,
   type AttendanceGroupEffectivePolicyCalculationPostureV1,
   type AttendanceGroupEffectivePolicyEditorRefV1,
@@ -38,7 +39,10 @@ import {
   type AttendanceGroupEffectivePolicyResponseV1,
 } from './w6-group-effective-policy-contract'
 
-const REASON_CODES = new Set(ATTENDANCE_GROUP_EFFECTIVE_POLICY_REASON_CODES_V1)
+/** Position-specific closures — see the contract module for why a single flat
+ * union cannot enforce §4.2's position rule. */
+const FSER_POSITION_REASON_CODES = new Set(ATTENDANCE_GROUP_EFFECTIVE_POLICY_FSER_REASON_CODES_V1)
+const DOMAIN_POSITION_REASON_CODES = new Set(ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAIN_REASON_CODES_V1)
 
 const CALCULATION_POSTURES: readonly AttendanceGroupEffectivePolicyCalculationPostureV1[] = Object.freeze([
   'legacy',
@@ -58,13 +62,37 @@ const FSER_STATES = Object.freeze(['not_configured', 'pending_apply', 'effective
 
 const FLEX_MODES = Object.freeze(['strict', 'flex_required_duration'])
 const RULE_SOURCES = Object.freeze(['org_default', 'group_rule_set'])
-const SCHEDULE_ROUTE_SURFACES: Record<string, readonly string[] | null> = Object.freeze({
+/**
+ * W6-R8: the #4711 closed step/surface table, re-declared here because the
+ * canonical table (`ATTENDANCE_GROUP_STEP_SURFACES` in
+ * `apps/web/src/router/attendanceGroupContextRoute.ts`) lives in the FRONTEND
+ * package and there is no shared module across that boundary. This is the
+ * same spelling re-declared across a package boundary, not W6 minting a
+ * second navigation spelling — and the duplication is closed MECHANICALLY,
+ * not by comment: `tests/unit/attendance-w6-schedule-route-surface-parity.test.ts`
+ * imports the canonical table by relative path and asserts set-equality
+ * (normalising this file's `calendar: null` to the canonical `[]`; both mean
+ * "no surface permitted", and the parser honours that by requiring exactly
+ * `{kind, step}` for `calendar`).
+ *
+ * Exported so the aggregate builds editor refs against THIS table instead of
+ * hard-coding surface literals of its own.
+ */
+export const SCHEDULE_ROUTE_SURFACES: Record<string, readonly string[] | null> = Object.freeze({
   schedule: ['shifts', 'assignments', 'advanced-scheduling'],
   calendar: null,
   rules: ['rule-sets'],
 })
 const GROUP_STAGES = Object.freeze(['basics', 'people', 'schedule', 'policies'])
-const SOURCE_REF_KINDS = Object.freeze(['shift', 'rule_set', 'fixed_schedule_config', 'schedule_group'])
+/**
+ * The sourceRef `kind` union. §4.2 defines NO sourceRef-kind union, so this is
+ * W6's own closed set — which means it must not carry a member no producer can
+ * emit. `schedule_group` was declared and never produced (the same
+ * "declared enum with no producer" class as the orphaned conflict code), so it
+ * is removed here and in the OpenAPI draft. Adding a kind later is a
+ * deliberate contract act, not a silent extension.
+ */
+const SOURCE_REF_KINDS = Object.freeze(['shift', 'rule_set', 'fixed_schedule_config'])
 
 export type AttendanceGroupEffectivePolicyValidationResult =
   | { readonly ok: true }
@@ -108,19 +136,44 @@ function isNonNegativeInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0
 }
 
+/** Matches the OpenAPI draft's `revision: {type: integer, minimum: 1}` and the
+ * column's `integer NOT NULL DEFAULT 1`. The previous bare
+ * `typeof === 'number'` accepted `NaN` and negatives — and `NaN` serialises to
+ * JSON `null`, i.e. a body this validator blessed violated the module's own
+ * OpenAPI draft. */
+function isPositiveInt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1
+}
+
+/** A nullable date-only field: the producer emits either a canonical
+ * `YYYY-MM-DD` or `null`. Accepting `null` here is the P1 fix (validator was
+ * stricter than its producer); requiring the SHAPE rather than any non-empty
+ * string is the paired tightening, so widening one direction does not quietly
+ * widen the other. */
+function isDateOnlyOrNull(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value))
+}
+
+function isDateOnly(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+}
+
+/** `Date.parse` alone accepts many non-ISO strings (e.g. `'March 5 2026'`),
+ * so the shape is checked first and `Date.parse` only rejects impossible
+ * calendar values. */
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/
 function isIsoTimestamp(value: unknown): value is string {
-  return typeof value === 'string' && !Number.isNaN(Date.parse(value))
+  return typeof value === 'string' && ISO_TIMESTAMP_RE.test(value) && !Number.isNaN(Date.parse(value))
 }
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
 }
 
-/** W6-R6: reason codes are closed end to end (§4.2), not merely
- * "an array of strings" — every entry must be one of FSER's closed
- * `REASON_ORDER` or the four W6-authored domain reason codes. */
-function isReasonCodeArray(value: unknown): value is string[] {
-  return isStringArray(value) && value.every((item) => REASON_CODES.has(item))
+/** W6-R6 + §4.2: reason codes are closed PER POSITION, not merely "an array of
+ * strings" and not a single flat union across both positions. */
+function isReasonCodeArray(value: unknown, allowed: ReadonlySet<string>): value is string[] {
+  return isStringArray(value) && value.every((item) => allowed.has(item))
 }
 
 /**
@@ -176,11 +229,22 @@ function validateFixedSchedule(value: unknown): AttendanceGroupEffectivePolicyVa
   }
   const v = value as Record<string, unknown>
   if (typeof v.state !== 'string' || !FSER_STATES.includes(v.state)) return fail('fixedSchedule.state: unknown enum value')
-  if (!isReasonCodeArray(v.reasonCodes)) return fail('fixedSchedule.reasonCodes: not a closed-set string array')
+  // §4.2: FSER's own closed list at THIS position — a W6-authored domain code here is a violation.
+  if (!isReasonCodeArray(v.reasonCodes, FSER_POSITION_REASON_CODES)) {
+    return fail('fixedSchedule.reasonCodes: not FSER\u2019s own closed list')
+  }
   if (v.desired !== null) {
     if (!hasClosedKeys(v.desired, ['shiftId', 'startDate', 'endDate', 'revision'])) return fail('fixedSchedule.desired: unexpected key set')
     const d = v.desired as Record<string, unknown>
-    if (!isNonEmptyString(d.shiftId) || !isNonEmptyString(d.startDate) || !isNonEmptyString(d.endDate) || typeof d.revision !== 'number') {
+    // `endDate` accepts `null` (open-ended managed row — the producer's own
+    // shape); `startDate` does not (NOT NULL column); `revision` is a POSITIVE
+    // int, matching the OpenAPI draft's `minimum: 1`.
+    if (
+      !isNonEmptyString(d.shiftId) ||
+      !isDateOnly(d.startDate) ||
+      !isDateOnlyOrNull(d.endDate) ||
+      !isPositiveInt(d.revision)
+    ) {
       return fail('fixedSchedule.desired: field type mismatch')
     }
   }
@@ -206,10 +270,13 @@ function validateFixedSchedule(value: unknown): AttendanceGroupEffectivePolicyVa
     // #4814 NIT-3: keys alone were checked, not value TYPES — `rowCount: {}`
     // or `producerKey: 42` passed.
     const managedSet = set as Record<string, unknown>
+    // `endDate: null` is a LEGAL open-ended managed row. Rejecting it here was
+    // the P1: it turned a legitimate row into a hard 500 on a GET, via the
+    // aggregate's own self-validation.
     if (
       !isNonEmptyString(managedSet.shiftId) ||
-      !isNonEmptyString(managedSet.startDate) ||
-      !isNonEmptyString(managedSet.endDate) ||
+      !isDateOnly(managedSet.startDate) ||
+      !isDateOnlyOrNull(managedSet.endDate) ||
       !isNonEmptyString(managedSet.producerKey)
     ) {
       return fail('fixedSchedule.drift.managedSets[]: field type mismatch')
@@ -222,21 +289,38 @@ function validateFixedSchedule(value: unknown): AttendanceGroupEffectivePolicyVa
   return { ok: true }
 }
 
+/**
+ * `sourceRefs` used to be listed as OPTIONAL on EVERY domain, so a domain the
+ * fixture pack always pins with `sourceRefs` could omit it entirely and still
+ * validate. Verified against all seven fixtures: `schedule`, `segments` and
+ * `rules` ALWAYS carry it (sometimes `[]`); `membership`, `flex`,
+ * `punchMethod` and `requestPosture` NEVER do. So it is required on the first
+ * three and not permitted at all on the rest — the true shape, in both
+ * directions, rather than a permissive middle that matches neither.
+ */
+type SourceRefsPolicy = 'required' | 'not_permitted'
+
 function validateDomainSummary(
   name: string,
   value: unknown,
-  extraRequired: readonly string[],
+  sourceRefsPolicy: SourceRefsPolicy,
+  extraRequired: readonly string[] = [],
   extraOptional: readonly string[] = [],
 ): AttendanceGroupEffectivePolicyValidationResult {
-  if (!hasClosedKeys(value, ['label', 'reasonCodes', 'editorRef', ...extraRequired], ['sourceRefs', ...extraOptional])) {
+  const required = ['label', 'reasonCodes', 'editorRef', ...extraRequired]
+  if (sourceRefsPolicy === 'required') required.push('sourceRefs')
+  if (!hasClosedKeys(value, required, extraOptional)) {
     return fail(`${name}: unexpected key set`)
   }
   const v = value as Record<string, unknown>
   if (typeof v.label !== 'string' || !ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1.includes(v.label as never)) {
     return fail(`${name}.label: unknown enum value`)
   }
-  if (!isReasonCodeArray(v.reasonCodes)) return fail(`${name}.reasonCodes: not a closed-set string array`)
-  if (Object.prototype.hasOwnProperty.call(v, 'sourceRefs') && !validateSourceRefs(v.sourceRefs)) {
+  // §4.2: domain positions carry FSER's codes with `EFFECTIVE` filtered out, plus W6's own.
+  if (!isReasonCodeArray(v.reasonCodes, DOMAIN_POSITION_REASON_CODES)) {
+    return fail(`${name}.reasonCodes: not a closed-set domain reason-code array`)
+  }
+  if (sourceRefsPolicy === 'required' && !validateSourceRefs(v.sourceRefs)) {
     return fail(`${name}.sourceRefs: invalid shape`)
   }
   const editorRef = parseAttendanceGroupEffectivePolicyEditorRefV1(v.editorRef)
@@ -300,10 +384,10 @@ export function validateAttendanceGroupEffectivePolicyResponseV1(
   }
   const domains = d.domains as Record<string, unknown>
 
-  const membership = validateDomainSummary('domains.membership', domains.membership, [])
+  const membership = validateDomainSummary('domains.membership', domains.membership, 'not_permitted')
   if (!membership.ok) return membership
 
-  const schedule = validateDomainSummary('domains.schedule', domains.schedule, ['strategy', 'fixedSchedule'])
+  const schedule = validateDomainSummary('domains.schedule', domains.schedule, 'required', ['strategy', 'fixedSchedule'])
   if (!schedule.ok) return schedule
   const scheduleValue = domains.schedule as Record<string, unknown>
   if (typeof scheduleValue.strategy !== 'string' || !GROUP_TYPES.includes(scheduleValue.strategy as never)) {
@@ -312,27 +396,27 @@ export function validateAttendanceGroupEffectivePolicyResponseV1(
   const fixedSchedule = validateFixedSchedule(scheduleValue.fixedSchedule)
   if (!fixedSchedule.ok) return fixedSchedule
 
-  const segments = validateDomainSummary('domains.segments', domains.segments, [])
+  const segments = validateDomainSummary('domains.segments', domains.segments, 'required')
   if (!segments.ok) return segments
 
-  const flex = validateDomainSummary('domains.flex', domains.flex, [], ['mode'])
+  const flex = validateDomainSummary('domains.flex', domains.flex, 'not_permitted', [], ['mode'])
   if (!flex.ok) return flex
   const flexValue = domains.flex as Record<string, unknown>
   if (Object.prototype.hasOwnProperty.call(flexValue, 'mode') && !FLEX_MODES.includes(flexValue.mode as string)) {
     return fail('domains.flex.mode: unknown enum value')
   }
 
-  const rules = validateDomainSummary('domains.rules', domains.rules, ['source'])
+  const rules = validateDomainSummary('domains.rules', domains.rules, 'required', ['source'])
   if (!rules.ok) return rules
   const rulesValue = domains.rules as Record<string, unknown>
   if (!RULE_SOURCES.includes(rulesValue.source as string)) return fail('domains.rules.source: unknown enum value')
 
-  const punchMethod = validateDomainSummary('domains.punchMethod', domains.punchMethod, ['source'])
+  const punchMethod = validateDomainSummary('domains.punchMethod', domains.punchMethod, 'not_permitted', ['source'])
   if (!punchMethod.ok) return punchMethod
   const punchMethodValue = domains.punchMethod as Record<string, unknown>
   if (punchMethodValue.source !== 'org_inherited') return fail('domains.punchMethod.source: must be org_inherited')
 
-  const requestPosture = validateDomainSummary('domains.requestPosture', domains.requestPosture, [
+  const requestPosture = validateDomainSummary('domains.requestPosture', domains.requestPosture, 'not_permitted', [
     'overtime',
     'makeupPunch',
     'outdoor',

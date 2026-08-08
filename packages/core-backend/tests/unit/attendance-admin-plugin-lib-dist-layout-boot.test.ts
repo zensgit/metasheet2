@@ -33,6 +33,20 @@ import { describe, expect, it } from 'vitest'
  * directly inside `attendance-admin.ts` bypassing the resolver) reproduces
  * #4814 P1 and reds this test with `MODULE_NOT_FOUND` — proven by running
  * this exact test against the pre-fix source (see PR #4814 report).
+ *
+ * REBUILD CHANGE (phase 1): the probe now COPIES `plugins/plugin-attendance`
+ * and WRITES a real `packages/core-backend/package.json` instead of
+ * symlinking the plugin dir in. Both are consequences of the hardened
+ * resolver, not cosmetics:
+ *  - the resolver anchors the repo root on the NAMED
+ *    `packages/core-backend/package.json`, which `Dockerfile.backend`'s
+ *    `COPY packages ./packages` genuinely puts in the image, so a probe
+ *    without it would not mirror production;
+ *  - the resolver `lstat`s every path component from the repo root down and
+ *    rejects symlinks (attack class A3b: a symlinked PARENT component still
+ *    `lstat`s as a regular file at the leaf), so a symlinked
+ *    `plugins/plugin-attendance` would now be refused — correctly, but for a
+ *    reason unrelated to what this test gates.
  */
 describe('attendance-admin.ts plugin-attendance require — dist-layout boot (#4814 P1)', () => {
   it(
@@ -97,8 +111,22 @@ describe('attendance-admin.ts plugin-attendance require — dist-layout boot (#4
         expect(fs.existsSync(routerPath), `tsc did not emit ${routerPath}. tsc output:\n${tscStderr}`).toBe(true)
 
         fs.symlinkSync(realNodeModulesDir, path.join(probeApp, 'packages/core-backend/node_modules'), 'dir')
+        // The repo-root ANCHOR the hardened resolver looks for. Production has
+        // it (Dockerfile.backend `COPY packages ./packages`); the probe must
+        // too, or it would be testing a layout production never ships.
+        fs.copyFileSync(
+          path.join(coreBackendRoot, 'package.json'),
+          path.join(probeApp, 'packages/core-backend/package.json'),
+        )
         fs.mkdirSync(path.join(probeApp, 'plugins'), { recursive: true })
-        fs.symlinkSync(realPluginsDir, path.join(probeApp, 'plugins/plugin-attendance'), 'dir')
+        // COPIED, not symlinked: the resolver rejects a symlinked path
+        // component between the repo root and the target file (attack class
+        // A3b). `dereference: true` so the copy contains real files even if
+        // the source tree itself holds links.
+        fs.cpSync(realPluginsDir, path.join(probeApp, 'plugins/plugin-attendance'), {
+          recursive: true,
+          dereference: true,
+        })
 
         // Runs in a CHILD PROCESS deliberately: requiring the real router
         // executes real module-scope code (DB pool + message bus

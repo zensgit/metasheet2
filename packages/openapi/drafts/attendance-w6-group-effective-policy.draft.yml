@@ -133,7 +133,11 @@ components:
         kind:
           type: string
           description: Closed configuration-source kinds (config IDs only, never user IDs).
-          enum: [shift, rule_set, fixed_schedule_config, schedule_group]
+          # `schedule_group` removed: it was declared here and in the TS
+          # contract but no producer ever emitted it. §4.2 defines no
+          # sourceRef-kind union, so narrowing to the produced kinds needs no
+          # lock amendment.
+          enum: [shift, rule_set, fixed_schedule_config]
         id:
           type: string
           format: uuid
@@ -173,7 +177,11 @@ components:
           properties:
             shiftId: { type: string, format: uuid }
             startDate: { type: string, format: date }
-            endDate: { type: string, format: date }
+            # NULLABLE by construction: the producer (`formatDateOnly`) emits
+            # null for an open-ended managed row, and
+            # `attendance_shift_assignments.end_date` is a nullable `date`
+            # with no NOT NULL and no CHECK.
+            endDate: { type: string, format: date, nullable: true }
             revision: { type: integer, minimum: 1 }
         coverage:
           type: object
@@ -202,7 +210,8 @@ components:
                 properties:
                   shiftId: { type: string, format: uuid }
                   startDate: { type: string, format: date }
-                  endDate: { type: string, format: date }
+                  # Nullable for the same reason as `desired.endDate` above.
+                  endDate: { type: string, format: date, nullable: true }
                   producerKey: { type: string }
                   rowCount: { type: integer, minimum: 1 }
         evaluatedAt:

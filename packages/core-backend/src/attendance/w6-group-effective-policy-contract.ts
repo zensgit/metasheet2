@@ -73,24 +73,39 @@ export type AttendanceGroupEffectivePolicyConflictCodeV1 =
   (typeof ATTENDANCE_GROUP_EFFECTIVE_POLICY_CONFLICT_CODES_V1)[number]
 
 /**
- * Closed reason-code union per §4.2: *"Reason codes inside the embedded
- * fixed-schedule object are the FSER lock's closed list, unchanged and in
- * FSER order."* Used to validate BOTH `fixedSchedule.reasonCodes` (FSER's
- * full list, embedded verbatim, including `EFFECTIVE`) and every
- * `domains.*.reasonCodes` (always a strict subset — FSER's codes with
- * `EFFECTIVE` filtered out for the `schedule` domain, plus the four
- * W6-authored domain-level codes below that are not part of FSER's own
- * vocabulary).
+ * Reason-code closure, POSITION-SPECIFIC — because §4.2 is position-specific.
+ *
+ * §4.2: *"Reason codes inside the embedded fixed-schedule object are the FSER
+ * lock's closed list, unchanged and in FSER order. W6 adds no FSER reason
+ * code."* A single FLAT union over both positions cannot express that: with a
+ * flat set, a W6-authored code passes at the `fixedSchedule` position (which
+ * §4.2 says is FSER's list unchanged) and an FSER-only code passes at a
+ * domain position. That flat union is what shipped, under a test named
+ * "must be FSER's own closed list" that could only reject a wholly
+ * nonexistent code. The two sets below make the position distinction real:
+ *
+ *  - {@link ATTENDANCE_GROUP_EFFECTIVE_POLICY_FSER_REASON_CODES_V1} — FSER's
+ *    `REASON_ORDER` verbatim, the ONLY vocabulary legal inside
+ *    `fixedSchedule.reasonCodes`;
+ *  - {@link ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAIN_REASON_CODES_V1} — what
+ *    a `domains.*.reasonCodes` entry may be: FSER's codes with `EFFECTIVE`
+ *    filtered out (the aggregate filters it, and §4.3's own example shows an
+ *    effective group with `[]` at domain level), plus the four W6-authored
+ *    domain codes that are not part of FSER's vocabulary.
  *
  * FSER's `REASON_ORDER` is IMPORTED, not hand-copied — a second hand-typed
- * copy is exactly the drift risk §7.3 forbids for W6-2's OpenAPI mint, and
- * is exactly what R4's own fidelity test independently duplicates a third
- * time (flagged separately, #4814 P3-5).
+ * copy is exactly the drift risk §7.3 forbids for W6-2's OpenAPI mint.
  */
 const fserEffectivenessServiceLib = requirePluginAttendanceLib<{ REASON_ORDER: readonly string[] }>(
   __dirname,
   'attendance-group-fixed-schedule-effectiveness-service.cjs',
 )
+
+/** FSER's own closed list, unchanged and in FSER order (§4.2). */
+export const ATTENDANCE_GROUP_EFFECTIVE_POLICY_FSER_REASON_CODES_V1: readonly string[] = Object.freeze([
+  ...fserEffectivenessServiceLib.REASON_ORDER,
+])
+
 /** The four domain-level reason codes this aggregate mints itself — never
  * part of FSER's vocabulary, so not present in `REASON_ORDER`. */
 const ATTENDANCE_GROUP_EFFECTIVE_POLICY_OWN_REASON_CODES_V1 = [
@@ -99,8 +114,19 @@ const ATTENDANCE_GROUP_EFFECTIVE_POLICY_OWN_REASON_CODES_V1 = [
   'CALCULATION_GROUP_MEMBERSHIP_OVERLAP',
   'RULE_SOURCE_MISSING',
 ] as const
+
+/** Legal at `domains.*.reasonCodes`: FSER's codes minus `EFFECTIVE`, plus
+ * W6's own. Derived from the imported list, never re-typed. */
+export const ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAIN_REASON_CODES_V1: readonly string[] = Object.freeze([
+  ...fserEffectivenessServiceLib.REASON_ORDER.filter((code) => code !== 'EFFECTIVE'),
+  ...ATTENDANCE_GROUP_EFFECTIVE_POLICY_OWN_REASON_CODES_V1,
+])
+
+/** Union of both positions. Kept for callers that need "is this a W6 reason
+ * code at all"; it is deliberately NOT what the validator uses at either
+ * position, because a union cannot enforce a position rule. */
 export const ATTENDANCE_GROUP_EFFECTIVE_POLICY_REASON_CODES_V1: readonly string[] = Object.freeze([
-  ...fserEffectivenessServiceLib.REASON_ORDER,
+  ...ATTENDANCE_GROUP_EFFECTIVE_POLICY_FSER_REASON_CODES_V1,
   ...ATTENDANCE_GROUP_EFFECTIVE_POLICY_OWN_REASON_CODES_V1,
 ])
 
@@ -165,10 +191,21 @@ export type AttendanceGroupFixedScheduleEffectivenessV1 = {
     | 'effective'
     | 'configuration_changed'
   readonly reasonCodes: readonly string[]
+  /**
+   * `endDate` is `string | null` because the PRODUCER emits `null` BY
+   * CONSTRUCTION: FSER's `formatDateOnly` returns `null` for a null column,
+   * `attendance_shift_assignments.end_date` is a NULLABLE `date` with no NOT
+   * NULL and no CHECK, and the canonical managed-row writer has an explicit
+   * `end_date: input.endDate ?? null` branch. Declaring it `string` made this
+   * type — and the validator that follows it — STRICTER THAN ITS OWN
+   * PRODUCER, which §4.2 forbids: the embedded fixed-schedule object is the
+   * FSER contract verbatim. `startDate` stays non-null (the column is NOT
+   * NULL).
+   */
   readonly desired: {
     readonly shiftId: string
     readonly startDate: string
-    readonly endDate: string
+    readonly endDate: string | null
     readonly revision: number
   } | null
   readonly coverage: {
@@ -181,10 +218,15 @@ export type AttendanceGroupFixedScheduleEffectivenessV1 = {
   readonly drift: {
     readonly unconfiguredManagedRows: number
     readonly unpublishedManagedRows: number
+    /** Same nullability reasoning as `desired.endDate` above: FSER derives
+     * every managed set's `endDate` through the same `formatDateOnly`, over
+     * the same nullable column. `producerKey` stays non-null — it is
+     * guaranteed non-null whenever `producer_type` is non-null by
+     * `chk_attendance_shift_assignments_producer_metadata`. */
     readonly managedSets: ReadonlyArray<{
       readonly shiftId: string
       readonly startDate: string
-      readonly endDate: string
+      readonly endDate: string | null
       readonly producerKey: string
       readonly rowCount: number
     }>
