@@ -7,13 +7,23 @@ import {
   supersedeDeprovisionEvidenceForAccessGraphWrite,
 } from '../../src/directory/access-graph-mutex'
 import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovision-ledger'
+import {
+  bindDirectoryAccount,
+  unbindDirectoryAccount,
+} from '../../src/directory/directory-sync'
+import {
+  archiveLocalAccount,
+  createLocalAccount,
+} from '../../src/directory/local-directory-org'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const PREFIX = `d5a-mutex-${Date.now()}`
 
 type SeededEvidence = {
+  accountId: string
   eventId: string
   integrationId: string
+  orgId: string
   userId: string
 }
 
@@ -74,13 +84,26 @@ async function seedAppliedEvidence(): Promise<SeededEvidence> {
   )
   const account = await query<{ id: string }>(
     `INSERT INTO directory_accounts (
-       integration_id, provider, external_user_id, external_key, name, is_active
-     ) VALUES ($1::uuid, 'dingtalk', $2, $3, 'D5A Mutex', FALSE)
+       integration_id, provider, corp_id, external_user_id, union_id, open_id,
+       external_key, name, is_active
+     )
+     SELECT integration.id,
+            'dingtalk',
+            integration.corp_id,
+            $2,
+            $3,
+            $4,
+            $2,
+            'D5A Mutex',
+            FALSE
+       FROM directory_integrations integration
+      WHERE integration.id = $1::uuid
      RETURNING id::text AS id`,
     [
       integrationId,
       `${PREFIX}-external-${randomUUID()}`,
-      `dingtalk:${PREFIX}:${randomUUID()}`,
+      `${PREFIX}-union-${randomUUID()}`,
+      `${PREFIX}-open-${randomUUID()}`,
     ],
   )
   await query(
@@ -103,7 +126,59 @@ async function seedAppliedEvidence(): Promise<SeededEvidence> {
     }),
   )
   if (!applied.eventId) throw new Error('failed to seed deprovision evidence')
-  return { eventId: applied.eventId, integrationId, userId }
+  return {
+    accountId: account.rows[0].id,
+    eventId: applied.eventId,
+    integrationId,
+    orgId,
+    userId,
+  }
+}
+
+async function resetSeededForAccessOverride(
+  seeded: SeededEvidence,
+): Promise<void> {
+  await query(
+    `UPDATE users
+        SET is_active = TRUE, activation_status = 'activated'
+      WHERE id = $1`,
+    [seeded.userId],
+  )
+  await query(
+    `UPDATE directory_accounts SET is_active = TRUE WHERE id = $1::uuid`,
+    [seeded.accountId],
+  )
+  await query(
+    `UPDATE directory_account_links
+        SET local_user_id = $2, link_status = 'linked'
+      WHERE directory_account_id = $1::uuid`,
+    [seeded.accountId, seeded.userId],
+  )
+  await query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active)
+     VALUES ($1, $2, TRUE)
+     ON CONFLICT (user_id, org_id)
+     DO UPDATE SET is_active = TRUE`,
+    [seeded.userId, seeded.orgId],
+  )
+}
+
+async function reopenEvidence(eventId: string): Promise<void> {
+  await query(
+    `UPDATE directory_deprovision_effects
+        SET status = 'applied', reversed_at = NULL, reversed_by = NULL
+      WHERE event_id = $1::uuid`,
+    [eventId],
+  )
+  await query(
+    `UPDATE directory_deprovision_events
+        SET status = 'applied',
+            resolved_at = NULL,
+            resolved_by = NULL,
+            resolve_note = NULL
+      WHERE id = $1::uuid`,
+    [eventId],
+  )
 }
 
 async function readEvidence(userId: string) {
@@ -144,6 +219,30 @@ async function waitUntilBlockedOnHolder(
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error(`timed out waiting for pid ${waiterPid} to block on ${holderPid}`)
+}
+
+async function waitForAnyUserLockWaiter(
+  inspector: Pool,
+  holderPid: number,
+  timeoutMs = 8000,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const result = await inspector.query<{ pid: number }>(
+      `SELECT activity.pid
+         FROM pg_stat_activity activity
+        WHERE activity.pid <> $1::int
+          AND activity.wait_event_type = 'Lock'
+          AND $1::int = ANY(pg_blocking_pids(activity.pid))
+          AND activity.query LIKE '%FROM users%'
+        ORDER BY activity.pid
+        LIMIT 1`,
+      [holderPid],
+    )
+    if (result.rows[0]?.pid) return Number(result.rows[0].pid)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error(`timed out waiting for a production writer to block on user holder ${holderPid}`)
 }
 
 describeIfDatabase('directory access-graph mutex (real DB)', () => {
@@ -243,5 +342,178 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
       await pool.end()
     }
   })
-})
 
+  it('manual bind supersedes open evidence and advances generation in the bind transaction', async () => {
+    const seeded = await seedAppliedEvidence()
+    await resetSeededForAccessOverride(seeded)
+    const before = await readEvidence(seeded.userId)
+
+    await bindDirectoryAccount(seeded.accountId, {
+      localUserRef: seeded.userId,
+      adminUserId: 'admin:d5b-bind',
+      enableDingTalkGrant: false,
+    })
+
+    const after = await readEvidence(seeded.userId)
+    expect(Number(after.access_generation)).toBe(Number(before.access_generation) + 1)
+    expect(after.event_status).toBe('superseded')
+    expect(new Set(after.effect_statuses)).toEqual(new Set(['superseded']))
+    expect(after.resolved_by).toBe('admin:d5b-bind')
+  })
+
+  it('manual unbind supersedes open evidence and advances generation in the unbind transaction', async () => {
+    const seeded = await seedAppliedEvidence()
+    await resetSeededForAccessOverride(seeded)
+    const before = await readEvidence(seeded.userId)
+
+    await unbindDirectoryAccount(seeded.accountId, {
+      adminUserId: 'admin:d5b-unbind',
+      disableDingTalkGrant: true,
+    })
+
+    const after = await readEvidence(seeded.userId)
+    expect(Number(after.access_generation)).toBe(Number(before.access_generation) + 1)
+    expect(after.event_status).toBe('superseded')
+    expect(new Set(after.effect_statuses)).toEqual(new Set(['superseded']))
+    expect(after.resolved_by).toBe('admin:d5b-unbind')
+  })
+
+  it('local account create and archive both invalidate open evidence', async () => {
+    const seeded = await seedAppliedEvidence()
+    await resetSeededForAccessOverride(seeded)
+    const beforeCreate = await readEvidence(seeded.userId)
+
+    const localAccount = await createLocalAccount({
+      orgId: seeded.orgId,
+      localUserId: seeded.userId,
+      actorId: 'admin:d5b-local-create',
+    })
+    const afterCreate = await readEvidence(seeded.userId)
+    expect(Number(afterCreate.access_generation)).toBe(
+      Number(beforeCreate.access_generation) + 1,
+    )
+    expect(afterCreate.event_status).toBe('superseded')
+    expect(afterCreate.resolved_by).toBe('admin:d5b-local-create')
+
+    await reopenEvidence(seeded.eventId)
+    const beforeArchive = await readEvidence(seeded.userId)
+    await archiveLocalAccount(
+      seeded.orgId,
+      localAccount.id,
+      'admin:d5b-local-archive',
+    )
+    const afterArchive = await readEvidence(seeded.userId)
+    expect(Number(afterArchive.access_generation)).toBe(
+      Number(beforeArchive.access_generation) + 1,
+    )
+    expect(afterArchive.event_status).toBe('superseded')
+    expect(afterArchive.resolved_by).toBe('admin:d5b-local-archive')
+  })
+
+  it('the production bind parks on the canonical user mutex before it locks the account', async () => {
+    const seeded = await seedAppliedEvidence()
+    await resetSeededForAccessOverride(seeded)
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+    const holder = await pool.connect()
+    try {
+      await holder.query('BEGIN')
+      const holderPid = Number(
+        (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+          .rows[0].pid,
+      )
+      await holder.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+        seeded.userId,
+      ])
+
+      const bindPromise = bindDirectoryAccount(seeded.accountId, {
+        localUserRef: seeded.userId,
+        adminUserId: 'admin:d5b-barrier',
+        enableDingTalkGrant: false,
+      })
+      const waiterPid = await waitForAnyUserLockWaiter(pool, holderPid)
+      const waiter = await pool.query<{ account_locked: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM pg_locks account_lock
+             JOIN pg_class relation ON relation.oid = account_lock.relation
+            WHERE account_lock.pid = $1::int
+              AND relation.relname = 'directory_accounts'
+              AND account_lock.granted
+         ) AS account_locked`,
+        [waiterPid],
+      )
+      expect(waiter.rows[0]?.account_locked).toBe(false)
+
+      await holder.query('ROLLBACK')
+      await bindPromise
+      expect((await readEvidence(seeded.userId)).event_status).toBe('superseded')
+    } finally {
+      await holder.query('ROLLBACK').catch(() => undefined)
+      holder.release()
+      await pool.end()
+    }
+  })
+
+  it("a 'pending' email-match hint never trips the bind CAS: witness and re-read share the linked-only predicate (D5 review P1)", async () => {
+    // The sync loop writes local_user_id onto 'pending' rows as a match HINT (the top-ranked
+    // bind target in the review workbench). Before the fix, the prior-holder witness read that
+    // hint (status-agnostic) while the in-transaction CAS re-read was linked-scoped: witness
+    // non-null, CAS null, and EVERY manual bind of such an account failed forever with
+    // "binding changed; retry" — a retry that could never succeed.
+    const orgId = `${PREFIX}-org-${randomUUID()}`
+    const hintUserId = `${PREFIX}-hint-${randomUUID()}`
+    const targetUserId = `${PREFIX}-target-${randomUUID()}`
+    const integration = await query<{ id: string }>(
+      `INSERT INTO directory_integrations (name, corp_id, org_id, provider, status, default_deprovision_policy)
+       VALUES ($1, $2, $3, 'dingtalk', 'active', 'manual_review') RETURNING id::text AS id`,
+      [`${PREFIX}-integration-${randomUUID()}`, `${PREFIX}-corp-${randomUUID()}`, orgId],
+    )
+    for (const [uid, email] of [
+      [hintUserId, `${PREFIX}-hint@example.com`],
+      [targetUserId, `${PREFIX}-target@example.com`],
+    ]) {
+      await query(
+        `INSERT INTO users (id, email, password_hash, is_active, activation_status, access_generation)
+         VALUES ($1, $2, 'x', TRUE, 'activated', 0)`,
+        [uid, email],
+      )
+    }
+    const account = await query<{ id: string }>(
+      `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, email, is_active)
+       SELECT integration.id, 'dingtalk', integration.corp_id, $2, $3, $4, $2, 'Pending Hint', $5, TRUE
+         FROM directory_integrations integration WHERE integration.id = $1::uuid
+       RETURNING id::text AS id`,
+      [
+        integration.rows[0].id,
+        `${PREFIX}-external-${randomUUID()}`,
+        `${PREFIX}-union-${randomUUID()}`,
+        `${PREFIX}-open-${randomUUID()}`,
+        `${PREFIX}-hint@example.com`,
+      ],
+    )
+    // The sync loop's own shape: a PENDING row carrying the match hint.
+    await query(
+      `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+       VALUES ($1::uuid, $2, 'pending', 'email')`,
+      [account.rows[0].id, hintUserId],
+    )
+
+    // Binding to a DIFFERENT user must succeed — the pending hint is not a holder.
+    const bound = await bindDirectoryAccount(account.rows[0].id, {
+      localUserRef: targetUserId,
+      adminUserId: 'admin:d5-pending-hint',
+      enableDingTalkGrant: false,
+    })
+    expect(bound.account.linkStatus).toBe('linked')
+    expect(bound.account.localUser?.id).toBe(targetUserId)
+    // And the hint user is NOT presented as a previous holder — they never held anything.
+    expect(bound.previousLocalUser).toBeNull()
+
+    const link = await query<{ local_user_id: string; link_status: string }>(
+      `SELECT local_user_id, link_status FROM directory_account_links WHERE directory_account_id = $1::uuid`,
+      [account.rows[0].id],
+    )
+    expect(link.rows).toHaveLength(1)
+    expect(link.rows[0]).toMatchObject({ local_user_id: targetUserId, link_status: 'linked' })
+  })
+})

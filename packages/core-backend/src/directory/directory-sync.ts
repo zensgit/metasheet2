@@ -45,6 +45,10 @@ import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } 
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+} from './access-graph-mutex'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -267,6 +271,7 @@ type DirectoryBindingTargetAccountRow = {
   name: string
   email: string | null
   mobile: string | null
+  is_active: boolean
 }
 
 type DirectoryAccountLinkedUserRow = {
@@ -4039,6 +4044,7 @@ export async function syncDirectoryIntegration(
                     name: account.name,
                     email: account.email,
                     mobile: account.mobile,
+                    is_active: account.is_active,
                   },
                   adminUserId: triggeredBy,
                   name: cleanName,
@@ -5455,6 +5461,7 @@ async function lockAuthoritativeDirectoryBindingAccount(
        account.name,
        account.email,
        account.mobile,
+       account.is_active,
        integration.provider AS integration_provider,
        integration.corp_id AS integration_corp_id
      FROM directory_accounts account
@@ -5493,6 +5500,8 @@ async function applyDirectoryAccountBindInTransaction(
     normalizedAdminUserId: string
     enableDingTalkGrant: boolean
     localUser: Pick<DirectoryBindingUserRow, 'id' | 'email' | 'username' | 'name'>
+    expectedPriorLocalUserId: string | null
+    supersedeTargetUser?: boolean
     /**
      * T1 pending create: link + identity only — no active user_orgs until activate (Action C).
      * Default false preserves W4-PRE-1b membership maintenance for normal bind/admit.
@@ -5505,10 +5514,13 @@ async function applyDirectoryAccountBindInTransaction(
     normalizedAdminUserId,
     enableDingTalkGrant,
     localUser,
+    expectedPriorLocalUserId,
+    supersedeTargetUser = true,
     skipUserOrgMembership = false,
   } = options
   const account = await lockAuthoritativeDirectoryBindingAccount(client, normalizedAccountId)
   if (!account) throw new Error('Directory account not found')
+  if (!account.is_active) throw new Error('Directory account is inactive and cannot be bound')
   const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
   if (!identityExternalKey) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
@@ -5535,10 +5547,14 @@ async function applyDirectoryAccountBindInTransaction(
      FROM directory_account_links
      WHERE directory_account_id = $1::uuid
        AND link_status = 'linked'
+     FOR UPDATE
      LIMIT 1`,
     [normalizedAccountId],
   )
   const priorLocalUserId = (priorLinkResult.rows[0] as { local_user_id?: string | null } | undefined)?.local_user_id ?? null
+  if (priorLocalUserId !== expectedPriorLocalUserId) {
+    throw new Error('Directory account binding changed; retry the operation')
+  }
 
   const profile = JSON.stringify({
     source: 'directory_admin_bind',
@@ -5696,6 +5712,18 @@ async function applyDirectoryAccountBindInTransaction(
   if (priorLocalUserId && priorLocalUserId !== localUser.id) {
     await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: priorLocalUserId, orgId })
   }
+
+  const supersededUserIds = [
+    ...(supersedeTargetUser ? [localUser.id] : []),
+    ...(priorLocalUserId && priorLocalUserId !== localUser.id ? [priorLocalUserId] : []),
+  ]
+  if (supersededUserIds.length > 0) {
+    await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+      userIds: supersededUserIds,
+      actorId: normalizedAdminUserId,
+      reason: 'directory account binding changed by an administrator',
+    })
+  }
 }
 
 async function createDirectoryAdmittedUserInTransaction(
@@ -5710,6 +5738,7 @@ async function createDirectoryAdmittedUserInTransaction(
     passwordHash: string
     mustChangePassword: boolean
     enableDingTalkGrant: boolean
+    expectedPriorLocalUserId?: string | null
   },
 ): Promise<{ userId: string }> {
   const userId = crypto.randomUUID()
@@ -5788,6 +5817,27 @@ async function createDirectoryAdmittedUserInTransaction(
     }
   }
 
+  let expectedPriorLocalUserId = options.expectedPriorLocalUserId
+  if (expectedPriorLocalUserId === undefined) {
+    const priorLinkResult = await client.query(
+      `SELECT local_user_id
+         FROM directory_account_links
+        WHERE directory_account_id = $1::uuid
+          AND link_status = 'linked'
+        LIMIT 1`,
+      [options.account.id],
+    )
+    expectedPriorLocalUserId =
+      (priorLinkResult.rows[0] as { local_user_id?: string | null } | undefined)?.local_user_id
+      ?? null
+  }
+  if (expectedPriorLocalUserId) {
+    const lockedPriorUsers = await lockUsersForAccessGraphWrite(client, [expectedPriorLocalUserId])
+    if (!lockedPriorUsers.has(expectedPriorLocalUserId)) {
+      throw new Error('Directory account binding changed; retry the operation')
+    }
+  }
+
   // DT-HARDEN-02: INSERT + bind are one all-or-nothing unit. A bind throw after the INSERT
   // (missing openId/unionId, or an identity already bound to another local user) would
   // otherwise leave a committed orphan once the sync loop swallows the error — the exact
@@ -5839,6 +5889,8 @@ async function createDirectoryAdmittedUserInTransaction(
         username: options.username,
         name: options.name,
       },
+      expectedPriorLocalUserId,
+      supersedeTargetUser: false,
       skipUserOrgMembership: pendingMode,
     })
   } catch (error) {
@@ -6180,7 +6232,7 @@ async function resolveDirectoryBindingUser(localUserRef: string): Promise<Direct
 
 async function loadDirectoryBindingTargetAccount(directoryAccountId: string): Promise<DirectoryBindingTargetAccountRow | null> {
   const result = await query<DirectoryBindingTargetAccountRow>(
-    `SELECT id, integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile
+    `SELECT id, integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile, is_active
      FROM directory_accounts
      WHERE id = $1
      LIMIT 1`,
@@ -6189,6 +6241,20 @@ async function loadDirectoryBindingTargetAccount(directoryAccountId: string): Pr
   return result.rows[0] ?? null
 }
 
+/**
+ * The prior-HOLDER witness for bind/admit CAS checks — `link_status = 'linked'` on purpose, and
+ * this predicate must stay IDENTICAL to the CAS re-reads in
+ * `applyDirectoryAccountBindInTransaction` / `createDirectoryAdmittedUserInTransaction`.
+ *
+ * D5 adversarial review P1: this read used to be status-agnostic while the CAS re-read was
+ * linked-scoped. A 'pending' email/mobile match row (the sync loop itself writes
+ * `local_user_id` onto 'pending' rows as a match HINT) made the witness non-null, the
+ * linked-scoped CAS null, and every manual bind/admit of such an account failed forever with
+ * "binding changed; retry" — the retry could never succeed, on precisely the top-ranked bind
+ * targets in the review workbench. A pending hint is not a holder: it never activated
+ * membership, holds nothing to deactivate, and must neither trip the CAS nor be shown as
+ * `previousLocalUser`.
+ */
 async function loadDirectoryLinkedUser(directoryAccountId: string): Promise<DirectoryAccountLinkedUserRow | null> {
   const result = await query<DirectoryAccountLinkedUserRow>(
     `SELECT l.local_user_id,
@@ -6198,6 +6264,7 @@ async function loadDirectoryLinkedUser(directoryAccountId: string): Promise<Dire
      FROM directory_account_links l
      LEFT JOIN users u ON u.id = l.local_user_id
      WHERE l.directory_account_id = $1
+       AND l.link_status = 'linked'
      LIMIT 1`,
     [directoryAccountId],
   )
@@ -6366,13 +6433,26 @@ export async function bindDirectoryAccount(
 
   const localUser = await resolveDirectoryBindingUser(normalizedLocalUserRef)
   if (!localUser) throw new Error('Local user not found')
+  const expectedPriorLocalUserId = previousLinkedUser?.local_user_id ?? null
 
   await transaction(async (client) => {
+    const lockedUsers = await lockUsersForAccessGraphWrite(client, [
+      localUser.id,
+      ...(expectedPriorLocalUserId ? [expectedPriorLocalUserId] : []),
+    ])
+    const lockedTargetUser = lockedUsers.get(localUser.id)
+    if (!lockedTargetUser || !lockedTargetUser.isActive) {
+      throw new Error('Local user is no longer active; retry the operation')
+    }
+    if (expectedPriorLocalUserId && !lockedUsers.has(expectedPriorLocalUserId)) {
+      throw new Error('Directory account binding changed; retry the operation')
+    }
     await applyDirectoryAccountBindInTransaction(client, {
       normalizedAccountId,
       normalizedAdminUserId,
       enableDingTalkGrant,
-      localUser,
+      localUser: lockedTargetUser,
+      expectedPriorLocalUserId,
     })
   })
 
@@ -6458,6 +6538,7 @@ export async function admitDirectoryAccountUser(
       passwordHash,
       mustChangePassword,
       enableDingTalkGrant,
+      expectedPriorLocalUserId: previousLinkedUser?.local_user_id ?? null,
     })
     userId = created.userId
   })
@@ -6546,20 +6627,33 @@ export async function unbindDirectoryAccount(
   if (!normalizedAccountId) throw new Error('directoryAccountId is required')
   if (!normalizedAdminUserId) throw new Error('adminUserId is required')
 
-  // #4526 review fix: `previousLinkedUser` used to be read via `loadDirectoryLinkedUser` OUTSIDE
-  // this transaction (alongside `account`, in the `Promise.all` this replaced). That pre-read was
-  // load-bearing but stale: if this account's link changed between the pre-read and the
-  // transaction body below (e.g. a rapid unbind+rebind of the SAME account), the link UPSERT
-  // below unconditionally severs whoever is linked NOW while the deactivation call only
-  // considered the STALE holder — the CURRENT holder could be left with an active membership and
-  // zero bindings. Reading it here, inside the transaction, with `FOR UPDATE OF l` locking the
-  // `directory_account_links` row for this account closes that window: any concurrent writer of
-  // THIS SAME row (bind/admit/another unbind) now serializes behind this transaction instead of
-  // racing it. `FOR UPDATE OF l` (not a bare `FOR UPDATE`) is required because of the `LEFT JOIN
-  // users u` — Postgres refuses to lock the nullable side of an outer join.
   let previousLinkedUser: DirectoryAccountLinkedUserRow | null = null
 
   await transaction(async (client) => {
+    // This unlocked read is only an expected-holder snapshot. The first row lock is still the
+    // canonical users row; after it is held, the account/link are locked and re-read. A mismatch
+    // fails closed instead of modifying an unprotected replacement holder.
+    const expectedLinkedUserResult = await client.query(
+      `SELECT l.local_user_id,
+              u.email AS local_user_email,
+              u.username AS local_user_username,
+              u.name AS local_user_name
+         FROM directory_account_links l
+         LEFT JOIN users u ON u.id = l.local_user_id
+        WHERE l.directory_account_id = $1
+        LIMIT 1`,
+      [normalizedAccountId],
+    )
+    const expectedLinkedUser =
+      (expectedLinkedUserResult.rows[0] as DirectoryAccountLinkedUserRow | undefined)
+      ?? null
+    const expectedLocalUserId = expectedLinkedUser?.local_user_id ?? null
+    if (expectedLocalUserId) {
+      const lockedUsers = await lockUsersForAccessGraphWrite(client, [expectedLocalUserId])
+      if (!lockedUsers.has(expectedLocalUserId)) {
+        throw new Error('Directory account binding changed; retry the operation')
+      }
+    }
     const account = await lockAuthoritativeDirectoryBindingAccount(client, normalizedAccountId)
     if (!account) throw new Error('Directory account not found')
     const identityExternalKey = buildDingTalkIdentityExternalKey(
@@ -6581,6 +6675,9 @@ export async function unbindDirectoryAccount(
       [normalizedAccountId],
     )
     previousLinkedUser = (linkedUserLockResult.rows[0] as DirectoryAccountLinkedUserRow | undefined) ?? null
+    if ((previousLinkedUser?.local_user_id ?? null) !== expectedLocalUserId) {
+      throw new Error('Directory account binding changed; retry the operation')
+    }
 
     if (previousLinkedUser?.local_user_id) {
       const candidateIdentityParams: unknown[] = [
@@ -6666,6 +6763,11 @@ export async function unbindDirectoryAccount(
       await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, {
         userId: previousLinkedUser.local_user_id,
         orgId,
+      })
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+        userIds: [previousLinkedUser.local_user_id],
+        actorId: normalizedAdminUserId,
+        reason: 'directory account unbound by an administrator',
       })
     }
   })
