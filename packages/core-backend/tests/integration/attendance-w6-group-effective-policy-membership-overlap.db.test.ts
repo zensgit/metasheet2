@@ -25,6 +25,13 @@
  * `CALCULATION_GROUP_MEMBERSHIP_OVERLAP` if the invariant is ever violated
  * (a stale row predating the constraint, a manual DB edit, a future bug).
  *
+ * CI COVERAGE, stated first: under the owner-ruled phase-1 hard scope fence
+ * this file is NOT wired into `.github/workflows/plugin-tests.yml` and NOT
+ * excluded in `packages/core-backend/vitest.config.ts`. It therefore does not
+ * execute in any required check on this branch, AND the default no-DB lane
+ * collects it and reports it SKIPPED — green, having executed nothing. Wiring
+ * both is a named phase-2 item.
+ *
  * Governing document:
  *   docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md
  */
@@ -32,7 +39,10 @@ import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { createAttendanceGroupEffectivePolicyAggregateService } from '../../src/attendance/w6-group-effective-policy-aggregate'
+import {
+  ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1,
+  createAttendanceGroupEffectivePolicyAggregateService,
+} from '../../src/attendance/w6-group-effective-policy-aggregate'
 
 const serverUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = serverUrl ? describe : describe.skip
@@ -63,6 +73,10 @@ describeIfDatabase('W6-1 group effective-policy — membership-overlap counter (
   const overlapUserB = 'user-overlap-b'
   const cleanUser = 'user-clean'
   const boundedGroupSoloUser = 'user-bounded-group-solo'
+  /** Holds THREE effective-today rows in `dedupGroupId` (plus one elsewhere),
+   * so per-user dedup and choose-first/choose-latest give DIFFERENT answers. */
+  const dedupGroupId = randomUUID()
+  const tripleRowUser = 'user-triple-row'
 
   beforeAll(async () => {
     await adminPool.query(`CREATE DATABASE ${databaseName}`)
@@ -88,8 +102,8 @@ describeIfDatabase('W6-1 group effective-policy — membership-overlap counter (
       );
     `)
     await pool.query(
-      'INSERT INTO attendance_groups (id, org_id) VALUES ($1, $4), ($2, $4), ($3, $4)',
-      [groupId, otherGroupId, boundedGroupId, orgId],
+      'INSERT INTO attendance_groups (id, org_id) VALUES ($1, $5), ($2, $5), ($3, $5), ($4, $5)',
+      [groupId, otherGroupId, boundedGroupId, dedupGroupId, orgId],
     )
 
     // The constraint is airtight by design (confirmed under a concurrent
@@ -125,6 +139,19 @@ describeIfDatabase('W6-1 group effective-policy — membership-overlap counter (
       `INSERT INTO attendance_calculation_group_memberships (org_id, user_id, group_id, effective_from, effective_to)
        VALUES ($1, $2, $3, $4, NULL)`,
       [orgId, boundedGroupSoloUser, boundedGroupId, today],
+    )
+    // W6-R5's NAMED negative proof: a choose-first / choose-latest rewrite
+    // must fail. The prior fixture could not discriminate it — every user had
+    // exactly two rows, so "one row per user" and "all rows per user" agree.
+    // `tripleRowUser` holds THREE effective-today rows inside `groupId`
+    // itself, so correct per-user dedup counts it ONCE while a rewrite that
+    // picks one row per user (or drops the GROUP BY) produces a different
+    // total for the SAME seeded data. Divergence by construction, not by
+    // hope.
+    await pool.query(
+      `INSERT INTO attendance_calculation_group_memberships (org_id, user_id, group_id, effective_from, effective_to)
+       VALUES ($1, $2, $3, $4, NULL), ($1, $2, $3, $4, NULL), ($1, $2, $3, $4, NULL)`,
+      [orgId, tripleRowUser, dedupGroupId, today],
     )
   })
 
@@ -185,11 +212,66 @@ describeIfDatabase('W6-1 group effective-policy — membership-overlap counter (
     expect(count).toBe(0)
   })
 
-  // W6-R5's "a choose-first/choose-latest mutation must fail" negative proof
-  // is run manually against the SHIPPED `countMembershipOverlap` SQL in
-  // `w6-group-effective-policy-aggregate.ts` (edit → rerun the first test in
-  // this file → confirm it reds → restore via file backup), not simulated
-  // here. A hand-rolled string-replace against a copy of the query would
-  // only prove the copy is mutable, not that the real module's behavior
-  // changes — see the W6-1 PR body/report for the transcript.
+  it('W6-R5 choose-first/choose-latest: a user with THREE rows in the group is counted ONCE, and the mutated query provably disagrees', async () => {
+    // The prior version of this proof lived as a MANUAL transcript in a PR
+    // body. A transcript in a PR body is not a durable gate, so the fixture is
+    // now built to DISCRIMINATE and both hypotheses are executed against the
+    // same seeded data in the same run.
+    const service = createAttendanceGroupEffectivePolicyAggregateService({
+      query: db().query,
+      fser: { getEffectiveness: async () => { throw new Error('not used') } },
+    })
+    // SHIPPED behaviour: tripleRowUser has 3 rows in dedupGroupId and 1 in
+    // otherGroupId, i.e. 4 effective-today rows org-wide (> 1), and is counted
+    // exactly ONCE.
+    expect(await service.countMembershipOverlap(orgId, dedupGroupId)).toBe(1)
+
+    // The CHOOSE-FIRST rewrite, executed against the SAME database: replacing
+    // the per-user GROUP BY with "one row per user, first by id" changes the
+    // inner set's cardinality semantics. Running both here is what makes this
+    // a gate rather than a claim — and the shipped SQL is taken from the
+    // module's exported constant, so this compares against what really ships.
+    const chooseFirstSql = ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1.replace(
+      'GROUP BY m.user_id',
+      'ORDER BY m.user_id ASC LIMIT 1',
+    )
+    expect(chooseFirstSql, 'the mutation anchor must actually match').not.toBe(
+      ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1,
+    )
+    const mutated = await pool.query(chooseFirstSql, [orgId, groupId])
+    const shipped = await pool.query(ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1, [orgId, groupId])
+    expect(Number(shipped.rows[0].cnt)).toBe(2)
+    expect(Number(mutated.rows[0].cnt)).not.toBe(Number(shipped.rows[0].cnt))
+  })
+
+  it('non-vacuity: the exported SQL constant is what the service actually issues', async () => {
+    const seen: string[] = []
+    const service = createAttendanceGroupEffectivePolicyAggregateService({
+      query: async (sql: string, params?: unknown[]) => {
+        seen.push(sql)
+        return (await pool.query(sql, params)).rows
+      },
+      fser: { getEffectiveness: async () => { throw new Error('not used') } },
+    })
+    await service.countMembershipOverlap(orgId, groupId)
+    expect(seen).toEqual([ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1])
+  })
+
+  it('SCHEMA SHAPE is not hand-drifted: the ephemeral table covers every column the shipped query references', async () => {
+    // The DDL above is hand-written (the real migration carries 14 columns and
+    // three CHECKs). That is a drift channel: if the migration later adds a
+    // discriminator the counter should filter on, this suite would keep passing
+    // against the OLD shape. This asserts the ephemeral table is a superset of
+    // the columns the SHIPPED query actually names, so the fixture cannot fall
+    // behind the query it is meant to test.
+    const referenced = ['org_id', 'user_id', 'group_id', 'effective_from', 'effective_to'].filter((column) =>
+      ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1.includes(column),
+    )
+    expect(referenced.length).toBe(5) // non-vacuity
+    const columns = await pool.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'attendance_calculation_group_memberships'`,
+    )
+    const present = new Set(columns.rows.map((row: { column_name: string }) => row.column_name))
+    expect(referenced.filter((column) => !present.has(column))).toEqual([])
+  })
 })

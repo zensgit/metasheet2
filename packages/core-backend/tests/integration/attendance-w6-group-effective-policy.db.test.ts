@@ -25,24 +25,43 @@
  * `attendance_calc_group_memberships_no_overlap`, which must never touch
  * the shared `metasheet_test` database other test files run against.
  *
- * R3 mutation-red evidence (guard-removal) was run manually against this
- * suite and reverted via file backup — NOT part of the committed file;
- * see the W6-1 PR body / report for the transcript.
+ * CI COVERAGE, stated first because everything below depends on it. Under the
+ * owner-ruled phase-1 hard scope fence this file is NOT wired into
+ * `.github/workflows/plugin-tests.yml` and NOT excluded in
+ * `packages/core-backend/vitest.config.ts`. Both consequences are real and
+ * neither may be read past:
+ *   (1) it does not execute in ANY required check on this branch;
+ *   (2) the default no-DB lane COLLECTS it (that config declares no
+ *       `include:`, so the default glob picks up `tests/integration/*.db.test.ts`)
+ *       and `describeIfDatabase` then reports it SKIPPED — a green run that
+ *       executed nothing, which is precisely the F1/#3487 skip-green failure
+ *       mode the fenced `exclude:` entry existed to prevent.
+ * Wiring both, plus recomputing the provenance pin against fresh main, is a
+ * named phase-2 item after PR 4805 reaches its merge ruling.
+ *
+ * R3 mutation-red evidence (guard-removal): the prior branch recorded this as
+ * a MANUAL run whose transcript lived in a PR body. A transcript in a PR body
+ * is not a durable gate. This file now carries a committed, automated ordering
+ * proof instead — a counting spy on the aggregate's own `query`, asserting
+ * ZERO aggregate queries on every rejection leg and a POSITIVE CONTROL of >0
+ * on the 200 leg (a permanently-zero counter must not pass vacuously).
+ *
+ * SCOPE of that ordering proof, stated narrowly: `rbacGuard` is `vi.mock`ed
+ * out in this harness, so what is proven is "before AGGREGATE SQL", never
+ * "before ANY SQL". The real guard does read (`SELECT 1 FROM user_permissions
+ * …`), and §4.1 explicitly permits authorization middleware to read first.
  */
 import { randomUUID } from 'node:crypto'
 import express from 'express'
 import { Pool } from 'pg'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-// #4814 P3-5: imported from the module under test rather than reimplemented
-// a THIRD time here — the aggregate already reimplements the canonical
-// producer-key builder from plugins/plugin-attendance/index.cjs once
-// (documented equivalence argument in that file's header); a second,
-// independent reimplementation in this fidelity test would drift silently
-// alongside the aggregate's copy if the canonical builder ever changed,
-// since toStrictEqual would just keep comparing two copies that changed
-// together.
-import { buildFixedScheduleProducerKey } from '../../src/attendance/w6-group-effective-policy-aggregate'
+import {
+  buildAggregateCallPathClosure,
+  collectQuerySqlArguments,
+  findRepoRoot,
+  relationsInSql,
+} from '../helpers/attendance-w6-call-path-closure'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 if (dbUrl) process.env.DATABASE_URL = dbUrl
@@ -70,6 +89,37 @@ vi.mock('../../src/rbac/service', async (importOriginal) => {
   }
 })
 
+/**
+ * COUNTING SPY on the query function the aggregate service is constructed
+ * with. Without it every "…before SQL" title asserted nothing but a status
+ * code: if the ordering were INVERTED, each of those legs would still return
+ * the same status and nothing would red. Statuses are not ordering evidence.
+ *
+ * The wrapper records every statement that goes through `src/db/pg`'s `query`
+ * — which is what `attendance-admin.ts` hands the aggregate — and the
+ * assertions then count only the statements the AGGREGATE MODULE authors,
+ * identified by matching against the SQL literals the derived call-path
+ * closure attributes to `w6-group-effective-policy-aggregate.ts`. That
+ * distinction is load-bearing and was found by running the test, not by
+ * reading it: the delegated-admin membership gate legitimately issues SQL
+ * BEFORE the groupId format check, so a naive "zero statements" assertion is
+ * false on the 400-invalid-groupId leg for a correct implementation.
+ *
+ * `rbacGuard` is mocked out in this harness; see the file header for why the
+ * claim is "before AGGREGATE SQL", never "before any SQL".
+ */
+const observedSql: string[] = []
+vi.mock('../../src/db/pg', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/db/pg')>()
+  return {
+    ...actual,
+    query: (async (sql: string, params?: unknown[]) => {
+      observedSql.push(String(sql))
+      return actual.query(sql as never, params as never)
+    }) as typeof actual.query,
+  }
+})
+
 vi.mock('../../src/routes/admin-users', () => ({ ensurePlatformAdmin: vi.fn(async () => null) }))
 vi.mock('../../src/services/AttendanceScheduler', () => ({ getSharedAttendanceScheduler: vi.fn(() => null) }))
 vi.mock('../../src/services/AttendanceNotificationRedelivery', () => ({ redeliverFailedAttendanceNotification: vi.fn() }))
@@ -79,6 +129,21 @@ vi.mock('../../src/services/ApprovalDirectoryOrg', async (importOriginal) => {
 })
 
 const { attendanceAdminRouter } = await import('../../src/routes/attendance-admin')
+
+/** Relations the aggregate's own call-path closure can query — DERIVED, so the
+ * snapshot set below cannot silently omit a table the code really touches
+ * (`attendance_schedule_groups` was already missing from the hand-list). */
+function relationsFromAggregateClosure(): string[] {
+  const repoRoot = findRepoRoot(__dirname)
+  const closure = buildAggregateCallPathClosure(repoRoot)
+  const sql = collectQuerySqlArguments(closure, repoRoot)
+  const relations = new Set<string>()
+  for (const entry of sql.resolved) for (const relation of relationsInSql(entry.sql)) relations.add(relation)
+  // The pg adapter's BEGIN/COMMIT/ROLLBACK literals contribute nothing, and
+  // set-returning functions are not relations to snapshot.
+  relations.delete('jsonb_array_elements_text')
+  return [...relations].sort()
+}
 
 describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL)', () => {
   const pool = new Pool({ connectionString: dbUrl })
@@ -189,12 +254,13 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
     // attendance_shift_assignments row per target member for `effective` —
     // without these the desired config exists but nothing matches it
     // (state `pending_apply`, not `effective`).
-    // Deliberately a hand-written literal of buildFixedScheduleProducerKey's
-    // join format, NOT a call to that function — this is what gives this
-    // DB-level test independent discriminating power over a format-change
-    // mutation in that function (see the doc comment above
-    // buildFixedScheduleProducerKey in w6-group-effective-policy-aggregate.ts).
-    // Do NOT "DRY" this into a call to the imported function.
+    // Deliberately a HAND-WRITTEN literal of the canonical producer-key join
+    // format, NOT a call to the builder. This is what gives this suite
+    // independent discriminating power over a format change: mutating the
+    // canonical builder's separator breaks FSER's row match against this seed
+    // and reds the happy-path `state === 'effective'` assertion. Do NOT "DRY"
+    // this into a call to the builder — doing so would put the same function on
+    // both sides and remove the only DB-level discrimination that exists.
     const producerKey = ['attendance_group_fixed_schedule', groupAId, shiftId, '2026-08-01', '2026-08-31'].join(':')
     const producerRunId = randomUUID()
     for (const userId of [memberUser, adminUser]) {
@@ -258,12 +324,37 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       })
       expect(data.conflicts).toEqual([])
 
-      // W6-R2: no member list, no raw user id anywhere in the payload.
+      // W6-R2 — DERIVED forbidden domain, not a 4-needle hand-list.
+      // The previous version named two of the seven seeded users and two key
+      // spellings, so a field carrying `assignedBy`/`updatedBy`/`closedBy`/a
+      // manager id would have passed untouched. Two legs now:
+      //  (a) NONE of the seeded user ids may appear anywhere in the payload;
+      //  (b) structurally, every UUID in the payload must be one this test can
+      //      NAME (the group, or a declared sourceRef id) — an unexplained
+      //      identifier is a finding even if nobody predicted its key name.
       const raw = JSON.stringify(res.body)
-      expect(raw).not.toContain(memberUser)
-      expect(raw).not.toContain(adminUser)
+      for (const userId of seededUserIds) expect(raw, `seeded user id leaked: ${userId}`).not.toContain(userId)
       expect(raw).not.toContain('memberIds')
       expect(raw).not.toContain('userId')
+
+      const UUID_ANYWHERE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
+      const explained = new Set<string>([groupAId, shiftId, ruleSetId])
+      for (const ref of [
+        ...(data.domains.schedule.sourceRefs ?? []),
+        ...(data.domains.segments.sourceRefs ?? []),
+        ...(data.domains.rules.sourceRefs ?? []),
+      ] as Array<{ id: string }>) {
+        explained.add(ref.id)
+      }
+      const unexplained = [...new Set(raw.match(UUID_ANYWHERE) ?? [])].filter((id) => !explained.has(id))
+      expect(unexplained, 'payload carries UUIDs this test cannot account for').toEqual([])
+
+      // POSITIVE CONTROL on both legs: a deliberately-injected user id IS
+      // caught, so "no leak" is not the vacuous result of a check that can
+      // never fire.
+      const poisoned = JSON.stringify({ ...res.body, sneaky: memberUser })
+      expect(seededUserIds.some((id) => poisoned.includes(id))).toBe(true)
+      expect([...new Set(poisoned.match(UUID_ANYWHERE) ?? [])].filter((id) => !explained.has(id))).not.toEqual([])
     })
 
     it('returns needs_configuration for the unconfigured scheduled_shift group (as its own admin)', async () => {
@@ -283,29 +374,69 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
   })
 
   describe('W6-R1: GET-only, zero writes (behavioral)', () => {
-    const TOUCHED_TABLES = [
-      'attendance_groups',
-      'attendance_group_members',
-      'attendance_group_managers',
-      'attendance_rule_sets',
-      'attendance_shifts',
-      'attendance_shift_segments',
-      'attendance_group_fixed_schedule_configs',
-      'attendance_shift_assignments',
-      'attendance_calculation_group_memberships',
-      'attendance_calculation_rollout_state',
-      'user_orgs',
-      'users',
+    /**
+     * DERIVED table domain. The previous list was HAND-WRITTEN and was already
+     * missing `attendance_schedule_groups`, a table the aggregate itself
+     * queries — so writes to it were invisible BY CONSTRUCTION, because the
+     * snapshot never issued a query against that relation at all.
+     *
+     * The set is now computed from the same call-path closure the static leg
+     * sweeps: every relation named after FROM/JOIN/INTO/UPDATE in every SQL
+     * literal the closure can issue, plus the trigger targets those writes
+     * would fan out to. Three legs below, matching the static guard's shape.
+     */
+    const derivedRelations = relationsFromAggregateClosure()
+    const TRIGGER_FANOUT_TABLES = [
+      // `attendance_group_members` carries `trg_attendance_group_members_w4c3a_revision`,
+      // which bumps this table. A write reaching a table only via a TRIGGER is
+      // never in any hand-list, so the fan-out target is named explicitly.
+      'attendance_group_effect_revisions',
     ]
+    const TOUCHED_TABLES = [...new Set([...derivedRelations, ...TRIGGER_FANOUT_TABLES])].sort()
 
-    // #4814 P2-3: a bare row-COUNT is structurally blind to an in-place
-    // UPDATE (row count is unchanged by definition). Every Postgres UPDATE
-    // — even one that writes back the same values — creates a NEW row
-    // version with a fresh `xmin` (the transaction-id system column), so
-    // `MAX(xmin)` per table changes even when the row count does not. This
-    // snapshot therefore catches the row-count-preserving mutation R1
-    // explicitly names as forbidden (a `last_*`/`updated_at` column touch)
-    // in addition to the INSERT/DELETE row-count leg it had before.
+    it('LEG 1 (unclaimed = 0): every relation the aggregate can query is in the snapshot set', () => {
+      expect(derivedRelations.filter((table) => !TOUCHED_TABLES.includes(table))).toEqual([])
+      // The specific table the hand-list missed, named so a regression is legible.
+      expect(TOUCHED_TABLES).toContain('attendance_schedule_groups')
+    })
+
+    it('LEG 2 (non-empty domain): the derived set is substantial', () => {
+      expect(derivedRelations.length).toBeGreaterThanOrEqual(8)
+    })
+
+    it('LEG 3 (off-path negative): a table the aggregate never queries is NOT in the derived set', () => {
+      // Without this, "derive from the whole repo" would satisfy legs 1 and 2.
+      expect(derivedRelations).not.toContain('attendance_records')
+      expect(derivedRelations).not.toContain('approval_instances')
+    })
+
+    /**
+     * A bare row COUNT is structurally blind to an in-place UPDATE. Every
+     * Postgres UPDATE — even one writing back identical values — creates a new
+     * row version with a fresh `xmin`, so `MAX(xmin)` moves when the count does
+     * not.
+     *
+     * INSERT-then-DELETE inside one window — MEASURED, not reasoned about.
+     * The initial write-up here asserted this was an uncatchable blind spot;
+     * running the probe REFUTED that for the tables that matter. On
+     * `attendance_groups` the insert-then-delete IS detected, because the
+     * table carries `trg_attendance_groups_w4c3a_revision`, whose row in
+     * `attendance_group_effect_revisions` (a member of the snapshot set via
+     * TRIGGER_FANOUT_TABLES) does NOT revert when the source row is deleted.
+     * Both cases are pinned below.
+     *
+     * The RESIDUAL limit, stated at its true boundary rather than inflated:
+     * on a derived table with NO trigger fan-out, an insert-then-delete does
+     * revert both metrics and is not detected. Measured trigger counts in the
+     * derived set: `attendance_groups` 2, `attendance_group_members` 2,
+     * `attendance_calculation_rollout_state` 4,
+     * `attendance_calculation_group_memberships` 1, and ZERO on the rest.
+     * Closing that residue needs per-table statement triggers appending to a
+     * probe log, i.e. trigger DDL against the SHARED `metasheet_test` database
+     * — the exact cross-test pollution the overlap suite moved to a dedicated
+     * ephemeral database to avoid. Recorded as a phase-2 item rather than
+     * half-built here.
+     */
     async function snapshotTables(): Promise<Array<{ table: string; count: number; maxXmin: string }>> {
       return Promise.all(
         TOUCHED_TABLES.map(async (table) => {
@@ -317,10 +448,83 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       )
     }
 
-    it('row counts AND row versions (xmin) across every touched table are unchanged after a full route round-trip', async () => {
+    it('row counts AND row versions (xmin) are unchanged across the FULL request matrix, not one happy-path call', async () => {
+      // The previous leg bracketed exactly ONE request on ONE branch, so a
+      // write firing only on the scheduled_shift / 404 / 400 / 403 branches sat
+      // outside the snapshot window entirely. Same assertion, every branch this
+      // suite already exercises.
       const before = await snapshotTables()
-      const res = await request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy`)
-      expect(res.status).toBe(200)
+
+      await request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy`)
+      await request(makeApp({ id: outsiderUser, permissions: ['attendance:admin'], orgId: orgB }))
+        .get(`/api/attendance/groups/${groupBId}/effective-policy`)
+      await request(adminApp()).get(`/api/attendance/groups/${groupBId}/effective-policy`) // cross-org 404
+      await request(adminApp()).get(`/api/attendance/groups/${randomUUID()}/effective-policy`) // unknown 404
+      await request(adminApp()).get('/api/attendance/groups/not-a-uuid/effective-policy') // 400
+      await request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy?label=effective`) // 400
+      await request(adminApp())
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+        .send({ label: 'effective' }) // 400
+      await request(makeApp({ id: nonMemberAdminUser, permissions: ['attendance:admin'], orgId: orgA }))
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`) // 403 non-member
+      await request(makeApp({ id: noOrgUser, permissions: ['attendance:admin'] }))
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`) // 403 no org
+      await request(makeApp({ id: memberUser, permissions: [], orgId: orgA }))
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`) // 403 no permission
+      await request(adminApp())
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+        .set('x-org-id', orgB) // 403 spoof
+      await request(makeApp({ id: platformAdminUser, permissions: [], role: 'admin', orgId: orgA }))
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`) // 200 platform admin
+
+      const after = await snapshotTables()
+      expect(after).toEqual(before)
+    })
+
+    it('POSITIVE CONTROL: the snapshot DOES detect a same-row-count in-place UPDATE', async () => {
+      // "Nothing changed" must be paired with proof the detector can fire, or
+      // it is indistinguishable from a snapshot that reads nothing.
+      const before = await snapshotTables()
+      await pool.query('UPDATE attendance_groups SET updated_at = updated_at WHERE id = $1', [groupAId])
+      const after = await snapshotTables()
+      expect(after).not.toEqual(before)
+      const groupsBefore = before.find((row) => row.table === 'attendance_groups')
+      const groupsAfter = after.find((row) => row.table === 'attendance_groups')
+      expect(groupsAfter?.count).toBe(groupsBefore?.count) // row COUNT alone would have missed it
+      expect(groupsAfter?.maxXmin).not.toBe(groupsBefore?.maxXmin)
+    })
+
+    it('MEASURED: insert-then-delete on a TRIGGER-carrying table IS detected (via the trigger fan-out row, which does not revert)', async () => {
+      const before = await snapshotTables()
+      const probeId = randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_groups (id, org_id, name, attendance_type, timezone) VALUES ($1, $2, $3, 'free_time', 'UTC')`,
+        [probeId, orgA, `w6agg-itd-trigger-${runstamp}`],
+      )
+      await pool.query('DELETE FROM attendance_groups WHERE id = $1', [probeId])
+      const after = await snapshotTables()
+      expect(after).not.toEqual(before)
+      // Precisely WHERE it is detected: the source table reverts, the fan-out
+      // table does not. Naming both halves keeps the mechanism honest.
+      const groupsBefore = before.find((row) => row.table === 'attendance_groups')
+      const groupsAfter = after.find((row) => row.table === 'attendance_groups')
+      expect(groupsAfter?.count).toBe(groupsBefore?.count)
+      const revisionsBefore = before.find((row) => row.table === 'attendance_group_effect_revisions')
+      const revisionsAfter = after.find((row) => row.table === 'attendance_group_effect_revisions')
+      expect(revisionsAfter).not.toEqual(revisionsBefore)
+    })
+
+    it('MEASURED RESIDUAL: insert-then-delete on a table with NO trigger fan-out is NOT detected — the true boundary of this mechanism', async () => {
+      // This is the honest limit, pinned so that a future mechanism which DOES
+      // catch it reds here and forces the header to be updated rather than
+      // leaving an over-claim in place.
+      const before = await snapshotTables()
+      const probeId = randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_rule_sets (id, org_id, name, is_default) VALUES ($1, $2, $3, false)`,
+        [probeId, orgA, `w6agg-itd-notrigger-${runstamp}`],
+      )
+      await pool.query('DELETE FROM attendance_rule_sets WHERE id = $1', [probeId])
       const after = await snapshotTables()
       expect(after).toEqual(before)
     })
@@ -397,24 +601,128 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
   })
 
   describe('W6-R6/R7: enum-strict, zero client-supplied state', () => {
-    it('invalid groupId format is rejected 400 before any group SQL', async () => {
+    it('invalid groupId format is rejected 400 before any AGGREGATE SQL', async () => {
       const res = await request(adminApp()).get('/api/attendance/groups/not-a-uuid/effective-policy')
       expect(res.status).toBe(400)
       expect(res.body.error.code).toBe('GROUP_ID_INVALID')
     })
 
-    it('any query parameter is rejected 400 before SQL (R7 — no state-selecting input accepted)', async () => {
+    it('any query parameter is rejected 400 before AGGREGATE SQL (R7 — no state-selecting input accepted)', async () => {
       const res = await request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy?label=effective`)
       expect(res.status).toBe(400)
       expect(res.body.error.code).toBe('QUERY_NOT_ACCEPTED')
     })
 
-    it('a JSON body is rejected 400 before SQL (R7)', async () => {
+    it('a STATE-BEARING JSON body is rejected 400 before AGGREGATE SQL (R7)', async () => {
       const res = await request(adminApp())
         .get(`/api/attendance/groups/${groupAId}/effective-policy`)
         .send({ domains: { membership: { label: 'effective' } } })
       expect(res.status).toBe(400)
       expect(res.body.error.code).toBe('BODY_NOT_ACCEPTED')
+    })
+
+    it('an EMPTY JSON body carries no state and is ACCEPTED — §4.1 verbatim, and must not be tightened into "no body bytes"', async () => {
+      // The lock says the route rejects no STATE-BEARING body and that an empty
+      // JSON object carries no state. The previous suite only ever sent a
+      // state-bearing body, so this boundary was untested in BOTH directions
+      // and a future "tighten it to zero bytes" change would have passed
+      // silently while exceeding the ratified contract.
+      const res = await request(adminApp())
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+        .set('Content-Type', 'application/json')
+        .send('{}')
+      expect(res.status).toBe(200)
+    })
+
+    it('a NON-EMPTY mismatching x-org-id still 403s (pins the empty-header decision so a relaxation cannot widen past it)', async () => {
+      // The empty-header case is an owner call left at the fail-closed status
+      // quo. This negative exists so that if empty-after-trim is ever treated
+      // as absent, the relaxation cannot silently extend to a real mismatch.
+      const res = await request(adminApp())
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+        .set('x-org-id', `${orgA}-not-really`)
+      expect(res.status).toBe(403)
+    })
+  })
+
+  describe('W6-R3 ORDERING (committed + automated, replacing the prior manual transcript)', () => {
+    // DERIVED: the SQL literals the closure attributes to the aggregate module.
+    const aggregateSqlLiterals = (() => {
+      const repoRoot = findRepoRoot(__dirname)
+      const closure = buildAggregateCallPathClosure(repoRoot)
+      const sql = collectQuerySqlArguments(closure, repoRoot)
+      return new Set(
+        sql.resolved
+          .filter((entry) => entry.file.endsWith('w6-group-effective-policy-aggregate.ts'))
+          .map((entry) => entry.sql),
+      )
+    })()
+
+    it('the derived aggregate-SQL set is non-empty (an empty set would make every ordering leg pass vacuously)', () => {
+      expect(aggregateSqlLiterals.size).toBeGreaterThanOrEqual(5)
+    })
+
+    async function aggregateQueriesDuring(run: () => Promise<unknown>): Promise<number> {
+      observedSql.length = 0
+      await run()
+      return observedSql.filter((sql) => aggregateSqlLiterals.has(sql)).length
+    }
+
+    it('POSITIVE CONTROL FIRST: the happy path really does issue aggregate queries (a permanently-zero counter must not pass vacuously)', async () => {
+      const calls = await aggregateQueriesDuring(() =>
+        request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy`).expect(200),
+      )
+      expect(calls).toBeGreaterThan(0)
+    })
+
+    it('ZERO aggregate queries on every rejection leg (this is the ordering proof; the status codes never were)', async () => {
+      const legs: Array<{ label: string; run: () => Promise<unknown> }> = [
+        {
+          label: '400 query parameter',
+          run: () => request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy?label=effective`).expect(400),
+        },
+        {
+          label: '400 state-bearing body',
+          run: () =>
+            request(adminApp())
+              .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+              .send({ label: 'effective' })
+              .expect(400),
+        },
+        {
+          label: '403 no authenticated org',
+          run: () =>
+            request(makeApp({ id: noOrgUser, permissions: ['attendance:admin'] }))
+              .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+              .expect(403),
+        },
+        {
+          label: '403 spoofed x-org-id',
+          run: () =>
+            request(adminApp())
+              .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+              .set('x-org-id', orgB)
+              .expect(403),
+        },
+        {
+          label: '400 invalid groupId',
+          run: () => request(adminApp()).get('/api/attendance/groups/not-a-uuid/effective-policy').expect(400),
+        },
+      ]
+      for (const leg of legs) {
+        expect(await aggregateQueriesDuring(leg.run), leg.label).toBe(0)
+      }
+    })
+
+    it('the delegated-non-member 403 issues the MEMBERSHIP read and then stops — no aggregate read follows it', async () => {
+      // This leg genuinely reads (the active-membership gate is real SQL), so
+      // the assertion is not "zero queries" but "the group SQL never ran":
+      // proven by the aggregate's own 404/200 shapes never appearing.
+      const res = await request(makeApp({ id: nonMemberAdminUser, permissions: ['attendance:admin'], orgId: orgA }))
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+      expect(res.status).toBe(403)
+      expect(res.body.error.code).toBe('FORBIDDEN')
+      expect(res.body.error.message).toBe('Org membership required for effective-policy')
     })
   })
 
@@ -434,9 +742,29 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
           super(message)
         }
       }
+      // The DIRECT side is built with the CANONICAL producer key from
+      // plugins/plugin-attendance/lib/, the same function index.cjs delegates
+      // to. The prior version injected the SAME function into both sides, so a
+      // mutation to the builder moved both sides together and this
+      // `toStrictEqual` was structurally incapable of reding on it — which is
+      // exactly what the file and the PR body claimed it had been confirmed to
+      // catch. That claim is retracted: what the separator mutation actually
+      // reds is the happy-path `state === 'effective'` assertion, via FSER's
+      // own row matching against this suite's INDEPENDENT hand-written seed
+      // literal. Two separate proofs; neither stands in for the other.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      const canonicalProducerKeyLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs') as {
+        buildAttendanceGroupFixedScheduleProducerKey: (input: {
+          groupId: string
+          shiftId: string
+          startDate: string
+          endDate: string | null
+        }) => string
+      }
       const directFser = fserLib.createAttendanceGroupFixedScheduleEffectivenessService({
         HttpError: TestHttpError,
-        buildAttendanceGroupFixedScheduleProducerKey: buildFixedScheduleProducerKey,
+        buildAttendanceGroupFixedScheduleProducerKey:
+          canonicalProducerKeyLib.buildAttendanceGroupFixedScheduleProducerKey,
         now: () => frozenNow,
       })
       const dbAdapter = { query: async (sql: string, params?: unknown[]) => (await pool.query(sql, params)).rows }
