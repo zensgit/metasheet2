@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
-import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  bindDingTalkIdentityToUser,
+  unbindSelfManagedDingTalkIdentity,
+} from '../../src/auth/dingtalk-oauth'
 import { query, transaction } from '../../src/db/pg'
 import {
   lockUsersForAccessGraphWrite,
@@ -8,6 +12,7 @@ import {
 } from '../../src/directory/access-graph-mutex'
 import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovision-ledger'
 import {
+  __directorySyncInternalsForTests,
   bindDirectoryAccount,
   unbindDirectoryAccount,
 } from '../../src/directory/directory-sync'
@@ -15,19 +20,25 @@ import {
   archiveLocalAccount,
   createLocalAccount,
 } from '../../src/directory/local-directory-org'
+import { __dingtalkOAuthInternalsForTests } from '../../src/auth/dingtalk-oauth'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const PREFIX = `d5a-mutex-${Date.now()}`
 
 type SeededEvidence = {
   accountId: string
+  corpId: string
   eventId: string
+  externalUserId: string
   integrationId: string
+  openId: string
   orgId: string
+  unionId: string
   userId: string
 }
 
 async function cleanup(): Promise<void> {
+  vi.unstubAllEnvs()
   await query(
     `DELETE FROM directory_deprovision_events WHERE local_user_id LIKE $1`,
     [`${PREFIX}-%`],
@@ -43,9 +54,23 @@ async function cleanup(): Promise<void> {
   await query(`DELETE FROM users WHERE id LIKE $1`, [`${PREFIX}-%`])
 }
 
+function configureDingTalkOAuth(corpId: string): void {
+  vi.stubEnv('DINGTALK_CLIENT_ID', 'd5c-client')
+  vi.stubEnv('DINGTALK_CLIENT_SECRET', 'd5c-secret')
+  vi.stubEnv(
+    'DINGTALK_REDIRECT_URI',
+    'https://metasheet.example.test/api/auth/dingtalk/callback',
+  )
+  vi.stubEnv('DINGTALK_CORP_ID', corpId)
+}
+
 async function seedAppliedEvidence(): Promise<SeededEvidence> {
   const orgId = `${PREFIX}-org-${randomUUID()}`
   const userId = `${PREFIX}-user-${randomUUID()}`
+  const corpId = `${PREFIX}-corp-${randomUUID()}`
+  const externalUserId = `${PREFIX}-external-${randomUUID()}`
+  const unionId = `${PREFIX}-union-${randomUUID()}`
+  const openId = `${PREFIX}-open-${randomUUID()}`
   const integration = await query<{ id: string }>(
     `INSERT INTO directory_integrations (
        name, corp_id, org_id, provider, status, default_deprovision_policy
@@ -53,7 +78,7 @@ async function seedAppliedEvidence(): Promise<SeededEvidence> {
      RETURNING id::text AS id`,
     [
       `${PREFIX}-integration-${randomUUID()}`,
-      `${PREFIX}-corp-${randomUUID()}`,
+      corpId,
       orgId,
     ],
   )
@@ -101,9 +126,9 @@ async function seedAppliedEvidence(): Promise<SeededEvidence> {
      RETURNING id::text AS id`,
     [
       integrationId,
-      `${PREFIX}-external-${randomUUID()}`,
-      `${PREFIX}-union-${randomUUID()}`,
-      `${PREFIX}-open-${randomUUID()}`,
+      externalUserId,
+      unionId,
+      openId,
     ],
   )
   await query(
@@ -128,9 +153,13 @@ async function seedAppliedEvidence(): Promise<SeededEvidence> {
   if (!applied.eventId) throw new Error('failed to seed deprovision evidence')
   return {
     accountId: account.rows[0].id,
+    corpId,
     eventId: applied.eventId,
+    externalUserId,
     integrationId,
+    openId,
     orgId,
+    unionId,
     userId,
   }
 }
@@ -515,5 +544,176 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
     )
     expect(link.rows).toHaveLength(1)
     expect(link.rows[0]).toMatchObject({ local_user_id: targetUserId, link_status: 'linked' })
+  })
+
+  it('automatic sync inventory parks on the linked user mutex before re-reading account state', async () => {
+    const seeded = await seedAppliedEvidence()
+    await resetSeededForAccessOverride(seeded)
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+    const holder = await pool.connect()
+    try {
+      await holder.query('BEGIN')
+      const holderPid = Number(
+        (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+          .rows[0].pid,
+      )
+      await holder.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+        seeded.userId,
+      ])
+
+      const inventoryPromise = transaction((client) =>
+        __directorySyncInternalsForTests.lockDirectorySyncAccessGraphUsers(
+          client,
+          {
+            integrationId: seeded.integrationId,
+            users: [{
+              userId: seeded.externalUserId,
+              name: 'D5C Sync',
+              unionId: seeded.unionId,
+              openId: seeded.openId,
+              departmentIds: [],
+              source: {},
+            }],
+          },
+        ),
+      )
+      await waitForAnyUserLockWaiter(pool, holderPid)
+      await holder.query('ROLLBACK')
+
+      const inventory = await inventoryPromise
+      expect(inventory.lockedUserIds).toEqual(new Set([seeded.userId]))
+      expect(
+        inventory.priorAccessByExternalUserId.get(seeded.externalUserId),
+      ).toMatchObject({
+        account_id: seeded.accountId,
+        local_user_id: seeded.userId,
+        link_status: 'linked',
+      })
+    } finally {
+      await holder.query('ROLLBACK').catch(() => undefined)
+      holder.release()
+      await pool.end()
+    }
+  })
+
+  it('OAuth bind supersedes only a real canonical identity or grant change', async () => {
+    const seeded = await seedAppliedEvidence()
+    await resetSeededForAccessOverride(seeded)
+    configureDingTalkOAuth(seeded.corpId)
+    const profile = {
+      openId: seeded.openId,
+      unionId: seeded.unionId,
+      nick: 'D5C OAuth',
+    }
+    const beforeFirstBind = await readEvidence(seeded.userId)
+
+    await bindDingTalkIdentityToUser({
+      localUserId: seeded.userId,
+      dtUser: profile,
+      boundBy: 'admin:d5c-oauth',
+      enableGrant: true,
+    })
+
+    const afterFirstBind = await readEvidence(seeded.userId)
+    expect(Number(afterFirstBind.access_generation)).toBe(
+      Number(beforeFirstBind.access_generation) + 1,
+    )
+    expect(afterFirstBind.event_status).toBe('superseded')
+    expect(afterFirstBind.resolved_by).toBe('admin:d5c-oauth')
+
+    await reopenEvidence(seeded.eventId)
+    const beforeNoopBind = await readEvidence(seeded.userId)
+    await bindDingTalkIdentityToUser({
+      localUserId: seeded.userId,
+      dtUser: profile,
+      boundBy: 'admin:d5c-oauth',
+      enableGrant: true,
+    })
+    expect(await readEvidence(seeded.userId)).toEqual(beforeNoopBind)
+  })
+
+  it('self-managed OAuth unbind supersedes evidence in the same transaction', async () => {
+    const seeded = await seedAppliedEvidence()
+    await resetSeededForAccessOverride(seeded)
+    configureDingTalkOAuth(seeded.corpId)
+    await bindDingTalkIdentityToUser({
+      localUserId: seeded.userId,
+      dtUser: {
+        openId: seeded.openId,
+        unionId: seeded.unionId,
+        nick: 'D5C OAuth',
+      },
+      boundBy: 'admin:d5c-oauth',
+      enableGrant: false,
+    })
+    await query(
+      `UPDATE directory_account_links
+          SET link_status = 'unlinked'
+        WHERE directory_account_id = $1::uuid`,
+      [seeded.accountId],
+    )
+    await reopenEvidence(seeded.eventId)
+    const before = await readEvidence(seeded.userId)
+
+    await expect(
+      unbindSelfManagedDingTalkIdentity({
+        localUserId: seeded.userId,
+        actorId: seeded.userId,
+      }),
+    ).resolves.toBe(true)
+
+    const identity = await query(
+      `SELECT id
+         FROM user_external_identities
+        WHERE provider = 'dingtalk' AND local_user_id = $1`,
+      [seeded.userId],
+    )
+    expect(identity.rows).toHaveLength(0)
+    const after = await readEvidence(seeded.userId)
+    expect(Number(after.access_generation)).toBe(
+      Number(before.access_generation) + 1,
+    )
+    expect(after.event_status).toBe('superseded')
+    expect(after.resolved_by).toBe(seeded.userId)
+  })
+
+  it("OAuth ensureGrant is creation-only: a deprovision-written DISABLED grant is never flipped back (D5 review P2)", async () => {
+    const orgId = `${PREFIX}-org-${randomUUID()}`
+    const offboarded = `${PREFIX}-offboarded-${randomUUID()}`
+    const newcomer = `${PREFIX}-newcomer-${randomUUID()}`
+    for (const uid of [offboarded, newcomer]) {
+      await query(
+        `INSERT INTO users (id, password_hash, is_active, activation_status, access_generation)
+         VALUES ($1, 'x', TRUE, 'activated', 3)`,
+        [uid],
+      )
+    }
+    // Deprovision's authoritative mark: an explicit disabled row.
+    await query(
+      `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by)
+       VALUES ('dingtalk', $1, FALSE, 'system:directory-deprovision')`,
+      [offboarded],
+    )
+
+    // The offboarded person attempts OAuth login: the DO UPDATE variant flipped this row back to
+    // TRUE (silently undoing deprovision); creation-only must leave it exactly as written.
+    await __dingtalkOAuthInternalsForTests.ensureGrant(offboarded)
+    const after = await query<{ enabled: boolean }>(
+      `SELECT enabled FROM user_external_auth_grants WHERE local_user_id = $1`, [offboarded])
+    expect(after.rows[0]?.enabled).toBe(false)
+    const gen = await query<{ g: number }>(
+      `SELECT access_generation::int AS g FROM users WHERE id = $1`, [offboarded])
+    expect(gen.rows[0]?.g).toBe(3) // no supersede leg fired — nothing changed
+
+    // A genuinely NEW grant (no row) IS an access-graph write: row created enabled, and the
+    // §5.4 legs fire — generation moves.
+    void orgId
+    await __dingtalkOAuthInternalsForTests.ensureGrant(newcomer)
+    const created = await query<{ enabled: boolean }>(
+      `SELECT enabled FROM user_external_auth_grants WHERE local_user_id = $1`, [newcomer])
+    expect(created.rows[0]?.enabled).toBe(true)
+    const newcomerGen = await query<{ g: number }>(
+      `SELECT access_generation::int AS g FROM users WHERE id = $1`, [newcomer])
+    expect(newcomerGen.rows[0]?.g).toBeGreaterThan(3)
   })
 })
