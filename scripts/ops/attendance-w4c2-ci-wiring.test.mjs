@@ -10,6 +10,7 @@ import {
   extractStepById,
   isQuotedInTestExclude,
   realDbStepWholeFileArgs,
+  requireExecutableRealDbStep,
   stepHasEnvDatabaseUrl,
   stepInvokesVitestIntegrationConfig,
   vitestInvocations,
@@ -169,7 +170,19 @@ test('plugin-tests.yml attendance real-DB step (id: attendance-real-db-integrati
 // SCOPE (owner ruling): the root fix belongs in `wholeFileVitestArgs` itself, but that helper is
 // shared by all 17 `*-ci-wiring.test.mjs` guards and changing it there would blast-radius into 16
 // other lanes. It is tracked separately as repo-level issue 4829. What lands HERE is the
-// attendance-scoped assertion only.
+// attendance-scoped assertion only — the shared helper is untouched.
+//
+// The DOMAIN is DERIVED PER INVOCATION, never named by step id (owner scope correction). The
+// attendance corpus is NOT carried by a single step: the approval step carries the
+// `attendance-notification-redelivery*` family (3 attendance whole-file args today), wired there
+// long before the attendance step existed. Binding this check to `attendance-real-db-integration`
+// would let a `-t` on the approval step silence those while the guard stayed green — the identical
+// wired-but-executes-nothing shape, one step over. So: enumerate the vitest invocations of the
+// three real-DB steps, keep the ones that ACTUALLY carry a `tests/integration/attendance-*` file
+// arg (membership computed from the args, never assumed from the step name), and reject the filter
+// flags on those. `multitable` carries ZERO attendance files today and therefore needs no
+// special-case branch — it simply contributes no invocations, and if it ever carries one the
+// derivation picks it up automatically. There is no hand-written multitable exception.
 //
 // Derived MECHANICALLY, never by eyeballing the raw YAML: `vitestInvocations()` already resolves
 // the real binary, strips bash comments (both directions), joins `\` continuations and splits on
@@ -179,34 +192,83 @@ test('plugin-tests.yml attendance real-DB step (id: attendance-real-db-integrati
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Every test-name-filter argument on the attendance step's vitest commands that run under
- * `vitest.integration.config.ts` — i.e. exactly the invocations whose whole-file args are what
- * `wholeFileVitestArgs()` reports as "wired". Both the separate-value form (`-t 'x'`,
- * `--testNamePattern 'x'`) and the inline form (`-t=x`, `--testNamePattern=x`) are matched, on the
- * TOKEN, so a path argument or another flag's value can never be mistaken for one.
+ * Test-name-filter arguments of ONE vitest invocation. Both the separate-value form (`-t 'x'`,
+ * `--testNamePattern 'x'`) and the equals-joined form (`-t=x`, `--testNamePattern=x`) are matched
+ * at ARG level, so a path argument or another flag's value can never be mistaken for one.
  */
-function testNameFilterArgsOnAttendanceRealDbStep() {
-  const step = requireAttendanceRealDbStepExecutable()
-  const hits = []
-  for (const inv of vitestInvocations(step)) {
-    if (!inv.usesIntegrationConfig) continue
-    for (const arg of inv.args) {
-      if (arg === '-t' || arg === '--testNamePattern') hits.push(arg)
-      else if (/^(?:-t|--testNamePattern)=/.test(arg)) hits.push(arg)
-    }
-  }
-  return hits
+function testNameFilterArgsOfInvocation(inv) {
+  return inv.args.filter(
+    (arg) => arg === '-t'
+      || arg === '--testNamePattern'
+      || /^(?:-t|--testNamePattern)=/.test(arg),
+  )
 }
 
-test(`attendance real-DB step (id: ${STEP_ID}) carries NO -t/--testNamePattern filter (issue 4828 hole 2; shared-helper root fix tracked as issue 4829)`, () => {
+/**
+ * The DERIVED domain: every (stepId, invocation) pair across the three real-DB steps whose
+ * invocation actually carries at least one `tests/integration/attendance-*` whole-file arg AND
+ * runs under `vitest.integration.config.ts` — i.e. exactly the invocations whose file args
+ * `wholeFileVitestArgs()` reports as "wired". Membership is computed from the ARGS; no step is
+ * included because of its name.
+ */
+function attendanceCarryingInvocations() {
+  const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  const steps = [
+    [STEP_ID, requireAttendanceRealDbStepExecutable()],
+    [REAL_DB_STEP_IDS.approval, requireExecutableRealDbStep(wf, REAL_DB_STEP_IDS.approval)],
+    [REAL_DB_STEP_IDS.multitable, requireExecutableRealDbStep(wf, REAL_DB_STEP_IDS.multitable)],
+  ]
+  const out = []
+  for (const [stepId, step] of steps) {
+    for (const inv of vitestInvocations(step)) {
+      if (!inv.usesIntegrationConfig) continue
+      const attendanceFiles = inv.wholeFileArgs.filter((f) => f.startsWith('tests/integration/attendance-'))
+      if (attendanceFiles.length === 0) continue
+      out.push({ stepId, inv, attendanceFiles })
+    }
+  }
+  return out
+}
+
+// NON-EMPTY CONTRIBUTOR control. Without it, a break in the contributor derivation empties the
+// domain and the no-filter assertion below passes over an empty set forever — green against
+// nothing (an empty scan is not an absence; that failure mode has bitten this repo before).
+// Derived, not a count pin: the attendance step must contribute, since it carries the bulk of the
+// corpus.
+test('issue 4828 hole 2 domain is non-vacuous (attendance-carrying invocations exist, incl. the attendance step)', () => {
+  const contributors = attendanceCarryingInvocations()
+  assert.ok(
+    contributors.length > 0,
+    'no vitest invocation across the three real-DB steps appears to carry ANY attendance file — '
+      + 'the contributor derivation broke, and the no-filter assertion would pass vacuously',
+  )
+  const stepIds = [...new Set(contributors.map((c) => c.stepId))]
+  assert.ok(
+    stepIds.includes(STEP_ID),
+    `the attendance real-DB step "${STEP_ID}" must contribute at least one attendance-carrying `
+      + `invocation (it carries the bulk of the corpus); it is missing, so the derivation broke `
+      + `rather than the wiring changing — got ${JSON.stringify(stepIds)}`,
+  )
+})
+
+test(`no attendance-carrying real-DB invocation uses -t/--testNamePattern (issue 4828 hole 2; shared-helper root fix tracked as issue 4829)`, () => {
+  const offenders = attendanceCarryingInvocations()
+    .map(({ stepId, inv, attendanceFiles }) => ({
+      stepId,
+      attendanceFilesAffected: attendanceFiles.length,
+      filters: testNameFilterArgsOfInvocation(inv),
+    }))
+    .filter((o) => o.filters.length > 0)
   assert.deepEqual(
-    testNameFilterArgsOnAttendanceRealDbStep(),
+    offenders,
     [],
-    `the attendance real-DB step's vitest command must not carry -t / --testNamePattern: the flag `
+    `a vitest invocation carrying attendance suites must not use -t / --testNamePattern: the flag `
       + `is silent and exit-0 when it matches nothing (\`-t 'no-such-test-name-zz'\` → "Test Files `
-      + `1 skipped (1)", exit 0), so every suite in the run-list would still be reported as a `
-      + `whole-file arg by wholeFileVitestArgs() — fully "wired" by all three corpora above — `
-      + `while executing ZERO assertions`,
+      + `1 skipped (1)", exit 0), so every attendance suite on that command would still be reported `
+      + `as a whole-file arg by wholeFileVitestArgs() — fully "wired" by all three corpora above — `
+      + `while executing ZERO assertions. This is checked on EVERY step that carries attendance `
+      + `files (the approval step carries the notification-redelivery family), not just the `
+      + `attendance step`,
   )
 })
 
@@ -214,15 +276,14 @@ test(`attendance real-DB step (id: ${STEP_ID}) carries NO -t/--testNamePattern f
 // can see the thing it claims is absent (a typo'd flag name or a scan over the wrong invocation
 // set would pass vacuously forever). Drive the same predicate over synthetic steps.
 test('issue 4828 hole 2 detector positive control: it actually detects -t/--testNamePattern in every form, and only there', () => {
+  // Exercises the SAME functions the live assertion uses — an inlined re-implementation here
+  // would test a copy of the predicate rather than the shipped one.
   const detect = (runScript) => {
-    const step = { run: runScript }
     const hits = []
-    for (const inv of vitestInvocations(step)) {
+    for (const inv of vitestInvocations({ run: runScript })) {
       if (!inv.usesIntegrationConfig) continue
-      for (const arg of inv.args) {
-        if (arg === '-t' || arg === '--testNamePattern') hits.push(arg)
-        else if (/^(?:-t|--testNamePattern)=/.test(arg)) hits.push(arg)
-      }
+      if (!inv.wholeFileArgs.some((f) => f.startsWith('tests/integration/attendance-'))) continue
+      hits.push(...testNameFilterArgsOfInvocation(inv))
     }
     return hits
   }
@@ -245,6 +306,17 @@ test('issue 4828 hole 2 detector positive control: it actually detects -t/--test
   // A filter on a command that does NOT run under the integration config cannot make the
   // attendance suites vacuous, and is not reported.
   assert.deepEqual(detect(`pnpm exec vitest run --config vitest.config.ts tests/x.test.ts -t 'zzz'\n${BASE}`), [])
+  // INVOCATION-level, not step-level: a `-t` on a sibling integration-config command that carries
+  // NO attendance file cannot silence an attendance suite, so it is not reported — while the
+  // attendance-carrying command on the very next line is still judged on its own args.
+  assert.deepEqual(
+    detect(`pnpm exec vitest run --config vitest.integration.config.ts tests/integration/multitable-x.db.test.ts -t 'zzz'\n${BASE}`),
+    [],
+  )
+  assert.deepEqual(
+    detect(`pnpm exec vitest run --config vitest.integration.config.ts tests/integration/multitable-x.db.test.ts -t 'zzz'\n${BASE} -t 'yyy'`),
+    ['-t'],
+  )
   // Look-alike tokens must not be mistaken for the flag.
   assert.deepEqual(detect(`${BASE} --reporter=verbose --testTimeout=60000`), [])
 })
