@@ -60,6 +60,7 @@ defineExpose({
         text
         size="small"
         data-testid="approval-canvas-inspector-close"
+        aria-label="关闭节点检查器"
         @click="emit('close')"
       >
         关闭
@@ -70,12 +71,15 @@ defineExpose({
         v-if="!readOnly"
         class="template-authoring__inspector-topology"
         data-testid="approval-canvas-inspector-topology"
+        role="toolbar"
+        :aria-label="`${graphNodeLabel(node.key)}节点拓扑操作`"
       >
         <template v-if="canMoveCanvasNode(node.key)">
           <el-button
             size="small"
             :disabled="!canvasStepMoveTarget(node.key, 'up')"
             :data-testid="`approval-canvas-move-up-${node.key}`"
+            :aria-label="`上移${graphNodeLabel(node.key)}节点`"
             @click="emit('move-up', node.key)"
           >
             上移
@@ -84,6 +88,7 @@ defineExpose({
             size="small"
             :disabled="!canvasStepMoveTarget(node.key, 'down')"
             :data-testid="`approval-canvas-move-down-${node.key}`"
+            :aria-label="`下移${graphNodeLabel(node.key)}节点`"
             @click="emit('move-down', node.key)"
           >
             下移
@@ -92,6 +97,7 @@ defineExpose({
             size="small"
             :type="movingCanvasNode === node.key ? 'primary' : undefined"
             :data-testid="`approval-canvas-move-${node.key}`"
+            :aria-label="`移动${graphNodeLabel(node.key)}节点`"
             @click="emit('begin-move', node.key)"
           >
             移动
@@ -101,6 +107,7 @@ defineExpose({
           v-if="node.type === 'condition'"
           size="small"
           :data-testid="`approval-canvas-add-condition-${node.key}`"
+          :aria-label="`为${graphNodeLabel(node.key)}添加条件分支`"
           @click="emit('add-condition-branch', node.key)"
         >
           +条件分支
@@ -109,6 +116,7 @@ defineExpose({
           v-if="node.type === 'parallel'"
           size="small"
           :data-testid="`approval-canvas-add-parallel-${node.key}`"
+          :aria-label="`为${graphNodeLabel(node.key)}添加并行分支`"
           @click="emit('add-parallel-branch', node.key)"
         >
           +并行分支
@@ -117,6 +125,7 @@ defineExpose({
           <el-button
             size="small"
             :data-testid="`approval-canvas-insert-${node.key}`"
+            :aria-label="`在${graphNodeLabel(node.key)}后插入审批节点`"
             @click="emit('insert-approval', node.key)"
           >
             +审批
@@ -124,6 +133,7 @@ defineExpose({
           <el-button
             size="small"
             :data-testid="`approval-canvas-insert-condition-${node.key}`"
+            :aria-label="`在${graphNodeLabel(node.key)}后插入条件节点`"
             @click="emit('insert-condition', node.key)"
           >
             +条件
@@ -132,6 +142,7 @@ defineExpose({
             v-if="canInsertParallelAfter(node)"
             size="small"
             :data-testid="`approval-canvas-insert-parallel-${node.key}`"
+            :aria-label="`在${graphNodeLabel(node.key)}后插入并行节点`"
             @click="emit('insert-parallel', node.key)"
           >
             +并行
@@ -142,6 +153,7 @@ defineExpose({
           size="small"
           type="danger"
           :data-testid="`approval-canvas-remove-${node.key}`"
+          :aria-label="`删除${graphNodeLabel(node.key)}节点`"
           @click="emit('remove', node.key)"
         >
           删除
