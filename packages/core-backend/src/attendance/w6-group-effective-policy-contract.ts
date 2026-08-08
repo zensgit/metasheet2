@@ -20,6 +20,7 @@
  *  - flex mode is the W5 union from w5-flex-policy.ts, read-only;
  *  - calculation posture is the W4 rollout state union, read-only.
  */
+import { requirePluginAttendanceLib } from '../util/resolve-plugin-attendance-lib'
 
 /** Parent lock §5.1 five display states — machine spelling per OD-W6-3(a). */
 export const ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1 = Object.freeze([
@@ -58,6 +59,38 @@ export const ATTENDANCE_GROUP_EFFECTIVE_POLICY_CONFLICT_CODES_V1 = Object.freeze
 ] as const)
 export type AttendanceGroupEffectivePolicyConflictCodeV1 =
   (typeof ATTENDANCE_GROUP_EFFECTIVE_POLICY_CONFLICT_CODES_V1)[number]
+
+/**
+ * Closed reason-code union per §4.2: *"Reason codes inside the embedded
+ * fixed-schedule object are the FSER lock's closed list, unchanged and in
+ * FSER order."* Used to validate BOTH `fixedSchedule.reasonCodes` (FSER's
+ * full list, embedded verbatim, including `EFFECTIVE`) and every
+ * `domains.*.reasonCodes` (always a strict subset — FSER's codes with
+ * `EFFECTIVE` filtered out for the `schedule` domain, plus the four
+ * W6-authored domain-level codes below that are not part of FSER's own
+ * vocabulary).
+ *
+ * FSER's `REASON_ORDER` is IMPORTED, not hand-copied — a second hand-typed
+ * copy is exactly the drift risk §7.3 forbids for W6-2's OpenAPI mint, and
+ * is exactly what R4's own fidelity test independently duplicates a third
+ * time (flagged separately, #4814 P3-5).
+ */
+const fserEffectivenessServiceLib = requirePluginAttendanceLib<{ REASON_ORDER: readonly string[] }>(
+  __dirname,
+  'attendance-group-fixed-schedule-effectiveness-service.cjs',
+)
+/** The four domain-level reason codes this aggregate mints itself — never
+ * part of FSER's vocabulary, so not present in `REASON_ORDER`. */
+const ATTENDANCE_GROUP_EFFECTIVE_POLICY_OWN_REASON_CODES_V1 = [
+  'SEGMENT_CALCULATION_NOT_AUTHORITATIVE',
+  'SCHEDULE_STRATEGY_INCOMPLETE',
+  'CALCULATION_GROUP_MEMBERSHIP_OVERLAP',
+  'RULE_SOURCE_MISSING',
+] as const
+export const ATTENDANCE_GROUP_EFFECTIVE_POLICY_REASON_CODES_V1: readonly string[] = Object.freeze([
+  ...fserEffectivenessServiceLib.REASON_ORDER,
+  ...ATTENDANCE_GROUP_EFFECTIVE_POLICY_OWN_REASON_CODES_V1,
+])
 
 /** Existing CHECK-constrained group type union (read-only mirror). */
 export type AttendanceGroupEffectivePolicyGroupTypeV1 =

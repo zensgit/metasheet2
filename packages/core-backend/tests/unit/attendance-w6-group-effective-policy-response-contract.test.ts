@@ -216,6 +216,38 @@ describe('W6 group effective-policy response contract validator', () => {
       ]
       expect(validateAttendanceGroupEffectivePolicyResponseV1(patched).ok).toBe(false)
     })
+
+    // #4814 P2-2: reasonCodes was checked only with isStringArray (any
+    // array of strings), not against a closed list — §4.2 requires it
+    // closed end to end, same as every other enum field above.
+    it('rejects a made-up domains.*.reasonCodes value (not FSER-sourced, not W6-authored)', () => {
+      const patched = structuredClone(base)
+      ;(patched.data.domains.membership as Record<string, unknown>).reasonCodes = ['NOT_A_REAL_REASON_CODE']
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'domains.membership.reasonCodes: not a closed-set string array',
+      })
+    })
+    it('rejects a raw UUID smuggled into domains.*.reasonCodes (values-free judge does not stand in for enum closure)', () => {
+      const patched = structuredClone(base)
+      ;(patched.data.domains.membership as Record<string, unknown>).reasonCodes = ['3f7a1c2e-0000-4000-8000-000000000001']
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'domains.membership.reasonCodes: not a closed-set string array',
+      })
+    })
+    it('rejects a made-up fixedSchedule.reasonCodes value (must be FSER\'s own closed list, §4.2)', () => {
+      const fixture = readFixture('aggregate-effective-fixed-shift.json') as {
+        ok: true
+        data: { domains: { schedule: { fixedSchedule: { reasonCodes: string[] } } } }
+      }
+      const patched = structuredClone(fixture)
+      patched.data.domains.schedule.fixedSchedule.reasonCodes = ['MADE_UP_FSER_REASON']
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'fixedSchedule.reasonCodes: not a closed-set string array',
+      })
+    })
   })
 
   describe('editorRef closed-table parser (W6-R8)', () => {

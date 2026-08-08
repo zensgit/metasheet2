@@ -30,12 +30,15 @@
 import {
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_CONFLICT_CODES_V1,
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAINS_V1,
+  ATTENDANCE_GROUP_EFFECTIVE_POLICY_REASON_CODES_V1,
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1,
   type AttendanceGroupEffectivePolicyCalculationPostureV1,
   type AttendanceGroupEffectivePolicyEditorRefV1,
   type AttendanceGroupEffectivePolicyGroupTypeV1,
   type AttendanceGroupEffectivePolicyResponseV1,
 } from './w6-group-effective-policy-contract'
+
+const REASON_CODES = new Set(ATTENDANCE_GROUP_EFFECTIVE_POLICY_REASON_CODES_V1)
 
 const CALCULATION_POSTURES: readonly AttendanceGroupEffectivePolicyCalculationPostureV1[] = Object.freeze([
   'legacy',
@@ -113,6 +116,13 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
 }
 
+/** W6-R6: reason codes are closed end to end (§4.2), not merely
+ * "an array of strings" — every entry must be one of FSER's closed
+ * `REASON_ORDER` or the four W6-authored domain reason codes. */
+function isReasonCodeArray(value: unknown): value is string[] {
+  return isStringArray(value) && value.every((item) => REASON_CODES.has(item))
+}
+
 /**
  * W6-R8: the single closed-table parser for `editorRef`. Returns the parsed
  * value on success; `null` on ANY shape that is not exactly one of the two
@@ -166,7 +176,7 @@ function validateFixedSchedule(value: unknown): AttendanceGroupEffectivePolicyVa
   }
   const v = value as Record<string, unknown>
   if (typeof v.state !== 'string' || !FSER_STATES.includes(v.state)) return fail('fixedSchedule.state: unknown enum value')
-  if (!isStringArray(v.reasonCodes)) return fail('fixedSchedule.reasonCodes: not a string array')
+  if (!isReasonCodeArray(v.reasonCodes)) return fail('fixedSchedule.reasonCodes: not a closed-set string array')
   if (v.desired !== null) {
     if (!hasClosedKeys(v.desired, ['shiftId', 'startDate', 'endDate', 'revision'])) return fail('fixedSchedule.desired: unexpected key set')
     const d = v.desired as Record<string, unknown>
@@ -211,7 +221,7 @@ function validateDomainSummary(
   if (typeof v.label !== 'string' || !ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1.includes(v.label as never)) {
     return fail(`${name}.label: unknown enum value`)
   }
-  if (!isStringArray(v.reasonCodes)) return fail(`${name}.reasonCodes: not a string array`)
+  if (!isReasonCodeArray(v.reasonCodes)) return fail(`${name}.reasonCodes: not a closed-set string array`)
   if (Object.prototype.hasOwnProperty.call(v, 'sourceRefs') && !validateSourceRefs(v.sourceRefs)) {
     return fail(`${name}.sourceRefs: invalid shape`)
   }
