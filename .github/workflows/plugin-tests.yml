@@ -436,8 +436,14 @@ jobs:
       # 30 (23 + 7); the other 335 — multitable's 216 included — remain outside every guard's
       # (all 17) file list. This closes attendance's own gap, not "the last" gap.
       # Pins the attendance step's stable id + literal DATABASE_URL + vitest.integration.config.ts
-      # invocation, and that each of the seven files is (a) excluded from the no-DB job's default
-      # vitest.config.ts and (b) run as a whole-file arg of that step, and (c) exists on disk.
+      # invocation. OBS-1 (2026-08-07) converted the per-file assertions from a hardcoded FILES
+      # allowlist (33 entries at conversion time) to a DERIVED completeness check: the corpus is
+      # enumerated from the on-disk tests/integration/attendance-*.db.test.ts glob plus the
+      # attendance-prefixed args the real-DB run-lists actually carry, and every corpus member
+      # must be (a) excluded from the no-DB job's default vitest.config.ts, (b) run as a
+      # whole-file arg of an executable real-DB step, and (c) exist on disk. An allowlist cannot
+      # notice a file it was never told about — the two W4C-3b suites this conversion wires
+      # (request-snapshots, central-approval) executed NOWHERE while the 33-entry guard was green.
       - name: Attendance W4C-2 CI wiring contract
         run: node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs
 
@@ -1271,6 +1277,8 @@ jobs:
             tests/integration/attendance-w4c3a-rollout-control.db.test.ts \
             tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
             tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
+            tests/integration/attendance-w4c3b-request-snapshots.db.test.ts \
+            tests/integration/attendance-w4c3b-central-approval.db.test.ts \
             tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts \
             tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts \
             tests/integration/attendance-w4c4-calculation-detail.db.test.ts \
