@@ -438,9 +438,20 @@ describe('DingTalk OAuth state store', () => {
       } as any)
       .mockResolvedValueOnce({ rows: [] } as any)
 
+    const txCalls: Array<[string, unknown[]]> = []
     vi.mocked(transaction).mockImplementation(async (callback: (client: { query: typeof query }) => Promise<unknown>) => {
+      const aliasOwners = new Map<string, string>()
       const clientQuery = vi.fn(async (sql: string, params: unknown[] = []) => {
+        txCalls.push([String(sql), params])
         const statement = String(sql)
+        if (/INSERT INTO user_login_aliases/i.test(statement)) {
+          aliasOwners.set(String(params[2] ?? ''), String(params[0] ?? ''))
+          return { rows: [] }
+        }
+        if (/SELECT user_id FROM user_login_aliases/i.test(statement)) {
+          const ownerId = aliasOwners.get(String(params[0] ?? ''))
+          return { rows: ownerId ? [{ user_id: ownerId }] : [] }
+        }
         if (/FROM users[\s\S]*FOR UPDATE/i.test(statement)) {
           return {
             rows: [{
@@ -452,6 +463,18 @@ describe('DingTalk OAuth state store', () => {
               activation_status: 'activated',
               is_active: true,
               access_generation: 0,
+            }],
+          }
+        }
+        if (/INSERT INTO users/i.test(statement)) {
+          return {
+            rows: [{
+              id: 'user-new',
+              email: 'dingtalk_open-id-1@placeholder.local',
+              name: 'Ding User',
+              role: 'user',
+              is_active: true,
+              activation_status: 'activated',
             }],
           }
         }
@@ -472,7 +495,11 @@ describe('DingTalk OAuth state store', () => {
     const result = await exchangeCodeForUser('auth-code')
 
     expect(result.localUserId).toBe('user-new')
-    expect(vi.mocked(query).mock.calls[1]?.[0]).toContain('password_hash')
-    expect(vi.mocked(query).mock.calls[1]?.[1]?.[3]).toMatch(/^\$2[aby]\$/)
+    // #4658 moved provisioning INSERTs into the alias-claiming transaction: the password-hash
+    // witness now lives on the transaction client, not the top-level query sequence.
+    const usersInsert = txCalls.find(([sql]) => /INSERT INTO users/i.test(sql) && sql.includes('password_hash'))
+    expect(usersInsert).toBeDefined()
+    const hashParam = (usersInsert?.[1] ?? []).find((p) => typeof p === 'string' && /^\$2[aby]\$/.test(p))
+    expect(hashParam).toBeDefined()
   })
 })

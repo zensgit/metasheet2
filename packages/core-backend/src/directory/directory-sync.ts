@@ -40,6 +40,7 @@ import {
   buildUnusablePasswordHash,
   isDirectoryPendingActivationEnabled,
 } from '../auth/user-activation'
+import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { SimpleCronExpression } from '../services/SchedulerService'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
@@ -6133,6 +6134,20 @@ async function createDirectoryAdmittedUserInTransaction(
       supersedeTargetUser: false,
       skipUserOrgMembership: pendingMode,
     })
+
+    // Alias full-writer: claim only when admission creates an activated user.
+    // pending_activation must claim nothing until T3 activate (design lock).
+    // Load-bearing: removing this branch must fail directory_admit activated writer tests.
+    if (activationStatus === 'activated') {
+      await claimNonEmptyLoginAliasesOrThrow({
+        userId,
+        email: options.email,
+        username: options.username,
+        mobile: options.mobile,
+        source: 'directory_admit',
+        client,
+      })
+    }
   } catch (error) {
     // Undo the users INSERT (and recover the transaction if the throw came from a failed
     // statement), then release, so the outer sync transaction stays usable for the next account.

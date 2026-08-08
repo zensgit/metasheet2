@@ -50,9 +50,33 @@ import {
   getDingTalkRuntimeStatus,
 } from '../../src/auth/dingtalk-oauth'
 
+const defaultTransactionStatements: string[] = []
+
 function createDefaultTransactionQuery() {
+  const aliasOwners = new Map<string, string>()
   return vi.fn(async (sql: string, params: unknown[] = []) => {
     const statement = String(sql)
+    defaultTransactionStatements.push(statement)
+    if (/INSERT INTO users/i.test(statement)) {
+      return {
+        rows: [{
+          id: String(params[0]),
+          email: String(params[1]),
+          name: String(params[2]),
+          role: 'user',
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      }
+    }
+    if (/INSERT INTO user_login_aliases/i.test(statement)) {
+      aliasOwners.set(String(params[2]), String(params[0]))
+      return { rows: [] }
+    }
+    if (/SELECT user_id FROM user_login_aliases/i.test(statement)) {
+      const ownerId = aliasOwners.get(String(params[0]))
+      return { rows: ownerId ? [{ user_id: ownerId }] : [] }
+    }
     if (/FROM users[\s\S]*FOR UPDATE/i.test(statement)) {
       return {
         rows: [{
@@ -83,6 +107,7 @@ function createDefaultTransactionQuery() {
 describe('dingtalk oauth login gates', () => {
   beforeEach(async () => {
     vi.unstubAllEnvs()
+    defaultTransactionStatements.length = 0
     pgMocks.query.mockReset()
     pgMocks.transaction.mockReset()
     clientMocks.exchangeCodeForUserAccessToken.mockReset()
@@ -330,11 +355,13 @@ describe('dingtalk oauth login gates', () => {
     const result = await exchangeCodeForUser('code-5')
 
     expect(result).toMatchObject({
-      localUserId: 'user-new',
+      localUserId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
       localUserEmail: 'alpha@example.com',
       isNewUser: true,
     })
-    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users'))).toBe(true)
+    expect(defaultTransactionStatements.some((statement) => statement.includes('INSERT INTO users'))).toBe(true)
   })
 
   it('does not supersede evidence for an idempotent explicit bind', async () => {

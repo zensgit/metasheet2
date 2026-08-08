@@ -19,11 +19,21 @@ import {
 } from '../integrations/dingtalk/runtime-policy'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { evaluateUserAuthenticationGate } from './user-activation'
+import {
+  claimNonEmptyLoginAliasesOrThrow,
+  LoginAliasClaimError,
+} from './login-alias-service'
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
 import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
 } from '../directory/access-graph-mutex'
+
+/** JIT placeholder email is not a login identifier — never claim it as an alias. */
+function isDingTalkPlaceholderEmail(email: string | null | undefined): boolean {
+  if (!email) return true
+  return /@placeholder\.local$/i.test(email.trim())
+}
 
 const logger = new Logger('DingTalkOAuth')
 
@@ -729,29 +739,64 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
     }
   }
 
-  try {
-    const result = await query<LocalUserRow>(
-      `INSERT INTO users (
-         id, email, name, password_hash, role,
-         activation_status, local_password_set, is_active,
-         created_at, updated_at
-       )
-       VALUES ($1, $2, $3, $4, 'user', 'activated', FALSE, TRUE, NOW(), NOW())
-       RETURNING id,
-                 email,
-                 COALESCE(name, '') AS name,
-                 COALESCE(role, 'user') AS role,
-                 COALESCE(is_active, TRUE) AS is_active,
-                 activation_status`,
-      [userId, email, name, passwordHash],
-    )
+  // Real identifiers only for the login-alias namespace. The synthetic
+  // `dingtalk_*@placeholder.local` email is stored on users.email for uniqueness
+  // but must NEVER be claimed as a login alias (alias full-writer coverage).
+  const realEmail = dtUser.email && !isDingTalkPlaceholderEmail(dtUser.email) ? dtUser.email : null
+  const realMobile = dtUser.mobile && String(dtUser.mobile).trim() ? dtUser.mobile : null
 
-    const row = result.rows[0]
-    if (!row) {
-      throw new Error('Failed to create local user for DingTalk login')
-    }
+  try {
+    // Load-bearing alias writer hook: claim real email/mobile inside the same transaction
+    // as the JIT users insert. Removing claimNonEmptyLoginAliasesOrThrow must fail the
+    // dingtalk_jit writer tests. Placeholder email is intentionally omitted from claims.
+    const row = await transaction(async (client) => {
+      // Persist real mobile on users.mobile in the same transaction as the alias claim.
+      // Claiming a mobile login alias without storing users.mobile left profile/login
+      // mirrors inconsistent under T2a OR-column reads.
+      const result = await client.query(
+        `INSERT INTO users (
+           id, email, name, mobile, password_hash, role,
+           activation_status, local_password_set, is_active,
+           created_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, 'user', 'activated', FALSE, TRUE, NOW(), NOW())
+         RETURNING id,
+                   email,
+                   COALESCE(name, '') AS name,
+                   COALESCE(role, 'user') AS role,
+                   COALESCE(is_active, TRUE) AS is_active,
+                   activation_status`,
+        [userId, email, name, realMobile, passwordHash],
+      )
+
+      const created = result.rows[0] as LocalUserRow | undefined
+      if (!created) {
+        throw new Error('Failed to create local user for DingTalk login')
+      }
+
+      if (realEmail || realMobile) {
+        await claimNonEmptyLoginAliasesOrThrow({
+          userId,
+          email: realEmail,
+          mobile: realMobile,
+          source: 'dingtalk_jit',
+          client,
+        })
+      }
+
+      return created
+    })
     return row
   } catch (error) {
+    if (error instanceof LoginAliasClaimError && error.code === 'ALIAS_CONFLICT') {
+      throw createPolicyError(
+        'Refusing to auto-provision DingTalk user because a login identifier is already claimed',
+        {
+          statusCode: 409,
+          code: 'auto_provision_alias_conflict',
+        },
+      )
+    }
     if (
       dtUser.email &&
       typeof error === 'object' &&

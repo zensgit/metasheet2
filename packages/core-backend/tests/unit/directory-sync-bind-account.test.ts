@@ -49,8 +49,17 @@ describe('bindDirectoryAccount', () => {
     accountOverrides: Record<string, unknown> = {},
     missingAccountIds: ReadonlySet<string> = new Set(),
   ): void {
+    const aliasOwners = new Map<string, string>()
     pgMocks.transaction.mockImplementation(async (handler) => handler({
       query: async (sql: string, params?: unknown[]) => {
+        if (/INSERT INTO user_login_aliases/i.test(String(sql))) {
+          aliasOwners.set(String(params?.[2] ?? ''), String(params?.[0] ?? ''))
+          return { rows: [] as Array<Record<string, unknown>> }
+        }
+        if (/SELECT user_id FROM user_login_aliases/i.test(String(sql))) {
+          const ownerId = aliasOwners.get(String(params?.[0] ?? ''))
+          return { rows: (ownerId ? [{ user_id: ownerId }] : []) as Array<Record<string, unknown>> }
+        }
         if (/FROM directory_accounts account\s+JOIN directory_integrations integration/.test(String(sql))) {
           const accountId = String(params?.[0] ?? 'account-1')
           if (missingAccountIds.has(accountId)) return { rows: [] }
