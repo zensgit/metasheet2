@@ -37,6 +37,7 @@ const {
 )
 const { classifyTrackedSites } = require(path.join(toolDir, 'classify-tracked-sites.cjs'))
 const { CURATED_DEBT_ENTRIES } = require(path.join(toolDir, 'curated-debt-entries.cjs'))
+const { APPROVED_SITE_IDENTITY_BY_KEY } = require(path.join(toolDir, 'approved-site-identities.cjs'))
 const {
   PINNED_BASELINE_REF,
   PINNED_BASELINE_ARTIFACT_RELPATH,
@@ -75,21 +76,48 @@ function readWorkflow() {
 }
 
 // -------------------------------------------------------------------------------------------
-// 1. Exact-head HEAD scan: every business/schedule_fact/shared_hook site must resolve to a
-//    curated debt entry or the generic-shared allowlist; every attendance-owned table must be
-//    classified; every w4_canonical-table site must be inside the canonical boundary. This is
-//    the actual §8.4 CI gate against the real repository.
+// 1. Exact-head HEAD scan: every business/schedule_fact/shared_hook site must resolve to an
+//    APPROVED SITE IDENTITY — an exact (relPath, enclosingSymbol, table, verb) tuple occurring
+//    the exact pinned number of times — every attendance-owned table must be classified, and
+//    every w4_canonical-table site must be inside the canonical boundary. This is the actual
+//    §8.4 CI gate against the real repository.
+//
+//    The `missing` leg doubles as the NON-EMPTY-DOMAIN leg: it is computed by walking the frozen
+//    identity table, not the census, so a scanner that returns nothing (broken root discovery,
+//    an over-eager exclusion, a regex that stops matching) puts all 181 pinned identities into
+//    `missing` and reds — this gate cannot pass vacuously against an empty tree.
 // -------------------------------------------------------------------------------------------
 test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML', () => {
   const source = createWorktreeSource(rootDir)
   const { sites } = buildRawCensus(source)
   const classified = classifyCensus(sites)
-  const { unclaimed } = classifyTrackedSites(classified.trackedSites)
+  const result = classifyTrackedSites(classified.trackedSites)
+  const { unclaimed, overCount, missing } = result
+
+  // Counts printed for the CI step log: a green tick is not evidence of what was measured.
+  console.log(
+    `[w4c0-dml-inventory] raw census sites=${sites.length} tracked=${result.trackedSiteCount}`
+    + ` observedIdentities=${result.observedIdentityCount} approvedIdentities=${result.approvedIdentityCount}`
+    + ` unclaimed=${unclaimed.length} overCount=${overCount.length} missing=${missing.length}`
+    + ` genericShared=${result.genericAllowlisted.length}`
+    + ` unclassifiedTables=${classified.unclassifiedTableSites.length}`
+    + ` outsideBoundary=${classified.outsideBoundarySites.length}`,
+  )
 
   assert.deepEqual(
     unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol} :: ${s.table}:${s.verb}`),
     [],
-    'every business/schedule_fact/shared_hook DML site must resolve to a curated debt entry or the generic-shared allowlist',
+    'every business/schedule_fact/shared_hook DML site must be an approved site identity — a new table, verb, or symbol inside an already-approved file has no claim',
+  )
+  assert.deepEqual(
+    overCount.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`),
+    [],
+    'an approved site identity may occur exactly its pinned number of times — a SECOND write at the same file/symbol/table/verb is new debt',
+  )
+  assert.deepEqual(
+    missing.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`),
+    [],
+    'a pinned identity that no longer occurs is a stale approval (and an empty census reds here, so the gate has a non-empty domain)',
   )
   assert.deepEqual(
     classified.unclassifiedTableSites.map((s) => `${s.relPath} :: ${s.table}`),
@@ -100,6 +128,223 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
     classified.outsideBoundarySites.map((s) => `${s.relPath} :: ${s.table}`),
     [],
     'w4_canonical-bucket tables may only be written from the canonical adapter path prefix',
+  )
+})
+
+// -------------------------------------------------------------------------------------------
+// 1b. The owner's escape, as a permanent regression probe.
+//
+//     BASE BEHAVIOUR (origin/main before this conversion): adding `INSERT INTO
+//     attendance_records` to packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts
+//     — a file approved WHOLE by GENERIC_SHARED_ALLOWLIST — left the exact-head HEAD scan GREEN.
+//     Removing only that file's allowlist entry made it fail, proving the file name, not the
+//     write, was doing the work.
+//
+//     These probes run the classifier over the REAL current census plus one synthetic site, so
+//     they exercise the same code path as the gate above. Each asserts WHICH leg reds and that
+//     the others stay clean — a probe that reds for the wrong reason proves nothing.
+// -------------------------------------------------------------------------------------------
+function currentTrackedSites() {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  return classifyCensus(sites).trackedSites
+}
+
+test("owner escape probe: a new table inside a whole-file-approved file is unclaimed, not admitted by the file's name", () => {
+  const tracked = currentTrackedSites()
+  const baseline = classifyTrackedSites(tracked)
+  assert.deepEqual(baseline.unclaimed, [], 'precondition: the untouched tree is clean')
+
+  // Same file + same heuristic enclosing symbol as the three real generic-shared approval writes
+  // in AfterSalesApprovalBridgeService.ts — only the TABLE differs. Under the old whole-file
+  // allowlist this was admitted; under exact identity it is a brand-new site.
+  const escape = {
+    relPath: 'packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts',
+    enclosingSymbol: 'normalizeCommand',
+    table: 'attendance_records',
+    verb: 'insert',
+    bucket: 'business',
+    key: 'synthetic-owner-escape',
+    line: 515,
+  }
+  const withEscape = classifyTrackedSites([...tracked, escape])
+  assert.deepEqual(
+    withEscape.unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol} :: ${s.table}:${s.verb}`),
+    ['packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts :: normalizeCommand :: attendance_records:insert'],
+    'the owner escape must red by NAME in the unclaimed leg',
+  )
+  assert.deepEqual(withEscape.overCount, [], 'the escape is a new identity, not a multiplicity drift')
+  assert.deepEqual(withEscape.missing, [], 'the escape must not disturb any pinned identity')
+})
+
+test('owner escape probe: a new VERB on an already-approved table/symbol inside an approved file is unclaimed', () => {
+  const tracked = currentTrackedSites()
+  // approval_instances IS approved at this file+symbol — but only for `insert`.
+  const newVerb = {
+    relPath: 'packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts',
+    enclosingSymbol: 'normalizeCommand',
+    table: 'approval_instances',
+    verb: 'delete',
+    bucket: 'shared_hook',
+    key: 'synthetic-new-verb',
+    line: 520,
+  }
+  const result = classifyTrackedSites([...tracked, newVerb])
+  assert.deepEqual(
+    result.unclaimed.map((s) => `${s.table}:${s.verb}`),
+    ['approval_instances:delete'],
+    'approval is per (file, symbol, table, VERB) — an approved table does not carry a new verb',
+  )
+  assert.deepEqual(result.overCount, [])
+})
+
+test('owner escape probe: a new SYMBOL inside the whole-file-approved ApprovalProductService is unclaimed', () => {
+  const tracked = currentTrackedSites()
+  // P26 used to claim this file by startsWith(), so every present and future symbol in it was
+  // approved. Now only the five enumerated writer identities are.
+  const newSymbol = {
+    relPath: 'packages/core-backend/src/services/ApprovalProductService.ts',
+    enclosingSymbol: 'quietlyAddedAssignmentWriter',
+    table: 'approval_assignments',
+    verb: 'update',
+    bucket: 'shared_hook',
+    key: 'synthetic-new-symbol',
+    line: 9999,
+  }
+  const result = classifyTrackedSites([...tracked, newSymbol])
+  assert.deepEqual(
+    result.unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol}`),
+    ['packages/core-backend/src/services/ApprovalProductService.ts :: quietlyAddedAssignmentWriter'],
+    'a whole-file path-prefix claim would have admitted this; exact identity does not',
+  )
+  assert.deepEqual(result.overCount, [])
+})
+
+test('multiplicity probe: a SECOND occurrence of an already-approved identity reds in overCount, not unclaimed', () => {
+  const tracked = currentTrackedSites()
+  // Pick a real approved identity from the live census and duplicate it verbatim. Nothing about
+  // the tuple changes — only how many times it occurs. This is the ONLY probe that exercises
+  // count pinning: if it reddened via `unclaimed` it would prove nothing about multiplicity.
+  const target = tracked.find(
+    (site) =>
+      site.relPath === 'plugins/plugin-attendance/index.cjs'
+      && site.enclosingSymbol === 'op'
+      && site.table === 'attendance_events'
+      && site.verb === 'insert',
+  )
+  assert.ok(target, 'precondition: the pinned repeated identity still exists in the census')
+
+  const duplicate = { ...target, line: target.line + 1, key: 'synthetic-second-occurrence' }
+  const result = classifyTrackedSites([...tracked, duplicate])
+
+  assert.deepEqual(
+    result.unclaimed,
+    [],
+    'the duplicate is the SAME identity — it must not red as unclaimed, or this probe never touched multiplicity',
+  )
+  assert.deepEqual(
+    result.overCount.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`),
+    ['plugins/plugin-attendance/index.cjs :: op :: attendance_events:insert pinned=2 observed=3'],
+    'an extra write at an already-approved (file, symbol, table, verb) must red by name with pinned vs observed counts',
+  )
+  assert.deepEqual(result.missing, [])
+})
+
+test('multiplicity probe: a REMOVED occurrence of a pinned identity reds in missing (stale approval / empty-domain leg)', () => {
+  const tracked = currentTrackedSites()
+  const target = tracked.find(
+    (site) =>
+      site.relPath === 'plugins/plugin-attendance/index.cjs'
+      && site.enclosingSymbol === 'op'
+      && site.table === 'attendance_events'
+      && site.verb === 'insert',
+  )
+  assert.ok(target)
+  const result = classifyTrackedSites(tracked.filter((site) => site !== target))
+  assert.deepEqual(
+    result.overCount,
+    [],
+  )
+  assert.deepEqual(
+    result.missing.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`),
+    ['plugins/plugin-attendance/index.cjs :: op :: attendance_events:insert pinned=2 observed=1'],
+    'a pinned approval that no longer matches a real write must be retired explicitly, not left to re-admit a future re-add',
+  )
+
+  // Non-empty-domain leg, mechanically: an empty census puts EVERY pinned identity in `missing`.
+  const empty = classifyTrackedSites([])
+  assert.equal(empty.missing.length, empty.approvedIdentityCount)
+  assert.ok(empty.approvedIdentityCount > 0, 'the approved-identity domain must be non-empty')
+})
+
+test('approval carries no file, prefix, or bare-symbol shape: every entry claim is exact-identity membership', () => {
+  // Attack the criterion itself. If any entry still approved by file or prefix, a synthetic site
+  // with that file but a nonsense symbol/table/verb would be claimed by it.
+  for (const entry of CURATED_DEBT_ENTRIES) {
+    for (const relPath of [
+      'packages/core-backend/src/routes/approvals.ts',
+      'packages/core-backend/src/services/ApprovalProductService.ts',
+      'packages/core-backend/src/services/ApprovalBridgeService.ts',
+      'packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts',
+      'packages/core-backend/src/services/AttendanceExpiryService.ts',
+      'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts',
+      'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts',
+      'packages/core-backend/src/attendance/w4c3a-sync-import-host.ts',
+      'packages/core-backend/src/attendance/w4c3b-approved-leave-cancellation.ts',
+      'plugins/plugin-attendance/index.cjs',
+    ]) {
+      assert.equal(
+        entry.claims({
+          relPath,
+          enclosingSymbol: '__synthetic_unapproved_symbol__',
+          table: 'attendance_records',
+          verb: 'insert',
+          line: 1,
+        }),
+        false,
+        `${entry.id} must not claim an unapproved symbol merely because it is in ${relPath}`,
+      )
+    }
+    // ...and the file's own approved symbols must not carry a different table or verb.
+    for (const row of APPROVED_SITE_IDENTITY_BY_KEY.values()) {
+      if (!(row.entryIds || []).includes(entry.id)) continue
+      assert.equal(
+        entry.claims({ ...row, table: '__synthetic_unapproved_table__' }),
+        false,
+        `${entry.id} must not claim a new table under its approved symbol ${row.enclosingSymbol}`,
+      )
+      assert.equal(
+        entry.claims({ ...row, verb: 'truncate' }),
+        false,
+        `${entry.id} must not claim a new verb under its approved symbol ${row.enclosingSymbol}`,
+      )
+      assert.equal(entry.claims(row), true, `${entry.id} must still claim its own approved identity`)
+    }
+  }
+})
+
+test('the identity table itself is well-formed: exact keys, no duplicates, one disposition, known owners', () => {
+  const rows = [...APPROVED_SITE_IDENTITY_BY_KEY.values()]
+  assert.ok(rows.length > 0)
+  const knownIds = new Set(CURATED_DEBT_ENTRIES.map((entry) => entry.id))
+  const seen = new Set()
+  for (const row of rows) {
+    const key = JSON.stringify([row.relPath, row.enclosingSymbol, row.table, row.verb])
+    assert.equal(seen.has(key), false, `duplicate approved identity: ${key}`)
+    seen.add(key)
+    assert.ok(Number.isInteger(row.occurrences) && row.occurrences >= 1, `bad multiplicity on ${key}`)
+    const owned = (row.entryIds || []).length > 0
+    const generic = typeof row.genericSharedReason === 'string' && row.genericSharedReason.length > 0
+    assert.notEqual(owned, generic, `exactly one disposition required on ${key}`)
+    for (const id of row.entryIds || []) {
+      assert.ok(knownIds.has(id), `approved identity ${key} names unknown debt id ${id}`)
+    }
+  }
+  console.log(
+    `[w4c0-dml-inventory] approved identities=${rows.length}`
+    + ` pinnedOccurrences=${rows.reduce((n, r) => n + r.occurrences, 0)}`
+    + ` repeated=${rows.filter((r) => r.occurrences > 1).length}`
+    + ` genericShared=${rows.filter((r) => r.genericSharedReason).length}`,
   )
 })
 

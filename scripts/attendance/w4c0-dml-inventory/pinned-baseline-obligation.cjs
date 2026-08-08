@@ -17,7 +17,6 @@ const path = require('path')
 
 const { createGitRefSource } = require('./sources.cjs')
 const { buildRawCensus, classifyCensus, contentHashOfKeys } = require('./collector.cjs')
-const { isGenericSharedAllowlisted } = require('./curated-debt-entries.cjs')
 
 const PINNED_BASELINE_REF = 'e0defbe26d7f2e1747e74aa908ca710422812bf7'
 const PINNED_BASELINE_ARTIFACT_RELPATH =
@@ -90,8 +89,12 @@ function provePinnedBaselineObligation(repoRoot) {
     const symbolKey = `${site.relPath} :: ${site.enclosingSymbol}`
     const tableVerb = `${site.table}:${site.verb}`
     const coveredByArtifact = symbolTableCoverage.has(`${symbolKey}@@${tableVerb}`)
-    const coveredByGeneric =
-      genericAllowlist.has(symbolKey) || isGenericSharedAllowlisted(site)
+    // Frozen-artifact evidence ONLY. The former `|| isGenericSharedAllowlisted(site)` fallback
+    // consulted a LIVE, HEAD-derived allowlist inside a proof about a historical tree — the exact
+    // "live claim crutch" this module's header forbids. The artifact's own genericSharedAllowlist
+    // was generated from this same pinned ref in the same run, so it is the complete and correct
+    // evidence for generic-shared sites at that ref.
+    const coveredByGeneric = genericAllowlist.has(symbolKey)
     if (!coveredByArtifact && !coveredByGeneric) {
       uncovered.push(`${symbolKey} :: ${tableVerb}`)
     }
