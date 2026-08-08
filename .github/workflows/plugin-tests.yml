@@ -437,13 +437,19 @@ jobs:
       # (all 17) file list. This closes attendance's own gap, not "the last" gap.
       # Pins the attendance step's stable id + literal DATABASE_URL + vitest.integration.config.ts
       # invocation. OBS-1 (2026-08-07) converted the per-file assertions from a hardcoded FILES
-      # allowlist (33 entries at conversion time) to a DERIVED completeness check: the corpus is
-      # enumerated from the on-disk tests/integration/attendance-*.db.test.ts glob plus the
-      # attendance-prefixed args the real-DB run-lists actually carry, and every corpus member
-      # must be (a) excluded from the no-DB job's default vitest.config.ts, (b) run as a
-      # whole-file arg of an executable real-DB step, and (c) exist on disk. An allowlist cannot
-      # notice a file it was never told about — the two W4C-3b suites this conversion wires
+      # allowlist (33 entries at conversion time) to a DERIVED completeness check. An allowlist
+      # cannot notice a file it was never told about — the two W4C-3b suites that conversion wires
       # (request-snapshots, central-approval) executed NOWHERE while the 33-entry guard was green.
+      # The corpus is every attendance-prefixed SUITE under tests/integration, found recursively,
+      # where "is a suite" is the union of "matches an include glob of a vitest config in the
+      # package" and "calls a vitest suite API" — no suffix or directory depth is hardcoded, after
+      # a .spec.ts probe and a subdirectory probe were both collected and skip-greened by the no-DB
+      # job while sitting in no corpus (2026-08-08). Every member must be excluded from the no-DB
+      # job's vitest.config.ts IF AND ONLY IF a real-DB step carries it as a whole-file arg, must
+      # exist on disk, and — when it is neither — must carry POSITIVE proof that it executes
+      # without a database. Deliberately placed BEFORE the pnpm install below: a wiring break reds
+      # this required check in seconds. That is also why the corpus is derived statically rather
+      # than from vitest's own collection, which does not exist yet at this point in the job.
       - name: Attendance W4C-2 CI wiring contract
         run: node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs
 
