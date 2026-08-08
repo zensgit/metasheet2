@@ -17,6 +17,7 @@ export type AccessGraphTransactionClient = {
 
 export type LockedAccessGraphUser = {
   id: string
+  name: string | null
   email: string | null
   username: string | null
   mobile: string | null
@@ -41,6 +42,7 @@ export async function lockUsersForAccessGraphWrite(
   for (const userId of normalizedUserIds) {
     const result = await client.query(
       `SELECT id::text AS id,
+              name,
               email,
               username,
               mobile,
@@ -56,6 +58,7 @@ export async function lockUsersForAccessGraphWrite(
     if (!row) continue
     lockedUsers.set(userId, {
       id: String(row.id),
+      name: row.name === null || row.name === undefined ? null : String(row.name),
       email: row.email === null || row.email === undefined ? null : String(row.email),
       username:
         row.username === null || row.username === undefined
