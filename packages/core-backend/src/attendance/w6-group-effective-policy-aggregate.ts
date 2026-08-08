@@ -137,10 +137,19 @@ function scheduleRouteRef(
  * that single derivation, reconstructed here because the canonical
  * function is a private top-level declaration inside the (non-exporting)
  * plugin entry file and is not independently `require`-able without
- * loading that file's full activation surface. See the parity test
- * (`attendance-w6-group-effective-policy-aggregate.test.ts`,
- * "producer key parity") for the equivalence proof over the exact
- * input shapes this call site ever supplies.
+ * loading that file's full activation surface. See the "producer key
+ * parity" describe block in
+ * `attendance-w6-group-effective-policy-aggregate.test.ts` — it PINS this
+ * function's exact output format literally (so any accidental format
+ * change reds immediately, not just when it happens to disagree with the
+ * canonical builder), and independently, the real-DB fidelity test
+ * (`attendance-w6-group-effective-policy.db.test.ts`) seeds fixed-schedule
+ * rows keyed by a producer key computed with THIS function and confirms
+ * FSER still matches them (a format drift here would show up there as a
+ * `DIFFERENT_MANAGED_KEY_ACTIVE`-shaped failure). Neither test imports the
+ * canonical builder itself — see the equivalence ARGUMENT above for why
+ * that is not independently re-provable without loading index.cjs's full
+ * activation surface.
  */
 export function buildFixedScheduleProducerKey(input: { groupId: string; shiftId: string; startDate: string; endDate: string | null }): string {
   return ['attendance_group_fixed_schedule', input.groupId, input.shiftId, input.startDate, input.endDate ?? 'null'].join(':')

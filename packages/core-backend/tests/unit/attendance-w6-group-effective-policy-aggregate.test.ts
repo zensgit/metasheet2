@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildFixedScheduleProducerKey,
   createAttendanceGroupEffectivePolicyAggregateService,
   type AttendanceGroupEffectivePolicyFserServiceLike,
   type AttendanceGroupEffectivePolicyQueryFn,
@@ -451,5 +452,44 @@ describe('OD-W6-6(a) authoritative-and-implemented branch (#4814 P3-2a — was u
     expect(result.domains.segments.reasonCodes).toEqual(['SEGMENT_CALCULATION_NOT_AUTHORITATIVE'])
     expect(result.domains.flex.label).toBe('preview_only')
     expect(result.domains.flex.reasonCodes).toEqual(['SEGMENT_CALCULATION_NOT_AUTHORITATIVE'])
+  })
+})
+
+/**
+ * `buildFixedScheduleProducerKey`'s own doc comment (this file's module
+ * header, ~L138-141) cites "the parity test
+ * (`attendance-w6-group-effective-policy-aggregate.test.ts`, 'producer key
+ * parity')" as where its equivalence-to-the-canonical-builder claim is
+ * proven — no such test existed (an asserted invariant with no test is a
+ * hidden bug waiting to happen). This is that test: it LITERALLY PINS the
+ * exact output format, so a format change (separator, field order,
+ * null-handling) reds here directly, rather than only being
+ * discriminated indirectly through a real-DB seed/match round-trip (as
+ * confirmed separately: mutating the join separator from ':' to '|' reds
+ * the real-DB happy-path fidelity test too, via FSER's own producer-key
+ * row-matching — this unit test is the FAST, DB-free version of that same
+ * discrimination).
+ */
+describe('producer key parity — buildFixedScheduleProducerKey literal pin', () => {
+  it('joins groupId:shiftId:startDate:endDate with the canonical "attendance_group_fixed_schedule" prefix', () => {
+    expect(
+      buildFixedScheduleProducerKey({
+        groupId: 'a4556006-000b-4000-8000-000000000001',
+        shiftId: 'a4556006-000b-4000-8000-000000000101',
+        startDate: '2026-08-01',
+        endDate: '2026-08-31',
+      }),
+    ).toBe('attendance_group_fixed_schedule:a4556006-000b-4000-8000-000000000001:a4556006-000b-4000-8000-000000000101:2026-08-01:2026-08-31')
+  })
+
+  it('a null endDate is joined as the literal string "null"', () => {
+    expect(
+      buildFixedScheduleProducerKey({
+        groupId: 'a4556006-000b-4000-8000-000000000001',
+        shiftId: 'a4556006-000b-4000-8000-000000000101',
+        startDate: '2026-08-01',
+        endDate: null,
+      }),
+    ).toBe('attendance_group_fixed_schedule:a4556006-000b-4000-8000-000000000001:a4556006-000b-4000-8000-000000000101:2026-08-01:null')
   })
 })
