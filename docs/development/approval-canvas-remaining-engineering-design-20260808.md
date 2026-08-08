@@ -42,7 +42,7 @@ Agents may implement, test, commit, push to the tracking branch, and update the 
 | G5-C S1–S12 product-path suite | **DONE** | `approval-g5c-authoring-scenarios.test.ts` (CI-wired) |
 | CI: approval-web-guard / web-tests green | **GREEN on a25e65b** (fix push); re-running on head after D8-b thin | required canaries include history/G5-C/version-read-summary |
 | Version dual-canvas shell (full D8-b) | **PARTIAL** | pure `approvalVersionReadSummary` + overlay/diff helpers; no editor dual-canvas chrome |
-| Extract `ApprovalFlowCanvas` / inspector modules | **OPEN** | reduce `TemplateAuthoringView` heat |
+| Extract `ApprovalFlowCanvas` / inspector modules | **DONE** | `ApprovalFlowCanvas.vue` + `ApprovalCanvasNodeInspector.vue`; draft/history remain in parent |
 | D3 Vue Flow/ELK | **BLOCKED (O3)** | do not start |
 
 ## PR Plan (execute-plan ready)
@@ -73,10 +73,10 @@ Statuses: `DONE` items must not be re-implemented by `/execute-plan`. Only `OPEN
 - **Files/components affected:** `apps/web/src/approvals/approvalVersionReadSummary.ts`, `apps/web/tests/approval-version-read-summary.test.ts`, CI canaries  
 - **Dependencies:** PR 0 (CI closeout)  
 
-### PR 4: Extract ApprovalFlowCanvas / inspector shell — OPEN
+### PR 4: Extract ApprovalFlowCanvas / inspector shell — DONE (on #4806)
 
-- **Description:** Extract canvas viewport, edge-insert, node cards, and inspector chrome from `TemplateAuthoringView.vue` into focused components; keep draft/history as single source of truth; no graph semantic changes. Serialize ownership of the hot file.  
-- **Files/components affected:** `apps/web/src/views/approval/TemplateAuthoringView.vue`, new files under `apps/web/src/approvals/components/` or `apps/web/src/views/approval/components/`, mounted specs  
+- **Description:** Extract canvas viewport, edge-insert, node cards, and inspector chrome from `TemplateAuthoringView.vue` into `ApprovalFlowCanvas` + `ApprovalCanvasNodeInspector`; draft/history remain the single source of truth; no graph semantic changes.  
+- **Files/components affected:** `TemplateAuthoringView.vue`, `apps/web/src/approvals/components/ApprovalFlowCanvas.vue`, `ApprovalCanvasNodeInspector.vue`, mounted/G5-C specs  
 - **Dependencies:** PR 0  
 
 ### PR 5: Final-eligibility MD + gate workflow — DONE (on #4806; maintain)
@@ -87,16 +87,20 @@ Statuses: `DONE` items must not be re-implemented by `/execute-plan`. Only `OPEN
 
 ## Execute-plan dry-run order
 
-Linearized remaining stack after PR 0 is green:
+Linearized remaining stack:
 
 ```text
-PR0 (CI closeout on #4806) → PR4 (extract hot file)
+(all engineering PRs 0–4 DONE on #4806)
 ```
 
-PR3 (version thin pure path) is **DONE** without dual-canvas chrome.
+Optional follow-ups (not blocking ENGINEERING-READY):
 
-- Max parallelism: 1 on `TemplateAuthoringView.vue` for PR4.  
-- Suggested: `/execute-plan docs/development/approval-canvas-remaining-engineering-design-20260808.md --dry-run` then execute only OPEN nodes (implementer must skip DONE).  
+- Wire `buildApprovalVersionReadSummary` into TemplateDetailView UI (display-only).  
+- D3 Vue Flow/ELK after O3.  
+- Owner: G0 / UAT / staged flags / merge.  
+
+- Suggested gate: `/workflow approval-canvas-final-gate`  
+- Suggested dry-run after new OPEN items only.  
 
 ## Verification
 

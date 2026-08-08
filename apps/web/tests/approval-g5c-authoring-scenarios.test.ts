@@ -314,20 +314,49 @@ describe('G5-C S11 100-node operable layout', () => {
 describe('G5-C S12 accessible alternative retained on authoring surface', () => {
   it('TemplateAuthoringView keeps list alternative, undo/redo, canvas-first, edge insert, palette; no node clusters', () => {
     const src = readFileSync(VIEW_PATH, 'utf8')
+    const canvasShell = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalFlowCanvas.vue'),
+      'utf8',
+    )
+    const inspectorShell = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalCanvasNodeInspector.vue'),
+      'utf8',
+    )
     expect(src).toMatch(/data-testid="approval-view-list"/)
     expect(src).toMatch(/辅助编辑模式/)
-    expect(src).toMatch(/data-testid="approval-canvas-undo"/)
-    expect(src).toMatch(/data-testid="approval-canvas-redo"/)
+    // Undo/redo + edge insert live on extracted ApprovalFlowCanvas (PR4).
+    expect(canvasShell).toMatch(/data-testid="approval-canvas-undo"/)
+    expect(canvasShell).toMatch(/data-testid="approval-canvas-redo"/)
     expect(src).toMatch(/const canvasViewMode = ref<'list' \| 'canvas'>\('canvas'\)/)
     expect(src).toMatch(/applyCanvasCommandToSession|undoAuthoringSession/)
     expect(src).toMatch(/promoteLinearDraftToGraphAuthoring/)
-    // D0: edge + insert surface, not primary node button clusters on canvas.
-    expect(src).toMatch(/data-testid="approval-canvas-edge-insert"/)
-    expect(src).toMatch(/data-testid="approval-canvas-inspector-topology"/)
+    expect(canvasShell).toMatch(/data-testid="approval-canvas-edge-insert"/)
+    expect(inspectorShell).toMatch(/data-testid="approval-canvas-inspector-topology"/)
     expect(src).not.toMatch(/class="template-authoring__canvas-node-actions"/)
+    expect(canvasShell).not.toMatch(/class="template-authoring__canvas-node-actions"/)
     // D6-f2 palette.
     expect(src).toMatch(/data-testid="approval-field-palette"/)
     expect(src).toMatch(/addFieldOfType/)
+    // PR4 extract: shell components owned under approvals/components
+    expect(src).toMatch(/ApprovalFlowCanvas/)
+    expect(src).toMatch(/ApprovalCanvasNodeInspector/)
+  })
+})
+
+describe('G5-C PR4 component extract (structural)', () => {
+  it('ships ApprovalFlowCanvas and ApprovalCanvasNodeInspector modules', () => {
+    const canvas = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalFlowCanvas.vue'),
+      'utf8',
+    )
+    const inspector = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalCanvasNodeInspector.vue'),
+      'utf8',
+    )
+    expect(canvas).toMatch(/data-testid="approval-graph-canvas"/)
+    expect(canvas).toMatch(/data-testid="approval-canvas-edge-insert"/)
+    expect(inspector).toMatch(/data-testid="approval-canvas-inspector"/)
+    expect(inspector).toMatch(/data-testid="approval-canvas-inspector-topology"/)
   })
 })
 
