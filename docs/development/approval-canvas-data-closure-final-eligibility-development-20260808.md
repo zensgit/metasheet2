@@ -105,3 +105,7 @@ These residuals do **not** block the engineering claim “G5-C product-path alge
 1. Owner G0 ratifies D0 (and optionally O3 layout choice).  
 2. Real-tenant UAT for authoring + FWB + attachments + version restore.  
 3. Staged flag enablement with observation (durable → Class A/B → FWB → attachments/Canvas).
+
+Owner checklists, env flag names, staged order, and sign-off template:
+
+→ `docs/development/approval-canvas-data-closure-owner-handoff-20260808.md`
