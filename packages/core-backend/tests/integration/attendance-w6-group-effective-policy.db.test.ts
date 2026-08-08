@@ -283,20 +283,30 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       'users',
     ]
 
-    async function countRows(): Promise<number[]> {
+    // #4814 P2-3: a bare row-COUNT is structurally blind to an in-place
+    // UPDATE (row count is unchanged by definition). Every Postgres UPDATE
+    // — even one that writes back the same values — creates a NEW row
+    // version with a fresh `xmin` (the transaction-id system column), so
+    // `MAX(xmin)` per table changes even when the row count does not. This
+    // snapshot therefore catches the row-count-preserving mutation R1
+    // explicitly names as forbidden (a `last_*`/`updated_at` column touch)
+    // in addition to the INSERT/DELETE row-count leg it had before.
+    async function snapshotTables(): Promise<Array<{ table: string; count: number; maxXmin: string }>> {
       return Promise.all(
         TOUCHED_TABLES.map(async (table) => {
-          const result = await pool.query(`SELECT count(*)::int AS total FROM ${table}`)
-          return result.rows[0].total
+          const result = await pool.query(
+            `SELECT count(*)::int AS total, COALESCE(MAX(xmin::text::bigint), -1) AS max_xmin FROM ${table}`,
+          )
+          return { table, count: result.rows[0].total, maxXmin: String(result.rows[0].max_xmin) }
         }),
       )
     }
 
-    it('row counts across every touched table are unchanged after a full route round-trip', async () => {
-      const before = await countRows()
+    it('row counts AND row versions (xmin) across every touched table are unchanged after a full route round-trip', async () => {
+      const before = await snapshotTables()
       const res = await request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy`)
       expect(res.status).toBe(200)
-      const after = await countRows()
+      const after = await snapshotTables()
       expect(after).toEqual(before)
     })
   })
