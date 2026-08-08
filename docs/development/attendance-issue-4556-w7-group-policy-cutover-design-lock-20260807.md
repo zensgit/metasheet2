@@ -55,6 +55,36 @@ shell; no W6 runtime exists, and OD-W6-0..9 are OPEN). This document therefore
 does **not** treat any W6 semantic as decided. Section 6 lists every
 dependence on a W6 outcome explicitly.
 
+**Update disclosed 2026-08-08 — the decision state has moved, and this
+document deliberately does not move with it.** The sentence above says
+"OD-W6-0..9 are OPEN"; that was true at the pinned baseline and is no longer
+the whole story. Resolutions for OD-W6-0..9 — adopt the W6 lock, and option
+**(a)** for each decision, against PR #4771's merge commit
+`2967da018ceea41b91098e14d4c15a57236eb5f8` — are recorded in **PR 4821**
+(OPEN, non-draft, head `b5cc1a22`), which states that **its own merge** is
+their durable anchor. That PR is not merged, so there is no record of those
+resolutions on `main`, and nothing below is rewritten as decided. Three limits
+matter and are stated rather than glossed:
+
+1. **Scope.** The authorization those resolutions carry, by their own text, is
+   the **W6-1 backend aggregate slice only**, Draft/HOLD, stopping after a
+   fresh exact-head gate (PR 4814, OPEN/Draft, unmerged). W6-2 contract
+   wiring, W6-3 UI, W6-4 verification, any merge, staging, soak, flag,
+   deployment, and closure of issue 4556 each remain withheld. A resolution of
+   OD-W6-*n* is not an adoption of W6 runtime.
+2. **Nothing has landed.** No W6 runtime exists at the rebase base
+   `origin/main@5c3146acbc81b655e62bee9249b68eaec4e6e4c6`: `git diff` between
+   the pinned baseline and that base over
+   `packages/core-backend/src/attendance`,
+   `packages/core-backend/src/services`, `plugins/plugin-attendance`,
+   `packages/openapi`, and `apps/web/src/views/attendance` is empty, and the
+   W6 lock file itself is byte-identical on `main` from `2967da01` through the
+   rebase base.
+3. **W7 is unaffected either way.** §8 item 1 makes W6 sign-off *and W6
+   runtime completion* a hard precondition; the second half is unmet
+   regardless of how the first resolves. Every §6 row therefore stays
+   conditional, and no OD-W7-*n* has any ruling at all.
+
 Where this document and an owner-ratified lock disagree, the ratified lock
 wins and this document must be amended.
 
@@ -90,7 +120,7 @@ Nothing else in the write boundary moves.
 | W1 effective-dated calculation-group membership exists with an org/user/date no-overlap exclusion constraint and an `(id, org_id)` uniqueness guard. | `packages/core-backend/src/db/migrations/zzzz20260723140000_create_attendance_calculation_group_memberships.ts:42-43`, `:89` |
 | The membership service exposes list/transition plus the typed overlap conflict `ATTENDANCE_CALCULATION_GROUP_CONFLICT` posture. | `packages/core-backend/src/services/AttendanceCalculationGroupMembership.ts:5`, `:283`, `:302` |
 | W6 preparation (types only, **no runtime, not owner-signed-off**) landed closed unions for source labels, domains, conflict codes (incl. `CALCULATION_GROUP_MEMBERSHIP_OVERLAP`), a read-only calculation-posture mirror, and the editorRef union. | `packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts:25-96`; PR #4771 |
-| W5 flex policy is a closed discriminated shape on the frozen context (`strict | flex_required_duration`, single-segment only). | `packages/core-backend/src/attendance/w5-flex-policy.ts:27-47`, `:143`, `:222`; `packages/core-backend/src/attendance/w4c0-write-boundary-types.ts:113-122` |
+| W5 flex policy is a closed discriminated shape on the frozen context (`strict \| flex_required_duration`, single-segment only). | `packages/core-backend/src/attendance/w5-flex-policy.ts:27-47`, `:143`, `:222`; `packages/core-backend/src/attendance/w4c0-write-boundary-types.ts:113-122` |
 | Fixed-schedule effectiveness has exactly one derivation (FSER service), declared the only source for group/employee/trace/report projections. | `plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs:71`, `:180` |
 
 ### 1.3 The landed W4C machinery W7 reuses (not redefines)
@@ -101,10 +131,10 @@ Nothing else in the write boundary moves.
 | Write-posture gating (w4c0) | Accepted write posture is minted from rollout state ∧ env allowlist (`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`); orgs outside fall to `legacy_projection_only`. | `packages/core-backend/src/attendance/w4c0-identity.ts:76`, `:363`, `:381` |
 | Zero-bypass discipline (w4c3c) | Hard zero-bypass is live: the current-tree open-debt set is asserted exactly empty (`unclaimed=0`), with a mutation leg proving a new side-door business DML fails; the P16 allowlist is exact `relPath::enclosingSymbol::table::verb`. | `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs:1033`, `:1074`, `:1386`; `scripts/attendance/w4c0-dml-inventory/curated-debt-entries.cjs:74` |
 | Decision trace (w4c3c/w4c4) | Dual-hosted read-only decision-trace routes; W4 trace evidence is read via `readAttendanceW4TraceEvidence`; the four named read surfaces (anomaly listing, makeup-anomaly facts, open-record attribution, decision trace) each use the canonical active-current helper with a closed surface union. | `packages/core-backend/src/routes/attendance-admin.ts:1376`, `:1416`; `packages/core-backend/src/services/AttendanceDecisionTrace.ts:344-346`, `:437`, `:589`; `packages/core-backend/src/services/AttendanceW4CalculationDetail.ts:781`; `packages/core-backend/src/attendance/w4c3c-active-current.ts:56`, `:197-198` |
-| Request-snapshot fingerprint freeze (w4c3b + #4780) | Calculation-affecting requests freeze payloads with a domain-separated canonical-JSON fingerprint at create/edit/terminal-bind; the W4C-5 §3 precondition is the closed **8-cell** set `(pending | reversible) × (missing | unsupported | payload-stale | reversal-incomplete)` (`ATTENDANCE_REQUEST_SNAPSHOT_DEFECT_CELLS_V1`), completed by PR #4780, with stored payloads re-hashed rather than trusting the stored fingerprint column. | `packages/core-backend/src/attendance/w4c3b-request-snapshots.ts:430`, `:997`, `:1096`, `:1239`, `:1368`; `packages/core-backend/src/attendance/w4c3a-rollout-control.ts:802-823`, `:863`, `:1044` |
+| Request-snapshot fingerprint freeze (w4c3b + #4780) | Calculation-affecting requests freeze payloads with a domain-separated canonical-JSON fingerprint at create/edit/terminal-bind; the W4C-5 §3 precondition is the closed **8-cell** set `(pending \| reversible) × (missing \| unsupported \| payload-stale \| reversal-incomplete)` (`ATTENDANCE_REQUEST_SNAPSHOT_DEFECT_CELLS_V1`), completed by PR #4780, with stored payloads re-hashed rather than trusting the stored fingerprint column. | `packages/core-backend/src/attendance/w4c3b-request-snapshots.ts:430`, `:997`, `:1096`, `:1239`, `:1368`; `packages/core-backend/src/attendance/w4c3a-rollout-control.ts:802-823`, `:863`, `:1044` |
 | Shadow ledger / calculation detail (w4c4) | Closed shadow-diff code set; `computeAttendanceW4ShadowDiff`; dual-host calculation-detail routes (admin + self, self rejects `userId` input); shadow backlog reader; expected-differences roster with a fail-closed probe (single ratified entry `correction_applied_daily_adjusted`). | `packages/core-backend/src/services/AttendanceW4CalculationDetail.ts:8-23`, `:252`, `:505`, `:593`; `packages/core-backend/src/routes/attendance-admin.ts:1479`, `:1512-1515`; `packages/core-backend/src/attendance/w4c2-shadow-expected-differences.ts:39-53`, `:75-83`, `:135` |
 | Outbox + scheduled-run identity (w4c2) | One transactional outbox table `attendance_result_event_outbox` (scheduled-run events insert into the same union table); the dispatcher performs DML on the outbox table only; server-minted scheduled-run identity, per-target outcomes as an append-only side table, and the #4770 sweep fairness/observability arc (durable `last_attempt_at` rotation + values-free counters) are landed (PRs #4774/#4779). | `packages/core-backend/src/attendance/w4c2-scheduled-run.ts:168-179`, `:307`, `:328-350`, `:593`, `:857`, `:922`, `:1056`; `packages/core-backend/src/attendance/w4c2-outbox-dispatcher.ts:84`, `:110-146`; `packages/core-backend/src/attendance/w4c2-scheduled-run-ops-worker.ts:44`, `:176-182`; `packages/core-backend/src/db/migrations/zzzz20260805120000_w4c2_scheduled_run_sweep_fairness.ts:1-28`, `zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union.ts` |
-| Manual override / recompute (w4c3c) | Immutable manual overrides with closed set/unset field lists; recompute policies are the closed pair `frozen_prior | current_policy` and append immutable calculations. | `packages/core-backend/src/attendance/w4c3c-manual-override.ts:46-56`, `:388`; `packages/core-backend/src/attendance/w4c3c-recompute.ts:31-36`, `:201` |
+| Manual override / recompute (w4c3c) | Immutable manual overrides with closed set/unset field lists; recompute policies are the closed pair `frozen_prior \| current_policy` and append immutable calculations. | `packages/core-backend/src/attendance/w4c3c-manual-override.ts:46-56`, `:388`; `packages/core-backend/src/attendance/w4c3c-recompute.ts:31-36`, `:201` |
 
 ### 1.4 Expected-but-absent (verified honestly)
 
@@ -285,7 +315,7 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 | Whether W7's resolver may share code with the W6 aggregate's readers | OD-W6-2 (FSER composition) and W6-R4 (single FSER derivation) | W7 must compose the same FSER service rather than re-derive, whatever W6 decides about embedding. |
 | The aggregate as calculation input | W6-R5 | Preserved by default (W7-R10); overriding it is an owner-level W6 decision (at W6 ratification, or a W6 amendment if W6 is already ratified), not a W7 choice. |
 | Label spellings reused in read-side labeling | OD-W6-3 | For the W6-owned source-label union, W7 §4.4 adopts the ratified spellings and mints none of its own. The W7-owned provenance values on the W4 detail/trace enums are a different enum family, owned by OD-W7-5 (strings fixed at W7-0) — see §4.4. |
-| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If the owner does not adopt/complete W6, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. Declining OD-W6-0 also has a consequence beyond W7: parent lock §10 item 8 (the effective/inherited/preview-only/conflicting group workflow) has no landed implementation at this baseline and W6 is its only planned vehicle, so issue #4556 could not close under §10 as ratified without an owner amendment to parent §10 — see the W8 plan §5-§6. |
+| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If the owner does not adopt/complete W6, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. Declining OD-W6-0 also has a consequence beyond W7: parent lock §10 item 8 (the effective/inherited/preview-only/conflicting group workflow) has no landed implementation at this baseline and W6 is its only planned vehicle, so issue #4556 could not close under §10 as ratified without an owner amendment to parent §10 — see the W8 plan §5-§6. **Status as of 2026-08-08** (§0 update, with its limits): OD-W6-0 is *recorded* as adopt, in an unmerged PR whose merge it names as the durable anchor — so the "declines" branch is not the recorded direction, but this row does not become satisfied by that. The **second** conjunct, W6 completion, is untouched: no W6 runtime is on `main`, and only the W6-1 backend slice is prospectively authorized (Draft/HOLD, unmerged), which does not reach the four-label workflow item 8 names. This row stays conditional. |
 
 ## 7. Decision points (owner menu, all OPEN)
 
@@ -304,6 +334,12 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 
 1. **Precondition (hard)**: owner signs off the W6 lock at its exact merged
    SHA and answers OD-W6-1..9; W6 runtime slices complete their own gates.
+   (Half of this has moved as of 2026-08-08 — see the §0 update: the sign-off
+   and the OD-W6-1..9 answers are *recorded* against merged SHA
+   `2967da018ceea41b91098e14d4c15a57236eb5f8`, in a PR that is not merged, and
+   the authorization they carry reaches only the W6-1 backend slice. The
+   second clause — W6 runtime slices completing their own gates — is unmet,
+   so this precondition as a whole is unmet and step 2 below is not reached.)
 2. Owner reviews this draft, answers OD-W7-1..8, and signs off the exact
    merged SHA of this document (docs may be amended until then).
 3. W7-0 preparation PR (contract/fixtures only, byte-inert, Draft/HOLD;
@@ -358,7 +394,7 @@ Code:
 - `packages/core-backend/src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union.ts` (existence/purpose)
 - `packages/core-backend/src/db/migrations/zzzz20260805120000_w4c2_scheduled_run_sweep_fairness.ts:1-28`
 - `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs:1033, 1045, 1074, 1386` (`:1045`/`:1074` are the two `assert.deepEqual(unclaimed, [], …)` completeness legs cited by W7-R10)
-- `scripts/attendance/w4c0-dml-inventory/collector.cjs:53, 104, 574, 807-823` (P16's **derived** scan domain: `isScannablePath`, `discoverRuntimeRoots`, `scanFileForDmlSites`, `buildRawCensus`'s roots→`listAllFiles` walk — read at the pinned baseline and re-read at `origin/main@323d7e1afef407f68c8ff2a6bfa940f175300f59`, byte-identical line anchors at both)
+- `scripts/attendance/w4c0-dml-inventory/collector.cjs:53, 104, 574, 807-823` (P16's **derived** scan domain: `isScannablePath`, `discoverRuntimeRoots`, `scanFileForDmlSites`, `buildRawCensus`'s roots→`listAllFiles` walk — read at the pinned baseline and re-read at the current rebase base `origin/main@5c3146acbc81b655e62bee9249b68eaec4e6e4c6`; the file's blob hash is identical at both, so the line anchors hold by construction rather than by re-reading)
 - `scripts/attendance/w4c0-dml-inventory/curated-debt-entries.cjs:74` (the exact P16 allowlist — the **claim** side, not the scan domain)
 - `packages/openapi/drafts/attendance-w6-group-effective-policy.draft.yml:25` (the aggregate route literal `/api/attendance/groups/{groupId}/effective-policy` W7-R10 leg (ii) matches against)
 - `packages/core-backend/src/attendance/__tests__/w4c1-fingerprint-golden.test.ts:1-13`; `packages/core-backend/tests/utils/attendance-w4c2-golden-response.ts`; `packages/core-backend/tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts` (existence/role)
@@ -374,6 +410,24 @@ Documents:
 - W6 lock `docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md` (whole; §2.3 `:89-97`, W6-R4/R5 `:106-107`, OD-W6-1..9 `:234-246`)
 - `docs/development/attendance-4709-fser4-member-projection-contract-amendment-20260804.md:136-183` (§3-§4)
 
-GitHub state (queried 2026-08-07): PR #4771 MERGED (W6 prep), PR #4773 MERGED
-(OD-W4C-61=(a) hardening), PRs #4774/#4779 MERGED (#4770 arc), PR #4780 MERGED
-(#4775 8-cell); issues #4556, #4629, #4770, #4775, #4791, #4792 OPEN.
+GitHub state, **re-queried 2026-08-08 against the rebase base
+`origin/main@5c3146acbc81b655e62bee9249b68eaec4e6e4c6`**. The 2026-08-07 line
+this replaces listed issue #4791 as OPEN; it is not, so the line is superseded
+rather than re-dated:
+
+- PRs MERGED: #4771 (W6 prep, merge commit
+  `2967da018ceea41b91098e14d4c15a57236eb5f8`); #4772 (FSER-4 §2 member-safe
+  `/me` projection); #4773 (OD-W4C-61=(a) hardening); #4774/#4779 (#4770 arc);
+  #4780 (#4775 8-cell); **4799** (`51c3d8720789476efa15f6b99b6dc5f51df4743b`,
+  the issue-4791 scratch-DB teardown fix — verified an ancestor of the rebase
+  base).
+- Issues OPEN: #4556, #4629, #4709, #4770, #4775, #4792.
+- Issues CLOSED: **4791** (57P01 teardown flake), CLOSED COMPLETED
+  2026-08-07T15:44:55Z, and its rollup **4796**, closed 2026-08-07T15:45:30Z
+  on the same evidence. The W8 plan's OD-W8-3 carries the full record; the
+  criterion was the `scratchDrain=` line reporting `CLEAN` on main's required
+  gate, not a green run.
+- PRs OPEN / unmerged, named for provenance only and authorized by nothing
+  here: 4805 (the W8 plan's L8 CI-wiring precondition, head `2985e03c`); 4814
+  (W6-1 backend slice, Draft, head `4cc01228`); 4821 (durable W6 RATIFY
+  record, non-draft, head `b5cc1a22` — the §0 update above).
