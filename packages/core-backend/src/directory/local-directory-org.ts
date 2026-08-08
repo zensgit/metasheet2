@@ -35,6 +35,10 @@ import {
   upsertActiveUserOrgMembership,
   deactivateUserOrgMembershipIfNoOtherActiveBinding,
 } from './directory-sync'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+} from './access-graph-mutex'
 
 function normalizeText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
@@ -445,6 +449,7 @@ export interface CreateLocalAccountInput {
   email?: string | null
   mobile?: string | null
   title?: string | null
+  actorId?: string
 }
 
 /**
@@ -462,25 +467,26 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
 
   const integration = await getOrCreateLocalIntegration(input.orgId)
 
-  const userRow = await query<{ id: string; name: string | null; email: string | null }>(
-    `SELECT id, name, email FROM users WHERE id = $1`,
-    [localUserId],
-  )
-  const user = userRow.rows[0]
-  if (!user) throw new LocalDirectoryNotFoundError('local user not found')
-
-  const name = normalizeText(input.name) || normalizeText(user.name) || normalizeText(user.email) || localUserId
-  if (name.length > MAX_NAME_LENGTH) throw new LocalDirectoryValidationError(`name must be at most ${MAX_NAME_LENGTH} characters`)
-  const email = input.email !== undefined ? normalizeText(input.email) || null : user.email ?? null
-  const mobile = input.mobile !== undefined ? normalizeText(input.mobile) || null : null
-  const title = input.title !== undefined ? normalizeText(input.title) || null : null
-
   const externalUserId = localUserId
   const externalKey = `${input.orgId}:${localUserId}`
+  const actorId = normalizeText(input.actorId) || 'system:local-directory'
 
   let accountId = ''
   try {
     await transaction(async (client) => {
+      const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
+      const user = lockedUsers.get(localUserId)
+      if (!user) throw new LocalDirectoryNotFoundError('local user not found')
+      if (!user.isActive) throw new LocalDirectoryConflictError('local user is inactive')
+
+      const name = normalizeText(input.name) || normalizeText(user.name) || normalizeText(user.email) || localUserId
+      if (name.length > MAX_NAME_LENGTH) {
+        throw new LocalDirectoryValidationError(`name must be at most ${MAX_NAME_LENGTH} characters`)
+      }
+      const email = input.email !== undefined ? normalizeText(input.email) || null : user.email
+      const mobile = input.mobile !== undefined ? normalizeText(input.mobile) || null : null
+      const title = input.title !== undefined ? normalizeText(input.title) || null : null
+
       const inserted = await client.query(
         `INSERT INTO directory_accounts (
            integration_id, provider, corp_id, external_user_id, external_key, name, email, mobile,
@@ -521,6 +527,11 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
       // reimplemented (this file's own header: "directory-sync.ts is edited nowhere by this
       // file" — same convention `getOrCreateLocalIntegration` already follows).
       await upsertActiveUserOrgMembership(client, { userId: localUserId, orgId: input.orgId })
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+        userIds: [localUserId],
+        actorId,
+        reason: 'local directory account created by an administrator',
+      })
     })
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -609,15 +620,62 @@ export async function updateLocalAccount(
  * user (`current.local_user_id`) — an account nobody was ever linked to has no membership to
  * reconsider.
  */
-export async function archiveLocalAccount(orgId: string, accountId: string): Promise<LocalAccountSummary | null> {
+export async function archiveLocalAccount(
+  orgId: string,
+  accountId: string,
+  actorIdInput?: string,
+): Promise<LocalAccountSummary | null> {
   const current = await loadLocalAccountForOrg(orgId, accountId)
   if (!current) return null
 
   if (current.is_active) {
     await transaction(async (client) => {
-      await client.query(`UPDATE directory_accounts SET is_active = false, updated_at = NOW() WHERE id = $1`, [accountId])
-      if (current.local_user_id) {
-        await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: current.local_user_id, orgId })
+      const expectedLocalUserId = current.local_user_id
+      if (expectedLocalUserId) {
+        const lockedUsers = await lockUsersForAccessGraphWrite(client, [expectedLocalUserId])
+        if (!lockedUsers.has(expectedLocalUserId)) {
+          throw new LocalDirectoryConflictError('local account binding changed; retry')
+        }
+      }
+
+      const accountResult = await client.query(
+        `SELECT id, is_active
+           FROM directory_accounts
+          WHERE id = $1 AND integration_id = $2 AND provider = 'local'
+          FOR UPDATE`,
+        [accountId, current.integration_id],
+      )
+      const lockedAccount = accountResult.rows[0] as { id: string; is_active: boolean } | undefined
+      if (!lockedAccount) throw new LocalDirectoryNotFoundError('local account not found')
+      if (!lockedAccount.is_active) return
+
+      const linkResult = await client.query(
+        `SELECT local_user_id
+           FROM directory_account_links
+          WHERE directory_account_id = $1
+          FOR UPDATE`,
+        [accountId],
+      )
+      const actualLocalUserId =
+        (linkResult.rows[0] as { local_user_id?: string | null } | undefined)?.local_user_id
+        ?? null
+      if (actualLocalUserId !== expectedLocalUserId) {
+        throw new LocalDirectoryConflictError('local account binding changed; retry')
+      }
+
+      await client.query(
+        `UPDATE directory_accounts
+            SET is_active = false, updated_at = NOW()
+          WHERE id = $1 AND is_active = TRUE`,
+        [accountId],
+      )
+      if (expectedLocalUserId) {
+        await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: expectedLocalUserId, orgId })
+        await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+          userIds: [expectedLocalUserId],
+          actorId: normalizeText(actorIdInput) || 'system:local-directory',
+          reason: 'local directory account archived by an administrator',
+        })
       }
     })
   }
