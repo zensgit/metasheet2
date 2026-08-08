@@ -1,0 +1,132 @@
+# Time Machine — R13/R14 收尾主线：Revision 完整性 + 飞书对标缺口 — 设计与验证 MD（2026-07-13）
+
+> **性质**：owner `/goal`「R12 基础工程收口 + R13/R14 飞书对标缺口」一轮的设计+验证交付。ultracode，模型按难度分派（Opus=安全/设计/对抗审；Sonnet=锁定规格的实现切片；Fable=纯 FE/文案）。
+> **主线定位（owner 定，如实）**：R12 从「最终收官」降级为**基础工程收口**；刚发现的飞书对标缺口接成 R13（revision 完整性）/ R14（产品面 + 规模化）。**合并后的准确终点不是「再做几项运维就结束」**，而是：**先补齐 revision 链 → 再补完整 T-state 产品面与规模化恢复 → 最后跑 O-2**。中小型场景届时可认真宣称媲美；再补 base-wide 原子恢复，才适合宣称接近飞书 Time Machine 完整产品能力。
+> **权威边界**：本 MD 是**当前收口索引**；**代码与既有 canonical Global History 文档才是语义权威**。旧台账（#4148/#4155/#4185）将加 superseded 指针；#4147 本身不是台账（真正对应的旧验证 MD 是 **#4148**）。
+
+## 0. 现状与本轮进度
+
+| 线 | 状态 |
+|---|---|
+| **R12-B #4197**（确定性并发 barrier + OD-7 措辞 + #4161 注释） | ✅ **MERGED `904cf4aa0`** |
+| **R12-C #4199**（O-2 operator-contract：19-flag manifest + `--strict` + 源码派生完整性测试 + required CI + o2-ladder 修） | ✅ **MERGED 2026-07-13 09:09Z** |
+| **R12 #4186**（AS-BUILT 台账） | ⏸ 保持 Draft，**最后重写**（删「代码开发全部落地」结论；稳定事实；作唯一收口索引） |
+| **R13-A #4187**（form/plugin/automation revision 完整性设计锁） | ✅ **RATIFIED 2026-07-13**（§0.5；见 §2） |
+| **R13-A 实现 lanes A/B/C** | 🔄 **进行中**（3 条隔离 Sonnet lane，Draft PR，见 §2.3） |
+| **R13-A OD-6 guard** | ⬜ 独立 rung（见 §2.4） |
+| **R13-B T-state 产品面** | ⬜ 设计（见 §3） |
+| **R13-C retention+reset 共存 / 异步>5000** | ⬜ 先设计锁 + 真实数据量基准（见 §4） |
+| **R14 产品路线** | 🔒 **owner 决策**（方案 A base-wide atomic restore vs 方案 B granular 定位，见 §5） |
+| **O-2 上线验证** | 🔒 owner/ops（flag-off 基线 → 分级 flag-on → 证据 → 单租户 pilot，见 §6） |
+
+## 1. R13/R14 开发顺序（owner「规划开发顺序」）
+
+```
+R13-A revision 链补齐  ──┬─ lane A (form CRUD+attachment+link)   [Sonnet impl + Opus gate]
+  (先修锁→再实现)        ├─ lane B (plugin create/update)         [Sonnet impl + Opus gate]   ← 可并行
+                         └─ lane C (automation CRUD+writeback)    [Sonnet impl + Opus gate]
+                         └─ OD-6 revision-disposition CI guard    [Opus 设计 + Sonnet impl]   ← lanes 落后接
+R13-B T-state 产品面    ──── 完整 T 状态 API/页面（含 T 后被删记录）+ History Center 直接预览/恢复
+                            [Sonnet API + Fable FE + Opus gate]    ← 可与 R13-A 并行
+R13-C 运维与规模        ──── retention+reset 共存 / >5000 异步任务  [Opus 设计锁 + 真实基准，先设计不改热事务]
+R14 产品路线           ──── owner 决策 → base-wide atomic restore（若方案 A）
+O-2 上线              ──── flag-off 基线 → 分级 flag-on → 证据 → 单租户 pilot   [owner/ops]
+最后：重写并合 #4186（唯一收口索引），旧台账降指针
+```
+
+**并行性**：R13-A 的 A/B/C 三 lane **文件隔离**（A=univer-meta 路由；B=records.ts；C=automation-executor+automation-service），可立即并行。R13-B 可与 R13-A 并行。**R13-C 先做设计锁 + 真实数据量基准**，避免直接改高风险恢复事务。R14 是 owner 产品决策，其结果决定 automation/workflow/dashboard config-history 是否进 config revision。
+
+## 2. R13-A Revision 完整性（RATIFIED #4187）
+
+### 2.1 缺口（独立审计确认，primary-source）
+`meta_records` 全仓 **37 个写入点**；**恰 8 个真实用户数据内容路径不写 revision**（owner「8 不是 2」= 确认），另有 **1 个** config-lane 结构性残余（整表 FK-cascade drop）。8 个路径喂同一 `reconstructRecordsAtT` ⇒ PIT view / restore / revert / **Reset** 全基于错误历史；Reset-to-T 会**静默销毁**本应存在于 T 的记录。审计 `/tmp/r13-revision-disposition-audit-20260713.md`。
+
+### 2.2 两处 draft 纠错（owner P2，审计证实）
+- **link 分支**："link-only 编辑 ⇒ patch 空 ⇒ 不 UPDATE" = **错**。`patch[fieldId]=ids` @`univer-meta.ts:14306` ⇒ patch 非空 ⇒ 进入 UPDATE + bump version ⇒ link 编辑是真实 data 变更、同样 UNCAPTURED。**OD-4 改为 IN SCOPE**（lane A 加 revision↔meta_links 恢复一致性 golden）。
+- **CREATE 风险**：draft §0 写「kept / 非破坏 / 历史不完整」= **低估**。created-before-reset-T 且 create 未捕获 ⇒ `reconstructRecordsAtT`(record-reconstructor.ts:34) 无 ≤T revision ⇒ absent ⇒ `computeSheetReset`(univer-meta.ts:10031-10037) 无条件推入 delete-set（分不清「T 后创建」与「T 前创建但未捕获」）⇒ **Reset-to-T 销毁本应存在于 T 的记录**。CREATE **是破坏性的**，与 EDIT 同类。
+
+### 2.3 8 路径 → 3 lane（OD-1 = 全量 bucket-A，拆三刀）
+
+| Lane | 站点 | source (OD-2) | actor (OD-3) | PR |
+|---|---|---|---|---|
+| **A** form | `univer-meta.ts:14470`(create) · `:14423`(edit,含 link) · `:15693`(attachment-delete) | `'public-form'` / attachment `'rest'` | 已知 actor;匿名表单 CREATE=null | 🔄 lane A |
+| **B** plugin | `records.ts:546`(create) · `:507`(patch) | `'plugin'` | actor-less=null | 🔄 lane B |
+| **C** automation | `automation-executor.ts:2475`(create) · `:2217`(update) · `automation-service.ts:2818`(resultWriteback) | `'automation'` | context.actorId / chainActorId / null | 🔄 lane C |
+
+**每 lane 证明义务**：真实入口 golden · **同事务** `recordRecordRevision` + 完整 snapshot · PIT 修正后正确 · 失败回滚（无半写）· **源码突变→红**。**事务边界逐 lane 重验**（D-1「偏差1」：这些 lane 曾非统一事务；D-2 §0 称现已事务化——**逐站点证明，不假设**；非原子的站点 STOP 上报）。UNFLAGGED 纯正确性（同 D-1），无 env flag。
+
+### 2.4 OD-6 revision-disposition guard（独立 rung）
+审计给出矩阵：**22 must-write / 15 exempt**；guard 对 **INSERT/UPDATE/DELETE** 强制每个 `meta_records` sink 声明 disposition（rank-8 锁 guard 忽略 INSERT，故不能复用）。今日对 8 个 lane 站点开火。**特判**：`univer-meta.ts:6521` field-undelete rehydration = **owner 裁定 MUST-WRITE**（审计标 debatable-EXEMPT，owner 定必写）；`approval-record-projection-service.ts:223` 派生投影 = **EXEMPT**；整表 cascade #9(`univer-meta.ts:12519`) 归 **config guard**、不在本 record guard 射程。marker-based（rank-8 形态）优于 lint（clever fingerprint 有 6521 漏洞）。
+
+## 3. R13-B 历史版本体验（完整 T-state 产品面）
+- **完整 T 状态 API/页面**：PIT view 纳入「当前已删除但 T 时存在」的记录 —— 需 reconstruct 保留 T 时存在、now 已删的行（当前 `reconstructRecordsAtT` 基于 revision，删除后有 delete revision ⇒ 可判 T 时存在；但 UI 目前只显示影响数量）。
+- **History Center 直接预览并恢复**：从时间线直接 preview/restore 单条，而非只显示「影响 N 条」。复用既有 restore-preview/execute + PIT-undelete 面；FE 增量。
+- 模型：Sonnet API + Fable FE + Opus gate。**依赖 R13-A**（T-state 正确性依赖 revision 链完整——否则 T-state 本身在 8 路径上是错的）。
+
+## 4. R13-C 运维与规模（先设计锁 + 真实基准，勿直接改热事务）
+- **retention 与 Reset 在保留窗口内共存**：当前 `PIT_RESET_RETENTION_BLOCKED`（retention='1' ⇒ reset 409）是**互斥**。目标改为**保留窗口内可恢复**：retention 开启时，只要目标 T 在保留窗口内，reset/restore 仍可执行。**先设计锁**（定义窗口语义、与 anchor/floor 交互），**用真实数据量基准**验证，再动恢复事务。
+- **超过 5000 条改异步任务**：`SHEET_REVERT_MAX_RECORDS`(默认 5000) 现为 fail-closed 拒绝。目标：超限转**异步任务**，提供**进度/失败/取消**语义。设计锁 + 基准先行。
+
+## 5. 🔒 R14 产品路线（owner 一次决策）
+- **方案 A（推荐）**：实现 **base-wide atomic restore** —— 与飞书「一键恢复整个多维表格」直接对等，同时保留我们更强的按记录/字段/sheet 恢复。
+- **方案 B**：不做整库恢复，正式定位 **Granular History & Recovery**（更安全、更细粒度，不宣称完整 Time Machine 对等）。
+- **连带**：automation/workflow/dashboard 配置历史——选方案 A（完整对标）则也进 config revision；选 granular 则明确排除。**放 R14 后半段。**
+
+## 6. O-2 上线验证（owner/ops）
+当前镜像 **flag-off 基线** → 按破坏性从低到高**逐项 flag-on** → 同时归档 **API/浏览器/DB/回收站证据** → **先单租户 pilot**，生产**每个 flag 单独签核**，不直接全量。（部署 host env + 全栈，本会话不可达；runbook 见 o2-ladder + #4199 manifest `--strict`。）
+
+## 7. 最终验收（owner 明定）
+1. **所有用户数据写入口都产生正确 revision**（R13-A + OD-6 guard 锁死）。
+2. 历史时点页面能展示**完整 T 状态**（R13-B）。
+3. preview/execute/权限/锁/漂移/原子性**全部有 mutation-proven goldens**。
+4. retention 开启时仍可在保留窗口内恢复（R13-C）。
+5. 主干镜像完成 **flag-off → 分级 flag-on → 浏览器/API/DB staging 证据**（O-2）。
+6. 生产仅**单租户 pilot**，不直接全量开启。
+7. **最后重写并合入 #4186**（唯一收口索引），旧台账降历史指针。
+
+## 8. 验证台账（随 lane/gate 完成滚动更新）
+
+| 项 | 证据 |
+|---|---|
+| R12-B #4197 | Opus gate APPROVE-with-fixes；G17 barrier 正控独立复跑（neuter 锁再验→50ms assertion 红）；MERGED `904cf4aa0` |
+| R12-C #4199 | Opus gate APPROVE-with-hardening 0P1/0P2；19-flag 源码派生完整性测试 mutation-proven；接 required CI；MERGED 09:09Z |
+| R13-A 缺口 8 路径 | 独立审计 37 站点、8 UNCAPTURED 确认；link-branch + CREATE-reset 两纠错 primary-source 证实 |
+| R13-A 锁 | #4187 RATIFIED §0.5（OD-1..6）；audit synthesis `/tmp/r13-revision-disposition-audit-20260713.md` |
+| R13-A lanes A/B/C | ✅ 实现完 + **首手验**（Draft，待 owner GO）：**A #4219**(14/14; CREATE-rollback 原子 + OD-4 真 revert link 一致 + G4 merge-trap[我补,mutation-proven])· **B #4216**(10/10; A2 PIT-lie 闭 + G4 merge-trap[我补,mutation-proven])· **C #4220**(12/12; 3 站点原子[`withTransaction` fallback 穿 `queryFn`,button/AutomationService 两构造皆原子], G4 genuine)。三者：source-by-surface + actor-or-null + 完整 snapshot + mutation-kill 承重 + 两点 CI。⚠️ **Opus gates 两条 stall on infra**(600s watchdog/长真库跑)：**B gate 完成=CHANGES-REQUESTED**,抓出 G4 未钉(单字段 record 令 `snapshot:patch` 假绿)→已修;A/C gate stall→G4+原子性**我首手复核**(snapshot→patch mutation 恰红新 golden;fallback 源读)。**非完整对抗审——owner 可要求 scoped 重 gate。** OD-3 flag: C same-base writeback actor=approval actor `chainActorId` 待 owner 确认 |
+| R13-A OD-6 guard | ⬜ 待建（矩阵 22/15），**stacks on 3 lanes 落地后** |
+| **R13-B** T-state 读完整性 | ✅ **设计锁 #4225**(PROPOSED)：缺口=PIT view 丢弃 T 后被删记录(`:8314` 只喂 liveIds);读面 decision-independent,写面批量恢复耦合 R14。OD-B1..B3 |
+| **R13-C** retention+reset/async | ✅ **设计锁 #4224**(PROPOSED)：一刀切 409→逐 T reconstructability gate;>5000 异步 job;基准方法学(真跑=ratify 前置)。OD-C1..C4 |
+| R14 · O-2 | 🔒 owner 决策 / owner-ops（见 §5/§6） |
+
+## 9. 收官口径（如实，不掩盖未完成代码）
+R12 基础工程收口**已落**（#4197/#4199 MERGED）。**revision 链尚未补齐**（R13-A 3 lane 进行中 + OD-6 guard 未建）——在此之前，PIT/History/Reset 在 8 条用户数据路径上**仍基于错误历史**，且 Reset 有静默数据销毁向量。**因此现在既不能宣称「Time Machine 完成」，也不能宣称「媲美飞书」**。诚实终点见 §主线定位。**#4186 最后重写并合，作唯一收口索引；本 MD 为当前进度索引，代码 + canonical 文档为语义权威。**
+
+## 10. Owner 审阅 + 计划（2026-07-13 v2）—— W0 可信性纠错 + 收尾顺序
+
+owner 提交了完整审阅 + 收尾计划 + 估算。**逐条复核：计划成立，W0-first 顺序门正确，估算合理。** 对我方 #4235 的 **P1 已实证复核成立**。
+
+### 10.1 W0 可信性——`HISTORY_INCOMPLETE` 现草案不安全（owner P1，我已实证）
+- **healed-gap（实证：#4235 comparator = `ORDER BY created_at DESC LIMIT 1` = live-vs-LATEST）**：v1✓→v2 漏→v3✓；live==v3 ⇒ 预检**通过**，但 Reset/Revert 到 T∈[v2,v3) 用 latest≤T=v1 快照=**错**。tail 健康、**中段有洞**，live-vs-latest 结构性看不见。⇒ 需**连续版本证明 / 持久化 trusted-since**，非只比 live-vs-latest。
+- **check→write 竞态**：execute 预检是破坏性事务**前**多条 READ COMMITTED 查询 ⇒ check→write 间可落无 revision 写入。⇒ execute 复检+恢复写入须**同一锁定事务**（`FOR UPDATE` scope 行）。
+- **缺 golden**：healed-gap + 并发竞态。
+- **本轮处置**：Opus lane 进行中——先**构造 healed-gap/race 反例金测**（对当前 #4235 应**红**），再设计+实现 trusted-since/连续性 + 同锁事务复检 + 新金测；**不得误拒** healthy lock/unlock（G-HI-2）与 formula 物化（G-HI-3）。**#4235 修好前不落地**（owner「不能安全落地」，我同意）。
+
+### 10.2 收尾顺序（owner 计划，我采纳 + 模型分派）
+| 阶段 | 内容 | 顺序门 | 模型 |
+|---|---|---|---|
+| **W0 可信性** | 修 `HISTORY_INCOMPLETE`（§10.1）→ 依次 form/plugin/automation/approval/attachment **5 刀** → 最后 revision-disposition guard（#4227 已建） | **硬顺序门** | Opus 预检 · Sonnet 逐刀 · Opus gate |
+| **T-state 体验** | **采用 #4205**（deleted-since-T 完整版本视图 + preview/restore + operationId + 单记录 resurrect）；**#4225 已关**（重复） | W0 后 | Sonnet API + Fable FE + Opus gate |
+| **整库恢复** | base 级跨表/配置 preview + 确定性计划 + 原子恢复（= R14 方案 A 若选） | T-state 后；**R14 owner 决策** | Opus |
+| **规模与关系** | >5000 benchmark/job + retention 共存（#4224）+ 边级 link history（独立锁 OD-4） | 受恢复事务风险约束 | Opus 设计 + Sonnet |
+| **上线** | staging 浏览器验收 + 逐 flag ladder + 监控/回滚 | 最后；owner/ops | — |
+
+### 10.3 诚实工作量（owner 估算，采纳）
+可安全用：**8–12 人周**；严格飞书公开核心：**12–20 人周**；再超越：**16–28 人周**。三人并行守 W0 门 ≈ 4–6 / 7–10 / 10–14 周。**现有 Draft 不能按「已完成」计**：#4219/#4220 DIRTY、其余 BEHIND；**revision 链一刀未落 main**。
+
+### 10.4 台账/去重 + 待清理
+- **#4205 = T-state 权威**；**#4225 已关**（本轮，owner 令）。
+- **#4187 §4/§8 残留 proposed/not-authorized（顶部已 RATIFIED）= 合并前必须全文清理**（owner P3）——#4187 由平行 session 主写，我不擅动免冲突，**标给落地方**。
+- **平行 session 重复**：#4187 vs #4204 · #4227 vs #4204——建议 owner 择 #4187+#4227 权威并停平行重做。
+- **已超飞书的部分**（owner 认定）：细粒度单字段/记录/sheet 恢复 + 签名 preview + CAS + typed confirm + 事务原子性——飞书不支持只恢复单表/视图、归档表不能恢复到指定时刻。**W0 可信闭环后中小场景可宣称媲美；补整库原子恢复后宜宣称接近飞书完整能力。**
+
+**采纳 owner 建议**：**暂不启用更多恢复 flag**，先把 W0 做成可信闭环 → 再 #4205 → 最后整库恢复。
