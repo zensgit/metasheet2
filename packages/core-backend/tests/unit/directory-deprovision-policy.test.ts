@@ -61,6 +61,11 @@ function stubClient(
       if (/INSERT INTO user_external_auth_grants/i.test(sql)) {
         return { rows: [] }
       }
+      // Rev 4.4: the grant flip is now a plain effect-driven UPDATE (RETURNING is its
+      // fail-closed "row was still enabled" witness — answer it, don't just silence it).
+      if (/UPDATE user_external_auth_grants/i.test(sql)) {
+        return { rows: [{ local_user_id: String(params?.[0] ?? '') }] }
+      }
       if (/SELECT org_id\s+FROM directory_integrations/i.test(sql)) {
         return { rows: [{ org_id: STUB_ORG_ID }] }
       }
@@ -82,6 +87,7 @@ function stubClient(
             org_candidacy_clear: true,
             globally_clear: !notGloballyClear.has(userId),
             dingtalk_grant_enabled: true,
+            dingtalk_grant_row_exists: true,
           }],
         }
       }
@@ -109,7 +115,10 @@ function stubClient(
 const wrote = (queries: string[], pattern: RegExp) => queries.some((sql) => pattern.test(sql))
 const DEACTIVATES_USER = /UPDATE users[\s\S]*is_active = FALSE/i
 const DEACTIVATES_USER_ORG = /UPDATE user_orgs\s+SET is_active = FALSE/i
-const DISABLES_GRANT = /INSERT INTO user_external_auth_grants/i
+// Rev 4.4: an ENABLED grant is closed by an effect-driven UPDATE … SET enabled = FALSE; the
+// INSERT shape is the deny-row CREATION for a person with no row (also matched so the
+// default-off test proves NEITHER write happens in preview).
+const DISABLES_GRANT = /(?:UPDATE user_external_auth_grants[\s\S]*SET enabled = FALSE|INSERT INTO user_external_auth_grants)/i
 
 const CANDIDATE = { directory_account_id: 'acct-1', local_user_id: 'user-1', deprovision_policy_override: null }
 

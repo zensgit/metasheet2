@@ -224,9 +224,19 @@ describeIfDatabase('W4-PRE-1c case ① — real sync sweep composed with the dep
           GROUP BY event.run_id`,
         [fixture.localUserId],
       )
+      // Rev 4.4: the fixture person has NO grant row, so the globally-clear departure now
+      // plans a THIRD effect — the evidenced deny-row creation (grant_row_created) — on top of
+      // membership_changed + user_changed.
       expect(evidence.rows).toEqual([
-        { effect_count: 2, run_id: result.run.id },
+        { effect_count: 3, run_id: result.run.id },
       ])
+      const grantEffect = await query<{ grant_row_created: boolean }>(
+        `SELECT effect.grant_row_created
+           FROM directory_deprovision_effects effect
+          WHERE effect.local_user_id = $1 AND effect.effect_type = 'grant_changed'`,
+        [fixture.localUserId],
+      )
+      expect(grantEffect.rows).toEqual([{ grant_row_created: true }])
     }, 30_000)
   })
 

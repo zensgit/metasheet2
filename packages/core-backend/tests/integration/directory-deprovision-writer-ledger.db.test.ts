@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { query, transaction } from '../../src/db/pg'
-import { previewDeprovisionForUser } from '../../src/directory/deprovision-evidence-api'
+import { previewDeprovisionForUser, restoreDeprovisionEvent } from '../../src/directory/deprovision-evidence-api'
+import { __dingtalkOAuthInternalsForTests } from '../../src/auth/dingtalk-oauth'
 import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovision-ledger'
 import { applyDirectoryDeprovisionPolicies } from '../../src/directory/directory-sync'
 
@@ -38,6 +39,8 @@ async function cleanup(): Promise<void> {
 async function seedDirectory(
   options: {
     grantEnabled?: boolean
+    /** Rev 4.4: seed the explicit OPS-01 deny row (disabled grant) instead of no row at all. */
+    grantDisabledRow?: boolean
     membershipActive?: boolean
     policy?: 'manual_review' | 'disable_grant_only' | 'mark_inactive'
   } = {},
@@ -106,6 +109,13 @@ async function seedDirectory(
       `INSERT INTO user_external_auth_grants (
          provider, local_user_id, enabled, granted_by, created_at, updated_at
        ) VALUES ('dingtalk', $1, TRUE, 'test:d4-writer', NOW(), NOW())`,
+      [userId],
+    )
+  } else if (options.grantDisabledRow === true) {
+    await query(
+      `INSERT INTO user_external_auth_grants (
+         provider, local_user_id, enabled, granted_by, created_at, updated_at
+       ) VALUES ('dingtalk', $1, FALSE, 'system:directory-deprovision', NOW(), NOW())`,
       [userId],
     )
   }
@@ -447,9 +457,15 @@ describeIfDatabase(
       expect(evidence.rows[0].count).toBe('0')
     })
 
+    // Rev 4.4: a globally-clear candidate with NO grant row is no longer zero-effect (the deny
+    // mark must be evidenced — see the rehire golden below), so the zero-effect case is now
+    // "deny row already present": nothing left to change, nothing written, and the person's
+    // OAuth posture is asserted UNCHANGED — the exact loophole of closeout-review P2, where the
+    // zero-effect path and the effectful path disagreed about the deny row.
     it('writes no generation or evidence when the planner produces zero effects', async () => {
       const seeded = await seedDirectory({
         grantEnabled: false,
+        grantDisabledRow: true,
         membershipActive: false,
         policy: 'disable_grant_only',
       })
@@ -488,6 +504,147 @@ describeIfDatabase(
         [seeded.userId],
       )
       expect(evidence.rows[0].count).toBe('0')
+      // Closeout review P2: the zero-effect run must leave OAuth loginability EXACTLY as it
+      // found it — here the pre-existing deny row, which creation-only ensureGrant must honour.
+      await __dingtalkOAuthInternalsForTests.ensureGrant(seeded.userId)
+      const posture = await query<{ enabled: boolean; count: string }>(
+        `SELECT enabled, COUNT(*) OVER ()::text AS count
+           FROM user_external_auth_grants
+          WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [seeded.userId],
+      )
+      expect(posture.rows).toHaveLength(1)
+      expect(posture.rows[0].enabled).toBe(false)
+    })
+
+    // THE closeout-review golden (P1): 无既有 grant → 离岗 → rehire → OAuth. A person who never
+    // had a grant is deprovisioned; Rev 4.4 requires the deny row their departure creates to be
+    // ledger-evidenced (grant_row_created), so the rehire restore can DELETE it — after which
+    // OAuth's creation-only ensureGrant works again. Under the pre-4.4 writer the deny row was
+    // written outside the ledger and the rehired person was locked out of OAuth forever.
+    it('no-grant departure evidences the deny-row creation, and rehire restore deletes it so OAuth works again', async () => {
+      const seeded = await seedDirectory({
+        grantEnabled: false,
+        membershipActive: true,
+        policy: 'mark_inactive',
+      })
+
+      const outcome = await apply(seeded)
+      expect(outcome.affected).toEqual([
+        {
+          directoryAccountId: seeded.accountId,
+          localUserId: seeded.userId,
+          policy: 'mark_inactive',
+          globallyClear: true,
+        },
+      ])
+
+      // The deny row exists, is disabled, and its CREATION is evidenced.
+      const denyRow = await query<{ enabled: boolean; granted_by: string }>(
+        `SELECT enabled, granted_by FROM user_external_auth_grants
+          WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [seeded.userId],
+      )
+      expect(denyRow.rows).toHaveLength(1)
+      expect(denyRow.rows[0]).toEqual({ enabled: false, granted_by: 'system:directory-deprovision' })
+      const grantEffect = await query<{
+        before_active: boolean
+        after_active: boolean
+        grant_row_created: boolean
+      }>(
+        `SELECT before_active, after_active, grant_row_created
+           FROM directory_deprovision_effects
+          WHERE local_user_id = $1 AND effect_type = 'grant_changed'`,
+        [seeded.userId],
+      )
+      expect(grantEffect.rows).toEqual([
+        { before_active: false, after_active: false, grant_row_created: true },
+      ])
+
+      // While departed, OAuth stays blocked: creation-only ensureGrant honours the deny row.
+      await __dingtalkOAuthInternalsForTests.ensureGrant(seeded.userId)
+      const blocked = await query<{ enabled: boolean }>(
+        `SELECT enabled FROM user_external_auth_grants
+          WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [seeded.userId],
+      )
+      expect(blocked.rows[0].enabled).toBe(false)
+
+      // Rehire: the directory source comes back, and the restore reverses every effect —
+      // including the deny row's EXISTENCE.
+      await query(
+        `UPDATE directory_accounts SET is_active = TRUE WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+      const eventRow = await query<{ id: string }>(
+        `SELECT id::text AS id FROM directory_deprovision_events
+          WHERE local_user_id = $1 AND status = 'applied'`,
+        [seeded.userId],
+      )
+      expect(eventRow.rows).toHaveLength(1)
+      await restoreDeprovisionEvent({
+        eventId: eventRow.rows[0].id,
+        mode: 'rehire',
+        adminUserId: 'admin-test',
+      })
+
+      const restored = await query<{ user_active: boolean; membership_active: boolean }>(
+        `SELECT u.is_active AS user_active, m.is_active AS membership_active
+           FROM users u JOIN user_orgs m ON m.user_id = u.id AND m.org_id = $2
+          WHERE u.id = $1`,
+        [seeded.userId, seeded.orgId],
+      )
+      expect(restored.rows[0]).toEqual({ user_active: true, membership_active: true })
+      const rowsAfterRestore = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM user_external_auth_grants
+          WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [seeded.userId],
+      )
+      expect(rowsAfterRestore.rows[0].count).toBe('0') // absence restored — the actual reversal
+
+      // And the rehired person can OAuth again: ensureGrant now CREATES the enabled grant.
+      await __dingtalkOAuthInternalsForTests.ensureGrant(seeded.userId)
+      const loginable = await query<{ enabled: boolean }>(
+        `SELECT enabled FROM user_external_auth_grants
+          WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [seeded.userId],
+      )
+      expect(loginable.rows[0].enabled).toBe(true)
+    })
+
+    // The other zero-effect flavour: NOT globally clear (still employed via another org's
+    // directory). No deny row may appear — and the never-granted person must REMAIN
+    // OAuth-loginable after the run. Kills any reintroduction of the unconditional deny write.
+    it('a not-globally-clear zero-effect run leaves a never-granted person OAuth-loginable', async () => {
+      const seeded = await seedDirectory({
+        grantEnabled: false,
+        membershipActive: false,
+        policy: 'mark_inactive',
+      })
+      await seedActiveSibling(seeded)
+
+      const outcome = await apply(seeded)
+      expect(outcome.affected).toEqual([])
+      const evidence = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM directory_deprovision_events
+          WHERE local_user_id = $1`,
+        [seeded.userId],
+      )
+      expect(evidence.rows[0].count).toBe('0')
+      const denyRows = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM user_external_auth_grants
+          WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [seeded.userId],
+      )
+      expect(denyRows.rows[0].count).toBe('0')
+
+      await __dingtalkOAuthInternalsForTests.ensureGrant(seeded.userId)
+      const loginable = await query<{ enabled: boolean }>(
+        `SELECT enabled FROM user_external_auth_grants
+          WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [seeded.userId],
+      )
+      expect(loginable.rows[0].enabled).toBe(true)
     })
 
     it('ignores a stale transition id when the source account is active again', async () => {
