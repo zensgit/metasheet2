@@ -217,7 +217,8 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
               <button
                 type="button"
                 class="template-authoring__canvas-edge-insert-btn"
-                aria-label="在连线后插入节点"
+                aria-label="在此连线插入节点"
+                title="在此连线插入节点"
                 :aria-expanded="edgeInsertMenuEdgeKey === line.key"
                 :data-testid="`approval-canvas-edge-insert-${line.key}`"
                 @click.stop="emit('toggle-edge-insert', line.key)"
