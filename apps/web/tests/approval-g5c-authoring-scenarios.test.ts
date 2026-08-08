@@ -360,6 +360,59 @@ describe('G5-C PR4 component extract (structural)', () => {
   })
 })
 
+/**
+ * Residual canvas polish pins (Wave-3 PR9): form undo/redo shell, form history module,
+ * version dual-canvas on detail, edge-insert a11y copy, inspector graphNodeLabel aria.
+ * Source-scan only — no flaky mounts.
+ */
+describe('G5-C residual canvas polish pins (structural)', () => {
+  it('TemplateAuthoringView wires form undo/redo testids and form authoring history module', () => {
+    const src = readFileSync(VIEW_PATH, 'utf8')
+    expect(src).toMatch(/data-testid="approval-form-undo"/)
+    expect(src).toMatch(/data-testid="approval-form-redo"/)
+    // Discriminating import path (not a loose name match elsewhere).
+    expect(src).toMatch(/from ['"].*approvalFormAuthoringHistory['"]/)
+  })
+
+  it('TemplateDetailView keeps dual-canvas version surface', () => {
+    const detail = readFileSync(
+      join(__dirname, '../src/views/approval/TemplateDetailView.vue'),
+      'utf8',
+    )
+    expect(detail).toMatch(/data-testid="template-version-dual-canvas"/)
+    expect(detail).toMatch(/from ['"].*approvalVersionDualCanvas['"]/)
+  })
+
+  it('edge mid-point insert keeps business aria-label on ApprovalFlowCanvas', () => {
+    const canvas = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalFlowCanvas.vue'),
+      'utf8',
+    )
+    expect(canvas).toMatch(/aria-label="在此连线插入节点"/)
+    expect(canvas).toMatch(/data-testid="approval-canvas-edge-insert"/)
+  })
+
+  it('inspector topology actions use graphNodeLabel in aria-labels', () => {
+    const inspector = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalCanvasNodeInspector.vue'),
+      'utf8',
+    )
+    expect(inspector).toMatch(/data-testid="approval-canvas-inspector-topology"/)
+    expect(inspector).toMatch(
+      /:aria-label="`\$\{graphNodeLabel\(node\.key\)\}节点拓扑操作`"/,
+    )
+    expect(inspector).toMatch(
+      /:aria-label="`上移\$\{graphNodeLabel\(node\.key\)\}节点`"/,
+    )
+    expect(inspector).toMatch(
+      /:aria-label="`在\$\{graphNodeLabel\(node\.key\)\}后插入审批节点`"/,
+    )
+    expect(inspector).toMatch(
+      /:aria-label="`删除\$\{graphNodeLabel\(node\.key\)\}节点`"/,
+    )
+  })
+})
+
 describe('G5-C command fail-closed surface', () => {
   it('invalid move does not partially apply and empty undo fails closed', () => {
     const graph: ApprovalGraph = {
