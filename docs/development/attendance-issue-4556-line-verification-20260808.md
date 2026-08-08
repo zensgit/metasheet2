@@ -21,6 +21,183 @@
 
 ---
 
+## Landing delta — historical baseline vs. current live state
+
+> **Read this before anything below it.** The body of this document is a **historical baseline
+> record**: it was verified against one pinned `main` SHA and a set of PR heads that were live at the
+> time of writing. `main` and those PRs have moved since. This section separates the two so that a
+> pinned PR head in the body is never read as the current live state.
+>
+> This section changes no verdict, count, or citation in the body. Nothing below it was rewritten to
+> match the live state — preserving the pinned body *is* the point.
+
+### A. Historical baseline — what the body is pinned to
+
+| Item | Value |
+| --- | --- |
+| Pinned `main` | `a45e1416002e6ca500eeda8d70e86c6443a10700` — `feat(directory): harden deprovision evidence ledger (#4646)`, **2026-08-08 03:44:26 UTC** |
+| Second-pass `main` observed while writing the body | `bea44e12d5af45e9131d4f12ce7f0a6d2d2ffc9a` — `docs(approval): stamp PR 4806 merge closeout on canvas final-eligibility MDs (#4811)`, **2026-08-08 04:46:01 UTC** |
+| Scope of the pin | Every blob citation, `file:line` reference, ancestry verdict and mechanically-derived count in the body is scoped to `a45e1416…` and is **stated as of that SHA**. |
+| Deliberately **not** SHA-pinned, by the body's own caveat | Check-run rollups and `mergeStateStatus`. Both are mutable and lazily recomputed; they are point-in-time observations, never properties of a commit. |
+| Consequence | **Body citations are pinned to the baseline and may be superseded.** Where the live state below disagrees with the body, the live state is current and the body is the historical record — neither is an erratum against the other. |
+
+### B. Current live state, re-read at landing
+
+All values in §B were re-read from `git`/`gh` at landing on **2026-08-08, ~08:57 UTC**. The exact
+commands are listed in §D. Nothing in §B is taken from the body's prose or from any PR body.
+
+**This section is itself a point-in-time read, and it demonstrates its own caveat.** `main` advanced
+once *during* this landing work — an earlier pass of §B pinned `a06ce31928293541995b00da57c75e9f40dad0f2`
+and every figure was re-derived against `60659ddc3b…` after the rebase. The same drift will make §B
+stale in turn; the correct response to a disagreement between §B and a fresh `gh` read is to trust
+the fresh read, exactly as §A says for the body.
+
+#### B.1 `main` and the merge gate
+
+| Item | Value at landing |
+| --- | --- |
+| `origin/main` | `60659ddc3bb3042a8c2191f6468fe27a46a29bfa` — `feat(approval): a11y labels on ApprovalCanvasNodeInspector topology (#4819)`, **2026-08-08 08:56:06 UTC** |
+| Distance from the pinned baseline | **14 commits** ahead of `a45e1416…`; **12 commits** ahead of the second-pass `bea44e12d5…` |
+| Required status checks on `main` | **9 contexts**, `strict=true` — `contracts (strict)`, `contracts (dashboard)`, `pr-validate`, `test (20.x)`, `contracts (openapi)`, `web-tests`, `stock-prep PowerShell 5.1 acceptance`, `attendance-web-guard`, `integration-guard` (re-read from the branch-protection API at landing; this list has grown historically, so it is read, not recalled) |
+
+#### B.2 Every open PR this document references, plus the two that did not exist at the baseline
+
+`mergeStateStatus` (`mss`) is a **read-time** value, not a property of the head SHA — repeated reads
+of the same head returned different values during this work. Each row states the value observed at
+landing.
+
+| PR | Head pinned in the body | Head at landing | State | `mss` at landing | Delta vs. the body |
+| --- | --- | --- | --- | --- | --- |
+| **4804** — W7/W8 design-lock drafts (docs-only) | `a1344c77c09725b757b5e9408b501e433bc3d385` | `a1344c77c09725b757b5e9408b501e433bc3d385` | OPEN, **Draft** | `BEHIND` | **No change.** Head identical; still Draft/HOLD. |
+| **4805** — OBS-1 orphan-suite wiring + derived completeness guard | `40dfd4f3fb8bfaa987e2706c399e5e41a3b29451` | **`2985e03c078ae45f9f59f3da58b073fdecab4449`** | OPEN, ready-for-review | **`DIRTY`** | **Head superseded, and the PR now conflicts with `main`.** See §C.2 — this is the largest delta in this section. |
+| **4810** — FSER-4 §3–4 frontend surface wiring | `4ca537c66bb00bede251cbabdcbdc7e730ec60f9` | `4ca537c66bb00bede251cbabdcbdc7e730ec60f9` | OPEN, **Draft** | `BEHIND` | **No change.** Head identical; still Draft/HOLD. `BEHIND` is base drift under `strict=true`, which a rebase clears; it is not `BLOCKED`. |
+| **4813** — *this PR* (the two line-level MDs) | — | the commit carrying this section | OPEN, **Draft** | — | The body remains pinned to `a45e1416…`; only this section is re-read at landing. A PR's own head cannot be stated inside itself — committing this section changes it. |
+| **4814** — W6-1 group effective-policy READ aggregate backend | **not referenced by the body** | `4cc0122883846900a1325cdacd5eda0355d77215` | OPEN, **Draft** | `BEHIND` | **New since the baseline.** Did not exist when the body was written. See §C.1. |
+| **4821** — W6 lock durable RATIFY record (docs-only) | **not referenced by the body** | `a80ee9ba9c71e234d8b2c801d862d3a568d3eada` | OPEN, ready-for-review | `BLOCKED` | **New since the baseline.** Did not exist when the body was written. See §C.1. At the landing read its rollup had 3 contexts still `IN_PROGRESS` (`web-tests`, `test (18.x)`, `test (20.x)`); no command was run that attributes the `BLOCKED` value to a cause, so none is asserted. |
+| **4745** — Windows-native exact-SHA QA v2 | `043851d3db7bb8d4b4514af3b1354265f9b2cdf3` | `043851d3db7bb8d4b4514af3b1354265f9b2cdf3` | OPEN, **Draft** | `BEHIND` | **Head unchanged.** The body's "16/16 check runs `success`" was read at an earlier pass on this head and was not re-executed at landing. |
+| **4634** — Windows-native internal QA package | `66a980357078f9d243fd4b025b080ac9aca9fa21` | `66a980357078f9d243fd4b025b080ac9aca9fa21` | OPEN, **Draft** | `CLEAN` | **Head unchanged.** Base re-read at landing: `codex/attendance-onprem-package-workspace-deps-20260727` — i.e. PR 4630's branch, **not** `main`, so `CLEAN` here does not mean the 9 required contexts ran. |
+| **4630** — on-prem package workspace runtime dep | (body states `DIRTY`, base = PR 4612's abandoned branch) | `7d8ba0d1d1deddfb47fd2cea5e00773b8e13d034` | OPEN, **Draft** | `DIRTY` | **No change.** Base re-read at landing: `claude/w4c2-live-scheduled-shadow-20260725`. |
+| branch `claude/attendance-windows-qa-v2-0dc3596dd-20260806` (no PR) | `7e531be6d6c85e61709661a7d59db8fc975daf58` | `7e531be6d6c85e61709661a7d59db8fc975daf58` | **still no PR in any state** | — | **No change.** Re-confirmed by a `gh pr list --state all --head …` that returned zero rows. |
+
+**Merged or closed since the baseline: none of the above.** Every PR the body inventoried as open
+was still open at landing; no PR the body named as in-flight has merged or closed.
+
+#### B.3 Every issue this document references
+
+| Issue | State at landing | Comments | Last updated | Delta vs. the body |
+| --- | --- | --- | --- | --- |
+| **4556** — parent attendance line | OPEN | 18 | 2026-08-05T08:27:37Z | No change. |
+| **4629** — W4C-2 Internal Preview QA feedback | OPEN | 15 | 2026-08-05T08:27:18Z | No change. |
+| **4709** — derived fixed-schedule effectiveness (FSER) | OPEN | 1 | 2026-08-01T07:30:40Z | No change. |
+| **4711** — preserve group context across navigation | OPEN | 1 | 2026-08-01T08:05:08Z | No change. |
+| **4770** — sweep fairness / observability | OPEN | 0 | 2026-08-05T08:52:20Z | No change; still zero comments, so still no closure statement. |
+| **4775** — W4C-5 §3 request-snapshot 8-cell set | OPEN | 0 | 2026-08-05T15:01:43Z | No change; still zero comments. |
+| **4791** — 57P01 scratch-DB teardown race | **CLOSED / completed** | 3 | 2026-08-07T15:44:55Z | No change; matches the body. |
+| **4792** — malformed `bpmn:timeCycle` residue | OPEN | 0 | 2026-08-06T09:02:37Z | No change; still unfixed and unowned. |
+| **4802** — 7 K3-line ops suites never executed | **CLOSED / completed** | 3 | 2026-08-07T16:12:28Z | No change; matches the body. |
+| **4822** — unify `rootDir`/`outDir`, package `main`/`types`, Docker `CMD` | OPEN | 0 | 2026-08-08T08:47:17Z | **New since the baseline** — not referenced by the body. See §C.4. |
+
+### C. What changed between the two — the deltas that matter to a reader deciding what to do next
+
+#### C.1 W6 now has a ratification-anchor PR — and it is **not merged**, so `main` is unchanged
+
+Two PRs on the W6 phase came into existence after the body was written:
+
+- **PR 4821** (OPEN, ready-for-review, head `a80ee9ba9c71…`, `mss=BLOCKED`) is docs-only: a single
+  file, `docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md`,
+  **+45 / −10**. It *proposes* transcribing an owner RATIFY of the W6 lock into that lock's §9.
+- **PR 4814** (OPEN, **Draft/HOLD**, head `4cc012288384…`, `mss=BEHIND`, 16 files) is the W6-1
+  group effective-policy READ aggregate backend slice — the runtime work that the ratification
+  would authorize. **It is on HOLD pending PR 4821.**
+
+**PR 4821 is unmerged, therefore `main` is unchanged.** Re-read at landing, the W6 design lock on
+`origin/main` still carries `Status: **PROPOSED / runtime HOLD**`. The body's statement that
+`OD-W6-0` and `OD-W6-1..9` are OPEN and that **W6-GATE is open** therefore **remains true of `main`
+at landing**, and no statement in the body about W6 is superseded.
+
+What a reader must not do with this row: PR 4821's body asserts an owner ruling, but *a PR body is
+not the authorization* — that is precisely the self-authorization loop PR 4821 exists to break, and
+its own body says so ("Merging this PR is the durable anchor"). This section records that the
+proposal **exists and is pending**; it does not record that W6 is ratified, and nothing here should
+be cited as evidence that it is. Whether the ruling is correctly transcribed is a review question on
+PR 4821, and merging it is a separate owner act.
+
+#### C.2 PR 4805's head is superseded **and it now conflicts with `main`**
+
+The body pins PR 4805 at head `40dfd4f3fb8bfaa987e2706c399e5e41a3b29451` and reports a green check
+rollup at that head. At landing the head is `2985e03c078ae45f9f59f3da58b073fdecab4449` and
+`mergeStateStatus` is **`DIRTY`**.
+
+This differs in kind from the `BEHIND` rows elsewhere in §B.2. `BEHIND` is base drift under
+`strict=true` and a rebase clears it. **`DIRTY` is a merge conflict against `main` and requires a
+conflict resolution, not a rebase-and-rerun.** A reader planning the OBS-1 landing should treat the
+body's green rollup for PR 4805 as belonging to a superseded head: the rollup read at the *new* head
+at landing was 24 `SUCCESS` + 1 `SKIPPED` (`Strict E2E with Enhanced Gates`), but that rollup was
+produced before the conflict state was observed and, per the caveat above, is not pinned by the SHA.
+
+#### C.3 Three files cited by the body changed on `main` — and **every `plugin-tests.yml:NNN` line citation in the body is now off by +2 or +5**
+
+Method: 55 distinct repository paths were extracted from the two documents by regex, then intersected
+with `git diff --name-only a45e1416… 60659ddc3b…`. (The regex captures paths of the common source
+extensions; it is not a proof that every citation form in the documents was enumerated.) Three cited
+paths appear in that diff:
+
+| Cited path | Change between baseline and current `main` | Effect on the body |
+| --- | --- | --- |
+| `.github/workflows/plugin-tests.yml` | **+5 / −0**, inserted in two hunks (after baseline line 103 → +2 lines; after baseline line 1100 → +3 more). File grew 1476 → 1481 lines. Landed by `882c292906` and `26d4be3e04`, both **directory/D4 work, not this line**. | **All seven line-pinned citations in the body still resolve at the pinned baseline and no longer resolve at current `main`.** Verified content-identity per citation: baseline `:223`, `:224`, `:585` → current `:225`, `:226`, `:587` (**+2**); baseline `:1201`, `:1249`, `:1250`, `:1265`, `:1305` → current `:1206`, `:1254`, `:1255`, `:1270`, `:1310` (**+5**). The *content* each citation names is unchanged — only its line number moved. |
+| `packages/core-backend/vitest.config.ts` | **+12 / −0**: three `directory-*` real-DB exclusions added at baseline line 234. | **No effect.** The body makes no line-pinned citation to this file. |
+| `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` | Changed. | **No effect on any line citation.** The body makes no line-pinned citation to this file. |
+
+Five attendance test files also changed on `main` (`attendance-w4pre1c-departure-org-scoped`,
+`…-departure-permission-negative`, `…-departure-sweep-deprovision`, `…-manual-review-pending`,
+`attendance-w4pre1d-departure-candidate-split`, all `.db.test.ts`). **None of the five is cited by
+either document** (verified: zero occurrences of each filename in both files), and they are W4-pre
+departure/deprovision files carried by the directory D4 work, not W4C/W5/W6 files. The body's
+real-DB corpus count is unaffected: attendance `*.db.test.ts` under `packages/core-backend/tests`
+counted **73 at the pinned baseline and 73 at current `main`**.
+
+#### C.4 One new issue exists that the body does not reference
+
+**Issue 4822** (OPEN, 0 comments, 2026-08-08T08:47:17Z) — "repo: unify `rootDir`/`outDir` + package
+`main`/`types` + Docker `CMD`, and make `docker-build` actually boot the built backend". It is
+recorded here for completeness because it postdates the baseline. Its relationship to this line, if
+any, is **not assessed** by this document — no command was run that establishes one.
+
+#### C.5 Summary for a reader deciding what to do next
+
+1. **Nothing merged or closed** among the PRs the body inventoried; the in-flight picture is intact.
+2. **W6 moved on paper only.** A ratification anchor (PR 4821) and the runtime slice it would unblock
+   (PR 4814, Draft/HOLD) both exist and are both unmerged. `main` still reads PROPOSED / OPEN, so
+   every W6 statement in the body stands.
+3. **PR 4805 needs conflict resolution, not a rebase** — the one row whose remediation shape changed.
+4. **Line numbers into `plugin-tests.yml` need +2 or +5** if you resolve them against current `main`
+   instead of the pinned baseline. Everything they name is otherwise unchanged.
+5. Every other pinned head in the body is byte-identical to the live head at landing.
+
+### D. Commands run to produce §B and §C
+
+Every state claim in §B and §C came from one of these; none came from a document's prose or a PR body.
+
+```
+git fetch origin --prune
+git ls-remote origin refs/heads/main refs/heads/claude/attendance-windows-qa-v2-0dc3596dd-20260806
+git log -1 --format='%H%x09%cI%x09%s' <each of a45e1416… bea44e12d5… 60659ddc3b…>
+git rev-list --count a45e1416…..origin/main          # 14
+git rev-list --count bea44e12d5…..origin/main        # 12
+git diff --name-only a45e1416… 60659ddc3b…           # 69 paths; intersected with the cited-path set
+git diff --numstat  a45e1416… 60659ddc3b… -- .github/workflows/plugin-tests.yml packages/core-backend/vitest.config.ts
+git diff -U0        a45e1416… 60659ddc3b… -- .github/workflows/plugin-tests.yml   # hunk offsets
+git show <sha>:.github/workflows/plugin-tests.yml | sed -n '<L>p'                # per-citation content identity
+git ls-tree -r --name-only <sha> -- packages/core-backend/tests | grep -cE 'attendance.*\.db\.test\.ts$'
+git show origin/main:docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md
+gh api repos/zensgit/metasheet2/branches/main/protection
+gh pr view <N> --json number,state,isDraft,headRefOid,baseRefName,mergeStateStatus,files,statusCheckRollup
+gh pr list --state all --head claude/attendance-windows-qa-v2-0dc3596dd-20260806
+gh api repos/zensgit/metasheet2/issues/<N>           # state, state_reason, comments, updated_at
+```
+
+---
+
 ## 0. Purpose and honest scope
 
 This document records **what is proven on `origin/main`, by what mechanism, and what is not.**
