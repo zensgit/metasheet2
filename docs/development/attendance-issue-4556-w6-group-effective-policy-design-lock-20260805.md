@@ -112,9 +112,9 @@ are the stable anchors.
 | W6-R4 | Fixed-schedule effectiveness has exactly one derivation: the aggregate composes the existing FSER service. W6 introduces no second predicate, no re-derivation, and no cached second status. | A mechanical inventory pins every caller of the FSER derivation; adding a parallel derivation or persisted status cache fails the inventory assertion. |
 | W6-R5 | No calculation writer consumes the W6 aggregate. W6 never selects a winner among conflicting policies and never mutates rollout state. | Import graph proves zero calculation-path imports of the W6 module; the membership-overlap fixture must surface `conflict_action_required`, and a choose-first/choose-latest mutation fails. |
 | W6-R6 | Label, state, and reason-code enums are closed and enum-strict end to end: unknown input values are rejected 4xx at the boundary; unknown internal states fail closed rather than mapping to a default label. | Every enum field has an invalid-value negative; a silent-fallback mutation (unknown → `needs_configuration` or unknown → default) turns a test red. |
-| W6-R7 | Labels derive only from persisted configuration facts plus org rollout posture. Client-supplied hints, query flags, or headers cannot alter a label. | A request carrying label/state override fields is rejected before SQL; label assertions are byte-exact per fixture. |
+| W6-R7 | Labels derive only from persisted configuration facts plus org rollout posture. Client-supplied hints, query flags, or headers cannot alter a label. | A request carrying label/state override fields is rejected before aggregate SQL; authorization middleware may perform its own RBAC reads before the route handler. Label assertions are byte-exact per fixture. |
 | W6-R8 | Editor navigation reuses the existing authoritative surfaces: the #4711 closed route family for `schedule|calendar|rules` and the existing group-editor stage union for `basics|people`. W6 mints no second navigation spelling and no caller-supplied section IDs. | The editor-reference union is closed; an out-of-table step/surface value fails parsing; the UI builder test proves each reference resolves through the existing #4711 builder or stage selector. |
-| W6-R9 | PROPOSED authorizes no runtime work. The W6-0 preparation PR is byte-inert: deleting its contract, fixtures, and shell files leaves every existing test green. | Deletion-green run recorded in the W6-0 PR; owner RATIFY of the exact merged SHA predates the first W6 runtime commit. |
+| W6-R9 | PROPOSED authorizes no runtime work. The W6-0 preparation PR is byte-inert: deleting its contract, fixtures, and shell files leaves every existing test green. | **Procedural violation, contained rather than erased:** W6-1 branch commits in PR 4814 predate this durable RATIFY record, so the original "RATIFY predates the first runtime commit" criterion was not met. Those commits remained Draft/HOLD and no W6 runtime reached `main`. The §9 decision is prospective only: after this record lands it authorizes reviewing and repairing the complete W6-1 inventory against fresh `main`; it does not retroactively authorize the earlier commits or authorize their merge. |
 
 ## 4. Aggregate read-model contract (draft)
 
@@ -127,25 +127,27 @@ GET /api/attendance/groups/:groupId/effective-policy
 - Permission: `attendance:admin` in v1 (aligned with the FSER v1 read route).
 - Org identity: authenticated principal only; the #4711 §3.2 rules apply
   verbatim (no `getOrgId(req)`, no `DEFAULT_ORG_ID`, byte-equal-or-403 client
-  selectors, authenticated-but-unscoped 403 before SQL).
+  selectors, authenticated-but-unscoped 403 before aggregate SQL).
 - Delegated attendance admins must additionally hold active membership in the
   target org (parent lock §3.5, final paragraph).
 - Unknown group, cross-org group, and inaccessible group share one values-free
   404 shape.
-- The route accepts no body and no state-selecting query parameter. Any
-  label/state/posture override input is rejected with a typed 400 before SQL.
+- The route accepts no state-bearing body and no state-selecting query
+  parameter. Any label/state/posture override input is rejected with a typed
+  400 before aggregate SQL; an empty JSON object carries no state and is not
+  represented as a stronger "no body bytes" guarantee.
 
 ### 4.2 Closed enums
 
 Field-by-field provenance: every row below names the ratified clause it
-implements; rows marked **PROPOSED** are new W6 decisions listed in §6.
+implements; rows marked **RATIFIED** are W6 decisions resolved in §9.
 
 | Enum | Closed values | Provenance |
 | --- | --- | --- |
-| `AttendanceGroupEffectivePolicySourceLabelV1` | `effective`, `org_inherited`, `preview_only`, `needs_configuration`, `conflict_action_required` | parent §5.1 five display states (exact machine spelling **PROPOSED**, OD-W6-3) |
-| `AttendanceGroupEffectivePolicyDomainV1` | `basics`, `membership`, `schedule`, `segments`, `flex`, `rules`, `punch_method`, `request_posture` | parent §3.5 item list (grouping **PROPOSED**, OD-W6-4) |
-| `AttendanceGroupEffectivePolicyConflictCodeV1` | `CALCULATION_GROUP_MEMBERSHIP_OVERLAP`, `FIXED_SCHEDULE_CONFIGURATION_CHANGED`, `FIXED_SCHEDULE_PENDING_APPLY`, `FIXED_SCHEDULE_UNPUBLISHED_MANAGED_ROW`, `SCHEDULE_STRATEGY_INCOMPLETE`, `RULE_SOURCE_MISSING`, `TIMEZONE_MISSING` | v1 closed inventory (**PROPOSED**, OD-W6-4); overlap posture from parent §3.4 |
-| `editorRef` union | `{ kind: 'group_stage', stage: 'basics'|'people'|'schedule'|'policies' }` or `{ kind: 'group_context_route', step: 'schedule'|'calendar'|'rules', surface?: <closed per-step table> }` | #4711 §3.1 closed tables + parent §5.1 (union shape **PROPOSED**, OD-W6-9) |
+| `AttendanceGroupEffectivePolicySourceLabelV1` | `effective`, `org_inherited`, `preview_only`, `needs_configuration`, `conflict_action_required` | parent §5.1 five display states (exact machine spelling **RATIFIED**, OD-W6-3) |
+| `AttendanceGroupEffectivePolicyDomainV1` | `basics`, `membership`, `schedule`, `segments`, `flex`, `rules`, `punch_method`, `request_posture` | parent §3.5 item list (grouping **RATIFIED**, OD-W6-4) |
+| `AttendanceGroupEffectivePolicyConflictCodeV1` | `CALCULATION_GROUP_MEMBERSHIP_OVERLAP`, `FIXED_SCHEDULE_CONFIGURATION_CHANGED`, `FIXED_SCHEDULE_PENDING_APPLY`, `FIXED_SCHEDULE_UNPUBLISHED_MANAGED_ROW`, `SCHEDULE_STRATEGY_INCOMPLETE`, `RULE_SOURCE_MISSING`, `TIMEZONE_MISSING` | v1 closed inventory (**RATIFIED**, OD-W6-4); overlap posture from parent §3.4 |
+| `editorRef` union | `{ kind: 'group_stage', stage: 'basics'|'people'|'schedule'|'policies' }` or `{ kind: 'group_context_route', step: 'schedule'|'calendar'|'rules', surface?: <closed per-step table> }` | #4711 §3.1 closed tables + parent §5.1 (union shape **RATIFIED**, OD-W6-9) |
 
 Reason codes inside the embedded fixed-schedule object are the FSER lock's
 closed list, unchanged and in FSER order. W6 adds no FSER reason code.
@@ -237,7 +239,7 @@ winner selection stays W7 and stays fail-closed per parent R2.
    `<script setup>` SFC export; its specs are wired into the required
    `attendance-web-guard` run list **and** both path filters.
 
-## 6. Decision points (owner menu, all OPEN)
+## 6. Decision points (owner menu, resolved in §9)
 
 | ID | Question | Options (recommended first) |
 | --- | --- | --- |
@@ -260,15 +262,16 @@ winner selection stays W7 and stays fail-closed per parent R2.
   shell;
 - zero-behavior proof: OpenAPI `dist/` byte-identical after a rebuild; zero
   runtime imports of the new modules; deletion-green test run recorded;
-- merged as Draft/HOLD; owner RATIFY of the exact merged SHA gates W6-1.
+- merged as Draft/HOLD; owner RATIFY of the exact merged SHA gates W6-1
+  (**satisfied prospectively by §9 when this record lands**).
 
-### 7.2 W6-1 backend aggregate (runtime, blocked on RATIFY)
+### 7.2 W6-1 backend aggregate (prospectively authorized Draft/HOLD; merge separately gated)
 
 - service + route per §4; real-DB legs in the existing attendance integration
   gate file set, fixture IDs file-namespaced;
 - matrix: every §4.3 fixture shape reproduced from seeded rows with exact-key
   deepEqual; two-org isolation; delegated-non-member 403; spoofed org
-  selectors 403 before SQL; unknown group 404 shape parity; invalid enum
+  selectors 403 before aggregate SQL; unknown group 404 shape parity; invalid enum
   negatives for every enum field;
 - mutation legs, each individually red: drop the auth guard; add a second
   FSER derivation; collapse membership overlap to first/latest; silent-map an
@@ -299,10 +302,15 @@ winner selection stays W7 and stays fail-closed per parent R2.
 
 ## 8. Landing sequence
 
-1. Merge this document (with the W6-0 contract draft, fixtures, and shell) as
-   **PROPOSED / Draft / HOLD** after exact-head independent review.
-2. Owner RATIFYs the exact merged SHA and answers OD-W6-1..9.
-3. W6-1 backend aggregate lands as its own gated PR.
+1. **Completed 2026-08-05:** merge this document (with the W6-0 contract
+   draft, fixtures, and shell) as **PROPOSED / Draft / HOLD** after exact-head
+   independent review.
+2. **Completed prospectively by the merge of this record:** owner RATIFYs the
+   exact merged SHA and answers OD-W6-1..9. The contained pre-anchor W6-1
+   branch inventory remains disclosed under W6-R9; this step does not make it
+   retroactively authorized.
+3. W6-1 backend aggregate proceeds as its own gated PR and stops after its
+   fresh exact-head gate for a separate owner merge decision.
 4. W6-2 contract wiring lands as its own gated PR.
 5. W6-3 UI lands as its own gated PR.
 6. W6-4 verification MD closes the W6 code scope.
@@ -312,15 +320,12 @@ winner selection stays W7 and stays fail-closed per parent R2.
 ## 9. Owner decision — RATIFICATION RECORD (2026-08-08)
 
 This section exists because a PR body cannot be its own authorization source.
-Until this record landed on `main`, the only trace of the ruling below was a
-working-session transcript, which is not auditable after the fact. **Merging
-this document is the durable anchor**; if any line below misstates the ruling,
-it must not be merged.
-
-The owner's ruling, transcribed verbatim:
-
-> RATIFY 2967da018ceea41b91098e14d4c15a57236eb5f8;OD-W6-0=采纳;OD-W6-1..9 全 (a)。
-> 授权 W6-1 backend aggregate 开工(Draft/HOLD,fresh exact-head 门后停)。
+On 2026-08-08, after reviewing PR 4821 as the proposed durable record of the
+decision table and narrow scope below, the owner explicitly instructed
+`合入 #4821`. That merge instruction confirms the resolutions recorded here;
+it does not manufacture an earlier verbatim quote or make the authorization
+retroactive. **The merge of this document is the durable anchor**; if any line
+below misstates the confirmed resolutions, it must not be merged.
 
 Resolved decisions:
 
