@@ -12,6 +12,7 @@ import {
   realDbStepWholeFileArgs,
   stepHasEnvDatabaseUrl,
   stepInvokesVitestIntegrationConfig,
+  vitestInvocations,
   wholeFileVitestArgs,
 } from './ci-realdb-step-contract.mjs'
 
@@ -151,6 +152,101 @@ function requireAttendanceRealDbStepExecutable() {
 
 test('plugin-tests.yml attendance real-DB step (id: attendance-real-db-integration) is executable', () => {
   assert.doesNotThrow(() => requireAttendanceRealDbStepExecutable())
+})
+
+// ---------------------------------------------------------------------------------------------
+// Issue 4828 hole 2 (owner-ruled): "wired" must also mean "not name-filtered to nothing".
+//
+// `wholeFileVitestArgs()` reports a file as a whole-file arg without inspecting the OTHER args on
+// the same command, and vitest's `-t` / `--testNamePattern` filter is silent and exit-0 when it
+// matches nothing:
+//     vitest --config vitest.integration.config.ts <file> -t 'no-such-test-name-zz'
+//     → exits 0, "Test Files 1 skipped (1)"
+// So a suite can satisfy BOTH wiring points, be carried by an executable real-DB step, and still
+// execute ZERO assertions while every corpus leg above stays green — the same skip-green shape
+// this guard exists to eliminate, one level further in.
+//
+// SCOPE (owner ruling): the root fix belongs in `wholeFileVitestArgs` itself, but that helper is
+// shared by all 17 `*-ci-wiring.test.mjs` guards and changing it there would blast-radius into 16
+// other lanes. It is tracked separately as repo-level issue 4829. What lands HERE is the
+// attendance-scoped assertion only.
+//
+// Derived MECHANICALLY, never by eyeballing the raw YAML: `vitestInvocations()` already resolves
+// the real binary, strips bash comments (both directions), joins `\` continuations and splits on
+// `;`/`&&`/`||`/`|`/`&`, so a COMMENTED-OUT `-t` never reaches the token list (correctly ignored)
+// and a REORDERED one is caught wherever it sits (position-independent). A substring scan of the
+// YAML text would get both cases wrong.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Every test-name-filter argument on the attendance step's vitest commands that run under
+ * `vitest.integration.config.ts` — i.e. exactly the invocations whose whole-file args are what
+ * `wholeFileVitestArgs()` reports as "wired". Both the separate-value form (`-t 'x'`,
+ * `--testNamePattern 'x'`) and the inline form (`-t=x`, `--testNamePattern=x`) are matched, on the
+ * TOKEN, so a path argument or another flag's value can never be mistaken for one.
+ */
+function testNameFilterArgsOnAttendanceRealDbStep() {
+  const step = requireAttendanceRealDbStepExecutable()
+  const hits = []
+  for (const inv of vitestInvocations(step)) {
+    if (!inv.usesIntegrationConfig) continue
+    for (const arg of inv.args) {
+      if (arg === '-t' || arg === '--testNamePattern') hits.push(arg)
+      else if (/^(?:-t|--testNamePattern)=/.test(arg)) hits.push(arg)
+    }
+  }
+  return hits
+}
+
+test(`attendance real-DB step (id: ${STEP_ID}) carries NO -t/--testNamePattern filter (issue 4828 hole 2; shared-helper root fix tracked as issue 4829)`, () => {
+  assert.deepEqual(
+    testNameFilterArgsOnAttendanceRealDbStep(),
+    [],
+    `the attendance real-DB step's vitest command must not carry -t / --testNamePattern: the flag `
+      + `is silent and exit-0 when it matches nothing (\`-t 'no-such-test-name-zz'\` → "Test Files `
+      + `1 skipped (1)", exit 0), so every suite in the run-list would still be reported as a `
+      + `whole-file arg by wholeFileVitestArgs() — fully "wired" by all three corpora above — `
+      + `while executing ZERO assertions`,
+  )
+})
+
+// Negative control on the detector itself: an "assert absent" leg is worthless without proof it
+// can see the thing it claims is absent (a typo'd flag name or a scan over the wrong invocation
+// set would pass vacuously forever). Drive the same predicate over synthetic steps.
+test('issue 4828 hole 2 detector positive control: it actually detects -t/--testNamePattern in every form, and only there', () => {
+  const detect = (runScript) => {
+    const step = { run: runScript }
+    const hits = []
+    for (const inv of vitestInvocations(step)) {
+      if (!inv.usesIntegrationConfig) continue
+      for (const arg of inv.args) {
+        if (arg === '-t' || arg === '--testNamePattern') hits.push(arg)
+        else if (/^(?:-t|--testNamePattern)=/.test(arg)) hits.push(arg)
+      }
+    }
+    return hits
+  }
+  const BASE = 'pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts tests/integration/attendance-x.db.test.ts'
+  // Clean command: no hit.
+  assert.deepEqual(detect(BASE), [])
+  // Every filter spelling is caught...
+  assert.deepEqual(detect(`${BASE} -t 'zzz'`), ['-t'])
+  assert.deepEqual(detect(`${BASE} --testNamePattern 'zzz'`), ['--testNamePattern'])
+  assert.deepEqual(detect(`${BASE} -t=zzz`), ['-t=zzz'])
+  assert.deepEqual(detect(`${BASE} --testNamePattern=zzz`), ['--testNamePattern=zzz'])
+  // ...wherever it sits in the argument order (position-independent).
+  assert.deepEqual(
+    detect('pnpm exec vitest run -t zzz --config vitest.integration.config.ts tests/integration/attendance-x.db.test.ts'),
+    ['-t'],
+  )
+  // A COMMENTED-OUT flag is correctly NOT a hit (this is why the check is token-derived, not a
+  // substring scan of the YAML — the string "-t " appears in the text either way).
+  assert.deepEqual(detect(`# ${BASE} -t 'zzz'\n${BASE}`), [])
+  // A filter on a command that does NOT run under the integration config cannot make the
+  // attendance suites vacuous, and is not reported.
+  assert.deepEqual(detect(`pnpm exec vitest run --config vitest.config.ts tests/x.test.ts -t 'zzz'\n${BASE}`), [])
+  // Look-alike tokens must not be mistaken for the flag.
+  assert.deepEqual(detect(`${BASE} --reporter=verbose --testTimeout=60000`), [])
 })
 
 // ---------------------------------------------------------------------------------------------
