@@ -43,10 +43,17 @@ describe('attendance-admin.ts plugin-attendance require — dist-layout boot (#4
       const tsc = path.join(coreBackendRoot, 'node_modules/.bin/tsc')
       const tsconfigPath = path.join(coreBackendRoot, 'tsconfig.json')
       const realPluginsDir = path.join(repoRoot, 'plugins/plugin-attendance')
+      const realNodeModulesDir = path.join(coreBackendRoot, 'node_modules')
 
       expect(fs.existsSync(tsc)).toBe(true)
       expect(fs.existsSync(tsconfigPath)).toBe(true)
       expect(fs.existsSync(realPluginsDir)).toBe(true)
+      // A dangling node_modules symlink below would surface as the probe's
+      // require() throwing MODULE_NOT_FOUND for an unrelated package (e.g.
+      // `express`/`pg`) -- indistinguishable, in the final assertions, from
+      // the #4814 P1 bug this test targets. Fail loudly and specifically
+      // here instead.
+      expect(fs.existsSync(realNodeModulesDir)).toBe(true)
 
       const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'w6-dist-layout-boot-'))
       try {
@@ -68,20 +75,28 @@ describe('attendance-admin.ts plugin-attendance require — dist-layout boot (#4
 
         // Real build: the exact `tsc` binary + `tsconfig.json` this package
         // ships, not a hand-simulated layout — emitted straight into the
-        // probe's `dist/`.
-        execFileSync(tsc, ['-p', tsconfigPath, '--outDir', probeDist], {
-          cwd: coreBackendRoot,
-          stdio: 'pipe',
-          timeout: 120_000,
-        })
+        // probe's `dist/`. `tsconfig.json` sets `noEmitOnError: false`, so
+        // `tsc` still emits (and this build should still be treated as
+        // successful for THIS test's purpose) even if it exits non-zero
+        // because of an unrelated type error anywhere else in
+        // `core-backend` -- this test is a boot-resolution gate, not a
+        // second `type-check` job, and must not fail opaquely on a type
+        // error somewhere else in the package. Only a missing emit (the
+        // thing `noEmitOnError` cannot save) is this test's failure.
+        let tscStderr = ''
+        try {
+          execFileSync(tsc, ['-p', tsconfigPath, '--outDir', probeDist], {
+            cwd: coreBackendRoot,
+            stdio: 'pipe',
+            timeout: 120_000,
+          })
+        } catch (e) {
+          tscStderr = String((e as { stderr?: Buffer | string })?.stderr ?? e)
+        }
         const routerPath = path.join(probeDist, 'src/routes/attendance-admin.js')
-        expect(fs.existsSync(routerPath)).toBe(true)
+        expect(fs.existsSync(routerPath), `tsc did not emit ${routerPath}. tsc output:\n${tscStderr}`).toBe(true)
 
-        fs.symlinkSync(
-          path.join(coreBackendRoot, 'node_modules'),
-          path.join(probeApp, 'packages/core-backend/node_modules'),
-          'dir',
-        )
+        fs.symlinkSync(realNodeModulesDir, path.join(probeApp, 'packages/core-backend/node_modules'), 'dir')
         fs.mkdirSync(path.join(probeApp, 'plugins'), { recursive: true })
         fs.symlinkSync(realPluginsDir, path.join(probeApp, 'plugins/plugin-attendance'), 'dir')
 
@@ -114,9 +129,12 @@ describe('attendance-admin.ts plugin-attendance require — dist-layout boot (#4
         })
         fs.rmSync(probeScriptPath, { force: true })
 
-        expect(stdout).not.toContain('MODULE_NOT_FOUND')
+        // Positive assertions FIRST: on failure, the reported message names
+        // the real cause (what stdout actually was) rather than leading
+        // with a `not.toContain` pass/fail that gives no diagnostic detail.
         expect(stdout).toContain('PROBE_RESULT: RESOLVED_OK')
         expect(stdout).toContain('attendanceAdminRouter')
+        expect(stdout).not.toContain('MODULE_NOT_FOUND')
       } finally {
         fs.rmSync(tmpRoot, { recursive: true, force: true })
       }
