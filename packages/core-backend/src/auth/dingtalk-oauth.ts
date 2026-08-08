@@ -74,13 +74,15 @@ interface LocalUserRow {
   activation_status?: string | null
 }
 
-export type DingTalkOAuthIntent = 'login' | 'bind'
+export type DingTalkOAuthIntent = 'login' | 'bind' | 'activate'
 
 interface StateRecord {
   expiresAt: number
   redirectPath?: string
   intent?: DingTalkOAuthIntent
   bindUserId?: string
+  activateUserId?: string
+  activateAdminUserId?: string
 }
 
 export interface StateValidationResult {
@@ -89,6 +91,8 @@ export interface StateValidationResult {
   redirectPath?: string
   intent?: DingTalkOAuthIntent
   bindUserId?: string
+  activateUserId?: string
+  activateAdminUserId?: string
 }
 
 export type DingTalkRuntimeUnavailableReason =
@@ -371,7 +375,7 @@ async function validateStateFromRedis(state: string): Promise<StateValidationRes
       parsed = null
     }
 
-    if (!parsed || typeof parsed.expiresAt !== 'number') {
+    if (!parsed || typeof parsed.expiresAt !== 'number' || !isValidStateRecord(parsed)) {
       return { valid: false, error: 'Invalid or unknown state parameter' }
     }
 
@@ -384,6 +388,8 @@ async function validateStateFromRedis(state: string): Promise<StateValidationRes
       redirectPath: parsed.redirectPath,
       intent: parsed.intent,
       bindUserId: parsed.bindUserId,
+      activateUserId: parsed.activateUserId,
+      activateAdminUserId: parsed.activateAdminUserId,
     }
   } catch (error) {
     logRedisFallback('Redis state validation failed', error)
@@ -406,6 +412,10 @@ function validateStateFromMemory(state: string): StateValidationResult {
   if (!record) return { valid: false, error: 'Invalid or unknown state parameter' }
   pendingStates.delete(state)
 
+  if (!isValidStateRecord(record)) {
+    return { valid: false, error: 'Invalid or unknown state parameter' }
+  }
+
   if (Date.now() > record.expiresAt) {
     return { valid: false, error: 'State parameter has expired' }
   }
@@ -415,7 +425,35 @@ function validateStateFromMemory(state: string): StateValidationResult {
     redirectPath: record.redirectPath,
     intent: record.intent,
     bindUserId: record.bindUserId,
+    activateUserId: record.activateUserId,
+    activateAdminUserId: record.activateAdminUserId,
   }
+}
+
+function isNonEmptyStateId(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function isValidStateRecord(record: StateRecord): boolean {
+  const intent = record.intent
+  if (intent === undefined || intent === 'login') {
+    return !record.bindUserId && !record.activateUserId && !record.activateAdminUserId
+  }
+  if (intent === 'bind') {
+    return (
+      isNonEmptyStateId(record.bindUserId)
+      && !record.activateUserId
+      && !record.activateAdminUserId
+    )
+  }
+  if (intent === 'activate') {
+    return (
+      !record.bindUserId
+      && isNonEmptyStateId(record.activateUserId)
+      && isNonEmptyStateId(record.activateAdminUserId)
+    )
+  }
+  return false
 }
 
 async function readGrantEnabled(localUserId: string): Promise<boolean | null> {
@@ -969,12 +1007,31 @@ export async function generateState(options: {
   redirectPath?: string | null
   intent?: DingTalkOAuthIntent | null
   bindUserId?: string | null
+  activateUserId?: string | null
+  activateAdminUserId?: string | null
 } = {}): Promise<string> {
   const state = crypto.randomUUID()
-  const normalizedIntent = options.intent === 'bind' ? 'bind' : null
+  const normalizedIntent = options.intent === 'bind' || options.intent === 'activate'
+    ? options.intent
+    : null
   const normalizedBindUserId = typeof options.bindUserId === 'string' && options.bindUserId.trim().length > 0
     ? options.bindUserId.trim()
     : null
+  const normalizedActivateUserId = typeof options.activateUserId === 'string' && options.activateUserId.trim().length > 0
+    ? options.activateUserId.trim()
+    : null
+  const normalizedActivateAdminUserId = typeof options.activateAdminUserId === 'string' && options.activateAdminUserId.trim().length > 0
+    ? options.activateAdminUserId.trim()
+    : null
+  if (normalizedIntent === 'bind' && !normalizedBindUserId) {
+    throw new Error('DingTalk bind state requires a user')
+  }
+  if (
+    normalizedIntent === 'activate'
+    && (!normalizedActivateUserId || !normalizedActivateAdminUserId)
+  ) {
+    throw new Error('DingTalk activation state requires target and administrator')
+  }
   const record: StateRecord = {
     expiresAt: Date.now() + STATE_TTL_MS,
     ...(typeof options.redirectPath === 'string' && options.redirectPath.trim().length > 0
@@ -982,6 +1039,12 @@ export async function generateState(options: {
       : {}),
     ...(normalizedIntent ? { intent: normalizedIntent } : {}),
     ...(normalizedIntent === 'bind' && normalizedBindUserId ? { bindUserId: normalizedBindUserId } : {}),
+    ...(normalizedIntent === 'activate' && normalizedActivateUserId
+      ? { activateUserId: normalizedActivateUserId }
+      : {}),
+    ...(normalizedIntent === 'activate' && normalizedActivateAdminUserId
+      ? { activateAdminUserId: normalizedActivateAdminUserId }
+      : {}),
   }
 
   const storedInRedis = await writeStateToRedis(state, record)

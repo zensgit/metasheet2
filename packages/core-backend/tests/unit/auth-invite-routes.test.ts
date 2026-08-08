@@ -40,6 +40,8 @@ vi.mock('../../src/auth/invite-tokens', () => ({
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
   transaction: pgMocks.transaction,
+  // #4662's OAuth activation intent imports pool from db/pg; this suite never touches it.
+  pool: { query: pgMocks.query },
 }))
 
 vi.mock('bcryptjs', () => bcryptMocks)

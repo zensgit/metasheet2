@@ -31,6 +31,7 @@ import {
 } from '../auth/invite-accept-writes'
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
+import { activatePendingUser } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
 import { FEATURE_FLAGS } from '../config/flags'
@@ -41,7 +42,8 @@ import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { query } from '../db/pg'
 import { parseUserActivationStatus } from '../auth/user-activation'
-import { listUserPermissions } from '../rbac/service'
+import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { auditLog } from '../audit/audit'
 import { secretManager } from '../security/SecretManager'
 import { isPlmEnabled, resolveEffectiveProductMode } from '../config/product-mode'
 import { getBcryptSaltRounds, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
@@ -451,6 +453,162 @@ async function loadAuthPermissions(userId: string): Promise<string[]> {
     logger.warn('Failed to load legacy permissions for auth user', error instanceof Error ? error : undefined)
     return []
   }
+}
+
+async function isActivePlatformAdmin(userId: string): Promise<boolean> {
+  const result = await query<{
+    is_active: boolean
+    activation_status: string | null
+  }>(
+    `SELECT is_active, activation_status
+       FROM users
+      WHERE id = $1
+      LIMIT 1`,
+    [userId],
+  )
+  const row = result.rows[0]
+  const activationStatus = parseUserActivationStatus(row?.activation_status)
+  return Boolean(
+    row?.is_active === true
+    && activationStatus.ok
+    && activationStatus.status === 'activated'
+    && await isRbacAdmin(userId),
+  )
+}
+
+class DingTalkActivationIntentError extends Error {
+  readonly statusCode: number
+  readonly code: string
+
+  constructor(statusCode: number, code: string, message: string) {
+    super(message)
+    this.name = 'DingTalkActivationIntentError'
+    this.statusCode = statusCode
+    this.code = code
+  }
+}
+
+type DingTalkActivationSource = {
+  directoryAccountId: string
+}
+
+async function resolveDingTalkActivationSource(input: {
+  corpId: string
+  openId?: string
+  unionId?: string
+}): Promise<DingTalkActivationSource> {
+  const corpId = input.corpId.trim()
+  const openId = String(input.openId || '').trim()
+  const unionId = String(input.unionId || '').trim()
+  if (!corpId || (!openId && !unionId)) {
+    throw new DingTalkActivationIntentError(
+      409,
+      'activate_source_ineligible',
+      'DingTalk activation source is not eligible',
+    )
+  }
+
+  const result = await query<{
+    directory_account_id: string
+  }>(
+    `SELECT account.id AS directory_account_id
+       FROM directory_accounts account
+       JOIN directory_integrations integration
+         ON integration.id = account.integration_id
+      WHERE account.provider = 'dingtalk'
+        AND integration.provider = 'dingtalk'
+        AND account.is_active = TRUE
+        AND integration.status = 'active'
+        AND account.corp_id = $1
+        AND integration.corp_id = $1
+        AND ($2 = '' OR account.open_id = $2)
+        AND ($3 = '' OR account.union_id = $3)
+      ORDER BY account.id
+      LIMIT 2`,
+    [corpId, openId, unionId],
+  )
+  if (result.rows.length !== 1) {
+    throw new DingTalkActivationIntentError(
+      409,
+      'activate_source_ineligible',
+      'DingTalk activation source is not eligible',
+    )
+  }
+  return {
+    directoryAccountId: result.rows[0].directory_account_id,
+  }
+}
+
+async function loadActivatedAuthUser(userId: string): Promise<User> {
+  const result = await query<{
+    id: string
+    email: string | null
+    name: string | null
+    role: string | null
+    is_active: boolean
+    activation_status: string | null
+  }>(
+    `SELECT id, email, name, role, is_active, activation_status
+       FROM users
+      WHERE id = $1
+      LIMIT 1`,
+    [userId],
+  )
+  const row = result.rows[0]
+  const activationStatus = parseUserActivationStatus(row?.activation_status)
+  if (
+    !row
+    || row.is_active !== true
+    || !activationStatus.ok
+    || activationStatus.status !== 'activated'
+  ) {
+    throw new DingTalkActivationIntentError(
+      409,
+      'activate_commit_incomplete',
+      'DingTalk activation did not complete',
+    )
+  }
+  return {
+    id: row.id,
+    email: row.email ?? '',
+    name: row.name ?? row.email ?? row.id,
+    role: row.role ?? 'user',
+    permissions: await loadAuthPermissions(row.id),
+    created_at: new Date(),
+    updated_at: new Date(),
+  }
+}
+
+function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentError {
+  if (error instanceof DingTalkActivationIntentError) return error
+  const code = error instanceof Error
+    ? String((error as Error & { code?: unknown }).code || '')
+    : ''
+  if (code === 'ACTIVATE_USER_NOT_FOUND') {
+    return new DingTalkActivationIntentError(404, 'activate_target_not_found', 'Activation target was not found')
+  }
+  if (
+    code === 'ACTIVATE_NOT_PENDING'
+    || code === 'ACTIVATE_RACE'
+    || code === 'ACTIVATE_SOURCE_MISSING'
+    || code === 'ACTIVATE_SOURCE_INACTIVE'
+    || code === 'ACTIVATE_INTEGRATION_INACTIVE'
+    || code === 'ACTIVATE_LINK_MISMATCH'
+    || code === 'ACTIVATE_SOURCE_INELIGIBLE'
+    || code === 'ACTIVATE_ALIAS_CONFLICT'
+    || code === 'ACTIVATE_ALIAS_REQUIRED'
+  ) {
+    return new DingTalkActivationIntentError(
+      409,
+      'activate_source_ineligible',
+      'DingTalk activation source is not eligible',
+    )
+  }
+  return new DingTalkActivationIntentError(
+    500,
+    'activate_failed',
+    'DingTalk activation failed',
+  )
 }
 
 async function issueAuthSessionToken(user: User, req: Request): Promise<string> {
@@ -1212,19 +1370,76 @@ authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
     }
 
     const rawIntent = typeof req.query.intent === 'string' ? req.query.intent.trim().toLowerCase() : ''
-    const mode: 'bind' | 'login' = rawIntent === 'bind' ? 'bind' : 'login'
+    if (rawIntent && rawIntent !== 'login' && rawIntent !== 'bind' && rawIntent !== 'activate') {
+      return res.status(400).json({
+        success: false,
+        error: 'Unsupported DingTalk OAuth intent',
+        code: 'invalid_dingtalk_intent',
+      })
+    }
+    const mode: 'bind' | 'activate' | 'login' = rawIntent === 'bind'
+      ? 'bind'
+      : rawIntent === 'activate'
+        ? 'activate'
+        : 'login'
     const redirectPath = normalizeDingTalkRedirectPath(req.query.redirect)
 
     let bindUserId: string | null = null
+    let activateUserId: string | null = null
+    let activateAdminUserId: string | null = null
     if (mode === 'bind') {
       const authResult = await requireAuthenticatedUser(req, res)
       if (!authResult) return
       bindUserId = authResult.user.id
+    } else if (mode === 'activate') {
+      const authResult = await requireAuthenticatedUser(req, res)
+      if (!authResult) return
+      if (!await isRbacAdmin(authResult.user.id)) {
+        return res.status(403).json({
+          success: false,
+          error: 'Platform administrator permission is required',
+          code: 'activate_admin_required',
+        })
+      }
+      activateUserId = typeof req.query.targetUserId === 'string'
+        ? req.query.targetUserId.trim()
+        : ''
+      if (!activateUserId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required parameter: targetUserId',
+          code: 'activate_target_required',
+        })
+      }
+      const target = await query<{ id: string }>(
+        `SELECT id
+           FROM users
+          WHERE id = $1
+            AND activation_status = 'pending_activation'
+            AND is_active = FALSE
+          LIMIT 1`,
+        [activateUserId],
+      )
+      if (!target.rows[0]) {
+        return res.status(409).json({
+          success: false,
+          error: 'Activation target is not pending',
+          code: 'activate_target_not_pending',
+        })
+      }
+      activateAdminUserId = authResult.user.id
     }
 
     const state = await generateState(
       mode === 'bind'
         ? { redirectPath, intent: 'bind', bindUserId }
+        : mode === 'activate'
+          ? {
+              redirectPath,
+              intent: 'activate',
+              activateUserId,
+              activateAdminUserId,
+            }
         : { redirectPath },
     )
     const url = buildAuthUrl(state)
@@ -1241,7 +1456,7 @@ authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
     logger.error('DingTalk launch error', error instanceof Error ? error : undefined)
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to build DingTalk auth URL',
+      error: 'Failed to build DingTalk auth URL',
     })
   }
 })
@@ -1320,6 +1535,82 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       })
     }
 
+    if (stateCheck.intent === 'activate') {
+      const activateUserId = String(stateCheck.activateUserId || '').trim()
+      const activateAdminUserId = String(stateCheck.activateAdminUserId || '').trim()
+      if (!activateUserId || !activateAdminUserId) {
+        throw new DingTalkActivationIntentError(
+          400,
+          'activate_state_invalid',
+          'DingTalk activation state is invalid',
+        )
+      }
+      if (!await isActivePlatformAdmin(activateAdminUserId)) {
+        throw new DingTalkActivationIntentError(
+          403,
+          'activate_admin_required',
+          'Platform administrator permission is required',
+        )
+      }
+
+      const profile = await exchangeCodeForDingTalkProfile(code)
+      const runtimeStatus = getDingTalkRuntimeStatus()
+      const corpId = String(runtimeStatus.corpId || '').trim()
+      const source = await resolveDingTalkActivationSource({
+        corpId,
+        openId: profile.openId,
+        unionId: profile.unionId,
+      })
+
+      try {
+        await activatePendingUser({
+          userId: activateUserId,
+          mode: 'sso',
+          adminUserId: activateAdminUserId,
+          directoryAccountId: source.directoryAccountId,
+          enableDingTalkGrant: true,
+          expectedDingTalkIdentity: {
+            corpId,
+            openId: profile.openId,
+            unionId: profile.unionId,
+          },
+        })
+      } catch (error) {
+        throw mapDingTalkActivationFailure(error)
+      }
+
+      const user = await loadActivatedAuthUser(activateUserId)
+      const token = await issueAuthSessionToken(user, req)
+      await auditLog({
+        actorId: activateAdminUserId,
+        actorType: 'user',
+        action: 'directory.user.activate_sso',
+        resourceType: 'user',
+        resourceId: activateUserId,
+        meta: {
+          mode: 'sso',
+          source: 'dingtalk_oauth',
+        },
+      })
+
+      return res.json({
+        success: true,
+        data: {
+          mode: 'activate',
+          user: {
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            role: user.role,
+            permissions: user.permissions,
+          },
+          token,
+          redirectPath: stateCheck.redirectPath || null,
+          features: buildFeaturePayload(user),
+        },
+      })
+    }
+
     const result = await exchangeCodeForUser(code)
     const permissions = await loadAuthPermissions(result.localUserId)
     const user: User = {
@@ -1353,12 +1644,16 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
     })
   } catch (error) {
     logger.error('DingTalk callback error', error instanceof Error ? error : undefined)
-    const statusCode = error instanceof DingTalkLoginPolicyError
+    const statusCode = error instanceof DingTalkActivationIntentError
+      ? error.statusCode
+      : error instanceof DingTalkLoginPolicyError
       ? error.statusCode
       : error instanceof DingTalkRequestError
         ? 502
         : 500
-    const message = error instanceof DingTalkLoginPolicyError
+    const message = error instanceof DingTalkActivationIntentError
+      ? error.message
+      : error instanceof DingTalkLoginPolicyError
       ? error.message
       : error instanceof DingTalkRequestError
         ? error.message
@@ -1367,6 +1662,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
     return res.status(statusCode).json({
       success: false,
       error: message,
+      ...(error instanceof DingTalkActivationIntentError ? { code: error.code } : {}),
     })
   }
 })

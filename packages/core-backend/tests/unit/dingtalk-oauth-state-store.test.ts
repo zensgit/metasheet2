@@ -241,6 +241,56 @@ describe('DingTalk OAuth state store', () => {
     })
   })
 
+  it('round-trips an activate intent once with both target and administrator bound', async () => {
+    vi.stubEnv('REDIS_URL', 'redis://localhost:6379')
+
+    const state = await generateState({
+      redirectPath: '/admin/users',
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+
+    await expect(validateState(state)).resolves.toEqual({
+      valid: true,
+      redirectPath: '/admin/users',
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+    await expect(validateState(state)).resolves.toEqual({
+      valid: false,
+      error: 'Invalid or unknown state parameter',
+    })
+  })
+
+  it('rejects incomplete activate state generation', async () => {
+    await expect(generateState({
+      intent: 'activate',
+      activateUserId: 'pending-user',
+    })).rejects.toThrow('requires target and administrator')
+  })
+
+  it('fails closed on a persisted unknown intent', async () => {
+    vi.stubEnv('REDIS_URL', 'redis://localhost:6379')
+    const state = await generateState()
+    const key = `metasheet:auth:dingtalk:state:${state}`
+    const stored = redisMockState.kv.get(key)
+    expect(stored).toBeDefined()
+    redisMockState.kv.set(key, {
+      value: JSON.stringify({
+        expiresAt: Date.now() + 60_000,
+        intent: 'future-unsafe-intent',
+      }),
+      expiresAt: stored?.expiresAt ?? null,
+    })
+
+    await expect(validateState(state)).resolves.toEqual({
+      valid: false,
+      error: 'Invalid or unknown state parameter',
+    })
+  })
+
   it('returns expired when a Redis-backed state exceeds its logical TTL', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-03-31T00:00:00.000Z'))
@@ -424,25 +474,12 @@ describe('DingTalk OAuth state store', () => {
       unionId: 'union-id-1',
       nick: 'Ding User',
     })
-    vi.mocked(query)
-      .mockResolvedValueOnce({ rows: [] } as any)
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'user-new',
-          email: 'dingtalk_open-id-1@placeholder.local',
-          name: 'Ding User',
-          role: 'user',
-          is_active: true,
-          activation_status: 'activated',
-        }],
-      } as any)
-      .mockResolvedValueOnce({ rows: [] } as any)
+    vi.mocked(query).mockResolvedValueOnce({ rows: [] } as any)
 
-    const txCalls: Array<[string, unknown[]]> = []
+    let insertedUserParams: unknown[] | null = null
     vi.mocked(transaction).mockImplementation(async (callback: (client: { query: typeof query }) => Promise<unknown>) => {
       const aliasOwners = new Map<string, string>()
       const clientQuery = vi.fn(async (sql: string, params: unknown[] = []) => {
-        txCalls.push([String(sql), params])
         const statement = String(sql)
         if (/INSERT INTO user_login_aliases/i.test(statement)) {
           aliasOwners.set(String(params[2] ?? ''), String(params[0] ?? ''))
@@ -451,6 +488,19 @@ describe('DingTalk OAuth state store', () => {
         if (/SELECT user_id FROM user_login_aliases/i.test(statement)) {
           const ownerId = aliasOwners.get(String(params[0] ?? ''))
           return { rows: ownerId ? [{ user_id: ownerId }] : [] }
+        }
+        if (/INSERT INTO users/i.test(statement)) {
+          insertedUserParams = params
+          return {
+            rows: [{
+              id: 'user-new',
+              email: 'dingtalk_open-id-1@placeholder.local',
+              name: 'Ding User',
+              role: 'user',
+              is_active: true,
+              activation_status: 'activated',
+            }],
+          }
         }
         if (/FROM users[\s\S]*FOR UPDATE/i.test(statement)) {
           return {
@@ -495,11 +545,6 @@ describe('DingTalk OAuth state store', () => {
     const result = await exchangeCodeForUser('auth-code')
 
     expect(result.localUserId).toBe('user-new')
-    // #4658 moved provisioning INSERTs into the alias-claiming transaction: the password-hash
-    // witness now lives on the transaction client, not the top-level query sequence.
-    const usersInsert = txCalls.find(([sql]) => /INSERT INTO users/i.test(sql) && sql.includes('password_hash'))
-    expect(usersInsert).toBeDefined()
-    const hashParam = (usersInsert?.[1] ?? []).find((p) => typeof p === 'string' && /^\$2[aby]\$/.test(p))
-    expect(hashParam).toBeDefined()
+    expect(insertedUserParams?.[4]).toMatch(/^\$2[aby]\$/)
   })
 })
