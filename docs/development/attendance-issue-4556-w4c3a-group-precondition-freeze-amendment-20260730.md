@@ -1,8 +1,28 @@
 # Attendance issue #4556 W4C-3a group-precondition freeze amendment
 
-Status: **PROPOSED - owner RATIFY required**
+Status: **RATIFIED** (W4C-3a remediation and a fresh exact-head gate only)
 
 Date: 2026-07-30
+
+Ratified: 2026-07-31, merged SHA
+`1326f2d9f8b8b5149b837673d3b6ec8949e53b76` — the commit that landed this
+document on `main` (PR 4685) — with `OD-W4C-58=(a)`. Durable owner record
+(relayed from the owner's explicit instruction): PR 4685 comment `5137577915`,
+<https://github.com/zensgit/metasheet2/pull/4685#issuecomment-5137577915>.
+
+Scope of what the ratification authorizes: exactly what this amendment states
+— W4C-3a remediation and a fresh exact-head independent gate, and nothing
+downstream. It does **not** authorize the W4C-3a code PR merge or caller
+cutover, W4C-3b or later slices, staging or soak, flag changes, deployment,
+production/customer data, or issue closure.
+
+**Status reconciliation note (2026-08-09):** this header previously read
+`PROPOSED - owner RATIFY required`. That was in-repo status drift, not a
+pending decision — the owner record cited above predates this correction and is
+unchanged by it. This edit transcribes that existing record and confers no new
+authority; the linked owner comment is the authority, not this document and not
+the pull request carrying this edit. If any line here misstates that record, it
+must not merge.
 
 Authority proposed against:
 
