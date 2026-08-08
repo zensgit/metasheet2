@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { query, transaction } from '../../src/db/pg'
+import { previewDeprovisionForUser } from '../../src/directory/deprovision-evidence-api'
 import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovision-ledger'
 import { applyDirectoryDeprovisionPolicies } from '../../src/directory/directory-sync'
 
@@ -158,10 +159,69 @@ async function seedActiveSibling(
   return { integrationId, orgId }
 }
 
+async function seedSameOrgActiveSibling(
+  seeded: SeededDirectory,
+): Promise<{ accountId: string; integrationId: string }> {
+  const integration = await query<{ id: string }>(
+    `INSERT INTO directory_integrations (
+       name, corp_id, org_id, provider, status
+     ) VALUES ($1, $2, $3, 'dingtalk', 'active')
+     RETURNING id::text AS id`,
+    [
+      `${PREFIX}-same-org-integration-${randomUUID()}`,
+      `${PREFIX}-same-org-corp-${randomUUID()}`,
+      seeded.orgId,
+    ],
+  )
+  const integrationId = integration.rows[0].id
+  const account = await query<{ id: string }>(
+    `INSERT INTO directory_accounts (
+       integration_id, provider, external_user_id, external_key, name, is_active
+     ) VALUES ($1::uuid, 'dingtalk', $2, $3, 'D4 Same Org Sibling', TRUE)
+     RETURNING id::text AS id`,
+    [
+      integrationId,
+      `${PREFIX}-same-org-external-${randomUUID()}`,
+      `dingtalk:${PREFIX}:same-org:${randomUUID()}`,
+    ],
+  )
+  await query(
+    `INSERT INTO directory_account_links (
+       directory_account_id, local_user_id, link_status
+     ) VALUES ($1::uuid, $2, 'linked')`,
+    [account.rows[0].id, seeded.userId],
+  )
+  return { accountId: account.rows[0].id, integrationId }
+}
+
+async function readOnlyApplyPlan(seeded: SeededDirectory) {
+  return transaction(async (client) =>
+    applyDirectoryDeprovisionCandidate(
+      {
+        query: async (statement, params) => {
+          const result = await client.query(statement, params)
+          return { rows: result.rows as Array<Record<string, unknown>> }
+        },
+      },
+      {
+        localUserId: seeded.userId,
+        orgId: seeded.orgId,
+        integrationId: seeded.integrationId,
+        directoryAccountId: seeded.accountId,
+        runId: seeded.runId,
+        triggeredBy: 'test:d7-preview-parity',
+        policy: 'mark_inactive',
+        write: false,
+      },
+    ),
+  )
+}
+
 async function apply(
   seeded: SeededDirectory,
   options: {
     enabled?: boolean
+    integrationDefaultPolicy?: 'manual_review' | 'disable_grant_only' | 'mark_inactive'
     runId?: string
   } = {},
 ) {
@@ -179,7 +239,7 @@ async function apply(
         triggeredBy: 'test:d4-writer',
         deactivatedAccountIds: [seeded.accountId],
         syncedAccountCount: 1,
-        integrationDefaultPolicy: 'mark_inactive',
+        integrationDefaultPolicy: options.integrationDefaultPolicy ?? 'mark_inactive',
         enabled: options.enabled ?? true,
       },
     ),
@@ -553,6 +613,159 @@ describeIfDatabase(
         [seeded.userId],
       )
       expect(evidence.rows[0].count).toBe('0')
+    })
+
+    it('keeps preview and apply identical when a same-org sibling remains active', async () => {
+      const seeded = await seedDirectory({ grantEnabled: true })
+      await seedSameOrgActiveSibling(seeded)
+      await query(
+        `UPDATE directory_accounts SET is_active = TRUE WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+
+      const preview = await previewDeprovisionForUser(
+        seeded.userId,
+        seeded.integrationId,
+      )
+      const afterPreview = await query<{
+        access_generation: string
+        grant_enabled: boolean
+        membership_active: boolean
+        user_active: boolean
+        event_count: string
+      }>(
+        `SELECT u.access_generation::text,
+                u.is_active AS user_active,
+                m.is_active AS membership_active,
+                g.enabled AS grant_enabled,
+                (
+                  SELECT COUNT(*)::text
+                    FROM directory_deprovision_events event
+                   WHERE event.local_user_id = u.id
+                ) AS event_count
+           FROM users u
+           JOIN user_orgs m ON m.user_id = u.id AND m.org_id = $2
+           JOIN user_external_auth_grants g
+             ON g.local_user_id = u.id AND g.provider = 'dingtalk'
+          WHERE u.id = $1`,
+        [seeded.userId, seeded.orgId],
+      )
+      expect(afterPreview.rows[0]).toEqual({
+        access_generation: '7',
+        grant_enabled: true,
+        membership_active: true,
+        user_active: true,
+        event_count: '0',
+      })
+      await query(
+        `UPDATE directory_accounts SET is_active = FALSE WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+      const applyPlan = await readOnlyApplyPlan(seeded)
+
+      expect(preview.plan).toEqual(applyPlan.plan)
+      expect(preview.plan.effects).toEqual([])
+      expect(preview.prospectiveDeactivatedAccountIds).toEqual([
+        seeded.accountId,
+      ])
+    })
+
+    it('keeps preview and apply identical for a globally-clear prospective departure', async () => {
+      const seeded = await seedDirectory({ grantEnabled: true })
+      await query(
+        `UPDATE directory_accounts SET is_active = TRUE WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+
+      const preview = await previewDeprovisionForUser(
+        seeded.userId,
+        seeded.integrationId,
+      )
+      await query(
+        `UPDATE directory_accounts SET is_active = FALSE WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+      const applyPlan = await readOnlyApplyPlan(seeded)
+
+      expect(preview.plan).toEqual(applyPlan.plan)
+      expect(preview.plan.effects.map((effect) => effect.type).sort()).toEqual([
+        'grant_changed',
+        'membership_changed',
+        'user_changed',
+      ])
+    })
+
+    it('lets an account override replace a more conservative integration default in both preview and apply', async () => {
+      const seeded = await seedDirectory({
+        grantEnabled: true,
+        policy: 'manual_review',
+      })
+      await query(
+        `UPDATE directory_accounts
+            SET is_active = TRUE,
+                deprovision_policy_override = 'mark_inactive'
+          WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+
+      const preview = await previewDeprovisionForUser(
+        seeded.userId,
+        seeded.integrationId,
+      )
+      expect(preview.plan.skipReason).toBeNull()
+      expect(preview.plan.effects.map((effect) => effect.type).sort()).toEqual([
+        'grant_changed',
+        'membership_changed',
+        'user_changed',
+      ])
+
+      await query(
+        `UPDATE directory_accounts SET is_active = FALSE WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+      const outcome = await apply(seeded, {
+        integrationDefaultPolicy: 'manual_review',
+      })
+      expect(outcome.usersDeactivatedCount).toBe(1)
+      expect(outcome.grantsDisabledCount).toBe(1)
+      expect(outcome.membershipDeactivationAttemptedCount).toBe(1)
+
+      const event = await query<{ policy: string }>(
+        `SELECT policy
+           FROM directory_deprovision_events
+          WHERE local_user_id = $1`,
+        [seeded.userId],
+      )
+      expect(event.rows).toEqual([{ policy: 'mark_inactive' }])
+    })
+
+    it('keeps preview and apply identical when only a different-org sibling remains active', async () => {
+      const seeded = await seedDirectory({ grantEnabled: true })
+      await seedActiveSibling(seeded)
+      await query(
+        `UPDATE directory_accounts SET is_active = TRUE WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+
+      const preview = await previewDeprovisionForUser(
+        seeded.userId,
+        seeded.integrationId,
+      )
+      await query(
+        `UPDATE directory_accounts SET is_active = FALSE WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+      const applyPlan = await readOnlyApplyPlan(seeded)
+
+      expect(preview.plan).toEqual(applyPlan.plan)
+      expect(preview.plan.effects).toEqual([
+        {
+          type: 'membership_changed',
+          orgId: seeded.orgId,
+          beforeActive: true,
+          afterActive: false,
+        },
+      ])
     })
   },
 )

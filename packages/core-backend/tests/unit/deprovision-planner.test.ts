@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { planDirectoryDeprovision } from '../../src/directory/deprovision-planner'
+import {
+  planDirectoryDeprovision,
+  resolveDirectoryDeprovisionPolicy,
+  resolveLeastDestructiveDirectoryDeprovisionPolicy,
+  selectLeastDestructiveDirectoryDeprovisionPolicy,
+} from '../../src/directory/deprovision-planner'
 
 describe('planDirectoryDeprovision (D2 prospective)', () => {
   it('returns zero effects for pending_activation (no fake offboarding)', () => {
@@ -16,6 +21,27 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
     expect(plan.effects).toEqual([])
     expect(plan.skipReason).toBe('pending_activation_no_offboarding_effects')
   })
+
+  it.each([null, '', 'suspended'])(
+    'fails unknown activation status %j closed with zero effects',
+    (activationStatus) => {
+      const plan = planDirectoryDeprovision({
+        localUserId: 'u-unknown',
+        policy: 'mark_inactive',
+        activationStatus,
+        isActive: true,
+        orgId: 'org-1',
+        orgMembershipActive: true,
+        dingtalkGrantEnabled: true,
+        globallyClear: true,
+      })
+      expect(plan).toEqual({
+        localUserId: 'u-unknown',
+        skipReason: 'unknown_activation_status',
+        effects: [],
+      })
+    },
+  )
 
   it('plans one source-org membership + grant + user effect for globally-clear', () => {
     const plan = planDirectoryDeprovision({
@@ -104,5 +130,34 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       skipReason: 'manual_review',
       effects: [],
     })
+  })
+
+  it('fails unknown stored policies closed and selects the least-destructive override', () => {
+    expect(resolveDirectoryDeprovisionPolicy('unknown', null)).toBe(
+      'manual_review',
+    )
+    expect(
+      resolveLeastDestructiveDirectoryDeprovisionPolicy('mark_inactive', [
+        'disable_grant_only',
+        'manual_review',
+      ]),
+    ).toBe('manual_review')
+  })
+
+  it('treats the integration default as an account fallback, not a preview veto', () => {
+    expect(
+      resolveLeastDestructiveDirectoryDeprovisionPolicy('manual_review', [
+        'mark_inactive',
+      ]),
+    ).toBe('mark_inactive')
+    expect(
+      resolveLeastDestructiveDirectoryDeprovisionPolicy('disable_grant_only', []),
+    ).toBe('disable_grant_only')
+    expect(
+      selectLeastDestructiveDirectoryDeprovisionPolicy([
+        'mark_inactive',
+        'manual_review',
+      ]),
+    ).toBe('manual_review')
   })
 })

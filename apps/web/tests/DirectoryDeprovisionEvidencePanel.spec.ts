@@ -85,6 +85,7 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
       if (String(url).includes('/deprovision/preview/')) {
         return jsonResponse({
           flags: { enabled: false, maxBatch: 25, policyNote: 'n' },
+          prospectiveDeactivatedAccountIds: ['account-1', 'account-2'],
           user: { id: 'u1', activationStatus: 'activated', isActive: true, accessGeneration: 2 },
           plan: {
             skipReason: null,
@@ -114,6 +115,7 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
       && String(c[0]).includes('integrationId=int-1')
     ))).toBe(true)
     expect(root.querySelector('[data-testid="deprovision-preview-result"]')?.textContent).toMatch(/user_changed/)
+    expect(root.querySelector('[data-testid="deprovision-preview-scope"]')?.textContent).toMatch(/2 个/)
   })
 
   it('surfaces DRIFT_CONFLICT on restore failure', async () => {

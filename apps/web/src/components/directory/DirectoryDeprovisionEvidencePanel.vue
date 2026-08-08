@@ -70,6 +70,9 @@
       </div>
       <div v-if="preview" class="deprov-evidence__card" data-testid="deprovision-preview-result">
         <div>用户 {{ preview.user.id }} · activation={{ preview.user.activationStatus }} · is_active={{ preview.user.isActive }} · gen={{ preview.user.accessGeneration }}</div>
+        <div class="deprov-evidence__hint" data-testid="deprovision-preview-scope">
+          预演范围：当前集成下 {{ preview.prospectiveDeactivatedAccountIds.length }} 个 active linked account
+        </div>
         <div v-if="preview.plan.skipReason" class="deprov-evidence__hint">
           skipReason: {{ preview.plan.skipReason }}（零 effect）
         </div>
@@ -192,6 +195,7 @@ type PlannedEffect = {
 
 type PreviewPayload = {
   flags: DeprovisionFlags
+  prospectiveDeactivatedAccountIds: string[]
   user: {
     id: string
     activationStatus: string
