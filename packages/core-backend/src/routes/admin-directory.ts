@@ -1262,11 +1262,18 @@ export function adminDirectoryRouter(): Router {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
     try {
-      const data = await previewDeprovisionForUser(req.params.userId)
+      const integrationId = typeof req.query.integrationId === 'string'
+        ? req.query.integrationId.trim()
+        : ''
+      if (!integrationId) {
+        jsonError(res, 400, 'INTEGRATION_ID_REQUIRED', 'integrationId is required')
+        return
+      }
+      const data = await previewDeprovisionForUser(req.params.userId, integrationId)
       jsonOk(res, data)
     } catch (error) {
       const code = (error as { code?: string })?.code
-      if (code === 'USER_NOT_FOUND') {
+      if (code === 'USER_NOT_FOUND' || code === 'INTEGRATION_NOT_FOUND') {
         jsonError(res, 404, code, (error as Error).message)
         return
       }

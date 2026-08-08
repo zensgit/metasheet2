@@ -1,7 +1,7 @@
 # DingTalk Deprovision 恢复 + Preview/UI 证据链 — 实现级设计
 
 - Date: 2026-07-23
-- Status: **implementation design lock / Rev 4.2**
+- Status: **implementation design lock / Rev 4.3**
 - Locked: 2026-07-23（owner 批准两篇一并升 lock）
 - Scope: 打开 `DIRECTORY_DEPROVISION_ENABLED` 之前，把「权威 effect 账本 + prospective planner + 全写者 per-user 锁 + event 恢复（含 drift）」设计正确
 - Baseline: **`origin/main @ 1bcfc86b8`**；相对 `ca625f14a` 本线相关代码 **scoped diff = 0**（membership + globally-clear 事实基线仍成立）
@@ -43,6 +43,14 @@ Prospective planner、三 effect 意图、event 恢复、全写者锁意图、ma
 |---|------|------------|
 | **P1** | `event → directory_account_links` FK 卡死 unbind/rebind；partial unique 不能作 FK 目标 | §5.2：**删除** event→current-link FK；**保留** INSERT trigger 验当前 linked + 字段 immutability 固化历史；**不**采用 append-only link_versions（YAGNI，除非未来另票） |
 | **P2** | §3 写 supersede **或** generation++ | §3 与 §5.4 统一为 **generation++ AND supersede** |
+
+### 0.6 Rev 4.2 → Rev 4.3（D3 implementation erratum）
+
+| # | 问题 | Rev 4.3 锁定 |
+|---|------|--------------|
+| **P1** | `globally_clear` 被误读为「清全部组织 membership」，与主写者的 org/global 双候选语义及 `UNIQUE(event_id,effect_type)` 冲突 | 每 event 只记源 integration 所属 org 的一条 `membership_changed`；`globally_clear` 只门控 `grant_changed` / `user_changed` |
+
+**Ratification 记录（2026-08-07）**：owner 于会话「钉钉同步业务功能开发-260721」下达收尾指令（「请排序并完成所有这条线剩余的开发」），采纳的收尾意见以「显式批准 Rev 4.3 的来源组织单 membership effect 语义」为第 1 步 —— 本勘误据此落账执行。该勘误使锁文与已落 main 的主写者语义（W4-PRE-1d owner P2 裁决，#4530 review issuecomment-5043752399：org 候选与 global 候选分立，global 守卫只门控 grant/`users.is_active`）一致，并非新语义。终版随验证 MD 提请 owner 会签。
 
 产品方向见 companion — **已赞成**。  
 **Implementation design lock 已于 2026-07-23 批准。**  
@@ -156,7 +164,14 @@ Writer：`applyDirectoryDeprovisionPlan` 仅在 `enabled=true` 时写访问图 +
 - membership `org_id` 可空 → 无法锚定组织成员 effect。  
 - 恢复盲写 before 覆盖后续安全停用（drift/generation 必须严格）。
 
-### 5.2 表结构意图（Rev 4.2 — DB 权威；历史 witness 不绑 live link）
+### 5.2 表结构意图（Rev 4.3 — DB 权威；历史 witness 不绑 live link）
+
+**Rev 4.3 implementation erratum:** `globally_clear` 只表示该用户在任意目录中已无其他
+active linked account，因此允许同时关闭 DingTalk grant 与 `users.is_active`。当前 integration
+所属组织的 `user_orgs` membership 是独立的组织级 effect，不因用户在其他组织仍 active 而保留。
+因此一次 event 最多有一个 `membership_changed`（锚定 event 的 `org_id`），而不是为用户的全部
+组织各写一个 membership effect。此勘误使 schema 的 `UNIQUE (event_id, effect_type)`、effects
+trigger 与已落地主写者的 org/global 双候选语义一致。
 
 **Prerequisite unique keys**（迁移必须先有，否则复合 FK 无法建）：
 
@@ -244,7 +259,7 @@ directory_deprovision_event_effects (
 | 机制 | 要求 |
 |------|------|
 | **BEFORE INSERT ON events** | 在 **已持有对应 `users` 行锁的同一事务** 内校验：**当时** 存在 linked 行（`link_status='linked'` 且 account/user 匹配）；account ∈ integration；integration.org_id 匹配；sync 时 run 存在且同 integration。失败 → **拒绝 INSERT**。 |
-| **BEFORE INSERT ON effects** | `membership_changed` ⇒ `NEW.org_id = parent event.org_id`，否则拒绝。 |
+| **BEFORE INSERT ON effects** | `membership_changed` ⇒ `NEW.org_id = parent event.org_id`；grant/user effect 的 `org_id` 必须为 NULL；effect 的 user/generation 必须与 parent event 一致。 |
 | **Immutability** | events：INSERT 后禁止改身份字段（含 `directory_account_id`, `local_user_id`, `link_witness_*`, policy, globally_clear, generation, event_origin, run_id, org_id, integration_id, triggered_by）。仅允许 resolve 列。effects：INSERT 后禁止改 type/org/before_active/after_active/generation；仅 status/reversed_*。 |
 | **禁止** | event→**current** `directory_account_links` FK；partial unique 作 FK 目标；仅靠 witness=自身 CHECK 充当“当时已 linked”（CHECK 只防自相矛盾，**trigger 才验 live link**）。 |
 

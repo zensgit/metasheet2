@@ -7,7 +7,8 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       localUserId: 'u1',
       activationStatus: 'pending_activation',
       isActive: false,
-      activeOrgIds: ['org-1'],
+      orgId: 'org-1',
+      orgMembershipActive: false,
       dingtalkGrantEnabled: true,
       globallyClear: true,
     })
@@ -15,23 +16,42 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
     expect(plan.skipReason).toBe('pending_activation_no_offboarding_effects')
   })
 
-  it('plans org clear + grant + inactive for activated globally-clear', () => {
+  it('plans one source-org membership + grant + user effect for globally-clear', () => {
     const plan = planDirectoryDeprovision({
       localUserId: 'u2',
       activationStatus: 'activated',
       isActive: true,
-      activeOrgIds: ['org-a', 'org-b'],
+      orgId: 'org-a',
+      orgMembershipActive: true,
       dingtalkGrantEnabled: true,
       globallyClear: true,
     })
     expect(plan.skipReason).toBeNull()
-    expect(plan.effects.map((e) => e.type).sort()).toEqual([
-      'clear_user_orgs',
-      'clear_user_orgs',
-      'disable_dingtalk_grant',
-      'set_user_inactive',
-    ].sort())
+    expect(plan.effects.map((e) => e.type).sort()).toEqual(
+      ['membership_changed', 'grant_changed', 'user_changed'].sort(),
+    )
+    expect(plan.effects.find((e) => e.type === 'membership_changed')?.orgId).toBe('org-a')
     expect(plan.effects.every((e) => e.beforeActive === true && e.afterActive === false)).toBe(true)
+  })
+
+  it('keeps the source-org membership effect while another org preserves global access', () => {
+    const plan = planDirectoryDeprovision({
+      localUserId: 'u-cross-org',
+      activationStatus: 'activated',
+      isActive: true,
+      orgId: 'org-a',
+      orgMembershipActive: true,
+      dingtalkGrantEnabled: true,
+      globallyClear: false,
+    })
+    expect(plan.effects).toEqual([
+      {
+        type: 'membership_changed',
+        orgId: 'org-a',
+        beforeActive: true,
+        afterActive: false,
+      },
+    ])
   })
 
   it('zero-effect when already inactive with no orgs/grant', () => {
@@ -39,7 +59,8 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       localUserId: 'u3',
       activationStatus: 'activated',
       isActive: false,
-      activeOrgIds: [],
+      orgId: 'org-a',
+      orgMembershipActive: false,
       dingtalkGrantEnabled: false,
       globallyClear: true,
     })

@@ -22,7 +22,7 @@ export function readDeprovisionRuntimeFlags() {
   }
 }
 
-export async function previewDeprovisionForUser(localUserId: string) {
+export async function previewDeprovisionForUser(localUserId: string, integrationId: string) {
   const user = await query<{
     id: string
     activation_status: string | null
@@ -43,10 +43,24 @@ export async function previewDeprovisionForUser(localUserId: string) {
   }
   const u = user.rows[0]
 
-  const orgs = await query<{ org_id: string }>(
-    `SELECT org_id FROM user_orgs WHERE user_id = $1 AND COALESCE(is_active, TRUE) = TRUE`,
-    [localUserId],
-  ).catch(() => ({ rows: [] as Array<{ org_id: string }> }))
+  const integration = await query<{ org_id: string }>(
+    `SELECT org_id FROM directory_integrations WHERE id = $1::uuid`,
+    [integrationId],
+  )
+  if (!integration.rows[0]) {
+    const err = new Error('Directory integration not found')
+    ;(err as Error & { code?: string }).code = 'INTEGRATION_NOT_FOUND'
+    throw err
+  }
+  const orgId = integration.rows[0].org_id
+
+  const membership = await query<{ active: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM user_orgs
+        WHERE user_id = $1 AND org_id = $2 AND COALESCE(is_active, TRUE) = TRUE
+     ) AS active`,
+    [localUserId, orgId],
+  )
 
   // `user_external_auth_grants` is the table the OAuth login path reads. This used to read
   // `user_external_identities.grant_enabled` — a column no migration creates — behind a `.catch`
@@ -60,14 +74,27 @@ export async function previewDeprovisionForUser(localUserId: string) {
       LIMIT 1`,
     [localUserId],
   )
+  const globalBinding = await query<{ active: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+        WHERE l.local_user_id = $1
+          AND l.link_status = 'linked'
+          AND a.is_active = TRUE
+          AND a.integration_id <> $2::uuid
+     ) AS active`,
+    [localUserId, integrationId],
+  )
 
   const plan = planDirectoryDeprovision({
     localUserId,
     activationStatus: u.activation_status,
     isActive: u.is_active,
-    activeOrgIds: orgs.rows.map((r) => r.org_id),
+    orgId,
+    orgMembershipActive: membership.rows[0]?.active === true,
     dingtalkGrantEnabled: grant.rows[0]?.enabled === true,
-    globallyClear: true,
+    globallyClear: globalBinding.rows[0]?.active !== true,
   })
 
   return {
@@ -221,18 +248,23 @@ export async function restoreDeprovisionEvent(options: {
 
   const currentMatchesAfter: Record<string, boolean> = {}
   for (const e of applied) {
-    if (e.effect_type === 'set_user_inactive') {
+    if (e.effect_type === 'user_changed') {
       // after_active false means user should still be inactive for restore eligibility
       currentMatchesAfter[e.id] = user.rows[0].is_active === false
-    } else if (e.effect_type === 'clear_user_orgs') {
+    } else if (e.effect_type === 'membership_changed') {
+      // DRIFT GATE — must fail closed. Swallowing this read turned a failed query into
+      // "0 active memberships", which reads as "current state matches after_active=false":
+      // the gate was satisfied BY ITS OWN FAILURE and could never fire on this leg. Same
+      // defect class as the phantom grant column fixed in #4587; a gate read that cannot
+      // complete must abort the restore, not wave it through.
       const org = await query<{ n: number }>(
         `SELECT count(*)::int AS n FROM user_orgs
           WHERE user_id = $1 AND org_id = $2 AND COALESCE(is_active, TRUE) = TRUE`,
         [event.local_user_id, e.org_id],
-      ).catch(() => ({ rows: [{ n: 0 }] }))
+      )
       // after false → no active membership
       currentMatchesAfter[e.id] = (org.rows[0]?.n ?? 0) === 0
-    } else if (e.effect_type === 'disable_dingtalk_grant') {
+    } else if (e.effect_type === 'grant_changed') {
       // This is a DRIFT GATE, so it must fail closed. Reading the phantom column and catching the
       // error yielded "no grant", which reads as "current state matches after_active=false" — the
       // gate was satisfied *by the read failing*, so it could never fire, and a grant that was
@@ -245,7 +277,9 @@ export async function restoreDeprovisionEvent(options: {
       )
       currentMatchesAfter[e.id] = g.rows[0]?.enabled !== true
     } else {
-      currentMatchesAfter[e.id] = true
+      const err = new Error(`Unsupported deprovision effect type: ${e.effect_type}`)
+      ;(err as Error & { code?: string }).code = 'EFFECT_TYPE_UNSUPPORTED'
+      throw err
     }
   }
 
@@ -269,12 +303,12 @@ export async function restoreDeprovisionEvent(options: {
     await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [event.local_user_id])
 
     for (const e of applied) {
-      if (e.effect_type === 'set_user_inactive') {
+      if (e.effect_type === 'user_changed') {
         await client.query(
           `UPDATE users SET is_active = TRUE, updated_at = NOW() WHERE id = $1`,
           [event.local_user_id],
         )
-      } else if (e.effect_type === 'clear_user_orgs' && e.org_id) {
+      } else if (e.effect_type === 'membership_changed' && e.org_id) {
         // `user_orgs` is (user_id, org_id, is_active, created_at) — there is no `updated_at`.
         // Setting one raised `42703`, which the `.catch` hid; the aborted transaction then failed
         // the very next statement with `25P02`, so restoring ANY event carrying a membership
@@ -290,12 +324,12 @@ export async function restoreDeprovisionEvent(options: {
         )
         if (!mem.rows[0]) {
           const err = new Error(
-            `membership row missing for org ${e.org_id}; cannot reverse clear_user_orgs`,
+            `membership row missing for org ${e.org_id}; cannot reverse membership_changed`,
           )
           ;(err as Error & { code?: string }).code = 'DRIFT_CONFLICT'
           throw err
         }
-      } else if (e.effect_type === 'disable_dingtalk_grant') {
+      } else if (e.effect_type === 'grant_changed') {
         // Upsert, not UPDATE: deprovision may have created the disabled row itself, and a restore
         // that silently matched zero rows would report success while the person stayed locked
         // out. The `.catch` is gone for the same reason it was wrong on the read — it could not
