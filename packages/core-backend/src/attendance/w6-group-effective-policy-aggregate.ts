@@ -56,7 +56,7 @@ import type {
 export type AttendanceGroupEffectivePolicyQueryFn = (sql: string, params?: unknown[]) => Promise<Record<string, unknown>[]>
 
 /** Structural type for the injected FSER service — matches
- * `createAttendanceGroupFixedScheduleEffectivenessService(...)`'s
+ * the FSER factory's returned
  * `getEffectiveness` export exactly (see
  * `plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs`). */
 export interface AttendanceGroupEffectivePolicyFserServiceLike {
