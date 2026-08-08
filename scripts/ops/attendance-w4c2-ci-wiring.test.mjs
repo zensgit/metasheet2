@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -35,8 +35,9 @@ import {
 //     job's vitest.config.ts IF AND ONLY IF it is a whole-file vitest arg of an EXECUTABLE real-DB
 //     step in plugin-tests.yml — so it runs exactly once, with a database. Both directions fail:
 //     carried-but-not-excluded is collected twice and skip-greens in the no-DB job;
-//     excluded-but-not-carried executes NOWHERE. A suite that is neither must prove it needs no
-//     database (below). 87 members at this head.
+//     excluded-but-not-carried executes NOWHERE; and NEITHER is refused outright (below). 87
+//     members at this head. The disk walk itself is TOTAL: an entry that is neither a directory nor
+//     a regular file — a symlink, a FIFO — is REFUSED, not skipped (see `walkFiles`).
 //     "Is a suite" is the UNION of two independent derivations, neither of them a list of names:
 //     the file's path matches an `include` glob compiled from a vitest config's own literal, OR
 //     its masked source calls a vitest suite API. No suffix and no directory depth is written down
@@ -51,13 +52,18 @@ import {
 //     attendance arg must match that config's `include` and none of its `exclude`, and it must
 //     declare no `testNamePattern` — otherwise one config edit silences every carried suite with
 //     the run-lists, the excludes and the argument allowlist all still green.
-//   corpus part 3 (issue 4828, owner-ruled 2026-08-08): the residual cell — a suite that is
-//     NEITHER excluded NOR carried genuinely lives in the no-DB job, and must carry POSITIVE proof
-//     that it executes assertions without a database. Not "no gate was recognised": proof. The
-//     first implementation had it the other way round — it enumerated four gate-ADJACENT source
-//     patterns and called everything else gate-free — and review executed ten real gate shapes
-//     that it waved through, including a self-skip on this lane's own ATTENDANCE_TEST_DATABASE_URL
-//     and a gate hoisted into a helper module. The default is now `unknown`, which reds.
+//   corpus part 3 (issue 4828; owner-ruled 2026-08-08, then re-ruled 2026-08-09): the residual
+//     cell — a suite that is NEITHER excluded NOR carried — is now simply REFUSED. Two earlier
+//     implementations tried to let such a suite argue from its own SOURCE that it needs no
+//     database, and both were executed and bypassed: a gate CLASSIFIER waved through ten real gate
+//     shapes (including a self-skip on this lane's own ATTENDANCE_TEST_DATABASE_URL and a gate
+//     hoisted into a helper module), and its inversion, a DB-independence PROVER, returned
+//     `{ proven: true }` for `require(moduleVariable)` and `await import(moduleVariable)` because
+//     its specifier scan could only capture string literals. Owner ruling: do not harden the
+//     enumeration, remove the thing that needs enumerating. The self-proof exit and its predicate
+//     are DELETED; the boundary is now a pure WIRING property with no source analysis in it, so
+//     there is no spelling left to recognise and nothing left to fool. Measured at the head this
+//     landed on: all 87 members are already carried AND excluded, so no reachable verdict changed.
 //
 // PLACEMENT REALITY the union below encodes: 72 of the 74 on-disk attendance .db suites are
 // carried by the attendance step (id `attendance-real-db-integration`); the 2
@@ -587,9 +593,14 @@ const INTEGRATION_CONFIG = 'vitest.integration.config.ts'
 const readCoreBackendFile = (rel) => readFileSync(join(CORE_BACKEND_DIR, rel), 'utf8')
 
 /**
- * Source with comments AND string/template bodies blanked, positions preserved. Used for every
- * STRUCTURAL question below (does this file call a suite API, does it read the environment, does
- * this config declare a key) so a mention inside a comment or a test title can never answer one.
+ * Source with comments AND string/template bodies blanked, positions preserved. It is used for the
+ * two STRUCTURAL questions this file still asks — does this source call a vitest suite API
+ * (`attendanceCorpus`), and does this config declare a direct `test.<key>` (`directTestArrayEntries`
+ * / `declaresDirectTestKey`) — so a mention inside a comment or a test title can never answer one.
+ *
+ * It KEEPS EARNING ITS PLACE after the 2026-08-09 deletion of `proveNoDatabaseDependence`: it was
+ * never only that predicate's helper. It no longer answers "does this file read the environment",
+ * because nothing asks — the part-3 verdict does not read suite source at all any more.
  *
  * Local rather than imported: `ci-realdb-step-contract.mjs` has an equivalent private masker, but
  * that module is shared by 17 guards and is deliberately untouched by this change (its
@@ -818,13 +829,74 @@ function splitTopLevel(text, separator) {
   return parts
 }
 
-/** Package-relative POSIX paths of every file under `dir`, RECURSIVELY. Throws on a missing dir. */
+/**
+ * A human-readable name for a filesystem entry's type, for the REFUSAL MESSAGE ONLY. The decision
+ * in `walkFiles` does not consult this list — it is a two-way partition (directory | regular file |
+ * refused), so a type nobody named here is still refused, and the octal `mode` is always printed so
+ * even an unnamed type is diagnosable.
+ */
+function describeStatType(st) {
+  const named = [
+    ['symbolic link', () => st.isSymbolicLink()],
+    ['FIFO / named pipe', () => st.isFIFO()],
+    ['socket', () => st.isSocket()],
+    ['block device', () => st.isBlockDevice()],
+    ['character device', () => st.isCharacterDevice()],
+  ].filter(([, is]) => is())
+  const label = named.length > 0 ? named.map(([n]) => n).join('+') : 'an unnamed non-regular type'
+  return `${label} (mode 0o${(st.mode & 0o170000).toString(8)})`
+}
+
+/**
+ * Package-relative POSIX paths of every REGULAR file under `dir`, RECURSIVELY. Throws on a missing
+ * dir, and FAILS CLOSED on anything that is neither a directory nor a regular file.
+ *
+ * The previous shape was `if (isDirectory()) … else if (isFile()) …` with NO else: a symlink is
+ * neither, so it silently vanished — no corpus member was generated for it, the whole two-point
+ * wiring assertion was never registered for that path, and the guard exited 0 (owner reproduced
+ * this by dropping an attendance test symlink into the corpus root, 2026-08-09). "Skipped because
+ * unclassifiable" is the same skip-green shape this entire file exists to delete, one layer below
+ * the suites.
+ *
+ * The classification is taken from `lstat`, NOT from the `Dirent`, for two independent reasons:
+ *   • `Dirent` reports `UNKNOWN` on filesystems that do not fill in `d_type`, and in that state
+ *     EVERY `is*()` predicate answers false — a refusal keyed on Dirent would red the whole guard
+ *     on such a filesystem for ordinary regular files. `lstat` never answers "unknown".
+ *   • `statSync` would FOLLOW a symlink, so a link to a regular file would be classified as a file
+ *     and admitted to the corpus under the link's own name. That is the "resolve then validate"
+ *     option, and it is refused deliberately: the corpus maps a disk path to a vitest ARGUMENT
+ *     (`tests/integration/<rel>`) that is then compared against the no-DB `test.exclude` and the
+ *     real-DB run-lists, both of which are literal strings. A link and its target are two distinct
+ *     argument spellings for one suite, so admitting the link would let a file be "wired" under one
+ *     name and collected under another, and a link pointing OUT of the package (`../../..`) would
+ *     mint an argument no run-list could ever legitimately carry. An outright refusal is the
+ *     stricter option and it is also the only one whose right answer this static guard can know.
+ *
+ * The refusal is not scoped to `attendance-`-prefixed names: a name-scoped refusal would be exactly
+ * the narrowing that produced every allowlist this file has been deleting.
+ */
 function walkFiles(dir, prefix = '') {
   const out = []
   for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name
-    if (entry.isDirectory()) out.push(...walkFiles(join(dir, entry.name), rel))
-    else if (entry.isFile()) out.push(rel)
+    const full = join(dir, entry.name)
+    const st = lstatSync(full)
+    if (st.isDirectory()) {
+      out.push(...walkFiles(full, rel))
+      continue
+    }
+    if (st.isFile()) {
+      out.push(rel)
+      continue
+    }
+    throw new Error(
+      `corpus walk: refusing to classify "${rel}" under ${dir} — it is ${describeStatType(st)}, `
+        + `neither a directory nor a regular file. An entry the walk cannot classify is REFUSED, `
+        + `never skipped: skipping it would generate no wiring assertion for that path and the `
+        + `guard would exit 0 over a suite no CI job executes. Replace it with a regular file (a `
+        + `symlink is not resolved: a link and its target are two different vitest argument `
+        + `spellings for one suite, and only one of them can be the wired one).`,
+    )
   }
   return out
 }
@@ -860,7 +932,7 @@ function attendanceCorpus({ dir = INTEGRATION_DIR, includeRegexes = suiteInclude
     const source = readFileSync(join(dir, rel), 'utf8')
     const matchesInclude = includeRegexes.some((re) => re.test(arg))
     if (!matchesInclude && !SUITE_API_CALL_RE.test(maskSourceNoise(source))) continue
-    out.push({ rel, arg, source })
+    out.push({ rel, arg })
   }
   return out
 }
@@ -982,15 +1054,41 @@ test('the no-DB job config declares no explicit test.include (the assumption thi
   )
 })
 
-// Corpus part 1 (disk → wiring), now TOTAL over the family: for every attendance suite on disk,
+// The corpus is derived at REGISTRATION time (one test per member), so a walk that fails closed
+// throws before any test exists. A bare module-load throw reports `tests 0 / pass 0 / fail 0` —
+// non-zero exit, but the exact counts shape this tree treats as a false signal — so the failure is
+// captured and re-thrown from a NAMED test instead. It is not swallowed: the error is rethrown
+// verbatim, the per-member legs disappear (a visible count drop), and the non-vacuity leg above
+// re-derives the corpus independently and reds on the same throw.
+// The name below says "derivation" rather than naming only the walk, because this catch is what any
+// registration-time failure lands in — a non-regular entry (the P2 case, and the common one) but
+// equally an unparseable vitest config or an unsupported glob. Naming it after just the walk would
+// be an assertion the test does not make. The captured error is rethrown VERBATIM, so whichever it
+// was is stated in the failure itself.
+let CORPUS = null
+let CORPUS_DERIVATION_ERROR = null
+try {
+  CORPUS = attendanceCorpus()
+} catch (err) {
+  CORPUS_DERIVATION_ERROR = err
+}
+
+test('attendance corpus derivation succeeds — the walk REFUSES (never skips) any non-regular entry', () => {
+  if (CORPUS_DERIVATION_ERROR != null) throw CORPUS_DERIVATION_ERROR
+  assert.ok(
+    Array.isArray(CORPUS) && CORPUS.length > 0,
+    'the corpus walk produced no members at all — an empty scan is not an absence',
+  )
+})
+
+// Corpus part 1 (disk → wiring), TOTAL over the family: for every attendance suite on disk,
 // "excluded from the no-DB job" and "carried by an executable real-DB run-list" must be the SAME
-// answer, and when both are false the file lives in the no-DB job and must prove it needs no
-// database. See the part-3 header below for why the two directions are one assertion.
-for (const entry of attendanceCorpus()) {
+// answer, and BOTH must be true. See the part-3 header below for why the directions are one
+// assertion and why "neither" is now simply refused.
+for (const entry of CORPUS ?? []) {
   test(`${entry.arg} runs exactly once, with a database (no-DB exclude ⟺ real-DB run-list)`, () => {
     const reason = attendanceSuiteResidueReason({
       arg: entry.arg,
-      source: readFileSync(join(INTEGRATION_DIR, entry.rel), 'utf8'),
       carried: new Set(realDbWholeFileArgUnion()),
       excluded: noDbExcludedArgs(),
     })
@@ -1007,132 +1105,73 @@ for (const entry of attendanceCorpus()) {
 // derivation (misses it because it is in no run-list) alike. That is exactly the slot
 // `attendance-settlement-table-v1-5a.test.ts` occupied until this PR renamed it.
 //
-// The FIRST implementation of this leg closed the slot by asking "does this file contain a DB
-// gate?", answering from a four-entry list of gate-ADJACENT source patterns, and treating anything
-// that tripped none of them as gate-free. Review executed that classifier over fourteen real gate
-// shapes: TEN returned the safe-to-run-with-no-database verdict, including a self-skip on this
-// lane's OWN `ATTENDANCE_TEST_DATABASE_URL` (invisible to `/\bDATABASE_URL\b/` — the preceding `_`
-// is a word character, so there is no word boundary), a gate hoisted into a helper module, and a
-// `beforeAll(ctx => ctx.skip())`. Extending the list would have moved the boundary, not removed it.
+// TWO earlier implementations of this leg tried to answer that by READING THE SOURCE, and both were
+// executed and bypassed:
 //
-// So the question changed. This leg no longer asks what a file contains; it asks WHERE THE FILE
-// RUNS, which is stated in two machine-readable places and nowhere else:
+//   1. `classifyDbGate` asked "does this file contain a DB gate?" from a four-entry list of
+//      gate-ADJACENT patterns and called everything else gate-free. Review executed fourteen real
+//      gate shapes; TEN came back safe-to-run-with-no-database, including a self-skip on this lane's
+//      OWN `ATTENDANCE_TEST_DATABASE_URL` (invisible to `/\bDATABASE_URL\b/` — the preceding `_` is
+//      a word character, so there is no word boundary) and a `beforeAll(ctx => ctx.skip())`.
+//   2. `proveNoDatabaseDependence` inverted it: it enumerated what DB-INDEPENDENCE looks like and
+//      called everything else unknown. Better polarity, same class of defect one level in — its
+//      module-specifier requirement ("import nothing but 'vitest'") could only see a STRING LITERAL
+//      specifier, so the owner executed `require(moduleVariable)` → `{ proven: true }` and
+//      `await import(moduleVariable)` → `{ proven: true }` (both reproduced 2026-08-09). A dynamic
+//      DB-helper suite dropped into a temp corpus with no exclude and no run-list left the guard
+//      PASSING. Teaching it those two spellings would have been the third round of the same move.
 //
-//   excluded from the no-DB job's vitest.config.ts   ⟺   carried by an executable real-DB run-list
+// OWNER RULING (2026-08-09): do not harden the enumeration — REMOVE the thing that needs
+// enumerating. The self-proof exit is DELETED, along with the whole predicate that served it. This
+// leg no longer reads suite source at all. It asks only WHERE THE FILE RUNS, which is stated in two
+// machine-readable places and nowhere else, and it requires BOTH:
 //
-// Both directions are asserted, and they are one assertion because each direction is a distinct
-// way to execute nothing:
+//   excluded from the no-DB job's vitest.config.ts   ∧   carried by an executable real-DB run-list
+//
+// Each of the other three cells is a distinct way to execute nothing:
 //   • carried but NOT excluded — the no-DB job collects it too and its gate skip-greens it there,
 //     a half-satisfied two-point wiring.
 //   • excluded but NOT carried — removed from the only job that would have collected it and put in
-//     no run-list: it executes NOWHERE, whatever its source says. The gate-shape classifier could
-//     not see this case at all, because a gate-free file passed it.
-//   • NEITHER — the file genuinely lives in the no-DB job. Only here does the source matter, and
-//     only as POSITIVE proof (below): the burden is on the file to show it needs no database, and
-//     everything that cannot be shown is unknown and reds.
+//     no run-list: it executes NOWHERE, whatever its source says.
+//   • NEITHER — the file sits in the no-DB job with no run-list behind it. This used to be the cell
+//     a suite could argue its way out of; there is no argument any more. The boundary is now a pure
+//     WIRING property with no source analysis in it, so the entire question "can this guard
+//     recognise that gate/import/require spelling" ceases to exist — there is nothing left for a new
+//     spelling to fool.
 //
-// BOTH SIDES ARE DERIVED. The file set is the recursive disk scan above; "carried" is the SAME
+// WHAT THAT COSTS, stated rather than left to be discovered: no-DB residency is no longer available
+// to an attendance integration suite at all. A genuinely database-free one must be two-point wired
+// like every other member (it will simply run under the real-DB step and pass), or live outside
+// tests/integration, or outside the `attendance-` family. Widening this back — for that suite or any
+// other — is an owner ruling, never a reviewer-local convenience.
+//
+// REACHABILITY at the head this landed on: measured, not asserted. Forcing the exit to always FAIL
+// reddened exactly two tests, both synthetic (the proof unit test and the temp-dir sweep); ZERO of
+// the 87 per-member wiring legs moved, because every one of the 87 is already carried AND excluded.
+// So the deletion changes no reachable verdict here — it removes a bypass, not a capability.
+//
+// BOTH SIDES ARE DERIVED. The file set is the recursive disk scan above (which now REFUSES any entry
+// that is not a directory or a regular file, rather than skipping it); "carried" is the SAME
 // `realDbWholeFileArgUnion()` the other corpora use; "excluded" is parsed out of the same
 // `test.exclude` the shared `isQuotedInTestExclude` reads (and proven to agree with it, above).
 // Nothing is hand-listed — a hand-listed domain is the defect class this guard exists to delete.
 // ---------------------------------------------------------------------------------------------
 
 /**
- * POSITIVE proof that a file executes assertions WITHOUT a database. The inversion of the deleted
- * `classifyDbGate`: that function enumerated what a gate looks like and called everything else
- * gate-free; this one enumerates what DB-INDEPENDENCE looks like and calls everything else
- * unknown. The complement of a positive predicate cannot be widened by inventing a new gate
- * spelling — a new spelling simply fails to be proof, which is already the failing verdict.
- *
- * Every "must NOT contain" requirement is failed by a hit in EITHER the raw source OR the masked
- * one (comments and string bodies blanked). Masking exists to stop a comment answering a structural
- * question, but a masker is a heuristic — a regexp literal containing a quote character, say, could
- * blank real code and hand back a file that looks clean. Taking the UNION of both readings makes
- * that failure mode over-strict (a comment saying "skip" blocks the proof) instead of over-
- * permissive, which is the only direction this predicate may err in.
- *
- *   1. no reference to `process` or `import.meta.env` at all — the only way a suite in this tree
- *      learns whether a database exists is by reading the environment;
- *   2. no `skip` token anywhere, in any casing — `describe.skip`, `it.skipIf`, `ctx.skip()`,
- *      `const { skip: off } = describe`, and any future spelling all contain it;
- *   3. no `runIf`, and no member access on a suite API (`describe.`/`it.`/`test.`) — a gate is a
- *      member of one of them or a rebinding of one of them;
- *   4. every TOP-LEVEL call is literally `describe(`, `it(` or `test(` — this is what rejects
- *      `describeDb('x', …)` and `const d = pickDescribe(hasDb); d('x', …)` regardless of where the
- *      binding came from;
- *   5. `describe`/`it`/`test` are not locally rebound;
- *   6. no import or require of anything but `'vitest'` — a gate can be hoisted into a helper
- *      module, and a specifier this function cannot follow is not proof of anything;
- *   7. at least one `it(`/`test(` — a file that declares no test cannot prove it executes
- *      assertions, and an empty/unreadable source is not evidence of absence.
- *
- * WHAT THIS COSTS, stated rather than left to be discovered: (6) and (4) together mean a file that
- * imports the application cannot be proven DB-free, so in practice the proof succeeds only for a
- * self-contained suite. At this head zero files rely on it — all 87 corpus members are excluded and
- * carried — so the reachable behaviour is unchanged; a future genuinely-DB-free attendance
- * integration suite either keeps itself self-contained or is wired like every other one, which is
- * an owner decision, not a silent widening here.
- *
- * An EXECUTED signal would be stronger still — collect the file with no database and observe
- * whether it executes or skips. It is not available to this guard: the step that runs it sits ahead
- * of the workspace install in its job, so vitest does not exist when this file runs. That placement
- * is deliberate (a wiring break reds before the install), and it is why the corpus derivation above
- * leans on two independent static derivations rather than on one clever one. The ordering is not
- * asserted in this comment: the leg named "this guard's step runs BEFORE the workspace install"
- * asserts it off the parsed workflow, so the justification cannot go stale without a red.
- *
- * @param {unknown} source
- * @returns {{ proven: boolean, missing: string[] }}
- */
-export function proveNoDatabaseDependence(source) {
-  if (typeof source !== 'string' || source.trim().length === 0) {
-    return { proven: false, missing: ['source is empty or unreadable — an empty read is not evidence of absence'] }
-  }
-  const masked = maskSourceNoise(source)
-  const missing = []
-  // "must NOT contain" — union of both readings, so a masking mistake can only over-restrict.
-  const anywhere = (re) => re.test(source) || re.test(masked)
-  if (anywhere(/\bprocess\b/) || anywhere(/\bimport\s*\.\s*meta\s*\.\s*env\b/)) {
-    missing.push('reads the environment (process / import.meta.env)')
-  }
-  if (anywhere(/skip/i)) missing.push('mentions skip')
-  if (anywhere(/\brunIf\b/)) missing.push('mentions runIf')
-  if (anywhere(/(?:^|[^.\w$])(?:describe|it|test)\s*\./)) {
-    missing.push('takes a member of a suite API (describe./it./test.)')
-  }
-  if (anywhere(/\b(?:const|let|var|function|class)\s+(?:describe|it|test)\b/)) {
-    missing.push('rebinds describe/it/test locally')
-  }
-  const topLevelCallees = new Set()
-  for (const text of [source, masked]) {
-    for (const m of text.matchAll(/^([A-Za-z_$][\w$]*)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\(/gm)) {
-      topLevelCallees.add(m[1])
-    }
-  }
-  for (const callee of topLevelCallees) {
-    if (!['describe', 'it', 'test'].includes(callee)) {
-      missing.push(`calls "${callee}(" at top level — only literal describe/it/test may declare suites`)
-    }
-  }
-  // Module specifiers are read off the RAW source: a commented-out import blocking the proof is
-  // fail-closed, whereas stripping comments first risks a `//` inside a string hiding a real one.
-  for (const m of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"]([^'"]+)['"]/g)) {
-    if (m[1] !== 'vitest') missing.push(`imports ${JSON.stringify(m[1])} — only 'vitest' can be followed`)
-  }
-  // "must contain" — masked only, so a mention in a comment or a test title cannot supply it.
-  if (!/(?:^|[^.\w$])(?:it|test)\s*\(/.test(masked)) {
-    missing.push('declares no it()/test() case, so it cannot be shown to execute assertions')
-  }
-  return { proven: missing.length === 0, missing }
-}
-
-/**
  * The part-3 verdict for one attendance suite: `null` when it runs exactly once with a database,
  * otherwise the reason it does not. `carried` and `excluded` are INJECTED so the temp-dir mutation
  * below can drive all four cells — on the live tree every member is carried+excluded, which would
- * otherwise leave both new directions green against nothing.
+ * otherwise leave the three failing directions green against nothing.
+ *
+ * TOTAL and SOURCE-FREE. Three of the four cells fail, and the file's contents are not consulted in
+ * any of them: `source` is deliberately NOT a parameter. That is the whole point of the 2026-08-09
+ * ruling — for as long as a suite could argue "I need no database" from its own text, the guard had
+ * to RECOGNISE the argument, and every recogniser shipped so far was executed and bypassed (a gate on
+ * `ATTENDANCE_TEST_DATABASE_URL`, a gate hoisted into a helper, and finally
+ * `require(moduleVariable)` / `await import(moduleVariable)`, which the literal-only specifier scan
+ * could not see at all). With no self-proof exit there is no recogniser and nothing to bypass.
  */
-function attendanceSuiteResidueReason({ arg, source, carried, excluded }) {
+function attendanceSuiteResidueReason({ arg, carried, excluded }) {
   const isCarried = carried.has(arg)
   const isExcluded = excluded.has(arg)
   if (isCarried && isExcluded) return null
@@ -1146,14 +1185,15 @@ function attendanceSuiteResidueReason({ arg, source, carried, excluded }) {
       + 'removed from the only job that would have collected it and listed in none that would '
       + 'execute it, so it executes NOWHERE'
   }
-  const proof = proveNoDatabaseDependence(source)
-  if (proof.proven) return null
-  return 'neither excluded from the no-DB job nor carried by a real-DB run-list, and its '
-    + `independence from a database is NOT proven (${proof.missing.join('; ')}) — so the no-DB job `
-    + 'collects it and a gate in any spelling skip-greens it, and no CI job ever executes it. Wire '
-    + "it into a real-DB step's run-list AND the no-DB test.exclude, or make it self-contained. "
-    + 'Adding an exclusion to this guard instead is a contract change requiring an owner ruling '
-    + '(issue 4828)'
+  return 'neither excluded from the no-DB job nor carried by a real-DB run-list — the no-DB job '
+    + 'collects it, a DB gate in any spelling skip-greens it there, and no CI job ever executes it. '
+    + "Every attendance integration suite must satisfy BOTH wiring points: a real-DB step's "
+    + 'run-list AND the no-DB test.exclude. There is no self-proof exit: a suite may no longer '
+    + 'argue from its own source that it needs no database (that exit was deleted 2026-08-09 after '
+    + '`require(moduleVariable)` and `await import(moduleVariable)` were executed and returned '
+    + '"proven"). A genuinely database-free suite is wired like the rest, or lives outside '
+    + 'tests/integration / outside the attendance- family. Adding an exclusion to this guard '
+    + 'instead is a contract change requiring an owner ruling (issue 4828)'
 }
 
 /**
@@ -1164,101 +1204,49 @@ function attendanceSuiteResidueReason({ arg, source, carried, excluded }) {
 function collectAttendanceResidue({ dir, carried, excluded, includeRegexes }) {
   const residue = []
   for (const entry of attendanceCorpus({ dir, includeRegexes })) {
-    const reason = attendanceSuiteResidueReason({
-      arg: entry.arg,
-      source: entry.source,
-      carried,
-      excluded,
-    })
+    const reason = attendanceSuiteResidueReason({ arg: entry.arg, carried, excluded })
     if (reason != null) residue.push({ file: entry.rel, reason })
   }
   return residue
 }
 
-// Predicate unit tests over INLINE SOURCE STRINGS — no I/O, no temp dir, no fixture. This layer
-// cannot go red for a path reason, so it isolates "the predicate is wrong" from "the scan read
-// the wrong place" (the temp-dir test below covers the second).
-test('issue 4828 DB-independence proof: every executed gate shape fails it, including the ones the deleted classifier called gate-free', () => {
-  const proven = (src) => proveNoDatabaseDependence(src).proven
-  // The one shape that IS proof: self-contained, imports only vitest, bare suite calls.
-  assert.ok(proven("import { describe, it } from 'vitest'\ndescribe('pure', () => { it('x', () => {}) })\n"))
-  assert.ok(proven("it('x', () => { if (1 + 1 !== 2) throw new Error('math') })\n"), 'globals:true form')
-  // The four real binding names in this tree.
-  for (const name of ['describeDb', 'describeWithDb', 'describeIfDatabase', 'attendanceIntegrationDescribe']) {
-    assert.ok(!proven(`const ${name} = dbUrl ? describe : describe.skip\n${name}('x', () => {})\n`))
-  }
-  // A binding name never seen before — the anti-allowlist property, now on the safe side.
-  assert.ok(!proven('const zzNeverSeenBefore = u ? describe : describe.skip\n'))
-  assert.ok(!proven('const d = !u ? describe.skip : describe\n'))
-  // THE TEN SHAPES THE DELETED CLASSIFIER RETURNED "ungated" FOR. Each is a real DB gate; each
-  // must now fail the proof. These are the executed findings, encoded so they cannot come back.
-  assert.ok(!proven("const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL\nconst d = dbUrl ? describe : describe.skip\n"), 'this lane\'s own env var')
-  assert.ok(!proven("const u = process.env.TEST_DATABASE_URL\nif (!u) throw new Error('x')\n"))
-  assert.ok(!proven("const u = process.env.POSTGRES_URL\n"))
-  assert.ok(!proven("import { describeDb } from './helpers/db-describe'\ndescribeDb('x', () => { it('y', () => {}) })\n"), 'gate hoisted to a helper module')
-  assert.ok(!proven("const d = pickDescribe(hasDb)\nd('x', () => {})\n"), 'the shape the deleted unit test PINNED as ungated')
-  assert.ok(!proven("const itDb = process.env.PGURL ? it : it.skip\nitDb('x', () => {})\n"), 'it-level gate')
-  assert.ok(!proven("const testDb = process.env.PGURL ? test : test.skip\ntestDb('x', () => {})\n"), 'test-level gate')
-  assert.ok(!proven("describe('x', () => { beforeAll((ctx) => { if (!u) ctx.skip() }) })\n"), 'vitest silent whole-suite skip')
-  assert.ok(!proven("const { skip: off } = describe\nconst d = hasDb ? describe : off\nd('x', () => {})\n"), 'fully aliased ternary')
-  assert.ok(!proven("import { dbUrl } from './fixtures/db'\ndescribe('x', () => { if (!dbUrl) return\n  it('y', () => {}) })\n"), 'early return, gate value imported')
-  // And the shapes it already caught must stay caught.
-  assert.ok(!proven("describe.skipIf(!process.env.PG)('x', () => {})\n"))
-  assert.ok(!proven("describe.runIf(hasDb)('x', () => {})\n"))
-  assert.ok(!proven("if (!process.env.DATABASE_URL) return\n"))
-  assert.ok(!proven("describe.skip('temporarily off', () => {})\n"))
-  // An empty read is not evidence of absence.
-  assert.ok(!proven(''))
-  assert.ok(!proven('   \n\t '))
-  assert.ok(!proven(undefined))
-  // A file that declares no test case cannot prove it executes assertions.
-  assert.ok(!proven("import { describe } from 'vitest'\nexport const helper = 1\n"))
-  // Masker-evasion: a regexp literal containing a quote character makes the naive mask blank the
-  // rest of the file. The union of raw+masked readings is what keeps this failing.
-  assert.ok(
-    !proven("import { describe, it } from 'vitest'\nconst q = /['\"]/\nconst u = process.env.DATABASE_URL\ndescribe('x', () => { it('y', () => {}) })\n"),
-    'a regexp literal must not be able to hide an env read from the mask',
-  )
-  // A commented-out import is fail-closed too (specifiers are read off the raw source).
-  assert.ok(!proven("// import { describeDb } from './helpers/db'\nit('x', () => {})\n"))
-  // The reasons are reported, not just the verdict (the live failure message quotes them), and they
-  // name the specific requirement that failed rather than "unclassifiable".
-  assert.deepEqual(
-    proveNoDatabaseDependence("const d = process.env.X ? describe : describe.skip\n").missing,
-    [
-      'reads the environment (process / import.meta.env)',
-      'mentions skip',
-      'takes a member of a suite API (describe./it./test.)',
-      'declares no it()/test() case, so it cannot be shown to execute assertions',
-    ],
-  )
-})
-
-// PERMANENT ENCODING of the owner-named mutation, extended to all four cells of the partition.
-// Driven over a temp-dir corpus, so no probe fixture ever lives in
-// packages/core-backend/tests/integration — and, critically, so the two directions that are
-// LIVE-VACUOUS on the real tree (every real member is carried AND excluded) still have a test that
-// can go red when they break.
-test('issue 4828 residue sweep: all four cells of (excluded × carried) behave, over a temp-dir corpus', () => {
+// PERMANENT ENCODING of the owner-named mutations, over all four cells of the partition. Driven
+// over a temp-dir corpus, so no probe fixture ever lives in packages/core-backend/tests/integration
+// — and, critically, so the three FAILING cells, which are LIVE-VACUOUS on the real tree (every real
+// member is carried AND excluded), still have a test that can go red when they break.
+//
+// This is also the standing regression test for the DELETED self-proof exit. SEVEN probes below sit
+// in the ¬excluded ∧ ¬carried cell, spanning FIVE different source shapes: an inline env gate, a gate
+// imported from a helper, a `require(moduleVariable)`, an `await import(moduleVariable)` (those two
+// are what the owner executed against the old predicate — it returned `{ proven: true }` for both),
+// and a completely self-contained vitest-only suite, which the old predicate accepted as DB-free.
+// All seven must be residue and all seven must carry the IDENTICAL reason, asserted by equality. If
+// a future change reintroduces any source-reading exit, at least one of them either drops out of the
+// residue list or gets a different reason, and this test reds either way.
+test('issue 4828 residue sweep: all four cells of (excluded × carried) behave, and the verdict is source-independent, over a temp-dir corpus', () => {
   const dir = mkdtempSync(join(tmpdir(), 'w4c2-part3-'))
   try {
     const GATED = "const describeDb = process.env.DATABASE_URL ? describe : describe.skip\ndescribeDb('x', () => { it('y', () => {}) })\n"
-    const PROVEN_FREE = "import { describe, it } from 'vitest'\ndescribe('pure', () => { it('x', () => {}) })\n"
+    const SELF_CONTAINED = "import { describe, it } from 'vitest'\ndescribe('pure', () => { it('x', () => {}) })\n"
     const HELPER_GATED = "import { describeDb } from './helpers/db'\ndescribeDb('x', () => { it('y', () => {}) })\n"
+    // The two shapes the deleted `proveNoDatabaseDependence` returned `{ proven: true }` for: the
+    // module specifier is a VARIABLE, so a scan that could only capture a string literal saw no
+    // import at all and let an unwired DB-helper suite through.
+    const REQUIRE_VAR = "const spec = './hel' + 'pers/db'\nconst h = require(spec)\nit('y', () => { h.q() })\n"
+    const IMPORT_VAR = "const spec = './hel' + 'pers/db'\nconst h = await import(spec)\nit('y', () => { h.q() })\n"
     const files = {
       // excluded ∧ carried — the only clean cell.
       'attendance-probe-wired.db.test.ts': GATED,
-      // excluded ∧ ¬carried — executes NOWHERE. Invisible to the deleted gate classifier.
+      // excluded ∧ ¬carried — executes NOWHERE.
       'attendance-probe-excluded-uncarried.db.test.ts': GATED,
       // ¬excluded ∧ carried — the no-DB job collects it too and skip-greens it.
       'attendance-probe-carried-unexcluded.test.ts': GATED,
-      // ¬excluded ∧ ¬carried, unproven — the original OBS-1 shape.
+      // ¬excluded ∧ ¬carried — six sources, one verdict.
       'attendance-probe-loose-gated.test.ts': GATED,
-      // ¬excluded ∧ ¬carried, unproven via an imported gate — no env read in the file at all,
-      // which the deleted classifier called gate-free.
       'attendance-probe-loose-helper.test.ts': HELPER_GATED,
-      // ¬excluded ∧ ¬carried, PROVEN DB-free — the one legitimate resident of the no-DB job.
-      'attendance-probe-loose-free.test.ts': PROVEN_FREE,
+      'attendance-probe-loose-require-var.test.ts': REQUIRE_VAR,
+      'attendance-probe-loose-import-var.test.ts': IMPORT_VAR,
+      'attendance-probe-loose-selfcontained.test.ts': SELF_CONTAINED,
       // A `.spec.ts` suite and a SUBDIRECTORY suite: both were collected and skip-greened by the
       // no-DB job while sitting in NO corpus at all (executed, 2026-08-08). Both must be swept.
       'attendance-probe-spec.spec.ts': GATED,
@@ -1294,17 +1282,96 @@ test('issue 4828 residue sweep: all four cells of (excluded × carried) behave, 
         'attendance-probe-excluded-uncarried.db.test.ts',
         'attendance-probe-loose-gated.test.ts',
         'attendance-probe-loose-helper.test.ts',
+        'attendance-probe-loose-import-var.test.ts',
+        'attendance-probe-loose-require-var.test.ts',
+        'attendance-probe-loose-selfcontained.test.ts',
         'attendance-probe-spec.spec.ts',
         'sub/attendance-probe-nested.test.ts',
       ],
-      'exactly the six broken cells must be residue: the wired one, the PROVEN DB-free one, the '
-        + 'non-suite companion and the other family must not',
+      'exactly these nine probes must be residue — including the self-contained suite and the two '
+        + 'variable-specifier probes, which the deleted self-proof exit waved through; only the '
+        + 'two-point-wired one, the non-suite companion and the other family must not',
     )
     const reasonOf = (name) => residue.find((r) => r.file === name).reason
     assert.match(reasonOf('attendance-probe-excluded-uncarried.db.test.ts'), /executes NOWHERE/)
     assert.match(reasonOf('attendance-probe-carried-unexcluded.test.ts'), /half-satisfied two-point wiring/)
-    assert.match(reasonOf('attendance-probe-loose-gated.test.ts'), /is NOT proven/)
-    assert.match(reasonOf('attendance-probe-loose-helper.test.ts'), /imports "\.\/helpers\/db"/)
+    // Source-independence, asserted as EQUALITY rather than as five separate pattern matches: the
+    // unwired cell returns one reason, and it cannot vary with what the file contains.
+    const UNWIRED = reasonOf('attendance-probe-loose-gated.test.ts')
+    assert.match(UNWIRED, /neither excluded from the no-DB job nor carried by a real-DB run-list/)
+    assert.match(UNWIRED, /There is no self-proof exit/)
+    for (const name of [
+      'attendance-probe-loose-helper.test.ts',
+      'attendance-probe-loose-require-var.test.ts',
+      'attendance-probe-loose-import-var.test.ts',
+      'attendance-probe-loose-selfcontained.test.ts',
+      'attendance-probe-spec.spec.ts',
+      'sub/attendance-probe-nested.test.ts',
+    ]) {
+      assert.equal(
+        reasonOf(name),
+        UNWIRED,
+        `${name} must get the IDENTICAL unwired verdict as the plainly-gated probe — the verdict is `
+          + `a wiring property, and nothing in a file's source may change it`,
+      )
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// P2 positive control on the walk's refusal, driven over a temp dir: the classification must be
+// TOTAL. A regular file and a directory are walked; a symlink — even one pointing at a perfectly
+// good regular file in the same directory — is REFUSED rather than resolved, and so is a FIFO where
+// the platform can make one. Without this, "walkFiles throws on a symlink" would be a claim about
+// code rather than an executed fact, and the earlier `else if (isFile())` shape (which silently
+// dropped both) would pass every other leg in this file.
+test('P2: the corpus walk refuses symlinks and other non-regular entries instead of skipping them', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w4c2-walk-'))
+  try {
+    writeFileSync(join(dir, 'attendance-real.test.ts'), "it('x', () => {})\n")
+    mkdirSync(join(dir, 'sub'), { recursive: true })
+    writeFileSync(join(dir, 'sub/attendance-nested.test.ts'), "it('x', () => {})\n")
+    // Control: with only directories and regular files, the walk succeeds and finds both.
+    assert.deepEqual(walkFiles(dir).sort(), ['attendance-real.test.ts', 'sub/attendance-nested.test.ts'])
+
+    symlinkSync('attendance-real.test.ts', join(dir, 'attendance-link.test.ts'))
+    assert.throws(
+      () => walkFiles(dir),
+      (err) => /refusing to classify "attendance-link\.test\.ts"/.test(err.message)
+        && /symbolic link/.test(err.message)
+        && /mode 0o120000/.test(err.message),
+      'a symlink must red the walk with a message naming the entry and its type — never vanish',
+    )
+    rmSync(join(dir, 'attendance-link.test.ts'))
+    // A symlink pointing OUT of the corpus root is refused for the same reason (it would mint a
+    // vitest argument spelling no run-list could legitimately carry).
+    symlinkSync(join(dir, 'sub/attendance-nested.test.ts'), join(dir, 'attendance-abs-link.test.ts'))
+    assert.throws(() => walkFiles(dir), /refusing to classify "attendance-abs-link\.test\.ts"/)
+    rmSync(join(dir, 'attendance-abs-link.test.ts'))
+    // …and the refusal is not scoped to the attendance- prefix: any unclassifiable entry reds.
+    symlinkSync('attendance-real.test.ts', join(dir, 'zz-other-family.test.ts'))
+    assert.throws(() => walkFiles(dir), /refusing to classify "zz-other-family\.test\.ts"/)
+    rmSync(join(dir, 'zz-other-family.test.ts'))
+
+    // FIFO: same refusal, different type. Skipped only where mkfifo is unavailable — and the skip is
+    // reported, never silent (the symlink legs above already prove the refusal branch executes).
+    const fifo = join(dir, 'attendance-fifo.test.ts')
+    const mk = spawnSync('mkfifo', [fifo], { encoding: 'utf8' })
+    if (mk.status === 0) {
+      assert.throws(
+        () => walkFiles(dir),
+        (err) => /refusing to classify "attendance-fifo\.test\.ts"/.test(err.message)
+          && /FIFO \/ named pipe/.test(err.message),
+      )
+      rmSync(fifo)
+    } else {
+      console.log(`# note: mkfifo unavailable on this platform (${mk.status}), FIFO leg not executed`)
+    }
+
+    // Restored to a clean corpus, the walk succeeds again — so the throws above were the entries,
+    // not a latched failure.
+    assert.deepEqual(walkFiles(dir).sort(), ['attendance-real.test.ts', 'sub/attendance-nested.test.ts'])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -1373,7 +1440,7 @@ test('issue 4828 residue sweep: all four cells of (excluded × carried) behave, 
   for (const file of carried) {
     test(`${file} (carried by a real-DB run-list) exists on disk`, () => {
       // Both wiring texts can stay intact while the suite is renamed/deleted — vitest exits 0
-      // on an unmatched path argument, so CI stays green and the proof never runs.
+      // on an unmatched path argument, so CI stays green and the suite never executes.
       assert.ok(
         existsSync(join(repoRoot, 'packages/core-backend', file)),
         `wired suite packages/core-backend/${file} must exist on disk`,
