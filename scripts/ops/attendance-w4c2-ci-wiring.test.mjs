@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import {
   REAL_DB_STEP_IDS,
   extractStepById,
@@ -39,6 +40,13 @@ import {
 //     on-disk glob can distinguish from genuine no-DB integration tests — must be in the
 //     no-DB exclude too. The non-.db corpus is run-list-derived because the run-list is the
 //     only machine-readable statement that such a file is a real-DB suite.
+//   corpus part 3 (issue 4828, owner-ruled 2026-08-08): the slot the first two leave open — a
+//     suite that IS DB-gated but is NOT named *.db.test.ts and is in NO run-list is invisible to
+//     part 1 (glob misses it by name) AND to part 2 (run-list derivation misses it entirely).
+//     Every on-disk non-.db attendance-*.test.ts must therefore be EITHER carried by a real-DB
+//     run-list OR provably gate-free. The gate is detected BY SHAPE (the `? describe :
+//     describe.skip` ternary, under any binding name), and an unclassifiable shape FAILS CLOSED.
+//     Until this landed, the paragraph below said only in PROSE that such a file "must be wired".
 //
 // PLACEMENT REALITY the union below encodes: 72 of the 74 on-disk attendance .db suites are
 // carried by the attendance step (id `attendance-real-db-integration`); the 2
@@ -318,6 +326,203 @@ for (const file of onDiskAttendanceDbSuites()) {
       `vitest.config.ts must exclude ${file} (DATABASE_URL-gated whole file) as an exact quoted `
         + `entry inside the direct test.exclude array — a comment / coverage.exclude / free-text `
         + `hit is not placement. A missing entry is the half-wired skip-green shape`,
+    )
+  })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Corpus part 3 (issue 4828, owner-ruled): the hiding place the first two corpora leave open.
+//
+// A suite that IS DB-gated but is NOT named `*.db.test.ts` and is carried by NO real-DB run-list
+// is invisible to BOTH corpora above — part 1 is a disk glob over `*.db.test.ts` (misses it by
+// name), part 2 is derived from the run-lists (misses it because it is in no run-list). That is
+// exactly the slot `attendance-settlement-table-v1-5a.test.ts` occupied until this PR renamed it,
+// and until now the file header only said in PROSE that such a file "must be wired" — nothing
+// enforced it. This closes it mechanically:
+//
+//   every on-disk non-.db `attendance-*.test.ts` is EITHER carried by a real-DB run-list
+//   OR contains no DB gate.
+//
+// BOTH SIDES ARE DERIVED. The file set is a disk scan; "carried" is the SAME
+// `realDbWholeFileArgUnion()` the other two corpora use (a separately-built set could drift and
+// let part 3 pass on a definition of "carried" part 2 does not share). Nothing is hand-listed —
+// a hand-listed domain is the defect class this guard exists to delete.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * DB-gate detection by SHAPE, never by binding name. The tree expresses the gate exactly one way
+ * — a conditional describe: `const <anything> = <dbUrlExpr> ? describe : describe.skip` (421
+ * occurrences across tests/integration at this head, under at least four different identifiers:
+ * describeDb, describeWithDb, describeIfDatabase, attendanceIntegrationDescribe). Matching the
+ * IDENTIFIERS would rebuild the allowlist this PR deletes: a fifth name lands and the file is
+ * silently classified ungated. So the predicate matches the ternary shape itself; the bound name
+ * is irrelevant.
+ *
+ * Returns one of three verdicts, and the caller treats anything but 'ungated' as unwired:
+ *   'gated'    — a recognized conditional-describe gate is present.
+ *   'ungated'  — NO gate and NO gate-adjacent signal at all; safe to run in the no-DB job.
+ *   'unknown'  — a gate-adjacent signal is present in a shape this function does not recognize
+ *                (a skipIf/runIf form, a bare describe.skip that is not the ternary, a
+ *                DATABASE_URL reference with no recognized gate), or the source is empty.
+ *
+ * 'unknown' FAILS CLOSED by design (owner ruling): an unclassifiable file must redden this guard
+ * and force a human decision, never slip through the 'no DB gate' exit. The empty-source case is
+ * part of that — an empty read is not evidence of absence, so it must not be classified 'ungated'
+ * (readFileSync already throws on a missing path, so a wrong directory cannot pass silently
+ * either).
+ */
+export function classifyDbGate(source) {
+  if (typeof source !== 'string' || source.trim().length === 0) return 'unknown'
+  const RECOGNIZED_GATE = [
+    // `<expr> ? describe : describe.skip` — the form the whole tree uses.
+    /\?\s*describe\s*:\s*describe\s*\.\s*skip\b/,
+    // the inversion, accepted so a negated condition is not misread as "no gate".
+    /\?\s*describe\s*\.\s*skip\s*:\s*describe\b/,
+  ]
+  if (RECOGNIZED_GATE.some((re) => re.test(source))) return 'gated'
+  // Gate-ADJACENT signals: present but in no shape recognized above ⇒ cannot be called ungated.
+  const GATE_ADJACENT = [
+    /\bdescribe\s*\.\s*skip\b/,
+    /\bdescribe\s*\.\s*(?:skipIf|runIf)\b/,
+    /\b(?:it|test)\s*\.\s*(?:skipIf|runIf)\b/,
+    /\bDATABASE_URL\b/,
+  ]
+  if (GATE_ADJACENT.some((re) => re.test(source))) return 'unknown'
+  return 'ungated'
+}
+
+/** The on-disk non-.db attendance suites — part 1's complement within the attendance family. */
+function onDiskNonDbAttendanceSuites(dir = INTEGRATION_DIR) {
+  return readdirSync(dir)
+    .filter((name) => /^attendance-.*\.test\.ts$/.test(name) && !ATTENDANCE_DB_SUITE_RE.test(name))
+    .sort()
+}
+
+/**
+ * The part-3 verdict for one suite. Carried short-circuits: a file the run-lists carry is wired
+ * regardless of how it spells its gate, so it never needs classifying.
+ */
+function nonDbSuiteResidueReason({ file, source, carried }) {
+  if (carried.has(`tests/integration/${file}`)) return null
+  const gate = classifyDbGate(source)
+  if (gate === 'ungated') return null
+  return gate === 'gated'
+    ? 'DB-gated but carried by no real-DB run-list — it executes NOWHERE'
+    : 'gate shape unclassifiable — refusing to assume it is DB-free (fail closed)'
+}
+
+/**
+ * The whole part-3 sweep as a pure-ish function of (directory, carried set) so the permanent
+ * mutation test below can drive it over a SYNTHETIC temp-dir corpus — no probe fixture is
+ * shipped in the real tree.
+ */
+function collectNonDbResidue({ dir, carried }) {
+  const residue = []
+  for (const file of onDiskNonDbAttendanceSuites(dir)) {
+    const reason = nonDbSuiteResidueReason({
+      file,
+      source: readFileSync(join(dir, file), 'utf8'),
+      carried,
+    })
+    if (reason != null) residue.push({ file, reason })
+  }
+  return residue
+}
+
+// Classifier unit tests over INLINE SOURCE STRINGS — no I/O, no temp dir, no fixture. This layer
+// cannot go red for a path reason, so it isolates "the predicate is wrong" from "the scan read
+// the wrong place" (the temp-dir test below covers the second).
+test('issue 4828 classifier: recognizes the gate by shape under any binding name; fails closed on unrecognized shapes', () => {
+  // All four real binding names present in the tree — the identifier must not matter.
+  for (const name of ['describeDb', 'describeWithDb', 'describeIfDatabase', 'attendanceIntegrationDescribe']) {
+    assert.equal(
+      classifyDbGate(`const ${name} = dbUrl ? describe : describe.skip\n${name}('x', () => {})\n`),
+      'gated',
+      `binding name ${name} must be irrelevant — the ternary shape is the signal`,
+    )
+  }
+  // A name never seen before must still classify as gated (the anti-allowlist property).
+  assert.equal(classifyDbGate('const zzNeverSeenBefore = u ? describe : describe.skip\n'), 'gated')
+  // Inverted ternary.
+  assert.equal(classifyDbGate('const d = !u ? describe.skip : describe\n'), 'gated')
+  // Genuinely gate-free integration test.
+  assert.equal(
+    classifyDbGate("import { describe, it } from 'vitest'\ndescribe('pure', () => { it('x', () => {}) })\n"),
+    'ungated',
+  )
+  // Unclassifiable shapes must be 'unknown', NOT 'ungated' — these are the fail-closed cases.
+  assert.equal(classifyDbGate("describe.skipIf(!process.env.PG)('x', () => {})\n"), 'unknown')
+  assert.equal(classifyDbGate("describe.runIf(hasDb)('x', () => {})\n"), 'unknown')
+  assert.equal(classifyDbGate("const d = pickDescribe(hasDb)\nd('x', () => {})\n"), 'ungated')
+  assert.equal(classifyDbGate("if (!process.env.DATABASE_URL) return\n"), 'unknown')
+  assert.equal(classifyDbGate("describe.skip('temporarily off', () => {})\n"), 'unknown')
+  // An empty read is not evidence of absence.
+  assert.equal(classifyDbGate(''), 'unknown')
+  assert.equal(classifyDbGate('   \n\t '), 'unknown')
+  assert.equal(classifyDbGate(undefined), 'unknown')
+})
+
+// PERMANENT ENCODING of the owner-named mutation: "a DB-gated attendance-*.test.ts that is NOT
+// renamed and NOT wired must red". Driven over a temp-dir corpus, so the probe never lives in
+// packages/core-backend/tests/integration.
+test('issue 4828 residue sweep: a DB-gated, non-.db-named, un-carried suite is detected (temp-dir corpus)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w4c2-part3-'))
+  try {
+    const GATED = "const describeDb = process.env.DATABASE_URL ? describe : describe.skip\ndescribeDb('x', () => {})\n"
+    const UNGATED = "import { describe, it } from 'vitest'\ndescribe('pure', () => { it('x', () => {}) })\n"
+    const ODD = "describe.skipIf(!process.env.PG)('x', () => {})\n"
+    writeFileSync(join(dir, 'attendance-probe-gated-uncarried.test.ts'), GATED)
+    writeFileSync(join(dir, 'attendance-probe-gated-carried.test.ts'), GATED)
+    writeFileSync(join(dir, 'attendance-probe-ungated.test.ts'), UNGATED)
+    writeFileSync(join(dir, 'attendance-probe-unclassifiable.test.ts'), ODD)
+    // Out-of-family / out-of-corpus decoys that must NOT be swept by this corpus.
+    writeFileSync(join(dir, 'multitable-probe-gated.test.ts'), GATED)
+    writeFileSync(join(dir, 'attendance-probe-named.db.test.ts'), GATED)
+
+    const carried = new Set(['tests/integration/attendance-probe-gated-carried.test.ts'])
+    const residue = collectNonDbResidue({ dir, carried })
+    assert.deepEqual(
+      residue.map((r) => r.file).sort(),
+      ['attendance-probe-gated-uncarried.test.ts', 'attendance-probe-unclassifiable.test.ts'],
+      'the gated+uncarried suite AND the unclassifiable one must both be residue; the carried '
+        + 'one, the genuinely gate-free one, the other family and the .db-named file must not',
+    )
+    assert.match(residue.find((r) => r.file.endsWith('gated-uncarried.test.ts')).reason, /executes NOWHERE/)
+    assert.match(residue.find((r) => r.file.endsWith('unclassifiable.test.ts')).reason, /fail closed/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Non-vacuity floor on the part-3 scan itself: 13 non-.db attendance suites exist at this head.
+test('issue 4828 corpus part 3 is non-vacuous (the non-.db attendance family is non-empty)', () => {
+  const files = onDiskNonDbAttendanceSuites()
+  assert.ok(
+    files.length >= 8,
+    `on-disk non-.db attendance-*.test.ts scan found only ${files.length} files (13 at this head) `
+      + `— a near-empty scan means the directory path or the predicate broke, not that the family `
+      + `shrank by that much`,
+  )
+})
+
+// The live assertion, one test per file so the failure names the offender.
+for (const file of onDiskNonDbAttendanceSuites()) {
+  test(`tests/integration/${file} (non-.db-named) is carried by a real-DB run-list OR has no DB gate`, () => {
+    const reason = nonDbSuiteResidueReason({
+      file,
+      source: readFileSync(join(INTEGRATION_DIR, file), 'utf8'),
+      carried: new Set(realDbWholeFileArgUnion()),
+    })
+    assert.equal(
+      reason,
+      null,
+      `tests/integration/${file}: ${reason} — a DB-gated suite that is neither renamed to the `
+        + `*.db.test.ts convention (corpus part 1) nor carried by a real-DB run-list (corpus `
+        + `part 2) is invisible to BOTH: the no-DB job collects it and the conditional describe `
+        + `skip-greens it, so no CI job ever executes it. Wire it into a real-DB step's run-list `
+        + `(and the no-DB test.exclude), or rename it to *.db.test.ts and two-point wire it. `
+        + `Adding an exclusion here instead is a contract change requiring an owner ruling `
+        + `(issue 4828)`,
     )
   })
 }
