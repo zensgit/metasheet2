@@ -97,7 +97,8 @@ Optional follow-ups (not blocking ENGINEERING-READY; **not** product FINAL):
 
 - Full dual-canvas version UX (editor-embedded) if product wants beyond TemplateDetailView summary.  
 - D3 Vue Flow/ELK after O3.  
-- Owner: G0 ratify, real-tenant UAT, staged flag enablement with observation.  
+- Owner: G0 ratify, real-tenant UAT, staged flag enablement with observation —  
+  **packet:** `docs/development/approval-canvas-data-closure-owner-handoff-20260808.md`.  
 
 - Suggested gate: `/workflow approval-canvas-final-gate`  
 - Suggested dry-run only after new OPEN engineering items.  

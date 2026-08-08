@@ -147,6 +147,10 @@ No product-code change in this delivery flips a default to ON.
 
 ## 6. Owner-only remaining gates
 
+Executable owner packet (checklists + flag stages + sign-off template):
+
+→ **`docs/development/approval-canvas-data-closure-owner-handoff-20260808.md`**
+
 1. G0 ratify of `approval-canvas-v2-interaction-design-lock-20260721.md` (and O3 layout engine choice if renderer migration is desired).  
 2. Real-tenant UAT: form authoring, linear/condition/parallel publish+execute, route preview, FWB create/update, attachments, version restore.  
 3. Staged enablement: durable → Class A → Class B → FWB → attachments / Canvas V2, with observation windows.  
