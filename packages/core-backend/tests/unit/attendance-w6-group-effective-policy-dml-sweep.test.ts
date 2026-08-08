@@ -162,6 +162,42 @@ describe('W6-R1 static leg — zero DML anywhere in the derived closure', () => 
   })
 })
 
+describe('W6-R3 static leg — every AGGREGATE-authored read is org-scoped', () => {
+  /**
+   * The module header claims "every query it issues carries an `org_id`
+   * predicate". Two of its reads did NOT (they keyed on `shift_id`/`id`
+   * alone), which made an absolute claim false — this repo's rule is that
+   * absolute claims must be swept mechanically, not asserted in prose.
+   *
+   * A behavioural probe cannot discriminate this: `shiftId` reaches those
+   * reads only from `fser.desired.shiftId`, which a composite `(shift_id,
+   * org_id)` FK already proves same-org, so dropping the predicate changes no
+   * observable output. Attempting it as a mutation produced a red for the
+   * WRONG REASON (a pg type-inference error), which is not an outcome
+   * assertion. So the gate is static and mechanical, over the SQL literals the
+   * derived closure attributes to the aggregate module.
+   */
+  const aggregateSql = sqlArguments.resolved.filter((entry) =>
+    entry.file.endsWith('w6-group-effective-policy-aggregate.ts'),
+  )
+
+  it('non-vacuity: the aggregate really does author several SQL literals', () => {
+    expect(aggregateSql.length).toBeGreaterThanOrEqual(8)
+  })
+
+  it('every one of them names org_id in its predicate', () => {
+    const unscoped = aggregateSql
+      .filter((entry) => !/\borg_id\b/i.test(entry.sql))
+      .map((entry) => entry.sql.replace(/\s+/g, ' ').slice(0, 100))
+    expect(unscoped).toEqual([])
+  })
+
+  it('positive control: the check DOES reject an unscoped read', () => {
+    const unscoped = { file: 'w6-group-effective-policy-aggregate.ts', sql: 'SELECT flex_mode FROM attendance_shifts WHERE id = $1 LIMIT 1' }
+    expect(/\borg_id\b/i.test(unscoped.sql)).toBe(false)
+  })
+})
+
 describe('W6-R1 static leg — every reachable query() argument is sweepable', () => {
   it('zero STRING-COMPOSED SQL arguments (the class that defeated the literal-text detector)', () => {
     expect(sqlArguments.composed).toEqual([])
