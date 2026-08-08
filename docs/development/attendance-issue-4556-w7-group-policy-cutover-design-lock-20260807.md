@@ -358,7 +358,7 @@ Code:
 - `packages/core-backend/src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union.ts` (existence/purpose)
 - `packages/core-backend/src/db/migrations/zzzz20260805120000_w4c2_scheduled_run_sweep_fairness.ts:1-28`
 - `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs:1033, 1045, 1074, 1386` (`:1045`/`:1074` are the two `assert.deepEqual(unclaimed, [], …)` completeness legs cited by W7-R10)
-- `scripts/attendance/w4c0-dml-inventory/collector.cjs:53, 104, 574, 807-823` (P16's **derived** scan domain: `isScannablePath`, `discoverRuntimeRoots`, `scanFileForDmlSites`, `buildRawCensus`'s roots→`listAllFiles` walk — read at the pinned baseline and re-read at `origin/main@a45e1416002e6ca500eeda8d70e86c6443a10700`, byte-identical line anchors at both)
+- `scripts/attendance/w4c0-dml-inventory/collector.cjs:53, 104, 574, 807-823` (P16's **derived** scan domain: `isScannablePath`, `discoverRuntimeRoots`, `scanFileForDmlSites`, `buildRawCensus`'s roots→`listAllFiles` walk — read at the pinned baseline and re-read at `origin/main@323d7e1afef407f68c8ff2a6bfa940f175300f59`, byte-identical line anchors at both)
 - `scripts/attendance/w4c0-dml-inventory/curated-debt-entries.cjs:74` (the exact P16 allowlist — the **claim** side, not the scan domain)
 - `packages/openapi/drafts/attendance-w6-group-effective-policy.draft.yml:25` (the aggregate route literal `/api/attendance/groups/{groupId}/effective-policy` W7-R10 leg (ii) matches against)
 - `packages/core-backend/src/attendance/__tests__/w4c1-fingerprint-golden.test.ts:1-13`; `packages/core-backend/tests/utils/attendance-w4c2-golden-response.ts`; `packages/core-backend/tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts` (existence/role)

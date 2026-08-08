@@ -344,16 +344,18 @@ Code:
   adversarial gate; re-verified in the first amendment round after rebase onto
   `origin/main@51c3d8720789476efa15f6b99b6dc5f51df4743b`, and again in this
   round after rebase onto
-  `origin/main@a45e1416002e6ca500eeda8d70e86c6443a10700`):
+  `origin/main@323d7e1afef407f68c8ff2a6bfa940f175300f59`):
   `.github/workflows/plugin-tests.yml:553` (no-DB core-backend test step, no
   `DATABASE_URL`), `:594` (Start Postgres, after it), `:1147` (attendance
   real-DB run-list step, 38 `attendance-w4c*` entries);
   **anchor drift disclosed**: those three line numbers are the pinned-baseline
   ones and hold byte-identically at `51c3d872`, but `plugin-tests.yml` moved on
-  main between `51c3d872` and `a45e1416` — at `a45e1416` the same three anchors
-  are `:606`, `:647`, and `:1201` (the run-list step is located by its stable
-  `id: attendance-real-db-integration`, not by line number). The **facts** are
-  unchanged at `a45e1416`, re-counted this round: 40 files on disk match
+  main between `51c3d872` and `a45e1416` — at `a45e1416`, and unchanged at the
+  current rebase target `323d7e1a` (whose only new commit touches none of these
+  files), the same three anchors are `:606`, `:647`, and `:1201` (the run-list
+  step is located by its stable `id: attendance-real-db-integration`, not by
+  line number). The **facts** are unchanged at `323d7e1a`, re-counted this
+  round: 40 files on disk match
   `attendance-w4c*.db.test.ts`, the step carries 98 whole-file args of which 38
   are `attendance-w4c*`, the two files missing from the run-list are exactly
   `attendance-w4c3b-request-snapshots.db.test.ts` and
