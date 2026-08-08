@@ -696,6 +696,15 @@ export default defineConfig({
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
+      // #4556 W6-1 group effective-policy aggregate route: real Postgres via the shared
+      // metasheet_test database (R1/R3/R4 legs). Excluded here so describeIfDatabase cannot
+      // skip-green it; plugin-tests.yml runs the whole file with ATTENDANCE_TEST_DATABASE_URL.
+      'tests/integration/attendance-w6-group-effective-policy.db.test.ts',
+      // #4556 W6-1 membership-overlap counter (R5): a DEDICATED ephemeral database (not
+      // metasheet_test) because seeding a genuine overlap requires temporarily dropping
+      // attendance_calc_group_memberships_no_overlap. Excluded here for the same skip-green
+      // reason; plugin-tests.yml runs the whole file.
+      'tests/integration/attendance-w6-group-effective-policy-membership-overlap.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
