@@ -45,6 +45,8 @@ function fakeClient(account = CORP_ACCOUNT_WITHOUT_OPENID) {
 }
 
 const CORP_ACCOUNT_WITHOUT_OPENID = {
+  // #4651: the bind path re-reads the account under lock and refuses an inactive one.
+  is_active: true,
   id: '11111111-1111-1111-1111-111111111111',
   integration_id: '22222222-2222-2222-2222-222222222222',
   provider: 'dingtalk',
