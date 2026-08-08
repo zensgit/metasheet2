@@ -25,14 +25,9 @@ Four independent residual polish lanes with **no shared hot file**:
 
 ## PR Plan
 
-### PR 6: Promote residual canaries + smoke honesty — OPEN (this wave)
+### PR 6: Promote residual canaries + smoke honesty — OPEN
 
 - **Description:** Residual test files now exist on main. Promote form-history + dual-canvas from optional `test -f` to always-on canaries; add flow-canvas-a11y + inspector-a11y canaries. Update owner smoke to verify residual modules present. Stamp wave-1/2 design ledgers DONE with PR numbers.
-- **Always-on residual canaries:**
-  - `approval-form-authoring-history`
-  - `approval-version-dual-canvas`
-  - `approval-flow-canvas-a11y`
-  - `approval-canvas-inspector-a11y`
 - **Files/components affected:** `.github/workflows/approval-web-guard.yml`, `apps/web/scripts/run-required-web-tests.sh`, `scripts/ops/approval-canvas-owner-uat-smoke.sh`, residual design MDs (wave1/2/3)  
 - **Dependencies:** None  
 
@@ -63,10 +58,3 @@ Level 0 parallel: PR6 || PR7 || PR8 || PR9
 ## Autonomy
 
 Agents implement, test, push, open PRs, arm squash auto-merge. Must not flip flags or claim product FINAL.
-
-## Prior waves (closed)
-
-| Wave | PLAN_ID | PRs |
-|---|---|---|
-| Wave-1 | `6fa2fbf6` | #4815 form history, #4816 dual canvas, #4817 CI/smoke |
-| Wave-2 | `6fa2fbf6-w2` | #4818 flow canvas a11y, #4819 inspector a11y |
