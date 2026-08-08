@@ -49,9 +49,20 @@ describeIfDatabase('W6-1 group effective-policy — membership-overlap counter (
   const orgId = 'org-overlap'
   const groupId = randomUUID()
   const otherGroupId = randomUUID()
+  // #4814 P2-4: `otherGroupId` was seeded with the SAME two overlapping
+  // members as `groupId`, so per-group and per-org scoping produce
+  // IDENTICAL counts for it — the two hypotheses are indistinguishable, so
+  // asserting against `otherGroupId` alone proves nothing about
+  // boundedness (confirmed: neutering `AND m.group_id = $2` to `OR TRUE`
+  // left every existing assertion in this file green). `boundedGroupId`
+  // holds a member whose overlap set DIFFERS from groupId/otherGroupId's
+  // (zero org-wide overlap for them at all), so per-group vs per-org
+  // scoping diverge and the assertion actually discriminates.
+  const boundedGroupId = randomUUID()
   const overlapUserA = 'user-overlap-a'
   const overlapUserB = 'user-overlap-b'
   const cleanUser = 'user-clean'
+  const boundedGroupSoloUser = 'user-bounded-group-solo'
 
   beforeAll(async () => {
     await adminPool.query(`CREATE DATABASE ${databaseName}`)
@@ -76,7 +87,10 @@ describeIfDatabase('W6-1 group effective-policy — membership-overlap counter (
           )
       );
     `)
-    await pool.query('INSERT INTO attendance_groups (id, org_id) VALUES ($1, $2), ($3, $2)', [groupId, orgId, otherGroupId])
+    await pool.query(
+      'INSERT INTO attendance_groups (id, org_id) VALUES ($1, $4), ($2, $4), ($3, $4)',
+      [groupId, otherGroupId, boundedGroupId, orgId],
+    )
 
     // The constraint is airtight by design (confirmed under a concurrent
     // race in attendance-legacy-membership-overlap-audit.db.test.ts) — the
@@ -99,6 +113,18 @@ describeIfDatabase('W6-1 group effective-policy — membership-overlap counter (
       `INSERT INTO attendance_calculation_group_memberships (org_id, user_id, group_id, effective_from, effective_to)
        VALUES ($1, $2, $3, $4, NULL)`,
       [orgId, cleanUser, groupId, today],
+    )
+    // boundedGroupSoloUser: exactly ONE effective-today row, TOTAL, in
+    // `boundedGroupId` only — zero org-wide overlap and a member set
+    // entirely disjoint from overlapUserA/B. A per-group query must
+    // report 0 for boundedGroupId; a per-org (or group-filter-dropped)
+    // query would instead return 2 (overlapUserA + overlapUserB, who
+    // qualify org-wide regardless of which group is asked about) — the
+    // divergence P2-4 needs to actually discriminate the two.
+    await pool.query(
+      `INSERT INTO attendance_calculation_group_memberships (org_id, user_id, group_id, effective_from, effective_to)
+       VALUES ($1, $2, $3, $4, NULL)`,
+      [orgId, boundedGroupSoloUser, boundedGroupId, today],
     )
   })
 
@@ -125,16 +151,38 @@ describeIfDatabase('W6-1 group effective-policy — membership-overlap counter (
     expect(count).toBe(2) // overlapUserA + overlapUserB; cleanUser excluded
   })
 
-  it('a different, non-overlapping group in the same org reports 0', async () => {
+  it('a second group sharing the SAME two org-wide-overlapping members ALSO reports 2 (sanity/consistency check — NOT a per-group-boundedness proof, see the next test for that)', async () => {
     // otherGroupId's own members (A and B) also have exactly 2 rows each
-    // org-wide, so it reports 2 as well — reusing it as its own group
-    // confirms the query is bounded per-group, not per-org.
+    // org-wide, so it reports 2 as well. This is a consistency check that
+    // the query genuinely re-evaluates for a different $2 groupId value
+    // (not, say, an accidentally-cached first result) -- it does NOT by
+    // itself distinguish per-group scoping from per-org scoping, because
+    // both groups here have an IDENTICAL overlap set and so produce the
+    // same count either way (#4814 P2-4). Boundedness is proven by the
+    // next test, which uses a group with a DIFFERENT overlap set.
     const service = createAttendanceGroupEffectivePolicyAggregateService({
       query: db().query,
       fser: { getEffectiveness: async () => { throw new Error('not used') } },
     })
     const count = await service.countMembershipOverlap(orgId, otherGroupId)
     expect(count).toBe(2)
+  })
+
+  it('OD-W6-8(a): a group whose member has zero org-wide overlap reports 0 even though OTHER users in the same org DO overlap — proves the query is genuinely bounded per-group, not per-org', async () => {
+    // boundedGroupId's only member (boundedGroupSoloUser) holds exactly one
+    // effective-today membership, total -- no overlap. overlapUserA/B DO
+    // have org-wide overlap, but neither is a member of boundedGroupId. A
+    // per-group query must therefore report 0; a per-org (or
+    // group-filter-dropped) query would instead report 2, since
+    // overlapUserA/B qualify org-wide regardless of which group is asked
+    // about. This is the case the previous test's identical-overlap-set
+    // fixture could not discriminate.
+    const service = createAttendanceGroupEffectivePolicyAggregateService({
+      query: db().query,
+      fser: { getEffectiveness: async () => { throw new Error('not used') } },
+    })
+    const count = await service.countMembershipOverlap(orgId, boundedGroupId)
+    expect(count).toBe(0)
   })
 
   // W6-R5's "a choose-first/choose-latest mutation must fail" negative proof
