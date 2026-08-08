@@ -41,7 +41,7 @@ Agents may implement, test, commit, push to the tracking branch, and update the 
 | Final-eligibility MD + gate workflow | **DONE** | docs + `.grok/workflows/approval-canvas-final-gate.rhai` |
 | G5-C S1–S12 product-path suite | **DONE** | `approval-g5c-authoring-scenarios.test.ts` (CI-wired) |
 | CI: approval-web-guard / web-tests green | **IN PROGRESS** | fix regressions; required canaries include new specs |
-| Version dual-canvas shell (full D8-b) | **OPEN** | helpers exist; no editor dual-canvas product shell |
+| Version dual-canvas shell (full D8-b) | **PARTIAL** | pure `approvalVersionReadSummary` + overlay/diff helpers; no editor dual-canvas chrome |
 | Extract `ApprovalFlowCanvas` / inspector modules | **OPEN** | reduce `TemplateAuthoringView` heat |
 | D3 Vue Flow/ELK | **BLOCKED (O3)** | do not start |
 
@@ -67,11 +67,11 @@ Statuses: `DONE` items must not be re-implemented by `/execute-plan`. Only `OPEN
 - **Files/components affected:** `TemplateAuthoringView.vue`, G5-C structural assertions  
 - **Dependencies:** None  
 
-### PR 3: Version overlay read surface (D8-b thin) — OPEN
+### PR 3: Version overlay read surface (D8-b thin) — DONE (pure path on #4806)
 
-- **Description:** Reuse `diffApprovalTemplateVersions` + `buildVersionGraphOverlay` as a read-only change summary when version payloads are available in authoring/review. No new backend. Do not claim dual-canvas product shell. Prefer pure helper + structural tests if UI surface is deferred.  
-- **Files/components affected:** `apps/web/src/approvals/versionGraphOverlay.ts`, `apps/web/src/approvals/templateVersionDiff.ts`, optional thin UI under `apps/web/src/views/approval/`, tests  
-- **Dependencies:** PR 0 (green #4806 preferred)  
+- **Description:** `buildApprovalVersionReadSummary` composes existing diff + optional overlay into business-facing lines and badge tallies. No new backend; no dual-canvas chrome claim.  
+- **Files/components affected:** `apps/web/src/approvals/approvalVersionReadSummary.ts`, `apps/web/tests/approval-version-read-summary.test.ts`, CI canaries  
+- **Dependencies:** PR 0 (CI closeout)  
 
 ### PR 4: Extract ApprovalFlowCanvas / inspector shell — OPEN
 
@@ -90,10 +90,12 @@ Statuses: `DONE` items must not be re-implemented by `/execute-plan`. Only `OPEN
 Linearized remaining stack after PR 0 is green:
 
 ```text
-PR0 (CI closeout on #4806) → PR4 (extract) → PR3 (version thin)
+PR0 (CI closeout on #4806) → PR4 (extract hot file)
 ```
 
-- Max parallelism: 1 on `TemplateAuthoringView.vue` (PR0 then PR4). PR3 may parallel PR4 only if it does not touch the same hot file.  
+PR3 (version thin pure path) is **DONE** without dual-canvas chrome.
+
+- Max parallelism: 1 on `TemplateAuthoringView.vue` for PR4.  
 - Suggested: `/execute-plan docs/development/approval-canvas-remaining-engineering-design-20260808.md --dry-run` then execute only OPEN nodes (implementer must skip DONE).  
 
 ## Verification

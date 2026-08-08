@@ -103,6 +103,8 @@ on:
       - 'apps/web/src/approvals/approvalAuthoringHistory.ts'
       - 'apps/web/tests/approval-authoring-history.test.ts'
       - 'apps/web/tests/approval-g5c-authoring-scenarios.test.ts'
+      - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
+      - 'apps/web/tests/approval-version-read-summary.test.ts'
       - 'apps/web/tests/approval-form-commands.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
       - 'apps/web/src/approvals/canvasViewport.ts'
@@ -285,6 +287,8 @@ on:
       - 'apps/web/src/approvals/approvalAuthoringHistory.ts'
       - 'apps/web/tests/approval-authoring-history.test.ts'
       - 'apps/web/tests/approval-g5c-authoring-scenarios.test.ts'
+      - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
+      - 'apps/web/tests/approval-version-read-summary.test.ts'
       - 'apps/web/tests/approval-form-commands.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
       - 'apps/web/src/approvals/canvasViewport.ts'
@@ -435,7 +439,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run Canvas V2 command canaries
-        run: pnpm --filter @metasheet/web exec vitest run approval-canvas-commands approval-form-commands approval-authoring-history approval-g5c-authoring-scenarios --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-canvas-commands approval-form-commands approval-authoring-history approval-g5c-authoring-scenarios approval-version-read-summary --reporter=dot
 
       - name: Run FWB mapping authoring contract
         run: pnpm --filter @metasheet/web exec vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
