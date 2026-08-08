@@ -119,6 +119,7 @@ function armMockDirectory(fixture: Fixture): void {
 
 async function cleanupFixture(fixture: Fixture): Promise<void> {
   await query(`DELETE FROM directory_sync_alerts WHERE integration_id = $1`, [fixture.integrationId])
+  await query(`DELETE FROM directory_deprovision_events WHERE integration_id = $1`, [fixture.integrationId])
   await query(`DELETE FROM directory_sync_runs WHERE integration_id = $1`, [fixture.integrationId])
   await query(
     `DELETE FROM directory_account_links WHERE directory_account_id IN (SELECT id FROM directory_accounts WHERE integration_id = $1)`,
@@ -208,6 +209,98 @@ describeIfDatabase('W4-PRE-1c case ① — real sync sweep composed with the dep
 
       const user = await query<{ is_active: boolean }>(`SELECT is_active FROM users WHERE id = $1`, [fixture.localUserId])
       expect(user.rows[0].is_active).toBe(false)
+
+      // D4 orchestration pin: the production sync passed its own transaction client and real
+      // run id into the writer. A second transaction or synthetic run cannot satisfy this readback.
+      const evidence = await query<{
+        effect_count: number
+        run_id: string
+      }>(
+        `SELECT event.run_id::text,
+                COUNT(effect.id)::int AS effect_count
+           FROM directory_deprovision_events event
+           JOIN directory_deprovision_effects effect ON effect.event_id = event.id
+          WHERE event.local_user_id = $1
+          GROUP BY event.run_id`,
+        [fixture.localUserId],
+      )
+      expect(evidence.rows).toEqual([
+        { effect_count: 2, run_id: result.run.id },
+      ])
+    }, 30_000)
+  })
+
+  describe('D4 fail-last evidence write rolls the production sync transaction back', () => {
+    let fixture: Fixture
+    const triggerName = `d4_fail_event_trigger_${TS}`
+    const functionName = `d4_fail_event_function_${TS}`
+
+    afterAll(async () => {
+      await query(`DROP TRIGGER IF EXISTS ${triggerName} ON directory_deprovision_events`)
+      await query(`DROP FUNCTION IF EXISTS ${functionName}()`)
+      if (fixture) await cleanupFixture(fixture)
+      delete process.env.DIRECTORY_DEPROVISION_ENABLED
+    })
+
+    it('rolls back the account sweep and every access write when the ledger INSERT fails', async () => {
+      fixture = await seedDepartureFixture('ledger-fail')
+      armMockDirectory(fixture)
+      process.env.DIRECTORY_DEPROVISION_ENABLED = 'true'
+      await query(`
+        CREATE FUNCTION ${functionName}()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.local_user_id = '${fixture.localUserId}' THEN
+            RAISE EXCEPTION 'D4 deterministic ledger failure';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `)
+      await query(`
+        CREATE TRIGGER ${triggerName}
+        BEFORE INSERT ON directory_deprovision_events
+        FOR EACH ROW EXECUTE FUNCTION ${functionName}()
+      `)
+
+      try {
+        await expect(
+          syncDirectoryIntegration(
+            fixture.integrationId,
+            'system:w4pre1c-d4-ledger-fail',
+            'manual',
+          ),
+        ).rejects.toThrow('D4 deterministic ledger failure')
+      } finally {
+        await query(`DROP TRIGGER IF EXISTS ${triggerName} ON directory_deprovision_events`)
+        await query(`DROP FUNCTION IF EXISTS ${functionName}()`)
+      }
+
+      const account = await query<{ is_active: boolean }>(
+        `SELECT is_active FROM directory_accounts WHERE id = $1`,
+        [fixture.accountId],
+      )
+      expect(account.rows[0].is_active).toBe(true)
+      await expect(
+        membershipIsActive(fixture.localUserId, fixture.orgId),
+      ).resolves.toBe(true)
+      const user = await query<{ access_generation: string; is_active: boolean }>(
+        `SELECT access_generation::text, is_active FROM users WHERE id = $1`,
+        [fixture.localUserId],
+      )
+      expect(user.rows[0]).toEqual({ access_generation: '0', is_active: true })
+      const evidence = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count
+           FROM directory_deprovision_events
+          WHERE local_user_id = $1`,
+        [fixture.localUserId],
+      )
+      expect(evidence.rows[0].count).toBe('0')
+      const runs = await listDirectorySyncRuns(fixture.integrationId, {
+        limit: 1,
+        offset: 0,
+      })
+      expect(runs.items[0]?.status).toBe('failed')
     }, 30_000)
   })
 })

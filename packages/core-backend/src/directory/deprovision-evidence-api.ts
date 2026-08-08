@@ -3,7 +3,10 @@
  */
 
 import { query, transaction } from '../db/pg'
-import { planDirectoryDeprovision } from './deprovision-planner'
+import {
+  planDirectoryDeprovision,
+  type DirectoryDeprovisionPolicy,
+} from './deprovision-planner'
 import {
   evaluateDeprovisionRestoreEligibility,
   type RestoreEffectView,
@@ -43,8 +46,10 @@ export async function previewDeprovisionForUser(localUserId: string, integration
   }
   const u = user.rows[0]
 
-  const integration = await query<{ org_id: string }>(
-    `SELECT org_id FROM directory_integrations WHERE id = $1::uuid`,
+  const integration = await query<{ org_id: string; default_deprovision_policy: string }>(
+    `SELECT org_id, default_deprovision_policy
+       FROM directory_integrations
+      WHERE id = $1::uuid`,
     [integrationId],
   )
   if (!integration.rows[0]) {
@@ -87,8 +92,17 @@ export async function previewDeprovisionForUser(localUserId: string, integration
     [localUserId, integrationId],
   )
 
+  const storedPolicy = integration.rows[0].default_deprovision_policy
+  const policy: DirectoryDeprovisionPolicy = [
+    'manual_review',
+    'disable_grant_only',
+    'mark_inactive',
+  ].includes(storedPolicy)
+    ? (storedPolicy as DirectoryDeprovisionPolicy)
+    : 'manual_review'
   const plan = planDirectoryDeprovision({
     localUserId,
+    policy,
     activationStatus: u.activation_status,
     isActive: u.is_active,
     orgId,

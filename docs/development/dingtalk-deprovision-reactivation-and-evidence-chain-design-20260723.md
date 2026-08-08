@@ -150,7 +150,9 @@ Apply 在 directory transition 之后调用时，prospective = 本轮 `RETURNING
 
 **Positive control test:** 将消失的 linked 账号 → Preview `candidateCount ≥ 1`；去掉 prospective 排除 → 变 0 且测试红。
 
-Writer：`applyDirectoryDeprovisionPlan` 仅在 `enabled=true` 时写访问图 + ledger；`enabled=false` 零写。
+Writer：`applyDirectoryDeprovisionCandidate(client, ...)` 只接受调用方现有的 sync 事务
+client；`enabled=true` 时在该事务内完成 user row lock、写时重读、访问图、
+generation 与 ledger，`enabled=false` 零写且不自开第二事务。
 
 ---
 
