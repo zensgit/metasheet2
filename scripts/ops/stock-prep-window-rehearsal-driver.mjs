@@ -174,6 +174,15 @@ record('create-target-system', ok(targetSystem) && Boolean(payload(targetSystem)
   timeout: timedOut(targetSystem),
 })
 const targetSystemId = payload(targetSystem).id
+// Fail closed: equal source/target ids make every same-instance check a self-comparison
+// (owner #4768). Binding B4 to sourceSystemId is not enough if targetSystemId is only an
+// alias — String(sourceSystemId) recreates target-vs-itself. This step must stay a live
+// inequality; the offline contract pins its exact predicate via the positive manifest.
+record('source-target-systems-distinct',
+  Boolean(sourceSystemId) && Boolean(targetSystemId) && sourceSystemId !== targetSystemId, {
+  sourcePresent: Boolean(sourceSystemId),
+  targetPresent: Boolean(targetSystemId),
+})
 
 // ---------------------------------------------------------------------------------------------
 // Step 0-c — THE PIPELINE SOURCE. Not K3: no K3 configuration can serve as a C6 source, because

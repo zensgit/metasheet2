@@ -349,6 +349,13 @@ const REQUIRED_DISCRIMINATORS = {
     'ok(targetSystem)',
     'Boolean(payload(targetSystem)?.id)',
   ],
+  // Equal source/target ids recreate owner #4768 self-comparison even when B4 still names
+  // sourceSystemId — String(sourceSystemId) as the target assignment is the false-green form.
+  'source-target-systems-distinct': [
+    'Boolean(sourceSystemId)',
+    'Boolean(targetSystemId)',
+    'sourceSystemId !== targetSystemId',
+  ],
   'staging-install': [
     'ok(stagingInstall)',
     'Boolean(stagingSheetId)',
@@ -526,4 +533,96 @@ test('BEHAVIOURAL: a bare read yields LOGICAL keys only when projectId + objectI
     'objectId `material` was never provisioned -> empty alias map (the driver\'s original bug)')
   assert.equal(wrongObject.records[0][PHYSICAL.code], 'MAT-RH-001',
     'and the raw physical key is what comes through instead')
+})
+
+// ---------------------------------------------------------------------------------------------
+// Review 2026-08-08 (P2) + follow-up: four rehearsal regressions that can leave REQUIRED CI green
+// if only surrounding shape is pinned. Injected forms:
+//   A. `f.name || f.title` -> `f.logicalId`      (map empty; every seed row rejected)
+//   B. B4 `systemId: sourceSystemId` -> `targetSystemId`  (self-comparison — owner #4768)
+//   C. `const targetSystemId = payload(targetSystem).id` -> `String(sourceSystemId)`
+//      (ids equal at runtime; B4 still "names source" while same-instance is self)
+//   D. keep a bare `f.id` read unused while physical uses `f.logicalId || f.fieldId`
+//      (token presence of f.id without USE still false-greens a bare-token guard)
+// Pin selection EXPRESSIONS + their USE, and pin distinct source/target ids via the exact
+// predicate manifest (runtime fail-closed) plus positive assignment origins.
+// ---------------------------------------------------------------------------------------------
+
+test('the field map is keyed on the SHAPE /fields actually returns ({id, name}), not an invented key', () => {
+  // The route selects `id, name, type, property, "order"` and answers `{data:{fields:[...]}}`
+  // (packages/core-backend/src/routes/univer-meta.ts, GET /fields). A key that route never emits
+  // yields an empty map — the failure mode this pins.
+  const route = fs.readFileSync(
+    path.join(repoRoot, 'packages/core-backend/src/routes/univer-meta.ts'), 'utf8')
+  const listBlock = route.slice(route.indexOf("router.get('/fields'"))
+  assert.ok(listBlock.length > 0, 'GET /fields not found — every assertion below would be vacuous')
+  const select = listBlock.slice(0, 1200)
+  assert.ok(/SELECT id, name,/.test(select),
+    'GET /fields must still SELECT id and name — if the route shape changed, this guard is stale '
+    + 'and the driver must be re-derived from the NEW shape rather than this test relaxed')
+
+  // Pin the ACTUAL selection expressions and their use in the map write — not bare token
+  // presence. A loop that does `const unused = f.id` while physical is `f.logicalId || f.fieldId`
+  // still contains `\bf.id\b` and would false-green a token-only guard (mutation D).
+  const loopStart = driver.indexOf('const physicalByName')
+  assert.ok(loopStart > 0, 'physicalByName resolution loop not found')
+  const loop = driver.slice(loopStart, loopStart + 400)
+  assert.ok(/const logical = f && \(f\.name \|\| f\.title\)/.test(loop),
+    'logical selection must be `f.name || f.title` (route returns name; title is the documented '
+    + 'fallback). Mutation A (`f.logicalId`) left CI green while the map resolved empty.')
+  assert.ok(/const physical = f && \(f\.id \|\| f\.fieldId\)/.test(loop),
+    'physical selection must be `f.id || f.fieldId` — the id half of GET /fields. Reading `f.id` '
+    + 'into an unused binding does not count; the value written into the map must use it.')
+  assert.ok(/physicalByName\[logical\]\s*=\s*physical/.test(loop),
+    'both selections must be USED: physicalByName[logical] = physical')
+
+  // NEGATIVE CONTROLS: each independent mutant must fail the matching pin.
+  const mutantLogical = loop.replace(/f\.name \|\| f\.title/, 'f.logicalId')
+  assert.equal(/const logical = f && \(f\.name \|\| f\.title\)/.test(mutantLogical), false,
+    'the `f.logicalId` logical-key mutant must fail this test — otherwise it pins nothing')
+  const mutantPhysical = loop
+    .replace(
+      /const physical = f && \(f\.id \|\| f\.fieldId\)/,
+      'const unusedId = f && f.id\n  const physical = f && (f.logicalId || f.fieldId)',
+    )
+  assert.equal(/const physical = f && \(f\.id \|\| f\.fieldId\)/.test(mutantPhysical), false,
+    'unused `f.id` + wrong physical selection must fail this test — otherwise token presence '
+    + 'is enough and the guard is not load-bearing')
+})
+
+test('B4 binds the K3-READ record, never the write target (no self-comparison)', () => {
+  // Owner P1 (#4768): binding B4 to the target made `sameK3Instance(x, x)` trivially true. The
+  // driver now binds the separate read record; nothing in CI asserted that until this test.
+  const b4Line = driver.match(/buildK3WiseMaterialListB4Config\(\{[^}]*\}\)/)
+  assert.ok(b4Line, 'the driver must mint a B4 binding via buildK3WiseMaterialListB4Config')
+  assert.match(b4Line[0], /systemId:\s*sourceSystemId\b/,
+    'B4 must bind sourceSystemId (the K3-read record). Mutation B (`targetSystemId`) restores the '
+    + 'exact defect owner reported and left this file 15/15 green.')
+  assert.doesNotMatch(b4Line[0], /systemId:\s*targetSystemId\b/,
+    'binding the write target is the self-referential shape the runtime now rejects with '
+    + 'K3_C6_B4_BINDING_SELF_REFERENTIAL')
+
+  // Distinct records with POSITIVE assignment origins — not a denylist of alias spellings.
+  // `const targetSystemId = String(sourceSystemId)` still leaves B4 naming sourceSystemId and
+  // defeats `= sourceSystemId` exact-text denial while recreating self-comparison at runtime.
+  assert.ok(/^const sourceSystemId = payload\(sourceSystem\)\.id[ \t]*$/m.test(driver),
+    'sourceSystemId must be the id returned by create-source-system')
+  assert.ok(/^const targetSystemId = payload\(targetSystem\)\.id[ \t]*$/m.test(driver),
+    'targetSystemId must be the id returned by create-target-system — not an alias of the source')
+
+  // Runtime fail-closed is the live inequality step; the positive manifest pins its exact
+  // predicate (Boolean(source) && Boolean(target) && source !== target). Offline, that step's
+  // presence is required by the manifest covering every record() step.
+  // NEGATIVE CONTROL: the String(sourceSystemId) alias must fail the assignment pin.
+  const aliasMutant = driver.replace(
+    /^const targetSystemId = payload\(targetSystem\)\.id[ \t]*$/m,
+    'const targetSystemId = String(sourceSystemId)',
+  )
+  assert.equal(/^const targetSystemId = payload\(targetSystem\)\.id[ \t]*$/m.test(aliasMutant), false,
+    'String(sourceSystemId) as targetSystemId must fail this test — otherwise self-comparison '
+    + 'via alias is still green')
+
+  // And the target must DECLARE the pairing, which is what widens #4769's relation check.
+  assert.match(driver, /pairedReadSystemId:\s*sourceSystemId\b/,
+    'the write target must declare pairedReadSystemId = the K3-read record id')
 })
