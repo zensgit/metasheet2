@@ -273,10 +273,17 @@
 
         <div
           v-for="(field, index) in draft.fields"
+          :id="`approval-field-row-${field.localId}`"
           :key="field.localId"
           class="template-authoring__item"
+          :class="{ 'template-authoring__item--focused': formFieldFocusLocalId === field.localId }"
           data-testid="approval-template-field-row"
+          :data-field-local-id="field.localId"
+          :data-selected="formFieldFocusLocalId === field.localId ? 'true' : undefined"
+          :aria-current="formFieldFocusLocalId === field.localId ? 'true' : undefined"
+          tabindex="-1"
           :draggable="!readOnly"
+          @focusin="selectFormFieldFocus(field.localId)"
           @dragstart="onFieldDragStart(index)"
           @dragover.prevent
           @drop="onFieldDrop(index)"
@@ -2039,6 +2046,30 @@ function applyFormFieldsStructural(
   formFieldFocusLocalId.value = next.focusLocalId
 }
 
+/** UI selection only — does not push form history (focus-only; structural stack unchanged). */
+function selectFormFieldFocus(localId: string): void {
+  if (formFieldFocusLocalId.value === localId) return
+  formFieldFocusLocalId.value = localId
+}
+
+/**
+ * After palette/add, land keyboard authors on the new field row (selection already set via
+ * form history focusLocalId). Prefer the label input; fall back to the row shell.
+ */
+async function focusFormFieldRow(localId: string): Promise<void> {
+  formFieldFocusLocalId.value = localId
+  await nextTick()
+  const row = document.getElementById(`approval-field-row-${localId}`)
+  if (!row) return
+  row.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+  const labelInput = row.querySelector('input') as HTMLInputElement | null
+  if (labelInput && !labelInput.disabled) {
+    labelInput.focus()
+    return
+  }
+  row.focus()
+}
+
 function onFormFieldUndo(): void {
   if (readOnly.value) return
   // Align tip with live draft so in-place edits since last structural op redo correctly.
@@ -2686,7 +2717,9 @@ const fieldPaletteEntries = AUTHORABLE_FIELD_TYPES.map((type) => ({
 function addField() {
   if (readOnly.value) return
   const added = createEmptyFieldDraft(draft.value.fields.length + 1)
+  // Structural push carries focusLocalId so undo restores prior focus (#4815).
   applyFormFieldsStructural([...draft.value.fields, added], added.localId)
+  void focusFormFieldRow(added.localId)
 }
 
 /** D6-f2 palette: add a field of the chosen kind without ordinary-user ID entry. */
@@ -2705,7 +2738,9 @@ function addFieldOfType(type: AuthorableFieldType) {
       optionsText: '',
     }]
   }
+  // Structural push sets form history focusLocalId to the new field; UI selection follows.
   applyFormFieldsStructural([...draft.value.fields, next], next.localId)
+  void focusFormFieldRow(next.localId)
 }
 
 function removeField(index: number) {
@@ -3409,6 +3444,17 @@ onUnmounted(() => {
 .template-authoring__item--highlighted {
   border-color: var(--el-color-primary);
   box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+}
+
+/* Form palette focus-return: selected field row (formFieldFocusLocalId). */
+.template-authoring__item--focused {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 1px var(--el-color-primary-light-5);
+}
+
+.template-authoring__item--focused:focus {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 
 /* G-B2-06 read-only linear flow spine. */
