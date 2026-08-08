@@ -378,3 +378,78 @@ describe('W6-1 group effective-policy aggregate — fail-closed enum guards (#48
     })
   })
 })
+
+/**
+ * OD-W6-6(a) (#4814 P3-2a): the lock's predicate is *"`preview_only` unless
+ * the org rollout posture is `authoritative` AND
+ * `SEGMENT_CALCULATION_IMPLEMENTED` is true."* Every `aggregate-*.json`
+ * fixture leaves `attendance_calculation_rollout_state` empty (posture
+ * always `legacy`) and no test injects `segmentCalculationImplemented:
+ * true`, so the `authoritativeAndImplemented` half of the disjunct in
+ * `getAggregate` never executed in this suite — a mutation neutering it
+ * would have stayed green. This case is built to be single-segment-strict
+ * FALSE (3 segments, `flex_required_duration`) so `effective` can ONLY be
+ * reached via the authoritative-and-implemented disjunct, isolating it
+ * from the already-covered single-segment-strict path.
+ */
+describe('OD-W6-6(a) authoritative-and-implemented branch (#4814 P3-2a — was untested)', () => {
+  const groupId = 'a4556006-000a-4000-8000-000000000001'
+  const shiftId = 'a4556006-000a-4000-8000-000000000101'
+  const configId = 'a4556006-000a-4000-8000-000000000102'
+
+  function makeAuthoritativeQuery(): AttendanceGroupEffectivePolicyQueryFn {
+    return async (sql) => {
+      const s = sql.toLowerCase()
+      if (s.includes('from attendance_groups')) return [{ id: groupId, attendance_type: 'fixed_shift', timezone: 'Asia/Shanghai', rule_set_id: null }]
+      if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 4 }]
+      if (s.includes('from attendance_group_managers')) return [{ role: 'owner', cnt: 1 }]
+      if (s.includes('from attendance_calculation_rollout_state')) return [{ state: 'authoritative' }]
+      if (s.includes('from attendance_group_fixed_schedule_configs')) return [{ id: configId }]
+      // Deliberately NOT single-segment-strict: 3 segments, flex_required_duration.
+      if (s.includes('count(*)::int as cnt from attendance_shift_segments')) return [{ cnt: 3 }]
+      if (s.includes('from attendance_shifts')) return [{ flex_mode: 'flex_required_duration' }]
+      if (s.includes('from attendance_calculation_group_memberships')) return []
+      if (s.includes('from attendance_rule_sets')) return []
+      throw new Error(`unexpected SQL: ${sql}`)
+    }
+  }
+
+  const fser = makeFser({
+    groupId,
+    state: 'effective',
+    reasonCodes: ['EFFECTIVE'],
+    desired: { shiftId, startDate: '2026-08-01', endDate: '2026-08-31', revision: 1 },
+    coverage: { targetMembers: 4, matchingMembers: 4, missingMembers: 0, nonMemberTargets: 0, differentKeyRows: 0 },
+    drift: { unconfiguredManagedRows: 0, unpublishedManagedRows: 0, managedSets: [] },
+    evaluatedAt: NOW,
+  })
+
+  it('segments/flex land effective via the authoritative-and-implemented disjunct, not the (already-covered) single-segment-strict one', async () => {
+    const service = createAttendanceGroupEffectivePolicyAggregateService({
+      query: makeAuthoritativeQuery(),
+      fser,
+      now: () => NOW,
+      segmentCalculationImplemented: true,
+    })
+    const result = await service.getAggregate({ orgId: 'org-1', groupId })
+    expect(result.calculationPosture).toBe('authoritative')
+    expect(result.domains.segments.label).toBe('effective')
+    expect(result.domains.segments.reasonCodes).toEqual([])
+    expect(result.domains.flex.label).toBe('effective')
+    expect(result.domains.flex.reasonCodes).toEqual([])
+  })
+
+  it('the SAME shape with segmentCalculationImplemented: false (authoritative alone is not enough) lands preview_only', async () => {
+    const service = createAttendanceGroupEffectivePolicyAggregateService({
+      query: makeAuthoritativeQuery(),
+      fser,
+      now: () => NOW,
+      segmentCalculationImplemented: false,
+    })
+    const result = await service.getAggregate({ orgId: 'org-1', groupId })
+    expect(result.domains.segments.label).toBe('preview_only')
+    expect(result.domains.segments.reasonCodes).toEqual(['SEGMENT_CALCULATION_NOT_AUTHORITATIVE'])
+    expect(result.domains.flex.label).toBe('preview_only')
+    expect(result.domains.flex.reasonCodes).toEqual(['SEGMENT_CALCULATION_NOT_AUTHORITATIVE'])
+  })
+})
