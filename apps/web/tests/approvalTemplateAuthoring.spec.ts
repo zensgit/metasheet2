@@ -1422,7 +1422,14 @@ describe('TemplateAuthoringView', () => {
     ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     const before = container!.querySelectorAll('[data-testid="approval-canvas-node"]').length
-    ;(container!.querySelector('[data-testid="approval-canvas-add-condition-cond_1"]') as HTMLButtonElement).click()
+    // D0: topology actions live on the selected-node inspector (no node button clusters).
+    const condNode = container!.querySelector('[data-canvas-node="cond_1"] [data-testid="approval-canvas-node-select"]') as HTMLElement
+    expect(condNode).not.toBeNull()
+    condNode.click()
+    await flushUi()
+    const addBranch = container!.querySelector('[data-testid="approval-canvas-add-condition-cond_1"]') as HTMLButtonElement
+    expect(addBranch).not.toBeNull()
+    addBranch.click()
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(before + 1) // new node on canvas
     // P1 fix (review #4433 F1): the canvas-added branch seeds an INCOMPLETE starter rule too —

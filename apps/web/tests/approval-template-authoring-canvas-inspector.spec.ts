@@ -21,6 +21,10 @@ const PARENT_AUTHORING_SOURCE = readFileSync(
   join(HERE, '../src/views/approval/TemplateAuthoringView.vue'),
   'utf8',
 )
+const CANVAS_INSPECTOR_SHELL_SOURCE = readFileSync(
+  join(HERE, '../src/approvals/components/ApprovalCanvasNodeInspector.vue'),
+  'utf8',
+)
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -775,7 +779,8 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       await flushUi()
 
       expect(scrollIntoViewSpy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' })
-      expect(PARENT_AUTHORING_SOURCE).toMatch(
+      // PR4: inspector chrome (incl. scroll-margin) lives on ApprovalCanvasNodeInspector.
+      expect(CANVAS_INSPECTOR_SHELL_SOURCE).toMatch(
         /\.template-authoring__canvas-inspector\s*\{[\s\S]*?scroll-margin-top:\s*164px/,
       )
     } finally {
@@ -800,15 +805,19 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(CHILD_EDITOR_SOURCE).toMatch(/\.template-authoring__grid\s*\{/)
     // Parent no longer owns the G-2 condition rules (moved to the child SFC).
     expect(PARENT_AUTHORING_SOURCE).not.toMatch(/\.template-authoring__condition-branch\s*\{/)
-    // Desktop inspector is wide enough for ms-w-360 controls (~400px).
-    expect(PARENT_AUTHORING_SOURCE).toMatch(/\.template-authoring__canvas-inspector\s*\{[\s\S]*?width:\s*400px/)
+    // Desktop inspector shell is wide enough for ms-w-360 controls (~400px) — PR4 extract.
+    expect(CANVAS_INSPECTOR_SHELL_SOURCE).toMatch(/\.template-authoring__canvas-inspector\s*\{[\s\S]*?width:\s*400px/)
 
     routeParams = { id: 'tpl_inspector_styles' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
 
-    // List surface (default): condition branch must receive child-owned dashed border + wrap head.
+    // Canvas is the ordinary-user default; switch to the retained accessible list surface.
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // List surface: condition branch must receive child-owned dashed border + wrap head.
     const listBranch = container!.querySelector(
       '[data-testid="approval-graph-readonly-list"] .template-authoring__condition-branch',
     ) as HTMLElement | null
