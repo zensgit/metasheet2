@@ -1,6 +1,8 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import { Client } from 'pg'
 import { query } from '../../src/db/pg'
 import { activatePendingUser } from '../../src/auth/user-activate'
+import { supersedeDeprovisionEvidenceForAccessGraphWrite } from '../../src/directory/access-graph-mutex'
 import { restoreDeprovisionEvent } from '../../src/directory/deprovision-evidence-api'
 
 /**
@@ -72,6 +74,61 @@ async function seedDirectory(opts: { sourceActive: boolean }) {
   return { integrationId, accountId, runId: run.rows[0].id }
 }
 
+async function seedActivationSource(options: {
+  linkedUserId?: string
+  linkStatus?: string
+  accountActive?: boolean
+  accountProvider?: string
+  integrationProvider?: string
+  accountCorpId?: string
+  integrationCorpId?: string
+  integrationStatus?: string
+  openId?: string
+  unionId?: string
+}) {
+  const integrationCorpId = options.integrationCorpId ?? `corp-${ORG}`
+  const integration = await query<{ id: string }>(
+    `INSERT INTO directory_integrations
+       (name, corp_id, org_id, provider, status, default_deprovision_policy)
+     VALUES ('activation-source-test', $1, $2, $3, $4, 'manual_review')
+     RETURNING id::text AS id`,
+    [
+      integrationCorpId,
+      ORG,
+      options.integrationProvider ?? 'dingtalk',
+      options.integrationStatus ?? 'active',
+    ],
+  )
+  const account = await query<{ id: string }>(
+    `INSERT INTO directory_accounts
+       (integration_id, provider, corp_id, external_user_id, external_key, name,
+        open_id, union_id, is_active)
+     VALUES ($1::uuid, $2, $3, 'ext-activation-source',
+             'dingtalk:activation-source:ext', 'Activation Source', $4, $5, $6)
+     RETURNING id::text AS id`,
+    [
+      integration.rows[0].id,
+      options.accountProvider ?? 'dingtalk',
+      options.accountCorpId ?? integrationCorpId,
+      options.openId ?? null,
+      options.unionId ?? null,
+      options.accountActive ?? true,
+    ],
+  )
+  if (options.linkedUserId !== undefined) {
+    await query(
+      `INSERT INTO directory_account_links
+         (directory_account_id, local_user_id, link_status)
+       VALUES ($1::uuid, $2, $3)`,
+      [account.rows[0].id, options.linkedUserId, options.linkStatus ?? 'linked'],
+    )
+  }
+  return {
+    integrationId: integration.rows[0].id,
+    accountId: account.rows[0].id,
+  }
+}
+
 async function seedEvent(
   seeded: { integrationId: string; accountId: string; runId: string },
   effects: Array<{ type: string; orgId: string | null }>,
@@ -109,6 +166,96 @@ const grantRow = async (): Promise<{ enabled: boolean; granted_by: string | null
 
 const grantEnabled = async (): Promise<boolean | undefined> => (await grantRow())?.enabled
 
+async function waitForRestoreWaiters(
+  holderPid: number,
+  expected: number,
+  timeoutMs = 8_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const waiting = await query<{ blocked: number; rooted: number }>(
+      `SELECT
+         count(*) FILTER (
+           WHERE wait_event_type = 'Lock'
+             AND query ILIKE '%activation_status%'
+             AND query ILIKE '%FROM users%'
+             AND query ILIKE '%FOR UPDATE%'
+         )::int AS blocked,
+         count(*) FILTER (
+           WHERE $1 = ANY(pg_blocking_pids(pid))
+             AND query ILIKE '%activation_status%'
+             AND query ILIKE '%FROM users%'
+             AND query ILIKE '%FOR UPDATE%'
+         )::int AS rooted
+       FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND state = 'active'
+         AND pid <> pg_backend_pid()`,
+      [holderPid],
+    )
+    if (
+      (waiting.rows[0]?.blocked ?? 0) >= expected
+      && (waiting.rows[0]?.rooted ?? 0) >= 1
+    ) {
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(
+    `timed out waiting for ${expected} restore transaction(s) queued behind holder ${holderPid}`,
+  )
+}
+
+async function waitForQueryBlockedOnHolder(
+  holderPid: number,
+  queryPattern: string,
+  timeoutMs = 8_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const waiting = await query<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND $1 = ANY(pg_blocking_pids(pid))
+          AND query ILIKE $2`,
+      [holderPid, queryPattern],
+    )
+    if ((waiting.rows[0]?.n ?? 0) >= 1) return
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(
+    `timed out waiting for query ${queryPattern} blocked by holder ${holderPid}`,
+  )
+}
+
+async function withLockedUser<T>(
+  callback: (holder: Client, holderPid: number) => Promise<T>,
+): Promise<T> {
+  const holder = new Client({ connectionString: process.env.DATABASE_URL })
+  await holder.connect()
+  try {
+    await holder.query('BEGIN')
+    const pid = await holder.query<{ pid: number }>(
+      'SELECT pg_backend_pid() AS pid',
+    )
+    await holder.query(
+      `SELECT id FROM users WHERE id = $1 FOR UPDATE`,
+      [USER],
+    )
+    return await callback(holder, pid.rows[0].pid)
+  } finally {
+    try {
+      await holder.query('ROLLBACK')
+    } catch {
+      // The callback may already have committed the holder.
+    }
+    await holder.end()
+  }
+}
+
 describeIfDatabase('DingTalk grant/membership writes target the real tables (real DB)', () => {
   beforeEach(cleanup)
   afterAll(cleanup)
@@ -119,6 +266,10 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
        VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', FALSE, 'pending_activation', FALSE)`,
       [USER],
     )
+
+    // Closeout review P1: every activation mode now requires the authoritative linked active
+    // source, and the membership org DERIVES from it (ORG here — the caller's orgId confirms).
+    await seedActivationSource({ linkedUserId: USER })
 
     // Positive control: nothing has granted anything yet.
     expect(await grantEnabled()).toBeUndefined()
@@ -143,6 +294,246 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
     expect(aliases.rows.map((r) => r.normalized_value)).toContain('grant-fix@example.com')
   })
 
+  it('T3 SSO activate commits only with an active exact DingTalk source link', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'sso-source-user', 'SSO Source', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({
+      linkedUserId: USER,
+      openId: 'oauth-open-1',
+      unionId: 'oauth-union-1',
+    })
+
+    await activatePendingUser({
+      userId: USER,
+      mode: 'sso',
+      adminUserId: 'admin-test',
+      enableDingTalkGrant: true,
+      directoryAccountId: source.accountId,
+      expectedDingTalkIdentity: {
+        corpId: `corp-${ORG}`,
+        openId: 'oauth-open-1',
+        unionId: 'oauth-union-1',
+      },
+    })
+
+    const committed = await query<{
+      activation_status: string
+      is_active: boolean
+      membership_active: boolean | null
+      grant_enabled: boolean | null
+    }>(
+      `SELECT u.activation_status,
+              u.is_active,
+              membership.is_active AS membership_active,
+              auth_grant.enabled AS grant_enabled
+         FROM users u
+         LEFT JOIN user_orgs membership
+           ON membership.user_id = u.id AND membership.org_id = $2
+         LEFT JOIN user_external_auth_grants auth_grant
+           ON auth_grant.local_user_id = u.id AND auth_grant.provider = 'dingtalk'
+        WHERE u.id = $1`,
+      [USER, ORG],
+    )
+    expect(committed.rows[0]).toMatchObject({
+      activation_status: 'activated',
+      is_active: true,
+      membership_active: true,
+      grant_enabled: true,
+    })
+  })
+
+  it('T3 SSO rejects an OAuth profile that does not match the locked source row', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'oauth-mismatch-user', 'OAuth Mismatch', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({
+      linkedUserId: USER,
+      openId: 'oauth-open-authoritative',
+      unionId: 'oauth-union-authoritative',
+    })
+
+    await expect(
+      activatePendingUser({
+        userId: USER,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        orgId: ORG,
+        enableDingTalkGrant: true,
+        directoryAccountId: source.accountId,
+        expectedDingTalkIdentity: {
+          corpId: `corp-${ORG}`,
+          openId: 'oauth-open-attacker',
+          unionId: 'oauth-union-authoritative',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INELIGIBLE' })
+
+    const residue = await query<{
+      activation_status: string
+      is_active: boolean
+      memberships: number
+      grants: number
+    }>(
+      `SELECT u.activation_status,
+              u.is_active,
+              (SELECT count(*)::int FROM user_orgs WHERE user_id = u.id) AS memberships,
+              (SELECT count(*)::int FROM user_external_auth_grants WHERE local_user_id = u.id) AS grants
+         FROM users u
+        WHERE u.id = $1`,
+      [USER],
+    )
+    expect(residue.rows[0]).toMatchObject({
+      activation_status: 'pending_activation',
+      is_active: false,
+      memberships: 0,
+      grants: 0,
+    })
+  })
+
+  it('T3 SSO rejects an account with no linked witness and leaves zero activation residue', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'missing-source-user', 'Missing Source', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({})
+
+    await expect(
+      activatePendingUser({
+        userId: USER,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        orgId: ORG,
+        enableDingTalkGrant: true,
+        directoryAccountId: source.accountId,
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_MISSING' })
+
+    const residue = await query<{
+      activation_status: string
+      is_active: boolean
+      memberships: number
+      grants: number
+      aliases: number
+    }>(
+      `SELECT u.activation_status,
+              u.is_active,
+              (SELECT count(*)::int FROM user_orgs WHERE user_id = u.id) AS memberships,
+              (SELECT count(*)::int FROM user_external_auth_grants WHERE local_user_id = u.id) AS grants,
+              (SELECT count(*)::int FROM user_login_aliases WHERE user_id = u.id) AS aliases
+         FROM users u
+        WHERE u.id = $1`,
+      [USER],
+    )
+    expect(residue.rows[0]).toMatchObject({
+      activation_status: 'pending_activation',
+      is_active: false,
+      memberships: 0,
+      grants: 0,
+      aliases: 0,
+    })
+  })
+
+  it('T3 SSO requires link_status=linked even when local_user_id matches', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'unlinked-source-user', 'Unlinked Source', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({
+      linkedUserId: USER,
+      linkStatus: 'unlinked',
+    })
+
+    await expect(
+      activatePendingUser({
+        userId: USER,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        directoryAccountId: source.accountId,
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_MISSING' })
+
+    const target = await query<{ activation_status: string; is_active: boolean }>(
+      `SELECT activation_status, is_active FROM users WHERE id = $1`,
+      [USER],
+    )
+    expect(target.rows[0]).toEqual({
+      activation_status: 'pending_activation',
+      is_active: false,
+    })
+  })
+
+  it('T3 SSO rejects a linked account that belongs to another user', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES
+         ($1, 'source-owner', 'Source Owner', 'x', TRUE, 'activated', TRUE),
+         ($2, 'source-target', 'Source Target', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER_A, USER_B],
+    )
+    const source = await seedActivationSource({ linkedUserId: USER_A })
+
+    await expect(
+      activatePendingUser({
+        userId: USER_B,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        directoryAccountId: source.accountId,
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_LINK_MISMATCH' })
+
+    const target = await query<{ activation_status: string; is_active: boolean }>(
+      `SELECT activation_status, is_active FROM users WHERE id = $1`,
+      [USER_B],
+    )
+    expect(target.rows[0]).toEqual({
+      activation_status: 'pending_activation',
+      is_active: false,
+    })
+  })
+
+  it('T3 SSO rejects provider/corp-ineligible source rows without activating', async () => {
+    await query(
+      `INSERT INTO users
+         (id, username, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'ineligible-source', 'Ineligible Source', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    const source = await seedActivationSource({
+      linkedUserId: USER,
+      accountCorpId: `other-corp-${ORG}`,
+    })
+
+    await expect(
+      activatePendingUser({
+        userId: USER,
+        mode: 'sso',
+        adminUserId: 'admin-test',
+        directoryAccountId: source.accountId,
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INELIGIBLE' })
+
+    const target = await query<{ activation_status: string; is_active: boolean }>(
+      `SELECT activation_status, is_active FROM users WHERE id = $1`,
+      [USER],
+    )
+    expect(target.rows[0]).toEqual({
+      activation_status: 'pending_activation',
+      is_active: false,
+    })
+  })
+
   it('restoring a membership effect actually re-activates the membership', async () => {
     await query(
       `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
@@ -157,6 +548,16 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
       eventId, mode: 'rehire', adminUserId: 'admin-test',
     })
     expect(result.restoredEffectCount).toBe(1)
+    expect(result).toMatchObject({
+      restoreMode: 'rehire',
+      effectsReversed: ['membership_changed'],
+      passwordUnchanged: true,
+      localUser: {
+        id: USER,
+        isActive: true,
+        activationStatus: 'activated',
+      },
+    })
 
     // Before the fix this whole call aborted with 25P02 (`user_orgs.updated_at` does not exist),
     // so the membership stayed FALSE — for EVERY real deprovision event, since every candidate
@@ -236,6 +637,327 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
     expect(effects.rows.map((r) => r.status)).toEqual(['applied'])
   })
 
+  it('a grant writer racing after eligibility is preserved by the write-point drift guard', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by)
+       VALUES ('dingtalk', $1, FALSE, 'system:directory-deprovision')`,
+      [USER],
+    )
+    const seeded = await seedDirectory({ sourceActive: true })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'grant_changed', orgId: null }],
+      3,
+    )
+    const holder = new Client({ connectionString: process.env.DATABASE_URL })
+    await holder.connect()
+    try {
+      await holder.query('BEGIN')
+      const pid = await holder.query<{ pid: number }>(
+        'SELECT pg_backend_pid() AS pid',
+      )
+      await holder.query(
+        `UPDATE user_external_auth_grants
+            SET enabled = TRUE, granted_by = 'concurrent-writer'
+          WHERE provider = 'dingtalk' AND local_user_id = $1`,
+        [USER],
+      )
+
+      const restore = restoreDeprovisionEvent({
+        eventId,
+        mode: 'rehire',
+        adminUserId: 'admin-test',
+      })
+      await waitForQueryBlockedOnHolder(
+        pid.rows[0].pid,
+        '%INSERT INTO user_external_auth_grants%',
+      )
+      await holder.query('COMMIT')
+
+      await expect(restore).rejects.toMatchObject({ code: 'DRIFT_CONFLICT' })
+    } finally {
+      try {
+        await holder.query('ROLLBACK')
+      } catch {
+        // The holder may already be committed.
+      }
+      await holder.end()
+    }
+
+    expect(await grantRow()).toMatchObject({
+      enabled: true,
+      granted_by: 'concurrent-writer',
+    })
+    const state = await query<{
+      access_generation: string
+      effect_status: string
+      event_status: string
+    }>(
+      `SELECT users.access_generation::text,
+              event.status AS event_status,
+              effect.status AS effect_status
+         FROM users
+         JOIN directory_deprovision_events event
+           ON event.local_user_id = users.id
+         JOIN directory_deprovision_effects effect
+           ON effect.event_id = event.id
+        WHERE users.id = $1`,
+      [USER],
+    )
+    expect(state.rows[0]).toMatchObject({
+      access_generation: '3',
+      event_status: 'applied',
+      effect_status: 'applied',
+    })
+  })
+
+  it('rehire requires the exact source account to remain actively linked to the same user', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, FALSE)`,
+      [USER, ORG],
+    )
+    const seeded = await seedDirectory({ sourceActive: true })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'membership_changed', orgId: ORG }],
+      3,
+    )
+    await query(
+      `UPDATE directory_account_links
+          SET link_status = 'unlinked'
+        WHERE directory_account_id = $1::uuid
+          AND local_user_id = $2`,
+      [seeded.accountId, USER],
+    )
+
+    await expect(
+      restoreDeprovisionEvent({
+        eventId,
+        mode: 'rehire',
+        adminUserId: 'admin-test',
+      }),
+    ).rejects.toMatchObject({ code: 'SOURCE_INACTIVE' })
+
+    const membership = await query<{ is_active: boolean }>(
+      `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`,
+      [USER, ORG],
+    )
+    expect(membership.rows[0]?.is_active).toBe(false)
+    const event = await query<{ status: string }>(
+      `SELECT status FROM directory_deprovision_events WHERE id = $1::uuid`,
+      [eventId],
+    )
+    expect(event.rows[0]?.status).toBe('applied')
+  })
+
+  it('admin force may restore an inactive source only with explicit confirmation and provenance', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, FALSE)`,
+      [USER, ORG],
+    )
+    const seeded = await seedDirectory({ sourceActive: false })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'membership_changed', orgId: ORG }],
+      3,
+    )
+
+    await expect(
+      restoreDeprovisionEvent({
+        eventId,
+        mode: 'admin_force',
+        adminUserId: 'admin-test',
+        confirm: false,
+        note: 'confirmed source remains inactive',
+      }),
+    ).rejects.toMatchObject({ code: 'FORCE_CONFIRM_REQUIRED' })
+
+    const result = await restoreDeprovisionEvent({
+      eventId,
+      mode: 'admin_force',
+      adminUserId: 'admin-test',
+      confirm: true,
+      note: 'confirmed source remains inactive',
+    })
+    expect(result.restoreMode).toBe('admin_force')
+
+    const event = await query<{
+      resolve_note: string
+      resolved_by: string
+      restore_mode: string
+      status: string
+    }>(
+      `SELECT status, resolved_by, resolve_note, restore_mode
+         FROM directory_deprovision_events
+        WHERE id = $1::uuid`,
+      [eventId],
+    )
+    expect(event.rows[0]).toMatchObject({
+      status: 'fully_resolved',
+      resolved_by: 'admin-test',
+      resolve_note: 'confirmed source remains inactive',
+      restore_mode: 'admin_force',
+    })
+  })
+
+  it('a concurrent access-graph writer supersedes evidence before a blocked restore can act', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, FALSE)`,
+      [USER, ORG],
+    )
+    const seeded = await seedDirectory({ sourceActive: true })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'membership_changed', orgId: ORG }],
+      3,
+    )
+
+    await withLockedUser(async (holder, holderPid) => {
+      const restore = restoreDeprovisionEvent({
+        eventId,
+        mode: 'rehire',
+        adminUserId: 'admin-test',
+      })
+      await waitForRestoreWaiters(holderPid, 1)
+
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(holder, {
+        userIds: [USER],
+        actorId: 'concurrent-admin',
+        reason: 'concurrent admin access update',
+      })
+      await holder.query('COMMIT')
+
+      await expect(restore).rejects.toMatchObject({
+        code: 'EVENT_NOT_APPLIED',
+      })
+    })
+
+    const state = await query<{
+      access_generation: string
+      event_status: string
+      effect_status: string
+      membership_active: boolean
+    }>(
+      `SELECT u.access_generation::text,
+              event.status AS event_status,
+              effect.status AS effect_status,
+              membership.is_active AS membership_active
+         FROM users u
+         JOIN directory_deprovision_events event
+           ON event.local_user_id = u.id
+         JOIN directory_deprovision_effects effect
+           ON effect.event_id = event.id
+         JOIN user_orgs membership
+           ON membership.user_id = u.id
+          AND membership.org_id = $2
+        WHERE u.id = $1`,
+      [USER, ORG],
+    )
+    expect(state.rows[0]).toMatchObject({
+      access_generation: '4',
+      event_status: 'superseded',
+      effect_status: 'superseded',
+      membership_active: false,
+    })
+  })
+
+  it('two blocked restores linearize to exactly one reversal with complete resolution provenance', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, access_generation)
+       VALUES ($1, 'grant-fix@example.com', 'Grant Fix', 'x', TRUE, 'activated', 3)`,
+      [USER],
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, FALSE)`,
+      [USER, ORG],
+    )
+    const seeded = await seedDirectory({ sourceActive: true })
+    const eventId = await seedEvent(
+      seeded,
+      [{ type: 'membership_changed', orgId: ORG }],
+      3,
+    )
+
+    const outcomes = await withLockedUser(async (holder, holderPid) => {
+      const calls = Array.from({ length: 2 }, () =>
+        restoreDeprovisionEvent({
+          eventId,
+          mode: 'rehire',
+          adminUserId: 'admin-test',
+        }),
+      )
+      await waitForRestoreWaiters(holderPid, 2)
+      await holder.query('COMMIT')
+      return Promise.allSettled(calls)
+    })
+
+    const successes = outcomes.filter(
+      (outcome) => outcome.status === 'fulfilled',
+    )
+    const failures = outcomes.filter(
+      (outcome): outcome is PromiseRejectedResult =>
+        outcome.status === 'rejected',
+    )
+    expect(successes).toHaveLength(1)
+    expect(failures).toHaveLength(1)
+    expect(failures[0].reason).toMatchObject({ code: 'EVENT_NOT_APPLIED' })
+
+    const state = await query<{
+      access_generation: string
+      effect_status: string
+      event_status: string
+      resolved_by: string
+      restore_mode: string
+      reversed_by: string
+    }>(
+      `SELECT users.access_generation::text,
+              event.status AS event_status,
+              event.resolved_by,
+              event.restore_mode,
+              effect.status AS effect_status,
+              effect.reversed_by
+         FROM users
+         JOIN directory_deprovision_events event
+           ON event.local_user_id = users.id
+         JOIN directory_deprovision_effects effect
+           ON effect.event_id = event.id
+        WHERE users.id = $1`,
+      [USER],
+    )
+    expect(state.rows[0]).toMatchObject({
+      access_generation: '4',
+      event_status: 'fully_resolved',
+      resolved_by: 'admin-test',
+      restore_mode: 'rehire',
+      effect_status: 'reversed',
+      reversed_by: 'admin-test',
+    })
+  })
+
   it('alias conflict rolls back users/membership/grant (real Postgres transaction)', async () => {
     // A owns the global alias key "shared_login" (not necessarily their users.username —
     // users.username is UNIQUE lower, so B uses a distinct username column only after we
@@ -257,6 +979,9 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
        VALUES ($1, 'pending-b@example.com', 'Pending B', 'Shared_Login', 'hash-b', FALSE, 'pending_activation', FALSE)`,
       [USER_B],
     )
+
+    // Closeout review P1: activation requires the linked active source in every mode.
+    await seedActivationSource({ linkedUserId: USER_B })
 
     await expect(
       activatePendingUser({

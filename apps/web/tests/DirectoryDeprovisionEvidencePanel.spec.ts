@@ -55,7 +55,7 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
           policyNote: '策略≠已执行',
         })
       }
-      if (String(url).includes('/deprovision/events')) {
+      if (String(url).includes('/deprovision-events?')) {
         return jsonResponse({ items: [], flags: { enabled: false, maxBatch: 25, policyNote: 'x' } })
       }
       return jsonResponse({})
@@ -79,12 +79,13 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
       if (String(url).includes('/deprovision/flags')) {
         return jsonResponse({ enabled: false, maxBatch: 25, policyNote: 'n' })
       }
-      if (String(url).includes('/deprovision/events?')) {
+      if (String(url).includes('/deprovision-events?')) {
         return jsonResponse({ items: [] })
       }
       if (String(url).includes('/deprovision/preview/')) {
         return jsonResponse({
           flags: { enabled: false, maxBatch: 25, policyNote: 'n' },
+          prospectiveDeactivatedAccountIds: ['account-1', 'account-2'],
           user: { id: 'u1', activationStatus: 'activated', isActive: true, accessGeneration: 2 },
           plan: {
             skipReason: null,
@@ -114,6 +115,7 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
       && String(c[0]).includes('integrationId=int-1')
     ))).toBe(true)
     expect(root.querySelector('[data-testid="deprovision-preview-result"]')?.textContent).toMatch(/user_changed/)
+    expect(root.querySelector('[data-testid="deprovision-preview-scope"]')?.textContent).toMatch(/2 个/)
   })
 
   it('surfaces DRIFT_CONFLICT on restore failure', async () => {
@@ -122,9 +124,9 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
         return jsonResponse({ enabled: false, maxBatch: 25, policyNote: 'n' })
       }
       if (
-        String(url).includes('/deprovision/events')
+        String(url).includes('/deprovision-events?')
         && !String(url).includes('/effects')
-        && !String(url).includes('/restore')
+        && !String(url).includes('/reactivate')
       ) {
         return jsonResponse({
           items: [
@@ -132,7 +134,7 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
               id: 'ev-1',
               local_user_id: 'u1',
               access_generation_at_apply: 3,
-              status: 'open',
+              status: 'applied',
               open_effect_count: 1,
             },
           ],
@@ -143,7 +145,7 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
           items: [
             {
               id: 'fx-1',
-              effect_type: 'set_user_inactive',
+              effect_type: 'membership_changed',
               status: 'applied',
               after_active: false,
               access_generation_at_apply: 3,
@@ -151,7 +153,7 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
           ],
         })
       }
-      if (String(url).includes('/restore') && init?.method === 'POST') {
+      if (String(url).includes('/reactivate') && init?.method === 'POST') {
         return jsonResponse({ code: 'DRIFT_CONFLICT', message: 'access_generation mismatch' }, false, 409)
       }
       return jsonResponse({})
@@ -172,5 +174,80 @@ describe('DirectoryDeprovisionEvidencePanel (D7)', () => {
     await flushUi()
 
     expect(root.querySelector('[data-testid="deprovision-drift-conflict"]')?.textContent).toMatch(/DRIFT_CONFLICT/)
+  })
+
+  it('requires applied evidence, explicit confirmation, and an eight-character note before force restore', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (String(url).includes('/deprovision/flags')) {
+        return jsonResponse({ enabled: false, maxBatch: 25, policyNote: 'n' })
+      }
+      if (String(url).includes('/deprovision-events?')) {
+        return jsonResponse({
+          items: [
+            {
+              id: 'ev-1',
+              local_user_id: 'u1',
+              access_generation_at_apply: 3,
+              status: 'applied',
+              open_effect_count: 1,
+            },
+          ],
+        })
+      }
+      if (String(url).includes('/effects')) {
+        return jsonResponse({
+          items: [
+            {
+              id: 'fx-1',
+              effect_type: 'membership_changed',
+              status: 'applied',
+              after_active: false,
+              access_generation_at_apply: 3,
+            },
+          ],
+        })
+      }
+      if (String(url).includes('/force-reactivate') && init?.method === 'POST') {
+        return jsonResponse({
+          restoreMode: 'admin_force',
+          restoredEffectCount: 1,
+        })
+      }
+      return jsonResponse({})
+    })
+
+    const root = mountPanel({ integrationId: 'int-1' })
+    ;(root.querySelector('[data-testid="deprovision-evidence-toggle"]') as HTMLButtonElement).click()
+    await flushUi()
+    const detailBtn = Array.from(root.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('详情'))
+    detailBtn!.click()
+    await flushUi()
+
+    const force = root.querySelector('[data-testid="deprovision-restore-force"]') as HTMLButtonElement
+    const confirm = root.querySelector('[data-testid="deprovision-force-confirm"]') as HTMLInputElement
+    const note = root.querySelector('[data-testid="deprovision-force-note"]') as HTMLTextAreaElement
+    expect(force.disabled).toBe(true)
+
+    confirm.click()
+    note.value = 'short'
+    note.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    expect(force.disabled).toBe(true)
+
+    note.value = 'confirmed by owner'
+    note.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    expect(force.disabled).toBe(false)
+    force.click()
+    await flushUi()
+
+    const call = apiFetchMock.mock.calls.find((args) =>
+      String(args[0]).includes('/force-reactivate'))
+    expect(call?.[0]).toContain('/api/admin/directory/deprovision-events/ev-1/force-reactivate')
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      confirm: true,
+      note: 'confirmed by owner',
+    })
   })
 })

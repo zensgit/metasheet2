@@ -222,24 +222,68 @@
         <template #header>
           <div class="template-authoring__panel-header">
             <strong>表单字段</strong>
-            <el-button
-              size="small"
-              :disabled="readOnly"
-              data-testid="approval-template-add-field"
-              @click="addField"
-            >
-              <el-icon><Plus /></el-icon>
-              添加字段
-            </el-button>
+            <div class="template-authoring__form-toolbar">
+              <el-button
+                size="small"
+                :disabled="readOnly || !canUndoFormFieldHistory"
+                data-testid="approval-form-undo"
+                @click="onFormFieldUndo"
+              >
+                撤销
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="readOnly || !canRedoFormFieldHistory"
+                data-testid="approval-form-redo"
+                @click="onFormFieldRedo"
+              >
+                重做
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="readOnly"
+                data-testid="approval-template-add-field"
+                @click="addField"
+              >
+                <el-icon><Plus /></el-icon>
+                添加字段
+              </el-button>
+            </div>
           </div>
         </template>
 
+        <!-- D6-f2 palette: ordinary users pick a field kind; no field-id entry. -->
+        <div
+          v-if="!readOnly"
+          class="template-authoring__field-palette"
+          data-testid="approval-field-palette"
+          role="group"
+          aria-label="添加表单字段类型"
+        >
+          <el-button
+            v-for="entry in fieldPaletteEntries"
+            :key="entry.type"
+            size="small"
+            :data-testid="`approval-field-palette-${entry.type}`"
+            @click="addFieldOfType(entry.type)"
+          >
+            {{ entry.label }}
+          </el-button>
+        </div>
+
         <div
           v-for="(field, index) in draft.fields"
+          :id="`approval-field-row-${field.localId}`"
           :key="field.localId"
           class="template-authoring__item"
+          :class="{ 'template-authoring__item--focused': formFieldFocusLocalId === field.localId }"
           data-testid="approval-template-field-row"
+          :data-field-local-id="field.localId"
+          :data-selected="formFieldFocusLocalId === field.localId ? 'true' : undefined"
+          :aria-current="formFieldFocusLocalId === field.localId ? 'true' : undefined"
+          tabindex="-1"
           :draggable="!readOnly"
+          @focusin="selectFormFieldFocus(field.localId)"
           @dragstart="onFieldDragStart(index)"
           @dragover.prevent
           @drop="onFieldDrop(index)"
@@ -537,229 +581,86 @@
         <!-- Complex graphs use a canvas for topology and a structured list for node configuration. -->
         <!-- D-6 view toggle: structured list ⇄ visual canvas (complex graphs only) -->
         <div v-if="graphReadOnly && canvasV2Enabled" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
-          <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">结构列表</el-button>
           <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
+          <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">辅助编辑模式</el-button>
         </div>
 
-        <!-- D-1/D-5 visual canvas + Canvas V2 Slice A right-side inspector.
-             Topology stays on the canvas; node config reuses the SAME draft handlers as 结构列表. -->
+        <!-- D-1/D-5 visual canvas + inspector (PR4: extracted shell components; draft/history stay here). -->
         <div
           v-if="graphReadOnly && canvasV2Enabled && canvasViewMode === 'canvas'"
           class="template-authoring__canvas-workspace"
           data-testid="approval-canvas-workspace"
         >
-          <div class="template-authoring__canvas-main">
-            <el-alert
-              v-if="canvasValidity.length"
-              type="warning"
-              :closable="false"
-              show-icon
-              data-testid="approval-canvas-validity"
-              title="画布结构校验（保存时后端为最终判定）"
-            >
-              <ul class="template-authoring__error-list"><li v-for="issue in canvasValidity" :key="issue">{{ issue }}</li></ul>
-            </el-alert>
-            <div class="template-authoring__canvas-toolbar" data-testid="approval-canvas-toolbar">
-              <el-button-group>
-                <el-button :icon="ZoomOut" title="缩小画布" aria-label="缩小画布" data-testid="approval-canvas-zoom-out" @click="changeCanvasZoom('out')" />
-                <el-button
-                  class="template-authoring__canvas-zoom-label"
-                  aria-label="重置画布缩放为 100%"
-                  data-testid="approval-canvas-zoom-label"
-                  @click="resetCanvasZoom"
-                >
-                  {{ canvasZoomLabel }}
-                </el-button>
-                <el-button :icon="ZoomIn" title="放大画布" aria-label="放大画布" data-testid="approval-canvas-zoom-in" @click="changeCanvasZoom('in')" />
-              </el-button-group>
-              <el-button :icon="FullScreen" data-testid="approval-canvas-fit" @click="fitCanvasToViewport">适应画布</el-button>
-            </div>
-            <div class="template-authoring__canvas-viewport-shell">
-              <div
-                ref="canvasViewportRef"
-                class="template-authoring__canvas-viewport"
-                role="region"
-                aria-label="审批流程画布"
-                tabindex="0"
-                @scroll="syncCanvasViewportState"
-              >
-                <div class="template-authoring__canvas-stage" :style="canvasStageStyle">
-                  <div
-                    class="template-authoring__canvas"
-                    data-testid="approval-graph-canvas"
-                    :style="canvasSurfaceStyle"
-                  >
-                <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height">
-                  <defs>
-                    <marker id="approval-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
-                      <path d="M0,0 L7,3 L0,6 Z" fill="#bbb" />
-                    </marker>
-                  </defs>
-                  <path
-                    v-for="line in canvasEdgeLines"
-                    :key="line.key"
-                    :d="line.path"
-                    stroke="#bbb"
-                    stroke-width="1.5"
-                    fill="none"
-                    marker-end="url(#approval-canvas-arrow)"
-                    data-testid="approval-canvas-edge"
-                  />
-                </svg>
-                <button
-                  v-for="line in canvasMoveTargetLines"
-                  :key="`move-target-${line.key}`"
-                  type="button"
-                  class="template-authoring__canvas-move-target"
-                  :style="{ left: `${line.dropX}px`, top: `${line.dropY}px` }"
-                  :aria-label="canvasMoveTargetLabel(line.key)"
-                  :data-testid="`approval-canvas-move-target-${line.key}`"
-                  @click.stop="applyCanvasNodeMove(line.key)"
-                  @dragover.prevent
-                  @drop="onCanvasNodeDrop($event, line.key)"
-                >
-                  <el-icon><Rank /></el-icon>
-                  <span>移到这里</span>
-                </button>
-                <div
-                  v-for="pos in canvasLayout.nodes"
-                  :key="pos.key"
-                  class="template-authoring__canvas-node"
-                  :class="{ 'is-selected': selectedCanvasNode === pos.key, 'is-moving': movingCanvasNode === pos.key }"
-                  :style="{ position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: CANVAS_NODE_W + 'px' }"
-                  :data-canvas-node="pos.key"
-                  data-testid="approval-canvas-node"
-                  :draggable="!readOnly && canMoveCanvasNode(pos.key)"
-                  @click="selectCanvasNode(pos.key)"
-                  @dragstart="onCanvasNodeDragStart($event, pos.key)"
-                  @dragend="cancelCanvasNodeMove"
-                >
-                  <div
-                    class="template-authoring__canvas-node-selector"
-                    role="button"
-                    tabindex="0"
-                    :aria-label="`编辑${graphNodeLabel(pos.key)}节点`"
-                    :aria-pressed="selectedCanvasNode === pos.key"
-                    data-testid="approval-canvas-node-select"
-                    @click.stop="selectCanvasNode(pos.key)"
-                    @keydown.enter.stop.prevent="selectCanvasNode(pos.key)"
-                    @keydown.space.stop.prevent="selectCanvasNode(pos.key)"
-                    @keydown="onCanvasNodeKeydown($event, pos.key)"
-                  >
-                    <strong>{{ graphNodeLabel(pos.key) }}</strong>
-                    <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
-                      {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
-                    </span>
-                  </div>
-                  <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
-                    <template v-if="canMoveCanvasNode(pos.key)">
-                      <el-button
-                        :icon="Top"
-                        size="small"
-                        title="上移节点"
-                        :aria-label="`上移${graphNodeLabel(pos.key)}`"
-                        :disabled="!canvasStepMoveTarget(pos.key, 'up')"
-                        :data-testid="`approval-canvas-move-up-${pos.key}`"
-                        @click.stop="moveCanvasNodeStep(pos.key, 'up')"
-                      />
-                      <el-button
-                        :icon="Bottom"
-                        size="small"
-                        title="下移节点"
-                        :aria-label="`下移${graphNodeLabel(pos.key)}`"
-                        :disabled="!canvasStepMoveTarget(pos.key, 'down')"
-                        :data-testid="`approval-canvas-move-down-${pos.key}`"
-                        @click.stop="moveCanvasNodeStep(pos.key, 'down')"
-                      />
-                      <el-button
-                        :icon="Rank"
-                        size="small"
-                        title="移动节点"
-                        :aria-label="`选择${graphNodeLabel(pos.key)}的移动位置`"
-                        :type="movingCanvasNode === pos.key ? 'primary' : undefined"
-                        :data-testid="`approval-canvas-move-${pos.key}`"
-                        @click.stop="beginCanvasNodeMove(pos.key)"
-                      />
-                    </template>
-                    <el-button v-if="canvasNodeByKey(pos.key)?.type === 'condition'" size="small" :data-testid="`approval-canvas-add-condition-${pos.key}`" @click.stop="onAddConditionBranch(pos.key)">+条件分支</el-button>
-                    <el-button v-if="canvasNodeByKey(pos.key)?.type === 'parallel'" size="small" :data-testid="`approval-canvas-add-parallel-${pos.key}`" @click.stop="onAddParallelBranch(pos.key)">+并行分支</el-button>
-                    <template v-if="canInsertAfter(canvasNodeByKey(pos.key)!)">
-                      <el-button size="small" :data-testid="`approval-canvas-insert-${pos.key}`" @click.stop="onInsertApprovalAfter(pos.key)">+审批</el-button>
-                      <el-button size="small" :data-testid="`approval-canvas-insert-condition-${pos.key}`" @click.stop="onInsertConditionAfter(pos.key)">+条件</el-button>
-                      <!-- F4: no +并行 inside a parallel branch — the backend rejects nested parallel. -->
-                      <el-button v-if="canInsertParallelAfter(canvasNodeByKey(pos.key)!)" size="small" :data-testid="`approval-canvas-insert-parallel-${pos.key}`" @click.stop="onInsertParallelAfter(pos.key)">+并行</el-button>
-                    </template>
-                    <el-button v-if="canRemoveNode(canvasNodeByKey(pos.key)!)" size="small" type="danger" :data-testid="`approval-canvas-remove-${pos.key}`" @click.stop="onRemoveNode(pos.key)">删除</el-button>
-                  </div>
-                </div>
-                  </div>
-                </div>
-              </div>
-              <svg
-                class="template-authoring__canvas-minimap"
-                :width="CANVAS_MINIMAP_W"
-                :height="CANVAS_MINIMAP_H"
-                :viewBox="`0 0 ${CANVAS_MINIMAP_W} ${CANVAS_MINIMAP_H}`"
-                role="img"
-                aria-label="画布缩略导航"
-                data-testid="approval-canvas-minimap"
-              >
-                <g :transform="`translate(${canvasMinimap.offsetX} ${canvasMinimap.offsetY}) scale(${canvasMinimap.scale})`">
-                  <path
-                    v-for="line in canvasEdgeLines"
-                    :key="`minimap-${line.key}`"
-                    :d="line.path"
-                    class="template-authoring__canvas-minimap-edge"
-                  />
-                  <rect
-                    v-for="pos in canvasLayout.nodes"
-                    :key="`minimap-${pos.key}`"
-                    :x="pos.x"
-                    :y="pos.y"
-                    :width="CANVAS_NODE_W"
-                    :height="CANVAS_NODE_H"
-                    rx="6"
-                    class="template-authoring__canvas-minimap-node"
-                  />
-                </g>
-                <rect
-                  :x="canvasMinimap.viewport.x"
-                  :y="canvasMinimap.viewport.y"
-                  :width="canvasMinimap.viewport.width"
-                  :height="canvasMinimap.viewport.height"
-                  class="template-authoring__canvas-minimap-window"
-                  data-testid="approval-canvas-minimap-window"
-                />
-              </svg>
-            </div>
-            <p class="template-authoring__hint">画布用于编排结构（增删节点 / 分支、拖动布局）。点击节点在右侧检查器编辑配置；也可切换「结构列表」。</p>
-          </div>
-          <aside
+          <ApprovalFlowCanvas
+            ref="approvalFlowCanvasRef"
+            :read-only="readOnly"
+            :canvas-validity="canvasValidity"
+            :can-undo="canUndoCanvasHistory"
+            :can-redo="canRedoCanvasHistory"
+            :canvas-zoom-label="canvasZoomLabel"
+            :canvas-stage-css="canvasStageStyle"
+            :canvas-surface-css="canvasSurfaceStyle"
+            :canvas-layout="canvasLayout"
+            :canvas-edge-lines="canvasEdgeLines"
+            :canvas-move-target-lines="canvasMoveTargetLines"
+            :selected-canvas-node="selectedCanvasNode"
+            :moving-canvas-node="movingCanvasNode"
+            :edge-insert-menu-edge-key="edgeInsertMenuEdgeKey"
+            :canvas-minimap="canvasMinimap"
+            :node-width="CANVAS_NODE_W"
+            :node-height="CANVAS_NODE_H"
+            :minimap-width="CANVAS_MINIMAP_W"
+            :minimap-height="CANVAS_MINIMAP_H"
+            :graph-node-label="graphNodeLabel"
+            :node-type-label="nodeTypeLabel"
+            :canvas-node-by-key="canvasNodeByKey"
+            :can-move-canvas-node="canMoveCanvasNode"
+            :can-insert-parallel-on-edge="canInsertParallelOnEdge"
+            :canvas-move-target-label="canvasMoveTargetLabel"
+            @undo="onCanvasUndo"
+            @redo="onCanvasRedo"
+            @zoom-out="changeCanvasZoom('out')"
+            @zoom-in="changeCanvasZoom('in')"
+            @zoom-reset="resetCanvasZoom"
+            @fit="fitCanvasToViewport"
+            @scroll="syncCanvasViewportState"
+            @select-node="selectCanvasNode"
+            @node-keydown="onCanvasNodeKeydown"
+            @drag-start="onCanvasNodeDragStart"
+            @drag-end="cancelCanvasNodeMove"
+            @move-target-click="applyCanvasNodeMove"
+            @drop="onCanvasNodeDrop"
+            @toggle-edge-insert="toggleEdgeInsertMenu"
+            @edge-insert-approval="onEdgeInsertApproval"
+            @edge-insert-condition="onEdgeInsertCondition"
+            @edge-insert-parallel="onEdgeInsertParallel"
+          />
+          <ApprovalCanvasNodeInspector
             v-if="selectedCanvasInspectorNode"
-            ref="canvasInspectorRef"
-            class="template-authoring__canvas-inspector"
-            data-testid="approval-canvas-inspector"
-            :data-inspector-node="selectedCanvasInspectorNode.key"
-            :data-inspector-type="selectedCanvasInspectorNode.type"
+            ref="approvalCanvasInspectorRef"
+            :node="selectedCanvasInspectorNode"
+            :read-only="readOnly"
+            :moving-canvas-node="movingCanvasNode"
+            :graph-node-label="graphNodeLabel"
+            :node-type-label="nodeTypeLabel"
+            :can-move-canvas-node="canMoveCanvasNode"
+            :canvas-step-move-target="canvasStepMoveTarget"
+            :can-insert-after="canInsertAfter"
+            :can-insert-parallel-after="canInsertParallelAfter"
+            :can-remove-node="canRemoveNode"
+            @close="clearCanvasSelection"
+            @move-up="(key) => moveCanvasNodeStep(key, 'up')"
+            @move-down="(key) => moveCanvasNodeStep(key, 'down')"
+            @begin-move="beginCanvasNodeMove"
+            @add-condition-branch="onAddConditionBranch"
+            @add-parallel-branch="onAddParallelBranch"
+            @insert-approval="onInsertApprovalAfter"
+            @insert-condition="onInsertConditionAfter"
+            @insert-parallel="onInsertParallelAfter"
+            @remove="onRemoveNode"
           >
-            <div class="template-authoring__canvas-inspector-header">
-              <div class="template-authoring__canvas-inspector-title">
-                <strong>{{ graphNodeLabel(selectedCanvasInspectorNode.key) }}</strong>
-                <span class="template-authoring__node-type" :data-node-type="selectedCanvasInspectorNode.type">
-                  {{ nodeTypeLabel(selectedCanvasInspectorNode.type) }}
-                </span>
-              </div>
-              <el-button
-                text
-                size="small"
-                data-testid="approval-canvas-inspector-close"
-                @click="clearCanvasSelection"
-              >关闭</el-button>
-            </div>
-            <div class="template-authoring__canvas-inspector-body">
-              <ApprovalGraphNodeConfigEditor :node="selectedCanvasInspectorNode" />
-            </div>
-          </aside>
+            <ApprovalGraphNodeConfigEditor :node="selectedCanvasInspectorNode" />
+          </ApprovalCanvasNodeInspector>
         </div>
 
         <div v-if="graphReadOnly && (!canvasV2Enabled || canvasViewMode === 'list')" data-testid="approval-graph-readonly-list">
@@ -1346,7 +1247,7 @@ import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
-import { Bottom, FullScreen, Plus, Rank, Top, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
+import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useFeatureFlags } from '../../stores/featureFlags'
@@ -1368,6 +1269,8 @@ import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewF
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
+import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
+import ApprovalCanvasNodeInspector from '../../approvals/components/ApprovalCanvasNodeInspector.vue'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
   type ApprovalNodeConfigEditorApi,
@@ -1379,7 +1282,9 @@ import {
   buildSlaHours,
   buildUpdateTemplatePayload,
   createEmptyDetailColumnDraft,
+  AUTHORABLE_FIELD_TYPES,
   createEmptyFieldDraft,
+  type AuthorableFieldType,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
   DETAIL_LEAF_FIELD_TYPES,
@@ -1408,7 +1313,6 @@ import {
   type CcNodeEdit,
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
-  applyTopologyToDraft,
   moveItemToIndex,
 } from '../../approvals/templateAuthoring'
 import {
@@ -1420,9 +1324,31 @@ import {
   insertConditionGateway,
   insertParallelGateway,
   linearNodeMoveTargets,
-  moveLinearNode,
   removeLinearNode,
 } from '../../approvals/graphTopologyEdit'
+import {
+  applyCanvasCommandToSession,
+  applyTopologyOpToSession,
+  canRedoAuthoring,
+  canUndoAuthoring,
+  createAuthoringSessionHistory,
+  draftFromSessionGraph,
+  promoteLinearDraftToGraphAuthoring,
+  redoAuthoringSession,
+  reseedAuthoringSessionHistory,
+  undoAuthoringSession,
+  type AuthoringSessionHistory,
+} from '../../approvals/approvalAuthoringHistory'
+import {
+  canRedoFormHistory,
+  canUndoFormHistory,
+  createFormAuthoringHistory,
+  pushFormSnapshot,
+  redoFormHistory,
+  undoFormHistory,
+  type FormAuthoringHistory,
+} from '../../approvals/approvalFormAuthoringHistory'
+import type { ApprovalCanvasSelection } from '../../approvals/approvalCanvasCommands'
 import {
   computeLayout,
   graphValidityIssues,
@@ -1627,6 +1553,14 @@ function scrollAuthoringTarget(target: HTMLElement | null, focus = false) {
 
 async function selectAuthoringSection(section: AuthoringSectionId) {
   activeAuthoringSection.value = section
+  // Canvas V2: ordinary-user flow authoring uses one preservedGraph rail. Promote linear steps
+  // when entering the flow step so linear + branch share the canvas surface; list remains the
+  // retained accessible alternative (辅助编辑模式).
+  if (section === 'flow' && canvasV2Enabled.value && !readOnly.value && !draft.value.preservedGraph) {
+    draft.value = promoteLinearDraftToGraphAuthoring(draft.value)
+    reseedCanvasHistoryFromDraft()
+    canvasViewMode.value = 'canvas'
+  }
   await nextTick()
   scrollAuthoringTarget(authoringContentRef.value)
 }
@@ -2067,38 +2001,188 @@ function approvalSourceIsPlaceholder(nodeKey: string): boolean {
   return publishPlaceholderRoleKeys.value.includes(nodeKey)
 }
 
-// ── Topology authoring (structural graph edits via graphTopologyEdit + applyTopologyToDraft) ──
+// ── Topology authoring (graphTopologyEdit + authoring session history) ──
 // Each op runs on the EFFECTIVE graph (configs applied) and re-seeds the draft, so the structured
-// editors stay in sync. Guards mirror the engine preconditions so a shown button never throws; a
-// (defensive) throw surfaces as loadError. The interactive free-drag canvas is the gated next slice.
-function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): void {
-  try {
-    draft.value = applyTopologyToDraft(draft.value, op)
-  } catch {
-    // Topology helpers include internal node/edge keys in diagnostics. Those identifiers are useful
-    // to developers but are not an author-facing vocabulary and must not leak into the editor banner.
-    loadError.value = '该拓扑操作不适用于当前流程结构'
+// editors stay in sync. Typed move/reorder use approvalCanvasCommands; other topology helpers
+// record snapshot inverses. Invalid ops fail closed with no partial draft apply.
+const canvasAuthoringHistory = ref<AuthoringSessionHistory>(
+  createAuthoringSessionHistory({ nodes: [], edges: [] }),
+)
+const canUndoCanvasHistory = computed(() => canUndoAuthoring(canvasAuthoringHistory.value))
+const canRedoCanvasHistory = computed(() => canRedoAuthoring(canvasAuthoringHistory.value))
+
+// ── Form field list session history (separate from canvas) ──
+// Structural mutations only (add/remove/reorder). Label/type in-place edits are not snapshotted.
+// Tip is aligned from live draft before each structural push so those edits ride on the "before"
+// of the next structural op without polluting canvas history.
+const formAuthoringHistory = ref<FormAuthoringHistory>(
+  createFormAuthoringHistory([]),
+)
+const formFieldFocusLocalId = ref<string | null>(null)
+const canUndoFormFieldHistory = computed(() => canUndoFormHistory(formAuthoringHistory.value))
+const canRedoFormFieldHistory = computed(() => canRedoFormHistory(formAuthoringHistory.value))
+
+function reseedFormHistoryFromDraft(): void {
+  formAuthoringHistory.value = createFormAuthoringHistory(
+    draft.value.fields,
+    formFieldFocusLocalId.value,
+  )
+}
+
+function applyFormFieldsStructural(
+  nextFields: FieldAuthoringDraft[],
+  nextFocus: string | null = formFieldFocusLocalId.value,
+): void {
+  // Align tip with live draft so label/type edits since the last structural op survive as the
+  // undo "before" of this mutation (still one stack entry for the structural change).
+  const aligned: FormAuthoringHistory = {
+    ...formAuthoringHistory.value,
+    fields: draft.value.fields,
+    focusLocalId: formFieldFocusLocalId.value,
+  }
+  const next = pushFormSnapshot(aligned, nextFields, nextFocus)
+  formAuthoringHistory.value = next
+  draft.value.fields = next.fields
+  formFieldFocusLocalId.value = next.focusLocalId
+}
+
+/** UI selection only — does not push form history (focus-only; structural stack unchanged). */
+function selectFormFieldFocus(localId: string): void {
+  if (formFieldFocusLocalId.value === localId) return
+  formFieldFocusLocalId.value = localId
+}
+
+/**
+ * After palette/add, land keyboard authors on the new field row (selection already set via
+ * form history focusLocalId). Prefer the label input; fall back to the row shell.
+ */
+async function focusFormFieldRow(localId: string): Promise<void> {
+  formFieldFocusLocalId.value = localId
+  await nextTick()
+  const row = document.getElementById(`approval-field-row-${localId}`)
+  if (!row) return
+  row.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+  const labelInput = row.querySelector('input') as HTMLInputElement | null
+  if (labelInput && !labelInput.disabled) {
+    labelInput.focus()
+    return
+  }
+  row.focus()
+}
+
+function onFormFieldUndo(): void {
+  if (readOnly.value) return
+  // Align tip with live draft so in-place edits since last structural op redo correctly.
+  const aligned: FormAuthoringHistory = {
+    ...formAuthoringHistory.value,
+    fields: draft.value.fields,
+    focusLocalId: formFieldFocusLocalId.value,
+  }
+  const result = undoFormHistory(aligned)
+  if (!result.ok) return
+  formAuthoringHistory.value = result.history
+  draft.value.fields = result.fields
+  formFieldFocusLocalId.value = result.focusLocalId
+}
+
+function onFormFieldRedo(): void {
+  if (readOnly.value) return
+  const aligned: FormAuthoringHistory = {
+    ...formAuthoringHistory.value,
+    fields: draft.value.fields,
+    focusLocalId: formFieldFocusLocalId.value,
+  }
+  const result = redoFormHistory(aligned)
+  if (!result.ok) return
+  formAuthoringHistory.value = result.history
+  draft.value.fields = result.fields
+  formFieldFocusLocalId.value = result.focusLocalId
+}
+
+function currentCanvasSelection(): ApprovalCanvasSelection {
+  return selectedCanvasNode.value
+    ? { kind: 'node', nodeKey: selectedCanvasNode.value }
+    : { kind: 'none' }
+}
+
+function reseedCanvasHistoryFromDraft(): void {
+  canvasAuthoringHistory.value = reseedAuthoringSessionHistory(
+    draft.value,
+    currentCanvasSelection(),
+  )
+}
+
+function applySessionHistoryToDraft(next: AuthoringSessionHistory): void {
+  canvasAuthoringHistory.value = next
+  draft.value = draftFromSessionGraph(draft.value, next.graph)
+  if (next.selection.kind === 'node') {
+    selectedCanvasNode.value = next.selection.nodeKey
+  } else {
+    selectedCanvasNode.value = null
   }
 }
+
+function runTopologyOp(
+  op: (graph: ApprovalGraph) => ApprovalGraph,
+  selectionAfter?: ApprovalCanvasSelection,
+): void {
+  const result = applyTopologyOpToSession(
+    canvasAuthoringHistory.value,
+    draft.value,
+    op,
+    selectionAfter ?? currentCanvasSelection(),
+  )
+  if (!result.ok) {
+    loadError.value = result.errorMessage ?? '该拓扑操作不适用于当前流程结构'
+    return
+  }
+  draft.value = result.draft
+  canvasAuthoringHistory.value = result.history
+  if (result.history.selection.kind === 'node') {
+    selectedCanvasNode.value = result.history.selection.nodeKey
+  }
+}
+
+function onCanvasUndo(): void {
+  if (readOnly.value) return
+  // Live effective graph carries inspector map edits; never undo against a stale session tip.
+  const result = undoAuthoringSession(
+    canvasAuthoringHistory.value,
+    buildApprovalGraph(draft.value),
+  )
+  if (!result.ok) return
+  applySessionHistoryToDraft(result.history)
+}
+
+function onCanvasRedo(): void {
+  if (readOnly.value) return
+  const result = redoAuthoringSession(
+    canvasAuthoringHistory.value,
+    buildApprovalGraph(draft.value),
+  )
+  if (!result.ok) return
+  applySessionHistoryToDraft(result.history)
+}
+
 function onAddConditionBranch(nodeKey: string): void {
-  runTopologyOp((graph) => addConditionBranch(graph, nodeKey))
+  runTopologyOp((graph) => addConditionBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
 function onAddParallelBranch(nodeKey: string): void {
-  runTopologyOp((graph) => addParallelBranch(graph, nodeKey))
+  runTopologyOp((graph) => addParallelBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
 function onInsertApprovalAfter(nodeKey: string): void {
-  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey))
+  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey), { kind: 'node', nodeKey })
 }
 function onInsertConditionAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertConditionGateway(graph, nodeKey))
+  runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
   canvasViewMode.value = 'canvas'
 }
 function onInsertParallelAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertParallelGateway(graph, nodeKey))
+  runTopologyOp((graph) => insertParallelGateway(graph, nodeKey), { kind: 'node', nodeKey })
   canvasViewMode.value = 'canvas'
 }
 function onRemoveNode(nodeKey: string): void {
-  runTopologyOp((graph) => removeLinearNode(graph, nodeKey))
+  runTopologyOp((graph) => removeLinearNode(graph, nodeKey), { kind: 'none' })
   // Canvas V2 Slice A: deleting the selected node clears selection and closes the inspector.
   if (selectedCanvasNode.value === nodeKey) clearCanvasSelection()
 }
@@ -2131,12 +2215,16 @@ function canRemoveNode(node: ApprovalNode): boolean {
 }
 
 // ── D-1/D-5/D-6 visual canvas. Layout and semantic move targets are pure data; drag/drop and
-// Alt+Arrow both invoke the same topology edit, so visual position never diverges from the saved graph.
-// Reuses the same topology handlers as the list and the same draft-backed right-side inspector. ──
-const canvasViewMode = ref<'list' | 'canvas'>('list')
+// Alt+Arrow both invoke the same typed canvas command, so visual position never diverges from the
+// saved graph. Canvas is the ordinary-user default when Canvas V2 is on; list is the retained
+// accessible alternative until S12 equivalence is proven. ──
+const canvasViewMode = ref<'list' | 'canvas'>('canvas')
 const selectedCanvasNode = ref<string | null>(null)
-const canvasInspectorRef = ref<HTMLElement | null>(null)
-const canvasViewportRef = ref<HTMLElement | null>(null)
+const approvalFlowCanvasRef = ref<{ getViewportEl: () => HTMLElement | null } | null>(null)
+const approvalCanvasInspectorRef = ref<{ scrollIntoView: (opts?: ScrollIntoViewOptions) => void } | null>(null)
+function canvasViewportEl(): HTMLElement | null {
+  return approvalFlowCanvasRef.value?.getViewportEl() ?? null
+}
 const movingCanvasNode = ref<string | null>(null)
 const canvasZoom = ref(1)
 const canvasViewportState = ref({ width: 0, height: 0, scrollLeft: 0, scrollTop: 0 })
@@ -2166,7 +2254,7 @@ const canvasMinimap = computed(() => computeMinimapFrame(
   { width: CANVAS_MINIMAP_W, height: CANVAS_MINIMAP_H },
 ))
 function syncCanvasViewportState(): void {
-  const viewport = canvasViewportRef.value
+  const viewport = canvasViewportEl()
   if (!viewport) return
   canvasViewportState.value = {
     width: viewport.clientWidth,
@@ -2187,7 +2275,7 @@ function resetCanvasZoom(): void {
   void setCanvasZoom(1)
 }
 async function fitCanvasToViewport(): Promise<void> {
-  const viewport = canvasViewportRef.value
+  const viewport = canvasViewportEl()
   if (!viewport) return
   await setCanvasZoom(fitCanvasZoom(
     canvasLayout.value,
@@ -2203,7 +2291,7 @@ async function selectCanvasNode(nodeKey: string): Promise<void> {
   selectedCanvasNode.value = nodeKey
   await nextTick()
   if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 960px)').matches) {
-    canvasInspectorRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    approvalCanvasInspectorRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 }
 function clearCanvasSelection(): void {
@@ -2313,9 +2401,59 @@ function cancelCanvasNodeMove(): void {
 function applyCanvasNodeMove(targetEdgeKey: string): void {
   const nodeKey = movingCanvasNode.value
   if (!nodeKey || !canvasMoveTargets.value.has(targetEdgeKey)) return
-  runTopologyOp((graph) => moveLinearNode(graph, nodeKey, targetEdgeKey))
+  const selectionBefore: ApprovalCanvasSelection = { kind: 'node', nodeKey }
+  // Always command against the live effective graph so inspector-only map edits
+  // (approvalMode / assigneeSources / condition rules / …) are not wiped on project.
+  const applied = applyCanvasCommandToSession(
+    canvasAuthoringHistory.value,
+    { type: 'move-node-into-edge', nodeKey, intoEdgeKey: targetEdgeKey },
+    selectionBefore,
+    buildApprovalGraph(draft.value),
+  )
+  if (!applied.ok) {
+    // Fail closed: no draft mutation. Business-facing copy only (no edge/node keys).
+    loadError.value = '该位置不能放置此节点'
+    cancelCanvasNodeMove()
+    return
+  }
+  applySessionHistoryToDraft(applied.history)
   selectedCanvasNode.value = nodeKey
   cancelCanvasNodeMove()
+}
+
+const edgeInsertMenuEdgeKey = ref<string | null>(null)
+function toggleEdgeInsertMenu(edgeKey: string): void {
+  edgeInsertMenuEdgeKey.value = edgeInsertMenuEdgeKey.value === edgeKey ? null : edgeKey
+}
+function closeEdgeInsertMenu(): void {
+  edgeInsertMenuEdgeKey.value = null
+}
+function edgeSourceNode(edgeKey: string): ApprovalNode | undefined {
+  const edge = canvasEffectiveGraph.value.edges.find((candidate) => candidate.key === edgeKey)
+  if (!edge) return undefined
+  return canvasNodeByKey(edge.source)
+}
+function canInsertParallelOnEdge(edgeKey: string): boolean {
+  const source = edgeSourceNode(edgeKey)
+  return Boolean(source && canInsertParallelAfter(source))
+}
+function onEdgeInsertApproval(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertAfter(source)) return
+  onInsertApprovalAfter(source.key)
+  closeEdgeInsertMenu()
+}
+function onEdgeInsertCondition(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertAfter(source)) return
+  onInsertConditionAfter(source.key)
+  closeEdgeInsertMenu()
+}
+function onEdgeInsertParallel(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertParallelAfter(source)) return
+  onInsertParallelAfter(source.key)
+  closeEdgeInsertMenu()
 }
 function moveCanvasNodeStep(nodeKey: string, direction: 'up' | 'down'): void {
   const target = canvasStepMoveTarget(nodeKey, direction)
@@ -2559,17 +2697,67 @@ function swap<T>(items: T[], index: number, delta: -1 | 1) {
   return copy
 }
 
+const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
+  text: '文本',
+  textarea: '多行文本',
+  number: '数字',
+  date: '日期',
+  datetime: '日期时间',
+  select: '单选',
+  'multi-select': '多选',
+  user: '人员',
+  detail: '明细',
+  'record-link': '关联记录',
+}
+const fieldPaletteEntries = AUTHORABLE_FIELD_TYPES.map((type) => ({
+  type,
+  label: FIELD_PALETTE_LABELS[type],
+}))
+
 function addField() {
-  draft.value.fields = [...draft.value.fields, createEmptyFieldDraft(draft.value.fields.length + 1)]
+  if (readOnly.value) return
+  const added = createEmptyFieldDraft(draft.value.fields.length + 1)
+  // Structural push carries focusLocalId so undo restores prior focus (#4815).
+  applyFormFieldsStructural([...draft.value.fields, added], added.localId)
+  void focusFormFieldRow(added.localId)
+}
+
+/** D6-f2 palette: add a field of the chosen kind without ordinary-user ID entry. */
+function addFieldOfType(type: AuthorableFieldType) {
+  if (readOnly.value) return
+  const next = createEmptyFieldDraft(draft.value.fields.length + 1)
+  next.type = type
+  next.label = FIELD_PALETTE_LABELS[type]
+  if (type === 'detail') {
+    next.detailColumns = [{
+      localId: `col_${next.localId}`,
+      id: `${next.id}_col1`,
+      type: 'text',
+      label: '子字段 1',
+      required: false,
+      optionsText: '',
+    }]
+  }
+  // Structural push sets form history focusLocalId to the new field; UI selection follows.
+  applyFormFieldsStructural([...draft.value.fields, next], next.localId)
+  void focusFormFieldRow(next.localId)
 }
 
 function removeField(index: number) {
-  if (draft.value.fields.length === 1) return
-  draft.value.fields = draft.value.fields.filter((_, i) => i !== index)
+  if (readOnly.value || draft.value.fields.length === 1) return
+  const removed = draft.value.fields[index]
+  const nextFields = draft.value.fields.filter((_, i) => i !== index)
+  const nextFocus = removed && formFieldFocusLocalId.value === removed.localId
+    ? (nextFields[Math.min(index, nextFields.length - 1)]?.localId ?? null)
+    : formFieldFocusLocalId.value
+  applyFormFieldsStructural(nextFields, nextFocus)
 }
 
 function moveField(index: number, delta: -1 | 1) {
-  draft.value.fields = swap(draft.value.fields, index, delta) ?? draft.value.fields
+  if (readOnly.value) return
+  const next = swap(draft.value.fields, index, delta)
+  if (!next) return
+  applyFormFieldsStructural(next, draft.value.fields[index]?.localId ?? formFieldFocusLocalId.value)
 }
 // D-4 drag-reorder: native HTML5 drag wires to the pure `moveItemToIndex` logic. (The drag GESTURE is
 // manual/E2E QA — jsdom DragEvent is unreliable; the reorder LOGIC is unit-covered in templateAuthoring.)
@@ -2579,8 +2767,11 @@ function onFieldDragStart(index: number) {
 }
 function onFieldDrop(index: number) {
   if (readOnly.value || draggedFieldIndex.value === null) return
-  draft.value.fields = moveItemToIndex(draft.value.fields, draggedFieldIndex.value, index)
+  const from = draggedFieldIndex.value
   draggedFieldIndex.value = null
+  if (from === index) return
+  const next = moveItemToIndex(draft.value.fields, from, index)
+  applyFormFieldsStructural(next, next[index]?.localId ?? formFieldFocusLocalId.value)
 }
 
 // detail / sub-form (明细) sub-field authoring. Sub-fields are LEAF types only (no nested
@@ -2685,6 +2876,9 @@ async function loadTemplateForEdit() {
     draft.value = createEmptyTemplateDraft()
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
+    formFieldFocusLocalId.value = null
+    reseedCanvasHistoryFromDraft()
+    reseedFormHistoryFromDraft()
     snapshotDraft()
     return
   }
@@ -2695,9 +2889,12 @@ async function loadTemplateForEdit() {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
+    formFieldFocusLocalId.value = null
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
+    reseedCanvasHistoryFromDraft()
+    reseedFormHistoryFromDraft()
     snapshotDraft()
   } catch (error: unknown) {
     loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
@@ -2748,6 +2945,9 @@ async function persistDraft() {
       draft.value = draftFromTemplate(updated)
       unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
       graphReadOnlyMessage.value = graphReadOnlyReason(updated)
+      formFieldFocusLocalId.value = null
+      reseedCanvasHistoryFromDraft()
+      reseedFormHistoryFromDraft()
       snapshotDraft()
       return updated
     }
@@ -2755,6 +2955,9 @@ async function persistDraft() {
     draft.value = draftFromTemplate(created)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
+    formFieldFocusLocalId.value = null
+    reseedCanvasHistoryFromDraft()
+    reseedFormHistoryFromDraft()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
@@ -2775,9 +2978,12 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     draft.value = draftFromTemplate(created)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
+    formFieldFocusLocalId.value = null
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
+    reseedCanvasHistoryFromDraft()
+    reseedFormHistoryFromDraft()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
@@ -2966,7 +3172,8 @@ onUnmounted(() => {
 .template-authoring__actions,
 .template-authoring__inline,
 .template-authoring__panel-header,
-.template-authoring__item-toolbar {
+.template-authoring__item-toolbar,
+.template-authoring__form-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -3239,6 +3446,17 @@ onUnmounted(() => {
   box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
 }
 
+/* Form palette focus-return: selected field row (formFieldFocusLocalId). */
+.template-authoring__item--focused {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 1px var(--el-color-primary-light-5);
+}
+
+.template-authoring__item--focused:focus {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+}
+
 /* G-B2-06 read-only linear flow spine. */
 .template-authoring__spine {
   display: flex;
@@ -3451,196 +3669,15 @@ pre {
   min-width: 0;
   width: 100%;
 }
-.template-authoring__canvas-main {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.template-authoring__canvas-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  min-height: 32px;
-  margin-bottom: 8px;
-}
-.template-authoring__canvas-zoom-label {
-  min-width: 58px;
-  font-variant-numeric: tabular-nums;
-}
-.template-authoring__canvas-viewport-shell {
-  position: relative;
-  min-width: 0;
-}
-.template-authoring__canvas-viewport {
-  min-height: 360px;
-  max-height: min(66vh, 720px);
-  max-width: 100%;
-  overflow: auto;
-  border: 1px solid var(--el-border-color);
-  border-radius: 6px;
-  background: var(--ms-bg-page);
-}
-.template-authoring__canvas-viewport:focus-visible {
-  outline: 2px solid var(--el-color-primary-light-5);
-  outline-offset: 2px;
-}
-.template-authoring__canvas-stage {
-  position: relative;
-  min-width: 1px;
-  min-height: 1px;
-}
-.template-authoring__canvas {
-  position: relative;
-  background: var(--ms-bg-page);
-  min-height: 200px;
-}
-.template-authoring__canvas-edges {
-  position: absolute;
-  left: 0;
-  top: 0;
-}
-.template-authoring__canvas-node {
-  box-sizing: border-box;
-  padding: 6px 10px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 6px;
-  background: var(--ms-bg-card);
-  box-shadow: var(--el-box-shadow-lighter);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  cursor: default;
-  font-size: 12px;
-  min-height: 96px;
-}
-.template-authoring__canvas-node[draggable='true'] {
-  cursor: grab;
-}
-.template-authoring__canvas-node.is-selected {
-  border-color: var(--el-color-primary);
-  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
-}
-.template-authoring__canvas-node.is-moving {
-  border-style: dashed;
-  border-color: var(--el-color-primary);
-}
-.template-authoring__canvas-node-selector {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  border-radius: 4px;
-  cursor: pointer;
-  outline: none;
-}
-.template-authoring__canvas-node-selector:focus-visible {
-  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
-}
-.template-authoring__canvas-node-actions {
+.template-authoring__field-palette {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-}
-.template-authoring__canvas-move-target {
-  position: absolute;
-  z-index: 3;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 28px;
-  padding: 4px 8px;
-  border: 1px dashed var(--el-color-primary);
-  border-radius: 6px;
-  color: var(--el-color-primary);
-  background: var(--el-bg-color);
-  box-shadow: var(--el-box-shadow-lighter);
-  transform: translate(-50%, -50%);
-  cursor: pointer;
-  font-size: 12px;
-}
-.template-authoring__canvas-move-target:hover,
-.template-authoring__canvas-move-target:focus-visible {
-  border-style: solid;
-  background: var(--el-color-primary-light-9);
-  outline: none;
-}
-.template-authoring__canvas-minimap {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  box-sizing: border-box;
-  border: 1px solid var(--el-border-color);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--el-bg-color) 94%, transparent);
-  box-shadow: var(--el-box-shadow-lighter);
-  pointer-events: none;
-}
-.template-authoring__canvas-minimap-edge {
-  fill: none;
-  stroke: var(--el-border-color-darker);
-  stroke-width: 5;
-}
-.template-authoring__canvas-minimap-node {
-  fill: var(--el-fill-color-light);
-  stroke: var(--el-border-color-darker);
-  stroke-width: 4;
-}
-.template-authoring__canvas-minimap-window {
-  fill: color-mix(in srgb, var(--el-color-primary) 12%, transparent);
-  stroke: var(--el-color-primary);
-  stroke-width: 1.5;
-}
-@media (max-width: 560px) {
-  .template-authoring__canvas-minimap {
-    display: none;
-  }
-}
-.template-authoring__canvas-inspector {
-  /* ~400px so ms-w-360 controls fit with body padding; stacks to 100% under 960px. */
-  flex: 0 0 400px;
-  width: 400px;
-  max-width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 6px;
-  background: var(--el-bg-color);
-  display: flex;
-  flex-direction: column;
-  max-height: min(70vh, 720px);
-  overflow: hidden;
-  scroll-margin-top: 164px;
-}
-.template-authoring__canvas-inspector-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--el-border-color-light);
-}
-.template-authoring__canvas-inspector-title {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  font-size: 13px;
-}
-.template-authoring__canvas-inspector-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  padding: 10px 12px 14px;
+  gap: 6px;
+  margin-bottom: 12px;
 }
 @media (max-width: 960px) {
   .template-authoring__canvas-workspace {
     flex-direction: column;
-  }
-  .template-authoring__canvas-inspector {
-    flex: 1 1 auto;
-    width: 100%;
-    max-height: none;
   }
 }
 

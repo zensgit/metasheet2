@@ -36,6 +36,17 @@ const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => pool.query(sql, params)
 
 const RUN = `e1c_${Date.now()}`
+
+// #4658 makes login identifiers a GLOBAL unique namespace (user_login_aliases), so the suite's
+// old shared literal mobile ('13800000000' on every profile) now correctly refuses the second
+// provisioning — two different people cannot hold the same mobile alias. Same person must keep
+// the same mobile across container/web hops, different people must differ: derive it from the
+// unionId deterministically.
+function mobileFor(unionId: string): string {
+  let h = 0
+  for (const ch of unionId) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+  return `13${String(h % 900000000 + 100000000)}`
+}
 const CORP = `corp_${RUN}`
 const USER_LINKED = `user_${RUN}_linked`
 const USER_DISABLED = `user_${RUN}_disabled`
@@ -54,7 +65,7 @@ function primeContainerChain(unionId: string, userId = `emp_${unionId}`, options
     name: `Name ${unionId}`,
     unionId,
     email: options.omitEmail ? undefined : (options.email ?? `${unionId}@example.com`),
-    mobile: '13800000000',
+    mobile: mobileFor(unionId),
     avatarUrl: '',
     departmentIds: [],
     source: {},
@@ -187,7 +198,7 @@ describeIfDb('E1 — dingtalk container login (real DB)', () => {
       unionId: UNION_GOLDEN,
       nick: 'Golden',
       email: `${UNION_GOLDEN}@example.com`,
-      mobile: '13800000000',
+      mobile: mobileFor(UNION_GOLDEN),
       avatarUrl: '',
     })
     const second = await exchangeCodeForUser('web-code-golden')

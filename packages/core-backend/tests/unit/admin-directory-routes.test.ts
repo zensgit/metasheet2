@@ -51,6 +51,14 @@ const workNotificationMocks = vi.hoisted(() => ({
   testDingTalkWorkNotificationAgentId: vi.fn(),
 }))
 
+const deprovisionMocks = vi.hoisted(() => ({
+  listDeprovisionEffects: vi.fn(),
+  listDeprovisionEvents: vi.fn(),
+  previewDeprovisionForUser: vi.fn(),
+  readDeprovisionRuntimeFlags: vi.fn(),
+  restoreDeprovisionEvent: vi.fn(),
+}))
+
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isRbacAdmin,
 }))
@@ -128,6 +136,14 @@ vi.mock('../../src/integrations/dingtalk/approval-card-config', () => ({
   generateApprovalCardLinkSecret: approvalCardConfigMocks.generateApprovalCardLinkSecret,
   getApprovalCardConfigStatus: approvalCardConfigMocks.getApprovalCardConfigStatus,
   saveApprovalCardPublicAppUrl: approvalCardConfigMocks.saveApprovalCardPublicAppUrl,
+}))
+
+vi.mock('../../src/directory/deprovision-evidence-api', () => ({
+  listDeprovisionEffects: deprovisionMocks.listDeprovisionEffects,
+  listDeprovisionEvents: deprovisionMocks.listDeprovisionEvents,
+  previewDeprovisionForUser: deprovisionMocks.previewDeprovisionForUser,
+  readDeprovisionRuntimeFlags: deprovisionMocks.readDeprovisionRuntimeFlags,
+  restoreDeprovisionEvent: deprovisionMocks.restoreDeprovisionEvent,
 }))
 
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
@@ -233,6 +249,155 @@ describe('adminDirectoryRouter', () => {
     approvalCardConfigMocks.generateApprovalCardLinkSecret.mockReset()
     approvalCardConfigMocks.getApprovalCardConfigStatus.mockReset()
     approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockReset()
+    deprovisionMocks.listDeprovisionEffects.mockReset()
+    deprovisionMocks.listDeprovisionEvents.mockReset()
+    deprovisionMocks.previewDeprovisionForUser.mockReset()
+    deprovisionMocks.readDeprovisionRuntimeFlags.mockReset()
+    deprovisionMocks.restoreDeprovisionEvent.mockReset()
+  })
+
+  it('maps a superseded or already-restored deprovision event to 409 without auditing success', async () => {
+    deprovisionMocks.restoreDeprovisionEvent.mockRejectedValue(
+      Object.assign(new Error('Deprovision event is no longer applied'), {
+        code: 'EVENT_NOT_APPLIED',
+      }),
+    )
+
+    const response = await invokeRoute(
+      'post',
+      '/deprovision/events/:eventId/restore',
+      {
+        params: { eventId: 'event-1' },
+        body: { mode: 'rehire' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'EVENT_NOT_APPLIED',
+        message: 'Deprovision event is no longer applied',
+      },
+    })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('rejects an invalid compatibility restore mode instead of silently treating it as rehire', async () => {
+    const response = await invokeRoute(
+      'post',
+      '/deprovision/events/:eventId/restore',
+      {
+        params: { eventId: 'event-1' },
+        body: { mode: 'force' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'RESTORE_MODE_INVALID' },
+    })
+    expect(deprovisionMocks.restoreDeprovisionEvent).not.toHaveBeenCalled()
+  })
+
+  it('exposes the locked rehire and force-reactivate routes with fixed modes', async () => {
+    deprovisionMocks.restoreDeprovisionEvent.mockResolvedValue({
+      eventId: 'event-1',
+      restoreMode: 'rehire',
+      restoredEffectCount: 1,
+      localUserId: 'user-1',
+      note: null,
+    })
+
+    const rehire = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/reactivate',
+      {
+        params: { eventId: 'event-1' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(rehire.statusCode).toBe(200)
+    expect(deprovisionMocks.restoreDeprovisionEvent).toHaveBeenLastCalledWith({
+      eventId: 'event-1',
+      mode: 'rehire',
+      adminUserId: 'admin-1',
+      confirm: false,
+      note: undefined,
+    })
+
+    deprovisionMocks.restoreDeprovisionEvent.mockResolvedValue({
+      eventId: 'event-2',
+      restoreMode: 'admin_force',
+      restoredEffectCount: 1,
+      localUserId: 'user-2',
+      note: 'confirmed by owner',
+    })
+    const forced = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/force-reactivate',
+      {
+        params: { eventId: 'event-2' },
+        body: { confirm: true, note: 'confirmed by owner' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(forced.statusCode).toBe(200)
+    expect(deprovisionMocks.restoreDeprovisionEvent).toHaveBeenLastCalledWith({
+      eventId: 'event-2',
+      mode: 'admin_force',
+      adminUserId: 'admin-1',
+      confirm: true,
+      note: 'confirmed by owner',
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
+  })
+
+  it('lists integration-scoped events and rejects an unknown status before querying', async () => {
+    deprovisionMocks.listDeprovisionEvents.mockResolvedValue([
+      { id: 'event-1', status: 'applied' },
+    ])
+    deprovisionMocks.readDeprovisionRuntimeFlags.mockReturnValue({
+      enabled: false,
+      maxBatch: 25,
+    })
+
+    const listed = await invokeRoute(
+      'get',
+      '/integrations/:integrationId/deprovision-events',
+      {
+        params: { integrationId: 'integration-1' },
+        query: { status: 'applied', userId: 'user-1', limit: '10' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(listed.statusCode).toBe(200)
+    expect(deprovisionMocks.listDeprovisionEvents).toHaveBeenCalledWith({
+      integrationId: 'integration-1',
+      localUserId: 'user-1',
+      limit: 10,
+      status: 'applied',
+    })
+
+    deprovisionMocks.listDeprovisionEvents.mockClear()
+    const invalid = await invokeRoute(
+      'get',
+      '/integrations/:integrationId/deprovision-events',
+      {
+        params: { integrationId: 'integration-1' },
+        query: { status: 'open' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(invalid.statusCode).toBe(400)
+    expect(invalid.body).toMatchObject({
+      ok: false,
+      error: { code: 'DEPROVISION_EVENT_STATUS_INVALID' },
+    })
+    expect(deprovisionMocks.listDeprovisionEvents).not.toHaveBeenCalled()
   })
 
   describe('approval-card config (CFG-2)', () => {

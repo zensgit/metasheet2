@@ -1,6 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { query } from '../../src/db/pg'
 import { applyDirectoryDeprovisionPolicies } from '../../src/directory/directory-sync'
+import {
+  createDirectoryDeprovisionRun,
+  deleteDirectoryDeprovisionEvidence,
+} from '../utils/directory-deprovision-fixtures'
 
 /**
  * DT-OPS-01 — who loses access, proved against the REAL migrated tables.
@@ -30,6 +34,7 @@ const uid = (name: string) => `dtdep-${name}-${TS}`
 describeIfDatabase('DT-OPS-01 deprovision selection (real DB)', () => {
   let integrationA = ''
   let integrationB = ''
+  let runA = ''
 
   const client = {
     query: (sql: string, params?: unknown[]) =>
@@ -40,6 +45,8 @@ describeIfDatabase('DT-OPS-01 deprovision selection (real DB)', () => {
     integrationDefaultPolicy: 'mark_inactive',
     syncedAccountCount: 100,
     enabled: true,
+    runId: '',
+    triggeredBy: 'test:directory-deprovision-selection',
   }
 
   /** Creates a user (if new) plus one linked directory account. Returns the account id. */
@@ -88,10 +95,13 @@ describeIfDatabase('DT-OPS-01 deprovision selection (real DB)', () => {
       `INSERT INTO directory_integrations (name, corp_id) VALUES ($1, $2) RETURNING id::text AS id`,
       [`dtdep-b-${TS}`, `dtdep-corp-b-${TS}`],
     )).rows[0].id
+    runA = await createDirectoryDeprovisionRun(integrationA)
+    baseOptions.runId = runA
   })
 
   // Every scenario owns its people; wipe between tests so a leaked write cannot pass the next one.
   afterEach(async () => {
+    await deleteDirectoryDeprovisionEvidence([integrationA, integrationB])
     await query(`DELETE FROM user_external_auth_grants WHERE local_user_id LIKE $1`, [`dtdep-%-${TS}`])
     await query(
       `DELETE FROM directory_accounts WHERE integration_id = ANY($1::uuid[])`,
@@ -118,6 +128,12 @@ describeIfDatabase('DT-OPS-01 deprovision selection (real DB)', () => {
     expect(outcome.candidateCount).toBe(1)
     expect(outcome.usersDeactivatedCount).toBe(1)
     await expect(isUserActive(user)).resolves.toBe(false)
+    // No grant row existed, so the LEDGER records no grant effect (nothing was taken away) —
+    // but the bookkeeping upsert still leaves an explicit DISABLED row. That row is load-bearing:
+    // dingtalk-oauth's ensureGrant path is INSERT ... enabled=TRUE ... ON CONFLICT DO NOTHING, so
+    // a departed person with NO row would be silently re-granted on their next OAuth attempt;
+    // the explicit disabled row is what makes that a no-op. (Also pinned by the orchestration
+    // suite's OPS-01 test — the run-effect shape has been this since DT-OPS-01.)
     await expect(grantEnabled(user)).resolves.toBe(false)
   })
 
@@ -249,6 +265,12 @@ describeIfDatabase('DT-OPS-01 deprovision selection (real DB)', () => {
   it('disable_grant_only revokes DingTalk login and leaves the local account alive', async () => {
     const user = uid('grantonly')
     const departed = await seedAccount({ userId: user, accountActive: false })
+    await query(
+      `INSERT INTO user_external_auth_grants (
+         provider, local_user_id, enabled, granted_by, created_at, updated_at
+       ) VALUES ('dingtalk', $1, TRUE, 'test:directory-deprovision-selection', NOW(), NOW())`,
+      [user],
+    )
 
     const outcome = await applyDirectoryDeprovisionPolicies(client, {
       ...baseOptions,

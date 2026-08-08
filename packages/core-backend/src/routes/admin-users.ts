@@ -29,13 +29,26 @@ import {
   assertPendingUserCannotBeActivatedViaGenericStatusApi,
   PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
 } from '../auth/user-activation'
-import { activatePendingUser } from '../auth/user-activate'
-import type { ActivateErrorCode } from '../auth/user-activate'
+import { activatePendingUser, isActivateMode } from '../auth/user-activate'
+import type {
+  ActivateErrorCode,
+  ActivateMode,
+  ActivateUserInput,
+  ActivateUserResult,
+} from '../auth/user-activate'
 import {
+  applyMobileLoginAliasChangeOrThrow,
   assertAliasCutoverAllowed,
   backfillUserLoginAliases,
+  claimNonEmptyLoginAliasesOrThrow,
   isAuthLoginAliasCutoverEnabled,
+  LoginAliasClaimError,
 } from '../auth/login-alias-service'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+  type AccessGraphTransactionClient,
+} from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
@@ -669,14 +682,13 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
   }
 }
 
-async function assertUsersCanEnableDingTalkGrant(userIds: string[]): Promise<void> {
+async function assertUsersCanEnableDingTalkGrant(
+  client: AccessGraphTransactionClient,
+  userIds: string[],
+): Promise<void> {
   if (userIds.length === 0) return
 
-  const identityResult = await query<{
-    local_user_id: string
-    corp_id: string | null
-    provider_open_id: string | null
-  }>(
+  const identityResult = await client.query(
     `SELECT local_user_id, corp_id, provider_open_id
      FROM user_external_identities
      WHERE provider = $1
@@ -685,7 +697,11 @@ async function assertUsersCanEnableDingTalkGrant(userIds: string[]): Promise<voi
   )
 
   const blockedUserIds = new Set<string>()
-  for (const row of identityResult.rows) {
+  for (const row of identityResult.rows as Array<{
+    local_user_id: string
+    corp_id: string | null
+    provider_open_id: string | null
+  }>) {
     if (row.corp_id && !row.provider_open_id) {
       blockedUserIds.add(row.local_user_id)
     }
@@ -788,10 +804,31 @@ function normalizeUserIdList(value: unknown): string[] {
   return Array.from(unique)
 }
 
-async function upsertDingTalkGrants(userIds: string[], enabled: boolean, adminUserId: string): Promise<void> {
-  if (userIds.length === 0) return
+async function upsertDingTalkGrants(
+  client: AccessGraphTransactionClient,
+  userIds: string[],
+  enabled: boolean,
+  adminUserId: string,
+): Promise<string[]> {
+  if (userIds.length === 0) return []
 
-  await query(
+  const current = await client.query(
+    `SELECT local_user_id, enabled
+       FROM user_external_auth_grants
+      WHERE provider = $1
+        AND local_user_id = ANY($2::text[])`,
+    [DINGTALK_PROVIDER, userIds],
+  )
+  const currentByUserId = new Map(
+    (current.rows as Array<{ local_user_id: string; enabled: boolean }>).map(
+      (row) => [row.local_user_id, row.enabled],
+    ),
+  )
+  const changedUserIds = userIds.filter(
+    (userId) => currentByUserId.get(userId) !== enabled,
+  )
+
+  await client.query(
     `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
      SELECT $1, target_user_id, $2, $3, NOW(), NOW()
      FROM unnest($4::text[]) AS target(target_user_id)
@@ -799,6 +836,14 @@ async function upsertDingTalkGrants(userIds: string[], enabled: boolean, adminUs
      DO UPDATE SET enabled = EXCLUDED.enabled, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
     [DINGTALK_PROVIDER, enabled, adminUserId, userIds],
   )
+  if (changedUserIds.length > 0) {
+    await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+      userIds: changedUserIds,
+      actorId: adminUserId,
+      reason: 'superseded by administrator DingTalk grant update',
+    })
+  }
+  return changedUserIds
 }
 
 function deriveDelegableNamespaces(roleIds: string[]): string[] {
@@ -1792,6 +1837,17 @@ const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; 
   // RULED 409: an inactive integration is likewise configuration, not an outage.
   ACTIVATE_INTEGRATION_INACTIVE: { status: 409, message: 'Directory integration is not active; cannot activate' },
   ACTIVATE_LINK_MISMATCH: { status: 409, message: 'Directory link points to a different user' },
+  ACTIVATE_SOURCE_INELIGIBLE: {
+    status: 409,
+    message: 'Directory source is not eligible for DingTalk SSO activation',
+  },
+  // 409: membership org is DERIVED from the directory-source integration for every activation
+  // mode; a caller-supplied orgId is only ever match-validated, never trusted (closeout review
+  // P1 — non-SSO admin activation previously wrote the client's orgId unchecked).
+  ACTIVATE_ORG_MISMATCH: {
+    status: 409,
+    message: 'orgId does not match the directory source integration for this user',
+  },
 }
 
 type ActivatePolicyRow = Readonly<{ status: number; message: string }>
@@ -1876,6 +1932,132 @@ export function mapActivateError(error: unknown): { status: number; code: string
     if (policy) return { code: rawCode, ...policy }
   }
   return { ...ACTIVATE_ERROR_FALLBACK }
+}
+
+const MAX_BULK_ACTIVATE_ITEMS = 100
+
+type ParsedActivateRequest = Omit<ActivateUserInput, 'adminUserId'>
+
+type BulkActivateResult =
+  | {
+      userId: string
+      ok: true
+      result: ActivateUserResult
+    }
+  | {
+      userId: string
+      ok: false
+      error: { code: string; message: string; status: number }
+    }
+
+function parseOptionalNonEmptyString(
+  value: unknown,
+  fieldName: string,
+): string | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (typeof value !== 'string' || !value.trim()) {
+    throw Object.assign(new Error(`${fieldName} must be a non-empty string or null`), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  return value.trim()
+}
+
+function parseActivateRequest(
+  raw: unknown,
+  routeUserId?: string,
+): ParsedActivateRequest {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw Object.assign(new Error('Activation request must be an object'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  const body = raw as Record<string, unknown>
+  const rawUserId = routeUserId ?? body.userId
+  if (typeof rawUserId !== 'string' || !rawUserId.trim()) {
+    throw Object.assign(new Error('userId must be a non-empty string'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+
+  const rawMode = body.mode === undefined ? 'temp_password' : body.mode
+  if (!isActivateMode(rawMode)) {
+    throw Object.assign(new Error('mode must be temp_password, sso, or admin_no_password'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  const mode: ActivateMode = rawMode
+
+  if (body.temporaryPassword !== undefined && typeof body.temporaryPassword !== 'string') {
+    throw Object.assign(new Error('temporaryPassword must be a string'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  if (mode !== 'temp_password' && body.temporaryPassword !== undefined) {
+    throw Object.assign(new Error('temporaryPassword is only valid for temp_password mode'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  if (
+    body.enableDingTalkGrant !== undefined
+    && typeof body.enableDingTalkGrant !== 'boolean'
+  ) {
+    throw Object.assign(new Error('enableDingTalkGrant must be a boolean'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+
+  return {
+    userId: rawUserId.trim(),
+    mode,
+    temporaryPassword: typeof body.temporaryPassword === 'string'
+      ? body.temporaryPassword
+      : undefined,
+    orgId: parseOptionalNonEmptyString(body.orgId, 'orgId'),
+    directoryAccountId: parseOptionalNonEmptyString(
+      body.directoryAccountId,
+      'directoryAccountId',
+    ),
+    enableDingTalkGrant: body.enableDingTalkGrant === true,
+  }
+}
+
+function mapActivateRequestError(error: unknown): {
+  status: number
+  code: string
+  message: string
+} {
+  if ((error as { code?: unknown } | null)?.code === 'ACTIVATE_REQUEST_INVALID') {
+    return {
+      status: 400,
+      code: 'ACTIVATE_REQUEST_INVALID',
+      message: (error as Error).message,
+    }
+  }
+  return mapActivateError(error)
+}
+
+async function auditActivateSuccess(
+  adminUserId: string,
+  result: ActivateUserResult,
+  mode: ActivateMode,
+  source: 'admin_activate' | 'admin_activate_bulk',
+): Promise<void> {
+  await auditLog({
+    actorId: adminUserId,
+    actorType: 'user',
+    action: 'update',
+    resourceType: 'user',
+    resourceId: result.userId,
+    meta: {
+      source,
+      mode,
+      localPasswordSet: result.localPasswordSet,
+      // Boolean only: plaintext passwords and provider identity values are forbidden in audit.
+      temporaryPasswordIssued: Boolean(result.temporaryPassword),
+    },
+  })
 }
 
 export function adminUsersRouter(): Router {
@@ -3543,6 +3725,17 @@ export function adminUsersRouter(): Router {
           ],
         )
 
+        // Load-bearing alias writer hook: admin create always inserts activation_status=activated.
+        // Removing claimNonEmptyLoginAliasesOrThrow must fail the admin_create writer tests.
+        await claimNonEmptyLoginAliasesOrThrow({
+          userId,
+          email: cleanEmail || null,
+          username: cleanUsername,
+          mobile: cleanMobile,
+          source: 'admin_create',
+          client,
+        })
+
         if (roleId) {
           await client.query(
             `INSERT INTO user_roles (user_id, role_id)
@@ -3691,6 +3884,13 @@ export function adminUsersRouter(): Router {
       if (error instanceof AttendanceDefaultShiftNotFoundError) {
         return jsonError(res, error.status, error.code, error.message)
       }
+      if (error instanceof LoginAliasClaimError) {
+        // Fixed safe messages only — never echo error.stack / PG detail from nested drivers.
+        if (error.code === 'ALIAS_CONFLICT') {
+          return jsonError(res, 409, 'LOGIN_ALIAS_CONFLICT', error.message)
+        }
+        return jsonError(res, 500, 'LOGIN_ALIAS_FAILED', error.message)
+      }
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'USER_CREATE_SCHEMA_UNAVAILABLE', 'Required user or attendance tables are not available until migrations are applied')
       }
@@ -3748,37 +3948,172 @@ export function adminUsersRouter(): Router {
       // (strip all whitespace, map empty to NULL) before comparison so legacy
       // rows like "138 0013 8000" don't spuriously fail CAS when the client
       // sends the already-sanitised "13800138000" witness.
-      const updateResult = await query<{ id: string }>(
-        `UPDATE users
-         SET name = $1,
-             mobile = $2,
-             employee_no = $3,
-             department = $4,
-             position = $5,
-             hire_date = $6::date,
-             updated_at = NOW()
-         WHERE id = $7
-           AND (
-             $8::boolean = FALSE
-             OR NULLIF(regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g'), '')
-                IS NOT DISTINCT FROM
-                NULLIF(regexp_replace(COALESCE($9::text, ''), '\\s+', '', 'g'), '')
-           )
-         RETURNING id`,
-        [
-          nextName,
-          nextMobile,
-          nextEmployeeNo,
-          nextDepartment,
-          nextPosition,
-          nextHireDate,
-          userId,
-          hasExpectedMobile,
-          expectedMobile ?? null,
-        ],
-      )
-      if (updateResult.rows.length === 0) {
-        return jsonError(res, 409, 'PROFILE_MOBILE_CONFLICT', 'User mobile changed before update was applied')
+      //
+      // Mobile path TOCTOU fix: do NOT retire aliases from the pre-transaction
+      // profile.mobile snapshot. Lock the users row FOR UPDATE, derive the
+      // authoritative previous mobile from that locked row, then claim → update
+      // → retire in the same transaction. A concurrent mobile writer cannot make
+      // this route delete a stale prior alias.
+      // Load-bearing alias writer hook: removing applyMobileLoginAliasChangeOrThrow
+      // or the FOR UPDATE load must fail the admin_profile_mobile route/unit tests.
+      type ProfileTxnClient = {
+        query: <T extends Record<string, unknown> = Record<string, unknown>>(
+          sql: string,
+          params?: unknown[],
+        ) => Promise<{ rows: T[] }>
+      }
+
+      const runProfileUpdate = async (
+        client: ProfileTxnClient,
+        fields: {
+          name: string
+          mobile: string | null
+          employeeNo: string | null
+          department: string | null
+          position: string | null
+          hireDate: string | null
+        },
+      ) => {
+        const updateResult = await client.query<{ id: string }>(
+          `UPDATE users
+           SET name = $1,
+               mobile = $2,
+               employee_no = $3,
+               department = $4,
+               position = $5,
+               hire_date = $6::date,
+               updated_at = NOW()
+           WHERE id = $7
+             AND (
+               $8::boolean = FALSE
+               OR NULLIF(regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g'), '')
+                  IS NOT DISTINCT FROM
+                  NULLIF(regexp_replace(COALESCE($9::text, ''), '\\s+', '', 'g'), '')
+             )
+           RETURNING id`,
+          [
+            fields.name,
+            fields.mobile,
+            fields.employeeNo,
+            fields.department,
+            fields.position,
+            fields.hireDate,
+            userId,
+            hasExpectedMobile,
+            expectedMobile ?? null,
+          ],
+        )
+        if (updateResult.rows.length === 0) {
+          const err = new Error('User mobile changed before update was applied') as Error & {
+            code?: string
+          }
+          err.code = 'PROFILE_MOBILE_CONFLICT'
+          throw err
+        }
+      }
+
+      // Authoritative before/after values for audit — mobile path refreshes from the locked row.
+      let auditBefore = {
+        name: profile.name,
+        mobile: profile.mobile,
+        employeeNo: profile.employeeNo,
+        department: profile.department,
+        position: profile.position,
+        hireDate: profile.hireDate,
+      }
+      let auditAfter = {
+        name: nextName,
+        mobile: nextMobile,
+        employeeNo: nextEmployeeNo,
+        department: nextDepartment,
+        position: nextPosition,
+        hireDate: nextHireDate,
+      }
+
+      if (hasMobile) {
+        await transaction(async (client) => {
+          type LockedProfileRow = {
+            id: string
+            name: string
+            mobile: string | null
+            employeeNo: string | null
+            department: string | null
+            position: string | null
+            hireDate: string | null
+          }
+          const locked = await client.query(
+            `SELECT ${ADMIN_USER_PROFILE_SELECT}
+             FROM users
+             WHERE id = $1
+             FOR UPDATE`,
+            [userId],
+          )
+          const lockedRow = locked.rows[0] as LockedProfileRow | undefined
+          if (!lockedRow) {
+            const err = new Error('User not found') as Error & { code?: string }
+            err.code = 'NOT_FOUND'
+            throw err
+          }
+
+          // Authoritative previous mobile comes from the locked row only — never the
+          // pre-transaction snapshot (stale profile.mobile would retire the wrong alias).
+          const previousMobileFromLock = lockedRow.mobile
+          const effectiveNextName = hasName ? nextName : lockedRow.name
+          const effectiveNextMobile = nextMobile
+          const effectiveNextEmployeeNo = hasEmployeeNo ? nextEmployeeNo : lockedRow.employeeNo
+          const effectiveNextDepartment = hasDepartment ? nextDepartment : lockedRow.department
+          const effectiveNextPosition = hasPosition ? nextPosition : lockedRow.position
+          const effectiveNextHireDate = hasHireDate ? nextHireDate : lockedRow.hireDate
+
+          auditBefore = {
+            name: lockedRow.name,
+            mobile: lockedRow.mobile,
+            employeeNo: lockedRow.employeeNo,
+            department: lockedRow.department,
+            position: lockedRow.position,
+            hireDate: lockedRow.hireDate,
+          }
+          auditAfter = {
+            name: effectiveNextName,
+            mobile: effectiveNextMobile,
+            employeeNo: effectiveNextEmployeeNo,
+            department: effectiveNextDepartment,
+            position: effectiveNextPosition,
+            hireDate: effectiveNextHireDate,
+          }
+
+          await applyMobileLoginAliasChangeOrThrow({
+            userId,
+            previousMobile: previousMobileFromLock,
+            nextMobile: effectiveNextMobile,
+            source: 'admin_profile_mobile',
+            client,
+            afterNewClaim: async () => {
+              await runProfileUpdate(client, {
+                name: effectiveNextName,
+                mobile: effectiveNextMobile,
+                employeeNo: effectiveNextEmployeeNo,
+                department: effectiveNextDepartment,
+                position: effectiveNextPosition,
+                hireDate: effectiveNextHireDate,
+              })
+            },
+          })
+        })
+      } else {
+        await runProfileUpdate(
+          {
+            query: async (sql, params) => query(sql, params),
+          },
+          {
+            name: nextName,
+            mobile: nextMobile,
+            employeeNo: nextEmployeeNo,
+            department: nextDepartment,
+            position: nextPosition,
+            hireDate: nextHireDate,
+          },
+        )
       }
 
       await auditLog({
@@ -3789,22 +4124,8 @@ export function adminUsersRouter(): Router {
         resourceId: userId,
         meta: {
           adminUserId,
-          before: {
-            name: profile.name,
-            mobile: profile.mobile,
-            employeeNo: profile.employeeNo,
-            department: profile.department,
-            position: profile.position,
-            hireDate: profile.hireDate,
-          },
-          after: {
-            name: nextName,
-            mobile: nextMobile,
-            employeeNo: nextEmployeeNo,
-            department: nextDepartment,
-            position: nextPosition,
-            hireDate: nextHireDate,
-          },
+          before: auditBefore,
+          after: auditAfter,
         },
       })
 
@@ -3814,6 +4135,19 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
+      const code = (error as { code?: string } | null)?.code
+      if (code === 'NOT_FOUND') {
+        return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      }
+      if (code === 'PROFILE_MOBILE_CONFLICT') {
+        return jsonError(res, 409, 'PROFILE_MOBILE_CONFLICT', 'User mobile changed before update was applied')
+      }
+      if (error instanceof LoginAliasClaimError) {
+        if (error.code === 'ALIAS_CONFLICT') {
+          return jsonError(res, 409, 'LOGIN_ALIAS_CONFLICT', error.message)
+        }
+        return jsonError(res, 500, 'LOGIN_ALIAS_FAILED', error.message)
+      }
       return jsonError(res, 500, 'USER_PROFILE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update user profile')
     }
   })
@@ -4002,11 +4336,14 @@ export function adminUsersRouter(): Router {
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
       if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-      if (enabled) await assertUsersCanEnableDingTalkGrant([userId])
-
-      await upsertDingTalkGrants([userId], enabled, adminUserId)
+      const found = await transaction(async (client) => {
+        const locked = await lockUsersForAccessGraphWrite(client, [userId])
+        if (!locked.has(userId)) return false
+        if (enabled) await assertUsersCanEnableDingTalkGrant(client, [userId])
+        await upsertDingTalkGrants(client, [userId], enabled, adminUserId)
+        return true
+      })
+      if (!found) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
       await auditLog({
         actorId: adminUserId,
@@ -4046,20 +4383,17 @@ export function adminUsersRouter(): Router {
       if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
       if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds array is required')
 
-      const existingResult = await query<{ id: string }>(
-        `SELECT id
-         FROM users
-         WHERE id = ANY($1::text[])`,
-        [userIds],
-      )
-      const existingIds = new Set(existingResult.rows.map((row) => row.id).filter(Boolean))
-      const missingUserIds = userIds.filter((userId) => !existingIds.has(userId))
+      const missingUserIds = await transaction(async (client) => {
+        const locked = await lockUsersForAccessGraphWrite(client, userIds)
+        const missing = userIds.filter((userId) => !locked.has(userId))
+        if (missing.length > 0) return missing
+        if (enabled) await assertUsersCanEnableDingTalkGrant(client, userIds)
+        await upsertDingTalkGrants(client, userIds, enabled, adminUserId)
+        return []
+      })
       if (missingUserIds.length > 0) {
         return jsonError(res, 404, 'USERS_NOT_FOUND', 'One or more users were not found', { missingUserIds })
       }
-      if (enabled) await assertUsersCanEnableDingTalkGrant(userIds)
-
-      await upsertDingTalkGrants(userIds, enabled, adminUserId)
 
       await Promise.all(userIds.map((userId) => auditLog({
         actorId: adminUserId,
@@ -4213,30 +4547,48 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 400, 'SELF_DISABLE_FORBIDDEN', 'Cannot disable your own account')
       }
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      const updateResult = await transaction(async (client) => {
+        const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
+        const lockedUser = lockedUsers.get(userId)
+        if (!lockedUser) return null
 
-      try {
-        assertPendingUserCannotBeActivatedViaGenericStatusApi(profile.activationStatus, isActive)
-      } catch (error) {
+        assertPendingUserCannotBeActivatedViaGenericStatusApi(
+          lockedUser.activationStatus ?? '',
+          isActive,
+        )
+
+        if (lockedUser.isActive !== isActive) {
+          await client.query(
+            `UPDATE users
+             SET is_active = $1, updated_at = NOW()
+             WHERE id = $2`,
+            [isActive, userId],
+          )
+          await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+            userIds: [userId],
+            actorId: adminUserId,
+            reason: 'superseded by administrator user-status update',
+          })
+        }
+        return { beforeIsActive: lockedUser.isActive }
+      }).catch((error) => {
         const code = (error as Error & { code?: string }).code
         if (code === PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE) {
-          return jsonError(
-            res,
-            400,
-            PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
-            (error as Error).message,
-          )
+          return {
+            pendingActivationError: error as Error,
+          }
         }
         throw error
+      })
+      if (!updateResult) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if ('pendingActivationError' in updateResult) {
+        return jsonError(
+          res,
+          400,
+          PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
+          updateResult.pendingActivationError.message,
+        )
       }
-
-      await query(
-        `UPDATE users
-         SET is_active = $1, updated_at = NOW()
-         WHERE id = $2`,
-        [isActive, userId],
-      )
 
       const revocation = !isActive
         ? await revokeUserSessions(userId, {
@@ -4253,7 +4605,7 @@ export function adminUsersRouter(): Router {
         resourceId: userId,
         meta: {
           adminUserId,
-          before: { is_active: profile.is_active },
+          before: { is_active: updateResult.beforeIsActive },
           after: { is_active: isActive },
           revokedAfter: revocation?.revokedAfter || null,
         },
@@ -4739,42 +5091,107 @@ export function adminUsersRouter(): Router {
   })
 
   // T3 — promote pending_activation → activated (temp password / SSO-shaped source check).
+  r.post('/api/admin/users/activate/bulk', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    const rawItems = req.body?.items
+    if (
+      !Array.isArray(rawItems)
+      || rawItems.length === 0
+      || rawItems.length > MAX_BULK_ACTIVATE_ITEMS
+    ) {
+      return jsonError(
+        res,
+        400,
+        'ACTIVATE_BULK_INVALID',
+        `items must contain between 1 and ${MAX_BULK_ACTIVATE_ITEMS} activation requests`,
+      )
+    }
+
+    let items: ParsedActivateRequest[]
+    try {
+      items = rawItems.map((item) => parseActivateRequest(item))
+      const seenUserIds = new Set<string>()
+      for (const item of items) {
+        if (seenUserIds.has(item.userId)) {
+          return jsonError(
+            res,
+            400,
+            'ACTIVATE_BULK_DUPLICATE_USER',
+            'Each userId may appear only once in a bulk activation request',
+          )
+        }
+        seenUserIds.add(item.userId)
+      }
+    } catch (error) {
+      const mapped = mapActivateRequestError(error)
+      return jsonError(res, mapped.status, mapped.code, mapped.message)
+    }
+
+    const results: BulkActivateResult[] = []
+    for (const item of items) {
+      try {
+        const result = await activatePendingUser({
+          ...item,
+          adminUserId,
+        })
+        await auditActivateSuccess(adminUserId, result, item.mode, 'admin_activate_bulk')
+        results.push({ userId: item.userId, ok: true, result })
+      } catch (error) {
+        const mapped = mapActivateError(error)
+        results.push({
+          userId: item.userId,
+          ok: false,
+          error: {
+            status: mapped.status,
+            code: mapped.code,
+            message: mapped.message,
+          },
+        })
+      }
+    }
+
+    const successCount = results.filter((item) => item.ok).length
+    const failureCount = results.length - successCount
+    await auditLog({
+      actorId: adminUserId,
+      actorType: 'user',
+      action: 'update',
+      resourceType: 'user',
+      resourceId: 'bulk-activate',
+      meta: {
+        source: 'admin_activate_bulk',
+        requestedCount: results.length,
+        successCount,
+        failureCount,
+      },
+    })
+    return jsonOk(res, {
+      items: results,
+      successCount,
+      failureCount,
+    })
+  })
+
   r.post('/api/admin/users/:id/activate', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    let input: ParsedActivateRequest
     try {
-      const modeRaw = String(req.body?.mode || 'temp_password').trim()
-      const mode =
-        modeRaw === 'sso' || modeRaw === 'admin_no_password' ? modeRaw : 'temp_password'
+      input = parseActivateRequest(req.body ?? {}, String(req.params.id || ''))
+    } catch (error) {
+      const mapped = mapActivateRequestError(error)
+      return jsonError(res, mapped.status, mapped.code, mapped.message)
+    }
+    try {
       // claimAliases is NOT client-controllable: production activate always claims
       // email/username/mobile aliases inside the activation transaction.
       const result = await activatePendingUser({
-        userId: String(req.params.id || ''),
-        mode,
+        ...input,
         adminUserId,
-        temporaryPassword: typeof req.body?.temporaryPassword === 'string'
-          ? req.body.temporaryPassword
-          : undefined,
-        orgId: typeof req.body?.orgId === 'string' ? req.body.orgId : null,
-        directoryAccountId: typeof req.body?.directoryAccountId === 'string'
-          ? req.body.directoryAccountId
-          : null,
-        enableDingTalkGrant: req.body?.enableDingTalkGrant === true,
       })
-      await auditLog({
-        actorId: adminUserId,
-        actorType: 'user',
-        action: 'update',
-        resourceType: 'user',
-        resourceId: result.userId,
-        meta: {
-          source: 'admin_activate',
-          mode,
-          localPasswordSet: result.localPasswordSet,
-          // never audit plaintext password
-          temporaryPasswordIssued: Boolean(result.temporaryPassword),
-        },
-      })
+      await auditActivateSuccess(adminUserId, result, input.mode, 'admin_activate')
       return jsonOk(res, result)
     } catch (error) {
       const mapped = mapActivateError(error)

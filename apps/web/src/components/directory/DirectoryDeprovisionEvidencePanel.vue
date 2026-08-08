@@ -2,7 +2,7 @@
   <article class="deprov-evidence" data-testid="deprovision-evidence-panel">
     <div class="deprov-evidence__head">
       <div>
-        <h2>离岗证据链（D7）</h2>
+        <h2>离岗证据链</h2>
         <p class="deprov-evidence__hint">
           预览计划、查看 effect 事件、执行 rehire / admin force 恢复。策略配置 ≠ 已执行。
         </p>
@@ -70,6 +70,9 @@
       </div>
       <div v-if="preview" class="deprov-evidence__card" data-testid="deprovision-preview-result">
         <div>用户 {{ preview.user.id }} · activation={{ preview.user.activationStatus }} · is_active={{ preview.user.isActive }} · gen={{ preview.user.accessGeneration }}</div>
+        <div class="deprov-evidence__hint" data-testid="deprovision-preview-scope">
+          预演范围：当前集成下 {{ preview.prospectiveDeactivatedAccountIds.length }} 个 active linked account
+        </div>
         <div v-if="preview.plan.skipReason" class="deprov-evidence__hint">
           skipReason: {{ preview.plan.skipReason }}（零 effect）
         </div>
@@ -135,7 +138,7 @@
         <button
           class="deprov-evidence__btn"
           type="button"
-          :disabled="restoring"
+          :disabled="restoring || !canRestore"
           data-testid="deprovision-restore-rehire"
           @click="void restore('rehire')"
         >
@@ -144,7 +147,7 @@
         <button
           class="deprov-evidence__btn deprov-evidence__btn--danger"
           type="button"
-          :disabled="restoring || !forceConfirm"
+          :disabled="restoring || !canRestore || !forceConfirm || forceNote.trim().length < 8"
           data-testid="deprovision-restore-force"
           @click="void restore('admin_force')"
         >
@@ -162,6 +165,9 @@
         placeholder="force 备注（≥8 字）"
         data-testid="deprovision-force-note"
       />
+      <p v-if="!canRestore" class="deprov-evidence__hint">
+        该事件没有可恢复的 applied effects。
+      </p>
       <p v-if="restoreConflict" class="deprov-evidence__status deprov-evidence__status--error" data-testid="deprovision-drift-conflict">
         {{ restoreConflict }}
       </p>
@@ -171,7 +177,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { apiFetch } from '../../utils/api'
 
 type DeprovisionFlags = {
@@ -189,6 +195,7 @@ type PlannedEffect = {
 
 type PreviewPayload = {
   flags: DeprovisionFlags
+  prospectiveDeactivatedAccountIds: string[]
   user: {
     id: string
     activationStatus: string
@@ -205,7 +212,7 @@ type DeprovisionEvent = {
   id: string
   local_user_id: string
   access_generation_at_apply: number
-  status: string
+  status: 'applied' | 'fully_resolved' | 'superseded'
   open_effect_count?: number
   integration_id?: string
 }
@@ -213,7 +220,7 @@ type DeprovisionEvent = {
 type DeprovisionEffect = {
   id: string
   effect_type: string
-  status: string
+  status: 'applied' | 'reversed' | 'superseded'
   after_active: boolean
   access_generation_at_apply: number
 }
@@ -243,6 +250,11 @@ const restoring = ref(false)
 const forceConfirm = ref(false)
 const forceNote = ref('')
 const restoreConflict = ref('')
+const canRestore = computed(
+  () =>
+    selectedEvent.value?.status === 'applied'
+    && effects.value.some((effect) => effect.status === 'applied'),
+)
 
 function shortId(id: string): string {
   if (!id) return ''
@@ -304,17 +316,30 @@ async function runPreview() {
 async function loadEvents() {
   loadingEvents.value = true
   try {
+    if (!props.integrationId) {
+      events.value = []
+      selectedEvent.value = null
+      effects.value = []
+      return
+    }
+    const selectedEventId = selectedEvent.value?.id
     const params = new URLSearchParams()
-    if (props.integrationId) params.set('integrationId', props.integrationId)
     if (eventsUserFilter.value.trim()) params.set('userId', eventsUserFilter.value.trim())
     params.set('limit', '50')
-    const response = await apiFetch(`/api/admin/directory/deprovision/events?${params.toString()}`)
+    const response = await apiFetch(
+      `/api/admin/directory/integrations/${encodeURIComponent(props.integrationId)}/deprovision-events?${params.toString()}`,
+    )
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
       setError(body?.error?.message || '加载事件失败')
       return
     }
     events.value = (body?.data?.items || []) as DeprovisionEvent[]
+    if (selectedEventId) {
+      selectedEvent.value =
+        events.value.find((event) => event.id === selectedEventId) ?? null
+      if (!selectedEvent.value) effects.value = []
+    }
     if (body?.data?.flags) flags.value = body.data.flags as DeprovisionFlags
   } catch (error) {
     setError(error instanceof Error ? error.message : '加载事件失败')
@@ -329,7 +354,9 @@ async function selectEvent(ev: DeprovisionEvent) {
   forceConfirm.value = false
   forceNote.value = ''
   try {
-    const response = await apiFetch(`/api/admin/directory/deprovision/events/${encodeURIComponent(ev.id)}/effects`)
+    const response = await apiFetch(
+      `/api/admin/directory/deprovision-events/${encodeURIComponent(ev.id)}/effects`,
+    )
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
       setError(body?.error?.message || '加载 effects 失败')
@@ -343,17 +370,18 @@ async function selectEvent(ev: DeprovisionEvent) {
 }
 
 async function restore(mode: 'rehire' | 'admin_force') {
-  if (!selectedEvent.value) return
+  if (!selectedEvent.value || !canRestore.value) return
   restoring.value = true
   restoreConflict.value = ''
   try {
     const response = await apiFetch(
-      `/api/admin/directory/deprovision/events/${encodeURIComponent(selectedEvent.value.id)}/restore`,
+      `/api/admin/directory/deprovision-events/${encodeURIComponent(selectedEvent.value.id)}/${
+        mode === 'rehire' ? 'reactivate' : 'force-reactivate'
+      }`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mode,
           confirm: mode === 'admin_force' ? forceConfirm.value : undefined,
           note: mode === 'admin_force' ? forceNote.value : undefined,
         }),
@@ -363,14 +391,23 @@ async function restore(mode: 'rehire' | 'admin_force') {
     if (!response.ok) {
       const code = body?.error?.code || ''
       const message = body?.error?.message || '恢复失败'
-      if (code === 'DRIFT_CONFLICT' || code === 'SOURCE_INACTIVE' || code === 'NO_EFFECTS') {
+      if (
+        code === 'DRIFT_CONFLICT'
+        || code === 'SOURCE_INACTIVE'
+        || code === 'NO_EFFECTS'
+        || code === 'EVENT_NOT_APPLIED'
+      ) {
         restoreConflict.value = `${code}: ${message}`
       } else {
         setError(`${code || 'ERROR'}: ${message}`)
       }
       return
     }
-    setOk(`恢复成功（${mode}）· effects=${body?.data?.restoredEffectCount ?? 0}`)
+    setOk(
+      `恢复成功（${body?.data?.restoreMode || mode}）· effects=${
+        body?.data?.restoredEffectCount ?? 0
+      }`,
+    )
     await loadEvents()
     if (selectedEvent.value) await selectEvent(selectedEvent.value)
   } catch (error) {

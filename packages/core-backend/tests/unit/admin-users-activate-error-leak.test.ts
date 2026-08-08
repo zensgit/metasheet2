@@ -52,6 +52,8 @@ vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn() }))
 
 vi.mock('../../src/auth/user-activate', () => ({
   activatePendingUser: activateMocks.activatePendingUser,
+  isActivateMode: (value: unknown) =>
+    value === 'temp_password' || value === 'sso' || value === 'admin_no_password',
 }))
 
 import { adminUsersRouter } from '../../src/routes/admin-users'
@@ -257,6 +259,8 @@ describe('activate error surface — HTTP-level leak control (behaviour, not syn
     const cases: Array<[string, number, string]> = [
       ['ACTIVATE_INTEGRATION_INACTIVE', 409, 'Directory integration is not active; cannot activate'],
       ['ACTIVATE_SOURCE_MISSING', 409, 'No linked active directory account for activation'],
+      // Closeout review P1: derived-org confirmation failure surfaces as 409 with OUR message.
+      ['ACTIVATE_ORG_MISMATCH', 409, 'orgId does not match the directory source integration for this user'],
     ]
     return cases.reduce(
       (chain, [code, status, message]) => chain.then(async () => {

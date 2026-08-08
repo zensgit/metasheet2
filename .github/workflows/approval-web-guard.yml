@@ -100,6 +100,20 @@ on:
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
       - 'apps/web/tests/approval-canvas-commands.test.ts'
+      - 'apps/web/src/approvals/approvalAuthoringHistory.ts'
+      - 'apps/web/src/approvals/components/ApprovalFlowCanvas.vue'
+      - 'apps/web/src/approvals/components/ApprovalCanvasNodeInspector.vue'
+      - 'apps/web/tests/approval-authoring-history.test.ts'
+      - 'apps/web/tests/approval-g5c-authoring-scenarios.test.ts'
+      # Residual parallel PLAN 6fa2fbf6 / wave-3: always-on residual canaries + path filters.
+      - 'apps/web/tests/approval-form-authoring-history.test.ts'
+      - 'apps/web/tests/approval-version-dual-canvas.test.ts'
+      - 'apps/web/tests/approval-flow-canvas-a11y.test.ts'
+      - 'apps/web/tests/approval-canvas-inspector-a11y.test.ts'
+      - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
+      - 'apps/web/src/approvals/approvalVersionDualCanvas.ts'
+      - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
+      - 'apps/web/tests/approval-version-read-summary.test.ts'
       - 'apps/web/tests/approval-form-commands.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
       - 'apps/web/src/approvals/canvasViewport.ts'
@@ -279,6 +293,20 @@ on:
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
       - 'apps/web/tests/approval-canvas-commands.test.ts'
+      - 'apps/web/src/approvals/approvalAuthoringHistory.ts'
+      - 'apps/web/src/approvals/components/ApprovalFlowCanvas.vue'
+      - 'apps/web/src/approvals/components/ApprovalCanvasNodeInspector.vue'
+      - 'apps/web/tests/approval-authoring-history.test.ts'
+      - 'apps/web/tests/approval-g5c-authoring-scenarios.test.ts'
+      # Residual parallel PLAN 6fa2fbf6 / wave-3: always-on residual canaries + path filters.
+      - 'apps/web/tests/approval-form-authoring-history.test.ts'
+      - 'apps/web/tests/approval-version-dual-canvas.test.ts'
+      - 'apps/web/tests/approval-flow-canvas-a11y.test.ts'
+      - 'apps/web/tests/approval-canvas-inspector-a11y.test.ts'
+      - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
+      - 'apps/web/src/approvals/approvalVersionDualCanvas.ts'
+      - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
+      - 'apps/web/tests/approval-version-read-summary.test.ts'
       - 'apps/web/tests/approval-form-commands.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
       - 'apps/web/src/approvals/canvasViewport.ts'
@@ -429,7 +457,20 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run Canvas V2 command canaries
-        run: pnpm --filter @metasheet/web exec vitest run approval-canvas-commands approval-form-commands --reporter=dot
+        # Always-on canaries (Canvas V2 core + residual PLAN 6fa2fbf6 / wave-3 after files landed on main).
+        run: |
+          set -euo pipefail
+          pnpm --filter @metasheet/web exec vitest run \
+            approval-canvas-commands \
+            approval-form-commands \
+            approval-authoring-history \
+            approval-g5c-authoring-scenarios \
+            approval-version-read-summary \
+            approval-form-authoring-history \
+            approval-version-dual-canvas \
+            approval-flow-canvas-a11y \
+            approval-canvas-inspector-a11y \
+            --reporter=dot
 
       - name: Run FWB mapping authoring contract
         run: pnpm --filter @metasheet/web exec vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot

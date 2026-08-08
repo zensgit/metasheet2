@@ -3,15 +3,42 @@
  *
  * Single durable transaction: status + is_active + optional password + optional
  * memberships. Rejects inactive directory sources for SSO-shaped activates.
+ *
+ * Load-bearing mutation notes (source-link hardening):
+ * - Explicit `directoryAccountId` must JOIN a real link row with
+ *   `link_status = 'linked'` AND `local_user_id` exactly the pending user.
+ *   LEFT JOIN + "only reject truthy mismatched local_user_id" is forbidden:
+ *   missing link / unlinked / null local_user_id must fail closed.
+ * - Implicit source branch requires `link_status = 'linked'` exactly
+ *   (never `COALESCE(NULL, 'linked')`).
+ * - SOURCE_MISSING vs LINK_MISMATCH stay precise: missing/unlinked → MISSING;
+ *   linked-to-another-user → MISMATCH.
+ * - mode=sso additionally requires authoritative DingTalk provider on both
+ *   account and integration plus corp_id consistency between those rows.
+ *   Request body corp/provider hints are never consulted.
  */
 
 import * as bcrypt from 'bcryptjs'
 import { transaction } from '../db/pg'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+} from '../directory/access-graph-mutex'
 import { claimLoginAlias } from './login-alias-service'
 import { buildUnusablePasswordHash } from './user-activation'
 
 export type ActivateMode = 'temp_password' | 'sso' | 'admin_no_password'
+
+export const ACTIVATE_MODES: readonly ActivateMode[] = [
+  'temp_password',
+  'sso',
+  'admin_no_password',
+] as const
+
+export function isActivateMode(value: unknown): value is ActivateMode {
+  return value === 'temp_password' || value === 'sso' || value === 'admin_no_password'
+}
 
 export type ActivateUserInput = {
   userId: string
@@ -23,6 +50,12 @@ export type ActivateUserInput = {
   enableDingTalkGrant?: boolean
   /** SSO: directory account that must be active + linked to this user. */
   directoryAccountId?: string | null
+  /** OAuth SSO: provider identity that the locked directory source must still match. */
+  expectedDingTalkIdentity?: {
+    corpId: string
+    openId?: string | null
+    unionId?: string | null
+  } | null
 }
 
 export type ActivateUserResult = {
@@ -57,6 +90,10 @@ export type ActivateErrorCode =
   | 'ACTIVATE_SOURCE_INACTIVE'
   | 'ACTIVATE_INTEGRATION_INACTIVE'
   | 'ACTIVATE_LINK_MISMATCH'
+  /** SSO-only: account/integration provider is not DingTalk, or corp_id is inconsistent. */
+  | 'ACTIVATE_SOURCE_INELIGIBLE'
+  /** Caller-supplied orgId disagrees with the org derived from the directory-source integration. */
+  | 'ACTIVATE_ORG_MISMATCH'
 
 function throwCoded(message: string, code: ActivateErrorCode): never {
   const err = new Error(message)
@@ -75,6 +112,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   let passwordHash: string | null = null
   let localPasswordSet = false
   let mustChangePassword = false
+  let membershipOrgId = input.orgId ?? null
 
   if (input.mode === 'temp_password') {
     temporaryPassword = input.temporaryPassword?.trim() || generateTempPassword()
@@ -92,37 +130,41 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   }
 
   await transaction(async (client) => {
-    const locked = await client.query(
-      `SELECT id, email, username, mobile, activation_status, is_active
-         FROM users
-        WHERE id = $1
-        FOR UPDATE`,
-      [userId],
-    )
-    const user = locked.rows[0] as
-      | {
-          id: string
-          email: string | null
-          username: string | null
-          mobile: string | null
-          activation_status: string
-          is_active: boolean
-        }
-      | undefined
-    if (!user) throwCoded('User not found', 'ACTIVATE_USER_NOT_FOUND')
-    if (user.activation_status !== 'pending_activation') {
+    const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
+    const user = lockedUsers.get(userId)
+    if (!user) {
+      throwCoded('User not found', 'ACTIVATE_USER_NOT_FOUND')
+    }
+    if (user.activationStatus !== 'pending_activation') {
       throwCoded(
         'User is not pending_activation',
         'ACTIVATE_NOT_PENDING',
       )
     }
 
-    if (input.mode === 'sso' || input.directoryAccountId) {
-      await assertDirectorySourceActiveForActivate(client, {
-        userId,
-        directoryAccountId: input.directoryAccountId ?? null,
-      })
+    // Closeout review P1: EVERY activation mode resolves and validates the authoritative
+    // directory source — the gated form (`sso || directoryAccountId`) let temp_password /
+    // admin_no_password activate an offboarded or source-dead pending user by simply not
+    // mentioning the source, which the design lock forbids ("admin 激活同样不得对 inactive
+    // 目录源静默开通"). Pending users exist only via directory admission, so a pending user
+    // with no linked active source is a refusal (ACTIVATE_SOURCE_MISSING), not a pass.
+    //
+    // The membership org DERIVES from the source integration in every mode; a client-supplied
+    // orgId may only CONFIRM it. The gated form discarded the DB's org for non-SSO modes and
+    // trusted the client's — "org A 的目录账号 + org B 的 orgId" wrote a cross-org membership.
+    const sourceOrgId = await assertDirectorySourceActiveForActivate(client, {
+      userId,
+      directoryAccountId: input.directoryAccountId ?? null,
+      requireDingTalkSso: input.mode === 'sso',
+      expectedDingTalkIdentity: input.expectedDingTalkIdentity ?? null,
+    })
+    if (input.orgId && input.orgId !== sourceOrgId) {
+      throwCoded(
+        'orgId does not match the directory source integration for this user',
+        'ACTIVATE_ORG_MISMATCH',
+      )
     }
+    membershipOrgId = sourceOrgId
 
     const updated = await client.query(
       `UPDATE users
@@ -142,7 +184,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     }
 
     // Active membership for current org when provided.
-    if (input.orgId) {
+    if (membershipOrgId) {
       // `user_orgs` is (user_id, org_id, is_active, created_at) with PK (user_id, org_id) — there
       // is no `updated_at`. Writing one raised `42703` and aborted this transaction, which is why
       // the "schema variance" fallback underneath could never help: once a statement fails inside
@@ -156,7 +198,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
          VALUES ($1, $2, TRUE, NOW())
          ON CONFLICT (user_id, org_id) DO UPDATE
            SET is_active = TRUE`,
-        [userId, input.orgId],
+        [userId, membershipOrgId],
       )
     }
 
@@ -225,6 +267,12 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
         'ACTIVATE_ALIAS_REQUIRED',
       )
     }
+
+    await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+      userIds: [userId],
+      actorId: input.adminUserId ?? userId,
+      reason: 'superseded by pending-user activation',
+    })
   })
 
   return {
@@ -236,53 +284,152 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   }
 }
 
+type DirectorySourceRow = {
+  account_active: boolean
+  integration_status: string
+  local_user_id: string | null
+  link_status: string | null
+  account_provider: string | null
+  integration_provider: string | null
+  account_corp_id: string | null
+  integration_corp_id: string | null
+  account_open_id: string | null
+  account_union_id: string | null
+  integration_org_id: string | null
+}
+
 async function assertDirectorySourceActiveForActivate(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> },
-  options: { userId: string; directoryAccountId: string | null },
-): Promise<void> {
+  options: {
+    userId: string
+    directoryAccountId: string | null
+    requireDingTalkSso: boolean
+    expectedDingTalkIdentity: ActivateUserInput['expectedDingTalkIdentity']
+  },
+): Promise<string> {
   // Closed set: linked directory account must be active; integration active.
+  // Explicit id: account row + link fail-closed (INNER semantics enforced in TS after LEFT JOIN
+  // so we can distinguish SOURCE_MISSING account-not-found from LINK_MISMATCH).
+  // Implicit: start from links with exact link_status='linked' (no COALESCE default).
   const sql = options.directoryAccountId
     ? `SELECT da.id, da.is_active AS account_active, di.status AS integration_status,
-              l.local_user_id, l.link_status
+              l.local_user_id, l.link_status,
+              da.provider AS account_provider, di.provider AS integration_provider,
+              da.corp_id AS account_corp_id, di.corp_id AS integration_corp_id,
+              da.open_id AS account_open_id, da.union_id AS account_union_id,
+              di.org_id AS integration_org_id
          FROM directory_accounts da
          JOIN directory_integrations di ON di.id = da.integration_id
          LEFT JOIN directory_account_links l ON l.directory_account_id = da.id
-        WHERE da.id = $1
-        LIMIT 1`
+        WHERE da.id = $1`
     : `SELECT da.id, da.is_active AS account_active, di.status AS integration_status,
-              l.local_user_id, l.link_status
+              l.local_user_id, l.link_status,
+              da.provider AS account_provider, di.provider AS integration_provider,
+              da.corp_id AS account_corp_id, di.corp_id AS integration_corp_id,
+              da.open_id AS account_open_id, da.union_id AS account_union_id,
+              di.org_id AS integration_org_id
          FROM directory_account_links l
          JOIN directory_accounts da ON da.id = l.directory_account_id
          JOIN directory_integrations di ON di.id = da.integration_id
         WHERE l.local_user_id = $1
-          AND COALESCE(l.link_status, 'linked') = 'linked'
-        LIMIT 1`
+          AND l.link_status = 'linked'
+        ORDER BY da.id`
 
   const params = options.directoryAccountId
     ? [options.directoryAccountId]
     : [options.userId]
   const result = await client.query(sql, params)
-  const row = result.rows[0] as
-    | {
-        account_active: boolean
-        integration_status: string
-        local_user_id: string | null
-        link_status: string | null
-      }
-    | undefined
+  const rows = result.rows as DirectorySourceRow[]
+  const row = rows[0]
 
   if (!row) {
     throwCoded('No linked active directory account for activation', 'ACTIVATE_SOURCE_MISSING')
   }
-  if (row.account_active === false) {
-    throwCoded('Directory account is inactive; cannot activate', 'ACTIVATE_SOURCE_INACTIVE')
+
+  // Fail closed on the link itself (explicit path especially — LEFT JOIN can return account
+  // rows with no link / unlinked / null local_user_id).
+  const linkStatus = row.link_status == null ? null : String(row.link_status)
+  const linkedUserId = row.local_user_id == null ? null : String(row.local_user_id)
+  if (linkStatus !== 'linked') {
+    // Not a linked source for anyone (missing row, pending, unlinked, …).
+    throwCoded('No linked active directory account for activation', 'ACTIVATE_SOURCE_MISSING')
   }
-  if (String(row.integration_status || '').toLowerCase() !== 'active') {
+  if (linkedUserId !== options.userId) {
+    // Linked status but not this pending user: precise mismatch vs missing.
+    if (linkedUserId) {
+      throwCoded('Directory link points to a different user', 'ACTIVATE_LINK_MISMATCH')
+    }
+    throwCoded('No linked active directory account for activation', 'ACTIVATE_SOURCE_MISSING')
+  }
+
+  const isDingTalkEligible = (candidate: DirectorySourceRow): boolean => {
+    const accountProvider = String(candidate.account_provider || '').toLowerCase()
+    const integrationProvider = String(candidate.integration_provider || '').toLowerCase()
+    const accountCorp = String(candidate.account_corp_id || '').trim()
+    const integrationCorp = String(candidate.integration_corp_id || '').trim()
+    const providerAndCorpEligible = (
+      accountProvider === 'dingtalk'
+      && integrationProvider === 'dingtalk'
+      && accountCorp.length > 0
+      && accountCorp === integrationCorp
+    )
+    if (!providerAndCorpEligible) return false
+
+    const expected = options.expectedDingTalkIdentity
+    if (!expected) return true
+    const expectedCorp = String(expected.corpId || '').trim()
+    const expectedOpenId = String(expected.openId || '').trim()
+    const expectedUnionId = String(expected.unionId || '').trim()
+    if (
+      expectedCorp.length === 0
+      || (expectedOpenId.length === 0 && expectedUnionId.length === 0)
+      || accountCorp !== expectedCorp
+    ) {
+      return false
+    }
+    if (
+      expectedOpenId.length > 0
+      && String(candidate.account_open_id || '').trim() !== expectedOpenId
+    ) {
+      return false
+    }
+    if (
+      expectedUnionId.length > 0
+      && String(candidate.account_union_id || '').trim() !== expectedUnionId
+    ) {
+      return false
+    }
+    return true
+  }
+
+  const eligibleRows = options.requireDingTalkSso
+    ? rows.filter(isDingTalkEligible)
+    : rows
+  if (eligibleRows.length === 0) {
+    throwCoded(
+      'Directory source is not a DingTalk account eligible for SSO activation',
+      'ACTIVATE_SOURCE_INELIGIBLE',
+    )
+  }
+  const activeEligible = eligibleRows.find(
+    (candidate) =>
+      candidate.account_active === true
+      && String(candidate.integration_status || '').toLowerCase() === 'active',
+  )
+  if (activeEligible) {
+    const sourceOrgId = String(activeEligible.integration_org_id || '').trim()
+    if (sourceOrgId) return sourceOrgId
+    throwCoded(
+      'Directory source is not a DingTalk account eligible for SSO activation',
+      'ACTIVATE_SOURCE_INELIGIBLE',
+    )
+  }
+  if (eligibleRows.some(
+    (candidate) => String(candidate.integration_status || '').toLowerCase() !== 'active',
+  )) {
     throwCoded('Directory integration is not active; cannot activate', 'ACTIVATE_INTEGRATION_INACTIVE')
   }
-  if (row.local_user_id && row.local_user_id !== options.userId) {
-    throwCoded('Directory link points to a different user', 'ACTIVATE_LINK_MISMATCH')
-  }
+  throwCoded('Directory account is inactive; cannot activate', 'ACTIVATE_SOURCE_INACTIVE')
 }
 
 function generateTempPassword(): string {

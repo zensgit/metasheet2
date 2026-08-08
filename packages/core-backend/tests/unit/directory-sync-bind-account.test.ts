@@ -49,8 +49,17 @@ describe('bindDirectoryAccount', () => {
     accountOverrides: Record<string, unknown> = {},
     missingAccountIds: ReadonlySet<string> = new Set(),
   ): void {
+    const aliasOwners = new Map<string, string>()
     pgMocks.transaction.mockImplementation(async (handler) => handler({
       query: async (sql: string, params?: unknown[]) => {
+        if (/INSERT INTO user_login_aliases/i.test(String(sql))) {
+          aliasOwners.set(String(params?.[2] ?? ''), String(params?.[0] ?? ''))
+          return { rows: [] as Array<Record<string, unknown>> }
+        }
+        if (/SELECT user_id FROM user_login_aliases/i.test(String(sql))) {
+          const ownerId = aliasOwners.get(String(params?.[0] ?? ''))
+          return { rows: (ownerId ? [{ user_id: ownerId }] : []) as Array<Record<string, unknown>> }
+        }
         if (/FROM directory_accounts account\s+JOIN directory_integrations integration/.test(String(sql))) {
           const accountId = String(params?.[0] ?? 'account-1')
           if (missingAccountIds.has(accountId)) return { rows: [] }
@@ -67,11 +76,30 @@ describe('bindDirectoryAccount', () => {
               name: '林岚',
               email: null,
               mobile: '13900001234',
+              is_active: true,
               integration_provider: 'dingtalk',
               integration_corp_id: 'dingcorp',
               ...accountOverrides,
             }],
           }
+        }
+        if (/FROM users[\s\S]*FOR UPDATE/.test(String(sql))) {
+          const userId = String(params?.[0] ?? 'user-1')
+          return {
+            rows: [{
+              id: userId,
+              name: userId === 'user-1' ? 'Alpha' : 'Previous User',
+              email: userId === 'user-1' ? 'alpha@example.com' : `${userId}@example.com`,
+              username: null,
+              mobile: null,
+              activation_status: 'activated',
+              is_active: true,
+              access_generation: 0,
+            }],
+          }
+        }
+        if (/UPDATE users[\s\S]*access_generation/.test(String(sql))) {
+          return { rows: [{ access_generation: 1 }] }
         }
         return clientQuery(sql, params)
       },
@@ -939,6 +967,87 @@ describe('bindDirectoryAccount', () => {
     expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
+  it('rechecks account active state at the bind write point', async () => {
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT local_user_id\s+FROM directory_account_links/.test(String(sql))) {
+        return { rows: [] }
+      }
+      if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
+        return { rows: [{ org_id: 'default' }] }
+      }
+      return { rows: [] }
+    })
+    installTransactionMock(clientQuery, { is_active: false })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: 'external-1',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          name: 'Account',
+          email: null,
+          mobile: null,
+          is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          username: null,
+          mobile: null,
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+        }],
+      })
+
+    await expect(bindDirectoryAccount('account-1', {
+      localUserRef: 'user-1',
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: false,
+    })).rejects.toThrow('inactive and cannot be bound')
+
+    expect(clientQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO directory_account_links'),
+      expect.anything(),
+    )
+  })
+
+  it('fails closed when the unbind holder changes between snapshot and locked re-read', async () => {
+    let linkReadCount = 0
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (/SELECT l\.local_user_id,[\s\S]*FROM directory_account_links l/.test(String(sql))) {
+        linkReadCount += 1
+        return {
+          rows: [{
+            local_user_id: linkReadCount === 1 ? 'user-1' : 'user-2',
+            local_user_email: null,
+            local_user_username: null,
+            local_user_name: null,
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+    installTransactionMock(clientQuery)
+
+    await expect(unbindDirectoryAccount('account-1', {
+      adminUserId: 'admin-1',
+    })).rejects.toThrow('binding changed; retry')
+
+    expect(clientQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO directory_account_links'),
+      expect.anything(),
+    )
+  })
+
   it('removes the bound identity, optionally disables grant, and resets the link on unbind', async () => {
     // W4-PRE-1b item B: unbindDirectoryAccount now ALSO resolves the account's org and
     // deactivates the previously-linked user's user_orgs row (org-scoped sibling check) in the
@@ -952,7 +1061,7 @@ describe('bindDirectoryAccount', () => {
       if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
         return { rows: [{ org_id: 'default' }] }
       }
-      if (String(sql).includes('FOR UPDATE OF l')) {
+      if (/SELECT l\.local_user_id,[\s\S]*FROM directory_account_links l/.test(String(sql))) {
         return { rows: [{ local_user_id: 'user-1', local_user_email: 'alpha@example.com', local_user_name: 'Alpha' }] }
       }
       if (String(sql).includes('FROM user_external_identities') && String(sql).includes('FOR UPDATE')) {
@@ -1036,7 +1145,7 @@ describe('bindDirectoryAccount', () => {
       if (/SELECT org_id\s+FROM directory_integrations/.test(String(sql))) {
         return { rows: [{ org_id: 'default' }] }
       }
-      if (String(sql).includes('FOR UPDATE OF l')) {
+      if (/SELECT l\.local_user_id,[\s\S]*FROM directory_account_links l/.test(String(sql))) {
         return { rows: [{ local_user_id: 'user-1', local_user_email: 'alpha@example.com', local_user_name: 'Alpha' }] }
       }
       return { rows: [] }
@@ -1110,7 +1219,7 @@ describe('bindDirectoryAccount', () => {
       }
       // #4526 review fix: the previously-linked-user read moved INSIDE the transaction
       // (`FOR UPDATE OF l`) — served here now, not via the outer `pgMocks.query`.
-      if (String(sql).includes('FOR UPDATE OF l')) {
+      if (/SELECT l\.local_user_id,[\s\S]*FROM directory_account_links l/.test(String(sql))) {
         return { rows: [{ local_user_id: 'user-1', local_user_email: 'alpha@example.com', local_user_name: 'Alpha' }] }
       }
       return { rows: [] }

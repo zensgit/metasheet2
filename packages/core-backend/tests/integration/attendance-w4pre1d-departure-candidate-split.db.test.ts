@@ -1,6 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { query } from '../../src/db/pg'
 import { applyDirectoryDeprovisionPolicies } from '../../src/directory/directory-sync'
+import {
+  createDirectoryDeprovisionRun,
+  deleteDirectoryDeprovisionEvidence,
+} from '../utils/directory-deprovision-fixtures'
 
 /**
  * W4-PRE-1d — candidate-set split (owner P1/P2, #4530 review, issuecomment-5043752399,
@@ -38,6 +42,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
   let integrationB = ''
   let orgA = ''
   let orgB = ''
+  let runA = ''
+  let runB = ''
 
   const client = {
     query: (sql: string, params?: unknown[]) =>
@@ -111,9 +117,12 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
       [`w4pre1d-b-${TS}`, `w4pre1d-corp-b-${TS}`, `w4pre1d-org-b-${TS}`],
     )).rows[0].id
     orgB = `w4pre1d-org-b-${TS}`
+    runA = await createDirectoryDeprovisionRun(integrationA)
+    runB = await createDirectoryDeprovisionRun(integrationB)
   })
 
   afterEach(async () => {
+    await deleteDirectoryDeprovisionEvidence([integrationA, integrationB])
     await query(`DELETE FROM user_external_auth_grants WHERE local_user_id LIKE $1`, [`w4pre1d-%-${TS}`])
     await query(`DELETE FROM user_orgs WHERE user_id LIKE $1`, [`w4pre1d-%-${TS}`])
     await query(`DELETE FROM directory_accounts WHERE integration_id = ANY($1::uuid[])`, [[integrationA, integrationB]]) // links cascade
@@ -133,6 +142,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
 
       const outcome = await applyDirectoryDeprovisionPolicies(client, {
         integrationId: integrationA,
+        runId: runA,
+        triggeredBy: 'test:w4pre1d-candidate-split',
         deactivatedAccountIds: [departedA],
         syncedAccountCount: 50,
         integrationDefaultPolicy: 'mark_inactive',
@@ -164,6 +175,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
 
       const outcome = await applyDirectoryDeprovisionPolicies(client, {
         integrationId: integrationA,
+        runId: runA,
+        triggeredBy: 'test:w4pre1d-candidate-split',
         deactivatedAccountIds: [departedA],
         syncedAccountCount: 50,
         integrationDefaultPolicy: 'disable_grant_only',
@@ -192,6 +205,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
       // Run 1: A departs while B is still active — same as case① above.
       const first = await applyDirectoryDeprovisionPolicies(client, {
         integrationId: integrationA,
+        runId: runA,
+        triggeredBy: 'test:w4pre1d-candidate-split',
         deactivatedAccountIds: [departedA],
         syncedAccountCount: 50,
         integrationDefaultPolicy: 'mark_inactive',
@@ -205,6 +220,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
       await query(`UPDATE directory_accounts SET is_active = false WHERE id = $1`, [bindingB])
       const second = await applyDirectoryDeprovisionPolicies(client, {
         integrationId: integrationB,
+        runId: runB,
+        triggeredBy: 'test:w4pre1d-candidate-split',
         deactivatedAccountIds: [bindingB],
         syncedAccountCount: 50,
         integrationDefaultPolicy: 'mark_inactive',
@@ -230,6 +247,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
 
       await applyDirectoryDeprovisionPolicies(client, {
         integrationId: integrationA,
+        runId: runA,
+        triggeredBy: 'test:w4pre1d-candidate-split',
         deactivatedAccountIds: [departedA],
         syncedAccountCount: 50,
         integrationDefaultPolicy: 'disable_grant_only',
@@ -241,6 +260,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
       await query(`UPDATE directory_accounts SET is_active = false WHERE id = $1`, [bindingB])
       const second = await applyDirectoryDeprovisionPolicies(client, {
         integrationId: integrationB,
+        runId: runB,
+        triggeredBy: 'test:w4pre1d-candidate-split',
         deactivatedAccountIds: [bindingB],
         syncedAccountCount: 50,
         integrationDefaultPolicy: 'disable_grant_only',
@@ -285,6 +306,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
 
         const outcome = await applyDirectoryDeprovisionPolicies(client, {
           integrationId: integrationA,
+          runId: runA,
+          triggeredBy: 'test:w4pre1d-candidate-split',
           deactivatedAccountIds: departedIds,
           syncedAccountCount: 50,
           integrationDefaultPolicy: 'mark_inactive',
@@ -318,6 +341,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
 
       const outcome = await applyDirectoryDeprovisionPolicies(client, {
         integrationId: integrationA,
+        runId: runA,
+        triggeredBy: 'test:w4pre1d-candidate-split',
         deactivatedAccountIds: [departedA],
         syncedAccountCount: 50,
         integrationDefaultPolicy: 'manual_review',
@@ -344,6 +369,8 @@ describeIfDatabase('W4-PRE-1d — org-membership vs global candidate-set split (
 
       const outcome = await applyDirectoryDeprovisionPolicies(client, {
         integrationId: integrationA,
+        runId: runA,
+        triggeredBy: 'test:w4pre1d-candidate-split',
         deactivatedAccountIds: [departedA],
         syncedAccountCount: 50,
         integrationDefaultPolicy: 'mark_inactive',

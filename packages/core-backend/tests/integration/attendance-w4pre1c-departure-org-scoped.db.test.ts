@@ -1,6 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { query } from '../../src/db/pg'
 import { applyDirectoryDeprovisionPolicies } from '../../src/directory/directory-sync'
+import {
+  createDirectoryDeprovisionRun,
+  deleteDirectoryDeprovisionEvidence,
+} from '../utils/directory-deprovision-fixtures'
 
 /**
  * W4-PRE-1c items A/B, owner cases ② ("双组织") and ③ ("活跃 sibling") — proved against real
@@ -46,6 +50,7 @@ describeIfDatabase('W4-PRE-1c cases ②③ — org-scoped user_orgs deactivation
   let integrationB = ''
   let orgA = ''
   let orgB = ''
+  let runA = ''
 
   const client = {
     query: (sql: string, params?: unknown[]) =>
@@ -56,6 +61,8 @@ describeIfDatabase('W4-PRE-1c cases ②③ — org-scoped user_orgs deactivation
     integrationDefaultPolicy: 'mark_inactive',
     syncedAccountCount: 100,
     enabled: true,
+    runId: '',
+    triggeredBy: 'test:w4pre1c-org-scoped',
   }
 
   async function seedAccount(opts: {
@@ -101,9 +108,12 @@ describeIfDatabase('W4-PRE-1c cases ②③ — org-scoped user_orgs deactivation
       [`w4pre1cos-b-${TS}`, `w4pre1cos-corp-b-${TS}`, `w4pre1cos-org-b-${TS}`],
     )).rows[0].id
     orgB = `w4pre1cos-org-b-${TS}`
+    runA = await createDirectoryDeprovisionRun(integrationA)
+    baseOptions.runId = runA
   })
 
   afterEach(async () => {
+    await deleteDirectoryDeprovisionEvidence([integrationA, integrationB])
     await query(`DELETE FROM user_external_auth_grants WHERE local_user_id LIKE $1`, [`w4pre1cos-%-${TS}`])
     await query(`DELETE FROM user_orgs WHERE user_id LIKE $1`, [`w4pre1cos-%-${TS}`])
     await query(`DELETE FROM directory_accounts WHERE integration_id = ANY($1::uuid[])`, [[integrationA, integrationB]]) // links cascade
@@ -174,6 +184,12 @@ describeIfDatabase('W4-PRE-1c cases ②③ — org-scoped user_orgs deactivation
     const user = uid('grantonly')
     const departed = await seedAccount({ integrationId: integrationA, userId: user, accountActive: false })
     await query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)`, [user, orgA])
+    await query(
+      `INSERT INTO user_external_auth_grants (
+         provider, local_user_id, enabled, granted_by, created_at, updated_at
+       ) VALUES ('dingtalk', $1, TRUE, 'test:w4pre1c-org-scoped', NOW(), NOW())`,
+      [user],
+    )
 
     const outcome = await applyDirectoryDeprovisionPolicies(client, {
       ...baseOptions,

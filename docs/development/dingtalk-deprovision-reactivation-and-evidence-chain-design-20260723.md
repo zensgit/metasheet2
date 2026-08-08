@@ -1,7 +1,7 @@
 # DingTalk Deprovision 恢复 + Preview/UI 证据链 — 实现级设计
 
 - Date: 2026-07-23
-- Status: **implementation design lock / Rev 4.3**
+- Status: **implementation design lock / Rev 4.4**（Rev 4.3 已终签；Rev 4.4 为 OPS-01 证据模型勘误，见 §0.7）
 - Locked: 2026-07-23（owner 批准两篇一并升 lock）
 - Scope: 打开 `DIRECTORY_DEPROVISION_ENABLED` 之前，把「权威 effect 账本 + prospective planner + 全写者 per-user 锁 + event 恢复（含 drift）」设计正确
 - Baseline: **`origin/main @ 1bcfc86b8`**；相对 `ca625f14a` 本线相关代码 **scoped diff = 0**（membership + globally-clear 事实基线仍成立）
@@ -51,6 +51,34 @@ Prospective planner、三 effect 意图、event 恢复、全写者锁意图、ma
 | **P1** | `globally_clear` 被误读为「清全部组织 membership」，与主写者的 org/global 双候选语义及 `UNIQUE(event_id,effect_type)` 冲突 | 每 event 只记源 integration 所属 org 的一条 `membership_changed`；`globally_clear` 只门控 `grant_changed` / `user_changed` |
 
 **Ratification 记录（2026-08-07）**：owner 于会话「钉钉同步业务功能开发-260721」下达收尾指令（「请排序并完成所有这条线剩余的开发」），采纳的收尾意见以「显式批准 Rev 4.3 的来源组织单 membership effect 语义」为第 1 步 —— 本勘误据此落账执行。该勘误使锁文与已落 main 的主写者语义（W4-PRE-1d owner P2 裁决，#4530 review issuecomment-5043752399：org 候选与 global 候选分立，global 守卫只门控 grant/`users.is_active`）一致，并非新语义。终版随验证 MD 提请 owner 会签。
+
+### 0.7 Rev 4.3 → Rev 4.4（OPS-01 evidence erratum — 会签指令）
+
+**Rev 4.3 终签记录（2026-08-08）**：closeout 复审（会话「钉钉同步业务功能开发-260721」，审阅结论
+CHANGES REQUESTED @ main=45cf3a7c51）会签裁决「Rev 4.3 可以终签」。§0.6 勘误自此为 RATIFIED。
+
+**Rev 4.4 勘误（同一复审的会签指令，逐字要点）**：「OPS-01 暂不签 — ledger 必须记录『grant 行
+从不存在到 disabled』的存在性变化，restore 时才能安全删除；不能仅调整 upsert 位置。」
+
+| # | 问题 | Rev 4.4 锁定 |
+|---|------|--------------|
+| **P1** | OPS-01 的显式 disabled grant 行由 writer 在 ledger 之外无条件写入：从未有过 grant 的人离岗后被留下孤儿 deny 行，rehire restore 无 effect 可逆转，OAuth `ensureGrant`（creation-only）被永久挡死 | grant 表的一切写入**纯 effect 驱动**：有 enabled 行 → `grant_changed` 翻转 effect（restore 翻回）；无任何行且 globally-clear → `grant_changed` **creation effect**（`before=after=FALSE`，新列 `grant_row_created=TRUE`），writer 据此 INSERT deny 行，restore 据此 **DELETE** 恢复「无行」态；deny 行已存在 → 无 effect、零写 |
+| **P2** | 零 effect 候选走了与有 effect 候选相反的 deny 语义（early return 跳过 bookkeeping upsert） | 语义统一后该分叉不复存在：globally-clear 且无行 ⇒ 必有 creation effect（不再是零 effect）；零 effect ⇒ 真正无事可改、零写（§5.3 不变量恢复干净），真库金标断言零 effect 运行前后 OAuth loginability 不变 |
+| schema | creation 标记必须与其余证据同等防篡改 | `directory_deprovision_effects.grant_row_created boolean NOT NULL DEFAULT FALSE` + CHECK（仅 `grant_changed` 且 `before=after=FALSE` 可为 TRUE）+ immutability trigger 扩列；migration down() 在存在 creation 证据时拒绝降级 |
+
+**§5.2/§5.3 的适用性**：本勘误不改 §5.3「零 effect 零写」不变量——它通过把 deny 行创建**变成 effect**
+使旧实现的违例（ledger 外写行）不可再现。金标：真库「无既有 grant → 离岗 → rehire → OAuth」
+（`directory-deprovision-writer-ledger.db.test.ts`），mutation 六连杀（restore DELETE、creation 规划、
+no-op 豁免、writer INSERT、org 校验、激活源门控）。
+
+**可逆性边界（独立对抗审 P2，2026-08-09 落账 — 措辞限定，非行为变更）**：creation effect 的
+DELETE 逆转仅在其事件仍为 `applied` 时可用。任何后续 access-graph 写（例：管理员
+`PATCH /status` 重新启用、更新的离岗事件）按 §5.4 将证据 **supersede**，此后 `rehire` 与
+`admin_force` 均被既有门拒绝（`EVENT_NOT_APPLIED`），deny 行成为**无 live 证据的残留**——且后续
+离岗 planner 见行已存在也不再补记 creation effect。该 supersede 语义为 main 既有合同（本勘误
+未触碰那两道门），故 Rev 4.4 的承诺应读作：「**在事件被 supersede 之前**，deny 行的存在性变化
+可被 restore 安全逆转」。残留行的补偿路径（人工清理 or 再证据化）列入 owner 会签清单（验证 MD
+§4 第 3 项）。另：多 active 源的 org 派生消歧为 follow-up hardening（#4833）。
 
 产品方向见 companion — **已赞成**。  
 **Implementation design lock 已于 2026-07-23 批准。**  
@@ -150,7 +178,9 @@ Apply 在 directory transition 之后调用时，prospective = 本轮 `RETURNING
 
 **Positive control test:** 将消失的 linked 账号 → Preview `candidateCount ≥ 1`；去掉 prospective 排除 → 变 0 且测试红。
 
-Writer：`applyDirectoryDeprovisionPlan` 仅在 `enabled=true` 时写访问图 + ledger；`enabled=false` 零写。
+Writer：`applyDirectoryDeprovisionCandidate(client, ...)` 只接受调用方现有的 sync 事务
+client；`enabled=true` 时在该事务内完成 user row lock、写时重读、访问图、
+generation 与 ledger，`enabled=false` 零写且不自开第二事务。
 
 ---
 

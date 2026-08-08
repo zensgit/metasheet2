@@ -1252,6 +1252,128 @@ export function adminDirectoryRouter(): Router {
 
   // ── D7 evidence chain: flags / plan preview / events / restore ────────────
 
+  type DeprovisionEventStatus =
+    | 'applied'
+    | 'fully_resolved'
+    | 'superseded'
+
+  function readDeprovisionEventStatus(
+    value: unknown,
+  ): DeprovisionEventStatus | undefined | null {
+    if (value === undefined || value === null || value === '') return undefined
+    if (
+      value === 'applied'
+      || value === 'fully_resolved'
+      || value === 'superseded'
+    ) {
+      return value
+    }
+    return null
+  }
+
+  async function listDeprovisionEventsForRequest(
+    req: Request,
+    res: Response,
+    integrationId?: string,
+  ): Promise<void> {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    const status = readDeprovisionEventStatus(req.query.status)
+    if (status === null) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_EVENT_STATUS_INVALID',
+        'status must be applied, fully_resolved, or superseded',
+      )
+      return
+    }
+    try {
+      const items = await listDeprovisionEvents({
+        integrationId:
+          integrationId
+          ?? (typeof req.query.integrationId === 'string'
+            ? req.query.integrationId
+            : undefined),
+        localUserId:
+          typeof req.query.userId === 'string'
+            ? req.query.userId
+            : undefined,
+        limit:
+          typeof req.query.limit === 'string'
+            ? Number(req.query.limit)
+            : 50,
+        status,
+      })
+      jsonOk(res, { items, flags: readDeprovisionRuntimeFlags() })
+    } catch (error) {
+      jsonError(
+        res,
+        500,
+        'DEPROVISION_EVENTS_FAILED',
+        readErrorMessage(error, 'List events failed'),
+      )
+    }
+  }
+
+  async function restoreDeprovisionEventForRequest(
+    req: Request,
+    res: Response,
+    mode: 'rehire' | 'admin_force',
+  ): Promise<void> {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const result = await restoreDeprovisionEvent({
+        eventId: req.params.eventId,
+        mode,
+        adminUserId,
+        confirm: req.body?.confirm === true,
+        note:
+          typeof req.body?.note === 'string'
+            ? req.body.note
+            : undefined,
+      })
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'directory-deprovision-event',
+        resourceId: req.params.eventId,
+        meta: {
+          restoreMode: mode,
+          restoredEffectCount: result.restoredEffectCount,
+          localUserId: result.localUserId,
+          noteLength: result.note ? result.note.length : 0,
+        },
+      })
+      jsonOk(res, result)
+    } catch (error) {
+      const code =
+        (error as { code?: string })?.code
+        || 'DEPROVISION_RESTORE_FAILED'
+      const status =
+        code === 'EVENT_NOT_FOUND' || code === 'USER_NOT_FOUND'
+          ? 404
+          : code === 'DRIFT_CONFLICT'
+              || code === 'SOURCE_INACTIVE'
+              || code === 'NO_EFFECTS'
+              || code === 'NOT_APPLIED'
+              || code === 'EVENT_NOT_APPLIED'
+            ? 409
+            : code === 'FORCE_CONFIRM_REQUIRED'
+                || code === 'FORCE_NOTE_REQUIRED'
+              ? 400
+              : 500
+      jsonError(
+        res,
+        status,
+        code,
+        (error as Error)?.message || 'Restore failed',
+      )
+    }
+  }
+
   router.get('/deprovision/flags', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -1282,19 +1404,38 @@ export function adminDirectoryRouter(): Router {
   })
 
   router.get('/deprovision/events', async (req: Request, res: Response) => {
-    const adminUserId = await ensurePlatformAdmin(req, res)
-    if (!adminUserId) return
-    try {
-      const items = await listDeprovisionEvents({
-        integrationId: typeof req.query.integrationId === 'string' ? req.query.integrationId : undefined,
-        localUserId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
-        limit: typeof req.query.limit === 'string' ? Number(req.query.limit) : 50,
-      })
-      jsonOk(res, { items, flags: readDeprovisionRuntimeFlags() })
-    } catch (error) {
-      jsonError(res, 500, 'DEPROVISION_EVENTS_FAILED', readErrorMessage(error, 'List events failed'))
-    }
+    await listDeprovisionEventsForRequest(req, res)
   })
+
+  router.get(
+    '/integrations/:integrationId/deprovision-events',
+    async (req: Request, res: Response) => {
+      await listDeprovisionEventsForRequest(
+        req,
+        res,
+        req.params.integrationId,
+      )
+    },
+  )
+
+  router.get(
+    '/deprovision-events/:eventId/effects',
+    async (req: Request, res: Response) => {
+      const adminUserId = await ensurePlatformAdmin(req, res)
+      if (!adminUserId) return
+      try {
+        const items = await listDeprovisionEffects(req.params.eventId)
+        jsonOk(res, { items })
+      } catch (error) {
+        jsonError(
+          res,
+          500,
+          'DEPROVISION_EFFECTS_FAILED',
+          readErrorMessage(error, 'List effects failed'),
+        )
+      }
+    },
+  )
 
   router.get('/deprovision/events/:eventId/effects', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
@@ -1308,43 +1449,34 @@ export function adminDirectoryRouter(): Router {
   })
 
   router.post('/deprovision/events/:eventId/restore', async (req: Request, res: Response) => {
-    const adminUserId = await ensurePlatformAdmin(req, res)
-    if (!adminUserId) return
-    try {
-      const modeRaw = String(req.body?.mode || 'rehire').trim()
-      const mode = modeRaw === 'admin_force' ? 'admin_force' : 'rehire'
-      const result = await restoreDeprovisionEvent({
-        eventId: req.params.eventId,
-        mode,
-        adminUserId,
-        confirm: req.body?.confirm === true,
-        note: typeof req.body?.note === 'string' ? req.body.note : undefined,
-      })
-      await auditLog({
-        actorId: adminUserId,
-        actorType: 'user',
-        action: 'update',
-        resourceType: 'directory-deprovision-event',
-        resourceId: req.params.eventId,
-        meta: {
-          restoreMode: mode,
-          restoredEffectCount: result.restoredEffectCount,
-          localUserId: result.localUserId,
-          noteLength: result.note ? result.note.length : 0,
-        },
-      })
-      jsonOk(res, result)
-    } catch (error) {
-      const code = (error as { code?: string })?.code || 'DEPROVISION_RESTORE_FAILED'
-      const status =
-        code === 'EVENT_NOT_FOUND' || code === 'USER_NOT_FOUND' ? 404
-          : code === 'DRIFT_CONFLICT' || code === 'SOURCE_INACTIVE' || code === 'NO_EFFECTS' || code === 'NOT_APPLIED'
-            ? 409
-            : code === 'FORCE_CONFIRM_REQUIRED' || code === 'FORCE_NOTE_REQUIRED' ? 400
-              : 500
-      jsonError(res, status, code, (error as Error)?.message || 'Restore failed')
+    const mode = String(req.body?.mode ?? 'rehire').trim()
+    if (mode !== 'rehire' && mode !== 'admin_force') {
+      const adminUserId = await ensurePlatformAdmin(req, res)
+      if (!adminUserId) return
+      jsonError(
+        res,
+        400,
+        'RESTORE_MODE_INVALID',
+        'mode must be rehire or admin_force',
+      )
+      return
     }
+    await restoreDeprovisionEventForRequest(req, res, mode)
   })
+
+  router.post(
+    '/deprovision-events/:eventId/reactivate',
+    async (req: Request, res: Response) => {
+      await restoreDeprovisionEventForRequest(req, res, 'rehire')
+    },
+  )
+
+  router.post(
+    '/deprovision-events/:eventId/force-reactivate',
+    async (req: Request, res: Response) => {
+      await restoreDeprovisionEventForRequest(req, res, 'admin_force')
+    },
+  )
 
   return router
 }

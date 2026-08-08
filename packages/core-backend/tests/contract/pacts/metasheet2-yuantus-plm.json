@@ -1497,7 +1497,7 @@
           "properties": [
             {
               "name": "item_number",
-              "label": "料号",
+              "label": "\u6599\u53f7",
               "type": "string",
               "required": true,
               "length": 64,
@@ -3177,10 +3177,10 @@
       }
     },
     {
-      "description": "submit an approved CAD review comment",
+      "description": "reject a CAD approval without sealed evidence",
       "providerStates": [
         {
-          "name": "CAD file 01H000000000000000000000F7 accepts approved review updates"
+          "name": "CAD file 01H000000000000000000000F7 requires sealed approval evidence"
         }
       ],
       "request": {
@@ -3208,15 +3208,12 @@
         }
       },
       "response": {
-        "status": 200,
+        "status": 409,
         "headers": {
           "Content-Type": "application/json"
         },
         "body": {
-          "file_id": "01H000000000000000000000F7",
-          "state": "approved",
-          "note": "Looks good",
-          "reviewed_by_id": 1
+          "detail": "cad_review_evidence_id_required"
         }
       }
     },
