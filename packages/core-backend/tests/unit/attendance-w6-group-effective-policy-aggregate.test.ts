@@ -259,3 +259,122 @@ describe('W6-1 group effective-policy aggregate (fake-DB, exact fixture reproduc
     expect(result).toStrictEqual(fixture.data)
   })
 })
+
+/**
+ * W6-R6 (#4814 P2-1): "a silent-fallback mutation (unknown → `needs_configuration`
+ * or unknown → default) turns a test red." Each of the five internal
+ * enum reads the service does over data it does NOT itself validate on the
+ * way in (group type, manager role, rollout state, FSER state, shift flex
+ * mode) fails closed with a named error code rather than silently mapping
+ * an unrecognized value to a label or a default. None of these five is
+ * reachable through today's CHECK constraints or FSER's own closed state
+ * machine — that is exactly why they are defence in depth, and exactly why
+ * an untested one can rot silently (gate M1/M2). Each case below asserts
+ * the SPECIFIC error code (not a bare `toThrow()`, which would also pass on
+ * an unrelated crash) and is built by taking the minimal valid "effective
+ * fixed_shift" shape and flipping exactly one field to an out-of-enum
+ * value, so a revert of any one guard back to a silent fallback reds
+ * exactly its own case.
+ */
+describe('W6-1 group effective-policy aggregate — fail-closed enum guards (#4814 P2-1)', () => {
+  const groupId = 'a4556006-0009-4000-8000-000000000001'
+  const shiftId = 'a4556006-0009-4000-8000-000000000101'
+  const configId = 'a4556006-0009-4000-8000-000000000102'
+
+  /** A query router for a minimal valid "effective fixed_shift" group,
+   * with one override hook per SQL target so each test can flip exactly
+   * one field to an out-of-enum value. */
+  function makeQuery(overrides: {
+    groupType?: unknown
+    managerRole?: unknown
+    rolloutState?: unknown
+    flexMode?: unknown
+  }): AttendanceGroupEffectivePolicyQueryFn {
+    return async (sql) => {
+      const s = sql.toLowerCase()
+      if (s.includes('from attendance_groups')) {
+        return [{ id: groupId, attendance_type: overrides.groupType ?? 'fixed_shift', timezone: 'Asia/Shanghai', rule_set_id: null }]
+      }
+      if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 1 }]
+      if (s.includes('from attendance_group_managers')) {
+        return overrides.managerRole !== undefined ? [{ role: overrides.managerRole, cnt: 1 }] : [{ role: 'owner', cnt: 1 }]
+      }
+      if (s.includes('from attendance_calculation_rollout_state')) {
+        return overrides.rolloutState !== undefined ? [{ state: overrides.rolloutState }] : []
+      }
+      if (s.includes('from attendance_group_fixed_schedule_configs')) return [{ id: configId }]
+      if (s.includes('count(*)::int as cnt from attendance_shift_segments')) return [{ cnt: 1 }]
+      if (s.includes('from attendance_shifts')) return [{ flex_mode: overrides.flexMode ?? 'strict' }]
+      if (s.includes('from attendance_calculation_group_memberships')) return []
+      if (s.includes('from attendance_rule_sets')) return []
+      throw new Error(`unexpected SQL: ${sql}`)
+    }
+  }
+
+  const validFser = makeFser({
+    groupId,
+    state: 'effective',
+    reasonCodes: ['EFFECTIVE'],
+    desired: { shiftId, startDate: '2026-08-01', endDate: '2026-08-31', revision: 1 },
+    coverage: { targetMembers: 1, matchingMembers: 1, missingMembers: 0, nonMemberTargets: 0, differentKeyRows: 0 },
+    drift: { unconfiguredManagedRows: 0, unpublishedManagedRows: 0, managedSets: [] },
+    evaluatedAt: NOW,
+  })
+
+  it('M1 — unrecognized FSER state fails closed with FSER_STATE_UNRECOGNIZED (not a silent needs_configuration)', async () => {
+    const query = makeQuery({})
+    const fser: AttendanceGroupEffectivePolicyFserServiceLike = {
+      getEffectiveness: async () => ({
+        groupId,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        state: 'quantum' as any,
+        reasonCodes: [],
+        desired: null,
+        coverage: { targetMembers: 0, matchingMembers: 0, missingMembers: 0, nonMemberTargets: 0, differentKeyRows: 0 },
+        drift: { unconfiguredManagedRows: 0, unpublishedManagedRows: 0, managedSets: [] },
+        evaluatedAt: NOW,
+      }),
+    }
+    const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser, now: () => NOW })
+    await expect(service.getAggregate({ orgId: 'org-1', groupId })).rejects.toMatchObject({
+      status: 500,
+      code: 'FSER_STATE_UNRECOGNIZED',
+    })
+  })
+
+  it('unrecognized group attendance_type fails closed with GROUP_TYPE_UNRECOGNIZED (not a silent free_time coercion)', async () => {
+    const query = makeQuery({ groupType: 'weird_type' })
+    const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser: validFser, now: () => NOW })
+    await expect(service.getAggregate({ orgId: 'org-1', groupId })).rejects.toMatchObject({
+      status: 500,
+      code: 'GROUP_TYPE_UNRECOGNIZED',
+    })
+  })
+
+  it('unrecognized manager role fails closed with MANAGER_ROLE_UNRECOGNIZED (not a silent skip)', async () => {
+    const query = makeQuery({ managerRole: 'captain' })
+    const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser: validFser, now: () => NOW })
+    await expect(service.getAggregate({ orgId: 'org-1', groupId })).rejects.toMatchObject({
+      status: 500,
+      code: 'MANAGER_ROLE_UNRECOGNIZED',
+    })
+  })
+
+  it('unrecognized rollout state fails closed with ROLLOUT_STATE_UNRECOGNIZED (not a silent "legacy" default)', async () => {
+    const query = makeQuery({ rolloutState: 'partially_enabled' })
+    const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser: validFser, now: () => NOW })
+    await expect(service.getAggregate({ orgId: 'org-1', groupId })).rejects.toMatchObject({
+      status: 500,
+      code: 'ROLLOUT_STATE_UNRECOGNIZED',
+    })
+  })
+
+  it('unrecognized shift flex_mode fails closed with FLEX_MODE_UNRECOGNIZED (not a silent "strict" default — #4814 P3-4)', async () => {
+    const query = makeQuery({ flexMode: 'lunar' })
+    const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser: validFser, now: () => NOW })
+    await expect(service.getAggregate({ orgId: 'org-1', groupId })).rejects.toMatchObject({
+      status: 500,
+      code: 'FLEX_MODE_UNRECOGNIZED',
+    })
+  })
+})

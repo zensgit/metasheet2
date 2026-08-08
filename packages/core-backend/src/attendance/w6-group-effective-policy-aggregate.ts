@@ -97,6 +97,9 @@ const ROLLOUT_STATES = new Set<AttendanceGroupEffectivePolicyCalculationPostureV
   'authoritative',
   'suspended',
 ])
+// Mirrors `chk_attendance_shifts_flex_mode` — the only two values the
+// column's own CHECK constraint permits.
+const FLEX_MODES = new Set(['strict', 'flex_required_duration'])
 
 function stageRef(stage: 'basics' | 'people' | 'schedule' | 'policies'): AttendanceGroupEffectivePolicyEditorRefV1 {
   return { kind: 'group_stage', stage }
@@ -228,7 +231,10 @@ export function createAttendanceGroupEffectivePolicyAggregateService(deps: Atten
     ])
     const segmentCount = Number(segmentRows[0]?.cnt ?? 0)
     const flexModeRaw = shiftRows[0]?.flex_mode
-    const flexMode = flexModeRaw === 'flex_required_duration' ? 'flex_required_duration' : 'strict'
+    if (typeof flexModeRaw !== 'string' || !FLEX_MODES.has(flexModeRaw)) {
+      throw new AttendanceGroupEffectivePolicyServiceError(500, 'FLEX_MODE_UNRECOGNIZED', 'Shift flex mode is not a recognized value')
+    }
+    const flexMode = flexModeRaw as 'strict' | 'flex_required_duration'
     return { segmentCount, flexMode }
   }
 
