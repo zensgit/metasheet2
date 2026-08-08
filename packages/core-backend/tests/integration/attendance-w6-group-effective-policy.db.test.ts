@@ -82,7 +82,13 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
   const nonMemberAdminUser = randomUUID()
   const platformAdminUser = randomUUID()
   const noOrgUser = randomUUID()
-  const seededUserIds = [adminUser, memberUser, outsiderUser, nonMemberAdminUser, platformAdminUser, noOrgUser]
+  // Claims org A but is ALSO an active member of org B — the sharpest probe
+  // for "does a spoofed x-org-id header actually change which org's data is
+  // reachable" (a user who merely lacks ANY membership in the spoofed org
+  // cannot distinguish "header ignored" from "header honored, membership
+  // check correctly rejected the org anyway").
+  const dualOrgUser = randomUUID()
+  const seededUserIds = [adminUser, memberUser, outsiderUser, nonMemberAdminUser, platformAdminUser, noOrgUser, dualOrgUser]
 
   const groupAId = randomUUID()
   const groupBId = randomUUID()
@@ -124,6 +130,8 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
     await seedMembership(adminUser, orgA)
     await seedMembership(memberUser, orgA)
     await seedMembership(outsiderUser, orgB)
+    await seedMembership(dualOrgUser, orgA)
+    await seedMembership(dualOrgUser, orgB)
     // nonMemberAdminUser: holds attendance:admin permission but NO active
     // org_A membership row at all (delegated-non-member probe).
     // platformAdminUser: global admin, ALSO no org_A membership row —
@@ -328,6 +336,13 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
         .get(`/api/attendance/groups/${groupAId}/effective-policy`)
         .set('x-org-id', orgA)
       expect(res.status).toBe(200)
+    })
+
+    it('spoofed x-org-id probe, sharp form: claims org A but is ALSO an active member of org B — a header claiming org B must still 403, proving org identity is not merely "ignored because unreachable" but genuinely never sourced from the header', async () => {
+      const app = makeApp({ id: dualOrgUser, permissions: ['attendance:admin'], orgId: orgA })
+      const res = await request(app).get(`/api/attendance/groups/${groupBId}/effective-policy`).set('x-org-id', orgB)
+      expect(res.status).toBe(403)
+      expect(res.body.ok).toBe(false)
     })
 
     it('platform-admin bypass: global admin with NO org_A membership row still reaches the aggregate (permission bypass, org identity NOT bypassed)', async () => {
