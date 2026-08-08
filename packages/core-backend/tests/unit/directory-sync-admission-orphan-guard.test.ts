@@ -58,6 +58,7 @@ const CORP_ACCOUNT_WITHOUT_OPENID = {
   name: '张三',
   email: null,
   mobile: null,
+  is_active: true,
 }
 
 const baseOptions = {

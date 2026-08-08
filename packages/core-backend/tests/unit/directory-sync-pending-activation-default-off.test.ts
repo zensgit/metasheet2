@@ -54,6 +54,7 @@ const ACCOUNT = {
   name: '李四',
   email: 'li@example.com',
   mobile: null as string | null,
+  is_active: true,
 }
 
 const baseOptions = {
