@@ -2,7 +2,7 @@
 
 **Status:** ENGINEERING-READY FOR PRODUCT FINAL (owner UAT + staged flag ON **not** done)  
 **Product-code base:** `origin/main@7c7d550dbfba175a8c29afe0f59ba06b2287303d`  
-**Exact product head (this delivery):** 
+**Exact product head (this delivery):** `0bfaeddeb180f25a05ea83563d43769cb4f4369b`  
 **Branch:** `claude/approval-canvas-final-engineering-20260808`  
 **Development companion:** `docs/development/approval-canvas-data-closure-final-eligibility-development-20260808.md`
 

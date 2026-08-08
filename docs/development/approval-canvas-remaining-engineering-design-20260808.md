@@ -40,7 +40,7 @@ Agents may implement, test, commit, push to the tracking branch, and update the 
 | Form field palette (D6-f2 slice) | **DONE** | `approval-field-palette` |
 | Final-eligibility MD + gate workflow | **DONE** | docs + `.grok/workflows/approval-canvas-final-gate.rhai` |
 | G5-C S1–S12 product-path suite | **DONE** | `approval-g5c-authoring-scenarios.test.ts` (CI-wired) |
-| CI: approval-web-guard / web-tests green | **GREEN on a25e65b** (fix push); re-running on head after D8-b thin | required canaries include history/G5-C/version-read-summary |
+| CI: approval-web-guard / web-tests green | **GREEN** (a25e65 + 0bfaed head re-runs) | canaries: history/G5-C/version-read-summary; PR4 shells in path filter |
 | Version dual-canvas shell (full D8-b) | **PARTIAL→UI wired** | pure summary + TemplateDetailView read summary lines/overlay tallies; full dual-canvas product shell not claimed |
 | Extract `ApprovalFlowCanvas` / inspector modules | **DONE** | `ApprovalFlowCanvas.vue` + `ApprovalCanvasNodeInspector.vue`; draft/history remain in parent |
 | D3 Vue Flow/ELK | **BLOCKED (O3)** | do not start |
@@ -49,7 +49,7 @@ Agents may implement, test, commit, push to the tracking branch, and update the 
 
 Statuses: `DONE` items must not be re-implemented by `/execute-plan`. Only `OPEN` / `IN_PROGRESS` nodes are executable.
 
-### PR 0: #4806 closeout — CI green + gate wiring — IN_PROGRESS
+### PR 0: #4806 closeout — CI green + gate wiring — DONE
 
 - **Description:** Fix CI failures introduced by D0 productization (authoring specs that assumed node button clusters; UF-6 hex/rgb guard). Wire `approval-authoring-history` + `approval-g5c-authoring-scenarios` into approval-web-guard canaries and required web run-list. Push to #4806 until `approval-web-guard` and `web-tests` are green.  
 - **Files/components affected:** `apps/web/src/views/approval/TemplateAuthoringView.vue`, `apps/web/tests/approvalTemplateAuthoring.spec.ts`, `.github/workflows/approval-web-guard.yml`, `apps/web/scripts/run-required-web-tests.sh`, this design doc, workflow  

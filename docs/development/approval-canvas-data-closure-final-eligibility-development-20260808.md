@@ -3,7 +3,7 @@
 **Status:** ENGINEERING-READY FOR PRODUCT FINAL (owner UAT + staged flag ON still required)  
 **Branch:** `claude/approval-canvas-final-engineering-20260808`  
 **Base:** `origin/main@7c7d550dbfba175a8c29afe0f59ba06b2287303d`  
-**Exact product head (this delivery):** 
+**Exact product head (this delivery):** `0bfaeddeb180f25a05ea83563d43769cb4f4369b`  
 **Authority:**  
 - `docs/development/approval-canvas-v2-development-plan-20260720.md` (D0–D11 + G gates; status remains PROPOSED for G0 owner ratify)  
 - `docs/development/approval-canvas-v2-interaction-design-lock-20260721.md` (D0 interaction contract; still PROPOSED until G0)  
