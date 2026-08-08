@@ -299,6 +299,10 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 
 ### 7.1 当前真实剩余(2026-08-05)
 
+> **状态时点提示(2026-08-07 追加)**:本表是 **2026-08-05 的时点记录**,不改写。
+> R2/R3/R4 此后已完成(#4768 已 MERGED,彩排最终跑 17/17 见 §8')。
+> **当前状态以 §7.6 为准** —— 链条现在卡在配置面修复,而不是本表列出的那些项。
+
 | # | 项 | 状态 | 阻塞于 |
 |---|---|---|---|
 | R1 | **#4769** 前置门:C6-only 写入口(`/run` 与 replay 双拒)、Save endpoint 钉死、C6 消费 approved B4 binding | ✅ **MERGED 2026-08-05T18:01Z**(main `65edb98c6`),9/9 required 绿含 `integration-guard` | — |
@@ -383,6 +387,137 @@ zip      d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
 ⚠️ **不要用 `config.url` 别名。** adapter 认 `config.baseUrl || config.url`,而 D2 的实例摘要
 只读 `config.baseUrl` —— 用别名会让摘要为 null ⇒ `INSTANCE_UNVERIFIABLE` ⇒ **写门不可满足**。
 方向是 fail-closed(不会写错账套),故登记为**窗口后 P2**(issue #4793),不阻塞本次 baseUrl 场景。
+
+---
+
+## 7.6 配置修复阻塞:两道门与正确的修复前提(2026-08-07,实测)
+
+窗口未能开始。链条卡在**配置面修复**这一步,`readyForControlledWindow=NO`。
+
+### 7.6.1 现场报告
+
+配置负责人在 [#4628](https://github.com/zensgit/metasheet2/issues/4628) 报
+`CONFIGURATION_REPAIR_NOT_SAVED`:**已部署**的 K3 WebAPI adapter 被声明为 target-only,
+把既有 K3 target 的草稿改成 `role=source` 后**保存按钮立即被禁用**;V1 只读核验因此
+`independentVerification=FAIL`、`blockerReason=K3_CONFIG_MISMATCH`。
+
+### 7.6.2 两道门,顺序触发(与构建无关)
+
+在 `7bf2bd7a1`(0725 release)、`aa48c3f18`(冻结窗口包)、`3c9160d09`(已关闭的 #4798 head)
+三个候选构建上**逐一核验,结论一致**:
+
+| # | 门 | 位置 | 三构建 |
+|---|---|---|---|
+| 1 | 前端按 adapter 声明拦下 `role=source` | `IntegrationWorkbenchView.vue:1265` → `adapterSupportsSide` | ✓✓✓ |
+| 2 | 服务端对**已存在**记录抛 `kind and role cannot be changed after creation` | `external-systems.cjs:257-268`(`upsertExternalSystem`) | ✓✓✓ |
+
+服务端 role 是固定三值枚举(`VALID_ROLES`,`external-systems.cjs:21`),**不与 adapter 声明的
+roles 交叉校验**(`upsertExternalSystem` 全文无 adapter registry / adapter metadata 引用)。
+
+⇒ 现场看到的"保存被禁用"是**门 1 先触发**,服务端并未应答。**门 2 是下一步才会撞上的**:
+若绕过前端但仍在**现有 target 记录**上改 role,服务端不可变性会拒绝。
+
+> **因此:修复必须新建一条 K3-read 记录,而不是把现有 target 改成 source。**
+> 这一条**不依赖任何 PR 的合并**:门 2 是记录级不可变性(`external-systems.cjs:257-268`),
+> 与 adapter 怎么声明 roles 无关,任何构建下都成立。
+> 而**新建的那条记录也不需要 `source` 角色** —— 见 §7.6.3。
+
+**与本阻塞无关的一项独立就绪项**:`approvedSqlServerSourceRefPresent=NO` 现在就能按既有授权补齐 ——
+pipeline 的 source 一直是**已批准的 SQL Server source**,其 adapter 本就声明 source 侧
+(`data-source-sql-readonly-source-adapter.cjs:433`),从不经过上面两道门。
+
+### 7.6.3 正确的修复前提:K3 保持 target-only,K3-read 不需要 `source` 角色
+
+**#4798 已 CLOSED(2026-08-07T14:27:43Z),不是修复路径。** 它给 K3 adapter 加 `source` 角色,
+而那会对外宣告一项**运行期不成立**的通用 pipeline source 能力 —— UI 会允许操作员建出一条
+**首跑必失败**的 source。核验于 main `4e6a35d99`:
+
+| 事实 | 位置 |
+|---|---|
+| C6 dry-run 的 `readSourceRows` 发**字面裸读** `read({ object, limit, cursor })` | `external-write-dry-run.cjs:427` |
+| pipeline runner 的读**带** `options`,但其来源是 `pipeline.options.source` —— DB/JSON 上的普通对象 | `pipeline-runner.cjs:631` ← `resolveSourceReadOptions` `:85-103` |
+| 而 list 读的放行键是**模块私有 `Symbol`** ⇒ 任何 JSON 配置都表达不了它 | `read-smoke-marker.cjs:5` |
+| ⇒ 记录配 `readMode:'list'` 时,两个调用点的读都因缺该 Symbol 被 `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` 回绝 | `k3-wise-webapi-adapter.cjs:975-980` |
+| ⇒ 未写 `readMode` 时默认 `single_record_detail`,改由 `K3_WISE_READ_KEY_REQUIRED` 回绝(§7.2 三变体表) | `k3-wise-webapi-adapter.cjs:972` |
+
+**provenance**:§7.2 记的是 dry-run 那一条(`readSourceRows` 确为**字面**裸读),它只讲了那条路径;
+runner 这一条是**本节新增**的相邻发现,不是对 §7.2 的更正。两条的判据也不同 ——
+runner 那条并非"漏传参数",而是**结构上传不进去**:私有 Symbol 不可能出现在 JSON 配置里。
+adapter 在 main 上仍是 `roles: ['target']`(`k3-wise-webapi-adapter.cjs:2579`),**保持不变**。
+
+**而 runbook 本来就不需要 K3 持有 `source` 角色。** pipeline 的 source 仍是**已批准的 SQL Server
+source**(`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`,§7.2);K3-read **不进 pipeline 的
+任何一端**,它在三条使用路径上全部**按 id 被引用**,而这三条**都不查 `role`**:
+
+| 用途 | 判定 | 位置 |
+|---|---|---|
+| 步 0-b / 步骤 1 的 read-smoke | 只比 `kind` 与 preset 的 `requiredKind`,**无 role 检查** | `http-routes.cjs:2810-2812` |
+| B4 关系集合 | `[source, target, target.config.pairedReadSystemId]` —— 纯 id | `http-routes.cjs:1114-1118` |
+| B4 自指守卫 | `binding.config.systemId === system.id` —— 纯 id | `k3-wise-c6-write-profile.cjs:377-384` |
+
+⇒ **K3-read = 一条无 write profile 的独立读探针记录。** 它的 `role` 由建它的路径决定
+(照工作台复制则继承 target,见 §7.6.4),**不必、也不应当是 `source`**;
+而按门 2,建成之后 role 不可再改(`external-systems.cjs:257-268`),所以这一点必须在**建记录时**就定。
+
+### 7.6.4 未决:K3-read 的凭据从哪来(待配置负责人答一个问题)
+
+两条**既有**创建路径各缺一半,合不成"有凭据 + 无 profile"的那条记录:
+
+| 路径 | 给得了 | 给不了 | 位置 |
+|---|---|---|---|
+| 工作台「复制为新连接」 | `kind`/`role`/`config`/`capabilities`(可在 config JSON 里去掉 profile) | **凭据** —— 草稿无凭据输入,保存也不发 `credentials` | `IntegrationWorkbenchView.vue:2092-2106`、`:2210-2219` |
+| K3 配置向导 | 凭据 | **无 profile 的记录** —— `role:'target'` 与 material profile 都**无条件**写死 | `k3WiseSetup.ts:1969`、`:1987` |
+
+复制也**不可能在浏览器侧补上凭据**:公开读取面只回 `hasCredentials`/`credentialFormat`/
+`credentialFingerprint`,**从不回明文**(`external-systems.cjs:115-136`)。而新建时不带 `credentials`
+⇒ 后端写 `null`(`external-systems.cjs:297`)⇒ 该记录读时必抛 `K3_WISE_CREDENTIALS_MISSING`。
+
+> **待配置负责人回答(本侧不预设答案,两条都未裁)**:
+> **现场能否重新录入 K3-read 的那份凭据?**
+>
+> - **能** ⇒ **零代码配置路径**。受控 API `POST /api/integration/external-systems` 的 create 分支
+>   **本来就收 `credentials`**:路由把 `requestBody(req)` 原样下传、无字段白名单
+>   (`http-routes.cjs:2748-2751`),规范化保留 `credentials`(`external-systems.cjs:100`),
+>   落库前加密(`:241`)。建一条 `kind=erp:k3-wise-webapi`、**不带 `objects.material.profile`**、
+>   带 list 读配置、带凭据的**新**记录即可,并按步 0-b 四值表回填
+>   `pairedReadSystemId` 与 B4 `config.systemId`。
+> - **不能** ⇒ 需要一条**窄口径的、服务端保凭据的复制**能力(明文只在服务端流转,浏览器侧做不到)。
+>   ⚠️ **它必须只做"带着凭据复制一条记录"这一件事,不得顺带给 K3 开 `source` 角色** ——
+>   那正是 #4798 被关闭的原因(§7.6.3)。
+>
+> 本侧不自行选:前者动的是**受控配置面上的数据**,后者是**新增能力面**,都不在本侧授权内。
+
+> **原 §7.6.4「本侧不自行选 (a)」的理由已作废(留痕)**:旧理由是"以 API 达成的正是为 #4798
+> 保留的那一项能力变更,绕开评审与放行"。在正确前提下 K3-read **不需要 `source` 角色**,
+> 该 API 路径**不再夹带任何能力变更**。不自行选的理由改为上面那条(动受控配置面的数据)。
+> 旧 §7.6.3(「#4798 与"合并即解除"的撤回」)所依赖的两种构建情形随 #4798 关闭一并作废:
+> 不再有等待部署的 adapter 声明变更,`packageDeployment=NOT_AUTHORIZED` 也不再是本阻塞的分支条件。
+
+### 7.6.5 时限
+
+`operationId=stockprep_aa48_readiness_verify_20260807_02`、
+`authorizationEnd=2026-08-08T08:00:00+08:00`,前置 `CONFIGURATION_REPAIR_SAVED` 未满足。
+owner 曾指示"修复保存后可直接执行 V2,无需再等 owner 回复" ⇒ 若 §7.6.4 的凭据问题不落定,
+该授权将**静默失效**,链条停在此处。是否随裁定一并重发 V2,待 owner 决定。
+
+---
+
+## 7.7 CI 侧阻碍:#4791 flake 的机制已确定性复现(2026-08-07)
+
+与窗口并行、**不需要任何授权**的一项:#4791 的 57P01 teardown flake 会红**必需**的 `test` 检查,
+拖住任何 PR。issue 原文把根因记为"in-flight query 的 rejection",**偏了一步**:
+
+> `DROP DATABASE … WITH (FORCE)` 调 `pg_terminate_backend` 后,`pg` 把终止以 **`'error'` 事件**
+> 交给拥有连接的 Client/Pool,**不是**在途 query 的 rejection —— query 上的 `.catch()` **拿不到它**。
+> 无监听器 ⇒ node uncaught ⇒ vitest `Errors: N` ⇒ **全绿但退出码 1**。
+
+复现来自 PR #4799 新套件的第一版(未给持有 client 挂 `'error'` 监听器):
+本地 `5 passed / Errors 2 / exit 1`,与 CI 签名逐字一致。**机制自此可按需复现**(时序仍不可)。
+
+修法(#4799):`ALLOW_CONNECTIONS false` → 轮询 `pg_stat_activity` 排空 → 普通 `DROP`;
+仅超时才 force 并**点名**持有者。判据是两个调用点无条件打的
+`scratchDrain=CLEAN|FORCED` —— 强制 drop 就是修复前行为,所以"CI 变绿"分不出排空生效与运气好。
+**#4791 不随 #4799 关闭**,等 CI 实报 `CLEAN`。
 
 ---
 
