@@ -106,14 +106,19 @@ was still open at landing; no PR the body named as in-flight has merged or close
 
 #### C.1 W6 now has a ratification-anchor PR — and it is **not merged**, so `main` is unchanged
 
-Two PRs on the W6 phase came into existence after the body was written:
+Two PRs on the W6 phase were created after this PR was opened (`createdAt` read from `gh`: this PR
+2026-08-08T05:40:27Z; PR 4814 2026-08-08T06:22:44Z; PR 4821 2026-08-08T08:46:37Z), which is why the
+body references neither:
 
 - **PR 4821** (OPEN, ready-for-review, head `a80ee9ba9c71…`, `mss=BLOCKED`) is docs-only: a single
   file, `docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md`,
   **+45 / −10**. It *proposes* transcribing an owner RATIFY of the W6 lock into that lock's §9.
-- **PR 4814** (OPEN, **Draft/HOLD**, head `4cc012288384…`, `mss=BEHIND`, 16 files) is the W6-1
-  group effective-policy READ aggregate backend slice — the runtime work that the ratification
-  would authorize. **It is on HOLD pending PR 4821.**
+- **PR 4814** (OPEN, head `4cc012288384…`, `mss=BEHIND`, 16 files) is the W6-1 group
+  effective-policy READ aggregate backend slice — the runtime work that the ratification would
+  authorize. Mechanically, `gh` reports `isDraft=true` and its title begins `[HOLD]`. That it is held
+  **specifically pending PR 4821** is read from **PR 4821's own body**, which describes PR 4814 as
+  open against an unratified lock; that dependency is therefore reported here as a PR-body claim, not
+  as something this section independently derived.
 
 **PR 4821 is unmerged, therefore `main` is unchanged.** Re-read at landing, the W6 design lock on
 `origin/main` still carries `Status: **PROPOSED / runtime HOLD**`. The body's statement that
@@ -130,15 +135,20 @@ PR 4821, and merging it is a separate owner act.
 #### C.2 PR 4805's head is superseded **and it now conflicts with `main`**
 
 The body pins PR 4805 at head `40dfd4f3fb8bfaa987e2706c399e5e41a3b29451` and reports a green check
-rollup at that head. At landing the head is `2985e03c078ae45f9f59f3da58b073fdecab4449` and
-`mergeStateStatus` is **`DIRTY`**.
+rollup at that head. At landing the head is `2985e03c078ae45f9f59f3da58b073fdecab4449`, with
+`mergeable=CONFLICTING` and `mergeStateStatus=DIRTY`.
 
 This differs in kind from the `BEHIND` rows elsewhere in §B.2. `BEHIND` is base drift under
-`strict=true` and a rebase clears it. **`DIRTY` is a merge conflict against `main` and requires a
-conflict resolution, not a rebase-and-rerun.** A reader planning the OBS-1 landing should treat the
-body's green rollup for PR 4805 as belonging to a superseded head: the rollup read at the *new* head
-at landing was 24 `SUCCESS` + 1 `SKIPPED` (`Strict E2E with Enhanced Gates`), but that rollup was
-produced before the conflict state was observed and, per the caveat above, is not pinned by the SHA.
+`strict=true` and a rebase clears it. **`CONFLICTING`/`DIRTY` is a merge conflict against `main` and
+needs a conflict resolution, not a rebase-and-rerun.** The `mergeable` field is the load-bearing one
+here: an intermediate read of the same head returned `mergeStateStatus=UNKNOWN` (GitHub had not yet
+recomputed it) before a later read returned `CONFLICTING`/`DIRTY` — a live demonstration of why this
+section labels `mss` a read-time value rather than a property of the SHA.
+
+A reader planning the OBS-1 landing should also treat the body's green rollup for PR 4805 as
+belonging to a **superseded head**. The rollup at the new head, read at landing, was 24 `SUCCESS` +
+1 `SKIPPED` (`Strict E2E with Enhanced Gates`) — but a rollup is not pinned by a SHA, and a green
+rollup does not clear a merge conflict.
 
 #### C.3 Three files cited by the body changed on `main` — and **every `plugin-tests.yml:NNN` line citation in the body is now off by +2 or +5**
 
@@ -181,7 +191,9 @@ any, is **not assessed** by this document — no command was run that establishe
 
 ### D. Commands run to produce §B and §C
 
-Every state claim in §B and §C came from one of these; none came from a document's prose or a PR body.
+Every state claim in §B and §C came from one of these. None was taken from either document's prose.
+The **single** claim sourced from a PR body is the PR 4814 → PR 4821 dependency in §C.1, and it is
+labelled as such at the point of use; every other value is a `git`/`gh` field or a command output.
 
 ```
 git fetch origin --prune
