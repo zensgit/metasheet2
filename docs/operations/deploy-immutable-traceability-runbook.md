@@ -16,6 +16,26 @@ The production Docker workflow builds both runtime images with the current `GITH
 
 The workflow and `scripts/ops/deploy-attendance-prod.sh` reject deploys whose `DEPLOY_IMAGE_TAG` is not a full 40-character commit SHA. The backend image exposes the same SHA through `/health`; the web image writes it to `/build-info.json`.
 
+## GitHub Actions Production Gate
+
+A push to `main` builds and publishes immutable backend/web images but does not deploy them. Production deployment is a separate explicit action:
+
+```bash
+gh workflow run docker-build.yml \
+  --ref main \
+  -f confirm_production_deploy=DEPLOY_PRODUCTION \
+  -f drill_fail_stage=none
+```
+
+The `deploy` job runs only when all of these are true:
+
+- the event is `workflow_dispatch`;
+- the selected ref is `main`;
+- `confirm_production_deploy` exactly equals `DEPLOY_PRODUCTION`;
+- the job enters the GitHub `production` environment.
+
+Leaving the confirmation blank is a build-only run. Configure required reviewers on the `production` environment in repository settings when the plan supports protected environments; the workflow-level three-part gate remains mandatory either way.
+
 ## Operator-Visible Evidence
 
 Download the deploy artifact for a run:
