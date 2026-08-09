@@ -285,10 +285,21 @@ describe('W6-1 pre-auth boundary: the global JWT gate and its escapes', () => {
     const app = express()
 
     // THE MIRROR of `src/index.ts`'s gate — the four branches pinned above, with
-    // the REAL predicate functions imported from the REAL modules. Only the
-    // terminal `jwtAuthMiddleware` is replaced, by a sentinel that records that
-    // enforcement ran: this suite is about WHETHER auth runs, not about what a
-    // valid token does.
+    // the REAL predicate functions imported from the REAL modules.
+    //
+    // TWO substitutions, both stated so a reviewer comparing mirror to original
+    // finds no unexplained divergence:
+    //  - the terminal `jwtAuthMiddleware` becomes a sentinel that records that
+    //    enforcement RAN. This suite is about whether auth runs, not about what
+    //    a valid token does.
+    //  - the publicForm branch's `optionalJwtAuthMiddleware(req, res, next)`
+    //    becomes a bare `next()`. Equivalent for every probe here, all of which
+    //    are token-less: with no bearer, `optionalJwtAuthMiddleware` hydrates
+    //    nothing and calls `next()` — it never 401s, which is precisely why it
+    //    counts as a non-enforcing branch. Substituting it keeps this harness
+    //    from depending on `authService` for a branch no probe can even enter
+    //    (its predicate requires a `publicToken` AND one of two multitable
+    //    paths, asserted false for every spelling below).
     app.use((req, _res, next) => {
       branch = ''
       authRan = false
