@@ -1030,12 +1030,20 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       }
     })
 
-    it('the ROUTE runs the membership read AND the aggregate reads on ONE transaction whose FIRST statement is SET TRANSACTION READ ONLY', async () => {
+    it('for a DELEGATED (non-admin) caller the route runs the membership read AND the aggregate reads on ONE transaction whose FIRST statement is SET TRANSACTION READ ONLY', async () => {
       observedTransactions.length = 0
       observedSql.length = 0
       // adminApp()'s principal holds `attendance:admin` but is NOT an admin
       // (no legacy claim, and `isAdmin` is mocked false), so the membership
       // query really executes on this path.
+      //
+      // The title says DELEGATED deliberately. A platform admin short-circuits
+      // `canReadAttendanceDirectoryReadiness` before the membership statement
+      // is reached, so for that caller there is no membership read to be inside
+      // the transaction at all — an unqualified "the ROUTE runs the membership
+      // read …" would be false for half the caller population. That
+      // short-circuit is pinned, DB-free, in
+      // `tests/unit/attendance-w6-group-effective-policy-authorization-boundary.test.ts`.
       const res = await request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy`)
       expect(res.status).toBe(200)
 

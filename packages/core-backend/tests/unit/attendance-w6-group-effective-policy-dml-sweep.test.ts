@@ -308,6 +308,73 @@ describe('W6-R1 static leg — every reachable DB-seam argument is accounted for
     expect(classified.resolved[0].sql.trim().toUpperCase().startsWith('SELECT')).toBe(false)
   })
 
+  it('the RBAC short-circuit that runs OUTSIDE the transaction is read-only BY CONSTRUCTION — zero write verbs in the whole of rbac/service.ts', () => {
+    // WHAT THIS BACKS. The route comment states that a platform admin
+    // short-circuits `canReadAttendanceDirectoryReadiness` before the membership
+    // statement, and that the RBAC lookup it runs instead sits OUTSIDE the
+    // read-only transaction (it reads on the module-scope pool). The owner's
+    // ruling permits RBAC's own upstream reads to stay outside — but only
+    // because they are reads. That "because" is the thing asserted here, and
+    // asserting it is the whole point: the comment must not be the only place
+    // the property is recorded.
+    //
+    // SCOPE, and why it is not redundant with the closure sweep above. The
+    // closure DOES already reach this file, but declaration-by-declaration
+    // (`isAdmin`, `userHasPermission`, …). This leg is deliberately WHOLE-FILE:
+    // a write verb added to some declaration the closure does not currently
+    // reach would pass the closure sweep and still falsify the comment, because
+    // the comment's claim is about the file, not about today's reachable subset.
+    //
+    // DETECTORS ARE THE SWEEP'S OWN, reused verbatim rather than re-specified.
+    // A second, narrower same-purpose detector is exactly the contract-narrowing
+    // shape this suite exists to refuse — and it would also re-introduce the
+    // trap the shared ones already handle: `rbac/service.ts` contains
+    // `cache.delete(...)`, a JS Map call, which a naive /\bDELETE\b/ would red
+    // on a perfectly clean file. `\bDELETE\s+FROM\b` does not.
+    const rbacServiceRelative = 'packages/core-backend/src/rbac/service.ts'
+    const text = readFileSync(join(repoRoot, rbacServiceRelative), 'utf8')
+
+    // ANCHORS — an empty read, a moved file, or a wrong path must not pass as
+    // "no write verbs found". A scan window that read nothing is the classic
+    // way this leg would go green against nothing.
+    expect(text.length).toBeGreaterThan(500)
+    expect(text).toContain('export async function isAdmin(userId: string): Promise<boolean>')
+    // The exact statement the route comment attributes to it — `user_roles`,
+    // not `user_permissions`/`role_permissions`. If this moves, the comment's
+    // table name is stale and must be re-derived rather than trusted.
+    expect(text).toContain('SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1')
+    // And it is the POOL, not an injected handle — which is what puts it
+    // outside the transaction in the first place.
+    expect(text).toContain("import { pool } from '../db/pg'")
+
+    // THE ASSERTION.
+    const rawHits = RAW_SQL_DML.filter((pattern) => pattern.test(text)).map((pattern) => pattern.source)
+    const kyselyHits = KYSELY_DML.filter((pattern) => pattern.test(text)).map((pattern) => pattern.source)
+    expect({ file: rbacServiceRelative, rawHits, kyselyHits }).toEqual({
+      file: rbacServiceRelative,
+      rawHits: [],
+      kyselyHits: [],
+    })
+
+    // POSITIVE CONTROLS — one per detector family, on the SAME text, so an
+    // "assert it does not happen" leg cannot pass by being blind. Both use the
+    // real file's text plus one appended statement, i.e. they exercise the
+    // detector against the same input shape the assertion above uses.
+    for (const injected of [
+      "\nawait pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [a, b])\n",
+      "\nawait pool.query('UPDATE user_roles SET role_id = $1', [a])\n",
+      "\nawait pool.query('DELETE FROM user_roles WHERE user_id = $1', [a])\n",
+    ]) {
+      expect(RAW_SQL_DML.some((pattern) => pattern.test(text + injected)), injected).toBe(true)
+    }
+    expect(KYSELY_DML.some((pattern) => pattern.test(`${text}\nawait db.insertInto('user_roles').execute()\n`))).toBe(true)
+
+    // DISCRIMINATION — the `cache.delete(...)` already in the file is NOT a
+    // write verb, and must not be counted as one. Without this half, a leg that
+    // reds on the clean file would look like a working guard.
+    expect(text).toContain('cache.delete(')
+  })
+
   it('the READ ONLY backstop is statically ON the route path (its own literal is in the swept set)', () => {
     // A structural backstop that is not reachable from the route is not a
     // backstop. This is the static half of that claim; the behavioural half

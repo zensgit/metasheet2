@@ -1796,26 +1796,62 @@ export function attendanceAdminRouter(): Router {
           return jsonError(res, 403, 'FORBIDDEN', 'Insufficient permissions')
         }
 
-        // W6-R1 structural backstop. EVERYTHING from here on runs inside ONE
-        // `SET TRANSACTION READ ONLY` transaction, and the membership gate is
-        // deliberately INSIDE it rather than before it: the owner's binding
-        // addendum names `canReadAttendanceDirectoryReadiness` as precisely the
-        // call-path hole a static sweep kept missing (DML injected there wrote
-        // 130 rows with the old guard green), so its membership read must share
-        // the aggregate's and FSER's read-only client, not run on the pool.
+        // W6-R1 structural backstop. Everything from here on that runs THROUGH
+        // `readOnlyQuery` runs inside ONE `SET TRANSACTION READ ONLY`
+        // transaction: the MEMBERSHIP-CHECK BRANCH of the authorization gate and
+        // everything downstream of it (the groupId check, the aggregate's reads,
+        // and FSER's reads, which share the same handle by construction).
         //
-        // Two consequences, both real and neither hidden:
-        //  - a delegated-non-member 403 and an invalid-groupId 400 now OPEN a
-        //    transaction (read-only, rolled back with nothing in it). The W4-0
-        //    §9 W4-0-G2 "zero transactions" wording applies to the SETUP-READINESS
-        //    route, not to this one; for this route the ordering guarantee is
-        //    "no AGGREGATE SQL", which the suite asserts with a counting spy.
-        //  - `isRbacAdmin` (the full/platform-admin bypass inside
-        //    `canReadAttendanceDirectoryReadiness`) still reads on the POOL.
-        //    That is the RBAC carve-out the owner allowed: it is authorization
-        //    middleware, it reads `user_permissions`/`role_permissions` only,
-        //    and it short-circuits BEFORE the membership query — which is why
-        //    every proof of the membership read has to run as a NON-admin.
+        // The membership gate is deliberately INSIDE the transaction rather than
+        // before it: the owner's binding addendum names
+        // `canReadAttendanceDirectoryReadiness` as precisely the call-path hole a
+        // static sweep kept missing (DML injected there wrote 130 rows with the
+        // old guard green), so its membership read must share the aggregate's and
+        // FSER's read-only client, not run on the pool.
+        //
+        // THE COVERAGE IS NARROWER THAN "the whole handler", in three ways that
+        // are each stated because each was previously overstated here:
+        //
+        //  1. A delegated-non-member 403 and an invalid-groupId 400 now OPEN a
+        //     transaction (read-only, rolled back with nothing in it). The W4-0
+        //     §9 W4-0-G2 "zero transactions" wording applies to the
+        //     SETUP-READINESS route, not to this one; for this route the ordering
+        //     guarantee is "no AGGREGATE SQL", which the suite asserts with a
+        //     counting spy.
+        //
+        //  2. The gate SHORT-CIRCUITS for a platform admin, and the plain
+        //     consequence is that FOR THAT CALLER THE MEMBERSHIP STATEMENT NEVER
+        //     EXECUTES AT ALL. `canReadAttendanceDirectoryReadiness` opens with
+        //     `if (hasLegacyAdminClaim(req) || await isRbacAdmin(userId)) return true`
+        //     — both disjuncts return BEFORE the `SELECT 1 FROM user_orgs …`
+        //     statement is reached. So for a platform admin the read-only
+        //     transaction covers strictly less than it does for a delegated
+        //     admin: it still wraps the aggregate and FSER reads, but there is no
+        //     membership statement inside it to wrap. This is also why every
+        //     proof of the membership read has to run as a NON-admin — as an
+        //     admin the proof would be about a query that never ran.
+        //
+        //  3. What the short-circuit DOES run sits OUTSIDE the transaction, and
+        //     the two disjuncts differ:
+        //       - `hasLegacyAdminClaim(req)` issues NO SQL at all — it reads
+        //         `req.user` claims only.
+        //       - `isRbacAdmin` is `isAdmin` in `src/rbac/service.ts`, and it
+        //         reads on the module-scope POOL, not on `readOnlyQuery`. Its
+        //         body is a single `SELECT 1 FROM user_roles WHERE user_id = $1
+        //         AND role_id = $2 LIMIT 1` — `user_roles`, NOT
+        //         `user_permissions`/`role_permissions` (those belong to
+        //         `userHasPermission`, a different function; an earlier revision
+        //         of this comment named the wrong tables).
+        //     That pool read is the RBAC carve-out the owner allowed: RBAC's own
+        //     upstream reads may stay outside the transaction. It is safe to
+        //     allow because it is READ-ONLY BY CONSTRUCTION, and that is
+        //     ASSERTED rather than claimed: a committed leg in
+        //     `tests/unit/attendance-w6-group-effective-policy-dml-sweep.test.ts`
+        //     runs the sweep's own `RAW_SQL_DML`/`KYSELY_DML` detectors over the
+        //     WHOLE of `src/rbac/service.ts` and reds if a write verb ever
+        //     appears anywhere in that file — which is broader than the
+        //     declaration-level closure, since the closure only sweeps the
+        //     declarations it can reach.
         const aggregate = await runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
           const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId, readOnlyQuery)
           if (!allowed) {
