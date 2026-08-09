@@ -56,6 +56,7 @@ const {
 const {
   assertP26ActionAndFixtureContract,
   classifyP26ApprovalAssignmentSites,
+  keyOf: p26KeyOf,
 } = require(path.join(toolDir, 'p26-approval-assignment-classification.cjs'))
 const {
   TABLE_BUCKETS,
@@ -1283,6 +1284,42 @@ test('W4C-3b P26 mutations kill action, fixture, and assignment-DML omissions or
     "async function mutateAssignments() { await db.query('UPDATE approval_assignments SET is_active = FALSE') }\n",
   )
   assert.equal(classifyP26ApprovalAssignmentSites([...sites, ...added]).unclassified.length, 1)
+})
+
+test('W4C-3b P26 key is injective: a symbol containing the old separator cannot alias another site', () => {
+  // The collector mints route symbols as `${METHOD} ${routePath}` from arbitrary path literals,
+  // so an enclosingSymbol containing ' :: ' is constructible, not hypothetical. Under the old
+  // `[relPath, enclosingSymbol, verb].join(' :: ')` key these two DIFFERENT sites collapse onto
+  // the same string, which silently lends one site's classification to the other — the criterion
+  // itself becoming the bypass.
+  const classifications = [
+    { relPath: 'a.ts', enclosingSymbol: 'POST /x :: b.ts :: sym', verb: 'update', count: 1, owner: 'decoy' },
+  ]
+  const impostor = {
+    relPath: 'a.ts :: POST /x',
+    enclosingSymbol: 'b.ts :: sym',
+    verb: 'update',
+    table: 'approval_assignments',
+  }
+  assert.notEqual(
+    p26KeyOf(classifications[0]),
+    p26KeyOf(impostor),
+    'two distinct (relPath, enclosingSymbol, verb) triples must not share a key',
+  )
+  const result = classifyP26ApprovalAssignmentSites([impostor], classifications)
+  assert.equal(
+    result.unclassified.length,
+    1,
+    'the impostor site must remain unclassified — it must not inherit the decoy classification',
+  )
+  assert.equal(result.classifiedSites.length, 0)
+  assert.equal(result.stale.length, 1, 'and the decoy classification must itself report as stale')
+
+  // Positive control: the SAME triple really does classify, so the assertion above is about
+  // aliasing and not about `classifyP26ApprovalAssignmentSites` rejecting synthetic input.
+  const genuine = { ...impostor, relPath: 'a.ts', enclosingSymbol: 'POST /x :: b.ts :: sym' }
+  const ok = classifyP26ApprovalAssignmentSites([genuine], classifications)
+  assert.deepEqual([ok.unclassified.length, ok.classifiedSites.length, ok.stale.length], [0, 1, 0])
 })
 
 test('P12-P14/P17-P19/P22/P26-P28 remain visible and explicitly canonicalized by W4C-3b', () => {
