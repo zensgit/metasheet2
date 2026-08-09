@@ -174,6 +174,21 @@ function relationsFromAggregateClosure(): string[] {
   return [...relations].sort()
 }
 
+/**
+ * Tables a write on this call path could reach only by TRIGGER fan-out — never
+ * named in any SQL literal, so never in any derived set. MODULE SCOPE on
+ * purpose: two describe blocks consume it (the row-count snapshot's table
+ * domain, and the "arbitrary table no list mentions" refusal leg's proof that
+ * its chosen table really is off every list). Two copies would let the second
+ * consumer's premise drift away from the first's without anything reddening.
+ */
+const TRIGGER_FANOUT_TABLES = [
+  // `attendance_group_members` carries `trg_attendance_group_members_w4c3a_revision`,
+  // which bumps this table. A write reaching a table only via a TRIGGER is
+  // never in any hand-list, so the fan-out target is named explicitly.
+  'attendance_group_effect_revisions',
+]
+
 describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL)', () => {
   const pool = new Pool({ connectionString: dbUrl })
   const runstamp = randomUUID().slice(0, 8)
@@ -424,12 +439,6 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
      * would fan out to. Three legs below, matching the static guard's shape.
      */
     const derivedRelations = relationsFromAggregateClosure()
-    const TRIGGER_FANOUT_TABLES = [
-      // `attendance_group_members` carries `trg_attendance_group_members_w4c3a_revision`,
-      // which bumps this table. A write reaching a table only via a TRIGGER is
-      // never in any hand-list, so the fan-out target is named explicitly.
-      'attendance_group_effect_revisions',
-    ]
     const TOUCHED_TABLES = [...new Set([...derivedRelations, ...TRIGGER_FANOUT_TABLES])].sort()
 
     it('LEG 1 (unclaimed = 0): every relation the aggregate can query is in the snapshot set', () => {
@@ -1058,6 +1067,208 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
         (sql) => /FROM user_orgs uo/.test(sql) && /uo\.is_active = true/.test(sql),
       )
       expect(membershipOnAnyPath.length).toBe(membershipStatements.length)
+    })
+
+    /**
+     * THE TWO ESCAPES THE OWNER NAMED, both required to be refused BY POSTGRES.
+     *
+     * Why these two specifically, and why a generic UPDATE/INSERT/DELETE leg
+     * does not cover them:
+     *
+     *  - ESCAPE A is the ONE-HOP shape (`query(buildXxxSql())`). It is the
+     *    shape that walked through three successive versions of the static
+     *    sweep, because the sweep can only reason about SQL text it can trace
+     *    and a helper's return value is not text it can see. The transaction
+     *    does not care: the refusal is at EXECUTION, against the command type
+     *    of whatever string actually arrives, so composition and indirection
+     *    buy the escape nothing. This leg is what makes "the mechanism of
+     *    record is the transaction, not the sweep" a measured claim.
+     *
+     *  - ESCAPE B is a table NO LIST MENTIONS. Every list-based proof on this
+     *    branch — the row-count snapshot, the derived relation set, the
+     *    trigger fan-out set — is blind to a table outside its domain by
+     *    construction. The transaction is not, and this leg measures that.
+     *    Its off-list-ness is DERIVED here, not asserted: the table is checked
+     *    against the same derived closure the snapshot uses.
+     */
+    describe('the two escapes the owner named — refused by PostgreSQL, not by analysis', () => {
+      /** The one-hop escape verbatim: a helper that COMPOSES its SQL, so no
+       *  literal for a text sweep to find at the call site. Deliberately
+       *  interpolated rather than parameterised — a builder that returned a
+       *  parameterised literal would be a weaker probe than the one that
+       *  actually got through. */
+      function buildAttendanceGroupTouchSql(groupId: string): string {
+        return 'UPD' + `ATE attendance_groups SET timezone = 'UTC' WHERE id = '${groupId}'`
+      }
+
+      /** A table on NO list this branch derives or hand-writes. Chosen for its
+       *  distance from attendance entirely; its off-list-ness is asserted
+       *  mechanically below rather than taken on faith. */
+      const ARBITRARY_TABLE = 'bpmn_signal_events'
+      const ARBITRARY_WRITE_SQL = `INSERT INTO ${ARBITRARY_TABLE} (signal_name, status) VALUES ($1, $2)`
+
+      it(`PREMISE (derived, not asserted): ${ARBITRARY_TABLE} is in NO list this branch computes or writes down`, () => {
+        const derived = relationsFromAggregateClosure()
+        // Non-vacuity first — a derivation that returns nothing would make the
+        // "absent from it" claim true for the boring reason.
+        expect(derived.length).toBeGreaterThanOrEqual(8)
+        expect(derived).not.toContain(ARBITRARY_TABLE)
+        expect(TRIGGER_FANOUT_TABLES).not.toContain(ARBITRARY_TABLE)
+        // And the write-shape battery above (which names attendance tables the
+        // derived set DOES contain) does not reach it either.
+        expect(WRITE_SHAPES.some((shape) => shape.sql.includes(ARBITRARY_TABLE))).toBe(false)
+      })
+
+      it('ESCAPE A — a ONE-HOP composed helper write, on the handle the membership read and the aggregate reads shared, RAISES 25006', async () => {
+        const { runAttendanceSetupReadinessReadOnly } = await import('../../src/services/AttendanceSetupReadinessAggregate')
+        const { canReadAttendanceDirectoryReadiness } = await import('../../src/routes/attendance-admin')
+        const { createAttendanceGroupEffectivePolicyAggregateService } = await import(
+          '../../src/attendance/w6-group-effective-policy-aggregate'
+        )
+        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+        const fserLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
+        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+        const producerKeyLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs')
+
+        observedTransactions.length = 0
+        await runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
+          // The aggregate's OWN seam expression, built exactly as
+          // `createAttendanceGroupEffectivePolicyReadOnlyService` builds it in
+          // `attendance-admin.ts`. The escape goes through THIS, not through a
+          // separate client — so what is refused is the seam the aggregate
+          // itself calls, one hop away from where a helper would sit.
+          const aggregateSeam = async (sql: string, params?: unknown[]) => (await readOnlyQuery(sql, params)).rows
+
+          const allowed = await canReadAttendanceDirectoryReadiness(
+            memberRequest(memberUser),
+            memberUser,
+            orgA,
+            readOnlyQuery,
+          )
+          expect(allowed).toBe(true)
+          const service = createAttendanceGroupEffectivePolicyAggregateService({
+            query: aggregateSeam,
+            fser: fserLib.createAttendanceGroupFixedScheduleEffectivenessService({
+              HttpError: ReadOnlyProbeHttpError,
+              buildAttendanceGroupFixedScheduleProducerKey:
+                producerKeyLib.buildAttendanceGroupFixedScheduleProducerKey,
+              now: () => new Date().toISOString(),
+            }),
+            now: () => new Date().toISOString(),
+            segmentCalculationImplemented: false,
+          })
+          // The legitimate reads still work on this handle — otherwise the
+          // raise below would be indistinguishable from a dead connection.
+          const aggregate = await service.getAggregate({ orgId: orgA, groupId: groupAId })
+          expect(aggregate.groupId).toBe(groupAId)
+
+          // The one-hop escape. NOTE the shape: the SQL never appears as a
+          // literal at this call site, which is exactly the property that
+          // defeated the static sweep.
+          const error = await aggregateSeam(buildAttendanceGroupTouchSql(groupAId)).then(
+            () => null,
+            (caught: unknown) => caught as { code?: string },
+          )
+          expect(error).not.toBeNull()
+          expect(error?.code).toBe('25006')
+        })
+      })
+
+      it('ESCAPE A POSITIVE CONTROL: the composed helper SQL really is a working write outside the transaction', async () => {
+        // Without this, `25006` could not be distinguished from "that builder
+        // produced a statement that was never going to work". Rolled back, so
+        // the fixture is untouched.
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const result = await client.query(buildAttendanceGroupTouchSql(groupAId))
+          expect(result.rowCount).toBe(1)
+        } finally {
+          await client.query('ROLLBACK')
+          client.release()
+        }
+      })
+
+      it(`ESCAPE B — a write to ${ARBITRARY_TABLE} (a table NO list mentions), on the aggregate's handle, RAISES 25006`, async () => {
+        const { runAttendanceSetupReadinessReadOnly } = await import('../../src/services/AttendanceSetupReadinessAggregate')
+        const { canReadAttendanceDirectoryReadiness } = await import('../../src/routes/attendance-admin')
+
+        await runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
+          // Same handle, after the membership read has genuinely executed on
+          // it — so this is the aggregate's transaction, not a fresh one.
+          const allowed = await canReadAttendanceDirectoryReadiness(
+            memberRequest(memberUser),
+            memberUser,
+            orgA,
+            readOnlyQuery,
+          )
+          expect(allowed).toBe(true)
+          const stillReads = await readOnlyQuery('SELECT 1 AS one', [])
+          expect(stillReads.rows[0].one).toBe(1)
+
+          const error = await readOnlyQuery(ARBITRARY_WRITE_SQL, [`w6-ro-probe-${runstamp}`, 'pending']).then(
+            () => null,
+            (caught: unknown) => caught as { code?: string },
+          )
+          expect(error).not.toBeNull()
+          expect(error?.code).toBe('25006')
+        })
+      })
+
+      it(`ESCAPE B POSITIVE CONTROL: the same ${ARBITRARY_TABLE} write SUCCEEDS outside the transaction`, async () => {
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const result = await client.query(ARBITRARY_WRITE_SQL, [`w6-ro-probe-${runstamp}`, 'pending'])
+          expect(result.rowCount).toBe(1)
+        } finally {
+          await client.query('ROLLBACK')
+          client.release()
+        }
+      })
+
+      it('THE MEMBERSHIP CHECK IS INSIDE, NOT ADJACENT: a write attempted at the membership read\'s own point RAISES 25006', async () => {
+        // "Adjacent" would mean the membership read runs on a handle that is
+        // not read-only and the aggregate's runs on one that is. The
+        // discriminating experiment is to attempt a write at the point where
+        // the membership read just executed, on the SAME handle, BEFORE any
+        // aggregate query has been issued — if the membership read were merely
+        // adjacent, that write would succeed.
+        const { runAttendanceSetupReadinessReadOnly } = await import('../../src/services/AttendanceSetupReadinessAggregate')
+        const { canReadAttendanceDirectoryReadiness } = await import('../../src/routes/attendance-admin')
+
+        observedTransactions.length = 0
+        await runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
+          const allowed = await canReadAttendanceDirectoryReadiness(
+            memberRequest(memberUser),
+            memberUser,
+            orgA,
+            readOnlyQuery,
+          )
+          expect(allowed).toBe(true)
+          // Measured: the membership statement really executed on this handle
+          // (an admin bypass returns `true` without issuing it at all).
+          const statements = observedTransactions[0].statements
+          expect(statements.filter((sql) => /FROM user_orgs uo/.test(sql)).length).toBe(1)
+          // ...and NO aggregate query has run yet, so what follows is a write
+          // at the membership read's own point, not after the aggregate's.
+          const repoRoot = findRepoRoot(__dirname)
+          const aggregateLiterals = new Set(
+            collectQuerySqlArguments(buildAggregateCallPathClosure(repoRoot), repoRoot)
+              .resolved.filter((entry) => entry.file.endsWith('w6-group-effective-policy-aggregate.ts'))
+              .map((entry) => entry.sql),
+          )
+          expect(aggregateLiterals.size).toBeGreaterThanOrEqual(5)
+          expect(statements.filter((sql) => aggregateLiterals.has(sql)).length).toBe(0)
+
+          const error = await readOnlyQuery('UPDATE user_orgs SET is_active = true WHERE user_id = $1', [memberUser]).then(
+            () => null,
+            (caught: unknown) => caught as { code?: string },
+          )
+          expect(error).not.toBeNull()
+          expect(error?.code).toBe('25006')
+        })
+      })
     })
   })
 })
