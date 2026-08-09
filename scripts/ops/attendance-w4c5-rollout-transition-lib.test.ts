@@ -299,6 +299,9 @@ function fakePlan(overrides: Record<string, unknown> = {}) {
     rowExists: true,
     currentState: 'legacy',
     currentVersion: 1,
+    // A bootstrap row's own priorState is null (see the type's doc comment); most fixtures below
+    // override both currentState and priorState together to describe a specific transition.
+    priorState: null,
     targetState: 'shadow',
     legalPair: true,
     comparisonWritePosture: 'shadow',
@@ -336,6 +339,12 @@ test('computeAttendanceW4C5PlanDigestV1 changes when a predicate count changes',
 test('computeAttendanceW4C5PlanDigestV1 changes when currentVersion changes (there-and-back transitions do not collide)', () => {
   const digest1 = computeAttendanceW4C5PlanDigestV1(fakePlan({ currentVersion: 1 }))
   const digest2 = computeAttendanceW4C5PlanDigestV1(fakePlan({ currentVersion: 3 }))
+  assert.notEqual(digest1, digest2)
+})
+
+test('computeAttendanceW4C5PlanDigestV1 changes when priorState changes, state/version held fixed (P2-1)', () => {
+  const digest1 = computeAttendanceW4C5PlanDigestV1(fakePlan({ currentState: 'shadow', currentVersion: 2, priorState: 'legacy' }))
+  const digest2 = computeAttendanceW4C5PlanDigestV1(fakePlan({ currentState: 'shadow', currentVersion: 2, priorState: 'eligible' }))
   assert.notEqual(digest1, digest2)
 })
 
@@ -471,7 +480,10 @@ test('runAttendanceW4C5ApplyOrchestrationV1: idempotent re-apply is a no-op and 
   // digest carried on the command line (APPLY_ARGS.planDigest = 64 'a's, a deliberately WRONG
   // digest for that pre-transition plan — proving idempotency short-circuits BEFORE any digest
   // comparison ever runs, not merely that it happens to match by coincidence).
-  const postTransitionPlan = fakePlan({ currentState: 'shadow', currentVersion: 2, targetState: 'shadow' })
+  // priorState: 'legacy' matches APPLY_ARGS.expectedState ('legacy') — this is the transition
+  // that ACTUALLY happened (legacy -> shadow), which is exactly what makes this a genuine
+  // re-observation of a completed transition, not merely a state/version coincidence.
+  const postTransitionPlan = fakePlan({ currentState: 'shadow', currentVersion: 2, priorState: 'legacy', targetState: 'shadow' })
   const deps = countingDeps(postTransitionPlan)
 
   const outcome = await runAttendanceW4C5ApplyOrchestrationV1(deps, APPLY_ARGS, VALIDATED_MANIFEST)
@@ -479,6 +491,45 @@ test('runAttendanceW4C5ApplyOrchestrationV1: idempotent re-apply is a no-op and 
   assert.equal(outcome.outcome, 'noop_already_at_target')
   assert.equal(outcome.state, 'shadow')
   assert.equal(deps.transitionCalls.length, 0)
+})
+
+test('runAttendanceW4C5ApplyOrchestrationV1 P2-1: state/version match alone is NOT enough — a priorState mismatch falls through to the digest check, never a no-op', async () => {
+  // Same (state, version) shape as the genuine no-op above (shadow v2, target shadow,
+  // expectedVersion 1), but this fixture's priorState is 'eligible', not the 'legacy'
+  // APPLY_ARGS.expectedState claims. This is the exact false-completion shape the gate executed
+  // (D1/A17): an operator asserting an --expected-state that was never the state this row
+  // actually transitioned from. The all-'a' planDigest on APPLY_ARGS was never a valid digest for
+  // ANY plan, so falling through to step 3 must refuse with PLAN_DIGEST_MISMATCH — never a no-op.
+  const wrongPriorPlan = fakePlan({ currentState: 'shadow', currentVersion: 2, priorState: 'eligible', targetState: 'shadow' })
+  const deps = countingDeps(wrongPriorPlan)
+
+  await assert.rejects(
+    () => runAttendanceW4C5ApplyOrchestrationV1(deps, APPLY_ARGS, VALIDATED_MANIFEST),
+    (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_PLAN_DIGEST_MISMATCH',
+  )
+  assert.equal(deps.transitionCalls.length, 0)
+})
+
+test('runAttendanceW4C5ApplyOrchestrationV1 P2-1: a priorState mismatch with a FRESHLY MATCHING digest reaches the boundary (never a local no-op) and the boundary is what refuses it', async () => {
+  // Sharper than the digest-mismatch case above: here the caller ALSO supplies a digest that
+  // matches this exact (wrong-priorState) plan, so step 3 cannot be what blocks the no-op. This
+  // is the mutation-exclusive proof for the priorState conjunct: neutering ONLY the priorState
+  // check turns this into an exit-0 no-op; neutering the digest check leaves this test green
+  // (the plan/digest amount here is genuinely fresh and matching, by construction).
+  const wrongPriorPlan = fakePlan({ currentState: 'shadow', currentVersion: 2, priorState: 'eligible', targetState: 'shadow' })
+  const matchingArgs = { ...APPLY_ARGS, planDigest: computeAttendanceW4C5PlanDigestV1(wrongPriorPlan as never) }
+  const deps = countingDeps(wrongPriorPlan)
+
+  const outcome = await runAttendanceW4C5ApplyOrchestrationV1(deps, matchingArgs, VALIDATED_MANIFEST)
+
+  // With the priorState check in place but nothing else changed, this is NOT a no-op — it falls
+  // through to the boundary call, which is asserted here to have been invoked exactly once with
+  // the caller's claimed (wrong) expectedState. A real boundary would refuse this with its own
+  // ILLEGAL_TRANSITION/STALE_EXPECTED_STATE code (proven end-to-end at the DB level); this fake
+  // only proves the tool-level no-op never fires.
+  assert.equal(outcome.outcome, 'transitioned')
+  assert.equal(deps.transitionCalls.length, 1)
+  assert.equal((deps.transitionCalls[0] as { expectedState: string }).expectedState, 'legacy')
 })
 
 test('runAttendanceW4C5ApplyOrchestrationV1: a genuinely stale plan (diverged to a DIFFERENT state, not the target) is a hard digest-mismatch refusal, never a no-op', async () => {

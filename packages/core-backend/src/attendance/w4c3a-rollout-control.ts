@@ -1100,6 +1100,21 @@ export type AttendanceRolloutTransitionPlanV1 = Readonly<{
   rowExists: boolean
   currentState: AttendanceRolloutStateV1
   currentVersion: number | null
+  /**
+   * The state the row transitioned FROM to reach `currentState` — i.e. the persisted
+   * `attendance_calculation_rollout_state.prior_state` column, read (never written) by this
+   * read-only reporter. `null` exactly when `currentState === 'legacy'` with no prior
+   * transition ever recorded (a missing row, or a bootstrap row that has never transitioned) —
+   * every other state always has a non-null `priorState`, enforced by the DB trigger
+   * `attendance_w4_rollout_state_guard` (`prior_state must record the previous state`).
+   * W4C-5 P2-1 (PR #4839 gate, 20260809): surfaced so the operator tool's idempotency
+   * short-circuit can require the CALLER's asserted `--expected-state` to match the state the
+   * row actually transitioned from, not just its current state/version — see that module's
+   * `runAttendanceW4C5ApplyOrchestrationV1` for why current-state/version alone under-constrains
+   * the no-op path (an illegal pair or a weaker manifest key set can both slip through a
+   * state/version-only check).
+   */
+  priorState: AttendanceRolloutStateV1 | null
   targetState: AttendanceRolloutStateV1
   legalPair: boolean
   comparisonWritePosture: AttendanceAcceptedWritePostureV1 | null
@@ -1129,22 +1144,41 @@ function passVerdict(
 async function readRolloutStateForPlan(
   trx: AttendanceW4TransactionClientV1,
   orgId: string,
-): Promise<Readonly<{ rowExists: boolean; state: AttendanceRolloutStateV1; version: number | null }>> {
+): Promise<
+  Readonly<{
+    rowExists: boolean
+    state: AttendanceRolloutStateV1
+    version: number | null
+    priorState: AttendanceRolloutStateV1 | null
+  }>
+> {
   const row = await trx.query(
-    `SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1`,
+    `SELECT state, version, prior_state FROM attendance_calculation_rollout_state WHERE org_id = $1`,
     [orgId],
   )
-  if (row.rows.length === 0) return { rowExists: false, state: 'legacy', version: null }
+  if (row.rows.length === 0) return { rowExists: false, state: 'legacy', version: null, priorState: null }
   if (row.rows.length !== 1) fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
   const state = row.rows[0].state
   const version = row.rows[0].version
+  const priorStateRaw = row.rows[0].prior_state
   if (typeof state !== 'string' || !TRANSITION_STATES.has(state as AttendanceRolloutStateV1)) {
     fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
   }
   if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
     fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
   }
-  return { rowExists: true, state: state as AttendanceRolloutStateV1, version }
+  // Enum-strict, matching `state` above: NULL is the only legal absence (see the type's doc
+  // comment); any non-null value that is not one of the five ratified states fails closed rather
+  // than being silently coerced to `null` or to `state`.
+  if (priorStateRaw !== null && (typeof priorStateRaw !== 'string' || !TRANSITION_STATES.has(priorStateRaw as AttendanceRolloutStateV1))) {
+    fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
+  }
+  return {
+    rowExists: true,
+    state: state as AttendanceRolloutStateV1,
+    version,
+    priorState: priorStateRaw === null ? null : (priorStateRaw as AttendanceRolloutStateV1),
+  }
 }
 
 async function buildAttendanceRolloutTransitionPlanV1(
@@ -1245,6 +1279,7 @@ async function buildAttendanceRolloutTransitionPlanV1(
     rowExists: persisted.rowExists,
     currentState,
     currentVersion: persisted.version,
+    priorState: persisted.priorState,
     targetState,
     legalPair: legal !== undefined,
     comparisonWritePosture: legal ? legal.comparisonWritePosture : null,

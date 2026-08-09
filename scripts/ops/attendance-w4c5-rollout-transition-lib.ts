@@ -338,6 +338,13 @@ export function computeAttendanceW4C5PlanDigestV1(plan: AttendanceRolloutTransit
     rowExists: plan.rowExists,
     currentState: plan.currentState,
     currentVersion: plan.currentVersion,
+    // W4C-5 P2-1 (PR #4839 gate, 20260809): included so this digest genuinely covers "every
+    // observable field of the plan" (see the comment on the digest-match step below) now that
+    // `priorState` is one. Without it, a plan whose ONLY change since a prior computation is its
+    // `priorState` (impossible in practice today, since any state transition also changes
+    // `currentVersion`, but not something this digest should rely on staying impossible) would
+    // silently produce the same digest.
+    priorState: plan.priorState,
     targetState: plan.targetState,
     legalPair: plan.legalPair,
     comparisonWritePosture: plan.comparisonWritePosture,
@@ -456,14 +463,29 @@ export function parseAttendanceW4C5ApplyArgsV1(argv: readonly string[]): Attenda
 //   1. Re-run plan fresh (in THIS invocation — a stale plan from an earlier process can never be
 //      applied, because its digest can only ever be compared against a digest computed just now).
 //   2. IDEMPOTENCY FIRST: if the org is ALREADY at exactly targetState with version exactly
-//      expectedVersion + 1 (i.e. this precise transition already completed, most likely by an
-//      earlier identical apply invocation), return a no-op success WITHOUT ever comparing plan
-//      digests. Getting this order backwards is the sharpest trap here: on a second identical
-//      apply, the fresh replan observes the NEW state/version, so its digest necessarily differs
-///     from the digest supplied on the command line — a digest-check-first ordering would reject
-//      every idempotent re-apply as `PLAN_DIGEST_MISMATCH`, making "re-apply is a no-op" untestable.
+//      expectedVersion + 1 AND its recorded priorState equals the caller's asserted
+//      expectedState (i.e. THIS precise transition already completed, most likely by an earlier
+//      identical apply invocation), return a no-op success WITHOUT ever comparing plan digests.
+//      Getting this order backwards is the sharpest trap here: on a second identical apply, the
+//      fresh replan observes the NEW state/version, so its digest necessarily differs from the
+//      digest supplied on the command line — a digest-check-first ordering would reject every
+//      idempotent re-apply as `PLAN_DIGEST_MISMATCH`, making "re-apply is a no-op" untestable.
 //      Divergence to any OTHER state is never treated as a no-op — only this exact
-//      (targetState, expectedVersion + 1) tuple short-circuits.
+//      (targetState, expectedVersion + 1, priorState) tuple short-circuits.
+//      W4C-5 P2-1 (PR #4839 gate, 20260809): the `priorState` conjunct closes a false-completion
+//      hole the (targetState, expectedVersion + 1) pair alone left open — that pair says nothing
+//      about which state the row transitioned FROM, so an operator whose `--expected-state`
+//      names a pair that was never legal (e.g. `authoritative -> shadow`, not one of the seven
+//      ratified pairs) or that selects a WEAKER §4 manifest key set than the transition that
+//      actually happened (e.g. claiming `--expected-state shadow` for a promotion that only a
+//      `--expected-state eligible` authority-promotion manifest actually evidenced) previously
+//      still got `exit 0 noop_already_at_target` — routing around both the digest check below
+//      AND the boundary's own `normalizeTransitionInput` pair-legality guard entirely, without
+//      ever calling it. Requiring `freshPlan.priorState === args.expectedState` here means the
+//      no-op can only ever fire for the EXACT transition the caller claims to be re-observing;
+//      any other claimed prior state falls through to the digest check (step 3), and from there —
+//      once a caller supplies a freshly matching digest for the WRONG claimed pair — to the
+//      boundary's own `ILLEGAL_TRANSITION`/`STALE_EXPECTED_STATE` refusal, never a silent no-op.
 //   3. Digest match: the supplied `--plan-digest` must equal the freshly recomputed digest. There
 //      is deliberately no separate local "blocked"/"illegal pair"/"not allowlisted" check here —
 //      see the comment directly above the digest comparison below for why folding those into a
@@ -507,7 +529,8 @@ export async function runAttendanceW4C5ApplyOrchestrationV1(
   if (
     freshPlan.rowExists &&
     freshPlan.currentState === args.targetState &&
-    freshPlan.currentVersion === args.expectedVersion + 1
+    freshPlan.currentVersion === args.expectedVersion + 1 &&
+    freshPlan.priorState === args.expectedState
   ) {
     const freshDigest = computeAttendanceW4C5PlanDigestV1(freshPlan)
     return Object.freeze({
