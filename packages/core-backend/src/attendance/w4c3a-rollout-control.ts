@@ -36,6 +36,7 @@ import {
   type VerifiedAttendanceOperationIdentityV1,
 } from './w4c0-identity'
 import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
+import { W4_TRANSACTION_STATEMENT_TIMEOUT_MS } from './w4c0-operation-contract'
 import {
   ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1,
   buildAttendanceRequestCalculationPayloadFromRequestRowV1,
@@ -1046,6 +1047,241 @@ export async function readAttendanceRequestSnapshotDefectReportV1(
   orgId: string,
 ): Promise<AttendanceRequestSnapshotDefectReportV1> {
   return classifyAttendanceRequestSnapshotDefectsV1(connection, orgId)
+}
+
+// ---------------------------------------------------------------------------
+// W4C-5 §5 tooling contract: "a read-only `status`/`plan` command that emits
+// `PASS|BLOCKED` per predicate". This is the SOLE plan-report shape — the
+// separately-gated operator tool (scripts/ops/) must call this rather than
+// re-deriving any of section 1/3's logic itself (amendment section 2: "two
+// competing transition implementations are forbidden"). It reuses the exact
+// same private matrix/predicate helpers `transitionAttendanceCalculationRolloutV1`
+// enforces, wrapped in a transaction this function ALWAYS rolls back — never
+// commits, regardless of outcome — so it is mechanically zero-write even
+// though several reused helpers issue `SELECT ... FOR UPDATE` (a lock taken
+// and released within this function's own short-lived transaction, never a
+// persisted change). Completion gate 4 applies unchanged: this report is
+// advisory only and can go stale the instant it returns; only the boundary
+// transaction's own re-evaluation under the exclusive rollout lock is ever
+// authoritative.
+// ---------------------------------------------------------------------------
+
+export const ATTENDANCE_ROLLOUT_TRANSITION_PREDICATE_CODES_V1 = Object.freeze([
+  'ORG_ALLOWLISTED',
+  'ROLLOUT_ROW_RESOLVABLE',
+  'LEGAL_TRANSITION_PAIR',
+  'UNCLOSED_LEGACY_BATCH',
+  'RETRYABLE_JOB_POSTURE_MISMATCH',
+  'RETRYABLE_JOB_HAS_OPERATION_ROWS',
+  'NONTERMINAL_LEGACY_JOB',
+  'INCOMPLETE_OPERATION',
+  'UNRESOLVED_INGRESS_REVIEW',
+  'DEFECTIVE_REQUEST_SNAPSHOT',
+] as const)
+
+export type AttendanceRolloutTransitionPredicateCodeV1 =
+  (typeof ATTENDANCE_ROLLOUT_TRANSITION_PREDICATE_CODES_V1)[number]
+
+export type AttendanceRolloutTransitionPredicateV1 = Readonly<{
+  code: AttendanceRolloutTransitionPredicateCodeV1
+  applicable: boolean
+  pass: boolean
+  count: number | null
+}>
+
+export type AttendanceRolloutTransitionPlanInputV1 = Readonly<{
+  orgId: string
+  targetState: AttendanceRolloutStateV1
+}>
+
+export type AttendanceRolloutTransitionPlanV1 = Readonly<{
+  orgId: string
+  orgAllowlisted: boolean
+  rowExists: boolean
+  currentState: AttendanceRolloutStateV1
+  currentVersion: number | null
+  targetState: AttendanceRolloutStateV1
+  legalPair: boolean
+  comparisonWritePosture: AttendanceAcceptedWritePostureV1 | null
+  canBootstrap: boolean
+  predicates: readonly AttendanceRolloutTransitionPredicateV1[]
+  blocked: boolean
+}>
+
+function passVerdict(
+  code: AttendanceRolloutTransitionPredicateCodeV1,
+  applicable: boolean,
+  pass: boolean,
+  count: number | null,
+): AttendanceRolloutTransitionPredicateV1 {
+  return Object.freeze({ code, applicable, pass, count })
+}
+
+/**
+ * Read-only sibling of `lockRolloutStateForBootstrapOrRead` used ONLY for planning: no `FOR
+ * UPDATE`, and it never inserts a bootstrap row (a real bootstrap INSERT belongs exclusively to
+ * the transactional boundary, never to a plan report that is always rolled back — issuing one
+ * here even inside a rolled-back transaction would defeat the point of a dynamic zero-write
+ * proof over the statements this function sends). A missing row is reported as `rowExists:
+ * false` with the effective current state assumed `legacy` (the only state a missing row can
+ * ever mean, matching the boundary's own bootstrap precondition), never fabricated.
+ */
+async function readRolloutStateForPlan(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<Readonly<{ rowExists: boolean; state: AttendanceRolloutStateV1; version: number | null }>> {
+  const row = await trx.query(
+    `SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1`,
+    [orgId],
+  )
+  if (row.rows.length === 0) return { rowExists: false, state: 'legacy', version: null }
+  if (row.rows.length !== 1) fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
+  const state = row.rows[0].state
+  const version = row.rows[0].version
+  if (typeof state !== 'string' || !TRANSITION_STATES.has(state as AttendanceRolloutStateV1)) {
+    fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
+  }
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+    fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
+  }
+  return { rowExists: true, state: state as AttendanceRolloutStateV1, version }
+}
+
+async function buildAttendanceRolloutTransitionPlanV1(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+  targetState: AttendanceRolloutStateV1,
+): Promise<AttendanceRolloutTransitionPlanV1> {
+  const orgAllowlisted = isAttendanceCalculationOrgAllowlistedV1(orgId)
+  const persisted = await readRolloutStateForPlan(trx, orgId)
+  const currentState = persisted.state
+  const legal = findLegalTransition(currentState, targetState)
+  const canBootstrap = !persisted.rowExists && orgAllowlisted && currentState === 'legacy' && targetState === 'shadow'
+  const rowResolvable = persisted.rowExists || canBootstrap
+
+  const predicates: AttendanceRolloutTransitionPredicateV1[] = [
+    passVerdict('ORG_ALLOWLISTED', true, orgAllowlisted, null),
+    passVerdict('ROLLOUT_ROW_RESOLVABLE', true, rowResolvable, null),
+    passVerdict('LEGAL_TRANSITION_PAIR', true, legal !== undefined, null),
+  ]
+
+  // The remaining predicates all require database reads against a real org; without an
+  // allowlisted, resolvable row and a legal pair there is nothing further to safely evaluate —
+  // matches the boundary's own fail-fast ordering (org allowlist, then row, then matrix, all
+  // BEFORE any predicate in section 3 ever runs).
+  if (orgAllowlisted && rowResolvable && legal) {
+    const batchIds = await allOrgBatchIds(trx, orgId)
+    let unclosedBatches = 0
+    for (const batchId of batchIds) {
+      const state = await loadBatchReferenceState(trx, orgId, batchId)
+      if (!state.closed && !state.hasFrozenPreimage) unclosedBatches += 1
+    }
+    predicates.push(passVerdict('UNCLOSED_LEGACY_BATCH', true, unclosedBatches === 0, unclosedBatches))
+
+    const retryableJobMismatches = await countRetryableJobPostureMismatches(trx, orgId, legal.comparisonWritePosture)
+    predicates.push(
+      passVerdict('RETRYABLE_JOB_POSTURE_MISMATCH', true, retryableJobMismatches === 0, retryableJobMismatches),
+    )
+
+    const resumePair = isResumePair(currentState, targetState)
+    if (resumePair) {
+      const retryableJobsWithOperationRows = await countRetryableJobsWithOperationRows(trx, orgId)
+      predicates.push(
+        passVerdict(
+          'RETRYABLE_JOB_HAS_OPERATION_ROWS',
+          true,
+          retryableJobsWithOperationRows === 0,
+          retryableJobsWithOperationRows,
+        ),
+      )
+    } else {
+      predicates.push(passVerdict('RETRYABLE_JOB_HAS_OPERATION_ROWS', false, true, null))
+    }
+
+    if (CALCULATION_ENTRY_TARGETS.has(targetState)) {
+      const nonterminalLegacyJobs = await countNonterminalNullVersionLegacyJobs(trx, orgId)
+      predicates.push(
+        passVerdict('NONTERMINAL_LEGACY_JOB', true, nonterminalLegacyJobs === 0, nonterminalLegacyJobs),
+      )
+    } else {
+      predicates.push(passVerdict('NONTERMINAL_LEGACY_JOB', false, true, null))
+    }
+
+    if (ELIGIBILITY_AUTHORITY_TARGETS.has(targetState)) {
+      const incompleteOperations = await countIncompleteOperations(trx, orgId)
+      predicates.push(
+        passVerdict('INCOMPLETE_OPERATION', true, incompleteOperations === 0, incompleteOperations),
+      )
+      const unresolvedReviews = await countUnresolvedIngressReviews(trx, orgId)
+      predicates.push(
+        passVerdict('UNRESOLVED_INGRESS_REVIEW', true, unresolvedReviews === 0, unresolvedReviews),
+      )
+      const snapshotDefects = await classifyAttendanceRequestSnapshotDefectsV1(trx, orgId)
+      predicates.push(
+        passVerdict(
+          'DEFECTIVE_REQUEST_SNAPSHOT',
+          true,
+          snapshotDefects.totalDefectiveRequests === 0,
+          snapshotDefects.totalDefectiveRequests,
+        ),
+      )
+    } else {
+      predicates.push(passVerdict('INCOMPLETE_OPERATION', false, true, null))
+      predicates.push(passVerdict('UNRESOLVED_INGRESS_REVIEW', false, true, null))
+      predicates.push(passVerdict('DEFECTIVE_REQUEST_SNAPSHOT', false, true, null))
+    }
+  } else {
+    for (const code of ATTENDANCE_ROLLOUT_TRANSITION_PREDICATE_CODES_V1) {
+      if (code === 'ORG_ALLOWLISTED' || code === 'ROLLOUT_ROW_RESOLVABLE' || code === 'LEGAL_TRANSITION_PAIR') continue
+      predicates.push(passVerdict(code, false, true, null))
+    }
+  }
+
+  const blocked = predicates.some((predicate) => predicate.applicable && !predicate.pass)
+
+  return Object.freeze({
+    orgId,
+    orgAllowlisted,
+    rowExists: persisted.rowExists,
+    currentState,
+    currentVersion: persisted.version,
+    targetState,
+    legalPair: legal !== undefined,
+    comparisonWritePosture: legal ? legal.comparisonWritePosture : null,
+    canBootstrap,
+    predicates: Object.freeze(predicates),
+    blocked,
+  })
+}
+
+/**
+ * The tooling contract's read-only `plan` reporter. Performs ZERO persisted writes: the whole
+ * body runs inside a transaction this function unconditionally rolls back in its `finally`
+ * block — it NEVER issues `COMMIT`, on any path, including a thrown error. `connection` must be
+ * idle (no already-open transaction) — the same discipline as every other multi-statement
+ * boundary in this file.
+ */
+export async function planAttendanceCalculationRolloutTransitionV1(
+  connection: AttendanceW4TransactionClientV1,
+  rawInput: AttendanceRolloutTransitionPlanInputV1,
+): Promise<AttendanceRolloutTransitionPlanV1> {
+  if (typeof rawInput !== 'object' || rawInput === null) fail('W4C3A_ROLLOUT_CONTROL_INPUT_INVALID')
+  const orgId = String(parseCanonicalAttendanceRolloutOrgKeyV1(rawInput.orgId))
+  const targetState = requireRolloutState(rawInput.targetState, 'W4C3A_ROLLOUT_CONTROL_INPUT_INVALID')
+  await connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+  try {
+    await connection.query("SELECT set_config('statement_timeout', $1, true)", [
+      String(W4_TRANSACTION_STATEMENT_TIMEOUT_MS),
+    ])
+    return await buildAttendanceRolloutTransitionPlanV1(connection, orgId, targetState)
+  } finally {
+    // Unconditional ROLLBACK — never COMMIT — on every path, success or failure. This is what
+    // turns "this function does not issue INSERT/UPDATE/DELETE" from a claim about the code
+    // above into a mechanically enforced invariant about what the database ever durably
+    // observes, even against a future edit inside `buildAttendanceRolloutTransitionPlanV1`
+    // that accidentally added a write.
+    await connection.query('ROLLBACK').catch(() => undefined)
+  }
 }
 
 function isRetryableControlPrecondition(error: unknown): boolean {
