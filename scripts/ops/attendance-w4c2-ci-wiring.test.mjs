@@ -3080,13 +3080,17 @@ const OUT_OF_DOMAIN_REASONS = Object.freeze({
  * member. It keeps the YAML bridge's blast radius proportional to real usage instead of coupling
  * this guard to the parseability of all 81 workflow files.
  *
- * The directory scan REFUSES a non-regular entry rather than skipping it, exactly as `walkFiles`
- * does — a symlinked workflow is a file this guard has not read.
+ * The directory scan REFUSES a non-regular entry rather than skipping it, on the same principle as
+ * `walkFiles` — a SYMLINKED workflow is a file this guard has not read. It follows that helper's
+ * treatment of DIRECTORIES too, which is not refusal: GitHub Actions does not read nested workflow
+ * directories at all, so a subdirectory here cannot hold a step that runs, and refusing it would red
+ * this guard over something that can never execute.
  */
-function workflowFilesNamingGoverningConfig(basename) {
+function workflowFilesNamingGoverningConfig(basename, dir = WORKFLOWS_DIR) {
   const out = []
-  for (const name of readdirSync(WORKFLOWS_DIR).sort()) {
-    const st = lstatSync(join(WORKFLOWS_DIR, name))
+  for (const name of readdirSync(dir).sort()) {
+    const st = lstatSync(join(dir, name))
+    if (st.isDirectory()) continue
     if (!st.isFile()) {
       throw new Error(
         `workflow scan: failing CLOSED — .github/workflows/${name} is ${describeStatType(st)}, not a `
@@ -3094,7 +3098,7 @@ function workflowFilesNamingGoverningConfig(basename) {
       )
     }
     if (!/\.ya?ml$/.test(name)) continue
-    const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8')
+    const text = readFileSync(join(dir, name), 'utf8')
     if (!text.includes(basename)) continue
     out.push({ file: name, text })
   }
@@ -3251,6 +3255,36 @@ function liveOutOfDomainInvocations() {
     workflowStepsWithRun(workflowFilesNamingGoverningConfig(posix.basename(governingIntegrationConfig()))),
   )
 }
+
+test('COMPLEMENT discovery scan positive control: it selects by text, skips directories, and REFUSES a non-regular entry', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w4c2-wfscan-'))
+  try {
+    writeFileSync(join(dir, 'b-names-it.yml'), 'jobs:\n  x:\n    steps:\n      - run: vitest --config vitest.integration.config.ts run a\n')
+    writeFileSync(join(dir, 'a-names-it.yaml'), '# vitest.integration.config.ts mentioned in a comment\n')
+    writeFileSync(join(dir, 'c-does-not.yml'), 'jobs: {}\n')
+    writeFileSync(join(dir, 'd-names-it.yml.example'), 'vitest.integration.config.ts\n')
+    mkdirSync(join(dir, 'scripts'))
+    writeFileSync(join(dir, 'scripts/nested.yml'), 'vitest.integration.config.ts\n')
+    // SELECTION: by extension AND by text, sorted; the `.yml.example` and the non-naming file are out,
+    // and a NESTED file is out because GitHub never reads it.
+    assert.deepEqual(
+      workflowFilesNamingGoverningConfig('vitest.integration.config.ts', dir).map((e) => e.file),
+      ['a-names-it.yaml', 'b-names-it.yml'],
+    )
+    // NEGATIVE CONTROL on the text filter itself — a basename nothing names selects nothing, so the
+    // filter is doing work rather than always answering "all".
+    assert.deepEqual(workflowFilesNamingGoverningConfig('vitest.nowhere.config.ts', dir), [])
+    // REFUSAL: a symlink is a file this guard has not read. Proven to fire, not asserted to.
+    symlinkSync(join(dir, 'b-names-it.yml'), join(dir, 'e-link.yml'))
+    assert.throws(
+      () => workflowFilesNamingGoverningConfig('vitest.integration.config.ts', dir),
+      /failing CLOSED/,
+      'a symlinked workflow must be refused rather than followed or skipped',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('COMPLEMENT is non-vacuous: workflow steps outside the three real-DB steps do run the governing config', () => {
   const invocations = liveOutOfDomainInvocations()
