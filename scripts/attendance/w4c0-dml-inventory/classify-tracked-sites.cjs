@@ -26,9 +26,10 @@ const {
  * @param {Array<object>} trackedSites census sites in the tracked buckets.
  *
  * Every leg is always computed. `unclaimed` and `overCount` are meaningful for ANY census,
- * including the synthetic single-site fixtures the positive controls feed. `missing` is only
- * meaningful for a whole-tree census (a partial census trivially misses most identities), and is
- * asserted by the full-tree gate.
+ * including the synthetic single-site fixtures the positive controls feed. `missing` and
+ * `fingerprintDrift` are only meaningful for a whole-tree census — both walk the frozen identity
+ * table, so a partial census trivially puts most of the 181 identities into each — and both are
+ * asserted empty by the full-tree gate only.
  */
 function classifyTrackedSites(trackedSites) {
   const claimsByEntryId = new Map(CURATED_DEBT_ENTRIES.map((e) => [e.id, []]))

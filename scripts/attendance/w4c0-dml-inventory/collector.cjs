@@ -782,7 +782,14 @@ function scanFileForDmlSites(relPath, content) {
     const isStagingDdlVerb = verb === 'staging_create' || verb === 'staging_drop' || verb === 'staging_alter'
     if (isStagingDdlVerb && isMigrationPath(relPath)) continue
     const lineIndex = lineIndexAt(masked, m.index)
-    const statementFingerprint = statementFingerprintOf(statementTextAt(masked, m.index, literalRanges))
+    // `statementText` is carried alongside the fingerprint so that ALIGNMENT is checkable, not
+    // merely assumed. A hash is non-empty and perfectly stable even when it was taken over the
+    // WRONG span — `sqlLiteralRanges` is a quote-pairing scan, and one mispaired quote upstream
+    // could put a site inside a range belonging to a different literal. That would pin the wrong
+    // text and stay green forever. The suite asserts, for every tracked site, that this text
+    // actually contains that site's own table and verb.
+    const statementText = statementTextAt(masked, m.index, literalRanges)
+    const statementFingerprint = statementFingerprintOf(statementText)
     sites.push({
       relPath,
       line: lineIndex + 1,
@@ -790,6 +797,7 @@ function scanFileForDmlSites(relPath, content) {
       table,
       enclosingSymbol: nearestEnclosingSymbol(originalLines, lineIndex),
       statementFingerprint,
+      statementText,
     })
 
     // Remaining targets of a `TRUNCATE a, b, c` / `DROP TABLE a, b` list. Each becomes its own
@@ -812,6 +820,7 @@ function scanFileForDmlSites(relPath, content) {
           // Every target of one statement shares that statement's fingerprint — they are the
           // same statement, and a change to it must red all of them together.
           statementFingerprint,
+          statementText,
         })
       }
     }

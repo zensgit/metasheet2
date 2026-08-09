@@ -740,6 +740,58 @@ test('statement fingerprint: normalisation is exactly whitespace + case, so form
   )
 })
 
+test('statement fingerprint ALIGNMENT: every site is fingerprinted over its OWN statement', () => {
+  // A fingerprint is non-empty and perfectly stable even when taken over the WRONG span, and that
+  // failure is invisible: the gate would be green forever while pinning text belonging to some
+  // other literal. `sqlLiteralRanges` is a quote-pairing scan over the whole masked file, so a
+  // single mispaired quote upstream could shift every later range. "212/212 sites have a
+  // non-empty fingerprint" rules out extraction FAILURE; it says nothing about MISALIGNMENT, and
+  // the WHERE-deletion probe proves alignment for exactly one site out of 212.
+  //
+  // Mechanical check over the whole census: the text a site was fingerprinted over must contain
+  // that site's own table name AND its own verb keyword.
+  const VERB_KEYWORDS = {
+    insert: ['insert'],
+    update: ['update'],
+    delete: ['delete'],
+    truncate: ['truncate'],
+    merge: ['merge'],
+    copy: ['copy'],
+    staging_create: ['create'],
+    staging_drop: ['drop'],
+    staging_alter: ['alter'],
+  }
+  const tracked = currentTrackedSites()
+  assert.ok(tracked.length > 0, 'precondition: the census is non-empty')
+
+  const misaligned = []
+  for (const site of tracked) {
+    const text = String(site.statementText ?? '').replace(/\s+/g, ' ').toLowerCase()
+    const keywords = VERB_KEYWORDS[site.verb]
+    assert.ok(keywords, `unmapped verb ${site.verb} — extend VERB_KEYWORDS rather than skipping it, or this check silently stops covering that verb`)
+    const hasTable = text.includes(String(site.table).toLowerCase())
+    const hasVerb = keywords.some((kw) => text.includes(kw))
+    if (!hasTable || !hasVerb) {
+      misaligned.push(`${site.relPath}:${site.line} ${site.table}:${site.verb} hasTable=${hasTable} hasVerb=${hasVerb} text=${text.slice(0, 120)}`)
+    }
+  }
+  assert.deepEqual(
+    misaligned,
+    [],
+    'every tracked site must be fingerprinted over text that actually contains its own table and verb — a site failing this is pinning some other statement, and its fingerprint guards nothing',
+  )
+
+  // Negative control: the check must be capable of failing. A site whose text is replaced with an
+  // unrelated statement has to be caught, or the loop above is asserting nothing.
+  const decoy = { ...tracked[0], statementText: 'SELECT 1 FROM some_unrelated_place' }
+  const decoyText = decoy.statementText.replace(/\s+/g, ' ').toLowerCase()
+  assert.equal(
+    decoyText.includes(String(decoy.table).toLowerCase()) && VERB_KEYWORDS[decoy.verb].some((kw) => decoyText.includes(kw)),
+    false,
+    'positive control for the detector itself: mismatched statement text must be detectable',
+  )
+})
+
 test('every approved identity carries a well-formed statement fingerprint multiset', () => {
   for (const row of APPROVED_SITE_IDENTITIES) {
     assert.ok(Array.isArray(row.statementFingerprints), `${siteIdentityLabel(row)} must carry statementFingerprints`)
