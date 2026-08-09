@@ -1169,7 +1169,15 @@ async function readRolloutStateForPlan(
   }
   // Enum-strict, matching `state` above: NULL is the only legal absence (see the type's doc
   // comment); any non-null value that is not one of the five ratified states fails closed rather
-  // than being silently coerced to `null` or to `state`.
+  // than being silently coerced to `null` or to `state`. Honest self-disclosure (same discipline
+  // as the second `findLegalTransition` call this file already documents as unreachable-but-kept):
+  // the DDL CHECK constraint `chk_acrs_prior_state`
+  // (`CHECK (prior_state IS NULL OR prior_state IN (...ROLLOUT_STATES...))`,
+  // zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage.ts) already makes an
+  // out-of-enum non-null value impossible to durably write on any live path today — mutating this
+  // branch away leaves every test green. Kept as defense-in-depth against a future DDL widening
+  // that removes the CHECK, never trusting the DB shape alone for a value this reporter surfaces
+  // to a caller.
   if (priorStateRaw !== null && (typeof priorStateRaw !== 'string' || !TRANSITION_STATES.has(priorStateRaw as AttendanceRolloutStateV1))) {
     fail('W4C3A_ROLLOUT_CONTROL_STATE_INVALID')
   }
