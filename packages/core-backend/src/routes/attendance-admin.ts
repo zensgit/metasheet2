@@ -19,6 +19,7 @@ import {
   runAttendanceSetupReadinessReadOnly,
   type AttendanceSetupReadinessOrgCounts,
   type AttendanceSetupReadinessNotify,
+  type AttendanceSetupReadinessQueryFn,
   type AttendanceSetupReadinessPerStepEntry,
   type AttendanceSetupStepId,
   type AttendancePunchPolicyPosture,
@@ -123,12 +124,41 @@ const attendanceGroupEffectivePolicyFserService = attendanceGroupFixedScheduleEf
   },
 )
 
-const attendanceGroupEffectivePolicyAggregateService = createAttendanceGroupEffectivePolicyAggregateService({
-  query: async (sql: string, params?: unknown[]) => (await query(sql, params)).rows,
-  fser: attendanceGroupEffectivePolicyFserService,
-  now: attendanceGroupEffectivePolicyNow,
-  segmentCalculationImplemented: attendanceShiftServiceLib.SEGMENT_CALCULATION_IMPLEMENTED,
-})
+/**
+ * W6-R1 STRUCTURAL BACKSTOP (owner ruling on the #4832 review, and the earlier
+ * binding addendum it restates).
+ *
+ * There used to be a module-scope aggregate service here, constructed once
+ * with the POOL-backed `query`. That is deleted, and the deletion is the
+ * point: while such a singleton exists, every helper on the read path can
+ * reach the pool by accident, and the only thing standing between a stray
+ * write and the database is whether a static analyser saw it. The service is
+ * now built PER REQUEST, inside the read-only transaction, bound to that
+ * transaction's client — so there is no pool-bound aggregate to call.
+ *
+ * `runAttendanceSetupReadinessReadOnly` (W4-0, `services/AttendanceSetupReadinessAggregate.ts`)
+ * is reused rather than reinvented: it issues `SET TRANSACTION READ ONLY` as
+ * the FIRST statement of the transaction, so PostgreSQL itself refuses every
+ * subsequent write with SQLSTATE 25006 regardless of statement shape,
+ * batching, or how it was composed.
+ *
+ * The static sweep (`tests/unit/attendance-w6-group-effective-policy-dml-sweep.test.ts`)
+ * is NOT the mechanism of record and does not substitute for this. It is a
+ * second, independent leg that can be defeated by any dataflow it cannot
+ * trace; the transaction cannot.
+ */
+function createAttendanceGroupEffectivePolicyReadOnlyService(
+  readOnlyQuery: AttendanceSetupReadinessQueryFn,
+): ReturnType<typeof createAttendanceGroupEffectivePolicyAggregateService> {
+  return createAttendanceGroupEffectivePolicyAggregateService({
+    // Named `query` deliberately: the DB-seam sweep resolves an adapter's
+    // name from its object-literal property, and this is the seam.
+    query: async (sql: string, params?: unknown[]) => (await readOnlyQuery(sql, params)).rows,
+    fser: attendanceGroupEffectivePolicyFserService,
+    now: attendanceGroupEffectivePolicyNow,
+    segmentCalculationImplemented: attendanceShiftServiceLib.SEGMENT_CALCULATION_IMPLEMENTED,
+  })
+}
 
 /**
  * W6-1 (#4556) §4.1: org identity for the group effective-policy route comes
@@ -1741,15 +1771,43 @@ export function attendanceAdminRouter(): Router {
           return jsonError(res, 403, 'FORBIDDEN', 'Insufficient permissions')
         }
 
-        const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId)
-        if (!allowed) return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for effective-policy')
+        // W6-R1 structural backstop. EVERYTHING from here on runs inside ONE
+        // `SET TRANSACTION READ ONLY` transaction, and the membership gate is
+        // deliberately INSIDE it rather than before it: the owner's binding
+        // addendum names `canReadAttendanceDirectoryReadiness` as precisely the
+        // call-path hole a static sweep kept missing (DML injected there wrote
+        // 130 rows with the old guard green), so its membership read must share
+        // the aggregate's and FSER's read-only client, not run on the pool.
+        //
+        // Two consequences, both real and neither hidden:
+        //  - a delegated-non-member 403 and an invalid-groupId 400 now OPEN a
+        //    transaction (read-only, rolled back with nothing in it). The W4-0
+        //    §9 W4-0-G2 "zero transactions" wording applies to the SETUP-READINESS
+        //    route, not to this one; for this route the ordering guarantee is
+        //    "no AGGREGATE SQL", which the suite asserts with a counting spy.
+        //  - `isRbacAdmin` (the full/platform-admin bypass inside
+        //    `canReadAttendanceDirectoryReadiness`) still reads on the POOL.
+        //    That is the RBAC carve-out the owner allowed: it is authorization
+        //    middleware, it reads `user_permissions`/`role_permissions` only,
+        //    and it short-circuits BEFORE the membership query — which is why
+        //    every proof of the membership read has to run as a NON-admin.
+        const aggregate = await runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
+          const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId, readOnlyQuery)
+          if (!allowed) {
+            throw new AttendanceGroupEffectivePolicyServiceError(
+              403,
+              'FORBIDDEN',
+              'Org membership required for effective-policy',
+            )
+          }
 
-        const groupId = String(req.params.groupId || '').trim()
-        if (!UUID_RE.test(groupId)) {
-          return jsonError(res, 400, 'GROUP_ID_INVALID', 'groupId must be a UUID')
-        }
+          const groupId = String(req.params.groupId || '').trim()
+          if (!UUID_RE.test(groupId)) {
+            throw new AttendanceGroupEffectivePolicyServiceError(400, 'GROUP_ID_INVALID', 'groupId must be a UUID')
+          }
 
-        const aggregate = await attendanceGroupEffectivePolicyAggregateService.getAggregate({ orgId, groupId })
+          return createAttendanceGroupEffectivePolicyReadOnlyService(readOnlyQuery).getAggregate({ orgId, groupId })
+        })
         return jsonOk(res, aggregate)
       } catch (error) {
         if (error instanceof AttendanceGroupEffectivePolicyServiceError) {

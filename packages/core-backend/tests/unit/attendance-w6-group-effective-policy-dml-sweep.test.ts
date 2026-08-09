@@ -5,27 +5,61 @@ import {
   AGGREGATE_ROUTE_ENTRY_FILE,
   AGGREGATE_ROUTE_ENTRY_PATH,
   buildAggregateCallPathClosure,
+  checkPassThroughCallers,
   collectQuerySqlArguments,
   extractRouteHandlerSource,
   findRepoRoot,
   pluginLibFilesInClosure,
+  type CallPathClosure,
 } from '../helpers/attendance-w6-call-path-closure'
 
 /**
  * W6-R1 — GET-only, zero writes: STATIC leg.
  *
- * What this file used to claim and could not deliver, recorded so the claim is
- * not quietly re-made: its header said "static DML sweep over the whole
- * aggregate CALL PATH" and "the primary, unfoolable proof is behavioral", while
- * `SWEPT_FILES` was a hand-list of TWO files and the detector was literal text.
- * Two independent probes walked through it:
- *   - DML injected into `canReadAttendanceDirectoryReadiness` — called from
- *     inside the route block, DECLARED outside it — wrote 130 rows with the
- *     sweep green;
- *   - `deps.query('IN' + "SERT INTO …")` inside the MOST-swept file wrote 6
- *     rows with the sweep green.
- * Those are two independent defects: the DOMAIN and the DETECTOR. Fixing one
- * does not close W6-R1.
+ * ─────────────────────────────────────────────────────────────────────────
+ * W6-R1 IS NOT COMPLETE. Stated first, and not to be read past.
+ *
+ * W6-R1's red line is "the aggregate performs zero writes", and the proof of
+ * that has two legs: this static one, and the behavioural one in
+ * `tests/integration/attendance-w6-group-effective-policy.db.test.ts` (plus
+ * `…-membership-overlap.db.test.ts`). Under the owner-ruled phase-1 scope
+ * fence NEITHER real-DB suite is two-point wired — they are absent from
+ * `.github/workflows/plugin-tests.yml`'s run-list AND absent from
+ * `packages/core-backend/vitest.config.ts`'s `exclude:`. The second absence
+ * is the worse one: the default no-DB lane COLLECTS them and
+ * `describeIfDatabase` reports them SKIPPED, which is a green run that
+ * executed nothing — the F1/#3487 skip-green failure mode.
+ *
+ * Consequence, plainly: on this branch W6-R1's behavioural proof does not
+ * execute in any required check, so W6-R1 CANNOT BE COUNTED COMPLETE. Both
+ * wirings, plus recomputing the provenance pin against fresh main, are a
+ * named phase-2 item gated on PR 4805's merge ruling. Nothing in this file
+ * discharges that red line; this file is one of its two legs.
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * WHAT THIS FILE USED TO CLAIM AND COULD NOT DELIVER, recorded so the claim
+ * is not quietly re-made. Its header said "static DML sweep over the whole
+ * aggregate CALL PATH"; `SWEPT_FILES` was a hand-list of TWO files and the
+ * detector was literal text. Two probes walked through it: DML injected into
+ * `canReadAttendanceDirectoryReadiness` wrote 130 rows green, and
+ * `deps.query('IN' + "SERT INTO …")` inside the MOST-swept file wrote 6 rows
+ * green. Those were fixed — and then a THIRD probe walked through the fix:
+ * the rebuilt sweep granted WHOLE-FILE pass-through to three files, one of
+ * which was `src/routes/attendance-admin.ts` (the route file), under a test
+ * titled "the pass-through sites are the generic pg adapter ONLY". A
+ * module-scope helper returning a composed SQL string, called as
+ * `query(buildAttendanceGroupTouchSql())` inside the handler, wrote rows with
+ * that guard green.
+ *
+ * THE FIX IS A DELETION, NOT AN ADDITION. Adding the helper's shape to the
+ * detector is the failure mode that produced the allowlist. So: no file is
+ * exempt as a file, the pass-through definition is narrowed to one structural
+ * shape, and a DATABASE-LEVEL constraint — a `SET TRANSACTION READ ONLY`
+ * transaction the whole aggregate runs inside — becomes the mechanism of
+ * record, so that W6-R1 no longer depends on this static analysis being
+ * complete. See `createAttendanceGroupEffectivePolicyReadOnlyService` in
+ * `src/routes/attendance-admin.ts` and the raise/succeed proofs in the
+ * real-DB suite.
  *
  * DOMAIN — derived, not listed. `tests/helpers/attendance-w6-call-path-closure.ts`
  * starts at the route registration block (anchored on the route's own path
@@ -33,27 +67,24 @@ import {
  * relative imports, and `requirePluginAttendanceLib` literals into the plugin
  * `lib/` CJS modules (declaration-by-declaration there too, keyed on the
  * properties actually read). Three legs below, because two are not enough:
- * `unclaimed = 0`, a non-empty-domain floor, and an OFF-PATH NEGATIVE — without
- * the third, "sweep the whole repo" satisfies the first two trivially.
+ * `unclaimed = 0`, a non-empty-domain floor, and an OFF-PATH NEGATIVE —
+ * without the third, "sweep the whole repo" satisfies the first two trivially.
  *
- * DETECTOR — refuses what it cannot sweep. Every `query(...)` first argument is
- * classified: a literal is swept, a STRING-COMPOSED expression is a FINDING,
- * and a pass-through identifier is recorded (the generic pg adapter authors no
- * SQL and its callers are themselves in the closure).
+ * DETECTOR — refuses what it cannot sweep, and exempts no file. Every DB-seam
+ * argument is `resolved` (a literal), `passthrough` (a NAMED adapter's own
+ * formal parameter, forwarded, with a non-empty and fully-classified caller
+ * set), or a FINDING. There is no fourth bucket and no file allowlist.
  *
- * SCOPE, stated narrowly rather than inflated: this is a STATIC leg. It proves
- * no reachable declaration contains a DML verb or unsweepable SQL. The
- * behavioural leg lives in
- * `tests/integration/attendance-w6-group-effective-policy.db.test.ts` — and
- * under the phase-1 scope fence that file is NOT CI-wired and is reported
- * skipped in the default no-DB lane, so on this branch W6-R1's behavioural
- * proof does not execute in any required check. That is a disclosure, not a
- * caveat to be read past.
+ * SCOPE, stated narrowly rather than inflated: this is a STATIC leg over
+ * source text. It proves no reachable declaration contains a DML verb and no
+ * reachable DB seam receives SQL the sweep cannot account for. It is NOT the
+ * mechanism of record for W6-R1 — the READ ONLY transaction is.
  */
 
 const repoRoot = findRepoRoot(__dirname)
 const closure = buildAggregateCallPathClosure(repoRoot)
 const sqlArguments = collectQuerySqlArguments(closure, repoRoot)
+const callerReports = checkPassThroughCallers(closure, repoRoot, sqlArguments)
 
 // Raw-SQL DML verbs (word-boundary, case-insensitive).
 const RAW_SQL_DML = [/\bINSERT\s+INTO\b/i, /\bUPDATE\s+\w/i, /\bDELETE\s+FROM\b/i, /\bMERGE\s+INTO\b/i, /\bTRUNCATE\b/i]
@@ -63,14 +94,16 @@ const KYSELY_DML = [/\.insertInto\s*\(/, /\.updateTable\s*\(/, /\.deleteFrom\s*\
 
 /** Files that MUST be in any honest "aggregate call path" domain. The list is
  * a FLOOR the derivation has to clear, not the domain itself — the domain is
- * whatever the closure computes. Both entries below are files the previous
- * hand-list omitted and a probe wrote through. */
+ * whatever the closure computes. */
 const REQUIRED_IN_DOMAIN = [
   'packages/core-backend/src/attendance/w6-group-effective-policy-aggregate.ts',
   'packages/core-backend/src/attendance/w6-group-effective-policy-response-contract.ts',
   'packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts',
   'packages/core-backend/src/routes/attendance-admin.ts',
   'packages/core-backend/src/util/resolve-plugin-attendance-lib.ts',
+  // The READ ONLY transaction seam the aggregate now runs inside. If this
+  // stops being reachable from the route, the backstop has been unwired.
+  'packages/core-backend/src/services/AttendanceSetupReadinessAggregate.ts',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
 ]
 
@@ -81,6 +114,13 @@ const MUST_BE_OFF_PATH = [
   'packages/core-backend/src/services/AttendanceCalculationGroupMembership.ts',
   'plugins/plugin-attendance/index.cjs',
 ]
+
+/** Builds a one-unit synthetic closure so a candidate shape can be classified
+ *  in isolation. `file` is a REAL repo path on purpose in the escape battery
+ *  below: the point being proved is that file identity buys nothing. */
+function syntheticClosure(file: string, name: string, text: string): CallPathClosure {
+  return { files: [file], units: [{ file, name, text }], externals: [] }
+}
 
 describe('W6-R1 static leg — the swept DOMAIN is derived and complete', () => {
   it('LEG 1 (unclaimed = 0): every file that must be on the path IS in the derived closure', () => {
@@ -128,7 +168,7 @@ describe('W6-R1 static leg — the swept DOMAIN is derived and complete', () => 
     const shifted = '// unrelated leading comment\n'.repeat(50) + text
     expect(extractRouteHandlerSource(shifted, 'get', AGGREGATE_ROUTE_ENTRY_PATH)).toEqual(block)
     // Landed on the RIGHT route and captured its full body.
-    expect(block).toContain('attendanceGroupEffectivePolicyAggregateService.getAggregate')
+    expect(block).toContain('createAttendanceGroupEffectivePolicyReadOnlyService')
     expect(block).toContain('QUERY_NOT_ACCEPTED')
     expect(block).toContain('BODY_NOT_ACCEPTED')
     expect(block.length).toBeGreaterThan(500)
@@ -154,8 +194,8 @@ describe('W6-R1 static leg — zero DML anywhere in the derived closure', () => 
     const text = readFileSync(join(repoRoot, AGGREGATE_ROUTE_ENTRY_FILE), 'utf8')
     const block = extractRouteHandlerSource(text, 'get', AGGREGATE_ROUTE_ENTRY_PATH)
     const poisoned = block.replace(
-      'attendanceGroupEffectivePolicyAggregateService.getAggregate',
-      "await query(`UPDATE attendance_groups SET updated_at = now() WHERE id = $1`); attendanceGroupEffectivePolicyAggregateService.getAggregate",
+      'const aggregate = await runAttendanceSetupReadinessReadOnly',
+      "await query(`UPDATE attendance_groups SET updated_at = now() WHERE id = $1`); const aggregate = await runAttendanceSetupReadinessReadOnly",
     )
     expect(poisoned).not.toEqual(block)
     expect(RAW_SQL_DML.some((pattern) => pattern.test(poisoned))).toBe(true)
@@ -198,18 +238,27 @@ describe('W6-R3 static leg — every AGGREGATE-authored read is org-scoped', () 
   })
 })
 
-describe('W6-R1 static leg — every reachable query() argument is sweepable', () => {
-  it('zero STRING-COMPOSED SQL arguments (the class that defeated the literal-text detector)', () => {
-    expect(sqlArguments.composed).toEqual([])
+describe('W6-R1 static leg — every reachable DB-seam argument is accounted for', () => {
+  it('the sweep REFUSES nothing today: findings is empty', () => {
+    // The headline. `findings` is the bucket for "SQL this sweep cannot
+    // account for" — composed strings, helper-authored strings, anonymous
+    // adapters, callees it cannot see. A non-empty list is a failure of the
+    // static leg, never something to be waved through.
+    expect(sqlArguments.findings.map((entry) => `${entry.file} :: ${entry.snippet} — ${entry.reason}`)).toEqual([])
   })
 
-  it('every resolved SQL literal is a SELECT, or one of the three transaction-control keywords', () => {
-    expect(sqlArguments.resolved.length).toBeGreaterThan(0) // non-vacuity
-    // BEGIN/COMMIT/ROLLBACK come from the generic pool's transaction helper and
-    // write nothing by themselves. They are named as a CLOSED set rather than
-    // waved through as "not SELECT but fine": anything else non-SELECT is a
+  it('non-vacuity: the sweep really did classify a substantial number of DB-seam sites', () => {
+    expect(sqlArguments.resolved.length).toBeGreaterThanOrEqual(20)
+    expect(sqlArguments.passthrough.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('every resolved SQL literal is a SELECT, or one of the four transaction-control statements', () => {
+    // Named as a CLOSED set rather than waved through as "not SELECT but
+    // fine". `SET TRANSACTION READ ONLY` is the W6-R1 backstop's own first
+    // statement; BEGIN/COMMIT/ROLLBACK come from the generic pool's
+    // transaction helper. None of them writes. Anything else non-SELECT is a
     // finding, and the DML legs above run over the same units regardless.
-    const TRANSACTION_CONTROL = new Set(['BEGIN', 'COMMIT', 'ROLLBACK'])
+    const TRANSACTION_CONTROL = new Set(['BEGIN', 'COMMIT', 'ROLLBACK', 'SET TRANSACTION READ ONLY'])
     const offenders = sqlArguments.resolved
       .filter((entry) => {
         const sql = entry.sql.trim().toUpperCase()
@@ -219,52 +268,277 @@ describe('W6-R1 static leg — every reachable query() argument is sweepable', (
     expect(offenders).toEqual([])
   })
 
-  it('the pass-through sites are the generic pg adapter only, and are disclosed rather than exempted silently', () => {
-    // Deliberately asserted as a SHAPE, not a count: the adapter forwards SQL
-    // authored by its callers, and those callers are themselves in the
-    // closure, so their literals are swept at the authoring site.
-    const files = [...new Set(sqlArguments.passthrough.map((entry) => entry.file))].sort()
-    expect(files).toEqual([
-      'packages/core-backend/src/db/pg.ts',
-      'packages/core-backend/src/integration/db/connection-pool.ts',
-      'packages/core-backend/src/routes/attendance-admin.ts',
-    ])
+  it('the READ ONLY backstop is statically ON the route path (its own literal is in the swept set)', () => {
+    // A structural backstop that is not reachable from the route is not a
+    // backstop. This is the static half of that claim; the behavioural half
+    // (a write RAISES 25006 on the shared handle) is in the real-DB suite.
+    const readOnly = sqlArguments.resolved.filter((entry) => entry.sql.trim().toUpperCase() === 'SET TRANSACTION READ ONLY')
+    expect(readOnly.length).toBe(1)
+    expect(readOnly[0].file).toBe('packages/core-backend/src/services/AttendanceSetupReadinessAggregate.ts')
   })
 
-  it('positive control: a composed SQL argument in the SAME shape as the probe that beat the old detector IS flagged', () => {
-    // The probe was `deps.query('IN' + "SERT INTO attendance_schedule_groups …")`
-    // injected into the aggregate module — the most-swept file — and the old
-    // literal-text sweep stayed green while 6 rows were written. Re-run the
-    // detector over a synthetic unit carrying exactly that shape.
-    const synthetic = {
-      files: ['synthetic.ts'],
-      units: [
-        {
-          file: 'synthetic.ts',
-          name: 'probe',
-          text: `async function probe() { await deps.query('IN' + "SERT INTO attendance_schedule_groups (org_id) VALUES ($1)", [orgId]) }`,
-        },
-      ],
-      externals: [],
-    }
-    const result = collectQuerySqlArguments(synthetic, repoRoot)
-    expect(result.composed.length).toBe(1)
+  it('every pass-through is a NAMED adapter forwarding its OWN first formal parameter', () => {
+    // The narrowed definition, asserted as a SHAPE over every entry — not as
+    // a list of blessed files. `paramIndex === 0` is load-bearing: a
+    // "pass-through" that forwards some OTHER parameter into the SQL position
+    // is a shape nobody has justified, and an earlier revision of the
+    // classifier silently produced exactly that (index 1, `params`) because
+    // its local lookup ignored scope.
+    const shapes = sqlArguments.passthrough.map((entry) => ({
+      adapterName: entry.adapterName,
+      paramIndex: entry.paramIndex,
+      named: entry.adapterName.length > 0,
+    }))
+    expect(shapes.every((shape) => shape.named)).toBe(true)
+    expect(shapes.every((shape) => shape.paramIndex === 0)).toBe(true)
+    // And every entry names the parameter it actually traced to.
+    expect(sqlArguments.passthrough.every((entry) => entry.provenanceLeaf.length > 0)).toBe(true)
+  })
+
+  it('every pass-through adapter has a NON-EMPTY, fully-classified caller set inside the closure', () => {
+    // Requirement (5). Two failure modes, both asserted: a pass-through whose
+    // adapter has zero callers in the closure is the empty-read trap (it
+    // proves nothing about where its SQL comes from), and a caller that
+    // passes something unclassifiable at that position is a hole in the
+    // justification.
+    expect(callerReports.length).toBeGreaterThan(0)
+    expect(callerReports.filter((report) => report.callerCount === 0)).toEqual([])
+    const holes = callerReports.flatMap((report) =>
+      report.unclassifiedCallers.map((caller) => `${report.adapterName}#${report.paramIndex} <- ${caller.file}: ${caller.snippet} — ${caller.reason}`),
+    )
+    expect(holes).toEqual([])
+  })
+})
+
+describe('W6-R1 static leg — ESCAPE BATTERY: no file is exempt as a file', () => {
+  /**
+   * Every case below is planted in `src/routes/attendance-admin.ts` — the file
+   * the deleted allowlist exempted whole — and every one must be a FINDING.
+   * If any of these goes back to passing, the whole-file exemption has been
+   * reintroduced under another name.
+   */
+  const ROUTE_FILE = AGGREGATE_ROUTE_ENTRY_FILE
+
+  function classifyIn(text: string, name = 'probe'): ReturnType<typeof collectQuerySqlArguments> {
+    return collectQuerySqlArguments(syntheticClosure(ROUTE_FILE, name, text), repoRoot)
+  }
+
+  it("ESCAPE 1 (the owner's): a module-scope helper returning composed SQL, called as query(helper())", () => {
+    const result = classifyIn(
+      `async function handler(req, res) { await query(buildAttendanceGroupTouchSql()) }`,
+    )
     expect(result.resolved).toEqual([])
-    // And the same shape with a plain literal is NOT flagged, so "composed"
-    // is discriminating rather than "anything with a query() call".
-    const clean = {
-      files: ['synthetic.ts'],
-      units: [
-        {
-          file: 'synthetic.ts',
-          name: 'probe',
-          text: 'async function probe() { await deps.query(`SELECT 1 FROM attendance_groups`, []) }',
-        },
-      ],
-      externals: [],
+    expect(result.passthrough).toEqual([])
+    expect(result.findings.length).toBe(1)
+    expect(result.findings[0].reason).toMatch(/no formal-parameter provenance/)
+  })
+
+  it('ESCAPE 1b: the SAME shape spliced into the REAL route handler text', () => {
+    // Stronger than a hand-written stand-in: this is the actual registration
+    // block off disk, with the escape inserted where the owner said it went.
+    const text = readFileSync(join(repoRoot, ROUTE_FILE), 'utf8')
+    const block = extractRouteHandlerSource(text, 'get', AGGREGATE_ROUTE_ENTRY_PATH)
+    const poisoned = block.replace(
+      'const aggregate = await runAttendanceSetupReadinessReadOnly',
+      'await query(buildAttendanceGroupTouchSql()); const aggregate = await runAttendanceSetupReadinessReadOnly',
+    )
+    expect(poisoned).not.toEqual(block)
+    // Baseline: the UNPOISONED real block refuses nothing.
+    expect(classifyIn(block, '<route registration block>').findings).toEqual([])
+    const result = classifyIn(poisoned, '<route registration block>')
+    expect(result.findings.length).toBe(1)
+    // The route handler is an anonymous arrow passed to `r.get(...)`, so this
+    // shape reds on the anonymity of its adapter as well as on provenance.
+    expect(result.findings[0].reason).toMatch(/anonymous enclosing function|no formal-parameter provenance/)
+  })
+
+  it('ESCAPE 2: query(factory()) inline', () => {
+    const result = classifyIn(`async function handler(req, res) { await query(makeSql()) }`)
+    expect(result.findings.length).toBe(1)
+    expect(result.passthrough).toEqual([])
+  })
+
+  it('ESCAPE 3: a TWO-HOP helper laundered through locals', () => {
+    const result = classifyIn(
+      `async function handler(req, res) {
+         const fragment = makeFragment()
+         const sql = wrap(fragment)
+         await query(sql)
+       }`,
+    )
+    expect(result.findings.length).toBe(1)
+    expect(result.passthrough).toEqual([])
+  })
+
+  it('ESCAPE 4: a helper IMPORTED from another module', () => {
+    // `importedBuilder` has no declaration inside the swept unit, so there is
+    // nothing for the DML legs to sweep — refused rather than assumed benign.
+    const result = classifyIn(
+      `async function handler(req, res) { const sql = importedBuilder(req.params.groupId); await query(sql) }`,
+    )
+    expect(result.findings.length).toBe(1)
+    expect(result.passthrough).toEqual([])
+  })
+
+  it('ESCAPE 5: a write reached through requirePluginAttendanceLib into the plugin CJS lib', () => {
+    // Two halves. (a) a LITERAL write inside the lib is caught by the DML
+    // legs — proven here on the real detector; (b) an obfuscated write at the
+    // lib's own db seam is a FINDING.
+    const literalWrite = `async function touch(db, orgId) { await db.query('INSERT INTO attendance_groups (org_id) VALUES ($1)', [orgId]) }`
+    expect(RAW_SQL_DML.some((pattern) => pattern.test(literalWrite))).toBe(true)
+    const obfuscated = collectQuerySqlArguments(
+      syntheticClosure(
+        'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
+        'touch',
+        `async function touch(db, orgId) { await db.query(buildTouchSql(orgId)) }`,
+      ),
+      repoRoot,
+    )
+    expect(obfuscated.findings.length).toBe(1)
+    expect(obfuscated.passthrough).toEqual([])
+  })
+
+  it('ESCAPE 6 (regression): the directly-composed form is STILL refused', () => {
+    // `deps.query('IN' + "SERT INTO …")` — the probe that beat the previous
+    // literal-text detector inside the most-swept file. Re-run so a rewrite of
+    // the classifier cannot silently drop the case it was built for.
+    const result = collectQuerySqlArguments(
+      syntheticClosure(
+        'packages/core-backend/src/attendance/w6-group-effective-policy-aggregate.ts',
+        'probe',
+        `async function probe() { await deps.query('IN' + "SERT INTO attendance_schedule_groups (org_id) VALUES ($1)", [orgId]) }`,
+      ),
+      repoRoot,
+    )
+    expect(result.findings.length).toBe(1)
+    expect(result.findings[0].reason).toMatch(/string-composed/)
+    expect(result.resolved).toEqual([])
+  })
+
+  it('ESCAPE 7: composition with REAL parameter provenance is still refused (the veto overrides provenance)', () => {
+    // `query('IN' + suffix)` where `suffix` IS a formal parameter would satisfy
+    // provenance on its own. It must still red, or the provenance rule becomes
+    // a way to launder concatenation.
+    const result = classifyIn(`async function adapter(suffix) { await query('IN' + suffix) }`)
+    expect(result.findings.length).toBe(1)
+    expect(result.findings[0].reason).toMatch(/string-composed/)
+  })
+
+  it('ESCAPE 8: an anonymous adapter cannot be a pass-through (no caller set is checkable)', () => {
+    const result = classifyIn(`const handlers = [async (sql) => { await query(sql) }]`)
+    expect(result.findings.length).toBe(1)
+    expect(result.findings[0].reason).toMatch(/anonymous enclosing function/)
+  })
+
+  it('DISCRIMINATION: the legitimate adapter shape is NOT a finding', () => {
+    // Without this the battery above would be satisfied by a classifier that
+    // simply refuses everything, which would be a useless test that looks
+    // identical to a working one.
+    const result = classifyIn(`async function runSql(sql, params) { return query(sql, params) }`)
+    expect(result.findings).toEqual([])
+    expect(result.passthrough.length).toBe(1)
+    expect(result.passthrough[0].adapterName).toBe('runSql')
+    expect(result.passthrough[0].paramIndex).toBe(0)
+    expect(result.passthrough[0].provenanceLeaf).toBe('sql')
+  })
+
+  it('DISCRIMINATION: a plain literal in the same position is resolved, not refused', () => {
+    const result = classifyIn('async function probe() { await deps.query(`SELECT 1 FROM attendance_groups`, []) }')
+    expect(result.findings).toEqual([])
+    expect(result.resolved.length).toBe(1)
+    expect(result.resolved[0].sql).toBe('SELECT 1 FROM attendance_groups')
+  })
+
+  it('the caller-set check DOES fail a pass-through whose only caller launders SQL', () => {
+    // Positive control for requirement (5) specifically: the adapter itself is
+    // a textbook pass-through, and it is the CALLER that is dirty. Without
+    // this leg, requirement (5) could be permanently vacuous and look green.
+    const text = `
+      async function runSql(sql, params) { return query(sql, params) }
+      async function handler(req) { return runSql(buildTouchSql(req.params.groupId), []) }
+    `
+    const probeClosure = syntheticClosure(ROUTE_FILE, 'probe', text)
+    const args = collectQuerySqlArguments(probeClosure, repoRoot)
+    expect(args.passthrough.length).toBe(1)
+    expect(args.passthrough[0].adapterName).toBe('runSql')
+    const reports = checkPassThroughCallers(probeClosure, repoRoot, args)
+    const runSqlReport = reports.find((report) => report.adapterName === 'runSql')
+    expect(runSqlReport?.callerCount).toBe(1)
+    expect(runSqlReport?.unclassifiedCallers.length).toBe(1)
+    // The reason is requirement (4), not (1), and that is worth stating
+    // exactly rather than papering over with a loose matcher. `req` IS a
+    // formal parameter of `handler`, and it reaches the argument through
+    // `buildTouchSql(req.params.groupId)` — so raw provenance is satisfied
+    // and would have let this through on its own. What refuses it is that
+    // `buildTouchSql` has no declaration inside the closure, so the DML legs
+    // never see its body. Provenance alone is NOT the guarantee; the
+    // conjunction is.
+    expect(runSqlReport?.unclassifiedCallers[0].reason).toBe(
+      'callee `buildTouchSql` is not declared inside the swept closure',
+    )
+  })
+
+  it('the caller-set check DOES fail a caller whose builder IS in the closure but composes SQL', () => {
+    // The sibling of the case above: requirement (4)'s second half. Here the
+    // builder is right there in the unit — so "is it swept?" is satisfied —
+    // and the refusal has to come from the composition veto reaching INTO the
+    // callee's body, not merely inspecting the argument expression.
+    const text = `
+      async function runSql(sql, params) { return query(sql, params) }
+      function buildTouchSql(groupId) { return 'UPD' + 'ATE attendance_groups SET updated_at = now() WHERE id = ' + groupId }
+      async function handler(req) { return runSql(buildTouchSql(req.params.groupId), []) }
+    `
+    const probeClosure = syntheticClosure(ROUTE_FILE, 'probe', text)
+    const args = collectQuerySqlArguments(probeClosure, repoRoot)
+    const reports = checkPassThroughCallers(probeClosure, repoRoot, args)
+    const runSqlReport = reports.find((report) => report.adapterName === 'runSql')
+    expect(runSqlReport?.unclassifiedCallers.length).toBe(1)
+    expect(runSqlReport?.unclassifiedCallers[0].reason).toBe('callee `buildTouchSql` composes strings in its body')
+  })
+
+  it('ESCAPE 9: a laundering chain LONGER than the trace depth cap fails CLOSED, not open', () => {
+    // The trace is depth-capped. A capped analysis that returned "no
+    // composition found, no callee found, provenance satisfied" would be an
+    // open door at exactly the depth an attacker controls. Asserted, not
+    // reasoned: five hops is past the cap, and it must still be a FINDING.
+    const result = classifyIn(
+      `async function adapter(seed) {
+         const h1 = seed
+         const h2 = h1
+         const h3 = h2
+         const h4 = h3
+         const h5 = h4
+         const h6 = launder(h5)
+         await query(h6)
+       }`,
+    )
+    expect(result.passthrough).toEqual([])
+    expect(result.findings.length).toBe(1)
+  })
+
+  it('the transaction-control set is CLOSED: READ WRITE is not silently accepted alongside READ ONLY', () => {
+    // The backstop's own literal is the one non-SELECT statement this sweep
+    // waves through. If `SET TRANSACTION READ ONLY` were ever flipped to
+    // `READ WRITE`, a set that matched loosely (prefix, or "starts with SET
+    // TRANSACTION") would accept the flip and the guard would report green on
+    // an unwired backstop. Same predicate as the production leg, run over a
+    // synthetic literal to prove it discriminates.
+    const TRANSACTION_CONTROL = new Set(['BEGIN', 'COMMIT', 'ROLLBACK', 'SET TRANSACTION READ ONLY'])
+    const accepts = (sql: string): boolean => {
+      const normalised = sql.trim().toUpperCase()
+      return normalised.startsWith('SELECT') || TRANSACTION_CONTROL.has(normalised)
     }
-    const cleanResult = collectQuerySqlArguments(clean, repoRoot)
-    expect(cleanResult.composed).toEqual([])
-    expect(cleanResult.resolved.length).toBe(1)
+    expect(accepts('SET TRANSACTION READ ONLY')).toBe(true)
+    expect(accepts('SET TRANSACTION READ WRITE')).toBe(false)
+    expect(accepts('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')).toBe(false)
+  })
+
+  it('the caller-set check DOES fail a pass-through with ZERO callers (the empty-read trap)', () => {
+    const text = `async function orphanQuery(sql) { return client.query(sql) }`
+    const probeClosure = syntheticClosure(ROUTE_FILE, 'probe', text)
+    const args = collectQuerySqlArguments(probeClosure, repoRoot)
+    expect(args.passthrough.length).toBe(1)
+    const reports = checkPassThroughCallers(probeClosure, repoRoot, args)
+    expect(reports.find((report) => report.adapterName === 'orphanQuery')?.callerCount).toBe(0)
   })
 })

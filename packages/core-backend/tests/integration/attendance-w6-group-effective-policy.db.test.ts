@@ -109,6 +109,11 @@ vi.mock('../../src/rbac/service', async (importOriginal) => {
  * claim is "before AGGREGATE SQL", never "before any SQL".
  */
 const observedSql: string[] = []
+/** One entry per transaction the route opens, in order, each carrying the
+ *  statements issued on THAT client handle. This is what makes "the membership
+ *  read and the aggregate reads share ONE read-only transaction" a checkable
+ *  claim rather than a design intention. */
+const observedTransactions: Array<{ statements: string[] }> = []
 vi.mock('../../src/db/pg', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/db/pg')>()
   return {
@@ -117,6 +122,30 @@ vi.mock('../../src/db/pg', async (importOriginal) => {
       observedSql.push(String(sql))
       return actual.query(sql as never, params as never)
     }) as typeof actual.query,
+    // W6-R1 backstop: the aggregate no longer runs on the pool, so a spy on
+    // `query` alone would observe NOTHING it authors. That is not a
+    // hypothetical — running this suite after the route was moved onto the
+    // transaction reduced the ordering positive control to `expected 0 to be
+    // greater than 0`, which is exactly the vacuum the control exists to
+    // catch. The transaction client is wrapped too, and its statements are
+    // recorded BOTH in `observedSql` (so every existing ordering leg keeps
+    // counting the same things) and per-handle in `observedTransactions`.
+    transaction: (async <T,>(
+      handler: (client: { query: (sql: string, params?: unknown[]) => Promise<unknown> }) => Promise<T>,
+    ) => {
+      const record = { statements: [] as string[] }
+      observedTransactions.push(record)
+      return (actual.transaction as unknown as (h: typeof handler) => Promise<T>)(async (client) => {
+        return handler({
+          ...client,
+          query: (sql: string, params?: unknown[]) => {
+            observedSql.push(String(sql))
+            record.statements.push(String(sql))
+            return client.query(sql, params)
+          },
+        })
+      })
+    }) as typeof actual.transaction,
   }
 })
 
@@ -856,6 +885,179 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       delete (routeEmbed as Record<string, unknown>).evaluatedAt
       delete (directEmbed as Record<string, unknown>).evaluatedAt
       expect(routeEmbed).toStrictEqual(directEmbed)
+    })
+  })
+
+  describe('W6-R1 STRUCTURAL BACKSTOP: the READ ONLY transaction (the mechanism of record)', () => {
+    /**
+     * The static sweep can only ever prove things about source text it can
+     * trace. This block proves the property the sweep is NOT relied on for:
+     * PostgreSQL itself refuses writes on the handle the aggregate runs on.
+     *
+     * Two halves, both required. A raise proof with no read proof is
+     * indistinguishable from a broken connection; a read proof with no raise
+     * proof is indistinguishable from a transaction that is not read-only.
+     * Both run against the SAME handle inside ONE `runAttendanceSetupReadinessReadOnly`
+     * body, because a write attempted on a fresh client proves nothing about
+     * the shared one.
+     */
+
+    /** A request whose principal is a plain org member — NOT an admin. This is
+     *  load-bearing: `canReadAttendanceDirectoryReadiness` short-circuits on
+     *  `hasLegacyAdminClaim(req) || await isRbacAdmin(userId)`, so run as an
+     *  admin the membership query never executes and every assertion about it
+     *  passes without the statement ever reaching Postgres. `isAdmin` is
+     *  mocked to false in this file, and this request carries no admin claim. */
+    function memberRequest(userId: string): express.Request {
+      return { user: { id: userId, permissions: ['attendance:admin'] }, headers: {} } as unknown as express.Request
+    }
+
+    class ReadOnlyProbeHttpError extends Error {
+      constructor(public status: number, public code: string, message: string) {
+        super(message)
+      }
+    }
+
+    const WRITE_SHAPES: Array<{ label: string; sql: string; params: unknown[] }> = [
+      {
+        label: 'UPDATE',
+        sql: 'UPDATE attendance_groups SET timezone = $1 WHERE id = $2',
+        params: ['UTC', groupAId],
+      },
+      {
+        label: 'INSERT',
+        sql: 'INSERT INTO attendance_group_members (org_id, group_id, user_id) VALUES ($1, $2, $3)',
+        params: [orgA, groupAId, outsiderUser],
+      },
+      {
+        label: 'DELETE',
+        sql: 'DELETE FROM attendance_group_members WHERE org_id = $1 AND group_id = $2',
+        params: [orgA, groupAId],
+      },
+    ]
+
+    for (const shape of WRITE_SHAPES) {
+      it(`a ${shape.label} on the aggregate's own transaction RAISES 25006, while the membership read and the aggregate reads on the SAME handle succeed`, async () => {
+        const { runAttendanceSetupReadinessReadOnly } = await import('../../src/services/AttendanceSetupReadinessAggregate')
+        const { canReadAttendanceDirectoryReadiness } = await import('../../src/routes/attendance-admin')
+        const { createAttendanceGroupEffectivePolicyAggregateService } = await import(
+          '../../src/attendance/w6-group-effective-policy-aggregate'
+        )
+        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+        const fserLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
+        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+        const producerKeyLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs')
+
+        observedTransactions.length = 0
+        await runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
+          // (1) THE MEMBERSHIP READ — the call-path hole the owner named — on
+          //     this handle, as a non-admin so the SQL genuinely executes.
+          const allowed = await canReadAttendanceDirectoryReadiness(
+            memberRequest(memberUser),
+            memberUser,
+            orgA,
+            readOnlyQuery,
+          )
+          expect(allowed).toBe(true)
+          // MEASURED, not reasoned: `allowed === true` is also what an admin
+          // bypass returns, and on that path the membership statement never
+          // reaches Postgres at all. Assert the statement itself landed on
+          // THIS handle, or the whole leg is about a query that never ran.
+          const membershipSoFar = observedTransactions[0].statements.filter(
+            (sql) => /FROM user_orgs uo/.test(sql) && /uo\.is_active = true/.test(sql),
+          )
+          expect(membershipSoFar.length).toBe(1)
+
+          // (2) THE AGGREGATE + FSER READS on the same handle.
+          const service = createAttendanceGroupEffectivePolicyAggregateService({
+            query: async (sql: string, params?: unknown[]) => (await readOnlyQuery(sql, params)).rows,
+            fser: fserLib.createAttendanceGroupFixedScheduleEffectivenessService({
+              HttpError: ReadOnlyProbeHttpError,
+              buildAttendanceGroupFixedScheduleProducerKey:
+                producerKeyLib.buildAttendanceGroupFixedScheduleProducerKey,
+              now: () => new Date().toISOString(),
+            }),
+            now: () => new Date().toISOString(),
+            segmentCalculationImplemented: false,
+          })
+          const aggregate = await service.getAggregate({ orgId: orgA, groupId: groupAId })
+          expect(aggregate.groupId).toBe(groupAId)
+          // Non-vacuity: the FSER leg really ran on this handle too, so the
+          // "same transaction" claim covers FSER's queries and not only the
+          // aggregate's own.
+          expect(aggregate.domains.schedule.fixedSchedule).not.toBeNull()
+
+          // (3) A WRITE on the SAME handle. Asserted on SQLSTATE, not on a
+          //     message substring: `25006 read_only_sql_transaction` is the
+          //     code Postgres raises for a write in a READ ONLY transaction,
+          //     and matching on text would also accept a syntax error or a
+          //     missing-table error — "not this error" is not an outcome.
+          //     Deliberately the LAST statement in the body: after it the
+          //     transaction is aborted, and anything further would fail with
+          //     25P02 for a different reason.
+          const error = await readOnlyQuery(shape.sql, shape.params).then(
+            () => null,
+            (caught: unknown) => caught as { code?: string; message?: string },
+          )
+          expect(error).not.toBeNull()
+          expect(error?.code).toBe('25006')
+        })
+      })
+    }
+
+    it('POSITIVE CONTROL: the very same write SUCCEEDS outside the read-only transaction (so 25006 is the transaction, not the statement)', async () => {
+      // Without this the raise proof cannot distinguish "READ ONLY refused it"
+      // from "that statement was always going to fail". Run on the raw pool,
+      // inside an explicit transaction that is ROLLED BACK, so the fixture is
+      // untouched.
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const result = await client.query('UPDATE attendance_groups SET timezone = $1 WHERE id = $2', ['UTC', groupAId])
+        expect(result.rowCount).toBe(1)
+      } finally {
+        await client.query('ROLLBACK')
+        client.release()
+      }
+    })
+
+    it('the ROUTE runs the membership read AND the aggregate reads on ONE transaction whose FIRST statement is SET TRANSACTION READ ONLY', async () => {
+      observedTransactions.length = 0
+      observedSql.length = 0
+      // adminApp()'s principal holds `attendance:admin` but is NOT an admin
+      // (no legacy claim, and `isAdmin` is mocked false), so the membership
+      // query really executes on this path.
+      const res = await request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy`)
+      expect(res.status).toBe(200)
+
+      expect(observedTransactions.length).toBe(1)
+      const statements = observedTransactions[0].statements
+      expect(statements[0]).toBe('SET TRANSACTION READ ONLY')
+
+      // The membership read is on THIS handle...
+      const membershipStatements = statements.filter((sql) => /FROM user_orgs uo/.test(sql) && /uo\.is_active = true/.test(sql))
+      expect(membershipStatements.length).toBe(1)
+
+      // ...and so are the aggregate's own reads.
+      const repoRoot = findRepoRoot(__dirname)
+      const closure = buildAggregateCallPathClosure(repoRoot)
+      const aggregateLiterals = new Set(
+        collectQuerySqlArguments(closure, repoRoot)
+          .resolved.filter((entry) => entry.file.endsWith('w6-group-effective-policy-aggregate.ts'))
+          .map((entry) => entry.sql),
+      )
+      expect(aggregateLiterals.size).toBeGreaterThanOrEqual(5)
+      const aggregateStatements = statements.filter((sql) => aggregateLiterals.has(sql))
+      expect(aggregateStatements.length).toBeGreaterThan(0)
+
+      // NEGATIVE: the membership read must NOT also appear on the pool path.
+      // `observedSql` carries pool statements and transaction statements alike,
+      // so the discriminating check is the COUNT — one occurrence, the one
+      // already located inside the transaction.
+      const membershipOnAnyPath = observedSql.filter(
+        (sql) => /FROM user_orgs uo/.test(sql) && /uo\.is_active = true/.test(sql),
+      )
+      expect(membershipOnAnyPath.length).toBe(membershipStatements.length)
     })
   })
 })

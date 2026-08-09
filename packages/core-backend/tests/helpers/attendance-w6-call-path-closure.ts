@@ -374,32 +374,114 @@ export function pluginLibFilesInClosure(closure: CallPathClosure): string[] {
 }
 
 /**
- * Classifies the FIRST argument of every `query(...)` / `<x>.query(...)` call
- * the closure can reach.
+ * Classifies the SQL-bearing argument of every DB-seam call the closure can
+ * reach, into exactly three buckets. There is NO fourth bucket, and — this is
+ * the point of the rewrite — NO FILE IS EXEMPT AS A FILE.
  *
- *  - `resolved`    — a single string/template literal (or an identifier naming
- *                    a module-scope literal constant). Swept for DML verbs.
- *  - `composed`    — a STRING-COMPOSING expression: `+` concatenation, a
- *                    template with substitutions, `.concat(`/`.join(`. These
- *                    are FINDINGS, not exemptions. This is the class that
- *                    defeated the previous literal-text-only detector INSIDE
- *                    the most-swept file: `deps.query('IN' + "SERT INTO …")`
- *                    wrote rows with every sweep green. Refusing unsweepable
- *                    SQL is strictly stronger than trying to see through it.
- *  - `passthrough` — an identifier that carries SQL authored somewhere else
- *                    (a function parameter, or a local built by a call). These
- *                    are the generic pg adapter layers (`src/db/pg.ts`,
- *                    `src/integration/db/connection-pool.ts`). They author no
- *                    SQL; their callers are themselves in this closure, so the
- *                    literals they forward are swept at the authoring site.
- *                    Stated as a real limit rather than hidden: SQL reaching
- *                    the adapter from OUTSIDE this closure is out of scope by
- *                    construction.
+ * What this replaced, recorded so the shape cannot come back. The previous
+ * revision classified anything it could not resolve as `passthrough`, and the
+ * guard on top of it asserted
+ *
+ *     expect(passthroughFiles).toEqual([
+ *       'packages/core-backend/src/db/pg.ts',
+ *       'packages/core-backend/src/integration/db/connection-pool.ts',
+ *       'packages/core-backend/src/routes/attendance-admin.ts',   // <- not an adapter
+ *     ])
+ *
+ * under a title that said "the pass-through sites are the generic pg adapter
+ * ONLY". `attendance-admin.ts` is the ROUTE FILE. Whole-file pass-through plus
+ * "unresolvable ⇒ pass-through" means a real write in the route handler is
+ * invisible: a module-scope helper that returns a composed SQL string, called
+ * as `query(buildAttendanceGroupTouchSql())` inside the handler, wrote rows
+ * with the guard green. That is the owner's demonstrated escape, and it is why
+ * the fix is NOT "add the helper's shape to the detector" — adding one more
+ * recognised syntax is the failure mode that produced the allowlist in the
+ * first place. The thing that needed enumerating (the file list) is deleted.
+ *
+ * THE PASS-THROUGH DEFINITION, verbatim, as it is now implemented:
+ *
+ *   A DB-seam call site is PASS-THROUGH only when it forwards a NAMED
+ *   adapter's own formal parameter, and every caller of that adapter inside
+ *   the closure passes, at that parameter's position, an argument which is
+ *   itself already classified (resolved, or a valid pass-through).
+ *
+ * Mechanically, ALL of the following must hold, or the site is a FINDING:
+ *
+ *   (1) PROVENANCE. Trace the argument expression through same-unit locals
+ *       (depth-capped) and into the argument positions of any call inside it.
+ *       At least one leaf identifier must be a FORMAL PARAMETER of the
+ *       innermost enclosing function of the call site. `query(factory())`,
+ *       `const s = build(); query(s)`, a two-hop helper, an imported helper —
+ *       every one of these traces to a call with NO parameter-derived leaf,
+ *       so every one of them is a FINDING.
+ *   (2) NO COMPOSITION, anywhere in the traced expressions: `+`, a template
+ *       with substitutions, `.concat(`, `.join(`. This is a VETO that
+ *       overrides (1), so `query('IN' + suffixParam)` — which does have
+ *       parameter provenance — is still a FINDING.
+ *   (3) A NAME. The innermost enclosing function must have a resolvable name
+ *       (function/method declaration, variable declarator, or object-literal
+ *       property — climbing through parens and `as` casts). An anonymous
+ *       adapter has no caller set that can be checked, so it is a FINDING.
+ *       The route handler itself is an anonymous arrow passed to `r.get(...)`,
+ *       which is why the owner's escape reds twice over.
+ *   (4) EVERY CALLEE IN THE TRACE IS SWEPT AND AUTHORS NOTHING. Each call
+ *       appearing in the traced expressions must have its declaration inside
+ *       the closure (so the DML legs sweep its text) and must contain NO
+ *       string-composing expression ANYWHERE in its body — not merely in its
+ *       return positions, which a local variable would hide.
+ *   (5) A NON-EMPTY, FULLY-CLASSIFIED CALLER SET. Checked separately by
+ *       `checkPassThroughCallers`: for each (adapterName, paramIndex) there
+ *       must be at least one call to that name inside the closure — a
+ *       pass-through with no callers is the empty-read trap, not a proof — and
+ *       every such call's argument at that index must itself classify as
+ *       resolved or pass-through.
+ *
+ * DB-SEAM CALL SITES are matched by callee name ending in `query`
+ * (case-insensitive): `query`, `.query`, `runQuery`, `readOnlyQuery`,
+ * `wrappedQuery`. Deliberately WIDER than the previous exact-`query` match,
+ * because widening the swept domain can only add findings, never hide one; the
+ * cost is that a DB seam given a name outside that pattern is not swept, which
+ * is a real limit and is stated rather than implied. It is not the mechanism of
+ * record: the READ ONLY transaction is.
+ *
+ * WHAT REMAINS TRUE OF THE ADAPTERS. `src/db/pg.ts` and
+ * `src/integration/db/connection-pool.ts` still pass — but now for a stated
+ * STRUCTURAL reason (their `sql`/`sqlOrConfig` formal parameters are what
+ * reaches the seam, and `buildQueryConfig` composes nothing) rather than
+ * because of the file they live in. If either file ever authors SQL, or routes
+ * it through a helper that composes, the guard reds. So does the route file,
+ * which has no exemption at all any more.
  */
+export interface SqlArgumentSite {
+  readonly file: string
+  readonly unit: string
+  readonly snippet: string
+}
+export interface ResolvedSqlArgument extends SqlArgumentSite {
+  readonly sql: string
+}
+export interface PassThroughSqlArgument extends SqlArgumentSite {
+  /** The NAMED enclosing function whose formal parameter is forwarded. */
+  readonly adapterName: string
+  /** Position of that formal parameter in the adapter's signature. */
+  readonly paramIndex: number
+  /** The parameter identifier the trace actually landed on. */
+  readonly provenanceLeaf: string
+}
+export interface SqlArgumentFinding extends SqlArgumentSite {
+  readonly reason: string
+}
+
 export interface SqlArguments {
-  readonly resolved: ReadonlyArray<{ file: string; sql: string }>
-  readonly composed: ReadonlyArray<{ file: string; snippet: string }>
-  readonly passthrough: ReadonlyArray<{ file: string; snippet: string }>
+  readonly resolved: ReadonlyArray<ResolvedSqlArgument>
+  readonly passthrough: ReadonlyArray<PassThroughSqlArgument>
+  /** Sites the sweep REFUSES. A non-empty list means the static leg failed. */
+  readonly findings: ReadonlyArray<SqlArgumentFinding>
+}
+
+/** Callee names that are treated as DB seams. See the header. */
+export function isDbSeamCalleeName(name: string): boolean {
+  return name.toLowerCase().endsWith('query')
 }
 
 function isStringComposing(node: ts.Node): boolean {
@@ -412,94 +494,446 @@ function isStringComposing(node: ts.Node): boolean {
   return false
 }
 
-export function collectQuerySqlArguments(closure: CallPathClosure, repoRoot: string): SqlArguments {
-  const resolved: Array<{ file: string; sql: string }> = []
-  const composed: Array<{ file: string; snippet: string }> = []
-  const passthrough: Array<{ file: string; snippet: string }> = []
+function containsComposition(node: ts.Node): boolean {
+  let found = false
+  const walk = (child: ts.Node): void => {
+    if (found) return
+    if (isStringComposing(child)) {
+      found = true
+      return
+    }
+    child.forEachChild(walk)
+  }
+  if (isStringComposing(node)) return true
+  node.forEachChild(walk)
+  return found
+}
 
-  // Module-scope literal constants, so `query(SOME_SQL_V1, …)` resolves
-  // instead of being written off as unsweepable.
-  const literalConstants = new Map<string, string>()
+function calleeNameOf(call: ts.CallExpression): string | null {
+  const callee = call.expression
+  if (ts.isIdentifier(callee)) return callee.text
+  if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.name)) return callee.name.text
+  return null
+}
+
+type FunctionLike = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | ts.MethodDeclaration
+
+function isFunctionLike(node: ts.Node): node is FunctionLike {
+  return (
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node)
+  )
+}
+
+function enclosingFunctionOf(node: ts.Node): FunctionLike | null {
+  let current: ts.Node | undefined = node.parent
+  while (current) {
+    if (isFunctionLike(current)) return current
+    current = current.parent
+  }
+  return null
+}
+
+/**
+ * The adapter's NAME. Climbs through parenthesised expressions and `as`/type
+ * assertions, because the real read-only seam is written as
+ * `const readOnlyQuery = (<T>(sql, params) => client.query(sql, params)) as Fn`
+ * — a shape that a naive "is the parent a VariableDeclaration" check reads as
+ * anonymous and would have turned into a self-inflicted FINDING.
+ */
+function adapterNameOf(fn: FunctionLike): string | null {
+  if ((ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn) || ts.isFunctionExpression(fn)) && fn.name) {
+    if (ts.isIdentifier(fn.name)) return fn.name.text
+  }
+  let node: ts.Node = fn
+  let parent: ts.Node | undefined = fn.parent
+  while (
+    parent &&
+    (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent) || ts.isTypeAssertionExpression(parent) ||
+      ts.isSatisfiesExpression(parent))
+  ) {
+    node = parent
+    parent = parent.parent
+  }
+  if (!parent) return null
+  if (ts.isVariableDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name)) {
+    return parent.name.text
+  }
+  if (ts.isPropertyAssignment(parent) && parent.initializer === node) {
+    if (ts.isIdentifier(parent.name) || ts.isStringLiteral(parent.name)) return parent.name.text
+  }
+  if (ts.isPropertyDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name)) {
+    return parent.name.text
+  }
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    parent.right === node
+  ) {
+    if (ts.isIdentifier(parent.left)) return parent.left.text
+    if (ts.isPropertyAccessExpression(parent.left) && ts.isIdentifier(parent.left.name)) return parent.left.name.text
+  }
+  return null
+}
+
+function formalParameterIndex(fn: FunctionLike): Map<string, number> {
+  const out = new Map<string, number>()
+  fn.parameters.forEach((param, index) => {
+    if (ts.isIdentifier(param.name)) out.set(param.name.text, index)
+  })
+  return out
+}
+
+interface ParsedUnit {
+  readonly file: string
+  readonly name: string
+  readonly source: ts.SourceFile
+}
+
+function scriptKindFor(file: string): ts.ScriptKind {
+  return file.endsWith('.cjs') || file.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TS
+}
+
+function parseUnits(closure: CallPathClosure): ParsedUnit[] {
+  return closure.units.map((unit) => ({
+    file: unit.file,
+    name: unit.name,
+    source: ts.createSourceFile(
+      `${unit.file}#${unit.name}`,
+      unit.text,
+      ts.ScriptTarget.ES2022,
+      true,
+      scriptKindFor(unit.file),
+    ),
+  }))
+}
+
+/**
+ * LEXICALLY-SCOPED local lookup, resolved from the node that mentions the
+ * name outward. A flat unit-wide `Map<name, initializer>` was the first
+ * implementation and it was wrong in a way that only showed up when the
+ * transcript was read: `ConnectionPool` declares `queryConfig` THREE times
+ * (in `buildQueryConfig`, in `query`, and inside `transaction`'s wrapped
+ * client), the whole class arrives as ONE unit, and last-write-wins made the
+ * trace for `query`'s site follow `transaction`'s declaration — reporting
+ * provenance through the wrong formal parameter (`params`, index 1) while
+ * still passing. A pass-through justified by the wrong parameter is not a
+ * justification, so the lookup walks the real scope chain instead.
+ */
+function resolveLocalBinding(name: string, from: ts.Node): ts.Expression | null {
+  let current: ts.Node | undefined = from
+  while (current) {
+    let statements: readonly ts.Statement[] | null = null
+    if (ts.isBlock(current)) statements = current.statements
+    else if (ts.isSourceFile(current)) statements = current.statements
+    else if (ts.isCaseClause(current) || ts.isDefaultClause(current)) statements = current.statements
+    if (statements) {
+      for (const statement of statements) {
+        if (!ts.isVariableStatement(statement)) continue
+        for (const declaration of statement.declarationList.declarations) {
+          if (ts.isIdentifier(declaration.name) && declaration.name.text === name && declaration.initializer) {
+            return declaration.initializer
+          }
+        }
+      }
+    }
+    current = current.parent
+  }
+  return null
+}
+
+/** Every function-like declaration the closure carries, indexed by name, so a
+ *  callee appearing in a traced expression can be checked for (a) being swept
+ *  at all and (b) composing nothing. */
+function indexClosureFunctions(units: ParsedUnit[]): Map<string, ts.Node[]> {
+  const out = new Map<string, ts.Node[]>()
+  const add = (name: string, node: ts.Node): void => {
+    const list = out.get(name)
+    if (list) list.push(node)
+    else out.set(name, [node])
+  }
+  for (const unit of units) {
+    const walk = (node: ts.Node): void => {
+      if (isFunctionLike(node)) {
+        const name = adapterNameOf(node)
+        if (name) add(name, node)
+      }
+      node.forEachChild(walk)
+    }
+    unit.source.forEachChild(walk)
+  }
+  return out
+}
+
+function moduleScopeLiteralConstants(closure: CallPathClosure, repoRoot: string): Map<string, string> {
+  const out = new Map<string, string>()
   for (const file of closure.files) {
     const absolute = path.join(repoRoot, file)
     if (!fs.existsSync(absolute)) continue
-    const kind = file.endsWith('.cjs') || file.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TS
     const source = ts.createSourceFile(
       absolute,
       fs.readFileSync(absolute, 'utf8'),
       ts.ScriptTarget.ES2022,
       true,
-      kind,
+      scriptKindFor(file),
     )
     source.forEachChild((node) => {
       if (!ts.isVariableStatement(node)) return
       for (const decl of node.declarationList.declarations) {
         if (!ts.isIdentifier(decl.name) || !decl.initializer) continue
         if (ts.isStringLiteral(decl.initializer) || ts.isNoSubstitutionTemplateLiteral(decl.initializer)) {
-          literalConstants.set(decl.name.text, decl.initializer.text)
+          out.set(decl.name.text, decl.initializer.text)
         }
       }
     })
   }
+  return out
+}
 
-  for (const unit of closure.units) {
-    const kind = unit.file.endsWith('.cjs') || unit.file.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TS
-    const source = ts.createSourceFile(`${unit.file}#${unit.name}`, unit.text, ts.ScriptTarget.ES2022, true, kind)
-    // Locals declared inside this unit, so a one-hop `const sql = <expr>` can
-    // be resolved rather than waved through.
-    const locals = new Map<string, ts.Expression>()
-    const collectLocals = (node: ts.Node): void => {
-      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-        locals.set(node.name.text, node.initializer)
+type Classification =
+  | { kind: 'resolved'; sql: string }
+  | { kind: 'passthrough'; adapterName: string; paramIndex: number; provenanceLeaf: string }
+  | { kind: 'finding'; reason: string }
+
+interface ClassifierContext {
+  readonly unit: ParsedUnit
+  readonly literalConstants: Map<string, string>
+  readonly closureFunctions: Map<string, ts.Node[]>
+}
+
+/**
+ * Classifies ONE argument expression at ONE call site. The call site node is
+ * needed (not just the argument) because provenance is defined against the
+ * innermost enclosing function's formal parameters.
+ */
+function classifySqlArgument(arg: ts.Expression, callSite: ts.Node, ctx: ClassifierContext): Classification {
+  if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) return { kind: 'resolved', sql: arg.text }
+  if (ts.isIdentifier(arg)) {
+    const constant = ctx.literalConstants.get(arg.text)
+    if (constant !== undefined) return { kind: 'resolved', sql: constant }
+  }
+
+  // ---- trace ------------------------------------------------------------
+  const traced: ts.Node[] = [arg]
+  const visitedLocals = new Set<string>()
+  for (let depth = 0; depth < 4; depth += 1) {
+    const before = traced.length
+    for (const node of [...traced]) {
+      const collectIdentifiers = (child: ts.Node): void => {
+        if (ts.isIdentifier(child) && !visitedLocals.has(child.text)) {
+          // Resolved from the mention outward, so a name declared in several
+          // sibling scopes of the same unit follows ITS OWN declaration.
+          const local = resolveLocalBinding(child.text, child)
+          if (local) {
+            visitedLocals.add(child.text)
+            traced.push(local)
+          }
+        }
+        child.forEachChild(collectIdentifiers)
       }
-      node.forEachChild(collectLocals)
+      if (ts.isIdentifier(node)) collectIdentifiers(node)
+      node.forEachChild(collectIdentifiers)
     }
-    source.forEachChild(collectLocals)
+    if (traced.length === before) break
+  }
 
-    const classify = (arg: ts.Expression, snippet: string, depth: number): void => {
-      if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
-        resolved.push({ file: unit.file, sql: arg.text })
+  // ---- (2) composition veto, applied to the WHOLE trace ------------------
+  for (const node of traced) {
+    if (containsComposition(node)) {
+      return { kind: 'finding', reason: 'string-composed SQL in the traced expression — refused, not analysed' }
+    }
+  }
+
+  // ---- (3) a named adapter ----------------------------------------------
+  const enclosing = enclosingFunctionOf(callSite)
+  if (!enclosing) {
+    return { kind: 'finding', reason: 'call site is not inside any function — no formal parameters to forward' }
+  }
+  const adapterName = adapterNameOf(enclosing)
+  if (!adapterName) {
+    return {
+      kind: 'finding',
+      reason: 'anonymous enclosing function — no adapter name, so no caller set can be checked',
+    }
+  }
+
+  // ---- (1) formal-parameter provenance ----------------------------------
+  const formals = formalParameterIndex(enclosing)
+  let provenanceLeaf: string | null = null
+  let paramIndex = -1
+  const leaves: string[] = []
+  for (const node of traced) {
+    const collectLeaves = (child: ts.Node): void => {
+      if (ts.isPropertyAccessExpression(child)) {
+        collectLeaves(child.expression)
         return
       }
-      if (isStringComposing(arg)) {
-        composed.push({ file: unit.file, snippet })
+      if (ts.isCallExpression(child)) {
+        // The callee NAME is not a data leaf; its ARGUMENTS are.
+        for (const callArg of child.arguments) collectLeaves(callArg)
+        if (ts.isPropertyAccessExpression(child.expression)) collectLeaves(child.expression.expression)
         return
       }
-      if (ts.isIdentifier(arg)) {
-        const constant = literalConstants.get(arg.text)
-        if (constant !== undefined) {
-          resolved.push({ file: unit.file, sql: constant })
-          return
-        }
-        const local = locals.get(arg.text)
-        if (local && depth < 3) {
-          classify(local, snippet, depth + 1)
-          return
-        }
-      }
-      passthrough.push({ file: unit.file, snippet })
+      if (ts.isIdentifier(child)) leaves.push(child.text)
+      child.forEachChild(collectLeaves)
     }
+    collectLeaves(node)
+  }
+  for (const leaf of leaves) {
+    const index = formals.get(leaf)
+    if (index !== undefined) {
+      provenanceLeaf = leaf
+      paramIndex = index
+      break
+    }
+  }
+  if (provenanceLeaf === null) {
+    return {
+      kind: 'finding',
+      reason: `no formal-parameter provenance: the SQL reaching this seam is authored inside the closure (traced leaves: ${
+        leaves.length ? [...new Set(leaves)].join(', ') : '<none>'
+      })`,
+    }
+  }
 
+  // ---- (4) every callee in the trace is swept and composes nothing -------
+  const calleeNames = new Set<string>()
+  for (const node of traced) {
+    const collectCallees = (child: ts.Node): void => {
+      if (ts.isCallExpression(child)) {
+        const name = calleeNameOf(child)
+        if (name) calleeNames.add(name)
+      }
+      child.forEachChild(collectCallees)
+    }
+    if (ts.isCallExpression(node)) {
+      const name = calleeNameOf(node)
+      if (name) calleeNames.add(name)
+    }
+    collectCallees(node)
+  }
+  for (const name of calleeNames) {
+    const declarations = ctx.closureFunctions.get(name)
+    if (!declarations || declarations.length === 0) {
+      return { kind: 'finding', reason: `callee \`${name}\` is not declared inside the swept closure` }
+    }
+    for (const declaration of declarations) {
+      if (containsComposition(declaration)) {
+        return { kind: 'finding', reason: `callee \`${name}\` composes strings in its body` }
+      }
+    }
+  }
+
+  return { kind: 'passthrough', adapterName, paramIndex, provenanceLeaf }
+}
+
+export function collectQuerySqlArguments(closure: CallPathClosure, repoRoot: string): SqlArguments {
+  const units = parseUnits(closure)
+  const literalConstants = moduleScopeLiteralConstants(closure, repoRoot)
+  const closureFunctions = indexClosureFunctions(units)
+
+  const resolved: ResolvedSqlArgument[] = []
+  const passthrough: PassThroughSqlArgument[] = []
+  const findings: SqlArgumentFinding[] = []
+
+  for (const unit of units) {
+    const ctx: ClassifierContext = { unit, literalConstants, closureFunctions }
     const walk = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
-        const callee = node.expression
-        const calleeName = ts.isIdentifier(callee)
-          ? callee.text
-          : ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.name)
-            ? callee.name.text
-            : null
-        if (calleeName === 'query') {
+        const calleeName = calleeNameOf(node)
+        if (calleeName && isDbSeamCalleeName(calleeName)) {
+          const snippet = node.getText(unit.source).replace(/\s+/g, ' ').slice(0, 200)
+          const site = { file: unit.file, unit: unit.name, snippet }
           const arg = node.arguments[0]
-          const snippet = node.getText(source).slice(0, 200)
-          if (!arg) passthrough.push({ file: unit.file, snippet })
-          else classify(arg, snippet, 0)
+          if (!arg) {
+            findings.push({ ...site, reason: 'DB-seam call with no first argument — nothing to classify' })
+          } else {
+            const verdict = classifySqlArgument(arg, node, ctx)
+            if (verdict.kind === 'resolved') resolved.push({ ...site, sql: verdict.sql })
+            else if (verdict.kind === 'passthrough') {
+              passthrough.push({
+                ...site,
+                adapterName: verdict.adapterName,
+                paramIndex: verdict.paramIndex,
+                provenanceLeaf: verdict.provenanceLeaf,
+              })
+            } else findings.push({ ...site, reason: verdict.reason })
+          }
         }
       }
       node.forEachChild(walk)
     }
-    source.forEachChild(walk)
+    unit.source.forEachChild(walk)
   }
-  return { resolved, composed, passthrough }
+  return { resolved, passthrough, findings }
+}
+
+export interface PassThroughCallerReport {
+  readonly adapterName: string
+  readonly paramIndex: number
+  /** Calls to `adapterName` found anywhere in the closure. */
+  readonly callerCount: number
+  /** Callers whose argument at `paramIndex` is neither resolved nor a valid
+   *  pass-through — each one is a hole in the pass-through justification. */
+  readonly unclassifiedCallers: ReadonlyArray<{ file: string; snippet: string; reason: string }>
+}
+
+/**
+ * Requirement (5). For every distinct (adapterName, paramIndex) that
+ * `collectQuerySqlArguments` accepted as pass-through, find the calls to that
+ * name inside the closure and classify what they pass at that position.
+ *
+ * Caller matching is by NAME, which is a conservative OVER-approximation: two
+ * unrelated functions that share a name are checked as one, so the check can
+ * only demand more, never less. Stated because it is a real property of the
+ * mechanism, not because it weakens the result.
+ */
+export function checkPassThroughCallers(
+  closure: CallPathClosure,
+  repoRoot: string,
+  sqlArguments: SqlArguments,
+): PassThroughCallerReport[] {
+  const units = parseUnits(closure)
+  const literalConstants = moduleScopeLiteralConstants(closure, repoRoot)
+  const closureFunctions = indexClosureFunctions(units)
+
+  const targets = new Map<string, { adapterName: string; paramIndex: number }>()
+  for (const entry of sqlArguments.passthrough) {
+    targets.set(`${entry.adapterName}#${entry.paramIndex}`, {
+      adapterName: entry.adapterName,
+      paramIndex: entry.paramIndex,
+    })
+  }
+
+  const reports: PassThroughCallerReport[] = []
+  for (const { adapterName, paramIndex } of targets.values()) {
+    let callerCount = 0
+    const unclassifiedCallers: Array<{ file: string; snippet: string; reason: string }> = []
+    for (const unit of units) {
+      const ctx: ClassifierContext = { unit, literalConstants, closureFunctions }
+      const walk = (node: ts.Node): void => {
+        if (ts.isCallExpression(node) && calleeNameOf(node) === adapterName) {
+          callerCount += 1
+          const arg = node.arguments[paramIndex]
+          const snippet = node.getText(unit.source).replace(/\s+/g, ' ').slice(0, 160)
+          if (!arg) {
+            unclassifiedCallers.push({ file: unit.file, snippet, reason: `no argument at index ${paramIndex}` })
+          } else {
+            const verdict = classifySqlArgument(arg, node, ctx)
+            if (verdict.kind === 'finding') {
+              unclassifiedCallers.push({ file: unit.file, snippet, reason: verdict.reason })
+            }
+          }
+        }
+        node.forEachChild(walk)
+      }
+      unit.source.forEachChild(walk)
+    }
+    reports.push({ adapterName, paramIndex, callerCount, unclassifiedCallers })
+  }
+  return reports
 }
 
 /** Relation names following FROM / JOIN / INTO / UPDATE in a SQL string. */

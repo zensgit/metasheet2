@@ -19,15 +19,30 @@
  * `shift_id` alone. Both tables carry `org_id`, so the code was changed to
  * match the claim rather than the claim narrowed to match the code.)
  *
- * GET-only (W6-R1): every query in this file is a SELECT. The mechanical
- * proof is `tests/unit/attendance-w6-group-effective-policy-dml-sweep.test.ts`.
- * Read what that test actually proves before relying on this sentence: its
- * static leg sweeps a DERIVED call-path closure and REFUSES any `query(...)`
- * whose SQL argument is not a single literal (a concatenated verb defeated
- * the previous literal-text-only detector inside this very file), and its
- * behavioural leg brackets the route round-trip with a per-table row-count +
- * `MAX(xmin)` snapshot over a DERIVED table set. The behavioural leg's known
- * blind spot is disclosed in that file's header, not papered over here.
+ * GET-only (W6-R1): every query in this file is a SELECT.
+ *
+ * W6-R1 IS NOT COMPLETE, and this module must not be read as if it were. The
+ * red line has two legs. The MECHANISM OF RECORD is a database-level
+ * constraint: the route builds this service PER REQUEST inside a
+ * `SET TRANSACTION READ ONLY` transaction, and PostgreSQL refuses any write on
+ * that handle with SQLSTATE 25006 no matter how the statement was composed —
+ * see `createAttendanceGroupEffectivePolicyReadOnlyService` in
+ * `../routes/attendance-admin.ts`. The static sweep
+ * (`tests/unit/attendance-w6-group-effective-policy-dml-sweep.test.ts`) is a
+ * SECOND, independent leg, not a substitute: it sweeps a DERIVED call-path
+ * closure, exempts no file, and REFUSES any DB-seam argument it cannot account
+ * for — but any static analysis can be defeated by dataflow it cannot trace,
+ * which is precisely how three successive versions of it were walked through.
+ *
+ * The behavioural proofs of BOTH legs live in
+ * `tests/integration/attendance-w6-group-effective-policy.db.test.ts` and
+ * `…-membership-overlap.db.test.ts`, and under the phase-1 scope fence NEITHER
+ * suite is two-point wired (absent from the CI run-list AND absent from
+ * `vitest.config.ts`'s `exclude:`, so the no-DB lane collects them and reports
+ * them skipped). Until both wirings land — phase 2, gated on PR 4805's merge
+ * ruling — W6-R1's behavioural proof executes in no required check and the red
+ * line cannot be counted discharged. That is a statement of status, not a
+ * caveat to be read past.
  *
  * Fixed-schedule effectiveness (W6-R4, OD-W6-2(a)): this module calls the
  * EXISTING FSER service (`attendance-group-fixed-schedule-effectiveness-service.cjs`,
