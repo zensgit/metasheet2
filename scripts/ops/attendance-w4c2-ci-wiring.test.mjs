@@ -1209,6 +1209,67 @@ function stepRunScriptsOfJob(jobName) {
   return JSON.parse(res.stdout)
 }
 
+// P1-2 FROZEN ROWS: the config resolver, driven over synthetic steps. `governingIntegrationConfig`
+// on the LIVE workflow is asserted separately below; this leg proves the resolver can actually SEE
+// the shapes it claims to refuse, including the exact executed bypass
+// (`--config tests/vitest.integration.config.ts`, a real second file with the same basename).
+test('P1-2 config-resolution positive control: same-basename decoys, escapes and ambiguity all fail CLOSED', () => {
+  const step = (run) => [['probe', { run }]]
+  const CMD = 'pnpm exec vitest run tests/integration/attendance-x.db.test.ts'
+  // The canonical shape resolves, in all three spellings the argument allowlist permits.
+  assert.equal(governingIntegrationConfig(step(`${CMD} --config vitest.integration.config.ts`)), INTEGRATION_CONFIG)
+  assert.equal(governingIntegrationConfig(step(`${CMD} --config=vitest.integration.config.ts`)), INTEGRATION_CONFIG)
+  assert.equal(governingIntegrationConfig(step(`${CMD} -c vitest.integration.config.ts`)), INTEGRATION_CONFIG)
+  // Punctuation that normalises to the canonical path is the SAME file, and resolves to it — the
+  // resolver is not a string comparison wearing a different hat.
+  assert.equal(governingIntegrationConfig(step(`${CMD} --config ./vitest.integration.config.ts`)), INTEGRATION_CONFIG)
+  // THE EXECUTED BYPASS: a different file with the SAME BASENAME, which the shared
+  // `argsUseIntegrationConfig` cannot tell apart from the canonical one. The resolver keeps them
+  // apart — it resolves the decoy to ITSELF — which is what makes the pin below able to fire and
+  // what makes every config leg read the decoy rather than a bystander.
+  for (const decoy of [
+    'tests/vitest.integration.config.ts',
+    'decoy/vitest.integration.config.js',
+    './tests/../tests/vitest.integration.config.ts',
+  ]) {
+    const resolvedDecoy = resolvePackageRelativeConfig(decoy)
+    assert.notEqual(resolvedDecoy, null, `${decoy} must resolve to a package-relative path, not be discarded`)
+    assert.notEqual(
+      resolvedDecoy,
+      INTEGRATION_CONFIG,
+      `${decoy} must NOT resolve to the canonical config — the shared basename regex says true for `
+        + `it, and conflating the two is exactly the executed bypass`,
+    )
+  }
+  // …and end to end: a resolvable config that is NOT the canonical one is returned as itself, so
+  // the canonical pin reds instead of the guard silently reading the file it wished had been used.
+  assert.equal(governingIntegrationConfig(step(`${CMD} --config vitest.config.ts`)), NO_DB_CONFIG)
+  assert.notEqual(governingIntegrationConfig(step(`${CMD} --config vitest.config.ts`)), INTEGRATION_CONFIG)
+  // A same-basename decoy that does not exist on disk is refused outright rather than falling back.
+  assert.throws(
+    () => governingIntegrationConfig(step(`${CMD} --config tests/vitest.integration.config.ts`)),
+    /not a regular file/,
+  )
+  // Unresolvable / ambiguous shapes throw rather than defaulting to the canonical file.
+  assert.throws(() => governingIntegrationConfig(step(`${CMD} --config /abs/vitest.integration.config.ts`)), /failing CLOSED/)
+  assert.throws(() => governingIntegrationConfig(step(`${CMD} --config ../outside/vitest.integration.config.ts`)), /failing CLOSED/)
+  assert.throws(() => governingIntegrationConfig(step(CMD)), /failing CLOSED/)
+  assert.throws(
+    () => governingIntegrationConfig(step(`${CMD} --config vitest.integration.config.ts --config other.config.ts`)),
+    /failing CLOSED/,
+  )
+  assert.throws(
+    () => governingIntegrationConfig([
+      ['a', { run: `${CMD} --config vitest.integration.config.ts` }],
+      ['b', { run: `${CMD} --config vitest.config.ts` }],
+    ]),
+    /different configs/,
+  )
+  // A config that resolves but does not EXIST is refused — the pin cannot read a file that is not
+  // there, and silently falling back to the canonical one is exactly the substitution P1-2 is about.
+  assert.throws(() => governingIntegrationConfig(step(`${CMD} --config vitest.nonexistent.config.ts`)), /not a regular file/)
+})
+
 // Why the corpus below is derived STATICALLY rather than from vitest's own collection: this guard
 // runs before the workspace install, so vitest does not exist yet. That is a real property of the
 // workflow, so it is asserted here instead of claimed in a comment that could quietly stop being
@@ -1267,6 +1328,138 @@ const NO_DB_CONFIG = 'vitest.config.ts'
 const INTEGRATION_CONFIG = 'vitest.integration.config.ts'
 
 const readCoreBackendFile = (rel) => readFileSync(join(CORE_BACKEND_DIR, rel), 'utf8')
+
+// ---------------------------------------------------------------------------------------------
+// P1-2 — THE CONFIG THE GUARD INSPECTS MUST BE THE CONFIG THAT GOVERNS EXECUTION.
+//
+// Every leg that "pins vitest.integration.config.ts itself" — the include/exclude reconciliation,
+// the `testNamePattern` refusal, the suffix vocabulary the corpus leans on — read a HARDCODED
+// `packages/core-backend/vitest.integration.config.ts`, while the invocation was admitted to the
+// domain by the shared `argsUseIntegrationConfig`, which matches the BASENAME:
+//
+//     vitest.integration.config.ts          -> true
+//     tests/vitest.integration.config.ts    -> true       <-- a DIFFERENT FILE
+//     ../decoy/vitest.integration.config.js -> true       <-- a different file, outside the package
+//
+// So the file the guard inspected and the file vitest loaded could simply be two different files.
+// Executed: pointing the attendance step at `tests/vitest.integration.config.ts` carrying
+// `testNamePattern: 'no-such-test-zz'` left the guard at 199/199, while behaviourally a config-level
+// `testNamePattern` yields `Test Files 3 skipped (3)` and exit 0 — all 87 carried suites executing
+// zero assertions with required CI green.
+//
+// The fix is not to widen the basename regex. It is to RESOLVE the `--config` argument the
+// invocation actually passes and to read THAT file. Since the resolved path is then what every pin
+// inspects, a decoy is inspected too — its `testNamePattern` reds the very leg it was meant to slip
+// past — and separately the resolved path is pinned to the canonical one so the move itself is a
+// named, one-line red rather than a silent relocation.
+//
+// FAIL CLOSED, stated with its cost: a value this guard cannot resolve to a package-relative file
+// (absolute, escaping `..`, absent, or two `--config` flags on one command) is REFUSED, and so is a
+// real-DB vitest invocation running under any config other than the governing one. Adding such a
+// line to a real-DB step reds this guard until an owner widens the rule — the same polarity as the
+// inert alphabet, and for the same reason: a config this guard has not read is a config whose
+// collection it cannot vouch for.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Every `--config` / `-c` / `--config=` VALUE of one invocation, in order. A flag with no usable
+ * value contributes `null` so "present but unresolvable" is distinguishable from "absent".
+ *
+ * @param {{ args: string[] }} inv
+ * @returns {(string | null)[]}
+ */
+function configValuesOfInvocation(inv) {
+  const out = []
+  for (let i = 0; i < inv.args.length; i++) {
+    const arg = inv.args[i]
+    if (arg === '--config' || arg === '-c') {
+      const value = inv.args[i + 1]
+      if (typeof value === 'string' && !value.startsWith('-')) {
+        out.push(value)
+        i += 1
+      } else {
+        out.push(null)
+      }
+      continue
+    }
+    if (arg.startsWith('--config=')) out.push(arg.slice('--config='.length))
+  }
+  return out
+}
+
+/**
+ * A `--config` value resolved to a package-relative POSIX path, or `null` when it names a file this
+ * guard cannot read as one (absolute — the runner's checkout prefix is unknowable here; escaping
+ * the package root; empty).
+ *
+ * @param {string | null} value
+ * @returns {string | null}
+ */
+function resolvePackageRelativeConfig(value) {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  if (value.startsWith('/')) return null
+  const rel = posix.normalize(value)
+  if (rel === '' || rel === '..' || rel.startsWith('../')) return null
+  return rel
+}
+
+/**
+ * THE config file the real-DB steps actually load — derived from the invocations, never assumed.
+ *
+ * Throws (fail closed) unless every provably-executed vitest invocation across the three real-DB
+ * steps names exactly one resolvable config, they all name the SAME one, and that file exists as a
+ * regular file in the package. The return value is what every config pin below reads.
+ *
+ * @param {[string, Record<string, unknown>][]} steps (id, parsed step) pairs; the live three by default
+ * @returns {string} package-relative POSIX path
+ */
+function governingIntegrationConfig(steps = realDbSteps()) {
+  const problems = []
+  const resolved = new Set()
+  for (const [stepId, step] of steps) {
+    for (const inv of executableVitestInvocations(step)) {
+      const values = configValuesOfInvocation(inv)
+      if (values.length !== 1) {
+        problems.push(
+          `step "${stepId}" has a vitest invocation with ${values.length} \`--config\` arguments `
+            + `(${JSON.stringify(values)}); exactly one is required, because with none vitest picks a `
+            + `config this guard never read and with two it uses the last`,
+        )
+        continue
+      }
+      const rel = resolvePackageRelativeConfig(values[0])
+      if (rel == null) {
+        problems.push(
+          `step "${stepId}" runs vitest with \`--config ${JSON.stringify(values[0])}\`, which does not `
+            + `resolve to a file inside packages/core-backend (absolute paths and \`..\` escapes are `
+            + `refused: this guard cannot read what it cannot locate)`,
+        )
+        continue
+      }
+      resolved.add(rel)
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`governing vitest config: failing CLOSED —\n  ${problems.join('\n  ')}`)
+  }
+  if (resolved.size !== 1) {
+    throw new Error(
+      `governing vitest config: failing CLOSED — the real-DB steps run vitest under `
+        + `${resolved.size} different configs (${JSON.stringify([...resolved])}). Every pin below `
+        + `inspects ONE config file; with more than one, some carried suite is governed by a file `
+        + `this guard did not read`,
+    )
+  }
+  const [rel] = [...resolved]
+  const abs = join(CORE_BACKEND_DIR, rel)
+  if (!existsSync(abs) || !lstatSync(abs).isFile()) {
+    throw new Error(
+      `governing vitest config: failing CLOSED — the real-DB steps pass \`--config ${rel}\`, but `
+        + `packages/core-backend/${rel} is not a regular file on disk`,
+    )
+  }
+  return rel
+}
 
 /**
  * Source with comments AND string/template bodies blanked, positions preserved. It is used for the
@@ -1632,7 +1825,9 @@ function attendanceCorpus(options) {
  */
 function suiteIncludeRegexes() {
   const globs = [
-    ...(directTestArrayEntries(readCoreBackendFile(INTEGRATION_CONFIG), 'include') ?? []),
+    // The GOVERNING config (P1-2), resolved from the invocation — not the hardcoded name, which
+    // could be a bystander while vitest loaded a different file with the same basename.
+    ...(directTestArrayEntries(readCoreBackendFile(governingIntegrationConfig()), 'include') ?? []),
     ...(directTestArrayEntries(readCoreBackendFile(NO_DB_CONFIG), 'include') ?? []),
   ]
   return globs.map(globToRegExp)
@@ -2479,12 +2674,15 @@ test('P2: the corpus walk refuses symlinks and other non-regular entries instead
   // carried suite at once, with the run-lists, the no-DB excludes and the argument allowlist above
   // all still green — the same bypass as `-t`, one file over. Pinned here, attendance-scoped: the
   // assertion is over the attendance args only, not over the approval/multitable corpora.
-  test(`${INTEGRATION_CONFIG} still collects every carried attendance suite, and applies no name filter`, () => {
-    const cfg = readCoreBackendFile(INTEGRATION_CONFIG)
+  test(`the GOVERNING integration config still collects every carried attendance suite, and applies no name filter`, () => {
+    // P1-2: the config is RESOLVED from the invocation, so this pin can no longer be pointed at a
+    // bystander with the same basename while vitest loads a different file.
+    const governing = governingIntegrationConfig()
+    const cfg = readCoreBackendFile(governing)
     const include = directTestArrayEntries(cfg, 'include')
     assert.ok(
       Array.isArray(include) && include.length > 0,
-      `${INTEGRATION_CONFIG} must declare a direct test.include — without it this pin cannot be `
+      `${governing} must declare a direct test.include — without it this pin cannot be `
         + `evaluated and the real-DB steps' collection is unstated`,
     )
     const includeRe = include.map(globToRegExp)
@@ -2493,20 +2691,38 @@ test('P2: the corpus walk refuses symlinks and other non-regular entries instead
       assert.ok(
         includeRe.some((re) => re.test(arg)),
         `${arg} is carried by a real-DB run-list but matches no test.include glob of `
-          + `${INTEGRATION_CONFIG} (${JSON.stringify(include)}) — the step would hand vitest a path `
+          + `${governing} (${JSON.stringify(include)}) — the step would hand vitest a path `
           + `it does not collect, and vitest exits 0 on it`,
       )
       assert.ok(
         !excludeRe.some((re) => re.test(arg)),
         `${arg} is carried by a real-DB run-list but matches a test.exclude glob of `
-          + `${INTEGRATION_CONFIG} — it is removed from the very run that is supposed to execute it`,
+          + `${governing} — it is removed from the very run that is supposed to execute it`,
       )
     }
     assert.ok(
       !declaresDirectTestKey(cfg, 'testNamePattern'),
-      `${INTEGRATION_CONFIG} must not declare test.testNamePattern: a name filter set in the config `
+      `${governing} must not declare test.testNamePattern: a name filter set in the config `
         + `silences every carried suite exactly as \`-t\` does on the command line, and the argument `
         + `allowlist above cannot see it`,
+    )
+  })
+
+  // The resolved path is ALSO pinned to the canonical one. The resolution above already makes a
+  // decoy self-defeating (its own `testNamePattern` reds the leg it was meant to slip past), but a
+  // relocation should be a named one-line red rather than something a reader has to infer from a
+  // leg that happens to still pass. `INTEGRATION_CONFIG` is now used ONLY here — as the pinned
+  // value, never as the thing that gets read.
+  test('P1-2: the config the real-DB steps actually load is the canonical integration config', () => {
+    assert.equal(
+      governingIntegrationConfig(),
+      INTEGRATION_CONFIG,
+      `the real-DB steps' \`--config\` resolves to a different file than `
+        + `packages/core-backend/${INTEGRATION_CONFIG}. The shared \`argsUseIntegrationConfig\` `
+        + `matches only the BASENAME — \`tests/vitest.integration.config.ts\` and `
+        + `\`../decoy/vitest.integration.config.js\` both satisfy it — so a same-basename file `
+        + `elsewhere in the tree used to be admitted while every pin inspected the canonical one. `
+        + `Moving the config is an owner decision: update this pin in the same commit`,
     )
   })
 
