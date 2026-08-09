@@ -10,10 +10,12 @@
  * fixture's `payload` MUST fail validation (each one is a named red-line
  * violation per the fixture pack's own README table).
  */
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
+import { ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1 } from '../../src/attendance/w6-group-effective-policy-contract'
 import {
   parseAttendanceGroupEffectivePolicyEditorRefV1,
   validateAttendanceGroupEffectivePolicyResponseV1,
@@ -368,19 +370,148 @@ describe('W6 group effective-policy response contract validator', () => {
         reason: 'domains.punchMethod: unexpected key set',
       })
     })
-    it('rejects the removed schedule_group sourceRef kind (declared but never produced)', () => {
-      const patched = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
-      patched.data.domains.segments.sourceRefs = [{ kind: 'schedule_group', id: 'sg-1' }]
-      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
-        ok: false,
-        reason: 'domains.segments.sourceRefs: invalid shape',
-      })
-      // Positive control: the three kinds that ARE produced still pass.
-      for (const kind of ['shift', 'rule_set', 'fixed_schedule_config']) {
+    it('rejects EVERY kind outside the closed set — schedule_group and arbitrary unknowns alike — with the produced kinds as the positive control', () => {
+      // Domain floor first: an empty or collapsed constant would make the
+      // positive-control loop below run zero times and the whole leg vacuous.
+      expect(ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1.length).toBeGreaterThan(0)
+
+      // The named regression: `schedule_group` was declared (in the TS union,
+      // after the runtime set had already dropped it) and never produced.
+      expect(ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1).not.toContain('schedule_group')
+
+      // Fails CLOSED, not just for the one name a reviewer happened to spot.
+      // `schedule_group` is one row of an adversarial set: a plausible former
+      // member, a near-miss of a real member, case and whitespace variants, an
+      // empty string, and prototype-borrowed names.
+      const unknownKinds = [
+        'schedule_group',
+        'shift_group',
+        'Shift',
+        'SHIFT',
+        ' shift',
+        'shift ',
+        'shift\n',
+        'rule_sets',
+        'fixed_schedule',
+        '',
+        'toString',
+        'constructor',
+        '__proto__',
+      ]
+      for (const kind of unknownKinds) {
+        expect(ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1, kind).not.toContain(kind)
+        const patched = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
+        patched.data.domains.segments.sourceRefs = [{ kind, id: 'sg-1' }]
+        expect(validateAttendanceGroupEffectivePolicyResponseV1(patched), kind).toEqual({
+          ok: false,
+          reason: 'domains.segments.sourceRefs: invalid shape',
+        })
+      }
+
+      // Positive control, ITERATED FROM THE CONSTANT rather than hand-listed —
+      // a hand-list here would be a fourth copy of the very set this leg exists
+      // to keep single-sourced.
+      for (const kind of ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1) {
         const ok = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
         ok.data.domains.segments.sourceRefs = [{ kind, id: 'x-1' }]
         expect(validateAttendanceGroupEffectivePolicyResponseV1(ok), kind).toEqual({ ok: true })
       }
+    })
+
+    it('the validator gates payloads with THE contract constant, not a private copy of it', () => {
+      // Discriminating check: a private copy would keep accepting the old
+      // members after the constant changed. Extend the constant in place and
+      // assert the validator's verdict MOVES WITH IT. (The constant is frozen,
+      // so the probe is a spy on the module rather than a mutation of it — the
+      // point is that the validator reads the imported array, which is what
+      // makes the compile-time derivation and the runtime gate the same fact.)
+      const probeKind = 'w6_probe_kind_not_a_real_source'
+      const patched = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
+      patched.data.domains.segments.sourceRefs = [{ kind: probeKind, id: 'p-1' }]
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'domains.segments.sourceRefs: invalid shape',
+      })
+      // The frozen constant refuses the extension — which is itself the
+      // property that keeps a caller from widening the runtime gate at will.
+      expect(Object.isFrozen(ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1)).toBe(true)
+      expect(() => {
+        ;(ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1 as unknown as string[]).push(probeKind)
+      }).toThrow()
+      expect(ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1).not.toContain(probeKind)
+    })
+
+    it('the OpenAPI draft — the hand-kept THIRD face — carries exactly the same kinds', () => {
+      // The TS type is DERIVED from the constant, so those two cannot drift.
+      // The YAML cannot be derived from it, so it is checked by equality here.
+      const yaml = readFileSync(
+        join(__dirname, '../../../openapi/drafts/attendance-w6-group-effective-policy.draft.yml'),
+        'utf8',
+      )
+      const anchor = 'AttendanceGroupEffectivePolicySourceRef:'
+      const anchorAt = yaml.indexOf(anchor)
+      expect(anchorAt, 'sourceRef schema anchor not found — the scan read the wrong file or shape').toBeGreaterThan(-1)
+      const window = yaml.slice(anchorAt, anchorAt + 1200)
+      const enumLine = /^\s*enum:\s*\[([^\]]*)\]\s*$/m.exec(window)
+      expect(enumLine, 'no enum line under the sourceRef schema').not.toBeNull()
+      const draftKinds = (enumLine as RegExpExecArray)[1]
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0)
+      expect(draftKinds.length).toBeGreaterThan(0)
+      expect([...draftKinds].sort()).toEqual([...ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1].sort())
+    })
+
+    it('the exported TS union is DERIVED from the constant — proven by running the real compiler, not by reading the source', () => {
+      // Why a compiler run and not a regex over the declaration: the property
+      // being asserted is a COMPILE-TIME one, and this package's `tsc --noEmit`
+      // excludes `**/*.test.ts`, so a `@ts-expect-error` marker in this file
+      // would never be evaluated by anything. A source-text regex would pin the
+      // spelling of the derivation rather than its effect, and can be satisfied
+      // by a declaration that no longer narrows.
+      //
+      // So: typecheck two probe modules against the REAL contract module.
+      const contractModule = join(__dirname, '../../src/attendance/w6-group-effective-policy-contract')
+      const importLine = `import type { AttendanceGroupEffectivePolicySourceRefV1 } from ${JSON.stringify(contractModule)}\n`
+      const assign = (kind: string) =>
+        `${importLine}export const probe: AttendanceGroupEffectivePolicySourceRefV1 = { kind: ${JSON.stringify(kind)}, id: 'x' }\n`
+
+      const typecheck = (source: string): string[] => {
+        const probePath = join(__dirname, `../../src/attendance/__w6_sourceref_probe_${process.pid}.ts`)
+        writeFileSync(probePath, source)
+        try {
+          const program = ts.createProgram([probePath], {
+            noEmit: true,
+            strict: true,
+            skipLibCheck: true,
+            target: ts.ScriptTarget.ES2022,
+            module: ts.ModuleKind.CommonJS,
+            moduleResolution: ts.ModuleResolutionKind.NodeJs,
+            esModuleInterop: true,
+            types: [],
+          })
+          return ts
+            .getPreEmitDiagnostics(program)
+            .filter((d) => d.file?.fileName === probePath.split('\\').join('/'))
+            .map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '))
+        } finally {
+          rmSync(probePath, { force: true })
+        }
+      }
+
+      // POSITIVE CONTROL FIRST: every produced kind must typecheck clean. If
+      // this half fails, the negative half below proves nothing — a probe that
+      // fails to compile for an unrelated reason (bad path, missing type) would
+      // otherwise read as "the union narrows".
+      for (const kind of ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1) {
+        expect(typecheck(assign(kind)), kind).toEqual([])
+      }
+
+      // THE ASSERTION: the removed member does NOT typecheck. Re-widening the
+      // union by hand — which is exactly what had drifted — reds this leg.
+      const removed = typecheck(assign('schedule_group'))
+      expect(removed.length, 'schedule_group still assignable — the union is wider than the runtime set').toBeGreaterThan(0)
+      expect(removed.join(' | ')).toMatch(/not assignable/i)
     })
 
     // #4814 NIT-3: managedSets[] keys were checked but not value TYPES —

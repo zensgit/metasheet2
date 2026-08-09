@@ -33,6 +33,7 @@ import {
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAIN_REASON_CODES_V1,
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_FSER_REASON_CODES_V1,
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1,
+  ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1,
   type AttendanceGroupEffectivePolicyCalculationPostureV1,
   type AttendanceGroupEffectivePolicyEditorRefV1,
   type AttendanceGroupEffectivePolicyGroupTypeV1,
@@ -85,14 +86,18 @@ export const SCHEDULE_ROUTE_SURFACES: Record<string, readonly string[] | null> =
 })
 const GROUP_STAGES = Object.freeze(['basics', 'people', 'schedule', 'policies'])
 /**
- * The sourceRef `kind` union. §4.2 defines NO sourceRef-kind union, so this is
- * W6's own closed set — which means it must not carry a member no producer can
- * emit. `schedule_group` was declared and never produced (the same
- * "declared enum with no producer" class as the orphaned conflict code), so it
- * is removed here and in the OpenAPI draft. Adding a kind later is a
- * deliberate contract act, not a silent extension.
+ * The sourceRef `kind` set the validator gates payloads with. It is NOT a
+ * second copy: it is THE set from the contract module, which is also what the
+ * exported `AttendanceGroupEffectivePolicySourceRefKindV1` type is derived
+ * from, so compile-time and runtime cannot disagree about which kinds exist.
+ *
+ * A prior revision declared its own local array here while the contract
+ * module's type kept a fourth member (`schedule_group`) — a value this
+ * validator rejected still typechecked. That is why the array is imported
+ * rather than restated. Adding a kind is one deliberate edit in the contract
+ * module, not a silent extension in either file.
  */
-const SOURCE_REF_KINDS = Object.freeze(['shift', 'rule_set', 'fixed_schedule_config'])
+const SOURCE_REF_KINDS: readonly string[] = ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1
 
 export type AttendanceGroupEffectivePolicyValidationResult =
   | { readonly ok: true }

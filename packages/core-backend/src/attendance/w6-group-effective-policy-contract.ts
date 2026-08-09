@@ -170,9 +170,40 @@ export type AttendanceGroupEffectivePolicyEditorRefV1 =
       readonly surface?: 'rule-sets'
     }
 
+/**
+ * THE sourceRef `kind` set — ONE authority, consulted by both the compiler and
+ * the runtime validator.
+ *
+ * §4.2 defines no sourceRef-kind union, so this is W6's own closed set, which
+ * means it must not carry a member no producer can emit. `schedule_group` was
+ * declared and never produced (the same "declared enum with no producer" class
+ * as the orphaned conflict code) and is gone from all three faces: this set,
+ * the OpenAPI draft, and — via the derivation below — the exported TS type.
+ *
+ * The type is DERIVED from this array rather than written beside it. A prior
+ * revision kept the two by hand and they DRIFTED: the runtime set had dropped
+ * `schedule_group` while the exported type still declared it, so a value the
+ * validator rejects at runtime still typechecked. Deriving makes that
+ * particular disagreement unrepresentable — adding or removing a kind is one
+ * edit here, and the compiler follows.
+ *
+ * The inner `as const` is load-bearing: without it the element type widens to
+ * `string`, the derived union collapses to `string`, and the compile-time half
+ * of this guarantee silently disappears while everything still builds.
+ */
+export const ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1 = Object.freeze([
+  'shift',
+  'rule_set',
+  'fixed_schedule_config',
+] as const)
+
+/** The `kind` union, derived from the closed set above — never hand-written. */
+export type AttendanceGroupEffectivePolicySourceRefKindV1 =
+  (typeof ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1)[number]
+
 /** Configuration-source references: config IDs only, never user IDs (W6-R2). */
 export type AttendanceGroupEffectivePolicySourceRefV1 = {
-  readonly kind: 'shift' | 'rule_set' | 'fixed_schedule_config' | 'schedule_group'
+  readonly kind: AttendanceGroupEffectivePolicySourceRefKindV1
   readonly id: string
 }
 

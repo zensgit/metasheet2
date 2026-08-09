@@ -137,6 +137,14 @@ components:
           # contract but no producer ever emitted it. §4.2 defines no
           # sourceRef-kind union, so narrowing to the produced kinds needs no
           # lock amendment.
+          #
+          # AUTHORITY: `ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1`
+          # in `packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts`.
+          # The runtime validator imports it and the exported TS `kind` union is
+          # DERIVED from it, so those two cannot drift from each other. This YAML
+          # is a hand-kept THIRD face and can still drift from both — a unit leg
+          # (`…-response-contract.test.ts`) parses this enum and asserts
+          # set-equality with that constant, so it reds if either side moves.
           enum: [shift, rule_set, fixed_schedule_config]
         id:
           type: string
