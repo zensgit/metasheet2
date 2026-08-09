@@ -3040,6 +3040,20 @@ test('P1-1 frozen rows: a narrowing flag is READ on an invocation that selects a
 /** The three step ids `realDbSteps()` covers — the set this leg is the complement OF. */
 const IN_DOMAIN_STEP_IDS = Object.freeze([STEP_ID, REAL_DB_STEP_IDS.approval, REAL_DB_STEP_IDS.multitable])
 
+/**
+ * The ONE workflow file whose steps can be "covered" by `realDbSteps()`.
+ *
+ * `realDbSteps()` resolves the three ids with `extractStepById` over
+ * `.github/workflows/plugin-tests.yml` and nothing else, so covered-ness is FILE-SCOPED. Deciding it
+ * on the id alone would let a decoy step carrying an in-domain id, in ANOTHER workflow file that
+ * sorts earlier, consume the coverage slot — and then the REAL attendance step would land in this
+ * complement and red under the decoy's name. Fail-closed either way, but the diagnosis would point
+ * at the legitimate step: the same misdiagnosis class as the `//`-truncation above, one leg over.
+ * The non-vacuity leg additionally asserts each id occurs EXACTLY ONCE across the discovered files
+ * and in THIS file, so a cross-file duplicate reds by its own name rather than being merely absorbed.
+ */
+const COVERED_WORKFLOW_FILE = 'plugin-tests.yml'
+
 const WORKFLOWS_DIR = join(repoRoot, '.github/workflows')
 
 /**
@@ -3164,8 +3178,12 @@ function outOfDomainIntegrationInvocations(steps) {
   const claimed = new Set()
   const out = []
   for (const step of steps) {
-    const isCovered = typeof step.id === 'string' && IN_DOMAIN_STEP_IDS.includes(step.id) && !claimed.has(step.id)
-    if (typeof step.id === 'string' && IN_DOMAIN_STEP_IDS.includes(step.id)) claimed.add(step.id)
+    // FILE-SCOPED, then first-in-document-order. See `COVERED_WORKFLOW_FILE`.
+    const claimable = step.file === COVERED_WORKFLOW_FILE
+      && typeof step.id === 'string'
+      && IN_DOMAIN_STEP_IDS.includes(step.id)
+    const isCovered = claimable && !claimed.has(step.id)
+    if (claimable) claimed.add(step.id)
     if (isCovered) continue
     for (const inv of vitestInvocations(step)) {
       if (!inv.usesIntegrationConfig) continue
@@ -3272,6 +3290,21 @@ test('COMPLEMENT is non-vacuous: workflow steps outside the three real-DB steps 
       + 'files name the governing config — a scan that stops early would make this leg total over a '
       + 'subset while reading as total over the repository',
   )
+  // COVERAGE IS FILE-SCOPED, and that assumption is asserted rather than assumed: each in-domain id
+  // must occur EXACTLY ONCE across every discovered file, and in the file `realDbSteps()` resolves
+  // it in. A duplicate id anywhere else reds HERE, by its own file and index, instead of silently
+  // consuming the coverage slot and making the legitimate step look like the offender.
+  const discovered = workflowStepsWithRun(workflowFilesNamingGoverningConfig(basename))
+  for (const id of IN_DOMAIN_STEP_IDS) {
+    assert.deepEqual(
+      discovered.filter((s) => s.id === id).map((s) => `${s.file}#${s.index}`).map((k) => k.split('#')[0]),
+      [COVERED_WORKFLOW_FILE],
+      `step id "${id}" must occur exactly once across the workflow files that name the governing `
+        + `config, and in ${COVERED_WORKFLOW_FILE} — the only file realDbSteps() resolves it in. A `
+        + `second step carrying this id elsewhere is a decoy: realDbSteps() would still resolve the `
+        + `original while the complement's coverage slot was consumed by whichever sorted first`,
+    )
+  }
 })
 
 test('COMPLEMENT: no invocation outside the three real-DB steps selects an attendance suite or widens to the whole corpus', () => {
@@ -3406,13 +3439,34 @@ test('COMPLEMENT frozen probes: the two executed 208/208-green mutations are now
   // decoy id later in the document is judged HERE, not waved through as covered.
   const withVictim = S3_STEP_RUN_AT_GATE_HEAD.replace(CARRIED, `${CARRIED} \\\n  ${VICTIM}`)
   const duplicateDecoy = outOfDomainIntegrationInvocations([
-    { file: 'w.yml', job: 'test', index: 0, id: STEP_ID, run: S3_STEP_RUN_AT_GATE_HEAD },
-    { file: 'w.yml', job: 'other', index: 1, id: STEP_ID, run: withVictim },
+    { file: COVERED_WORKFLOW_FILE, job: 'test', index: 0, id: STEP_ID, run: S3_STEP_RUN_AT_GATE_HEAD },
+    { file: COVERED_WORKFLOW_FILE, job: 'other', index: 1, id: STEP_ID, run: withVictim },
   ])
   assert.equal(duplicateDecoy.length, 1, 'the SECOND step with an in-domain id must not be treated as covered')
   assert.deepEqual(
     outOfDomainPositionalOffenders({ invocations: duplicateDecoy, corpusArgs, suiteArgs }).map((o) => o.reason),
     [OUT_OF_DOMAIN_REASONS.attendance],
+  )
+  // …and coverage is FILE-SCOPED as well as first-wins. A decoy carrying an in-domain id in ANOTHER
+  // workflow file — one that sorts BEFORE plugin-tests.yml, so it is walked first — must NOT consume
+  // the coverage slot: `realDbSteps()` resolves the three ids over plugin-tests.yml alone, so the
+  // decoy is not the step the in-domain legs judge. Getting this wrong is silent in the polarity
+  // that matters least (still red) and loud in the wrong place: the LEGITIMATE step would be the one
+  // reported. Both steps below carry the attendance argument, and BOTH must be judged here.
+  const crossFileDecoy = outOfDomainIntegrationInvocations([
+    { file: 'aaa-decoy.yml', job: 'decoy', index: 0, id: STEP_ID, run: withVictim },
+    { file: COVERED_WORKFLOW_FILE, job: 'test', index: 9, id: STEP_ID, run: withVictim },
+  ])
+  assert.deepEqual(
+    crossFileDecoy.map((m) => m.file),
+    ['aaa-decoy.yml'],
+    'a step with an in-domain id in a DIFFERENT workflow file must be judged by the complement, and '
+      + `the ${COVERED_WORKFLOW_FILE} one must still be the covered step`,
+  )
+  assert.deepEqual(
+    outOfDomainPositionalOffenders({ invocations: crossFileDecoy, corpusArgs, suiteArgs })
+      .map((o) => `${o.file}:${o.reason}`),
+    [`aaa-decoy.yml:${OUT_OF_DOMAIN_REASONS.attendance}`],
   )
 
   // The frozen copy is a copy of something REAL: a step with this id, running the governing config,
