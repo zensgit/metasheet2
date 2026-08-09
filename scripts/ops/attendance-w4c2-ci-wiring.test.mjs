@@ -10,12 +10,10 @@ import {
   extractStepById,
   isQuotedInTestExclude,
   quotedExcludeEntries,
-  realDbStepWholeFileArgs,
   requireExecutableRealDbStep,
   stepHasEnvDatabaseUrl,
   stepInvokesVitestIntegrationConfig,
   vitestInvocations,
-  wholeFileVitestArgs,
 } from './ci-realdb-step-contract.mjs'
 
 // #4612 gate4 round 4 (P3-4): the W4C-2 attendance real-DB suites had NO source-level two-point
@@ -45,6 +43,15 @@ import {
 //     readdirSync) was provably narrower than the collector it reconciled against: a `.spec.ts`
 //     probe and a subdirectory probe were both collected and skip-greened by the no-DB job while
 //     sitting in NO corpus and this guard stayed fully green (both executed, 2026-08-08).
+//     "RUNS EXACTLY ONCE" IS NOW LITERALLY ASSERTED, not a way of describing the biconditional: the
+//     membership question above is answered off a `Set`, which collapses duplicates, so a second
+//     vitest process repeating one file satisfied it while racing itself against one database. The
+//     count is asserted `=== 1` separately — see the P2 section. And "EXECUTABLE" is no longer just
+//     the four-pin step contract: a command whose execution cannot be PROVEN unconditional carries
+//     nothing at all here, because the shared parser discards the operator that separated it (a
+//     `true || pnpm … vitest …` rewrite left every file "wired" by a command bash never runs) — see
+//     the P1-2 section. Both boundaries — "which argument belongs to this family" (P1-1) and "which
+//     command actually executes" (P1-2) — now have exactly ONE definition each in this file.
 //   corpus part 2 (wiring → disk): every attendance-prefixed whole-file arg the real-DB run-lists
 //     actually carry must exist on disk (vitest exits 0 on an unmatched path argument, so a
 //     rename/delete with stale wiring stays green otherwise). Its exclude leg is now part 1's, in
@@ -88,8 +95,8 @@ import {
 // ruling, never a reviewer-local convenience.
 //
 // KNOWN RESIDUAL, stated rather than left to be found: the corpus derivation is static, because the
-// step that runs this file (plugin-tests.yml, "Attendance W4C-2 CI wiring contract", :448) executes
-// BEFORE `Setup pnpm` (:495) and `pnpm install --frozen-lockfile` (:521) — vitest does not exist in
+// step that runs this file (plugin-tests.yml, "Attendance W4C-2 CI wiring contract", :453) executes
+// BEFORE `Setup pnpm` (:501) and `pnpm install --frozen-lockfile` (:530) — vitest does not exist in
 // the workspace yet, so the file set cannot be taken from vitest's own collection. One shape
 // therefore remains outside it: a file that declares no suite API inline, does not match any
 // `include` glob of either config, and is nonetheless collected by the no-DB job while importing a
@@ -116,6 +123,265 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const STEP_ID = 'attendance-real-db-integration'
+/** Every vitest argument this guard reasons about is package-relative to packages/core-backend. */
+const INTEGRATION_ARG_PREFIX = 'tests/integration/'
+const ATTENDANCE_BASENAME_PREFIX = 'attendance-'
+
+/**
+ * THE definition of "this vitest argument names an attendance integration suite" (owner P1-1).
+ *
+ * There was more than one, and they disagreed. The corpus recognised a member by BASENAME over a
+ * RECURSIVE walk (`sub/attendance-x.db.test.ts` is a member), while the run-list "carried"
+ * computation and the argument-safety domain each tested the ARGUMENT with
+ * `startsWith('tests/integration/attendance-')` — which answers NO for that same file, because the
+ * next path segment is `sub`. Owner's probe: a NESTED suite, fully two-point wired, with `-t`
+ * applied to the invocation that carried it — this guard stayed 191/191 PASS while that suite
+ * executed zero assertions. The nested file was a corpus member (so it got its wiring legs) and was
+ * simultaneously invisible to the check that would have rejected the `-t`.
+ *
+ * So the fix is not a wider regex in the one place the probe happened to enter. It is ONE predicate
+ * with three call sites — `attendanceCorpus` (disk → arg), `realDbWholeFileArgUnion`'s consumers
+ * (arg → wiring) and `attendanceCarryingInvocations` (arg → command safety). If two callers can
+ * disagree about what an attendance argument is, the disagreement IS the defect, and it will keep
+ * reappearing wherever the third copy was not updated.
+ *
+ * DEPTH-INDEPENDENT BY CONSTRUCTION: the family is decided by the BASENAME, exactly as the corpus
+ * walk decides it, and the location is decided by the `tests/integration/` root, exactly as the
+ * shared `wholeFileVitestArgs` regex decides it. No directory depth is written down.
+ *
+ * @param {unknown} arg a vitest whole-file argument, package-relative to packages/core-backend
+ */
+function isAttendanceIntegrationArg(arg) {
+  if (typeof arg !== 'string') return false
+  if (!arg.startsWith(INTEGRATION_ARG_PREFIX)) return false
+  const rel = arg.slice(INTEGRATION_ARG_PREFIX.length)
+  if (rel.length === 0 || rel.startsWith('/')) return false
+  const base = rel.slice(rel.lastIndexOf('/') + 1)
+  return base.startsWith(ATTENDANCE_BASENAME_PREFIX)
+}
+
+// ---------------------------------------------------------------------------------------------
+// P1-2 (owner): a shell short-circuit hid the whole invocation.
+//
+// The shared parser splits a run script on `;` / `&&` / `||` / `|` / `&` and keeps the COMMANDS,
+// discarding which operator separated them. Control-flow information is therefore lost: owner's
+// probe rewrote a real command as `true || pnpm … vitest …` and this guard stayed 190/190 PASS
+// while nothing ran — every carried suite still counted as "wired" by a command bash would never
+// execute.
+//
+// WHICH OF THE TWO OFFERED APPROACHES THIS TAKES, AND WHY. The owner offered "preserve control-flow
+// information" OR "accept only commands provably executed unconditionally". This takes the SECOND,
+// and implements it as a WHOLE-SCRIPT property rather than as per-command operator tracking,
+// because per-command tracking cannot see an ENCLOSING construct:
+//
+//     if false
+//     then
+//       pnpm … vitest … tests/integration/attendance-x.db.test.ts
+//     fi
+//
+// Every one of those lines, judged on its own, is an unconditional simple command with no operator
+// in it — and the vitest command never runs. An operator-tracking fix that looked only at what
+// separates commands ON a line would pass this, which is the same bypass one level out. The
+// whole-script property proves the absence of every operator AND every compound construct at once,
+// and under it per-command tracking is vacuous: a script containing no operator and no reserved
+// word is a flat sequence of standalone simple commands, each executed unconditionally in order.
+//
+// The property is a POSITIVE alphabet, not a list of forbidden spellings (the enumeration failure
+// mode this file has been deleting for six amendments). A logical line is accepted only when every
+// one of its whitespace-separated words is spelled entirely from characters whose shell meaning is
+// FIXED — no operator, no quote, no expansion, no substitution, no redirection, no comment, no
+// continuation, no grouping — and no word is a bash reserved word. Anything else is UNPROVABLE.
+// A new shell construct nobody has thought of is unrecognised and therefore refused; a denylist
+// would fail open on it.
+//
+// AN UNPROVABLE STEP'S INVOCATIONS ARE TREATED AS NOT EXECUTING, never as executing: its whole-file
+// args stop counting as wiring, so its suites become "excluded but carried by NO executable run-list
+// — executes NOWHERE" and red per member, and `unprovableRunLines` reds by name so the diagnosis is
+// one line rather than 87. It returns a LIST rather than throwing on purpose: the union is computed
+// at module scope, and a throw there reports `tests 0 / pass 0 / fail 0` — the count shape this tree
+// treats as a false signal.
+//
+// WHAT IT COSTS, stated rather than left to be discovered: a real-DB step's run script may no longer
+// contain a quoted word, a `$`-expansion, a pipeline or a `&&` — an `echo "starting"` added to any
+// of the three steps reds this guard until it is rewritten unquoted or the owner widens the
+// alphabet. ONE exception is carved out because all three steps already use it and it is a complete,
+// anchored description rather than a family: the `: "${VAR:?message}"` precondition line, the `:`
+// builtin applied to one double-quoted parameter expansion whose message itself contains no `$`,
+// quote, backslash or backtick. It cannot open a construct and cannot conditionally skip anything;
+// if VAR is unset the step ABORTS, which is red.
+//
+// SCOPE (owner ruling, restated): the root fix belongs in `ci-realdb-step-contract.mjs`, whose
+// `vitestInvocations` is what discards the operators — but that module is shared by 17 guards and is
+// tracked separately as repo-level issue 4829. What lands here is the attendance-scoped gate only;
+// the shared module is untouched. Consequence, stated: the shared `stepInvokesVitestIntegrationConfig`
+// (pin (c), used by `requireAttendanceRealDbStepExecutable` above) is flatness-BLIND, so
+// `true || pnpm … vitest …` still satisfies it. That is why the named leg below exists rather than
+// the executability pin being relied on.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Characters whose shell meaning is FIXED in every position: letters, digits, and the punctuation
+ * that bash treats as ordinary text. Deliberately absent: `|&;()<>` (operators/redirection/grouping),
+ * `'"` (quoting), `` $` `` (expansion/substitution), `\` (escape/continuation), `#` (comment),
+ * `*?[]{}~!` (globbing/brace/history/negation).
+ */
+const INERT_WORD_RE = /^[A-Za-z0-9_@/.:=+,-]+$/
+
+/**
+ * The bash reserved words that are SPELLABLE in the inert alphabet above — i.e. the complete residue
+ * of bash's own reserved-word list after the alphabet has already excluded `!`, `[[`, `]]`, `{` and
+ * `}`. Taken from the language grammar, so it is a CLOSED set rather than a collection of traps
+ * somebody thought of; it is iterated by a test below, so every entry is proven refused rather than
+ * three of them being spot-checked.
+ */
+const INERT_ALPHABET_RESERVED_WORDS = Object.freeze([
+  'case', 'coproc', 'do', 'done', 'elif', 'else', 'esac', 'fi', 'for', 'function',
+  'if', 'in', 'select', 'then', 'time', 'until', 'while',
+])
+
+/**
+ * The ONE non-inert line shape accepted, anchored end to end: `: "${VAR:?message}"`. The message
+ * body is restricted to the inert alphabet plus spaces, so it cannot itself carry an expansion, a
+ * quote, a backslash or a backtick.
+ */
+const PARAM_ASSERT_LINE_RE = /^:[ \t]+"\$\{[A-Za-z_][A-Za-z0-9_]*:\?[A-Za-z0-9 _./-]*\}"$/
+
+/**
+ * The commands a real-DB step's run script may execute — an ALLOWLIST, for the same reason the
+ * argument check above is one.
+ *
+ * The inert alphabet and the reserved-word table together prove there is no OPERATOR and no COMPOUND
+ * COMMAND in the script. They do NOT prove that an earlier line lets the next one run, because
+ * several shell BUILTINS are spelled in that same alphabet and end or hijack the script:
+ *
+ *     exit 0                      the step goes green having run nothing after this line
+ *     exec pnpm --version         replaces the shell; every later line is unreachable
+ *     eval exit                   the same, one indirection out
+ *     source setup.sh  /  . x.sh  runs arbitrary text that can do either of the above
+ *
+ * `exit 0` on the line before the vitest command is the same defect as `true || …` with a different
+ * spelling, and enumerating those builtins would be the move this file keeps deleting. So the
+ * COMMAND NAME is allowlisted instead: `:` (the no-op builtin) and the package runners plus the two
+ * binaries these steps actually use. None of them is a builtin that can end the script or replace
+ * the shell — an external command cannot make a LATER command not run; it can only fail, which reds
+ * the step. Anything else — a builtin nobody has thought of included — is unrecognised and REFUSED.
+ *
+ * A leading `NAME=value` assignment prefix is skipped before this is applied (the shared
+ * `vitestArgsOfCommand` skips them too), and a line that is ONLY assignments is accepted: an
+ * assignment cannot stop a later command.
+ */
+const ALLOWED_COMMAND_WORDS = Object.freeze([
+  ':', 'pnpm', 'pnpx', 'npm', 'npx', 'yarn', 'bun', 'bunx', 'corepack', 'vitest', 'node',
+])
+const ASSIGNMENT_WORD_RE = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+/**
+ * A step's `run:` script as LOGICAL lines — the same reconstruction the shared `vitestInvocations`
+ * performs (whole-line `#` comments dropped when no continuation is pending; trailing `\` joins the
+ * next raw line). Mirrored rather than imported because the shared module exposes only the finished
+ * invocation list; the mirror is not asserted in prose — a leg below drives the shared parser over
+ * these lines ONE AT A TIME and requires the result to equal the whole-step parse, so a drift
+ * between the two reconstructions reds.
+ *
+ * @param {Record<string, unknown>} step
+ * @returns {string[]}
+ */
+function runLogicalLines(step) {
+  const run = step != null && typeof step.run === 'string' ? step.run : ''
+  const logical = []
+  let pending = null
+  for (const line of run.split('\n')) {
+    if (pending === null && /^\s*#/.test(line)) continue
+    const continued = /\\\s*$/.test(line)
+    const text = continued ? line.replace(/\\\s*$/, ' ') : line
+    pending = pending === null ? text : pending + text
+    if (!continued) {
+      logical.push(pending)
+      pending = null
+    }
+  }
+  if (pending !== null) logical.push(pending)
+  return logical
+}
+
+/**
+ * Every logical line of a step's run script whose execution this guard CANNOT prove is
+ * unconditional, with the reason. Empty ⟺ the whole script is a flat sequence of standalone simple
+ * commands, which is the only shape under which "the step carries this file" means "the step runs
+ * this file".
+ *
+ * @param {Record<string, unknown>} step
+ * @returns {{ line: string, reason: string }[]}
+ */
+function unprovableRunLines(step) {
+  const out = []
+  for (const raw of runLogicalLines(step)) {
+    const line = raw.trim()
+    if (line === '') continue
+    if (PARAM_ASSERT_LINE_RE.test(line)) continue
+    const words = line.split(/\s+/)
+    const nonInert = words.filter((word) => !INERT_WORD_RE.test(word))
+    if (nonInert.length > 0) {
+      out.push({
+        line,
+        reason: `contains ${JSON.stringify(nonInert)}, which is not spelled from the inert alphabet `
+          + `${INERT_WORD_RE.source} — it may be a control operator (\`||\`, \`&&\`, \`;\`, \`|\`, `
+          + `\`&\`), a quote, an expansion/substitution, a redirection, a comment or a grouping, and `
+          + `this guard cannot prove the command on this line executes`,
+      })
+      continue
+    }
+    const reserved = words.filter((word) => INERT_ALPHABET_RESERVED_WORDS.includes(word))
+    if (reserved.length > 0) {
+      out.push({
+        line,
+        reason: `uses the bash reserved word(s) ${JSON.stringify(reserved)} — a compound command `
+          + `(\`if\`/\`while\`/\`for\`/\`case\`/…) can span lines, so the commands it encloses are `
+          + `not provably executed even though each of them looks unconditional on its own line`,
+      })
+      continue
+    }
+    const command = words.find((word) => !ASSIGNMENT_WORD_RE.test(word))
+    if (command !== undefined && !ALLOWED_COMMAND_WORDS.includes(command)) {
+      out.push({
+        line,
+        reason: `runs "${command}", which is not one of the allowed commands `
+          + `${JSON.stringify(ALLOWED_COMMAND_WORDS)}. Proving there is no operator and no compound `
+          + `command is not enough: shell builtins spelled in the same inert alphabet end or hijack `
+          + `the script, and every later line then never executes — \`exit 0\`, \`exec …\`, `
+          + `\`eval …\`, \`source …\`, \`. …\`. This is an allowlist so a builtin nobody has thought `
+          + `of is refused rather than waved through; adding a genuinely needed command is one owner `
+          + `decision`,
+      })
+    }
+  }
+  return out
+}
+
+/**
+ * The vitest invocations of a step that are PROVABLY EXECUTED. An unprovable script contributes
+ * NONE — fail closed, never "assume it runs".
+ *
+ * @param {Record<string, unknown>} step
+ */
+function executableVitestInvocations(step) {
+  if (unprovableRunLines(step).length > 0) return []
+  return vitestInvocations(step)
+}
+
+/**
+ * Whole-file vitest args of a step's PROVABLY EXECUTED invocations that run under the integration
+ * config — the local, control-flow-aware counterpart of the shared `wholeFileVitestArgs`. Order and
+ * DUPLICATES are preserved: the multiplicity leg below needs to see a file carried twice.
+ *
+ * @param {Record<string, unknown>} step
+ * @returns {string[]}
+ */
+function executableWholeFileArgs(step) {
+  return executableVitestInvocations(step)
+    .filter((inv) => inv.usesIntegrationConfig)
+    .flatMap((inv) => inv.wholeFileArgs)
+}
 const W4C3C_TOOLING_STEP_ID = 'attendance-w4c3c-tooling-contracts'
 const W4C3C_TOOLING_FILES = Object.freeze([
   'scripts/ops/staging-attendance-tooling-teardown.test.mjs',
@@ -287,6 +553,11 @@ function unpermittedArgsOfInvocation(inv) {
  * `wholeFileVitestArgs()` reports as "wired". Membership is computed from the ARGS; no step is
  * included because of its name.
  */
+// This domain deliberately keeps the SHARED `vitestInvocations` rather than the flatness-gated
+// `executableVitestInvocations`: a narrowing flag on a command whose execution cannot be proven is
+// still worth reporting, and reporting it is strictly more conservative than dropping it. The two
+// mechanisms are orthogonal and each keeps its own red — a `$NAME_FILTER` on a real-DB step reds
+// BOTH the argument allowlist (unrecognised token) and the control-flow leg (non-inert word).
 function attendanceCarryingInvocations() {
   const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
   const steps = [
@@ -298,7 +569,11 @@ function attendanceCarryingInvocations() {
   for (const [stepId, step] of steps) {
     for (const inv of vitestInvocations(step)) {
       if (!inv.usesIntegrationConfig) continue
-      const attendanceFiles = inv.wholeFileArgs.filter((f) => f.startsWith('tests/integration/attendance-'))
+      // The SHARED predicate (owner P1-1). This filter used to be an inline
+      // `startsWith('tests/integration/attendance-')`, which answered NO for a SUBDIRECTORY suite
+      // the corpus had already claimed by basename — so a `-t` on the invocation that carried only
+      // nested suites was never even looked at.
+      const attendanceFiles = inv.wholeFileArgs.filter(isAttendanceIntegrationArg)
       if (attendanceFiles.length === 0) continue
       out.push({ stepId, inv, attendanceFiles })
     }
@@ -354,18 +629,27 @@ test(`every attendance-carrying real-DB invocation runs its files with no execut
 // Negative control on the detector itself: an "assert absent" leg is worthless without proof it
 // can see the thing it claims is absent (a typo'd flag name or a scan over the wrong invocation
 // set would pass vacuously forever). Drive the same predicate over synthetic steps.
-test('issue 4828 hole 2 detector positive control: the allowlist accepts the real argument vocabulary and rejects every executed bypass family', () => {
-  // Exercises the SAME functions the live assertion uses — an inlined re-implementation here
-  // would test a copy of the predicate rather than the shipped one.
-  const detect = (runScript) => {
-    const hits = []
-    for (const inv of vitestInvocations({ run: runScript })) {
-      if (!inv.usesIntegrationConfig) continue
-      if (!inv.wholeFileArgs.some((f) => f.startsWith('tests/integration/attendance-'))) continue
-      hits.push(...unpermittedArgsOfInvocation(inv))
-    }
-    return hits
+/**
+ * The hole-2 detector over a synthetic run script: the SAME derivation the live assertion uses
+ * (same shared parser, same shared `isAttendanceIntegrationArg`, same `unpermittedArgsOfInvocation`)
+ * — an inlined re-implementation would test a copy of the predicate rather than the shipped one.
+ * Module-level rather than inline in one test so the P1-1 leg drives the identical path.
+ *
+ * @param {string} runScript
+ * @returns {string[]}
+ */
+function detectUnpermittedAttendanceArgs(runScript) {
+  const hits = []
+  for (const inv of vitestInvocations({ run: runScript })) {
+    if (!inv.usesIntegrationConfig) continue
+    if (!inv.wholeFileArgs.some(isAttendanceIntegrationArg)) continue
+    hits.push(...unpermittedArgsOfInvocation(inv))
   }
+  return hits
+}
+
+test('issue 4828 hole 2 detector positive control: the allowlist accepts the real argument vocabulary and rejects every executed bypass family', () => {
+  const detect = detectUnpermittedAttendanceArgs
   const BASE = 'pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts tests/integration/attendance-x.db.test.ts'
   // The REAL argument vocabulary of all three real-DB steps at this head — must be accepted, or
   // this leg would red the live workflow and be neutered on arrival.
@@ -422,6 +706,243 @@ test('issue 4828 hole 2 detector positive control: the allowlist accepts the rea
   // A flag NOT on the allowlist reds even when it is harmless in isolation — that is the point of
   // an allowlist, and the cost is one owner decision per genuinely new argument.
   assert.deepEqual(detect(`${BASE} --testTimeout=60000`), ['--testTimeout=60000'])
+})
+
+// ---------------------------------------------------------------------------------------------
+// P1-1 (owner) — PERMANENT ENCODING of the owner's nested-suite probe.
+//
+// The probe: a NESTED suite (`tests/integration/sub/attendance-*.db.test.ts`), fully two-point
+// wired, carried by an invocation that also carried `-t`. The guard stayed 191/191 PASS and that
+// suite executed zero assertions, because the corpus claimed it by BASENAME while the argument
+// safety check tested the ARGUMENT with a `tests/integration/attendance-` prefix that a nested path
+// cannot match. The three derivations are driven over ONE nested argument below and must agree.
+// ---------------------------------------------------------------------------------------------
+test('P1-1: isAttendanceIntegrationArg is basename-scoped and depth-independent, and the prefix test it replaced was not', () => {
+  assert.ok(isAttendanceIntegrationArg('tests/integration/attendance-x.db.test.ts'))
+  assert.ok(isAttendanceIntegrationArg('tests/integration/sub/attendance-x.db.test.ts'))
+  assert.ok(isAttendanceIntegrationArg('tests/integration/a/b/attendance-x.spec.ts'))
+  // Other families, other roots, and the degenerate spellings.
+  assert.ok(!isAttendanceIntegrationArg('tests/integration/multitable-x.db.test.ts'))
+  assert.ok(!isAttendanceIntegrationArg('tests/integration/sub/multitable-x.db.test.ts'))
+  assert.ok(!isAttendanceIntegrationArg('tests/integration/sub/attendance/x.db.test.ts'))
+  assert.ok(!isAttendanceIntegrationArg('tests/unit/attendance-x.test.ts'))
+  assert.ok(!isAttendanceIntegrationArg('tests/integration-extra/attendance-x.test.ts'))
+  assert.ok(!isAttendanceIntegrationArg('tests/integration/'))
+  assert.ok(!isAttendanceIntegrationArg(undefined))
+  // The DEFECT, asserted rather than described: the predicate this replaced answers NO for the
+  // nested suite the corpus already claims — that disagreement is what the owner's probe walked
+  // through.
+  assert.ok(
+    !'tests/integration/sub/attendance-x.db.test.ts'.startsWith(
+      `${INTEGRATION_ARG_PREFIX}${ATTENDANCE_BASENAME_PREFIX}`,
+    ),
+    'the old prefix test must be shown to disagree with the corpus, or this leg proves nothing',
+  )
+})
+
+test('P1-1: the corpus, the carried-arg computation and the argument-safety domain all recognise a NESTED attendance suite', () => {
+  const NESTED = 'tests/integration/sub/attendance-probe-nested.db.test.ts'
+  const GATED = "const describeDb = process.env.DATABASE_URL ? describe : describe.skip\ndescribeDb('x', () => { it('y', () => {}) })\n"
+  const dir = mkdtempSync(join(tmpdir(), 'w4c2-p11-'))
+  try {
+    // (1) corpus derivation (disk → arg)
+    mkdirSync(join(dir, 'sub'), { recursive: true })
+    writeFileSync(join(dir, 'sub/attendance-probe-nested.db.test.ts'), GATED)
+    assert.deepEqual(
+      attendanceCorpus({ dir }).map((e) => e.arg),
+      [NESTED],
+      'the recursive corpus walk claims the nested suite',
+    )
+    // (2) the run-list "carried" computation (arg → wiring)
+    const step = { run: `pnpm exec vitest --config vitest.integration.config.ts run ${NESTED}` }
+    assert.deepEqual(
+      executableWholeFileArgs(step).filter(isAttendanceIntegrationArg),
+      [NESTED],
+      'the carried-arg computation must see the same file the corpus claimed',
+    )
+    // (3) the argument safety check (arg → command safety). THIS is the leg the owner's probe
+    // walked through: with the prefix test in place the `-t` was invisible here.
+    assert.deepEqual(
+      detectUnpermittedAttendanceArgs(`${step.run} -t zzz`),
+      ['-t', 'zzz'],
+      'a name filter on an invocation carrying ONLY nested attendance suites must be caught',
+    )
+    // Negative control on the same three legs: another family at the same depth is claimed by none
+    // of them, so the agreement above is not "everything matches".
+    rmSync(join(dir, 'sub/attendance-probe-nested.db.test.ts'))
+    writeFileSync(join(dir, 'sub/multitable-probe-nested.db.test.ts'), GATED)
+    assert.deepEqual(attendanceCorpus({ dir }), [])
+    const other = { run: 'pnpm exec vitest --config vitest.integration.config.ts run tests/integration/sub/multitable-probe-nested.db.test.ts' }
+    assert.deepEqual(executableWholeFileArgs(other).filter(isAttendanceIntegrationArg), [])
+    assert.deepEqual(detectUnpermittedAttendanceArgs(`${other.run} -t zzz`), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------------------------
+// P1-2 (owner) — the control-flow legs. See the long rationale above `INERT_WORD_RE`.
+// ---------------------------------------------------------------------------------------------
+
+/** The three real-DB steps, as (id, parsed step) pairs. Located by exact id, never by title. */
+function realDbSteps() {
+  const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  return [
+    [STEP_ID, requireAttendanceRealDbStepExecutable()],
+    [REAL_DB_STEP_IDS.approval, requireExecutableRealDbStep(wf, REAL_DB_STEP_IDS.approval)],
+    [REAL_DB_STEP_IDS.multitable, requireExecutableRealDbStep(wf, REAL_DB_STEP_IDS.multitable)],
+  ]
+}
+
+test('P1-2: every real-DB step run script is a provably unconditional flat command sequence', () => {
+  const offenders = realDbSteps().flatMap(([stepId, step]) => unprovableRunLines(step).map((o) => ({ stepId, ...o })))
+  assert.deepEqual(
+    offenders,
+    [],
+    'a real-DB step run script may contain only standalone simple commands spelled from the inert '
+      + 'alphabet (plus the anchored `: "${VAR:?msg}"` precondition line). The shared parser splits '
+      + 'on `;`/`&&`/`||`/`|`/`&` and DISCARDS which operator separated the commands, so a rewrite '
+      + 'to `true || pnpm … vitest …` left every carried suite reported as "wired" by a command bash '
+      + 'never executes (owner probe: 190/190 PASS while nothing ran). An invocation whose execution '
+      + 'this guard cannot prove is treated as NOT executing, so the suites it carries stop counting '
+      + 'as wired and red per member as well — this leg exists so the diagnosis is one named line '
+      + 'instead of 87. Rewrite the script as flat unconditional commands, or take an owner ruling '
+      + 'to widen the alphabet (the shared-helper root fix is repo-level issue 4829)',
+  )
+})
+
+test('P1-2: the local logical-line reconstruction agrees with the shared parser on every real-DB step', () => {
+  for (const [stepId, step] of realDbSteps()) {
+    const whole = vitestInvocations(step)
+    const perLine = runLogicalLines(step).flatMap((line) => vitestInvocations({ run: line }))
+    assert.deepEqual(
+      perLine,
+      whole,
+      `${stepId}: the logical lines this guard classifies must be the same logical lines the shared `
+        + `parser extracts invocations from — otherwise the flatness verdict is about a different `
+        + `script than the wiring verdict`,
+    )
+    assert.ok(whole.length > 0, `${stepId}: no invocation parsed at all — the drift check is vacuous`)
+  }
+})
+
+test('P1-2 control-flow classifier positive control: the real vocabulary is accepted and every hiding shape is refused', () => {
+  const unprovable = (run) => unprovableRunLines({ run }).map((o) => o.line)
+  const CMD = 'pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-x.db.test.ts --reporter=dot'
+  // The REAL shape of all three steps at this head — accepted, or this leg would red the live
+  // workflow and be neutered on arrival.
+  assert.deepEqual(unprovable(`: "\${DATABASE_URL:?DATABASE_URL is required for attendance integration}"\n${CMD}\n`), [])
+  assert.deepEqual(unprovable(`: "\${DATABASE_URL:?DATABASE_URL is required for multitable real-DB integration}"\n${CMD}\n`), [])
+  // Continuation-joined exactly as the workflow writes it.
+  assert.deepEqual(
+    unprovable('pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\\n  tests/integration/attendance-x.db.test.ts \\\n  --reporter=dot\n'),
+    [],
+  )
+  // Blank lines and whole-line comments are inert.
+  assert.deepEqual(unprovable(`\n# a comment\n${CMD}\n`), [])
+  // (a) THE OWNER'S PROBE — the short-circuit. One line, refused.
+  assert.equal(unprovable(`true || ${CMD}`).length, 1)
+  // (b) the rest of the operator family: they all lose the same information.
+  for (const script of [
+    `false && ${CMD}`,
+    `${CMD} || true`,
+    `true; ${CMD}`,
+    `echo x | ${CMD}`,
+    `${CMD} &`,
+    `( ${CMD} )`,
+    `{ ${CMD} ; }`,
+    `$(${CMD})`,
+    '`' + CMD + '`',
+    `${CMD} > /dev/null`,
+    `${CMD} 2>&1`,
+    `RUN_IT=0\nif false\nthen\n${CMD}\nfi`,
+    `for f in a b\ndo\n${CMD}\ndone`,
+    `while false\ndo\n${CMD}\ndone`,
+    `case x in\ny)\n${CMD}\nesac`,
+    `CMD="${CMD}"\n$CMD`,
+    `run_them() {\n${CMD}\n}\nrun_them`,
+  ]) {
+    assert.ok(unprovable(script).length > 0, `must be refused: ${JSON.stringify(script)}`)
+  }
+  // (c) the SCRIPT-ENDING builtins. Every one of these is spelled entirely in the inert alphabet and
+  // carries no operator and no reserved word, so the alphabet alone would wave them through — and
+  // each makes the vitest command on the NEXT line unreachable exactly as `true ||` does.
+  for (const script of [
+    `exit 0\n${CMD}`,
+    `exec pnpm --version\n${CMD}`,
+    `eval exit\n${CMD}`,
+    `source scripts/setup.sh\n${CMD}`,
+    `. scripts/setup.sh\n${CMD}`,
+    `return 0\n${CMD}`,
+    `${CMD}\nexit 0`,
+  ]) {
+    assert.ok(unprovable(script).length > 0, `script-ending builtin must be refused: ${JSON.stringify(script)}`)
+  }
+  // A leading assignment prefix does not hide the command it prefixes…
+  assert.equal(unprovable(`FOO=1 exit 0\n${CMD}`).length, 1)
+  // …and a line that is ONLY assignments is accepted (it cannot stop a later command).
+  assert.deepEqual(unprovable(`FOO=1\n${CMD}`), [])
+  // The anchored `:` exception cannot be widened into a general quoting escape hatch.
+  assert.equal(unprovable(': "${DATABASE_URL:?msg}" || true').length, 1)
+  assert.equal(unprovable(': "${DATABASE_URL:-$(curl evil)}"').length, 1)
+  assert.equal(unprovable(': "${DATABASE_URL:?msg}" ; true').length, 1)
+  // THE LOAD-BEARING PART: the shared parser still reports the short-circuited invocation as a real
+  // vitest command carrying the file — and this guard refuses to count it as executed. Without this
+  // pair the leg above would be an assertion about a classifier nobody consults.
+  const shortCircuited = { run: `true || ${CMD}` }
+  assert.equal(vitestInvocations(shortCircuited).length, 1, 'the shared parser sees the invocation')
+  assert.deepEqual(
+    vitestInvocations(shortCircuited)[0].wholeFileArgs,
+    ['tests/integration/attendance-x.db.test.ts'],
+    'and reports the file as a whole-file arg — this is the bypass',
+  )
+  assert.deepEqual(executableVitestInvocations(shortCircuited), [], 'but it is NOT provably executed')
+  assert.deepEqual(executableWholeFileArgs(shortCircuited), [], 'so it carries NOTHING')
+  // Positive control on the same pair: unmutated, the file IS carried.
+  assert.deepEqual(executableWholeFileArgs({ run: CMD }), ['tests/integration/attendance-x.db.test.ts'])
+})
+
+test('P1-2: every bash reserved word spellable in the inert alphabet is refused, iterated from the table', () => {
+  const CMD = 'pnpm exec vitest --config vitest.integration.config.ts run tests/integration/attendance-x.db.test.ts'
+  assert.ok(INERT_ALPHABET_RESERVED_WORDS.length >= 17, 'the reserved-word table lost entries')
+  for (const word of INERT_ALPHABET_RESERVED_WORDS) {
+    assert.equal(
+      unprovableRunLines({ run: `${word} ${CMD}` }).length,
+      1,
+      `bash reserved word "${word}" must be refused as a command word — it can open a compound `
+        + `command whose enclosed commands are not provably executed`,
+    )
+    assert.equal(
+      unprovableRunLines({ run: `${CMD}\n${word}` }).length,
+      1,
+      `bash reserved word "${word}" must be refused wherever it sits, not only as a first line`,
+    )
+  }
+  // Negative control: the refusal is keyed on the reserved-word table, not on "the line has more
+  // than one word" — an allowed command with arguments of the same shape is accepted.
+  assert.deepEqual(unprovableRunLines({ run: 'node --test scripts/ops/x.test.mjs' }), [])
+})
+
+test('P1-2: every allowed command word is accepted, and the allowlist is what refuses everything else', () => {
+  const ARGS = 'exec vitest --config vitest.integration.config.ts run tests/integration/attendance-x.db.test.ts'
+  for (const word of ALLOWED_COMMAND_WORDS) {
+    assert.deepEqual(
+      unprovableRunLines({ run: word === ':' ? ':' : `${word} ${ARGS}` }),
+      [],
+      `"${word}" is on the command allowlist and must be accepted`,
+    )
+  }
+  // The real vocabulary the three steps use is a SUBSET of the allowlist — asserted, so a future
+  // edit that empties the allowlist cannot leave this leg passing over nothing.
+  for (const word of [':', 'pnpm']) assert.ok(ALLOWED_COMMAND_WORDS.includes(word))
+  // Everything else is refused, including the script-ending builtins the alphabet cannot see.
+  for (const word of ['exit', 'exec', 'eval', 'source', '.', 'env', 'bash', 'sh', 'trap', 'shopt', 'alias']) {
+    assert.equal(
+      unprovableRunLines({ run: `${word} ${ARGS}` }).length,
+      1,
+      `"${word}" is not on the command allowlist and must be refused`,
+    )
+  }
 })
 
 // ---------------------------------------------------------------------------------------------
@@ -584,7 +1105,9 @@ test(`W4C-3c tooling step (id: ${W4C3C_TOOLING_STEP_ID}) lives in required job a
 
 const CORE_BACKEND_DIR = join(repoRoot, 'packages/core-backend')
 const INTEGRATION_DIR = join(CORE_BACKEND_DIR, 'tests/integration')
-const INTEGRATION_ARG_PREFIX = 'tests/integration/'
+// INTEGRATION_ARG_PREFIX now lives with `isAttendanceIntegrationArg` at the top of this file — one
+// definition of where an integration argument lives, next to the one definition of what makes it
+// an attendance one.
 /** The config the NO-DB job runs under (`pnpm test` in packages/core-backend). */
 const NO_DB_CONFIG = 'vitest.config.ts'
 /** The config every real-DB step runs under. */
@@ -926,9 +1449,11 @@ const SUITE_API_CALL_RE = /(?:^|[^.\w$])(?:describe|it|test|suite|bench)\s*(?:\.
 function attendanceCorpus({ dir = INTEGRATION_DIR, includeRegexes = suiteIncludeRegexes() } = {}) {
   const out = []
   for (const rel of walkFiles(dir)) {
-    const base = rel.slice(rel.lastIndexOf('/') + 1)
-    if (!base.startsWith('attendance-')) continue
     const arg = `${INTEGRATION_ARG_PREFIX}${rel}`
+    // The SHARED predicate (owner P1-1), so the corpus cannot claim a file that the run-list and
+    // argument-safety derivations would then decline to recognise — that disagreement is exactly
+    // what the nested-suite probe walked through.
+    if (!isAttendanceIntegrationArg(arg)) continue
     const source = readFileSync(join(dir, rel), 'utf8')
     const matchesInclude = includeRegexes.some((re) => re.test(arg))
     if (!matchesInclude && !SUITE_API_CALL_RE.test(maskSourceNoise(source))) continue
@@ -960,16 +1485,21 @@ function noDbExcludedArgs() {
 /**
  * Every whole-file vitest arg across the workflow's THREE executable real-DB steps: the
  * attendance step (looser local executability contract, header) plus the approval and
- * multitable steps (shared four-pin contract — `realDbStepWholeFileArgs` throws unless the
+ * multitable steps (shared four-pin contract — `requireExecutableRealDbStep` throws unless the
  * step exists AND is executable, so a file cannot count as "wired" into a deleted or disabled
  * step).
+ *
+ * P1-2: the extraction is `executableWholeFileArgs`, NOT the shared `wholeFileVitestArgs` — a
+ * command whose execution cannot be proven (`true || pnpm … vitest …`, or anything inside an `if`)
+ * carries NOTHING here. DUPLICATES ARE PRESERVED so the P2 multiplicity leg can see a file carried
+ * by two executable invocations; callers that only need membership build their own Set.
  */
 function realDbWholeFileArgUnion() {
   const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
   return [
-    ...wholeFileVitestArgs(requireAttendanceRealDbStepExecutable()),
-    ...realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.approval),
-    ...realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable),
+    ...executableWholeFileArgs(requireAttendanceRealDbStepExecutable()),
+    ...executableWholeFileArgs(requireExecutableRealDbStep(wf, REAL_DB_STEP_IDS.approval)),
+    ...executableWholeFileArgs(requireExecutableRealDbStep(wf, REAL_DB_STEP_IDS.multitable)),
   ]
 }
 
@@ -1095,6 +1625,91 @@ for (const entry of CORPUS ?? []) {
     assert.equal(reason, null, `${entry.arg}: ${reason}`)
   })
 }
+
+// ---------------------------------------------------------------------------------------------
+// P2 (owner): "executed exactly once" was UNPROVEN. The per-member leg above answers a MEMBERSHIP
+// question — it builds a `Set` from the union, and a Set collapses duplicates. Owner's probe: a
+// SECOND independent vitest process repeating the same file, and the guard stayed 190/190 PASS.
+//
+// Twice is as wrong as zero. Two vitest processes running one suite against ONE database is a race
+// — the same fixtures, the same rows, the same shared-DB collision this tree has been bitten by
+// before — not extra safety. So the count is asserted STRICTLY `=== 1`, and both failing directions
+// are inside one assertion because the domain is seeded from the CORPUS as well as from the union:
+// a suite carried zero times has a key with count 0, so `=== 1` catches "never" and "twice" alike
+// rather than only the direction the probe happened to enter.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * How many times each attendance suite is executed, over ALL provably-executed real-DB invocations.
+ *
+ * @param {string[]} carriedArgs whole-file args, DUPLICATES INTACT (`realDbWholeFileArgUnion()`)
+ * @param {string[]} corpusArgs every attendance suite on disk — seeded at 0 so "never" is in domain
+ * @returns {Map<string, number>}
+ */
+function attendanceExecutionCounts(carriedArgs, corpusArgs) {
+  const counts = new Map()
+  for (const arg of corpusArgs) counts.set(arg, 0)
+  for (const arg of carriedArgs) {
+    if (!isAttendanceIntegrationArg(arg)) continue
+    counts.set(arg, (counts.get(arg) ?? 0) + 1)
+  }
+  return counts
+}
+
+test('P2: every attendance suite is executed EXACTLY ONCE across all provably-executed real-DB invocations', () => {
+  const counts = attendanceExecutionCounts(realDbWholeFileArgUnion(), (CORPUS ?? []).map((e) => e.arg))
+  assert.ok(
+    counts.size >= 70,
+    `the multiplicity domain holds only ${counts.size} attendance suites (87 at this head) — a `
+      + `near-empty domain means the corpus or the run-list parsing broke, and \`=== 1\` would pass `
+      + `over almost nothing`,
+  )
+  const offenders = [...counts.entries()]
+    .filter(([, executions]) => executions !== 1)
+    .map(([arg, executions]) => ({ arg, executions }))
+    .sort((a, b) => (a.arg < b.arg ? -1 : 1))
+  assert.deepEqual(
+    offenders,
+    [],
+    'each attendance suite must appear as a whole-file arg of EXACTLY ONE provably-executed real-DB '
+      + 'invocation. `executions: 0` — it is carried by nothing that runs (a deleted run-list entry, '
+      + 'or a command this guard cannot prove executes). `executions: 2` — it runs in two vitest '
+      + 'processes against ONE database, which is a fixture race, not extra coverage; the `Set` the '
+      + 'per-member leg builds collapses that to a single membership answer, which is why the count '
+      + 'is asserted here instead',
+  )
+})
+
+test('P2 multiplicity counter positive control: it distinguishes 0, 1 and 2, and ignores other families', () => {
+  const CFG = '--config vitest.integration.config.ts'
+  const ONE = 'tests/integration/attendance-x.db.test.ts'
+  const NESTED = 'tests/integration/sub/attendance-y.db.test.ts'
+  const OTHER = 'tests/integration/multitable-z.db.test.ts'
+  const once = { run: `pnpm exec vitest ${CFG} run ${ONE} ${NESTED} ${OTHER}` }
+  // Two SEPARATE executable invocations repeating one file — the owner's probe shape.
+  const twice = { run: `pnpm exec vitest ${CFG} run ${ONE} ${NESTED}\npnpm exec vitest ${CFG} run ${ONE}` }
+  assert.deepEqual(
+    [...attendanceExecutionCounts(executableWholeFileArgs(once), [ONE, NESTED]).entries()].sort(),
+    [[ONE, 1], [NESTED, 1]],
+    'the clean shape must count 1 for both, including the NESTED suite (P1-1 predicate)',
+  )
+  assert.deepEqual(
+    [...attendanceExecutionCounts(executableWholeFileArgs(twice), [ONE, NESTED]).entries()].sort(),
+    [[ONE, 2], [NESTED, 1]],
+    'a file carried by two executable invocations must count 2 — a Set would have said 1',
+  )
+  // Carried zero times: the corpus seed is what makes this visible at all.
+  assert.deepEqual([...attendanceExecutionCounts([], [ONE]).entries()], [[ONE, 0]])
+  // Another family is not counted, and a short-circuited second invocation contributes nothing.
+  assert.equal(attendanceExecutionCounts(executableWholeFileArgs(once), []).has(OTHER), false)
+  const shortCircuitedTwice = { run: `pnpm exec vitest ${CFG} run ${ONE}\ntrue || pnpm exec vitest ${CFG} run ${ONE}` }
+  assert.deepEqual(
+    [...attendanceExecutionCounts(executableWholeFileArgs(shortCircuitedTwice), [ONE]).entries()],
+    [[ONE, 0]],
+    'an unprovable script carries NOTHING at all — including the line that would have been fine, '
+      + 'because the flatness verdict is a property of the whole script',
+  )
+})
 
 // ---------------------------------------------------------------------------------------------
 // Corpus part 3 (issue 4828, owner-ruled): the hiding place the first two corpora leave open —
@@ -1387,8 +2002,12 @@ test('P2: the corpus walk refuses symlinks and other non-regular entries instead
 // carried arg that does NOT exist on disk is caught by the existence leg below, which is the only
 // case the corpus scan cannot see.
 {
+  // The SHARED predicate (owner P1-1): the prefix test this replaced dropped every SUBDIRECTORY
+  // attendance suite out of the existence + integration-config legs below, while the corpus above
+  // claimed it — the third of the three places that could disagree about what an attendance
+  // argument is.
   const carried = [...new Set(realDbWholeFileArgUnion())]
-    .filter((arg) => arg.startsWith('tests/integration/attendance-'))
+    .filter(isAttendanceIntegrationArg)
     .sort()
 
   test('OBS-1 corpus part 2 is non-vacuous (real-DB run-lists carry attendance files)', () => {

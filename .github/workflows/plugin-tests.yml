@@ -445,9 +445,9 @@ jobs:
       # package" and "calls a vitest suite API" — no suffix or directory depth is hardcoded, after
       # a .spec.ts probe and a subdirectory probe were both collected and skip-greened by the no-DB
       # job while sitting in no corpus (2026-08-08). Every member must be excluded from the no-DB
-      # job's vitest.config.ts IF AND ONLY IF a real-DB step carries it as a whole-file arg, must
-      # exist on disk, and — when it is neither — must carry POSITIVE proof that it executes
-      # without a database. Deliberately placed BEFORE the pnpm install below: a wiring break reds
+      # job's vitest.config.ts AND carried EXACTLY ONCE by a provably-executed real-DB invocation,
+      # and must exist on disk. NEITHER is REFUSED: the exit that let a suite submit a "positive
+      # proof" of DB-independence is DELETED (4828, 2026-08-09). Placed BEFORE the install: a break reds
       # this required check in seconds. That is also why the corpus is derived statically rather
       # than from vitest's own collection, which does not exist yet at this point in the job.
       - name: Attendance W4C-2 CI wiring contract
