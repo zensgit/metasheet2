@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import {
   REAL_DB_STEP_IDS,
   extractStepById,
+  extractTestExcludeArrayBody,
   isQuotedInTestExclude,
   quotedExcludeEntries,
   requireExecutableRealDbStep,
@@ -2501,23 +2502,128 @@ test('OBS-1 corpus derivation is non-vacuous and both wiring sides parse', () =>
   // a consistency check between two copies of one mistake is not a second opinion. The local side
   // now strips block comments and resolves (or refuses) spreads; the shared side still does
   // neither, which is deliberate — the shared module is untouched here (repo-level issue 4829).
-  // A DISAGREEMENT IS THEREFORE A REAL FINDING in either direction, and the message says which.
+  // A DISAGREEMENT IS THEREFORE A REAL FINDING in either direction — but the member it SURFACES on
+  // is not necessarily the member that CAUSED it (gate finding P3-1), so the cause is derived from
+  // the config and reported first. See `excludeCrossReadCauses`.
   const cfg = readCoreBackendFile(NO_DB_CONFIG)
-  for (const { arg } of corpus) {
-    const local = excluded.has(arg)
-    const shared = isQuotedInTestExclude(cfg, arg)
-    assert.equal(
-      local,
-      shared,
-      `the two test.exclude reads disagree about ${arg}: this file says ${local}, the shared `
-        + `isQuotedInTestExclude says ${shared}. Shared-true / local-false means the entry is `
-        + `present in the text but NOT in effect — a block comment around it, which vitest ignores `
-        + `while the shared parser (which strips only \`//\`) counts it, so the suite is collected `
-        + `by the no-DB job and skip-greened there. Shared-false / local-true means the entry is `
-        + `reached through a spread the shared parser cannot follow. Either way the exclude side of `
-        + `the two-point wiring is not what it reads like`,
+  const disagreements = corpus
+    .map(({ arg }) => ({ arg, local: excluded.has(arg), shared: isQuotedInTestExclude(cfg, arg) }))
+    .filter((d) => d.local !== d.shared)
+  assert.deepEqual(
+    disagreements,
+    [],
+    `the two test.exclude reads disagree. WHY (derived from the config, not from the member the `
+      + `disagreement happened to surface on):\n  ${excludeCrossReadCauses(cfg).join('\n  ')}\n`
+      + `Either way the exclude side of the two-point wiring is not what it reads like`,
+  )
+})
+
+/**
+ * WHY the local `test.exclude` read and the shared `isQuotedInTestExclude` disagree — named from
+ * the CONFIG.
+ *
+ * P3-1 (gate @ d72cf7dcdf): this leg used to `assert.equal` per corpus member, so the FIRST member
+ * whose two answers differed became the whole diagnosis. Executed: adding one legitimate glob whose
+ * string contains `//` (`'tests/integration/de//coy.ts'`) reddened while naming
+ * `attendance-comp-time-expiry-reminder.test.ts`, a suite with nothing wrong with it. Fail-closed,
+ * so never a bypass — but the reader is sent to the wrong file, and the actual mechanism is one line
+ * away in a module they were told is out of scope.
+ *
+ * The mechanism, read off the shared source rather than guessed: `quotedExcludeEntries` does
+ * `line.replace(/\/\/.*$/, '')` with NO string-awareness. A quoted entry containing `//` is
+ * therefore TRUNCATED mid-string; the surviving opening quote pairs with the NEXT entry's opening
+ * quote, and every entry after it is mis-paired. So ONE such entry desyncs an arbitrary suffix of
+ * the array, and the corpus member that happens to be reported is downstream collateral.
+ *
+ * Three causes are distinguished, and each names its own entries:
+ *   (a) an entry whose string contains `//` — the truncation above (this is the executed case);
+ *   (b) an entry the SHARED side sees and the local side does not — a `/* … *\/` block comment,
+ *       which vitest ignores while the shared parser counts it (the P2-1 bypass);
+ *   (c) an entry the LOCAL side sees and the shared side does not — reached through a spread the
+ *       shared parser cannot follow.
+ *
+ * @param {string} cfgSrc source of the no-DB config
+ * @returns {string[]} one line per cause, most specific first; never empty
+ */
+function excludeCrossReadCauses(cfgSrc) {
+  const local = directTestArrayEntries(cfgSrc, 'exclude') ?? []
+  const body = extractTestExcludeArrayBody(cfgSrc)
+  const shared = body == null ? [] : quotedExcludeEntries(body)
+  const causes = []
+  const truncating = local.filter((entry) => entry.includes('//'))
+  if (truncating.length > 0) {
+    causes.push(
+      `(a) THE CAUSE IS THE ENTRY, NOT THE SUITE: ${JSON.stringify(truncating)} — the shared `
+        + `quotedExcludeEntries() strips \`//\` to end of line with no string-awareness, so this `
+        + `entry is TRUNCATED mid-string and its surviving quote pairs with the next entry's `
+        + `opening quote. Every entry after it in the array is mis-read, which is why the members `
+        + `listed above may have nothing wrong with them. Rewrite the glob without \`//\` (or take `
+        + `the shared-parser fix, repo-level issue 4829)`,
     )
   }
+  const onlyShared = shared.filter((entry) => !local.includes(entry))
+  if (onlyShared.length > 0) {
+    causes.push(
+      `(b) present to the SHARED read but not in effect: ${JSON.stringify(onlyShared.slice(0, 5))}`
+        + `${onlyShared.length > 5 ? ` (+${onlyShared.length - 5} more)` : ''} — a block comment `
+        + `around an entry, which vitest ignores while the shared parser (which strips only \`//\`) `
+        + `counts it, so the suite is collected by the no-DB job and skip-greened there`,
+    )
+  }
+  const onlyLocal = local.filter((entry) => !shared.includes(entry))
+  if (onlyLocal.length > 0) {
+    causes.push(
+      `(c) in effect but invisible to the SHARED read: ${JSON.stringify(onlyLocal.slice(0, 5))}`
+        + `${onlyLocal.length > 5 ? ` (+${onlyLocal.length - 5} more)` : ''} — reached through a `
+        + `spread the shared parser cannot follow (or truncated by (a) above)`,
+    )
+  }
+  if (causes.length === 0) {
+    causes.push(
+      '(none found) — the two entry LISTS agree, so the disagreement is in the membership question '
+        + 'rather than in the parse: check `directTestArrayEntries` and `isQuotedInTestExclude` for a '
+        + 'normalisation difference on the reported member',
+    )
+  }
+  return causes
+}
+
+test('P3-1: the exclude cross-read names the entry that caused the desync, not a downstream suite', () => {
+  const ENTRY = 'tests/integration/attendance-x.db.test.ts'
+  const cfg = (body) => `import { defineConfig } from 'vitest/config'\nexport default defineConfig({\n  test: {\n    exclude: [\n${body}\n    ],\n  },\n})\n`
+  // (a) THE EXECUTED CASE — one legitimate glob containing `//`, followed by an ordinary entry.
+  const desynced = cfg(`      'tests/integration/de//coy.ts',\n      '${ENTRY}',`)
+  // The desync is real: the two reads disagree about a suite that is not the offending entry.
+  assert.equal(directTestArrayEntries(desynced, 'exclude').includes(ENTRY), true)
+  assert.equal(isQuotedInTestExclude(desynced, ENTRY), false, 'the shared read must actually desync, or this row proves nothing')
+  const causes = excludeCrossReadCauses(desynced)
+  assert.match(causes[0], /^\(a\) THE CAUSE IS THE ENTRY/, 'the truncating entry must be reported FIRST')
+  assert.match(causes[0], /de\/\/coy\.ts/, 'the cause must name the entry that truncates')
+  assert.ok(
+    !causes[0].includes(ENTRY),
+    'the leading cause must not name the downstream suite — that is the misdiagnosis this row exists for',
+  )
+  // (b) a block-commented entry: the shared side sees it, the local side does not.
+  const blockCommented = cfg(`      /* '${ENTRY}', */\n      'tests/integration/other.test.ts',`)
+  const bCauses = excludeCrossReadCauses(blockCommented)
+  assert.ok(bCauses.some((c) => c.startsWith('(b)') && c.includes(ENTRY)), `got ${JSON.stringify(bCauses)}`)
+  assert.ok(!bCauses.some((c) => c.startsWith('(a)')), 'no `//` entry is present, so (a) must not fire')
+  // (c) an entry reached through a spread the shared parser cannot follow.
+  const spread = `import { defineConfig } from 'vitest/config'\nconst HIDDEN = ['${ENTRY}']\nexport default defineConfig({\n  test: {\n    exclude: ['**/dist/**', ...HIDDEN],\n  },\n})\n`
+  const cCauses = excludeCrossReadCauses(spread)
+  assert.ok(cCauses.some((c) => c.startsWith('(c)') && c.includes(ENTRY)), `got ${JSON.stringify(cCauses)}`)
+  // NEGATIVE CONTROL: a healthy config produces no cause at all, so the diagnosis is not "always
+  // blame something".
+  assert.deepEqual(
+    excludeCrossReadCauses(cfg(`      '${ENTRY}',\n      'tests/integration/other.test.ts',`)).filter((c) => /^\([abc]\)/.test(c)),
+    [],
+  )
+  // …and the live config is healthy today, which is what makes the leg above meaningful rather than
+  // permanently red.
+  assert.deepEqual(
+    excludeCrossReadCauses(readCoreBackendFile(NO_DB_CONFIG)).filter((c) => /^\([abc]\)/.test(c)),
+    [],
+  )
 })
 
 // P2-1 FROZEN ROWS: the executed bypasses, driven over synthetic configs so the parsers are proven
