@@ -23,8 +23,8 @@
  * requests are API requests:
  *
  *  - **Case-insensitive.** The routers in this app are mounted with Express's default
- *    `caseSensitive: false`, so path matching downstream is case-insensitive. The policy is defined the
- *    same way, so the set of paths the policy calls "API" is exactly the set the router will route.
+ *    `caseSensitive: false`, so path case is not significant downstream. The policy is defined the same
+ *    way, so one request is classified identically by every layer that looks at it.
  *
  *  - **Segment-anchored.** A prefix matches only at a `/` boundary or at end-of-path. `/apifoo` is not
  *    an API path, and a path that merely *resembles* a declared exception (`/api/healthcheck` next to
@@ -130,8 +130,11 @@ export const GLOBAL_GATE_EXCEPTIONS: readonly GateException[] = [
   { path: '/api/auth/register', kind: 'exact', reason: 'Self-registration — pre-authentication.' },
   { path: '/api/auth/invite/preview', kind: 'exact', reason: 'Invite preview — authenticated by the invite token in the request.' },
   { path: '/api/auth/invite/accept', kind: 'exact', reason: 'Invite acceptance — authenticated by the invite token in the request.' },
-  { path: '/api/auth/refresh', kind: 'exact', reason: 'Session refresh — authenticated by the refresh token, not the access token.' },
-  { path: '/api/auth/refresh-token', kind: 'exact', reason: 'Session refresh (alias) — authenticated by the refresh token.' },
+  // NOTE — there is deliberately no `/api/auth/refresh` entry. No route is mounted there and nothing
+  // calls it; it was only ever reachable as a by-product of prefix matching against the entry below.
+  // Declaring it would be a standing pre-authorisation for a route nobody has written yet, which rule
+  // 2 above forbids.
+  { path: '/api/auth/refresh-token', kind: 'exact', reason: 'Session refresh — authenticated by the refresh token, not the access token.' },
   { path: '/api/auth/dev-token', kind: 'exact', reason: 'Development/test token issuance — pre-authentication.' },
   { path: '/api/auth/dingtalk/launch', kind: 'exact', reason: 'DingTalk OAuth launch — pre-authentication redirect.' },
   { path: '/api/auth/dingtalk/callback', kind: 'exact', reason: 'DingTalk OAuth callback — authenticated by the OAuth code, not a session.' },

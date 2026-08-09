@@ -13,6 +13,8 @@ import express from 'express'
 import request from 'supertest'
 import { describe, it, expect } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
+import { isPublicFormAuthBypass } from '../../src/auth/jwt-middleware'
+import { isOapiAllowlistRequest } from '../../src/multitable/oapi-read-allowlist'
 import {
   GLOBAL_GATE_EXCEPTIONS,
   apiPathEquals,
@@ -32,11 +34,11 @@ const PROBE_NON_API_PATH = '/apiary/policy-probe/resource'
  * below asks the router whether it routes that spelling, and requires the policy to agree.
  */
 const SPELLINGS: readonly { name: string; of: (p: string) => string }[] = [
-  { name: 'as written', of: (p) => p },
-  { name: 'upper-cased', of: (p) => p.toUpperCase() },
-  { name: 'mixed-case', of: (p) => p.split('').map((c, i) => (i % 2 ? c.toUpperCase() : c)).join('') },
-  { name: 'trailing slash', of: (p) => `${p}/` },
-  { name: 'percent-encoded first segment', of: (p) => p.replace(/^\/(\w)/, (_m, c: string) => `/%${c.charCodeAt(0).toString(16)}`) },
+  { name: 'A', of: (p) => p },
+  { name: 'B', of: (p) => p.toUpperCase() },
+  { name: 'C', of: (p) => p.split('').map((c, i) => (i % 2 ? c.toUpperCase() : c)).join('') },
+  { name: 'D', of: (p) => `${p}/` },
+  { name: 'E', of: (p) => p.replace(/^\/(\w)/, (_m, c: string) => `/%${c.charCodeAt(0).toString(16)}`) },
 ]
 
 /** Build a real app: a path-less mounted router (the common shape in index.ts) carrying probe routes. */
@@ -69,11 +71,11 @@ describe('API path policy — the predicate recognises what the router routes', 
       const routerServesIt = res.status === 200
 
       if (routerServesIt) {
-        // THE invariant. Anything the router is willing to route to a handler must be recognised as
-        // API traffic by the policy, so the gate and every downstream surface see it as API traffic too.
+        // THE invariant: whatever the router is willing to hand to a handler is classified as API
+        // traffic by the policy, so the gate and every downstream surface agree about it.
         expect(
           isApiPath(candidate),
-          `the router serves this spelling but the policy does not classify it as an API path`,
+          `policy and router disagree about this path`,
         ).toBe(true)
       } else {
         // Not routed: nothing to protect. Recorded so the sweep can never pass by routing nothing.
@@ -84,7 +86,7 @@ describe('API path policy — the predicate recognises what the router routes', 
 
   it('at least one spelling other than the literal one is routed (the sweep is not vacuous)', async () => {
     const routed: string[] = []
-    for (const spelling of SPELLINGS.filter((s) => s.name !== 'as written')) {
+    for (const spelling of SPELLINGS.filter((s) => s.name !== 'A')) {
       const res = await request(pinned.url()).get(spelling.of(PROBE_API_PATH))
       if (res.status === 200) routed.push(spelling.name)
     }
@@ -149,6 +151,89 @@ describe('API path policy — declared exceptions behave as their kind declares'
     expect(isGateException('/api/policy-probe/resource')).toBe(false)
     expect(matchGateException('/api/policy-probe/resource')).toBeNull()
   })
+})
+
+/**
+ * The gate's dispatch chain, assembled here from the SAME predicates `index.ts` imports, with a
+ * recorder standing in for `jwtAuthMiddleware` so the test can see which branch a request took.
+ *
+ * This is a COPY of the chain in `index.ts`, not the chain itself — a unit test cannot boot the real
+ * server cheaply. What keeps the copy honest is `api-path-policy.guard.test.ts`: it fails if any call
+ * site (including `index.ts`) decides these questions with its own literal path test instead of the
+ * shared predicates used below. The two together give the property: API paths default INTO the gate,
+ * and only declared exceptions opt out.
+ */
+function buildGateApp(record: (outcome: 'gate' | 'exception' | 'not-api') => void): express.Express {
+  const app = express()
+  app.use((req, _res, next) => {
+    if (isGateException(req.path)) { record('exception'); return next() }
+    if (isPublicFormAuthBypass(req)) { record('exception'); return next() }
+    if (isOapiAllowlistRequest(req.method, req.path, req.headers.authorization)) { record('exception'); return next() }
+    if (isApiPath(req.path)) { record('gate'); return next() }
+    record('not-api')
+    return next()
+  })
+  // The probe routers sit BEHIND the chain, as the real routers do, so one request reports both which
+  // branch the chain took AND whether a router would have served the request at all.
+  const router = express.Router()
+  router.get(PROBE_API_PATH, (_req, res) => { res.status(200).json({ routed: true }) })
+  router.get(PROBE_NON_API_PATH, (_req, res) => { res.status(200).json({ routed: true }) })
+  app.use(router)
+  app.use((_req, res) => { res.status(404).json({ routed: false }) })
+  return app
+}
+
+describe('API path policy — the gate chain sends API paths to the gate', () => {
+  const pinned = usePinnedServer()
+  let outcome: 'gate' | 'exception' | 'not-api' | null = null
+  pinned.setApp(buildGateApp((o) => { outcome = o }))
+
+  async function probe(path: string): Promise<{ outcome: string | null; routed: boolean }> {
+    outcome = null
+    const res = await request(pinned.url()).get(path)
+    return { outcome, routed: res.status === 200 }
+  }
+
+  async function outcomeFor(path: string): Promise<string | null> {
+    return (await probe(path)).outcome
+  }
+
+  for (const spelling of SPELLINGS) {
+    it(`classifies an undeclared API path spelled ${spelling.name} consistently with the router`, async () => {
+      const { outcome: branch, routed } = await probe(spelling.of(PROBE_API_PATH))
+      if (routed) {
+        // Anything a router would serve must have been sent to the gate on the way in.
+        expect(branch, 'a routable API path did not reach the gate').toBe('gate')
+      } else {
+        // Not routable: no handler to protect. Recorded so the sweep cannot pass by routing nothing.
+        expect(branch).not.toBe('exception')
+      }
+    })
+  }
+
+  it('at least three spellings are routable and every one of them reached the gate', async () => {
+    const reached: string[] = []
+    for (const spelling of SPELLINGS) {
+      const { outcome: branch, routed } = await probe(spelling.of(PROBE_API_PATH))
+      if (routed && branch === 'gate') reached.push(spelling.name)
+    }
+    expect(reached.length, 'too few routable spellings — the gate sweep proves little').toBeGreaterThanOrEqual(3)
+  })
+
+  it('sends a path outside the API surface past the gate untouched', async () => {
+    expect(await outcomeFor(PROBE_NON_API_PATH)).toBe('not-api')
+    expect(await outcomeFor('/health-probe')).toBe('not-api')
+  })
+
+  // Per-declaration sweep: each declared exception must actually take the exception branch, and a
+  // sibling that merely resembles it must still reach the gate.
+  for (const entry of GLOBAL_GATE_EXCEPTIONS.filter((e) => isApiPath(e.path))) {
+    it(`lets the declared ${entry.kind} exception ${entry.path} skip the gate, but not its look-alike`, async () => {
+      expect(await outcomeFor(entry.path)).toBe('exception')
+      expect(await outcomeFor(`${entry.path}-sibling`)).toBe('gate')
+      expect(await outcomeFor(`${entry.path}/child-probe`)).toBe(entry.kind === 'prefix' ? 'exception' : 'gate')
+    })
+  }
 })
 
 describe('API path policy — comparison helpers', () => {

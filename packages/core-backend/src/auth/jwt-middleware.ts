@@ -49,7 +49,10 @@ export function isPublicFormAuthBypass(req: PublicFormBypassRequest): boolean {
   return false
 }
 
-function isPasswordChangeWhitelisted(path: string): boolean {
+function isPasswordChangeWhitelisted(pathOrUrl: string): boolean {
+  // The caller falls back to `req.originalUrl`, which — unlike `req.path` — still carries the query
+  // string. Compare the path portion only, so both callers' inputs mean the same thing here.
+  const path = (pathOrUrl || '').split('?')[0]
   // Exact, via the shared policy: each entry names one route, so a longer path that merely starts with
   // one of them is not covered by it.
   return PASSWORD_CHANGE_WHITELIST.some((entry) => apiPathEquals(path, entry))
