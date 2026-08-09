@@ -187,8 +187,29 @@ function discoverRuntimeRoots(source) {
 // distinction survives the match instead of being thrown away by the regex. It is parsed in JS by
 // `resolveTableIdentifier`, which keeps the group indices stable (m[1] = verb, m[2] = table token)
 // and keeps the asymmetric-quote case an explicit decision rather than a backreference subtlety.
+// `ONLY` is a PostgreSQL inheritance modifier, not a table: `UPDATE ONLY t` and
+// `DELETE FROM ONLY t` both target `t`. Without the optional group below the capture took `ONLY`
+// as the table name, which is not attendance-owned, so the write left the tracked buckets
+// entirely — the same one-token bypass shape as the schema qualifier. It is consumed
+// STRUCTURALLY here and deliberately NOT added to `SQL_RESERVED_NON_TABLE_WORDS`: that set
+// `continue`s, i.e. discards the site, which would be fail-OPEN and would leave the real write
+// invisible rather than mis-named. Measured: zero `ONLY` DML targets exist in the domain today,
+// so this closes a latent hole at zero census cost.
 const DML_LINE_PATTERN =
-  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+(?:"?[a-zA-Z_][a-zA-Z0-9_]*"?\s*\.\s*)*("?[a-zA-Z_][a-zA-Z0-9_]*"?)/g
+  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+(?:ONLY\s+)?(?:"?[a-zA-Z_][a-zA-Z0-9_]*"?\s*\.\s*)*("?[a-zA-Z_][a-zA-Z0-9_]*"?)/g
+
+// `TRUNCATE a, b` and `DROP TABLE a, b` take a LIST of targets; the pattern above matches the verb
+// once and so produced a site for `a` only, leaving every later target invisible. This sticky
+// continuation consumes the rest of the list from immediately after the first target.
+//
+// Restricted to the two verbs where a comma list is actually a target list. Applying it to every
+// verb was measured first and is wrong: it produces 12 false sites in this tree (`CONSTRAINT`
+// captured from `ALTER TABLE`-shaped DDL, and one prose fragment). Restricted, it produces ZERO
+// today — so, like `ONLY`, this closes a latent hole at zero census cost. Sticky (`y`) rather than
+// slicing so nothing depends on a fixed-width window that could cut an identifier in half.
+const MULTI_TARGET_VERBS = new Set(['truncate', 'staging_drop'])
+const TABLE_LIST_CONTINUATION =
+  /\s*,\s*(?:ONLY\s+)?(?:"?[a-zA-Z_][a-zA-Z0-9_]*"?\s*\.\s*)*("?[a-zA-Z_][a-zA-Z0-9_]*"?)/y
 
 // PostgreSQL identifier folding, applied to the captured table token.
 //
@@ -698,6 +719,27 @@ function scanFileForDmlSites(relPath, content) {
       table,
       enclosingSymbol: nearestEnclosingSymbol(originalLines, lineIndex),
     })
+
+    // Remaining targets of a `TRUNCATE a, b, c` / `DROP TABLE a, b` list. Each becomes its own
+    // site at its own line, so a second target can neither hide behind the first nor collapse
+    // into it. Placed AFTER the staging-DDL/migration `continue` above on purpose: if the first
+    // target of a statement is out of scope for a reason, every target of that statement is.
+    if (MULTI_TARGET_VERBS.has(verb)) {
+      TABLE_LIST_CONTINUATION.lastIndex = m.index + m[0].length
+      let continuation
+      while ((continuation = TABLE_LIST_CONTINUATION.exec(masked)) !== null) {
+        const { table: nextTable } = resolveTableIdentifier(continuation[1])
+        if (SQL_RESERVED_NON_TABLE_WORDS.has(nextTable.toUpperCase())) break
+        const nextLineIndex = lineIndexAt(masked, continuation.index)
+        sites.push({
+          relPath,
+          line: nextLineIndex + 1,
+          verb,
+          table: nextTable,
+          enclosingSymbol: nearestEnclosingSymbol(originalLines, nextLineIndex),
+        })
+      }
+    }
   }
   return sites
 }

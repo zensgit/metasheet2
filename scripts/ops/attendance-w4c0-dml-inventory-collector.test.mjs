@@ -2007,6 +2007,105 @@ test('W4C-3c scanner resolves schema-qualified write targets to the real table, 
   assert.deepEqual([bare.length, bare[0]?.table], [1, 'attendance_records'])
 })
 
+test('W4C-3c scanner: PostgreSQL ONLY is an inheritance modifier, not a table', () => {
+  // `UPDATE ONLY t` used to capture `ONLY` as the table. `ONLY` is not attendance-owned, so the
+  // write left the tracked buckets entirely — the same one-token bypass shape as the schema
+  // qualifier, and equally silent. Consumed structurally now; deliberately NOT added to
+  // SQL_RESERVED_NON_TABLE_WORDS, because that set `continue`s and would discard the site
+  // altogether, turning a mis-named write into an invisible one.
+  const shapes = [
+    ['async function q1() { await db.query(`UPDATE ONLY attendance_records SET status = $1`) }', 'update', 'attendance_records'],
+    ['async function q2() { await db.query(`DELETE FROM ONLY attendance_events WHERE id = $1`) }', 'delete', 'attendance_events'],
+    ['async function q3() { await db.query(`UPDATE ONLY public.attendance_records SET status = $1`) }', 'update', 'attendance_records'],
+    ['async function q4() { await db.query(`TRUNCATE ONLY attendance_records`) }', 'truncate', 'attendance_records'],
+  ]
+  for (const [source, verb, table] of shapes) {
+    const sites = scanFileForDmlSites('probe.cjs', source)
+    assert.equal(sites.length, 1, source)
+    assert.deepEqual([sites[0].verb, sites[0].table], [verb, table], source)
+  }
+  // Negative control: a table genuinely NAMED `only_...` must not be eaten by the modifier group.
+  const realTable = scanFileForDmlSites('probe.cjs', 'async function q5() { await db.query(`UPDATE attendance_only_flags SET x = $1`) }')
+  assert.deepEqual([realTable.length, realTable[0]?.table], [1, 'attendance_only_flags'])
+})
+
+test('W4C-3c scanner: every target of a TRUNCATE / DROP TABLE list becomes its own site', () => {
+  // A comma list is a TARGET list for exactly these two verbs. Only the first target used to
+  // become a site, so `TRUNCATE unrelated_table, attendance_records` hid an attendance truncation
+  // behind an innocuous first name.
+  const lists = [
+    ['async function q1() { await db.query(`TRUNCATE attendance_records, attendance_events`) }', 'truncate', ['attendance_records', 'attendance_events']],
+    ['async function q2() { await db.query(`TRUNCATE TABLE unrelated_rows, attendance_records, attendance_events`) }', 'truncate', ['unrelated_rows', 'attendance_records', 'attendance_events']],
+    ['async function q3() { await db.query(`DROP TABLE IF EXISTS staging_a, attendance_records`) }', 'staging_drop', ['staging_a', 'attendance_records']],
+    ['async function q4() { await db.query(`TRUNCATE ONLY public.attendance_records, public.attendance_events`) }', 'truncate', ['attendance_records', 'attendance_events']],
+  ]
+  for (const [source, verb, tables] of lists) {
+    const sites = scanFileForDmlSites('probe.cjs', source)
+    assert.deepEqual(sites.map((s) => s.table), tables, source)
+    assert.deepEqual([...new Set(sites.map((s) => s.verb))], [verb], source)
+  }
+
+  // Negative control, and the reason the continuation is restricted to these two verbs: applying
+  // it to every verb was measured and mints 12 false sites in this tree. A comma after any other
+  // verb's target is a column list, a SET list, or DDL — never another target.
+  const notATargetList = scanFileForDmlSites(
+    'probe.cjs',
+    'async function q5() { await db.query(`ALTER TABLE attendance_records ADD CONSTRAINT a_ck CHECK (x > 0), ADD CONSTRAINT b_ck CHECK (y > 0)`) }',
+  )
+  assert.deepEqual(notATargetList.map((s) => s.table), ['attendance_records'], 'an ALTER TABLE constraint list must not mint extra table sites')
+  const insertColumns = scanFileForDmlSites(
+    'probe.cjs',
+    'async function q6() { await db.query(`INSERT INTO attendance_records (id, org_id) VALUES ($1, $2)`) }',
+  )
+  assert.deepEqual(insertColumns.map((s) => s.table), ['attendance_records'], 'an INSERT column list must not mint extra table sites')
+})
+
+test('DISCLOSURE (executable): the shapes this scanner still cannot see', () => {
+  // This test asserts a LIMITATION, on purpose. It is the residue list made executable: if any of
+  // these ever starts producing a site, this test reds and whoever changed it must update the
+  // stated residue in the PR body, `approved-site-identities.cjs`, and the collector header —
+  // rather than quietly widening the guarantee. A prose disclosure can drift from behaviour; this
+  // one cannot.
+  //
+  // Every row is paired with a positive control proving the row is about the ONE property named
+  // and not about a typo in the fixture.
+  const invisible = [
+    ['non-literal table name, resolvable const binding',
+      'const T = "attendance_records"\nasync function f() { await db.query(`INSERT INTO ${T} (id) VALUES ($1)`) }'],
+    ['non-literal table name, arbitrary expression',
+      'async function f() { await db.query(`INSERT INTO ${cfg.table} (id) VALUES ($1)`) }'],
+    ['lowercase SQL keywords',
+      'async function f() { await db.query(`insert into attendance_records (id) values ($1)`) }'],
+    ['mixed-case SQL keywords',
+      'async function f() { await db.query(`Insert Into attendance_records (id) VALUES ($1)`) }'],
+  ]
+  for (const [label, source] of invisible) {
+    assert.deepEqual(
+      scanFileForDmlSites('probe.cjs', source),
+      [],
+      `STILL INVISIBLE by design: ${label}. If this now produces a site, the scanner improved — update the stated residue everywhere it is written down, then change this row.`,
+    )
+  }
+
+  // Positive controls: the same writes in the literal, uppercase-keyword form ARE seen. Without
+  // these, a scanner that had stopped producing sites entirely would pass the block above.
+  for (const [label, source] of [
+    ['literal table, uppercase keywords', 'async function f() { await db.query(`INSERT INTO attendance_records (id) VALUES ($1)`) }'],
+    ['literal table, uppercase keywords, UPDATE', 'async function f() { await db.query(`UPDATE attendance_records SET status = $1`) }'],
+  ]) {
+    assert.equal(scanFileForDmlSites('probe.cjs', source).length, 1, `positive control must be seen: ${label}`)
+  }
+
+  // And the table-domain half of the same disclosure: the operational tables the plugin owns are
+  // outside the attendance-owned domain, so even a LITERAL write to them is out of scope today.
+  assert.equal(
+    isAttendanceOwnedCandidate('plugin_attendance_report_sync_jobs'),
+    false,
+    'STILL OUT OF DOMAIN by design: plugin_attendance_* operational tables. Four live writes exist at plugins/plugin-attendance/index.cjs and are invisible twice over (dynamic target AND out-of-domain table). Closing this needs a migrations-derived table domain plus constant-binding resolution, and it is scoped as follow-up work, not silently absent.',
+  )
+  assert.equal(isAttendanceOwnedCandidate('attendance_records'), true, 'positive control: the domain is not simply empty')
+})
+
 test('W4C-3c comment masker tracks nested braces inside template expressions', () => {
   const source = [
     'const sql = `SELECT ${render({ nested: { value: 1 } })}`',
