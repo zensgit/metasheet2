@@ -32,6 +32,11 @@ const {
   contentHashOfKeys,
   maskCommentsForDmlScan,
   hasLiveDmlOnTable,
+  discoverRuntimeRoots,
+  parseWorkspacePatterns,
+  isScannablePath,
+  isAttendanceOwnedCandidate,
+  resolveTableIdentifier,
 } = require(
   path.join(toolDir, 'collector.cjs'),
 )
@@ -327,6 +332,311 @@ test('multiplicity probe: a REMOVED occurrence of a pinned identity reds in miss
   assert.equal(empty.missing.length, empty.approvedIdentityCount)
   assert.equal(empty.overCount.length, 0)
   assert.ok(empty.approvedIdentityCount > 0, 'the approved-identity domain must be non-empty')
+})
+
+// -------------------------------------------------------------------------------------------
+// 1c. Two escapes that defeated this gate BEFORE the identity table was ever consulted.
+//
+//     Both were found by adversarial review of the identity conversion, and neither is a defect
+//     of the identity scheme — they are upstream of it, which is precisely why they mattered:
+//     the conversion's headline promise ("a new INSERT INTO attendance_records in an
+//     already-approved file can no longer land silently") held for exactly one spelling.
+//
+//       P1  TABLE-IDENTIFIER CASE. `INSERT INTO ATTENDANCE_RECORDS` DID mint a raw census site —
+//           the keywords are uppercase, so the case-sensitive pattern matched — and was then
+//           dropped by a case-SENSITIVE ownership test, before classifyTable. Not tracked, not
+//           unclaimed, not unclassified: silent. In PostgreSQL an unquoted identifier folds to
+//           lower case, so it named the same relation as the approved lowercase site.
+//           Signature: `raw` MOVES, `tracked` does not.
+//
+//       P2  CENSUS DOMAIN. `plugins/plugin-after-sales` matches the `plugins/*` workspace pattern
+//           but ships no package.json, and root promotion required one — so a live product plugin
+//           in this very after-sales approval domain was scanned by nothing.
+//           Signature: `raw` does NOT move, because the file is never opened.
+//
+//     The probes below are frozen must-red rows for both, and they assert the SIGNATURE, not just
+//     redness: each one requires the raw census to grow by exactly one site, which is what
+//     separates "the scanner saw it and the classifier judged it" from "the file was never read".
+// -------------------------------------------------------------------------------------------
+let cachedBaselineCensus = null
+function baselineCensus() {
+  if (cachedBaselineCensus === null) {
+    const source = createWorktreeSource(rootDir)
+    const { sites, roots } = buildRawCensus(source)
+    const classified = classifyCensus(sites)
+    cachedBaselineCensus = { sites, roots, classified, result: classifyTrackedSites(classified.trackedSites) }
+  }
+  return cachedBaselineCensus
+}
+
+/**
+ * Whole-pipeline probe. `censusWithMutatedFile` above rescans ONE file and splices the result into
+ * the live census, which is enough to exercise classification — but it assumes the file is in the
+ * scan domain, so it can never detect a domain hole. This helper instead runs the REAL
+ * `buildRawCensus` over a source whose `readFile` returns mutated content for exactly one path, so
+ * root discovery and the directory walk are exercised too. That is what makes the
+ * `plugins/plugin-after-sales` row below a domain proof rather than a classification proof.
+ */
+function fullCensusWithMutatedSource(relPath, mutate) {
+  const base = createWorktreeSource(rootDir)
+  const original = base.readFile(relPath)
+  assert.ok(original != null, `probe target must exist: ${relPath}`)
+  const mutated = mutate(original)
+  assert.notEqual(mutated, original, 'probe mutation must actually change the file content')
+  const source = {
+    readFile: (probePath) => (probePath === relPath ? mutated : base.readFile(probePath)),
+    listDir: (dir) => base.listDir(dir),
+    listAllFiles: (dir) => base.listAllFiles(dir),
+  }
+  const { sites, roots } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  return { sites, roots, classified, result: classifyTrackedSites(classified.trackedSites) }
+}
+
+function unclaimedLabels(result) {
+  return result.unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol} :: ${s.table}:${s.verb}`)
+}
+
+function countLabels(rows) {
+  return rows.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`)
+}
+
+test('PostgreSQL identifier folding: the resolver states which reading applies to each token shape', () => {
+  // The two axes are different SQL, not different strictness settings:
+  //   unquoted  -> PostgreSQL folds to lower case  -> the SAME relation
+  //   quoted    -> PostgreSQL preserves the spelling -> a DIFFERENT relation
+  assert.deepEqual(resolveTableIdentifier('attendance_records'), { table: 'attendance_records', quoted: false })
+  assert.deepEqual(resolveTableIdentifier('ATTENDANCE_RECORDS'), { table: 'attendance_records', quoted: false })
+  assert.deepEqual(resolveTableIdentifier('Attendance_Records'), { table: 'attendance_records', quoted: false })
+  assert.deepEqual(resolveTableIdentifier('"attendance_records"'), { table: 'attendance_records', quoted: true })
+  assert.deepEqual(resolveTableIdentifier('"Attendance_Records"'), { table: 'Attendance_Records', quoted: true })
+  assert.deepEqual(resolveTableIdentifier('"ATTENDANCE_RECORDS"'), { table: 'ATTENDANCE_RECORDS', quoted: true })
+  // Asymmetric quoting is not a quoted identifier in any dialect. Fold it — the WIDER of the two
+  // readings, so an evasion cannot be built out of a stray quote.
+  assert.deepEqual(resolveTableIdentifier('"Attendance_Records'), { table: 'attendance_records', quoted: false })
+  assert.deepEqual(resolveTableIdentifier('Attendance_Records"'), { table: 'attendance_records', quoted: false })
+})
+
+test('attendance ownership is case-insensitive on the WRITE census, as it always was on the read legs', () => {
+  // Before the fix this predicate was exact-match, while P25_READ_TABLE_PATTERN,
+  // ATTENDANCE_RECORD_READ_PATTERN and ATTENDANCE_CALCULATION_READ_PATTERN all carried `gi`.
+  // The write census was the only leg in the file without case-insensitive table matching.
+  for (const name of [
+    'attendance_records', 'ATTENDANCE_RECORDS', 'Attendance_Records',
+    'approval_instances', 'APPROVAL_INSTANCES', 'Approval_Records', 'APPROVAL_ASSIGNMENTS',
+  ]) {
+    assert.equal(isAttendanceOwnedCandidate(name), true, `${name} must be in attendance scope`)
+  }
+  // Negative control: the predicate widened on CASE only. It must not have widened on name.
+  for (const name of [
+    'approval_workflows', 'APPROVAL_WORKFLOWS', 'users', 'plugin_after_sales_template_installs',
+    'attendance', 'attendancerecords',
+  ]) {
+    assert.equal(isAttendanceOwnedCandidate(name), false, `${name} must stay out of attendance scope`)
+  }
+})
+
+// Frozen must-red rows for P1. Every one of these was GREEN before the fix, with the raw census
+// moving 1220 -> 1221 while every counter stayed at zero.
+const IDENTIFIER_CASE_MUST_RED_ROWS = [
+  {
+    name: 'uppercase table identifier',
+    sql: '      await trx.query(`INSERT INTO ATTENDANCE_RECORDS (id) VALUES ($1)`, [approvalId])\n',
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: attendance_records:insert`],
+  },
+  {
+    name: 'mixed-case table identifier',
+    sql: '      await trx.query(`INSERT INTO Attendance_Records (id) VALUES ($1)`, [approvalId])\n',
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: attendance_records:insert`],
+  },
+  {
+    name: 'uppercase verb AND uppercase table together',
+    sql: "      await trx.query(`UPDATE ATTENDANCE_RECORDS SET status = 'void' WHERE id = $1`, [approvalId])\n",
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: attendance_records:update`],
+  },
+  {
+    name: 'schema-qualified uppercase table',
+    sql: '      await trx.query(`INSERT INTO public.ATTENDANCE_RECORDS (id) VALUES ($1)`, [approvalId])\n',
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: attendance_records:insert`],
+  },
+  {
+    name: 'uppercase SHARED approval table (covers all of SHARED_TABLE_NAMES)',
+    sql: '      await trx.query(`DELETE FROM APPROVAL_ASSIGNMENTS WHERE instance_id = $1`, [approvalId])\n',
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: approval_assignments:delete`],
+  },
+]
+
+test('frozen must-red: an attendance table written in ANY unquoted case is the same relation and reds by name', () => {
+  for (const row of IDENTIFIER_CASE_MUST_RED_ROWS) {
+    const probe = fullCensusWithMutatedSource(AFTER_SALES_BRIDGE, spliceAfterSalesTransaction(row.sql))
+    // The P1 signature, asserted rather than assumed: the scanner DID see the write. If this
+    // equality ever fails the probe has stopped testing case and started testing something else.
+    assert.equal(
+      probe.sites.length,
+      baselineCensus().sites.length + 1,
+      `${row.name}: the raw census must grow by exactly one site — the scanner sees the write, the question is only what the ownership test then does with it`,
+    )
+    assert.deepEqual(unclaimedLabels(probe.result), row.unclaimed, `${row.name}: must red in unclaimed, folded onto its real lowercase relation`)
+    assert.deepEqual(probe.result.overCount, [], `${row.name}: no pinned identity may be disturbed`)
+    assert.deepEqual(probe.result.missing, [], `${row.name}: no pinned identity may be disturbed`)
+    assert.deepEqual(
+      probe.classified.unclassifiedTableSites,
+      [],
+      `${row.name}: an UNQUOTED identifier folds to a real registered table, so it must land in its bucket and red by identity — not fall out as unclassified`,
+    )
+  }
+})
+
+test('frozen must-red: an UPPERCASE spelling of an APPROVED write is the SAME identity — it reds on multiplicity, not as a new site', () => {
+  // This is the row that distinguishes the implemented reading from the crude alternative
+  // ("anything non-lowercase becomes an unclassified table"). Under the crude variant an
+  // uppercase spelling of an approved write would red in `unclassifiedTables`, and the collector
+  // would be asserting that ATTENDANCE_RECORDS is a table it has never heard of — which is false.
+  // Under PostgreSQL folding it must resolve onto the very identity that is already pinned, and
+  // therefore red as observed=2 against pinned=1, minting NO new identity.
+  const probe = fullCensusWithMutatedSource(
+    AFTER_SALES_BRIDGE,
+    spliceAfterSalesTransaction(
+      '      await trx.query(\n'
+      + '        `INSERT INTO APPROVAL_INSTANCES (id, status, workflow_key)\n'
+      + "         VALUES ($1, 'pending', $2)`,\n"
+      + '        [approvalId, REFUND_WORKFLOW_KEY],\n'
+      + '      )\n',
+    ),
+  )
+  assert.equal(probe.sites.length, baselineCensus().sites.length + 1)
+  assert.deepEqual(
+    probe.result.unclaimed,
+    [],
+    'an uppercase spelling of an approved write must NOT mint a new identity — if it does, the fold is not mapping onto the same relation',
+  )
+  assert.equal(
+    probe.result.observedIdentityCount,
+    baselineCensus().result.observedIdentityCount,
+    'the identity COUNT must be unchanged: the uppercase write is the same tuple, occurring twice',
+  )
+  assert.deepEqual(
+    countLabels(probe.result.overCount),
+    [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: approval_instances:insert pinned=1 observed=2`],
+    'the uppercase duplicate must red on multiplicity against the identity it actually names',
+  )
+  assert.deepEqual(probe.classified.unclassifiedTableSites, [])
+  assert.deepEqual(probe.result.missing, [])
+})
+
+test('frozen must-red: a QUOTED mixed-case identifier is a DIFFERENT relation — unclassified, and never silently dropped', () => {
+  // PostgreSQL does not fold a double-quoted identifier, so `"Attendance_Records"` is NOT
+  // `attendance_records` and must not be admitted as it. It is still one shift key away from an
+  // attendance table, so it must not be dropped in silence either — the union ownership test pulls
+  // it into scope and `classifyTable` (whose registry holds only the real, lowercase tables) then
+  // reds it as an unclassified attendance-owned table. Both halves of that are asserted here.
+  const probe = fullCensusWithMutatedSource(
+    AFTER_SALES_BRIDGE,
+    spliceAfterSalesTransaction(
+      '      await trx.query(`INSERT INTO "Attendance_Records" (id) VALUES ($1)`, [approvalId])\n',
+    ),
+  )
+  assert.equal(probe.sites.length, baselineCensus().sites.length + 1)
+  assert.deepEqual(
+    probe.classified.unclassifiedTableSites.map((s) => `${s.relPath} :: ${s.table}`),
+    [`${AFTER_SALES_BRIDGE} :: Attendance_Records`],
+    'a quoted mixed-case attendance lookalike must red as an unclassified attendance-owned table',
+  )
+  assert.deepEqual(
+    probe.result.unclaimed,
+    [],
+    'it must NOT be folded into attendance_records — that would be the wrong PostgreSQL reading, and would let a quoted identifier inherit a lowercase table approval',
+  )
+  assert.deepEqual(probe.result.overCount, [])
+  assert.deepEqual(probe.result.missing, [])
+
+  // Control: a quoted identifier that is ALREADY lowercase names the ordinary relation, so it must
+  // keep classifying normally. Quoting is not itself suspicious.
+  const quotedLower = scanFileForDmlSites(
+    'probe.cjs',
+    'async function q() { await db.query(`INSERT INTO "attendance_records" (id) VALUES ($1)`) }',
+  )
+  assert.deepEqual([quotedLower.length, quotedLower[0]?.table], [1, 'attendance_records'])
+})
+
+// --- P2: the census domain -------------------------------------------------------------------
+
+const AFTER_SALES_PLUGIN_DIR = 'plugins/plugin-after-sales'
+const AFTER_SALES_PLUGIN_MODULE = `${AFTER_SALES_PLUGIN_DIR}/lib/refund-approval.cjs`
+
+test('census domain: every workspace-manifest directory is a scan root, with no marker-file escape', () => {
+  const source = createWorktreeSource(rootDir)
+  const roots = discoverRuntimeRoots(source)
+
+  // Expectation DERIVED from the manifest, not a copied list: expand pnpm-workspace.yaml here and
+  // require the root set to be exactly that, plus the named extra roots. Any marker-file rule
+  // (package.json, plugin.json, or the next one someone invents) fails this by construction —
+  // which is the point. Membership must come from the manifest, not from an incidental file.
+  const patterns = parseWorkspacePatterns(fs.readFileSync(path.join(rootDir, 'pnpm-workspace.yaml'), 'utf8'))
+  const expected = new Set(['scripts'])
+  for (const pattern of patterns) {
+    if (pattern.endsWith('/*')) {
+      const base = pattern.slice(0, -2)
+      for (const entry of fs.readdirSync(path.join(rootDir, base), { withFileTypes: true })) {
+        if (entry.isDirectory()) expected.add(`${base}/${entry.name}`)
+      }
+    } else {
+      expected.add(pattern)
+    }
+  }
+  assert.ok(expected.size > 1, 'precondition: the manifest expansion must be non-empty')
+  assert.deepEqual(roots, [...expected].sort(), 'the scan domain is exactly the workspace manifest plus the named extra roots')
+
+  // Frozen by name: the directory the marker-file rule lost. It is a live product plugin —
+  // plugin.json manifestVersion 2.0.0, an 850-line index.cjs, a contributed route, 13 lib modules.
+  assert.ok(roots.includes(AFTER_SALES_PLUGIN_DIR), `${AFTER_SALES_PLUGIN_DIR} must be a scan root`)
+  // Non-vacuity: if someone later adds a package.json to this plugin, the old rule would have
+  // covered it too and this row would silently stop exercising the escape. Say so out loud.
+  assert.equal(
+    fs.existsSync(path.join(rootDir, AFTER_SALES_PLUGIN_DIR, 'package.json')),
+    false,
+    'precondition: this plugin still has no package.json, so it still exercises the marker-file escape — if that changes, pick another manifest directory without one',
+  )
+  assert.equal(
+    fs.existsSync(path.join(rootDir, AFTER_SALES_PLUGIN_DIR, 'plugin.json')),
+    true,
+    'precondition: this plugin really is product code',
+  )
+})
+
+test('frozen must-red: attendance DML inside plugins/plugin-after-sales is inside the census domain and reds', () => {
+  const source = createWorktreeSource(rootDir)
+  // Walk the chain rather than assuming it: extension, exclusion rules, and the directory walk.
+  assert.equal(isScannablePath(AFTER_SALES_PLUGIN_MODULE), true, 'the module must be a scannable path')
+  assert.ok(
+    source.listAllFiles(AFTER_SALES_PLUGIN_DIR).includes(AFTER_SALES_PLUGIN_MODULE),
+    'the directory walk must actually reach the module',
+  )
+  assert.deepEqual(
+    scanFileForDmlSites(AFTER_SALES_PLUGIN_MODULE, source.readFile(AFTER_SALES_PLUGIN_MODULE)),
+    [],
+    'precondition: this module writes no DML today, so the probe below contributes the only site and the +1 assertion is exact',
+  )
+
+  const probe = fullCensusWithMutatedSource(AFTER_SALES_PLUGIN_MODULE, (original) => `${original}
+async function quietlyWriteAttendance(client, recordId) {
+  await client.query(\`INSERT INTO attendance_records (id) VALUES ($1)\`, [recordId])
+}
+`)
+  // The P2 signature, and the discriminator against P1: under the old rule the raw census did NOT
+  // move at all here, because the file was never opened. Redness alone would not have shown that.
+  assert.equal(
+    probe.sites.length,
+    baselineCensus().sites.length + 1,
+    'the raw census must grow — an unscanned directory contributes nothing, which is exactly how this escape hid',
+  )
+  assert.deepEqual(
+    unclaimedLabels(probe.result),
+    [`${AFTER_SALES_PLUGIN_MODULE} :: quietlyWriteAttendance :: attendance_records:insert`],
+    'an attendance write from the after-sales plugin must red by name',
+  )
+  assert.deepEqual(probe.result.overCount, [])
+  assert.deepEqual(probe.result.missing, [])
 })
 
 test('approval carries no file, prefix, or bare-symbol shape: every entry claim is exact-identity membership', () => {
