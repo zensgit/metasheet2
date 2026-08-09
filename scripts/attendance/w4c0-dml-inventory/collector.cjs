@@ -688,8 +688,78 @@ function hasLiveDmlOnTable(content, verb, table) {
 // classification) with 1-based line numbers retained ONLY as informational metadata — the debt
 // key never includes the line number (an unrelated edit elsewhere in the file must not red this
 // guard). Comments and documentation examples are masked first so they cannot mint sites.
+// --- statement fingerprint ---------------------------------------------------------------------
+//
+// The site identity (relPath, enclosingSymbol, table, verb) says WHERE a write is and WHAT it
+// touches. It says nothing about what the statement DOES. Deleting the entire
+// `WHERE org_id = $1 AND request_id = $2 AND …` from an approved tenant-scoped UPDATE — turning
+// it into an unbounded, cross-tenant, table-wide UPDATE — changes no component of the identity,
+// so the gate stayed green with byte-identical counters. That is not the substitution residue
+// (which is about two different call sites colliding on one symbol name): the file, symbol, table
+// and verb here are all the legitimate ones, and only the meaning of the SQL changed.
+//
+// The fingerprint closes that. It is deliberately a NORMALISED TEXT hash, not a parse:
+//   - whitespace runs collapse to one space, so reformatting/indentation does NOT churn the gate
+//     (measured: the same statement re-indented across six lines fingerprints identically);
+//   - comments are already blanked by the masker, so a comment edit does not churn it either;
+//   - case is folded, consistent with the identifier rule above;
+//   - everything else is significant — a changed WHERE, a changed SET list, a changed target
+//     column list, and a changed `${dynamicTable}` expression all move the hash (each measured).
+// A parser would be narrower and would need a dialect; this is the fail-closed direction: it can
+// only red MORE often than a semantic diff would, and every red is a real edit to a statement
+// somebody once approved.
+function normalizeStatementText(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+function statementFingerprintOf(text) {
+  return sha256Hex(normalizeStatementText(text)).slice(0, 16)
+}
+
+// One pass per file producing the [start, end) content ranges of every JS string/template literal,
+// so the per-site lookup is a scan of a small sorted array rather than a fresh O(file) walk each
+// time. Same tokenisation rule as sqlLiteralContainingIndex, which it replaces for bulk use.
+function sqlLiteralRanges(content) {
+  const src = String(content ?? '')
+  const ranges = []
+  let quote = null
+  let start = -1
+  let escaped = false
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i]
+    if (quote !== null) {
+      if (escaped) { escaped = false; continue }
+      if (ch === '\\') { escaped = true; continue }
+      if (ch === quote) {
+        ranges.push([start + 1, i])
+        quote = null
+        start = -1
+      }
+      continue
+    }
+    if (ch === '`' || ch === "'" || ch === '"') { quote = ch; start = i }
+  }
+  return ranges
+}
+
+// The statement text a site is fingerprinted over: the SQL literal containing it when there is
+// one (the normal case — SQL in this codebase lives in template literals), otherwise a bounded
+// slice from the verb to the end of the statement, for `.sql` and `.sh` files where the SQL is
+// not wrapped in a JS literal at all. The fallback is bounded so a file with no `;` cannot make
+// one site's fingerprint cover the whole file.
+const STATEMENT_SLICE_LIMIT = 4000
+function statementTextAt(masked, index, ranges) {
+  for (const [start, end] of ranges) {
+    if (start <= index && index < end) return masked.slice(start, end)
+  }
+  const semicolon = masked.indexOf(';', index)
+  const end = semicolon === -1 ? Math.min(masked.length, index + STATEMENT_SLICE_LIMIT) : semicolon
+  return masked.slice(index, Math.min(end, index + STATEMENT_SLICE_LIMIT))
+}
+
 function scanFileForDmlSites(relPath, content) {
   const masked = maskCommentsForDmlScan(content)
+  const literalRanges = sqlLiteralRanges(masked)
   // Original lines for symbol attribution (function names live in non-comment code).
   const originalLines = String(content ?? '').split(/\r?\n/)
   const sites = []
@@ -712,12 +782,14 @@ function scanFileForDmlSites(relPath, content) {
     const isStagingDdlVerb = verb === 'staging_create' || verb === 'staging_drop' || verb === 'staging_alter'
     if (isStagingDdlVerb && isMigrationPath(relPath)) continue
     const lineIndex = lineIndexAt(masked, m.index)
+    const statementFingerprint = statementFingerprintOf(statementTextAt(masked, m.index, literalRanges))
     sites.push({
       relPath,
       line: lineIndex + 1,
       verb,
       table,
       enclosingSymbol: nearestEnclosingSymbol(originalLines, lineIndex),
+      statementFingerprint,
     })
 
     // Remaining targets of a `TRUNCATE a, b, c` / `DROP TABLE a, b` list. Each becomes its own
@@ -737,6 +809,9 @@ function scanFileForDmlSites(relPath, content) {
           verb,
           table: nextTable,
           enclosingSymbol: nearestEnclosingSymbol(originalLines, nextLineIndex),
+          // Every target of one statement shares that statement's fingerprint — they are the
+          // same statement, and a change to it must red all of them together.
+          statementFingerprint,
         })
       }
     }
@@ -1124,6 +1199,10 @@ module.exports = {
   isScannablePath,
   maskCommentsForDmlScan,
   resolveTableIdentifier,
+  statementFingerprintOf,
+  normalizeStatementText,
+  statementTextAt,
+  sqlLiteralRanges,
   hasLiveDmlOnTable,
   scanFileForDmlSites,
   scanFileForP25CallPathSites,

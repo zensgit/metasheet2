@@ -35,10 +35,13 @@ function classifyTrackedSites(trackedSites) {
   const genericAllowlisted = []
   const unclaimed = []
   const observedCountByKey = new Map()
+  const observedFingerprintsByKey = new Map()
 
   for (const site of trackedSites) {
     const key = siteIdentityKey(site)
     observedCountByKey.set(key, (observedCountByKey.get(key) || 0) + 1)
+    if (!observedFingerprintsByKey.has(key)) observedFingerprintsByKey.set(key, [])
+    observedFingerprintsByKey.get(key).push(site.statementFingerprint ?? null)
 
     const approved = APPROVED_SITE_IDENTITY_BY_KEY.get(key)
     if (!approved) {
@@ -89,12 +92,40 @@ function classifyTrackedSites(trackedSites) {
     }
   }
 
+  // Statement-fingerprint leg. `unclaimed`/`overCount`/`missing` all answer "is this write at a
+  // coordinate somebody approved, the pinned number of times". None of them answers "is it still
+  // the STATEMENT somebody approved". Deleting the whole `WHERE` from an approved tenant-scoped
+  // UPDATE — making it an unbounded cross-tenant table-wide UPDATE — changes no component of the
+  // identity and no count, so every leg above stays empty. This one reds.
+  //
+  // Compared as a sorted MULTISET, not a set, and that is load-bearing: 11 of the 19 repeated
+  // identities have occurrences with DIFFERENT statement text, and 5 more have two occurrences
+  // sharing one fingerprint. A set would collapse those and silently lose an occurrence.
+  //
+  // A count change reds here as well as in overCount/missing. That overlap is deliberate: the
+  // legs are additive and none is weakened to keep them disjoint.
+  const fingerprintDrift = []
+  for (const row of APPROVED_SITE_IDENTITIES) {
+    const key = siteIdentityKey(row)
+    const pinned = [...(row.statementFingerprints || [])].sort()
+    const observed = [...(observedFingerprintsByKey.get(key) || [])].sort()
+    if (JSON.stringify(pinned) !== JSON.stringify(observed)) {
+      fingerprintDrift.push({
+        identity: siteIdentityLabel(row),
+        pinned,
+        observed,
+        entryIds: row.entryIds,
+      })
+    }
+  }
+
   return {
     claimsByEntryId,
     genericAllowlisted,
     unclaimed,
     overCount,
     missing,
+    fingerprintDrift,
     trackedSiteCount: trackedSites.length,
     observedIdentityCount: observedCountByKey.size,
     approvedIdentityCount: APPROVED_SITE_IDENTITIES.length,

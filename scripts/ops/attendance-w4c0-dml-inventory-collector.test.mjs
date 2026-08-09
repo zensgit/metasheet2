@@ -37,12 +37,17 @@ const {
   isScannablePath,
   isAttendanceOwnedCandidate,
   resolveTableIdentifier,
+  statementFingerprintOf,
 } = require(
   path.join(toolDir, 'collector.cjs'),
 )
 const { classifyTrackedSites } = require(path.join(toolDir, 'classify-tracked-sites.cjs'))
 const { CURATED_DEBT_ENTRIES } = require(path.join(toolDir, 'curated-debt-entries.cjs'))
-const { APPROVED_SITE_IDENTITY_BY_KEY } = require(path.join(toolDir, 'approved-site-identities.cjs'))
+const {
+  APPROVED_SITE_IDENTITY_BY_KEY,
+  APPROVED_SITE_IDENTITIES,
+  siteIdentityLabel,
+} = require(path.join(toolDir, 'approved-site-identities.cjs'))
 const {
   PINNED_BASELINE_REF,
   PINNED_BASELINE_ARTIFACT_RELPATH,
@@ -105,6 +110,7 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
     `[w4c0-dml-inventory] raw census sites=${sites.length} tracked=${result.trackedSiteCount}`
     + ` observedIdentities=${result.observedIdentityCount} approvedIdentities=${result.approvedIdentityCount}`
     + ` unclaimed=${unclaimed.length} overCount=${overCount.length} missing=${missing.length}`
+    + ` fingerprintDrift=${result.fingerprintDrift.length}`
     + ` genericShared=${result.genericAllowlisted.length}`
     + ` unclassifiedTables=${classified.unclassifiedTableSites.length}`
     + ` outsideBoundary=${classified.outsideBoundarySites.length}`,
@@ -124,6 +130,11 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
     missing.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`),
     [],
     'a pinned identity that no longer occurs is a stale approval (and an empty census reds here, so the gate has a non-empty domain)',
+  )
+  assert.deepEqual(
+    result.fingerprintDrift.map((d) => `${d.identity} pinned=${JSON.stringify(d.pinned)} observed=${JSON.stringify(d.observed)}`),
+    [],
+    'an approved identity must still carry the STATEMENT it was approved with — a changed WHERE, SET list, target column list or dynamic target at an approved coordinate is new debt, not a free edit',
   )
   assert.deepEqual(
     classified.unclassifiedTableSites.map((s) => `${s.relPath} :: ${s.table}`),
@@ -637,6 +648,115 @@ async function quietlyWriteAttendance(client, recordId) {
   )
   assert.deepEqual(probe.result.overCount, [])
   assert.deepEqual(probe.result.missing, [])
+})
+
+// --- P1-2: the statement, not just the coordinate ---------------------------------------------
+
+const ATTENDANCE_PLUGIN_INDEX = 'plugins/plugin-attendance/index.cjs'
+const ARCHIVE_WHERE_CLAUSE = `
+          WHERE org_id = $1
+            AND request_id = $2
+            AND source_key NOT LIKE '%:archived:%'`
+
+test('frozen must-red: deleting the WHERE from an approved tenant-scoped UPDATE reds in fingerprintDrift', () => {
+  // The owner's P1-2, verbatim. `archiveScheduleDispatchSourceKey` archives ONE request for ONE
+  // org. Delete its entire WHERE and it becomes an unbounded, cross-tenant, table-wide UPDATE
+  // that rewrites `source_key` for every row in `attendance_schedule_dispatch_requests`.
+  //
+  // Nothing about the site IDENTITY changes: same file, same symbol, same table, same verb, same
+  // occurrence count. Before the fingerprint the whole suite stayed green with byte-identical
+  // counter lines — the single most dangerous shape the inventory could not see, because it is a
+  // change to what an ALREADY-APPROVED write does rather than the appearance of a new one.
+  //
+  // Note this is NOT the substitution residue: that one is about two different call sites
+  // colliding on a shared symbol name. Here the file, symbol, table and verb are all the genuine,
+  // legitimately-approved ones. Only the SQL changed.
+  const probe = fullCensusWithMutatedSource(ATTENDANCE_PLUGIN_INDEX, (original) => {
+    assert.equal(
+      original.split(ARCHIVE_WHERE_CLAUSE).length - 1,
+      1,
+      'probe anchor must match exactly once — if the archive statement was reformatted, re-derive the probe rather than loosening it',
+    )
+    return original.replace(ARCHIVE_WHERE_CLAUSE, '')
+  })
+
+  // The identity legs must ALL stay clean — that is the whole point of the finding.
+  assert.deepEqual(probe.result.unclaimed, [], 'the coordinate is unchanged, so no new identity appears')
+  assert.deepEqual(probe.result.overCount, [], 'the occurrence count is unchanged')
+  assert.deepEqual(probe.result.missing, [], 'no pinned identity stops occurring')
+  assert.equal(
+    probe.sites.length,
+    baselineCensus().sites.length,
+    'the raw census does not move either — this attack adds no site, it edits one',
+  )
+
+  // ...and the statement leg must red, naming the identity.
+  assert.deepEqual(
+    probe.result.fingerprintDrift.map((d) => d.identity),
+    [`${ATTENDANCE_PLUGIN_INDEX} :: archiveScheduleDispatchSourceKey :: attendance_schedule_dispatch_requests:update`],
+    'removing the tenant scope from an approved UPDATE must red by name in the statement leg',
+  )
+  const drift = probe.result.fingerprintDrift[0]
+  assert.equal(drift.pinned.length, drift.observed.length, 'same number of occurrences — this is content drift, not a count change')
+  assert.notDeepEqual(drift.pinned, drift.observed, 'the pinned and observed fingerprints must actually differ')
+})
+
+test('statement fingerprint: normalisation is exactly whitespace + case, so formatting does not churn the gate', () => {
+  const withWhere = "UPDATE attendance_records SET status = $1 WHERE org_id = $2 AND id = $3"
+  const reformatted = "UPDATE attendance_records\n   SET status = $1\n WHERE org_id = $2\n   AND id = $3"
+  const cased = "update attendance_records set status = $1 where org_id = $2 and id = $3"
+
+  // Must NOT churn: reformatting and case are not semantic changes, and a gate that reds on them
+  // gets re-pinned reflexively until nobody reads the diff.
+  assert.equal(statementFingerprintOf(reformatted), statementFingerprintOf(withWhere), 'reindentation must not move the fingerprint')
+  assert.equal(statementFingerprintOf(cased), statementFingerprintOf(withWhere), 'keyword case must not move the fingerprint')
+
+  // Must red: each of these is a different statement.
+  for (const [label, variant] of [
+    ['WHERE deleted', 'UPDATE attendance_records SET status = $1'],
+    ['WHERE weakened', 'UPDATE attendance_records SET status = $1 WHERE id = $3'],
+    ['SET list extended', 'UPDATE attendance_records SET status = $1, approved = TRUE WHERE org_id = $2 AND id = $3'],
+    ['predicate negated', 'UPDATE attendance_records SET status = $1 WHERE org_id != $2 AND id = $3'],
+    ['dynamic target changed', 'UPDATE ${otherTable} SET status = $1 WHERE org_id = $2 AND id = $3'],
+  ]) {
+    assert.notEqual(statementFingerprintOf(variant), statementFingerprintOf(withWhere), `${label} must move the fingerprint`)
+  }
+
+  // The multiset property, asserted directly: 11 of the 19 repeated identities have occurrences
+  // whose statements DIFFER, so comparing as a set would silently lose an occurrence.
+  const repeated = APPROVED_SITE_IDENTITIES.filter((row) => row.occurrences > 1)
+  assert.ok(repeated.length > 0, 'precondition: there are repeated identities to reason about')
+  for (const row of repeated) {
+    assert.equal(
+      row.statementFingerprints.length,
+      row.occurrences,
+      `${siteIdentityLabel(row)}: the pinned fingerprint list is a MULTISET of length occurrences, not a set`,
+    )
+  }
+  const withDifferingStatements = repeated.filter((row) => new Set(row.statementFingerprints).size > 1)
+  assert.ok(
+    withDifferingStatements.length > 0,
+    'at least one repeated identity must have occurrences with DIFFERENT statements, or the multiset-vs-set distinction would be untested',
+  )
+})
+
+test('every approved identity carries a well-formed statement fingerprint multiset', () => {
+  for (const row of APPROVED_SITE_IDENTITIES) {
+    assert.ok(Array.isArray(row.statementFingerprints), `${siteIdentityLabel(row)} must carry statementFingerprints`)
+    assert.equal(
+      row.statementFingerprints.length,
+      row.occurrences,
+      `${siteIdentityLabel(row)}: one fingerprint per pinned occurrence`,
+    )
+    for (const fp of row.statementFingerprints) {
+      assert.match(fp, /^[0-9a-f]{16}$/, `${siteIdentityLabel(row)}: fingerprint must be 16 lowercase hex chars`)
+    }
+    assert.deepEqual(
+      row.statementFingerprints,
+      [...row.statementFingerprints].sort(),
+      `${siteIdentityLabel(row)}: pinned fingerprints must be stored sorted, so comparison is order-independent`,
+    )
+  }
 })
 
 test('approval carries no file, prefix, or bare-symbol shape: every entry claim is exact-identity membership', () => {
