@@ -702,9 +702,9 @@ function unpermittedArgsOfInvocation(inv) {
 // still worth reporting, and reporting it is strictly more conservative than dropping it. The two
 // mechanisms are orthogonal and each keeps its own red — a `$NAME_FILTER` on a real-DB step reds
 // BOTH the argument allowlist (unrecognised token) and the control-flow leg (non-inert word).
-function attendanceCarryingInvocations({ corpusArgs = attendanceCorpusArgs() } = {}) {
+function attendanceCarryingInvocations({ steps = realDbSteps(), corpusArgs = attendanceCorpusArgs() } = {}) {
   const out = []
-  for (const [stepId, step] of realDbSteps()) {
+  for (const [stepId, step] of steps) {
     for (const inv of vitestInvocations(step)) {
       if (!inv.usesIntegrationConfig) continue
       // MEMBERSHIP IS BY SELECTION, not by spelling. This filter was
@@ -780,16 +780,13 @@ test(`every attendance-carrying real-DB invocation runs its files with no execut
  * @returns {string[]}
  */
 function detectUnpermittedAttendanceArgs(runScript, corpusArgs = SYNTHETIC_CORPUS) {
-  const hits = []
-  for (const inv of vitestInvocations({ run: runScript })) {
-    if (!inv.usesIntegrationConfig) continue
-    // The SAME selection routine the live leg uses (`selectedCorpusSuites`), over a synthetic
-    // corpus. Re-implementing the domain test here would drive a COPY of the predicate: the live
-    // leg's empty-skip bug is exactly the kind that survives when the control has its own copy.
-    if (selectedCorpusSuites(inv, corpusArgs).length === 0) continue
-    hits.push(...unpermittedArgsOfInvocation(inv))
-  }
-  return hits
+  // THE SHIPPED ROUTINE, over a synthetic step — not a re-implementation of it. This used to be its
+  // own loop with its own copy of the domain test, and the copies could be fixed independently: a
+  // reverted `continue` in the LIVE routine left every control here green, which is precisely the
+  // "green test against nothing" shape (proved by mutation — reverting the live domain test reddened
+  // nothing until these were collapsed into one).
+  return attendanceCarryingInvocations({ steps: [['synthetic', { run: runScript }]], corpusArgs })
+    .flatMap(({ inv }) => unpermittedArgsOfInvocation(inv))
 }
 
 /**
