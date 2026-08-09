@@ -2206,7 +2206,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
 // Absolute filters are refused rather than modelled: vitest matches them with
 // `isAbsolute(f) && t.startsWith(f)` against the runner's real checkout prefix, which is not
 // knowable from here. They over-select in the counter (fail closed) and red by name here.
-test('P1-1: every positional of every real-DB invocation is package-relative and selects at least one collected suite', () => {
+test("P1-1: every positional of the three real-DB steps' invocations is package-relative and selects at least one collected suite", () => {
   const suiteArgs = integrationSuiteCorpus().map((e) => e.arg)
   assert.ok(suiteArgs.length > 0, 'the integration suite corpus is empty — an empty scan is not an absence')
   const offenders = []
@@ -2475,7 +2475,12 @@ function realDbExecutableInvocations() {
   return realDbSteps().flatMap(([, step]) => executableIntegrationInvocations(step))
 }
 
-test('P2: every attendance suite is executed EXACTLY ONCE across all provably-executed real-DB invocations', () => {
+// SCOPE OF THIS UNIVERSAL, said in its own title: the domain is `realDbSteps()` — three step ids —
+// and NOT every invocation that runs the governing config. Eleven steps of plugin-tests.yml and six
+// more across three other workflow files do; the COMPLEMENT leg below asserts that none of those
+// fourteen selects an attendance suite or widens to the whole corpus. The two together are total
+// over the pinned config; neither on its own is, and an earlier revision of this title said it was.
+test("P2: every attendance suite is executed EXACTLY ONCE across the three real-DB steps' provably-executed invocations (the COMPLEMENT leg covers every other invocation under the same config)", () => {
   const corpusArgs = attendanceCorpusArgs()
   const counts = attendanceExecutionCounts(realDbExecutableInvocations(), corpusArgs)
   assert.equal(
@@ -2492,8 +2497,10 @@ test('P2: every attendance suite is executed EXACTLY ONCE across all provably-ex
   assert.deepEqual(
     offenders,
     [],
-    'each attendance suite must appear as a whole-file arg of EXACTLY ONE provably-executed real-DB '
-      + 'invocation. `executions: 0` — it is carried by nothing that runs (a deleted run-list entry, '
+    'each attendance suite must be selected by EXACTLY ONE provably-executed invocation OF THE THREE '
+      + 'REAL-DB STEPS (invocations elsewhere under the same config are the COMPLEMENT leg\'s domain, '
+      + 'and it requires them to select none). `executions: 0` — it is carried by nothing that runs '
+      + '(a deleted run-list entry, '
       + 'or a command this guard cannot prove executes). `executions: 2` — it runs in two vitest '
       + 'processes against ONE database, which is a fixture race, not extra coverage; the `Set` the '
       + 'per-member leg builds collapses that to a single membership answer, which is why the count '
@@ -2609,6 +2616,428 @@ test('P1-1 frozen rows: a narrowing flag is READ on an invocation that selects a
   // leg has not simply been widened to "report every invocation".
   assert.deepEqual(detectUnpermittedAttendanceArgs(`${BASE} ${PROBE_OTHER} -t zzz`), [])
   assert.deepEqual(detectUnpermittedAttendanceArgs(`${BASE} multitable- -t zzz`), [])
+})
+
+// ---------------------------------------------------------------------------------------------
+// THE COMPLEMENT of `realDbSteps()` (gate finding @ d72cf7dcdf, P1).
+//
+// Every leg above this line has ONE domain: the three step ids `realDbSteps()` names. That domain
+// is right for what those legs assert about attendance WIRING — the three steps are where the
+// family is wired and where the executability contract is held. It is NOT the set of places a
+// SECOND execution can come from. Measured here with the PyYAML walk below, not estimated:
+// ELEVEN steps of plugin-tests.yml run vitest under the governing config, and six more do across
+// three other workflow files — SEVENTEEN invocations, of which `realDbSteps()` contributes three.
+//
+// THE ATTACK, executed against the head this leg lands on. Add ONE line to the EXISTING
+// `sealed-export-s3-real-db` step — same workflow, same job, same Postgres service, already
+// carrying `DATABASE_URL`, already invoking `--config vitest.integration.config.ts run`:
+//
+//       tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts \
+//     + tests/integration/attendance-w4c2-posture-matrix.db.test.ts \
+//       --reporter=verbose
+//
+// → the guard was 208/208 GREEN while that suite ran in TWO vitest processes against ONE database.
+// Replace the added line with the single positional `./` → 208/208 GREEN again, while real vitest
+// 1.6.1 expands `./` to the ENTIRE collected corpus (executed; see the differential table beside
+// `vitestFilterSelects`). Both are verbatim the hazard the multiplicity leg names — "two vitest
+// processes against ONE database, which is a fixture race, not extra coverage" — entered through
+// the axis the counting-key rewrite did not touch. The enumeration of SPELLINGS was deleted; the
+// enumeration of STEPS was not, and the step one was the one still open.
+//
+// THE TWO LEGS ARE JOINTLY TOTAL, and each is now qualified so neither claims the other's ground.
+// The multiplicity leg says: across the three real-DB steps' provably-executed invocations, each
+// attendance suite is selected EXACTLY ONCE. This leg says: across EVERY OTHER invocation under
+// the same governing config, in every workflow file that names it, no attendance suite is selected
+// at all and no positional widens to the whole corpus. Together they cover every vitest invocation
+// under the pinned config in `.github/workflows`, which is the universe the "exactly once" claim
+// needs — and neither sentence is an unqualified universal over a domain of three.
+//
+// WHAT THIS DELIBERATELY IS NOT: the fully DERIVED domain (take every step that runs the governing
+// config and apply the three real-DB steps' rules to it). That is the better end state and it is
+// NOT taken here, on purpose: those rules include the inert-alphabet flatness property, which is
+// currently held against three CURATED run scripts. Applying it to the fourteen foreign
+// invocations would red scripts that are not this change's to rewrite (sealed-export S3/S4,
+// after-sales, BPMN ×2, real-app assembly, snapshot-protection, comment-reaction, and three
+// sealed-export workflows), so it is an OWNER RULING on alphabet scope, deferred and stated rather
+// than taken silently.
+//
+// Consequences of that choice, stated rather than left to be found:
+//   • This leg reads the SHARED `vitestInvocations`, never the flatness-gated
+//     `executableVitestInvocations`. Gating it would fail OPEN precisely where it matters: a
+//     foreign script that this guard cannot prove flat would contribute NO invocations and its
+//     duplicate attendance argument would pass unseen. More invocations examined is the
+//     conservative direction here, and it is the opposite direction from the in-domain legs, where
+//     an unprovable command must not count as wiring.
+//   • It reds on a FOREIGN step whose positional this guard's model cannot resolve to a definite,
+//     non-empty, proper subset of the collected corpus — the same polarity, and the same cost, as
+//     the inert alphabet: a widening is an owner decision, not a silent one.
+//   • The domain is invocations whose `--config` argument SPELLS the governing config's basename,
+//     which is what the shared `argsUseIntegrationConfig` matches. A config named through a shell
+//     variable (`--config $CFG`) is outside it — and outside every other leg in this file too,
+//     because the shared helper cannot see it either. Stated, not hidden.
+// ---------------------------------------------------------------------------------------------
+
+/** The three step ids `realDbSteps()` covers — the set this leg is the complement OF. */
+const IN_DOMAIN_STEP_IDS = Object.freeze([STEP_ID, REAL_DB_STEP_IDS.approval, REAL_DB_STEP_IDS.multitable])
+
+const WORKFLOWS_DIR = join(repoRoot, '.github/workflows')
+
+/**
+ * Reasons a non-domain invocation is refused. Each is a DISTINCT string so the offender list
+ * discriminates the failure shapes rather than collapsing them into one indistinguishable red —
+ * a mutation matrix whose rows share a signature proves less than one whose rows do not.
+ */
+const OUT_OF_DOMAIN_REASONS = Object.freeze({
+  noPositional: 'no positional at all — vitest then runs the ENTIRE collected corpus of the governing config',
+  absolute: 'absolute path — this guard cannot resolve the runner checkout prefix, so what it selects is unknown',
+  attendance: 'selects attendance suites, which are already executed by the three real-DB steps — a SECOND execution',
+  wholeCorpus: 'selects the WHOLE collected corpus, so every attendance suite runs a second time',
+  zero: 'resolves to ZERO collected suites under this guard\'s selection model, which cannot be admitted here',
+})
+
+/**
+ * Workflow files that NAME the governing config's basename, read as `{ file, text }`.
+ *
+ * The text pre-filter is not a shortcut: an invocation whose `--config` value does not spell that
+ * basename is not in this leg's domain in the first place (the shared `argsUseIntegrationConfig`
+ * matches the basename and nothing else), so a file that never contains the string cannot hold a
+ * member. It keeps the YAML bridge's blast radius proportional to real usage instead of coupling
+ * this guard to the parseability of all 81 workflow files.
+ *
+ * The directory scan REFUSES a non-regular entry rather than skipping it, exactly as `walkFiles`
+ * does — a symlinked workflow is a file this guard has not read.
+ */
+function workflowFilesNamingGoverningConfig(basename) {
+  const out = []
+  for (const name of readdirSync(WORKFLOWS_DIR).sort()) {
+    const st = lstatSync(join(WORKFLOWS_DIR, name))
+    if (!st.isFile()) {
+      throw new Error(
+        `workflow scan: failing CLOSED — .github/workflows/${name} is ${describeStatType(st)}, not a `
+          + `regular file; this guard reads workflow text and cannot vouch for what it did not read`,
+      )
+    }
+    if (!/\.ya?ml$/.test(name)) continue
+    const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8')
+    if (!text.includes(basename)) continue
+    out.push({ file: name, text })
+  }
+  return out
+}
+
+/**
+ * Every step carrying a `run:` script across the given workflow files, in document order, off the
+ * PARSED YAML — one fail-closed python3+PyYAML bridge for all of them (stdin = JSON `[{file,text}]`).
+ * A file that does not parse aborts, naming itself: an unparseable workflow is not "no steps".
+ *
+ * @returns {{ file: string, job: string, index: number, id: string|null, run: string }[]}
+ */
+function workflowStepsWithRun(files) {
+  const py = [
+    'import json, sys',
+    'try:',
+    '    import yaml',
+    'except Exception as exc:',
+    "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
+    '    sys.exit(3)',
+    'entries = json.loads(sys.stdin.read())',
+    'out = []',
+    'for entry in entries:',
+    '    try:',
+    '        doc = yaml.safe_load(entry["text"])',
+    '    except Exception as exc:',
+    '        sys.stderr.write("YAML_PARSE_ERROR in %s: %r" % (entry["file"], exc))',
+    '        sys.exit(4)',
+    '    jobs = doc.get("jobs") if isinstance(doc, dict) else None',
+    '    if not isinstance(jobs, dict):',
+    '        continue',
+    '    for job_name, job in jobs.items():',
+    '        steps = job.get("steps") if isinstance(job, dict) else None',
+    '        if not isinstance(steps, list):',
+    '            continue',
+    '        for index, step in enumerate(steps):',
+    '            if not isinstance(step, dict):',
+    '                continue',
+    '            run = step.get("run")',
+    '            if not isinstance(run, str):',
+    '                continue',
+    '            step_id = step.get("id")',
+    '            out.append({',
+    '                "file": entry["file"],',
+    '                "job": str(job_name),',
+    '                "index": index,',
+    '                "id": step_id if isinstance(step_id, str) else None,',
+    '                "run": run,',
+    '            })',
+    'json.dump(out, sys.stdout)',
+  ].join('\n')
+  const res = spawnSync('python3', ['-c', py], {
+    input: JSON.stringify(files),
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024,
+    timeout: 120_000,
+  })
+  if (res.error) {
+    throw new Error(`workflow step walk: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+  }
+  if (res.status !== 0) {
+    throw new Error(
+      `workflow step walk: failing CLOSED — PyYAML bridge exited ${res.status}: `
+        + `${(res.stderr || '').trim() || '(no stderr)'}`,
+    )
+  }
+  return JSON.parse(res.stdout)
+}
+
+/**
+ * Every vitest invocation under the governing config that `realDbSteps()` does NOT cover.
+ *
+ * "Covered" is the FIRST step in document order carrying each of the three ids — which is the step
+ * the shared first-match-wins lookup resolves. A DUPLICATE id later in the document is therefore
+ * NOT waved through as in-domain: it lands here, where it is judged on its arguments.
+ *
+ * @param {{ file: string, job: string, index: number, id: string|null, run: string }[]} steps
+ */
+function outOfDomainIntegrationInvocations(steps) {
+  const claimed = new Set()
+  const out = []
+  for (const step of steps) {
+    const isCovered = typeof step.id === 'string' && IN_DOMAIN_STEP_IDS.includes(step.id) && !claimed.has(step.id)
+    if (typeof step.id === 'string' && IN_DOMAIN_STEP_IDS.includes(step.id)) claimed.add(step.id)
+    if (isCovered) continue
+    for (const inv of vitestInvocations(step)) {
+      if (!inv.usesIntegrationConfig) continue
+      out.push({ file: step.file, job: step.job, index: step.index, id: step.id, inv })
+    }
+  }
+  return out
+}
+
+/**
+ * The refusals. A positional of a non-domain invocation is admissible ONLY when it resolves to a
+ * NON-EMPTY, PROPER subset of the collected integration corpus that contains no attendance suite.
+ *
+ * The zero-selection rule is not pedantry, and it is where this leg absorbs the one place the
+ * selection model is known to diverge from vitest: every divergent spelling measured against the
+ * real binary makes this model select ZERO while vitest selects one file or the entire corpus
+ * (`./` is the worst case). Refusing "resolves to zero" therefore refuses the whole divergence
+ * class by name instead of relying on a model that would have to guess the runner's checkout path.
+ *
+ * @param {object} o
+ * @param {{ file: string, job: string, index: number, id: string|null, inv: { args: string[] } }[]} o.invocations
+ * @param {string[]} o.corpusArgs the attendance family
+ * @param {string[]} o.suiteArgs the whole collected integration corpus
+ */
+function outOfDomainPositionalOffenders({ invocations, corpusArgs, suiteArgs }) {
+  const offenders = []
+  const at = (m) => ({ file: m.file, job: m.job, index: m.index, id: m.id })
+  for (const member of invocations) {
+    const filters = positionalFiltersOfInvocation(member.inv)
+    if (filters.length === 0) {
+      offenders.push({ ...at(member), positional: null, reason: OUT_OF_DOMAIN_REASONS.noPositional })
+      continue
+    }
+    for (const positional of filters) {
+      if (positional.startsWith('/')) {
+        offenders.push({ ...at(member), positional, reason: OUT_OF_DOMAIN_REASONS.absolute })
+        continue
+      }
+      const selected = suiteArgs.filter((arg) => vitestFilterSelects(arg, positional))
+      if (selected.length === suiteArgs.length) {
+        offenders.push({ ...at(member), positional, reason: OUT_OF_DOMAIN_REASONS.wholeCorpus })
+        continue
+      }
+      const attendance = corpusArgs.filter((arg) => vitestFilterSelects(arg, positional))
+      if (attendance.length > 0) {
+        offenders.push({ ...at(member), positional, reason: OUT_OF_DOMAIN_REASONS.attendance })
+        continue
+      }
+      if (selected.length === 0) {
+        offenders.push({ ...at(member), positional, reason: OUT_OF_DOMAIN_REASONS.zero })
+      }
+    }
+  }
+  return offenders
+}
+
+/** The live complement domain, derived end to end. */
+function liveOutOfDomainInvocations() {
+  return outOfDomainIntegrationInvocations(
+    workflowStepsWithRun(workflowFilesNamingGoverningConfig(posix.basename(governingIntegrationConfig()))),
+  )
+}
+
+test('COMPLEMENT is non-vacuous: workflow steps outside the three real-DB steps do run the governing config', () => {
+  const invocations = liveOutOfDomainInvocations()
+  assert.ok(
+    invocations.length > 0,
+    'no invocation outside the three real-DB steps runs the governing config at all — either the '
+      + 'workflow walk broke or the file pre-filter did, and the complement assertion below would '
+      + 'pass over an empty set forever. An empty scan is not an absence',
+  )
+  // The three in-domain steps must be EXCLUDED from it, or the leg is asserting over the wrong set.
+  const ids = new Set(invocations.map((m) => m.id))
+  for (const id of IN_DOMAIN_STEP_IDS) {
+    assert.ok(!ids.has(id), `${id} is covered by realDbSteps() and must not appear in its complement`)
+  }
+  // …and the domain must reach beyond the workflow the rest of this file reads, or the "jointly
+  // total" claim above is narrower than it says.
+  assert.ok(
+    new Set(invocations.map((m) => m.file)).size > 1,
+    'the complement domain covers only one workflow file — the discovery scan narrowed',
+  )
+})
+
+test('COMPLEMENT: no invocation outside the three real-DB steps selects an attendance suite or widens to the whole corpus', () => {
+  const suiteArgs = integrationSuiteCorpus().map((e) => e.arg)
+  assert.ok(suiteArgs.length > 0, 'the integration suite corpus is empty — an empty scan is not an absence')
+  const offenders = outOfDomainPositionalOffenders({
+    invocations: liveOutOfDomainInvocations(),
+    corpusArgs: attendanceCorpusArgs(),
+    suiteArgs,
+  })
+  assert.deepEqual(
+    offenders,
+    [],
+    'the multiplicity leg counts executions across the THREE real-DB steps only. Seventeen vitest '
+      + 'invocations run the governing config across this repository\'s workflows, so "executed '
+      + 'exactly once" is only true if the other fourteen execute NO attendance suite and widen to '
+      + 'nothing. Adding `tests/integration/attendance-*.db.test.ts` to any of them — e.g. the '
+      + '`sealed-export-s3-real-db` step, which shares this job and its Postgres service — runs '
+      + 'that suite in a SECOND vitest process against ONE database: a fixture race, not extra '
+      + 'coverage. A positional resolving to zero or to the whole corpus is refused for the same '
+      + 'reason one step over: `./` selects nothing in this guard\'s model and EVERYTHING in real '
+      + 'vitest 1.6.1. If a foreign step must legitimately carry one of these shapes, that is an '
+      + 'owner decision (and the derived-domain rewrite this leg defers), not a silent widening',
+  )
+})
+
+/**
+ * The `sealed-export-s3-real-db` step's run script, VERBATIM at the head the gate attacked — the
+ * exact foreign step both 208/208-green mutations were applied to.
+ *
+ * A frozen copy rather than a live read, deliberately: this test is the POSITIVE CONTROL for the
+ * live leg above, and a control whose fixture is the very thing under attack reds twice for one
+ * defect and can be pushed off its own expectations by the mutation it is meant to detect (the
+ * MUT-A probe, applied on top of a workflow already carrying MUT-A, would see the argument twice).
+ * The live side is asserted by the leg above, over all fourteen invocations; this side proves the
+ * detector can SEE the two shapes, which an "assert absent" leg cannot prove about itself.
+ */
+const S3_STEP_RUN_AT_GATE_HEAD = ': "${DATABASE_URL:?DATABASE_URL is required for sealed-export S3 real-DB proof}"\n'
+  + 'pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\\n'
+  + '  tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts \\\n'
+  + '  --reporter=verbose\n'
+
+// FROZEN PROBES — the two mutations that were 208/208 GREEN at the head this leg lands on, each
+// driven through the SHIPPED routines over a foreign step of the real shape.
+test('COMPLEMENT frozen probes: the two executed 208/208-green mutations are now refused, each with its own signature', () => {
+  const corpusArgs = attendanceCorpusArgs()
+  const suiteArgs = integrationSuiteCorpus().map((e) => e.arg)
+  const VICTIM = 'tests/integration/attendance-w4c2-posture-matrix.db.test.ts'
+  assert.ok(corpusArgs.includes(VICTIM), 'the probe victim must be a real corpus member')
+  const S3 = { file: 'plugin-tests.yml', job: 'test', index: 54, id: 'sealed-export-s3-real-db' }
+  const CARRIED = 'tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts'
+  /** The shipped routines over ONE foreign step. */
+  const probe = (run) =>
+    outOfDomainPositionalOffenders({
+      invocations: outOfDomainIntegrationInvocations([{ ...S3, run }]),
+      corpusArgs,
+      suiteArgs,
+    }).map((o) => ({ positional: o.positional, reason: o.reason }))
+  /** …with one extra positional appended to its run-list, exactly as the mutations did it. */
+  const withExtraPositional = (extra) =>
+    probe(S3_STEP_RUN_AT_GATE_HEAD.replace(CARRIED, `${CARRIED} \\\n  ${extra}`))
+
+  // The step's REAL script, unmutated, is admissible — so every red below is the mutation, not the
+  // shape. (The live leg above asserts the same thing over the live text of all fourteen.)
+  assert.deepEqual(probe(S3_STEP_RUN_AT_GATE_HEAD), [])
+
+  // PROBE 1 (MUT-A): one extra line naming an attendance suite, in the same run-list, same job,
+  // same Postgres service. Guard was 208/208 green.
+  assert.deepEqual(withExtraPositional(VICTIM), [{ positional: VICTIM, reason: OUT_OF_DOMAIN_REASONS.attendance }])
+  // …and through SPELLINGS the domain predicate declines, so the probe is not testing one literal.
+  for (const spelling of [
+    'tests/integration//attendance-w4c2-posture-matrix.db.test.ts',
+    'tests/integration/./attendance-w4c2-posture-matrix.db.test.ts',
+    'tests/integration/ATTENDANCE-w4c2-posture-matrix.db.test.ts',
+    'attendance-w4c2-posture-matrix',
+  ]) {
+    assert.deepEqual(
+      withExtraPositional(spelling),
+      [{ positional: spelling, reason: OUT_OF_DOMAIN_REASONS.attendance }],
+      `a second execution spelled "${spelling}" must be refused by NAME`,
+    )
+  }
+
+  // PROBE 2 (MUT-B): the `./` positional. Guard was 208/208 green, while real vitest 1.6.1 expands
+  // `./` to the ENTIRE collected corpus (executed — see the differential table).
+  assert.deepEqual(withExtraPositional('./'), [{ positional: './', reason: OUT_OF_DOMAIN_REASONS.zero }])
+  // …its relatives in the same divergence class, all of which this model resolves to zero.
+  for (const spelling of ['tests/../', './././', 'nope/../']) {
+    assert.deepEqual(
+      withExtraPositional(spelling),
+      [{ positional: spelling, reason: OUT_OF_DOMAIN_REASONS.zero }],
+      `"${spelling}" resolves to zero here and is refused rather than admitted`,
+    )
+  }
+  // The Windows-separator spelling too — noting what the shared tokeniser does to it on the way in:
+  // `shellTokens` reads `\` as bash's escape character and DROPS it, so the token that reaches the
+  // model is `testsintegrationattendance-…`, not the path. It resolves to zero either way, and zero
+  // is refused, which is the point: the refusal does not depend on recognising the spelling.
+  assert.deepEqual(
+    withExtraPositional('tests\\integration\\attendance-w4c2-posture-matrix.db.test.ts').map((o) => o.reason),
+    [OUT_OF_DOMAIN_REASONS.zero],
+  )
+  // …and the wideners this model DOES see as wideners: a bare directory, a trailing-slash one, the
+  // family fragment, and the invocation with no positional at all.
+  for (const spelling of ['tests/integration', 'tests/integration/', '.']) {
+    assert.deepEqual(
+      withExtraPositional(spelling),
+      [{ positional: spelling, reason: OUT_OF_DOMAIN_REASONS.wholeCorpus }],
+      `"${spelling}" selects the whole corpus and must be refused as a widener`,
+    )
+  }
+  assert.deepEqual(
+    withExtraPositional('attendance-'),
+    [{ positional: 'attendance-', reason: OUT_OF_DOMAIN_REASONS.attendance }],
+    'the 11-character family fragment selects the whole family and is refused as attendance, not as a widener',
+  )
+  assert.deepEqual(
+    probe(S3_STEP_RUN_AT_GATE_HEAD.replace(` \\\n  ${CARRIED}`, '')),
+    [{ positional: null, reason: OUT_OF_DOMAIN_REASONS.noPositional }],
+  )
+  // …and an absolute one, which this model cannot resolve at all.
+  assert.deepEqual(
+    withExtraPositional('/checkout/tests/integration'),
+    [{ positional: '/checkout/tests/integration', reason: OUT_OF_DOMAIN_REASONS.absolute }],
+  )
+
+  // NEGATIVE CONTROL — the leg is not refusing everything: a second legitimate non-attendance file
+  // is admissible, so a real foreign step can still grow a real argument.
+  assert.deepEqual(withExtraPositional('tests/integration/comment-reactions.api.test.ts'), [])
+
+  // A step carrying one of the three ids is skipped only for its FIRST occurrence: a duplicate
+  // decoy id later in the document is judged HERE, not waved through as covered.
+  const withVictim = S3_STEP_RUN_AT_GATE_HEAD.replace(CARRIED, `${CARRIED} \\\n  ${VICTIM}`)
+  const duplicateDecoy = outOfDomainIntegrationInvocations([
+    { file: 'w.yml', job: 'test', index: 0, id: STEP_ID, run: S3_STEP_RUN_AT_GATE_HEAD },
+    { file: 'w.yml', job: 'other', index: 1, id: STEP_ID, run: withVictim },
+  ])
+  assert.equal(duplicateDecoy.length, 1, 'the SECOND step with an in-domain id must not be treated as covered')
+  assert.deepEqual(
+    outOfDomainPositionalOffenders({ invocations: duplicateDecoy, corpusArgs, suiteArgs }).map((o) => o.reason),
+    [OUT_OF_DOMAIN_REASONS.attendance],
+  )
+
+  // The frozen copy is a copy of something REAL: a step with this id, running the governing config,
+  // exists in the live workflow. What its script says today is the live leg's business, not this
+  // control's — but that the scenario exists at all is asserted rather than assumed.
+  const liveIds = new Set(liveOutOfDomainInvocations().map((m) => m.id))
+  assert.ok(
+    liveIds.has('sealed-export-s3-real-db'),
+    'the foreign step these probes are named for must still be a live non-domain invocation of the '
+      + 'governing config, or this control is frozen against a scenario that no longer exists',
+  )
 })
 
 // ---------------------------------------------------------------------------------------------
