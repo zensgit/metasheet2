@@ -35,6 +35,8 @@ import express from 'express'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { isPublicFormAuthBypass, isWhitelisted } from '../../src/auth/jwt-middleware'
+import { correlationContextEnrichmentMiddleware } from '../../src/middleware/correlation'
+import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from '../../src/middleware/attendance-production'
 import { isOapiAllowlistRequest } from '../../src/multitable/oapi-read-allowlist'
 import { AGGREGATE_ROUTE_ENTRY_FILE, AGGREGATE_ROUTE_ENTRY_PATH, findRepoRoot } from '../helpers/attendance-w6-call-path-closure'
 
@@ -119,6 +121,65 @@ describe('W6-1 pre-auth boundary: the global JWT gate and its escapes', () => {
     expect(gateAt).toBeGreaterThan(-1)
     expect(mountAt).toBeGreaterThan(-1)
     expect(mountAt).toBeGreaterThan(gateAt)
+  })
+
+  /**
+   * The harness mounts everything `index.ts` puts between the gate and the
+   * router. "Nothing in between refuses an unauthenticated request" is only a
+   * MEASURED claim if the in-between really is all present — otherwise it is
+   * the same assumed-negative this file was written to replace. This leg pins
+   * the list: a new middleware inserted there reds here, which is the signal to
+   * add it to the harness and re-measure rather than to keep trusting the old
+   * verdict.
+   */
+  it('the harness carries EVERY middleware src/index.ts mounts between the gate and the router', () => {
+    const gateEnd = indexSource.indexOf('\n    })', indexSource.indexOf('if (isWhitelisted(req.path)) return next()'))
+    const mountAt = indexSource.indexOf('this.app.use(attendanceAdminRouter())')
+    expect(gateEnd).toBeGreaterThan(-1)
+    expect(mountAt).toBeGreaterThan(gateEnd)
+
+    const between = indexSource.slice(gateEnd, mountAt)
+    const mounts = [...between.matchAll(/^\s*this\.app\.use\((.+)$/gm)].map((match) => match[1].trim())
+
+    // The four UNCONDITIONAL middlewares — they run for every request, so each
+    // one is a place the request could be refused, and each is mounted in the
+    // harness above. Anything added here is unmodelled and reds.
+    expect(mounts.slice(0, 4)).toEqual([
+      'correlationContextEnrichmentMiddleware)',
+      '(req: Request, _res: Response, next: NextFunction) => {', // inline tenant context
+      'attendanceAuditMiddleware())',
+      'attendanceSecurityMiddleware())',
+    ])
+
+    // Everything else between here and our mount must be a ROUTER, not a bare
+    // middleware. A router only handles paths it registered and falls through
+    // otherwise, so it cannot refuse this route's request — but that reasoning
+    // only holds if they really are all routers. Classified mechanically; an
+    // unrecognised entry (a new inline middleware, say) reds rather than being
+    // waved through as "probably a router".
+    const rest = mounts.slice(4)
+    expect(rest.length).toBeGreaterThan(0)
+    for (const entry of rest) {
+      const pathScoped = /^'([^']+)',/.exec(entry)
+      if (pathScoped) {
+        // A path-scoped mount can only see this route if its prefix matches.
+        expect(canonical.startsWith(pathScoped[1]), `path-scoped mount ${entry} covers this route`).toBe(false)
+        continue
+      }
+      expect(entry, `unmodelled non-router mount between the gate and our router: ${entry}`).toMatch(
+        /^[A-Za-z][\w.]*(Router|Routes)\s*\(/,
+      )
+    }
+
+    // And the two path-scoped ones are gated by the SAME case-sensitive `/api/`
+    // prefix test as the gate — so an upper-cased spelling skips attendance
+    // audit logging, the IP allowlist and rate limiting as well. Recorded here
+    // because it widens the reported finding beyond authentication.
+    const productionSource = readFileSync(
+      join(repoRoot, 'packages/core-backend/src/middleware/attendance-production.ts'),
+      'utf8',
+    )
+    expect(productionSource).toContain("if (!req.path.startsWith('/api/')) return false")
   })
 
   // ── the live harness ─────────────────────────────────────────────────────
@@ -254,9 +315,32 @@ describe('W6-1 pre-auth boundary: the global JWT gate and its escapes', () => {
       return next()
     })
 
+    // EVERYTHING `src/index.ts` mounts BETWEEN the gate and the router, real
+    // and in order. Omitting them would leave the claim "nothing between the
+    // gate and the handler refuses this request" as an assumption — the exact
+    // shape of the mistake this file exists to correct. The next leg pins this
+    // list against `index.ts` so it cannot silently fall behind.
+    app.use(correlationContextEnrichmentMiddleware)
+    // The tenant-context middleware is an inline anonymous function in the
+    // class method; mirrored here. With no `req.user` it takes its early
+    // `return next()`, which is the branch under test.
+    app.use((req, _res, next) => {
+      const tenantId = typeof req.user?.tenantId === 'string' && req.user.tenantId.trim().length > 0
+        ? req.user.tenantId.trim()
+        : undefined
+      if (!tenantId) return next()
+      return next()
+    })
+    app.use(attendanceAuditMiddleware())
+    app.use(attendanceSecurityMiddleware())
+
     // The REAL router, so the route's own `rbacGuard('attendance', 'admin')` is
     // the real one. `req.user` is never populated (the sentinel above does not
     // authenticate), which is exactly the unauthenticated case under test.
+    //
+    // NOTE for a reviewer: this file `vi.mock`s `src/rbac/service`, but that is
+    // NOT load-bearing for the 401 below — `rbacGuard` refuses on `!userId`
+    // before it consults the service at all. The mock exists for part B.
     app.use(attendanceAdminRouter())
 
     // Reached only if BOTH the gate and the route-level guard let the request

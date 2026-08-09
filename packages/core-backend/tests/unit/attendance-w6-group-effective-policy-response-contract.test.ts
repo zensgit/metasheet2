@@ -10,8 +10,9 @@
  * fixture's `payload` MUST fail validation (each one is a named red-line
  * violation per the fixture pack's own README table).
  */
-import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
@@ -477,7 +478,13 @@ describe('W6 group effective-policy response contract validator', () => {
         `${importLine}export const probe: AttendanceGroupEffectivePolicySourceRefV1 = { kind: ${JSON.stringify(kind)}, id: 'x' }\n`
 
       const typecheck = (source: string): string[] => {
-        const probePath = join(__dirname, `../../src/attendance/__w6_sourceref_probe_${process.pid}.ts`)
+        // The probe lives in the OS temp dir, never under `src/`. A probe file
+        // written into the source tree survives a mid-run kill (the cleanup is
+        // in a `finally`, which a signal skips) and the next `tsc --noEmit`
+        // would then typecheck a stray generated file. The import specifier
+        // above is absolute, so the probe resolves the real contract module
+        // from anywhere.
+        const probePath = join(mkdtempSync(join(tmpdir(), 'w6-sourceref-')), 'probe.ts')
         writeFileSync(probePath, source)
         try {
           const program = ts.createProgram([probePath], {
@@ -495,7 +502,7 @@ describe('W6 group effective-policy response contract validator', () => {
             .filter((d) => d.file?.fileName === probePath.split('\\').join('/'))
             .map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '))
         } finally {
-          rmSync(probePath, { force: true })
+          rmSync(dirname(probePath), { recursive: true, force: true })
         }
       }
 
