@@ -1125,13 +1125,178 @@ test('W4C-3a fixed item-effect DML is classified under the completed P06-P09 cut
 // 5. CI wiring: this file must be named explicitly in the workflow (node:test files are neither
 //    vitest-discovered nor covered by vitest.config.ts's exclude list — see module header).
 // -------------------------------------------------------------------------------------------
-test('this collector test file has an explicit CI execution step', () => {
+//
+//    The two `assert.match` calls this test used to be were whole-file substring checks: they
+//    proved the filename and the step name appear SOMEWHERE in the workflow text. `if: false` on
+//    the step left them both green — the gate could be switched off while its own wiring test
+//    still printed a tick. The check below is structural instead: it locates the step by a pinned
+//    `id`, derives the step's own block by indentation, and asserts the step's KEY SET exactly.
+//
+//    Asserting the key set exactly, rather than rejecting a list of known-bad keys, is deliberate:
+//    enumerating traps (`if`, `continue-on-error`, `shell`, …) never converges — the next disabling
+//    key is always the one not on the list. `['id', 'name', 'run']` and nothing else rejects every
+//    such key, including ones nobody has thought of yet.
+const COLLECTOR_STEP_ID = 'attendance-w4c0-dml-inventory'
+const COLLECTOR_STEP_COMMAND = `node --test scripts/ops/${THIS_TEST_FILENAME}`
+
+/**
+ * Locate one workflow step by its `id` and return its own block, derived structurally.
+ *
+ * Boundaries come from YAML indentation, never from a fixed line window: a step starts at the
+ * nearest preceding `      - ` line and ends at the next `      - ` line or at any key indented
+ * four spaces or less (which means the steps list itself has ended). Getting this wrong in the
+ * generous direction would silently attribute a NEIGHBOURING step's keys to this one, so the
+ * must-red matrix below includes a boundary control in both directions.
+ *
+ * Pure function of the workflow text so the same code path is exercised by the real workflow and
+ * by the synthetic negative rows — a analyzer that is only ever run against a passing input is not
+ * evidence about a failing one.
+ */
+function findWorkflowStepById(workflowText, stepId) {
+  const lines = workflowText.split(/\r?\n/)
+  const isStepStart = (line) => /^ {6}- /.test(line)
+  const leftStepsList = (line) => /^ {0,5}\S/.test(line)
+
+  const idLineIndexes = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^ {8}id:\s*(\S+)\s*$/.exec(lines[i])?.[1] === stepId) idLineIndexes.push(i)
+  }
+  if (idLineIndexes.length !== 1) return { found: false, idCount: idLineIndexes.length }
+  const idLine = idLineIndexes[0]
+
+  let start = -1
+  for (let i = idLine; i >= 0; i -= 1) {
+    if (isStepStart(lines[i])) { start = i; break }
+    if (leftStepsList(lines[i])) break
+  }
+  if (start < 0) return { found: false, idCount: 1 }
+
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (isStepStart(lines[i]) || leftStepsList(lines[i])) { end = i; break }
+  }
+
+  let job = null
+  for (let i = start; i >= 0; i -= 1) {
+    const m = lines[i].match(/^ {2}([A-Za-z0-9_-]+):\s*$/)
+    if (m) { job = m[1]; break }
+  }
+
+  const block = lines.slice(start, end)
+  // A step's own keys are the mapping keys at 8-space indentation, plus the `- name:` opener.
+  const keys = []
+  const opener = block[0].match(/^ {6}- ([A-Za-z0-9_-]+):/)
+  if (opener) keys.push(opener[1])
+  for (const line of block.slice(1)) {
+    const m = line.match(/^ {8}([A-Za-z0-9_-]+):/)
+    if (m) keys.push(m[1])
+  }
+  return { found: true, idCount: 1, job, keys: keys.sort(), text: block.join('\n'), start, end }
+}
+
+test('this collector test file has an explicit, un-disableable CI execution step', () => {
   const workflow = readWorkflow()
+
+  // Retained verbatim from the previous version of this test — nothing is weakened, only added.
   assert.match(workflow, new RegExp(THIS_TEST_FILENAME.replaceAll('.', '\\.')))
   assert.match(
     workflow,
     /Run attendance W4C-0 Stage D §8\.4 and W4C-4 §12\.7 inventory collectors/,
     'the required CI step must name the W4C-4 current/history inventory, not only the older DML collector',
+  )
+
+  const step = findWorkflowStepById(workflow, COLLECTOR_STEP_ID)
+  assert.equal(step.found, true, `exactly one workflow step must carry id: ${COLLECTOR_STEP_ID} (found ${step.idCount})`)
+  assert.equal(step.job, 'test', 'the step must live in the `test` job — that is the one feeding the required `test (20.x)` context; the same step in another job would satisfy a whole-file substring check and gate nothing')
+  assert.ok(
+    step.text.includes(COLLECTOR_STEP_COMMAND),
+    `the step must run the exact command \`${COLLECTOR_STEP_COMMAND}\`; a renamed or re-pointed command would leave the step name intact and run something else`,
+  )
+  assert.deepEqual(
+    step.keys,
+    ['id', 'name', 'run'],
+    'the step may carry ONLY name/id/run. Any other key — `if`, `continue-on-error`, `shell`, `env`, `working-directory`, or the next one invented — can neutralise or redirect the gate while every substring check stays green, so the key set is pinned exactly rather than blacklisted',
+  )
+})
+
+test('CI wiring gate: the step analyzer reds on every way of disabling, moving, or redirecting the step', () => {
+  // Synthetic workflows through the SAME analyzer the real assertion uses. Without these the
+  // analyzer would only ever have been run against an input that passes, which is no evidence
+  // about one that should not.
+  const step = (extraKeys = '') => [
+    'jobs:',
+    '  test:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - name: Checkout',
+    '        uses: actions/checkout@v4',
+    '      - name: Run attendance W4C-0 Stage D §8.4 and W4C-4 §12.7 inventory collectors',
+    `        id: ${COLLECTOR_STEP_ID}`,
+    ...(extraKeys ? [extraKeys] : []),
+    '        run: |',
+    '          git fetch --no-tags --depth=1 origin e0defbe26d7f2e1747e74aa908ca710422812bf7',
+    `          ${COLLECTOR_STEP_COMMAND}`,
+    '      - name: Run linting',
+    '        run: pnpm lint',
+    '',
+  ].join('\n')
+
+  const baseline = findWorkflowStepById(step(), COLLECTOR_STEP_ID)
+  assert.deepEqual(
+    [baseline.found, baseline.job, baseline.keys, baseline.text.includes(COLLECTOR_STEP_COMMAND)],
+    [true, 'test', ['id', 'name', 'run'], true],
+    'positive control: the analyzer must accept a correctly wired step, or every red below proves nothing',
+  )
+
+  for (const [label, disablingKey] of [
+    ['if: false', '        if: false'],
+    ['if: on an expression', "        if: github.event_name == 'push'"],
+    ['continue-on-error', '        continue-on-error: true'],
+    ['an alternative shell', '        shell: pwsh'],
+    ['a redirected working-directory', '        working-directory: ./elsewhere'],
+    ['an env override', '        env:'],
+  ]) {
+    const analyzed = findWorkflowStepById(step(disablingKey), COLLECTOR_STEP_ID)
+    assert.equal(analyzed.found, true, `${label}: the step is still found`)
+    assert.notDeepEqual(analyzed.keys, ['id', 'name', 'run'], `${label} must be rejected by the pinned key set`)
+  }
+
+  // Moved to another job: a whole-file substring check cannot see this at all.
+  const movedJob = step().replace('  test:', '  unrelated-job:')
+  assert.equal(findWorkflowStepById(movedJob, COLLECTOR_STEP_ID).job, 'unrelated-job')
+
+  // Command re-pointed while the step name and id stay intact.
+  const repointed = step().replace(COLLECTOR_STEP_COMMAND, 'node --test scripts/ops/some-other.test.mjs')
+  assert.equal(findWorkflowStepById(repointed, COLLECTOR_STEP_ID).text.includes(COLLECTOR_STEP_COMMAND), false)
+
+  // Id removed, and id duplicated — both must fail to resolve to exactly one step.
+  assert.equal(findWorkflowStepById(step().replace(`        id: ${COLLECTOR_STEP_ID}\n`, ''), COLLECTOR_STEP_ID).found, false)
+  const duplicated = step().replace(
+    '      - name: Run linting\n        run: pnpm lint',
+    `      - name: Decoy\n        id: ${COLLECTOR_STEP_ID}\n        run: true`,
+  )
+  assert.deepEqual(
+    [findWorkflowStepById(duplicated, COLLECTOR_STEP_ID).found, findWorkflowStepById(duplicated, COLLECTOR_STEP_ID).idCount],
+    [false, 2],
+    'a duplicated id must not silently resolve to whichever step comes first',
+  )
+
+  // BLOCK-BOUNDARY control, both directions. A boundary bug and a passing test look identical, so
+  // assert that a NEIGHBOUR's disabling key is not attributed to this step, and that this step's
+  // own one still is.
+  const neighbourDisabled = step().replace(
+    '      - name: Run linting\n        run: pnpm lint',
+    '      - name: Run linting\n        if: false\n        continue-on-error: true\n        run: pnpm lint',
+  )
+  assert.deepEqual(
+    findWorkflowStepById(neighbourDisabled, COLLECTOR_STEP_ID).keys,
+    ['id', 'name', 'run'],
+    'the next step\'s keys must NOT bleed into this step\'s block — an over-generous end boundary would red spuriously and then be "fixed" by loosening the assertion',
+  )
+  assert.notDeepEqual(
+    findWorkflowStepById(step('        if: false'), COLLECTOR_STEP_ID).keys,
+    ['id', 'name', 'run'],
+    'and this step\'s OWN disabling key must still be caught — the pair proves the boundary is exact, not merely tight or merely loose',
   )
 })
 
