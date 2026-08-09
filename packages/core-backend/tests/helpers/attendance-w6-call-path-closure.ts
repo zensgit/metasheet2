@@ -440,9 +440,18 @@ export function pluginLibFilesInClosure(closure: CallPathClosure): string[] {
  * (case-insensitive): `query`, `.query`, `runQuery`, `readOnlyQuery`,
  * `wrappedQuery`. Deliberately WIDER than the previous exact-`query` match,
  * because widening the swept domain can only add findings, never hide one; the
- * cost is that a DB seam given a name outside that pattern is not swept, which
- * is a real limit and is stated rather than implied. It is not the mechanism of
- * record: the READ ONLY transaction is.
+ * cost is that a DB seam reached under a name outside that pattern is not
+ * swept. That is a real limit, and it is now MEASURED rather than merely
+ * conceded — `attendance-w6-group-effective-policy-dml-sweep.test.ts` carries a
+ * `MEASURED RESIDUAL` leg listing the exact shapes that fall outside it
+ * (aliasing, destructured aliasing, element access, computed element access,
+ * `.call`, `.apply`), each shown classifying as nothing at all. Two things
+ * bound the residual, and neither is an argument that it does not exist:
+ * evading BOTH static legs needs a non-`query`-named seam AND a split-literal
+ * composer (a plain literal `INSERT` still reds the raw-DML text leg wherever
+ * it sits), and the mechanism of record for W6-R1 is not this sweep at all —
+ * it is the READ ONLY transaction, which refuses the write whatever the call
+ * site is named.
  *
  * WHAT REMAINS TRUE OF THE ADAPTERS. `src/db/pg.ts` and
  * `src/integration/db/connection-pool.ts` still pass — but now for a stated
@@ -586,6 +595,56 @@ function formalParameterIndex(fn: FunctionLike): Map<string, number> {
   return out
 }
 
+/** EVERY name a parameter list binds, including through destructuring patterns.
+ *  Wider than `formalParameterIndex` on purpose: this feeds the SHADOWING test,
+ *  where missing a bound name is the dangerous direction. */
+function boundParameterNames(fn: FunctionLike): Set<string> {
+  const out = new Set<string>()
+  const collect = (name: ts.BindingName): void => {
+    if (ts.isIdentifier(name)) {
+      out.add(name.text)
+      return
+    }
+    for (const element of name.elements) {
+      if (ts.isBindingElement(element)) collect(element.name)
+    }
+  }
+  for (const param of fn.parameters) collect(param.name)
+  return out
+}
+
+/**
+ * Is `name`, at this position, bound by something NEARER than module scope —
+ * a local `const`/`let`, or a formal parameter of ANY enclosing function?
+ *
+ * This exists because the module-scope literal-constant table is keyed by NAME
+ * across every file in the closure, and consulting it first made a formal
+ * parameter that merely SHARES a name with some constant come back as a
+ * `resolved` literal. Measured, not theorised: with
+ * `AttendanceSetupReadinessAggregate.ts` in the closure (it declares
+ * `const ATTENDANCE_SETTINGS_KEY = 'attendance.settings'` at module scope), the
+ * textbook adapter
+ *
+ *     async function runSql(ATTENDANCE_SETTINGS_KEY, params) { return query(ATTENDANCE_SETTINGS_KEY, params) }
+ *
+ * classified as `resolved: ['attendance.settings']` — a string the seam never
+ * receives. Two harms, not one: the sweep FABRICATES SQL text that downstream
+ * legs then treat as fact (the "every resolved literal is a SELECT" check, and
+ * the DB suite's derived `TOUCHED_TABLES` relation set), and the site skips
+ * requirement (5) — the caller-set check — altogether, because only
+ * pass-throughs are caller-checked. Outer-function parameters and destructured
+ * bindings count too: a captured parameter is no less a parameter.
+ */
+function isShadowedByNearerBinding(name: string, from: ts.Node): boolean {
+  if (resolveLocalBinding(name, from) !== null) return true
+  let fn = enclosingFunctionOf(from)
+  while (fn) {
+    if (boundParameterNames(fn).has(name)) return true
+    fn = enclosingFunctionOf(fn)
+  }
+  return false
+}
+
 interface ParsedUnit {
   readonly file: string
   readonly name: string
@@ -710,7 +769,11 @@ interface ClassifierContext {
  */
 function classifySqlArgument(arg: ts.Expression, callSite: ts.Node, ctx: ClassifierContext): Classification {
   if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) return { kind: 'resolved', sql: arg.text }
-  if (ts.isIdentifier(arg)) {
+  if (ts.isIdentifier(arg) && !isShadowedByNearerBinding(arg.text, arg)) {
+    // Module-scope constants are consulted ONLY when nothing nearer binds the
+    // name. See `isShadowedByNearerBinding` for the measured failure this
+    // ordering fixes — the name table is global to the closure, so without the
+    // shadow test a formal parameter can come back as a fabricated literal.
     const constant = ctx.literalConstants.get(arg.text)
     if (constant !== undefined) return { kind: 'resolved', sql: constant }
   }

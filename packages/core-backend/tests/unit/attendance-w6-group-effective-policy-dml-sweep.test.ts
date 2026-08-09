@@ -541,4 +541,121 @@ describe('W6-R1 static leg — ESCAPE BATTERY: no file is exempt as a file', () 
     const reports = checkPassThroughCallers(probeClosure, repoRoot, args)
     expect(reports.find((report) => report.adapterName === 'orphanQuery')?.callerCount).toBe(0)
   })
+
+  it('ESCAPE 10: a formal parameter that SHARES A NAME with a module-scope constant is NOT resolved to that constant', () => {
+    /**
+     * The classifier's module-scope literal-constant table is keyed by NAME
+     * across every file in the closure. Consulting it before testing for a
+     * nearer binding meant a textbook adapter came back as a `resolved`
+     * LITERAL — SQL text the seam never receives.
+     *
+     * Two harms, and the second is the worse one:
+     *  (a) the sweep FABRICATES SQL, which downstream legs consume as fact
+     *      (the "every resolved literal is a SELECT" check here, and the
+     *      real-DB suite's derived `TOUCHED_TABLES` relation set);
+     *  (b) the site silently skips requirement (5) — only pass-throughs get
+     *      their caller set checked, so a misread parameter is never traced
+     *      back to what its callers actually pass.
+     *
+     * `AttendanceSetupReadinessAggregate.ts` is a REAL closure file that
+     * really does declare `const ATTENDANCE_SETTINGS_KEY = 'attendance.settings'`
+     * at module scope, so this collision is reproduced from live code rather
+     * than invented.
+     */
+    const READ_ONLY_SEAM_FILE = 'packages/core-backend/src/services/AttendanceSetupReadinessAggregate.ts'
+    // Non-vacuity: the constant really is there, at module scope, with that text.
+    const seamSource = readFileSync(join(repoRoot, READ_ONLY_SEAM_FILE), 'utf8')
+    expect(seamSource).toContain("const ATTENDANCE_SETTINGS_KEY = 'attendance.settings'")
+
+    const probeClosure: CallPathClosure = {
+      files: [ROUTE_FILE, READ_ONLY_SEAM_FILE],
+      units: [{
+        file: ROUTE_FILE,
+        name: 'probe',
+        text: 'async function runSql(ATTENDANCE_SETTINGS_KEY, params) { return query(ATTENDANCE_SETTINGS_KEY, params) }',
+      }],
+      externals: [],
+    }
+    const result = collectQuerySqlArguments(probeClosure, repoRoot)
+    expect(result.resolved).toEqual([])
+    expect(result.findings).toEqual([])
+    expect(result.passthrough.length).toBe(1)
+    expect(result.passthrough[0].adapterName).toBe('runSql')
+    expect(result.passthrough[0].paramIndex).toBe(0)
+    expect(result.passthrough[0].provenanceLeaf).toBe('ATTENDANCE_SETTINGS_KEY')
+
+    // DISCRIMINATION: with NOTHING nearer binding the name, the same identifier
+    // in the same position IS still resolved from the constant table. Without
+    // this the fix could be "never consult the table", which would be a
+    // different (and unjustified) narrowing.
+    const unshadowed = collectQuerySqlArguments(
+      {
+        files: [ROUTE_FILE, READ_ONLY_SEAM_FILE],
+        units: [{ file: ROUTE_FILE, name: 'probe', text: 'async function h() { return query(ATTENDANCE_SETTINGS_KEY) }' }],
+        externals: [],
+      },
+      repoRoot,
+    )
+    expect(unshadowed.resolved.map((entry) => entry.sql)).toEqual(['attendance.settings'])
+  })
+
+  it('MEASURED RESIDUAL: DB seams reached under a name outside the `*query` pattern are NOT swept — the true boundary of this leg', () => {
+    /**
+     * Stated as a measurement, not as a caveat, and asserted so it cannot
+     * quietly drift. Each shape below reaches a DB seam without a callee name
+     * this sweep matches, so it produces NO classification at all — not a
+     * pass, not a finding, nothing. Enumerating fixes for them is the failure
+     * mode that produced the allowlist twice already; what bounds the residual
+     * instead is stated below and is checkable.
+     */
+    const SHAPES: Array<[string, string]> = [
+      ['local alias', 'async function h() { const q = query; await q(buildTouchSql()) }'],
+      ['destructured alias', 'async function h(deps) { const { query: q } = deps; await q(buildTouchSql()) }'],
+      ['element access', "async function h() { await client['query'](buildTouchSql()) }"],
+      ['computed element access', 'async function h(k) { await client[k](buildTouchSql()) }'],
+      ['Function.prototype.call', 'async function h() { await query.call(null, buildTouchSql()) }'],
+      ['Function.prototype.apply', 'async function h() { await query.apply(null, [buildTouchSql()]) }'],
+    ]
+    for (const [label, text] of SHAPES) {
+      const result = classifyIn(text, label)
+      expect({
+        label,
+        resolved: result.resolved.length,
+        passthrough: result.passthrough.length,
+        findings: result.findings.length,
+      }).toEqual({ label, resolved: 0, passthrough: 0, findings: 0 })
+    }
+
+    // BOUND 1 — evading BOTH static legs needs a split-literal composer too: a
+    // plain literal write through the very same aliased seam still reds the
+    // raw-SQL DML text leg, which reads unit TEXT and never looks at call shape.
+    const literalThroughAlias = "async function h() { const q = query; await q('INSERT INTO attendance_groups (org_id) VALUES ($1)') }"
+    expect(classifyIn(literalThroughAlias, 'literal via alias').findings.length).toBe(0)
+    expect(RAW_SQL_DML.some((pattern) => pattern.test(literalThroughAlias))).toBe(true)
+
+    // BOUND 2 — none of these shapes exists on the real call path today. If one
+    // ever appears, this count moves and the assertion reds, which is the point
+    // of measuring rather than conceding.
+    let indirectSeamCallSites = 0
+    for (const unit of closure.units) {
+      // `.call`/`.apply`/`.bind` and element-access invocations, counted over
+      // the SAME unit text the sweep reads.
+      for (const m of unit.text.matchAll(/\.(?:call|apply|bind)\s*\(/g)) {
+        void m
+        indirectSeamCallSites += 1
+      }
+      for (const m of unit.text.matchAll(/\[[^\]\n]+\]\s*\(/g)) {
+        void m
+        indirectSeamCallSites += 1
+      }
+    }
+    // The five live hits are all `Object.prototype.hasOwnProperty.call(...)` in
+    // the response contract — named explicitly so a SIXTH cannot hide behind a
+    // loose inequality.
+    const hasOwnPropertyCalls = closure.units
+      .map((unit) => [...unit.text.matchAll(/Object\.prototype\.hasOwnProperty\.call\s*\(/g)].length)
+      .reduce((a, b) => a + b, 0)
+    expect(hasOwnPropertyCalls).toBe(5)
+    expect(indirectSeamCallSites).toBe(hasOwnPropertyCalls)
+  })
 })
