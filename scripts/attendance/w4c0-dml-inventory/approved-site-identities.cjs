@@ -44,7 +44,16 @@
 //     (file, symbol, table, verb) does not red. Multiplicity pinning bounds ADDITIONS, not swaps.
 //   - The `debtKey` 50-line block index is deliberately NOT part of this identity: it would red
 //     on unrelated line shifts. Multiplicity, not block index, is what separates repeated sites.
-//   - The scanner's DML pattern remains case-sensitive; lowercase SQL keywords stay invisible.
+//   - CASE, on two separate axes. The scanner's DML pattern matches KEYWORDS case-sensitively, so
+//     a lowercase or mixed-case SQL keyword stays invisible — that residue is unchanged. The TABLE
+//     IDENTIFIER is a different axis and is NOT case-sensitive: it is resolved by PostgreSQL
+//     folding rules (unquoted folds, so `ATTENDANCE_RECORDS` is the same relation AND the same
+//     site identity as `attendance_records`; double-quoted is preserved, so `"Attendance_Records"`
+//     is a different relation and reds as an unclassified attendance-owned table). One consequence
+//     is worth saying out loud rather than leaving to be discovered: because an uppercase spelling
+//     resolves onto the SAME identity, SUBSTITUTING an approved lowercase write with its uppercase
+//     spelling stays green — same relation, same pinned count. That is the substitution residue
+//     already stated above, not a second hole; ADDING an uppercase write reds on multiplicity.
 //
 // This file lives inside `scripts/attendance/w4c0-dml-inventory/`, which the collector excludes
 // from its own scan, so the literal table names below are data and never mint census sites.

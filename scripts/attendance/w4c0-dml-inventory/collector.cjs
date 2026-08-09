@@ -437,6 +437,15 @@ function nearestEnclosingSymbol(lines, dmlLineIndex) {
  *  - handle `${ ... }` interpolations by re-entering JS code mode recursively
  *
  * Inside single/double-quoted JS strings: never treat `//`, `--`, or `/*` as comments.
+ *
+ * CONSEQUENCE, stated so it is not discovered later as a surprise: SQL-comment masking is a
+ * TEMPLATE-LITERAL behaviour. A comment deliberately wedged between the words of a DML verb —
+ * `INSERT/*c*\/INTO`, or `INSERT --c\n INTO` — is masked away, and so still seen, inside a
+ * template literal; inside a single- or double-quoted string the bytes are preserved verbatim, so
+ * the verb does not match and the site is NOT seen. This is narrow, not a general hole: ordinary
+ * quoted SQL with no interleaved comment IS seen in all three token kinds. It is an evasion that
+ * requires deliberately splitting a keyword inside a non-template string, and it belongs to the
+ * already-stated "lowercase/mixed-case keyword" class of scanner limitations.
  */
 function maskCommentsForDmlScan(content) {
   const src = String(content ?? '')
