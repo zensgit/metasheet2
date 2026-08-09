@@ -531,6 +531,19 @@ jobs:
         run: |
           node --test scripts/ops/attendance-legacy-membership-overlap-audit-contract.test.mjs
 
+      # W4C-5 operator transition tooling — pure module (no DB): manifest validator, plan digest,
+      # apply orchestration sequencing (idempotency-first, then digest match, then the boundary
+      # call). Uses `tsx --test` rather than plain `node --test` because the module is TypeScript
+      # and the matrix's 18.x leg has no native type stripping; `tsx` transpiles for both legs.
+      # The real-PostgreSQL half (zero-write proof, full legacy -> shadow cycle, idempotent
+      # re-apply, and the refusal matrix) is
+      # tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts, wired into the
+      # "Run attendance integration tests" step below and excluded from this job's default
+      # vitest.config.ts run.
+      - name: Run W4C-5 operator transition tooling unit tests
+        run: |
+          pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts
+
       # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
       # EXCLUDE constraint on purpose and proves the runtime integrity guard is
       # independently load-bearing. Keep whole-file execution explicit.
@@ -1269,6 +1282,7 @@ jobs:
             tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts \
             tests/integration/attendance-w4c3a-import-rollback.db.test.ts \
             tests/integration/attendance-w4c3a-rollout-control.db.test.ts \
+            tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts \
             tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
             tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
             tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts \
