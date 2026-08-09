@@ -1292,6 +1292,16 @@ test('P1-2 config-resolution positive control: same-basename decoys, escapes and
   // Unresolvable / ambiguous shapes throw rather than defaulting to the canonical file.
   assert.throws(() => governingIntegrationConfig(step(`${CMD} --config /abs/vitest.integration.config.ts`)), /failing CLOSED/)
   assert.throws(() => governingIntegrationConfig(step(`${CMD} --config ../outside/vitest.integration.config.ts`)), /failing CLOSED/)
+  // …INCLUDING the `..` path that names the canonical file and, on the real runner, resolves to it.
+  // Refused deliberately (see the header): whether the escape returns depends on directory names
+  // above the package, which is the same unknowable checkout prefix that makes absolute values
+  // unmodellable. This row exists so the refusal is a decision on record rather than a surprise.
+  assert.throws(
+    () => governingIntegrationConfig(step(`${CMD} --config ../core-backend/vitest.integration.config.ts`)),
+    /failing CLOSED/,
+    'the escapes-and-returns spelling must stay refused; accepting it would require guessing the '
+      + 'runner checkout layout, and a wrong guess admits a DIFFERENT file under the canonical name',
+  )
   assert.throws(() => governingIntegrationConfig(step(CMD)), /failing CLOSED/)
   assert.throws(
     () => governingIntegrationConfig(step(`${CMD} --config vitest.integration.config.ts --config other.config.ts`)),
@@ -1398,6 +1408,18 @@ const readCoreBackendFile = (rel) => readFileSync(join(CORE_BACKEND_DIR, rel), '
 // line to a real-DB step reds this guard until an owner widens the rule — the same polarity as the
 // inert alphabet, and for the same reason: a config this guard has not read is a config whose
 // collection it cannot vouch for.
+//
+// ONE CASE IS WORTH NAMING because it looks like a false positive and is not (gate NIT @ d72cf7dcdf):
+// `--config ../core-backend/vitest.integration.config.ts` NAMES THE CANONICAL FILE — on the real
+// runner it resolves to exactly the file this guard reads — and it is REFUSED ANYWAY. That is a
+// decision, not an oversight, and it is kept: whether a `..` path comes back to the same file
+// depends on the names of the directories ABOVE the package, which are the runner's checkout layout
+// and are not knowable from here — the same missing prefix that makes absolute `--config` values
+// and absolute file FILTERS unmodellable. Resolving it "equal enough" would mean guessing that
+// prefix, and a guess that is wrong admits a DIFFERENT file under the canonical name, which is
+// precisely the same-basename decoy this section exists to close. The cost is one owner decision if
+// a real-DB step ever needs that spelling; the fix is to write the config path package-relative.
+// Asserted as a named row below, so the refusal cannot quietly become an acceptance.
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -3661,15 +3683,42 @@ test('P2: the corpus walk refuses symlinks and other non-regular entries instead
 // carried arg that does NOT exist on disk is caught by the existence leg below, which is the only
 // case the corpus scan cannot see.
 {
+  // P3-2 (gate @ d72cf7dcdf): this computation used to run BARE at module scope, so any
+  // registration-time failure escaped as a module-load throw and node reported the whole FILE as
+  // one failing test — `tests 1 / pass 0 / fail 1`. That is the degenerate count shape this very
+  // file argues against beside `unprovableRunLines` ("a throw there reports tests 0 / pass 0 /
+  // fail 0 — the count shape this tree treats as a false signal"), and it was reachable: pointing
+  // a real-DB step's `--config` at a SYMLINK aliasing the canonical config produced exactly it.
+  //
+  // It is captured the same way the corpus derivation above is: the error is held and re-thrown
+  // from a NAMED test, so the failure arrives as an ordinary red inside a full run (the per-member
+  // legs disappear, which is a visible count drop, and the named leg says what happened) instead of
+  // as a one-line file-level abort with the other 200-odd assertions never evaluated.
+  //
   // The SHARED predicate (owner P1-1): the prefix test this replaced dropped every SUBDIRECTORY
   // attendance suite out of the existence + integration-config legs below, while the corpus above
   // claimed it — the third of the three places that could disagree about what an attendance
   // argument is.
-  const carried = [...new Set(realDbWholeFileArgUnion())]
-    .filter(isAttendanceIntegrationArg)
-    .sort()
+  let carried = null
+  let carriedError = null
+  try {
+    carried = [...new Set(realDbWholeFileArgUnion())]
+      .filter(isAttendanceIntegrationArg)
+      .sort()
+  } catch (err) {
+    carriedError = err
+  }
+
+  test('OBS-1 corpus part 2 derivation succeeds — the real-DB run-list union is readable', () => {
+    if (carriedError != null) throw carriedError
+    assert.ok(
+      Array.isArray(carried) && carried.length > 0,
+      'the real-DB run-list union produced no attendance args at all — an empty scan is not an absence',
+    )
+  })
 
   test('OBS-1 corpus part 2 is non-vacuous (real-DB run-lists carry attendance files)', () => {
+    if (carriedError != null) throw carriedError
     // P2-2: was `>= 60` against a real 87 — 27 members of slack, so the run-list side could lose a
     // third of the family without a red. Pinned to the same exact set as the disk side, which also
     // makes the two sides unable to shrink together and still agree.
@@ -3689,6 +3738,7 @@ test('P2: the corpus walk refuses symlinks and other non-regular entries instead
   // all still green — the same bypass as `-t`, one file over. Pinned here, attendance-scoped: the
   // assertion is over the attendance args only, not over the approval/multitable corpora.
   test(`the GOVERNING integration config still collects every carried attendance suite, and applies no name filter`, () => {
+    if (carriedError != null) throw carriedError
     // P1-2: the config is RESOLVED from the invocation, so this pin can no longer be pointed at a
     // bystander with the same basename while vitest loads a different file.
     const governing = governingIntegrationConfig()
@@ -3720,7 +3770,7 @@ test('P2: the corpus walk refuses symlinks and other non-regular entries instead
         + `silences every carried suite exactly as \`-t\` does on the command line, and the argument `
         + `allowlist above cannot see it`,
     )
-    // The selection model (`vitestFilterSelects`) transcribes vitest's `relative(dir, f)` on the
+    // The selection model (`vitestFilterSelects`) stands in for vitest's `relative(dir, f)` on the
     // assumption that `dir` — vitest's root — IS the package directory these arguments are already
     // relative to. That holds because the steps run through `pnpm --filter @metasheet/core-backend
     // exec`, so cwd == root. It is PINNED rather than assumed: a `root`/`dir` in the config would
@@ -3760,7 +3810,10 @@ test('P2: the corpus walk refuses symlinks and other non-regular entries instead
     )
   })
 
-  for (const file of carried) {
+  // `?? []` because the derivation may have failed above: the per-member legs then simply do not
+  // register (a visible count drop) and the named leg reports the captured error verbatim — which
+  // is the whole point of capturing it rather than letting the module-load throw eat the file.
+  for (const file of carried ?? []) {
     test(`${file} (carried by a real-DB run-list) exists on disk`, () => {
       // Both wiring texts can stay intact while the suite is renamed/deleted — vitest exits 0
       // on an unmatched path argument, so CI stays green and the suite never executes.
