@@ -533,16 +533,46 @@ jobs:
 
       # W4C-5 operator transition tooling — pure module (no DB): manifest validator, plan digest,
       # apply orchestration sequencing (idempotency-first, then digest match, then the boundary
-      # call). Uses `tsx --test` rather than plain `node --test` because the module is TypeScript
-      # and the matrix's 18.x leg has no native type stripping; `tsx` transpiles for both legs.
+      # call). Uses `tsx --test` rather than plain `node --test` because the module is
+      # TypeScript — this is the first `tsx --test` invocation in this workflow (every other
+      # `.test.ts` suite in scripts/ops runs its own logic through a plain `node --test`
+      # `.test.mjs` file that spawns the tsx CLI as a child process, per
+      # attendance-legacy-membership-overlap-audit-contract.test.mjs's shape). `if:
+      # matrix.node-version == '20.x'` (same pin as the "Run K3-line ops suites" step above,
+      # same reason: 20.x is the required leg; this is unproven on 18.x and narrows nothing that
+      # was ever proven there). A SUBTEST-COUNT FLOOR (same shape as "Integration Guard
+      # required-wiring contract" below, same reason: `node --test` — and `tsx --test`, which
+      # delegates to the identical runner — treats a child process that exits 0 as a PASSING
+      # FILE, so a collection-time abort before any subtest body runs would silently collapse
+      # this into a green zero-test file) refuses to report green below MIN_LIB_TESTS.
+      #
       # The real-PostgreSQL half (zero-write proof, full legacy -> shadow cycle, idempotent
       # re-apply, and the refusal matrix) is
       # tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts, wired into the
       # "Run attendance integration tests" step below and excluded from this job's default
       # vitest.config.ts run.
       - name: Run W4C-5 operator transition tooling unit tests
+        if: matrix.node-version == '20.x'
+        shell: bash
         run: |
-          pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts
+          set -euo pipefail
+          MIN_LIB_TESTS=46
+          if ! lib_out="$(pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts 2>&1)"; then
+            printf '%s\n' "$lib_out"
+            echo "W4C-5 tooling unit tests: tsx --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$lib_out"
+          lib_tests="$(printf '%s\n' "$lib_out" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$lib_tests" ]; then
+            echo "W4C-5 tooling unit tests: no 'tests <N>' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$lib_tests" -lt "$MIN_LIB_TESTS" ]; then
+            echo "W4C-5 tooling unit tests: only $lib_tests subtests ran, expected at least $MIN_LIB_TESTS" >&2
+            exit 1
+          fi
+          echo "W4C-5 tooling unit tests: $lib_tests subtests ran (floor $MIN_LIB_TESTS)."
 
       # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
       # EXCLUDE constraint on purpose and proves the runtime integrity guard is
